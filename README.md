@@ -36,10 +36,12 @@ apps/
     app/(app)/team/dashboard/  Owner portal (read-only, 4 views)
     app/(app)/team/ops/        Fazal-only Ops UI (3 MVP views)
     app/api/team/.../webhook   Twilio + Razorpay webhook receivers
-  team-orchestrator/        Python — DBOS workflows, migrations/
+  team-orchestrator/        Python — DBOS workflows
   team-ingestion-worker/    Python — Apify ingestion
 packages/
   team-shared/              Shared TS + Python types
+    db/                     Generated DB types (populated in VT-Foundation)
+migrations/                 Canonical migrations for the shared Postgres DB
 scripts/                    Repo tooling (lint rules)
 ```
 
@@ -108,9 +110,11 @@ For `apps/team-orchestrator`:
   same path. No `random`, no clock reads, no direct I/O outside steps.
 - Pass an explicit **idempotency key** for workflows triggered by webhooks
   or external events.
-- Schema changes go through ordered SQL files in
-  [`apps/team-orchestrator/migrations/`](./apps/team-orchestrator/migrations/)
-  (`000_init.sql`, `001_*.sql`, …). Never edit an applied migration.
+- Schema changes go through ordered SQL files in the repo-root
+  [`/migrations/`](./migrations/) directory (`000_init.sql`, `001_*.sql`, …).
+  This is the **single** migration directory — the `viabe-team-prod`
+  Postgres database is shared by all three apps. Never edit an applied
+  migration; never create a per-app migrations directory.
 - Multi-agent graphs use `langgraph_supervisor`; the supervisor is the only
   agent that routes — sub-agents do not call each other directly.
 
