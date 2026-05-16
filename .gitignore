@@ -1,0 +1,36 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Build output
+.next/
+dist/
+build/
+out/
+*.tsbuildinfo
+# next-env.d.ts is intentionally committed so CI typecheck works without a build.
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.uv-cache/
+*.egg-info/
+
+# Env
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.log
+
+# Test / coverage
+coverage/
+.vitest/
+.pytest_cache/

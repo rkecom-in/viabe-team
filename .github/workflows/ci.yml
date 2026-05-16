@@ -1,0 +1,64 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+
+# Required status checks (branch protection on main): lint, typecheck, test.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      # ESLint for the web app.
+      - run: pnpm --filter @viabe/team-web lint
+      # Lint rule: no-cross-product-env-vars (fails on REPORTS_* env vars).
+      - run: node scripts/lint-cross-product-env.mjs
+      # Python lint.
+      - uses: astral-sh/setup-uv@v5
+      - run: uvx ruff check apps/team-orchestrator apps/team-ingestion-worker
+
+  typecheck:
+    name: typecheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm typecheck
+
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      # JS/TS unit tests (repo tooling + workspaces).
+      - run: pnpm test
+      # Python unit tests (smoke). Scaffold deps are not installed here —
+      # tests import only stdlib + the package under test.
+      - uses: astral-sh/setup-uv@v5
+      - run: uv run --no-project --with pytest pytest
+        working-directory: apps/team-orchestrator
+      - run: uv run --no-project --with pytest pytest
+        working-directory: apps/team-ingestion-worker

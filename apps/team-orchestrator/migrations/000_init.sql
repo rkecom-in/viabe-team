@@ -1,0 +1,5 @@
+-- 000_init.sql — initial migration placeholder.
+--
+-- Phase 1 scaffold: intentionally empty. The first real schema lands in a
+-- later ticket. Migrations are ordered, apply-once, and never edited after
+-- they have been applied (see repo README — DBOS workflow conventions).
