@@ -16,7 +16,10 @@ uv run pytest
 ## Layout
 
 - `src/team_orchestrator/` — package code (no workflows yet).
-- `migrations/` — ordered, apply-once SQL migrations (`000_init.sql`, …).
+
+Database migrations are **not** owned by this app. The shared
+`viabe-team-prod` Postgres schema is managed from the repo-root
+[`/migrations/`](../../migrations/) directory — see its `README.md`.
 
 DBOS workflow conventions are documented in the repo root `README.md`.
 Phase 1 is a scaffold — no workflows are defined yet.
