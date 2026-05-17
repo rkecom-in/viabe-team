@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field
 
 
 class WebhookEvent(BaseModel):
-    """Inbound webhook event. VT-3.8 minimal stub — VT-3.3 expands/replaces it."""
+    """Inbound webhook event. Expanded in VT-3.3a with Twilio ingress fields."""
 
     body: str = ""
     sender_phone: str = ""
@@ -24,6 +24,10 @@ class WebhookEvent(BaseModel):
     status_callback_state: (
         Literal["delivered", "read", "failed", "undelivered"] | None
     ) = None
+    # VT-3.3a Twilio ingress fields.
+    dupe_status: bool = False  # True when the ingress layer saw this MessageSid before
+    num_media: int = 0  # Twilio NumMedia — image/media attachment count
+    media_url_0: str | None = None  # Twilio MediaUrl0, when num_media > 0
 
 
 class RouteToDirectHandler(BaseModel):

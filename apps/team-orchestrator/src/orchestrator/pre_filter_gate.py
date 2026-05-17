@@ -62,8 +62,15 @@ def pre_filter(event: WebhookEvent, state: SubscriberState) -> PreFilterResult:
     """Deterministically route a webhook event. See the module docstring.
 
     `state` is accepted for parity with the VT-3.3 caller and future rules; the
-    VT-3.8 routing rules are driven entirely by the event.
+    routing rules are driven entirely by the event.
     """
+    # Rule c — duplicate delivery (flagged by the VT-3.3a ingress layer).
+    # A duplicate is never re-processed, regardless of content.
+    if event.dupe_status:
+        return RouteToDirectHandler(
+            handler_name="dupe_handler", payload={"reason": "duplicate delivery"}
+        )
+
     # --- Twilio status callbacks ---
     if event.message_type == "status_callback":
         state = event.status_callback_state

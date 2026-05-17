@@ -179,6 +179,15 @@ def test_ambiguous_message_routes_to_brain(gate):
     assert isinstance(result, gate.t.RouteToBrain)
 
 
+def test_duplicate_event_routes_to_dupe_handler(gate):
+    """VT-3.3a: a duplicate-flagged event routes to dupe_handler, even when
+    its body would otherwise match another rule."""
+    event = gate.t.WebhookEvent(body="STOP", dupe_status=True)
+    result = gate.pre_filter(event, _state(gate, uuid4()))
+    assert isinstance(result, gate.t.RouteToDirectHandler)
+    assert result.handler_name == "dupe_handler"
+
+
 # --- Capture ratio -----------------------------------------------------------
 
 

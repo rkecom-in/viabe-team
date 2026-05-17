@@ -15,10 +15,13 @@ dependencies = [
     "psycopg[binary]",
     "psycopg-pool",
     "pyyaml",
+    "fastapi",
+    "uvicorn[standard]",
+    "twilio",
 ]
 
 [dependency-groups]
-dev = ["pytest", "ruff"]
+dev = ["pytest", "ruff", "httpx"]
 
 [build-system]
 requires = ["hatchling"]
