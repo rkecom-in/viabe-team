@@ -42,7 +42,7 @@ class SubscriberState(TypedDict):
     last_campaign_at: datetime | None
     # Campaign ids awaiting their T+7 attribution close.
     attribution_close_pending: list[UUID]
-    total_arrr_paise: int
+    total_recovered_paise: int
     cumulative_fees_paid_paise: int
     escalation_pending: bool
     last_owner_message_at: datetime | None
@@ -67,7 +67,7 @@ def new_subscriber_state(
         paid_conversion_at=None,
         last_campaign_at=None,
         attribution_close_pending=[],
-        total_arrr_paise=0,
+        total_recovered_paise=0,
         cumulative_fees_paid_paise=0,
         escalation_pending=False,
         last_owner_message_at=None,
