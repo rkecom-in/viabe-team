@@ -39,8 +39,9 @@ describe('no-cross-product-env-vars', () => {
 
   it('flags server secrets in the web app env file', () => {
     expect(envVarViolation('frontend', 'TEAM_SUPABASE_SECRET_KEY')).toMatch(/web app env/)
-    expect(envVarViolation('frontend', 'TEAM_TWILIO_AUTH_TOKEN')).toMatch(/web app env/)
     expect(envVarViolation('frontend', 'TEAM_ANTHROPIC_API_KEY')).toMatch(/web app env/)
+    // The unprefixed name is NOT whitelisted — a typo trap (use TEAM_TWILIO_AUTH_TOKEN).
+    expect(envVarViolation('frontend', 'TWILIO_AUTH_TOKEN')).toMatch(/web app env/)
   })
 
   it('allows NEXT_PUBLIC_ and non-secret vars in the web app env file', () => {
@@ -60,7 +61,7 @@ describe('no-cross-product-env-vars', () => {
   })
 
   it('whitelists team-web route-handler server vars (VT-3.3b)', () => {
-    expect(envVarViolation('frontend', 'TWILIO_AUTH_TOKEN')).toBeNull()
+    expect(envVarViolation('frontend', 'TEAM_TWILIO_AUTH_TOKEN')).toBeNull()
     expect(envVarViolation('frontend', 'INTERNAL_API_SECRET')).toBeNull()
     // A non-whitelisted server secret in the web env is still rejected.
     expect(envVarViolation('frontend', 'SOME_OTHER_API_KEY')).toMatch(/web app env/)

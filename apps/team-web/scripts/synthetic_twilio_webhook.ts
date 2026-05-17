@@ -8,7 +8,7 @@
  * tenant lookup + rate limiting -> DBOS workflow start.
  *
  * Prerequisites: team-web running (`pnpm --filter @viabe/team-web dev`), the
- * orchestrator running, and TWILIO_AUTH_TOKEN + INTERNAL_API_SECRET set.
+ * orchestrator running, and TEAM_TWILIO_AUTH_TOKEN + INTERNAL_API_SECRET set.
  *
  * Usage:
  *   pnpm --filter @viabe/team-web exec tsx scripts/synthetic_twilio_webhook.ts \
@@ -23,9 +23,9 @@ function arg(name: string, fallback: string): string {
 }
 
 async function main(): Promise<number> {
-  const authToken = process.env.TWILIO_AUTH_TOKEN
+  const authToken = process.env.TEAM_TWILIO_AUTH_TOKEN
   if (!authToken) {
-    console.error('error: TWILIO_AUTH_TOKEN not set')
+    console.error('error: TEAM_TWILIO_AUTH_TOKEN not set')
     return 1
   }
   const url =
