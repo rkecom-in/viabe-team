@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { scanRepo, scanText } from './lint-cross-product-env.mjs'
+import { envVarViolation, scanRepo, scanText } from './lint-cross-product-env.mjs'
 
 describe('no-cross-product-env-vars', () => {
   it('flags a REPORTS_ env var in TS source', () => {
@@ -35,6 +35,28 @@ describe('no-cross-product-env-vars', () => {
     expect(
       scanText('TEAM_SUPABASE_PUBLISHABLE_KEY and TEAM_SUPABASE_SECRET_KEY'),
     ).toEqual([])
+  })
+
+  it('flags server secrets in the web app env file', () => {
+    expect(envVarViolation('frontend', 'TEAM_SUPABASE_SECRET_KEY')).toMatch(/web app env/)
+    expect(envVarViolation('frontend', 'TEAM_TWILIO_AUTH_TOKEN')).toMatch(/web app env/)
+    expect(envVarViolation('frontend', 'TEAM_ANTHROPIC_API_KEY')).toMatch(/web app env/)
+  })
+
+  it('allows NEXT_PUBLIC_ and non-secret vars in the web app env file', () => {
+    expect(envVarViolation('frontend', 'NEXT_PUBLIC_TEAM_SUPABASE_URL')).toBeNull()
+    expect(envVarViolation('frontend', 'NEXT_PUBLIC_TEAM_SUPABASE_PUBLISHABLE_KEY')).toBeNull()
+    expect(envVarViolation('frontend', 'NEXT_PUBLIC_SITE_URL')).toBeNull()
+  })
+
+  it('flags NEXT_PUBLIC_ vars in a backend app env file', () => {
+    expect(envVarViolation('backend', 'NEXT_PUBLIC_TEAM_SUPABASE_URL')).toMatch(/backend app env/)
+  })
+
+  it('allows server secrets in a backend app env file', () => {
+    expect(envVarViolation('backend', 'TEAM_SUPABASE_SECRET_KEY')).toBeNull()
+    expect(envVarViolation('backend', 'TEAM_TWILIO_AUTH_TOKEN')).toBeNull()
+    expect(envVarViolation('backend', 'INTERNAL_API_SECRET')).toBeNull()
   })
 
   it('keeps the repo free of forbidden env vars', () => {

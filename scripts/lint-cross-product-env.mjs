@@ -2,13 +2,17 @@
 /**
  * Lint rule: no-cross-product-env-vars
  *
- * Viabe Team must never read another product's environment variables.
- * Any identifier prefixed with `REPORTS_` belongs to Viabe Reports and is a
- * cross-product leak — the apps in this repo must own their config surface.
+ * Three checks, all failing CI (exit 1) on violation:
  *
- * Fails CI (exit 1) when a forbidden prefix is referenced anywhere under
- * apps/ or packages/. Exported helpers are unit-tested in the sibling
- * `.test.mjs` file.
+ * 1. Cross-product vars — any `REPORTS_*` identifier (Viabe Reports) under
+ *    apps/ or packages/ source. Viabe Team owns its own config surface.
+ * 2. Deprecated Supabase keys — `SUPABASE_ANON_KEY` / `SUPABASE_SERVICE_ROLE_KEY`
+ *    in source (VT-2 key discipline: publishable + secret keys only).
+ * 3. Per-app .env.example separation — server secrets must not appear in the
+ *    web app's env file, and NEXT_PUBLIC_* vars must not appear in a backend
+ *    app's env file (frontend-leakage / deployment-scoping guard).
+ *
+ * Exported helpers are unit-tested in the sibling `.test.mjs` file.
  */
 import { readdirSync, readFileSync, statSync } from 'node:fs'
 import { join, relative } from 'node:path'
@@ -22,6 +26,20 @@ export const FORBIDDEN_PREFIXES = ['REPORTS_']
  * secret keys are permitted; the legacy anon / service-role keys are banned.
  */
 export const FORBIDDEN_ENV_NAMES = ['SUPABASE_ANON_KEY', 'SUPABASE_SERVICE_ROLE_KEY']
+
+/** Name suffixes that mark a var as a server secret (must stay backend-only). */
+const SECRET_SUFFIX = /(?:_SECRET_KEY|_AUTH_TOKEN|_API_KEY)$/
+
+/**
+ * Per-app .env.example files and which side of the frontend/backend boundary
+ * each sits on. `frontend` files may hold only NEXT_PUBLIC_* (and other
+ * non-secret) vars; `backend` files must hold no NEXT_PUBLIC_* vars.
+ */
+const ENV_EXAMPLE_RULES = [
+  { file: 'apps/team-web/.env.example', side: 'frontend' },
+  { file: 'apps/team-orchestrator/.env.example', side: 'backend' },
+  { file: 'apps/team-ingestion-worker/.env.example', side: 'backend' },
+]
 
 const SCAN_DIRS = ['apps', 'packages']
 const SCAN_EXTENSIONS = new Set([
@@ -64,6 +82,31 @@ export function scanText(text) {
   ]
 }
 
+/**
+ * Check one env var name against a per-app .env.example rule.
+ * Returns `null` if allowed, or a violation reason string.
+ */
+export function envVarViolation(side, name) {
+  const isPublic = name.startsWith('NEXT_PUBLIC_')
+  if (side === 'frontend' && !isPublic && SECRET_SUFFIX.test(name)) {
+    return 'server secret in the web app env (move to a backend app .env.example)'
+  }
+  if (side === 'backend' && isPublic) {
+    return 'NEXT_PUBLIC_ var in a backend app env (belongs in apps/team-web/.env.example)'
+  }
+  return null
+}
+
+/** Extract `NAME` from each `NAME=...` declaration line of a .env file. */
+function envVarDeclarations(text) {
+  const decls = []
+  text.split('\n').forEach((line, index) => {
+    const match = line.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=/)
+    if (match) decls.push({ name: match[1], line: index + 1 })
+  })
+  return decls
+}
+
 function* walk(dir) {
   let entries
   try {
@@ -85,20 +128,33 @@ function* walk(dir) {
 /** Scan the repo. Returns `{ violations }` — one entry per forbidden match. */
 export function scanRepo(root = process.cwd()) {
   const violations = []
+
+  // Checks 1 + 2: forbidden identifiers in source.
   for (const dir of SCAN_DIRS) {
     for (const file of walk(join(root, dir))) {
       const lines = readFileSync(file, 'utf8').split('\n')
       lines.forEach((line, index) => {
         for (const name of scanText(line)) {
-          violations.push({
-            file: relative(root, file),
-            line: index + 1,
-            name,
-          })
+          violations.push({ file: relative(root, file), line: index + 1, name })
         }
       })
     }
   }
+
+  // Check 3: per-app .env.example frontend/backend separation.
+  for (const { file, side } of ENV_EXAMPLE_RULES) {
+    let text
+    try {
+      text = readFileSync(join(root, file), 'utf8')
+    } catch {
+      continue
+    }
+    for (const { name, line } of envVarDeclarations(text)) {
+      const reason = envVarViolation(side, name)
+      if (reason) violations.push({ file, line, name: `${name} — ${reason}` })
+    }
+  }
+
   return { violations }
 }
 
@@ -113,8 +169,9 @@ function main() {
     console.error(`  ${v.file}:${v.line}  ${v.name}`)
   }
   console.error(
-    `\n${violations.length} violation(s). No cross-product (REPORTS_*) env vars; ` +
-      'no deprecated Supabase anon / service-role keys.',
+    `\n${violations.length} violation(s). No cross-product (REPORTS_*) vars; ` +
+      'no deprecated Supabase anon / service-role keys; ' +
+      'no server secrets in the web env; no NEXT_PUBLIC_* in a backend env.',
   )
   process.exit(1)
 }

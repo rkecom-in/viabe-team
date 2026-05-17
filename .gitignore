@@ -34,3 +34,4 @@ venv/
 coverage/
 .vitest/
 .pytest_cache/
+supabase/

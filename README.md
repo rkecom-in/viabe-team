@@ -58,8 +58,10 @@ pnpm install
 cd apps/team-orchestrator && uv sync && cd -
 cd apps/team-ingestion-worker && uv sync && cd -
 
-# Env
-cp .env.example .env        # fill in values
+# Env — each app has its own .env.example; copy to .env.local
+cp apps/team-web/.env.example             apps/team-web/.env.local
+cp apps/team-orchestrator/.env.example    apps/team-orchestrator/.env.local
+cp apps/team-ingestion-worker/.env.example apps/team-ingestion-worker/.env.local
 ```
 
 Common commands (run from repo root):
@@ -74,36 +76,33 @@ pnpm --filter @viabe/team-web dev   # Next.js dev server
 
 ## Environment variables
 
-Full list with placeholders: [`.env.example`](./.env.example).
+Each app owns its own `.env.example` — there is **no root `.env.example`**.
+This matches the deployment topology (Vercel reads `apps/team-web`'s env;
+Railway reads each backend service's) and stops a server secret and a
+client-bundled var from ever sharing one file.
 
-| Variable | Used by | Notes |
+| App | File | Holds |
 | --- | --- | --- |
-| `FOUNDING_PRICE_PAISE` | web | Founding-cohort price, in paise (`249900` = ₹2,499) |
-| `STANDARD_PRICE_PAISE` | web | Standard price, in paise (`499900` = ₹4,999) |
-| `PRO_PRICE_PAISE` | web | Pro price, in paise (`1499900` = ₹14,999) |
-| `FOUNDING_SEATS_TOTAL` | web | Total founding seats |
-| `ANTHROPIC_API_KEY` | orchestrator, ingestion | Anthropic SDK |
-| `TEAM_SUPABASE_URL` | all | Supabase REST API URL |
-| `TEAM_SUPABASE_PUBLISHABLE_KEY` | web | Client-side key (RLS enforced) |
-| `TEAM_SUPABASE_SECRET_KEY` | orchestrator, ingestion | Server-side key (bypasses RLS) |
-| `TEAM_SUPABASE_DB_URL` | orchestrator | Direct Postgres DSN — migration runner + DBOS |
-| `INTERNAL_API_SECRET` | all | 64-char shared secret; constant-time compare only |
-| `TEAM_TWILIO_ACCOUNT_SID` / `TEAM_TWILIO_AUTH_TOKEN` | web | Twilio webhook auth |
-| `TEAM_RAZORPAY_KEY_ID` / `TEAM_RAZORPAY_KEY_SECRET` / `TEAM_RAZORPAY_WEBHOOK_SECRET` | web | Razorpay webhook auth |
-| `APIFY_TOKEN` | ingestion | Apify SDK |
-| `SARVAM_API_KEY` | ingestion | Sarvam AI client |
-| `NEXT_PUBLIC_SITE_URL` | web | Public base URL |
+| `team-web` | [`apps/team-web/.env.example`](./apps/team-web/.env.example) | Frontend-bound vars only — all `NEXT_PUBLIC_*` |
+| `team-orchestrator` | [`apps/team-orchestrator/.env.example`](./apps/team-orchestrator/.env.example) | Server secrets — Supabase, Twilio, Razorpay, Anthropic, Resend, pricing, `INTERNAL_API_SECRET` |
+| `team-ingestion-worker` | [`apps/team-ingestion-worker/.env.example`](./apps/team-ingestion-worker/.env.example) | Server secrets — Supabase, Apify, Sarvam, Anthropic, `INTERNAL_API_SECRET` |
 
-### Forbidden env vars
+Local dev: copy each app's `.env.example` to `.env.local` in that app
+directory (see [Local dev setup](#local-dev-setup)).
 
-CI enforces two env-var rules via the lint rule
+### Environment variable rules
+
+CI enforces these via the lint rule
 ([`scripts/lint-cross-product-env.mjs`](./scripts/lint-cross-product-env.mjs)),
-which fails the build if a banned name appears under `apps/` or `packages/`:
+which fails the build on a violation:
 
 - **No cross-product vars** — any name prefixed `REPORTS_` (Viabe Reports).
 - **No deprecated Supabase keys** — `SUPABASE_ANON_KEY` and
   `SUPABASE_SERVICE_ROLE_KEY`. Only `TEAM_SUPABASE_PUBLISHABLE_KEY` and
   `TEAM_SUPABASE_SECRET_KEY` are permitted.
+- **Per-app env separation** — server secrets (`*_SECRET_KEY`, `*_AUTH_TOKEN`,
+  `*_API_KEY`) must not appear in `apps/team-web/.env.example`; `NEXT_PUBLIC_*`
+  vars must not appear in a backend app's `.env.example`.
 
 ## DBOS workflow conventions
 
