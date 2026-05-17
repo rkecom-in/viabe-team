@@ -31,7 +31,8 @@ def dsr_handler(event: WebhookEvent, tenant: Tenant) -> dict[str, Any]:
             "VALUES (%s, 'deletion', 'acknowledged', now()) RETURNING id",
             (str(tenant.tenant_id),),
         ).fetchone()
-    ticket_id = str(row[0]) if row else None
+    # The shared pool uses dict_row — access columns by name.
+    ticket_id = str(row["id"]) if row else None
 
     # "We received your request; we'll respond within 30 days per DPDP."
     # TODO VT-3.3: replace this logged stub with the real Twilio template send.

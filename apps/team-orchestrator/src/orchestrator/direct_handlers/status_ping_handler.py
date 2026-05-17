@@ -34,11 +34,12 @@ def status_ping_handler(event: WebhookEvent, tenant: Tenant) -> dict[str, Any]:
     if row is None:
         status_text = "No account state on file."
     else:
-        business_name, phase, phase_entered_at = row
-        since = (
-            f" since {phase_entered_at:%Y-%m-%d}" if phase_entered_at else ""
+        # The shared pool uses dict_row — access columns by name.
+        phase_entered_at = row["phase_entered_at"]
+        since = f" since {phase_entered_at:%Y-%m-%d}" if phase_entered_at else ""
+        status_text = (
+            f"{row['business_name']}: current phase '{row['phase']}'{since}."
         )
-        status_text = f"{business_name}: current phase '{phase}'{since}."
 
     # TODO VT-3.3: replace this logged stub with the real Twilio template send.
     logger.info("status ping reply -> %s: %s", event.sender_phone, status_text)
