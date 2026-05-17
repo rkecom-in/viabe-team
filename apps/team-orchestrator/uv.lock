@@ -1812,6 +1812,7 @@ dependencies = [
     { name = "psycopg", extra = ["binary"] },
     { name = "psycopg-pool" },
     { name = "pydantic" },
+    { name = "pyyaml" },
     { name = "supabase" },
 ]
 
@@ -1832,6 +1833,7 @@ requires-dist = [
     { name = "psycopg", extras = ["binary"] },
     { name = "psycopg-pool" },
     { name = "pydantic" },
+    { name = "pyyaml" },
     { name = "supabase" },
 ]
 

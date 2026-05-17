@@ -12,7 +12,7 @@ import os
 
 from dbos import DBOS, DBOSConfig
 
-from orchestrator.graph import init_substrate
+from orchestrator.graph import init_substrate, reset_substrate
 
 # 6 minutes: the 5-minute wall-clock hard limit (concept-team.md §8.3) plus a
 # 1-minute safety margin.
@@ -59,4 +59,5 @@ def shutdown_dbos() -> None:
     """Tear DBOS down. Used by tests; safe to call when not launched."""
     global _launched
     DBOS.destroy()
+    reset_substrate()
     _launched = False
