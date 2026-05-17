@@ -15,9 +15,10 @@ from orchestrator.direct_handlers.dupe_handler import dupe_handler
 from orchestrator.direct_handlers.opt_out_handler import opt_out_handler
 from orchestrator.direct_handlers.status_ping_handler import status_ping_handler
 from orchestrator.direct_handlers.template_error_handler import template_error_handler
-from orchestrator.types import Tenant, WebhookEvent
+from orchestrator.state import SubscriberState
+from orchestrator.types import WebhookEvent
 
-Handler = Callable[[WebhookEvent, Tenant], dict[str, Any]]
+Handler = Callable[[WebhookEvent, SubscriberState], dict[str, Any]]
 
 HANDLERS: dict[str, Handler] = {
     "opt_out_handler": opt_out_handler,

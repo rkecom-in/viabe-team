@@ -1,16 +1,13 @@
-"""Shared orchestrator types for the Pre-Filter Gate (VT-3.8).
+"""Shared orchestrator I/O types.
 
-WebhookEvent and Tenant are MINIMAL STUBS:
-- VT-3.8 minimal stub — VT-3.3 will expand/replace WebhookEvent when the Twilio
-  adapter ships.
-- VT-3.8 minimal stub — VT-3.2 will expand/replace Tenant as part of
-  SubscriberState.
+WebhookEvent is a MINIMAL STUB — VT-3.3 expands/replaces it when the Twilio
+adapter ships. (The VT-3.8 ``Tenant`` stub was removed in VT-3.2 — subscriber
+context is now ``orchestrator.state.SubscriberState``.)
 """
 
 from __future__ import annotations
 
 from typing import Literal
-from uuid import UUID
 
 from pydantic import BaseModel, Field
 
@@ -27,14 +24,6 @@ class WebhookEvent(BaseModel):
     status_callback_state: (
         Literal["delivered", "read", "failed", "undelivered"] | None
     ) = None
-
-
-class Tenant(BaseModel):
-    """Tenant context. VT-3.8 minimal stub — VT-3.2 expands/replaces it."""
-
-    tenant_id: UUID
-    opt_out_status: bool = False
-    preferred_language: Literal["en", "hi"] = "en"
 
 
 class RouteToDirectHandler(BaseModel):
