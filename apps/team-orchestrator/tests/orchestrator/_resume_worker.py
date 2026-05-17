@@ -16,7 +16,7 @@ import sys
 import time
 
 import psycopg
-from dbos import DBOS, DBOSConfig
+from dbos import DBOS, DBOSConfig, SetWorkflowID
 
 _DB_URL = sys.argv[1] if len(sys.argv) > 2 else ""
 _WORKFLOW_ID = sys.argv[2] if len(sys.argv) > 2 else ""
@@ -49,7 +49,7 @@ def main() -> None:
     config: DBOSConfig = {"name": "team-orchestrator", "database_url": _DB_URL}
     DBOS(config=config)
     DBOS.launch()  # recovers any workflow left PENDING by an earlier crash
-    with DBOS.SetWorkflowID(_WORKFLOW_ID):
+    with SetWorkflowID(_WORKFLOW_ID):
         DBOS.start_workflow(resume_probe_workflow, _WORKFLOW_ID)
     time.sleep(40)  # stay alive while the workflow runs / recovery completes
 

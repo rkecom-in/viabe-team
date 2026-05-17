@@ -13,7 +13,7 @@ from __future__ import annotations
 from typing import Any
 from uuid import UUID
 
-from dbos import DBOS
+from dbos import DBOS, SetWorkflowID, SetWorkflowTimeout
 
 from dbos_config import WORKFLOW_TIMEOUT_SECONDS
 from orchestrator.graph import OrchestratorState, get_compiled_graph, get_pool
@@ -72,5 +72,5 @@ def run_pipeline(tenant_id: str, run_id: str, inbound: str) -> dict[str, Any]:
     twice with the same run_id returns the first run's result without
     re-executing (DBOS idempotency).
     """
-    with DBOS.SetWorkflowTimeout(WORKFLOW_TIMEOUT_SECONDS), DBOS.SetWorkflowID(run_id):
+    with SetWorkflowTimeout(WORKFLOW_TIMEOUT_SECONDS), SetWorkflowID(run_id):
         return pipeline_run(tenant_id, run_id, inbound)
