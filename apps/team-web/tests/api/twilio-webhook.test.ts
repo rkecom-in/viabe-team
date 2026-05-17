@@ -1,0 +1,111 @@
+import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { NextRequest } from 'next/server'
+
+// The route's collaborators are mocked: the route's own behaviour (403 vs
+// forward, Pillar 7 never-5xx) is what's under test — not Twilio's crypto or
+// the network call.
+vi.mock('@/lib/twilio', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/lib/twilio')>()
+  return { ...actual, verifyTwilioSignature: vi.fn() }
+})
+vi.mock('@/lib/orchestrator-client', () => ({
+  forwardToOrchestrator: vi.fn(),
+}))
+
+import { forwardToOrchestrator } from '@/lib/orchestrator-client'
+import { verifyTwilioSignature } from '@/lib/twilio'
+import { POST } from '@/app/api/team/twilio/webhook/route'
+
+const verifyMock = vi.mocked(verifyTwilioSignature)
+const forwardMock = vi.mocked(forwardToOrchestrator)
+
+function webhookRequest(
+  body = 'From=%2B919999900001&Body=hello&MessageSid=SM_test',
+): NextRequest {
+  return new NextRequest('http://localhost:3000/api/team/twilio/webhook', {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/x-www-form-urlencoded',
+      'x-twilio-signature': 'test-signature',
+    },
+    body,
+  })
+}
+
+beforeEach(() => {
+  verifyMock.mockReset()
+  forwardMock.mockReset()
+})
+
+describe('Twilio inbound webhook (VT-3.3b)', () => {
+  it('verified signature forwards to the orchestrator and returns 200 TwiML', async () => {
+    verifyMock.mockReturnValue(true)
+    forwardMock.mockResolvedValue({
+      ok: true,
+      workflowId: 'twilio_inbound_SM_test',
+      reason: 'started',
+    })
+
+    const res = await POST(webhookRequest())
+
+    expect(res.status).toBe(200)
+    expect(res.headers.get('content-type')).toContain('text/xml')
+    expect(await res.text()).toContain('<Response/>')
+    expect(forwardMock).toHaveBeenCalledOnce()
+  })
+
+  it('invalid signature returns 403 and does not forward', async () => {
+    verifyMock.mockReturnValue(false)
+
+    const res = await POST(webhookRequest())
+
+    expect(res.status).toBe(403)
+    expect(forwardMock).not.toHaveBeenCalled()
+  })
+
+  it('orchestrator non-200 still returns 200 TwiML (Pillar 7)', async () => {
+    verifyMock.mockReturnValue(true)
+    forwardMock.mockResolvedValue({ ok: false, workflowId: null, reason: 'http_500' })
+
+    const res = await POST(webhookRequest())
+    expect(res.status).toBe(200)
+  })
+
+  it('orchestrator timeout still returns 200 TwiML (Pillar 7)', async () => {
+    verifyMock.mockReturnValue(true)
+    forwardMock.mockResolvedValue({ ok: false, workflowId: null, reason: 'timeout' })
+
+    const res = await POST(webhookRequest())
+    expect(res.status).toBe(200)
+  })
+
+  it('unknown_sender / rate_limit_exceeded reasons still return 200 TwiML', async () => {
+    verifyMock.mockReturnValue(true)
+    forwardMock.mockResolvedValue({ ok: true, workflowId: null, reason: 'unknown_sender' })
+
+    const res = await POST(webhookRequest())
+    expect(res.status).toBe(200)
+  })
+
+  it('image attachment fields are forwarded to the orchestrator', async () => {
+    verifyMock.mockReturnValue(true)
+    forwardMock.mockResolvedValue({ ok: true, workflowId: 'w', reason: 'started' })
+
+    await POST(
+      webhookRequest(
+        'From=%2B919999900001&MessageSid=SM_img&NumMedia=2&MediaUrl0=https%3A%2F%2Fx%2Fa.jpg',
+      ),
+    )
+
+    expect(forwardMock).toHaveBeenCalledWith(
+      expect.objectContaining({ NumMedia: '2', MediaUrl0: 'https://x/a.jpg' }),
+    )
+  })
+})
+
+describe('verifyTwilioSignature', () => {
+  it('returns false when the signature header is missing', async () => {
+    const actual = await vi.importActual<typeof import('@/lib/twilio')>('@/lib/twilio')
+    expect(actual.verifyTwilioSignature(null, 'http://x', {})).toBe(false)
+  })
+})

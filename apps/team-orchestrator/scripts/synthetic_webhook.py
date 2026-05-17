@@ -10,7 +10,7 @@ Prerequisites:
   - INTERNAL_API_SECRET set in the environment (same value the server uses)
 
 Usage:
-  python scripts/synthetic_webhook.py --tenant-id <uuid> --body "STOP" \\
+  python scripts/synthetic_webhook.py --body "STOP" \\
       --sender "+919999999999" [--message-type inbound_message|status_callback]
 """
 
@@ -27,9 +27,12 @@ _DEFAULT_URL = "http://localhost:8000/api/orchestrator/twilio-ingress"
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Fire a synthetic Twilio webhook")
-    parser.add_argument("--tenant-id", required=True, help="tenant UUID")
     parser.add_argument("--body", default="hello", help="message text")
-    parser.add_argument("--sender", default="+919999999999", help="sender phone (E.164)")
+    parser.add_argument(
+        "--sender",
+        default="+919999999999",
+        help="sender phone (E.164) — must match a tenant's whatsapp_number",
+    )
     parser.add_argument(
         "--message-type",
         default="inbound_message",
@@ -55,7 +58,7 @@ def main() -> int:
 
     response = httpx.post(
         args.url,
-        json={"tenant_id": args.tenant_id, "twilio_fields": twilio_fields},
+        json={"twilio_fields": twilio_fields},
         headers={"X-Internal-Secret": secret},
         timeout=15,
     )

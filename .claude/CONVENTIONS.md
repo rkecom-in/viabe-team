@@ -10,3 +10,7 @@ Environment variables:
 - Server secrets: only in apps/team-orchestrator/.env.example or apps/team-ingestion-worker/.env.example; never NEXT_PUBLIC_*.
 - The CI lint rule (scripts/lint-cross-product-env.mjs) enforces this separation.
 - Local dev: copy each app's .env.example to .env.local in that app directory.
+- Exception (VT-3.3b): Next.js route handlers run server-side and may need server-only
+  vars. apps/team-web/.env.example whitelists TWILIO_AUTH_TOKEN + INTERNAL_API_SECRET
+  by exact name (WEB_ENV_WHITELIST in the lint rule). Any other non-NEXT_PUBLIC_
+  secret-suffixed var in the web env is still rejected.

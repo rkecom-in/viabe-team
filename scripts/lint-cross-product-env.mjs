@@ -31,6 +31,14 @@ export const FORBIDDEN_ENV_NAMES = ['SUPABASE_ANON_KEY', 'SUPABASE_SERVICE_ROLE_
 const SECRET_SUFFIX = /(?:_SECRET_KEY|_AUTH_TOKEN|_API_KEY)$/
 
 /**
+ * Server-only vars permitted in apps/team-web/.env.example by exact name.
+ * Next.js route handlers run server-side and legitimately need these — they
+ * are never bundled to the client. Added in VT-3.3b. Any OTHER non-public
+ * secret-suffixed var in the web env is still rejected.
+ */
+const WEB_ENV_WHITELIST = new Set(['TWILIO_AUTH_TOKEN', 'INTERNAL_API_SECRET'])
+
+/**
  * Per-app .env.example files and which side of the frontend/backend boundary
  * each sits on. `frontend` files may hold only NEXT_PUBLIC_* (and other
  * non-secret) vars; `backend` files must hold no NEXT_PUBLIC_* vars.
@@ -88,7 +96,12 @@ export function scanText(text) {
  */
 export function envVarViolation(side, name) {
   const isPublic = name.startsWith('NEXT_PUBLIC_')
-  if (side === 'frontend' && !isPublic && SECRET_SUFFIX.test(name)) {
+  if (
+    side === 'frontend' &&
+    !isPublic &&
+    SECRET_SUFFIX.test(name) &&
+    !WEB_ENV_WHITELIST.has(name)
+  ) {
     return 'server secret in the web app env (move to a backend app .env.example)'
   }
   if (side === 'backend' && isPublic) {
