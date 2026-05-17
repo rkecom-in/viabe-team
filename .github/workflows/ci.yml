@@ -28,6 +28,16 @@ jobs:
       # Python lint.
       - uses: astral-sh/setup-uv@v5
       - run: uvx ruff check apps/team-orchestrator apps/team-ingestion-worker
+      # Pillar 1: the Pre-Filter Gate subtree must contain no LLM calls.
+      - name: No LLM in the Pre-Filter subtree (Pillar 1)
+        run: |
+          if grep -rniE 'anthropic|openai|messages\.create|claude-|\bsonnet\b' \
+              apps/team-orchestrator/src/orchestrator/pre_filter_gate.py \
+              apps/team-orchestrator/src/orchestrator/direct_handlers/; then
+            echo "::error::LLM reference found in the Pre-Filter subtree (Pillar 1 violation)"
+            exit 1
+          fi
+          echo "no-llm-in-pre-filter: ok"
 
   typecheck:
     name: typecheck
@@ -120,7 +130,7 @@ jobs:
           DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
         run: |
           uv sync --frozen
-          uv run pytest tests/orchestrator/test_skeleton.py -v
+          uv run pytest tests/orchestrator/ -v
         working-directory: apps/team-orchestrator
 
   gitleaks:

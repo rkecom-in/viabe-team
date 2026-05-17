@@ -109,3 +109,16 @@ def get_pool() -> ConnectionPool:
     if _pool is None:
         raise RuntimeError("init_substrate() not called — launch_dbos() first")
     return _pool
+
+
+def reset_substrate() -> None:
+    """Close and clear the module-level substrate.
+
+    Used by shutdown_dbos() so a later launch_dbos() rebuilds cleanly — e.g.
+    when a test suite cycles DBOS across more than one module.
+    """
+    global _pool, _compiled
+    if _pool is not None:
+        _pool.close()
+    _pool = None
+    _compiled = None
