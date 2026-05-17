@@ -1,0 +1,9 @@
+# Initial draft for VT-3.8. VT-8 admission gate will own production keyword
+# curation. Adding/removing keywords requires Type 2 governance per Notion.
+#
+# Matching: case-insensitive, word-boundary, anywhere in the message body.
+keywords:
+  - data deletion
+  - my data
+  - GDPR
+  - मेरा डेटा

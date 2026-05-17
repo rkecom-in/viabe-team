@@ -1,0 +1,9 @@
+# Initial draft for VT-3.8. VT-8 admission gate will own production keyword
+# curation. Adding/removing keywords requires Type 2 governance per Notion.
+#
+# Matching: exact, case-insensitive, against the whole trimmed message body.
+keywords:
+  - STOP
+  - UNSUBSCRIBE
+  - बंद करो
+  - चाहिएं नहीं
