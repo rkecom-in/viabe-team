@@ -28,16 +28,32 @@ jobs:
       # Python lint.
       - uses: astral-sh/setup-uv@v5
       - run: uvx ruff check apps/team-orchestrator apps/team-ingestion-worker
-      # Pillar 1: the Pre-Filter Gate subtree must contain no LLM calls.
-      - name: No LLM in the Pre-Filter subtree (Pillar 1)
+      # Pillar 1: the deterministic subtree (Pre-Filter Gate + phase machine)
+      # must contain no LLM calls.
+      - name: No LLM in the deterministic subtree (Pillar 1)
         run: |
           if grep -rniE 'anthropic|openai|messages\.create|claude-|\bsonnet\b' \
               apps/team-orchestrator/src/orchestrator/pre_filter_gate.py \
+              apps/team-orchestrator/src/orchestrator/state.py \
+              apps/team-orchestrator/src/orchestrator/transitions.py \
+              apps/team-orchestrator/src/orchestrator/invariants.py \
               apps/team-orchestrator/src/orchestrator/direct_handlers/; then
-            echo "::error::LLM reference found in the Pre-Filter subtree (Pillar 1 violation)"
+            echo "::error::LLM reference found in the deterministic subtree (Pillar 1)"
             exit 1
           fi
-          echo "no-llm-in-pre-filter: ok"
+          echo "no-llm-in-deterministic-subtree: ok"
+      # Pillar 1: agent / specialist code must never import the phase machine.
+      # The dirs do not exist yet (VT-3.4 / VT-3.9); this activates when they land.
+      - name: Agent code must not import transitions.py / invariants.py
+        run: |
+          for d in specialists agent brain; do
+            path="apps/team-orchestrator/src/orchestrator/$d"
+            if [ -d "$path" ] && grep -rnE '(import|from) .*\b(transitions|invariants)\b' "$path"; then
+              echo "::error::agent/specialist code must not import the phase machine (Pillar 1)"
+              exit 1
+            fi
+          done
+          echo "agent-cannot-import-phase-machine: ok"
 
   typecheck:
     name: typecheck

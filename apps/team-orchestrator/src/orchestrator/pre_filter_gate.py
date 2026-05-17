@@ -17,12 +17,12 @@ from pathlib import Path
 import yaml
 from dbos import DBOS
 
+from orchestrator.state import SubscriberState
 from orchestrator.types import (
     PreFilterResult,
     Reject,
     RouteToBrain,
     RouteToDirectHandler,
-    Tenant,
     WebhookEvent,
 )
 
@@ -58,10 +58,10 @@ def _normalize(body: str) -> str:
 
 
 @DBOS.step()
-def pre_filter(event: WebhookEvent, tenant: Tenant) -> PreFilterResult:
+def pre_filter(event: WebhookEvent, state: SubscriberState) -> PreFilterResult:
     """Deterministically route a webhook event. See the module docstring.
 
-    `tenant` is accepted for parity with the VT-3.3 caller and future rules; the
+    `state` is accepted for parity with the VT-3.3 caller and future rules; the
     VT-3.8 routing rules are driven entirely by the event.
     """
     # --- Twilio status callbacks ---

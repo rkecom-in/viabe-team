@@ -17,18 +17,19 @@ from typing import Any
 from dbos import DBOS
 
 from orchestrator.graph import get_pool
-from orchestrator.types import Tenant, WebhookEvent
+from orchestrator.state import SubscriberState
+from orchestrator.types import WebhookEvent
 
 logger = logging.getLogger(__name__)
 
 
 @DBOS.step()
-def status_ping_handler(event: WebhookEvent, tenant: Tenant) -> dict[str, Any]:
+def status_ping_handler(event: WebhookEvent, state: SubscriberState) -> dict[str, Any]:
     """Reply to a status ping with the tenant's current, accurate state."""
     with get_pool().connection() as conn:
         row = conn.execute(
             "SELECT business_name, phase, phase_entered_at FROM tenants WHERE id = %s",
-            (str(tenant.tenant_id),),
+            (str(state["tenant_id"]),),
         ).fetchone()
 
     if row is None:

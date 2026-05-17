@@ -13,18 +13,19 @@ from typing import Any
 from dbos import DBOS
 
 from orchestrator.graph import get_pool
-from orchestrator.types import Tenant, WebhookEvent
+from orchestrator.state import SubscriberState
+from orchestrator.types import WebhookEvent
 
 logger = logging.getLogger(__name__)
 
 
 @DBOS.step()
-def opt_out_handler(event: WebhookEvent, tenant: Tenant) -> dict[str, Any]:
+def opt_out_handler(event: WebhookEvent, state: SubscriberState) -> dict[str, Any]:
     """Set the tenant opt-out flag and send the opt-out confirmation."""
     with get_pool().connection() as conn:
         conn.execute(
             "UPDATE tenants SET opt_out = true WHERE id = %s",
-            (str(tenant.tenant_id),),
+            (str(state["tenant_id"]),),
         )
 
     # Pillar 7: confirmation MUST be sent.
@@ -32,7 +33,7 @@ def opt_out_handler(event: WebhookEvent, tenant: Tenant) -> dict[str, Any]:
     logger.info(
         "opt-out confirmation template -> %s (tenant %s)",
         event.sender_phone,
-        tenant.tenant_id,
+        state["tenant_id"],
     )
 
     return {

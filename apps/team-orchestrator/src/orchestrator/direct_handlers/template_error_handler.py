@@ -16,13 +16,14 @@ from typing import Any
 
 from dbos import DBOS
 
-from orchestrator.types import Tenant, WebhookEvent
+from orchestrator.state import SubscriberState
+from orchestrator.types import WebhookEvent
 
 logger = logging.getLogger(__name__)
 
 
 @DBOS.step()
-def template_error_handler(event: WebhookEvent, tenant: Tenant) -> dict[str, Any]:
+def template_error_handler(event: WebhookEvent, state: SubscriberState) -> dict[str, Any]:
     """Record a failed Twilio template send and its retry-eligibility."""
     # Template send failures are transient and retry-eligible by default;
     # VT-3.6 will replace this flag with real retry / escalation logic.
@@ -31,7 +32,7 @@ def template_error_handler(event: WebhookEvent, tenant: Tenant) -> dict[str, Any
     logger.warning(
         "template send failed (sid=%s, tenant=%s) — retry-eligible: %s",
         event.twilio_message_sid,
-        tenant.tenant_id,
+        state["tenant_id"],
         retry_eligible,
     )
 

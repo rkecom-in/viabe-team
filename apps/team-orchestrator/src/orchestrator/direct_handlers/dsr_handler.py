@@ -17,19 +17,20 @@ from typing import Any
 from dbos import DBOS
 
 from orchestrator.graph import get_pool
-from orchestrator.types import Tenant, WebhookEvent
+from orchestrator.state import SubscriberState
+from orchestrator.types import WebhookEvent
 
 logger = logging.getLogger(__name__)
 
 
 @DBOS.step()
-def dsr_handler(event: WebhookEvent, tenant: Tenant) -> dict[str, Any]:
+def dsr_handler(event: WebhookEvent, state: SubscriberState) -> dict[str, Any]:
     """Create a DSR ticket and send the DPDP acknowledgment — atomically."""
     with get_pool().connection() as conn:
         row = conn.execute(
             "INSERT INTO dsr_tickets (tenant_id, request_type, status, acknowledged_at) "
             "VALUES (%s, 'deletion', 'acknowledged', now()) RETURNING id",
-            (str(tenant.tenant_id),),
+            (str(state["tenant_id"]),),
         ).fetchone()
     # The shared pool uses dict_row — access columns by name.
     ticket_id = str(row["id"]) if row else None

@@ -1,14 +1,15 @@
 """VT-3.8 tests — Pre-Filter Gate (Stage 1) + 5 direct handlers.
 
-Require a live Postgres via ``DATABASE_URL`` plus the dbos / langgraph stack.
-Skipped in the lightweight unit-test job; run in the CI ``orchestrator`` job.
+Refactored in VT-3.2: pre_filter / handlers take a SubscriberState (not the
+removed Tenant stub). Require a live Postgres via ``DATABASE_URL`` plus the
+dbos / langgraph stack; run in the CI ``orchestrator`` job.
 """
 
 from __future__ import annotations
 
 import os
 from types import SimpleNamespace
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 
@@ -36,11 +37,16 @@ def gate():
     from orchestrator import types
     from orchestrator.direct_handlers import HANDLERS
     from orchestrator.pre_filter_gate import pre_filter
+    from orchestrator.state import new_subscriber_state
 
     launch_dbos()
     try:
         yield SimpleNamespace(
-            dsn=dsn, pre_filter=pre_filter, HANDLERS=HANDLERS, t=types
+            dsn=dsn,
+            pre_filter=pre_filter,
+            HANDLERS=HANDLERS,
+            t=types,
+            make_state=new_subscriber_state,
         )
     finally:
         shutdown_dbos()
@@ -54,6 +60,11 @@ def _new_tenant(dsn: str) -> str:
         ).fetchone()
     assert row is not None
     return str(row[0])
+
+
+def _state(gate, tenant_id: str | UUID):
+    """A minimal SubscriberState for routing — only tenant_id matters here."""
+    return gate.make_state(UUID(str(tenant_id)))
 
 
 def _inbound(gate, body: str):
@@ -73,13 +84,13 @@ def _callback(gate, state: str):
 
 def test_opt_out_keyword_en_routes_and_sets_flag(gate):
     tenant_id = _new_tenant(gate.dsn)
-    tenant = gate.t.Tenant(tenant_id=tenant_id)
-    result = gate.pre_filter(_inbound(gate, "STOP"), tenant)
+    sub = _state(gate, tenant_id)
+    result = gate.pre_filter(_inbound(gate, "STOP"), sub)
 
     assert isinstance(result, gate.t.RouteToDirectHandler)
     assert result.handler_name == "opt_out_handler"
 
-    outcome = gate.HANDLERS["opt_out_handler"](_inbound(gate, "STOP"), tenant)
+    outcome = gate.HANDLERS["opt_out_handler"](_inbound(gate, "STOP"), sub)
     assert outcome["opt_out_set"] is True
     assert outcome["confirmation_sent"] is True
 
@@ -92,13 +103,13 @@ def test_opt_out_keyword_en_routes_and_sets_flag(gate):
 
 def test_opt_out_keyword_hi_routes_and_sets_flag(gate):
     tenant_id = _new_tenant(gate.dsn)
-    tenant = gate.t.Tenant(tenant_id=tenant_id, preferred_language="hi")
-    result = gate.pre_filter(_inbound(gate, "बंद करो"), tenant)
+    sub = _state(gate, tenant_id)
+    result = gate.pre_filter(_inbound(gate, "बंद करो"), sub)
 
     assert isinstance(result, gate.t.RouteToDirectHandler)
     assert result.handler_name == "opt_out_handler"
 
-    gate.HANDLERS["opt_out_handler"](_inbound(gate, "बंद करो"), tenant)
+    gate.HANDLERS["opt_out_handler"](_inbound(gate, "बंद करो"), sub)
     with psycopg.connect(gate.dsn, autocommit=True) as conn:
         row = conn.execute(
             "SELECT opt_out FROM tenants WHERE id = %s", (tenant_id,)
@@ -108,14 +119,14 @@ def test_opt_out_keyword_hi_routes_and_sets_flag(gate):
 
 def test_dsr_keyword_routes_creates_ticket(gate):
     tenant_id = _new_tenant(gate.dsn)
-    tenant = gate.t.Tenant(tenant_id=tenant_id)
+    sub = _state(gate, tenant_id)
     event = _inbound(gate, "I want data deletion for my account")
 
-    result = gate.pre_filter(event, tenant)
+    result = gate.pre_filter(event, sub)
     assert isinstance(result, gate.t.RouteToDirectHandler)
     assert result.handler_name == "dsr_handler"
 
-    outcome = gate.HANDLERS["dsr_handler"](event, tenant)
+    outcome = gate.HANDLERS["dsr_handler"](event, sub)
     assert outcome["acknowledgment_sent"] is True
     assert outcome["dsr_ticket_id"] is not None
 
@@ -128,44 +139,42 @@ def test_dsr_keyword_routes_creates_ticket(gate):
 
 
 def test_status_callback_delivered_is_rejected(gate):
-    tenant = gate.t.Tenant(tenant_id=uuid4())
-    result = gate.pre_filter(_callback(gate, "delivered"), tenant)
+    result = gate.pre_filter(_callback(gate, "delivered"), _state(gate, uuid4()))
     assert isinstance(result, gate.t.Reject)
     assert "observability" in result.reason
 
 
 def test_status_callback_failed_routes_to_template_error_handler(gate):
-    tenant = gate.t.Tenant(tenant_id=uuid4())
-    result = gate.pre_filter(_callback(gate, "failed"), tenant)
+    result = gate.pre_filter(_callback(gate, "failed"), _state(gate, uuid4()))
     assert isinstance(result, gate.t.RouteToDirectHandler)
     assert result.handler_name == "template_error_handler"
 
 
 def test_status_ping_routes_to_status_ping_handler(gate):
     tenant_id = _new_tenant(gate.dsn)
-    tenant = gate.t.Tenant(tenant_id=tenant_id)
-    result = gate.pre_filter(_inbound(gate, "hi"), tenant)
+    sub = _state(gate, tenant_id)
+    result = gate.pre_filter(_inbound(gate, "hi"), sub)
     assert isinstance(result, gate.t.RouteToDirectHandler)
     assert result.handler_name == "status_ping_handler"
 
-    outcome = gate.HANDLERS["status_ping_handler"](_inbound(gate, "hi"), tenant)
+    outcome = gate.HANDLERS["status_ping_handler"](_inbound(gate, "hi"), sub)
     assert outcome["reply_sent"] is True
     assert "trial" in outcome["status_text"]  # accurate phase, no fabrication
 
 
 def test_substantive_message_routes_to_brain(gate):
-    tenant = gate.t.Tenant(tenant_id=uuid4())
     result = gate.pre_filter(
-        _inbound(gate, "I want to launch a campaign for dormant customers"), tenant
+        _inbound(gate, "I want to launch a campaign for dormant customers"),
+        _state(gate, uuid4()),
     )
     assert isinstance(result, gate.t.RouteToBrain)
     assert "substantive owner message" in result.reason
 
 
 def test_ambiguous_message_routes_to_brain(gate):
-    tenant = gate.t.Tenant(tenant_id=uuid4())
     result = gate.pre_filter(
-        _inbound(gate, "how are things going with the cafe customers"), tenant
+        _inbound(gate, "how are things going with the cafe customers"),
+        _state(gate, uuid4()),
     )
     assert isinstance(result, gate.t.RouteToBrain)
 
@@ -178,7 +187,7 @@ def test_capture_ratio_on_synthetic_event_mix(gate):
 
     Capture ratio = (RouteToDirectHandler + Reject) / total (Notion §4).
     """
-    tenant = gate.t.Tenant(tenant_id=uuid4())
+    sub = _state(gate, uuid4())
     events: list = []
     events += [_inbound(gate, "STOP") for _ in range(20)]
     events += [_inbound(gate, "बंद करो") for _ in range(20)]
@@ -195,7 +204,7 @@ def test_capture_ratio_on_synthetic_event_mix(gate):
 
     captured = 0
     for event in events:
-        result = gate.pre_filter(event, tenant)
+        result = gate.pre_filter(event, sub)
         if isinstance(result, (gate.t.RouteToDirectHandler, gate.t.Reject)):
             captured += 1
 

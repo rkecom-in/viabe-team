@@ -15,17 +15,18 @@ from typing import Any
 
 from dbos import DBOS
 
-from orchestrator.types import Tenant, WebhookEvent
+from orchestrator.state import SubscriberState
+from orchestrator.types import WebhookEvent
 
 logger = logging.getLogger(__name__)
 
 
 @DBOS.step()
-def dupe_handler(event: WebhookEvent, tenant: Tenant) -> dict[str, Any]:
+def dupe_handler(event: WebhookEvent, state: SubscriberState) -> dict[str, Any]:
     """Confirm a duplicate webhook delivery and end the workflow."""
     logger.info(
         "duplicate webhook delivery confirmed (sid=%s, tenant=%s)",
         event.twilio_message_sid,
-        tenant.tenant_id,
+        state["tenant_id"],
     )
     return {"handler": "dupe_handler", "duplicate_confirmed": True}
