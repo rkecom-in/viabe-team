@@ -130,7 +130,7 @@ def twilio_ingress(
         run_id = str(uuid5(NAMESPACE_URL, message_sid))
         # Read-only pre-check (no side-effect): has this MessageSid's workflow
         # already been started? Dedup itself happens inside the workflow.
-        already_seen = DBOS.get_workflow(workflow_id) is not None
+        already_seen = DBOS.get_workflow_status(workflow_id) is not None
         with SetWorkflowID(workflow_id):
             DBOS.start_workflow(webhook_pipeline_run, tenant_id, run_id, fields)
         return {
