@@ -17,6 +17,9 @@ Viabe Team is three deployable apps plus one shared package:
 | `apps/team-ingestion-worker` | Python 3.12, Apify SDK, Sarvam AI, Anthropic SDK | Heavy data ingestion |
 | `packages/team-shared` | TypeScript + Python (via codegen) | Shared types across apps |
 
+Inbound message flow: **Twilio → `team-web` webhook (signature verify) →
+`team-orchestrator` ingress (tenant lookup + rate limit) → DBOS workflow**.
+
 Reference docs (Notion):
 
 - **Concept doc** — https://www.notion.so/35e387c2cc5a817fb9e6d16a73167559

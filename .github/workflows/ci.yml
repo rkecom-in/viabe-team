@@ -81,6 +81,8 @@ jobs:
       - run: pnpm install --frozen-lockfile
       # JS/TS unit tests (repo tooling + workspaces).
       - run: pnpm test
+      # team-web route-handler tests (VT-3.3b Twilio webhook).
+      - run: pnpm --filter @viabe/team-web test
       # Python unit tests (smoke). Heavy deps are not installed here — tests
       # import only stdlib + the package under test. DB-backed migration tests
       # skip themselves (no psycopg / no DATABASE_URL); they run in `migrations`.

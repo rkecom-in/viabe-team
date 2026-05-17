@@ -59,6 +59,13 @@ describe('no-cross-product-env-vars', () => {
     expect(envVarViolation('backend', 'INTERNAL_API_SECRET')).toBeNull()
   })
 
+  it('whitelists team-web route-handler server vars (VT-3.3b)', () => {
+    expect(envVarViolation('frontend', 'TWILIO_AUTH_TOKEN')).toBeNull()
+    expect(envVarViolation('frontend', 'INTERNAL_API_SECRET')).toBeNull()
+    // A non-whitelisted server secret in the web env is still rejected.
+    expect(envVarViolation('frontend', 'SOME_OTHER_API_KEY')).toMatch(/web app env/)
+  })
+
   it('keeps the repo free of forbidden env vars', () => {
     expect(scanRepo().violations).toEqual([])
   })
