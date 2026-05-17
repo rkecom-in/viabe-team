@@ -303,6 +303,55 @@ def test_hash_phone_deterministic_and_salt_sensitive():
     assert a1 != b
 
 
+# --- PR-fix-5 (VT-3.3a-fix-2): RouteToBrain → escalated + brain-pending step --
+
+
+def test_substantive_message_marks_run_escalated(ingress):
+    """A substantive owner message routes to the brain. The brain is not yet
+    wired (VT-3.4), so the run must end 'escalated' — never silently 'completed'
+    (Pillar 7) — with an 'awaiting_brain' step carrying the pre-filter reason."""
+    phone = _phone()
+    _new_tenant(ingress.dsn, phone)
+    resp = _post(ingress, _fields(phone, Body="I want to plan a campaign"))
+    result = _await_workflow(resp.json()["workflow_id"])
+    assert result["routed"] == "brain"
+
+    with psycopg.connect(ingress.dsn, autocommit=True) as conn:
+        status = conn.execute(
+            "SELECT status FROM pipeline_runs WHERE id = %s", (result["run_id"],)
+        ).fetchone()[0]
+        step = conn.execute(
+            "SELECT output_envelope FROM pipeline_steps "
+            "WHERE run_id = %s AND step_kind = 'awaiting_brain'",
+            (result["run_id"],),
+        ).fetchone()
+    assert status == "escalated"
+    assert step is not None, "no awaiting_brain step record written"
+    assert "owner message" in step[0]["reason"]
+
+
+def test_status_callback_delivered_completes_clean(ingress):
+    """A 'delivered' status callback is a Reject (observability-only) — the run
+    completes cleanly with status 'completed' and NO awaiting_brain record."""
+    phone = _phone()
+    _new_tenant(ingress.dsn, phone)
+    resp = _post(ingress, _fields(phone, MessageStatus="delivered"))
+    result = _await_workflow(resp.json()["workflow_id"])
+    assert result["routed"] == "reject"
+
+    with psycopg.connect(ingress.dsn, autocommit=True) as conn:
+        status = conn.execute(
+            "SELECT status FROM pipeline_runs WHERE id = %s", (result["run_id"],)
+        ).fetchone()[0]
+        brain_steps = conn.execute(
+            "SELECT count(*) FROM pipeline_steps "
+            "WHERE run_id = %s AND step_kind = 'awaiting_brain'",
+            (result["run_id"],),
+        ).fetchone()[0]
+    assert status == "completed"
+    assert brain_steps == 0
+
+
 def test_dbos_auto_resumes_mid_ingress(ingress):
     """A webhook workflow SIGKILLed after the ingress step resumes cleanly."""
     dsn = ingress.dsn
