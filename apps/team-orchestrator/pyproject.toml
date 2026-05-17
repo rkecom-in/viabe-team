@@ -11,6 +11,7 @@ dependencies = [
     "pydantic",
     "supabase",
     "pgvector",
+    "psycopg[binary]",
 ]
 
 [dependency-groups]
@@ -28,5 +29,5 @@ line-length = 100
 target-version = "py312"
 
 [tool.pytest.ini_options]
-pythonpath = ["src"]
+pythonpath = ["src", "scripts"]
 testpaths = ["tests"]

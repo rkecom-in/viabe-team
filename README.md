@@ -83,21 +83,27 @@ Full list with placeholders: [`.env.example`](./.env.example).
 | `PRO_PRICE_PAISE` | web | Pro price, in paise (`1499900` = ₹14,999) |
 | `FOUNDING_SEATS_TOTAL` | web | Total founding seats |
 | `ANTHROPIC_API_KEY` | orchestrator, ingestion | Anthropic SDK |
-| `SUPABASE_URL` / `SUPABASE_SERVICE_ROLE_KEY` / `SUPABASE_ANON_KEY` | all | Supabase + pgvector |
-| `DBOS_DATABASE_URL` | orchestrator | DBOS system + app database |
+| `TEAM_SUPABASE_URL` | all | Supabase REST API URL |
+| `TEAM_SUPABASE_PUBLISHABLE_KEY` | web | Client-side key (RLS enforced) |
+| `TEAM_SUPABASE_SECRET_KEY` | orchestrator, ingestion | Server-side key (bypasses RLS) |
+| `TEAM_SUPABASE_DB_URL` | orchestrator | Direct Postgres DSN — migration runner + DBOS |
+| `INTERNAL_API_SECRET` | all | 64-char shared secret; constant-time compare only |
 | `TEAM_TWILIO_ACCOUNT_SID` / `TEAM_TWILIO_AUTH_TOKEN` | web | Twilio webhook auth |
 | `TEAM_RAZORPAY_KEY_ID` / `TEAM_RAZORPAY_KEY_SECRET` / `TEAM_RAZORPAY_WEBHOOK_SECRET` | web | Razorpay webhook auth |
 | `APIFY_TOKEN` | ingestion | Apify SDK |
 | `SARVAM_API_KEY` | ingestion | Sarvam AI client |
 | `NEXT_PUBLIC_SITE_URL` | web | Public base URL |
 
-### No cross-product env vars
+### Forbidden env vars
 
-Viabe Team must never read another product's environment. Any env var name
-prefixed with **`REPORTS_`** (Viabe Reports) is forbidden. CI enforces this
-via the `no-cross-product-env-vars` lint rule
+CI enforces two env-var rules via the lint rule
 ([`scripts/lint-cross-product-env.mjs`](./scripts/lint-cross-product-env.mjs)),
-which fails the build if such a name appears under `apps/` or `packages/`.
+which fails the build if a banned name appears under `apps/` or `packages/`:
+
+- **No cross-product vars** — any name prefixed `REPORTS_` (Viabe Reports).
+- **No deprecated Supabase keys** — `SUPABASE_ANON_KEY` and
+  `SUPABASE_SERVICE_ROLE_KEY`. Only `TEAM_SUPABASE_PUBLISHABLE_KEY` and
+  `TEAM_SUPABASE_SECRET_KEY` are permitted.
 
 ## DBOS workflow conventions
 

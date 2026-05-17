@@ -24,7 +24,20 @@ describe('no-cross-product-env-vars', () => {
     expect(scanText('the REPORTS_ prefix is reserved')).toEqual([])
   })
 
-  it('keeps the repo free of cross-product env vars', () => {
+  it('flags deprecated Supabase keys', () => {
+    expect(scanText('process.env.SUPABASE_SERVICE_ROLE_KEY')).toEqual([
+      'SUPABASE_SERVICE_ROLE_KEY',
+    ])
+    expect(scanText('const k = SUPABASE_ANON_KEY')).toContain('SUPABASE_ANON_KEY')
+  })
+
+  it('allows the permitted TEAM_SUPABASE_* keys', () => {
+    expect(
+      scanText('TEAM_SUPABASE_PUBLISHABLE_KEY and TEAM_SUPABASE_SECRET_KEY'),
+    ).toEqual([])
+  })
+
+  it('keeps the repo free of forbidden env vars', () => {
     expect(scanRepo().violations).toEqual([])
   })
 })
