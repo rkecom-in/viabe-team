@@ -17,6 +17,12 @@ import { fileURLToPath } from 'node:url'
 /** Env var name prefixes owned by other Viabe products. */
 export const FORBIDDEN_PREFIXES = ['REPORTS_']
 
+/**
+ * Deprecated Supabase keys (VT-2 key discipline). Only the publishable +
+ * secret keys are permitted; the legacy anon / service-role keys are banned.
+ */
+export const FORBIDDEN_ENV_NAMES = ['SUPABASE_ANON_KEY', 'SUPABASE_SERVICE_ROLE_KEY']
+
 const SCAN_DIRS = ['apps', 'packages']
 const SCAN_EXTENSIONS = new Set([
   '.ts',
@@ -39,16 +45,23 @@ const IGNORE_DIRS = new Set([
   '.venv',
 ])
 
-const PATTERN = new RegExp(
+const PREFIX_PATTERN = new RegExp(
   `\\b(?:${FORBIDDEN_PREFIXES.join('|')})[A-Z0-9_]+\\b`,
   'g',
 )
+
+const NAME_PATTERN = new RegExp(`\\b(?:${FORBIDDEN_ENV_NAMES.join('|')})\\b`, 'g')
 
 const isTestFile = (name) => /\.(test|spec)\./.test(name)
 
 /** Return every forbidden env var name referenced in `text`. */
 export function scanText(text) {
-  return [...new Set(text.match(PATTERN) ?? [])]
+  return [
+    ...new Set([
+      ...(text.match(PREFIX_PATTERN) ?? []),
+      ...(text.match(NAME_PATTERN) ?? []),
+    ]),
+  ]
 }
 
 function* walk(dir) {
@@ -95,12 +108,13 @@ function main() {
     console.log('no-cross-product-env-vars: ok')
     return
   }
-  console.error('no-cross-product-env-vars: forbidden cross-product env vars found:\n')
+  console.error('no-cross-product-env-vars: forbidden env vars found:\n')
   for (const v of violations) {
     console.error(`  ${v.file}:${v.line}  ${v.name}`)
   }
   console.error(
-    `\n${violations.length} violation(s). Viabe Team must not read other products' env vars.`,
+    `\n${violations.length} violation(s). No cross-product (REPORTS_*) env vars; ` +
+      'no deprecated Supabase anon / service-role keys.',
   )
   process.exit(1)
 }

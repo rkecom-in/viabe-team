@@ -55,10 +55,63 @@ jobs:
       - run: pnpm install --frozen-lockfile
       # JS/TS unit tests (repo tooling + workspaces).
       - run: pnpm test
-      # Python unit tests (smoke). Scaffold deps are not installed here —
-      # tests import only stdlib + the package under test.
+      # Python unit tests (smoke). Heavy deps are not installed here — tests
+      # import only stdlib + the package under test. DB-backed migration tests
+      # skip themselves (no psycopg / no DATABASE_URL); they run in `migrations`.
       - uses: astral-sh/setup-uv@v5
       - run: uv run --no-project --with pytest pytest
         working-directory: apps/team-orchestrator
       - run: uv run --no-project --with pytest pytest
         working-directory: apps/team-ingestion-worker
+
+  migrations:
+    name: migrations
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      # Applies /migrations/ via the runner, then asserts RLS tenant isolation.
+      - name: Apply migrations + RLS attack tests
+        env:
+          DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
+        run: uv run --no-project --with 'psycopg[binary]' --with pytest pytest tests/test_migrations.py
+        working-directory: apps/team-orchestrator
+
+  gitleaks:
+    name: gitleaks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  pr-title:
+    name: pr-title
+    runs-on: ubuntu-latest
+    steps:
+      - name: PR title must reference a Notion task ID
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          printf 'PR title: %s\n' "$PR_TITLE"
+          if ! printf '%s' "$PR_TITLE" | grep -qE '\(VT-[0-9A-Za-z.]+\)$'; then
+            echo "::error::PR title must end with a Notion task ref, e.g. (VT-2.3)"
+            exit 1
+          fi
