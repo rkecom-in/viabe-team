@@ -22,7 +22,7 @@ import uuid
 
 import httpx
 
-_DEFAULT_URL = "http://localhost:8000/api/orchestrator/twilio-ingress"
+_DEFAULT_URL = "http://localhost:8001/api/orchestrator/twilio-ingress"
 
 
 def main() -> int:

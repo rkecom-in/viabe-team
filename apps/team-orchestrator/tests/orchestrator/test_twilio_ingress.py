@@ -104,6 +104,46 @@ def _wait_for_count(dsn: str, sql: str, params: tuple, target: int, timeout: flo
     raise AssertionError(f"condition not met within {timeout}s: {sql}")
 
 
+# --- PR-fix-1 (VT-3.3a-fix-1): ingress hardening -----------------------------
+
+
+def test_empty_message_sid_returns_400(ingress):
+    """C3 (CL-73): a payload with no MessageSid is rejected with 400 before
+    any side-effect — not collapsed into a shared workflow_id."""
+    resp = ingress.client.post(
+        "/api/orchestrator/twilio-ingress",
+        json={"twilio_fields": {"From": _phone(), "Body": "hello"}},
+        headers={"X-Internal-Secret": _SECRET},
+    )
+    assert resp.status_code == 400
+    assert resp.json() == {"detail": "missing MessageSid"}
+
+
+def test_workflow_start_failure_writes_no_inbound_row(ingress, monkeypatch):
+    """C2 (CL-72): if the workflow never starts, no twilio_inbound_events row is
+    left behind — dedup recording lives inside the durable workflow boundary."""
+    from dbos import DBOS
+
+    phone = _phone()
+    _new_tenant(ingress.dsn, phone)
+    fields = _fields(phone)
+
+    def _boom(*_args, **_kwargs):
+        raise RuntimeError("simulated DBOS.start_workflow failure")
+
+    monkeypatch.setattr(DBOS, "start_workflow", _boom)
+    resp = _post(ingress, fields)
+    assert resp.status_code == 200
+    assert resp.json()["reason"] == "error_logged"
+
+    with psycopg.connect(ingress.dsn, autocommit=True) as conn:
+        count = conn.execute(
+            "SELECT count(*) FROM twilio_inbound_events WHERE message_sid = %s",
+            (fields["MessageSid"],),
+        ).fetchone()[0]
+    assert count == 0
+
+
 def test_health_endpoint(ingress):
     resp = ingress.client.get("/health")
     assert resp.status_code == 200
