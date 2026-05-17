@@ -91,6 +91,38 @@ jobs:
         run: uv run --no-project --with 'psycopg[binary]' --with pytest pytest tests/test_migrations.py
         working-directory: apps/team-orchestrator
 
+  orchestrator:
+    name: orchestrator
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+      # VT-3.1 DBOS-wrapped LangGraph substrate: DBOS auto-resume, checkpoint
+      # RLS, idempotency. Needs the full project (uv sync), not --no-project.
+      - name: DBOS + LangGraph skeleton tests
+        env:
+          DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
+        run: |
+          uv sync --frozen
+          uv run pytest tests/orchestrator/test_skeleton.py -v
+        working-directory: apps/team-orchestrator
+
   gitleaks:
     name: gitleaks
     runs-on: ubuntu-latest
