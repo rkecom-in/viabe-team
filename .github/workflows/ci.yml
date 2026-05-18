@@ -178,8 +178,26 @@ jobs:
           PR_TITLE: ${{ github.event.pull_request.title }}
         run: |
           printf 'PR title: %s\n' "$PR_TITLE"
-          if ! printf '%s' "$PR_TITLE" | grep -qE '\(VT-[0-9A-Za-z.]+\)$'; then
-            echo "::error::PR title must end with a Notion task ref, e.g. (VT-2.3)"
+          # PR title must end with a parenthesised VT-* reference.
+          # Grammar: VT-<parent>(-fix-<N>)?
+          #
+          # Valid <parent> forms:
+          #   - Real subtask ID from ViabeTeam_Sprint (e.g. VT-3.3a, VT-2, VT-122)
+          #   - Canonical pseudo-parents for cross-cutting fixes:
+          #       VT-CI         — CI config, workflows, gates, lint rules
+          #       VT-Foundation — base schema, foundational migrations, base helpers
+          #   - No other pseudo-parents without a logged Decision entry.
+          #
+          # Examples:
+          #   (VT-3.3a)             — subtask reference
+          #   (VT-3.3a-fix-1)       — first fix to that subtask
+          #   (VT-CI-fix-2)         — second CI-track fix
+          #   (VT-Foundation-fix-1) — first foundation fix
+          #
+          # See Clau_Session_Log decision: pseudo-parents lock 2026-05-18.
+          # Regex is POSIX ERE (grep -E): a plain group, not Python's (?:...).
+          if ! printf '%s' "$PR_TITLE" | grep -qE '\(VT-[0-9A-Za-z][0-9A-Za-z.]*(-fix-[0-9]+)?\)$'; then
+            echo "::error::PR title must end with a VT ref, e.g. (VT-3.3a) or (VT-CI-fix-2)"
             exit 1
           fi
 
