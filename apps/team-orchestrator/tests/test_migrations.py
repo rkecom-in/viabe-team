@@ -6,6 +6,7 @@ CI ``migrations`` job (which provisions a pgvector Postgres service).
 """
 
 import os
+from uuid import uuid4
 
 import pytest
 
@@ -136,3 +137,53 @@ def test_rls_blocks_cross_tenant(migrated):
                 "VALUES (%s, 'injected')",
                 (tenant_b,),
             )
+
+
+# --- Migration 014: schema hardening (VT-Foundation-fix-1, CL-70 DC2/H3) ------
+
+
+def test_pipeline_steps_step_index_unique(migrated):
+    """H3: two pipeline_steps rows with the same (run_id, step_index) are
+    rejected by the 014 pipeline_steps_run_step_unique constraint."""
+    dsn = migrated["dsn"]
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        tenant_id = conn.execute(
+            "INSERT INTO tenants (business_name, plan_tier, phase) "
+            "VALUES ('Step Index Test', 'founding', 'onboarding') RETURNING id"
+        ).fetchone()[0]
+        run_id = str(uuid4())
+        conn.execute(
+            "INSERT INTO pipeline_runs (id, tenant_id, run_type, status) "
+            "VALUES (%s, %s, 'orchestrator', 'running')",
+            (run_id, tenant_id),
+        )
+        conn.execute(
+            "INSERT INTO pipeline_steps (run_id, tenant_id, step_index, step_kind) "
+            "VALUES (%s, %s, 0, 'webhook_received')",
+            (run_id, tenant_id),
+        )
+        with pytest.raises(psycopg.errors.UniqueViolation):
+            conn.execute(
+                "INSERT INTO pipeline_steps "
+                "(run_id, tenant_id, step_index, step_kind) "
+                "VALUES (%s, %s, 0, 'duplicate')",
+                (run_id, tenant_id),
+            )
+
+
+def test_whatsapp_number_lookup_uses_index(migrated):
+    """DC2: the whatsapp_number lookup can use tenants_whatsapp_number_idx
+    rather than a sequential scan over tenants."""
+    dsn = migrated["dsn"]
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        # Discourage seq scan so the planner reveals the index it *can* use —
+        # a near-empty table would otherwise always seq-scan regardless.
+        conn.execute("SET enable_seqscan = off")
+        plan = "\n".join(
+            row[0]
+            for row in conn.execute(
+                "EXPLAIN SELECT id FROM tenants WHERE whatsapp_number = %s",
+                ("+919999900001",),
+            )
+        )
+    assert "tenants_whatsapp_number_idx" in plan, plan
