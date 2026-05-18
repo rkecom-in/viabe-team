@@ -126,20 +126,77 @@ def close_webhook_run(run_id: str, status: str) -> None:
         )
 
 
+# Twilio status-callback states (vs a plain inbound message).
+_CALLBACK_STATES = {"delivered", "read", "failed", "undelivered"}
+
+
+def build_webhook_event(fields: dict[str, Any], dupe_status: bool) -> WebhookEvent:
+    """Construct a WebhookEvent from raw Twilio fields. Plain helper (no LLM)."""
+    callback_state = fields.get("MessageStatus")
+    is_callback = callback_state in _CALLBACK_STATES
+    return WebhookEvent(
+        body=str(fields.get("Body", "")),
+        sender_phone=str(fields.get("From", "")),
+        message_type="status_callback" if is_callback else "inbound_message",
+        twilio_message_sid=fields.get("MessageSid"),
+        status_callback_state=callback_state if is_callback else None,
+        dupe_status=dupe_status,
+        num_media=int(fields.get("NumMedia", 0) or 0),
+        media_url_0=fields.get("MediaUrl0"),
+    )
+
+
+@DBOS.step()
+def record_inbound_message_sid(tenant_id: str, message_sid: str) -> bool:
+    """Record the MessageSid in the idempotency ledger — the FIRST workflow step.
+
+    Returns True if newly inserted, False if already seen. C2 fix (CL-72): this
+    runs inside the durable workflow boundary, so a half-completed ingress can
+    never leave a row that makes the next attempt look like a duplicate.
+    """
+    with get_pool().connection() as conn:
+        cur = conn.execute(
+            "INSERT INTO twilio_inbound_events (message_sid, tenant_id) "
+            "VALUES (%s, %s) ON CONFLICT (message_sid) DO NOTHING",
+            (message_sid, tenant_id),
+        )
+        return cur.rowcount == 1
+
+
+@DBOS.step()
+def record_brain_pending(tenant_id: str, run_id: str, reason: str) -> None:
+    """Record that this run is awaiting the brain (VT-3.4 unwired).
+
+    step_index=1 — after webhook_received at index 0. Idempotency is provided by
+    the DBOS workflow-id boundary (a step never replays); PR-fix-6 adds a UNIQUE
+    (run_id, step_index) constraint as a second guard.
+    """
+    with get_pool().connection() as conn:
+        conn.execute(
+            "INSERT INTO pipeline_steps "
+            "(run_id, tenant_id, step_index, step_kind, output_envelope) "
+            "VALUES (%s, %s, 1, 'awaiting_brain', %s)",
+            (run_id, tenant_id, Jsonb({"reason": reason})),
+        )
+
+
 @DBOS.workflow()
 def webhook_pipeline_run(
-    tenant_id: str, run_id: str, event_dict: dict
+    tenant_id: str, run_id: str, twilio_fields: dict
 ) -> dict[str, Any]:
-    """Durable inbound-webhook pipeline: ingress -> Pre-Filter Gate -> handler.
+    """Durable inbound-webhook pipeline: dedup -> ingress -> Pre-Filter -> handler.
 
     Started by /api/orchestrator/twilio-ingress with a workflow_id derived from
-    the Twilio MessageSid (DBOS exactly-once idempotency).
+    the Twilio MessageSid (DBOS exactly-once idempotency). Dedup detection and
+    event construction happen inside this durable boundary (C2 fix, CL-72).
     """
-    event = WebhookEvent(**event_dict)
+    message_sid = str(twilio_fields.get("MessageSid", ""))
+    newly_inserted = record_inbound_message_sid(tenant_id, message_sid)
+    event = build_webhook_event(twilio_fields, dupe_status=not newly_inserted)
     state = new_subscriber_state(UUID(tenant_id), UUID(run_id))
 
     # Phone-tokenise before anything is persisted (Pillar 3 / Pillar 7).
-    tokenised = dict(event_dict)
+    tokenised = event.model_dump()
     if event.sender_phone:
         tokenised["sender_phone"] = hash_phone(event.sender_phone)
 
@@ -148,11 +205,18 @@ def webhook_pipeline_run(
 
     result = pre_filter(event, state)
     handler_name: str | None = None
+    final_status = "completed"
     if result.kind == "direct_handler":
         handler_name = result.handler_name
         HANDLERS[handler_name](event, state)
+    elif result.kind == "brain":
+        # VT-3.4 brain not yet wired — record a brain-pending step and mark the
+        # run 'escalated' so it is not silently reported as completed (Pillar 7).
+        record_brain_pending(tenant_id, run_id, result.reason)
+        final_status = "escalated"
+    # result.kind == "reject" → observability-only; the run ends clean (completed).
 
-    close_webhook_run(run_id, "completed")
+    close_webhook_run(run_id, final_status)
     return {
         "run_id": run_id,
         "tenant_id": tenant_id,
