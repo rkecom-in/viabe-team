@@ -1,12 +1,12 @@
-"""Twilio inbound ingress endpoint (VT-3.3a + VT-3.3b).
+"""Twilio inbound ingress endpoint (VT-3.3a/b + VT-3.3a-fix-1).
 
-Deterministic ingress ONLY (Pillar 1): verify the internal secret, resolve the
-tenant, rate-limit, derive a DBOS workflow_id from the MessageSid
-(exactly-once), start the webhook workflow. No reasoning, no classification.
+Deterministic ingress ONLY (Pillar 1): verify the internal secret, reject a
+malformed payload, resolve the tenant, rate-limit, then start the durable
+webhook workflow. No reasoning, no classification.
 
-Path 2 (VT-3.3b): team-web verifies the Twilio signature and forwards the raw
-Twilio fields with INTERNAL_API_SECRET. Tenant lookup + rate limiting live
-here (Pillar 8 — a single DB-access path), not in team-web.
+Dedup detection and event construction live INSIDE webhook_pipeline_run (the
+durable boundary) — see PR-fix-1 / CL-72. This handler only validates and
+starts the workflow.
 """
 
 from __future__ import annotations
@@ -23,13 +23,10 @@ from pydantic import BaseModel
 
 from orchestrator.graph import get_pool
 from orchestrator.runner import webhook_pipeline_run
-from orchestrator.types import WebhookEvent
 from orchestrator.utils.phone_token import hash_phone
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
-
-_CALLBACK_STATES = {"delivered", "read", "failed", "undelivered"}
 
 # Fixed-window rate limits (per minute).
 _PER_TENANT_LIMIT = 30
@@ -39,10 +36,7 @@ _WORKSPACE_SENTINEL = "00000000-0000-0000-0000-000000000000"
 
 
 class TwilioIngressBody(BaseModel):
-    """Request body forwarded by team-web (VT-3.3b) — raw Twilio fields only.
-
-    The tenant is resolved here, not by team-web.
-    """
+    """Request body forwarded by team-web (VT-3.3b) — raw Twilio fields only."""
 
     twilio_fields: dict[str, Any]
 
@@ -89,50 +83,31 @@ def _within_rate_limits(tenant_id: str) -> bool:
         return _bump_bucket(conn, _WORKSPACE_SENTINEL, _WORKSPACE_LIMIT)
 
 
-def _record_inbound(message_sid: str, tenant_id: str) -> bool:
-    """Insert the MessageSid; return True if newly inserted, False if duplicate."""
-    with get_pool().connection() as conn:
-        cur = conn.execute(
-            "INSERT INTO twilio_inbound_events (message_sid, tenant_id) "
-            "VALUES (%s, %s) ON CONFLICT (message_sid) DO NOTHING",
-            (message_sid, tenant_id),
-        )
-        return cur.rowcount == 1
-
-
-def _build_event(fields: dict[str, Any], dupe: bool) -> WebhookEvent:
-    callback_state = fields.get("MessageStatus")
-    is_callback = callback_state in _CALLBACK_STATES
-    return WebhookEvent(
-        body=str(fields.get("Body", "")),
-        sender_phone=str(fields.get("From", "")),
-        message_type="status_callback" if is_callback else "inbound_message",
-        twilio_message_sid=fields.get("MessageSid"),
-        status_callback_state=callback_state if is_callback else None,
-        dupe_status=dupe,
-        num_media=int(fields.get("NumMedia", 0) or 0),
-        media_url_0=fields.get("MediaUrl0"),
-    )
-
-
 @router.post("/api/orchestrator/twilio-ingress")
 def twilio_ingress(
     body: TwilioIngressBody,
     x_internal_secret: str | None = Header(default=None),
 ) -> dict[str, Any]:
-    """Resolve the tenant, rate-limit, and start a durable webhook workflow.
+    """Validate, resolve the tenant, rate-limit, and start the webhook workflow.
 
     Returns ``{workflow_id, reason}`` — reason is one of: started, dupe,
-    unknown_sender, rate_limit_exceeded, error_logged. Never 5xx for an
-    application error (Pillar 7).
+    unknown_sender, rate_limit_exceeded, error_logged. 403 on a bad secret;
+    400 on a malformed payload (missing MessageSid). After validation, never
+    5xx for an application error (Pillar 7).
     """
     if not _verify_internal_secret(x_internal_secret):
         raise HTTPException(status_code=403, detail="invalid internal secret")
 
+    # C3 fix (CL-73): reject a malformed payload before any side-effects.
+    # Twilio always sends a MessageSid; a missing one is a team-web forwarder
+    # bug — surface it so team-web can log/alert rather than collapsing every
+    # malformed request into one workflow_id.
     fields = body.twilio_fields
     message_sid = str(fields.get("MessageSid", ""))
-    from_phone = str(fields.get("From", ""))
+    if not message_sid:
+        raise HTTPException(status_code=400, detail="missing MessageSid")
 
+    from_phone = str(fields.get("From", ""))
     try:
         tenant_id = _lookup_tenant(from_phone)
         if tenant_id is None:
@@ -153,13 +128,15 @@ def twilio_ingress(
 
         workflow_id = f"twilio_inbound_{message_sid}"
         run_id = str(uuid5(NAMESPACE_URL, message_sid))
-        dupe = not _record_inbound(message_sid, tenant_id)
-        event = _build_event(fields, dupe)
+        # Read-only pre-check (no side-effect): has this MessageSid's workflow
+        # already been started? Dedup itself happens inside the workflow.
+        already_seen = DBOS.get_workflow_status(workflow_id) is not None
         with SetWorkflowID(workflow_id):
-            DBOS.start_workflow(
-                webhook_pipeline_run, tenant_id, run_id, event.model_dump()
-            )
-        return {"workflow_id": workflow_id, "reason": "dupe" if dupe else "started"}
+            DBOS.start_workflow(webhook_pipeline_run, tenant_id, run_id, fields)
+        return {
+            "workflow_id": workflow_id,
+            "reason": "dupe" if already_seen else "started",
+        }
     except Exception:
         # Pillar 7: never 5xx for an application error.
         logger.exception("twilio-ingress: failed sid=%s", message_sid)
