@@ -62,6 +62,35 @@ def _lookup_tenant(from_phone: str) -> str | None:
     return str(row["id"]) if row else None
 
 
+# DBOS workflow statuses for a prior workflow that is still progressing — the
+# rest (ERROR / CANCELLED / MAX_RECOVERY_ATTEMPTS_EXCEEDED) are terminally dead.
+# Verified live against dbos 2.x WorkflowStatusString (CL-96).
+_RECOVERING_STATUSES = frozenset({"PENDING", "ENQUEUED", "DELAYED"})
+
+
+def _ingress_reason(prior: Any) -> str:
+    """Classify a (re)delivered MessageSid by the prior workflow's DBOS status.
+
+    ``DBOS.start_workflow`` no-ops on a known workflow_id (idempotency) — this
+    only *reports* the prior workflow's state, it never re-triggers it:
+
+    - None    -> ``started``  — brand-new MessageSid.
+    - SUCCESS -> ``dupe``     — true Twilio retry of an already-handled message.
+    - PENDING / ENQUEUED / DELAYED -> ``recovering`` — workflow still in flight;
+      DBOS recovery / the queue will carry it to completion.
+    - ERROR / CANCELLED / MAX_RECOVERY_ATTEMPTS_EXCEEDED -> ``terminal_failure``
+      — the prior workflow is dead and ``start_workflow`` no-ops, so nothing
+      recovers it (Pillar 7 — do not report a dead run as ``recovering``).
+    """
+    if prior is None:
+        return "started"
+    if prior.status == "SUCCESS":
+        return "dupe"
+    if prior.status in _RECOVERING_STATUSES:
+        return "recovering"
+    return "terminal_failure"
+
+
 def _bump_bucket(conn: Any, tenant_id: str, limit: int) -> bool:
     """Atomically increment the current minute bucket. Return True if within limit."""
     row = conn.execute(
@@ -91,7 +120,8 @@ def twilio_ingress(
     """Validate, resolve the tenant, rate-limit, and start the webhook workflow.
 
     Returns ``{workflow_id, reason}`` — reason is one of: started, dupe,
-    unknown_sender, rate_limit_exceeded, error_logged. 403 on a bad secret;
+    recovering, terminal_failure, unknown_sender, rate_limit_exceeded,
+    error_logged. 403 on a bad secret;
     400 on a malformed payload (missing MessageSid). After validation, never
     5xx for an application error (Pillar 7).
     """
@@ -128,14 +158,14 @@ def twilio_ingress(
 
         workflow_id = f"twilio_inbound_{message_sid}"
         run_id = str(uuid5(NAMESPACE_URL, message_sid))
-        # Read-only pre-check (no side-effect): has this MessageSid's workflow
-        # already been started? Dedup itself happens inside the workflow.
-        already_seen = DBOS.get_workflow_status(workflow_id) is not None
+        # Read-only pre-check (no side-effect): the prior workflow's DBOS status
+        # for this MessageSid, if any. Dedup itself happens inside the workflow.
+        prior = DBOS.get_workflow_status(workflow_id)
         with SetWorkflowID(workflow_id):
             DBOS.start_workflow(webhook_pipeline_run, tenant_id, run_id, fields)
         return {
             "workflow_id": workflow_id,
-            "reason": "dupe" if already_seen else "started",
+            "reason": _ingress_reason(prior),
         }
     except Exception:
         # Pillar 7: never 5xx for an application error.
