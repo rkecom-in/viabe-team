@@ -37,6 +37,8 @@ jobs:
               apps/team-orchestrator/src/orchestrator/state.py \
               apps/team-orchestrator/src/orchestrator/transitions.py \
               apps/team-orchestrator/src/orchestrator/invariants.py \
+              apps/team-orchestrator/src/orchestrator/runner.py \
+              apps/team-orchestrator/src/orchestrator/api/ \
               apps/team-orchestrator/src/orchestrator/direct_handlers/; then
             echo "::error::LLM reference found in the deterministic subtree (Pillar 1)"
             exit 1
@@ -180,3 +182,36 @@ jobs:
             echo "::error::PR title must end with a Notion task ref, e.g. (VT-2.3)"
             exit 1
           fi
+
+  # Non-blocking (continue-on-error + `|| true`): reports mypy --strict status
+  # and uploads logs, but does NOT gate merge. NOT in branch protection's
+  # required checks. Re-evaluate gate-or-drop at Sprint 1 end (CL-83).
+  mypy:
+    name: mypy (non-blocking)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+      - name: mypy --strict (apps/team-orchestrator)
+        working-directory: apps/team-orchestrator
+        run: |
+          uv sync --frozen
+          uv run --with 'mypy>=1.14' mypy --strict src/ 2>&1 | tee mypy-orchestrator.log || true
+      - name: mypy --strict (apps/team-ingestion-worker)
+        working-directory: apps/team-ingestion-worker
+        # No `uv sync`: the worker's `sarvam-ai-client` dependency is not
+        # resolvable on PyPI (pre-existing — flagged for a follow-up). The
+        # worker is a stdlib-only scaffold, so mypy needs no project deps.
+        run: |
+          uv run --no-project --with 'mypy>=1.14' mypy --strict src/ 2>&1 | tee mypy-worker.log || true
+      - name: Upload mypy logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mypy-reports
+          path: |
+            apps/team-orchestrator/mypy-orchestrator.log
+            apps/team-ingestion-worker/mypy-worker.log
