@@ -25,7 +25,7 @@ _NOTION_FIELDS = {
     "paid_conversion_at",
     "last_campaign_at",
     "attribution_close_pending",
-    "total_arrr_paise",
+    "total_recovered_paise",
     "cumulative_fees_paid_paise",
     "escalation_pending",
     "last_owner_message_at",
@@ -47,7 +47,7 @@ def test_new_subscriber_state_defaults():
     assert state["trial_started_at"] is None
     assert state["paid_conversion_at"] is None
     assert state["attribution_close_pending"] == []
-    assert state["total_arrr_paise"] == 0
+    assert state["total_recovered_paise"] == 0
     assert state["cumulative_fees_paid_paise"] == 0
     assert state["escalation_pending"] is False
     assert state["last_owner_message_at"] is None
