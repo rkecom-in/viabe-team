@@ -16,7 +16,7 @@ from typing import Any
 
 from dbos import DBOS
 
-from orchestrator.graph import get_pool
+from orchestrator.db import tenant_connection
 from orchestrator.state import SubscriberState
 from orchestrator.types import WebhookEvent
 from orchestrator.utils.twilio_send import send_template_message
@@ -25,7 +25,7 @@ from orchestrator.utils.twilio_send import send_template_message
 @DBOS.step()
 def status_ping_handler(event: WebhookEvent, state: SubscriberState) -> dict[str, Any]:
     """Reply to a status ping with the tenant's current, accurate state."""
-    with get_pool().connection() as conn:
+    with tenant_connection(state["tenant_id"]) as conn:
         row = conn.execute(
             "SELECT business_name, phase, phase_entered_at FROM tenants WHERE id = %s",
             (str(state["tenant_id"]),),

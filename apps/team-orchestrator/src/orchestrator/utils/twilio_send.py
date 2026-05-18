@@ -32,7 +32,7 @@ from pydantic import BaseModel
 from twilio.base.exceptions import TwilioRestException
 from twilio.rest import Client
 
-from orchestrator.graph import get_pool
+from orchestrator.db import tenant_connection
 from orchestrator.utils.phone_token import hash_phone
 
 logger = logging.getLogger(__name__)
@@ -77,13 +77,12 @@ def _client() -> Client:
 
 
 def get_tenant_whatsapp_number(tenant_id: UUID) -> str | None:
-    """Resolve a tenant's WhatsApp number.
+    """Resolve a tenant's own WhatsApp number.
 
-    Cross-tenant service-role read — same rationale as ``_lookup_tenant`` in
-    twilio_ingress.py: the send path runs before any tenant GUC is set, so it
-    reads with service-role visibility.
+    This is a tenant-scoped read (the tenant's own ``tenants`` row), so it goes
+    through ``tenant_connection`` — RLS-enforced under ``app_role`` (CL-71).
     """
-    with get_pool().connection() as conn:
+    with tenant_connection(tenant_id) as conn:
         row = conn.execute(
             "SELECT whatsapp_number FROM tenants WHERE id = %s",
             (str(tenant_id),),
