@@ -868,6 +868,20 @@ wheels = [
 ]
 
 [[package]]
+name = "langchain-anthropic"
+version = "1.4.3"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "anthropic" },
+    { name = "langchain-core" },
+    { name = "pydantic" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/fa/e3/d2f9dec95602524b1cfb4be2747ba5bc38d32501b2a56cb4bcb76e80bb45/langchain_anthropic-1.4.3.tar.gz", hash = "sha256:f8a2442463c0629b1b3110eaeaa56fdbdc87df2a802f8c7f5ecf611eb4874ec8", size = 685219, upload-time = "2026-05-03T17:33:27.118Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/d3/55/482a1968c95275e8be6d8c1e53b54f0f7be0b8b155ce1608c947a95cf543/langchain_anthropic-1.4.3-py3-none-any.whl", hash = "sha256:65466e0f2f95909a009708f2958e917dfdbfab79c612b4484a30866a85e1f291", size = 50389, upload-time = "2026-05-03T17:33:25.671Z" },
+]
+
+[[package]]
 name = "langchain-core"
 version = "1.4.0"
 source = { registry = "https://pypi.org/simple" }
@@ -2256,6 +2270,8 @@ dependencies = [
     { name = "anthropic" },
     { name = "dbos" },
     { name = "fastapi" },
+    { name = "langchain-anthropic" },
+    { name = "langchain-core" },
     { name = "langgraph" },
     { name = "langgraph-checkpoint-postgres" },
     { name = "langgraph-supervisor" },
@@ -2282,7 +2298,9 @@ requires-dist = [
     { name = "anthropic" },
     { name = "dbos", specifier = ">=2.0" },
     { name = "fastapi" },
-    { name = "langgraph", specifier = ">=0.3" },
+    { name = "langchain-anthropic", specifier = "==1.4.3" },
+    { name = "langchain-core", specifier = "==1.4.0" },
+    { name = "langgraph", specifier = "==1.2.0" },
     { name = "langgraph-checkpoint-postgres" },
     { name = "langgraph-supervisor" },
     { name = "pgvector" },

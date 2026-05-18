@@ -7,7 +7,31 @@ whole package via the autouse fixture below.
 
 from __future__ import annotations
 
+import os
+
 import pytest
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    config.addinivalue_line(
+        "markers",
+        "integration: real-LLM / external-service test; runs only when "
+        "the RUN_INTEGRATION_TESTS=1 environment variable is set.",
+    )
+
+
+def pytest_collection_modifyitems(
+    config: pytest.Config, items: list[pytest.Item]
+) -> None:
+    """Skip @pytest.mark.integration tests unless RUN_INTEGRATION_TESTS=1."""
+    if os.environ.get("RUN_INTEGRATION_TESTS") == "1":
+        return
+    skip = pytest.mark.skip(
+        reason="integration test — set RUN_INTEGRATION_TESTS=1 to run"
+    )
+    for item in items:
+        if "integration" in item.keywords:
+            item.add_marker(skip)
 
 
 @pytest.fixture
