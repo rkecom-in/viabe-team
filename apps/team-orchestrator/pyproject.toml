@@ -5,7 +5,11 @@ description = "Viabe Team orchestrator — durable multi-agent workflows"
 requires-python = ">=3.12"
 dependencies = [
     "dbos>=2.0",
-    "langgraph>=0.3",
+    # langgraph / langchain-* pinned with == (VT-3.9): the orchestrator-agent's
+    # model behaviour is version-sensitive — bumps are Type 2 governance.
+    "langgraph==1.2.0",
+    "langchain-core==1.4.0",
+    "langchain-anthropic==1.4.3",
     "langgraph-supervisor",
     "langgraph-checkpoint-postgres",
     "anthropic",
