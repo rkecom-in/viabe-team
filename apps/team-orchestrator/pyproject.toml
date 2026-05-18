@@ -21,7 +21,7 @@ dependencies = [
 ]
 
 [dependency-groups]
-dev = ["pytest", "ruff", "httpx"]
+dev = ["pytest", "ruff", "httpx", "mypy>=1.14"]
 
 [build-system]
 requires = ["hatchling"]
@@ -33,6 +33,12 @@ packages = ["src/team_orchestrator", "src/orchestrator"]
 [tool.ruff]
 line-length = 100
 target-version = "py312"
+
+[tool.mypy]
+# Heavy deps (dbos, langgraph, langgraph_supervisor, supabase, pgvector) ship
+# no type stubs — ignore missing imports so the baseline reflects our code,
+# not third-party stub gaps. mypy --strict is non-blocking (CL-83).
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 pythonpath = ["src", "scripts"]

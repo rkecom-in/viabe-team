@@ -11,7 +11,7 @@ dependencies = [
 ]
 
 [dependency-groups]
-dev = ["pytest", "ruff"]
+dev = ["pytest", "ruff", "mypy>=1.14"]
 
 [build-system]
 requires = ["hatchling"]
@@ -23,6 +23,10 @@ packages = ["src/team_ingestion_worker"]
 [tool.ruff]
 line-length = 100
 target-version = "py312"
+
+[tool.mypy]
+# mypy --strict is non-blocking (CL-83); ignore missing third-party stubs.
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
