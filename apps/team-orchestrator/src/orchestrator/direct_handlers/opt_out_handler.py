@@ -12,7 +12,7 @@ from typing import Any
 
 from dbos import DBOS
 
-from orchestrator.graph import get_pool
+from orchestrator.db import tenant_connection
 from orchestrator.state import SubscriberState
 from orchestrator.types import WebhookEvent
 from orchestrator.utils.twilio_send import send_template_message
@@ -21,7 +21,7 @@ from orchestrator.utils.twilio_send import send_template_message
 @DBOS.step()
 def opt_out_handler(event: WebhookEvent, state: SubscriberState) -> dict[str, Any]:
     """Set the tenant opt-out flag and send the opt-out confirmation."""
-    with get_pool().connection() as conn:
+    with tenant_connection(state["tenant_id"]) as conn:
         conn.execute(
             "UPDATE tenants SET opt_out = true WHERE id = %s",
             (str(state["tenant_id"]),),
