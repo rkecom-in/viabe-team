@@ -15,3 +15,38 @@ Environment variables:
   vars. apps/team-web/.env.example whitelists TEAM_TWILIO_AUTH_TOKEN + INTERNAL_API_SECRET
   by exact name (WEB_ENV_WHITELIST in the lint rule). Any other non-NEXT_PUBLIC_
   secret-suffixed var in the web env is still rejected.
+
+Merge ritual (Clau_Session_Log CL-87):
+- Fazal updates the Notion subtask Status to "Done" BEFORE clicking merge.
+- Merge command: `gh pr merge <N> --squash --delete-branch --admin` (solo-dev repo: --admin
+  bypasses self-approve restriction; legitimate Phase 1 trade-off).
+- Post-merge: `git checkout main && git pull && git branch -d <merged-branch>` to keep
+  Claude Code's local tree current.
+- Claude Code does NOT attempt Notion Status updates post-merge — Fazal-side ritual.
+
+Env-rename PR ritual (Clau_Session_Log CL-93):
+- Never atomic-swap an env var name. Always pre-merge double-set.
+- Procedure: (1) Set both OLD_NAME and NEW_NAME in the deploy environment (Railway/Vercel)
+  with the same value, (2) merge the PR, (3) confirm renamed code path is healthy in
+  production logs, (4) delete OLD_NAME from the deploy environment.
+- Claude Code flags env-rename PRs in the PR body: "Requires pre-merge double-set per CL-93".
+
+Stacked PR convention (Clau_Session_Log CL-88):
+- When a fix-PR has a real semantic dependency on another open PR (edits the same function
+  in the same way), stack on the open PR's branch rather than branching off main.
+- PR base in GitHub = the open PR's branch. After upstream merges, GitHub auto-retargets
+  the stacked PR's base to main; one-click rebase, no manual intervention.
+- Stacking is acceptable for 2-deep. At 3+ deep, prefer waiting for upstream merge.
+- Document dependency in the PR description: "Stacked on #N; merge order: #N then this".
+
+Discipline rules (Clau-side, from Resurrection File v2.18):
+- Re-read Notion subtask Out-of-scope section line-by-line before drafting any brief.
+- Context7 docs occasionally lag; live PyPI/GitHub source wins on disagreement.
+- psycopg dict_row factory: column-name access only, never positional.
+- Cross-app brief verification BEFORE drafting: env vars, dependencies, contracts, Pillar 8.
+- Pre-brief audit-blocker check: search Clau_Session_Log for Open Next Action / Question /
+  Blocker entries before drafting code-shipping briefs.
+- Audit-session Decision Authority self-enforcement: for findings in Clau-owned categories
+  (architecture, schema, code design, CI config), produce DECISIONS not QUESTIONS.
+- Pre-delivery brief consistency scan: acceptance line-by-line against implementation;
+  caveats must update both sections.
