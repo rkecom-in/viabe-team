@@ -19,7 +19,7 @@ export function verifyTwilioSignature(
   url: string,
   params: Record<string, string>,
 ): boolean {
-  const authToken = process.env.TWILIO_AUTH_TOKEN
+  const authToken = process.env.TEAM_TWILIO_AUTH_TOKEN
   if (!authToken || !signature) {
     return false
   }
