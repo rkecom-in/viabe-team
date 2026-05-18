@@ -163,6 +163,23 @@ def record_inbound_message_sid(tenant_id: str, message_sid: str) -> bool:
         return cur.rowcount == 1
 
 
+@DBOS.step()
+def record_brain_pending(tenant_id: str, run_id: str, reason: str) -> None:
+    """Record that this run is awaiting the brain (VT-3.4 unwired).
+
+    step_index=1 — after webhook_received at index 0. Idempotency is provided by
+    the DBOS workflow-id boundary (a step never replays); PR-fix-6 adds a UNIQUE
+    (run_id, step_index) constraint as a second guard.
+    """
+    with get_pool().connection() as conn:
+        conn.execute(
+            "INSERT INTO pipeline_steps "
+            "(run_id, tenant_id, step_index, step_kind, output_envelope) "
+            "VALUES (%s, %s, 1, 'awaiting_brain', %s)",
+            (run_id, tenant_id, Jsonb({"reason": reason})),
+        )
+
+
 @DBOS.workflow()
 def webhook_pipeline_run(
     tenant_id: str, run_id: str, twilio_fields: dict
@@ -188,11 +205,18 @@ def webhook_pipeline_run(
 
     result = pre_filter(event, state)
     handler_name: str | None = None
+    final_status = "completed"
     if result.kind == "direct_handler":
         handler_name = result.handler_name
         HANDLERS[handler_name](event, state)
+    elif result.kind == "brain":
+        # VT-3.4 brain not yet wired — record a brain-pending step and mark the
+        # run 'escalated' so it is not silently reported as completed (Pillar 7).
+        record_brain_pending(tenant_id, run_id, result.reason)
+        final_status = "escalated"
+    # result.kind == "reject" → observability-only; the run ends clean (completed).
 
-    close_webhook_run(run_id, "completed")
+    close_webhook_run(run_id, final_status)
     return {
         "run_id": run_id,
         "tenant_id": tenant_id,
