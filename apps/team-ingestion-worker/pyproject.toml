@@ -6,7 +6,7 @@ requires-python = ">=3.12"
 dependencies = [
     "apify-client",
     "anthropic",
-    "sarvam-ai-client",
+    "sarvamai==0.1.28",
     "pydantic",
 ]
 
