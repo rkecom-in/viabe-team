@@ -95,7 +95,7 @@ def test_opt_out_handler_returns_truthful_send_result(handlers_ctx, twilio_creat
         row = conn.execute(
             "SELECT opt_out FROM tenants WHERE id = %s", (tenant_id,)
         ).fetchone()
-    assert row["opt_out"] is True
+    assert row[0] is True  # bare psycopg.connect -> tuple rows
 
 
 def test_opt_out_handler_handles_send_failure(handlers_ctx, twilio_create):
@@ -114,7 +114,7 @@ def test_opt_out_handler_handles_send_failure(handlers_ctx, twilio_create):
         row = conn.execute(
             "SELECT opt_out FROM tenants WHERE id = %s", (tenant_id,)
         ).fetchone()
-    assert row["opt_out"] is True
+    assert row[0] is True  # bare psycopg.connect -> tuple rows
 
 
 # --- dsr_handler -------------------------------------------------------------
@@ -137,7 +137,7 @@ def test_dsr_handler_returns_truthful_send_result(handlers_ctx, twilio_create):
             "SELECT status FROM dsr_tickets WHERE id = %s",
             (outcome["dsr_ticket_id"],),
         ).fetchone()
-    assert row["status"] == "acknowledged"
+    assert row[0] == "acknowledged"  # bare psycopg.connect -> tuple rows
 
 
 def test_dsr_handler_handles_send_failure(handlers_ctx, twilio_create):
@@ -157,7 +157,7 @@ def test_dsr_handler_handles_send_failure(handlers_ctx, twilio_create):
             "SELECT status FROM dsr_tickets WHERE id = %s",
             (outcome["dsr_ticket_id"],),
         ).fetchone()
-    assert row["status"] == "acknowledged"
+    assert row[0] == "acknowledged"  # bare psycopg.connect -> tuple rows
 
 
 # --- status_ping_handler -----------------------------------------------------
