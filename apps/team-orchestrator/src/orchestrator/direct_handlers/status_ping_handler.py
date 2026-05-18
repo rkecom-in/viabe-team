@@ -1,7 +1,8 @@
 """status_ping_handler — Pre-Filter direct handler for status pings (VT-3.8).
 
 Pillar 1: fully deterministic, zero LLM.
-Pillar 7: report ACCURATE state only — no padding, no overstatement.
+Pillar 7: report ACCURATE state only — no padding, no overstatement; the
+return contract reports the real Twilio send outcome.
 
 NOTE: "last campaign / next scheduled action" are not yet in the Phase-1
 schema. Per Pillar 7 this handler reports only the tenant state that exists
@@ -11,7 +12,6 @@ and the campaign tables ship.
 
 from __future__ import annotations
 
-import logging
 from typing import Any
 
 from dbos import DBOS
@@ -19,8 +19,7 @@ from dbos import DBOS
 from orchestrator.graph import get_pool
 from orchestrator.state import SubscriberState
 from orchestrator.types import WebhookEvent
-
-logger = logging.getLogger(__name__)
+from orchestrator.utils.twilio_send import send_template_message
 
 
 @DBOS.step()
@@ -42,11 +41,15 @@ def status_ping_handler(event: WebhookEvent, state: SubscriberState) -> dict[str
             f"{row['business_name']}: current phase '{row['phase']}'{since}."
         )
 
-    # TODO VT-3.3: replace this logged stub with the real Twilio template send.
-    logger.info("status ping reply -> %s: %s", event.sender_phone, status_text)
+    send_result = send_template_message(
+        state["tenant_id"],
+        "team_status_ping",
+        {},
+        recipient_phone=event.sender_phone or None,
+    )
 
     return {
         "handler": "status_ping_handler",
         "status_text": status_text,
-        "reply_sent": True,
+        "send_result": send_result.model_dump(),
     }

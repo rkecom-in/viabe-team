@@ -40,6 +40,38 @@ team-web (`apps/team-web`) owns signature verification; to exercise the whole
 chain use `apps/team-web/scripts/synthetic_twilio_webhook.ts`. Tier 1 (CI) and
 Tier 3 (live Twilio sandbox via ngrok, post-VT-3.4) are documented in CL-67.
 
+## Manual Tier 2 — handler → Twilio send (VT-3.3c)
+
+Exercises a direct handler's outbound Twilio template send end to end.
+
+Prereqs: `TEAM_TWILIO_ACCOUNT_SID` / `TEAM_TWILIO_AUTH_TOKEN` /
+`TEAM_TWILIO_FROM_NUMBER` set to Twilio sandbox values; a tenant row whose
+`whatsapp_number` is your test number.
+
+```bash
+# 1. Start the orchestrator (see "Local dev" above).
+uv run uvicorn main:app --app-dir src
+
+# 2. In another shell, fire an opt-out synthetic webhook:
+uv run python scripts/synthetic_webhook.py --body "STOP" --sender "<your-number>"
+```
+
+3. Verify the orchestrator logs — on a successful send:
+
+       twilio-send: sent template 'team_opt_out_confirmation' -> phone_tok_… (sid=SM…)
+
+   On a 4xx failure the line is `twilio-send: permanent failure template …`
+   instead, and the handler still returns `send_result.success = false`
+   (Pillar 7 — the send claim is never hardcoded). The recipient phone is only
+   ever logged as a `phone_tok_…` token (Pillar 3).
+4. Verify the Twilio Console: an outbound message using the `content_sid`
+   mapped to that handler in `config/twilio_templates.yaml` (opt-out →
+   `HX6365c429…`).
+
+Handler-output persistence to `pipeline_steps` is **not** part of VT-3.3c — it
+is a separate observability concern (VT-122). Verify the send via the log line
+and the Twilio Console, not via a DB row.
+
 ## Layout
 
 - `src/team_orchestrator/` — package code (no workflows yet).
