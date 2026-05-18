@@ -182,12 +182,14 @@ def test_duplicate_message_sid_short_circuits(ingress):
     _new_tenant(ingress.dsn, phone)
     fields = _fields(phone, Body="hello again")
     first = _post(ingress, fields)
+    # Let the first workflow reach SUCCESS before the redelivery so the prior
+    # status is SUCCESS -> reason 'dupe' (VT-3.3a-fix-3 four-bucket reason).
+    _await_workflow(first.json()["workflow_id"])
     second = _post(ingress, fields)  # same MessageSid
 
     assert first.json()["reason"] == "started"
     assert second.json()["reason"] == "dupe"
     assert first.json()["workflow_id"] == second.json()["workflow_id"]
-    _await_workflow(first.json()["workflow_id"])
 
     with psycopg.connect(ingress.dsn, autocommit=True) as conn:
         count = conn.execute(
@@ -400,3 +402,30 @@ def test_dbos_auto_resumes_mid_ingress(ingress):
         ).fetchone()[0]
     assert runs == 1, f"ingress step produced {runs} runs — expected exactly 1"
     assert probes >= 1, "workflow did not resume + finish after SIGKILL"
+
+
+# --- VT-3.3a-fix-3 (CL-96): four-bucket ingress reason -----------------------
+
+
+def test_ingress_reason_mapping():
+    """_ingress_reason classifies a redelivery by the prior workflow's DBOS
+    status. Statuses verified live against dbos WorkflowStatusString —
+    'recovering' = still in flight, 'terminal_failure' = dead (Pillar 7)."""
+    from orchestrator.api.twilio_ingress import _ingress_reason
+
+    assert _ingress_reason(None) == "started"
+    assert _ingress_reason(SimpleNamespace(status="SUCCESS")) == "dupe"
+    for status in ("PENDING", "ENQUEUED", "DELAYED"):
+        assert _ingress_reason(SimpleNamespace(status=status)) == "recovering"
+    for status in ("ERROR", "CANCELLED", "MAX_RECOVERY_ATTEMPTS_EXCEEDED"):
+        assert _ingress_reason(SimpleNamespace(status=status)) == "terminal_failure"
+
+
+def test_started_reason_for_new_workflow_id(ingress):
+    """A first-time MessageSid — no prior workflow — returns reason 'started'."""
+    phone = _phone()
+    _new_tenant(ingress.dsn, phone)
+    resp = _post(ingress, _fields(phone, Body="hello there"))
+    assert resp.status_code == 200
+    assert resp.json()["reason"] == "started"
+    _await_workflow(resp.json()["workflow_id"])

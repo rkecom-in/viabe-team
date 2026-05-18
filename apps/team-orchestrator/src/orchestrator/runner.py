@@ -105,13 +105,22 @@ def open_webhook_run(tenant_id: str, run_id: str, trigger_payload: dict) -> None
 
 @DBOS.step()
 def record_webhook_received(tenant_id: str, run_id: str, envelope: dict) -> None:
-    """Write the webhook_received step_record to pipeline_steps. The envelope
-    is phone-tokenised — no plaintext PII (Pillar 3 / Pillar 7)."""
+    """Write the webhook_received step_record (step_index=0) to pipeline_steps.
+
+    The envelope is phone-tokenised — no plaintext PII (Pillar 3 / Pillar 7).
+
+    Idempotency is provided by the DBOS workflow-id boundary for COMPLETED
+    steps. A crash between the SQL commit and DBOS recording the step causes
+    re-execution on workflow resume — hence the ON CONFLICT (run_id, step_index)
+    DO NOTHING clause. Migration 014's UNIQUE (run_id, step_index) constraint
+    makes ON CONFLICT well-defined.
+    """
     with get_pool().connection() as conn:
         conn.execute(
             "INSERT INTO pipeline_steps "
             "(run_id, tenant_id, step_index, step_kind, input_envelope) "
-            "VALUES (%s, %s, 0, 'webhook_received', %s)",
+            "VALUES (%s, %s, 0, 'webhook_received', %s) "
+            "ON CONFLICT (run_id, step_index) DO NOTHING",
             (run_id, tenant_id, Jsonb(envelope)),
         )
 
@@ -165,17 +174,20 @@ def record_inbound_message_sid(tenant_id: str, message_sid: str) -> bool:
 
 @DBOS.step()
 def record_brain_pending(tenant_id: str, run_id: str, reason: str) -> None:
-    """Record that this run is awaiting the brain (VT-3.4 unwired).
+    """Record that this run is awaiting the brain (step_index=1, VT-3.4 unwired).
 
-    step_index=1 — after webhook_received at index 0. Idempotency is provided by
-    the DBOS workflow-id boundary (a step never replays); PR-fix-6 adds a UNIQUE
-    (run_id, step_index) constraint as a second guard.
+    Idempotency is provided by the DBOS workflow-id boundary for COMPLETED
+    steps. A crash between the SQL commit and DBOS recording the step causes
+    re-execution on workflow resume — hence the ON CONFLICT (run_id, step_index)
+    DO NOTHING clause. Migration 014's UNIQUE (run_id, step_index) constraint
+    makes ON CONFLICT well-defined.
     """
     with get_pool().connection() as conn:
         conn.execute(
             "INSERT INTO pipeline_steps "
             "(run_id, tenant_id, step_index, step_kind, output_envelope) "
-            "VALUES (%s, %s, 1, 'awaiting_brain', %s)",
+            "VALUES (%s, %s, 1, 'awaiting_brain', %s) "
+            "ON CONFLICT (run_id, step_index) DO NOTHING",
             (run_id, tenant_id, Jsonb({"reason": reason})),
         )
 
