@@ -17,8 +17,9 @@ from dbos import DBOS, SetWorkflowID, SetWorkflowTimeout
 from psycopg.types.json import Jsonb
 
 from dbos_config import WORKFLOW_TIMEOUT_SECONDS
+from orchestrator.db import tenant_connection
 from orchestrator.direct_handlers import HANDLERS
-from orchestrator.graph import OrchestratorState, get_compiled_graph, get_pool
+from orchestrator.graph import OrchestratorState, get_compiled_graph
 from orchestrator.pre_filter_gate import pre_filter
 from orchestrator.state import new_subscriber_state
 from orchestrator.types import WebhookEvent
@@ -28,7 +29,7 @@ from orchestrator.utils.phone_token import hash_phone
 @DBOS.step()
 def open_run(tenant_id: str, run_id: str) -> None:
     """Record the run as started. Idempotent (ON CONFLICT) so recovery is safe."""
-    with get_pool().connection() as conn:
+    with tenant_connection(tenant_id) as conn:
         conn.execute(
             "INSERT INTO pipeline_runs (id, tenant_id, run_type, status) "
             "VALUES (%s, %s, 'orchestrator', 'running') "
@@ -52,9 +53,14 @@ def invoke_graph(tenant_id: str, run_id: str, inbound: str) -> list[str]:
 
 
 @DBOS.step()
-def close_run(run_id: str) -> None:
-    """Mark the run completed. Idempotent."""
-    with get_pool().connection() as conn:
+def close_run(tenant_id: str, run_id: str) -> None:
+    """Mark the run completed. Idempotent.
+
+    tenant_id is required so the UPDATE runs under tenant_connection — under
+    RLS the WHERE id = %s is scoped by the USING clause, so without the GUC
+    set the UPDATE is a silent no-op (CL-71).
+    """
+    with tenant_connection(tenant_id) as conn:
         conn.execute(
             "UPDATE pipeline_runs SET status = 'completed', ended_at = now() "
             "WHERE id = %s",
@@ -67,7 +73,7 @@ def pipeline_run(tenant_id: str, run_id: str, inbound: str) -> dict[str, Any]:
     """Durable orchestrator pipeline run — three checkpointed steps."""
     open_run(tenant_id, run_id)
     history = invoke_graph(tenant_id, run_id, inbound)
-    close_run(run_id)
+    close_run(tenant_id, run_id)
     return {"tenant_id": tenant_id, "run_id": run_id, "history": history}
 
 
@@ -93,7 +99,7 @@ def run_pipeline(tenant_id: str, run_id: str, inbound: str) -> dict[str, Any]:
 def open_webhook_run(tenant_id: str, run_id: str, trigger_payload: dict) -> None:
     """Record the inbound run in pipeline_runs. Idempotent — a redelivered
     MessageSid maps to the same run_id. trigger_payload is phone-tokenised."""
-    with get_pool().connection() as conn:
+    with tenant_connection(tenant_id) as conn:
         conn.execute(
             "INSERT INTO pipeline_runs "
             "(id, tenant_id, run_type, status, trigger_payload) "
@@ -115,7 +121,7 @@ def record_webhook_received(tenant_id: str, run_id: str, envelope: dict) -> None
     DO NOTHING clause. Migration 014's UNIQUE (run_id, step_index) constraint
     makes ON CONFLICT well-defined.
     """
-    with get_pool().connection() as conn:
+    with tenant_connection(tenant_id) as conn:
         conn.execute(
             "INSERT INTO pipeline_steps "
             "(run_id, tenant_id, step_index, step_kind, input_envelope) "
@@ -126,9 +132,14 @@ def record_webhook_received(tenant_id: str, run_id: str, envelope: dict) -> None
 
 
 @DBOS.step()
-def close_webhook_run(run_id: str, status: str) -> None:
-    """Mark the inbound run finished. Idempotent."""
-    with get_pool().connection() as conn:
+def close_webhook_run(tenant_id: str, run_id: str, status: str) -> None:
+    """Mark the inbound run finished. Idempotent.
+
+    tenant_id is required so the UPDATE runs under tenant_connection — the
+    WHERE id = %s is scoped by the RLS USING clause, so without the GUC set
+    the UPDATE silently affects 0 rows (CL-71).
+    """
+    with tenant_connection(tenant_id) as conn:
         conn.execute(
             "UPDATE pipeline_runs SET status = %s, ended_at = now() WHERE id = %s",
             (status, run_id),
@@ -163,7 +174,7 @@ def record_inbound_message_sid(tenant_id: str, message_sid: str) -> bool:
     runs inside the durable workflow boundary, so a half-completed ingress can
     never leave a row that makes the next attempt look like a duplicate.
     """
-    with get_pool().connection() as conn:
+    with tenant_connection(tenant_id) as conn:
         cur = conn.execute(
             "INSERT INTO twilio_inbound_events (message_sid, tenant_id) "
             "VALUES (%s, %s) ON CONFLICT (message_sid) DO NOTHING",
@@ -182,7 +193,7 @@ def record_brain_pending(tenant_id: str, run_id: str, reason: str) -> None:
     DO NOTHING clause. Migration 014's UNIQUE (run_id, step_index) constraint
     makes ON CONFLICT well-defined.
     """
-    with get_pool().connection() as conn:
+    with tenant_connection(tenant_id) as conn:
         conn.execute(
             "INSERT INTO pipeline_steps "
             "(run_id, tenant_id, step_index, step_kind, output_envelope) "
@@ -228,7 +239,7 @@ def webhook_pipeline_run(
         final_status = "escalated"
     # result.kind == "reject" → observability-only; the run ends clean (completed).
 
-    close_webhook_run(run_id, final_status)
+    close_webhook_run(tenant_id, run_id, final_status)
     return {
         "run_id": run_id,
         "tenant_id": tenant_id,

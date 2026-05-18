@@ -15,7 +15,7 @@ from typing import Any
 
 from dbos import DBOS
 
-from orchestrator.graph import get_pool
+from orchestrator.db import tenant_connection
 from orchestrator.state import SubscriberState
 from orchestrator.types import WebhookEvent
 from orchestrator.utils.twilio_send import send_template_message
@@ -24,7 +24,7 @@ from orchestrator.utils.twilio_send import send_template_message
 @DBOS.step()
 def dsr_handler(event: WebhookEvent, state: SubscriberState) -> dict[str, Any]:
     """Create a DSR ticket and send the DPDP acknowledgment."""
-    with get_pool().connection() as conn:
+    with tenant_connection(state["tenant_id"]) as conn:
         row = conn.execute(
             "INSERT INTO dsr_tickets (tenant_id, request_type, status, acknowledged_at) "
             "VALUES (%s, 'deletion', 'acknowledged', now()) RETURNING id",

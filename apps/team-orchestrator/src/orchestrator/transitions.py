@@ -12,7 +12,7 @@ from datetime import UTC, datetime
 
 from dbos import DBOS
 
-from orchestrator.graph import get_pool
+from orchestrator.db import tenant_connection
 from orchestrator.invariants import check_invariants
 from orchestrator.state import MAX_TRIAL_EXTENSIONS, Phase, SubscriberState
 
@@ -112,7 +112,7 @@ def apply_transition(
         {"event": event, "from": from_phase, "to": to_phase, "at": now.isoformat()},
     ]
 
-    with get_pool().connection() as conn, conn.transaction():
+    with tenant_connection(state["tenant_id"]) as conn, conn.transaction():
         row = conn.execute(
             "INSERT INTO phase_transitions "
             "(tenant_id, from_phase, to_phase, event, transition_at, reason, run_id) "

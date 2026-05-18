@@ -55,6 +55,19 @@ _pool: ConnectionPool | None = None
 _compiled: Any | None = None
 
 
+def _reset_connection(conn: Any) -> None:
+    """Pool reset callback — defence-in-depth for tenant_connection (CL-122).
+
+    tenant_connection() does SET ROLE app_role + sets app.current_tenant, and
+    clears both in its own finally. This runs when a connection is returned to
+    the pool, so no SET ROLE / GUC can leak to the next borrower even if that
+    finally is bypassed.
+    """
+    with conn.cursor() as cur:
+        cur.execute("RESET ROLE")
+        cur.execute("SELECT set_config('app.current_tenant', '', false)")
+
+
 def _setup_checkpoint_rls(pool: ConnectionPool) -> None:
     """Pillar 3: tenant-isolate the LangGraph checkpoint tables.
 
@@ -89,6 +102,7 @@ def init_substrate(database_url: str) -> None:
         min_size=1,
         max_size=4,
         kwargs={"autocommit": True, "row_factory": dict_row},
+        reset=_reset_connection,
         open=True,
     )
     saver = PostgresSaver(_pool)

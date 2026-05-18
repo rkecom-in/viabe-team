@@ -72,6 +72,18 @@ Handler-output persistence to `pipeline_steps` is **not** part of VT-3.3c — it
 is a separate observability concern (VT-122). Verify the send via the log line
 and the Twilio Console, not via a DB row.
 
+## Tenant-scoped DB access (CL-71 / CL-122)
+
+Every reader/writer of a **tenant-scoped table** MUST acquire its connection via
+`orchestrator.db.tenant_connection(tenant_id)`. That wrapper does `SET ROLE
+app_role` (a non-superuser, no-`BYPASSRLS` role — migration `015`) and sets the
+`app.current_tenant` GUC, so `FORCE ROW LEVEL SECURITY` is genuinely enforced.
+
+Direct `get_pool().connection()` is reserved for: (a) the service-role path of
+migration `000b` — `_lookup_tenant`, `_within_rate_limits`; (b) DBOS framework
+operations; (c) the LangGraph `PostgresSaver` checkpointer. See
+`src/orchestrator/db/__init__.py`.
+
 ## Layout
 
 - `src/team_orchestrator/` — package code (no workflows yet).
