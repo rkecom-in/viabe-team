@@ -1,0 +1,43 @@
+# twilio_templates.yaml — name -> Twilio Content API content_sid mapping (VT-3.3c).
+#
+# Pillar 8: template *content* lives in the Twilio Console + the Meta WABA.
+# This file is a name->sid lookup only — no copy, no logic.
+#
+# audience is informational for VT-3.3c (all sends go to tenant.whatsapp_number
+# / the inbound sender). VT-6 routes owner-audience sends to a separate inbox.
+#
+# A template with `content_sid: null` is the stub-pending-approval path —
+# send_template_message returns success=False / error_code=template_not_yet_approved
+# without calling Twilio. Supported; no entry uses it today.
+
+team_welcome:
+  content_sid: HX1b66c0daaa52dc0b8575e50eebadfdd1
+  audience: customer
+
+team_weekly_approval:
+  content_sid: HX44b053c946a230ea0d2d3d2dc6118964
+  audience: customer
+
+team_opt_out_confirmation:
+  content_sid: HX6365c429e75c2e191bf396e1c6ba8708
+  audience: customer
+
+team_dsr_acknowledgment:
+  content_sid: HXcda0b9bb6ea92c072fb8eb7d06163ef0
+  audience: customer
+
+team_agent_stuck_escalation:
+  content_sid: HX6f15db7fee7037c570ba122387f39b10
+  audience: customer
+
+team_status_ping:
+  content_sid: HX11199e6fc93eaa1f8b26071995614476
+  audience: customer
+
+team_unable_to_complete_request:
+  content_sid: HXb545fe12033d79293f61bc614baa4caf
+  audience: owner
+
+team_error_handler:
+  content_sid: HXe9212e16b8647a5d9ab6fcff647bf600
+  audience: owner
