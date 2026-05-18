@@ -92,7 +92,7 @@ def test_opt_out_keyword_en_routes_and_sets_flag(gate):
 
     outcome = gate.HANDLERS["opt_out_handler"](_inbound(gate, "STOP"), sub)
     assert outcome["opt_out_set"] is True
-    assert outcome["confirmation_sent"] is True
+    assert outcome["send_result"]["success"] is True  # VT-3.3c: honest send
 
     with psycopg.connect(gate.dsn, autocommit=True) as conn:
         row = conn.execute(
@@ -127,7 +127,7 @@ def test_dsr_keyword_routes_creates_ticket(gate):
     assert result.handler_name == "dsr_handler"
 
     outcome = gate.HANDLERS["dsr_handler"](event, sub)
-    assert outcome["acknowledgment_sent"] is True
+    assert outcome["send_result"]["success"] is True  # VT-3.3c: honest send
     assert outcome["dsr_ticket_id"] is not None
 
     with psycopg.connect(gate.dsn, autocommit=True) as conn:
@@ -158,7 +158,7 @@ def test_status_ping_routes_to_status_ping_handler(gate):
     assert result.handler_name == "status_ping_handler"
 
     outcome = gate.HANDLERS["status_ping_handler"](_inbound(gate, "hi"), sub)
-    assert outcome["reply_sent"] is True
+    assert outcome["send_result"]["success"] is True  # VT-3.3c: honest send
     assert "trial" in outcome["status_text"]  # accurate phase, no fabrication
 
 

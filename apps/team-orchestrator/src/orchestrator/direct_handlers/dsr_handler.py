@@ -2,7 +2,7 @@
 
 Pillar 1: fully deterministic, zero LLM.
 Pillar 7: the acknowledgment send and the ticket creation happen within this
-single @DBOS.step — both, atomically, or neither.
+single @DBOS.step; the return contract reports the real Twilio outcome.
 
 The gate detects a generic DSR keyword; it cannot deterministically classify
 the request type, so the ticket is opened as 'deletion' (the DPDP default and
@@ -11,7 +11,6 @@ the dominant keyword set). VT-8 owns richer DSR classification.
 
 from __future__ import annotations
 
-import logging
 from typing import Any
 
 from dbos import DBOS
@@ -19,13 +18,12 @@ from dbos import DBOS
 from orchestrator.graph import get_pool
 from orchestrator.state import SubscriberState
 from orchestrator.types import WebhookEvent
-
-logger = logging.getLogger(__name__)
+from orchestrator.utils.twilio_send import send_template_message
 
 
 @DBOS.step()
 def dsr_handler(event: WebhookEvent, state: SubscriberState) -> dict[str, Any]:
-    """Create a DSR ticket and send the DPDP acknowledgment — atomically."""
+    """Create a DSR ticket and send the DPDP acknowledgment."""
     with get_pool().connection() as conn:
         row = conn.execute(
             "INSERT INTO dsr_tickets (tenant_id, request_type, status, acknowledged_at) "
@@ -36,15 +34,15 @@ def dsr_handler(event: WebhookEvent, state: SubscriberState) -> dict[str, Any]:
     ticket_id = str(row["id"]) if row else None
 
     # "We received your request; we'll respond within 30 days per DPDP."
-    # TODO VT-3.3: replace this logged stub with the real Twilio template send.
-    logger.info(
-        "DSR acknowledgment template -> %s (ticket %s)",
-        event.sender_phone,
-        ticket_id,
+    send_result = send_template_message(
+        state["tenant_id"],
+        "team_dsr_acknowledgment",
+        {},
+        recipient_phone=event.sender_phone or None,
     )
 
     return {
         "handler": "dsr_handler",
         "dsr_ticket_id": ticket_id,
-        "acknowledgment_sent": True,
+        "send_result": send_result.model_dump(),
     }

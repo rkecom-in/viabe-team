@@ -3,6 +3,19 @@
 Maps ``handler_name`` (as returned in ``RouteToDirectHandler``) to its handler.
 Pillar 8: one registry, one set of handlers — no shadow filtering elsewhere.
 Pillar 1: every handler is fully deterministic — zero LLM.
+
+Return contract (VT-3.3c)
+-------------------------
+Every handler returns a ``dict`` of the shape::
+
+    {"handler": <name>, "<side_effect_flag>": <value>, "send_result": {...}}
+
+``send_result`` is ``SendResult.model_dump()`` from ``utils.twilio_send`` — the
+honest outcome of the Twilio template send (Pillar 7). It replaces the old
+hardcoded ``confirmation_sent``/``acknowledgment_sent``/``reply_sent``: True
+booleans, which lied about a send that had not happened (audit C4, CL-74).
+``dupe_handler`` is the one exception — it sends nothing and has no
+``send_result``.
 """
 
 from __future__ import annotations
