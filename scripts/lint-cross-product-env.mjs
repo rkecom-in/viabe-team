@@ -36,7 +36,7 @@ const SECRET_SUFFIX = /(?:_SECRET_KEY|_AUTH_TOKEN|_API_KEY)$/
  * are never bundled to the client. Added in VT-3.3b. Any OTHER non-public
  * secret-suffixed var in the web env is still rejected.
  */
-const WEB_ENV_WHITELIST = new Set(['TWILIO_AUTH_TOKEN', 'INTERNAL_API_SECRET'])
+const WEB_ENV_WHITELIST = new Set(['TEAM_TWILIO_AUTH_TOKEN', 'INTERNAL_API_SECRET'])
 
 /**
  * Per-app .env.example files and which side of the frontend/backend boundary
