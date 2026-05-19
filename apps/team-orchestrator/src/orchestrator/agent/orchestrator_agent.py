@@ -20,10 +20,13 @@ import logging
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
+from uuid import UUID
 
-from langchain.agents import create_agent
+from langchain.agents import AgentState, create_agent
 from langchain_anthropic import ChatAnthropic
 from langchain_core.tools import BaseTool, tool
+
+from orchestrator.types.trigger_reason import TriggerReason
 
 logger = logging.getLogger("orchestrator.agent")
 
@@ -52,6 +55,27 @@ def escalate_to_fazal(run_id: str, reason: str, context: str) -> str:
 ORCHESTRATOR_AGENT_TOOLS: list[BaseTool] = [escalate_to_fazal]
 
 
+class OrchestratorAgentState(AgentState, total=False):
+    """State schema for the orchestrator ``create_agent`` subgraph (VT-3.4 PR 2/3).
+
+    create_agent's default ``AgentState`` is messages-centric — its subgraph
+    filters parent state down to that schema, so the supervisor's run-identity
+    fields would never reach a handoff tool's ``InjectedState`` (verified seam,
+    CL-209). This subclass adds them back, narrowly: extending ``AgentState``
+    (rather than swapping the whole schema to ``AgentGraphState``) keeps
+    create_agent's own state fields intact and keeps sales-recovery bundle
+    fields OUT of the orchestrator subgraph.
+
+    total=False: the three fields are populated by upstream producers
+    (VT-3.3 / VT-3.5 / VT-3.8) and may be absent at orchestrator entry —
+    matching ``AgentGraphState``'s totality for the same keys (CL-195).
+    """
+
+    run_id: UUID | None
+    tenant_id: UUID | None
+    trigger_reason: TriggerReason | None
+
+
 def build_orchestrator_agent(
     model: ChatAnthropic,
     *,
@@ -62,6 +86,10 @@ def build_orchestrator_agent(
     name="orchestrator_agent" is load-bearing — VT-3.4's supervisor graph
     references this exact string as the node name.
 
+    ``state_schema=OrchestratorAgentState`` (VT-3.4 PR 2/3): propagates
+    tenant_id / run_id / trigger_reason into the subgraph so the
+    ``spawn_sales_recovery`` handoff can read them from ``InjectedState``.
+
     ``create_agent`` (langchain 1.x) is the supported successor to the
     deprecated ``langgraph.prebuilt.create_react_agent`` (CL-134).
     """
@@ -70,6 +98,7 @@ def build_orchestrator_agent(
         tools=[*ORCHESTRATOR_AGENT_TOOLS, *extra_tools],
         system_prompt=ORCHESTRATOR_AGENT_SYSTEM_PROMPT,
         name="orchestrator_agent",
+        state_schema=OrchestratorAgentState,
     )
 
 
