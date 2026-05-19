@@ -24,6 +24,7 @@ import time
 from typing import Any, TypedDict
 
 import psycopg
+import psycopg.errors
 from dbos import DBOS, DBOSConfig, SetWorkflowID
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.postgres import PostgresSaver
@@ -92,7 +93,11 @@ def invoke_graph_step(run_id: str) -> None:
     langgraph continues from node_a's checkpoint instead of restarting.
     """
     with PostgresSaver.from_conn_string(_DB_URL) as checkpointer:
-        checkpointer.setup()  # idempotent — create checkpoint tables if absent
+        try:
+            checkpointer.setup()  # creates checkpoint tables if absent
+        except psycopg.errors.UniqueViolation:
+            pass  # checkpoint_migrations already populated, schema present
+        
         graph = _build_graph(checkpointer)
         config: RunnableConfig = {"configurable": {"thread_id": run_id}}
         if checkpointer.get_tuple(config) is None:
