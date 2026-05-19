@@ -21,6 +21,11 @@ def route_after_orchestrator(state: AgentGraphState) -> str:
                  path map routes to 'sales_recovery_agent'.
     'terminal' — no spawn tool_call; path map routes to 'orchestrator_terminal'.
 
+    Precedence (§4.5 / CL-209): if the last AIMessage carries BOTH a
+    spawn_sales_recovery and an escalate_to_fazal tool_call, 'spawn' wins —
+    spawning the specialist is the routable action; escalation is handled
+    inside the agent loop, not by this conditional edge.
+
     CL-183 VERIFICATION TARGET (verified in test_supervisor.py):
     Whether this function fires on the spawn path depends on langgraph's
     Command.PARENT-vs-conditional-edge precedence, which Context7 does not
