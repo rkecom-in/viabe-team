@@ -9,7 +9,12 @@ deterministic subtree; this package must not import the phase machine
 
 from orchestrator.agent.orchestrator_agent import (
     ORCHESTRATOR_AGENT_SYSTEM_PROMPT,
+    build_orchestrator_agent,
     orchestrator_agent,
 )
 
-__all__ = ["ORCHESTRATOR_AGENT_SYSTEM_PROMPT", "orchestrator_agent"]
+__all__ = [
+    "ORCHESTRATOR_AGENT_SYSTEM_PROMPT",
+    "build_orchestrator_agent",
+    "orchestrator_agent",
+]

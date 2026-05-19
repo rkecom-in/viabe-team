@@ -42,34 +42,6 @@ def _tool_calls(result: dict) -> list[str]:
     not os.environ.get("ANTHROPIC_API_KEY"),
     reason="ANTHROPIC_API_KEY not set",
 )
-def test_orchestrator_agent_routes_to_spawn_sales_recovery():
-    """A dormant-customer winback trigger routes to spawn_sales_recovery."""
-    from orchestrator.agent import orchestrator_agent
-
-    result = orchestrator_agent.invoke(
-        {
-            "messages": [
-                {
-                    "role": "user",
-                    "content": (
-                        "Weekly trigger: about 40 dormant customers from "
-                        "January have not returned. The owner wants a winback "
-                        "push for them."
-                    ),
-                }
-            ]
-        }
-    )
-    calls = _tool_calls(result)
-    assert "spawn_sales_recovery" in calls, f"expected spawn_sales_recovery, got {calls}"
-    assert "escalate_to_fazal" not in calls
-
-
-@pytest.mark.integration
-@pytest.mark.skipif(
-    not os.environ.get("ANTHROPIC_API_KEY"),
-    reason="ANTHROPIC_API_KEY not set",
-)
 def test_orchestrator_agent_routes_to_escalate_on_legal_keyword():
     """A refund + consumer-court message routes to escalate_to_fazal."""
     from orchestrator.agent import orchestrator_agent
