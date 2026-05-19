@@ -12,7 +12,6 @@ dependencies = [
     "langchain==1.3.1",
     "langchain-core==1.4.0",
     "langchain-anthropic==1.4.3",
-    "langgraph-supervisor",
     "langgraph-checkpoint-postgres",
     "anthropic",
     "pydantic",
@@ -41,7 +40,7 @@ line-length = 100
 target-version = "py312"
 
 [tool.mypy]
-# Heavy deps (dbos, langgraph, langgraph_supervisor, supabase, pgvector) ship
+# Heavy deps (dbos, langgraph, langchain, supabase, pgvector) ship
 # no type stubs — ignore missing imports so the baseline reflects our code,
 # not third-party stub gaps. mypy --strict is non-blocking (CL-83).
 ignore_missing_imports = true

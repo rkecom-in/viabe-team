@@ -34,7 +34,7 @@ jobs:
         run: |
           if grep -rniE 'anthropic|openai|messages\.create|claude-|\bsonnet\b' \
               apps/team-orchestrator/src/orchestrator/pre_filter_gate.py \
-              apps/team-orchestrator/src/orchestrator/state.py \
+              apps/team-orchestrator/src/orchestrator/state/ \
               apps/team-orchestrator/src/orchestrator/transitions.py \
               apps/team-orchestrator/src/orchestrator/invariants.py \
               apps/team-orchestrator/src/orchestrator/runner.py \

@@ -76,13 +76,6 @@ def _wait_for_probe(dsn: str, workflow_id: str, label: str, timeout: float) -> N
     raise AssertionError(f"probe step '{label}' not observed within {timeout}s")
 
 
-def test_langgraph_supervisor_importable():
-    """The langgraph_supervisor dependency is installed and pinned (VT-3.4 wires it)."""
-    import langgraph_supervisor
-
-    assert hasattr(langgraph_supervisor, "create_supervisor")
-
-
 def test_pipeline_run_executes_end_to_end(substrate):
     """The DBOS workflow runs the LangGraph substrate end-to-end with stub nodes."""
     tenant_id = _new_tenant(substrate.dsn)

@@ -1,10 +1,13 @@
-"""Orchestrator-Agent skeleton (VT-3.9 PR 1/N).
+"""Orchestrator-Agent — the supervisor of the multi-agent graph (VT-3.9 / VT-3.4).
 
-The minimal orchestrator-agent: an Opus 4.7 agent built with langchain
-`create_agent`, the reviewed system prompt, and two placeholder tools. It
-exists so VT-3.4's supervisor has
-an importable ``orchestrator_agent`` to wire — it is NOT yet called from
-runner.py (the runner integration is VT-3.4 PR 1/3).
+An Opus 4.7 agent built with langchain ``create_agent`` and the reviewed system
+prompt. ``build_orchestrator_agent`` is the factory: callers pass ``extra_tools``
+to add context-specific tools (VT-3.4's supervisor passes the ``spawn_sales_recovery``
+handoff tool — a specialist handoff is only meaningful inside the parent graph,
+so it is NOT in the base tool set).
+
+The module-level ``orchestrator_agent`` is the default-built instance (base tools
+only); it is the importable handle used by tests and any standalone caller.
 
 Deferred to later VT-3.9 PRs: L0 memory, the Context Composer bundle, the real
 compose_owner_output / send_whatsapp_template / get_subscriber_state /
@@ -14,11 +17,13 @@ query_pipeline_history tools, and machine-enforced hard limits.
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from pathlib import Path
+from typing import Any
 
 from langchain.agents import create_agent
 from langchain_anthropic import ChatAnthropic
-from langchain_core.tools import tool
+from langchain_core.tools import BaseTool, tool
 
 logger = logging.getLogger("orchestrator.agent")
 
@@ -35,39 +40,39 @@ _MODEL = ChatAnthropic(model="claude-opus-4-7", max_tokens=4096)  # type: ignore
 
 
 @tool
-def spawn_sales_recovery(context_summary: str, trigger_reason: str) -> str:
-    """Hand off to Sales Recovery Agent for dormant-customer winback campaign work.
-
-    Skeleton placeholder — this logs the handoff intent but does not yet invoke
-    a specialist. VT-3.4 PR 1/3 replaces it with the real langgraph_supervisor
-    handoff tool. Not for production paths.
-    """
-    logger.info(
-        "spawn_sales_recovery (placeholder) trigger_reason=%s context_summary=%s",
-        trigger_reason,
-        context_summary,
-    )
-    return f"[placeholder] would spawn sales_recovery with: {trigger_reason}"
-
-
-@tool
 def escalate_to_fazal(run_id: str, reason: str, context: str) -> str:
     """Escalate to Fazal. Log-only in this skeleton; real wiring is VT-3.6."""
     logger.warning("ESCALATE_TO_FAZAL run_id=%s reason=%s context=%s", run_id, reason, context)
     return f"[skeleton] escalation logged for run_id={run_id}"
 
 
-ORCHESTRATOR_AGENT_TOOLS = [spawn_sales_recovery, escalate_to_fazal]
+# Base tools every orchestrator-agent has, regardless of context. Specialist
+# handoff tools (spawn_*) are NOT here — they are passed as extra_tools by the
+# supervisor graph, since a handoff is only valid inside the parent graph.
+ORCHESTRATOR_AGENT_TOOLS: list[BaseTool] = [escalate_to_fazal]
 
-# name="orchestrator_agent" is load-bearing — VT-3.4's langgraph_supervisor
-# wiring references this exact string. Do not change.
-#
-# create_agent (langchain 1.x) is the supported successor to the deprecated
-# langgraph.prebuilt.create_react_agent (removed in langgraph V2.0) — VT-CI
-# dep-audit migration step 2, CL-134.
-orchestrator_agent = create_agent(
-    model=_MODEL,
-    tools=ORCHESTRATOR_AGENT_TOOLS,
-    system_prompt=ORCHESTRATOR_AGENT_SYSTEM_PROMPT,
-    name="orchestrator_agent",
-)
+
+def build_orchestrator_agent(
+    model: ChatAnthropic,
+    *,
+    extra_tools: Sequence[BaseTool] = (),
+) -> Any:
+    """Build the orchestrator-agent with the base tools plus ``extra_tools``.
+
+    name="orchestrator_agent" is load-bearing — VT-3.4's supervisor graph
+    references this exact string as the node name.
+
+    ``create_agent`` (langchain 1.x) is the supported successor to the
+    deprecated ``langgraph.prebuilt.create_react_agent`` (CL-134).
+    """
+    return create_agent(
+        model=model,
+        tools=[*ORCHESTRATOR_AGENT_TOOLS, *extra_tools],
+        system_prompt=ORCHESTRATOR_AGENT_SYSTEM_PROMPT,
+        name="orchestrator_agent",
+    )
+
+
+# Default module-level instance — base tools only. The VT-3.4 supervisor builds
+# its own instance with the spawn_sales_recovery handoff tool added.
+orchestrator_agent = build_orchestrator_agent(_MODEL)
