@@ -25,8 +25,6 @@ Deterministic pipeline routing happens BEFORE you are invoked, in the Pre-Filter
 - `spawn_sales_recovery(context_summary: str, trigger_reason: str)` — Hand off to Sales Recovery Agent for dormant-customer winback campaign work.
 - `escalate_to_fazal(run_id: str, reason: str, context: str)` — Escalate to Fazal when limits trip or owner escalation criteria fire.
 
-Note: in this skeleton build, `spawn_sales_recovery` is a placeholder — calling it logs the handoff intent but does not yet invoke a specialist. Behavior is wired in a follow-up PR. Call it as if it works; downstream tests verify the call shape.
-
 More tools will be added as their backing implementations land. Do not attempt to call tools not in this list.
 
 ## Escalation criteria
