@@ -39,7 +39,7 @@ def test_orchestrator_spawns_sales_recovery_returns_campaign_plan():
     Asserts: the graph runs end-to-end; active_agent == 'sales_recovery_agent';
     campaign_plan is a valid CampaignPlan with proposed_by/status as expected.
     """
-    model = ChatAnthropic(model="claude-opus-4-7", temperature=0)
+    model = ChatAnthropic(model="claude-opus-4-7")  # type: ignore[call-arg]
     graph = build_supervisor_graph(model=model)
 
     result = graph.invoke(
