@@ -22,6 +22,7 @@ from __future__ import annotations
 import os
 import warnings
 from typing import Any
+from uuid import uuid4
 
 import pytest
 
@@ -63,7 +64,10 @@ def test_orchestrator_spawns_sales_recovery_returns_campaign_plan() -> None:
                     "role": "user",
                     "content": "Recover dormant customers from the last 60 days",
                 }
-            ]
+            ],
+            # spawn_sales_recovery requires run identity in state (CL-209).
+            "tenant_id": uuid4(),
+            "run_id": uuid4(),
         }
     )
 
@@ -142,7 +146,14 @@ def _run_supervisor_path(
 
     trace: list[str] = []
     final_state: dict[str, Any] = {}
-    initial = {"messages": [{"role": "user", "content": user_text}]}
+    # tenant_id / run_id: spawn_sales_recovery's handoff fail-loud-requires
+    # run identity in state (CL-209). Seeded so the spawn path builds its
+    # bundle instead of raising TenantIsolationError.
+    initial = {
+        "messages": [{"role": "user", "content": user_text}],
+        "tenant_id": uuid4(),
+        "run_id": uuid4(),
+    }
 
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
