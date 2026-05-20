@@ -6,6 +6,10 @@ function) and ``orchestrator_terminal_node`` (the no-spawn sink). No LLM, no DB.
 
 from __future__ import annotations
 
+import pytest
+
+pytest.importorskip("langchain_core")
+
 from langchain_core.messages import AIMessage, ToolCall
 
 from orchestrator.routing import orchestrator_terminal_node, route_after_orchestrator
