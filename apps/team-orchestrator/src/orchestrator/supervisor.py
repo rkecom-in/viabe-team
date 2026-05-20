@@ -30,11 +30,11 @@ from orchestrator.agent.sales_recovery_stub import (
     build_stub_sales_recovery_agent,
     hardcoded_campaign_plan,
 )
+from orchestrator.agent.schemas.campaign_plan import parse_campaign_plan
 from orchestrator.collapse import collapse_node
 from orchestrator.handoffs import spawn_sales_recovery
 from orchestrator.routing import orchestrator_terminal_node, route_after_orchestrator
 from orchestrator.state.agent_graph_state import AgentGraphState
-from orchestrator.types.campaign_plan import CampaignPlan
 
 
 def build_supervisor_graph(
@@ -73,11 +73,17 @@ def build_supervisor_graph(
         """Wrap the stub agent. Parse a CampaignPlan from the final message;
         fall back to the hardcoded plan on any parse failure.
 
-        PR 3/3: the run's tenant_id (carried in AgentGraphState) is the
-        authoritative tenant boundary. The specialist's emitted / fallback
-        CampaignPlan may carry a different (or placeholder) tenant_id —
-        overwrite it here so downstream the collapse-path tenant guard
-        sees a single source of truth (CL-202 / Pillar 3)."""
+        VT-122: ``CampaignPlan`` is now a v1.0 discriminated union over
+        ``status``; ``parse_campaign_plan`` is the TypeAdapter accessor
+        (the union has no ``model_validate``). On any parse failure
+        (malformed JSON, schema violation, wrong variant shape) we fall
+        back to the hardcoded proposed variant.
+
+        Tenant + run identity (CL-202 / Pillar 3): the run's tenant_id
+        and run_id (carried in AgentGraphState) are the authoritative
+        boundary. The specialist's emitted plan may carry placeholders;
+        overwrite both fields here so downstream sees a single source
+        of truth."""
         result = sales_recovery.invoke({"messages": state["messages"]})
         final_content = result["messages"][-1].content
 
@@ -89,13 +95,19 @@ def build_supervisor_graph(
                     block.get("text", "") if isinstance(block, dict) else str(block)
                     for block in final_content
                 )
-            plan = CampaignPlan.model_validate(json.loads(final_content))
+            plan = parse_campaign_plan(json.loads(final_content))
         except Exception:
             plan = hardcoded_campaign_plan()
 
+        overrides: dict[str, Any] = {}
         state_tenant_id = state.get("tenant_id")
         if state_tenant_id is not None and plan.tenant_id != state_tenant_id:
-            plan = plan.model_copy(update={"tenant_id": state_tenant_id})
+            overrides["tenant_id"] = state_tenant_id
+        state_run_id = state.get("run_id")
+        if state_run_id is not None and plan.run_id != state_run_id:
+            overrides["run_id"] = state_run_id
+        if overrides:
+            plan = plan.model_copy(update=overrides)
 
         return {"messages": result["messages"], "campaign_plan": plan}
 
