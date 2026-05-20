@@ -1,9 +1,10 @@
 """CampaignPlan v1.0 — agent structured-output contract (VT-37).
 
-Supersedes the v0.1 7-field plumbing model at
-``orchestrator.types.campaign_plan`` (CL-177). The v0.1 model is left
-intact on `main` — VT-3.4 plumbing code still imports it; migration is
-a separate follow-up subtask (see PR body).
+Supersedes the v0.1 7-field plumbing model originally at
+``orchestrator.types.campaign_plan`` (CL-177). The v0.1 module was
+deleted by VT-122 once every consumer migrated to the v1.0 union
+below; the type alias ``CampaignPlan`` now refers exclusively to this
+discriminated union.
 
 Status enum split (load-bearing)
 --------------------------------

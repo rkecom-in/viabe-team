@@ -1,12 +1,12 @@
-"""VT-3.4 PR 3/3 — collapse-path tests.
+"""VT-3.4 PR 3/3 — collapse-path tests (migrated to CampaignPlan v1.0 by VT-122).
 
 Live-Postgres tests that exercise ``orchestrator.collapse.collapse_campaign_plan``
 end-to-end through ``tenant_connection`` (CL-122 / Pillar 3). Mirrors the
 test_tenant_isolation.py setup pattern.
 
 Three required cases:
-  1. Happy path: CampaignPlan persisted to ``campaigns``; ``subscriber_states``
-     activity fields updated.
+  1. Happy path: CampaignPlan persisted to ``campaigns`` (plan_json carries the
+     v1.0 dict); ``subscriber_states`` activity fields updated.
   2. Phase-unchanged (named): ``tenants.phase`` AND the persisted
      ``subscriber_states.phase`` equal the pre-collapse phase.
   3. Cross-tenant: collapse under tenant A does not touch tenant B's rows
@@ -16,7 +16,7 @@ Three required cases:
 from __future__ import annotations
 
 import os
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from uuid import UUID, uuid4
 
@@ -75,17 +75,55 @@ def _new_run(dsn: str, tenant_id: str) -> str:
     return run_id
 
 
-def _plan(tenant_id: str, *, subscriber_id: str | None = None):
-    from orchestrator.types.campaign_plan import CampaignPlan
+def _plan(tenant_id: str, run_id: str, *, customer_id: str | None = None):
+    """Build a valid v1.0 ``proposed`` CampaignPlan for collapse tests."""
+    from orchestrator.agent.schemas.campaign_plan import (
+        CampaignPlanProposed,
+        CampaignWindow,
+        ConfidenceLevel,
+        EvidenceRef,
+        EvidenceSourceKind,
+        ExpectedARRR,
+        Language,
+        MessagePlan,
+        TargetCohort,
+    )
 
-    return CampaignPlan(
+    cid = UUID(customer_id) if customer_id else uuid4()
+    now = datetime.now(UTC)
+    return CampaignPlanProposed(
         tenant_id=UUID(tenant_id),
-        subscriber_id=UUID(subscriber_id) if subscriber_id else uuid4(),
-        template_id="team_winback_v1",
-        body_params={"name": "Owner", "days_inactive": "14"},
-        status="proposed",
-        proposed_at=datetime.now(UTC),
-        proposed_by="sales_recovery_agent",
+        run_id=UUID(run_id),
+        generated_at=now,
+        campaign_window=CampaignWindow(
+            start=now + timedelta(hours=1),
+            end=now + timedelta(days=7),
+        ),
+        target_cohort=TargetCohort(
+            customer_ids=[cid],
+            cohort_label="60-90 day dormants",
+            cohort_size=1,
+            selection_reason="dormant cohort [E1].",
+        ),
+        expected_arrr=ExpectedARRR(
+            low_paise=10_000_00,
+            high_paise=30_000_00,
+            confidence=ConfidenceLevel.MEDIUM,
+            basis="prior winback yields [E1].",
+        ),
+        evidence_refs=[
+            EvidenceRef(
+                claim_id="E1",
+                source_kind=EvidenceSourceKind.TOOL_CALL,
+                source_id="test-evidence",
+            ),
+        ],
+        message_plan=MessagePlan(
+            template_id="team_winback_v1",
+            template_params={"first_name": "Owner", "discount": "10"},
+            language=Language.EN,
+            personalization="owner-first-name.",
+        ),
     )
 
 
@@ -95,7 +133,7 @@ def test_collapse_persists_campaign_and_updates_subscriber_state(rls_ctx):
 
     tenant = _new_tenant(rls_ctx.dsn)
     run_id = _new_run(rls_ctx.dsn, tenant)
-    plan = _plan(tenant)
+    plan = _plan(tenant, run_id)
 
     campaign_id = collapse_campaign_plan(
         tenant_id=UUID(tenant), run_id=UUID(run_id), campaign_plan=plan
@@ -103,7 +141,7 @@ def test_collapse_persists_campaign_and_updates_subscriber_state(rls_ctx):
 
     with tenant_connection(tenant) as conn:
         campaign_row = conn.execute(
-            "SELECT template_id, status, proposed_by FROM campaigns WHERE id = %s",
+            "SELECT plan_json, status, generated_at FROM campaigns WHERE id = %s",
             (str(campaign_id),),
         ).fetchone()
         sub_row = conn.execute(
@@ -113,9 +151,24 @@ def test_collapse_persists_campaign_and_updates_subscriber_state(rls_ctx):
         ).fetchone()
 
     assert campaign_row is not None
-    assert campaign_row["template_id"] == "team_winback_v1"
+    # status starts at the lifecycle-initial value 'proposed' (which
+    # shares the name with the agent-terminal state — see CL: status-
+    # enum split). Downstream VT-6 / VT-5 flip to approved/rejected /
+    # sent/failed.
     assert campaign_row["status"] == "proposed"
-    assert campaign_row["proposed_by"] == "sales_recovery_agent"
+    assert campaign_row["generated_at"] is not None
+    # plan_json carries the full v1.0 dict. Spot-check the key nested
+    # fields exposed by the migration's contract.
+    plan_json = campaign_row["plan_json"]
+    assert plan_json["version"] == "1.0"
+    assert plan_json["status"] == "proposed"
+    assert plan_json["message_plan"]["template_id"] == "team_winback_v1"
+    assert plan_json["message_plan"]["template_params"] == {
+        "first_name": "Owner",
+        "discount": "10",
+    }
+    assert plan_json["target_cohort"]["cohort_size"] == 1
+    assert len(plan_json["evidence_refs"]) >= 1
 
     assert sub_row is not None
     assert sub_row["last_campaign_at"] is not None
@@ -137,7 +190,7 @@ def test_collapse_does_not_change_phase(rls_ctx):
         ).fetchone()["phase"]
 
     collapse_campaign_plan(
-        tenant_id=UUID(tenant), run_id=UUID(run_id), campaign_plan=_plan(tenant)
+        tenant_id=UUID(tenant), run_id=UUID(run_id), campaign_plan=_plan(tenant, run_id)
     )
 
     with tenant_connection(tenant) as conn:
@@ -165,7 +218,7 @@ def test_collapse_does_not_cross_tenant_boundary(rls_ctx):
     collapse_campaign_plan(
         tenant_id=UUID(tenant_a),
         run_id=UUID(run_a),
-        campaign_plan=_plan(tenant_a),
+        campaign_plan=_plan(tenant_a, run_a),
     )
 
     with tenant_connection(tenant_b) as conn:
