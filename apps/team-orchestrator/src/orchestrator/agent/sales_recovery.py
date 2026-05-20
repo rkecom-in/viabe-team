@@ -39,6 +39,7 @@ validation.
 from __future__ import annotations
 
 import os
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -55,7 +56,19 @@ from orchestrator.agent.types import AgentResult
 # canary / plumbing-validation path.
 _PLACEHOLDER_SYSTEM_PROMPT = (
     "You are a placeholder agent. Reply with the JSON "
-    '{"status": "placeholder"}. Do nothing else.'
+    '{"status": "placeholder"}. Do nothing else. '
+    "Output raw JSON only — no markdown, no code fences."
+)
+
+# Markdown code-fence stripper. Matches a recognised fence shape and
+# captures the inner content. NARROW by design: it does not extract a
+# JSON object from arbitrary surrounding prose — that would mask
+# genuinely malformed output. Recognised: ``` or ```json (case-
+# insensitive) on its own line, optional whitespace, closing ``` on its
+# own line.
+_CODE_FENCE_RE = re.compile(
+    r"^\s*```(?:json)?[ \t]*\n(?P<body>.*?)\n```\s*$",
+    re.DOTALL | re.IGNORECASE,
 )
 
 # Per-response output cap passed to ``messages.create``. Distinct from the
@@ -196,12 +209,23 @@ def _extract_text(content_blocks: list[Any]) -> str:
 
 
 def _parse_placeholder_output(text: str) -> dict[str, Any] | None:
-    """Best-effort parse of the placeholder JSON. Returns None on failure."""
+    """Best-effort parse of the placeholder JSON. Returns None on failure.
+
+    Tolerates ONE level of markdown code-fence wrapping (``` or ```json)
+    — models intermittently wrap JSON in a fence even when the prompt
+    forbids it. The strip is narrow: a recognised fence shape only,
+    NOT a loose "first { to last }" extraction. Genuinely malformed or
+    truncated output must still return None so the caller classifies
+    ``status='invalid'`` rather than silently inventing a parse.
+    """
     import json
 
     text = text.strip()
     if not text:
         return None
+    fence_match = _CODE_FENCE_RE.match(text)
+    if fence_match is not None:
+        text = fence_match.group("body").strip()
     try:
         parsed = json.loads(text)
     except json.JSONDecodeError:
