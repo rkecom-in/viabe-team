@@ -144,6 +144,12 @@ def _run_supervisor_path(
     # patch the supervisor module's binding before the graph is built.
     monkeypatch.setattr(supervisor_mod, "route_after_orchestrator", recording_route)
 
+    # PR 3/3 added a `collapse` node downstream of sales_recovery_agent that
+    # writes to Postgres via tenant_connection. This landmine test exercises
+    # routing precedence with a fake model and no DB — neutralise the collapse
+    # node so the spawn path does not hit `get_pool()`.
+    monkeypatch.setattr(supervisor_mod, "collapse_node", lambda state: {})
+
     trace: list[str] = []
     final_state: dict[str, Any] = {}
     # tenant_id / run_id: spawn_sales_recovery's handoff fail-loud-requires
