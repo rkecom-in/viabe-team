@@ -1,0 +1,22 @@
+# Model configuration (VT-32).
+#
+# Selection is environment-driven (env var ``VIABE_ENV``):
+#   - production            -> ``production`` model
+#   - test / dev / canary   -> ``test`` model
+#
+# Resolver: ``orchestrator.agent.sales_recovery._resolve_model``.
+#
+# Rationale (CL-242):
+# - Haiku (claude-haiku-4-5) is fast and cheap — fine for plumbing-level
+#   canary / dev runs that prove the SDK loop wiring.
+# - Opus (claude-opus-4-7) is the production model. Hard-limit behaviour
+#   validation (VT-35) MUST run on Opus; do NOT let Haiku leak into that
+#   path — the budgets and step-count behaviour differ between models and
+#   we calibrate against Opus.
+#
+# Adding an agent: top-level key is the agent name (string). Both
+# ``production`` and ``test`` are required.
+
+sales_recovery:
+  production: claude-opus-4-7
+  test: claude-haiku-4-5
