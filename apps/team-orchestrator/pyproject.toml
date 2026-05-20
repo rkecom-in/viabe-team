@@ -13,7 +13,12 @@ dependencies = [
     "langchain-core==1.4.0",
     "langchain-anthropic==1.4.3",
     "langgraph-checkpoint-postgres",
-    "anthropic",
+    # anthropic pinned == (VT-32 / CL-242): the sales_recovery agent loop
+    # is written directly on the Messages API; behaviour-sensitive surfaces
+    # (extended thinking, usage shape, tool_use stop_reason) make bumps
+    # Type 2 governance. The dep was previously unpinned (dep-audit
+    # 2026-05-18 finding); pinning the previously-unpinned baseline here.
+    "anthropic==0.103.1",
     "pydantic",
     "supabase",
     "pgvector",
