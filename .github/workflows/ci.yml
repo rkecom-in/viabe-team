@@ -71,6 +71,38 @@ jobs:
           fi
           echo "No deprecated create_react_agent imports found."
 
+  gate-vt35-hard-limit-constants:
+    name: gate-vt35-hard-limit-constants
+    runs-on: ubuntu-latest
+    # VT-35 acceptance criterion: the four hard-limit constants
+    # (80_000 / 25 / 8 / 300) are Type 3 commitments. Changing any of
+    # them must break the build. This grep gate fails CI on a literal
+    # mismatch — bumping a budget is a Type-3-governance decision
+    # carrying its own brief, not a quiet code change.
+    steps:
+      - uses: actions/checkout@v4
+      - name: Token budget = 80_000
+        run: |
+          grep -qE '^_RUN_LEVEL_TOKEN_HARD_LIMIT = 80_000$' \
+            apps/team-orchestrator/src/orchestrator/agent/sales_recovery.py \
+            || (echo "::error::token hard-limit constant changed (VT-35 Type 3)" && exit 1)
+      - name: Tool-call budget = 25
+        run: |
+          grep -qE '^TOOL_CALL_HARD_LIMIT = 25$' \
+            apps/team-orchestrator/src/orchestrator/agent/limits/tool_counter.py \
+            || (echo "::error::tool-call hard-limit constant changed (VT-35 Type 3)" && exit 1)
+      - name: Depth budget = 8
+        run: |
+          grep -qE '^DEPTH_HARD_LIMIT = 8$' \
+            apps/team-orchestrator/src/orchestrator/agent/limits/depth_tracker.py \
+            || (echo "::error::depth hard-limit constant changed (VT-35 Type 3)" && exit 1)
+      - name: Wallclock budget = 300.0s
+        run: |
+          grep -qE '^WALL_CLOCK_HARD_LIMIT_S = 300\.0$' \
+            apps/team-orchestrator/src/orchestrator/agent/limits/wallclock_timer.py \
+            || (echo "::error::wallclock hard-limit constant changed (VT-35 Type 3)" && exit 1)
+          echo "VT-35 hard-limit constants intact: tokens=80_000 tool_calls=25 depth=8 wallclock=300.0s"
+
   typecheck:
     name: typecheck
     runs-on: ubuntu-latest
