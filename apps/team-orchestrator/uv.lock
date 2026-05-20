@@ -2282,6 +2282,7 @@ dependencies = [
     { name = "pydantic" },
     { name = "pyyaml" },
     { name = "supabase" },
+    { name = "team-shared" },
     { name = "twilio" },
     { name = "uvicorn", extra = ["standard"] },
 ]
@@ -2310,6 +2311,7 @@ requires-dist = [
     { name = "pydantic" },
     { name = "pyyaml" },
     { name = "supabase" },
+    { name = "team-shared", editable = "../../packages/team-shared" },
     { name = "twilio" },
     { name = "uvicorn", extras = ["standard"] },
 ]
@@ -2317,6 +2319,24 @@ requires-dist = [
 [package.metadata.requires-dev]
 dev = [
     { name = "httpx" },
+    { name = "mypy", specifier = ">=1.14" },
+    { name = "pytest" },
+    { name = "ruff" },
+]
+
+[[package]]
+name = "team-shared"
+version = "0.1.0"
+source = { editable = "../../packages/team-shared" }
+dependencies = [
+    { name = "pydantic" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "pydantic" }]
+
+[package.metadata.requires-dev]
+dev = [
     { name = "mypy", specifier = ">=1.14" },
     { name = "pytest" },
     { name = "ruff" },

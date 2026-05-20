@@ -3,7 +3,14 @@ name = "team-shared"
 version = "0.1.0"
 description = "Shared types for Viabe Team Python apps"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    # VT-39: framework schemas use Pydantic (consistent with VT-37 CampaignPlan).
+    # Pin matches the orchestrator's pin once locked there; loose for now.
+    "pydantic",
+]
+
+[dependency-groups]
+dev = ["pytest", "ruff", "mypy>=1.14"]
 
 [build-system]
 requires = ["hatchling"]
@@ -11,3 +18,14 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["python/team_shared"]
+
+[tool.pytest.ini_options]
+pythonpath = ["python"]
+testpaths = ["python/team_shared"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.mypy]
+ignore_missing_imports = true
