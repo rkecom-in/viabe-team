@@ -20,3 +20,12 @@
 sales_recovery:
   production: claude-opus-4-7
   test: claude-haiku-4-5
+
+# VT-50 self_evaluate MCP tool — Opus-backed quality gate. The model
+# pin is read by orchestrator.agent.tools.self_evaluate._resolve_self_evaluate_model.
+# Production MUST stay Opus per the LLM-backed rationale (false-negative
+# blast radius); demoting to Sonnet/Haiku is Type 2 governance and
+# requires a measured failure-rate study.
+self_evaluate:
+  production: claude-opus-4-7
+  test: claude-haiku-4-5
