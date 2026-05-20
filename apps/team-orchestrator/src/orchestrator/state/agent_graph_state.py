@@ -19,8 +19,8 @@ from langchain_core.messages import AnyMessage
 from langgraph.graph.message import add_messages
 from typing_extensions import TypedDict
 
+from orchestrator.agent.schemas.campaign_plan import CampaignPlan
 from orchestrator.context_builder import SalesRecoveryContext
-from orchestrator.types.campaign_plan import CampaignPlan
 from orchestrator.types.trigger_reason import TriggerReason
 
 
