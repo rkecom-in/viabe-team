@@ -185,16 +185,20 @@ def test_run_sales_recovery_agent_passes_brief_required_params(monkeypatch):
     assert call.kwargs["max_tokens"] != _RUN_LEVEL_TOKEN_HARD_LIMIT, (
         "messages.create max_tokens must NOT be the run-level 80K ceiling"
     )
-    # Extended thinking is intentionally NOT wired for the placeholder
-    # canary path (VT-32). A placeholder does zero reasoning; sending a
-    # thinking budget here is both meaningless and a 400 source when
-    # budget_tokens > max_tokens. The real agent's thinking policy is a
-    # VT-4.2 decision. Lock against a regression that re-adds it.
+    # Extended thinking is intentionally NOT wired for the v1.0 prompt
+    # path (VT-32). The real agent's thinking policy is a VT-4.2-era
+    # decision; VT-33 (system prompt) does not pre-empt it.
     assert "thinking" not in call.kwargs
     assert call.kwargs["tools"] == []
-    # System prompt must be exactly the placeholder text (Type-3 commit).
-    assert "placeholder agent" in call.kwargs["system"]
-    assert '"status": "placeholder"' in call.kwargs["system"]
+    # System prompt is the v1.0 sales_recovery file (VT-33). Spot-check
+    # identity, output-contract reference, and a Pillar 4 marker so a
+    # silent edit that drops a load-bearing section is caught.
+    prompt = call.kwargs["system"]
+    assert "Sales Recovery Agent" in prompt
+    assert "CampaignPlan" in prompt
+    assert "out_of_scope" in prompt
+    assert "insufficient_data" in prompt
+    assert "Pillar 4" in prompt  # retrieve-don't-calculate enforcement
 
 
 def test_run_sales_recovery_agent_status_invalid_when_output_unparseable(monkeypatch):
@@ -382,15 +386,24 @@ def test_sales_recovery_node_fail_loud_on_missing_run_id():
     or not os.environ.get("ANTHROPIC_API_KEY"),
     reason="canary skipped — needs VIABE_RUN_AGENT_CANARY=1 + ANTHROPIC_API_KEY",
 )
-def test_canary_real_haiku_run_returns_placeholder_status(monkeypatch):
+def test_canary_real_haiku_run_completes_with_parseable_json(monkeypatch):
     """One real Messages-API call against claude-haiku-4-5 to prove the SDK
-    plumbing works end-to-end. Fazal runs this manually once before
-    merge. CI must NEVER reach here (VIABE_RUN_AGENT_CANARY unset)."""
+    plumbing + v1.0 system prompt work end-to-end. Fazal runs this
+    manually once before merge. CI must NEVER reach here
+    (VIABE_RUN_AGENT_CANARY unset).
+
+    VT-33 updated this canary's success criteria. The v1.0 prompt
+    instructs the agent to emit a CampaignPlan JSON — no longer the
+    VT-32 ``{"status": "placeholder"}`` sentinel. Success now means the
+    model produced parseable JSON the loop classified as 'completed'
+    (or, validly, 'refused' if Haiku declined). Tokens accrued + the
+    raw message trace landed."""
     monkeypatch.setenv("VIABE_ENV", "test")  # forces Haiku
     result = run_sales_recovery_agent(
         SalesRecoveryContext(tenant_id="canary", run_id="canary")
     )
-    assert result.status == "placeholder", asdict(result)
-    assert result.output == {"status": "placeholder"}
+    assert result.status in {"completed", "refused"}, asdict(result)
     assert result.tokens_used > 0
     assert result.cost_paise > 0
+    # The model's final message landed in raw_messages.
+    assert any(m.get("role") == "assistant" for m in result.raw_messages)
