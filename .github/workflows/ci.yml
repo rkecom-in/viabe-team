@@ -57,6 +57,20 @@ jobs:
           done
           echo "agent-cannot-import-phase-machine: ok"
 
+  gate-no-deprecated-langgraph-imports:
+    name: gate-no-deprecated-langgraph-imports
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Block deprecated create_react_agent import
+        run: |
+          if grep -rE "from langgraph\.prebuilt import.*create_react_agent" \
+              --include="*.py" .; then
+            echo "::error::Deprecated import detected. Use langchain.agents.create_agent (CL-134)."
+            exit 1
+          fi
+          echo "No deprecated create_react_agent imports found."
+
   typecheck:
     name: typecheck
     runs-on: ubuntu-latest
