@@ -198,8 +198,74 @@ def test_run_sales_recovery_agent_passes_brief_required_params(monkeypatch):
 
 
 def test_run_sales_recovery_agent_status_invalid_when_output_unparseable(monkeypatch):
-    """Non-JSON model output → status='invalid', output=None."""
-    response = _fake_response(text="this is not json")
+    """Non-JSON model output → status='invalid', output=None.
+
+    Locks against a regression in which the fence-stripper grows into a
+    loose "first { to last }" extractor: garbage like "hello {world}"
+    must STILL classify as invalid, not silently parse into a partial
+    dict."""
+    response = _fake_response(text="hello {world}")
+    fake_client = _patched_client(response)
+    monkeypatch.setenv("VIABE_ENV", "test")
+    monkeypatch.setattr(
+        "orchestrator.agent.sales_recovery.Anthropic", lambda: fake_client
+    )
+
+    result = run_sales_recovery_agent(
+        SalesRecoveryContext(tenant_id="t1", run_id="r1")
+    )
+    assert result.status == "invalid"
+    assert result.output is None
+
+
+def test_run_sales_recovery_agent_tolerates_markdown_json_fence(monkeypatch):
+    """Haiku/Opus intermittently wrap JSON in a ```json ... ``` fence.
+    The placeholder canary failure (#3) was caused by the parser
+    rejecting fenced output. Production CampaignPlan output will hit
+    the same wrapper — fence tolerance is a correctness fix, not a
+    placeholder-specific one."""
+    fenced = '```json\n{"status": "placeholder"}\n```'
+    response = _fake_response(text=fenced)
+    fake_client = _patched_client(response)
+    monkeypatch.setenv("VIABE_ENV", "test")
+    monkeypatch.setattr(
+        "orchestrator.agent.sales_recovery.Anthropic", lambda: fake_client
+    )
+
+    result = run_sales_recovery_agent(
+        SalesRecoveryContext(tenant_id="t1", run_id="r1")
+    )
+    assert result.status == "placeholder"
+    assert result.output == {"status": "placeholder"}
+
+
+def test_run_sales_recovery_agent_tolerates_bare_code_fence(monkeypatch):
+    """Same regression, fence without the ``json`` tag — bare triple
+    backticks. Some models emit this shape."""
+    fenced = '```\n{"status": "placeholder"}\n```'
+    response = _fake_response(text=fenced)
+    fake_client = _patched_client(response)
+    monkeypatch.setenv("VIABE_ENV", "test")
+    monkeypatch.setattr(
+        "orchestrator.agent.sales_recovery.Anthropic", lambda: fake_client
+    )
+
+    result = run_sales_recovery_agent(
+        SalesRecoveryContext(tenant_id="t1", run_id="r1")
+    )
+    assert result.status == "placeholder"
+    assert result.output == {"status": "placeholder"}
+
+
+def test_run_sales_recovery_agent_does_not_loose_extract_from_prose(monkeypatch):
+    """Defensive: garbage prose containing a JSON-shaped substring must
+    still classify as invalid. The fence stripper is NARROW — it only
+    matches a recognised fence pattern at the message boundaries. A
+    loose ``"first { to last }"`` extractor would silently parse the
+    embedded substring and corrupt the status classification."""
+    response = _fake_response(
+        text='I think the answer is {"status": "placeholder"} or so'
+    )
     fake_client = _patched_client(response)
     monkeypatch.setenv("VIABE_ENV", "test")
     monkeypatch.setattr(
