@@ -48,7 +48,7 @@ from typing import Any, cast
 from uuid import UUID
 
 import yaml
-from anthropic import Anthropic
+from anthropic import Anthropic, APITimeoutError
 
 from orchestrator.agent.cost import compute_cost_paise
 from orchestrator.agent.limits import (
@@ -302,12 +302,25 @@ def run_sales_recovery_agent(context: SalesRecoveryContext) -> AgentResult:
         if ctx.is_cancelled:
             break
 
-        response = _run_one_turn(
-            client,
-            model=model,
-            system_prompt=_PLACEHOLDER_SYSTEM_PROMPT,
-            messages=messages,
-        )
+        try:
+            response = _run_one_turn(
+                client,
+                model=model,
+                system_prompt=_PLACEHOLDER_SYSTEM_PROMPT,
+                messages=messages,
+            )
+        except APITimeoutError:
+            # Per-turn HTTP ceiling tripped — one round-trip exceeded
+            # PER_TURN_HTTP_TIMEOUT_S. The underlying condition is "this
+            # run is taking too long"; convert to a wall-clock hard
+            # limit so the cancel path runs uniformly (terminated_by =
+            # wall_clock, FailureRecord routed). Distinguished from the
+            # turn-boundary check by the reason string.
+            wallclock_timer.ctx.signal(
+                HardLimitAxis.WALL_CLOCK,
+                f"per-turn HTTP timeout exceeded {PER_TURN_HTTP_TIMEOUT_S}s",
+            )
+            break
 
         usage = getattr(response, "usage", None)
         if usage is not None:
