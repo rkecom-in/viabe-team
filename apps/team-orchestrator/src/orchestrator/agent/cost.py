@@ -23,8 +23,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-# Fixed USD→INR for Phase 1 conversion. Documented in
-# docs/team/sr-agent-skeleton.md alongside the refresh policy.
+# Fixed USD→INR for Phase 1 conversion. SINGLE source of truth — the
+# rate-table docs in docs/team/sr-agent-skeleton.md reference this
+# constant by name. Update HERE first when refreshing; the doc carries
+# the refresh policy + the as-of date.
+#
+# As-of: 2026-05-20 (FX assumption set when VT-32 landed).
 _USD_TO_INR = 85
 _PAISE_PER_INR = 100  # 100 paise = 1 INR
 

@@ -79,14 +79,21 @@ cost_paise = round(
 | `claude-opus-4-7` | $15 | $75 | 127,500 | 637,500 |
 | `claude-haiku-4-5` | $1 | $5 | 8,500 | 42,500 |
 
-Conversion assumption: **₹85 / USD** (fixed). 100 paise = 1 INR.
+Conversion assumption: **₹85 / USD**, **as of 2026-05-20** (Phase 1 fixed).
+100 paise = 1 INR.
+
+Single source of truth: `_USD_TO_INR` in
+`apps/team-orchestrator/src/orchestrator/agent/cost.py`. The doc table
+above is derived from that constant — when refreshing, update the
+constant first, then bump the as-of date here.
 
 These are budget-attribution numbers, not billing numbers. Anthropic invoices
 in USD on cache-aware totals; full billing reconciliation lands in a later
 observability subtask. Phase 1 accuracy is sufficient for run-level
 cost_paise on `pipeline_steps` / `pipeline_runs.cost_paise`.
 
-**Refresh policy**: update `RATES` when (a) Anthropic changes a list price,
+**Refresh policy**: update `RATES` (and `_USD_TO_INR` when applicable) and
+bump the as-of date above when (a) Anthropic changes a list price,
 (b) the FX assumption drifts by more than ~5% from spot, or (c) a new model
 is added.
 
