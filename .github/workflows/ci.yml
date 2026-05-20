@@ -71,6 +71,37 @@ jobs:
           fi
           echo "No deprecated create_react_agent imports found."
 
+  gate-sr-agent-prompt-token-cap:
+    name: gate-sr-agent-prompt-token-cap
+    runs-on: ubuntu-latest
+    # VT-33 (system prompt v1.0) acceptance criterion: the sales_recovery
+    # system prompt is capped at 4_000 tokens. A prompt with no size
+    # gate is not done — silent prompt bloat is the failure mode this
+    # guard exists to catch.
+    #
+    # Tokenizer: tiktoken cl100k_base (GPT-4 encoding). Anthropic's real
+    # tokenizer differs by ±5-10% on English text, but cl100k_base is a
+    # close conservative proxy that runs offline (no API key burn in
+    # CI). When Anthropic ships a public local tokenizer or we have an
+    # API-key-bearing CI workflow, swap to the real count.
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: Token cap (4000) on sales_recovery_v1 system prompt
+        run: |
+          uv run --no-project --with tiktoken python - <<'PY'
+          import sys
+          import tiktoken
+          enc = tiktoken.get_encoding("cl100k_base")
+          path = "apps/team-orchestrator/src/orchestrator/agent/prompts/sales_recovery_v1.md"
+          text = open(path, encoding="utf-8").read()
+          n = len(enc.encode(text))
+          print(f"sales_recovery_v1.md tokens (cl100k_base proxy): {n} / 4000")
+          if n > 4000:
+              print(f"::error::system prompt exceeds 4000-token cap (got {n}) (VT-33)")
+              sys.exit(1)
+          PY
+
   gate-vt35-hard-limit-constants:
     name: gate-vt35-hard-limit-constants
     runs-on: ubuntu-latest
