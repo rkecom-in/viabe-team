@@ -63,14 +63,15 @@ from orchestrator.agent.types import AgentResult
 from orchestrator.error_router import route_failure
 from orchestrator.failures import FailureRecord, FailureType, HardLimitAxis
 
-# Exactly the placeholder text required by the VT-32 brief. Do not edit
-# without owning the brief — this prompt is a Type-3 commitment for the
-# canary / plumbing-validation path.
-_PLACEHOLDER_SYSTEM_PROMPT = (
-    "You are a placeholder agent. Reply with the JSON "
-    '{"status": "placeholder"}. Do nothing else. '
-    "Output raw JSON only — no markdown, no code fences."
+# Sales Recovery system prompt v1.0 (VT-33 / VT-4.2). Loaded from the
+# markdown file under prompts/; the file is the source of truth and is
+# CI-gated at 4000 tokens (gate-sr-agent-prompt-token-cap). Prompt edits
+# go through versioned files (sales_recovery_v1.md -> _v2.md ...); major
+# revisions are Type 2 governance.
+_SR_AGENT_PROMPT_PATH = (
+    Path(__file__).resolve().parent / "prompts" / "sales_recovery_v1.md"
 )
+_SR_AGENT_SYSTEM_PROMPT = _SR_AGENT_PROMPT_PATH.read_text(encoding="utf-8")
 
 # Markdown code-fence stripper. Matches a recognised fence shape and
 # captures the inner content. NARROW by design: it does not extract a
@@ -306,7 +307,7 @@ def run_sales_recovery_agent(context: SalesRecoveryContext) -> AgentResult:
             response = _run_one_turn(
                 client,
                 model=model,
-                system_prompt=_PLACEHOLDER_SYSTEM_PROMPT,
+                system_prompt=_SR_AGENT_SYSTEM_PROMPT,
                 messages=messages,
             )
         except APITimeoutError:
