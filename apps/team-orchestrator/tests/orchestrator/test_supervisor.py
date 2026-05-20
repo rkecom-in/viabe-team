@@ -38,8 +38,22 @@ from langchain_core.messages import AIMessage  # noqa: E402
 from langchain_core.runnables import Runnable  # noqa: E402
 
 from orchestrator import routing  # noqa: E402
+from orchestrator.agent.schemas.campaign_plan import (  # noqa: E402
+    CampaignPlanInsufficientData,
+    CampaignPlanOutOfScope,
+    CampaignPlanProposed,
+    CampaignStatus,
+)
 from orchestrator.supervisor import build_supervisor_graph  # noqa: E402
-from orchestrator.types.campaign_plan import CampaignPlan  # noqa: E402
+
+# v1.0 discriminated union: ``isinstance`` checks use the concrete
+# variant tuple, since ``CampaignPlan`` is a TypeAlias of
+# ``Annotated[union, Field(discriminator=...)]`` — not a class.
+_CampaignPlanVariants = (
+    CampaignPlanProposed,
+    CampaignPlanOutOfScope,
+    CampaignPlanInsufficientData,
+)
 
 
 @pytest.mark.integration
@@ -73,9 +87,12 @@ def test_orchestrator_spawns_sales_recovery_returns_campaign_plan() -> None:
 
     assert result.get("active_agent") == "sales_recovery_agent"
     plan = result.get("campaign_plan")
-    assert isinstance(plan, CampaignPlan)
-    assert plan.proposed_by == "sales_recovery_agent"
-    assert plan.status == "proposed"
+    assert isinstance(plan, _CampaignPlanVariants)
+    # v1.0: stub returns the proposed variant; lifecycle progression
+    # (approved/rejected/sent/failed) lives on a downstream field, NOT
+    # on plan.status (CL: status-enum split).
+    assert isinstance(plan, CampaignPlanProposed)
+    assert plan.status is CampaignStatus.PROPOSED
 
 
 # --- VT-3.4 PR 2/3: landmine-1 keyless precedence test (CL-202 / CL-203) ------
