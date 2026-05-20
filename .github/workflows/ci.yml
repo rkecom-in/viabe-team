@@ -102,6 +102,31 @@ jobs:
               sys.exit(1)
           PY
 
+  gate-vt39-tools-harness-import:
+    name: gate-vt39-tools-harness-import
+    runs-on: ubuntu-latest
+    # VT-39 acceptance criterion: every individual tool's tests import
+    # `run_tool_test` so the harness contract is uniformly exercised.
+    # Empty today (no tools on main yet — framework lands first); the
+    # gate guards future VT-5.x PRs.
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tool tests must import run_tool_test
+        run: |
+          TOOLS_TEST_DIR=apps/team-orchestrator/tests/orchestrator/agent/tools
+          if [ -d "$TOOLS_TEST_DIR" ]; then
+            for f in "$TOOLS_TEST_DIR"/test_*.py; do
+              [ -f "$f" ] || continue
+              if ! grep -qE 'from team_shared\.mcp import .*run_tool_test|from team_shared\.mcp\.test_harness import .*run_tool_test' "$f"; then
+                echo "::error::$f must import run_tool_test from team_shared.mcp (VT-39 harness contract)"
+                exit 1
+              fi
+            done
+            echo "All tool tests in $TOOLS_TEST_DIR import run_tool_test."
+          else
+            echo "No tools test dir yet (VT-5.x not landed). Gate passes vacuously."
+          fi
+
   gate-vt35-hard-limit-constants:
     name: gate-vt35-hard-limit-constants
     runs-on: ubuntu-latest
@@ -170,6 +195,11 @@ jobs:
         working-directory: apps/team-orchestrator
       - run: uv run --no-project --with pytest pytest
         working-directory: apps/team-ingestion-worker
+      # team-shared: VT-39 MCP framework lives here; needs pydantic.
+      # Uses uv sync (the package owns its dev deps) rather than the
+      # stdlib-only smoke pattern.
+      - run: uv sync --frozen && uv run pytest -q
+        working-directory: packages/team-shared
 
   migrations:
     name: migrations
