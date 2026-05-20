@@ -16,6 +16,8 @@ from uuid import uuid4
 
 import pytest
 
+pytest.importorskip("pydantic")
+
 import orchestrator.context_builder as cb
 from orchestrator.context_builder import (
     BusinessProfile,

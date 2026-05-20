@@ -17,6 +17,10 @@ import json
 from dataclasses import asdict, fields
 from uuid import uuid4
 
+import pytest
+
+pytest.importorskip("pydantic")
+
 from orchestrator.context_builder import (
     AttributionSnapshot,
     BusinessProfile,
