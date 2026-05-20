@@ -48,7 +48,7 @@ from typing import Any, Literal, cast
 
 import yaml
 from anthropic import Anthropic
-from pydantic import BaseModel, ConfigDict, Field  # noqa: F401 — Field used in input schema
+from pydantic import BaseModel, ConfigDict, Field
 
 from orchestrator.agent.self_evaluate import (
     SelfEvaluateFeedback,
@@ -117,14 +117,21 @@ class SelfEvaluateInput(BaseModel):
 
 class _FeedbackPayload(BaseModel):
     """Per-category feedback. Each field: ``None`` (category passed) or
-    a critique string (category flagged). pydantic v2 doesn't reserve
-    ``schema`` as a model method (it's ``model_json_schema`` now), so
-    using the literal category name here is safe. ``protected_namespaces``
-    cleared to silence the legacy-shadow warning."""
+    a critique string (category flagged).
 
-    model_config = ConfigDict(extra="forbid", protected_namespaces=())
+    Wire-format note: the JSON the model emits uses keys ``schema``,
+    ``pillar``, ``consistency``, ``legal`` (matches VT-36's
+    ``SelfEvaluateFeedback``). The Python attribute ``schema`` would
+    shadow pydantic's deprecated ``BaseModel.schema`` v1 method (UserWarning
+    + mypy "type-shadow" error), so the attribute is ``schema_critique``
+    with ``alias='schema'``. ``populate_by_name=True`` accepts both
+    spellings on validation; dump-by-alias is used at the call site so
+    the wire key stays ``schema`` in ``ToolResult.data``.
+    """
 
-    schema: str | None = None  # type: ignore[assignment]  # noqa: A003 — category name dictated by VT-36 Protocol; shadows BaseModel.schema (deprecated v1 method)
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    schema_critique: str | None = Field(default=None, alias="schema")
     pillar: str | None = None
     consistency: str | None = None
     legal: str | None = None
@@ -262,6 +269,13 @@ class SelfEvaluateTool(MCPTool[SelfEvaluateInput, SelfEvaluateOutput]):
         return SelfEvaluateOutput.model_validate(parsed)
 
 
+def _dump_output_with_wire_keys(output: SelfEvaluateOutput) -> dict[str, Any]:
+    """Dump ``SelfEvaluateOutput`` keeping the wire key ``schema`` (not
+    the Python attribute ``schema_critique``). Used by the adapter so
+    ``ToolResult.data`` matches the model-emitted wire format."""
+    return output.model_dump(mode="json", by_alias=True)
+
+
 # ---------------------------------------------------------------------------
 # Protocol adapter — bridges the tool to VT-36's SelfEvaluator
 # ---------------------------------------------------------------------------
@@ -328,19 +342,23 @@ class SelfEvaluateAdapter:
             )
 
         data = result.data or {}
-        outcome_str = data.get("outcome")
-        feedback_dict = data.get("feedback") or {}
+        # Re-validate the framework's dumped data back into the typed
+        # model — gives the adapter direct attribute access without
+        # juggling field-name vs. alias on the dict. populate_by_name
+        # accepts both the dumped ``schema`` (alias) and the attribute
+        # ``schema_critique`` form.
+        output = SelfEvaluateOutput.model_validate(data)
 
         outcome = (
             SelfEvaluateOutcome.PASS
-            if outcome_str == "pass"
+            if output.outcome == "pass"
             else SelfEvaluateOutcome.REVISE
         )
         feedback_obj = SelfEvaluateFeedback(
-            schema=feedback_dict.get("schema"),
-            pillar=feedback_dict.get("pillar"),
-            consistency=feedback_dict.get("consistency"),
-            legal=feedback_dict.get("legal"),
+            schema=output.feedback.schema_critique,
+            pillar=output.feedback.pillar,
+            consistency=output.feedback.consistency,
+            legal=output.feedback.legal,
         )
         # On PASS we elide the feedback dataclass (None) — the
         # gate's branching treats `None` as "no feedback to surface".

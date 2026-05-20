@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
@@ -343,18 +344,45 @@ def test_tolerates_markdown_fence_around_json(monkeypatch):
 @pytest.mark.skipif(
     os.environ.get("VIABE_RUN_SELF_EVALUATE_CANARY") != "1"
     or not os.environ.get("ANTHROPIC_API_KEY"),
-    reason="canary skipped — needs VIABE_RUN_SELF_EVALUATE_CANARY=1 + ANTHROPIC_API_KEY",
+    reason=(
+        "canary skipped — needs VIABE_RUN_SELF_EVALUATE_CANARY=1 + "
+        "ANTHROPIC_API_KEY"
+    ),
 )
-def test_canary_real_haiku_run_returns_verdict(monkeypatch):
-    """One real Messages-API call against claude-haiku-4-5 to prove the
-    self_evaluate plumbing works end-to-end. Skipped in CI (no API key
-    secret). Fazal runs manually before merge."""
-    monkeypatch.setenv("VIABE_ENV", "test")  # forces Haiku
+def test_canary_real_opus_run_returns_verdict(monkeypatch):
+    """One real Messages-API call against the PRODUCTION model
+    (claude-opus-4-7) to prove the self_evaluate plumbing works
+    end-to-end on the same model production runs. Skipped in CI (no
+    ANTHROPIC_API_KEY secret on the workflow). Fazal runs manually
+    before merge.
+
+    Defect-1 fix: previously this canary forced VIABE_ENV=test (Haiku),
+    which left production-model verification untested. The canary's job
+    is to validate the actual gate — if Opus's verdict shape ever
+    drifts from Haiku's, Haiku-only canaries miss the regression. Force
+    VIABE_ENV=production so the call lands on claude-opus-4-7.
+
+    Live-call structural lock: ``elapsed > 0.5s`` confirms a real
+    network round-trip happened, not a silent mock. A real Opus call on
+    a small JSON-output prompt typically takes 1.5-4s; 0.5s is a
+    conservative lower bound that still distinguishes mock (<0.1s) from
+    network. Adjust the threshold (do NOT remove it) if Anthropic's
+    latency drops below 0.5s in the future."""
+    monkeypatch.setenv("VIABE_ENV", "production")  # forces Opus 4.7
+
     adapter = SelfEvaluateAdapter(ctx=_ctx())
+    start = time.monotonic()
     verdict = adapter.evaluate(_draft(), criteria=[])
-    # We don't assert outcome — the model decides; we only assert the
-    # plumbing produced a Protocol-shaped verdict.
+    elapsed = time.monotonic() - start
+
+    # The model decides PASS/REVISE on the draft; we only assert the
+    # Protocol-shaped verdict.
     assert verdict.outcome in {
         SelfEvaluateOutcome.PASS,
         SelfEvaluateOutcome.REVISE,
     }
+    assert elapsed > 0.5, (
+        f"canary completed in {elapsed:.2f}s — likely mocked, not a real "
+        "Opus call. Check that _make_client was not patched and that "
+        "ANTHROPIC_API_KEY reached the SDK."
+    )
