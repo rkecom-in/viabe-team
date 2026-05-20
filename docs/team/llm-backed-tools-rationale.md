@@ -30,29 +30,53 @@ defaults to `is_llm_backed=False`; the override is rare.
 ### `self_evaluate` — Opus 4.7
 
 **Status:** locked. Used by VT-36 (self-evaluate gate). Implementation
-pending VT-50.
+shipped in VT-50 at
+`apps/team-orchestrator/src/orchestrator/agent/tools/self_evaluate.py`.
 
 **Why LLM not deterministic:** the four evaluation categories —
 schema, pillar discipline, internal consistency, legal compliance —
-are semantic. Schema violates a Pydantic model can catch directly, but
-semantic schema issues ("cohort_size=200 but customer_ids has 87
-entries — they don't match across fields") are easier for an LLM to
-flag. Pillar discipline and consistency are nuanced. Legal compliance
-needs paraphrase tolerance for high-pressure language. The
-deterministic alternative — keyword lists — false-negates on novel
-phrasings and costs maintenance.
+are semantic. The Pydantic model catches direct schema violations at
+parse time, but cross-field "semantic schema" issues
+("cohort_size=200 but customer_ids has 87 entries — they don't match
+across fields"; "cohort_label='90-180 day dormants' but
+context_summary shows zero customers in that bucket") are easier for
+an LLM to flag than for a rule explosion. Pillar discipline (invented
+numbers, per-vertical heuristics, overstated confidence, retention
+pressure) and legal compliance (paraphrase tolerance for high-pressure
+language under Indian DPDPA + Twilio/Meta WhatsApp policy) both
+require natural-language understanding. The deterministic alternative
+— keyword lists — false-negates on novel phrasings and costs
+maintenance that scales worse than the LLM cost.
 
 **Why Opus not Sonnet / Haiku:** the gate's job is to catch false
-negatives (a draft that should be revised passes through). False
-negatives cost owner trust irrecoverably; the cost difference between
-Opus and Sonnet is small relative to the cost of a bad campaign
-leaving the system. Run-level expected cost: ~₹10-15 per evaluation,
-~50 evaluations / day, ~₹500-750 / day — within the cost ceiling.
+negatives — a draft that SHOULD be revised passing through to delivery.
+False negatives cost **owner trust irrecoverably**: a bad campaign that
+leaves the system is hard to claw back, while a needless revise costs
+one extra cycle. The cost difference between Opus and Sonnet on a
+small evaluator JSON output is small relative to the blast radius of
+a bad approval.
 
-**Rationale citation in code:** override site at the seam (VT-50, when
-it lands) MUST point back here. The VT-36 gate test
+**Cost ceiling (Phase 1):**
+
+- Per evaluation: ~₹10-15 (Opus 4.7 list price; small input + small
+  output; full math in `apps/team-orchestrator/src/orchestrator/agent/cost.py`).
+- Volume: ~50 evaluations / day at Phase-1 tenant scale (one or two per
+  agent run, two-revise-then-fail policy bounds the runaway case).
+- Daily cost: ~₹500-750 — within the LLM-backed budget.
+- Demoting to Sonnet/Haiku is **Type 2 governance** and requires a
+  measured failure-rate study (concept-team.md §8.4).
+
+**Rationale citation in code:**
+`SelfEvaluateTool.is_llm_backed` (VT-50) carries a one-line override
+comment pointing back to this section. The VT-36 gate test
 `test_evaluation_criteria_are_the_four_documented` locks the four
-categories.
+categories at the gate level; VT-50's
+`test_input_schema_rejects_reasoning_chain` locks Pillar 7 independence
+at the tool level.
+
+**Model pin:** `apps/team-orchestrator/config/models.yaml`
+`self_evaluate.production = claude-opus-4-7`. Read at runtime via
+`_resolve_self_evaluate_model()`; never hardcoded in the tool.
 
 ### `classify_owner_message` — Opus 4.7
 
