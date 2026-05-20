@@ -73,10 +73,17 @@ _MAX_OUTPUT_TOKENS_PER_TURN = 1024
 # meter. Renaming this constant requires updating VT-35's enforcer.
 _RUN_LEVEL_TOKEN_HARD_LIMIT = 80_000
 
-# Extended-thinking budget. ``max_thinking_tokens`` in the brief maps to
-# the Messages-API ``thinking.budget_tokens`` field. Conservative budget
-# for the placeholder canary; the real prompt subtask will tune this.
-_THINKING_BUDGET_TOKENS = 16_000
+# Extended thinking is intentionally NOT wired for VT-32's placeholder
+# canary path — a placeholder that emits ``{"status": "placeholder"}``
+# does zero reasoning, so a thinking budget on the call is meaningless
+# AND tripped a 400 from the API when budget_tokens > max_tokens.
+# The real agent's thinking policy (whether to enable, with what
+# budget) is a VT-4.2-era per-turn reasoning decision, intertwined
+# with VT-35's depth tracker. VT-32 must not pre-empt it — when that
+# work lands, re-introduce ``thinking={"type": "enabled",
+# "budget_tokens": N}`` where N < _MAX_OUTPUT_TOKENS_PER_TURN (the API
+# enforces that relationship). Do NOT smuggle a thinking budget in
+# here today.
 
 # Cap turns at a small number for placeholder runs — without real tools
 # the model has nothing to chain, so one turn is enough. VT-35's depth
@@ -172,7 +179,6 @@ def _run_one_turn(
     return client.messages.create(  # type: ignore[call-overload]
         model=model,
         max_tokens=_MAX_OUTPUT_TOKENS_PER_TURN,
-        thinking={"type": "enabled", "budget_tokens": _THINKING_BUDGET_TOKENS},
         system=system_prompt,
         messages=messages,
         tools=[],

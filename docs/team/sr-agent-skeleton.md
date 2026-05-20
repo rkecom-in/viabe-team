@@ -45,6 +45,27 @@ If a later subtask needs token-by-token deltas (e.g. for an aborting
 mid-response enforcer), the seam can be switched to
 `messages.stream()` without changing the enforcer attach points.
 
+## Extended thinking (deferred)
+
+VT-32 deliberately ships with `thinking` NOT wired into the
+`messages.create` call. The placeholder system prompt asks the model
+to emit one JSON line — zero reasoning is required, and a 16K
+thinking budget on a 1024-token max_tokens response is a 400 from the
+API (`budget_tokens` must be strictly less than `max_tokens`).
+
+Whether the real sales-recovery agent uses extended thinking, and at
+what budget, is a **VT-4.2-era per-turn reasoning decision** — it
+interacts with the prompt design AND with VT-35's depth tracker. When
+that subtask lands, re-introduce:
+
+```python
+thinking={"type": "enabled", "budget_tokens": N}  # N < _MAX_OUTPUT_TOKENS_PER_TURN
+```
+
+The `N < _MAX_OUTPUT_TOKENS_PER_TURN` invariant is API-enforced; the
+PR re-adding the parameter MUST also raise `_MAX_OUTPUT_TOKENS_PER_TURN`
+to accommodate the chosen budget plus the actual response length.
+
 ## Per-response cap vs run-level hard limit
 
 Two distinct token numbers — do not conflate:
@@ -57,8 +78,10 @@ Two distinct token numbers — do not conflate:
 The 80K figure is the AgentResult/HardLimitAxis semantics; the 1024
 figure is the SDK call parameter. Passing 80K to `messages.create`
 trips the SDK's non-streaming 10-minute timeout guard (verified
-2026-05-20 canary failure); the brief's earlier conflation of the two
-caused that defect.
+2026-05-20 canary failure #1); the brief's earlier conflation of the
+two caused that defect. The follow-up `thinking.budget_tokens > max_tokens`
+400 (canary failure #2) is the same class of mistake: spec-numbers
+copied into SDK params without sanity-checking for the placeholder.
 
 ## VT-35 hook seams
 
