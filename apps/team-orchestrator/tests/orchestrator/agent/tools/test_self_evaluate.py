@@ -28,12 +28,7 @@ from orchestrator.agent.tools.self_evaluate import (  # noqa: E402
     SelfEvaluateInput,
     SelfEvaluateTool,
 )
-from team_shared.mcp import (  # noqa: E402
-    ErrorCode,
-    ToolContext,
-    ToolStatus,
-    run_tool_test,
-)
+from team_shared.mcp import ErrorCode, ToolContext, ToolStatus, run_tool_test  # noqa: E402
 from team_shared.mcp.test_harness import (  # noqa: E402
     ToolTestFixture,
     no_op_db_factory,
