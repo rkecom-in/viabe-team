@@ -4,6 +4,11 @@ version = "0.1.0"
 description = "Viabe Team orchestrator — durable multi-agent workflows"
 requires-python = ">=3.12"
 dependencies = [
+    # VT-39: MCP tool-contract framework lives in team-shared. The
+    # orchestrator imports MCPTool / ToolContext / ToolResult /
+    # PipelineStepsTelemetry from there. Path dependency keeps the
+    # framework testable in isolation from the orchestrator.
+    "team-shared",
     "dbos>=2.0",
     # langgraph / langchain-* pinned with == (VT-3.9 / CL-147): the
     # orchestrator-agent's model behaviour is version-sensitive — bumps are
@@ -32,6 +37,9 @@ dependencies = [
 
 [dependency-groups]
 dev = ["pytest", "ruff", "httpx", "mypy>=1.14"]
+
+[tool.uv.sources]
+team-shared = { path = "../../packages/team-shared", editable = true }
 
 [build-system]
 requires = ["hatchling"]
