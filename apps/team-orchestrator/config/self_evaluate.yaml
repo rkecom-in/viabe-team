@@ -1,0 +1,13 @@
+# Self-evaluate gate configuration (VT-36).
+#
+# Two-revise-then-fail policy. The gate runs self_evaluate against the
+# agent's draft CampaignPlan; on REVISE the agent gets feedback and
+# produces another draft. After ``max_revisions`` REVISE verdicts the
+# gate ships the draft anyway with self_evaluate_status=failed_after_revisions.
+#
+# Raising ``max_revisions`` is Type 2 governance (joint Clau + Fazal).
+# The rationale: more revisions costs budget and may indicate the model
+# is slow to converge rather than the gate helping — a measured bump
+# carries its own brief.
+
+max_revisions: 2
