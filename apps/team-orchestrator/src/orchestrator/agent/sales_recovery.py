@@ -42,14 +42,26 @@ import os
 import re
 import time
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
+from uuid import UUID
 
 import yaml
-from anthropic import Anthropic
+from anthropic import Anthropic, APITimeoutError
 
 from orchestrator.agent.cost import compute_cost_paise
+from orchestrator.agent.limits import (
+    PER_TURN_HTTP_TIMEOUT_S,
+    CancellationContext,
+    DepthTracker,
+    TokenMeter,
+    ToolCounter,
+    WallclockTimer,
+)
 from orchestrator.agent.types import AgentResult
+from orchestrator.error_router import route_failure
+from orchestrator.failures import FailureRecord, FailureType, HardLimitAxis
 
 # Exactly the placeholder text required by the VT-32 brief. Do not edit
 # without owning the brief — this prompt is a Type-3 commitment for the
@@ -98,11 +110,13 @@ _RUN_LEVEL_TOKEN_HARD_LIMIT = 80_000
 # enforces that relationship). Do NOT smuggle a thinking budget in
 # here today.
 
-# Cap turns at a small number for placeholder runs — without real tools
-# the model has nothing to chain, so one turn is enough. VT-35's depth
-# limit (≤ 8) is the hard cap once real tools land; this is a safety
-# rail for the empty-tool skeleton.
-_MAX_TURNS_PLACEHOLDER = 4
+# Loop safety upper bound (NOT a budget). VT-35's depth (≤8), tool-call
+# (≤25), wallclock (≤300s) and token (≤80K) enforcers are the real
+# budgets — this cap exists only as the final guard against a runaway
+# loop if every enforcer somehow failed to fire. Sized comfortably above
+# the tool-call cap so tests that exercise the 25/26 boundary can run
+# without bumping into it.
+_MAX_TURNS_PER_RUN = 50
 
 
 _MODELS_YAML = (
@@ -178,23 +192,30 @@ def _run_one_turn(
     model: str,
     system_prompt: str,
     messages: list[dict[str, Any]],
+    timeout: float = PER_TURN_HTTP_TIMEOUT_S,
 ) -> Any:
     """One Messages.create round-trip. VT-35 per-turn / token-meter seam.
 
     Isolated so VT-35's enforcers can instrument exactly one turn at a
     time and so tests can mock at this boundary (zero real API calls in
     CI by patching this function).
+
+    ``timeout`` (VT-35): per-turn HTTP ceiling passed to httpx. Caps the
+    wall-clock cost of any single round-trip even if the model hangs;
+    the run-level wall-clock budget is enforced separately by
+    WallclockTimer at the turn boundary.
     """
-    # mypy: anthropic.Messages.create overloads are TypedDict-heavy
+    # mypy: anthropic.Messages.create's overloads are TypedDict-heavy
     # (MessageParam, ThinkingConfigEnabledParam) — typing the plain-dict
     # messages list to match would add noise without value for a Phase 1
     # placeholder loop. The shape is asserted at runtime by the SDK.
-    return client.messages.create(  # type: ignore[call-overload]
+    return client.messages.create(
         model=model,
         max_tokens=_MAX_OUTPUT_TOKENS_PER_TURN,
         system=system_prompt,
-        messages=messages,
+        messages=messages,  # type: ignore[arg-type]
         tools=[],
+        timeout=timeout,
     )
 
 
@@ -243,10 +264,14 @@ def run_sales_recovery_agent(context: SalesRecoveryContext) -> AgentResult:
     those. The orchestrator measures (VT-35 hard limits attach here),
     the agent does not see its own usage.
 
-    For VT-32 the loop is intentionally minimal — placeholder prompt,
-    empty tools — but it preserves the per-turn boundary
-    (``_run_one_turn``) and tool-dispatch seam (``_dispatch_tool``) so
-    VT-35 enforcers attach without re-architecture.
+    VT-35: four hard-limit enforcers — TokenMeter, ToolCounter,
+    DepthTracker, WallclockTimer — instantiate per invocation (budgets
+    do not carry across dispatches) and report into the shared
+    CancellationContext. First signal wins. On cancel: status becomes
+    'terminated', terminated_by is the winning axis, terminated_reason
+    is the enforcer's message, and a FailureRecord(AGENT_HARD_LIMIT_BREACH)
+    is emitted to the error router. cost_paise STILL accrues — the API
+    spend already happened.
     """
     start = time.monotonic()
     client = Anthropic()
@@ -257,24 +282,61 @@ def run_sales_recovery_agent(context: SalesRecoveryContext) -> AgentResult:
     tools: dict[str, Any] = {}  # VT-32: no real tools yet.
     raw_messages: list[dict[str, Any]] = list(messages)
 
+    # VT-35 enforcers — fresh per invocation.
+    ctx = CancellationContext()
+    token_meter = TokenMeter(ctx)
+    tool_counter = ToolCounter(ctx)
+    depth_tracker = DepthTracker(ctx)
+    wallclock_timer = WallclockTimer(ctx)
+
     input_tokens_used = 0
     output_tokens_used = 0
     tool_calls_made = 0
     status: str = "completed"
     output: dict[str, Any] | None = None
 
-    for _ in range(_MAX_TURNS_PLACEHOLDER):
-        response = _run_one_turn(
-            client,
-            model=model,
-            system_prompt=_PLACEHOLDER_SYSTEM_PROMPT,
-            messages=messages,
-        )
+    for _ in range(_MAX_TURNS_PER_RUN):
+        # Pre-turn checks: wallclock (the only enforcer that can fire
+        # without a per-turn event source — accumulated time).
+        wallclock_timer.check()
+        if ctx.is_cancelled:
+            break
+
+        try:
+            response = _run_one_turn(
+                client,
+                model=model,
+                system_prompt=_PLACEHOLDER_SYSTEM_PROMPT,
+                messages=messages,
+            )
+        except APITimeoutError:
+            # Per-turn HTTP ceiling tripped — one round-trip exceeded
+            # PER_TURN_HTTP_TIMEOUT_S. The underlying condition is "this
+            # run is taking too long"; convert to a wall-clock hard
+            # limit so the cancel path runs uniformly (terminated_by =
+            # wall_clock, FailureRecord routed). Distinguished from the
+            # turn-boundary check by the reason string.
+            wallclock_timer.ctx.signal(
+                HardLimitAxis.WALL_CLOCK,
+                f"per-turn HTTP timeout exceeded {PER_TURN_HTTP_TIMEOUT_S}s",
+            )
+            break
 
         usage = getattr(response, "usage", None)
         if usage is not None:
-            input_tokens_used += int(getattr(usage, "input_tokens", 0) or 0)
-            output_tokens_used += int(getattr(usage, "output_tokens", 0) or 0)
+            in_t = int(getattr(usage, "input_tokens", 0) or 0)
+            out_t = int(getattr(usage, "output_tokens", 0) or 0)
+            input_tokens_used += in_t
+            output_tokens_used += out_t
+            token_meter.record_turn(input_tokens=in_t, output_tokens=out_t)
+
+        # Depth: if the previous beat was a tool dispatch, THIS turn is
+        # the post-tool reasoning step — increment depth.
+        depth_tracker.record_reasoning_turn()
+
+        # Post-turn cancellation check (token/depth may have signalled).
+        if ctx.is_cancelled:
+            break
 
         content_blocks = list(getattr(response, "content", []) or [])
         raw_messages.append(
@@ -285,19 +347,26 @@ def run_sales_recovery_agent(context: SalesRecoveryContext) -> AgentResult:
         if stop_reason == "tool_use":
             tool_results: list[dict[str, Any]] = []
             for block in content_blocks:
-                if getattr(block, "type", None) == "tool_use":
-                    tool_calls_made += 1
-                    result = _dispatch_tool(
-                        block.name, dict(block.input or {}), tools
-                    )
-                    tool_results.append(
-                        {
-                            "type": "tool_result",
-                            "tool_use_id": block.id,
-                            "content": result.get("content", ""),
-                            "is_error": bool(result.get("is_error", False)),
-                        }
-                    )
+                if getattr(block, "type", None) != "tool_use":
+                    continue
+                tool_calls_made += 1
+                tool_counter.record_dispatch()
+                depth_tracker.record_tool_dispatch()
+                if ctx.is_cancelled:
+                    break
+                result = _dispatch_tool(
+                    block.name, dict(block.input or {}), tools
+                )
+                tool_results.append(
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": block.id,
+                        "content": result.get("content", ""),
+                        "is_error": bool(result.get("is_error", False)),
+                    }
+                )
+            if ctx.is_cancelled:
+                break
             messages.append(
                 {
                     "role": "assistant",
@@ -329,17 +398,61 @@ def run_sales_recovery_agent(context: SalesRecoveryContext) -> AgentResult:
     )
     tokens_used = input_tokens_used + output_tokens_used
 
+    terminated_by: HardLimitAxis | None = None
+    terminated_reason: str | None = None
+    if ctx.is_cancelled:
+        status = "terminated"
+        terminated_by = ctx.cancelled_by
+        terminated_reason = ctx.reason
+        _emit_hard_limit_breach(
+            context=context,
+            axis=cast(HardLimitAxis, terminated_by),
+            reason=cast(str, terminated_reason),
+            tokens_used=tokens_used,
+            tool_calls_made=tool_calls_made,
+            wallclock_ms=wallclock_ms,
+        )
+
     return AgentResult(
         status=cast(Any, status),
-        terminated_by=None,
+        terminated_by=terminated_by,
         output=output,
         tokens_used=tokens_used,
         tool_calls_made=tool_calls_made,
         wallclock_ms=wallclock_ms,
         cost_paise=cost_paise,
         raw_messages=raw_messages,
-        terminated_reason=None,
+        terminated_reason=terminated_reason,
     )
+
+
+def _emit_hard_limit_breach(
+    *,
+    context: SalesRecoveryContext,
+    axis: HardLimitAxis,
+    reason: str,
+    tokens_used: int,
+    tool_calls_made: int,
+    wallclock_ms: int,
+) -> None:
+    """Construct + route a FailureRecord for a hard-limit cancellation
+    (VT-35 / VT-29 surface). Best-effort — a routing failure must NOT
+    re-raise into the run (observability cannot break recovery; the
+    error_router itself swallows + logs internally)."""
+    failure = FailureRecord(
+        failure_type=FailureType.AGENT_HARD_LIMIT_BREACH,
+        message=reason,
+        occurred_at=datetime.now(UTC),
+        tenant_id=UUID(context.tenant_id),
+        run_id=UUID(context.run_id),
+        metadata={
+            "axis": axis.value,
+            "tokens_used": tokens_used,
+            "tool_calls_made": tool_calls_made,
+            "wallclock_ms": wallclock_ms,
+        },
+    )
+    route_failure(failure)
 
 
 def _block_to_dict(block: Any) -> dict[str, Any]:

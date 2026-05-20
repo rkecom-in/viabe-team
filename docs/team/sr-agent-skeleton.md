@@ -83,19 +83,52 @@ two caused that defect. The follow-up `thinking.budget_tokens > max_tokens`
 400 (canary failure #2) is the same class of mistake: spec-numbers
 copied into SDK params without sanity-checking for the placeholder.
 
-## VT-35 hook seams
+## VT-35 hard-limit enforcement
 
-VT-35's four hard-limit enforcers attach at well-named seams in
-`sales_recovery.py`. Do not collapse them into a single opaque call.
+Four independent enforcers + a first-wins `CancellationContext` are wired
+into the loop. The orchestrator measures; the agent has no visibility into
+its own usage (Pillar 1). Termination is unilateral — no soft warnings.
 
-| Seam | Function | What attaches here |
-|---|---|---|
-| Per-turn boundary | `_run_one_turn(client, model, system_prompt, messages)` | token meter (reads `Usage`); depth tracker (increments on each turn that returns `tool_use` AND has a downstream turn) |
-| Tool-dispatch | `_dispatch_tool(tool_name, tool_input, tools)` | tool counter (increments on every dispatch, including failures) |
-| Run entry/exit | `run_sales_recovery_agent` | wallclock timer (asyncio task at entry; cancelled on early exit); cancel coordinator |
+| Enforcer | Budget | Where it attaches | What signals cancel |
+|---|---|---|---|
+| `TokenMeter` | 80,000 (cumulative input+output) | post-`_run_one_turn` via `.usage` | total > 80_000 |
+| `ToolCounter` | 25 dispatches | per call to `_dispatch_tool` | count > 25 (26th trips) |
+| `DepthTracker` | 8 think→tool cycles | per `_dispatch_tool` + post-`_run_one_turn` reasoning | depth > 8 (9th trips) |
+| `WallclockTimer` | 300s | turn-boundary deadline check + per-turn HTTP timeout (60s) | `now > start + 300s` |
 
-The depth-tracker and tool-counter both count from zero per invocation —
-budgets are per-dispatch, NOT cumulative across dispatches.
+All budgets reset per invocation — no cross-dispatch carry. The four
+constants (`_RUN_LEVEL_TOKEN_HARD_LIMIT`, `TOOL_CALL_HARD_LIMIT`,
+`DEPTH_HARD_LIMIT`, `WALL_CLOCK_HARD_LIMIT_S`) are Type-3 commitments;
+`.github/workflows/ci.yml` `gate-vt35-hard-limit-constants` greps each
+literal so any value change fails CI.
+
+On cancellation:
+1. The first signal wins (`CancellationContext` is idempotent).
+2. The loop breaks at the next check point (no orphan API call).
+3. `AgentResult.status = 'terminated'`, `terminated_by = <HardLimitAxis>`,
+   `terminated_reason = <enforcer's message>`.
+4. A `FailureRecord(AGENT_HARD_LIMIT_BREACH)` with `metadata.axis` is
+   emitted via `error_router.route_failure` — the router escalates per
+   the VT-29 strategy table (HIGH severity → owner, plus persistence to
+   `pipeline_steps`).
+5. `cost_paise` STILL accrues — the API spend already happened.
+
+### Sync vs async (VT-35, option b)
+
+The loop is synchronous. Blocking calls cannot be cleanly interrupted
+from an asyncio timer, so VT-35 ships **option (b)**: a monotonic-clock
+deadline checked at each turn boundary PLUS a per-turn HTTP timeout
+(`PER_TURN_HTTP_TIMEOUT_S = 60.0`) passed to `messages.create(timeout=)`.
+
+The combination bounds both axes of "run too long":
+- many fast turns accumulating past 300s → turn-boundary deadline check
+- one hung turn taking >5min → httpx-level per-call timeout
+
+No asyncio task, no separate thread, no zombies — the WallclockTimer is
+a plain object that goes out of scope when `run_sales_recovery_agent`
+returns. If the loop later goes async (e.g. for token-by-token
+streaming), only the WallclockTimer's mechanism changes; the seam
+interfaces stay identical.
 
 ## Model resolution
 
