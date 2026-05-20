@@ -30,6 +30,7 @@ from orchestrator.agent.sales_recovery_stub import (
     build_stub_sales_recovery_agent,
     hardcoded_campaign_plan,
 )
+from orchestrator.collapse import collapse_node
 from orchestrator.handoffs import spawn_sales_recovery
 from orchestrator.routing import orchestrator_terminal_node, route_after_orchestrator
 from orchestrator.state.agent_graph_state import AgentGraphState
@@ -55,7 +56,9 @@ def build_supervisor_graph(
         'terminal' -> orchestrator_terminal (route_after_orchestrator).
         The spawn tool ALSO emits Command(goto='sales_recovery_agent',
         graph=Command.PARENT) — landmine test covers the precedence.
-      - sales_recovery_agent -> END
+      - sales_recovery_agent -> collapse (PR 3/3): persists the CampaignPlan
+        and updates subscriber_states activity. No phase change.
+      - collapse -> END
       - orchestrator_terminal -> END
 
     ``checkpointer`` (PR 2/3): when given, the graph compiles with Postgres
@@ -68,7 +71,13 @@ def build_supervisor_graph(
 
     def sales_recovery_node(state: AgentGraphState) -> dict[str, Any]:
         """Wrap the stub agent. Parse a CampaignPlan from the final message;
-        fall back to the hardcoded plan on any parse failure."""
+        fall back to the hardcoded plan on any parse failure.
+
+        PR 3/3: the run's tenant_id (carried in AgentGraphState) is the
+        authoritative tenant boundary. The specialist's emitted / fallback
+        CampaignPlan may carry a different (or placeholder) tenant_id —
+        overwrite it here so downstream the collapse-path tenant guard
+        sees a single source of truth (CL-202 / Pillar 3)."""
         result = sales_recovery.invoke({"messages": state["messages"]})
         final_content = result["messages"][-1].content
 
@@ -84,11 +93,16 @@ def build_supervisor_graph(
         except Exception:
             plan = hardcoded_campaign_plan()
 
+        state_tenant_id = state.get("tenant_id")
+        if state_tenant_id is not None and plan.tenant_id != state_tenant_id:
+            plan = plan.model_copy(update={"tenant_id": state_tenant_id})
+
         return {"messages": result["messages"], "campaign_plan": plan}
 
     graph = StateGraph(AgentGraphState)
     graph.add_node("orchestrator_agent", orchestrator)
     graph.add_node("sales_recovery_agent", sales_recovery_node)
+    graph.add_node("collapse", collapse_node)
     graph.add_node("orchestrator_terminal", orchestrator_terminal_node)
     graph.add_edge(START, "orchestrator_agent")
     graph.add_conditional_edges(
@@ -96,7 +110,8 @@ def build_supervisor_graph(
         route_after_orchestrator,
         {"spawn": "sales_recovery_agent", "terminal": "orchestrator_terminal"},
     )
-    graph.add_edge("sales_recovery_agent", END)
+    graph.add_edge("sales_recovery_agent", "collapse")
+    graph.add_edge("collapse", END)
     graph.add_edge("orchestrator_terminal", END)
 
     if checkpointer is not None:
