@@ -14,6 +14,7 @@ from __future__ import annotations
 import hmac
 import logging
 import os
+from datetime import UTC, datetime
 from typing import Any
 from uuid import NAMESPACE_URL, uuid5
 
@@ -21,6 +22,8 @@ from dbos import DBOS, SetWorkflowID
 from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel
 
+from orchestrator.error_router import route_failure
+from orchestrator.failures import FailureRecord, FailureType
 from orchestrator.graph import get_pool
 from orchestrator.runner import webhook_pipeline_run
 from orchestrator.utils.phone_token import hash_phone
@@ -126,6 +129,17 @@ def twilio_ingress(
     5xx for an application error (Pillar 7).
     """
     if not _verify_internal_secret(x_internal_secret):
+        # VT-29: classify as a business failure so the taxonomy stays the sole
+        # surface for routing decisions. Tenant is unknown here (the request
+        # never authenticates), so route_failure logs without persisting and
+        # returns ACCEPT_AND_LOG. The 403 still ships unchanged.
+        route_failure(
+            FailureRecord(
+                failure_type=FailureType.WEBHOOK_SIGNATURE_FAILURE,
+                message="invalid internal secret on twilio-ingress",
+                occurred_at=datetime.now(UTC),
+            )
+        )
         raise HTTPException(status_code=403, detail="invalid internal secret")
 
     # C3 fix (CL-73): reject a malformed payload before any side-effects.
