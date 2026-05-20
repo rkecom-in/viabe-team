@@ -275,6 +275,33 @@ def test_wallclock_does_not_cancel_at_exactly_the_limit():
     assert ctx.cancelled_by is HardLimitAxis.WALL_CLOCK
 
 
+def test_per_turn_http_timeout_terminates_as_wall_clock(monkeypatch):
+    """A hung single turn → anthropic raises APITimeoutError → loop
+    converts to wall_clock cancel + emits the FailureRecord. Distinct
+    branch from the turn-boundary deadline (mocked-clock) test."""
+    from anthropic import APITimeoutError
+
+    router = _patch_router(monkeypatch)
+    fake = MagicMock()
+    # APITimeoutError needs a request argument in current anthropic SDK.
+    fake.messages.create.side_effect = APITimeoutError(request=MagicMock())
+    monkeypatch.setattr(
+        "orchestrator.agent.sales_recovery.Anthropic", lambda: fake
+    )
+    monkeypatch.setenv("VIABE_ENV", "test")
+
+    result = run_sales_recovery_agent(_ctx())
+
+    assert result.status == "terminated"
+    assert result.terminated_by is HardLimitAxis.WALL_CLOCK
+    assert "per-turn HTTP timeout" in (result.terminated_reason or "")
+    # Cancel emits exactly one FailureRecord, axis=wall_clock.
+    assert router.call_count == 1
+    assert router.call_args.args[0].metadata["axis"] == "wall_clock"
+    # Loop must NOT retry the call after the timeout.
+    assert fake.messages.create.call_count == 1
+
+
 def test_wallclock_cap_terminates_run(monkeypatch):
     """A run whose elapsed wall-clock exceeds 300s terminates with
     terminated_by=wall_clock. Inject a fake clock into WallclockTimer."""
