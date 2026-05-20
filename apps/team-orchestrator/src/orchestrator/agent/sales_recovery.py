@@ -59,6 +59,12 @@ from orchestrator.agent.limits import (
     ToolCounter,
     WallclockTimer,
 )
+from orchestrator.agent.schemas.campaign_plan import parse_campaign_plan
+from orchestrator.agent.self_evaluate import (
+    GateAction,
+    SelfEvaluateGate,
+    SelfEvaluator,
+)
 from orchestrator.agent.types import AgentResult
 from orchestrator.error_router import route_failure
 from orchestrator.failures import FailureRecord, FailureType, HardLimitAxis
@@ -257,7 +263,11 @@ def _parse_placeholder_output(text: str) -> dict[str, Any] | None:
     return None
 
 
-def run_sales_recovery_agent(context: SalesRecoveryContext) -> AgentResult:
+def run_sales_recovery_agent(
+    context: SalesRecoveryContext,
+    *,
+    evaluator: SelfEvaluator | None = None,
+) -> AgentResult:
     """Run the sales_recovery specialist; return a structured ``AgentResult``.
 
     Hand-written agent loop on the Anthropic Messages API (CL-242).
@@ -273,6 +283,14 @@ def run_sales_recovery_agent(context: SalesRecoveryContext) -> AgentResult:
     is the enforcer's message, and a FailureRecord(AGENT_HARD_LIMIT_BREACH)
     is emitted to the error router. cost_paise STILL accrues — the API
     spend already happened.
+
+    VT-36 self-evaluate gate (``evaluator`` parameter): when provided,
+    a draft CampaignPlan that the model produces at terminal goes
+    through the gate before being returned. Two-revise-then-fail policy
+    per ``config/self_evaluate.yaml``. ``evaluator=None`` skips the
+    gate — that is the current production default because VT-50 (the
+    real Opus-backed evaluator) is backlog. When VT-50 lands, every
+    caller starts passing it.
     """
     start = time.monotonic()
     client = Anthropic()
@@ -289,6 +307,15 @@ def run_sales_recovery_agent(context: SalesRecoveryContext) -> AgentResult:
     tool_counter = ToolCounter(ctx)
     depth_tracker = DepthTracker(ctx)
     wallclock_timer = WallclockTimer(ctx)
+
+    # VT-36 self-evaluate gate — fresh per invocation when an evaluator
+    # is provided. Shares the same ToolCounter so the gate's calls land
+    # on the 25-call cap (Pillar 1 / VT-35 precedence).
+    gate: SelfEvaluateGate | None = (
+        SelfEvaluateGate(evaluator=evaluator, ctx=ctx, tool_counter=tool_counter)
+        if evaluator is not None
+        else None
+    )
 
     input_tokens_used = 0
     output_tokens_used = 0
@@ -378,16 +405,64 @@ def run_sales_recovery_agent(context: SalesRecoveryContext) -> AgentResult:
             raw_messages.append({"role": "user", "content": tool_results})
             continue
 
-        # No tool_use → terminal. Extract placeholder output if present.
+        # No tool_use → terminal. Extract output.
         text = _extract_text(content_blocks)
         output = _parse_placeholder_output(text)
         if output is not None and output.get("status") == "placeholder":
             status = "placeholder"
-        elif stop_reason == "refusal":
+            break
+        if stop_reason == "refusal":
             status = "refused"
-        elif output is None:
+            break
+        if output is None:
             status = "invalid"
-        break
+            break
+
+        # VT-36 self-evaluate gate. Without a configured evaluator the
+        # gate is skipped (VT-50 deferral); the draft ships with
+        # self_evaluate_status='not_yet_evaluated' (schema default).
+        if gate is None:
+            status = "completed"
+            break
+
+        try:
+            draft_plan = parse_campaign_plan(output)
+        except Exception:
+            # Model emitted something that wasn't a valid CampaignPlan —
+            # the gate has no draft to evaluate.
+            status = "invalid"
+            break
+
+        gate_outcome = gate.run(draft_plan)
+        if gate_outcome.action is GateAction.SHIP:
+            stamped = draft_plan.model_copy(
+                update={"self_evaluate_status": gate_outcome.self_evaluate_status}
+            )
+            output = stamped.model_dump(mode="json")
+            status = "completed"
+            break
+        if gate_outcome.action is GateAction.ABORTED:
+            # Hard-limit cancel during the gate; the post-loop branch
+            # handles termination uniformly.
+            break
+        if gate_outcome.action is GateAction.SEAM_ERROR:
+            _emit_invalid_output(
+                context=context,
+                reason=gate_outcome.error_message or "self_evaluate seam error",
+                tokens_used=input_tokens_used + output_tokens_used,
+                tool_calls_made=tool_calls_made + gate.evaluator_calls,
+                wallclock_ms=int((time.monotonic() - start) * 1000),
+            )
+            status = "invalid"
+            break
+
+        # RETRY — append feedback as a user message and let the loop
+        # ask the model for a new draft. The next turn re-enters the
+        # terminal branch and runs the gate again.
+        for fb_msg in gate_outcome.feedback_messages:
+            messages.append(fb_msg)
+            raw_messages.append(fb_msg)
+        continue
 
     wallclock_ms = int((time.monotonic() - start) * 1000)
     # cost_paise accrues even on terminated runs (hard rule, VT-35 brief):
@@ -398,6 +473,11 @@ def run_sales_recovery_agent(context: SalesRecoveryContext) -> AgentResult:
         output_tokens=output_tokens_used,
     )
     tokens_used = input_tokens_used + output_tokens_used
+    # VT-36: gate's self_evaluate calls count toward the model's tool-
+    # dispatch budget. They also count toward the AgentResult's
+    # observability tool_calls_made for parity with the enforcer count.
+    if gate is not None:
+        tool_calls_made += gate.evaluator_calls
 
     terminated_by: HardLimitAxis | None = None
     terminated_reason: str | None = None
@@ -425,6 +505,33 @@ def run_sales_recovery_agent(context: SalesRecoveryContext) -> AgentResult:
         raw_messages=raw_messages,
         terminated_reason=terminated_reason,
     )
+
+
+def _emit_invalid_output(
+    *,
+    context: SalesRecoveryContext,
+    reason: str,
+    tokens_used: int,
+    tool_calls_made: int,
+    wallclock_ms: int,
+) -> None:
+    """Route a FailureRecord(AGENT_INVALID_OUTPUT) for a self-evaluate
+    seam error (VT-36 / VT-3.6). Best-effort — routing failure must
+    NOT re-raise into the run."""
+    failure = FailureRecord(
+        failure_type=FailureType.AGENT_INVALID_OUTPUT,
+        message=reason,
+        occurred_at=datetime.now(UTC),
+        tenant_id=UUID(context.tenant_id),
+        run_id=UUID(context.run_id),
+        metadata={
+            "source": "self_evaluate_gate",
+            "tokens_used": tokens_used,
+            "tool_calls_made": tool_calls_made,
+            "wallclock_ms": wallclock_ms,
+        },
+    )
+    route_failure(failure)
 
 
 def _emit_hard_limit_breach(
