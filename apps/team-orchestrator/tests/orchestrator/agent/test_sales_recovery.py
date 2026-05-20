@@ -185,7 +185,12 @@ def test_run_sales_recovery_agent_passes_brief_required_params(monkeypatch):
     assert call.kwargs["max_tokens"] != _RUN_LEVEL_TOKEN_HARD_LIMIT, (
         "messages.create max_tokens must NOT be the run-level 80K ceiling"
     )
-    assert call.kwargs["thinking"]["type"] == "enabled"
+    # Extended thinking is intentionally NOT wired for the placeholder
+    # canary path (VT-32). A placeholder does zero reasoning; sending a
+    # thinking budget here is both meaningless and a 400 source when
+    # budget_tokens > max_tokens. The real agent's thinking policy is a
+    # VT-4.2 decision. Lock against a regression that re-adds it.
+    assert "thinking" not in call.kwargs
     assert call.kwargs["tools"] == []
     # System prompt must be exactly the placeholder text (Type-3 commit).
     assert "placeholder agent" in call.kwargs["system"]
