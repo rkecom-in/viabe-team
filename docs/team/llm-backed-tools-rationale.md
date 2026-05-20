@@ -78,6 +78,27 @@ at the tool level.
 `self_evaluate.production = claude-opus-4-7`. Read at runtime via
 `_resolve_self_evaluate_model()`; never hardcoded in the tool.
 
+**Canary design — two modes:** the manual pre-merge canary lives at
+`apps/team-orchestrator/tests/orchestrator/agent/tools/test_self_evaluate.py`.
+Gated on `VIABE_RUN_SELF_EVALUATE_CANARY=1` + `ANTHROPIC_API_KEY` (skips
+in CI); a second env var `VIABE_CANARY_MODEL` (`haiku` | `opus`, default
+`haiku`) selects the mode:
+
+- **`VIABE_CANARY_MODEL=haiku` (default) — cheap plumbing check.** Real
+  Claude Haiku call. Asserts the SDK round-trip happened (`elapsed > 0.5s`)
+  + the return conforms to the `SelfEvaluateVerdict` Protocol shape.
+  Does NOT assert judgment correctness — Haiku may judge borderline
+  drafts differently than Opus. A Haiku pass is **NOT production
+  verification.**
+- **`VIABE_CANARY_MODEL=opus` — production-fidelity check, pre-merge.**
+  Real Claude Opus 4.7 call (the production pin). Asserts plumbing +
+  judgment: a deliberately-flawed draft (cohort_size mismatch) MUST
+  return REVISE with `schema` or `consistency` feedback populated.
+  This is the gate verification — block merge if it fails.
+
+Run order: Haiku for iteration; Opus once before merge. The Opus
+assertion costs ~₹10-15 per pass; the Haiku assertion costs ~₹1.
+
 ### `classify_owner_message` — Opus 4.7
 
 **Status:** locked. Used by the orchestrator's inbound classifier.
