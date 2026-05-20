@@ -341,48 +341,134 @@ def test_tolerates_markdown_fence_around_json(monkeypatch):
 # ---------- Canary: real-API, env-gated, NEVER runs in CI --------------------
 
 
+# ---------------------------------------------------------------------------
+# Canary — two-mode design (haiku plumbing / opus fidelity)
+# ---------------------------------------------------------------------------
+#
+# Both canary tests are env-gated on ``VIABE_RUN_SELF_EVALUATE_CANARY=1``
+# + ``ANTHROPIC_API_KEY`` (no key in CI → both SKIP). A second env-var
+# ``VIABE_CANARY_MODEL`` (haiku | opus, default ``haiku``) selects the
+# mode:
+#
+#   VIABE_CANARY_MODEL=haiku (default) — cheap plumbing check for iteration
+#       Real Claude Haiku call. Asserts ONLY: live round-trip happened,
+#       the return conforms to the SelfEvaluateVerdict Protocol shape.
+#       Does NOT assert judgment correctness — Haiku may judge
+#       differently than Opus on borderline drafts, asserting semantic
+#       correctness here would be flaky.
+#
+#   VIABE_CANARY_MODEL=opus — production-fidelity check, pre-merge
+#       Real Claude Opus 4.7 call (production pin). Asserts plumbing
+#       PLUS judgment: a deliberately-flawed draft (cohort_size mismatch)
+#       MUST yield REVISE with the schema OR consistency feedback
+#       populated. This is the real gate verification.
+#
+# A Haiku-mode pass is NOT production verification. The Opus canary is
+# the gate — run it before merge.
+
+
+def _canary_skip_reason(*, mode: str) -> str:
+    return (
+        f"{mode} canary skipped — set VIABE_RUN_SELF_EVALUATE_CANARY=1 + "
+        f"ANTHROPIC_API_KEY + VIABE_CANARY_MODEL={mode}"
+    )
+
+
 @pytest.mark.skipif(
     os.environ.get("VIABE_RUN_SELF_EVALUATE_CANARY") != "1"
-    or not os.environ.get("ANTHROPIC_API_KEY"),
-    reason=(
-        "canary skipped — needs VIABE_RUN_SELF_EVALUATE_CANARY=1 + "
-        "ANTHROPIC_API_KEY"
-    ),
+    or not os.environ.get("ANTHROPIC_API_KEY")
+    or os.environ.get("VIABE_CANARY_MODEL", "haiku") != "haiku",
+    reason=_canary_skip_reason(mode="haiku"),
 )
-def test_canary_real_opus_run_returns_verdict(monkeypatch):
-    """One real Messages-API call against the PRODUCTION model
-    (claude-opus-4-7) to prove the self_evaluate plumbing works
-    end-to-end on the same model production runs. Skipped in CI (no
-    ANTHROPIC_API_KEY secret on the workflow). Fazal runs manually
-    before merge.
+def test_canary_plumbing_haiku(monkeypatch):
+    """Plumbing-only canary against Claude Haiku (the ``test`` slot in
+    models.yaml; model id read from config — never hardcoded).
 
-    Defect-1 fix: previously this canary forced VIABE_ENV=test (Haiku),
-    which left production-model verification untested. The canary's job
-    is to validate the actual gate — if Opus's verdict shape ever
-    drifts from Haiku's, Haiku-only canaries miss the regression. Force
-    VIABE_ENV=production so the call lands on claude-opus-4-7.
+    Cheap. Run across iteration without burning Opus budget. Asserts:
+      - elapsed > 0.5s — distinguishes real network call from mock
+      - outcome ∈ {PASS, REVISE} — Protocol shape conformance
+      - feedback is None OR a SelfEvaluateFeedback with each category
+        either None or a string (never any other type)
 
-    Live-call structural lock: ``elapsed > 0.5s`` confirms a real
-    network round-trip happened, not a silent mock. A real Opus call on
-    a small JSON-output prompt typically takes 1.5-4s; 0.5s is a
-    conservative lower bound that still distinguishes mock (<0.1s) from
-    network. Adjust the threshold (do NOT remove it) if Anthropic's
-    latency drops below 0.5s in the future."""
-    monkeypatch.setenv("VIABE_ENV", "production")  # forces Opus 4.7
+    DOES NOT assert judgment correctness. Haiku may judge a borderline
+    draft differently than Opus. A Haiku PASS is not production
+    verification — the Opus canary (``test_canary_fidelity_opus``) is."""
+    monkeypatch.setenv("VIABE_ENV", "test")  # → Haiku per models.yaml
 
     adapter = SelfEvaluateAdapter(ctx=_ctx())
     start = time.monotonic()
     verdict = adapter.evaluate(_draft(), criteria=[])
     elapsed = time.monotonic() - start
 
-    # The model decides PASS/REVISE on the draft; we only assert the
-    # Protocol-shaped verdict.
+    assert elapsed > 0.5, (
+        f"canary completed in {elapsed:.2f}s — likely mocked, not a real "
+        "Haiku call. Check that _make_client was not patched and that "
+        "ANTHROPIC_API_KEY reached the SDK."
+    )
     assert verdict.outcome in {
         SelfEvaluateOutcome.PASS,
         SelfEvaluateOutcome.REVISE,
     }
+    # Protocol-shape conformance on feedback.
+    if verdict.feedback is not None:
+        for cat in ("schema", "pillar", "consistency", "legal"):
+            val = getattr(verdict.feedback, cat)
+            assert val is None or isinstance(val, str), (
+                f"feedback.{cat} must be str | None; got {type(val).__name__}"
+            )
+
+
+@pytest.mark.skipif(
+    os.environ.get("VIABE_RUN_SELF_EVALUATE_CANARY") != "1"
+    or not os.environ.get("ANTHROPIC_API_KEY")
+    or os.environ.get("VIABE_CANARY_MODEL") != "opus",
+    reason=_canary_skip_reason(mode="opus"),
+)
+def test_canary_fidelity_opus(monkeypatch):
+    """Production-fidelity canary against Claude Opus 4.7 (the
+    ``production`` slot in models.yaml — the actual self_evaluate
+    production pin; model id read from config, never hardcoded).
+
+    Run pre-merge to verify the production gate behaviour. Plumbing
+    assertions (real round-trip, Protocol shape) AND a judgment
+    assertion: a deliberately-flawed draft (cohort_size doesn't match
+    len(customer_ids)) MUST be flagged as REVISE with either the
+    ``schema`` or ``consistency`` feedback category populated.
+
+    The cohort_size mismatch is a cross-field semantic error Opus
+    catches reliably; this is the load-bearing judgment assertion. If
+    it fails, the production gate is not catching what it must —
+    BLOCK the merge."""
+    monkeypatch.setenv("VIABE_ENV", "production")  # → Opus 4.7 per models.yaml
+
+    # Deliberately-flawed: cohort_size says 200 but customer_ids has 1.
+    flawed_draft = _draft()
+    flawed_draft["target_cohort"]["cohort_size"] = 200
+
+    adapter = SelfEvaluateAdapter(ctx=_ctx())
+    start = time.monotonic()
+    verdict = adapter.evaluate(flawed_draft, criteria=[])
+    elapsed = time.monotonic() - start
+
     assert elapsed > 0.5, (
         f"canary completed in {elapsed:.2f}s — likely mocked, not a real "
         "Opus call. Check that _make_client was not patched and that "
         "ANTHROPIC_API_KEY reached the SDK."
+    )
+    assert verdict.outcome is SelfEvaluateOutcome.REVISE, (
+        f"Opus must flag a cohort_size mismatch as REVISE — the "
+        f"production gate is failing its job if it returns "
+        f"{verdict.outcome.value!r}."
+    )
+    assert verdict.feedback is not None
+    # Either category is a defensible flag site for this mismatch;
+    # accept both so we lock judgment-presence, not phrasing.
+    flagged = any(
+        getattr(verdict.feedback, cat) is not None
+        for cat in ("schema", "consistency")
+    )
+    assert flagged, (
+        "Opus must populate either schema or consistency feedback for "
+        "a cohort_size mismatch; got "
+        f"{verdict.feedback}."
     )
