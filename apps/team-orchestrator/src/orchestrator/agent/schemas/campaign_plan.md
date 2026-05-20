@@ -143,12 +143,12 @@ this PR's scope:
 
 ## Supersession of v0.1
 
-This contract supersedes the v0.1 7-field model at
+This contract supersedes the v0.1 7-field model originally at
 `apps/team-orchestrator/src/orchestrator/types/campaign_plan.py`
-(CL-177). The v0.1 model is **left intact** on `main` because VT-3.4
-plumbing code still imports it; migrating those import sites to v1.0
-is a **separate follow-up subtask**. The PR body enumerates the import
-sites that need migration.
+(CL-177). VT-122 migrated every consumer (4 production sites + 2
+tests) to the v1.0 discriminated union and deleted the v0.1 module
+file. The `CampaignPlan` name now refers exclusively to the v1.0
+union exported by this module.
 
 ## Evolution contract
 
