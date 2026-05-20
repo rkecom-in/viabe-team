@@ -31,6 +31,35 @@ changes in any of those are agent-visible.
 The dep was previously unpinned (`"anthropic"` with no version constraint —
 dep-audit 2026-05-18 finding). VT-32 pins the previously-unpinned baseline.
 
+## Streaming vs non-streaming (settled in VT-32)
+
+The loop uses **non-streaming** `client.messages.create(...)`. The
+non-streaming `Message` response populates `.usage` (`input_tokens`,
+`output_tokens`) at the per-turn boundary, which is what VT-35's token
+meter needs. No streaming machinery is required for the placeholder
+canary, and staying non-streaming keeps the per-turn seam
+(`_run_one_turn`) a single round-trip — simpler for VT-35 to
+instrument.
+
+If a later subtask needs token-by-token deltas (e.g. for an aborting
+mid-response enforcer), the seam can be switched to
+`messages.stream()` without changing the enforcer attach points.
+
+## Per-response cap vs run-level hard limit
+
+Two distinct token numbers — do not conflate:
+
+| Constant | Where | Meaning | Wired to |
+|---|---|---|---|
+| `_MAX_OUTPUT_TOKENS_PER_TURN = 1024` | `sales_recovery.py` | "max length of ONE response" — the Messages API parameter | `messages.create(max_tokens=...)` |
+| `_RUN_LEVEL_TOKEN_HARD_LIMIT = 80_000` | `sales_recovery.py` | The VT-35 cumulative run-level ceiling | **NOT** passed to any SDK call — VT-35 enforces externally |
+
+The 80K figure is the AgentResult/HardLimitAxis semantics; the 1024
+figure is the SDK call parameter. Passing 80K to `messages.create`
+trips the SDK's non-streaming 10-minute timeout guard (verified
+2026-05-20 canary failure); the brief's earlier conflation of the two
+caused that defect.
+
 ## VT-35 hook seams
 
 VT-35's four hard-limit enforcers attach at well-named seams in

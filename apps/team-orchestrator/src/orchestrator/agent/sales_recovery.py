@@ -58,7 +58,21 @@ _PLACEHOLDER_SYSTEM_PROMPT = (
     '{"status": "placeholder"}. Do nothing else.'
 )
 
-_MAX_TOKENS = 80_000
+# Per-response output cap passed to ``messages.create``. Distinct from the
+# run-level hard-limit ceiling below — ``max_tokens`` here is "max length
+# of ONE response", which is what the Messages API expects (passing the
+# 80K run-level budget here also trips the SDK's non-streaming 10-minute
+# timeout guard). The placeholder canary response is ~10 tokens; 1024 is
+# generous headroom. Real-prompt tuning lands with the real prompt.
+_MAX_OUTPUT_TOKENS_PER_TURN = 1024
+
+# Run-level hard-limit ceiling. VT-35's token meter enforces a CUMULATIVE
+# 80K cap across every turn in one run. This constant lives here only as
+# a documented reference for AgentResult semantics (CL-242); it is NOT
+# wired into any SDK call. VT-35 will read this when wiring the token
+# meter. Renaming this constant requires updating VT-35's enforcer.
+_RUN_LEVEL_TOKEN_HARD_LIMIT = 80_000
+
 # Extended-thinking budget. ``max_thinking_tokens`` in the brief maps to
 # the Messages-API ``thinking.budget_tokens`` field. Conservative budget
 # for the placeholder canary; the real prompt subtask will tune this.
@@ -157,7 +171,7 @@ def _run_one_turn(
     # placeholder loop. The shape is asserted at runtime by the SDK.
     return client.messages.create(  # type: ignore[call-overload]
         model=model,
-        max_tokens=_MAX_TOKENS,
+        max_tokens=_MAX_OUTPUT_TOKENS_PER_TURN,
         thinking={"type": "enabled", "budget_tokens": _THINKING_BUDGET_TOKENS},
         system=system_prompt,
         messages=messages,

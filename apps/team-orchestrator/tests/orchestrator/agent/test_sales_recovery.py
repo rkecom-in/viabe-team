@@ -162,8 +162,16 @@ def test_run_sales_recovery_agent_uses_resolved_model_from_env(monkeypatch):
 
 
 def test_run_sales_recovery_agent_passes_brief_required_params(monkeypatch):
-    """Brief item 2: max_tokens=80000, extended thinking on, empty tools.
-    Pin these into the Messages.create call shape so a regression is loud."""
+    """Per-response output cap (NOT the VT-35 run-level hard limit),
+    extended thinking on, empty tools. ``max_tokens`` here is the
+    per-call response cap; the 80K run-level token ceiling is a
+    documented constant the VT-35 token meter enforces, never passed
+    to ``messages.create``. Pin the call shape so a regression is loud."""
+    from orchestrator.agent.sales_recovery import (
+        _MAX_OUTPUT_TOKENS_PER_TURN,
+        _RUN_LEVEL_TOKEN_HARD_LIMIT,
+    )
+
     response = _fake_response(text='{"status": "placeholder"}')
     fake_client = _patched_client(response)
     monkeypatch.setenv("VIABE_ENV", "test")
@@ -173,7 +181,10 @@ def test_run_sales_recovery_agent_passes_brief_required_params(monkeypatch):
 
     run_sales_recovery_agent(SalesRecoveryContext(tenant_id="t1", run_id="r1"))
     call = fake_client.messages.create.call_args
-    assert call.kwargs["max_tokens"] == 80_000
+    assert call.kwargs["max_tokens"] == _MAX_OUTPUT_TOKENS_PER_TURN
+    assert call.kwargs["max_tokens"] != _RUN_LEVEL_TOKEN_HARD_LIMIT, (
+        "messages.create max_tokens must NOT be the run-level 80K ceiling"
+    )
     assert call.kwargs["thinking"]["type"] == "enabled"
     assert call.kwargs["tools"] == []
     # System prompt must be exactly the placeholder text (Type-3 commit).
