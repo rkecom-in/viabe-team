@@ -73,21 +73,20 @@ classification, batched by inbound frequency — within budget.
 
 **Rationale citation in code:** override site MUST point back here.
 
-## Pending Type-2 decision
+## Phase 1.5 deferral (Fazal Type 2 decision)
 
-### `draft_message_variants` — v1 inclusion pending
+### `draft_message_variants`
 
-The 2026-05-04 framework page proposed `draft_message_variants` as the
-third LLM-backed tool. Whether it ships in v1 (and at what model tier)
-is a **Type 2 governance decision** pending Fazal sign-off; VT-39
-deliberately does NOT set its status either way. The framework's
-`is_llm_backed()` flag + the `llm_backed_in_subset` registry audit are
-decision-agnostic — the eventual outcome plugs in with zero framework
-change.
+`draft_message_variants` — DEFERRED to Phase 1.5 per Fazal Type 2
+decision 2026-05-20 (Notion page
+`366387c2-cc5a-8159-b726-e7ce3ec6f4f3`). Not in the v1 LLM-backed set.
 
-When the decision lands, this section gets an entry mirroring the two
-above OR is removed if the tool is ruled out of v1. Until then, the
-framework treats `draft_message_variants` as "not yet a tool."
+The v1 LLM-backed set is exactly two: `self_evaluate` and
+`classify_owner_message` (above). The framework's `is_llm_backed()`
+flag + `llm_backed_in_subset` registry audit remain decision-agnostic
+— if `draft_message_variants` lands in Phase 1.5, the entry gets
+promoted to "Locked LLM-backed tools" above with its own
+why-LLM + why-Opus + cost ceiling, no framework change required.
 
 ## Audit
 
