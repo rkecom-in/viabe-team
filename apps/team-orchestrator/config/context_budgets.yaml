@@ -1,0 +1,19 @@
+# Context Composer per-section token budgets (VT-3.4 PR 2/3 / VT-34).
+#
+# Total cap: 8000 tokens — the ONLY enforced cap (build raises
+# ContextOverflowError if a bundle exceeds it after maximum truncation).
+#
+# Per-section values are ADVISORY in PR 2/3: they document each section's
+# intended share and the truncation order in context_builder.py keys off them,
+# but per-section caps are NOT independently enforced — only the total is.
+# Per-section enforcement is Tech Debt for the VT-7.1-bundling PR (when real
+# substrate data makes individual sections large enough to matter).
+total_cap: 8000
+sections:
+  business_profile: 500
+  customer_ledger_summary: 1500
+  recent_campaigns: 1500
+  attribution_snapshot: 800
+  pending_owner_inputs: 1500
+  meta: 200
+  slack: 2000  # reserved headroom; not assigned to a section
