@@ -1,4 +1,5 @@
-"""Parent multi-agent StateGraph wiring (VT-3.4 PR 1/3 + 2/3).
+"""Parent multi-agent StateGraph wiring (VT-3.4 PR 1/3 + 2/3, dispatch-switch
+VT-SalesRecovery-Agent Exec Order 6.7).
 
 Per CL-175: built manually instead of using ``langgraph_supervisor.create_supervisor``.
 ``orchestrator_agent`` IS the supervisor (CL-22). Specialists are routed-to via
@@ -14,27 +15,144 @@ CL-183 VERIFICATION TARGET (verified in test_supervisor.py):
 the orchestrator node — the precedence of these two is NOT documented in
 Context7 for this composition. The landmine test exercises both paths and
 asserts the observed behaviour. Do not remove it as "redundant".
+
+Dispatch switch (this commit): the ``sales_recovery_agent`` node now calls
+``run_sales_recovery_agent`` (VT-32) instead of the langchain ``create_agent``
+stub. The self-evaluate gate (VT-36 + VT-50 + the VT-SR-Agent wiring) is
+construction-injected via a per-run ``SelfEvaluateAdapter`` and becomes
+PRODUCTION-LOAD-BEARING with this PR. The stub module remains on disk for
+out-of-graph callers (tests, future replay tooling) but is no longer on the
+dispatch path.
+
+Module-level node (NOT a closure) so tests can ``monkeypatch.setattr(supervisor_mod,
+"_sales_recovery_node", ...)`` the same way collapse_node is patched in the
+landmine routing tests.
 """
 
 from __future__ import annotations
 
 import json
 from typing import Any
+from uuid import UUID
 
 from langchain_anthropic import ChatAnthropic
 from langgraph.checkpoint.postgres import PostgresSaver
 from langgraph.graph import END, START, StateGraph
+from pydantic import ValidationError
+from team_shared.mcp import ToolContext
 
+from orchestrator._tenant_guard import TenantIsolationError
+from orchestrator.agent.limits.wallclock_timer import WALL_CLOCK_HARD_LIMIT_S
 from orchestrator.agent.orchestrator_agent import build_orchestrator_agent
-from orchestrator.agent.sales_recovery_stub import (
-    build_stub_sales_recovery_agent,
-    hardcoded_campaign_plan,
+from orchestrator.agent.sales_recovery import (
+    SalesRecoveryContext,
+    run_sales_recovery_agent,
 )
 from orchestrator.agent.schemas.campaign_plan import parse_campaign_plan
+from orchestrator.agent.tools.self_evaluate import SelfEvaluateAdapter
 from orchestrator.collapse import collapse_node
+from orchestrator.db import tenant_connection
 from orchestrator.handoffs import spawn_sales_recovery
 from orchestrator.routing import orchestrator_terminal_node, route_after_orchestrator
 from orchestrator.state.agent_graph_state import AgentGraphState
+
+
+# Per-run budgets sourced from VT-35's hard-limit constants. Matched to the
+# values agent/sales_recovery_node.py uses for the standalone-node path so
+# the supervisor dispatch and the standalone wrapper give the gate the same
+# context shape.
+_RUN_COST_BUDGET_PAISE = 5_000  # ₹50 per VT-35
+_RUN_WALLCLOCK_BUDGET_MS = int(WALL_CLOCK_HARD_LIMIT_S * 1000)
+
+
+def _sales_recovery_node(state: AgentGraphState) -> dict[str, Any]:
+    """The supervisor's specialist-dispatch node.
+
+    Calls ``run_sales_recovery_agent`` (VT-32) — the REAL agent loop on the
+    Anthropic Messages SDK with the self-evaluate gate active (VT-36, made
+    structural by VT-SR-Agent gate wiring; backed by VT-50's Opus evaluator).
+
+    Tenant + run identity (CL-202 / Pillar 3): tenant_id and run_id MUST
+    be present in state — fail loud. The state's values are the
+    authoritative boundary; the agent's emitted plan may carry placeholder
+    UUIDs which we overwrite before returning.
+
+    Parse exception handling (CL-238): catches only
+    ``(json.JSONDecodeError, ValidationError)`` — narrow by design. A
+    ``ValidationError`` from a live agent indicates the agent emitted a
+    malformed CampaignPlan; that must NOT be swallowed as a clean miss
+    (would mask a real bug). The exception re-raises; the graph run
+    fails and DBOS / the error router observes it.
+    """
+    state_tenant_id = state.get("tenant_id")
+    if state_tenant_id is None:
+        raise TenantIsolationError(
+            "sales_recovery_node: tenant_id missing from state"
+        )
+    state_run_id = state.get("run_id")
+    if state_run_id is None:
+        raise TenantIsolationError(
+            "sales_recovery_node: run_id missing from state"
+        )
+
+    tenant_uuid = (
+        state_tenant_id
+        if isinstance(state_tenant_id, UUID)
+        else UUID(str(state_tenant_id))
+    )
+    run_uuid = (
+        state_run_id
+        if isinstance(state_run_id, UUID)
+        else UUID(str(state_run_id))
+    )
+
+    # Per-invocation ToolContext + adapter — the gate runs against a real
+    # SelfEvaluateAdapter (Opus-backed by VT-50). Production-load-bearing
+    # path activates here.
+    tool_ctx = ToolContext(
+        tenant_id=tenant_uuid,
+        run_id=run_uuid,
+        agent_id="sales_recovery",
+        parent_tool_call_id=None,
+        cost_budget_remaining_paise=_RUN_COST_BUDGET_PAISE,
+        wallclock_remaining_ms=_RUN_WALLCLOCK_BUDGET_MS,
+        db_handle=tenant_connection,
+    )
+    evaluator = SelfEvaluateAdapter(ctx=tool_ctx)
+
+    context = SalesRecoveryContext(
+        tenant_id=str(tenant_uuid), run_id=str(run_uuid)
+    )
+    agent_result = run_sales_recovery_agent(context, evaluator=evaluator)
+
+    if agent_result.output is None:
+        # Live-agent terminal failure modes (status in {refused, invalid,
+        # terminated}) produce no output. The agent's own emit calls
+        # routed a FailureRecord; the supervisor surfaces the failure
+        # rather than synthesising a fallback plan (CL-238 — the brief's
+        # "real error, not silent fallback").
+        raise RuntimeError(
+            f"sales_recovery_node: agent returned status={agent_result.status!r}"
+            " with no output (FailureRecord already routed if applicable)"
+        )
+
+    # Tight exception handling — narrow catch on parse failure. A
+    # ValidationError surfacing here means the live agent emitted a
+    # malformed CampaignPlan; that is a real bug, not a degraded run.
+    try:
+        plan = parse_campaign_plan(agent_result.output)
+    except (json.JSONDecodeError, ValidationError):
+        raise
+
+    overrides: dict[str, Any] = {}
+    if plan.tenant_id != tenant_uuid:
+        overrides["tenant_id"] = tenant_uuid
+    if plan.run_id != run_uuid:
+        overrides["run_id"] = run_uuid
+    if overrides:
+        plan = plan.model_copy(update=overrides)
+
+    return {"campaign_plan": plan}
 
 
 def build_supervisor_graph(
@@ -46,8 +164,9 @@ def build_supervisor_graph(
     Nodes:
       - orchestrator_agent: the supervisor, built with spawn_sales_recovery
         added to its tools.
-      - sales_recovery_agent: a node wrapping the stub specialist; it parses a
-        CampaignPlan from the stub's final message (hardcoded fallback).
+      - sales_recovery_agent: the module-level ``_sales_recovery_node`` —
+        calls the REAL ``run_sales_recovery_agent`` with the self-evaluate
+        gate active (VT-SR-Agent dispatch switch).
       - orchestrator_terminal: the no-spawn sink (CL-188).
 
     Routing:
@@ -67,53 +186,10 @@ def build_supervisor_graph(
     orchestrator = build_orchestrator_agent(
         model=model, extra_tools=[spawn_sales_recovery]
     )
-    sales_recovery = build_stub_sales_recovery_agent(model=model)
-
-    def sales_recovery_node(state: AgentGraphState) -> dict[str, Any]:
-        """Wrap the stub agent. Parse a CampaignPlan from the final message;
-        fall back to the hardcoded plan on any parse failure.
-
-        VT-122: ``CampaignPlan`` is now a v1.0 discriminated union over
-        ``status``; ``parse_campaign_plan`` is the TypeAdapter accessor
-        (the union has no ``model_validate``). On any parse failure
-        (malformed JSON, schema violation, wrong variant shape) we fall
-        back to the hardcoded proposed variant.
-
-        Tenant + run identity (CL-202 / Pillar 3): the run's tenant_id
-        and run_id (carried in AgentGraphState) are the authoritative
-        boundary. The specialist's emitted plan may carry placeholders;
-        overwrite both fields here so downstream sees a single source
-        of truth."""
-        result = sales_recovery.invoke({"messages": state["messages"]})
-        final_content = result["messages"][-1].content
-
-        try:
-            # final_content may be a string or a list of content blocks
-            # depending on the model's output shape — normalise to a string.
-            if isinstance(final_content, list):
-                final_content = "".join(
-                    block.get("text", "") if isinstance(block, dict) else str(block)
-                    for block in final_content
-                )
-            plan = parse_campaign_plan(json.loads(final_content))
-        except Exception:
-            plan = hardcoded_campaign_plan()
-
-        overrides: dict[str, Any] = {}
-        state_tenant_id = state.get("tenant_id")
-        if state_tenant_id is not None and plan.tenant_id != state_tenant_id:
-            overrides["tenant_id"] = state_tenant_id
-        state_run_id = state.get("run_id")
-        if state_run_id is not None and plan.run_id != state_run_id:
-            overrides["run_id"] = state_run_id
-        if overrides:
-            plan = plan.model_copy(update=overrides)
-
-        return {"messages": result["messages"], "campaign_plan": plan}
 
     graph = StateGraph(AgentGraphState)
     graph.add_node("orchestrator_agent", orchestrator)
-    graph.add_node("sales_recovery_agent", sales_recovery_node)
+    graph.add_node("sales_recovery_agent", _sales_recovery_node)
     graph.add_node("collapse", collapse_node)
     graph.add_node("orchestrator_terminal", orchestrator_terminal_node)
     graph.add_edge(START, "orchestrator_agent")
