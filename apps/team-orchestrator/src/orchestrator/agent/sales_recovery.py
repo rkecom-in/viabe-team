@@ -155,21 +155,29 @@ _MODELS_YAML = (
 
 @dataclass
 class SalesRecoveryContext:
-    """Placeholder context type for VT-32.
+    """Minimal context bundle for the VT-32 placeholder dispatch path.
 
-    The real ``SalesRecoveryContext`` bundle (full Context Composer
-    output) is a later subtask. For VT-32 the agent is run with a
-    placeholder prompt and no tools, so it does not consume context
-    fields — but the function signature MUST be stable so dispatch
-    callers can wire to it now and the bundle can fill in later.
+    The real Context Composer bundle (cohort, template registry,
+    expected outcome, etc.) lives in ``orchestrator.context_builder``
+    and lands when VT-34 wires it. This dataclass is the wedge the
+    agent loop reads from until that bundle replaces it.
 
-    ``tenant_id`` and ``run_id`` are required (Pillar 3 — every run is
-    tenant-scoped; the orchestrator never invokes a specialist without
-    them); other fields land later.
+    Fields are all required (Pillar 3 — every run is tenant-scoped and
+    has a concrete request; the orchestrator never invokes a specialist
+    without them). No defaults: missing data must surface at the
+    constructor, not as a silent ``""`` falling through the agent.
+
+    - ``tenant_id`` / ``run_id``: identity. Pillar 3.
+    - ``user_request``: the orchestrator-supplied user-message content
+      that triggered this dispatch. Threaded into the agent loop's
+      initial messages so the model has a concrete task to reason
+      about. CL-287: replaces the stale VT-32 ``"begin"`` cue that
+      v1.0 prompt (VT-33/VT-4.2) no longer recognises.
     """
 
     tenant_id: str
     run_id: str
+    user_request: str
 
 
 def _resolve_model(agent_name: str = "sales_recovery") -> str:
@@ -418,8 +426,18 @@ def run_sales_recovery_agent(
     start = time.monotonic()
     client = Anthropic()
     model = _resolve_model("sales_recovery")
+    # CL-287: the orchestrator-supplied user request is the initial user
+    # message — NOT a hardcoded "begin" cue. Empty / whitespace-only is
+    # a structural error (the orchestrator never spawns a specialist
+    # without a request); fail loud rather than feeding "" to the model.
+    if not context.user_request or not context.user_request.strip():
+        raise ValueError(
+            "run_sales_recovery_agent: context.user_request must be a"
+            " non-empty string (orchestrator must supply the user request"
+            " before dispatch)"
+        )
     messages: list[dict[str, Any]] = [
-        {"role": "user", "content": "begin"},
+        {"role": "user", "content": context.user_request},
     ]
     tools: dict[str, Any] = {}  # VT-32: no real tools yet.
     raw_messages: list[dict[str, Any]] = list(messages)
@@ -538,6 +556,23 @@ def run_sales_recovery_agent(
             status = "refused"
             break
         if output is None:
+            # CL-287: emit a FailureRecord BEFORE breaking so the run
+            # is observable in pipeline_steps / error router. Previous
+            # Path A was silent — a CL-238 violation. Best-effort, must
+            # not re-raise into the loop. Snapshot the model's terminal
+            # text (capped) for diagnosis without leaking unbounded
+            # payload into the error router.
+            _emit_invalid_output(
+                context=context,
+                reason=(
+                    "agent terminal output did not parse as a single JSON"
+                    " dict; first 200 chars: " + text.strip()[:200]
+                ),
+                tokens_used=input_tokens_used + output_tokens_used,
+                tool_calls_made=tool_calls_made,
+                wallclock_ms=int((time.monotonic() - start) * 1000),
+                source="agent_terminal_no_dict",
+            )
             status = "invalid"
             break
 
@@ -815,10 +850,17 @@ def _emit_invalid_output(
     tokens_used: int,
     tool_calls_made: int,
     wallclock_ms: int,
+    source: str = "self_evaluate_gate",
 ) -> None:
-    """Route a FailureRecord(AGENT_INVALID_OUTPUT) for a self-evaluate
-    seam error (VT-36 / VT-3.6). Best-effort — routing failure must
-    NOT re-raise into the run."""
+    """Route a FailureRecord(AGENT_INVALID_OUTPUT). Two callers:
+
+    - ``source="self_evaluate_gate"`` — VT-36 gate seam error.
+    - ``source="agent_terminal_no_dict"`` — CL-287: agent terminated
+      with text that did not parse as a single JSON dict (Path A).
+      Closes the CL-238 silent-failure hole where the loop previously
+      exited ``status='invalid'`` without observability.
+
+    Best-effort — routing failure must NOT re-raise into the run."""
     failure = FailureRecord(
         failure_type=FailureType.AGENT_INVALID_OUTPUT,
         message=reason,
@@ -826,7 +868,7 @@ def _emit_invalid_output(
         tenant_id=UUID(context.tenant_id),
         run_id=UUID(context.run_id),
         metadata={
-            "source": "self_evaluate_gate",
+            "source": source,
             "tokens_used": tokens_used,
             "tool_calls_made": tool_calls_made,
             "wallclock_ms": wallclock_ms,
