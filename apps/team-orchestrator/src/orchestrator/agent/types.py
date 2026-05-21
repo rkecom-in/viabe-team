@@ -29,6 +29,7 @@ AgentStatus = Literal[
     "refused",
     "invalid",
     "placeholder",
+    "rejected",  # self-evaluate gate exhausted retry; SELF_EVAL_REJECTED
 ]
 
 

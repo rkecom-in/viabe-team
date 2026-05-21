@@ -434,6 +434,18 @@ def run_sales_recovery_agent(
             break
 
         gate_outcome = gate.run(draft_plan)
+
+        # Every gate.run() — emit a self_evaluate event so production
+        # REVISE-frequency and per-attempt verdicts are observable in
+        # pipeline_steps. Best-effort; routing failure does NOT re-raise.
+        _emit_self_evaluate_attempt(
+            context=context,
+            attempt_number=gate_outcome.attempt_number,
+            outcome=gate_outcome.outcome,
+            rejection_feedback=gate_outcome.rejection_feedback,
+            feedback_messages=gate_outcome.feedback_messages,
+        )
+
         if gate_outcome.action is GateAction.SHIP:
             stamped = draft_plan.model_copy(
                 update={"self_evaluate_status": gate_outcome.self_evaluate_status}
@@ -454,6 +466,24 @@ def run_sales_recovery_agent(
                 wallclock_ms=int((time.monotonic() - start) * 1000),
             )
             status = "invalid"
+            break
+        if gate_outcome.action is GateAction.REJECTED:
+            # Exhausted the one-retry budget; the draft is known-bad.
+            # Do NOT ship. Route SELF_EVAL_REJECTED for escalation; the
+            # router's default_strategy is ESCALATE_TO_FAZAL.
+            _emit_self_eval_rejected(
+                context=context,
+                rejection_feedback=gate_outcome.rejection_feedback,
+                attempt_number=gate_outcome.attempt_number,
+                tokens_used=input_tokens_used + output_tokens_used,
+                tool_calls_made=tool_calls_made + gate.evaluator_calls,
+                wallclock_ms=int((time.monotonic() - start) * 1000),
+            )
+            stamped = draft_plan.model_copy(
+                update={"self_evaluate_status": gate_outcome.self_evaluate_status}
+            )
+            output = stamped.model_dump(mode="json")
+            status = "rejected"
             break
 
         # RETRY — append feedback as a user message and let the loop
@@ -505,6 +535,115 @@ def run_sales_recovery_agent(
         raw_messages=raw_messages,
         terminated_reason=terminated_reason,
     )
+
+
+def _emit_self_evaluate_attempt(
+    *,
+    context: SalesRecoveryContext,
+    attempt_number: int,
+    outcome: Any,
+    rejection_feedback: Any,
+    feedback_messages: list[dict[str, str]],
+) -> None:
+    """Write one pipeline_steps row per gate.run() — per-attempt
+    self_evaluate telemetry (VT-SalesRecovery-Agent wiring).
+
+    step_kind = 'self_evaluate_attempt'. output_envelope carries the
+    attempt number + verdict + reasons (list-per-category preserved
+    when present). RLS-scoped via tenant_connection. Best-effort —
+    observability MUST NOT break the run."""
+    from psycopg.types.json import Jsonb
+
+    from orchestrator.db import tenant_connection
+
+    envelope: dict[str, Any] = {
+        "attempt_number": attempt_number,
+        "outcome": outcome.value if outcome is not None else None,
+    }
+    # rejection_feedback is populated only on REJECTED outcomes; for
+    # RETRY the feedback lives in feedback_messages (the structured
+    # message bag the loop appends).
+    if rejection_feedback is not None:
+        envelope["reasons"] = {
+            "schema": rejection_feedback.schema,
+            "pillar": rejection_feedback.pillar,
+            "consistency": rejection_feedback.consistency,
+            "legal": rejection_feedback.legal,
+        }
+    elif feedback_messages:
+        envelope["feedback_messages"] = feedback_messages
+
+    try:
+        with tenant_connection(UUID(context.tenant_id)) as conn, conn.transaction():
+            # dict_row factory configured on the pool (graph.py); mypy
+            # can't see it through psycopg's generic Row type, cast at
+            # the seam (same pattern as error_router._log_decision).
+            raw_next = conn.execute(
+                "SELECT COALESCE(MAX(step_index), 0) + 1 AS next "
+                "FROM pipeline_steps WHERE run_id = %s",
+                (context.run_id,),
+            ).fetchone()
+            next_index_row = cast("dict[str, Any]", raw_next)
+            next_index = int(next_index_row["next"])
+            conn.execute(
+                """
+                INSERT INTO pipeline_steps
+                    (run_id, tenant_id, step_index, step_kind, output_envelope)
+                VALUES (%s, %s, %s, 'self_evaluate_attempt', %s)
+                """,
+                (
+                    context.run_id,
+                    context.tenant_id,
+                    next_index,
+                    Jsonb(envelope),
+                ),
+            )
+    except Exception:
+        # Observability never breaks recovery (CL-242 — same precedent
+        # as orchestrator.error_router._log_decision).
+        pass
+
+
+def _emit_self_eval_rejected(
+    *,
+    context: SalesRecoveryContext,
+    rejection_feedback: Any,
+    attempt_number: int,
+    tokens_used: int,
+    tool_calls_made: int,
+    wallclock_ms: int,
+) -> None:
+    """Route a FailureRecord(SELF_EVAL_REJECTED) — the gate exhausted
+    its one-retry budget and the run is rejected. Router escalates
+    to Fazal per the spec (severity HIGH, default_strategy
+    ESCALATE_TO_FAZAL)."""
+    reasons: dict[str, Any] = {}
+    if rejection_feedback is not None:
+        reasons = {
+            "schema": rejection_feedback.schema,
+            "pillar": rejection_feedback.pillar,
+            "consistency": rejection_feedback.consistency,
+            "legal": rejection_feedback.legal,
+        }
+    failure = FailureRecord(
+        failure_type=FailureType.SELF_EVAL_REJECTED,
+        message=(
+            f"self_evaluate gate rejected after {attempt_number} attempts "
+            "(initial draft + one retry)"
+        ),
+        occurred_at=datetime.now(UTC),
+        tenant_id=UUID(context.tenant_id),
+        run_id=UUID(context.run_id),
+        metadata={
+            "source": "self_evaluate_gate",
+            "attempt_number": attempt_number,
+            "reasons": reasons,
+            "tokens_used": tokens_used,
+            "tool_calls_made": tool_calls_made,
+            "wallclock_ms": wallclock_ms,
+        },
+    )
+    route_failure(failure)
 
 
 def _emit_invalid_output(
