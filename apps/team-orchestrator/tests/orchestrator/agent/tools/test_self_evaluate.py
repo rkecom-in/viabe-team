@@ -114,25 +114,27 @@ def test_pass_first_try_yields_outcome_pass_and_no_feedback(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "category, critique",
+    "category, critiques",
     [
-        ("schema", "target_cohort.cohort_size=200 but customer_ids has 87 entries — mismatch."),
-        ("pillar", "selection_reason cites 'cafés typically have 30% return rate' — invented per-vertical heuristic."),
-        ("consistency", "target_cohort.cohort_label='90-180 day dormants' but context_summary.attribution_snapshot shows 0 customers in that bucket."),
-        ("legal", "message_plan.template_params.body contains 'last chance' — high-pressure language prohibited under WhatsApp content policy."),
+        ("schema", ["target_cohort.cohort_size=200 but customer_ids has 87 entries — mismatch."]),
+        ("pillar", ["selection_reason cites 'cafés typically have 30% return rate' — invented per-vertical heuristic."]),
+        ("consistency", ["target_cohort.cohort_label='90-180 day dormants' but context_summary.attribution_snapshot shows 0 customers in that bucket."]),
+        ("legal", ["message_plan.template_params.body contains 'last chance' — high-pressure language prohibited under WhatsApp content policy."]),
     ],
 )
 def test_single_category_revise_populates_only_that_field(
-    monkeypatch, category, critique
+    monkeypatch, category, critiques
 ):
+    """v1.1: each category is a LIST of distinct critique strings. A
+    single-violation category is a one-entry list; the others stay None."""
     monkeypatch.setenv("VIABE_ENV", "test")
-    feedback = {
+    feedback: dict[str, Any] = {
         "schema": None,
         "pillar": None,
         "consistency": None,
         "legal": None,
     }
-    feedback[category] = critique
+    feedback[category] = critiques
     payload = {"outcome": "revise", "feedback": feedback}
     _patch_client_to_return(monkeypatch, json.dumps(payload))
 
@@ -141,8 +143,8 @@ def test_single_category_revise_populates_only_that_field(
 
     assert verdict.outcome is SelfEvaluateOutcome.REVISE
     assert verdict.feedback is not None
-    # The named category carries the critique; the others stay None.
-    assert getattr(verdict.feedback, category) == critique
+    # The named category carries the list; the others stay None.
+    assert getattr(verdict.feedback, category) == critiques
     for other in ("schema", "pillar", "consistency", "legal"):
         if other != category:
             assert getattr(verdict.feedback, other) is None
@@ -152,14 +154,15 @@ def test_single_category_revise_populates_only_that_field(
 
 
 def test_multi_category_revise_populates_all_flagged(monkeypatch):
+    """v1.1 widened model: each flagged category carries a LIST."""
     monkeypatch.setenv("VIABE_ENV", "test")
     payload = {
         "outcome": "revise",
         "feedback": {
-            "schema": "target_cohort.cohort_size mismatch.",
-            "pillar": "invented number in selection_reason.",
+            "schema": ["target_cohort.cohort_size mismatch."],
+            "pillar": ["invented number in selection_reason."],
             "consistency": None,
-            "legal": "high-pressure language in template_params.",
+            "legal": ["high-pressure language in template_params."],
         },
     }
     _patch_client_to_return(monkeypatch, json.dumps(payload))
