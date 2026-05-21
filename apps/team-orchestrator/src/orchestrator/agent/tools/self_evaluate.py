@@ -116,25 +116,32 @@ class SelfEvaluateInput(BaseModel):
 
 
 class _FeedbackPayload(BaseModel):
-    """Per-category feedback. Each field: ``None`` (category passed) or
-    a critique string (category flagged).
+    """Per-category feedback. Each field: ``None`` / empty list
+    (category passed) or a LIST of distinct critique strings (category
+    flagged).
 
     Wire-format note: the JSON the model emits uses keys ``schema``,
     ``pillar``, ``consistency``, ``legal`` (matches VT-36's
     ``SelfEvaluateFeedback``). The Python attribute ``schema`` would
-    shadow pydantic's deprecated ``BaseModel.schema`` v1 method (UserWarning
-    + mypy "type-shadow" error), so the attribute is ``schema_critique``
-    with ``alias='schema'``. ``populate_by_name=True`` accepts both
-    spellings on validation; dump-by-alias is used at the call site so
-    the wire key stays ``schema`` in ``ToolResult.data``.
+    shadow pydantic's deprecated ``BaseModel.schema`` v1 method, so the
+    attribute is ``schema_critique`` with ``alias='schema'``.
+    ``populate_by_name=True`` accepts both spellings on validation;
+    dump-by-alias is used at the call site so the wire key stays
+    ``schema`` in ``ToolResult.data``.
+
+    v1.1 (VT-SalesRecovery-Agent wiring): widened from
+    ``str | None`` to ``list[str] | None`` so multiple distinct
+    violations within one category are preserved end-to-end. The
+    prompt instructs the model to emit one entry per distinct
+    violation, never a summary string.
     """
 
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
-    schema_critique: str | None = Field(default=None, alias="schema")
-    pillar: str | None = None
-    consistency: str | None = None
-    legal: str | None = None
+    schema_critique: list[str] | None = Field(default=None, alias="schema")
+    pillar: list[str] | None = None
+    consistency: list[str] | None = None
+    legal: list[str] | None = None
 
 
 class SelfEvaluateOutput(BaseModel):
@@ -355,10 +362,14 @@ class SelfEvaluateAdapter:
             else SelfEvaluateOutcome.REVISE
         )
         feedback_obj = SelfEvaluateFeedback(
-            schema=output.feedback.schema_critique,
-            pillar=output.feedback.pillar,
-            consistency=output.feedback.consistency,
-            legal=output.feedback.legal,
+            schema=list(output.feedback.schema_critique)
+            if output.feedback.schema_critique
+            else None,
+            pillar=list(output.feedback.pillar) if output.feedback.pillar else None,
+            consistency=list(output.feedback.consistency)
+            if output.feedback.consistency
+            else None,
+            legal=list(output.feedback.legal) if output.feedback.legal else None,
         )
         # On PASS we elide the feedback dataclass (None) — the
         # gate's branching treats `None` as "no feedback to surface".
