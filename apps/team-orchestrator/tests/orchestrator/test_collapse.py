@@ -1,16 +1,30 @@
-"""VT-3.4 PR 3/3 — collapse-path tests (migrated to CampaignPlan v1.0 by VT-122).
+"""VT-3.4 PR 3/3 — collapse-path tests (migrated to CampaignPlan v1.0 by VT-122,
+variant-correctness fix CL-294).
 
-Live-Postgres tests that exercise ``orchestrator.collapse.collapse_campaign_plan``
-end-to-end through ``tenant_connection`` (CL-122 / Pillar 3). Mirrors the
+Live-Postgres tests that exercise ``orchestrator.collapse`` end-to-end
+through ``tenant_connection`` (CL-122 / Pillar 3). Mirrors the
 test_tenant_isolation.py setup pattern.
 
-Three required cases:
-  1. Happy path: CampaignPlan persisted to ``campaigns`` (plan_json carries the
-     v1.0 dict); ``subscriber_states`` activity fields updated.
-  2. Phase-unchanged (named): ``tenants.phase`` AND the persisted
-     ``subscriber_states.phase`` equal the pre-collapse phase.
-  3. Cross-tenant: collapse under tenant A does not touch tenant B's rows
-     (subscriber_states or campaigns).
+Cases:
+  Proposed-variant path (``collapse_campaign_plan``):
+    1. Happy path: CampaignPlan persisted to ``campaigns`` (plan_json carries
+       the v1.0 dict); ``subscriber_states`` activity fields updated.
+    2. Phase-unchanged (named): ``tenants.phase`` AND the persisted
+       ``subscriber_states.phase`` equal the pre-collapse phase.
+    3. Cross-tenant: collapse under tenant A does not touch tenant B's rows
+       (subscriber_states or campaigns).
+    4. Fail-loud guard (CL-294 Disposition B): calling
+       ``collapse_campaign_plan`` directly with a non-proposed plan still
+       raises ``RuntimeError`` — the guard is the defence-in-depth check
+       behind the variant dispatch in ``collapse_node``.
+
+  Non-proposed terminal-verdict path (``record_terminal_verdict`` via
+  ``collapse_node`` dispatch, CL-294):
+    5. ``out_of_scope``: ``collapse_node`` completes cleanly; one
+       ``pipeline_steps`` row with ``step_kind='campaign_plan_terminal'``
+       carries the variant + ``out_of_scope_reason``; no ``campaigns`` row.
+    6. ``insufficient_data``: same shape; ``missing_data`` lands in the
+       ``output_envelope``; no ``campaigns`` row.
 """
 
 from __future__ import annotations
@@ -204,6 +218,209 @@ def test_collapse_does_not_change_phase(rls_ctx):
     assert phase_before == starting_phase
     assert tenants_phase_after == starting_phase, "collapse must not mutate tenants.phase"
     assert sub_phase == starting_phase, "subscriber_states.phase must mirror tenants.phase"
+
+
+def _plan_out_of_scope(tenant_id: str, run_id: str):
+    """Build a valid v1.0 ``out_of_scope`` CampaignPlan (CL-294)."""
+    from orchestrator.agent.schemas.campaign_plan import (
+        CampaignPlanOutOfScope,
+        SuggestedSpecialist,
+    )
+
+    return CampaignPlanOutOfScope(
+        tenant_id=UUID(tenant_id),
+        run_id=UUID(run_id),
+        generated_at=datetime.now(UTC),
+        out_of_scope_reason=(
+            "Request concerns review-reputation handling; reputation "
+            "specialist owns that domain, not sales recovery."
+        ),
+        suggested_specialist=SuggestedSpecialist.REPUTATION,
+    )
+
+
+def _plan_insufficient_data(tenant_id: str, run_id: str):
+    """Build a valid v1.0 ``insufficient_data`` CampaignPlan (CL-294)."""
+    from orchestrator.agent.schemas.campaign_plan import (
+        CampaignPlanInsufficientData,
+        MissingDataItem,
+    )
+
+    return CampaignPlanInsufficientData(
+        tenant_id=UUID(tenant_id),
+        run_id=UUID(run_id),
+        generated_at=datetime.now(UTC),
+        missing_data=[
+            MissingDataItem(
+                category="cohort",
+                description="No dormant-customer rows surfaced for tenant.",
+                suggested_remediation="Seed customer ledger or supply cohort.",
+            )
+        ],
+    )
+
+
+def test_collapse_campaign_plan_raises_on_non_proposed_guard(rls_ctx):
+    """CL-294 Disposition B: ``collapse_campaign_plan`` keeps its fail-loud
+    guard against non-proposed plans. ``collapse_node`` dispatches non-
+    proposed variants AWAY from this function, but if a future consumer
+    calls it directly without gating on variant, the guard must still
+    raise (defence in depth)."""
+    from orchestrator.collapse import collapse_campaign_plan
+
+    tenant = _new_tenant(rls_ctx.dsn)
+    run_id = _new_run(rls_ctx.dsn, tenant)
+
+    with pytest.raises(RuntimeError, match="only handles the proposed variant"):
+        collapse_campaign_plan(
+            tenant_id=UUID(tenant),
+            run_id=UUID(run_id),
+            campaign_plan=_plan_insufficient_data(tenant, run_id),
+        )
+    with pytest.raises(RuntimeError, match="only handles the proposed variant"):
+        collapse_campaign_plan(
+            tenant_id=UUID(tenant),
+            run_id=UUID(run_id),
+            campaign_plan=_plan_out_of_scope(tenant, run_id),
+        )
+
+
+def test_collapse_node_out_of_scope_records_verdict_no_campaign(rls_ctx):
+    """CL-294: ``out_of_scope`` terminal verdict — ``collapse_node`` completes
+    cleanly, writes one ``pipeline_steps`` row with
+    ``step_kind='campaign_plan_terminal'`` carrying the variant +
+    ``out_of_scope_reason``, and creates NO ``campaigns`` row."""
+    from orchestrator.collapse import collapse_node
+    from orchestrator.db import tenant_connection
+
+    tenant = _new_tenant(rls_ctx.dsn)
+    run_id = _new_run(rls_ctx.dsn, tenant)
+    plan = _plan_out_of_scope(tenant, run_id)
+
+    update = collapse_node(
+        {
+            "tenant_id": UUID(tenant),
+            "run_id": UUID(run_id),
+            "campaign_plan": plan,
+        }
+    )
+    assert update == {}
+
+    with tenant_connection(tenant) as conn:
+        n_campaigns = conn.execute(
+            "SELECT count(*) AS n FROM campaigns WHERE run_id = %s",
+            (run_id,),
+        ).fetchone()["n"]
+        step_rows = conn.execute(
+            "SELECT step_kind, output_envelope, rationale "
+            "FROM pipeline_steps WHERE run_id = %s "
+            "AND step_kind = 'campaign_plan_terminal'",
+            (run_id,),
+        ).fetchall()
+
+    assert n_campaigns == 0, (
+        "out_of_scope verdict must NOT create a campaigns row"
+    )
+    assert len(step_rows) == 1, "exactly one terminal-verdict step expected"
+    envelope = step_rows[0]["output_envelope"]
+    assert envelope["variant"] == "out_of_scope"
+    assert envelope["version"] == "1.0"
+    assert envelope["out_of_scope_reason"].startswith(
+        "Request concerns review-reputation"
+    )
+    assert envelope["suggested_specialist"] == "reputation"
+    assert step_rows[0]["rationale"] == "agent terminal verdict: out_of_scope"
+
+
+def test_collapse_node_insufficient_data_records_verdict_no_campaign(rls_ctx):
+    """CL-294: ``insufficient_data`` terminal verdict — ``collapse_node``
+    completes cleanly, writes one ``pipeline_steps`` row carrying the
+    variant + ``missing_data`` list, and creates NO ``campaigns`` row."""
+    from orchestrator.collapse import collapse_node
+    from orchestrator.db import tenant_connection
+
+    tenant = _new_tenant(rls_ctx.dsn)
+    run_id = _new_run(rls_ctx.dsn, tenant)
+    plan = _plan_insufficient_data(tenant, run_id)
+
+    update = collapse_node(
+        {
+            "tenant_id": UUID(tenant),
+            "run_id": UUID(run_id),
+            "campaign_plan": plan,
+        }
+    )
+    assert update == {}
+
+    with tenant_connection(tenant) as conn:
+        n_campaigns = conn.execute(
+            "SELECT count(*) AS n FROM campaigns WHERE run_id = %s",
+            (run_id,),
+        ).fetchone()["n"]
+        step_rows = conn.execute(
+            "SELECT step_kind, output_envelope, rationale "
+            "FROM pipeline_steps WHERE run_id = %s "
+            "AND step_kind = 'campaign_plan_terminal'",
+            (run_id,),
+        ).fetchall()
+
+    assert n_campaigns == 0, (
+        "insufficient_data verdict must NOT create a campaigns row"
+    )
+    assert len(step_rows) == 1
+    envelope = step_rows[0]["output_envelope"]
+    assert envelope["variant"] == "insufficient_data"
+    assert envelope["version"] == "1.0"
+    assert isinstance(envelope["missing_data"], list)
+    assert len(envelope["missing_data"]) == 1
+    assert envelope["missing_data"][0]["category"] == "cohort"
+    assert envelope["missing_data"][0]["description"].startswith(
+        "No dormant-customer rows"
+    )
+    assert (
+        step_rows[0]["rationale"]
+        == "agent terminal verdict: insufficient_data"
+    )
+
+
+def test_collapse_node_proposed_still_persists_campaign(rls_ctx):
+    """CL-294: ``collapse_node``'s variant dispatch routes ``proposed`` plans
+    to ``collapse_campaign_plan`` unchanged. End-to-end via the node — the
+    direct-call happy-path test already covers the function; this test
+    pins the DISPATCH for the proposed branch."""
+    from orchestrator.collapse import collapse_node
+    from orchestrator.db import tenant_connection
+
+    tenant = _new_tenant(rls_ctx.dsn)
+    run_id = _new_run(rls_ctx.dsn, tenant)
+    plan = _plan(tenant, run_id)
+
+    update = collapse_node(
+        {
+            "tenant_id": UUID(tenant),
+            "run_id": UUID(run_id),
+            "campaign_plan": plan,
+        }
+    )
+    assert update == {}
+
+    with tenant_connection(tenant) as conn:
+        n_campaigns = conn.execute(
+            "SELECT count(*) AS n FROM campaigns WHERE run_id = %s",
+            (run_id,),
+        ).fetchone()["n"]
+        # No terminal-verdict step should be written on the proposed
+        # path — that surface is for non-proposed only.
+        n_terminal_steps = conn.execute(
+            "SELECT count(*) AS n FROM pipeline_steps WHERE run_id = %s "
+            "AND step_kind = 'campaign_plan_terminal'",
+            (run_id,),
+        ).fetchone()["n"]
+
+    assert n_campaigns == 1, "proposed must create exactly one campaigns row"
+    assert n_terminal_steps == 0, (
+        "proposed must NOT write a campaign_plan_terminal step"
+    )
 
 
 def test_collapse_does_not_cross_tenant_boundary(rls_ctx):
