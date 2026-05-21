@@ -30,9 +30,12 @@ from orchestrator.context_builder import (
 )
 
 # §4.1 — the actual SalesRecoveryContext dataclass fields.
+# Exec-6.85: ``user_request`` joins the bundle so the specialist receives
+# the orchestrator-supplied owner message inside the same payload.
 _EXPECTED_FIELDS = {
     "tenant_id",
     "run_id",
+    "user_request",
     "trigger_reason",
     "business_profile",
     "customer_ledger_summary",
@@ -47,7 +50,9 @@ _EXPECTED_FIELDS = {
 def test_build_sales_recovery_context_returns_expected_top_level_fields() -> None:
     """§4.1 — the constructor returns a SalesRecoveryContext with exactly the
     documented top-level fields."""
-    bundle = build_sales_recovery_context(uuid4(), uuid4(), "weekly_cadence")
+    bundle = build_sales_recovery_context(
+        uuid4(), uuid4(), "weekly_cadence", "recover dormant customers"
+    )
 
     assert isinstance(bundle, SalesRecoveryContext)
     assert {f.name for f in fields(bundle)} == _EXPECTED_FIELDS
@@ -57,7 +62,9 @@ def test_build_sales_recovery_context_safe_empty_when_substrates_absent() -> Non
     """§4.2 — with L1 KG + L2 episodic + campaigns/owner_inputs tables absent
     (CL-190), every section is its safe-empty fallback and data_completeness
     reports every section incomplete."""
-    bundle = build_sales_recovery_context(uuid4(), uuid4(), "weekly_cadence")
+    bundle = build_sales_recovery_context(
+        uuid4(), uuid4(), "weekly_cadence", "recover dormant customers"
+    )
 
     assert bundle.business_profile == BusinessProfile()
     assert bundle.customer_ledger_summary == LedgerSummary()
@@ -84,8 +91,21 @@ def test_build_sales_recovery_context_no_cross_tenant_leak() -> None:
     tenant_a = uuid4()
     tenant_b = uuid4()
 
-    bundle_a = build_sales_recovery_context(tenant_a, uuid4(), "owner_initiated")
+    bundle_a = build_sales_recovery_context(
+        tenant_a, uuid4(), "owner_initiated", "recover lapsed buyers"
+    )
 
     assert bundle_a.tenant_id == tenant_a
     serialised = json.dumps(asdict(bundle_a), default=str)
     assert str(tenant_b) not in serialised
+
+
+def test_build_sales_recovery_context_requires_non_empty_user_request() -> None:
+    """Exec-6.85: bundle constructor fails loud on empty / whitespace
+    ``user_request`` — the orchestrator must never spawn the specialist
+    without a real owner message. Mirrors the existing tenant_id / run_id
+    fail-loud discipline."""
+    with pytest.raises(ValueError, match="user_request"):
+        build_sales_recovery_context(uuid4(), uuid4(), "weekly_cadence", "")
+    with pytest.raises(ValueError, match="user_request"):
+        build_sales_recovery_context(uuid4(), uuid4(), "weekly_cadence", "   ")

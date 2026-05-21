@@ -42,11 +42,9 @@ import logging
 import os
 import re
 import time
-from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
-from uuid import UUID
 
 import yaml
 from anthropic import Anthropic, APITimeoutError
@@ -153,31 +151,15 @@ _MODELS_YAML = (
 )
 
 
-@dataclass
-class SalesRecoveryContext:
-    """Minimal context bundle for the VT-32 placeholder dispatch path.
-
-    The real Context Composer bundle (cohort, template registry,
-    expected outcome, etc.) lives in ``orchestrator.context_builder``
-    and lands when VT-34 wires it. This dataclass is the wedge the
-    agent loop reads from until that bundle replaces it.
-
-    Fields are all required (Pillar 3 — every run is tenant-scoped and
-    has a concrete request; the orchestrator never invokes a specialist
-    without them). No defaults: missing data must surface at the
-    constructor, not as a silent ``""`` falling through the agent.
-
-    - ``tenant_id`` / ``run_id``: identity. Pillar 3.
-    - ``user_request``: the orchestrator-supplied user-message content
-      that triggered this dispatch. Threaded into the agent loop's
-      initial messages so the model has a concrete task to reason
-      about. CL-287: replaces the stale VT-32 ``"begin"`` cue that
-      v1.0 prompt (VT-33/VT-4.2) no longer recognises.
-    """
-
-    tenant_id: str
-    run_id: str
-    user_request: str
+# Exec-6.85 reconciliation: the agent's context IS the orchestrator-side
+# Context Composer bundle. The minimal three-field wedge (tenant_id /
+# run_id / user_request) is gone — the agent receives the full bundle
+# (business_profile, customer_ledger_summary, recent_campaigns,
+# attribution_snapshot, pending_owner_inputs, meta, data_completeness, +
+# user_request, trigger_reason) so the v1.0 prompt has real task context
+# to reason about. The re-export below preserves the historical import
+# path ``from orchestrator.agent.sales_recovery import SalesRecoveryContext``.
+from orchestrator.context_builder import SalesRecoveryContext  # noqa: E402
 
 
 def _resolve_model(agent_name: str = "sales_recovery") -> str:
@@ -383,8 +365,8 @@ def _emit_model_output_conflict(
             f" {status_value!r}: {sorted(dropped_keys)}"
         ),
         occurred_at=datetime.now(UTC),
-        tenant_id=UUID(context.tenant_id),
-        run_id=UUID(context.run_id),
+        tenant_id=context.tenant_id,
+        run_id=context.run_id,
         metadata={
             "variant": status_value,
             "dropped_keys": sorted(dropped_keys),
@@ -771,7 +753,7 @@ def _emit_self_evaluate_attempt(
         envelope["feedback_messages"] = feedback_messages
 
     try:
-        with tenant_connection(UUID(context.tenant_id)) as conn, conn.transaction():
+        with tenant_connection(context.tenant_id) as conn, conn.transaction():
             # dict_row factory configured on the pool (graph.py); mypy
             # can't see it through psycopg's generic Row type, cast at
             # the seam (same pattern as error_router._log_decision).
@@ -829,8 +811,8 @@ def _emit_self_eval_rejected(
             "(initial draft + one retry)"
         ),
         occurred_at=datetime.now(UTC),
-        tenant_id=UUID(context.tenant_id),
-        run_id=UUID(context.run_id),
+        tenant_id=context.tenant_id,
+        run_id=context.run_id,
         metadata={
             "source": "self_evaluate_gate",
             "attempt_number": attempt_number,
@@ -865,8 +847,8 @@ def _emit_invalid_output(
         failure_type=FailureType.AGENT_INVALID_OUTPUT,
         message=reason,
         occurred_at=datetime.now(UTC),
-        tenant_id=UUID(context.tenant_id),
-        run_id=UUID(context.run_id),
+        tenant_id=context.tenant_id,
+        run_id=context.run_id,
         metadata={
             "source": source,
             "tokens_used": tokens_used,
@@ -894,8 +876,8 @@ def _emit_hard_limit_breach(
         failure_type=FailureType.AGENT_HARD_LIMIT_BREACH,
         message=reason,
         occurred_at=datetime.now(UTC),
-        tenant_id=UUID(context.tenant_id),
-        run_id=UUID(context.run_id),
+        tenant_id=context.tenant_id,
+        run_id=context.run_id,
         metadata={
             "axis": axis.value,
             "tokens_used": tokens_used,

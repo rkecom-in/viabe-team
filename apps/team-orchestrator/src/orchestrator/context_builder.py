@@ -105,20 +105,50 @@ class ContextMeta:
     cursor_info: dict[str, Any]
 
 
+_DEFAULT_SECTION_KEYS = (
+    "business_profile",
+    "customer_ledger_summary",
+    "recent_campaigns",
+    "attribution_snapshot",
+    "pending_owner_inputs",
+)
+
+
+def _default_data_completeness() -> dict[str, bool]:
+    return {key: False for key in _DEFAULT_SECTION_KEYS}
+
+
+def _default_meta() -> ContextMeta:
+    return ContextMeta(token_count=0, build_timestamp=datetime.now(UTC), cursor_info={})
+
+
 @dataclass(frozen=True, slots=True)
 class SalesRecoveryContext:
+    # Identity + task — required, no default. ``user_request`` is the
+    # orchestrator-supplied owner message that triggered the dispatch
+    # (Exec-6.85: bundle now carries it so the specialist receives the
+    # full task context instead of a minimal wedge).
     tenant_id: UUID
     run_id: UUID
-    trigger_reason: TriggerReason
-    business_profile: BusinessProfile
-    customer_ledger_summary: LedgerSummary
-    recent_campaigns: list[CampaignSnapshot]
-    attribution_snapshot: AttributionSnapshot
-    pending_owner_inputs: list[OwnerInput]
-    meta: ContextMeta
+    user_request: str
+    # Bundle sections + provenance — all default to CL-190 safe-empty so
+    # tests + lightweight call sites can construct a minimal bundle without
+    # filling every substrate. ``build_sales_recovery_context`` overrides
+    # these with the real per-section builders.
+    trigger_reason: TriggerReason = "weekly_cadence"
+    business_profile: BusinessProfile = field(default_factory=BusinessProfile)
+    customer_ledger_summary: LedgerSummary = field(default_factory=LedgerSummary)
+    recent_campaigns: list[CampaignSnapshot] = field(default_factory=list)
+    attribution_snapshot: AttributionSnapshot = field(
+        default_factory=AttributionSnapshot
+    )
+    pending_owner_inputs: list[OwnerInput] = field(default_factory=list)
+    meta: ContextMeta = field(default_factory=_default_meta)
     # CL-190: True = real data; False = safe-empty fallback (substrate absent
     # or no rows for tenant). Keys are the five section names below.
-    data_completeness: dict[str, bool]
+    data_completeness: dict[str, bool] = field(
+        default_factory=_default_data_completeness
+    )
 
 
 # --- token estimation --------------------------------------------------------
@@ -182,6 +212,7 @@ def build_sales_recovery_context(
     tenant_id: UUID,
     run_id: UUID,
     trigger_reason: TriggerReason,
+    user_request: str,
 ) -> SalesRecoveryContext:
     """Sole constructor for SalesRecoveryContext bundles.
 
@@ -189,7 +220,17 @@ def build_sales_recovery_context(
     completeness flags, enforces the 8K-token cap (per-section truncation in a
     fixed order), and assembles the bundle. Raises ``ContextOverflowError`` if
     the bundle still exceeds the cap after maximum truncation.
+
+    ``user_request`` (Exec-6.85): the orchestrator-supplied owner message
+    that triggered the dispatch. Required, must be non-empty — the
+    specialist cannot be spawned without one.
     """
+    if not isinstance(user_request, str) or not user_request.strip():
+        raise ValueError(
+            "build_sales_recovery_context: user_request must be a non-empty"
+            " string (orchestrator must supply the owner message before"
+            " dispatch)"
+        )
     budgets = _load_budgets()
     effective_cap = int(int(budgets["total_cap"]) * _SAFETY_MARGIN)
 
@@ -260,6 +301,7 @@ def build_sales_recovery_context(
     return SalesRecoveryContext(
         tenant_id=tenant_id,
         run_id=run_id,
+        user_request=user_request,
         trigger_reason=trigger_reason,
         business_profile=business_profile,
         customer_ledger_summary=ledger_summary,

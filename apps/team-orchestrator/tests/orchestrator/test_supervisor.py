@@ -191,6 +191,12 @@ def test_orchestrator_spawns_sales_recovery_returns_campaign_plan(
     )
     wallclock_s = time.monotonic() - wallclock_start
 
+    # --- Exec-6.85 bundle wire-through ---------------------------------
+    # The Composer bundle attached at handoff lives on the final state.
+    # Inspect it BEFORE asserting so the diag captures the truth probe
+    # even if a later assertion fails.
+    final_bundle = result.get("sales_recovery_context")
+
     diag = {
         "wallclock_s": wallclock_s,
         "active_agent": result.get("active_agent"),
@@ -198,6 +204,18 @@ def test_orchestrator_spawns_sales_recovery_returns_campaign_plan(
         "specialist_call_count": len(_CountingClient.calls_to_real_anthropic),
         "specialist_call_ledger": _CountingClient.calls_to_real_anthropic,
         "result_keys": sorted(result.keys()) if result else None,
+        "bundle_present": final_bundle is not None,
+        "bundle_user_request": (
+            final_bundle.user_request if final_bundle is not None else None
+        ),
+        "bundle_data_completeness": (
+            dict(final_bundle.data_completeness)
+            if final_bundle is not None
+            else None
+        ),
+        "bundle_trigger_reason": (
+            final_bundle.trigger_reason if final_bundle is not None else None
+        ),
     }
 
     # --- PROOF-OF-CALL: load-bearing -----------------------------------
@@ -216,6 +234,32 @@ def test_orchestrator_spawns_sales_recovery_returns_campaign_plan(
     # Opus. >=2s is a weak but reasonable lower bound.
     assert wallclock_s > 2.0, diag
 
+    # --- Exec-6.85 wire-through assertions -----------------------------
+    # (6) Composer bundle reached the final state. A None here means the
+    # handoff broke and the specialist ran against no task context.
+    assert final_bundle is not None, diag
+    # (7) Bundle carries the orchestrator's user_request — the first user
+    # message that hits the specialist's SDK call must come from the
+    # bundle, not a stale hardcoded cue.
+    assert final_bundle.user_request == USER_INPUT, diag
+    assert first_call["first_user_message"] == USER_INPUT, diag
+    # (8) Bundle identity matches the invocation state. Cross-tenant
+    # contamination would show up here.
+    assert final_bundle.tenant_id == tenant_id, diag
+    assert final_bundle.run_id == run_id, diag
+    # (9) data_completeness is structurally well-formed — five section
+    # keys, all booleans. CL-190 substrate-absence makes the truth probe
+    # for content emptiness (every flag False) a FINDING captured in
+    # diag, not an assertion: when L1 KG / L2 episodic / campaigns /
+    # owner_inputs land the values flip True without code change here.
+    assert set(final_bundle.data_completeness.keys()) == {
+        "business_profile",
+        "customer_ledger_summary",
+        "recent_campaigns",
+        "attribution_snapshot",
+        "pending_owner_inputs",
+    }, diag
+
     # --- Shape conformance ---------------------------------------------
     plan = result.get("campaign_plan")
     # ANY v1.0 variant is a PASS — empty uuid4() tenant legitimately
@@ -227,6 +271,182 @@ def test_orchestrator_spawns_sales_recovery_returns_campaign_plan(
     # context fields.
     assert plan.tenant_id == tenant_id, diag
     assert plan.run_id == run_id, diag
+
+
+# --- Exec-6.85: cheap-model wire-through canary (Haiku) -----------------------
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(
+    not os.environ.get("ANTHROPIC_API_KEY")
+    or not os.environ.get("DATABASE_URL"),
+    reason=(
+        "Exec-6.85 bundle canary needs ANTHROPIC_API_KEY (real model call) "
+        "+ DATABASE_URL (collapse node persistence). Haiku-flavored — "
+        "cheaper than the Opus canary above, used to gate the wire-through "
+        "contract without burning Opus quota on every PR. RUN_INTEGRATION_TESTS=1 "
+        "alone is insufficient."
+    ),
+)
+def test_orchestrator_spawns_sales_recovery_bundle_wire_through_canary_haiku(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Exec-6.85 truth probe: prove the Composer bundle reaches the
+    specialist on the live path, using Haiku to keep canary cost trivial.
+
+    Wire-through assertions (load-bearing):
+      - Composer bundle present on the final state with the
+        orchestrator-supplied ``user_request`` threaded in.
+      - The specialist's first SDK call carries that ``user_request`` as
+        the initial user message (proves the agent loop's seed message
+        comes from the bundle, not a stale hardcoded cue).
+      - Tenant + run identity on the bundle matches invocation state.
+      - ``data_completeness`` is structurally well-formed (five section
+        keys, booleans). Content emptiness with CL-190 substrate
+        absence is captured in diag, not asserted (TRUTH-PROBE finding
+        — the substrates land in later PRs and flip values to True
+        without touching the wire-through contract).
+
+    Proof-of-call discipline (mandatory): real billed call captured via
+    ``_CountingClient``, message id has the ``msg_`` prefix, wall-clock
+    floor consistent with a real round-trip. A green report without
+    these signals would be a dead canary.
+
+    Cheap-model flavor: VIABE_ENV=test resolves the specialist to
+    Haiku; the orchestrator is also driven through ``ChatAnthropic``
+    with Haiku to keep the second leg cheap.
+    """
+    import time
+
+    from anthropic import Anthropic as _RealAnthropic
+
+    assert _RealAnthropic.__module__.startswith("anthropic"), (
+        f"anthropic.Anthropic non-genuine: module={_RealAnthropic.__module__!r}"
+    )
+
+    class _CountingClient:
+        """Real Anthropic SDK + ledger — counts AFTER each call returns."""
+
+        calls: list[dict[str, Any]] = []
+
+        def __init__(self) -> None:
+            self._real = _RealAnthropic()
+
+        @property
+        def messages(self):  # type: ignore[no-untyped-def]
+            return self
+
+        def create(self, **kwargs):  # type: ignore[no-untyped-def]
+            response = self._real.messages.create(**kwargs)
+            _CountingClient.calls.append(
+                {
+                    "model": kwargs.get("model"),
+                    "first_user_message": (
+                        kwargs["messages"][0].get("content")
+                        if kwargs.get("messages")
+                        and isinstance(kwargs["messages"][0], dict)
+                        else None
+                    ),
+                    "response_id": getattr(response, "id", None),
+                    "response_usage_input": getattr(
+                        getattr(response, "usage", None), "input_tokens", None
+                    ),
+                    "response_usage_output": getattr(
+                        getattr(response, "usage", None), "output_tokens", None
+                    ),
+                }
+            )
+            return response
+
+    _CountingClient.calls = []
+    monkeypatch.setattr(
+        "orchestrator.agent.sales_recovery.Anthropic", _CountingClient
+    )
+    monkeypatch.setenv("VIABE_ENV", "test")  # _resolve_model → Haiku
+
+    model = ChatAnthropic(model="claude-haiku-4-5")  # type: ignore[call-arg]
+    graph = build_supervisor_graph(model=model)
+
+    tenant_id = uuid4()
+    run_id = uuid4()
+    USER_INPUT = "Recover dormant customers from the last 60 days"
+
+    wallclock_start = time.monotonic()
+    result = graph.invoke(
+        {
+            "messages": [{"role": "user", "content": USER_INPUT}],
+            "tenant_id": tenant_id,
+            "run_id": run_id,
+        }
+    )
+    wallclock_s = time.monotonic() - wallclock_start
+
+    final_bundle = result.get("sales_recovery_context")
+
+    diag = {
+        "wallclock_s": wallclock_s,
+        "active_agent": result.get("active_agent"),
+        "campaign_plan_type": type(result.get("campaign_plan")).__name__,
+        "specialist_call_count": len(_CountingClient.calls),
+        "specialist_call_ledger": _CountingClient.calls,
+        "result_keys": sorted(result.keys()) if result else None,
+        "bundle_present": final_bundle is not None,
+        "bundle_user_request": (
+            final_bundle.user_request if final_bundle is not None else None
+        ),
+        "bundle_data_completeness": (
+            dict(final_bundle.data_completeness)
+            if final_bundle is not None
+            else None
+        ),
+        "bundle_trigger_reason": (
+            final_bundle.trigger_reason if final_bundle is not None else None
+        ),
+    }
+
+    # --- Proof-of-call -------------------------------------------------
+    assert len(_CountingClient.calls) >= 1, diag
+    first_call = _CountingClient.calls[0]
+    assert first_call["model"] == "claude-haiku-4-5", diag
+    assert isinstance(first_call["response_id"], str), diag
+    assert first_call["response_id"].startswith("msg_"), diag
+    assert result.get("active_agent") == "sales_recovery_agent", diag
+    # Haiku is faster than Opus; relax the wall-clock floor accordingly.
+    assert wallclock_s > 0.5, diag
+
+    # --- Wire-through (Exec-6.85) --------------------------------------
+    assert final_bundle is not None, diag
+    assert final_bundle.user_request == USER_INPUT, diag
+    assert first_call["first_user_message"] == USER_INPUT, diag
+    assert final_bundle.tenant_id == tenant_id, diag
+    assert final_bundle.run_id == run_id, diag
+    assert set(final_bundle.data_completeness.keys()) == {
+        "business_profile",
+        "customer_ledger_summary",
+        "recent_campaigns",
+        "attribution_snapshot",
+        "pending_owner_inputs",
+    }, diag
+
+    # --- Verdict capture (no narrowing) --------------------------------
+    plan = result.get("campaign_plan")
+    assert isinstance(plan, _CampaignPlanVariants), diag
+    assert plan.tenant_id == tenant_id, diag
+    assert plan.run_id == run_id, diag
+    # Surface the verdict + finding regardless of variant — captured so a
+    # CI run output (or a manual paste in the PR body) carries the truth.
+    print(
+        "EXEC685_VERDICT:",
+        type(plan).__name__,
+        "data_completeness:",
+        dict(final_bundle.data_completeness),
+        "user_request_threaded:",
+        final_bundle.user_request,
+        "calls:",
+        len(_CountingClient.calls),
+        "wallclock_s:",
+        round(wallclock_s, 2),
+    )
 
 
 # --- VT-3.4 PR 2/3: landmine-1 keyless precedence test (CL-202 / CL-203) ------
@@ -417,3 +637,118 @@ def test_supervisor_graph_spawn_vs_no_spawn_precedence(
     assert "sales_recovery_agent" not in n_trace, (
         "no-spawn path must NOT reach sales_recovery_agent"
     )
+
+
+# --- Exec-6.85: Context Composer bundle wire-through (keyless) ----------------
+
+
+def test_sales_recovery_node_passes_bundle_to_agent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Exec-6.85 seam: ``_sales_recovery_node`` consumes the Composer
+    bundle from ``state['sales_recovery_context']`` and hands it to
+    ``run_sales_recovery_agent`` unchanged. Locks against a regression
+    where the node constructs a fresh minimal context and discards the
+    bundle (the pre-Exec-6.85 defect).
+
+    Keyless: monkeypatches ``run_sales_recovery_agent`` to capture the
+    received context and short-circuit. SelfEvaluateAdapter constructs
+    against a ToolContext with real UUIDs from the bundle.
+    """
+    import orchestrator.supervisor as supervisor_mod
+    from orchestrator.agent.types import AgentResult
+    from orchestrator.context_builder import build_sales_recovery_context
+
+    received: dict[str, Any] = {}
+
+    def _capture(context: Any, *, evaluator: Any) -> AgentResult:
+        received["context"] = context
+        received["evaluator"] = evaluator
+        return AgentResult(
+            status="completed",
+            output={
+                "status": "insufficient_data",
+                "tenant_id": str(context.tenant_id),
+                "run_id": str(context.run_id),
+                "generated_at": "2026-05-22T00:00:00+00:00",
+                "missing_data": [
+                    {
+                        "category": "customer_ledger_summary",
+                        "description": "no dormant customers seeded",
+                        "suggested_remediation": "Run customer-ledger ingest.",
+                    }
+                ],
+            },
+        )
+
+    monkeypatch.setattr(supervisor_mod, "run_sales_recovery_agent", _capture)
+    # Avoid persisting to DB — the node's downstream parse_campaign_plan is
+    # the only consumer of the AgentResult; that runs in-process.
+    monkeypatch.setattr(
+        supervisor_mod, "SelfEvaluateAdapter", lambda *, ctx: None
+    )
+
+    tenant_id = uuid4()
+    run_id = uuid4()
+    bundle = build_sales_recovery_context(
+        tenant_id, run_id, "weekly_cadence", "Recover dormant customers"
+    )
+
+    update = supervisor_mod._sales_recovery_node(
+        {"sales_recovery_context": bundle}
+    )
+
+    # Wire-through proof: the agent received the SAME bundle the handoff
+    # attached — not a freshly constructed minimal context.
+    assert received["context"] is bundle
+    # Downstream parse still produces a plan keyed to bundle identity.
+    plan = update["campaign_plan"]
+    assert plan.tenant_id == tenant_id
+    assert plan.run_id == run_id
+
+
+def test_sales_recovery_node_fails_loud_on_missing_bundle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Exec-6.85: a None bundle at the seam is a broken handoff. Fail
+    loud with TenantIsolationError rather than silently constructing a
+    fresh context that would run the specialist against no task data."""
+    import orchestrator.supervisor as supervisor_mod
+    from orchestrator._tenant_guard import TenantIsolationError
+
+    with pytest.raises(TenantIsolationError, match="sales_recovery_context"):
+        supervisor_mod._sales_recovery_node({})
+    with pytest.raises(TenantIsolationError, match="sales_recovery_context"):
+        supervisor_mod._sales_recovery_node(
+            {"sales_recovery_context": None}
+        )
+
+
+def test_spawn_sales_recovery_attaches_bundle_with_user_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Exec-6.85: ``_build_sales_recovery_update`` reads the first user
+    message from state and threads it into the bundle's ``user_request``.
+    Pre-Exec-6.85 the bundle had no user_request field; the specialist
+    extracted it node-side. Now the seam carries it.
+    """
+    from orchestrator.handoffs import _build_sales_recovery_update
+
+    tenant_id = uuid4()
+    run_id = uuid4()
+    USER_TEXT = "Recover dormant customers from the last 60 days"
+
+    update = _build_sales_recovery_update(
+        {
+            "messages": [{"role": "user", "content": USER_TEXT}],
+            "tenant_id": tenant_id,
+            "run_id": run_id,
+            "trigger_reason": "owner_initiated",
+        }
+    )
+
+    bundle = update["sales_recovery_context"]
+    assert bundle.tenant_id == tenant_id
+    assert bundle.run_id == run_id
+    assert bundle.user_request == USER_TEXT
+    assert bundle.trigger_reason == "owner_initiated"
