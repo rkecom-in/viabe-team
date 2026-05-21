@@ -15,7 +15,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Annotated, Any
 
-from langchain_core.messages import ToolMessage
+from langchain_core.messages import HumanMessage, ToolMessage
 from langchain_core.tools import BaseTool, InjectedToolCallId, tool
 from langgraph.prebuilt import InjectedState
 from langgraph.types import Command
@@ -23,6 +23,38 @@ from langgraph.types import Command
 from orchestrator._tenant_guard import TenantIsolationError
 from orchestrator.context_builder import build_sales_recovery_context
 from orchestrator.types.trigger_reason import TriggerReason
+
+
+def _extract_user_request_from_state(state: dict[str, Any]) -> str:
+    """Pull the first HumanMessage content from ``state['messages']``.
+
+    Exec-6.85: the Composer now carries ``user_request`` inside the bundle,
+    so the handoff must extract it at the spawn site (instead of letting
+    the specialist node do it post-handoff). Tolerates the two on-disk
+    message shapes used by the supervisor graph + the invoke() seed shape.
+    """
+    messages = state.get("messages") or []
+    if not messages:
+        raise ValueError(
+            "spawn_sales_recovery: state['messages'] is empty —"
+            " orchestrator must spawn the specialist with a user request"
+        )
+    first = messages[0]
+    if isinstance(first, HumanMessage):
+        content: Any = first.content
+    elif isinstance(first, dict) and first.get("role") == "user":
+        content = first.get("content", "")
+    else:
+        raise ValueError(
+            "spawn_sales_recovery: state['messages'][0] is not a user"
+            f" message (got {type(first).__name__})"
+        )
+    if isinstance(content, list):
+        parts = [b.get("text", "") for b in content if isinstance(b, dict)]
+        content = "".join(parts)
+    if not isinstance(content, str) or not content.strip():
+        raise ValueError("spawn_sales_recovery: user request is empty")
+    return content
 
 
 def make_spawn_tool(
@@ -94,10 +126,15 @@ def _build_sales_recovery_update(state: dict[str, Any]) -> dict[str, Any]:
     # upstream source stays observable rather than masked.
     trigger_reason: TriggerReason = state.get("trigger_reason") or "weekly_cadence"
 
+    # Exec-6.85: user_request is now part of the bundle. Extract at the
+    # handoff site rather than re-extracting in the specialist node.
+    user_request = _extract_user_request_from_state(state)
+
     bundle = build_sales_recovery_context(
         tenant_id=tenant_id,
         run_id=run_id,
         trigger_reason=trigger_reason,
+        user_request=user_request,
     )
     return {"sales_recovery_context": bundle}
 

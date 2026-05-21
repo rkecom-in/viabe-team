@@ -335,8 +335,8 @@ def test_run_sales_recovery_agent_path_a_emits_failure_record(monkeypatch):
     run_id = uuid4()
     result = run_sales_recovery_agent(
         SalesRecoveryContext(
-            tenant_id=str(tenant_id),
-            run_id=str(run_id),
+            tenant_id=tenant_id,
+            run_id=run_id,
             user_request="Recover dormant customers from the last 60 days",
         )
     )
@@ -428,9 +428,15 @@ def test_sales_recovery_node_returns_agent_result_under_agent_result_key(monkeyp
     ``SelfEvaluateAdapter`` per invocation and routes through the gate.
     For the placeholder JSON response the loop's placeholder-branch
     fires before the gate runs (gate only sees CampaignPlan-shaped
-    drafts), so the gate doesn't need a real seam here. Real UUIDs
-    are required because the node builds a ToolContext."""
+    drafts), so the gate doesn't need a real seam here.
+
+    Exec-6.85: the node consumes the Context Composer bundle from
+    ``state['sales_recovery_context']`` — supply one via
+    ``build_sales_recovery_context``.
+    """
     from uuid import uuid4
+
+    from orchestrator.context_builder import build_sales_recovery_context
 
     response = _fake_response(text='{"status": "placeholder"}')
     fake_client = _patched_client(response)
@@ -439,30 +445,25 @@ def test_sales_recovery_node_returns_agent_result_under_agent_result_key(monkeyp
         "orchestrator.agent.sales_recovery.Anthropic", lambda: fake_client
     )
 
-    update = sales_recovery_node(
-        {
-            "tenant_id": uuid4(),
-            "run_id": uuid4(),
-            "user_request": "test request",
-        }
+    bundle = build_sales_recovery_context(
+        uuid4(), uuid4(), "weekly_cadence", "test request"
     )
+    update = sales_recovery_node({"sales_recovery_context": bundle})
     assert "agent_result" in update
     assert update["agent_result"]["status"] == "placeholder"
     assert update["agent_result"]["output"] == {"status": "placeholder"}
 
 
-def test_sales_recovery_node_fail_loud_on_missing_tenant_id():
+def test_sales_recovery_node_fail_loud_on_missing_bundle():
+    """Exec-6.85: state with no Context Composer bundle is a contract
+    breach at the seam — fail loud with TenantIsolationError rather than
+    running the specialist against no task context."""
     from orchestrator._tenant_guard import TenantIsolationError
 
-    with pytest.raises(TenantIsolationError):
-        sales_recovery_node({"run_id": "r1"})
-
-
-def test_sales_recovery_node_fail_loud_on_missing_run_id():
-    from orchestrator._tenant_guard import TenantIsolationError
-
-    with pytest.raises(TenantIsolationError):
-        sales_recovery_node({"tenant_id": "t1"})
+    with pytest.raises(TenantIsolationError, match="sales_recovery_context"):
+        sales_recovery_node({})
+    with pytest.raises(TenantIsolationError, match="sales_recovery_context"):
+        sales_recovery_node({"sales_recovery_context": None})
 
 
 # --- CL-288: emit-shape coercion / per-variant payload ----------------------
