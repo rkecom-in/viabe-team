@@ -389,6 +389,324 @@ def test_sales_recovery_node_fail_loud_on_missing_run_id():
         sales_recovery_node({"tenant_id": "t1"})
 
 
+# --- CL-288: emit-shape coercion / per-variant payload ----------------------
+
+
+def _future_window_pair() -> tuple[str, str]:
+    """ISO timestamps for a 7-day campaign window starting tomorrow.
+
+    CampaignWindow validator rejects backdated starts and requires
+    end > start; pin both to safe future-tz-aware values.
+    """
+    from datetime import UTC, datetime, timedelta
+
+    start = datetime.now(UTC) + timedelta(days=1)
+    end = start + timedelta(days=7)
+    return start.isoformat(), end.isoformat()
+
+
+def _proposed_raw_minimal() -> dict[str, Any]:
+    """The minimal valid raw dict an obedient model would emit for the
+    PROPOSED variant. Mimics what `_parse_placeholder_output` returns
+    once coerced; pre-coercion the model also emits forbidden fields
+    that this fixture deliberately includes to exercise the dropper."""
+    from uuid import uuid4
+
+    start, end = _future_window_pair()
+    return {
+        "status": "proposed",
+        "campaign_window": {"start": start, "end": end},
+        "target_cohort": {
+            "customer_ids": [str(uuid4())],
+            "cohort_label": "dormant-60d",
+            "cohort_size": 1,
+            "selection_reason": "Inactive customers last 60d [E1].",
+        },
+        "expected_arrr": {
+            "low_paise": 100_000,
+            "high_paise": 500_000,
+            "confidence": "low",
+            "basis": "Historical recovery rate 20-40% per [E1].",
+        },
+        "evidence_refs": [
+            {
+                "claim_id": "E1",
+                "source_kind": "l4_skill_corpus",
+                "source_id": "dormant-recovery-benchmark",
+                "note": None,
+            }
+        ],
+        "message_plan": {
+            "template_id": "dormant_recovery_v1",
+            "template_params": {"discount": "10"},
+            "language": "en",
+            "personalization": "Hi {name}, we miss you.",
+        },
+        # The model would set the identity fields too — coercion overwrites.
+        "tenant_id": "00000000-0000-0000-0000-aaaaaaaaaaaa",
+        "run_id": "00000000-0000-0000-0000-bbbbbbbbbbbb",
+        "generated_at": "2020-01-01T00:00:00+00:00",
+        # Forbidden-on-proposed (empty) — should be dropped silently.
+        "out_of_scope_reason": None,
+        "missing_data": [],
+    }
+
+
+def _out_of_scope_raw_minimal() -> dict[str, Any]:
+    return {
+        "status": "out_of_scope",
+        "out_of_scope_reason": (
+            "Request is about review reputation; that's the reputation "
+            "specialist, not sales recovery."
+        ),
+        "suggested_specialist": "reputation",
+        # Forbidden empty — should be dropped silently.
+        "campaign_window": None,
+        "target_cohort": None,
+        "expected_arrr": None,
+        "evidence_refs": [],
+        "message_plan": None,
+        "missing_data": [],
+        "tenant_id": None,
+        "run_id": None,
+        "generated_at": None,
+    }
+
+
+def _insufficient_data_raw_minimal() -> dict[str, Any]:
+    return {
+        "status": "insufficient_data",
+        "missing_data": [
+            {
+                "category": "cohort",
+                "description": "No customer rows surfaced for this tenant.",
+                "suggested_remediation": "Seed the customer ledger.",
+            }
+        ],
+        # Forbidden empty — should be dropped silently.
+        "out_of_scope_reason": None,
+        "suggested_specialist": None,
+        "campaign_window": None,
+        "target_cohort": None,
+        "expected_arrr": None,
+        "evidence_refs": [],
+        "message_plan": None,
+        "tenant_id": None,
+        "run_id": None,
+        "generated_at": None,
+    }
+
+
+def _ctx_with_real_uuids() -> "SalesRecoveryContext":
+    from uuid import uuid4
+
+    return SalesRecoveryContext(tenant_id=str(uuid4()), run_id=str(uuid4()))
+
+
+def test_construct_variant_payload_proposed_roundtrips_through_parse():
+    """CL-288: proposed variant — coerce model raw → parse_campaign_plan
+    returns CampaignPlanProposed with identity fields injected from
+    context, populated forbidden fields dropped silently (none here),
+    and the campaign-side fields preserved."""
+    from datetime import UTC, datetime
+
+    from orchestrator.agent.sales_recovery import _construct_variant_payload
+    from orchestrator.agent.schemas.campaign_plan import (
+        CampaignPlanProposed,
+        CampaignStatus,
+        parse_campaign_plan,
+    )
+
+    ctx = _ctx_with_real_uuids()
+    now = datetime.now(UTC)
+    payload, dropped_empty, dropped_populated = _construct_variant_payload(
+        _proposed_raw_minimal(), context=ctx, generated_at=now
+    )
+
+    plan = parse_campaign_plan(payload)
+    assert isinstance(plan, CampaignPlanProposed)
+    assert plan.status is CampaignStatus.PROPOSED
+    assert str(plan.tenant_id) == ctx.tenant_id  # overwritten from context
+    assert str(plan.run_id) == ctx.run_id
+    assert plan.generated_at == now
+    assert plan.target_cohort.cohort_label == "dormant-60d"
+    # `out_of_scope_reason` and `missing_data` (empty on the raw dict)
+    # were silently dropped — not present on the payload.
+    assert "out_of_scope_reason" not in payload
+    assert "missing_data" not in payload
+    assert dropped_populated == {}
+    assert sorted(dropped_empty) == ["missing_data", "out_of_scope_reason"]
+
+
+def test_construct_variant_payload_out_of_scope_roundtrips_through_parse():
+    """CL-288: out_of_scope variant — coerce + parse → CampaignPlanOutOfScope.
+    All forbidden proposed-only / insufficient_data-only fields dropped."""
+    from datetime import UTC, datetime
+
+    from orchestrator.agent.sales_recovery import _construct_variant_payload
+    from orchestrator.agent.schemas.campaign_plan import (
+        CampaignPlanOutOfScope,
+        CampaignStatus,
+        SuggestedSpecialist,
+        parse_campaign_plan,
+    )
+
+    ctx = _ctx_with_real_uuids()
+    payload, dropped_empty, dropped_populated = _construct_variant_payload(
+        _out_of_scope_raw_minimal(),
+        context=ctx,
+        generated_at=datetime.now(UTC),
+    )
+
+    plan = parse_campaign_plan(payload)
+    assert isinstance(plan, CampaignPlanOutOfScope)
+    assert plan.status is CampaignStatus.OUT_OF_SCOPE
+    assert plan.out_of_scope_reason.startswith("Request is about review")
+    assert plan.suggested_specialist is SuggestedSpecialist.REPUTATION
+    # Forbidden proposed-side fields are not on the payload.
+    for forbidden in (
+        "campaign_window",
+        "target_cohort",
+        "expected_arrr",
+        "evidence_refs",
+        "message_plan",
+        "missing_data",
+    ):
+        assert forbidden not in payload
+    assert dropped_populated == {}
+    # All forbidden keys were empty in the fixture — landed in dropped_empty.
+    assert sorted(dropped_empty) == [
+        "campaign_window",
+        "evidence_refs",
+        "expected_arrr",
+        "message_plan",
+        "missing_data",
+        "target_cohort",
+    ]
+
+
+def test_construct_variant_payload_insufficient_data_roundtrips_through_parse():
+    """CL-288: insufficient_data variant — coerce + parse →
+    CampaignPlanInsufficientData. Required identity fields injected;
+    missing_data preserved; all variant-forbidden fields dropped."""
+    from datetime import UTC, datetime
+
+    from orchestrator.agent.sales_recovery import _construct_variant_payload
+    from orchestrator.agent.schemas.campaign_plan import (
+        CampaignPlanInsufficientData,
+        CampaignStatus,
+        parse_campaign_plan,
+    )
+
+    ctx = _ctx_with_real_uuids()
+    now = datetime.now(UTC)
+    payload, dropped_empty, dropped_populated = _construct_variant_payload(
+        _insufficient_data_raw_minimal(), context=ctx, generated_at=now
+    )
+
+    plan = parse_campaign_plan(payload)
+    assert isinstance(plan, CampaignPlanInsufficientData)
+    assert plan.status is CampaignStatus.INSUFFICIENT_DATA
+    assert len(plan.missing_data) == 1
+    assert plan.missing_data[0].category == "cohort"
+    assert str(plan.tenant_id) == ctx.tenant_id
+    assert str(plan.run_id) == ctx.run_id
+    assert plan.generated_at == now
+    # Forbidden proposed-side + out_of_scope-side fields all absent.
+    for forbidden in (
+        "campaign_window",
+        "target_cohort",
+        "expected_arrr",
+        "evidence_refs",
+        "message_plan",
+        "out_of_scope_reason",
+        "suggested_specialist",
+    ):
+        assert forbidden not in payload
+    assert dropped_populated == {}
+    assert "campaign_window" in dropped_empty
+
+
+def test_construct_variant_payload_drops_populated_forbidden_and_emits(
+    monkeypatch,
+):
+    """CL-288 item 2 — populated forbidden field on a non-proposed verdict:
+    must be DROPPED from the payload AND surface a FailureRecord
+    (MODEL_OUTPUT_CONFLICT) plus a WARN-level log so model self-
+    contradiction is observable.
+
+    Fixture: insufficient_data verdict but the model also emitted a
+    populated ``message_plan`` (proposed-only) and a populated
+    ``out_of_scope_reason`` (out_of_scope-only). Coercion must drop both,
+    and the run-loop branch must route exactly one MODEL_OUTPUT_CONFLICT
+    failure carrying both keys."""
+    from datetime import UTC, datetime
+
+    from orchestrator.agent.sales_recovery import (
+        _construct_variant_payload,
+        _emit_model_output_conflict,
+    )
+    from orchestrator.agent.schemas.campaign_plan import (
+        CampaignPlanInsufficientData,
+        parse_campaign_plan,
+    )
+    from orchestrator.failures import FailureRecord, FailureType
+
+    raw = _insufficient_data_raw_minimal()
+    raw["message_plan"] = {
+        "template_id": "leftover_v1",
+        "template_params": {},
+        "language": "en",
+        "personalization": "hi",
+    }
+    raw["out_of_scope_reason"] = "leftover prose from a previous reasoning step"
+
+    ctx = _ctx_with_real_uuids()
+    payload, dropped_empty, dropped_populated = _construct_variant_payload(
+        raw, context=ctx, generated_at=datetime.now(UTC)
+    )
+
+    # Both populated forbidden fields surfaced in the dropped_populated
+    # dict, with their original raw values preserved for observability.
+    assert set(dropped_populated.keys()) == {"message_plan", "out_of_scope_reason"}
+    assert dropped_populated["out_of_scope_reason"].startswith("leftover prose")
+
+    # Payload itself does not carry the forbidden keys.
+    assert "message_plan" not in payload
+    assert "out_of_scope_reason" not in payload
+
+    # The payload still validates as the picked variant.
+    plan = parse_campaign_plan(payload)
+    assert isinstance(plan, CampaignPlanInsufficientData)
+
+    # Routing the conflict produces exactly one FailureRecord with the
+    # expected type + metadata. Patch route_failure so we capture it
+    # without touching the DB.
+    router = MagicMock()
+    monkeypatch.setattr(
+        "orchestrator.agent.sales_recovery.route_failure", router
+    )
+    _emit_model_output_conflict(
+        context=ctx,
+        status_value="insufficient_data",
+        dropped_keys=list(dropped_populated.keys()),
+        raw_values=dropped_populated,
+    )
+    assert router.call_count == 1
+    failure = router.call_args.args[0]
+    assert isinstance(failure, FailureRecord)
+    assert failure.failure_type is FailureType.MODEL_OUTPUT_CONFLICT
+    assert failure.metadata["variant"] == "insufficient_data"
+    assert set(failure.metadata["dropped_keys"]) == {
+        "message_plan",
+        "out_of_scope_reason",
+    }
+    assert (
+        "leftover prose"
+        in failure.metadata["dropped_values"]["out_of_scope_reason"]
+    )
+
+
 # --- Canary: real API, env-gated, NEVER runs in CI ---------------------------
 
 
