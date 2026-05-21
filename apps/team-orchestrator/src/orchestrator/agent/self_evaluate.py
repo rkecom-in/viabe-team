@@ -70,25 +70,31 @@ class SelfEvaluateOutcome(str, Enum):
 class SelfEvaluateFeedback:
     """Structured feedback for the four categories. VT-50 returns
     these; the agent's loop receives them as user-message content on a
-    REVISE verdict."""
+    REVISE verdict.
 
-    schema: str | None = None
-    pillar: str | None = None
-    consistency: str | None = None
-    legal: str | None = None
+    v1.1 (VT-SalesRecovery-Agent wiring): each category is a LIST of
+    distinct critique strings, NOT a single string. Multiple violations
+    within one category (e.g. two invented numbers under ``pillar``)
+    are preserved end-to-end instead of collapsing to one summary. A
+    category that passed evaluation carries ``None`` (or an empty list
+    — treated equivalently by ``as_messages``); a category that flagged
+    carries one OR more critique entries.
+    """
+
+    schema: list[str] | None = None
+    pillar: list[str] | None = None
+    consistency: list[str] | None = None
+    legal: list[str] | None = None
 
     def as_messages(self) -> list[dict[str, str]]:
         """Render the non-empty categories as a user-message-friendly
-        bullet list. Returns a single message list (one dict)."""
+        bullet list. One bullet per distinct violation. Returns a single
+        message list (one dict)."""
         lines: list[str] = ["self_evaluate REVISE — address each:"]
-        if self.schema:
-            lines.append(f"- schema: {self.schema}")
-        if self.pillar:
-            lines.append(f"- pillar: {self.pillar}")
-        if self.consistency:
-            lines.append(f"- consistency: {self.consistency}")
-        if self.legal:
-            lines.append(f"- legal: {self.legal}")
+        for category in ("schema", "pillar", "consistency", "legal"):
+            entries = getattr(self, category) or []
+            for entry in entries:
+                lines.append(f"- {category}: {entry}")
         return [{"role": "user", "content": "\n".join(lines)}]
 
 
@@ -151,21 +157,31 @@ class FakeSelfEvaluator:
 class GateAction(str, Enum):
     """What the loop should do after a gate call."""
 
-    SHIP = "ship"          # gate accepted (passed OR failed_after_revisions)
+    SHIP = "ship"          # gate accepted; ship the draft as passed
     RETRY = "retry"        # gate revised; loop must run another turn
     ABORTED = "aborted"    # hard-limit cancel fired during the gate call
     SEAM_ERROR = "error"   # seam raised; route as AGENT_INVALID_OUTPUT
+    REJECTED = "rejected"  # exhausted retry; route as SELF_EVAL_REJECTED
 
 
 @dataclass
 class GateOutcome:
     """Result of one gate evaluation. The loop reads ``action`` to
-    decide whether to ship, retry, or surface a failure."""
+    decide whether to ship, retry, or surface a failure.
+
+    ``rejection_feedback`` is populated only when ``action`` is
+    ``REJECTED`` — it carries the final REVISE's per-category feedback
+    so the loop can include it in the FailureRecord metadata for
+    escalation. ``feedback_messages`` is populated on ``RETRY`` only.
+    """
 
     action: GateAction
     self_evaluate_status: SelfEvaluateStatus = SelfEvaluateStatus.NOT_YET_EVALUATED
     feedback_messages: list[dict[str, str]] = field(default_factory=list)
     error_message: str | None = None
+    rejection_feedback: SelfEvaluateFeedback | None = None
+    attempt_number: int = 1
+    outcome: SelfEvaluateOutcome | None = None
 
 
 # ----------------------------------------------------------------------------
@@ -240,40 +256,57 @@ class SelfEvaluateGate:
         invoking the seam. If the increment trips the hard-limit cap,
         the cancellation context is signalled and the gate returns
         without calling the seam — hard limits precede gate logic.
+
+        Locked REVISE contract (VT-SalesRecovery-Agent wiring):
+          - PASS first → SHIP with status=PASSED
+          - 1st REVISE → RETRY (one retry permitted)
+          - 2nd REVISE → REJECTED (no second retry, no ship-with-flag)
+        The ``max_revisions`` config value is the threshold at which
+        REJECTED fires. With the current ``max_revisions=2``, two
+        accumulated REVISE verdicts reject the run.
         """
         self.tool_counter.record_dispatch()
         if self.ctx.is_cancelled:
             return GateOutcome(action=GateAction.ABORTED)
 
         self.evaluator_calls += 1
+        attempt = self.evaluator_calls
         try:
             verdict = self.evaluator.evaluate(draft, EVALUATION_CRITERIA)
         except Exception as exc:  # noqa: BLE001 — surface via outcome
             return GateOutcome(
                 action=GateAction.SEAM_ERROR,
                 error_message=str(exc),
+                attempt_number=attempt,
             )
 
         if verdict.outcome is SelfEvaluateOutcome.PASS:
             return GateOutcome(
                 action=GateAction.SHIP,
                 self_evaluate_status=SelfEvaluateStatus.PASSED,
+                attempt_number=attempt,
+                outcome=SelfEvaluateOutcome.PASS,
             )
 
-        # REVISE — increment FIRST, then decide. Two-revise-then-fail
-        # means the Nth REVISE (where N == max_revisions) ships with the
-        # failure flag; the agent does not get another redraft.
+        # REVISE — increment first, then decide between RETRY and REJECT.
+        # At max_revisions accumulated, the gate REJECTS the run —
+        # never ships a draft known-bad (no ship-with-flag).
         self.revisions_used += 1
         if self.revisions_used >= self.config.max_revisions:
             return GateOutcome(
-                action=GateAction.SHIP,
+                action=GateAction.REJECTED,
                 self_evaluate_status=SelfEvaluateStatus.FAILED_AFTER_REVISIONS,
+                rejection_feedback=verdict.feedback,
+                attempt_number=attempt,
+                outcome=SelfEvaluateOutcome.REVISE,
             )
 
         feedback = verdict.feedback or SelfEvaluateFeedback()
         return GateOutcome(
             action=GateAction.RETRY,
             feedback_messages=feedback.as_messages(),
+            attempt_number=attempt,
+            outcome=SelfEvaluateOutcome.REVISE,
         )
 
 

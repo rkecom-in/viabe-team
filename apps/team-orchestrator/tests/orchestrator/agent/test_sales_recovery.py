@@ -350,7 +350,16 @@ def test_cost_rejects_negative_token_counts():
 
 
 def test_sales_recovery_node_returns_agent_result_under_agent_result_key(monkeypatch):
-    """The node translates AgentResult → state update under 'agent_result'."""
+    """The node translates AgentResult → state update under 'agent_result'.
+
+    The node now (VT-SalesRecovery-Agent gate-wiring) constructs a
+    ``SelfEvaluateAdapter`` per invocation and routes through the gate.
+    For the placeholder JSON response the loop's placeholder-branch
+    fires before the gate runs (gate only sees CampaignPlan-shaped
+    drafts), so the gate doesn't need a real seam here. Real UUIDs
+    are required because the node builds a ToolContext."""
+    from uuid import uuid4
+
     response = _fake_response(text='{"status": "placeholder"}')
     fake_client = _patched_client(response)
     monkeypatch.setenv("VIABE_ENV", "test")
@@ -358,7 +367,9 @@ def test_sales_recovery_node_returns_agent_result_under_agent_result_key(monkeyp
         "orchestrator.agent.sales_recovery.Anthropic", lambda: fake_client
     )
 
-    update = sales_recovery_node({"tenant_id": "t1", "run_id": "r1"})
+    update = sales_recovery_node(
+        {"tenant_id": uuid4(), "run_id": uuid4()}
+    )
     assert "agent_result" in update
     assert update["agent_result"]["status"] == "placeholder"
     assert update["agent_result"]["output"] == {"status": "placeholder"}

@@ -44,7 +44,7 @@ class Severity(str, Enum):
 
 
 class FailureType(str, Enum):
-    """The nine business failure types (VT-29)."""
+    """The business failure types (VT-29 + extensions)."""
 
     TOOL_CALL_TIMEOUT = "tool_call_timeout"
     TOOL_CALL_ERROR = "tool_call_error"
@@ -55,6 +55,11 @@ class FailureType(str, Enum):
     DATABASE_ERROR = "database_error"
     WEBHOOK_SIGNATURE_FAILURE = "webhook_signature_failure"
     UNKNOWN_ERROR = "unknown_error"
+    # Self-evaluate gate's terminal failure: the draft was REVISE'd
+    # twice (initial + one retry) and the retry still failed quality
+    # gate checks. Escalates to Fazal, never ships. Added by VT-Sales-
+    # Recovery-Agent gate-wiring subtask.
+    SELF_EVAL_REJECTED = "self_eval_rejected"
 
 
 class HardLimitAxis(str, Enum):
@@ -150,6 +155,13 @@ SPECS: dict[FailureType, FailureTypeSpec] = {
     ),
     FailureType.UNKNOWN_ERROR: FailureTypeSpec(
         severity=Severity.CRITICAL,
+        retryable=False,
+        default_strategy=Strategy.ESCALATE_TO_FAZAL,
+        max_retries=0,
+        escalation_threshold=1,
+    ),
+    FailureType.SELF_EVAL_REJECTED: FailureTypeSpec(
+        severity=Severity.HIGH,
         retryable=False,
         default_strategy=Strategy.ESCALATE_TO_FAZAL,
         max_retries=0,
