@@ -576,7 +576,11 @@ def _insufficient_data_raw_minimal() -> dict[str, Any]:
 def _ctx_with_real_uuids() -> "SalesRecoveryContext":
     from uuid import uuid4
 
-    return SalesRecoveryContext(tenant_id=str(uuid4()), run_id=str(uuid4()))
+    return SalesRecoveryContext(
+        tenant_id=str(uuid4()),
+        run_id=str(uuid4()),
+        user_request="test request",
+    )
 
 
 def test_construct_variant_payload_proposed_roundtrips_through_parse():
