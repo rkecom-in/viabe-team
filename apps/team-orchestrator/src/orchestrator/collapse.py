@@ -1,18 +1,22 @@
-"""Collapse path (VT-3.4 PR 3/3, migrated to CampaignPlan v1.0 by VT-122).
+"""Collapse path (VT-3.4 PR 3/3, migrated to CampaignPlan v1.0 by VT-122,
+variant-correctness fix CL-294).
 
 Consumes the ``CampaignPlan`` the specialist left in ``AgentGraphState``
-and writes it through to durable storage:
+and writes it through to durable storage. The three v1.0 variants land
+on DIFFERENT durable surfaces (CL-294):
 
-  1. INSERT a row into ``campaigns`` (migration 016 + 018).
-  2. UPSERT the per-tenant ``subscriber_states`` row (migration 017),
-     bumping ``last_campaign_at`` and appending the new campaign id to
-     ``attribution_close_pending``.
+  - ``proposed`` → ``collapse_campaign_plan``: INSERT a ``campaigns``
+    row (migration 016 + 018), UPSERT ``subscriber_states`` (017).
+  - ``out_of_scope`` / ``insufficient_data`` → ``record_terminal_verdict``:
+    one ``pipeline_steps`` row (migration 006) with
+    ``step_kind='campaign_plan_terminal'``, variant + reason fields in
+    ``output_envelope``. No campaign row — the agent declined to act.
 
-Only the ``proposed`` variant produces a ``campaigns`` row. The
-``out_of_scope`` and ``insufficient_data`` variants are refusals /
-defers — they do not create a campaign and so do not collapse. If
-either reaches this function, fail loud: it indicates the caller did
-not gate on ``plan.status`` before invoking.
+Both terminal paths complete the graph cleanly. The dispatch lives in
+``collapse_node``: ``collapse_campaign_plan`` itself remains strictly
+proposed-only — its non-proposed RuntimeError is the fail-loud guard
+against the dispatch ever routing a non-proposed plan to the campaign-
+write path (defence in depth).
 
 The collapse path NEVER mutates ``phase`` and NEVER calls
 ``apply_transition``. Proposing a campaign is an activity, not a
@@ -26,6 +30,7 @@ enforced (CL-122 / Pillar 3).
 
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime
 from typing import Any, cast
 from uuid import UUID
@@ -40,20 +45,31 @@ from orchestrator.agent.schemas.campaign_plan import (
 from orchestrator.db import tenant_connection
 from orchestrator.state.agent_graph_state import AgentGraphState
 
+logger = logging.getLogger(__name__)
+
 
 def collapse_campaign_plan(
     tenant_id: UUID,
     run_id: UUID,
     campaign_plan: CampaignPlan,
 ) -> UUID:
-    """Persist ``campaign_plan`` and update the subscriber's activity row.
+    """Persist a PROPOSED ``campaign_plan`` and update the subscriber's
+    activity row. Returns the new ``campaigns.id``.
 
-    Returns the new ``campaigns.id``. Phase is left untouched — read
-    from ``tenants`` so the upserted ``subscriber_states`` row stays
-    consistent with the canonical phase mirror.
+    Strictly proposed-only by design (CL-294 Disposition B). The
+    non-proposed RuntimeError below is a fail-loud guard, not a path
+    consumers should hit — ``collapse_node`` dispatches non-proposed
+    variants to ``record_terminal_verdict`` BEFORE reaching this
+    function. A non-proposed plan arriving here means a routing bug
+    upstream (the dispatch broke or a future consumer called this
+    function directly without gating on variant first).
 
-    Raises ``RuntimeError`` if ``campaign_plan`` is not the
-    ``proposed`` variant — only proposed plans produce campaign rows.
+    Phase is left untouched — read from ``tenants`` so the upserted
+    ``subscriber_states`` row stays consistent with the canonical
+    phase mirror.
+
+    Raises ``RuntimeError`` if ``campaign_plan`` is not the proposed
+    variant (defence-in-depth guard; see above).
     Raises ``TenantIsolationError`` if ``tenant_id`` disagrees with
     ``campaign_plan.tenant_id`` (CL-202).
     """
@@ -129,13 +145,113 @@ def collapse_campaign_plan(
     return campaign_id
 
 
-def collapse_node(state: AgentGraphState) -> dict[str, Any]:
-    """StateGraph node wrapper. Reads run identity + plan from state, calls
-    ``collapse_campaign_plan``, and returns an empty state update.
+def record_terminal_verdict(
+    tenant_id: UUID,
+    run_id: UUID,
+    campaign_plan: CampaignPlan,
+) -> None:
+    """Record a non-proposed terminal verdict to ``pipeline_steps`` (CL-294).
 
-    Fail-loud on missing identifiers: tenant_id / run_id must be present by
-    the time the specialist has produced a CampaignPlan; absence means an
-    upstream wiring bug, not a tolerable edge case (CL-195).
+    Writes one ``pipeline_steps`` row with
+    ``step_kind='campaign_plan_terminal'``. The variant
+    (``out_of_scope`` / ``insufficient_data``) lives in
+    ``output_envelope['variant']``; per-variant detail fields
+    (``out_of_scope_reason`` / ``suggested_specialist`` /
+    ``missing_data``) also land in ``output_envelope`` so downstream
+    observability can read them without a second lookup.
+
+    Best-effort: routing failure logs but does NOT re-raise.
+    Observability must not break the graph. Matches the existing
+    ``error_router._log_decision`` + ``_emit_self_evaluate_attempt``
+    persistence patterns.
+
+    Raises ``TenantIsolationError`` if ``tenant_id`` disagrees with
+    ``campaign_plan.tenant_id`` (CL-202 — kept for all three variants).
+    """
+    if campaign_plan.tenant_id != tenant_id:
+        raise TenantIsolationError(
+            f"record_terminal_verdict: campaign_plan.tenant_id "
+            f"{campaign_plan.tenant_id} != state tenant_id {tenant_id}"
+        )
+
+    variant = campaign_plan.status.value
+    envelope: dict[str, Any] = {
+        "variant": variant,
+        "version": campaign_plan.version,
+        "generated_at": campaign_plan.generated_at.isoformat(),
+    }
+    # Per-variant detail fields. Read via getattr so this helper does
+    # not import the leaf variant classes — keeps the dispatch in
+    # collapse_node, the only place that branches on variant identity.
+    for key in (
+        "out_of_scope_reason",
+        "suggested_specialist",
+        "missing_data",
+    ):
+        if hasattr(campaign_plan, key):
+            value = getattr(campaign_plan, key)
+            if hasattr(value, "value"):  # enum
+                envelope[key] = value.value
+            elif isinstance(value, list):
+                envelope[key] = [
+                    item.model_dump(mode="json")
+                    if hasattr(item, "model_dump")
+                    else item
+                    for item in value
+                ]
+            else:
+                envelope[key] = value
+
+    try:
+        with tenant_connection(tenant_id) as conn, conn.transaction():
+            raw = conn.execute(
+                "SELECT COALESCE(MAX(step_index), 0) + 1 AS next "
+                "FROM pipeline_steps WHERE run_id = %s",
+                (str(run_id),),
+            ).fetchone()
+            row = cast("dict[str, Any]", raw)
+            next_index = int(row["next"])
+            conn.execute(
+                """
+                INSERT INTO pipeline_steps
+                    (run_id, tenant_id, step_index, step_kind,
+                     output_envelope, rationale)
+                VALUES (%s, %s, %s, 'campaign_plan_terminal', %s, %s)
+                """,
+                (
+                    str(run_id),
+                    str(tenant_id),
+                    next_index,
+                    Jsonb(envelope),
+                    f"agent terminal verdict: {variant}",
+                ),
+            )
+    except Exception:
+        # Observability must not break the graph. Log + continue.
+        logger.exception(
+            "collapse: failed to record campaign_plan_terminal verdict"
+            " (variant=%s, run_id=%s)",
+            variant,
+            run_id,
+        )
+
+
+def collapse_node(state: AgentGraphState) -> dict[str, Any]:
+    """StateGraph node wrapper. Reads run identity + plan from state and
+    dispatches by CampaignPlan variant (CL-294):
+
+      - ``CampaignPlanProposed`` → ``collapse_campaign_plan`` writes the
+        ``campaigns`` row + ``subscriber_states`` upsert.
+      - ``out_of_scope`` / ``insufficient_data`` → ``record_terminal_verdict``
+        writes one ``pipeline_steps`` row. No campaign row.
+
+    Both paths complete the graph cleanly. The graph reaches END
+    regardless of variant — refusals and defers are legitimate terminal
+    states, not failures.
+
+    Fail-loud on missing identifiers: tenant_id / run_id must be present
+    by the time the specialist has produced a CampaignPlan; absence
+    means an upstream wiring bug, not a tolerable edge case (CL-195).
     """
     tenant_id = state.get("tenant_id")
     if tenant_id is None:
@@ -150,5 +266,13 @@ def collapse_node(state: AgentGraphState) -> dict[str, Any]:
             "did not produce one"
         )
 
-    collapse_campaign_plan(tenant_id=tenant_id, run_id=run_id, campaign_plan=plan)
+    if isinstance(plan, CampaignPlanProposed):
+        collapse_campaign_plan(
+            tenant_id=tenant_id, run_id=run_id, campaign_plan=plan
+        )
+    else:
+        # out_of_scope / insufficient_data — terminal-but-valid.
+        record_terminal_verdict(
+            tenant_id=tenant_id, run_id=run_id, campaign_plan=plan
+        )
     return {}
