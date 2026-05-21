@@ -19,6 +19,7 @@ Fazal triggers it manually once before merge.
 from __future__ import annotations
 
 import os
+import time
 from dataclasses import asdict
 from types import SimpleNamespace
 from typing import Any
@@ -747,6 +748,14 @@ def test_canary_real_haiku_run_completes_with_parseable_json(monkeypatch):
 # _construct_variant_payload recognises and (b) the three per-variant prompt
 # examples actually drive shape-conformant model output.
 #
+# Env requirement is THREE-WAY:
+#   - RUN_INTEGRATION_TESTS=1 (conftest hook strips @pytest.mark.integration
+#     skip; without it, the marker collects a skip regardless of the keys)
+#   - ANTHROPIC_API_KEY (this test's skipif)
+#   - DATABASE_URL (this test's skipif)
+# RUN_INTEGRATION_TESTS=1 ALONE cannot satisfy — the skipif still fires
+# when the API key or DB url is missing. All three are independent gates.
+#
 # Asserts valid-any-variant. DOES NOT assert status='proposed' — empty
 # uuid4() tenant has no dormant customers, so insufficient_data is the
 # correct verdict and is a PASS. Plan-quality / seeded-fixture proposed-path
@@ -762,13 +771,33 @@ def test_canary_real_haiku_run_completes_with_parseable_json(monkeypatch):
         "CL-288 real-model integration test needs ANTHROPIC_API_KEY"
         " (one real Opus messages.create) AND DATABASE_URL (route_failure"
         " best-effort writes pipeline_steps if model emits a forbidden"
-        " field — see _emit_model_output_conflict)"
+        " field — see _emit_model_output_conflict). RUN_INTEGRATION_TESTS=1"
+        " alone is insufficient — all three env gates are required and"
+        " independent."
     ),
 )
 def test_cl288_real_opus_emit_shape_round_trips_through_parse(monkeypatch):
     """Real Opus + real v1.0 prompt: model output flows through
     _construct_variant_payload -> parse_campaign_plan and yields a
-    valid v1.0 CampaignPlan, whatever variant the model picks."""
+    valid v1.0 CampaignPlan, whatever variant the model picks.
+
+    Load-bearing assertions PROVE a real Opus round-trip happened — a
+    green pass here cannot be reached by a mock-leak / silent
+    substitution path. Specifically:
+      (1) ``_SubstitutingClient.calls_to_real_anthropic`` records every
+          call that reaches ``self._real.messages.create(...)`` AFTER
+          it returns. >=1 entry is required.
+      (2) The first such entry carries the canary user input — not the
+          'begin' placeholder. Proves the substitution fired AND that
+          the substituted call actually reached the SDK.
+      (3) ``model='claude-opus-4-7'``. Proves Opus (not Haiku) was the
+          target.
+      (4) The response carries an ``id`` starting with ``'msg_'`` —
+          the format only a real Anthropic API response produces.
+      (5) ``result.tokens_used > 0`` and ``result.cost_paise > 0`` —
+          proxy proof through the agent's own usage accounting, which
+          pulls from the real response's ``usage`` attribute.
+    """
     from uuid import uuid4
 
     from anthropic import Anthropic as _RealAnthropic
@@ -778,6 +807,13 @@ def test_cl288_real_opus_emit_shape_round_trips_through_parse(monkeypatch):
         CampaignPlanOutOfScope,
         CampaignPlanProposed,
         parse_campaign_plan,
+    )
+
+    # Sanity: confirm `anthropic.Anthropic` is the genuine SDK class at
+    # test runtime. If a session-scoped conftest had replaced it, this
+    # test would silently route through whatever fake was installed.
+    assert _RealAnthropic.__module__.startswith("anthropic"), (
+        f"anthropic.Anthropic appears non-genuine: module={_RealAnthropic.__module__!r}"
     )
 
     USER_INPUT = "Recover dormant customers from the last 60 days"
@@ -792,7 +828,17 @@ def test_cl288_real_opus_emit_shape_round_trips_through_parse(monkeypatch):
         the SDK boundary is the integration-test seam — production
         behaviour and run_sales_recovery_agent's signature both remain
         unchanged.
+
+        ``calls_to_real_anthropic`` is the proof-of-call ledger. Each
+        entry is appended ONLY AFTER ``self._real.messages.create(...)``
+        returns. If the real network call never happens (mock leak,
+        SDK-patch swallowing, etc.) the list stays empty and the
+        assertion below fails the test loud.
         """
+
+        # Class-level (not instance) so the assertions below can reach
+        # it without holding a reference to the constructed client.
+        calls_to_real_anthropic: list[dict[str, Any]] = []
 
         def __init__(self) -> None:
             self._real = _RealAnthropic()
@@ -811,17 +857,49 @@ def test_cl288_real_opus_emit_shape_round_trips_through_parse(monkeypatch):
             ):
                 msgs = [{"role": "user", "content": USER_INPUT}] + msgs[1:]
             kwargs["messages"] = msgs
-            return self._real.messages.create(**kwargs)
+            # Real network round-trip — the ONLY place this test wants
+            # to touch the SDK boundary. If anything in this expression
+            # is patched/mocked silently, no record gets appended and
+            # the proof-of-call assertion fails the test.
+            response = self._real.messages.create(**kwargs)
+            _SubstitutingClient.calls_to_real_anthropic.append(
+                {
+                    "model": kwargs.get("model"),
+                    "first_user_message": (
+                        msgs[0].get("content")
+                        if msgs and isinstance(msgs[0], dict)
+                        else None
+                    ),
+                    "response_id": getattr(response, "id", None),
+                    "response_usage_input": getattr(
+                        getattr(response, "usage", None),
+                        "input_tokens",
+                        None,
+                    ),
+                    "response_usage_output": getattr(
+                        getattr(response, "usage", None),
+                        "output_tokens",
+                        None,
+                    ),
+                }
+            )
+            return response
+
+    # Reset the class-level ledger so a previous run's state cannot
+    # satisfy this test's proof-of-call assertion.
+    _SubstitutingClient.calls_to_real_anthropic = []
 
     monkeypatch.setenv("VIABE_ENV", "production")  # _resolve_model -> Opus
     monkeypatch.setattr(
         "orchestrator.agent.sales_recovery.Anthropic", _SubstitutingClient
     )
 
+    wallclock_start = time.monotonic()
     context = SalesRecoveryContext(
         tenant_id=str(uuid4()), run_id=str(uuid4())
     )
     result = run_sales_recovery_agent(context, evaluator=None)
+    wallclock_s = time.monotonic() - wallclock_start
 
     # Diagnostic surface for debug if the test fails.
     diag = {
@@ -832,6 +910,8 @@ def test_cl288_real_opus_emit_shape_round_trips_through_parse(monkeypatch):
         "terminated_reason": result.terminated_reason,
         "tokens_used": result.tokens_used,
         "cost_paise": result.cost_paise,
+        "wallclock_s": wallclock_s,
+        "real_call_ledger": _SubstitutingClient.calls_to_real_anthropic,
         "output_keys": (
             sorted(result.output.keys()) if isinstance(result.output, dict) else None
         ),
@@ -840,6 +920,33 @@ def test_cl288_real_opus_emit_shape_round_trips_through_parse(monkeypatch):
         ),
     }
 
+    # --- PROOF-OF-CALL: load-bearing. ---------------------------------
+    # (1) Real Anthropic.messages.create returned at least once.
+    assert len(_SubstitutingClient.calls_to_real_anthropic) >= 1, diag
+    first_call = _SubstitutingClient.calls_to_real_anthropic[0]
+
+    # (2) Canary user input reached the SDK (not 'begin').
+    assert first_call["first_user_message"] == USER_INPUT, diag
+
+    # (3) Opus was the target.
+    assert first_call["model"] == "claude-opus-4-7", diag
+
+    # (4) Response id has the 'msg_' prefix only real Anthropic emits.
+    assert isinstance(first_call["response_id"], str), diag
+    assert first_call["response_id"].startswith("msg_"), diag
+
+    # (5) Usage attributes are present + populated (proxy proof through
+    # agent accounting — pulled from response.usage which is set by
+    # the real API server).
+    assert result.tokens_used > 0, diag
+    assert result.cost_paise > 0, diag
+
+    # Wall-clock floor — WEAK backup signal per brief. Opus single-turn
+    # is typically >= 1.5s end-to-end; <0.5s strongly suggests no real
+    # call. Not the primary gate; the four assertions above are.
+    assert wallclock_s > 0.5, diag
+
+    # --- Shape conformance (the actual CL-288 claim). -----------------
     # Output must exist — Path A / refusal / hard-limit-terminated paths
     # do not exercise CL-288's coercion seam.
     assert result.output is not None, diag
