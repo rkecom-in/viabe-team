@@ -22,16 +22,12 @@ from __future__ import annotations
 
 from dataclasses import asdict
 from typing import Any, Mapping
-from uuid import UUID
 
 from team_shared.mcp import ToolContext
 
 from orchestrator._tenant_guard import TenantIsolationError
 from orchestrator.agent.limits.wallclock_timer import WALL_CLOCK_HARD_LIMIT_S
-from orchestrator.agent.sales_recovery import (
-    SalesRecoveryContext,
-    run_sales_recovery_agent,
-)
+from orchestrator.agent.sales_recovery import run_sales_recovery_agent
 from orchestrator.agent.tools.self_evaluate import SelfEvaluateAdapter
 from orchestrator.db import tenant_connection
 
@@ -48,45 +44,35 @@ _RUN_WALLCLOCK_BUDGET_MS = int(WALL_CLOCK_HARD_LIMIT_S * 1000)
 def sales_recovery_node(state: Mapping[str, Any]) -> dict[str, Any]:
     """Run the specialist; return a state update carrying the AgentResult.
 
-    Fail-loud (Pillar 3 / CL-202): ``tenant_id`` and ``run_id`` MUST be
-    present in ``state``. Constructs a ``SelfEvaluateAdapter`` per
-    invocation (one ToolContext per run) and passes it into
-    ``run_sales_recovery_agent`` so the self-evaluate gate runs at every
-    terminal draft.
+    Exec-6.85: consumes the Context Composer bundle from
+    ``state['sales_recovery_context']``. The bundle carries tenant_id,
+    run_id, user_request, trigger_reason, and the Composer's per-section
+    payload. A missing bundle at this seam means the caller did not
+    invoke the Composer — fail loud rather than running the specialist
+    against no task context.
+
+    Constructs a ``SelfEvaluateAdapter`` per invocation (one ToolContext
+    per run) and passes it into ``run_sales_recovery_agent`` so the
+    self-evaluate gate runs at every terminal draft.
 
     The returned dict places the result under ``agent_result`` as a
     plain mapping (LangGraph state values must be reducer-friendly).
     """
-    tenant_id = state.get("tenant_id")
-    if tenant_id is None:
+    context = state.get("sales_recovery_context")
+    if context is None:
         raise TenantIsolationError(
-            "sales_recovery_node: tenant_id missing from state"
+            "sales_recovery_node: state['sales_recovery_context'] is None —"
+            " caller must attach the Context Composer bundle (either via"
+            " spawn_sales_recovery in the supervisor graph or via"
+            " build_sales_recovery_context for out-of-graph callers)."
         )
-    run_id = state.get("run_id")
-    if run_id is None:
-        raise TenantIsolationError(
-            "sales_recovery_node: run_id missing from state"
-        )
-    # CL-287: standalone wrapper's input contract — state must carry the
-    # orchestrator-supplied user request. The supervisor's
-    # ``_sales_recovery_node`` extracts it from ``state['messages']``;
-    # this wrapper (used outside the supervisor graph) takes it directly
-    # under ``state['user_request']``. Required, no default.
-    user_request = state.get("user_request")
-    if not isinstance(user_request, str) or not user_request.strip():
-        raise ValueError(
-            "sales_recovery_node: user_request missing or empty in state"
-        )
-
-    tenant_uuid = tenant_id if isinstance(tenant_id, UUID) else UUID(str(tenant_id))
-    run_uuid = run_id if isinstance(run_id, UUID) else UUID(str(run_id))
 
     # Per-invocation ToolContext for VT-50's adapter. db_handle bridges
     # to orchestrator.db.tenant_connection until VT-8.1 ships typed
     # wrappers (cf. VT-39 framework doc).
     tool_ctx = ToolContext(
-        tenant_id=tenant_uuid,
-        run_id=run_uuid,
+        tenant_id=context.tenant_id,
+        run_id=context.run_id,
         agent_id="sales_recovery",
         parent_tool_call_id=None,
         cost_budget_remaining_paise=_RUN_COST_BUDGET_PAISE,
@@ -95,11 +81,6 @@ def sales_recovery_node(state: Mapping[str, Any]) -> dict[str, Any]:
     )
     evaluator = SelfEvaluateAdapter(ctx=tool_ctx)
 
-    context = SalesRecoveryContext(
-        tenant_id=str(tenant_uuid),
-        run_id=str(run_uuid),
-        user_request=user_request,
-    )
     result = run_sales_recovery_agent(context, evaluator=evaluator)
     return {"agent_result": asdict(result)}
 

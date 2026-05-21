@@ -62,7 +62,7 @@ def test_overflow_truncates_to_fit_total_cap(
         cb, "_build_pending_owner_inputs",
         lambda tid: (_owner_inputs(300, 100), False),
     )
-    bundle = build_sales_recovery_context(uuid4(), uuid4(), "weekly_cadence")
+    bundle = build_sales_recovery_context(uuid4(), uuid4(), "weekly_cadence", "test request")
 
     # Total cap enforced.
     assert bundle.meta.token_count <= _EFFECTIVE_CAP
@@ -87,7 +87,7 @@ def test_truncation_order_owner_inputs_before_campaigns(
         cb, "_build_recent_campaigns",
         lambda tid: (_campaigns(10), False),
     )
-    bundle = build_sales_recovery_context(uuid4(), uuid4(), "weekly_cadence")
+    bundle = build_sales_recovery_context(uuid4(), uuid4(), "weekly_cadence", "test request")
 
     assert len(bundle.pending_owner_inputs) > 0
     assert len(bundle.recent_campaigns) == 10  # untouched
@@ -104,7 +104,7 @@ def test_unbounded_section_raises_context_overflow(
         lambda tid: (BusinessProfile(business_name="x" * 40000), False),
     )
     with pytest.raises(ContextOverflowError):
-        build_sales_recovery_context(uuid4(), uuid4(), "weekly_cadence")
+        build_sales_recovery_context(uuid4(), uuid4(), "weekly_cadence", "test request")
 
 
 def test_meta_token_count_is_sum_of_five_content_sections() -> None:
@@ -114,7 +114,7 @@ def test_meta_token_count_is_sum_of_five_content_sections() -> None:
     (CL-184 / CL-204) — a downstream reader comparing it to 8000 compares a
     subset to the total.
     """
-    bundle = build_sales_recovery_context(uuid4(), uuid4(), "weekly_cadence")
+    bundle = build_sales_recovery_context(uuid4(), uuid4(), "weekly_cadence", "test request")
 
     expected = (
         _estimate_tokens(bundle.business_profile)
