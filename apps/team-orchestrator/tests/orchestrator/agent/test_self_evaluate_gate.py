@@ -135,7 +135,10 @@ def _patch_router(monkeypatch) -> MagicMock:
     return router
 
 
-def _verdict(outcome: SelfEvaluateOutcome, **fb: str) -> SelfEvaluateVerdict:
+def _verdict(outcome: SelfEvaluateOutcome, **fb: list[str]) -> SelfEvaluateVerdict:
+    """Build a verdict. v1.1: each kwarg is a ``list[str]`` of distinct
+    critique strings for that category (matches the widened
+    SelfEvaluateFeedback contract)."""
     feedback = SelfEvaluateFeedback(**fb) if fb else None
     return SelfEvaluateVerdict(outcome=outcome, feedback=feedback)
 
@@ -180,7 +183,7 @@ def test_gate_revise_then_pass(monkeypatch):
 
     evaluator = FakeSelfEvaluator(
         verdicts=[
-            _verdict(SelfEvaluateOutcome.REVISE, pillar="invented number"),
+            _verdict(SelfEvaluateOutcome.REVISE, pillar=["invented number"]),
             _verdict(SelfEvaluateOutcome.PASS),
         ]
     )
@@ -199,9 +202,14 @@ def test_gate_revise_then_pass(monkeypatch):
 # ---------- 3. Revise twice → ships failed_after_revisions -------------------
 
 
-def test_gate_revise_twice_ships_failed_after_revisions(monkeypatch):
-    """Both drafts get REVISE → ship the second with FAILED_AFTER_REVISIONS."""
-    _patch_router(monkeypatch)
+def test_gate_preserves_multiple_distinct_violations_within_one_category(monkeypatch):
+    """v1.1: SelfEvaluateFeedback.pillar (etc.) is ``list[str] | None``.
+    When a category carries 2+ distinct violations, ALL entries
+    survive end-to-end: evaluator → gate → AgentResult.
+
+    Locked because the widening exists for this case — a single
+    summary collapse would defeat the structured-retry contract."""
+    router = _patch_router(monkeypatch)
     tenant_id, run_id = _ctx_ids()
     drafts = [
         _valid_plan_dict(tenant_id=tenant_id, run_id=run_id),
@@ -212,8 +220,120 @@ def test_gate_revise_twice_ships_failed_after_revisions(monkeypatch):
 
     evaluator = FakeSelfEvaluator(
         verdicts=[
-            _verdict(SelfEvaluateOutcome.REVISE, pillar="invented number"),
-            _verdict(SelfEvaluateOutcome.REVISE, consistency="targeting mismatch"),
+            _verdict(
+                SelfEvaluateOutcome.REVISE,
+                pillar=["invented 30% return rate", "pressure language 'last chance'"],
+                consistency=["cohort_label mismatches attribution_snapshot"],
+            ),
+            _verdict(
+                SelfEvaluateOutcome.REVISE,
+                pillar=["another invented number", "second pressure phrase"],
+            ),
+        ]
+    )
+    run_sales_recovery_agent(
+        SalesRecoveryContext(tenant_id=tenant_id, run_id=run_id),
+        evaluator=evaluator,
+    )
+
+    # The rejection routes one FailureRecord; the metadata.reasons
+    # carries the lists from the FINAL REVISE verdict — 2 pillar
+    # entries preserved (not collapsed).
+    assert router.call_count == 1
+    failure_arg = router.call_args.args[0]
+    reasons = failure_arg.metadata["reasons"]
+    assert reasons["pillar"] == [
+        "another invented number",
+        "second pressure phrase",
+    ]
+    assert reasons["consistency"] is None
+
+
+def test_evaluator_none_default_skips_gate(monkeypatch):
+    """Test-injection seam: ``run_sales_recovery_agent(..., evaluator=None)``
+    skips the gate entirely. status='completed' (loop default for a
+    parseable non-placeholder dict), no router call. Locks the
+    unit-test injection path the brief preserves."""
+    router = _patch_router(monkeypatch)
+    tenant_id, run_id = _ctx_ids()
+    _patch_anthropic(
+        monkeypatch, [_valid_plan_dict(tenant_id=tenant_id, run_id=run_id)]
+    )
+    monkeypatch.setenv("VIABE_ENV", "test")
+
+    result = run_sales_recovery_agent(
+        SalesRecoveryContext(tenant_id=tenant_id, run_id=run_id),
+        evaluator=None,
+    )
+
+    assert result.status == "completed"
+    # Gate didn't run → no SELF_EVAL_REJECTED, no AGENT_INVALID_OUTPUT.
+    router.assert_not_called()
+
+
+def test_gate_emits_self_evaluate_attempt_per_call(monkeypatch):
+    """Telemetry: every gate.run() must emit a pipeline_steps row.
+    Mock _emit_self_evaluate_attempt and assert it's called once per
+    evaluator call, with the right attempt_number + outcome."""
+    _patch_router(monkeypatch)
+    tenant_id, run_id = _ctx_ids()
+    drafts = [
+        _valid_plan_dict(tenant_id=tenant_id, run_id=run_id),
+        _valid_plan_dict(tenant_id=tenant_id, run_id=run_id),
+    ]
+    _patch_anthropic(monkeypatch, drafts)
+    monkeypatch.setenv("VIABE_ENV", "test")
+
+    emitter = MagicMock()
+    monkeypatch.setattr(
+        "orchestrator.agent.sales_recovery._emit_self_evaluate_attempt",
+        emitter,
+    )
+
+    evaluator = FakeSelfEvaluator(
+        verdicts=[
+            _verdict(SelfEvaluateOutcome.REVISE, pillar=["bad"]),
+            _verdict(SelfEvaluateOutcome.PASS),
+        ]
+    )
+    run_sales_recovery_agent(
+        SalesRecoveryContext(tenant_id=tenant_id, run_id=run_id),
+        evaluator=evaluator,
+    )
+
+    assert emitter.call_count == 2
+    first_kwargs = emitter.call_args_list[0].kwargs
+    second_kwargs = emitter.call_args_list[1].kwargs
+    assert first_kwargs["attempt_number"] == 1
+    assert first_kwargs["outcome"] is SelfEvaluateOutcome.REVISE
+    assert second_kwargs["attempt_number"] == 2
+    assert second_kwargs["outcome"] is SelfEvaluateOutcome.PASS
+
+
+def test_gate_revise_twice_rejects_and_routes_self_eval_rejected(monkeypatch):
+    """v1.1 locked contract: two consecutive REVISE verdicts → run is
+    REJECTED. NO ship-with-flag. ``AgentResult.status == 'rejected'`` +
+    ``self_evaluate_status='failed_after_revisions'`` (the persistent
+    enum value, set on the draft for observability) + a
+    ``FailureRecord(SELF_EVAL_REJECTED)`` routed to the error_router
+    for escalation."""
+    router = _patch_router(monkeypatch)
+    tenant_id, run_id = _ctx_ids()
+    drafts = [
+        _valid_plan_dict(tenant_id=tenant_id, run_id=run_id),
+        _valid_plan_dict(tenant_id=tenant_id, run_id=run_id),
+    ]
+    _patch_anthropic(monkeypatch, drafts)
+    monkeypatch.setenv("VIABE_ENV", "test")
+
+    evaluator = FakeSelfEvaluator(
+        verdicts=[
+            _verdict(SelfEvaluateOutcome.REVISE, pillar=["invented number"]),
+            _verdict(
+                SelfEvaluateOutcome.REVISE,
+                consistency=["targeting mismatch"],
+                legal=["pressure language"],
+            ),
         ]
     )
     result = run_sales_recovery_agent(
@@ -221,13 +341,28 @@ def test_gate_revise_twice_ships_failed_after_revisions(monkeypatch):
         evaluator=evaluator,
     )
 
-    assert result.status == "completed"
+    assert result.status == "rejected"
     assert result.output is not None
     assert (
         result.output["self_evaluate_status"]
         == SelfEvaluateStatus.FAILED_AFTER_REVISIONS.value
     )
     assert evaluator.calls == 2
+
+    # Loop must have routed exactly one SELF_EVAL_REJECTED failure
+    # for escalation (router escalates HIGH severity to Fazal). Two
+    # routings happened: the per-attempt self_evaluate_attempt
+    # telemetry helper writes pipeline_steps DIRECTLY (no router), so
+    # router.call_count counts only the rejected failure.
+    assert router.call_count == 1
+    failure_arg = router.call_args.args[0]
+    assert failure_arg.failure_type.value == "self_eval_rejected"
+    # Final REVISE's reasons preserved on the FailureRecord metadata.
+    reasons = failure_arg.metadata["reasons"]
+    assert reasons["consistency"] == ["targeting mismatch"]
+    assert reasons["legal"] == ["pressure language"]
+    assert reasons["pillar"] is None
+    assert failure_arg.metadata["attempt_number"] == 2
 
 
 # ---------- 4. Bypass prevention ---------------------------------------------
