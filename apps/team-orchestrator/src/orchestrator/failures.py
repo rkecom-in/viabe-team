@@ -60,6 +60,14 @@ class FailureType(str, Enum):
     # gate checks. Escalates to Fazal, never ships. Added by VT-Sales-
     # Recovery-Agent gate-wiring subtask.
     SELF_EVAL_REJECTED = "self_eval_rejected"
+    # CL-288: the model emitted a populated field that the picked
+    # CampaignPlan variant forbids (e.g. ``message_plan`` on an
+    # ``insufficient_data`` verdict). The agent's emit-shape coercion
+    # dropped the field BEFORE schema validation, so the run continues
+    # — this is an OBSERVATION of model self-contradiction, not a
+    # terminal failure. LOW severity, ACCEPT_AND_LOG. Drives prompt
+    # tuning + behavioural quality dashboards, not retries.
+    MODEL_OUTPUT_CONFLICT = "model_output_conflict"
 
 
 class HardLimitAxis(str, Enum):
@@ -164,6 +172,13 @@ SPECS: dict[FailureType, FailureTypeSpec] = {
         severity=Severity.HIGH,
         retryable=False,
         default_strategy=Strategy.ESCALATE_TO_FAZAL,
+        max_retries=0,
+        escalation_threshold=1,
+    ),
+    FailureType.MODEL_OUTPUT_CONFLICT: FailureTypeSpec(
+        severity=Severity.LOW,
+        retryable=False,
+        default_strategy=Strategy.ACCEPT_AND_LOG,
         max_retries=0,
         escalation_threshold=1,
     ),

@@ -38,6 +38,7 @@ validation.
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import time
@@ -59,7 +60,15 @@ from orchestrator.agent.limits import (
     ToolCounter,
     WallclockTimer,
 )
-from orchestrator.agent.schemas.campaign_plan import parse_campaign_plan
+from pydantic import BaseModel
+
+from orchestrator.agent.schemas.campaign_plan import (
+    CampaignPlanInsufficientData,
+    CampaignPlanOutOfScope,
+    CampaignPlanProposed,
+    CampaignStatus,
+    parse_campaign_plan,
+)
 from orchestrator.agent.self_evaluate import (
     GateAction,
     SelfEvaluateGate,
@@ -68,6 +77,19 @@ from orchestrator.agent.self_evaluate import (
 from orchestrator.agent.types import AgentResult
 from orchestrator.error_router import route_failure
 from orchestrator.failures import FailureRecord, FailureType, HardLimitAxis
+
+_logger = logging.getLogger(__name__)
+
+# CL-288: variant-model registry for emit-shape coercion. Maps the
+# discriminator value to the variant model so the agent can project the
+# model's raw output onto a per-variant allowed-field set BEFORE schema
+# validation. The schema's strict ``extra='forbid'`` makes a flat-superset
+# emit invalid; this map lets the agent drop forbidden fields cleanly.
+_VARIANT_MODELS: dict[CampaignStatus, type[BaseModel]] = {
+    CampaignStatus.PROPOSED: CampaignPlanProposed,
+    CampaignStatus.OUT_OF_SCOPE: CampaignPlanOutOfScope,
+    CampaignStatus.INSUFFICIENT_DATA: CampaignPlanInsufficientData,
+}
 
 # Sales Recovery system prompt v1.0 (VT-33 / VT-4.2). Loaded from the
 # markdown file under prompts/; the file is the source of truth and is
@@ -263,6 +285,107 @@ def _parse_placeholder_output(text: str) -> dict[str, Any] | None:
     return None
 
 
+_EMPTY_SENTINELS: tuple[Any, ...] = (None, "", [], {})
+
+
+def _construct_variant_payload(
+    raw: dict[str, Any],
+    *,
+    context: SalesRecoveryContext,
+    generated_at: datetime,
+) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
+    """Reshape the model's raw output into a per-variant CampaignPlan dict.
+
+    Returns ``(payload, dropped_empty, dropped_populated)``.
+
+    - ``payload``: a dict containing ONLY fields declared on the picked
+      variant model. Identity / provenance fields (``tenant_id``,
+      ``run_id``, ``generated_at``) are OVERWRITTEN from ``context`` and
+      the server-time ``generated_at`` — the model has no authority to
+      set these (CL-288 item 1).
+    - ``dropped_empty``: forbidden keys whose value was None / [] / {} / "".
+      Routine emit-shape mismatch; caller logs at debug level.
+    - ``dropped_populated``: a dict ``{key: original_value}`` for forbidden
+      keys whose value was non-empty — i.e. model self-contradiction.
+      Caller emits FailureRecord(MODEL_OUTPUT_CONFLICT) and warn-logs.
+      Empty when no populated forbidden fields were seen.
+
+    Raises ``ValueError`` if ``raw['status']`` is missing or doesn't
+    match any of the three discriminated-union variants.
+    """
+    status_value = raw.get("status")
+    if status_value is None:
+        raise ValueError("missing 'status' discriminator in raw model output")
+    try:
+        variant_enum = CampaignStatus(status_value)
+    except ValueError as exc:
+        raise ValueError(
+            f"unknown CampaignStatus discriminator: {status_value!r}"
+        ) from exc
+    variant_cls = _VARIANT_MODELS[variant_enum]
+    allowed = set(variant_cls.model_fields.keys())
+
+    payload: dict[str, Any] = {}
+    dropped_empty: list[str] = []
+    dropped_populated: dict[str, Any] = {}
+    for key, value in raw.items():
+        if key in allowed:
+            payload[key] = value
+            continue
+        if value in _EMPTY_SENTINELS:
+            dropped_empty.append(key)
+        else:
+            dropped_populated[key] = value
+
+    # Identity injection — agent authority. Overwrite any model-emitted
+    # values for these three (the model has no reliable source of truth
+    # for tenant identity / run identity / server time).
+    payload["tenant_id"] = context.tenant_id
+    payload["run_id"] = context.run_id
+    payload["generated_at"] = generated_at.isoformat()
+
+    return payload, dropped_empty, dropped_populated
+
+
+def _emit_model_output_conflict(
+    *,
+    context: SalesRecoveryContext,
+    status_value: str,
+    dropped_keys: list[str],
+    raw_values: dict[str, Any],
+) -> None:
+    """Route a FailureRecord(MODEL_OUTPUT_CONFLICT) for populated
+    wrong-variant fields the agent dropped during coercion (CL-288).
+
+    Best-effort — observability only, run continues. Strategy is
+    ACCEPT_AND_LOG; nothing retries on this.
+
+    ``raw_values`` is the {key: value} snapshot for the dropped keys
+    only (not the full raw dict), capped at 200 chars per value to
+    bound payload size.
+    """
+    snapshot: dict[str, str] = {
+        k: (repr(v)[:200] if not isinstance(v, str) else v[:200])
+        for k, v in raw_values.items()
+    }
+    failure = FailureRecord(
+        failure_type=FailureType.MODEL_OUTPUT_CONFLICT,
+        message=(
+            f"model emitted populated forbidden fields on variant"
+            f" {status_value!r}: {sorted(dropped_keys)}"
+        ),
+        occurred_at=datetime.now(UTC),
+        tenant_id=UUID(context.tenant_id),
+        run_id=UUID(context.run_id),
+        metadata={
+            "variant": status_value,
+            "dropped_keys": sorted(dropped_keys),
+            "dropped_values": snapshot,
+        },
+    )
+    route_failure(failure)
+
+
 def run_sales_recovery_agent(
     context: SalesRecoveryContext,
     *,
@@ -417,6 +540,45 @@ def run_sales_recovery_agent(
         if output is None:
             status = "invalid"
             break
+
+        # CL-288: coerce the model's raw flat-superset emit into a
+        # per-variant CampaignPlan dict that conforms to the v1.0 strict
+        # discriminated union. The schema's ``extra='forbid'`` rejects
+        # cross-variant fields; the model has trained-from priors that
+        # default to flat-with-optional, so it consistently emits
+        # forbidden fields. Coerce BEFORE schema validation (gate-on or
+        # gate-off path).
+        try:
+            output, dropped_empty, dropped_populated = _construct_variant_payload(
+                output, context=context, generated_at=datetime.now(UTC)
+            )
+        except ValueError:
+            # Unknown / missing status discriminator — the model didn't
+            # pick a legal variant. Routed as invalid; no FailureRecord
+            # here (already-existing Path B / gate-failure paths route
+            # AGENT_INVALID_OUTPUT downstream when appropriate).
+            status = "invalid"
+            break
+        if dropped_empty:
+            _logger.debug(
+                "sales_recovery: dropped empty wrong-variant fields"
+                " %s on variant %r",
+                sorted(dropped_empty),
+                output["status"],
+            )
+        if dropped_populated:
+            _logger.warning(
+                "sales_recovery: dropped POPULATED wrong-variant fields"
+                " %s on variant %r — model self-contradiction observed",
+                sorted(dropped_populated.keys()),
+                output["status"],
+            )
+            _emit_model_output_conflict(
+                context=context,
+                status_value=str(output["status"]),
+                dropped_keys=list(dropped_populated.keys()),
+                raw_values=dropped_populated,
+            )
 
         # VT-36 self-evaluate gate. Without a configured evaluator the
         # gate is skipped (VT-50 deferral); the draft ships with
