@@ -736,3 +736,130 @@ def test_canary_real_haiku_run_completes_with_parseable_json(monkeypatch):
     assert result.cost_paise > 0
     # The model's final message landed in raw_messages.
     assert any(m.get("role") == "assistant" for m in result.raw_messages)
+
+
+# --- CL-288 real-model integration canary ---------------------------------
+#
+# Marked @pytest.mark.integration, skipif on ANTHROPIC_API_KEY + DATABASE_URL
+# (same gating pattern as the supervisor canary in test_supervisor.py). Runs
+# the REAL Opus model against the REAL revised sales_recovery_v1.md prompt;
+# verifies (a) the model's emitted `status` string is one
+# _construct_variant_payload recognises and (b) the three per-variant prompt
+# examples actually drive shape-conformant model output.
+#
+# Asserts valid-any-variant. DOES NOT assert status='proposed' — empty
+# uuid4() tenant has no dormant customers, so insufficient_data is the
+# correct verdict and is a PASS. Plan-quality / seeded-fixture proposed-path
+# verification is CL-289's job (separate subtask, requires seed data).
+# CL-288 verifies schema CONFORMANCE, not plan QUALITY.
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(
+    not os.environ.get("ANTHROPIC_API_KEY")
+    or not os.environ.get("DATABASE_URL"),
+    reason=(
+        "CL-288 real-model integration test needs ANTHROPIC_API_KEY"
+        " (one real Opus messages.create) AND DATABASE_URL (route_failure"
+        " best-effort writes pipeline_steps if model emits a forbidden"
+        " field — see _emit_model_output_conflict)"
+    ),
+)
+def test_cl288_real_opus_emit_shape_round_trips_through_parse(monkeypatch):
+    """Real Opus + real v1.0 prompt: model output flows through
+    _construct_variant_payload -> parse_campaign_plan and yields a
+    valid v1.0 CampaignPlan, whatever variant the model picks."""
+    from uuid import uuid4
+
+    from anthropic import Anthropic as _RealAnthropic
+
+    from orchestrator.agent.schemas.campaign_plan import (
+        CampaignPlanInsufficientData,
+        CampaignPlanOutOfScope,
+        CampaignPlanProposed,
+        parse_campaign_plan,
+    )
+
+    USER_INPUT = "Recover dormant customers from the last 60 days"
+
+    class _SubstitutingClient:
+        """Real Anthropic SDK, but rewrites the agent loop's hardcoded
+        'begin' cue (VT-32 placeholder) to the canary's real user request.
+
+        PR #39's CL-287 fix threads the orchestrator's user request
+        through SalesRecoveryContext; that lands separately. This branch
+        (CL-288, off main) still has the 'begin' hardcode. Patching at
+        the SDK boundary is the integration-test seam — production
+        behaviour and run_sales_recovery_agent's signature both remain
+        unchanged.
+        """
+
+        def __init__(self) -> None:
+            self._real = _RealAnthropic()
+
+        @property
+        def messages(self):  # type: ignore[no-untyped-def]
+            return self
+
+        def create(self, **kwargs):  # type: ignore[no-untyped-def]
+            msgs = list(kwargs.get("messages", []))
+            if (
+                msgs
+                and isinstance(msgs[0], dict)
+                and msgs[0].get("role") == "user"
+                and msgs[0].get("content") == "begin"
+            ):
+                msgs = [{"role": "user", "content": USER_INPUT}] + msgs[1:]
+            kwargs["messages"] = msgs
+            return self._real.messages.create(**kwargs)
+
+    monkeypatch.setenv("VIABE_ENV", "production")  # _resolve_model -> Opus
+    monkeypatch.setattr(
+        "orchestrator.agent.sales_recovery.Anthropic", _SubstitutingClient
+    )
+
+    context = SalesRecoveryContext(
+        tenant_id=str(uuid4()), run_id=str(uuid4())
+    )
+    result = run_sales_recovery_agent(context, evaluator=None)
+
+    # Diagnostic surface for debug if the test fails.
+    diag = {
+        "status": result.status,
+        "terminated_by": (
+            result.terminated_by.value if result.terminated_by else None
+        ),
+        "terminated_reason": result.terminated_reason,
+        "tokens_used": result.tokens_used,
+        "cost_paise": result.cost_paise,
+        "output_keys": (
+            sorted(result.output.keys()) if isinstance(result.output, dict) else None
+        ),
+        "output_status_field": (
+            result.output.get("status") if isinstance(result.output, dict) else None
+        ),
+    }
+
+    # Output must exist — Path A / refusal / hard-limit-terminated paths
+    # do not exercise CL-288's coercion seam.
+    assert result.output is not None, diag
+    assert result.status == "completed", diag
+
+    # The coerced payload round-trips through the strict v1.0 union.
+    plan = parse_campaign_plan(result.output)
+
+    # ANY variant is a PASS. Do NOT assert 'proposed' — empty tenant
+    # legitimately yields insufficient_data. See CL-289 for the seeded-
+    # fixture proposed-path test.
+    assert isinstance(
+        plan,
+        (
+            CampaignPlanProposed,
+            CampaignPlanOutOfScope,
+            CampaignPlanInsufficientData,
+        ),
+    ), diag
+
+    # Identity-injection invariant — agent overwrites, not the model.
+    assert str(plan.tenant_id) == context.tenant_id, diag
+    assert str(plan.run_id) == context.run_id, diag
