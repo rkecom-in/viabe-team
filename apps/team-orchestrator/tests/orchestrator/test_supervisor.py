@@ -58,15 +58,29 @@ _CampaignPlanVariants = (
 
 @pytest.mark.integration
 @pytest.mark.skipif(
-    not os.environ.get("ANTHROPIC_API_KEY"),
-    reason="ANTHROPIC_API_KEY not set",
+    not os.environ.get("ANTHROPIC_API_KEY")
+    or not os.environ.get("DATABASE_URL"),
+    reason=(
+        "real-supervisor integration test needs ANTHROPIC_API_KEY "
+        "(for the agent + self_evaluate calls) + DATABASE_URL (the "
+        "collapse node persists to campaigns / subscriber_states)"
+    ),
 )
 def test_orchestrator_spawns_sales_recovery_returns_campaign_plan() -> None:
-    """Orchestrator routes to the stub specialist; the specialist returns a
-    CampaignPlan.
+    """Production live-run through the supervisor dispatch.
 
-    Asserts: the graph runs end-to-end; active_agent == 'sales_recovery_agent';
-    campaign_plan is a valid CampaignPlan with proposed_by/status as expected.
+    VT-SR-Agent dispatch switch (Exec Order 6.7): the supervisor's
+    ``sales_recovery_agent`` node now calls the REAL
+    ``run_sales_recovery_agent`` (NOT the langchain stub) with the
+    self-evaluate gate active (VT-50 Opus adapter). This test is the
+    pre-merge canary at the supervisor level — verifies the
+    end-to-end production path: orchestrator → spawn → real agent →
+    gate → collapse.
+
+    Asserts: graph runs end-to-end; active_agent == 'sales_recovery_agent';
+    campaign_plan is a valid v1.0 CampaignPlan in the proposed variant
+    (the gate's PASS branch). Skipped in CI (no API key + no DB
+    secret); Fazal triggers manually before merging.
     """
     model = ChatAnthropic(model="claude-opus-4-7")  # type: ignore[call-arg]
     graph = build_supervisor_graph(model=model)
@@ -88,9 +102,9 @@ def test_orchestrator_spawns_sales_recovery_returns_campaign_plan() -> None:
     assert result.get("active_agent") == "sales_recovery_agent"
     plan = result.get("campaign_plan")
     assert isinstance(plan, _CampaignPlanVariants)
-    # v1.0: stub returns the proposed variant; lifecycle progression
-    # (approved/rejected/sent/failed) lives on a downstream field, NOT
-    # on plan.status (CL: status-enum split).
+    # The real agent on a PASS gate emits the proposed variant.
+    # Status-enum split locked: ``plan.status`` carries only the agent-
+    # terminal value (proposed); lifecycle states live downstream.
     assert isinstance(plan, CampaignPlanProposed)
     assert plan.status is CampaignStatus.PROPOSED
 
@@ -166,6 +180,16 @@ def _run_supervisor_path(
     # routing precedence with a fake model and no DB — neutralise the collapse
     # node so the spawn path does not hit `get_pool()`.
     monkeypatch.setattr(supervisor_mod, "collapse_node", lambda state: {})
+
+    # Dispatch switch (VT-SR-Agent Exec Order 6.7): sales_recovery_agent now
+    # calls run_sales_recovery_agent (real Anthropic Messages SDK + the
+    # self-evaluate gate with a VT-50 adapter). This landmine test runs
+    # keyless — neutralise the specialist node so the spawn path does not
+    # construct Anthropic() / hit the API. Routing precedence is the
+    # surface under test; the specialist's body is irrelevant here.
+    monkeypatch.setattr(
+        supervisor_mod, "_sales_recovery_node", lambda state: {}
+    )
 
     trace: list[str] = []
     final_state: dict[str, Any] = {}
