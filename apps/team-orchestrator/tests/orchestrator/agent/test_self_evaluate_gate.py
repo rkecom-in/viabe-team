@@ -159,7 +159,9 @@ def test_gate_passes_on_first_try(monkeypatch):
 
     evaluator = FakeSelfEvaluator(verdicts=[_verdict(SelfEvaluateOutcome.PASS)])
     result = run_sales_recovery_agent(
-        SalesRecoveryContext(tenant_id=tenant_id, run_id=run_id),
+        SalesRecoveryContext(
+            tenant_id=tenant_id, run_id=run_id, user_request="test request"
+        ),
         evaluator=evaluator,
     )
 
@@ -188,7 +190,9 @@ def test_gate_revise_then_pass(monkeypatch):
         ]
     )
     result = run_sales_recovery_agent(
-        SalesRecoveryContext(tenant_id=tenant_id, run_id=run_id),
+        SalesRecoveryContext(
+            tenant_id=tenant_id, run_id=run_id, user_request="test request"
+        ),
         evaluator=evaluator,
     )
 
@@ -232,7 +236,9 @@ def test_gate_preserves_multiple_distinct_violations_within_one_category(monkeyp
         ]
     )
     run_sales_recovery_agent(
-        SalesRecoveryContext(tenant_id=tenant_id, run_id=run_id),
+        SalesRecoveryContext(
+            tenant_id=tenant_id, run_id=run_id, user_request="test request"
+        ),
         evaluator=evaluator,
     )
 
@@ -262,7 +268,9 @@ def test_evaluator_none_default_skips_gate(monkeypatch):
     monkeypatch.setenv("VIABE_ENV", "test")
 
     result = run_sales_recovery_agent(
-        SalesRecoveryContext(tenant_id=tenant_id, run_id=run_id),
+        SalesRecoveryContext(
+            tenant_id=tenant_id, run_id=run_id, user_request="test request"
+        ),
         evaluator=None,
     )
 
@@ -297,7 +305,9 @@ def test_gate_emits_self_evaluate_attempt_per_call(monkeypatch):
         ]
     )
     run_sales_recovery_agent(
-        SalesRecoveryContext(tenant_id=tenant_id, run_id=run_id),
+        SalesRecoveryContext(
+            tenant_id=tenant_id, run_id=run_id, user_request="test request"
+        ),
         evaluator=evaluator,
     )
 
@@ -337,7 +347,9 @@ def test_gate_revise_twice_rejects_and_routes_self_eval_rejected(monkeypatch):
         ]
     )
     result = run_sales_recovery_agent(
-        SalesRecoveryContext(tenant_id=tenant_id, run_id=run_id),
+        SalesRecoveryContext(
+            tenant_id=tenant_id, run_id=run_id, user_request="test request"
+        ),
         evaluator=evaluator,
     )
 
@@ -379,7 +391,9 @@ def test_gate_runs_even_when_agent_never_called_self_evaluate(monkeypatch):
 
     evaluator = FakeSelfEvaluator(verdicts=[_verdict(SelfEvaluateOutcome.PASS)])
     result = run_sales_recovery_agent(
-        SalesRecoveryContext(tenant_id=tenant_id, run_id=run_id),
+        SalesRecoveryContext(
+            tenant_id=tenant_id, run_id=run_id, user_request="test request"
+        ),
         evaluator=evaluator,
     )
 
@@ -411,7 +425,9 @@ def test_gate_seam_error_routes_as_agent_invalid_output(monkeypatch):
         raise_on_call=RuntimeError("seam network failure")
     )
     result = run_sales_recovery_agent(
-        SalesRecoveryContext(tenant_id=tenant_id, run_id=run_id),
+        SalesRecoveryContext(
+            tenant_id=tenant_id, run_id=run_id, user_request="test request"
+        ),
         evaluator=evaluator,
     )
 

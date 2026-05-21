@@ -67,6 +67,16 @@ def sales_recovery_node(state: Mapping[str, Any]) -> dict[str, Any]:
         raise TenantIsolationError(
             "sales_recovery_node: run_id missing from state"
         )
+    # CL-287: standalone wrapper's input contract — state must carry the
+    # orchestrator-supplied user request. The supervisor's
+    # ``_sales_recovery_node`` extracts it from ``state['messages']``;
+    # this wrapper (used outside the supervisor graph) takes it directly
+    # under ``state['user_request']``. Required, no default.
+    user_request = state.get("user_request")
+    if not isinstance(user_request, str) or not user_request.strip():
+        raise ValueError(
+            "sales_recovery_node: user_request missing or empty in state"
+        )
 
     tenant_uuid = tenant_id if isinstance(tenant_id, UUID) else UUID(str(tenant_id))
     run_uuid = run_id if isinstance(run_id, UUID) else UUID(str(run_id))
@@ -86,7 +96,9 @@ def sales_recovery_node(state: Mapping[str, Any]) -> dict[str, Any]:
     evaluator = SelfEvaluateAdapter(ctx=tool_ctx)
 
     context = SalesRecoveryContext(
-        tenant_id=str(tenant_uuid), run_id=str(run_uuid)
+        tenant_id=str(tenant_uuid),
+        run_id=str(run_uuid),
+        user_request=user_request,
     )
     result = run_sales_recovery_agent(context, evaluator=evaluator)
     return {"agent_result": asdict(result)}

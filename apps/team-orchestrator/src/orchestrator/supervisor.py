@@ -36,6 +36,7 @@ from typing import Any
 from uuid import UUID
 
 from langchain_anthropic import ChatAnthropic
+from langchain_core.messages import HumanMessage
 from langgraph.checkpoint.postgres import PostgresSaver
 from langgraph.graph import END, START, StateGraph
 from pydantic import ValidationError
@@ -63,6 +64,47 @@ from orchestrator.state.agent_graph_state import AgentGraphState
 # context shape.
 _RUN_COST_BUDGET_PAISE = 5_000  # ₹50 per VT-35
 _RUN_WALLCLOCK_BUDGET_MS = int(WALL_CLOCK_HARD_LIMIT_S * 1000)
+
+
+def _extract_user_request(state: AgentGraphState) -> str:
+    """Read the first HumanMessage content from ``state['messages']``.
+
+    The orchestrator's user input lives at index 0 (langgraph
+    ``add_messages`` preserves order). Fail loud if absent or not a
+    HumanMessage — the specialist must not be spawned without one. The
+    extracted string flows into ``SalesRecoveryContext.user_request``
+    (CL-287) and becomes the agent loop's initial user message.
+
+    Tolerates two on-disk message shapes:
+      - ``HumanMessage`` instances (post add_messages reducer)
+      - bare dicts ``{"role": "user", "content": "..."}`` (pre-reducer
+        — the invoke() seed shape used by some test fixtures)
+    """
+    messages = state.get("messages") or []
+    if not messages:
+        raise ValueError(
+            "sales_recovery_node: state['messages'] empty —"
+            " orchestrator must spawn the specialist with a user request"
+        )
+    first = messages[0]
+    if isinstance(first, HumanMessage):
+        content = first.content
+    elif isinstance(first, dict) and first.get("role") == "user":
+        content = first.get("content", "")
+    else:
+        raise ValueError(
+            "sales_recovery_node: state['messages'][0] is not a user"
+            f" message (got {type(first).__name__})"
+        )
+    if isinstance(content, list):
+        # langchain content can be a list of blocks; concat any text parts.
+        parts = [b.get("text", "") for b in content if isinstance(b, dict)]
+        content = "".join(parts)
+    if not isinstance(content, str) or not content.strip():
+        raise ValueError(
+            "sales_recovery_node: user request is empty"
+        )
+    return content
 
 
 def _sales_recovery_node(state: AgentGraphState) -> dict[str, Any]:
@@ -106,6 +148,15 @@ def _sales_recovery_node(state: AgentGraphState) -> dict[str, Any]:
         else UUID(str(state_run_id))
     )
 
+    # CL-287: thread the orchestrator's user request to the specialist.
+    # The specialist's hardcoded "begin" cue was a VT-32 placeholder; v1.0
+    # prompt (VT-33/VT-4.2) needs a real task to reason about. Pull the
+    # first HumanMessage content from state["messages"] — that is the
+    # orchestrator graph's user input (langgraph add_messages reducer
+    # preserves it at index 0). Fail loud if absent: the specialist must
+    # never be spawned without a user request.
+    user_request = _extract_user_request(state)
+
     # Per-invocation ToolContext + adapter — the gate runs against a real
     # SelfEvaluateAdapter (Opus-backed by VT-50). Production-load-bearing
     # path activates here.
@@ -121,7 +172,9 @@ def _sales_recovery_node(state: AgentGraphState) -> dict[str, Any]:
     evaluator = SelfEvaluateAdapter(ctx=tool_ctx)
 
     context = SalesRecoveryContext(
-        tenant_id=str(tenant_uuid), run_id=str(run_uuid)
+        tenant_id=str(tenant_uuid),
+        run_id=str(run_uuid),
+        user_request=user_request,
     )
     agent_result = run_sales_recovery_agent(context, evaluator=evaluator)
 

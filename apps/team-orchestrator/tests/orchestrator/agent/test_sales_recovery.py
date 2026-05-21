@@ -122,7 +122,7 @@ def test_run_sales_recovery_agent_placeholder_happy_path(monkeypatch):
     )
 
     result = run_sales_recovery_agent(
-        SalesRecoveryContext(tenant_id="t1", run_id="r1")
+        SalesRecoveryContext(tenant_id="t1", run_id="r1", user_request="test request")
     )
 
     assert result.status == "placeholder"
@@ -153,12 +153,12 @@ def test_run_sales_recovery_agent_uses_resolved_model_from_env(monkeypatch):
     )
 
     monkeypatch.setenv("VIABE_ENV", "production")
-    run_sales_recovery_agent(SalesRecoveryContext(tenant_id="t1", run_id="r1"))
+    run_sales_recovery_agent(SalesRecoveryContext(tenant_id="t1", run_id="r1", user_request="test request"))
     assert fake_client.messages.create.call_args.kwargs["model"] == "claude-opus-4-7"
 
     fake_client.messages.create.reset_mock()
     monkeypatch.setenv("VIABE_ENV", "test")
-    run_sales_recovery_agent(SalesRecoveryContext(tenant_id="t1", run_id="r1"))
+    run_sales_recovery_agent(SalesRecoveryContext(tenant_id="t1", run_id="r1", user_request="test request"))
     assert fake_client.messages.create.call_args.kwargs["model"] == "claude-haiku-4-5"
 
 
@@ -180,7 +180,7 @@ def test_run_sales_recovery_agent_passes_brief_required_params(monkeypatch):
         "orchestrator.agent.sales_recovery.Anthropic", lambda: fake_client
     )
 
-    run_sales_recovery_agent(SalesRecoveryContext(tenant_id="t1", run_id="r1"))
+    run_sales_recovery_agent(SalesRecoveryContext(tenant_id="t1", run_id="r1", user_request="test request"))
     call = fake_client.messages.create.call_args
     assert call.kwargs["max_tokens"] == _MAX_OUTPUT_TOKENS_PER_TURN
     assert call.kwargs["max_tokens"] != _RUN_LEVEL_TOKEN_HARD_LIMIT, (
@@ -208,16 +208,31 @@ def test_run_sales_recovery_agent_status_invalid_when_output_unparseable(monkeyp
     Locks against a regression in which the fence-stripper grows into a
     loose "first { to last }" extractor: garbage like "hello {world}"
     must STILL classify as invalid, not silently parse into a partial
-    dict."""
+    dict.
+
+    CL-287: Path A now emits a FailureRecord(AGENT_INVALID_OUTPUT)
+    before breaking — patch route_failure to a MagicMock so the
+    FailureRecord UUID construction has valid input and the emit is
+    captured rather than crashing on this test's placeholder tenant
+    string."""
+    from uuid import uuid4
+
     response = _fake_response(text="hello {world}")
     fake_client = _patched_client(response)
     monkeypatch.setenv("VIABE_ENV", "test")
     monkeypatch.setattr(
         "orchestrator.agent.sales_recovery.Anthropic", lambda: fake_client
     )
+    monkeypatch.setattr(
+        "orchestrator.agent.sales_recovery.route_failure", MagicMock()
+    )
 
     result = run_sales_recovery_agent(
-        SalesRecoveryContext(tenant_id="t1", run_id="r1")
+        SalesRecoveryContext(
+            tenant_id=str(uuid4()),
+            run_id=str(uuid4()),
+            user_request="test request",
+        )
     )
     assert result.status == "invalid"
     assert result.output is None
@@ -238,7 +253,7 @@ def test_run_sales_recovery_agent_tolerates_markdown_json_fence(monkeypatch):
     )
 
     result = run_sales_recovery_agent(
-        SalesRecoveryContext(tenant_id="t1", run_id="r1")
+        SalesRecoveryContext(tenant_id="t1", run_id="r1", user_request="test request")
     )
     assert result.status == "placeholder"
     assert result.output == {"status": "placeholder"}
@@ -256,7 +271,7 @@ def test_run_sales_recovery_agent_tolerates_bare_code_fence(monkeypatch):
     )
 
     result = run_sales_recovery_agent(
-        SalesRecoveryContext(tenant_id="t1", run_id="r1")
+        SalesRecoveryContext(tenant_id="t1", run_id="r1", user_request="test request")
     )
     assert result.status == "placeholder"
     assert result.output == {"status": "placeholder"}
@@ -267,7 +282,12 @@ def test_run_sales_recovery_agent_does_not_loose_extract_from_prose(monkeypatch)
     still classify as invalid. The fence stripper is NARROW — it only
     matches a recognised fence pattern at the message boundaries. A
     loose ``"first { to last }"`` extractor would silently parse the
-    embedded substring and corrupt the status classification."""
+    embedded substring and corrupt the status classification.
+
+    CL-287: Path A emit now needs a valid UUID tenant_id; patch
+    route_failure so the new FailureRecord construction is captured."""
+    from uuid import uuid4
+
     response = _fake_response(
         text='I think the answer is {"status": "placeholder"} or so'
     )
@@ -276,12 +296,63 @@ def test_run_sales_recovery_agent_does_not_loose_extract_from_prose(monkeypatch)
     monkeypatch.setattr(
         "orchestrator.agent.sales_recovery.Anthropic", lambda: fake_client
     )
+    monkeypatch.setattr(
+        "orchestrator.agent.sales_recovery.route_failure", MagicMock()
+    )
 
     result = run_sales_recovery_agent(
-        SalesRecoveryContext(tenant_id="t1", run_id="r1")
+        SalesRecoveryContext(
+            tenant_id=str(uuid4()),
+            run_id=str(uuid4()),
+            user_request="test request",
+        )
     )
     assert result.status == "invalid"
     assert result.output is None
+
+
+def test_run_sales_recovery_agent_path_a_emits_failure_record(monkeypatch):
+    """CL-287: Path A (terminal output not a JSON dict → status='invalid'
+    with output=None) MUST emit a FailureRecord(AGENT_INVALID_OUTPUT)
+    before breaking. Closes the CL-238 silent-failure hole where the
+    agent could exit invalid without observability."""
+    from uuid import uuid4
+
+    from orchestrator.failures import FailureRecord, FailureType
+
+    response = _fake_response(text="I cannot proceed without a cohort spec.")
+    fake_client = _patched_client(response)
+    monkeypatch.setenv("VIABE_ENV", "test")
+    monkeypatch.setattr(
+        "orchestrator.agent.sales_recovery.Anthropic", lambda: fake_client
+    )
+    router = MagicMock()
+    monkeypatch.setattr(
+        "orchestrator.agent.sales_recovery.route_failure", router
+    )
+
+    tenant_id = uuid4()
+    run_id = uuid4()
+    result = run_sales_recovery_agent(
+        SalesRecoveryContext(
+            tenant_id=str(tenant_id),
+            run_id=str(run_id),
+            user_request="Recover dormant customers from the last 60 days",
+        )
+    )
+    assert result.status == "invalid"
+    assert result.output is None
+
+    # Exactly one FailureRecord(AGENT_INVALID_OUTPUT) routed with source
+    # 'agent_terminal_no_dict' — the new CL-287 emit, not the gate's.
+    assert router.call_count == 1
+    failure = router.call_args.args[0]
+    assert isinstance(failure, FailureRecord)
+    assert failure.failure_type is FailureType.AGENT_INVALID_OUTPUT
+    assert failure.tenant_id == tenant_id
+    assert failure.run_id == run_id
+    assert failure.metadata["source"] == "agent_terminal_no_dict"
+    assert "did not parse as a single JSON dict" in failure.message
 
 
 def test_run_sales_recovery_agent_cost_uses_compute_cost_paise(monkeypatch):
@@ -294,7 +365,7 @@ def test_run_sales_recovery_agent_cost_uses_compute_cost_paise(monkeypatch):
     )
 
     result = run_sales_recovery_agent(
-        SalesRecoveryContext(tenant_id="t1", run_id="r1")
+        SalesRecoveryContext(tenant_id="t1", run_id="r1", user_request="test request")
     )
 
     expected = compute_cost_paise(
@@ -369,7 +440,11 @@ def test_sales_recovery_node_returns_agent_result_under_agent_result_key(monkeyp
     )
 
     update = sales_recovery_node(
-        {"tenant_id": uuid4(), "run_id": uuid4()}
+        {
+            "tenant_id": uuid4(),
+            "run_id": uuid4(),
+            "user_request": "test request",
+        }
     )
     assert "agent_result" in update
     assert update["agent_result"]["status"] == "placeholder"
@@ -730,7 +805,11 @@ def test_canary_real_haiku_run_completes_with_parseable_json(monkeypatch):
     raw message trace landed."""
     monkeypatch.setenv("VIABE_ENV", "test")  # forces Haiku
     result = run_sales_recovery_agent(
-        SalesRecoveryContext(tenant_id="canary", run_id="canary")
+        SalesRecoveryContext(
+            tenant_id="canary",
+            run_id="canary",
+            user_request="Recover dormant customers from the last 60 days",
+        )
     )
     assert result.status in {"completed", "refused"}, asdict(result)
     assert result.tokens_used > 0
