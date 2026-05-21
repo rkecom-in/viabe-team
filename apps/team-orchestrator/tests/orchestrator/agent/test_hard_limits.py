@@ -116,7 +116,11 @@ def _patch_router(monkeypatch) -> MagicMock:
 
 
 def _ctx() -> SalesRecoveryContext:
-    return SalesRecoveryContext(tenant_id=str(uuid4()), run_id=str(uuid4()))
+    return SalesRecoveryContext(
+        tenant_id=str(uuid4()),
+        run_id=str(uuid4()),
+        user_request="test request",
+    )
 
 
 # ---------- coordinator: first-wins -------------------------------------------

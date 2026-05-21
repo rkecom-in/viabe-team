@@ -42,7 +42,6 @@ from orchestrator.agent.schemas.campaign_plan import (  # noqa: E402
     CampaignPlanInsufficientData,
     CampaignPlanOutOfScope,
     CampaignPlanProposed,
-    CampaignStatus,
 )
 from orchestrator.supervisor import build_supervisor_graph  # noqa: E402
 
@@ -58,41 +57,176 @@ _CampaignPlanVariants = (
 
 @pytest.mark.integration
 @pytest.mark.skipif(
-    not os.environ.get("ANTHROPIC_API_KEY"),
-    reason="ANTHROPIC_API_KEY not set",
+    not os.environ.get("ANTHROPIC_API_KEY")
+    or not os.environ.get("DATABASE_URL"),
+    reason=(
+        "real-supervisor integration test needs ANTHROPIC_API_KEY "
+        "(for the orchestrator + agent + self_evaluate calls) + "
+        "DATABASE_URL (the collapse node persists to campaigns / "
+        "subscriber_states). RUN_INTEGRATION_TESTS=1 alone is "
+        "insufficient — all three env gates are required and independent."
+    ),
 )
-def test_orchestrator_spawns_sales_recovery_returns_campaign_plan() -> None:
-    """Orchestrator routes to the stub specialist; the specialist returns a
-    CampaignPlan.
+def test_orchestrator_spawns_sales_recovery_returns_campaign_plan(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Production live-run through the supervisor dispatch.
 
-    Asserts: the graph runs end-to-end; active_agent == 'sales_recovery_agent';
-    campaign_plan is a valid CampaignPlan with proposed_by/status as expected.
+    VT-SR-Agent dispatch switch + CL-287 user_request threading +
+    CL-288 emit-shape coercion. End-to-end production path:
+    orchestrator → spawn → real agent → coercion → gate → collapse.
+
+    Load-bearing assertions PROVE a real Opus round-trip happened on
+    the specialist side — a green pass here cannot be reached by a
+    mock-leak or silent SDK-substitution path. Specifically:
+      (1) ``_CountingClient.calls_to_real_anthropic`` records every
+          call that reaches ``self._real.messages.create(...)`` AFTER
+          it returns. Specialist call count >= 1.
+      (2) First specialist call's ``model='claude-opus-4-7'``.
+      (3) First specialist response carries an ``id`` starting with
+          ``'msg_'`` — only real Anthropic API responses do.
+      (4) ``active_agent == 'sales_recovery_agent'`` — indirect proof
+          the orchestrator's ChatAnthropic also fired, since the graph
+          only routes there after the orchestrator invokes the
+          ``spawn_sales_recovery`` tool, which requires the orchestrator
+          model to have responded with tool_use.
+      (5) Wall-clock floor > 2.0s — Opus + Opus single-turn each is
+          typically >=1.5s; the canary makes at least two real calls
+          (orchestrator + specialist) so total >2s. Weak backup per the
+          CL-288 brief, not the primary gate.
+
+    Variant assertion: ANY v1.0 CampaignPlan variant is a PASS. Empty
+    ``uuid4()`` tenant has no dormant customers, so ``insufficient_data``
+    is the correct verdict; asserting ``proposed`` here is the CL-288
+    hallucination-pressure mistake. The seeded-fixture ``proposed``-
+    path canary is CL-289's job (separate subtask, needs seed data).
+    This canary verifies dispatch correctness + shape conformance,
+    not plan quality.
+
+    Env requirement is THREE-WAY, all independent and required:
+      - RUN_INTEGRATION_TESTS=1 (conftest hook strips the
+        @pytest.mark.integration skip; without it the marker collects
+        a skip regardless of keys)
+      - ANTHROPIC_API_KEY (this test's skipif)
+      - DATABASE_URL (this test's skipif)
     """
+    from anthropic import Anthropic as _RealAnthropic
+
+    # Sanity: confirm the genuine SDK class is in scope.
+    assert _RealAnthropic.__module__.startswith("anthropic"), (
+        f"anthropic.Anthropic non-genuine: module={_RealAnthropic.__module__!r}"
+    )
+
+    class _CountingClient:
+        """Real Anthropic SDK + ledger.
+
+        Forwards every ``.messages.create(**kwargs)`` to the real client,
+        records call metadata + response signature AFTER the call
+        returns. CL-287 already threads the user request through
+        SalesRecoveryContext, so no SDK-boundary substitution is needed
+        on this branch — just count.
+        """
+
+        calls_to_real_anthropic: list[dict[str, Any]] = []
+
+        def __init__(self) -> None:
+            self._real = _RealAnthropic()
+
+        @property
+        def messages(self):  # type: ignore[no-untyped-def]
+            return self
+
+        def create(self, **kwargs):  # type: ignore[no-untyped-def]
+            response = self._real.messages.create(**kwargs)
+            _CountingClient.calls_to_real_anthropic.append(
+                {
+                    "model": kwargs.get("model"),
+                    "first_user_message": (
+                        kwargs["messages"][0].get("content")
+                        if kwargs.get("messages")
+                        and isinstance(kwargs["messages"][0], dict)
+                        else None
+                    ),
+                    "response_id": getattr(response, "id", None),
+                    "response_usage_input": getattr(
+                        getattr(response, "usage", None), "input_tokens", None
+                    ),
+                    "response_usage_output": getattr(
+                        getattr(response, "usage", None), "output_tokens", None
+                    ),
+                }
+            )
+            return response
+
+    # Reset the class-level ledger so prior state cannot satisfy proof.
+    _CountingClient.calls_to_real_anthropic = []
+
+    # Patch ONLY the specialist's SDK seam. The orchestrator uses
+    # ChatAnthropic (langchain) which has its own SDK plumbing — that
+    # path is proven indirectly via active_agent below.
+    monkeypatch.setattr(
+        "orchestrator.agent.sales_recovery.Anthropic", _CountingClient
+    )
+    monkeypatch.setenv("VIABE_ENV", "production")  # _resolve_model → Opus
+
     model = ChatAnthropic(model="claude-opus-4-7")  # type: ignore[call-arg]
     graph = build_supervisor_graph(model=model)
 
+    tenant_id = uuid4()
+    run_id = uuid4()
+    USER_INPUT = "Recover dormant customers from the last 60 days"
+
+    import time
+
+    wallclock_start = time.monotonic()
     result = graph.invoke(
         {
             "messages": [
-                {
-                    "role": "user",
-                    "content": "Recover dormant customers from the last 60 days",
-                }
+                {"role": "user", "content": USER_INPUT}
             ],
             # spawn_sales_recovery requires run identity in state (CL-209).
-            "tenant_id": uuid4(),
-            "run_id": uuid4(),
+            "tenant_id": tenant_id,
+            "run_id": run_id,
         }
     )
+    wallclock_s = time.monotonic() - wallclock_start
 
-    assert result.get("active_agent") == "sales_recovery_agent"
+    diag = {
+        "wallclock_s": wallclock_s,
+        "active_agent": result.get("active_agent"),
+        "campaign_plan_type": type(result.get("campaign_plan")).__name__,
+        "specialist_call_count": len(_CountingClient.calls_to_real_anthropic),
+        "specialist_call_ledger": _CountingClient.calls_to_real_anthropic,
+        "result_keys": sorted(result.keys()) if result else None,
+    }
+
+    # --- PROOF-OF-CALL: load-bearing -----------------------------------
+    # (1) Specialist made >= 1 real Opus call.
+    assert len(_CountingClient.calls_to_real_anthropic) >= 1, diag
+    first_call = _CountingClient.calls_to_real_anthropic[0]
+    # (2) Opus was the specialist target.
+    assert first_call["model"] == "claude-opus-4-7", diag
+    # (3) 'msg_' id prefix proves real Anthropic API response.
+    assert isinstance(first_call["response_id"], str), diag
+    assert first_call["response_id"].startswith("msg_"), diag
+    # (4) Orchestrator dispatched (indirect proof of ChatAnthropic call —
+    # graph only sets active_agent after orchestrator's tool_use turn).
+    assert result.get("active_agent") == "sales_recovery_agent", diag
+    # (5) Wall-clock floor: orchestrator + specialist + gate, all real
+    # Opus. >=2s is a weak but reasonable lower bound.
+    assert wallclock_s > 2.0, diag
+
+    # --- Shape conformance ---------------------------------------------
     plan = result.get("campaign_plan")
-    assert isinstance(plan, _CampaignPlanVariants)
-    # v1.0: stub returns the proposed variant; lifecycle progression
-    # (approved/rejected/sent/failed) lives on a downstream field, NOT
-    # on plan.status (CL: status-enum split).
-    assert isinstance(plan, CampaignPlanProposed)
-    assert plan.status is CampaignStatus.PROPOSED
+    # ANY v1.0 variant is a PASS — empty uuid4() tenant legitimately
+    # yields insufficient_data. CL-288 hallucination-pressure: do NOT
+    # narrow to CampaignPlanProposed here. Seeded-fixture proposed-path
+    # verification is CL-289 (separate subtask, needs seed data).
+    assert isinstance(plan, _CampaignPlanVariants), diag
+    # Identity-injection invariant — agent overwrote model output with
+    # context fields.
+    assert plan.tenant_id == tenant_id, diag
+    assert plan.run_id == run_id, diag
 
 
 # --- VT-3.4 PR 2/3: landmine-1 keyless precedence test (CL-202 / CL-203) ------
@@ -166,6 +300,16 @@ def _run_supervisor_path(
     # routing precedence with a fake model and no DB — neutralise the collapse
     # node so the spawn path does not hit `get_pool()`.
     monkeypatch.setattr(supervisor_mod, "collapse_node", lambda state: {})
+
+    # Dispatch switch (VT-SR-Agent Exec Order 6.7): sales_recovery_agent now
+    # calls run_sales_recovery_agent (real Anthropic Messages SDK + the
+    # self-evaluate gate with a VT-50 adapter). This landmine test runs
+    # keyless — neutralise the specialist node so the spawn path does not
+    # construct Anthropic() / hit the API. Routing precedence is the
+    # surface under test; the specialist's body is irrelevant here.
+    monkeypatch.setattr(
+        supervisor_mod, "_sales_recovery_node", lambda state: {}
+    )
 
     trace: list[str] = []
     final_state: dict[str, Any] = {}
