@@ -54,15 +54,15 @@ def substrate():  # type: ignore[no-untyped-def]
     from dbos_config import launch_dbos, shutdown_dbos
     from orchestrator.dbos_purge import register_purge_scheduler
 
-    launch_dbos()
-    # Register AFTER launch — mirrors main.py's lifespan. The DBOS
-    # registry holds a stale ``self.dbos`` reference across
-    # launch/destroy cycles in a single pytest process; registering
-    # before launch in that situation hits the "already launched"
-    # branch with ``_executor_field=None`` and raises. Registering
-    # after launch ensures the registry's dbos ref is fresh and the
-    # poller's submit call has a live executor.
+    # Register BEFORE launch — mirrors main.py's lifespan. The
+    # launch-time ``app_version`` hash includes the purge workflow,
+    # and ``_launch`` drains the deferred-poller queue. Stale-
+    # registry safety: ``shutdown_dbos`` clears
+    # ``_dbos_global_registry.dbos`` between fixture cycles so this
+    # ``register_poller`` call takes the deferred branch even after a
+    # prior test in the same pytest process has destroyed its DBOS.
     register_purge_scheduler()
+    launch_dbos()
     try:
         yield SimpleNamespace(dsn=dsn, dbos=_get_dbos_instance())
     finally:

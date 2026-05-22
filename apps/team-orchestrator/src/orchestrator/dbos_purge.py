@@ -233,21 +233,32 @@ def register_purge_scheduler() -> None:
     """Apply the ``@DBOS.scheduled`` decoration to
     ``purge_workflow_inputs_scheduled``.
 
-    Call this AFTER ``launch_dbos()``. The production entrypoint
+    Call this BEFORE ``launch_dbos()``. The production entrypoint
     (``main.py`` lifespan) does so; the substrate test fixture
-    mirrors that order. ``DBOS.scheduled(cron)`` returns the
-    decorator factory (``_dbos.py:1098`` →
-    ``_scheduler_decorator.scheduled``); applying it to the plain
-    function calls ``DBOSRegistry.register_poller``, which checks
-    ``self.dbos._launched`` and submits to
-    ``self.dbos._executor`` when launched (otherwise queues for the
-    next ``DBOS.launch``). The registry's ``dbos`` reference is set
-    during ``DBOS.__init__`` and NOT cleared by ``DBOS.destroy``,
-    so in a process that cycles launch + destroy (pytest re-launch
-    across module fixtures) the registry can hold a stale dbos with
-    ``_launched=True`` and ``_executor_field=None``; registering
-    after a fresh launch ensures the registry's reference is
-    current and the executor is alive.
+    mirrors that order. Registering before launch ensures the
+    workflow is in the registry when ``_launch`` (``_dbos.py:523``)
+    computes the launch-time ``app_version`` hash (line 530:
+    ``GlobalParams.app_version = self._registry.compute_app_version()``)
+    and when ``_launch`` drains the deferred-poller queue at
+    ``_dbos.py:683-690``.
+
+    ``DBOS.scheduled(cron)`` returns the decorator factory
+    (``_dbos.py:1098`` → ``_scheduler_decorator.scheduled``);
+    applying it to the plain function calls
+    ``DBOSRegistry.register_poller`` (``_dbos.py:249-256``) which
+    branches on ``self.dbos._launched``. With register-before-launch
+    after a fresh process start, ``self.dbos`` is None and the
+    poller is queued in ``self.pollers`` for ``_launch`` to drain.
+
+    Pytest-fixture isolation: ``DBOSRegistry.dbos`` is set in
+    ``DBOS.__init__`` (``_dbos.py:399``) and DBOS's ``_destroy``
+    does NOT clear it (the destroyed instance keeps ``_launched=True``
+    and ``_executor_field=None``). ``dbos_config.shutdown_dbos``
+    clears the stale ``_dbos_global_registry.dbos`` after
+    ``DBOS.destroy()`` so a subsequent register-before-launch call
+    in the next fixture takes the deferred-poller branch as
+    intended, not the "already launched" branch with a None
+    executor.
 
     Tests that import this module purely for
     ``purge_terminal_workflow_inputs`` MUST NOT call this —

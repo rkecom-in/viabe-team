@@ -62,8 +62,30 @@ def launch_dbos() -> None:
 
 
 def shutdown_dbos() -> None:
-    """Tear DBOS down. Used by tests; safe to call when not launched."""
+    """Tear DBOS down. Used by tests; safe to call when not launched.
+
+    Clears the registry-side back-reference to the destroyed DBOS
+    instance — DBOS's ``_destroy`` (``_dbos.py:786-793``) clears
+    ``_executor_field`` but NOT ``_launched``, and ``DBOSRegistry.dbos``
+    is set in ``DBOS.__init__`` (``_dbos.py:399``) and is never reset.
+    Without this manual clear, in a pytest process that cycles
+    launch/destroy across module fixtures the registry continues to
+    hold a stale ``dbos`` with ``_launched=True`` and
+    ``_executor_field=None``. Any subsequent ``register_poller`` call
+    (e.g. ``register_purge_scheduler`` BEFORE the next ``launch_dbos``
+    — the architecturally correct ordering, so @DBOS.scheduled lands
+    in the registry before the launch-time ``app_version`` hash and
+    before ``_launch`` drains the deferred-poller queue at
+    ``_dbos.py:683``) would take the ``register_poller`` "already
+    launched" branch (``_dbos.py:252``) and submit to a None
+    executor.
+    """
     global _launched
     DBOS.destroy()
+    # Clear the registry's stale back-reference so the next
+    # ``register_poller`` call before launch takes the deferred branch.
+    import dbos._dbos as _dbos_mod
+    if _dbos_mod._dbos_global_registry is not None:
+        _dbos_mod._dbos_global_registry.dbos = None
     reset_substrate()
     _launched = False
