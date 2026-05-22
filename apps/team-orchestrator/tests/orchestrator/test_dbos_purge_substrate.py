@@ -52,25 +52,17 @@ def substrate():  # type: ignore[no-untyped-def]
 
     from dbos._dbos import _get_dbos_instance
     from dbos_config import launch_dbos, shutdown_dbos
-
-    # Register the @DBOS.scheduled purge workflow before launch so the
-    # poller picks it up. main.py (production entrypoint) does this
-    # for the live process; this fixture mirrors it so the helper
-    # exercises the registered scheduler.
-    #
-    # Note: this registration shifts the app_version for any test in
-    # the same pytest process that also calls launch_dbos. The
-    # fix-1 PR makes ``register_purge_scheduler`` an explicit call
-    # (no import-time side effect), so a plain ``from
-    # orchestrator.dbos_purge import purge_terminal_workflow_inputs``
-    # elsewhere stays inert. This fixture calls register explicitly
-    # because the substrate suite IS the path that wants the
-    # registration to land.
     from orchestrator.dbos_purge import register_purge_scheduler
 
-    register_purge_scheduler()
-
     launch_dbos()
+    # Register AFTER launch — mirrors main.py's lifespan. The DBOS
+    # registry holds a stale ``self.dbos`` reference across
+    # launch/destroy cycles in a single pytest process; registering
+    # before launch in that situation hits the "already launched"
+    # branch with ``_executor_field=None`` and raises. Registering
+    # after launch ensures the registry's dbos ref is fresh and the
+    # poller's submit call has a live executor.
+    register_purge_scheduler()
     try:
         yield SimpleNamespace(dsn=dsn, dbos=_get_dbos_instance())
     finally:

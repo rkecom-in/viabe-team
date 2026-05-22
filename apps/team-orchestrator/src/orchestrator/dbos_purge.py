@@ -233,16 +233,28 @@ def register_purge_scheduler() -> None:
     """Apply the ``@DBOS.scheduled`` decoration to
     ``purge_workflow_inputs_scheduled``.
 
-    Idempotent in intent: the production entrypoint
-    (``main.py`` lifespan) calls this exactly once before
-    ``launch_dbos()``. ``DBOS.scheduled(cron)`` returns the decorator
-    factory (``_dbos.py:1098`` → ``_scheduler_decorator.scheduled``);
-    applying it to the plain function registers the poller with
-    ``DBOSRegistry``. Tests that import this module purely for
-    ``purge_terminal_workflow_inputs`` MUST NOT call this — registering
-    the scheduler shifts ``DBOSRegistry.compute_app_version`` and
-    breaks the recovery filter that other tests in the same pytest
-    process depend on (``_recovery.py:58`` filters pending workflows
-    by ``app_version``).
+    Call this AFTER ``launch_dbos()``. The production entrypoint
+    (``main.py`` lifespan) does so; the substrate test fixture
+    mirrors that order. ``DBOS.scheduled(cron)`` returns the
+    decorator factory (``_dbos.py:1098`` →
+    ``_scheduler_decorator.scheduled``); applying it to the plain
+    function calls ``DBOSRegistry.register_poller``, which checks
+    ``self.dbos._launched`` and submits to
+    ``self.dbos._executor`` when launched (otherwise queues for the
+    next ``DBOS.launch``). The registry's ``dbos`` reference is set
+    during ``DBOS.__init__`` and NOT cleared by ``DBOS.destroy``,
+    so in a process that cycles launch + destroy (pytest re-launch
+    across module fixtures) the registry can hold a stale dbos with
+    ``_launched=True`` and ``_executor_field=None``; registering
+    after a fresh launch ensures the registry's reference is
+    current and the executor is alive.
+
+    Tests that import this module purely for
+    ``purge_terminal_workflow_inputs`` MUST NOT call this —
+    registering the scheduler shifts
+    ``DBOSRegistry.compute_app_version`` and breaks the recovery
+    filter that other tests in the same pytest process depend on
+    (``_recovery.py:58`` filters pending workflows by
+    ``app_version``).
     """
     DBOS.scheduled(_PURGE_CRON)(purge_workflow_inputs_scheduled)
