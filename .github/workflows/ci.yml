@@ -257,6 +257,11 @@ jobs:
           DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
           INTERNAL_API_SECRET: ci-test-internal-secret
           TEAM_PHONE_HASH_SALT: ci-test-phone-hash-salt
+          # VT-150-fix-1: integration tests gated on this env var
+          # (conftest.py:27 strips the @pytest.mark.integration skip only
+          # when set). Without it the four test_dbos_purge_substrate
+          # cases skip and the gate is theatre.
+          RUN_INTEGRATION_TESTS: "1"
         run: |
           uv sync --frozen
           uv run pytest tests/orchestrator/ -v

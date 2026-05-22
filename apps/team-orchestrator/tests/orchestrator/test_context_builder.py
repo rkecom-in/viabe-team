@@ -33,16 +33,21 @@ from orchestrator.context_builder import (
 
 @pytest.fixture(autouse=True)
 def _stub_db_backed_builders(monkeypatch: pytest.MonkeyPatch) -> None:
-    """VT-138: ``_build_recent_campaigns`` is now a live DB read via
-    ``tenant_connection``. The pure-Python tests in this file exercise
-    the bundle constructor's dispatcher + safe-empty contract; they
-    must not require a DB. Monkeypatch the DB-backed builder back to
-    safe-empty for every test here.
+    """``_build_recent_campaigns`` (VT-138) and
+    ``_build_pending_owner_inputs`` (VT-146) are both live DB reads
+    via ``tenant_connection``. The pure-Python tests in this file
+    exercise the bundle constructor's dispatcher + safe-empty contract;
+    they must not require a DB. Monkeypatch both DB-backed builders
+    back to safe-empty for every test here.
 
-    The DB read path itself is covered by the substrate-fixture suite
-    in ``test_context_builder_campaigns_readpath.py``.
+    The DB read paths themselves are covered by the substrate-fixture
+    suites in ``test_context_builder_campaigns_readpath.py`` and
+    ``test_context_builder_owner_inputs_readpath.py``.
     """
     monkeypatch.setattr(cb, "_build_recent_campaigns", lambda tid: ([], False))
+    monkeypatch.setattr(
+        cb, "_build_pending_owner_inputs", lambda tid: ([], False)
+    )
 
 # §4.1 — the actual SalesRecoveryContext dataclass fields.
 # Exec-6.85: ``user_request`` joins the bundle so the specialist receives

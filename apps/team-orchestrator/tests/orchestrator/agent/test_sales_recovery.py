@@ -44,13 +44,17 @@ from orchestrator.failures import HardLimitAxis  # noqa: E402
 
 @pytest.fixture(autouse=True)
 def _stub_db_backed_campaigns_builder(monkeypatch: pytest.MonkeyPatch) -> None:
-    """VT-138: ``_build_recent_campaigns`` is now a live DB read via
+    """VT-138 / VT-146: ``_build_recent_campaigns`` and
+    ``_build_pending_owner_inputs`` are now live DB reads via
     ``tenant_connection``. The unit tests in this file never spin up a
     DB substrate — they exercise the agent loop and node wrappers with
-    mocked Anthropic clients. Stub the DB-backed builder back to
+    mocked Anthropic clients. Stub both DB-backed builders to
     safe-empty so bundle construction stays pure-Python.
     """
     monkeypatch.setattr(_cb_mod, "_build_recent_campaigns", lambda tid: ([], False))
+    monkeypatch.setattr(
+        _cb_mod, "_build_pending_owner_inputs", lambda tid: ([], False)
+    )
 
 
 # --- 1. AgentResult contract -------------------------------------------------

@@ -31,24 +31,36 @@ from orchestrator.context_builder import (
 
 @pytest.fixture(autouse=True)
 def _stub_db_backed_builders(monkeypatch: pytest.MonkeyPatch) -> None:
-    """VT-138: ``_build_recent_campaigns`` is now a live DB read. Tests
-    in this file exercise the bundle constructor's truncation /
-    budget logic with synthetic monkeypatched data, no DB required.
-    Force the DB-backed builder back to safe-empty unless the
-    individual test explicitly overrides it.
+    """VT-138 (`_build_recent_campaigns`) + VT-146
+    (`_build_pending_owner_inputs`) are both live DB reads. Tests in
+    this file exercise the bundle constructor's truncation / budget
+    logic with synthetic monkeypatched data, no DB required. Force
+    both DB-backed builders to safe-empty unless the individual test
+    explicitly overrides them.
     """
     monkeypatch.setattr(cb, "_build_recent_campaigns", lambda tid: ([], False))
+    monkeypatch.setattr(
+        cb, "_build_pending_owner_inputs", lambda tid: ([], False)
+    )
 
 
 _EFFECTIVE_CAP = 6400
 
 
-def _owner_inputs(n: int, content_len: int) -> list[OwnerInput]:
+def _owner_inputs(n: int, segment_len: int) -> list[OwnerInput]:
+    """Build synthetic OwnerInput rows sized for the truncation tests.
+
+    VT-146 reshape: ``content`` is gone — ``intent / segment / occasion``
+    replace it. The bulk of the row's token footprint now lives on
+    ``segment`` (free-text classification label), so the truncation
+    tests scale that string instead of the old ``content``.
+    """
     return [
         OwnerInput(
             input_id=uuid4(),
             received_at=datetime.now(UTC),
-            content="x" * content_len,
+            intent="winback",
+            segment="x" * segment_len,
         )
         for _ in range(n)
     ]
