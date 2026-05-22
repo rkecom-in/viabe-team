@@ -28,6 +28,18 @@ from orchestrator.context_builder import (
     build_sales_recovery_context,
 )
 
+
+@pytest.fixture(autouse=True)
+def _stub_db_backed_builders(monkeypatch: pytest.MonkeyPatch) -> None:
+    """VT-138: ``_build_recent_campaigns`` is now a live DB read. Tests
+    in this file exercise the bundle constructor's truncation /
+    budget logic with synthetic monkeypatched data, no DB required.
+    Force the DB-backed builder back to safe-empty unless the
+    individual test explicitly overrides it.
+    """
+    monkeypatch.setattr(cb, "_build_recent_campaigns", lambda tid: ([], False))
+
+
 _EFFECTIVE_CAP = 6400
 
 
