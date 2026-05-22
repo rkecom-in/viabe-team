@@ -26,10 +26,18 @@ sys-DB IO).
 Public entry points:
   - ``purge_terminal_workflow_inputs()`` — invokable directly from tests
     and admin scripts. Returns ``(cutoff_ms, deleted_count)``.
-  - ``purge_workflow_inputs_scheduled`` — the @DBOS.scheduled poller.
-    Registered at module import; the registration is wired through
-    ``dbos_config.launch_dbos`` so the decorator fires before
-    ``DBOS.launch()`` and the poller thread starts with the rest.
+  - ``purge_workflow_inputs_scheduled`` — the plain (undecorated)
+    scheduled function. Importing this module does NOT register the
+    poller; the decorator is applied explicitly by
+    ``register_purge_scheduler()`` which the ``main.py`` lifespan calls
+    once before ``launch_dbos()``. Keeping the decoration off
+    import-time keeps ``DBOSRegistry.compute_app_version`` stable for
+    any test or admin path that imports this module purely for
+    ``purge_terminal_workflow_inputs`` — DBOS hashes registered
+    workflow source code to derive ``app_version``, and shifting the
+    hash between processes (e.g. subprocess workers vs. parent
+    fixture) breaks the recovery filter at ``_recovery.py:58``
+    ``get_pending_workflows(executor_id, app_version)``.
 """
 
 from __future__ import annotations
@@ -196,23 +204,45 @@ def _count_deletable_rows(dbos_instance: object, cutoff_ms: int) -> int:
         return 0
 
 
-@DBOS.scheduled(_PURGE_CRON)
 def purge_workflow_inputs_scheduled(
     scheduled_time: datetime, actual_time: datetime
 ) -> None:
-    """Scheduled DBOS workflow — sweep terminal workflow inputs.
+    """Scheduled DBOS workflow body — sweep terminal workflow inputs.
 
-    Cadence: every 30 minutes (``*/30 * * * *``). The body delegates to
+    Plain (undecorated) function. ``register_purge_scheduler()``
+    applies the ``DBOS.scheduled(_PURGE_CRON)`` decorator explicitly so
+    importing this module has no side effect on the DBOS registry.
+
+    Cadence (set by the registration call): every 30 minutes
+    (``*/30 * * * *``). The body delegates to
     ``purge_terminal_workflow_inputs`` so the same logic is callable
     from tests / admin scripts without rescheduling.
 
-    Returns ``None`` per the @DBOS.scheduled function-signature
-    contract. Failures inside ``purge_terminal_workflow_inputs`` are
-    already logged + best-effort; a raise here would mark the
-    scheduled workflow as ERROR and stop further invocations until
-    DBOS recovery flips it back, so wrap to be safe.
+    Failures inside ``purge_terminal_workflow_inputs`` are already
+    logged + best-effort; a raise here would mark the scheduled
+    workflow as ERROR and halt further invocations until DBOS recovery
+    flips it back, so wrap to be safe.
     """
     try:
         purge_terminal_workflow_inputs()
     except Exception:  # noqa: BLE001 — scheduler poller must keep firing
         logger.exception("workflow-input purge sweep raised; cadence continues")
+
+
+def register_purge_scheduler() -> None:
+    """Apply the ``@DBOS.scheduled`` decoration to
+    ``purge_workflow_inputs_scheduled``.
+
+    Idempotent in intent: the production entrypoint
+    (``main.py`` lifespan) calls this exactly once before
+    ``launch_dbos()``. ``DBOS.scheduled(cron)`` returns the decorator
+    factory (``_dbos.py:1098`` → ``_scheduler_decorator.scheduled``);
+    applying it to the plain function registers the poller with
+    ``DBOSRegistry``. Tests that import this module purely for
+    ``purge_terminal_workflow_inputs`` MUST NOT call this — registering
+    the scheduler shifts ``DBOSRegistry.compute_app_version`` and
+    breaks the recovery filter that other tests in the same pytest
+    process depend on (``_recovery.py:58`` filters pending workflows
+    by ``app_version``).
+    """
+    DBOS.scheduled(_PURGE_CRON)(purge_workflow_inputs_scheduled)

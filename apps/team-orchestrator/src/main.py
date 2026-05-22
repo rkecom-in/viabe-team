@@ -19,19 +19,21 @@ from orchestrator.api import router
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     from dbos_config import launch_dbos, shutdown_dbos
+    from orchestrator.dbos_purge import register_purge_scheduler
 
     # Register scheduled workflows BEFORE launch_dbos so their
-    # @DBOS.scheduled decorators land in the registry before the
-    # poller threads start. Importing this module here (and NOT from
-    # launch_dbos itself) keeps the production process getting the
-    # purge while keeping the keyless test fixtures that call
-    # launch_dbos directly free of the @DBOS.scheduled registration
-    # — adding registry entries shifts ``app_version`` per
-    # ``DBOSRegistry.compute_app_version``, which would break the
-    # cross-process app_version match that DBOS's recovery filter
-    # relies on (see _recovery.py:58, get_pending_workflows filters
-    # by app_version).
-    import orchestrator.dbos_purge  # noqa: F401 — registration side effect
+    # @DBOS.scheduled decoration lands in the registry before the
+    # poller threads start. ``register_purge_scheduler`` is an
+    # explicit call — importing ``orchestrator.dbos_purge`` has no
+    # registration side effect, so test fixtures that import the
+    # module purely for ``purge_terminal_workflow_inputs`` do not
+    # accidentally poison the DBOS registry. This isolation matters:
+    # adding registry entries shifts ``app_version`` per
+    # ``DBOSRegistry.compute_app_version``, and a shift between
+    # processes (e.g. subprocess workers vs. parent fixture) would
+    # break the recovery filter at ``_recovery.py:58``
+    # (``get_pending_workflows(executor_id, app_version)``).
+    register_purge_scheduler()
 
     launch_dbos()
     yield

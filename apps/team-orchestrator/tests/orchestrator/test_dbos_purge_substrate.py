@@ -53,14 +53,22 @@ def substrate():  # type: ignore[no-untyped-def]
     from dbos._dbos import _get_dbos_instance
     from dbos_config import launch_dbos, shutdown_dbos
 
-    # Register the @DBOS.scheduled purge workflow before launch so
-    # the poller picks it up. main.py (production entrypoint) does
-    # this for the live process; this test fixture mirrors that
-    # registration so the purge_terminal_workflow_inputs call exercises
-    # the registered helper. The decorator only registers the
-    # scheduled func; the poller cadence (30 min) means it does not
-    # fire during the test window — we call the helper directly.
-    import orchestrator.dbos_purge  # noqa: F401 — registration side effect
+    # Register the @DBOS.scheduled purge workflow before launch so the
+    # poller picks it up. main.py (production entrypoint) does this
+    # for the live process; this fixture mirrors it so the helper
+    # exercises the registered scheduler.
+    #
+    # Note: this registration shifts the app_version for any test in
+    # the same pytest process that also calls launch_dbos. The
+    # fix-1 PR makes ``register_purge_scheduler`` an explicit call
+    # (no import-time side effect), so a plain ``from
+    # orchestrator.dbos_purge import purge_terminal_workflow_inputs``
+    # elsewhere stays inert. This fixture calls register explicitly
+    # because the substrate suite IS the path that wants the
+    # registration to land.
+    from orchestrator.dbos_purge import register_purge_scheduler
+
+    register_purge_scheduler()
 
     launch_dbos()
     try:
@@ -125,20 +133,26 @@ def _exists(dbos_instance: Any, wfid: str) -> bool:
 
 def test_old_terminal_rows_are_purged(substrate, monkeypatch):  # type: ignore[no-untyped-def]
     """SUCCESS / ERROR / CANCELLED / MAX_RECOVERY_ATTEMPTS_EXCEEDED rows
-    older than the retention SLA are deleted by one sweep."""
+    older than the retention SLA are deleted by one sweep.
+
+    Boundary stability: retention 1 hour, rows aged 24 hours. The
+    cutoff sits ~23 hours above the row age, far above any plausible
+    pooler latency AND far above the age of any other workflow row
+    the same CI test session may have written. Avoids the 1-second-
+    retention race AND the co-tenancy race where ``deleted`` would
+    include rows other tests wrote in the same session.
+    """
     from orchestrator.dbos_purge import (
         _RETENTION_ENV_VAR,
         purge_terminal_workflow_inputs,
     )
 
-    # Shrink retention so the "old" rows we seed actually fall behind
-    # the cutoff in a fast test. 1 second retention.
-    monkeypatch.setenv(_RETENTION_ENV_VAR, "1")
+    monkeypatch.setenv(_RETENTION_ENV_VAR, "3600")
 
     now_ms = int(time.time() * 1000)
-    old_ms = now_ms - 60_000  # 60 s ago — older than 1 s retention
+    old_ms = now_ms - 86_400_000  # 24 h ago — well past the 1 h window
 
-    # Seed one row in each terminal state at an "old" timestamp.
+    # Seed one row in each terminal state at the "old" timestamp.
     old_success = _seed_workflow_status(
         substrate.dbos, status="SUCCESS", created_at_ms=old_ms,
         inputs_text='{"args":[],"kwargs":{"Body":"OLD_SECRET_PROBE_1"}}',
@@ -156,10 +170,9 @@ def test_old_terminal_rows_are_purged(substrate, monkeypatch):  # type: ignore[n
         created_at_ms=old_ms,
     )
 
-    cutoff_ms, deleted = purge_terminal_workflow_inputs()
+    _cutoff_ms, deleted = purge_terminal_workflow_inputs()
 
-    assert cutoff_ms < now_ms  # cutoff is in the past
-    assert deleted >= 4  # at least our four seeded rows
+    assert deleted == 4
     assert not _exists(substrate.dbos, old_success)
     assert not _exists(substrate.dbos, old_error)
     assert not _exists(substrate.dbos, old_cancelled)
