@@ -30,6 +30,8 @@ import pytest
 pytest.importorskip("anthropic")
 pytest.importorskip("yaml")
 
+import orchestrator.context_builder as _cb_mod  # noqa: E402
+
 from orchestrator.agent.cost import RATES, compute_cost_paise  # noqa: E402
 from orchestrator.agent.sales_recovery import (  # noqa: E402
     SalesRecoveryContext,
@@ -38,6 +40,17 @@ from orchestrator.agent.sales_recovery import (  # noqa: E402
 from orchestrator.agent.sales_recovery_node import sales_recovery_node  # noqa: E402
 from orchestrator.agent.types import AgentResult  # noqa: E402
 from orchestrator.failures import HardLimitAxis  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _stub_db_backed_campaigns_builder(monkeypatch: pytest.MonkeyPatch) -> None:
+    """VT-138: ``_build_recent_campaigns`` is now a live DB read via
+    ``tenant_connection``. The unit tests in this file never spin up a
+    DB substrate — they exercise the agent loop and node wrappers with
+    mocked Anthropic clients. Stub the DB-backed builder back to
+    safe-empty so bundle construction stays pure-Python.
+    """
+    monkeypatch.setattr(_cb_mod, "_build_recent_campaigns", lambda tid: ([], False))
 
 
 # --- 1. AgentResult contract -------------------------------------------------

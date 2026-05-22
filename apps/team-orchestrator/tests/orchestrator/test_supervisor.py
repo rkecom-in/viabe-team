@@ -501,7 +501,17 @@ def _run_supervisor_path(
     the conditional edge's router actually fires. Returns
     ``(node_visit_trace, final_state, route_keys, captured_warnings)``.
     """
+    import orchestrator.context_builder as context_builder_mod
     import orchestrator.supervisor as supervisor_mod
+
+    # VT-138: _build_recent_campaigns now reads the live campaigns table via
+    # tenant_connection. This landmine test runs keyless with no DB pool —
+    # stub the builder back to safe-empty so spawn_sales_recovery's bundle
+    # construction stays pure-Python. The DB read path itself is covered by
+    # the substrate-fixture suite in test_context_builder_campaigns_readpath.py.
+    monkeypatch.setattr(
+        context_builder_mod, "_build_recent_campaigns", lambda tid: ([], False)
+    )
 
     route_keys: list[str] = []
     real_route = routing.route_after_orchestrator
@@ -655,9 +665,16 @@ def test_sales_recovery_node_passes_bundle_to_agent(
     received context and short-circuit. SelfEvaluateAdapter constructs
     against a ToolContext with real UUIDs from the bundle.
     """
+    import orchestrator.context_builder as context_builder_mod
     import orchestrator.supervisor as supervisor_mod
     from orchestrator.agent.types import AgentResult
     from orchestrator.context_builder import build_sales_recovery_context
+
+    # VT-138: _build_recent_campaigns hits the live DB by default; stub it
+    # back to safe-empty for this keyless wire-through test.
+    monkeypatch.setattr(
+        context_builder_mod, "_build_recent_campaigns", lambda tid: ([], False)
+    )
 
     received: dict[str, Any] = {}
 
@@ -732,7 +749,14 @@ def test_spawn_sales_recovery_attaches_bundle_with_user_request(
     Pre-Exec-6.85 the bundle had no user_request field; the specialist
     extracted it node-side. Now the seam carries it.
     """
+    import orchestrator.context_builder as context_builder_mod
     from orchestrator.handoffs import _build_sales_recovery_update
+
+    # VT-138: stub the DB-backed campaigns builder; this keyless test
+    # exercises spawn-time bundle assembly, not the live read path.
+    monkeypatch.setattr(
+        context_builder_mod, "_build_recent_campaigns", lambda tid: ([], False)
+    )
 
     tenant_id = uuid4()
     run_id = uuid4()
