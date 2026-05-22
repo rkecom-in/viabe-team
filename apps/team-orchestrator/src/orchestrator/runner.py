@@ -218,8 +218,16 @@ def webhook_pipeline_run(
     event = build_webhook_event(twilio_fields, dupe_status=not newly_inserted)
     state = new_subscriber_state(UUID(tenant_id), UUID(run_id))
 
-    # Phone-tokenise before anything is persisted (Pillar 3 / Pillar 7).
+    # Redact + phone-tokenise before anything is persisted (Pillar 3 / Pillar 7).
+    # Body redaction (Component 0): drop the raw message body from the
+    # persisted envelope. Provenance via MessageSid + hashed sender_phone
+    # is preserved; content (what the owner said) is not retained. The
+    # in-memory ``event`` keeps body intact for the request's lifetime —
+    # request-scoped readers (pre_filter, the future owner_inputs
+    # extraction writer) consume body from ``event``, NOT from
+    # trigger_payload / input_envelope.
     tokenised = event.model_dump()
+    tokenised.pop("body", None)
     if event.sender_phone:
         tokenised["sender_phone"] = hash_phone(event.sender_phone)
 
