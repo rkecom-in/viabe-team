@@ -11,11 +11,13 @@ writes the derived ``intent / segment / occasion`` row to
 from orchestrator.owner_inputs.writer import (
     OwnerInputClassification,
     classify_message,
+    run_extraction_for_event,
     write_owner_input,
 )
 
 __all__ = [
     "OwnerInputClassification",
     "classify_message",
+    "run_extraction_for_event",
     "write_owner_input",
 ]

@@ -235,14 +235,18 @@ def webhook_pipeline_run(
     open_webhook_run(tenant_id, run_id, tokenised)
     record_webhook_received(tenant_id, run_id, tokenised)
 
-    # VT-146 — owner-input extraction. Reads body from the request-scoped
-    # ``event`` (NOT from any persisted column; VT-144 stripped raw body
-    # from trigger_payload / input_envelope), classifies via Anthropic
-    # Haiku, writes the derived intent/segment/occasion row to
-    # ``owner_inputs``. ``run_extraction_for_event`` is best-effort
-    # internally — classifier or write failure logs and returns None;
-    # the inbound pipeline never breaks. No body leaves this function
-    # via persistence; the body text crosses the wire to Anthropic only.
+    # VT-146 — owner-input extraction seam. Reads body from the
+    # request-scoped ``event`` (NOT from any persisted column; VT-144
+    # stripped raw body from trigger_payload / input_envelope), routes
+    # it to the classifier in ``orchestrator.owner_inputs`` (which owns
+    # the LLM seam — Pillar 1 keeps runner.py deterministic; the LLM
+    # call lives behind the writer's boundary), persists only the
+    # derived intent / segment / occasion row to ``owner_inputs``.
+    # ``run_extraction_for_event`` is best-effort internally —
+    # classifier or write failure logs and returns None; the inbound
+    # pipeline never breaks. No body leaves this function via
+    # persistence; the body text crosses the wire to the classifier
+    # only.
     run_extraction_for_event(UUID(tenant_id), UUID(run_id), event)
 
     result = pre_filter(event, state)
