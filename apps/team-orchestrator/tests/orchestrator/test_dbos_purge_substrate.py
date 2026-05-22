@@ -20,13 +20,12 @@ from __future__ import annotations
 import os
 import time
 from types import SimpleNamespace
+from typing import Any
 from uuid import uuid4
 
 import pytest
 
 pytest.importorskip("dbos")
-
-import psycopg  # noqa: E402 — after dependency skip guards
 
 pytestmark = pytest.mark.skipif(
     not os.environ.get("DATABASE_URL"),
@@ -39,24 +38,30 @@ def substrate():  # type: ignore[no-untyped-def]
     """Apply migrations + launch DBOS so its sys-DB tables exist and
     the @DBOS.scheduled poller is registered. The poller fires every
     30 min — within a fast test the scheduled invocation does NOT run;
-    we call ``purge_terminal_workflow_inputs`` directly."""
+    we call ``purge_terminal_workflow_inputs`` directly.
+
+    DBOS provisions its own sys-DB (named ``<app_db>_dbos_sys``) —
+    seeding goes through ``dbos_instance._sys_db.engine`` so we hit
+    the right database + schema regardless of how DBOS was configured.
+    """
     import apply_migrations
 
     dsn = os.environ["DATABASE_URL"]
     apply_migrations.apply(dsn=dsn)
     os.environ["TEAM_SUPABASE_DB_URL"] = dsn
 
+    from dbos._dbos import _get_dbos_instance
     from dbos_config import launch_dbos, shutdown_dbos
 
     launch_dbos()
     try:
-        yield SimpleNamespace(dsn=dsn)
+        yield SimpleNamespace(dsn=dsn, dbos=_get_dbos_instance())
     finally:
         shutdown_dbos()
 
 
 def _seed_workflow_status(
-    dsn: str,
+    dbos_instance: Any,
     *,
     status: str,
     created_at_ms: int,
@@ -66,27 +71,42 @@ def _seed_workflow_status(
     required columns. Returns the workflow_uuid for later assertions.
 
     Required-NOT-NULL columns per the schema:
-      workflow_uuid (PK), created_at (BigInteger), updated_at (BigInteger),
-      priority (Integer), was_forked_from (Boolean), rate_limited (Boolean).
-    Everything else nullable.
+      workflow_uuid (PK), created_at (BigInteger), updated_at
+      (BigInteger), priority (Integer), was_forked_from (Boolean),
+      rate_limited (Boolean). Everything else nullable.
+
+    Writes via the DBOS sys-DB engine so the test hits the right
+    database + the schema that DBOS configured at init.
     """
+    from dbos._schemas.system_database import SystemSchema
+
     wfid = f"test-purge-{uuid4().hex}"
-    with psycopg.connect(dsn, autocommit=True) as conn:
+    ws = SystemSchema.workflow_status
+    with dbos_instance._sys_db.engine.begin() as conn:
         conn.execute(
-            "INSERT INTO dbos.workflow_status "
-            "(workflow_uuid, status, created_at, updated_at, priority, "
-            "was_forked_from, rate_limited, inputs) "
-            "VALUES (%s, %s, %s, %s, 0, false, false, %s)",
-            (wfid, status, created_at_ms, created_at_ms, inputs_text),
+            ws.insert().values(
+                workflow_uuid=wfid,
+                status=status,
+                created_at=created_at_ms,
+                updated_at=created_at_ms,
+                priority=0,
+                was_forked_from=False,
+                rate_limited=False,
+                inputs=inputs_text,
+            )
         )
     return wfid
 
 
-def _exists(dsn: str, wfid: str) -> bool:
-    with psycopg.connect(dsn, autocommit=True) as conn:
+def _exists(dbos_instance: Any, wfid: str) -> bool:
+    from sqlalchemy import select
+
+    from dbos._schemas.system_database import SystemSchema
+
+    ws = SystemSchema.workflow_status
+    with dbos_instance._sys_db.engine.begin() as conn:
         row = conn.execute(
-            "SELECT 1 FROM dbos.workflow_status WHERE workflow_uuid = %s",
-            (wfid,),
+            select(ws.c.workflow_uuid).where(ws.c.workflow_uuid == wfid)
         ).fetchone()
     return row is not None
 
@@ -111,18 +131,18 @@ def test_old_terminal_rows_are_purged(substrate, monkeypatch):  # type: ignore[n
 
     # Seed one row in each terminal state at an "old" timestamp.
     old_success = _seed_workflow_status(
-        substrate.dsn, status="SUCCESS", created_at_ms=old_ms,
+        substrate.dbos, status="SUCCESS", created_at_ms=old_ms,
         inputs_text='{"args":[],"kwargs":{"Body":"OLD_SECRET_PROBE_1"}}',
     )
     old_error = _seed_workflow_status(
-        substrate.dsn, status="ERROR", created_at_ms=old_ms,
+        substrate.dbos, status="ERROR", created_at_ms=old_ms,
         inputs_text='{"args":[],"kwargs":{"Body":"OLD_SECRET_PROBE_2"}}',
     )
     old_cancelled = _seed_workflow_status(
-        substrate.dsn, status="CANCELLED", created_at_ms=old_ms,
+        substrate.dbos, status="CANCELLED", created_at_ms=old_ms,
     )
     old_max_retry = _seed_workflow_status(
-        substrate.dsn,
+        substrate.dbos,
         status="MAX_RECOVERY_ATTEMPTS_EXCEEDED",
         created_at_ms=old_ms,
     )
@@ -131,10 +151,10 @@ def test_old_terminal_rows_are_purged(substrate, monkeypatch):  # type: ignore[n
 
     assert cutoff_ms < now_ms  # cutoff is in the past
     assert deleted >= 4  # at least our four seeded rows
-    assert not _exists(substrate.dsn, old_success)
-    assert not _exists(substrate.dsn, old_error)
-    assert not _exists(substrate.dsn, old_cancelled)
-    assert not _exists(substrate.dsn, old_max_retry)
+    assert not _exists(substrate.dbos, old_success)
+    assert not _exists(substrate.dbos, old_error)
+    assert not _exists(substrate.dbos, old_cancelled)
+    assert not _exists(substrate.dbos, old_max_retry)
 
 
 def test_in_flight_rows_are_preserved_regardless_of_age(
@@ -153,25 +173,25 @@ def test_in_flight_rows_are_preserved_regardless_of_age(
     ancient_ms = now_ms - 86_400_000  # 24 h ago — extremely old
 
     old_pending = _seed_workflow_status(
-        substrate.dsn, status="PENDING", created_at_ms=ancient_ms,
+        substrate.dbos, status="PENDING", created_at_ms=ancient_ms,
         inputs_text='{"args":[],"kwargs":{"Body":"PENDING_BODY_PROBE"}}',
     )
     old_enqueued = _seed_workflow_status(
-        substrate.dsn, status="ENQUEUED", created_at_ms=ancient_ms,
+        substrate.dbos, status="ENQUEUED", created_at_ms=ancient_ms,
     )
     old_delayed = _seed_workflow_status(
-        substrate.dsn, status="DELAYED", created_at_ms=ancient_ms,
+        substrate.dbos, status="DELAYED", created_at_ms=ancient_ms,
     )
 
     purge_terminal_workflow_inputs()
 
-    assert _exists(substrate.dsn, old_pending), (
+    assert _exists(substrate.dbos, old_pending), (
         "PENDING row was purged — recovery would lose the workflow's inputs"
     )
-    assert _exists(substrate.dsn, old_enqueued), (
+    assert _exists(substrate.dbos, old_enqueued), (
         "ENQUEUED row was purged — queue worker would lose the dispatch"
     )
-    assert _exists(substrate.dsn, old_delayed), (
+    assert _exists(substrate.dbos, old_delayed), (
         "DELAYED row was purged — delayed dispatch would never fire"
     )
 
@@ -191,16 +211,16 @@ def test_recent_terminal_rows_within_retention_are_preserved(
     now_ms = int(time.time() * 1000)
 
     recent_success = _seed_workflow_status(
-        substrate.dsn, status="SUCCESS", created_at_ms=now_ms,
+        substrate.dbos, status="SUCCESS", created_at_ms=now_ms,
     )
     recent_error = _seed_workflow_status(
-        substrate.dsn, status="ERROR", created_at_ms=now_ms,
+        substrate.dbos, status="ERROR", created_at_ms=now_ms,
     )
 
     purge_terminal_workflow_inputs()
 
-    assert _exists(substrate.dsn, recent_success)
-    assert _exists(substrate.dsn, recent_error)
+    assert _exists(substrate.dbos, recent_success)
+    assert _exists(substrate.dbos, recent_error)
 
 
 def test_zero_row_sweep_is_idempotent(substrate, monkeypatch):  # type: ignore[no-untyped-def]

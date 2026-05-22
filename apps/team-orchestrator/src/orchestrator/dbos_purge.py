@@ -40,6 +40,8 @@ import time
 from datetime import datetime
 
 from dbos import DBOS
+from dbos._dbos import _get_dbos_instance
+from dbos._error import DBOSException
 from dbos._workflow_commands import garbage_collect as _dbos_garbage_collect
 
 logger = logging.getLogger(__name__)
@@ -121,12 +123,14 @@ def purge_terminal_workflow_inputs() -> tuple[int, int]:
     retention_s = _retention_seconds()
     cutoff_ms = _now_ms() - retention_s * 1000
 
-    dbos_instance = DBOS._instance  # type: ignore[attr-defined]
-    if dbos_instance is None:
-        # DBOS.launch() has not run. The @DBOS.scheduled poller should
-        # not fire before launch, but defend the direct-call surface
-        # (tests / admin scripts) so an unconfigured environment does
-        # not stack a stack trace into the log.
+    try:
+        dbos_instance = _get_dbos_instance()
+    except DBOSException:
+        # DBOS has not been constructed. The @DBOS.scheduled poller
+        # cannot fire before launch, but the direct-call surface
+        # (tests / admin scripts) might hit this — return cleanly so
+        # an unconfigured environment does not stack a trace into the
+        # log.
         logger.debug("workflow-input purge skipped: DBOS not launched")
         return cutoff_ms, 0
 
@@ -157,24 +161,32 @@ def _count_deletable_rows(dbos_instance: object, cutoff_ms: int) -> int:
     ``cutoff_ms`` AND status NOT IN the in-flight set. Best-effort: a
     failure here logs and returns 0, leaving the actual delete to
     proceed — observability must not block the privacy purge.
+
+    Queries via the DBOS sys-DB engine (``_sys_db.engine``); the
+    schema name is whatever DBOS resolved at init (default ``dbos``,
+    configurable via ``DBOSConfig``), so the SQL references the
+    declared schema's ``workflow_status`` table by going through
+    ``SystemSchema``'s already-bound table object.
     """
     try:
+        from sqlalchemy import select
+        from dbos._schemas.system_database import SystemSchema
+
         sys_db = getattr(dbos_instance, "_sys_db", None)
         if sys_db is None:
             return 0
         engine = getattr(sys_db, "engine", None)
         if engine is None:
             return 0
+        ws = SystemSchema.workflow_status
+        stmt = (
+            select(ws.c.workflow_uuid)
+            .where(ws.c.created_at < cutoff_ms)
+            .where(~ws.c.status.in_(["PENDING", "ENQUEUED", "DELAYED"]))
+        )
         with engine.begin() as conn:
-            row = conn.exec_driver_sql(
-                "SELECT count(*) FROM dbos.workflow_status "
-                "WHERE created_at < %s "
-                "AND status NOT IN ('PENDING', 'ENQUEUED', 'DELAYED')",
-                (cutoff_ms,),
-            ).fetchone()
-        if row is None:
-            return 0
-        return int(row[0])
+            rows = conn.execute(stmt).fetchall()
+        return len(rows)
     except Exception:  # noqa: BLE001 — observability-only count
         logger.debug(
             "workflow-input purge: deletable-row count failed; "
