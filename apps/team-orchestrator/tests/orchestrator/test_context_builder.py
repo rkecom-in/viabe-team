@@ -21,6 +21,7 @@ import pytest
 
 pytest.importorskip("pydantic")
 
+import orchestrator.context_builder as cb
 from orchestrator.context_builder import (
     AttributionSnapshot,
     BusinessProfile,
@@ -28,6 +29,20 @@ from orchestrator.context_builder import (
     SalesRecoveryContext,
     build_sales_recovery_context,
 )
+
+
+@pytest.fixture(autouse=True)
+def _stub_db_backed_builders(monkeypatch: pytest.MonkeyPatch) -> None:
+    """VT-138: ``_build_recent_campaigns`` is now a live DB read via
+    ``tenant_connection``. The pure-Python tests in this file exercise
+    the bundle constructor's dispatcher + safe-empty contract; they
+    must not require a DB. Monkeypatch the DB-backed builder back to
+    safe-empty for every test here.
+
+    The DB read path itself is covered by the substrate-fixture suite
+    in ``test_context_builder_campaigns_readpath.py``.
+    """
+    monkeypatch.setattr(cb, "_build_recent_campaigns", lambda tid: ([], False))
 
 # §4.1 — the actual SalesRecoveryContext dataclass fields.
 # Exec-6.85: ``user_request`` joins the bundle so the specialist receives

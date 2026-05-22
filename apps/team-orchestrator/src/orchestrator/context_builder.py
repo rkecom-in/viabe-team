@@ -27,12 +27,13 @@ from dataclasses import asdict, dataclass, field, is_dataclass, replace
 from datetime import UTC, datetime
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 from uuid import UUID
 
 import yaml
 
-from orchestrator._tenant_guard import emit_pipeline_step
+from orchestrator._tenant_guard import assert_tenant_scoped, emit_pipeline_step
+from orchestrator.db import tenant_connection
 from orchestrator.types.trigger_reason import TriggerReason
 
 _BUDGETS_PATH = Path(__file__).parent.parent.parent / "config" / "context_budgets.yaml"
@@ -191,8 +192,45 @@ def _build_ledger_summary(tenant_id: UUID) -> tuple[LedgerSummary, bool]:
 
 
 def _build_recent_campaigns(tenant_id: UUID) -> tuple[list[CampaignSnapshot], bool]:
-    """campaigns-table read — deferred to VT-4 (table not yet created)."""
-    return [], False
+    """campaigns-table read (VT-138).
+
+    Reads the live ``campaigns`` table via ``tenant_connection`` (RLS +
+    GUC scoped); returns the most-recent ``LIMIT 5`` rows mapped to
+    ``CampaignSnapshot``. ``id``, ``status`` and ``generated_at`` map
+    directly; ``recovered_paise`` is set to ``0`` because the per-
+    campaign attribution substrate does not exist yet (CL blocker
+    367387c2-cc5a-81a7-aa37-e6e23c222357 — Option 2, completeness-
+    flag-honest).
+
+    The completeness flag is ``False`` whenever this builder runs —
+    even when real rows return — because ``recovered_paise`` is a
+    placeholder. The flag will flip to ``True`` only when a future
+    ``campaign_attribution`` substrate populates the real recovered-
+    paise figure; that substrate is its own VT row and is OUT of scope
+    here.
+
+    Belt-and-braces over RLS (CL-71 / CL-190): the raw rows are passed
+    through ``assert_tenant_scoped`` before mapping — RLS should make a
+    cross-tenant row impossible, but the assertion logs + raises if it
+    ever happens.
+    """
+    with tenant_connection(tenant_id) as conn:
+        raw_rows = conn.execute(
+            "SELECT id, tenant_id, status, generated_at FROM campaigns "
+            "ORDER BY generated_at DESC LIMIT 5"
+        ).fetchall()
+    rows = cast("list[dict[str, Any]]", raw_rows)
+    assert_tenant_scoped(rows, tenant_id)
+    snapshots = [
+        CampaignSnapshot(
+            campaign_id=row["id"],
+            status=row["status"],
+            recovered_paise=0,
+            proposed_at=row["generated_at"],
+        )
+        for row in rows
+    ]
+    return snapshots, False
 
 
 def _build_attribution_snapshot(tenant_id: UUID) -> tuple[AttributionSnapshot, bool]:
