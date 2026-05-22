@@ -44,11 +44,18 @@ def launch_dbos() -> None:
     ``dbos_workflows`` / ``dbos_workflow_steps`` / ``dbos_queues`` tables and
     recovers any workflows interrupted by an earlier crash.
 
-    Scheduled workflows (notably the workflow-input purge in
-    ``orchestrator.dbos_purge``) are imported AFTER ``DBOS(config=...)``
-    constructs the registry but BEFORE ``DBOS.launch()`` starts the
-    poller threads — that is the window in which ``@DBOS.scheduled``
-    decorators must run so the scheduler picks them up.
+    Scheduled-workflow registration is the CALLER's responsibility, not
+    this function's. The production entrypoint
+    (``main.py`` lifespan) and the substrate test fixture both call
+    ``orchestrator.dbos_purge.register_purge_scheduler()`` BEFORE
+    invoking ``launch_dbos`` — that ordering puts the @DBOS.scheduled
+    poller in ``DBOSRegistry.pollers`` before ``_launch``
+    (``_dbos.py:523``) computes the launch-time ``app_version`` hash
+    at line 530 and before it drains the deferred-poller queue at
+    lines 683-690. ``launch_dbos`` itself imports no scheduled-workflow
+    modules; doing so here would couple the substrate to specific
+    scheduler features and recreate the import-time side-effect
+    problem ``register_purge_scheduler`` was introduced to avoid.
     """
     global _launched
     if _launched:
