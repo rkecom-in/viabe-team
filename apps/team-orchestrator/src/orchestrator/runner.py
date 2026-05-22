@@ -26,6 +26,14 @@ from orchestrator.state import new_subscriber_state
 from orchestrator.types import WebhookEvent
 from orchestrator.utils.phone_token import hash_phone
 
+# SHIP GATE (VT-146 / CL 368387c2-cc5a-81ba): owner_inputs extraction
+# transmits raw customer message bodies to the classifier vendor for
+# structured-intent extraction. Must stay False until the vendor DPA +
+# ZDR are executed and the privacy notice is signed (Fazal-owned).
+# Flipping this is a reviewed code change by design — do not convert
+# to an env var.
+OWNER_INPUTS_EXTRACTION_ENABLED = False
+
 
 @DBOS.step()
 def open_run(tenant_id: str, run_id: str) -> None:
@@ -247,7 +255,12 @@ def webhook_pipeline_run(
     # pipeline never breaks. No body leaves this function via
     # persistence; the body text crosses the wire to the classifier
     # only.
-    run_extraction_for_event(UUID(tenant_id), UUID(run_id), event)
+    #
+    # Gated by ``OWNER_INPUTS_EXTRACTION_ENABLED`` (module-level
+    # constant) — stays False until the vendor DPA + ZDR + the
+    # privacy notice clear. See the constant's comment above.
+    if OWNER_INPUTS_EXTRACTION_ENABLED:
+        run_extraction_for_event(UUID(tenant_id), UUID(run_id), event)
 
     result = pre_filter(event, state)
     handler_name: str | None = None
