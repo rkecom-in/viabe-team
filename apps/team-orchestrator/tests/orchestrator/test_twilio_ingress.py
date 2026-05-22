@@ -251,6 +251,56 @@ def test_phone_is_tokenised_not_plaintext(ingress):
     assert payload["sender_phone"].startswith("phone_tok_")
 
 
+def test_body_is_redacted_from_pipeline_runs_and_pipeline_steps(ingress):
+    """Component 0 — body redaction at the persistence seam.
+
+    Sends an identifiable plaintext body; reads back both
+    ``pipeline_runs.trigger_payload`` and ``pipeline_steps.input_envelope``;
+    asserts the body key is absent in both AND that no row in the live
+    DB carries the plaintext substring after the run completes. The
+    MessageSid provenance handle is still present in
+    ``trigger_payload``.
+    """
+    phone = _phone()
+    _new_tenant(ingress.dsn, phone)
+    secret_body = f"REDACT-PROBE-{uuid4().hex}-message"
+    sid = f"SM{uuid4().hex}"
+    resp = _post(ingress, _fields(phone, Body=secret_body, MessageSid=sid))
+    result = _await_workflow(resp.json()["workflow_id"])
+
+    with psycopg.connect(ingress.dsn, autocommit=True) as conn:
+        trigger_payload = conn.execute(
+            "SELECT trigger_payload FROM pipeline_runs WHERE id = %s",
+            (result["run_id"],),
+        ).fetchone()[0]
+        step_envelope = conn.execute(
+            "SELECT input_envelope FROM pipeline_steps "
+            "WHERE run_id = %s AND step_kind = 'webhook_received'",
+            (result["run_id"],),
+        ).fetchone()[0]
+
+    # (a) trigger_payload has no body key; (c) MessageSid provenance kept.
+    assert "body" not in trigger_payload, (
+        f"plaintext body leaked into trigger_payload: {trigger_payload!r}"
+    )
+    assert trigger_payload.get("twilio_message_sid") == sid
+
+    # (b) input_envelope has no body key.
+    assert "body" not in step_envelope, (
+        f"plaintext body leaked into input_envelope: {step_envelope!r}"
+    )
+    assert step_envelope.get("twilio_message_sid") == sid
+
+    # Defence in depth — the secret substring must not appear anywhere
+    # in either JSONB payload, regardless of which key it might have
+    # landed under.
+    import json as _json
+    serialised = _json.dumps(trigger_payload) + _json.dumps(step_envelope)
+    assert secret_body not in serialised, (
+        "plaintext body substring leaked into persisted JSONB"
+    )
+
+
 def test_rate_limit_per_tenant_exceeded(ingress):
     phone = _phone()
     tenant_id = _new_tenant(ingress.dsn, phone)
