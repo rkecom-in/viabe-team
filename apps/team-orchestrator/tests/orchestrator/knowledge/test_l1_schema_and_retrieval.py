@@ -251,6 +251,106 @@ def test_cross_tenant_attack_blocked_on_entities_and_relationships(substrate):  
     )
 
 
+def test_cross_recursion_level_attack_blocked_at_depth_two(substrate):  # type: ignore[no-untyped-def]
+    """Pillar 3 — recursive-step RLS proof.
+
+    Construct the cross-recursion-level attack:
+
+      1. Tenant B owns a chain ``b_root -> b_mid -> b_leaf`` (B-owned
+         relationships, ``tenant_id = B``).
+      2. Under tenant A's ``tenant_connection``, insert a single
+         relationship ``(tenant_id = A, from_entity = a_root,
+         to_entity = b_root)``. The FK on ``to_entity`` is unscoped
+         (referential only); the RLS ``WITH CHECK`` only validates the
+         row's own ``tenant_id`` matches the current tenant. So tenant A
+         is permitted to write a relationship that *points at* a
+         B-owned entity.
+      3. Traverse from ``a_root`` under tenant A's context.
+
+    Correct behaviour: A's traversal returns exactly the A-owned edge
+    ``a_root -> b_root`` at depth 1. The recursion MUST NOT extend
+    further — at recursion level 2 the CTE's JOIN looks for
+    ``from_entity = b_root AND r.tenant_id = A``, and B's edges
+    ``b_root -> b_mid`` (``tenant_id = B``) must be rejected by both
+    RLS and the explicit predicate. ``b_mid`` and ``b_leaf`` therefore
+    do not appear in any returned path.
+
+    A failure of this assertion would mean ``r.tenant_id = %(tenant_id)s``
+    is only honoured at the anchor / level 1 and the recursion is
+    leaking foreign-tenant edges at depth >= 2 — the exact bug the
+    rest of the file's cross-tenant test cannot catch.
+    """
+    from orchestrator.db import tenant_connection
+    from orchestrator.knowledge.l1 import traverse_relationships
+
+    tenant_a = _new_tenant(substrate.dsn)
+    tenant_b = _new_tenant(substrate.dsn)
+
+    # Tenant A's anchor entity.
+    a_root = _seed_entity(substrate.dsn, tenant_a, entity_type="customer")
+
+    # Tenant B's chain: b_root -> b_mid -> b_leaf, all B-owned.
+    b_root = _seed_entity(substrate.dsn, tenant_b, entity_type="customer")
+    b_mid = _seed_entity(substrate.dsn, tenant_b, entity_type="customer")
+    b_leaf = _seed_entity(substrate.dsn, tenant_b, entity_type="customer")
+    _seed_relationship(
+        substrate.dsn, tenant_b,
+        from_entity=b_root, to_entity=b_mid, relationship_type="knows",
+    )
+    _seed_relationship(
+        substrate.dsn, tenant_b,
+        from_entity=b_mid, to_entity=b_leaf, relationship_type="knows",
+    )
+
+    # Tenant A inserts a relationship pointing into B's graph. Done via
+    # ``tenant_connection`` so the RLS ``WITH CHECK`` policy runs for
+    # real and we prove the insert IS permitted (the FK does not scope
+    # to_entity by tenant).
+    cross_edge_id = uuid4()
+    with tenant_connection(tenant_a) as conn:
+        conn.execute(
+            "INSERT INTO l1_relationships (id, tenant_id, from_entity, "
+            "to_entity, relationship_type) VALUES (%s, %s, %s, %s, %s)",
+            (
+                str(cross_edge_id),
+                str(tenant_a),
+                str(a_root),
+                str(b_root),
+                "cross_ref",
+            ),
+        )
+
+    paths = traverse_relationships(tenant_a, start_entity=a_root, max_depth=3)
+
+    # The recursion must produce exactly one path: a_root -> b_root at
+    # depth 1, the A-owned cross_ref edge. B's chain MUST NOT be walked.
+    assert len(paths) == 1, (
+        f"expected exactly the A-owned a_root->b_root edge; got {paths!r}"
+    )
+    only_path = paths[0]
+    assert only_path.depth == 1
+    assert only_path.entities == [a_root, b_root]
+    assert only_path.relationship_types == ["cross_ref"]
+
+    # Belt-and-braces: neither of B's downstream nodes appears in any
+    # path's entity list, and B's "knows" relationship type is not
+    # surfaced anywhere.
+    all_entities_seen: set[UUID] = set()
+    all_rel_types_seen: set[str] = set()
+    for path in paths:
+        all_entities_seen.update(path.entities)
+        all_rel_types_seen.update(path.relationship_types)
+    assert b_mid not in all_entities_seen, (
+        "RLS leak at recursion level 2: b_mid surfaced via B's edge"
+    )
+    assert b_leaf not in all_entities_seen, (
+        "RLS leak at recursion level 3: b_leaf surfaced via B's edge"
+    )
+    assert "knows" not in all_rel_types_seen, (
+        "RLS leak: B's 'knows' edges were walked under tenant A"
+    )
+
+
 # --- Recursive-CTE traversal: 2-hop, 3-hop, depth cap -----------------------
 
 
