@@ -20,6 +20,7 @@ from dbos_config import WORKFLOW_TIMEOUT_SECONDS
 from orchestrator.db import tenant_connection
 from orchestrator.direct_handlers import HANDLERS
 from orchestrator.graph import OrchestratorState, get_compiled_graph
+from orchestrator.owner_inputs import run_extraction_for_event
 from orchestrator.pre_filter_gate import pre_filter
 from orchestrator.state import new_subscriber_state
 from orchestrator.types import WebhookEvent
@@ -233,6 +234,16 @@ def webhook_pipeline_run(
 
     open_webhook_run(tenant_id, run_id, tokenised)
     record_webhook_received(tenant_id, run_id, tokenised)
+
+    # VT-146 — owner-input extraction. Reads body from the request-scoped
+    # ``event`` (NOT from any persisted column; VT-144 stripped raw body
+    # from trigger_payload / input_envelope), classifies via Anthropic
+    # Haiku, writes the derived intent/segment/occasion row to
+    # ``owner_inputs``. ``run_extraction_for_event`` is best-effort
+    # internally — classifier or write failure logs and returns None;
+    # the inbound pipeline never breaks. No body leaves this function
+    # via persistence; the body text crosses the wire to Anthropic only.
+    run_extraction_for_event(UUID(tenant_id), UUID(run_id), event)
 
     result = pre_filter(event, state)
     handler_name: str | None = None

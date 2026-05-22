@@ -91,9 +91,20 @@ class AttributionSnapshot:
 
 @dataclass(frozen=True, slots=True)
 class OwnerInput:
+    """One owner-supplied input — derived classification only (VT-146).
+
+    Carries the structured ``intent / segment / occasion`` produced by
+    the Component-2 extraction writer; the raw message text is NOT a
+    field on this dataclass and is not stored in ``owner_inputs``. Brief
+    locks the derived-only shape so retention does not regress
+    VT-144's body-redaction fix.
+    """
+
     input_id: UUID
     received_at: datetime
-    content: str
+    intent: str
+    segment: str | None = None
+    occasion: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -238,9 +249,53 @@ def _build_attribution_snapshot(tenant_id: UUID) -> tuple[AttributionSnapshot, b
     return AttributionSnapshot(), False
 
 
+_PENDING_OWNER_INPUTS_LIMIT = 10
+
+
 def _build_pending_owner_inputs(tenant_id: UUID) -> tuple[list[OwnerInput], bool]:
-    """owner_inputs-table read — deferred (table not yet created)."""
-    return [], False
+    """owner_inputs-table read (VT-146).
+
+    Reads the live ``owner_inputs`` table via ``tenant_connection``
+    (RLS + GUC scoped); returns the pending rows (``consumed_at IS
+    NULL``) ordered most-recent-first, capped at
+    ``_PENDING_OWNER_INPUTS_LIMIT``. Pending semantics live in the
+    schema, not in this code — the partial index on
+    ``(tenant_id, created_at DESC) WHERE consumed_at IS NULL``
+    keeps the hot-path read cheap as the table grows over the tenant
+    relationship's lifetime.
+
+    Completeness flag: ``True`` when at least one row is returned,
+    ``False`` on empty. No placeholder columns on this section (unlike
+    VT-138's ``recovered_paise = 0`` placeholder in ``recent_campaigns``)
+    so empty-substrate vs. populated-substrate is the right contract.
+
+    Belt-and-braces over RLS (CL-71 / CL-190): the raw rows pass through
+    ``assert_tenant_scoped`` before mapping — RLS should make a
+    cross-tenant row impossible, but the assertion logs + raises if it
+    ever happens.
+    """
+    with tenant_connection(tenant_id) as conn:
+        raw_rows = conn.execute(
+            "SELECT id, tenant_id, intent, segment, occasion, created_at "
+            "FROM owner_inputs "
+            "WHERE consumed_at IS NULL "
+            "ORDER BY created_at DESC "
+            "LIMIT %s",
+            (_PENDING_OWNER_INPUTS_LIMIT,),
+        ).fetchall()
+    rows = cast("list[dict[str, Any]]", raw_rows)
+    assert_tenant_scoped(rows, tenant_id)
+    inputs = [
+        OwnerInput(
+            input_id=row["id"],
+            received_at=row["created_at"],
+            intent=row["intent"],
+            segment=row["segment"],
+            occasion=row["occasion"],
+        )
+        for row in rows
+    ]
+    return inputs, bool(inputs)
 
 
 # --- the bundle constructor --------------------------------------------------
