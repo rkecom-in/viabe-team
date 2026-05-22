@@ -53,6 +53,15 @@ def substrate():  # type: ignore[no-untyped-def]
     from dbos._dbos import _get_dbos_instance
     from dbos_config import launch_dbos, shutdown_dbos
 
+    # Register the @DBOS.scheduled purge workflow before launch so
+    # the poller picks it up. main.py (production entrypoint) does
+    # this for the live process; this test fixture mirrors that
+    # registration so the purge_terminal_workflow_inputs call exercises
+    # the registered helper. The decorator only registers the
+    # scheduled func; the poller cadence (30 min) means it does not
+    # fire during the test window — we call the helper directly.
+    import orchestrator.dbos_purge  # noqa: F401 — registration side effect
+
     launch_dbos()
     try:
         yield SimpleNamespace(dsn=dsn, dbos=_get_dbos_instance())

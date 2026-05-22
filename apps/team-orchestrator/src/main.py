@@ -20,6 +20,19 @@ from orchestrator.api import router
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     from dbos_config import launch_dbos, shutdown_dbos
 
+    # Register scheduled workflows BEFORE launch_dbos so their
+    # @DBOS.scheduled decorators land in the registry before the
+    # poller threads start. Importing this module here (and NOT from
+    # launch_dbos itself) keeps the production process getting the
+    # purge while keeping the keyless test fixtures that call
+    # launch_dbos directly free of the @DBOS.scheduled registration
+    # — adding registry entries shifts ``app_version`` per
+    # ``DBOSRegistry.compute_app_version``, which would break the
+    # cross-process app_version match that DBOS's recovery filter
+    # relies on (see _recovery.py:58, get_pending_workflows filters
+    # by app_version).
+    import orchestrator.dbos_purge  # noqa: F401 — registration side effect
+
     launch_dbos()
     yield
     shutdown_dbos()

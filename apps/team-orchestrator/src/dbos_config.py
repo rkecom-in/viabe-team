@@ -56,15 +56,6 @@ def launch_dbos() -> None:
     database_url = get_database_url()
     config: DBOSConfig = {"name": "team-orchestrator", "database_url": database_url}
     DBOS(config=config)
-
-    # Import scheduled-workflow modules so their @DBOS.scheduled
-    # decorators register with the DBOS registry before launch.
-    # ``dbos_purge`` runs every 30 min and deletes terminal-state
-    # workflow_status rows older than WORKFLOW_INPUT_RETENTION_SECONDS
-    # (default 7200s / 2h) — closes the Twilio Body retention sink
-    # (Step-0, Branch B).
-    import orchestrator.dbos_purge  # noqa: F401 — registration side effect
-
     DBOS.launch()
     init_substrate(database_url)
     _launched = True
