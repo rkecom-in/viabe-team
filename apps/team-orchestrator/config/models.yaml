@@ -29,3 +29,12 @@ sales_recovery:
 self_evaluate:
   production: claude-opus-4-7
   test: claude-haiku-4-5
+
+# VT-146 owner_input_classifier — Haiku in BOTH slots. Structured
+# extraction (message text -> intent/segment/occasion) is deterministic
+# classification work, not open-ended reasoning, so the per-slot
+# production/test split collapses to a single model. Resolver:
+# orchestrator.owner_inputs.writer._resolve_classifier_model.
+owner_input_classifier:
+  production: claude-haiku-4-5
+  test: claude-haiku-4-5

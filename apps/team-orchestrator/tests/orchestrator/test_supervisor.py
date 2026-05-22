@@ -504,13 +504,20 @@ def _run_supervisor_path(
     import orchestrator.context_builder as context_builder_mod
     import orchestrator.supervisor as supervisor_mod
 
-    # VT-138: _build_recent_campaigns now reads the live campaigns table via
-    # tenant_connection. This landmine test runs keyless with no DB pool —
-    # stub the builder back to safe-empty so spawn_sales_recovery's bundle
-    # construction stays pure-Python. The DB read path itself is covered by
-    # the substrate-fixture suite in test_context_builder_campaigns_readpath.py.
+    # VT-138 / VT-146: _build_recent_campaigns + _build_pending_owner_inputs
+    # are live DB reads via tenant_connection. This landmine test runs
+    # keyless with no DB pool — stub both builders back to safe-empty so
+    # spawn_sales_recovery's bundle construction stays pure-Python. The
+    # DB read paths are covered by the substrate-fixture suites in
+    # test_context_builder_campaigns_readpath.py and
+    # test_context_builder_owner_inputs_readpath.py.
     monkeypatch.setattr(
         context_builder_mod, "_build_recent_campaigns", lambda tid: ([], False)
+    )
+    monkeypatch.setattr(
+        context_builder_mod,
+        "_build_pending_owner_inputs",
+        lambda tid: ([], False),
     )
 
     route_keys: list[str] = []
@@ -670,10 +677,15 @@ def test_sales_recovery_node_passes_bundle_to_agent(
     from orchestrator.agent.types import AgentResult
     from orchestrator.context_builder import build_sales_recovery_context
 
-    # VT-138: _build_recent_campaigns hits the live DB by default; stub it
-    # back to safe-empty for this keyless wire-through test.
+    # VT-138 / VT-146: stub both DB-backed builders for this keyless
+    # wire-through test.
     monkeypatch.setattr(
         context_builder_mod, "_build_recent_campaigns", lambda tid: ([], False)
+    )
+    monkeypatch.setattr(
+        context_builder_mod,
+        "_build_pending_owner_inputs",
+        lambda tid: ([], False),
     )
 
     received: dict[str, Any] = {}
@@ -752,10 +764,15 @@ def test_spawn_sales_recovery_attaches_bundle_with_user_request(
     import orchestrator.context_builder as context_builder_mod
     from orchestrator.handoffs import _build_sales_recovery_update
 
-    # VT-138: stub the DB-backed campaigns builder; this keyless test
+    # VT-138 / VT-146: stub both DB-backed builders; this keyless test
     # exercises spawn-time bundle assembly, not the live read path.
     monkeypatch.setattr(
         context_builder_mod, "_build_recent_campaigns", lambda tid: ([], False)
+    )
+    monkeypatch.setattr(
+        context_builder_mod,
+        "_build_pending_owner_inputs",
+        lambda tid: ([], False),
     )
 
     tenant_id = uuid4()
