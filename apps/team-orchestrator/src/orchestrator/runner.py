@@ -104,17 +104,47 @@ def run_pipeline(tenant_id: str, run_id: str, inbound: str) -> dict[str, Any]:
 # pipeline_run is left untouched so VT-3.1's synthetic tests keep passing.
 
 
+# Keys forbidden from any JSONB persisted into pipeline_runs.trigger_payload
+# or pipeline_steps.input_envelope. ``body`` is the WhatsApp message text;
+# the rest are defensive aliases. Centralised here so a future caller cannot
+# bypass redaction by passing a body-bearing dict — VT-144 (PR #45) placed
+# the pop at the caller (webhook_pipeline_run); this PR pushes it to the
+# persistence boundary so NO write path to either sink can leak.
+_REDACTED_KEYS_AT_REST = frozenset({"body", "message_body", "raw_text", "content"})
+
+
+def _redact_for_persistence(payload: dict[str, Any]) -> dict[str, Any]:
+    """Return a shallow copy of ``payload`` with all
+    ``_REDACTED_KEYS_AT_REST`` removed.
+
+    Single source of truth for "what must never reach
+    ``pipeline_runs.trigger_payload`` / ``pipeline_steps.input_envelope``".
+    Shallow-copy is correct here — the persisted envelope is one level
+    of keys; redaction operates on top-level keys only by design (per
+    the VT-144 / VT-Privacy-Body brief, message-content fields live at
+    the top level).
+    """
+    return {k: v for k, v in payload.items() if k not in _REDACTED_KEYS_AT_REST}
+
+
 @DBOS.step()
 def open_webhook_run(tenant_id: str, run_id: str, trigger_payload: dict) -> None:
     """Record the inbound run in pipeline_runs. Idempotent — a redelivered
-    MessageSid maps to the same run_id. trigger_payload is phone-tokenised."""
+    MessageSid maps to the same run_id. trigger_payload is phone-tokenised.
+
+    Body-key redaction is applied at this persistence boundary (NOT by
+    the caller) so no future caller can leak message content into
+    ``trigger_payload``. The redacted dict is wrapped in ``Jsonb`` for
+    the INSERT; the input dict is not mutated.
+    """
+    safe_payload = _redact_for_persistence(trigger_payload)
     with tenant_connection(tenant_id) as conn:
         conn.execute(
             "INSERT INTO pipeline_runs "
             "(id, tenant_id, run_type, status, trigger_payload) "
             "VALUES (%s, %s, 'twilio_inbound', 'running', %s) "
             "ON CONFLICT (id) DO NOTHING",
-            (run_id, tenant_id, Jsonb(trigger_payload)),
+            (run_id, tenant_id, Jsonb(safe_payload)),
         )
 
 
@@ -123,6 +153,8 @@ def record_webhook_received(tenant_id: str, run_id: str, envelope: dict) -> None
     """Write the webhook_received step_record (step_index=0) to pipeline_steps.
 
     The envelope is phone-tokenised — no plaintext PII (Pillar 3 / Pillar 7).
+    Body-key redaction is applied at this persistence boundary so no
+    future caller can leak message content into ``input_envelope``.
 
     Idempotency is provided by the DBOS workflow-id boundary for COMPLETED
     steps. A crash between the SQL commit and DBOS recording the step causes
@@ -130,13 +162,14 @@ def record_webhook_received(tenant_id: str, run_id: str, envelope: dict) -> None
     DO NOTHING clause. Migration 014's UNIQUE (run_id, step_index) constraint
     makes ON CONFLICT well-defined.
     """
+    safe_envelope = _redact_for_persistence(envelope)
     with tenant_connection(tenant_id) as conn:
         conn.execute(
             "INSERT INTO pipeline_steps "
             "(run_id, tenant_id, step_index, step_kind, input_envelope) "
             "VALUES (%s, %s, 0, 'webhook_received', %s) "
             "ON CONFLICT (run_id, step_index) DO NOTHING",
-            (run_id, tenant_id, Jsonb(envelope)),
+            (run_id, tenant_id, Jsonb(safe_envelope)),
         )
 
 
@@ -227,16 +260,15 @@ def webhook_pipeline_run(
     event = build_webhook_event(twilio_fields, dupe_status=not newly_inserted)
     state = new_subscriber_state(UUID(tenant_id), UUID(run_id))
 
-    # Redact + phone-tokenise before anything is persisted (Pillar 3 / Pillar 7).
-    # Body redaction (Component 0): drop the raw message body from the
-    # persisted envelope. Provenance via MessageSid + hashed sender_phone
-    # is preserved; content (what the owner said) is not retained. The
-    # in-memory ``event`` keeps body intact for the request's lifetime —
-    # request-scoped readers (pre_filter, the future owner_inputs
-    # extraction writer) consume body from ``event``, NOT from
-    # trigger_payload / input_envelope.
+    # Phone-tokenise before anything is persisted (Pillar 3 / Pillar 7).
+    # Body-key redaction lives at the persistence boundary inside
+    # ``open_webhook_run`` / ``record_webhook_received`` — see
+    # ``_redact_for_persistence`` above. The caller no longer pops body
+    # so future call sites cannot leak by forgetting to pop; centralised
+    # at the writer per VT-Privacy-Writer-Side. The in-memory ``event``
+    # keeps body intact for request-scoped readers (pre_filter, the
+    # owner_inputs extraction writer when its SHIP GATE clears).
     tokenised = event.model_dump()
-    tokenised.pop("body", None)
     if event.sender_phone:
         tokenised["sender_phone"] = hash_phone(event.sender_phone)
 
