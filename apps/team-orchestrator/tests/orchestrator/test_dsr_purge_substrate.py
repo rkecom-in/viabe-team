@@ -114,19 +114,25 @@ def _seed_full_tenant_data(dsn: str, tenant_id: UUID) -> dict[str, UUID]:
             (str(tenant_id),),
         )
 
-        # subscriptions
+        # subscriptions (schema: tenant_id, status, no plan_tier column)
         conn.execute(
-            "INSERT INTO subscriptions (tenant_id, plan_tier, status) "
-            "VALUES (%s, 'founding', 'active')",
+            "INSERT INTO subscriptions (tenant_id, status) "
+            "VALUES (%s, 'active')",
             (str(tenant_id),),
         )
 
-        # phone_token_resolutions
+        # phone_token_resolutions (PK is ``token``; schema columns:
+        # token, tenant_id, phone_number_encrypted, resolved_count,
+        # last_resolved_at, created_at)
         conn.execute(
-            "INSERT INTO phone_token_resolutions (tenant_id, phone_token, "
-            "raw_phone, resolved_at) "
+            "INSERT INTO phone_token_resolutions (token, tenant_id, "
+            "phone_number_encrypted, last_resolved_at) "
             "VALUES (%s, %s, %s, now())",
-            (str(tenant_id), f"phone_tok_{uuid4().hex[:16]}", "+919000000000"),
+            (
+                f"phone_tok_{uuid4().hex[:16]}",
+                str(tenant_id),
+                "encrypted-blob-placeholder",
+            ),
         )
 
         # twilio_inbound_events
@@ -204,6 +210,7 @@ def _count_tenant_rows(dsn: str, table: str, tenant_id: UUID) -> int:
 
 
 def _tenant_row(dsn: str, tenant_id: UUID) -> dict[str, Any] | None:
+    """Default psycopg row_factory returns tuples — index positionally."""
     with psycopg.connect(dsn, autocommit=True) as conn:
         row = conn.execute(
             "SELECT business_name, whatsapp_number, opt_out FROM tenants "
@@ -213,20 +220,21 @@ def _tenant_row(dsn: str, tenant_id: UUID) -> dict[str, Any] | None:
     if row is None:
         return None
     return {
-        "business_name": row["business_name"],
-        "whatsapp_number": row["whatsapp_number"],
-        "opt_out": row["opt_out"],
+        "business_name": row[0],
+        "whatsapp_number": row[1],
+        "opt_out": row[2],
     }
 
 
 def _ticket_row(dsn: str, ticket_id: UUID) -> dict[str, Any]:
+    """Default psycopg row_factory returns tuples — index positionally."""
     with psycopg.connect(dsn, autocommit=True) as conn:
         row = conn.execute(
             "SELECT status, completed_at FROM dsr_tickets WHERE id = %s",
             (str(ticket_id),),
         ).fetchone()
     assert row is not None
-    return {"status": row["status"], "completed_at": row["completed_at"]}
+    return {"status": row[0], "completed_at": row[1]}
 
 
 # --- Tests ------------------------------------------------------------------
@@ -350,12 +358,13 @@ def test_purge_preserves_privacy_audit_log_dpdp_retention(substrate):  # type: i
 
     # Confirm the new event is the purge marker.
     with psycopg.connect(substrate.dsn, autocommit=True) as conn:
-        purge_events = conn.execute(
+        purge_events_row = conn.execute(
             "SELECT count(*) FROM privacy_audit_log "
             "WHERE tenant_id = %s AND event_type = 'subject_data_purged'",
             (str(tenant_id),),
-        ).fetchone()[0]
-    assert purge_events == 1
+        ).fetchone()
+    assert purge_events_row is not None
+    assert int(purge_events_row[0]) == 1
 
 
 def test_purge_is_idempotent_on_completed_ticket(substrate):  # type: ignore[no-untyped-def]
@@ -396,19 +405,36 @@ def test_dbos_layer_not_synchronously_purged_documented_finding(substrate):  # t
     ``orchestrator.dbos_purge``. A future change that adds the import
     would change the contract; lock that against silent breakage."""
     import inspect
+    import re
 
     from orchestrator import dsr_purge
 
     source = inspect.getsource(dsr_purge)
-    assert "dbos_purge" not in source, (
-        "dsr_purge MUST NOT call into dbos_purge synchronously — the "
-        "DBOS layer is time-based per PR #47, not tenant-scoped. If "
-        "this behaviour changes the privacy notice's RETAINED section "
-        "must be updated in lockstep."
+    # Match actual imports / function calls, not docstring prose. The
+    # docstring intentionally references ``dbos_purge`` to explain the
+    # design choice; a naked substring match would false-positive on
+    # that. Look for import statements + qualified-name calls.
+    import_pattern = re.compile(
+        r"^\s*(from\s+orchestrator\.dbos_purge|import\s+orchestrator\.dbos_purge)",
+        re.MULTILINE,
     )
-    assert "workflow_status" not in source, (
-        "dsr_purge MUST NOT issue raw SQL against dbos.workflow_status — "
-        "framework-managed table, see PR #47 / VT-150-fix-1."
+    assert import_pattern.search(source) is None, (
+        "dsr_purge MUST NOT import dbos_purge — the DBOS layer is "
+        "time-based per PR #47, not tenant-scoped. If this changes, "
+        "the privacy notice's RETAINED section must be updated in "
+        "lockstep."
+    )
+
+    # Raw SQL against dbos.workflow_status would be a clear violation —
+    # match the SQL-token pattern only inside strings, not comments /
+    # docstrings.
+    sql_pattern = re.compile(
+        r"(?:UPDATE|DELETE\s+FROM|INSERT\s+INTO|FROM)\s+dbos\.workflow_status",
+        re.IGNORECASE,
+    )
+    assert sql_pattern.search(source) is None, (
+        "dsr_purge MUST NOT issue raw SQL against dbos.workflow_status "
+        "— framework-managed, see PR #47 / VT-150-fix-1."
     )
 
     # Silence unused-import — datetime referenced by other tests.
