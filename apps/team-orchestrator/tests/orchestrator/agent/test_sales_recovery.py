@@ -372,6 +372,118 @@ def test_run_sales_recovery_agent_path_a_emits_failure_record(monkeypatch):
     assert "did not parse as a single JSON dict" in failure.message
 
 
+def test_run_sales_recovery_agent_variant_discriminator_invalid_emits_failure(
+    monkeypatch,
+):
+    """VT-4: model emits a JSON dict whose ``status`` is not one of the
+    three legal CampaignPlan v1.0 variants → ``_construct_variant_payload``
+    raises ValueError → the loop MUST emit a FailureRecord
+    (AGENT_INVALID_OUTPUT) before breaking with status='invalid'.
+
+    Closes the second CL-238 silent-failure hole — the loop previously
+    exited invalid here without any observability."""
+    import json
+    from uuid import uuid4
+
+    from orchestrator.failures import FailureRecord, FailureType
+
+    response = _fake_response(text=json.dumps({"status": "not_a_legal_variant"}))
+    fake_client = _patched_client(response)
+    monkeypatch.setenv("VIABE_ENV", "test")
+    monkeypatch.setattr(
+        "orchestrator.agent.sales_recovery.Anthropic", lambda: fake_client
+    )
+    router = MagicMock()
+    monkeypatch.setattr(
+        "orchestrator.agent.sales_recovery.route_failure", router
+    )
+
+    tenant_id = uuid4()
+    run_id = uuid4()
+    result = run_sales_recovery_agent(
+        SalesRecoveryContext(
+            tenant_id=tenant_id,
+            run_id=run_id,
+            user_request="Recover dormant customers",
+        )
+    )
+    assert result.status == "invalid"
+    # output is preserved (unlike Path A) — the model DID emit a parseable
+    # dict; the rejection is at the discriminator. Keeping the raw payload
+    # in the AgentResult helps post-hoc debugging without leaking through
+    # the orchestrator's variant typing.
+    assert result.output == {"status": "not_a_legal_variant"}
+    assert router.call_count == 1
+    failure = router.call_args.args[0]
+    assert isinstance(failure, FailureRecord)
+    assert failure.failure_type is FailureType.AGENT_INVALID_OUTPUT
+    assert failure.tenant_id == tenant_id
+    assert failure.run_id == run_id
+    assert failure.metadata["source"] == "agent_variant_discriminator_invalid"
+    assert "variant discriminator" in failure.message
+
+
+def test_run_sales_recovery_agent_schema_rejection_emits_failure(monkeypatch):
+    """VT-4: model emits a JSON dict with a legal ``status`` discriminator
+    but the post-coerce payload is rejected by ``parse_campaign_plan``
+    (e.g. required variant field absent) → the loop MUST emit a
+    FailureRecord(AGENT_INVALID_OUTPUT) before breaking with
+    status='invalid'.
+
+    Closes the third CL-238 silent-failure hole. The parse_campaign_plan
+    branch only runs when an evaluator is configured (VT-36 gate path);
+    a stub FakeSelfEvaluator is supplied so we reach the rejection."""
+    import json
+    from uuid import uuid4
+
+    from orchestrator.agent.self_evaluate import FakeSelfEvaluator
+    from orchestrator.failures import FailureRecord, FailureType
+
+    # Legal status; missing every required variant field. Coercer keeps
+    # only declared fields → payload reaches parse_campaign_plan with
+    # status+identity only → Pydantic rejects.
+    response = _fake_response(text=json.dumps({"status": "proposed"}))
+    fake_client = _patched_client(response)
+    monkeypatch.setenv("VIABE_ENV", "test")
+    monkeypatch.setattr(
+        "orchestrator.agent.sales_recovery.Anthropic", lambda: fake_client
+    )
+    router = MagicMock()
+    monkeypatch.setattr(
+        "orchestrator.agent.sales_recovery.route_failure", router
+    )
+
+    tenant_id = uuid4()
+    run_id = uuid4()
+    # FakeSelfEvaluator with empty verdicts list — parse_campaign_plan
+    # raises before .run() is called, so the verdict queue is never
+    # consumed. The evaluator's only role here is to make ``gate`` truthy
+    # so the parse branch executes.
+    evaluator = FakeSelfEvaluator(verdicts=[])
+    result = run_sales_recovery_agent(
+        SalesRecoveryContext(
+            tenant_id=tenant_id,
+            run_id=run_id,
+            user_request="Recover dormant customers",
+        ),
+        evaluator=evaluator,
+    )
+    assert result.status == "invalid"
+    # output reaches the coerce step (legal status discriminator) and is
+    # preserved on the AgentResult — useful for post-hoc inspection of
+    # what the model emitted before the schema rejection.
+    assert isinstance(result.output, dict)
+    assert result.output.get("status") == "proposed"
+    assert router.call_count == 1
+    failure = router.call_args.args[0]
+    assert isinstance(failure, FailureRecord)
+    assert failure.failure_type is FailureType.AGENT_INVALID_OUTPUT
+    assert failure.tenant_id == tenant_id
+    assert failure.run_id == run_id
+    assert failure.metadata["source"] == "agent_schema_rejection"
+    assert "schema rejection" in failure.message
+
+
 def test_run_sales_recovery_agent_cost_uses_compute_cost_paise(monkeypatch):
     """The agent's cost_paise matches the cost.py table for the resolved model."""
     response = _fake_response(text='{"status": "placeholder"}', input_tokens=1000, output_tokens=200)
