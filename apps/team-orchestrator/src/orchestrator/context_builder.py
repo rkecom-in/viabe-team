@@ -404,3 +404,160 @@ def build_sales_recovery_context(
         meta=meta,
         data_completeness=data_completeness,
     )
+
+
+# --- bundle → prompt serializer (VT-4 ship-thin) -----------------------------
+#
+# ship-thin scaffolding: the system prompt at ``sales_recovery_v1.md:48-52``
+# expects the orchestrator to supply ``cohort``, ``template``, and
+# ``expected outcome`` IN THE INPUT CONTEXT before the agent can return
+# ``status='proposed'``. The bundle carries cohort-adjacent data
+# (customer_ledger_summary.dormant_cohorts + top_spenders); ``templates``
+# and ``expected outcome`` are NOT bundle fields today — the
+# ``approved_templates.yaml`` registry + per-tenant attribution targets
+# are separate VT rows. Until those land, this serializer supplies them
+# inline as ship-thin defaults so the agent's first end-to-end run can
+# reach a real proposed/insufficient_data verdict instead of starving on
+# missing inputs. When the registries land, the inline defaults are
+# replaced with reads from those modules — no change to the serializer's
+# public surface.
+
+_PHASE1_APPROVED_TEMPLATES: tuple[str, ...] = (
+    "team_winback_v1",
+    "team_winback_v2",
+    "team_seasonal_v1",
+)
+_DEFAULT_TARGET_RECOVERED_PAISE: int = 50_000  # ~₹500 baseline target
+
+
+def serialize_bundle_for_prompt(
+    context: SalesRecoveryContext,
+    *,
+    templates_available: tuple[str, ...] = _PHASE1_APPROVED_TEMPLATES,
+    target_recovered_paise: int | None = None,
+) -> str:
+    """Render the SalesRecoveryContext bundle as a markdown context block
+    suitable for prepending to the agent's first user message.
+
+    The agent loop's input is the Anthropic Messages API. The bundle is
+    a Python dataclass — the LLM only sees what we put in the message
+    content. This function renders the bundle's sections plus the
+    ship-thin scaffolding (templates_available + target_recovered_paise)
+    into a single structured block.
+
+    Identity fields (``tenant_id``, ``run_id``) are deliberately omitted
+    — the agent has no use for them and the orchestrator owns identity
+    injection at output coercion. ``data_completeness`` IS included so
+    the model knows which sections are substrate-backed vs safe-empty.
+
+    The ``user_request`` is appended at the end of the block, so the
+    caller can use the returned string directly as the first user
+    message content.
+    """
+    if target_recovered_paise is None:
+        target_recovered_paise = max(
+            int(context.attribution_snapshot.last_7d_recovered_paise * 1.1),
+            _DEFAULT_TARGET_RECOVERED_PAISE,
+        )
+
+    parts: list[str] = ["# Sales Recovery Context"]
+
+    bp = context.business_profile
+    parts.append("\n## Business profile")
+    parts.append(
+        f"- name: {bp.business_name or '(unknown)'}\n"
+        f"- type: {bp.business_type or '(unknown)'}\n"
+        f"- locality: {bp.locality or '(unknown)'}\n"
+        f"- current_phase: {bp.current_phase or '(unknown)'}\n"
+        f"- founding_tier_flag: {bp.founding_tier_flag}\n"
+        f"- substrate_populated: "
+        f"{context.data_completeness.get('business_profile', False)}"
+    )
+
+    ls = context.customer_ledger_summary
+    parts.append("\n## Customer ledger summary")
+    cohort_lines = (
+        "\n".join(f"  - {name}: {count} customers" for name, count in ls.dormant_cohorts.items())
+        if ls.dormant_cohorts
+        else "  - (none recorded)"
+    )
+    parts.append(
+        f"- total_customers: {ls.total_customers}\n"
+        f"- dormant_cohorts:\n{cohort_lines}\n"
+        f"- top_spenders (count): {len(ls.top_spenders)}\n"
+        f"- substrate_populated: "
+        f"{context.data_completeness.get('customer_ledger_summary', False)}"
+    )
+
+    parts.append("\n## Recent campaigns")
+    if context.recent_campaigns:
+        campaign_lines = "\n".join(
+            f"  - campaign_id={c.campaign_id} status={c.status} "
+            f"recovered_paise={c.recovered_paise} "
+            f"proposed_at={c.proposed_at.isoformat()}"
+            for c in context.recent_campaigns
+        )
+        parts.append(
+            f"- count: {len(context.recent_campaigns)}\n{campaign_lines}\n"
+            f"- substrate_populated: "
+            f"{context.data_completeness.get('recent_campaigns', False)}"
+        )
+    else:
+        parts.append(
+            "- count: 0 (no prior recovery campaigns recorded)\n"
+            f"- substrate_populated: "
+            f"{context.data_completeness.get('recent_campaigns', False)}"
+        )
+
+    att = context.attribution_snapshot
+    parts.append("\n## Attribution snapshot")
+    parts.append(
+        f"- cumulative_recovered_paise: {att.cumulative_recovered_paise}\n"
+        f"- last_7d_recovered_paise: {att.last_7d_recovered_paise}\n"
+        f"- last_30d_recovered_paise: {att.last_30d_recovered_paise}\n"
+        f"- substrate_populated: "
+        f"{context.data_completeness.get('attribution_snapshot', False)}"
+    )
+
+    parts.append("\n## Pending owner inputs")
+    if context.pending_owner_inputs:
+        owner_lines = "\n".join(
+            f"  - intent={oi.intent} segment={oi.segment or '(none)'} "
+            f"occasion={oi.occasion or '(none)'} "
+            f"received_at={oi.received_at.isoformat()}"
+            for oi in context.pending_owner_inputs
+        )
+        parts.append(
+            f"- count: {len(context.pending_owner_inputs)}\n{owner_lines}\n"
+            f"- substrate_populated: "
+            f"{context.data_completeness.get('pending_owner_inputs', False)}"
+        )
+    else:
+        parts.append(
+            "- count: 0\n"
+            f"- substrate_populated: "
+            f"{context.data_completeness.get('pending_owner_inputs', False)}"
+        )
+
+    parts.append("\n## Available WhatsApp templates (orchestrator-approved)")
+    parts.append(
+        "\n".join(f"- {tid}" for tid in templates_available)
+        + "\n\nUse exactly one of the template_ids above in your "
+        "``message_plan.template_id``. Inventing a template_id is a "
+        "contract violation; if none of the listed templates fits the "
+        "cohort, return ``status='insufficient_data'``."
+    )
+
+    parts.append("\n## Expected outcome")
+    parts.append(
+        f"- target_recovered_paise: {target_recovered_paise}\n"
+        "- Use this figure to size your ``expected_arrr`` range. The "
+        "range MUST be a low/high band, not a point estimate; the "
+        "midpoint should sit near this target."
+    )
+
+    parts.append(f"\n## Trigger reason\n- {context.trigger_reason}")
+
+    parts.append(f"\n## Owner request\n{context.user_request}")
+
+    return "\n".join(parts)

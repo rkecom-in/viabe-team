@@ -67,6 +67,7 @@ from orchestrator.agent.schemas.campaign_plan import (
     CampaignStatus,
     parse_campaign_plan,
 )
+from orchestrator.context_builder import serialize_bundle_for_prompt
 from orchestrator.agent.self_evaluate import (
     GateAction,
     SelfEvaluateGate,
@@ -418,8 +419,19 @@ def run_sales_recovery_agent(
             " non-empty string (orchestrator must supply the user request"
             " before dispatch)"
         )
+    # VT-4 ship-thin: render the Composer bundle into the first user
+    # message so the model can actually use the context. Before this
+    # wiring landed, the bundle was a Python dataclass the agent loop
+    # ignored — the LLM only saw ``user_request``. The serializer lives
+    # in ``orchestrator.context_builder`` (the upstream Composer
+    # module); the agent does NOT build its own context — it just
+    # consumes the rendered block. ``templates_available`` +
+    # ``target_recovered_paise`` defaults are ship-thin scaffolding
+    # until the approved-templates registry + per-tenant attribution
+    # targets land as separate VT rows.
+    initial_user_content = serialize_bundle_for_prompt(context)
     messages: list[dict[str, Any]] = [
-        {"role": "user", "content": context.user_request},
+        {"role": "user", "content": initial_user_content},
     ]
     tools: dict[str, Any] = {}  # VT-32: no real tools yet.
     raw_messages: list[dict[str, Any]] = list(messages)
@@ -569,11 +581,23 @@ def run_sales_recovery_agent(
             output, dropped_empty, dropped_populated = _construct_variant_payload(
                 output, context=context, generated_at=datetime.now(UTC)
             )
-        except ValueError:
-            # Unknown / missing status discriminator — the model didn't
-            # pick a legal variant. Routed as invalid; no FailureRecord
-            # here (already-existing Path B / gate-failure paths route
-            # AGENT_INVALID_OUTPUT downstream when appropriate).
+        except ValueError as exc:
+            # VT-4: unknown / missing ``status`` discriminator — the
+            # model didn't pick a legal variant. Emit a FailureRecord
+            # BEFORE breaking so the run is observable downstream
+            # (CL-238 — no silent swallow). Best-effort, must not
+            # re-raise into the loop.
+            _emit_invalid_output(
+                context=context,
+                reason=(
+                    "variant discriminator missing or unknown; "
+                    + str(exc)[:200]
+                ),
+                tokens_used=input_tokens_used + output_tokens_used,
+                tool_calls_made=tool_calls_made,
+                wallclock_ms=int((time.monotonic() - start) * 1000),
+                source="agent_variant_discriminator_invalid",
+            )
             status = "invalid"
             break
         if dropped_empty:
@@ -606,9 +630,23 @@ def run_sales_recovery_agent(
 
         try:
             draft_plan = parse_campaign_plan(output)
-        except Exception:
-            # Model emitted something that wasn't a valid CampaignPlan —
-            # the gate has no draft to evaluate.
+        except Exception as exc:
+            # VT-4: model emitted something that wasn't a valid
+            # CampaignPlan (post-coerce schema rejection) — the gate has
+            # no draft to evaluate. Emit a FailureRecord so the run is
+            # observable (CL-238 — no silent swallow). Best-effort,
+            # must not re-raise into the loop.
+            _emit_invalid_output(
+                context=context,
+                reason=(
+                    "post-coerce CampaignPlan schema rejection; "
+                    + str(exc)[:200]
+                ),
+                tokens_used=input_tokens_used + output_tokens_used,
+                tool_calls_made=tool_calls_made,
+                wallclock_ms=int((time.monotonic() - start) * 1000),
+                source="agent_schema_rejection",
+            )
             status = "invalid"
             break
 
@@ -834,13 +872,20 @@ def _emit_invalid_output(
     wallclock_ms: int,
     source: str = "self_evaluate_gate",
 ) -> None:
-    """Route a FailureRecord(AGENT_INVALID_OUTPUT). Two callers:
+    """Route a FailureRecord(AGENT_INVALID_OUTPUT). Callers:
 
     - ``source="self_evaluate_gate"`` — VT-36 gate seam error.
     - ``source="agent_terminal_no_dict"`` — CL-287: agent terminated
       with text that did not parse as a single JSON dict (Path A).
       Closes the CL-238 silent-failure hole where the loop previously
       exited ``status='invalid'`` without observability.
+    - ``source="agent_variant_discriminator_invalid"`` — VT-4: the
+      model emitted a JSON dict but the ``status`` discriminator was
+      missing or not one of the v1.0 legal variants. Closes the second
+      CL-238 silent-failure hole.
+    - ``source="agent_schema_rejection"`` — VT-4: post-coerce
+      CampaignPlan schema rejection (e.g. required field absent on a
+      legal variant). Closes the third CL-238 silent-failure hole.
 
     Best-effort — routing failure must NOT re-raise into the run."""
     failure = FailureRecord(
