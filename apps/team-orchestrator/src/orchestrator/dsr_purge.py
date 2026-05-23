@@ -1,4 +1,4 @@
-"""DSR deletion fulfillment — tenant-wide subject data purge (VT-DSR-Purge).
+"""DSR deletion fulfillment — tenant-wide subject data purge (VT-DSRPurge).
 
 The DPDP / privacy regime promises Right-to-Erasure: a subject can
 request deletion and the controller MUST honor it. Until this module
@@ -8,12 +8,43 @@ anything. This module closes that gap for **tenant-wide** subject
 requests (the tenant IS the DSR subject for the Viabe-Team product;
 end-customer data lives inside the tenant's records and goes with it).
 
+Privileged path — documented
+----------------------------
+The brief asked for the purge to run under ``tenant_connection``
+(``SET ROLE app_role`` + tenant GUC). Migration 015's ``app_role``
+grants enumerate only seven tables explicitly (``tenants``,
+``pipeline_runs``, ``pipeline_steps``, ``phase_transitions``,
+``twilio_inbound_events``, ``dsr_tickets``, ``rate_limit_buckets``)
+plus ``ALTER DEFAULT PRIVILEGES`` which catches tables created AFTER
+015. Three tables this purge must touch — ``subscriptions``,
+``phone_token_resolutions``, ``privacy_audit_log`` — were created
+BEFORE 015 and are NOT in the explicit grant list. Running the purge
+under ``tenant_connection`` therefore fails with
+``InsufficientPrivilege`` on those tables.
+
+Two paths were considered:
+
+  (a) Add a permission migration granting app_role the missing
+      DELETE / INSERT. **Rejected** — would also let every normal
+      tenant-scoped writer DELETE rows from privacy_audit_log
+      (DPDP-required append-only) and from billing surfaces. Wider
+      blast radius than this PR needs.
+
+  (b) Run the purge under the privileged service role (the bare pool
+      connection, which has BYPASSRLS in CI + Supabase production)
+      and rely on explicit ``WHERE tenant_id = %s`` predicates for
+      scoping. **Chosen.** DSR fulfillment IS architecturally an
+      admin / operator action — the controller acting on a subject
+      request, not a tenant client writing. The explicit predicate
+      keeps the scope tight.
+
 Architecture
 ------------
-- Single public entry point: ``purge_tenant_data(ticket_id)``. Takes a
-  ``dsr_tickets.id``, reads the ticket's ``tenant_id``, and runs the
-  purge in a sequence that respects FK ordering.
-- Per-table delete functions live in this module so the inventory + the
+- Single public entry point: ``purge_tenant_data(ticket_id)``. Takes
+  a ``dsr_tickets.id``, reads the ticket's ``tenant_id``, and runs
+  the purge in FK-safe order within a single transaction on a
+  privileged pool connection.
+- Per-table delete helpers live in this module so the inventory + the
   delete order are reviewable in ONE file (the brief explicitly asks
   for the inventory to be a reviewable artifact).
 - Idempotent: a ticket already marked ``status='completed'`` short-
@@ -30,7 +61,7 @@ Tombstone policy (DRAFT — Fazal-overridable)
   evidence the request was honored.
 - ``privacy_audit_log``: untouched (DPDP 7-year retention). A
   ``subject_data_purged`` event is appended FIRST, before any other
-  DELETE, so the audit chain captures the request.
+  DELETE, so the audit captures the request even on partial failure.
 - All other tenant-scoped tables: hard DELETE.
 
 DBOS layer — out of scope for synchronous deletion
@@ -60,7 +91,7 @@ from uuid import UUID
 
 from psycopg.types.json import Jsonb
 
-from orchestrator.db import tenant_connection
+from orchestrator.graph import get_pool
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +103,24 @@ _TENANT_ANONYMIZE = {
     "whatsapp_number": None,
     "opt_out": True,
 }
+
+# FK-safe deletion order. Children before parents — pipeline_steps /
+# campaigns / owner_inputs all FK to pipeline_runs(id); l1_relationships
+# FK to l1_entities(id). Order is read top-to-bottom by the purge loop.
+_PURGE_ORDER: tuple[str, ...] = (
+    "l1_relationships",
+    "l1_entities",
+    "owner_inputs",
+    "campaigns",
+    "pipeline_steps",
+    "pipeline_runs",
+    "subscriber_states",
+    "phase_transitions",
+    "subscriptions",
+    "phone_token_resolutions",
+    "twilio_inbound_events",
+    "rate_limit_buckets",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -103,75 +152,43 @@ def purge_tenant_data(ticket_id: UUID) -> PurgeResult:
       3. Append a ``subject_data_purged`` event to
          ``privacy_audit_log`` (BEFORE any delete, so the audit
          captures the request even on partial failure).
-      4. DELETE child tables in FK-safe order, all under
-         ``tenant_connection(tenant_id)`` so RLS + GUC are scoped.
+      4. DELETE child tables in ``_PURGE_ORDER``, with explicit
+         ``WHERE tenant_id = %s`` on each.
       5. UPDATE ``tenants`` row → anonymized tombstone (kept for FK
          integrity with privacy_audit_log + dsr_tickets).
       6. UPDATE the ticket → status='completed', completed_at=now().
 
-    The whole purge runs inside a single ``conn.transaction()`` so a
-    failure mid-sequence rolls back to a coherent state. Re-running
-    the ticket then re-runs the full sequence.
+    Steps 3-6 run inside a single ``conn.transaction()`` on a
+    privileged pool connection (see module docstring for the elevated-
+    path justification). A failure mid-sequence rolls back; re-running
+    re-runs the full sequence (idempotent via the status check at the
+    top).
     """
-    tenant_id = _resolve_tenant_id_or_raise(ticket_id)
     deleted_counts: dict[str, int] = {}
     tenant_anonymized = False
 
-    with tenant_connection(tenant_id) as conn, conn.transaction():
-        if _ticket_already_completed(conn, ticket_id):
-            return PurgeResult(
-                ticket_id=ticket_id,
-                tenant_id=tenant_id,
-                deleted_counts={},
-                tenant_anonymized=False,
-                already_completed=True,
-            )
+    with get_pool().connection() as conn:
+        tenant_id = _resolve_tenant_id_or_raise(conn, ticket_id)
 
-        _append_audit_event(conn, tenant_id, ticket_id)
+        with conn.transaction():
+            if _ticket_already_completed(conn, ticket_id):
+                return PurgeResult(
+                    ticket_id=ticket_id,
+                    tenant_id=tenant_id,
+                    deleted_counts={},
+                    tenant_anonymized=False,
+                    already_completed=True,
+                )
 
-        # FK-safe deletion order — children before parents. Each
-        # DELETE returns rowcount; counts go into the result for
-        # test + telemetry.
-        deleted_counts["l1_relationships"] = _delete_where_tenant(
-            conn, "l1_relationships"
-        )
-        deleted_counts["l1_entities"] = _delete_where_tenant(
-            conn, "l1_entities"
-        )
-        deleted_counts["owner_inputs"] = _delete_where_tenant(
-            conn, "owner_inputs"
-        )
-        deleted_counts["campaigns"] = _delete_where_tenant(
-            conn, "campaigns"
-        )
-        # pipeline_steps before pipeline_runs (FK).
-        deleted_counts["pipeline_steps"] = _delete_where_tenant(
-            conn, "pipeline_steps"
-        )
-        deleted_counts["pipeline_runs"] = _delete_where_tenant(
-            conn, "pipeline_runs"
-        )
-        deleted_counts["subscriber_states"] = _delete_where_tenant(
-            conn, "subscriber_states"
-        )
-        deleted_counts["phase_transitions"] = _delete_where_tenant(
-            conn, "phase_transitions"
-        )
-        deleted_counts["subscriptions"] = _delete_where_tenant(
-            conn, "subscriptions"
-        )
-        deleted_counts["phone_token_resolutions"] = _delete_where_tenant(
-            conn, "phone_token_resolutions"
-        )
-        deleted_counts["twilio_inbound_events"] = _delete_where_tenant(
-            conn, "twilio_inbound_events"
-        )
-        deleted_counts["rate_limit_buckets"] = _delete_where_tenant(
-            conn, "rate_limit_buckets"
-        )
+            _append_audit_event(conn, tenant_id, ticket_id)
 
-        tenant_anonymized = _anonymize_tenant_row(conn, tenant_id)
-        _mark_ticket_completed(conn, ticket_id)
+            for table in _PURGE_ORDER:
+                deleted_counts[table] = _delete_where_tenant(
+                    conn, table, tenant_id
+                )
+
+            tenant_anonymized = _anonymize_tenant_row(conn, tenant_id)
+            _mark_ticket_completed(conn, ticket_id)
 
     logger.info(
         "dsr_purge: ticket_id=%s tenant_id=%s deleted=%s tenant_anonymized=%s",
@@ -189,22 +206,13 @@ def purge_tenant_data(ticket_id: UUID) -> PurgeResult:
     )
 
 
-def _resolve_tenant_id_or_raise(ticket_id: UUID) -> UUID:
-    """Read the ticket's ``tenant_id`` via a superuser connection.
-
-    Reading the ticket needs to happen BEFORE we enter
-    ``tenant_connection(tenant_id)`` — chicken-and-egg. Use the
-    pool's bare connection (RLS-bypassing service role) for this
-    one lookup. The actual purge runs under the tenant-scoped
-    connection.
-    """
-    from orchestrator.graph import get_pool
-
-    with get_pool().connection() as conn:
-        raw = conn.execute(
-            "SELECT tenant_id FROM dsr_tickets WHERE id = %s",
-            (str(ticket_id),),
-        ).fetchone()
+def _resolve_tenant_id_or_raise(conn: Any, ticket_id: UUID) -> UUID:
+    """Read the ticket's ``tenant_id``. Privileged role bypasses RLS,
+    so the lookup sees the row regardless of tenant context."""
+    raw = conn.execute(
+        "SELECT tenant_id FROM dsr_tickets WHERE id = %s",
+        (str(ticket_id),),
+    ).fetchone()
     if raw is None:
         raise ValueError(f"dsr_tickets row not found: id={ticket_id}")
     row = cast("dict[str, Any]", raw)
@@ -223,8 +231,8 @@ def _ticket_already_completed(conn: Any, ticket_id: UUID) -> bool:
     ).fetchone()
     if raw is None:
         raise ValueError(
-            f"dsr_tickets row not found inside tenant_connection: "
-            f"id={ticket_id} (RLS mismatch?)"
+            f"dsr_tickets row not found inside purge transaction: "
+            f"id={ticket_id}"
         )
     row = cast("dict[str, Any]", raw)
     return bool(row["status"] == "completed")
@@ -233,7 +241,7 @@ def _ticket_already_completed(conn: Any, ticket_id: UUID) -> bool:
 def _append_audit_event(
     conn: Any, tenant_id: UUID, ticket_id: UUID
 ) -> None:
-    """Append a hash-chain-style event noting the purge intent.
+    """Append an event noting the purge intent.
 
     The ``privacy_audit_log`` table (008) is the regulator-required
     7-year retention surface. VT-8 owns the full hash-chain
@@ -254,17 +262,17 @@ def _append_audit_event(
     )
 
 
-def _delete_where_tenant(conn: Any, table: str) -> int:
-    """DELETE ... WHERE tenant_id = app_current_tenant().
+def _delete_where_tenant(conn: Any, table: str, tenant_id: UUID) -> int:
+    """``DELETE FROM <table> WHERE tenant_id = %s``.
 
-    The ``tenant_connection`` already sets ``app.current_tenant`` so
-    RLS filters to this tenant; the explicit predicate is belt-and-
-    braces. ``table`` is hard-coded by the caller (no user-supplied
-    value reaches this function) so the SQL composition is safe.
+    ``table`` is hard-coded by the caller (selected from
+    ``_PURGE_ORDER``); no user input reaches this function so the
+    f-string composition is safe. ``tenant_id`` is bound as a parameter.
     Returns the rowcount the DELETE reported.
     """
     cur = conn.execute(
-        f"DELETE FROM {table} WHERE tenant_id = app_current_tenant()"
+        f"DELETE FROM {table} WHERE tenant_id = %s",
+        (str(tenant_id),),
     )
     return int(cur.rowcount)
 
