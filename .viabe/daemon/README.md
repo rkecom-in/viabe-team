@@ -122,6 +122,16 @@ rm               ~/Library/LaunchAgents/com.viabe.team.agent-loop.plist
 - `session.state` — current `session_id`; atomic-replaced across runs.
 - `transcripts/<session>-<unix-ts>.jsonl` — PreCompact-archived transcripts.
 - `STOP` — kill-switch file; daemon exits gracefully when present.
+- `.viabe/notifications/log` — outcome log for macOS / Telegram dispatch on `priority: high` notify (success / failure / no-op when `telegram.env` missing).
+
+### `priority: high` notify dispatch
+
+When the daemon receives a `type: notify` signal with `priority: high`, it dispatches from this host (where Cowork's sandbox cannot):
+
+1. `osascript -e 'display notification "<body>" with title "Cowork" subtitle "<task-id>"'`
+2. If `.viabe/secrets/telegram.env` exists, POST to the Telegram Bot API using `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` from that file (subshell-isolated; not exported to the daemon's broader environment).
+
+Both dispatches are best-effort: failures are logged to `.viabe/notifications/log` and never crash the daemon. `priority: normal` (or missing) skips both — terminal echo only.
 
 ### Tests
 

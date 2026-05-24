@@ -60,7 +60,7 @@ def test_process_signal_brief_ready_writes_state(daemon_paths, fake_query) -> No
     assert "tokens=80" in cost_content  # 50 in + 30 out
 
 
-def test_process_signal_notify_short_circuits_no_query(daemon_paths) -> None:
+def test_process_signal_notify_short_circuits_no_query(daemon_paths, monkeypatch) -> None:
     """Condition #2: notify never reaches query()."""
     _write_brief(daemon_paths.queue, "VT-Y", status="in-pr")
     sig = _write_signal(daemon_paths.inbox, "20260524T220100Z-notify-VT-Y.md", "VT-Y", "notify", body="[COWORK NOTIFY] test echo")
@@ -75,6 +75,11 @@ def test_process_signal_notify_short_circuits_no_query(daemon_paths) -> None:
                 yield None
 
         return _empty()
+
+    macos_calls: list[tuple] = []
+    tg_calls: list[tuple] = []
+    monkeypatch.setattr(core, "dispatch_macos_notification", lambda body, task, *, paths: macos_calls.append((body, task)) or False)
+    monkeypatch.setattr(core, "dispatch_telegram", lambda body, task, *, paths: tg_calls.append((body, task)) or False)
 
     new_session = asyncio.run(
         core.process_signal(
@@ -92,6 +97,60 @@ def test_process_signal_notify_short_circuits_no_query(daemon_paths) -> None:
     assert daemon_paths.daemon_log.read_text().strip().endswith("[COWORK NOTIFY] test echo")
     cost_lines = daemon_paths.cost_log.read_text().strip().splitlines()
     assert any("cost=$0.0" in line and "notify" in line for line in cost_lines)
+    assert macos_calls == [], "normal-priority notify must NOT dispatch macOS"
+    assert tg_calls == [], "normal-priority notify must NOT dispatch Telegram"
+
+
+def test_process_signal_notify_high_priority_dispatches_macos_and_telegram(daemon_paths, monkeypatch) -> None:
+    """Per updated protocol: priority:high notify fires macOS + Telegram from this host."""
+    _write_brief(daemon_paths.queue, "VT-Y", status="in-pr")
+    body_text = "PR #54 ready to merge"
+    sig_path = daemon_paths.inbox / "20260524T220150Z-notify-high.md"
+    sig_path.write_text(
+        "---\nfrom: cowork\nto: claudecode\ntask: VT-Y\ntype: notify\npriority: high\nts: 2026-05-24T22:01:50+05:30\n---\n\n"
+        f"[COWORK NOTIFY — HIGH] {body_text}\n"
+    )
+
+    macos_calls: list[tuple] = []
+    tg_calls: list[tuple] = []
+    monkeypatch.setattr(core, "dispatch_macos_notification", lambda body, task, *, paths: macos_calls.append((body, task)) or True)
+    monkeypatch.setattr(core, "dispatch_telegram", lambda body, task, *, paths: tg_calls.append((body, task)) or True)
+
+    asyncio.run(
+        core.process_signal(
+            sig_path,
+            session_id="sess_prior",
+            options=None,
+            paths=daemon_paths,
+            query_fn=lambda *a, **k: (_ for _ in []).throw(AssertionError("query() must not run for notify")),
+        )
+    )
+
+    assert len(macos_calls) == 1
+    assert "PR #54" in macos_calls[0][0]
+    assert macos_calls[0][1] == "VT-Y"
+    assert len(tg_calls) == 1
+    assert "PR #54" in tg_calls[0][0]
+    assert not sig_path.exists()
+
+
+def test_dispatch_telegram_noop_when_env_missing(daemon_paths) -> None:
+    """Telegram dispatcher returns False without raising when env file absent."""
+    assert not daemon_paths.telegram_env.exists()
+    assert core.dispatch_telegram("hello", "VT-X", paths=daemon_paths) is False
+
+
+def test_read_telegram_env_parses_supported_formats(tmp_path) -> None:
+    env_file = tmp_path / "telegram.env"
+    env_file.write_text(
+        "# comment\n"
+        "export TELEGRAM_BOT_TOKEN=\"abc123\"\n"
+        "TELEGRAM_CHAT_ID='-1009876'\n"
+        "OTHER=ignored\n"
+    )
+    token, chat = core._read_telegram_env(env_file)
+    assert token == "abc123"
+    assert chat == "-1009876"
 
 
 def test_process_signal_query_exception_triggers_backoff_then_blocked(daemon_paths, monkeypatch) -> None:

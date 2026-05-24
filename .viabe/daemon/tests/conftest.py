@@ -41,6 +41,8 @@ def daemon_paths(tmp_repo: Path):
         daemon_log=tmp_repo / ".viabe/daemon/agent-loop.log",
         transcripts=tmp_repo / ".viabe/daemon/transcripts",
         stop_file=tmp_repo / ".viabe/daemon/STOP",
+        telegram_env=tmp_repo / ".viabe/secrets/telegram.env",
+        notifications_log=tmp_repo / ".viabe/notifications/log",
     )
 
 

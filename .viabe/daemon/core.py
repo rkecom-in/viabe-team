@@ -67,6 +67,8 @@ class DaemonPaths:
     daemon_log: Path
     transcripts: Path
     stop_file: Path
+    telegram_env: Path
+    notifications_log: Path
 
 
 def default_paths(repo: Path) -> DaemonPaths:
@@ -81,6 +83,8 @@ def default_paths(repo: Path) -> DaemonPaths:
         daemon_log=repo / ".viabe/daemon/agent-loop.log",
         transcripts=repo / ".viabe/daemon/transcripts",
         stop_file=repo / ".viabe/daemon/STOP",
+        telegram_env=repo / ".viabe/secrets/telegram.env",
+        notifications_log=repo / ".viabe/notifications/log",
     )
 
 
@@ -335,6 +339,80 @@ def append_daemon_log(daemon_log: Path, line: str) -> None:
         fh.write(line.rstrip("\n") + "\n")
 
 
+def dispatch_macos_notification(body: str, task_id: Optional[str], *, paths: DaemonPaths) -> bool:
+    """Fire `osascript display notification`. Best-effort; never raises."""
+    title = "Cowork"
+    subtitle = task_id or ""
+    safe_body = body.replace("\\", "\\\\").replace('"', '\\"')
+    safe_sub = subtitle.replace("\\", "\\\\").replace('"', '\\"')
+    script = f'display notification "{safe_body}" with title "{title}" subtitle "{safe_sub}"'
+    try:
+        result = subprocess.run(
+            ["osascript", "-e", script], capture_output=True, text=True, timeout=5
+        )
+        if result.returncode != 0:
+            _log_notification(paths, f"osascript exit={result.returncode}: {result.stderr.strip()}")
+            return False
+        return True
+    except (subprocess.SubprocessError, FileNotFoundError, OSError) as exc:
+        _log_notification(paths, f"osascript exception: {type(exc).__name__}: {exc}")
+        return False
+
+
+def dispatch_telegram(body: str, task_id: Optional[str], *, paths: DaemonPaths) -> bool:
+    """POST to the Telegram Bot API. No-op if `.viabe/secrets/telegram.env`
+    is missing. Best-effort; never raises into caller."""
+    if not paths.telegram_env.exists():
+        return False
+    token, chat_id = _read_telegram_env(paths.telegram_env)
+    if not token or not chat_id:
+        _log_notification(paths, "telegram_env present but missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID")
+        return False
+    import urllib.parse
+    import urllib.request
+
+    text = f"[Cowork{(' ' + task_id) if task_id else ''}] {body}"
+    data = urllib.parse.urlencode({"chat_id": chat_id, "text": text}).encode()
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    try:
+        with urllib.request.urlopen(
+            urllib.request.Request(url, data=data, method="POST"), timeout=10
+        ) as resp:
+            payload = resp.read().decode("utf-8", errors="replace")
+    except Exception as exc:  # noqa: BLE001
+        _log_notification(paths, f"telegram exception: {type(exc).__name__}: {exc}")
+        return False
+    success = '"ok":true' in payload
+    _log_notification(paths, f"telegram {'sent' if success else 'failed'}: {payload[:200]}")
+    return success
+
+
+def _read_telegram_env(env_path: Path) -> tuple[Optional[str], Optional[str]]:
+    try:
+        text = env_path.read_text(encoding="utf-8")
+    except OSError:
+        return None, None
+    values: dict[str, str] = {}
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[7:]
+        key, _, value = line.partition("=")
+        values[key.strip()] = value.strip().strip('"').strip("'")
+    return values.get("TELEGRAM_BOT_TOKEN"), values.get("TELEGRAM_CHAT_ID")
+
+
+def _log_notification(paths: DaemonPaths, line: str) -> None:
+    try:
+        paths.notifications_log.parent.mkdir(parents=True, exist_ok=True)
+        with paths.notifications_log.open("a", encoding="utf-8") as fh:
+            fh.write(f"[{_iso_now()}] {line}\n")
+    except OSError:
+        pass
+
+
 async def process_signal(
     path: Path,
     session_id: Optional[str],
@@ -353,7 +431,11 @@ async def process_signal(
 
     if sig_type == "notify":
         body = read_signal_body(path)
-        append_daemon_log(paths.daemon_log, f"[{_iso_now()}] notify {task}: {body}")
+        priority = (front.get("priority") or "normal").lower()
+        append_daemon_log(paths.daemon_log, f"[{_iso_now()}] notify {task} priority={priority}: {body}")
+        if priority == "high":
+            dispatch_macos_notification(body, task, paths=paths)
+            dispatch_telegram(body, task, paths=paths)
         record_cost(paths.cost_log, task, "notify", cost_usd=0.0, tokens=0, session_id=session_id)
         move_to_processed(path, paths.processed)
         return session_id
@@ -727,7 +809,9 @@ __all__ = [
     "apply_merge_cleanup",
     "default_paths",
     "detect_pr_merges",
+    "dispatch_macos_notification",
     "dispatch_queued_task",
+    "dispatch_telegram",
     "load_session_id",
     "main_loop",
     "parse_signal_frontmatter",
