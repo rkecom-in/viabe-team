@@ -479,3 +479,177 @@ def test_started_reason_for_new_workflow_id(ingress):
     assert resp.status_code == 200
     assert resp.json()["reason"] == "started"
     _await_workflow(resp.json()["workflow_id"])
+
+
+# --- VT-OIV: owner_inputs extraction flag-flip verification -----------------
+#
+# Brief goal-items 1-4, 6: flipping ``OWNER_INPUTS_EXTRACTION_ENABLED`` to
+# True yields exactly one ``owner_inputs`` row carrying derived fields,
+# leaks no raw body to any of the three under-our-control persistence
+# sinks (``owner_inputs``, ``pipeline_runs.trigger_payload``,
+# ``pipeline_steps.input_envelope``), and the Composer's read-path
+# (``_build_pending_owner_inputs``) returns the just-written row. The
+# fourth sink — ``dbos.workflow_status.inputs`` — retains the raw body
+# for ~2.5h per CL-385 (intentional, replay-critical); this is the
+# accepted-and-documented surface and is NOT asserted on here. See
+# ``test_dbos_layer_not_synchronously_purged_documented_finding`` in
+# ``test_dsr_purge_substrate.py`` for the lock that the DBOS layer
+# stays time-based.
+
+
+def test_owner_inputs_extraction_writes_structured_row(ingress, monkeypatch):
+    """Brief goal-items 1-4: extraction on → exactly one derived row,
+    no raw body in any of the three under-our-control sinks, and the
+    Composer's ``_build_pending_owner_inputs`` returns it.
+
+    Goal #4 (Composer read-path) is closed by the assertion block at
+    the end of this test — the just-written row must surface through
+    the real Composer read path under the ``consumed_at IS NULL``
+    filter.
+    """
+    from orchestrator import runner as runner_mod
+    from orchestrator.context_builder import _build_pending_owner_inputs
+    from orchestrator.owner_inputs.writer import OwnerInputClassification
+
+    monkeypatch.setattr(runner_mod, "OWNER_INPUTS_EXTRACTION_ENABLED", True)
+    # The writer's classifier seam is gated on the env var (see
+    # ``run_extraction_for_event``'s early-skip) — set a sentinel so
+    # the gate opens; the real SDK call is bypassed by the
+    # ``classify_message`` patch below.
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-sentinel")
+    monkeypatch.setattr(
+        "orchestrator.owner_inputs.writer.classify_message",
+        lambda body, client=None: OwnerInputClassification(
+            intent="winback", segment="dormant_60d", occasion="diwali"
+        ),
+    )
+
+    phone = _phone()
+    tenant_id = _new_tenant(ingress.dsn, phone)
+    secret_body = f"OWNER-INPUT-PROBE-{uuid4().hex}-msg"
+    sid = f"SM{uuid4().hex}"
+    resp = _post(ingress, _fields(phone, Body=secret_body, MessageSid=sid))
+    result = _await_workflow(resp.json()["workflow_id"])
+
+    # --- owner_inputs row shape ------------------------------------
+    with psycopg.connect(ingress.dsn, autocommit=True) as conn:
+        rows = conn.execute(
+            "SELECT intent, segment, occasion, message_sid, run_id, "
+            "consumed_at, created_at FROM owner_inputs "
+            "WHERE tenant_id = %s",
+            (tenant_id,),
+        ).fetchall()
+    assert len(rows) == 1, (
+        f"expected exactly one owner_inputs row for tenant {tenant_id}; "
+        f"got {len(rows)}"
+    )
+    intent, segment, occasion, msg_sid, row_run_id, consumed_at, created_at = rows[0]
+    assert intent == "winback"
+    assert segment == "dormant_60d"
+    assert occasion == "diwali"
+    assert msg_sid == sid
+    assert str(row_run_id) == result["run_id"]
+    assert consumed_at is None
+    assert created_at is not None
+
+    # --- sink 1: owner_inputs row JSON does not contain raw body ---
+    with psycopg.connect(ingress.dsn, autocommit=True) as conn:
+        row_json = conn.execute(
+            "SELECT row_to_json(owner_inputs.*)::text FROM owner_inputs "
+            "WHERE tenant_id = %s",
+            (tenant_id,),
+        ).fetchone()[0]
+    assert secret_body not in row_json, (
+        "raw body substring leaked into owner_inputs row JSON"
+    )
+
+    # --- sink 2: pipeline_runs.trigger_payload --------------------
+    # --- sink 3: pipeline_steps.input_envelope --------------------
+    with psycopg.connect(ingress.dsn, autocommit=True) as conn:
+        trigger_payload = conn.execute(
+            "SELECT trigger_payload FROM pipeline_runs WHERE id = %s",
+            (result["run_id"],),
+        ).fetchone()[0]
+        step_envelope = conn.execute(
+            "SELECT input_envelope FROM pipeline_steps "
+            "WHERE run_id = %s AND step_kind = 'webhook_received'",
+            (result["run_id"],),
+        ).fetchone()[0]
+    assert "body" not in trigger_payload
+    assert "body" not in step_envelope
+    import json as _json
+    serialised = _json.dumps(trigger_payload) + _json.dumps(step_envelope)
+    assert secret_body not in serialised, (
+        "raw body substring leaked into pipeline_runs / pipeline_steps"
+    )
+
+    # --- Composer read-path (brief goal #4) -----------------------
+    # The just-written row must surface through the real Composer
+    # read path under the ``consumed_at IS NULL`` filter. Other
+    # tenants in this module's fixture do not produce owner_inputs
+    # rows (the flag is False outside this test), so the read is
+    # tenant-scoped to exactly one row.
+    from uuid import UUID as _UUID
+
+    pending, oi_ok = _build_pending_owner_inputs(_UUID(tenant_id))
+    assert oi_ok is True
+    assert len(pending) == 1
+    composer_row = pending[0]
+    assert composer_row.intent == "winback"
+    assert composer_row.segment == "dormant_60d"
+    assert composer_row.occasion == "diwali"
+
+
+def test_ingress_resilient_on_classifier_failure(ingress, monkeypatch):
+    """Brief goal-item 6: classify_message raises → webhook still ACKs
+    200, the rest of the pipeline runs, and NO owner_inputs row is
+    written. The writer's outer try/except in
+    ``orchestrator/owner_inputs/writer.py:240`` (``run_extraction_for_event``)
+    is the contract under test.
+    """
+    from orchestrator import runner as runner_mod
+
+    def _boom(body, client=None):
+        raise RuntimeError("simulated classifier failure")
+
+    monkeypatch.setattr(runner_mod, "OWNER_INPUTS_EXTRACTION_ENABLED", True)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-sentinel")
+    monkeypatch.setattr(
+        "orchestrator.owner_inputs.writer.classify_message", _boom
+    )
+
+    phone = _phone()
+    tenant_id = _new_tenant(ingress.dsn, phone)
+    # Substantive owner message → pre_filter routes to brain → final
+    # status 'escalated' (VT-3.4 brain not wired). Proves the pipeline
+    # ran past the extraction seam even though the classifier raised.
+    resp = _post(
+        ingress, _fields(phone, Body="I want to plan a Diwali campaign")
+    )
+    assert resp.status_code == 200
+    assert resp.json()["reason"] == "started"
+    result = _await_workflow(resp.json()["workflow_id"])
+
+    with psycopg.connect(ingress.dsn, autocommit=True) as conn:
+        status = conn.execute(
+            "SELECT status FROM pipeline_runs WHERE id = %s",
+            (result["run_id"],),
+        ).fetchone()[0]
+        webhook_step = conn.execute(
+            "SELECT count(*) FROM pipeline_steps "
+            "WHERE run_id = %s AND step_kind = 'webhook_received'",
+            (result["run_id"],),
+        ).fetchone()[0]
+        brain_step = conn.execute(
+            "SELECT count(*) FROM pipeline_steps "
+            "WHERE run_id = %s AND step_kind = 'awaiting_brain'",
+            (result["run_id"],),
+        ).fetchone()[0]
+        owner_inputs_count = conn.execute(
+            "SELECT count(*) FROM owner_inputs WHERE tenant_id = %s",
+            (tenant_id,),
+        ).fetchone()[0]
+    assert status == "escalated"
+    assert webhook_step == 1
+    assert brain_step == 1
+    assert owner_inputs_count == 0

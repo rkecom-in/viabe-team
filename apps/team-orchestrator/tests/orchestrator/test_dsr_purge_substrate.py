@@ -439,3 +439,77 @@ def test_dbos_layer_not_synchronously_purged_documented_finding(substrate):  # t
 
     # Silence unused-import — datetime referenced by other tests.
     _ = datetime.now(UTC)
+
+
+# --- VT-OIV: focused owner_inputs DSR-purge coverage ------------------------
+
+
+def test_owner_inputs_dsr_purge_covers_substrate(substrate):  # type: ignore[no-untyped-def]
+    """Brief goal-item 5: DSR purge deletes ALL owner_inputs rows for
+    the purged tenant (regardless of ``consumed_at`` state) and does
+    NOT touch a second tenant's owner_inputs row.
+
+    The broad ``test_purge_clears_subject_data_across_all_inventoried_tables``
+    above sweeps every purgeable table including owner_inputs; this
+    focused row pins (a) the per-feature delete count and (b) the
+    cross-tenant non-leak with mixed ``consumed_at`` state, so a
+    future regression scoping the purge to ``consumed_at IS NULL``
+    rows only would fail loud here.
+    """
+    from orchestrator.dsr_purge import purge_tenant_data
+
+    tenant_alpha = _new_tenant(substrate.dsn, name="tenant_alpha")
+    tenant_bravo = _new_tenant(substrate.dsn, name="tenant_bravo")
+
+    # Seed tenant_alpha: 1 pipeline_run + 3 owner_inputs rows with
+    # mixed consumed_at (1 pending, 2 consumed) — proves the purge
+    # does not depend on the pending filter.
+    alpha_run = uuid4()
+    with psycopg.connect(substrate.dsn, autocommit=True) as conn:
+        conn.execute(
+            "INSERT INTO pipeline_runs (id, tenant_id, run_type, status) "
+            "VALUES (%s, %s, 'twilio_inbound', 'completed')",
+            (str(alpha_run), str(tenant_alpha)),
+        )
+        conn.execute(
+            "INSERT INTO owner_inputs (tenant_id, run_id, message_sid, "
+            "intent, segment, occasion, consumed_at) VALUES "
+            "(%s, %s, %s, 'winback', 'dormant_60d', 'diwali', NULL),"
+            "(%s, %s, %s, 'campaign_request', 'vip', 'newyear', now()),"
+            "(%s, %s, %s, 'feedback', NULL, NULL, now())",
+            (
+                str(tenant_alpha), str(alpha_run), f"SM{uuid4().hex}",
+                str(tenant_alpha), str(alpha_run), f"SM{uuid4().hex}",
+                str(tenant_alpha), str(alpha_run), f"SM{uuid4().hex}",
+            ),
+        )
+
+    # Seed tenant_bravo: 1 pipeline_run + 1 owner_inputs row.
+    bravo_run = uuid4()
+    with psycopg.connect(substrate.dsn, autocommit=True) as conn:
+        conn.execute(
+            "INSERT INTO pipeline_runs (id, tenant_id, run_type, status) "
+            "VALUES (%s, %s, 'twilio_inbound', 'completed')",
+            (str(bravo_run), str(tenant_bravo)),
+        )
+        conn.execute(
+            "INSERT INTO owner_inputs (tenant_id, run_id, message_sid, "
+            "intent, segment, occasion) "
+            "VALUES (%s, %s, %s, 'winback', 'dormant_60d', 'diwali')",
+            (str(tenant_bravo), str(bravo_run), f"SM{uuid4().hex}"),
+        )
+
+    assert _count_tenant_rows(substrate.dsn, "owner_inputs", tenant_alpha) == 3
+    assert _count_tenant_rows(substrate.dsn, "owner_inputs", tenant_bravo) == 1
+
+    ticket_alpha = _open_dsr_ticket(substrate.dsn, tenant_alpha)
+    result = purge_tenant_data(ticket_alpha)
+
+    assert result.tenant_id == tenant_alpha
+    assert result.deleted_counts.get("owner_inputs") == 3, (
+        f"expected owner_inputs delete count = 3 for tenant_alpha; "
+        f"got {result.deleted_counts}"
+    )
+    assert _count_tenant_rows(substrate.dsn, "owner_inputs", tenant_alpha) == 0
+    # tenant_bravo's row is untouched.
+    assert _count_tenant_rows(substrate.dsn, "owner_inputs", tenant_bravo) == 1
