@@ -35,3 +35,5 @@ coverage/
 .vitest/
 .pytest_cache/
 supabase/
+.running/
+.viabe/secrets/

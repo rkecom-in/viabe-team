@@ -1,0 +1,13 @@
+.venv/
+agent-loop.log
+launchd.log
+launchd.err
+cost.log
+session.state
+session.state.tmp
+STOP
+transcripts/
+watch.log
+__pycache__/
+*.pyc
+.pytest_cache/

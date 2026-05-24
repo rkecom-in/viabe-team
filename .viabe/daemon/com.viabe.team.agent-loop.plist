@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.viabe.team.agent-loop</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/fazalkhan/development/viabe-team/.viabe/daemon/.venv/bin/python</string>
+        <string>/Users/fazalkhan/development/viabe-team/.viabe/daemon/agent-loop.py</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/fazalkhan/development/viabe-team</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/fazalkhan/development/viabe-team/.viabe/daemon/launchd.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/fazalkhan/development/viabe-team/.viabe/daemon/launchd.err</string>
+
+    <!-- ANTHROPIC_API_KEY is intentionally NOT set here per CL-385: that flag
+         is a SHIP-GATE controlled separately. The daemon resolves it from the
+         user's environment when it actually invokes the SDK. -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/Users/fazalkhan/.local/bin</string>
+    </dict>
+</dict>
+</plist>
