@@ -21,9 +21,10 @@
 -- second migration when that lands.
 --
 -- Retention: lifetime of the tenant relationship (DECISION
--- 368387c2-cc5a-8180-be0b-d1e64e0366de). DSR purge wiring is a separate
--- rostered Critical row; this migration does NOT include a purge trigger
--- or TTL.
+-- 368387c2-cc5a-8162 — authoritative; supersedes the earlier
+-- 368387c2-cc5a-8180-be0b-d1e64e0366de page). DSR purge wiring is a
+-- separate rostered Critical row; this migration does NOT include a
+-- purge trigger or TTL.
 
 CREATE TABLE owner_inputs (
     id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
