@@ -18,7 +18,6 @@ JSON dump of the fetched trace as the audit artifact for the
 
 from __future__ import annotations
 
-import asyncio
 import io
 import json
 import os
@@ -36,11 +35,9 @@ if str(SRC) not in sys.path:
 
 from orchestrator.observability import (  # noqa: E402
     redact_for_langsmith,
-    trace_run,
     traceable_node,
     traceable_tool,
 )
-from orchestrator.observability import langsmith as ls_mod  # noqa: E402
 
 
 RESULTS: dict[int, dict[str, Any]] = {}
@@ -187,7 +184,7 @@ def run_canary() -> int:
             candidates = list(
                 client.list_runs(
                     project_name=expected_project,
-                    filter=f'eq(metadata_key, "run_id")',
+                    filter='eq(metadata_key, "run_id")',
                 )
             )
         except BaseException:  # noqa: BLE001

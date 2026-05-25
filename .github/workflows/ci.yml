@@ -191,8 +191,10 @@ jobs:
       # Python unit tests (smoke). Heavy deps are not installed here — tests
       # import only stdlib + the package under test. DB-backed migration tests
       # skip themselves (no psycopg / no DATABASE_URL); they run in `migrations`.
+      # VT-101: observability tests monkeypatch `langsmith.traceable` which
+      # requires the langsmith module to be importable; add it explicitly.
       - uses: astral-sh/setup-uv@v5
-      - run: uv run --no-project --with pytest pytest
+      - run: uv run --no-project --with pytest --with langsmith pytest
         working-directory: apps/team-orchestrator
       - run: uv run --no-project --with pytest pytest
         working-directory: apps/team-ingestion-worker
