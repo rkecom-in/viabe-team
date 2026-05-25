@@ -6,6 +6,12 @@ the orchestrator (UUID type, surfaced in ``context_builder``, ``collapse``,
 satisfied by reuse, not by generation.
 """
 
+from orchestrator.privacy.pii_redactor import redact
+from orchestrator.observability.reasoning_trace import (
+    capture_agent_reasoning_step,
+    capture_tool_call_args,
+    capture_tool_call_result,
+)
 from orchestrator.observability.cost_dashboard import (
     detect_cost_anomalies,
     format_cost_breakdown_for_ops,
@@ -46,6 +52,9 @@ __all__ = [
     "TenantCostBreakdown",
     "TenantUnitEconomics",
     "WorkspaceCostSummary",
+    "capture_agent_reasoning_step",
+    "capture_tool_call_args",
+    "capture_tool_call_result",
     "detect_cost_anomalies",
     "format_cost_breakdown_for_ops",
     "format_run_id_footer",
@@ -60,6 +69,7 @@ __all__ = [
     "query_event_type",
     "query_run",
     "query_tenant_recent",
+    "redact",
     "redact_for_langsmith",
     "redact_for_log",
     "runaway_alert_candidates",
