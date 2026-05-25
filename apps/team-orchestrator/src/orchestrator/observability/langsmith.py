@@ -86,22 +86,15 @@ def traceable_node(name: str) -> Callable[[Callable[P, R]], Callable[P, R]]:
                 from langsmith import traceable as _ls_traceable
             except ImportError:
                 return fn(*args, **kwargs)
-            safe_inputs = {
-                "args": redact_for_langsmith(list(args)),
-                "kwargs": redact_for_langsmith(dict(kwargs)),
-                "run_id": str(run_id) if run_id is not None else None,
-            }
             metadata = {"run_id": str(run_id) if run_id is not None else None}
             try:
                 traced = _ls_traceable(
                     name=name,
                     project_name=get_project_name(),
                     metadata=metadata,
+                    process_inputs=redact_for_langsmith,
+                    process_outputs=redact_for_langsmith,
                 )(fn)
-                # Some SDK versions accept an `inputs` kwarg to override the
-                # captured signature payload; if unsupported, the redaction
-                # still applies via the wrapper's own redacted call below.
-                _ = safe_inputs
                 # mypy: SDK signature treats kwargs as LangSmithExtra; our
                 # wrapper preserves the wrapped function's real shape.
                 return traced(*args, **kwargs)  # type: ignore[arg-type]

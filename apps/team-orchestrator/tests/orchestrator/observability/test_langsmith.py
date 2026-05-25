@@ -70,7 +70,7 @@ def test_dispatch_generates_traceable_span_with_run_id(monkeypatch) -> None:
     _enable_tracing(monkeypatch)
     captured: dict[str, object] = {}
 
-    def fake_traceable(*, name, project_name, metadata):
+    def fake_traceable(*, name, project_name, metadata, process_inputs=None, process_outputs=None):
         captured["name"] = name
         captured["project_name"] = project_name
         captured["metadata"] = metadata
@@ -110,7 +110,7 @@ def test_nested_spans_inherit_parent_run_id(monkeypatch) -> None:
     _enable_tracing(monkeypatch)
     seen: list[str | None] = []
 
-    def fake_traceable(*, name, project_name, metadata):
+    def fake_traceable(*, name, project_name, metadata, process_inputs=None, process_outputs=None):
         seen.append(metadata.get("run_id"))
 
         def wrap(fn):
@@ -216,7 +216,7 @@ def test_redaction_applied_before_langsmith_send(monkeypatch) -> None:
     _enable_tracing(monkeypatch)
     captured_metadata: dict[str, object] = {}
 
-    def fake_traceable(*, name, project_name, metadata):
+    def fake_traceable(*, name, project_name, metadata, process_inputs=None, process_outputs=None):
         captured_metadata.update(metadata)
 
         def wrap(fn):
@@ -258,7 +258,7 @@ def test_project_threaded_to_traceable_call(monkeypatch) -> None:
     monkeypatch.setenv("LANGSMITH_PROJECT", "viabe-team-prod")
     captured: dict[str, object] = {}
 
-    def fake_traceable(*, name, project_name, metadata):
+    def fake_traceable(*, name, project_name, metadata, process_inputs=None, process_outputs=None):
         captured["project_name"] = project_name
 
         def wrap(fn):
@@ -285,7 +285,7 @@ def test_langsmith_failure_does_not_crash_pipeline(monkeypatch, capsys) -> None:
     function still returns its real value. Pipeline survives outages."""
     _enable_tracing(monkeypatch)
 
-    def boom_traceable(*, name, project_name, metadata):
+    def boom_traceable(*, name, project_name, metadata, process_inputs=None, process_outputs=None):
         raise RuntimeError("simulated LangSmith outage")
 
     monkeypatch.setattr("langsmith.traceable", boom_traceable)
