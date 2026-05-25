@@ -69,11 +69,22 @@ def _seed_tenant(pool, tenant_id: UUID) -> None:
         )
 
 
+def _resolved_host() -> str:
+    """Extract host portion of DATABASE_URL for evidence echo (no credentials)."""
+    url = os.environ.get("DATABASE_URL", "")
+    # postgres://user:pass@HOST:port/db → split on '@', take portion after, before '/'
+    if "@" not in url:
+        return "<no-host>"
+    after_at = url.split("@", 1)[1]
+    host_port = after_at.split("/", 1)[0]
+    return host_port
+
+
 def _preflight() -> None:
     if not os.environ.get("DATABASE_URL"):
         print("PREFLIGHT FAIL — DATABASE_URL not set; source supabase-dev.env in subshell.", file=sys.stderr)
         sys.exit(2)
-    print("PREFLIGHT OK — DATABASE_URL host hidden; project bound at runtime")
+    print(f"PREFLIGHT OK — resolved host: {_resolved_host()} (env-loaded)")
 
 
 def run_canary() -> int:
@@ -266,30 +277,39 @@ def run_canary() -> int:
 
     update_blocked = False
     delete_blocked = False
+    update_err = ""
+    delete_err = ""
     try:
         with tenant_connection(CANARY_TENANT_A) as conn, conn.cursor() as cur:
             cur.execute(
                 "UPDATE pipeline_log SET payload = '{}'::jsonb WHERE run_id = %s",
                 (str(run_id_1),),
             )
-    except psycopg.errors.InsufficientPrivilege:
+    except psycopg.errors.InsufficientPrivilege as exc:
         update_blocked = True
+        update_err = f"{type(exc).__name__}: {exc}"
     except BaseException as exc:  # noqa: BLE001
         update_blocked = "permission denied" in str(exc).lower()
+        update_err = f"{type(exc).__name__}: {exc}"
     try:
         with tenant_connection(CANARY_TENANT_A) as conn, conn.cursor() as cur:
             cur.execute("DELETE FROM pipeline_log WHERE run_id = %s", (str(run_id_1),))
-    except psycopg.errors.InsufficientPrivilege:
+    except psycopg.errors.InsufficientPrivilege as exc:
         delete_blocked = True
+        delete_err = f"{type(exc).__name__}: {exc}"
     except BaseException as exc:  # noqa: BLE001
         delete_blocked = "permission denied" in str(exc).lower()
+        delete_err = f"{type(exc).__name__}: {exc}"
     pass_5 = update_blocked and delete_blocked
     assertion(
         5,
         "Append-only: UPDATE + DELETE under app_role both raise permission-denied",
         pass_5,
-        observed=f"update_blocked={update_blocked} delete_blocked={delete_blocked}",
-        expected="update_blocked=True AND delete_blocked=True",
+        observed=(
+            f"host={_resolved_host()} "
+            f"update_err={update_err!r} delete_err={delete_err!r}"
+        ),
+        expected="both raise InsufficientPrivilege under app_role",
     )
 
     # -------------------------------------------------------------------
@@ -333,13 +353,17 @@ def run_canary() -> int:
     with pool.connection() as conn, conn.cursor() as cur:
         cur.execute("SELECT COUNT(*) FROM pipeline_log WHERE run_id = %s", (str(bad_run_id),))
         rows_written = list(cur.fetchone().values())[0]
+    breadcrumb_snippet = err_text.strip().splitlines()[-1] if err_text.strip() else "<empty>"
     pass_6 = (not crashed_caller) and has_breadcrumb and rows_written == 0
     assertion(
         6,
         "Failure isolation: caller does not crash; stderr breadcrumb; no row",
         pass_6,
-        observed=f"crashed={crashed_caller} breadcrumb={has_breadcrumb} rows={rows_written}",
-        expected="crashed=False AND breadcrumb=True AND rows=0",
+        observed=(
+            f"crashed={crashed_caller} rows_written={rows_written} "
+            f"breadcrumb={breadcrumb_snippet!r}"
+        ),
+        expected="crashed=False AND breadcrumb starts with [observability/log] AND rows=0",
     )
 
     # -------------------------------------------------------------------
@@ -378,8 +402,12 @@ def run_canary() -> int:
         7,
         "Retention sweep: 91-day row deleted; 89-day + new rows survive",
         pass_7,
-        observed=f"old={count_old} mid={count_mid} new={count_new} deleted_count={deleted}",
-        expected="old=0 AND mid=1 AND new=1",
+        observed=(
+            f"host={_resolved_host()} "
+            f"count_91d={count_old} count_89d={count_mid} count_now={count_new} "
+            f"sweep_returned_deleted={deleted}"
+        ),
+        expected="count_91d=0 AND count_89d=1 AND count_now=1",
     )
 
     return _finalise(pool)
@@ -404,15 +432,15 @@ def _finalise(pool) -> int:
             for r in cur.fetchall():
                 audit_rows.append(
                     {
-                        "id": str(r[0]),
-                        "run_id": str(r[1]),
-                        "tenant_id": str(r[2]) if r[2] else None,
-                        "event_type": r[3],
-                        "severity": r[4],
-                        "component": r[5],
-                        "payload": r[6],
-                        "duration_ms": r[7],
-                        "created_at": r[8].isoformat() if r[8] else None,
+                        "id": str(r["id"]),
+                        "run_id": str(r["run_id"]),
+                        "tenant_id": str(r["tenant_id"]) if r["tenant_id"] else None,
+                        "event_type": r["event_type"],
+                        "severity": r["severity"],
+                        "component": r["component"],
+                        "payload": r["payload"],
+                        "duration_ms": r["duration_ms"],
+                        "created_at": r["created_at"].isoformat() if r["created_at"] else None,
                     }
                 )
     except BaseException as exc:  # noqa: BLE001
