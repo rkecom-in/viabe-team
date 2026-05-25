@@ -153,62 +153,99 @@ def run_canary() -> int:
 
     @traceable_tool("canary.tool.process_payload")
     def tool(run_id: UUID, payload: dict[str, Any]) -> dict[str, str]:
-        return {"status": "handled", "echo_phone": payload["summary"]}
+        return {"status": "handled", "echo_phone": payload.get("summary", "")}
 
+    # Outermost @traceable_node creates the root span; nested @traceable_tool
+    # picks up the parent via LangSmith's contextvar-based threading. The
+    # root's id == trace_id which we capture for fetch.
     @traceable_node("canary.node.dispatch")
     def dispatch(run_id: UUID, payload: dict[str, Any]) -> dict[str, str]:
         return tool(run_id=run_id, payload=payload)
 
-    async def run_with_parent() -> dict[str, str]:
-        async with trace_run(parent_run_id, "canary.parent.trace_run"):
-            return dispatch(run_id=parent_run_id, payload=pii_payload)
-
     # Assertion 1 — real POST succeeds (call returns without raising;
     # if the SDK raised an HTTP error, the whole dispatch would crash).
+    # We capture the dispatch run's id by polling list_runs since @traceable
+    # generates its own id internally; the client-provided parent_run_id is
+    # the metadata key the wrapper attached.
     try:
-        result = asyncio.run(run_with_parent())
+        result = dispatch(run_id=parent_run_id, payload=pii_payload)
         assertion(1, "Real POST to LangSmith succeeded", True, observed=result)
     except BaseException as exc:  # noqa: BLE001
         assertion(1, "Real POST to LangSmith succeeded", False, observed=repr(exc), expected="no exception")
         return _finalise()
 
     # Give LangSmith a moment to commit the writes before we poll.
-    time.sleep(2)
+    time.sleep(3)
 
-    # Assertion 2 — trace fetchable post-write (poll up to 30s).
-    parent_run = None
-    try:
-        parent_run = _wait_for_run(client, parent_run_id, timeout_s=30, poll_s=2.0)
+    # Locate the dispatch root run via metadata.run_id == parent_run_id.
+    expected_project = os.environ["LANGSMITH_PROJECT"]
+    parent_run: Any = None
+    descendants: list[Any] = []
+    deadline = time.time() + 30
+    while time.time() < deadline:
+        try:
+            candidates = list(
+                client.list_runs(
+                    project_name=expected_project,
+                    filter=f'eq(metadata_key, "run_id")',
+                )
+            )
+        except BaseException:  # noqa: BLE001
+            candidates = []
+        matches = [
+            r
+            for r in candidates
+            if str(((getattr(r, "extra", None) or {}).get("metadata") or {}).get("run_id"))
+            == str(parent_run_id)
+        ]
+        if matches:
+            descendants = matches
+            roots = [r for r in matches if not getattr(r, "parent_run_id", None)]
+            parent_run = roots[0] if roots else matches[0]
+            break
+        time.sleep(2)
+
+    # Assertion 2 — trace fetchable post-write.
+    if parent_run is None:
         assertion(
             2,
-            "Trace fetchable via read_run within 30s",
-            True,
-            observed=f"id={getattr(parent_run, 'id', None)}",
+            "Trace fetchable via list_runs within 30s",
+            False,
+            observed="no runs matched metadata.run_id filter",
+            expected=f"≥1 run with metadata.run_id={parent_run_id}",
         )
-    except BaseException as exc:  # noqa: BLE001
-        assertion(2, "Trace fetchable via read_run within 30s", False, observed=repr(exc), expected="run object")
         return _finalise()
+    assertion(
+        2,
+        "Trace fetchable via list_runs within 30s",
+        True,
+        observed=f"id={getattr(parent_run, 'id', None)} count={len(descendants)}",
+    )
 
     run_dict = _run_to_dict(parent_run)
+    metadata = (run_dict.get("extra") or {}).get("metadata") or {}
 
-    # Assertion 3 — project name correct.
-    session_name = run_dict.get("session_name") or run_dict.get("project_name")
-    expected_project = os.environ["LANGSMITH_PROJECT"]
+    # Assertion 3 — project name correct (from extra.metadata.LANGSMITH_PROJECT).
+    project_in_run = (
+        metadata.get("LANGSMITH_PROJECT")
+        or run_dict.get("session_name")
+        or run_dict.get("project_name")
+    )
     assertion(
         3,
         f"Project name == {expected_project!r}",
-        session_name == expected_project,
-        observed=f"session_name={session_name!r}",
+        project_in_run == expected_project,
+        observed=f"project_in_run={project_in_run!r}",
         expected=expected_project,
     )
 
-    # Assertion 4 — fetched id == parent_run_id.
-    fetched_id = str(run_dict.get("id") or "")
+    # Assertion 4 — metadata.run_id matches the client-generated parent_run_id.
+    fetched_run_id_meta = metadata.get("run_id")
     assertion(
         4,
-        "Fetched run id == client-generated run_id",
-        fetched_id == str(parent_run_id),
-        observed=f"fetched={fetched_id} client={parent_run_id}",
+        "metadata.run_id == client-generated run_id",
+        str(fetched_run_id_meta) == str(parent_run_id),
+        observed=f"fetched_meta={fetched_run_id_meta} client={parent_run_id}",
         expected=str(parent_run_id),
     )
 
@@ -217,14 +254,19 @@ def run_canary() -> int:
     haystacks: list[str] = []
     haystacks.append(json.dumps(run_dict, default=_default_serialiser))
 
+    # descendants of this trace — child runs whose trace_id == parent's id.
+    parent_id_for_tree = str(getattr(parent_run, "id", parent_run_id))
     try:
-        # list all runs whose trace_id == parent_run_id (parent + descendants)
-        descendants = list(
-            client.list_runs(project_name=expected_project, trace=str(parent_run_id))
+        tree_runs = list(
+            client.list_runs(
+                project_name=expected_project,
+                trace_id=parent_id_for_tree,
+            )
         )
+        if tree_runs:
+            descendants = tree_runs
     except BaseException as exc:  # noqa: BLE001
-        descendants = []
-        print(f"[note] list_runs(trace=...) failed: {exc!r}", file=sys.stderr)
+        print(f"[note] list_runs(trace_id=...) failed: {exc!r}", file=sys.stderr)
 
     for r in descendants:
         haystacks.append(json.dumps(_run_to_dict(r), default=_default_serialiser))
@@ -252,9 +294,9 @@ def run_canary() -> int:
         expected="raw_leaked=[] AND all three redaction markers present",
     )
 
-    # Assertion 6 — nested span parenting.
+    # Assertion 6 — nested span parenting via @traceable contextvar threading.
     tree_ids = {str(getattr(r, "id", "")) for r in descendants}
-    parent_id_str = str(parent_run_id)
+    parent_id_str = parent_id_for_tree
     child_runs = [r for r in descendants if str(getattr(r, "id", "")) != parent_id_str]
     child_parented = any(
         str(getattr(r, "parent_run_id", "") or "") == parent_id_str for r in child_runs
@@ -279,7 +321,10 @@ def run_canary() -> int:
     sentinel_value: Any = None
     try:
         with _patched_env(bad_env), redirect_stderr(err_buf):
-            sentinel_value = dispatch(run_id=uuid4(), payload={"phone": "+919876543210"})
+            sentinel_value = dispatch(
+                run_id=uuid4(),
+                payload={"summary": "+919876543210 calling about renewal"},
+            )
     except BaseException as exc:  # noqa: BLE001
         crashed = True
         print(f"[7] caller saw exception: {exc!r}", file=sys.stderr)
