@@ -18,6 +18,10 @@ dependencies = [
     "langchain-core==1.4.0",
     "langchain-anthropic==1.4.3",
     "langgraph-checkpoint-postgres",
+    # VT-101: LangSmith tracing. Pin == band rather than == exact because the
+    # SDK is observability-only — a minor bump cannot change orchestrator
+    # behaviour (tracing failures are swallowed by design).
+    "langsmith>=0.8,<0.9",
     # anthropic pinned == (VT-32 / CL-242): the sales_recovery agent loop
     # is written directly on the Messages API; behaviour-sensitive surfaces
     # (extended thinking, usage shape, tool_use stop_reason) make bumps
