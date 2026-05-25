@@ -197,8 +197,32 @@ def test_log_event_returns_immediately(monkeypatch) -> None:
 
 @pytest.fixture
 def _dbpool():
-    """Open the orchestrator's connection pool for integration tests."""
+    """Open the orchestrator's connection pool for integration tests.
+
+    The pool is normally initialised by DBOS workflow launch; for these
+    tests we init it directly with the env's DATABASE_URL (the
+    `orchestrator` CI job sets it) so we don't need DBOS substrate setup.
+    """
+    import os
+
+    from orchestrator import graph as graph_mod
     from orchestrator.graph import get_pool
+
+    db_url = os.environ.get("DATABASE_URL")
+    if not db_url:
+        pytest.skip("DATABASE_URL not set; integration test requires real DB")
+
+    if graph_mod._pool is None:
+        from psycopg.rows import dict_row
+        from psycopg_pool import ConnectionPool
+
+        graph_mod._pool = ConnectionPool(
+            db_url,
+            min_size=1,
+            max_size=4,
+            kwargs={"autocommit": True, "row_factory": dict_row},
+            open=True,
+        )
 
     yield get_pool()
 
