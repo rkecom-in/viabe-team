@@ -61,6 +61,15 @@ def launch_dbos() -> None:
     if _launched:
         return
     database_url = get_database_url()
+
+    # VT-171 hot-fix (CL-56): configure Logfire BEFORE DBOS launch so the
+    # OTel exporter env vars (OTEL_EXPORTER_OTLP_ENDPOINT +
+    # OTEL_EXPORTER_OTLP_HEADERS) are set when DBOS starts emitting
+    # workflow + step spans. No-op when LOGFIRE_TOKEN is unset.
+    from orchestrator.observability.logfire import configure_logfire
+
+    configure_logfire()
+
     config: DBOSConfig = {"name": "team-orchestrator", "database_url": database_url}
     DBOS(config=config)
     DBOS.launch()
