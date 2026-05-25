@@ -92,6 +92,11 @@ EVENT_SCHEMAS: dict[str, dict[str, Validator]] = {
     "external_api_call": {
         "vendor": _required_str,
         "endpoint": _required_str,
+        # OPTIONAL fields (VT-103 convention; not enforced, no validator):
+        #   cost_paise: int — cost of this call in paise (1 INR = 100 paise)
+        #   cost_category: str — one of `llm`, `twilio`, `razorpay`, `apify`,
+        #     `infra_allocated`. Cost-dashboard aggregator falls back to
+        #     bucketing by `vendor` when this field is absent.
     },
     "external_api_response": {
         "vendor": _required_str,
