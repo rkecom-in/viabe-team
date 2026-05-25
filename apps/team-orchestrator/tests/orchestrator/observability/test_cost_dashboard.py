@@ -211,18 +211,24 @@ def _seed_cost_event(
         )
 
 
+def _fresh_tenant_uuid() -> UUID:
+    """Per-test tenant UUID — avoids residual-row pollution across tests in a session."""
+    return uuid4()
+
+
 @pytest.mark.integration
 def test_get_tenant_cost_aggregates_and_buckets(_dbpool) -> None:
-    _seed_tenant(_dbpool, CANARY_TENANT_A)
+    tenant = _fresh_tenant_uuid()
+    _seed_tenant(_dbpool, tenant)
     run_id = uuid4()
     for _ in range(3):
-        _seed_cost_event(_dbpool, CANARY_TENANT_A, run_id, 100, "llm")
+        _seed_cost_event(_dbpool, tenant, run_id, 100, "llm")
     for _ in range(2):
-        _seed_cost_event(_dbpool, CANARY_TENANT_A, run_id, 50, "twilio")
+        _seed_cost_event(_dbpool, tenant, run_id, 50, "twilio")
 
     since = datetime.now(timezone.utc) - timedelta(hours=1)
     until = datetime.now(timezone.utc) + timedelta(hours=1)
-    out = cd.get_tenant_cost(CANARY_TENANT_A, since, until)
+    out = cd.get_tenant_cost(tenant, since, until)
     assert out.total_paise == 3 * 100 + 2 * 50
     assert out.by_category["llm"] == 300
     assert out.by_category["twilio"] == 100
@@ -231,50 +237,54 @@ def test_get_tenant_cost_aggregates_and_buckets(_dbpool) -> None:
 
 @pytest.mark.integration
 def test_get_tenant_cost_cross_tenant_isolation(_dbpool) -> None:
-    _seed_tenant(_dbpool, CANARY_TENANT_A)
-    _seed_tenant(_dbpool, CANARY_TENANT_B)
+    tenant_a = _fresh_tenant_uuid()
+    tenant_b = _fresh_tenant_uuid()
+    _seed_tenant(_dbpool, tenant_a)
+    _seed_tenant(_dbpool, tenant_b)
     run_a, run_b = uuid4(), uuid4()
-    _seed_cost_event(_dbpool, CANARY_TENANT_A, run_a, 500)
-    _seed_cost_event(_dbpool, CANARY_TENANT_B, run_b, 9999)
+    _seed_cost_event(_dbpool, tenant_a, run_a, 500)
+    _seed_cost_event(_dbpool, tenant_b, run_b, 9999)
 
     since = datetime.now(timezone.utc) - timedelta(hours=1)
     until = datetime.now(timezone.utc) + timedelta(hours=1)
-    a = cd.get_tenant_cost(CANARY_TENANT_A, since, until)
+    a = cd.get_tenant_cost(tenant_a, since, until)
     assert a.total_paise == 500  # not inflated by B
 
 
 @pytest.mark.integration
 def test_get_workspace_cost_summary_top_n_ranking(_dbpool) -> None:
-    # Three tenants with distinct totals.
-    _seed_tenant(_dbpool, CANARY_TENANT_A)
-    _seed_tenant(_dbpool, CANARY_TENANT_B)
-    _seed_tenant(_dbpool, CANARY_TENANT_C)
-    _seed_cost_event(_dbpool, CANARY_TENANT_A, uuid4(), 200)
-    _seed_cost_event(_dbpool, CANARY_TENANT_B, uuid4(), 800)
-    _seed_cost_event(_dbpool, CANARY_TENANT_C, uuid4(), 400)
+    tenant_a = _fresh_tenant_uuid()
+    tenant_b = _fresh_tenant_uuid()
+    tenant_c = _fresh_tenant_uuid()
+    _seed_tenant(_dbpool, tenant_a)
+    _seed_tenant(_dbpool, tenant_b)
+    _seed_tenant(_dbpool, tenant_c)
+    _seed_cost_event(_dbpool, tenant_a, uuid4(), 200)
+    _seed_cost_event(_dbpool, tenant_b, uuid4(), 800)
+    _seed_cost_event(_dbpool, tenant_c, uuid4(), 400)
     # Refresh the materialised view so the day-bucketed query sees the rows.
     with _dbpool.connection() as conn, conn.cursor() as cur:
         cur.execute("REFRESH MATERIALIZED VIEW tenant_cost_daily")
 
     since = datetime.now(timezone.utc) - timedelta(days=1)
     until = datetime.now(timezone.utc) + timedelta(days=1)
-    summary = cd.get_workspace_cost_summary(since, until, top_n=10)
-    ranked = {tid: paise for tid, paise in summary.top_tenants}
-    # Order: B > C > A.
+    summary = cd.get_workspace_cost_summary(since, until, top_n=100)
     keys_in_order = [tid for tid, _ in summary.top_tenants]
-    assert keys_in_order.index(CANARY_TENANT_B) < keys_in_order.index(CANARY_TENANT_C)
-    assert keys_in_order.index(CANARY_TENANT_C) < keys_in_order.index(CANARY_TENANT_A)
-    assert ranked[CANARY_TENANT_B] >= 800
+    # Filter to just our seeded tenants — the workspace has many tenants;
+    # we assert the relative order of OUR three rather than absolute position.
+    seeded_order = [t for t in keys_in_order if t in {tenant_a, tenant_b, tenant_c}]
+    assert seeded_order == [tenant_b, tenant_c, tenant_a]
 
 
 @pytest.mark.integration
 def test_get_tenant_unit_economics_pro_rates_to_window(_dbpool, monkeypatch) -> None:
     monkeypatch.setenv("STANDARD_PRICE_PAISE", "100000")  # ₹1000/month
-    _seed_tenant(_dbpool, CANARY_TENANT_A, plan_tier="standard")
-    _seed_cost_event(_dbpool, CANARY_TENANT_A, uuid4(), 25000)  # ₹250 cost
+    tenant = _fresh_tenant_uuid()
+    _seed_tenant(_dbpool, tenant, plan_tier="standard")
+    _seed_cost_event(_dbpool, tenant, uuid4(), 25000)  # ₹250 cost
 
     since = datetime.now(timezone.utc) - timedelta(days=30)
     until = datetime.now(timezone.utc)
-    ue = cd.get_tenant_unit_economics(CANARY_TENANT_A, since, until)
+    ue = cd.get_tenant_unit_economics(tenant, since, until)
     # arrr_paise pro-rated to 30 days = 100000 paise, cost = 25000 paise → ratio = 4.0
     assert math.isclose(ue.ratio, 4.0, rel_tol=0.05)
