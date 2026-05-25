@@ -128,6 +128,21 @@ EVENT_SCHEMAS: dict[str, dict[str, Validator]] = {
     "canary_test": {
         "k": _optional_str,
     },
+    # VT-104 reasoning-trace event types (forward-pointing: function-as-
+    # tool boundary; VT-4 agent SDK PR wires the call sites).
+    "agent_reasoning_step": {
+        "step_name": _required_str,
+        # Optional fields: content (str, redacted), metadata (dict).
+    },
+    "tool_call_args": {
+        "tool_name": _required_str,
+        # Optional fields: args (dict, redacted).
+    },
+    "tool_call_result": {
+        "tool_name": _required_str,
+        "ok": lambda v: None if isinstance(v, bool) else f"expected bool, got {type(v).__name__}",
+        # Optional fields: result (any, redacted), error (str, redacted).
+    },
 }
 
 
