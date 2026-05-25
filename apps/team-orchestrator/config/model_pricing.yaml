@@ -1,0 +1,42 @@
+# Versioned vendor pricing (VT-103).
+#
+# Pinned per model / per vendor. Revisions are Type-1 governance: change
+# `effective_at`, append a new block, leave historical blocks intact so
+# past cost computations remain reproducible.
+#
+# All values in paise (1 INR = 100 paise) unless suffixed otherwise.
+
+effective_at: 2026-05-26
+notes: |
+  Phase-1 pricing baseline. Razorpay MDR is the documented 2% standard rate
+  (will negotiate once monthly volume justifies); Resend free tier covers
+  Phase 1; Twilio per-msg is the WhatsApp Business rate; Apify per-actor is
+  scraper-specific. LLM rates are Anthropic published list prices converted
+  at ~83 INR/USD.
+
+llm:
+  anthropic:
+    claude-sonnet-4-6:
+      input_per_1m_paise: 24900   # ~$3 per 1M input tokens
+      output_per_1m_paise: 124500 # ~$15 per 1M output tokens
+    claude-opus-4-7:
+      input_per_1m_paise: 124500  # ~$15 per 1M input
+      output_per_1m_paise: 622500 # ~$75 per 1M output
+    claude-haiku-4-5-20251001:
+      input_per_1m_paise: 8300    # ~$1 per 1M input
+      output_per_1m_paise: 41500  # ~$5 per 1M output
+
+twilio:
+  whatsapp_per_message_paise: 35   # WhatsApp Business utility template rate
+
+razorpay:
+  mdr_basis_points: 200            # 2.00% MDR; 1 bp = 0.01%
+
+resend:
+  per_email_paise: 0               # Phase-1 free tier; Phase 1.5+ tracks
+
+apify:
+  default_per_run_paise: 800       # ~$0.10 per scrape run baseline
+  per_actor:
+    google_maps_scraper: 1245      # ~$0.15
+    instagram_profile_scraper: 1660 # ~$0.20
