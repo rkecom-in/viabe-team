@@ -12,6 +12,11 @@ from uuid import UUID, uuid4
 
 import pytest
 
+# Skip the suite when langsmith isn't installed (`--no-project` smoke CI step).
+# The `orchestrator` CI job runs a full `uv sync` and executes these tests
+# normally; this guard keeps the lighter `test` step green.
+pytest.importorskip("langsmith")
+
 from orchestrator.observability import (
     format_run_id_footer,
     get_project_name,
