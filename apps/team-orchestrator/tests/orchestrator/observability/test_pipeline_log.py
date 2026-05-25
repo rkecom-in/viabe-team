@@ -239,7 +239,8 @@ def _seed_tenant(pool, tenant_id: UUID) -> None:
     """Idempotently insert a test tenants row so FK + RLS resolve."""
     with pool.connection() as conn, conn.cursor() as cur:
         cur.execute(
-            "INSERT INTO tenants (id, display_name) VALUES (%s, %s) ON CONFLICT (id) DO NOTHING",
+            "INSERT INTO tenants (id, business_name, plan_tier, phase) "
+            "VALUES (%s, %s, 'standard', 'onboarding') ON CONFLICT (id) DO NOTHING",
             (str(tenant_id), f"canary-{tenant_id}"),
         )
 
@@ -301,11 +302,11 @@ def test_cross_tenant_blocked(_dbpool) -> None:
     from orchestrator.db import tenant_connection
 
     with tenant_connection(CANARY_TENANT_A) as conn, conn.cursor() as cur:
-        cur.execute("SELECT COUNT(*) FROM pipeline_log WHERE run_id = %s", (str(run_id),))
-        count_a = cur.fetchone()[0]
+        cur.execute("SELECT COUNT(*) AS c FROM pipeline_log WHERE run_id = %s", (str(run_id),))
+        count_a = cur.fetchone()["c"]
     with tenant_connection(CANARY_TENANT_B) as conn, conn.cursor() as cur:
-        cur.execute("SELECT COUNT(*) FROM pipeline_log WHERE run_id = %s", (str(run_id),))
-        count_b = cur.fetchone()[0]
+        cur.execute("SELECT COUNT(*) AS c FROM pipeline_log WHERE run_id = %s", (str(run_id),))
+        count_b = cur.fetchone()["c"]
     assert count_a == 1
     assert count_b == 0
 
@@ -320,14 +321,14 @@ def test_workspace_null_tenant_not_visible_under_app_role(_dbpool) -> None:
 
     # Service role sees it
     with _dbpool.connection() as conn, conn.cursor() as cur:
-        cur.execute("SELECT COUNT(*) FROM pipeline_log WHERE run_id = %s", (str(run_id),))
-        service_count = cur.fetchone()[0]
+        cur.execute("SELECT COUNT(*) AS c FROM pipeline_log WHERE run_id = %s", (str(run_id),))
+        service_count = cur.fetchone()["c"]
     # app_role does not
     from orchestrator.db import tenant_connection
 
     with tenant_connection(CANARY_TENANT_A) as conn, conn.cursor() as cur:
-        cur.execute("SELECT COUNT(*) FROM pipeline_log WHERE run_id = %s", (str(run_id),))
-        app_count = cur.fetchone()[0]
+        cur.execute("SELECT COUNT(*) AS c FROM pipeline_log WHERE run_id = %s", (str(run_id),))
+        app_count = cur.fetchone()["c"]
     assert service_count == 1
     assert app_count == 0
 
@@ -351,13 +352,13 @@ def test_workspace_null_tenant_write_read_loop(_dbpool) -> None:
         )
 
     with _dbpool.connection() as conn, conn.cursor() as cur:
-        cur.execute("SELECT COUNT(*) FROM pipeline_log WHERE run_id = %s", (str(run_id),))
-        service_count = cur.fetchone()[0]
+        cur.execute("SELECT COUNT(*) AS c FROM pipeline_log WHERE run_id = %s", (str(run_id),))
+        service_count = cur.fetchone()["c"]
     from orchestrator.db import tenant_connection
 
     with tenant_connection(CANARY_TENANT_A) as conn, conn.cursor() as cur:
-        cur.execute("SELECT COUNT(*) FROM pipeline_log WHERE run_id = %s", (str(run_id),))
-        app_count = cur.fetchone()[0]
+        cur.execute("SELECT COUNT(*) AS c FROM pipeline_log WHERE run_id = %s", (str(run_id),))
+        app_count = cur.fetchone()["c"]
     assert service_count == 1, "service role should see its own NULL-tenant insert"
     assert app_count == 0, "app_role must NOT see workspace-level rows"
 
@@ -441,7 +442,7 @@ def test_retention_sweep_honors_days(_dbpool) -> None:
     assert deleted >= 1
 
     with _dbpool.connection() as conn, conn.cursor() as cur:
-        cur.execute("SELECT COUNT(*) FROM pipeline_log WHERE run_id = %s", (str(run_id_old),))
-        assert cur.fetchone()[0] == 0
-        cur.execute("SELECT COUNT(*) FROM pipeline_log WHERE run_id = %s", (str(run_id_new),))
-        assert cur.fetchone()[0] == 1
+        cur.execute("SELECT COUNT(*) AS c FROM pipeline_log WHERE run_id = %s", (str(run_id_old),))
+        assert cur.fetchone()["c"] == 0
+        cur.execute("SELECT COUNT(*) AS c FROM pipeline_log WHERE run_id = %s", (str(run_id_new),))
+        assert cur.fetchone()["c"] == 1
