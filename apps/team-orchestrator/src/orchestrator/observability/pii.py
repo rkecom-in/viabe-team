@@ -37,6 +37,12 @@ _PII_KEYS = frozenset(
         "body",
         "message_body",
         "raw_body",
+        # VT-102 extensions: error events carry stack traces and messages
+        # that may transitively contain PII (file paths embedding usernames,
+        # quoted payload fragments). Treat both as body-style hashable.
+        "stack_trace",
+        "stacktrace",
+        "error_message",
     }
 )
 
@@ -119,7 +125,7 @@ def _redact_pii_value(key_lower: str, value: Any) -> str:
         return "<redacted:none>"
     if key_lower in {"phone", "phone_e164", "mobile"}:
         return _hash_phone_inline(str(value))
-    if key_lower in {"body", "message_body", "raw_body"}:
+    if key_lower in {"body", "message_body", "raw_body", "stack_trace", "stacktrace", "error_message"}:
         return _hash_body(str(value))
     if key_lower in {"email"}:
         return "<redacted:email>"
@@ -128,4 +134,10 @@ def _redact_pii_value(key_lower: str, value: Any) -> str:
     return f"<redacted:{key_lower}:len={len(text)}>"
 
 
-__all__ = ["redact_for_langsmith"]
+# VT-102: alias for call-site clarity at non-LangSmith sinks (pipeline_log).
+# Both sinks share one redactor so future VT-104 replaces the implementation
+# in exactly one place.
+redact_for_log = redact_for_langsmith
+
+
+__all__ = ["redact_for_langsmith", "redact_for_log"]
