@@ -20,7 +20,17 @@ from orchestrator.api import router
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     from dbos_config import launch_dbos, shutdown_dbos
     from orchestrator.dbos_purge import register_purge_scheduler
+    from orchestrator.observability.envelopes import (
+        validate_registry_completeness,
+    )
     from orchestrator.scheduled_triggers import register_scheduled_triggers
+
+    # VT-179 boot hook (CL-419 / VT-179 fix-1): validate the typed-envelope
+    # registry covers every step_kind=<literal> in source. Fail-fast at
+    # FastAPI startup — second guard alongside dbos_config.launch_dbos's
+    # call, since both web-process and worker-process boot paths must
+    # enforce registry-source consistency.
+    validate_registry_completeness()
 
     # Register scheduled workflows BEFORE launch_dbos so the registered
     # set is in the registry when ``_launch`` (``_dbos.py:523``) computes

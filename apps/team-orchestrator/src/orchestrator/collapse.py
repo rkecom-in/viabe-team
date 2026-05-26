@@ -9,7 +9,7 @@ on DIFFERENT durable surfaces (CL-294):
     row (migration 016 + 018), UPSERT ``subscriber_states`` (017).
   - ``out_of_scope`` / ``insufficient_data`` → ``record_terminal_verdict``:
     one ``pipeline_steps`` row (migration 006) with
-    ``step_kind='campaign_plan_terminal'``, variant + reason fields in
+    ``step_kind='campaign_plan_emitted'``, variant + reason fields in
     ``output_envelope``. No campaign row — the agent declined to act.
 
 Both terminal paths complete the graph cleanly. The dispatch lives in
@@ -153,7 +153,7 @@ def record_terminal_verdict(
     """Record a non-proposed terminal verdict to ``pipeline_steps`` (CL-294).
 
     Writes one ``pipeline_steps`` row with
-    ``step_kind='campaign_plan_terminal'``. The variant
+    ``step_kind='campaign_plan_emitted'``. The variant
     (``out_of_scope`` / ``insufficient_data``) lives in
     ``output_envelope['variant']``; per-variant detail fields
     (``out_of_scope_reason`` / ``suggested_specialist`` /
@@ -162,7 +162,7 @@ def record_terminal_verdict(
 
     Best-effort: routing failure logs but does NOT re-raise.
     Observability must not break the graph. Matches the existing
-    ``error_router._log_decision`` + ``_emit_self_evaluate_attempt``
+    ``error_router._log_decision`` + ``_emit_self_evaluate_gate``
     persistence patterns.
 
     Raises ``TenantIsolationError`` if ``tenant_id`` disagrees with
@@ -216,7 +216,7 @@ def record_terminal_verdict(
                 INSERT INTO pipeline_steps
                     (run_id, tenant_id, step_seq, step_kind,
                      output_envelope, decision_rationale, status)
-                VALUES (%s, %s, %s, 'campaign_plan_terminal', %s, %s, 'completed')
+                VALUES (%s, %s, %s, 'campaign_plan_emitted', %s, %s, 'completed')
                 """,
                 (
                     str(run_id),
@@ -229,7 +229,7 @@ def record_terminal_verdict(
     except Exception:
         # Observability must not break the graph. Log + continue.
         logger.exception(
-            "collapse: failed to record campaign_plan_terminal verdict"
+            "collapse: failed to record campaign_plan_emitted verdict"
             " (variant=%s, run_id=%s)",
             variant,
             run_id,

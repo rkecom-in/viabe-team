@@ -60,6 +60,20 @@ def launch_dbos() -> None:
     global _launched
     if _launched:
         return
+
+    # VT-179 boot hook (CL-419 / VT-179 fix-1): validate the typed-envelope
+    # registry covers every step_kind=<literal> in source. Fail-fast at
+    # orchestrator-process boot so unregistered envelopes cannot reach
+    # production. Lives here (not in orchestrator/__init__.py) because the
+    # package-level import path traverses observability/__init__.py's eager
+    # re-exports, which pull psycopg — unacceptable for minimal-deps CI
+    # test runs that import orchestrator without launching DBOS.
+    from orchestrator.observability.envelopes import (
+        validate_registry_completeness,
+    )
+
+    validate_registry_completeness()
+
     database_url = get_database_url()
 
     # VT-171 hot-fix (CL-56): configure Logfire BEFORE DBOS launch so the
