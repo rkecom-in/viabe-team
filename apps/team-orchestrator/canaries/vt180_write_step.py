@@ -233,7 +233,6 @@ def run_canary() -> int:
     # -----------------------------------------------------------------
 
     # Assertion 4 — malformed envelope → soft-fail; row still written.
-    pre_b_count = int(after["step_count"])
     malformed = {
         "body_token": 12345,  # wrong type — expects str
         "sender_phone_token": "x",

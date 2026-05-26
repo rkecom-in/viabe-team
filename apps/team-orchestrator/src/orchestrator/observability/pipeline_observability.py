@@ -35,10 +35,7 @@ from psycopg.types.json import Jsonb
 from pydantic import ValidationError
 
 from orchestrator.db.tenant_connection import tenant_connection
-from orchestrator.observability.envelopes import (
-    EnvelopeNotRegistered,
-    envelope_for,
-)
+from orchestrator.observability.envelopes import envelope_for
 from orchestrator.observability.pii import redact_for_log
 
 logger = logging.getLogger(__name__)
