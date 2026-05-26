@@ -36,7 +36,6 @@ from uuid import UUID
 
 from psycopg.types.json import Jsonb
 
-from orchestrator.db.tenant_connection import tenant_connection
 from orchestrator.graph import get_pool
 
 logger = logging.getLogger(__name__)
