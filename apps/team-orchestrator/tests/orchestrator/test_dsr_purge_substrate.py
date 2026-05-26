@@ -332,9 +332,12 @@ def test_purge_preserves_other_tenant_data(substrate):  # type: ignore[no-untype
 
 def test_purge_preserves_privacy_audit_log_dpdp_retention(substrate):  # type: ignore[no-untyped-def]
     """privacy_audit_log entries for the purged tenant are NOT deleted
-    (DPDP 7-year retention). A new ``subject_data_purged`` event is
-    appended."""
-    from orchestrator.dsr_purge import purge_tenant_data
+    (DPDP 7-year retention). One ``subject_data_purged`` intent event
+    plus one ``subject_data_purged_table`` row per table in
+    ``_PURGE_ORDER`` are appended (VT-185 Q1 Option A — Cowork
+    plan-review 2026-05-26 locked the 1-intent + N-table audit
+    contract for CL-390 full-granularity compliance)."""
+    from orchestrator.dsr_purge import _PURGE_ORDER, purge_tenant_data
 
     tenant_id = _new_tenant(substrate.dsn, name="Audit retention test")
     _seed_full_tenant_data(substrate.dsn, tenant_id)
@@ -350,22 +353,32 @@ def test_purge_preserves_privacy_audit_log_dpdp_retention(substrate):  # type: i
     audit_count_after = _count_tenant_rows(
         substrate.dsn, "privacy_audit_log", tenant_id
     )
-    # Pre-existing row survives + purge writer appended one
-    # 'subject_data_purged' event.
-    assert audit_count_after == audit_count_before + 1, (
+    # Pre-existing row survives (DPDP retention) + purge writer
+    # appended 1 intent + N per-table rows (VT-185).
+    expected_added = 1 + len(_PURGE_ORDER)
+    assert audit_count_after == audit_count_before + expected_added, (
         f"privacy_audit_log count: before={audit_count_before} "
-        f"after={audit_count_after} — DPDP retention violated"
+        f"after={audit_count_after} — expected +{expected_added} "
+        f"(1 intent + {len(_PURGE_ORDER)} per-table audit rows)"
     )
 
-    # Confirm the new event is the purge marker.
+    # Confirm 1 intent + N per-table audit rows.
     with psycopg.connect(substrate.dsn, autocommit=True) as conn:
-        purge_events_row = conn.execute(
+        intent_row = conn.execute(
             "SELECT count(*) FROM privacy_audit_log "
             "WHERE tenant_id = %s AND event_type = 'subject_data_purged'",
             (str(tenant_id),),
         ).fetchone()
-    assert purge_events_row is not None
-    assert int(purge_events_row[0]) == 1
+        per_table_row = conn.execute(
+            "SELECT count(*) FROM privacy_audit_log "
+            "WHERE tenant_id = %s "
+            "  AND event_type = 'subject_data_purged_table'",
+            (str(tenant_id),),
+        ).fetchone()
+    assert intent_row is not None
+    assert int(intent_row[0]) == 1
+    assert per_table_row is not None
+    assert int(per_table_row[0]) == len(_PURGE_ORDER)
 
 
 def test_purge_is_idempotent_on_completed_ticket(substrate):  # type: ignore[no-untyped-def]
