@@ -183,8 +183,14 @@ def purge_tenant_data(ticket_id: UUID) -> PurgeResult:
             _append_audit_event(conn, tenant_id, ticket_id)
 
             for table in _PURGE_ORDER:
-                deleted_counts[table] = _delete_where_tenant(
-                    conn, table, tenant_id
+                rows_deleted = _delete_where_tenant(conn, table, tenant_id)
+                deleted_counts[table] = rows_deleted
+                # VT-185 Q1 Option A: per-table audit row written AFTER
+                # each successful DELETE. Combined with the intent row
+                # above, total = 1 + N audit rows per purge. CL-390
+                # full-granularity audit compliance.
+                _append_per_table_audit(
+                    conn, tenant_id, ticket_id, table, rows_deleted
                 )
 
             tenant_anonymized = _anonymize_tenant_row(conn, tenant_id)
@@ -262,6 +268,79 @@ def _append_audit_event(
     )
 
 
+def _append_per_table_audit(
+    conn: Any,
+    tenant_id: UUID,
+    ticket_id: UUID,
+    table: str,
+    rows_deleted: int,
+) -> None:
+    """VT-185 per-table audit row written AFTER each successful DELETE.
+
+    Companion to ``_append_audit_event``'s intent row (BEFORE deletes).
+    Payload carries ``{ticket_id, table, rows_deleted}`` so the regulator
+    audit trail captures actual purge granularity per table — CL-390
+    compliance. Q1 Option A locked per Cowork plan-review 2026-05-26.
+
+    ``this_hash`` placeholder shared with the intent row pending VT-8's
+    hash-chain enforcement.
+    """
+    conn.execute(
+        "INSERT INTO privacy_audit_log "
+        "(tenant_id, event_type, payload, this_hash, actor) "
+        "VALUES (%s, 'subject_data_purged_table', %s, %s, 'dsr_purge')",
+        (
+            str(tenant_id),
+            Jsonb(
+                {
+                    "ticket_id": str(ticket_id),
+                    "table": table,
+                    "rows_deleted": rows_deleted,
+                }
+            ),
+            ticket_id.hex,
+        ),
+    )
+
+
+def purge_tenant_data_dry_run(ticket_id: UUID) -> PurgeResult:
+    """VT-185 dry-run: count rows that WOULD be deleted; commit nothing.
+
+    Mirrors ``purge_tenant_data`` discovery flow but substitutes
+    ``SELECT COUNT(*)`` for each ``DELETE``, and skips audit + ticket-
+    completion writes entirely. The returned ``PurgeResult.deleted_counts``
+    semantically means "would delete". ``tenant_anonymized`` is always
+    False (no UPDATE issued). ``already_completed`` echoes the ticket's
+    current status so callers can detect a re-run of a finished ticket.
+
+    Q2 Option A locked per Cowork plan-review: separate function (not a
+    ``dry_run: bool`` parameter on ``purge_tenant_data``) eliminates the
+    accidentally-committed-in-dry-run failure class.
+
+    Per CL-416: this function never deletes. Per CL-82: tenant_id filter
+    applied per table even though service-role pool bypasses RLS — keeps
+    the count contract identical to the real purge's WHERE clause.
+    """
+    would_delete: dict[str, int] = {}
+    with get_pool().connection() as conn:
+        tenant_id = _resolve_tenant_id_or_raise(conn, ticket_id)
+        already_completed = _ticket_already_completed(conn, ticket_id)
+        for table in _PURGE_ORDER:
+            raw = conn.execute(
+                f"SELECT COUNT(*) AS n FROM {table} WHERE tenant_id = %s",
+                (str(tenant_id),),
+            ).fetchone()
+            row = cast("dict[str, Any]", raw)
+            would_delete[table] = int(row["n"])
+    return PurgeResult(
+        ticket_id=ticket_id,
+        tenant_id=tenant_id,
+        deleted_counts=would_delete,
+        tenant_anonymized=False,
+        already_completed=already_completed,
+    )
+
+
 def _delete_where_tenant(conn: Any, table: str, tenant_id: UUID) -> int:
     """``DELETE FROM <table> WHERE tenant_id = %s``.
 
@@ -311,4 +390,62 @@ def _mark_ticket_completed(conn: Any, ticket_id: UUID) -> None:
     )
 
 
-__all__ = ["PurgeResult", "purge_tenant_data"]
+__all__ = ["PurgeResult", "purge_tenant_data", "purge_tenant_data_dry_run"]
+
+
+# ---------------------------------------------------------------------------
+# VT-185 CLI entry point (Q3 Option A locked per Cowork plan-review).
+#
+# Usage:
+#   python -m orchestrator.dsr_purge --ticket <uuid>            # real purge
+#   python -m orchestrator.dsr_purge --ticket <uuid> --dry-run  # count only
+#
+# JSON output goes to stdout for ops-script consumption. Errors raise
+# ValueError (missing ticket) or re-raise the underlying psycopg
+# exception (FK constraint violation, etc.) — caller's responsibility
+# to catch + interpret.
+# ---------------------------------------------------------------------------
+
+if __name__ == "__main__":  # pragma: no cover
+    import argparse
+    import json
+    import sys
+
+    parser = argparse.ArgumentParser(
+        description="VT-185 DSR-purge CLI — purge tenant data on DSR ticket.",
+    )
+    parser.add_argument(
+        "--ticket",
+        required=True,
+        type=UUID,
+        help="dsr_tickets.id UUID (the deletion request)",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help=(
+            "Count rows that would be deleted across pipeline observability "
+            "tables; commit nothing"
+        ),
+    )
+    args = parser.parse_args()
+
+    if args.dry_run:
+        result = purge_tenant_data_dry_run(args.ticket)
+    else:
+        result = purge_tenant_data(args.ticket)
+
+    print(
+        json.dumps(
+            {
+                "ticket_id": str(result.ticket_id),
+                "tenant_id": str(result.tenant_id),
+                "deleted_counts": result.deleted_counts,
+                "tenant_anonymized": result.tenant_anonymized,
+                "already_completed": result.already_completed,
+                "dry_run": args.dry_run,
+            },
+            indent=2,
+        )
+    )
+    sys.exit(0)
