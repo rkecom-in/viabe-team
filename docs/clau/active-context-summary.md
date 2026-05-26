@@ -40,7 +40,7 @@
 | CL-59 | 2026-05-16 | nextjs, frontend, upgrade | Next.js upgraded 15 → 16 NOW before more code | Standing |
 | CL-67 | 2026-05-17 | testing, ci, dev, twilio-sandbox | Dev testing architecture: 3-tier (CI / synthetic webhook / live Twilio sandbox) | Standing |
 | CL-81 | 2026-05-18 | schema, migrations, path-first, orchestrator | Schema migrations are path-first (orchestrator-needs-first), not canonical-8-upfront | Standing |
-| CL-82 | 2026-05-18 | rls, guc, postgres, tenant-isolation | RLS canonical mechanism is `current_setting('app.current_tenant_id')` GUC, not auth.jwt | Standing |
+| CL-82 | 2026-05-18 | rls, guc, postgres, tenant-isolation, app_current_tenant | RLS canonical mechanism is session GUC, not auth.jwt. **SUBSTRATE NOTE (Cowork 2026-05-26):** active impl uses `app_current_tenant()` helper from `migrations/000b_rls_helpers.sql` reading `app.current_tenant` GUC, set by `tenant_connection()` wrapper. Standing-decision wording references `app.current_tenant_id` — substrate is the source of truth. Surfaced by CC at VT-175 STEP-0; my VT-175 brief example was a literal-wording transcription error. Brief authors: cite the helper, not the literal GUC name. | Standing |
 | CL-88 | 2026-05-18 | rls, guc, jwt, dual-mechanism | CORRECTION to CL-79: dual RLS mechanism (GUC for backend, JWT for client direct reads) | Standing |
 | CL-97 | 2026-05-17 | env, secrets, rename, pre-merge | Env-rename PR ritual: ALWAYS pre-merge double-set; never atomic-swap | Standing |
 | CL-98 | 2026-05-18 | env, secrets, rename, pre-merge | env-rename PRs use pre-merge double-set ritual (codified) | Standing |
@@ -86,7 +86,7 @@
 
 | CL | Replaced by | Topic |
 |---|---|---|
-| CL-1 | (Notion now read-only archive per 2026-05-25 migration) | Tooling: PM tool |
+| CL-1 | (Notion FULLY read-only archive; no exceptions per Fazal 2026-05-26) | Tooling: PM tool. **SUBSTRATE NOTE (Cowork 2026-05-26):** Initial 2026-05-25 migration covered ViabeTeam_Sprint + Clau_Session_Log; `Viabe_Launch_Tracker` (45 milestones) was NOT in scope and remained Notion-live. Fazal directive 2026-05-26: zero Notion read-write deps; Launch Tracker migrates to `.viabe/launch-tracker/MS-*.md` under VT-177. After VT-177 merges, Notion is fully archival — any new code or task spec that adds a Notion read or write is a violation. |
 | CL-20 | CL-385/CL-389/CL-390 cluster | Privacy: phone-tokenize, rest-plaintext |
 | CL-21 | CL-390 cluster | Privacy: 90-day step-record retention |
 | CL-32 | CL-175 | langgraph_supervisor library choice |
