@@ -279,9 +279,9 @@ def test_evaluator_none_default_skips_gate(monkeypatch):
     router.assert_not_called()
 
 
-def test_gate_emits_self_evaluate_attempt_per_call(monkeypatch):
+def test_gate_emits_self_evaluate_gate_per_call(monkeypatch):
     """Telemetry: every gate.run() must emit a pipeline_steps row.
-    Mock _emit_self_evaluate_attempt and assert it's called once per
+    Mock _emit_self_evaluate_gate and assert it's called once per
     evaluator call, with the right attempt_number + outcome."""
     _patch_router(monkeypatch)
     tenant_id, run_id = _ctx_ids()
@@ -294,7 +294,7 @@ def test_gate_emits_self_evaluate_attempt_per_call(monkeypatch):
 
     emitter = MagicMock()
     monkeypatch.setattr(
-        "orchestrator.agent.sales_recovery._emit_self_evaluate_attempt",
+        "orchestrator.agent.sales_recovery._emit_self_evaluate_gate",
         emitter,
     )
 
@@ -363,7 +363,7 @@ def test_gate_revise_twice_rejects_and_routes_self_eval_rejected(monkeypatch):
 
     # Loop must have routed exactly one SELF_EVAL_REJECTED failure
     # for escalation (router escalates HIGH severity to Fazal). Two
-    # routings happened: the per-attempt self_evaluate_attempt
+    # routings happened: the per-attempt self_evaluate_gate
     # telemetry helper writes pipeline_steps DIRECTLY (no router), so
     # router.call_count counts only the rejected failure.
     assert router.call_count == 1

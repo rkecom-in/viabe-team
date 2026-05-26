@@ -361,7 +361,7 @@ def test_hash_phone_deterministic_and_salt_sensitive():
 def test_substantive_message_marks_run_escalated(ingress):
     """A substantive owner message routes to the brain. The brain is not yet
     wired (VT-3.4), so the run must end 'escalated' — never silently 'completed'
-    (Pillar 7) — with an 'awaiting_brain' step carrying the pre-filter reason."""
+    (Pillar 7) — with an 'agent_invocation' step carrying the pre-filter reason."""
     phone = _phone()
     _new_tenant(ingress.dsn, phone)
     resp = _post(ingress, _fields(phone, Body="I want to plan a campaign"))
@@ -374,17 +374,17 @@ def test_substantive_message_marks_run_escalated(ingress):
         ).fetchone()[0]
         step = conn.execute(
             "SELECT output_envelope FROM pipeline_steps "
-            "WHERE run_id = %s AND step_kind = 'awaiting_brain'",
+            "WHERE run_id = %s AND step_kind = 'agent_invocation'",
             (result["run_id"],),
         ).fetchone()
     assert status == "escalated"
-    assert step is not None, "no awaiting_brain step record written"
+    assert step is not None, "no agent_invocation step record written"
     assert "owner message" in step[0]["reason"]
 
 
 def test_status_callback_delivered_completes_clean(ingress):
     """A 'delivered' status callback is a Reject (observability-only) — the run
-    completes cleanly with status 'completed' and NO awaiting_brain record."""
+    completes cleanly with status 'completed' and NO agent_invocation record."""
     phone = _phone()
     _new_tenant(ingress.dsn, phone)
     resp = _post(ingress, _fields(phone, MessageStatus="delivered"))
@@ -397,7 +397,7 @@ def test_status_callback_delivered_completes_clean(ingress):
         ).fetchone()[0]
         brain_steps = conn.execute(
             "SELECT count(*) FROM pipeline_steps "
-            "WHERE run_id = %s AND step_kind = 'awaiting_brain'",
+            "WHERE run_id = %s AND step_kind = 'agent_invocation'",
             (result["run_id"],),
         ).fetchone()[0]
     assert status == "completed"
@@ -642,7 +642,7 @@ def test_ingress_resilient_on_classifier_failure(ingress, monkeypatch):
         ).fetchone()[0]
         brain_step = conn.execute(
             "SELECT count(*) FROM pipeline_steps "
-            "WHERE run_id = %s AND step_kind = 'awaiting_brain'",
+            "WHERE run_id = %s AND step_kind = 'agent_invocation'",
             (result["run_id"],),
         ).fetchone()[0]
         owner_inputs_count = conn.execute(

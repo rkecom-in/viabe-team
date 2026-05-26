@@ -343,7 +343,7 @@ def test_route_failure_persists_decision_to_pipeline_steps(rls_ctx):
         ).fetchone()
 
     assert row is not None
-    assert row["step_kind"] == "error_router_decision"
+    assert row["step_kind"] == "error"
     assert row["output_envelope"] == {"strategy": "retry_with_backoff"}
     assert row["error"]["failure_type"] == "tool_call_timeout"
     assert row["error"]["vendor"] == "anthropic"

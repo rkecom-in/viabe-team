@@ -239,7 +239,7 @@ def record_brain_pending(tenant_id: str, run_id: str, reason: str) -> None:
         conn.execute(
             "INSERT INTO pipeline_steps "
             "(run_id, tenant_id, step_seq, step_kind, output_envelope, status) "
-            "VALUES (%s, %s, 1, 'awaiting_brain', %s, 'completed') "
+            "VALUES (%s, %s, 1, 'agent_invocation', %s, 'completed') "
             "ON CONFLICT (run_id, step_seq) DO NOTHING",
             (run_id, tenant_id, Jsonb({"reason": reason})),
         )
