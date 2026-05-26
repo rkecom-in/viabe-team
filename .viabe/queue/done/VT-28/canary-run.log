@@ -1,0 +1,124 @@
+Logfire project URL: https://logfire-eu.pydantic.dev/rkecom/viabe-team-dev
+PREFLIGHT OK — supabase: aws-1-ap-northeast-2.pooler.supabase.com:5432; anthropic: api.anthropic.com; logfire: https://logfire-eu.pydantic.dev; dbos: substrate=team-orchestrator (canary uses pipeline_log directly + invokes bodies synchronously via run_*_body callables — synthetic-clock pattern per docs/team/scheduled-triggers.md)
+12:52:22.394 vt28_canary_weekly_observability
+[1] PASS — VT-171 Logfire substitution: traced_node emits redacted span; legacy token format preserved
+    observed: {'logfire_enabled': True, 'redacted_dict': {'phone': 'phone_tok_1a65ab59a6390612', 'customer_name': '<redacted:customer_name:len=12>', 'body': 'body_tok_4374975e50716c5e'}}
+[2] PASS — VT-102 regression: all 4 trigger event types land in pipeline_log
+    observed: ['monthly_impact_shell', 'day39_shell', 'attribution_close_shell', 'weekly_cadence_fired']
+[3] PASS — VT-104 multi-pattern redactor regression + idempotency
+    observed: {'once': '<pan:redacted> email me at <email:hash:13e10ee283e17329> or phone_tok_9778fdd8266ab587; Aadhaar <aadhaar:redacted>; IFSC <ifsc:redacted>; GST <gst:redacted>; CC <cc:redacted>.', 'idempotent': True}
+[4] PASS — Weekly workflow_id deterministic on (tenant_id, iso_week); different week → different id
+    observed: {'id1': 'weekly:c26ad24f-b359-4755-a694-7d1ddc364203:2026-W22', 'id2': 'weekly:c26ad24f-b359-4755-a694-7d1ddc364203:2026-W22', 'id_other_week': 'weekly:c26ad24f-b359-4755-a694-7d1ddc364203:2026-W23'}
+[5] PASS — Cross-trigger isolation: same UUID across 4 trigger types → 4 distinct workflow_ids
+    observed: ['attribution_close:00000000-0000-4000-8000-000000000001', 'day39:00000000-0000-4000-8000-000000000001', 'monthly:00000000-0000-4000-8000-000000000001:2026-05', 'weekly:00000000-0000-4000-8000-000000000001:2026-W22']
+[6] PASS — Attribution close: shell event landed with status=skipped_schema_pending; reserved 'attribution_closed' NOT emitted
+    observed: {'event_type': 'attribution_close_shell', 'payload': {'note': 'VT-28 plumbing-mode shell. Reserved completion event ships under VT-176 once VT-175 lands the supporting schema. See docs/team/scheduled-triggers.md.', 'status': 'skipped_schema_pending', 'trigger_reason': 'attribution_close', 'scheduled_at_utc': '2026-05-26T03:30:00+00:00'}}
+[7] PASS — Day-39: shell event landed; reserved 'day39_evaluated/continue/refund_triggered' NOT emitted
+    observed: {'event_type': 'day39_shell', 'payload': {'note': 'VT-28 plumbing-mode shell. Reserved completion event ships under VT-176 once VT-175 lands the supporting schema. See docs/team/scheduled-triggers.md.', 'status': 'skipped_schema_pending', 'trigger_reason': 'day39', 'scheduled_at_utc': '2026-05-26T03:30:00+00:00'}, 'reserved_names_observed': 0}
+[8] PASS — Monthly impact: shell event landed; reserved 'monthly_impact_started' NOT emitted
+    observed: {'event_type': 'monthly_impact_shell', 'payload': {'note': 'VT-28 plumbing-mode shell. Reserved completion event ships under VT-176 once VT-175 lands the supporting schema. See docs/team/scheduled-triggers.md.', 'status': 'skipped_schema_pending', 'trigger_reason': 'monthly_impact', 'scheduled_at_utc': '2026-05-26T03:30:00+00:00'}, 'reserved_name_observed': 0}
+12:52:24.895 Message with 'claude-haiku-4-5-20251001' [LLM]
+[9] PASS — Real Anthropic Haiku call inside weekly cadence path; cost < ₹1
+    observed: {'pii_stripped': True, 'anthropic_ok': True, 'anthropic_err': None, 'in_tokens': 40, 'out_tokens': 5, 'cost_paise': 0, 'redacted_prompt': "Customer phone_tok_1a65ab59a6390612 (<customer_name>) wants to cancel. Reply with 'ack' only."}
+[10] PASS — register_scheduled_triggers idempotent: 4 triggers registered on first call; second call no-op (DBOS app_version stability)
+    observed: {'first_call_decorations': 4, 'second_call_decorations': 4}
+
+=== CANARY SUMMARY ===
+  [1] PASS — VT-171 Logfire substitution: traced_node emits redacted span; legacy token format preserved
+  [2] PASS — VT-102 regression: all 4 trigger event types land in pipeline_log
+  [3] PASS — VT-104 multi-pattern redactor regression + idempotency
+  [4] PASS — Weekly workflow_id deterministic on (tenant_id, iso_week); different week → different id
+  [5] PASS — Cross-trigger isolation: same UUID across 4 trigger types → 4 distinct workflow_ids
+  [6] PASS — Attribution close: shell event landed with status=skipped_schema_pending; reserved 'attribution_closed' NOT emitted
+  [7] PASS — Day-39: shell event landed; reserved 'day39_evaluated/continue/refund_triggered' NOT emitted
+  [8] PASS — Monthly impact: shell event landed; reserved 'monthly_impact_started' NOT emitted
+  [9] PASS — Real Anthropic Haiku call inside weekly cadence path; cost < ₹1
+  [10] PASS — register_scheduled_triggers idempotent: 4 triggers registered on first call; second call no-op (DBOS app_version stability)
+
+=== Anthropic cost: 0 paise (₹0.0000) — DR-15 budget ₹1 ===
+
+=== SAMPLE LOGFIRE SPAN (redacted-only payload) ===
+{
+  "args": [
+    {
+      "phone": "phone_tok_1a65ab59a6390612",
+      "customer_name": "<redacted:customer_name:len=12>",
+      "body": "body_tok_4374975e50716c5e"
+    }
+  ],
+  "node.name": "vt28_canary_weekly_observability"
+}
+
+=== AUDIT ARTIFACT — top-5 inserted pipeline_log rows ===
+[
+  {
+    "id": "cf826d35-a935-478e-9805-e30c994419b2",
+    "run_id": "e16ef226-f2e6-46f1-a927-2f3a83251979",
+    "tenant_id": null,
+    "event_type": "weekly_cadence_fired",
+    "severity": "info",
+    "component": "scheduled_trigger",
+    "payload": {
+      "note": "CL-274 plumbing-mode: trigger fires + reaches Anthropic. Useful weekly-proposal outcome reserved for VT-176.",
+      "trigger_reason": "weekly_cadence",
+      "scheduled_at_utc": "2026-05-26T03:30:00+00:00",
+      "anthropic_invoked": true
+    },
+    "created_at": "2026-05-26T07:22:22.700396+00:00"
+  },
+  {
+    "id": "164fe074-c2c3-44c5-a573-716ca5b82a4d",
+    "run_id": "4bfc45bb-0008-4cd8-a8b1-9bb695f6e4a4",
+    "tenant_id": null,
+    "event_type": "attribution_close_shell",
+    "severity": "info",
+    "component": "scheduled_trigger",
+    "payload": {
+      "note": "VT-28 plumbing-mode shell. Reserved completion event ships under VT-176 once VT-175 lands the supporting schema. See docs/team/scheduled-triggers.md.",
+      "status": "skipped_schema_pending",
+      "trigger_reason": "attribution_close",
+      "scheduled_at_utc": "2026-05-26T03:30:00+00:00"
+    },
+    "created_at": "2026-05-26T07:22:22.843830+00:00"
+  },
+  {
+    "id": "d73cbee7-6bc5-4cdb-828c-0358f96d68e0",
+    "run_id": "36de2900-b67d-4000-b667-312f8affdec0",
+    "tenant_id": null,
+    "event_type": "day39_shell",
+    "severity": "info",
+    "component": "scheduled_trigger",
+    "payload": {
+      "note": "VT-28 plumbing-mode shell. Reserved completion event ships under VT-176 once VT-175 lands the supporting schema. See docs/team/scheduled-triggers.md.",
+      "status": "skipped_schema_pending",
+      "trigger_reason": "day39",
+      "scheduled_at_utc": "2026-05-26T03:30:00+00:00"
+    },
+    "created_at": "2026-05-26T07:22:22.847430+00:00"
+  },
+  {
+    "id": "ea315cc8-8ee8-4904-a1b7-06caec0548d4",
+    "run_id": "2dad5d52-1c10-4e2f-ab72-746aa2fc5cb1",
+    "tenant_id": null,
+    "event_type": "monthly_impact_shell",
+    "severity": "info",
+    "component": "scheduled_trigger",
+    "payload": {
+      "note": "VT-28 plumbing-mode shell. Reserved completion event ships under VT-176 once VT-175 lands the supporting schema. See docs/team/scheduled-triggers.md.",
+      "status": "skipped_schema_pending",
+      "trigger_reason": "monthly_impact",
+      "scheduled_at_utc": "2026-05-26T03:30:00+00:00"
+    },
+    "created_at": "2026-05-26T07:22:22.993371+00:00"
+  }
+]
+
+ALL 10 ASSERTIONS PASSED
+couldn't stop thread 'pool-1-worker-0' within 5.0 seconds
+hint: you can try to call 'close()' explicitly or to use the pool as context manager
+couldn't stop thread 'pool-1-worker-1' within 5.0 seconds
+hint: you can try to call 'close()' explicitly or to use the pool as context manager
+couldn't stop thread 'pool-1-worker-2' within 5.0 seconds
+hint: you can try to call 'close()' explicitly or to use the pool as context manager
+couldn't stop thread 'pool-1-scheduler' within 5.0 seconds
+hint: you can try to call 'close()' explicitly or to use the pool as context manager
