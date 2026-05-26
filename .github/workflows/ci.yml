@@ -72,6 +72,81 @@ jobs:
           fi
           echo "No deprecated create_react_agent imports found."
 
+  gate-no-llm-in-deterministic-triggers:
+    name: gate-no-llm-in-deterministic-triggers
+    runs-on: ubuntu-latest
+    # VT-28 Pillar 1 enforcement: the 3 deterministic scheduled triggers
+    # (attribution close, day-39 evaluation, monthly impact) MUST NOT
+    # invoke any LLM or import any agent / supervisor module. The 4th
+    # trigger (weekly cadence) is exempt by design — it owns the
+    # reasoning path. Function-body scoped grep mirrors VT-171's
+    # gate-no-langsmith-imports pattern.
+    steps:
+      - uses: actions/checkout@v4
+      - name: Forbid LLM references in deterministic trigger bodies
+        run: |
+          set -euo pipefail
+          file="apps/team-orchestrator/src/orchestrator/scheduled_triggers.py"
+          if [ ! -f "$file" ]; then
+            echo "::error::$file missing — VT-28 expected this module on main"
+            exit 1
+          fi
+          # Extract the 3 deterministic trigger bodies (between their def
+          # line and the next blank-line-prefixed def at column 0).
+          python3 - <<'PY'
+          import re, sys
+          src = open("apps/team-orchestrator/src/orchestrator/scheduled_triggers.py").read()
+          # Match each deterministic body by its def name; consume until the next
+          # top-level def or end of file.
+          targets = (
+              "run_attribution_close_body",
+              "run_day39_evaluation_body",
+              "run_monthly_impact_body",
+              "attribution_close_scheduled",
+              "day39_evaluation_scheduled",
+              "monthly_impact_scheduled",
+          )
+          forbidden = re.compile(
+              r"(ChatAnthropic|from anthropic|import anthropic|claude-|"
+              r"langchain_anthropic|orchestrator_agent|supervisor\b|"
+              r"messages\.create|\bllm\b)",
+              re.IGNORECASE,
+          )
+          bad = []
+          for fn in targets:
+              m = re.search(rf"^def {fn}\b", src, re.MULTILINE)
+              if not m:
+                  bad.append(f"function {fn} missing from scheduled_triggers.py")
+                  continue
+              start = m.start()
+              nxt = re.search(r"^def \w+", src[m.end():], re.MULTILINE)
+              end = m.end() + nxt.start() if nxt else len(src)
+              body = src[start:end]
+              # Strip line comments / docstrings before scanning so the brief's
+              # narrative "no LLM" or "Anthropic" mentions in the doc don't
+              # trip the gate.
+              code_lines = []
+              in_doc = False
+              for line in body.splitlines():
+                  s = line.strip()
+                  if s.startswith('"""') or s.startswith("'''"):
+                      in_doc = not in_doc
+                      continue
+                  if in_doc:
+                      continue
+                  if s.startswith("#"):
+                      continue
+                  code_lines.append(line)
+              code = "\n".join(code_lines)
+              for hit in forbidden.finditer(code):
+                  bad.append(f"{fn}: forbidden token '{hit.group(0)}' in body")
+          if bad:
+              for entry in bad:
+                  print(f"::error::{entry}")
+              sys.exit(1)
+          print("gate-no-llm-in-deterministic-triggers: ok")
+          PY
+
   gate-no-langsmith-imports:
     name: gate-no-langsmith-imports
     runs-on: ubuntu-latest
