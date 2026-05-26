@@ -32,6 +32,15 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     # enforce registry-source consistency.
     validate_registry_completeness()
 
+    # VT-181 boot hook: every @tool_step decorator's step_kind must be in
+    # STEP_KIND_REGISTRY. Imports tool modules to populate registry first.
+    import orchestrator.agent.tools.compose_output  # noqa: F401
+    from orchestrator.observability.decorators import (
+        validate_tool_step_registry,
+    )
+
+    validate_tool_step_registry()
+
     # Register scheduled workflows BEFORE launch_dbos so the registered
     # set is in the registry when ``_launch`` (``_dbos.py:523``) computes
     # the launch-time ``app_version`` hash (line 530:

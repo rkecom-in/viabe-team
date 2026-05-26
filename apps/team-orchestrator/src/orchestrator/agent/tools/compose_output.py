@@ -5,6 +5,11 @@ to the orchestrator-agent's tool inventory. Pattern parallels
 ``self_evaluate.py`` (langchain ``@tool`` decoration) — the agent
 dispatches the tool via ``ChatAnthropic``'s tool-call mechanism.
 
+VT-181 retrofit: ``@tool_step`` wraps the function for observability —
+each invocation writes a pipeline_steps row via VT-180's write_step.
+ContextVar ``_observability_context`` must be set by the caller (per
+CL-Q1 Option A); without it the decorator logs + skips the write.
+
 Forward-pointing
 ----------------
 This module imports ``langchain_core.tools.tool`` to register the
@@ -25,14 +30,52 @@ from typing import Any
 from uuid import UUID
 
 from langchain_core.tools import tool
+from pydantic import BaseModel, ConfigDict
 
+from orchestrator.observability.decorators import tool_step
 from orchestrator.output_composer import (
     ComposedOutput,
     compose_owner_output,
 )
 
 
+class _ComposeOwnerOutputInput(BaseModel):
+    """VT-181 envelope shape for compose_owner_output_tool args."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    intent_or_trigger: str
+    tenant_id: str
+    phase: str
+    last_owner_message_at_iso: str | None = None
+    escalation_pending: bool = False
+    specialist_result_json: dict[str, Any] | None = None
+
+
+class _ComposeOwnerOutputOutput(BaseModel):
+    """VT-181 envelope shape for compose_owner_output_tool return dict."""
+
+    model_config = ConfigDict(extra="allow")
+
+    message_body: str
+    message_type: str
+    template_name: str | None = None
+    template_params: dict[str, Any] | None = None
+    urgency: str | None = None
+    follow_up_required: bool | None = None
+    follow_up_intent: str | None = None
+    preferred_language: str | None = None
+    signature: str | None = None
+    honesty_notes: list[str] | None = None
+
+
 @tool
+@tool_step(
+    step_kind="mcp_tool_call",
+    envelope_in=_ComposeOwnerOutputInput,
+    envelope_out=_ComposeOwnerOutputOutput,
+    step_name="compose_owner_output",
+)
 def compose_owner_output_tool(
     intent_or_trigger: str,
     tenant_id: str,

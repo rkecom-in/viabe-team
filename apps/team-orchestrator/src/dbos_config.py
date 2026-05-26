@@ -74,6 +74,18 @@ def launch_dbos() -> None:
 
     validate_registry_completeness()
 
+    # VT-181: every @tool_step decorator's step_kind must be in
+    # STEP_KIND_REGISTRY (envelope-type drift is OUT of scope per
+    # docstring; payload-shape is per-tool free-form JSONB).
+    # Triggers import of any modules that define decorated tools so
+    # TOOL_STEP_REGISTRY is populated before the check runs.
+    import orchestrator.agent.tools.compose_output  # noqa: F401
+    from orchestrator.observability.decorators import (
+        validate_tool_step_registry,
+    )
+
+    validate_tool_step_registry()
+
     database_url = get_database_url()
 
     # VT-171 hot-fix (CL-56): configure Logfire BEFORE DBOS launch so the
