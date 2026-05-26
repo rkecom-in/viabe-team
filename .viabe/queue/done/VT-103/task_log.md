@@ -1,0 +1,15 @@
+[2026-05-26T01:45:00+05:30] PICKUP: VT-103 brief-ready. Sprint 1 Exec Order 3. Canary mandatory + verbatim audit (Rule #15, tightened standard per Cowork's VT-102 question).
+[2026-05-26T01:46:00+05:30] STEP-0 git: HEAD=e5c4cdc (VT-102 just merged). On main. Both deps Done.
+[2026-05-26T01:46:30+05:30] STEP-0 brief artifacts: paths `apps/team/` → `apps/team-orchestrator/`; migration `039` → actual `022`; PR title (VT-Observability-Cost) → (VT-103); merge target dev → main; retired reviewers skipped. ARRR sourcing surfaced as plan risk #1 — `campaigns` schema has no amount columns; defaulting to env-driven `plan_tier → <PLAN>_PRICE_PAISE` mapping.
+[2026-05-26T01:47:00+05:30] STEP-0 scope-trim: per Cowork's heads-up — ship aggregation (§1/§2/§5), defer real Telegram bot wiring (VT-30 dep) + cron triggers (VT-28 dep) as callable functions only. VT-4.4 ceiling → stub assertion against existing limits/.
+[2026-05-26T01:47:37+05:30] PLAN: wrote `.viabe/queue/VT-103/plan.md`. 165K tokens / 130 min est (under 180K ceiling). 7 risks surfaced; 2 open questions for review (ARRR sourcing, anomaly baseline floor). Status flipped queued→review. Signalling plan-ready.
+[2026-05-26T03:50:00+05:30] REVIEW-APPROVED: review→implementing. Branched feat/vt-observability-cost-dashboard from main.
+[2026-05-26T03:55:00+05:30] IMPL: migrations/022_tenant_cost_views.sql (MV + UNIQUE index + service-role only). config/model_pricing.yaml (LLM/Twilio/Razorpay/Resend/Apify pinned per effective_at).
+[2026-05-26T04:05:00+05:30] IMPL: observability/cost_dashboard.py (5 fns + formatter). types.py extended (5 dataclasses). event_schemas.py documents OPTIONAL cost_category/cost_paise per condition #3. Conditions #1+#2 applied (docstring + floors).
+[2026-05-26T04:10:00+05:30] TESTS: 13 pure pass; 4 integration gated. ruff clean. Full observability suite 42 pass / 13 skip.
+[2026-05-26T04:15:00+05:30] CANARY: applied migration 022 to dev DB. Canary 8/8 PASS at host=aws-1-ap-northeast-2.pooler.supabase.com:5432 in 53.16s wall-clock. Audit JSON captured pre-cleanup (initial run had post-cleanup empty audit; fixed by moving snapshot before DELETE).
+[2026-05-26T04:18:00+05:30] PR: pushed branch; opened PR #58 (https://github.com/rkecom-in/viabe-team/pull/58). Status flipped implementing→pr-ready. Awaiting Fazal type:task per Pillar 7.
+[2026-05-26T02:39:00+05:30] CI-FAILURE: sha=556d50f orchestrator job FAILED (1m59s). Cowork question signal flagged the gap. 2 integration tests failed via shared tenant-UUID row pollution.
+[2026-05-26T02:40:00+05:30] FIX: a0adba0 pushed. Per-test uuid4() tenant IDs. Local integration verify: 4 passed (7.99s). task-result-supplement signalled to Cowork.
+[2026-05-26T02:41:40+05:30] CI-GREEN: a0adba0 all 12 checks PASS (orchestrator 2m0s). notify-ci-green signalled. Awaiting Fazal type:task.
+[2026-05-26T02:57:52+05:30] MERGED: squash merge to main as 95d9f29. PR #58 state=MERGED. Branch deleted on origin. Local main fast-forwarded. Status flipped pr-ready→done. Queue dir moved to .viabe/queue/done/VT-103/.
