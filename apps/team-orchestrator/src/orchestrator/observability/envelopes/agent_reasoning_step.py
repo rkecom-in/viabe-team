@@ -26,6 +26,10 @@ class AgentReasoningStepOutput(BaseModel):
     think_text: str | None = None
     action: str | None = None
     action_args: dict[str, Any] | None = None
+    # VT-182 — logfire span trace_id at the time of this Messages.create
+    # round-trip; None when Logfire is disabled or no active span.
+    # Surfaced via opentelemetry.trace.get_current_span() in agent_callback.
+    logfire_trace_id: str | None = None
 
 
 class AgentReasoningStepEnvelope(StepEnvelope):
