@@ -116,7 +116,10 @@ def run_canary() -> int:
         log_event,
         traceable_node,
     )
-    from orchestrator.observability.pii import redact_for_langsmith
+    # VT-171: legacy name `redact_for_langsmith` deprecated; canonical
+    # boundary is `redact_for_otel_span`. Same function — byte-identical
+    # output preserved for regression assertion below.
+    from orchestrator.observability.pii import redact_for_otel_span as redact_for_langsmith
     from orchestrator.privacy.pii_redactor import redact
 
     os.environ["TEAM_PHONE_HASH_SALT"] = os.environ.get(

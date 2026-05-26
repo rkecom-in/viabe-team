@@ -1,43 +1,59 @@
-"""PII redaction at observability sinks (VT-101 → VT-104 consolidation).
+"""PII redaction at observability sinks (VT-101 → VT-104 → VT-171).
 
 Thin delegation layer over the canonical
-:mod:`orchestrator.privacy.pii_redactor`. Preserved as a re-export shim
-so call sites threaded through VT-101 / VT-102 (the LangSmith
-``@traceable`` decorator and the ``pipeline_log`` writer) keep their
-public API and output byte-identical post-consolidation — that is the
-canary's Group A regression contract.
+:mod:`orchestrator.privacy.pii_redactor`. The redactor seam is preserved
+byte-identical across the LangSmith → Logfire migration; only the public
+export NAME changes (``redact_for_langsmith`` → ``redact_for_otel_span``)
+to remove vendor coupling from the surface.
 
-Token format for named-key redaction (``phone``, ``customer_name``,
-``body``, etc.) is preserved exactly so VT-101's LangSmith trace JSON
-and VT-102's ``pipeline_log`` JSONB rows do not drift. New pattern-driven
-redactions (PAN, Aadhaar, IFSC, GST, CC, long body, email regex) flow
-through the canonical module's ``redact`` directly.
-
-Bypass requires replacing the decorator wrapper at the call site (see
-``observability/langsmith.py``).
+Public exports
+--------------
+- :func:`redact_for_otel_span` — the canonical vendor-neutral redactor
+  call. Use this from new code.
+- :func:`redact_for_log` — alias preserved for the ``pipeline_log``
+  writer (no name change at that sink).
+- :func:`redact_for_langsmith` — **DEPRECATED**; emits
+  :class:`DeprecationWarning` and delegates. Removed in VT-172.
 """
 
 from __future__ import annotations
 
+import warnings
 from typing import Any
 
 from orchestrator.privacy.pii_redactor import redact
 
 
-def redact_for_langsmith(value: Any, _depth: int = 0) -> Any:
-    """Return a PII-safe copy of ``value`` for the LangSmith sink.
+def redact_for_otel_span(value: Any, _depth: int = 0) -> Any:
+    """Return a PII-safe copy of ``value`` for an OTel-style span sink.
 
     Delegates to :func:`orchestrator.privacy.pii_redactor.redact`. The
-    ``_depth`` parameter preserves VT-101's signature for any callers
+    ``_depth`` parameter preserves VT-101's call signature for callers
     that still pass it positionally; mapped to the canonical ``depth``.
     """
     return redact(value, depth=_depth)
 
 
-# VT-102: alias for the pipeline_log writer. Same redactor; call-site
-# clarity at non-LangSmith sinks. Kept as an alias rather than a
-# delegating function so the symbol table stays minimal.
-redact_for_log = redact_for_langsmith
+# pipeline_log writer — same redactor; call-site clarity at non-Logfire
+# sinks. Alias rather than a separate function so the symbol table stays
+# minimal.
+redact_for_log = redact_for_otel_span
 
 
-__all__ = ["redact_for_langsmith", "redact_for_log"]
+def redact_for_langsmith(value: Any, _depth: int = 0) -> Any:
+    """DEPRECATED — use :func:`redact_for_otel_span` instead.
+
+    Kept as a one-cycle alias so any straggler import keeps working after
+    the VT-171 LangSmith → Logfire migration. Emits
+    :class:`DeprecationWarning` on every call. Removed in VT-172.
+    """
+    warnings.warn(
+        "redact_for_langsmith is deprecated (VT-171 / CL-56 hot-fix); "
+        "use redact_for_otel_span instead. Removed in VT-172.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    return redact_for_otel_span(value, _depth)
+
+
+__all__ = ["redact_for_langsmith", "redact_for_log", "redact_for_otel_span"]
