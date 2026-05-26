@@ -196,6 +196,7 @@ def build_supervisor_graph(
     )
 
     graph = StateGraph(AgentGraphState)
+    # observability:opt-out reason=CompiledStateGraph-subgraph-rejects-function-wrappers-per-VT-183
     graph.add_node("orchestrator_agent", orchestrator)
     graph.add_node(
         "sales_recovery_agent",

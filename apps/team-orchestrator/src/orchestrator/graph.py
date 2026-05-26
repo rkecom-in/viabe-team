@@ -45,6 +45,7 @@ def placeholder_node(state: OrchestratorState) -> dict[str, list[str]]:
 def build_graph() -> StateGraph:
     """Build the (uncompiled) orchestrator state graph: START -> node -> END."""
     graph: StateGraph = StateGraph(OrchestratorState)
+    # observability:opt-out reason=VT-3.1-placeholder-node-pre-agent-substrate
     graph.add_node("placeholder_node", placeholder_node)
     graph.add_edge(START, "placeholder_node")
     graph.add_edge("placeholder_node", END)
