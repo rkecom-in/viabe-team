@@ -1,11 +1,17 @@
 -- 007_phone_token_resolutions.sql — phone-number tokenisation (Pillar 7).
 --
--- VT-178 docstring amendment (2026-05-26): actual on-main column shape
--- differs from brief §2.1. Actual: `token, tenant_id, phone_number_encrypted,
--- resolved_count, last_resolved_at, created_at`. Brief §2.1 expects
--- `phone_token, tenant_id, customer_id, phone_e164, created_at,
--- last_accessed_at`. Composite index in VT-178's migration 024
--- (`phone_token_resolutions_tenant_token_idx`) uses actual `token`.
+-- VT-178 docstring amendment (2026-05-26): this table originally had column
+-- shape `token, tenant_id, phone_number_encrypted, resolved_count,
+-- last_resolved_at, created_at`. VT-178 added composite index
+-- `phone_token_resolutions_tenant_token_idx` via migration 024.
+--
+-- VT-187 docstring amendment (2026-05-26): schema normalized to §2.1 spec
+-- via `025_pipeline_observability_normalize.sql`. Renamed `token` →
+-- `phone_token`, `last_resolved_at` → `last_accessed_at`. Added canonical
+-- column `customer_id` (NO FK constraint per CL-417 Cond 1 — TODO(VT-170)
+-- adds the customers table and the FK). PostgreSQL auto-updated the
+-- primary-key constraint and `phone_token_resolutions_tenant_token_idx` to
+-- reference the renamed `phone_token` column. See CL-417 for rationale.
 --
 -- RLS is the SAME as the other tenant-scoped tables (4 policies via
 -- `app_current_tenant()`). Brief §2.1 calls for STRICTER RLS — operator-

@@ -796,7 +796,7 @@ def _emit_self_evaluate_attempt(
             # can't see it through psycopg's generic Row type, cast at
             # the seam (same pattern as error_router._log_decision).
             raw_next = conn.execute(
-                "SELECT COALESCE(MAX(step_index), 0) + 1 AS next "
+                "SELECT COALESCE(MAX(step_seq), 0) + 1 AS next "
                 "FROM pipeline_steps WHERE run_id = %s",
                 (context.run_id,),
             ).fetchone()
@@ -805,8 +805,8 @@ def _emit_self_evaluate_attempt(
             conn.execute(
                 """
                 INSERT INTO pipeline_steps
-                    (run_id, tenant_id, step_index, step_kind, output_envelope)
-                VALUES (%s, %s, %s, 'self_evaluate_attempt', %s)
+                    (run_id, tenant_id, step_seq, step_kind, output_envelope, status)
+                VALUES (%s, %s, %s, 'self_evaluate_attempt', %s, 'completed')
                 """,
                 (
                     context.run_id,

@@ -150,7 +150,7 @@ def open_webhook_run(tenant_id: str, run_id: str, trigger_payload: dict) -> None
 
 @DBOS.step()
 def record_webhook_received(tenant_id: str, run_id: str, envelope: dict) -> None:
-    """Write the webhook_received step_record (step_index=0) to pipeline_steps.
+    """Write the webhook_received step_record (step_seq=0) to pipeline_steps.
 
     The envelope is phone-tokenised — no plaintext PII (Pillar 3 / Pillar 7).
     Body-key redaction is applied at this persistence boundary so no
@@ -158,17 +158,17 @@ def record_webhook_received(tenant_id: str, run_id: str, envelope: dict) -> None
 
     Idempotency is provided by the DBOS workflow-id boundary for COMPLETED
     steps. A crash between the SQL commit and DBOS recording the step causes
-    re-execution on workflow resume — hence the ON CONFLICT (run_id, step_index)
-    DO NOTHING clause. Migration 014's UNIQUE (run_id, step_index) constraint
+    re-execution on workflow resume — hence the ON CONFLICT (run_id, step_seq)
+    DO NOTHING clause. Migration 014's UNIQUE (run_id, step_seq) constraint
     makes ON CONFLICT well-defined.
     """
     safe_envelope = _redact_for_persistence(envelope)
     with tenant_connection(tenant_id) as conn:
         conn.execute(
             "INSERT INTO pipeline_steps "
-            "(run_id, tenant_id, step_index, step_kind, input_envelope) "
-            "VALUES (%s, %s, 0, 'webhook_received', %s) "
-            "ON CONFLICT (run_id, step_index) DO NOTHING",
+            "(run_id, tenant_id, step_seq, step_kind, input_envelope, status) "
+            "VALUES (%s, %s, 0, 'webhook_received', %s, 'completed') "
+            "ON CONFLICT (run_id, step_seq) DO NOTHING",
             (run_id, tenant_id, Jsonb(safe_envelope)),
         )
 
@@ -227,20 +227,20 @@ def record_inbound_message_sid(tenant_id: str, message_sid: str) -> bool:
 
 @DBOS.step()
 def record_brain_pending(tenant_id: str, run_id: str, reason: str) -> None:
-    """Record that this run is awaiting the brain (step_index=1, VT-3.4 unwired).
+    """Record that this run is awaiting the brain (step_seq=1, VT-3.4 unwired).
 
     Idempotency is provided by the DBOS workflow-id boundary for COMPLETED
     steps. A crash between the SQL commit and DBOS recording the step causes
-    re-execution on workflow resume — hence the ON CONFLICT (run_id, step_index)
-    DO NOTHING clause. Migration 014's UNIQUE (run_id, step_index) constraint
+    re-execution on workflow resume — hence the ON CONFLICT (run_id, step_seq)
+    DO NOTHING clause. Migration 014's UNIQUE (run_id, step_seq) constraint
     makes ON CONFLICT well-defined.
     """
     with tenant_connection(tenant_id) as conn:
         conn.execute(
             "INSERT INTO pipeline_steps "
-            "(run_id, tenant_id, step_index, step_kind, output_envelope) "
-            "VALUES (%s, %s, 1, 'awaiting_brain', %s) "
-            "ON CONFLICT (run_id, step_index) DO NOTHING",
+            "(run_id, tenant_id, step_seq, step_kind, output_envelope, status) "
+            "VALUES (%s, %s, 1, 'awaiting_brain', %s, 'completed') "
+            "ON CONFLICT (run_id, step_seq) DO NOTHING",
             (run_id, tenant_id, Jsonb({"reason": reason})),
         )
 

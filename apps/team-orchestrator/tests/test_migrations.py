@@ -142,14 +142,15 @@ def test_rls_blocks_cross_tenant(migrated):
 # --- Migration 014: schema hardening (VT-Foundation-fix-1, CL-70 DC2/H3) ------
 
 
-def test_pipeline_steps_step_index_unique(migrated):
-    """H3: two pipeline_steps rows with the same (run_id, step_index) are
-    rejected by the 014 pipeline_steps_run_step_unique constraint."""
+def test_pipeline_steps_step_seq_unique(migrated):
+    """H3: two pipeline_steps rows with the same (run_id, step_seq) are
+    rejected by the 014 pipeline_steps_run_step_unique constraint
+    (column renamed step_index→step_seq under VT-187 / migration 025)."""
     dsn = migrated["dsn"]
     with psycopg.connect(dsn, autocommit=True) as conn:
         tenant_id = conn.execute(
             "INSERT INTO tenants (business_name, plan_tier, phase) "
-            "VALUES ('Step Index Test', 'founding', 'onboarding') RETURNING id"
+            "VALUES ('Step Seq Test', 'founding', 'onboarding') RETURNING id"
         ).fetchone()[0]
         run_id = str(uuid4())
         conn.execute(
@@ -158,15 +159,15 @@ def test_pipeline_steps_step_index_unique(migrated):
             (run_id, tenant_id),
         )
         conn.execute(
-            "INSERT INTO pipeline_steps (run_id, tenant_id, step_index, step_kind) "
-            "VALUES (%s, %s, 0, 'webhook_received')",
+            "INSERT INTO pipeline_steps (run_id, tenant_id, step_seq, step_kind, status) "
+            "VALUES (%s, %s, 0, 'webhook_received', 'completed')",
             (run_id, tenant_id),
         )
         with pytest.raises(psycopg.errors.UniqueViolation):
             conn.execute(
                 "INSERT INTO pipeline_steps "
-                "(run_id, tenant_id, step_index, step_kind) "
-                "VALUES (%s, %s, 0, 'duplicate')",
+                "(run_id, tenant_id, step_seq, step_kind, status) "
+                "VALUES (%s, %s, 0, 'duplicate', 'completed')",
                 (run_id, tenant_id),
             )
 

@@ -102,8 +102,8 @@ def _seed_full_tenant_data(dsn: str, tenant_id: UUID) -> dict[str, UUID]:
         # pipeline_steps
         conn.execute(
             "INSERT INTO pipeline_steps "
-            "(run_id, tenant_id, step_index, step_kind, input_envelope) "
-            "VALUES (%s, %s, 0, 'webhook_received', '{}'::jsonb)",
+            "(run_id, tenant_id, step_seq, step_kind, input_envelope, status) "
+            "VALUES (%s, %s, 0, 'webhook_received', '{}'::jsonb, 'completed')",
             (str(run_id), str(tenant_id)),
         )
 
@@ -121,12 +121,13 @@ def _seed_full_tenant_data(dsn: str, tenant_id: UUID) -> dict[str, UUID]:
             (str(tenant_id),),
         )
 
-        # phone_token_resolutions (PK is ``token``; schema columns:
-        # token, tenant_id, phone_number_encrypted, resolved_count,
-        # last_resolved_at, created_at)
+        # phone_token_resolutions (PK is ``phone_token``; schema columns:
+        # phone_token, tenant_id, phone_number_encrypted, resolved_count,
+        # last_accessed_at, created_at, customer_id) — columns renamed
+        # under VT-187 / migration 025.
         conn.execute(
-            "INSERT INTO phone_token_resolutions (token, tenant_id, "
-            "phone_number_encrypted, last_resolved_at) "
+            "INSERT INTO phone_token_resolutions (phone_token, tenant_id, "
+            "phone_number_encrypted, last_accessed_at) "
             "VALUES (%s, %s, %s, now())",
             (
                 f"phone_tok_{uuid4().hex[:16]}",
