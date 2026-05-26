@@ -92,52 +92,174 @@ def test_cron_expressions_match_brief() -> None:
 # 3. Shell-event emission (Cond 2 — phantom-Done prevention)
 # ---------------------------------------------------------------------------
 
-def test_attribution_close_emits_shell_event_not_closed(monkeypatch) -> None:
-    captured = _captured_payloads(monkeypatch)
-    now = datetime(2026, 5, 26, 2, 0, tzinfo=timezone.utc)
-    st.run_attribution_close_body(now=now)
-    time.sleep(0.05)
-    assert captured, "log_event never reached"
-    event_type, _, _, severity, component, payload, _ = captured[0]
-    assert event_type == "attribution_close_shell"
-    assert event_type != "attribution_closed"  # reserved name MUST not fire
-    assert severity == "info"
-    assert component == "scheduled_trigger"
-    assert payload["status"] == "skipped_schema_pending"
-    assert payload["trigger_reason"] == "attribution_close"
+def test_attribution_close_body_delegates_to_billing_module(monkeypatch) -> None:
+    """VT-176: body scans eligibility + calls billing.close_attribution per row.
+
+    Monkeypatch the scanner + the billing function; assert exactly one
+    delegated call per eligible candidate. No DB / no real billing.
+    """
+    eligible = [UUID("00000000-0000-4000-8000-000000aaa176")]
+    monkeypatch.setattr(st, "_scan_attribution_close_eligible", lambda now: eligible)
+
+    called_with: list[UUID] = []
+
+    def _fake_close(campaign_id):
+        called_with.append(campaign_id)
+        from types import SimpleNamespace
+
+        return SimpleNamespace(campaign_id=campaign_id, total_arrr_paise=0)
+
+    import orchestrator.billing.attribution_close as ac_mod
+
+    monkeypatch.setattr(ac_mod, "close_attribution", _fake_close)
+
+    out = st.run_attribution_close_body(
+        now=datetime(2026, 5, 26, 2, 0, tzinfo=timezone.utc)
+    )
+    assert called_with == eligible
+    assert out == eligible
 
 
-def test_day39_emits_shell_event_not_evaluated(monkeypatch) -> None:
-    captured = _captured_payloads(monkeypatch)
-    st.run_day39_evaluation_body(
+def test_day39_body_delegates_and_invokes_refund_transition(monkeypatch) -> None:
+    """VT-176: body scans eligibility + calls billing.evaluate_day39.
+
+    Refund-verdict tenant also triggers a transition attempt (best-effort
+    wrapped). Monkeypatch the scanner + the evaluator + the transition
+    helper; assert the call graph.
+    """
+    eligible = [UUID("00000000-0000-4000-8000-000000bbb176")]
+    monkeypatch.setattr(st, "_scan_day39_eligible", lambda now: eligible)
+
+    from types import SimpleNamespace
+
+    refund_verdict = SimpleNamespace(
+        tenant_id=eligible[0],
+        verdict="refund_triggered",
+        already_decided=False,
+    )
+
+    import orchestrator.billing.day39_evaluator as eval_mod
+
+    monkeypatch.setattr(eval_mod, "evaluate_day39", lambda tid: refund_verdict)
+
+    transition_calls: list[UUID] = []
+    monkeypatch.setattr(
+        st, "_apply_day39_refund_transition", lambda tid: transition_calls.append(tid)
+    )
+
+    out = st.run_day39_evaluation_body(
         now=datetime(2026, 5, 26, 6, 0, tzinfo=timezone.utc)
     )
-    time.sleep(0.05)
-    assert captured
-    event_type, _, _, _, _, payload, _ = captured[0]
-    assert event_type == "day39_shell"
-    assert event_type != "day39_evaluated"  # reserved
-    assert event_type != "day39_continue"  # reserved
-    assert event_type != "day39_refund_triggered"  # reserved
-    assert payload["status"] == "skipped_schema_pending"
+    assert len(out) == 1
+    assert out[0].verdict == "refund_triggered"
+    assert transition_calls == eligible
 
 
-def test_monthly_impact_emits_shell_event_not_started(monkeypatch) -> None:
-    captured = _captured_payloads(monkeypatch)
-    st.run_monthly_impact_body(
-        now=datetime(2026, 6, 1, 8, 0, tzinfo=timezone.utc)
+def test_day39_body_continue_branch_skips_refund_transition(monkeypatch) -> None:
+    """VT-176: continue verdict does NOT call apply_transition."""
+    eligible = [UUID("00000000-0000-4000-8000-000000ccc176")]
+    monkeypatch.setattr(st, "_scan_day39_eligible", lambda now: eligible)
+
+    from types import SimpleNamespace
+
+    cont_verdict = SimpleNamespace(
+        tenant_id=eligible[0],
+        verdict="continue",
+        already_decided=False,
     )
-    time.sleep(0.05)
-    assert captured
-    event_type, _, _, _, _, payload, _ = captured[0]
-    assert event_type == "monthly_impact_shell"
-    assert event_type != "monthly_impact_started"  # reserved
-    assert payload["status"] == "skipped_schema_pending"
+
+    import orchestrator.billing.day39_evaluator as eval_mod
+
+    monkeypatch.setattr(eval_mod, "evaluate_day39", lambda tid: cont_verdict)
+
+    transition_calls: list[UUID] = []
+    monkeypatch.setattr(
+        st, "_apply_day39_refund_transition", lambda tid: transition_calls.append(tid)
+    )
+
+    st.run_day39_evaluation_body(now=datetime(2026, 5, 26, 6, 0, tzinfo=timezone.utc))
+    assert transition_calls == []
+
+
+def test_day39_body_replays_skip_refund_transition(monkeypatch) -> None:
+    """VT-176: already_decided=True replay skips the transition call."""
+    eligible = [UUID("00000000-0000-4000-8000-000000ddd176")]
+    monkeypatch.setattr(st, "_scan_day39_eligible", lambda now: eligible)
+
+    from types import SimpleNamespace
+
+    replay_verdict = SimpleNamespace(
+        tenant_id=eligible[0],
+        verdict="refund_triggered",
+        already_decided=True,
+    )
+
+    import orchestrator.billing.day39_evaluator as eval_mod
+
+    monkeypatch.setattr(eval_mod, "evaluate_day39", lambda tid: replay_verdict)
+
+    transition_calls: list[UUID] = []
+    monkeypatch.setattr(
+        st, "_apply_day39_refund_transition", lambda tid: transition_calls.append(tid)
+    )
+
+    st.run_day39_evaluation_body(now=datetime(2026, 5, 26, 6, 0, tzinfo=timezone.utc))
+    assert transition_calls == [], "replay should not re-trigger the transition"
 
 
 # ---------------------------------------------------------------------------
 # 4. Weekly cadence — emits real event (full implementation, NOT a shell)
 # ---------------------------------------------------------------------------
+
+def test_monthly_impact_body_emits_started_event(monkeypatch) -> None:
+    """VT-176: monthly impact body emits ``monthly_impact_started`` event
+    per eligible tenant. Monkeypatched DB returns one eligible tenant."""
+    captured = _captured_payloads(monkeypatch)
+    eligible_id = UUID("00000000-0000-4000-8000-000000eee176")
+
+    # Monkeypatch get_pool to return a fake connection that yields one row.
+    class _FakeCursor:
+        def execute(self, *args, **kwargs):
+            self._stored_args = args
+
+        def fetchall(self):
+            return [{"id": eligible_id}]
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    class _FakeConn:
+        def cursor(self, row_factory=None):
+            return _FakeCursor()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    class _FakePool:
+        def connection(self):
+            return _FakeConn()
+
+    from orchestrator import graph as graph_mod
+
+    monkeypatch.setattr(graph_mod, "_pool", _FakePool())
+
+    out = st.run_monthly_impact_body(
+        now=datetime(2026, 6, 1, 8, 0, tzinfo=timezone.utc)
+    )
+    time.sleep(0.05)
+    assert eligible_id in out
+    assert captured, "log_event never reached"
+    event_type, _, _, _, _, payload, _ = captured[0]
+    assert event_type == "monthly_impact_started"
+    assert payload["tenant_id"] == str(eligible_id)
+    assert payload["target_month"] == "2026-06"
+
 
 def test_weekly_cadence_emits_full_event_not_shell(monkeypatch) -> None:
     captured = _captured_payloads(monkeypatch)
@@ -193,10 +315,32 @@ def test_deterministic_bodies_do_not_import_orchestrator_agent() -> None:
     ],
 )
 def test_scheduled_handler_accepts_scheduled_and_actual_time(monkeypatch, fn) -> None:
+    """DBOS scheduled-handler signature smoke. Bodies that scan eligibility
+    are stubbed to return empty so we exercise the signature without DB."""
     _captured_payloads(monkeypatch)
+    monkeypatch.setattr(st, "_scan_attribution_close_eligible", lambda now: [])
+    monkeypatch.setattr(st, "_scan_day39_eligible", lambda now: [])
+
+    # Monthly impact body queries the pool inline; stub the pool getter.
+    class _EmptyCursor:
+        def execute(self, *a, **k): pass
+        def fetchall(self): return []
+        def __enter__(self): return self
+        def __exit__(self, *exc): return False
+
+    class _EmptyConn:
+        def cursor(self, row_factory=None): return _EmptyCursor()
+        def __enter__(self): return self
+        def __exit__(self, *exc): return False
+
+    class _EmptyPool:
+        def connection(self): return _EmptyConn()
+
+    from orchestrator import graph as graph_mod
+    monkeypatch.setattr(graph_mod, "_pool", _EmptyPool())
+
     fake_scheduled = datetime(2026, 5, 26, 9, 0, tzinfo=timezone.utc)
     fake_actual = datetime(2026, 5, 26, 9, 0, 12, tzinfo=timezone.utc)
-    # Should not raise.
     fn(fake_scheduled, fake_actual)
 
 
@@ -205,7 +349,14 @@ def test_scheduled_handler_accepts_scheduled_and_actual_time(monkeypatch, fn) ->
 # ---------------------------------------------------------------------------
 
 def test_register_scheduled_triggers_idempotent(monkeypatch) -> None:
-    """Two calls should not raise; second call is a no-op short-circuit."""
+    """Two calls should not raise; second call is a no-op short-circuit.
+
+    Migrated from VT-28 canary Assertion #10 per VT-176 review §Condition 1
+    (architectural-invariant check, not a runtime-API check — belongs as a
+    pure unit test). DBOS scheduled-poller registration MUST be idempotent
+    because re-registering shifts the launch-time ``app_version`` hash and
+    breaks the recovery filter at ``_recovery.py:58``.
+    """
     from dbos import DBOS
     call_count = {"n": 0}
 
@@ -216,7 +367,6 @@ def test_register_scheduled_triggers_idempotent(monkeypatch) -> None:
         return _wrap
 
     monkeypatch.setattr(DBOS, "scheduled", _fake_scheduled)
-    # Reset module-level guard.
     st._registered = False
     st.register_scheduled_triggers()
     first = call_count["n"]
@@ -224,5 +374,4 @@ def test_register_scheduled_triggers_idempotent(monkeypatch) -> None:
     second = call_count["n"]
     assert first == 4, "expected 4 triggers registered on first call"
     assert second == 4, "second call must short-circuit (idempotent)"
-    # Cleanup so other tests aren't tainted by the module guard staying True.
     st._registered = False
