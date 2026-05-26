@@ -206,6 +206,10 @@ def _dispatch_tool(
         return {"tool_name": tool_name, "is_error": True, "content": str(exc)}
 
 
+from orchestrator.observability.agent_callback import with_reasoning_capture
+
+
+@with_reasoning_capture
 def _run_one_turn(
     client: Anthropic,
     *,
@@ -224,6 +228,15 @@ def _run_one_turn(
     wall-clock cost of any single round-trip even if the model hangs;
     the run-level wall-clock budget is enforced separately by
     WallclockTimer at the turn boundary.
+
+    VT-182 retrofit: ``@with_reasoning_capture`` (above) wraps each call
+    so the response writes one ``agent_reasoning_step`` pipeline_steps
+    row via VT-180 write_step. Caller wraps the call in
+    ``observability_context(...)`` (VT-181 ContextVar) +
+    ``reasoning_step_input(...)`` (VT-182 ContextVar) so the callback has
+    run_id/tenant_id + input envelope fields. Without those, the callback
+    logs a warning and skips the write (observability is best-effort per
+    CL-122).
     """
     # mypy: anthropic.Messages.create's overloads are TypedDict-heavy
     # (MessageParam, ThinkingConfigEnabledParam) — typing the plain-dict
