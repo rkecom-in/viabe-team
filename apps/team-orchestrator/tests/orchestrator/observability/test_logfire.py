@@ -6,7 +6,6 @@ The canary covers the on-the-wire ingest proofs against the EU workspace.
 
 from __future__ import annotations
 
-import os
 import warnings
 from typing import Any
 from uuid import uuid4
