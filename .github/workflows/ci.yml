@@ -397,6 +397,137 @@ jobs:
           uv run pytest tests/orchestrator/ -v
         working-directory: apps/team-orchestrator
 
+      # VT-186 gate-envelope-schema-registered: every step_kind=<literal> in
+      # source is registered in STEP_KIND_REGISTRY; every @tool_step's
+      # step_kind is registered. Runs in the orchestrator job so the
+      # full-deps env (psycopg + dbos + pydantic + envelopes) is reused
+      # without duplicating CI surface (Q3 Option A locked, Cowork
+      # plan-review 2026-05-26).
+      - name: gate-envelope-schema-registered (VT-186)
+        env:
+          VIABE_SKIP_ENVELOPE_REGISTRY_CHECK: "0"
+        run: |
+          uv run python -c "
+          import orchestrator.agent.tools.compose_output  # noqa: F401
+          from orchestrator.observability.envelopes import validate_registry_completeness
+          from orchestrator.observability.decorators import validate_tool_step_registry
+          validate_registry_completeness()
+          validate_tool_step_registry()
+          print('envelope + tool_step registries clean (VT-186)')
+          "
+        working-directory: apps/team-orchestrator
+
+  gate-langgraph-nodes-have-observability-hook:
+    name: gate-langgraph-nodes-have-observability-hook
+    # VT-186 / VT-183: every `graph.add_node(NAME, callable)` call in
+    # the orchestrator src tree must wrap the callable with
+    # `with_state_transition_hook(...)` OR carry a
+    # `# observability:opt-out reason=...` annotation on the line
+    # preceding the call (Q1 Option A — Cowork plan-review locked).
+    # The annotation pattern preserves the VT-183 CompiledStateGraph
+    # exception (orchestrator_agent subgraph rejects function wrappers)
+    # and the VT-3.1 placeholder_node (no agent yet).
+    #
+    # Uses AST so multi-line `add_node(` calls and nested-paren
+    # arguments parse correctly. Pure stdlib (no setup-python needed
+    # for ast); ubuntu-latest already has python3.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Assert every graph.add_node is hooked or opt-out (AST)
+        run: |
+          python3 <<'PY'
+          import ast, sys
+          from pathlib import Path
+
+          OPT_OUT_MARK = "observability:opt-out"
+          HOOK_NAME = "with_state_transition_hook"
+          ROOT = Path("apps/team-orchestrator/src/orchestrator")
+          violations = []
+
+          for path in ROOT.rglob("*.py"):
+              source = path.read_text(encoding="utf-8")
+              source_lines = source.splitlines()
+              try:
+                  tree = ast.parse(source, filename=str(path))
+              except SyntaxError:
+                  continue
+              for node in ast.walk(tree):
+                  if not isinstance(node, ast.Call):
+                      continue
+                  func = node.func
+                  if not (isinstance(func, ast.Attribute) and func.attr == "add_node"):
+                      continue
+                  if len(node.args) < 2:
+                      continue
+                  callable_arg = node.args[1]
+                  hooked = (
+                      isinstance(callable_arg, ast.Call)
+                      and isinstance(callable_arg.func, ast.Name)
+                      and callable_arg.func.id == HOOK_NAME
+                  )
+                  if hooked:
+                      continue
+                  # Check up to 3 lines preceding the add_node call for an
+                  # opt-out annotation.
+                  start_line = node.lineno
+                  preceding = source_lines[max(0, start_line - 4):start_line - 1]
+                  opt_out = any(OPT_OUT_MARK in line for line in preceding)
+                  if opt_out:
+                      continue
+                  violations.append(f"{path}:{start_line}: add_node without hook or opt-out annotation")
+
+          if violations:
+              print("::error::LangGraph add_node calls missing observability hook:", file=sys.stderr)
+              for v in violations:
+                  print(f"  {v}", file=sys.stderr)
+              print(
+                  "Wrap the callable with `with_state_transition_hook(...)` OR add a "
+                  "`# observability:opt-out reason=<text>` comment within 3 lines above "
+                  "the call (per VT-186 / VT-183).",
+                  file=sys.stderr,
+              )
+              sys.exit(1)
+          print("gate-langgraph-nodes-have-observability-hook: ok")
+          PY
+
+  gate-mcp-tools-have-observability-decorator:
+    name: gate-mcp-tools-have-observability-decorator
+    # VT-186 / VT-181: every langchain `@tool` function in
+    # `apps/team-orchestrator/src/orchestrator/agent/tools/` must ALSO
+    # be wrapped by `@observability.tool_step` so each invocation writes
+    # a pipeline_steps row via VT-180 write_step. Exception: self_evaluate.py
+    # — retrofit deferred per VT-181 docstring (MCPTool subclass signature
+    # mismatch); follow-up tracked under VT-190 (Cowork commits to file).
+    # If exceptions accumulate (>2-3), promote to per-tool annotation
+    # pattern (Q2 Option B fallback noted in plan-review verdict).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Assert every @tool is @tool_step decorated
+        run: |
+          set -e
+          OFFENDERS=()
+          for f in $(grep -lrE '^@tool$' \
+              apps/team-orchestrator/src/orchestrator/agent/tools/ \
+              --include='*.py' 2>/dev/null); do
+            # Exception: self_evaluate.py (VT-181 deferred; VT-190 follow-up)
+            case "$f" in
+              */self_evaluate.py) continue ;;
+            esac
+            if ! grep -q 'tool_step' "$f"; then
+              OFFENDERS+=("$f")
+            fi
+          done
+          if [ ${#OFFENDERS[@]} -ne 0 ]; then
+            echo "::error::@tool functions missing @tool_step decoration:"
+            printf '  %s\n' "${OFFENDERS[@]}"
+            echo "Add @observability.tool_step decorator above @tool, OR"
+            echo "extend the exception list with a follow-up VT-N reference."
+            exit 1
+          fi
+          echo "gate-mcp-tools-have-observability-decorator: ok"
+
   gitleaks:
     name: gitleaks
     runs-on: ubuntu-latest
