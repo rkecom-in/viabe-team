@@ -1,0 +1,67 @@
+Logfire project URL: https://logfire-eu.pydantic.dev/rkecom/viabe-team-dev
+PREFLIGHT OK — supabase: aws-1-ap-northeast-2.pooler.supabase.com:5432; anthropic: api.anthropic.com; logfire: https://logfire-eu.pydantic.dev; dbos: substrate=team-orchestrator (canary invokes bodies synchronously via run_*_body callables; apply_transition wrapped defensively for out-of-DBOS-context invocation)
+15:04:55.664 vt176_canary_observability
+[1] PASS — VT-171 Logfire substitution: traced_node emits redacted span; legacy token format byte-identical
+    observed: {'logfire_enabled': True, 'redacted': {'phone': 'phone_tok_e013d3d6a49a8c77', 'customer_name': '<redacted:customer_name:len=12>', 'body': 'body_tok_c44e0c77d73d40f5'}}
+[2] PASS — VT-102 + VT-176 regression: 4 REAL completion event types present; ZERO `*_shell` in canary window
+    observed: {'event_types_seen_in_window': ['attribution_closed', 'day39_refund_triggered', 'monthly_impact_started', 'weekly_cadence_fired'], 'real_set_present': True, 'any_shell_present': False}
+[3] PASS — VT-104 multi-pattern redactor regression + idempotency
+    observed: {'once_eq_twice': True, 'sample': '<pan:redacted> email me at <email:hash:4c50d7b7a711a230> or phone_tok_d95d28fa7b7ec324; Aadhaar <aadhaar:redacted>; IFSC...'}
+[4] PASS — Workflow_id deterministic on (tenant_id, iso_week); different week → different id
+    observed: {'id1': 'weekly:6e0f507f-c4b7-49c9-8d37-c60506c33bae:2026-W22', 'id2': 'weekly:6e0f507f-c4b7-49c9-8d37-c60506c33bae:2026-W22', 'id_other': 'weekly:6e0f507f-c4b7-49c9-8d37-c60506c33bae:2026-W23'}
+[5] PASS — Cross-trigger isolation: same UUID across 4 trigger types → 4 distinct workflow_ids
+    observed: {'ids': ['attribution_close:00000000-0000-4000-8000-000000000001', 'day39:00000000-0000-4000-8000-000000000001', 'monthly:00000000-0000-4000-8000-000000000001:2026-05', 'weekly:00000000-0000-4000-8000-000000000001:2026-W22']}
+[6] PASS — Attribution close emits 'attribution_closed' with correct total_arrr_paise (NOT '_shell')
+    observed: {'campaign_in_closed_list': True, 'pipeline_log_payload': {'tenant_id': 'c609d5c7-3343-4e96-8ed6-819237c3c0e6', 'campaign_id': '7f3e92b2-87aa-4670-8404-07a724f664b9', 'closed_at_utc': '2026-05-26T09:34:58.483218+00:00', 'total_arrr_paise': 850, 'attribution_row_count': 3}, 'total_arrr_paise_persisted': 850}
+[7] PASS — Day-39 refund branch: 'day39_refund_triggered' event emitted (NOT '_shell')
+    observed: {'refund_verdict_returned': True, 'pipeline_log_refund_count_in_window': 1}
+[8] PASS — Monthly impact body emits 'monthly_impact_started' for eligible tenant
+    observed: {'tenant_in_notified_list': True, 'pipeline_log_started_count': 10}
+15:05:05.535 Message with 'claude-haiku-4-5-20251001' [LLM]
+[9] PASS — CL-274 plumbing-mode: real Anthropic Haiku call; cost < ₹1; PII stripped in sent prompt
+    observed: {'pii_stripped': True, 'anthropic_ok': True, 'anthropic_err': None, 'in_tokens': 43, 'out_tokens': 5, 'cost_paise': 0}
+[10] PASS — Runtime gate verification: 0 forbidden LLM-token references in deterministic body functions
+    observed: {'functions_scanned': ['run_attribution_close_body', 'run_day39_evaluation_body', 'run_monthly_impact_body', '_apply_day39_refund_transition', '_scan_attribution_close_eligible', '_scan_day39_eligible', 'attribution_close_scheduled', 'day39_evaluation_scheduled', 'monthly_impact_scheduled'], 'violations': []}
+
+=== CANARY SUMMARY ===
+  [1] PASS — VT-171 Logfire substitution: traced_node emits redacted span; legacy token format byte-identical
+  [2] PASS — VT-102 + VT-176 regression: 4 REAL completion event types present; ZERO `*_shell` in canary window
+  [3] PASS — VT-104 multi-pattern redactor regression + idempotency
+  [4] PASS — Workflow_id deterministic on (tenant_id, iso_week); different week → different id
+  [5] PASS — Cross-trigger isolation: same UUID across 4 trigger types → 4 distinct workflow_ids
+  [6] PASS — Attribution close emits 'attribution_closed' with correct total_arrr_paise (NOT '_shell')
+  [7] PASS — Day-39 refund branch: 'day39_refund_triggered' event emitted (NOT '_shell')
+  [8] PASS — Monthly impact body emits 'monthly_impact_started' for eligible tenant
+  [9] PASS — CL-274 plumbing-mode: real Anthropic Haiku call; cost < ₹1; PII stripped in sent prompt
+  [10] PASS — Runtime gate verification: 0 forbidden LLM-token references in deterministic body functions
+
+=== Anthropic cost: 0 paise (₹0.0000) — DR-15 ₹1 budget ===
+
+=== SAMPLE PIPELINE_LOG EVENT PAYLOADS (real completion events) ===
+{
+  "attribution_closed": {
+    "tenant_id": "c609d5c7-3343-4e96-8ed6-819237c3c0e6",
+    "campaign_id": "7f3e92b2-87aa-4670-8404-07a724f664b9",
+    "closed_at_utc": "2026-05-26T09:34:58.483218+00:00",
+    "total_arrr_paise": 850,
+    "attribution_row_count": 3
+  },
+  "day39_refund_triggered": {
+    "verdict": "refund_triggered",
+    "tenant_id": "4f62ea06-9574-44b2-a757-bb46f0149862",
+    "arrr_paise": 100,
+    "decided_at_utc": "2026-05-26T09:34:59.771986+00:00",
+    "multiplier_threshold": 2,
+    "cumulative_fees_paise": 500,
+    "paid_conversion_at_utc": "2026-04-16T09:34:58.674099+00:00"
+  },
+  "monthly_impact_started": {
+    "note": "VT-176 emission. Downstream PDF generator (VT-9.6 successor) consumes monthly_impact_started events.",
+    "tenant_id": "0258f3c2-37d3-442a-9f0b-72adb367011c",
+    "target_month": "2026-05",
+    "trigger_reason": "monthly_impact",
+    "scheduled_at_utc": "2026-05-26T09:34:55.665216+00:00"
+  }
+}
+
+ALL 10 ASSERTIONS PASSED

@@ -318,3 +318,34 @@ This rule pairs with Rule #14 (reconcile summaries) and Rule #15 (canary mandato
 Fazal-issued 2026-05-26 ~04:15 IST. Standing. Cowork applies on every brief-ready dispatch. Claude Code enforces at PICKUP via missing-field bounce.
 
 ---
+
+
+## Rule #17 — CC must not stash untracked files during merge tasks
+
+*Originating directive: Fazal, 2026-05-26 ~19:54 IST, after the VT-178 merge cycle revealed CC had run `git stash --include-untracked` post-merge to clean the working tree for `pull --ff-only`. The stash swept ~30 untracked Cowork-side files into `stash@{0}` — 9 sub-row sprint files (VT-178..VT-186) + launch-tracker.md + templates.md + queue dirs + architecture mermaid. Recovery required Fazal terminal access to `rm .git/index.lock && git stash apply stash@{0}` (Cowork's FUSE-mounted sandbox couldn't unlink the lock file). Fazal directive verbatim: "ensure this doesn't happen again. I told you last time as well that it's a single folder used by claude code, and you and also me. Any change we make happens on the same git index." Companion to the VT-30 carryforward rule: CC uses explicit `git add <files>` (whitelist), NOT `git commit -am`.*
+
+RULE 17 — CC MERGE-TASK STASH DISCIPLINE: During any `task-merge` workflow (CC's merge cycle: checkout → pull → merge → cleanup), Claude Code MUST NOT run `git stash --include-untracked` (or `-u`). If a `git checkout` or `git pull` requires a clean working tree and untracked files are blocking it, CC must STOP, send a signal to Cowork describing the working-tree state, and wait for Cowork to commit / move / cleanup the files. Only resume after Cowork confirms working tree is acceptable.
+
+Stash-WITHOUT-`--include-untracked` is fine (it preserves tracked-file changes). The forbidden operation is **anything that removes untracked files from the working tree without Cowork's explicit consent**.
+
+**Pre-merge checklist for CC** (add to merge-task signal acknowledgment):
+
+1. `git status --porcelain` — capture working tree state
+2. Filter for `??` (untracked) entries OUTSIDE the row's scope (e.g., not in `apps/team-orchestrator/canaries/vt<N>_*.py` for the current row)
+3. If any out-of-scope untracked files exist → STOP, send signal to Cowork, wait for response
+4. If working tree contains modified-tracked files OUTSIDE the row's scope → STOP, send signal to Cowork (likely Cowork-side amendments needing their own commit), wait
+5. ONLY when working tree contains only row-scoped changes → proceed with merge cleanup
+
+**Companion rule from VT-30 (carryforward, in force):** CC uses explicit `git add <files>` (whitelist), NOT `git commit -am`. `-a` adds all modified-tracked files, sweeping Cowork-side edits to existing tracked files into CC's PR. The whitelist pattern protects PR scope boundary.
+
+**Cowork-side companion discipline:** Cowork commits its own substrate work to its own commit/branch/PR (per Fazal directive 2026-05-26 — direct commit to main acceptable for documentation/state files; PR for anything bigger). Cowork SHOULD NOT leave its untracked working-tree drift to be passively swept by CC's next merge cycle. The bound is: when Cowork has finished a substrate-work session, commit it before the next CC task starts.
+
+**Why this rule exists in mechanical form, not as "CC will be more careful":** The shared-git-index model means CC's working-tree-cleanup operations have effects beyond CC's scope. "Will be more careful" failed twice (VT-30 sweep via `commit -am` + VT-178 sweep via `stash -u`). The rule must be explicit + checked at each merge cycle, not relied on as discretion.
+
+This rule pairs with Rules #14/#15/#16 as a Rule-About-Boundary-Discipline (vs Rule-About-Verification). #14/#15/#16 catch unverified claims; #17 catches scope-boundary violations.
+
+## Authority
+
+Fazal-issued 2026-05-26 ~19:54 IST. Standing. Originating CL-418. CC applies on every task-merge cycle. Cowork verifies CC didn't sweep by reading task-result + git stash list as part of merge-closure audit.
+
+---

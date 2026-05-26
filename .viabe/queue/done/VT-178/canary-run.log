@@ -1,0 +1,91 @@
+PREFLIGHT OK — supabase: aws-1-ap-northeast-2.pooler.supabase.com:5432; ANTHROPIC_API_KEY: <absent — defense-in-depth>
+[1] PASS — pipeline_runs actual columns superset of expected (VT-178 Q1 — schema as-is)
+    observed: {'actual_columns': ['cost_paise', 'ended_at', 'id', 'run_type', 'started_at', 'status', 'tenant_id', 'terminal_state_metadata', 'trigger_payload'], 'missing': []}
+[2] PASS — pipeline_steps actual columns superset of expected
+    observed: {'actual_columns': ['cost_paise', 'duration_ms', 'ended_at', 'error_envelope', 'id', 'input_envelope', 'output_envelope', 'rationale', 'run_id', 'started_at', 'step_index', 'step_kind', 'tenant_id'], 'missing': []}
+[3] PASS — phone_token_resolutions actual columns superset of expected
+    observed: {'actual_columns': ['created_at', 'last_resolved_at', 'phone_number_encrypted', 'resolved_count', 'tenant_id', 'token'], 'missing': []}
+[4] PASS — pipeline_runs RLS isolation: tenant_A sees its row; tenant_B does not
+    observed: {'tenant_a_count': 1, 'tenant_b_count': 0}
+[5] PASS — pipeline_steps RLS isolation: tenant_A sees its step; tenant_B does not
+    observed: {'tenant_a_count': 1, 'tenant_b_count': 0}
+[6] PASS — phone_token_resolutions stricter access: app_role denied (BY-GRANT-EXCLUSION); service-role reads OK
+    observed: {'app_role_tenant_a_blocked': True, 'app_role_tenant_b_blocked': True, 'service_role_count': 1}
+[7] PASS — Required composite indexes present per VT-178 migration 024
+    observed: {'all_indexes': ['phone_token_resolutions_pkey', 'phone_token_resolutions_tenant_idx', 'phone_token_resolutions_tenant_token_idx', 'pipeline_runs_pkey', 'pipeline_runs_tenant_idx', 'pipeline_runs_tenant_started_idx', 'pipeline_steps_pkey', 'pipeline_steps_run_idx', 'pipeline_steps_run_step_idx', 'pipeline_steps_run_step_unique', 'pipeline_steps_tenant_idx', 'pipeline_steps_tenant_started_idx'], 'missing': []}
+[8] PASS — Zero LLM invariant: ANTHROPIC_API_KEY absent throughout canary execution
+    observed: {'anthropic_api_key_present': False}
+
+=== CANARY SUMMARY ===
+  [1] PASS — pipeline_runs actual columns superset of expected (VT-178 Q1 — schema as-is)
+  [2] PASS — pipeline_steps actual columns superset of expected
+  [3] PASS — phone_token_resolutions actual columns superset of expected
+  [4] PASS — pipeline_runs RLS isolation: tenant_A sees its row; tenant_B does not
+  [5] PASS — pipeline_steps RLS isolation: tenant_A sees its step; tenant_B does not
+  [6] PASS — phone_token_resolutions stricter access: app_role denied (BY-GRANT-EXCLUSION); service-role reads OK
+  [7] PASS — Required composite indexes present per VT-178 migration 024
+  [8] PASS — Zero LLM invariant: ANTHROPIC_API_KEY absent throughout canary execution
+
+=== Anthropic cost: 0 paise (pure DDL/RLS canary) ===
+
+=== SAMPLE SCHEMA (information_schema.columns + pg_indexes) ===
+{
+  "pipeline_runs": [
+    "cost_paise",
+    "ended_at",
+    "id",
+    "run_type",
+    "started_at",
+    "status",
+    "tenant_id",
+    "terminal_state_metadata",
+    "trigger_payload"
+  ],
+  "pipeline_steps": [
+    "cost_paise",
+    "duration_ms",
+    "ended_at",
+    "error_envelope",
+    "id",
+    "input_envelope",
+    "output_envelope",
+    "rationale",
+    "run_id",
+    "started_at",
+    "step_index",
+    "step_kind",
+    "tenant_id"
+  ],
+  "phone_token_resolutions": [
+    "created_at",
+    "last_resolved_at",
+    "phone_number_encrypted",
+    "resolved_count",
+    "tenant_id",
+    "token"
+  ],
+  "indexes": [
+    "phone_token_resolutions_pkey",
+    "phone_token_resolutions_tenant_idx",
+    "phone_token_resolutions_tenant_token_idx",
+    "pipeline_runs_pkey",
+    "pipeline_runs_tenant_idx",
+    "pipeline_runs_tenant_started_idx",
+    "pipeline_steps_pkey",
+    "pipeline_steps_run_idx",
+    "pipeline_steps_run_step_idx",
+    "pipeline_steps_run_step_unique",
+    "pipeline_steps_tenant_idx",
+    "pipeline_steps_tenant_started_idx"
+  ]
+}
+
+ALL 8 ASSERTIONS PASSED
+couldn't stop thread 'pool-1-worker-0' within 5.0 seconds
+hint: you can try to call 'close()' explicitly or to use the pool as context manager
+couldn't stop thread 'pool-1-worker-1' within 5.0 seconds
+hint: you can try to call 'close()' explicitly or to use the pool as context manager
+couldn't stop thread 'pool-1-worker-2' within 5.0 seconds
+hint: you can try to call 'close()' explicitly or to use the pool as context manager
+couldn't stop thread 'pool-1-scheduler' within 5.0 seconds
+hint: you can try to call 'close()' explicitly or to use the pool as context manager
