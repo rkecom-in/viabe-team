@@ -1,0 +1,42 @@
+# template_routing.yaml — intent_or_trigger × phase → template_name (VT-30).
+#
+# Maps the orchestrator-agent's `intent_or_trigger` string (e.g. "welcome",
+# "weekly_approval", "agent_stuck") to a `template_name` from
+# `twilio_templates.yaml`. The composer cross-references both files —
+# this one for the name; that one for the content_sid + audience.
+#
+# Pillar 8: routing logic is config-driven. Adding a new (intent, phase)
+# pair = YAML change, not code change. New templates require Meta approval
+# (VT-13.3) before they can be listed in `twilio_templates.yaml`.
+#
+# Phase keys
+# ----------
+# Each intent block has phase-specific entries plus an optional `any`
+# fallback. Composer prefers the specific phase entry; falls back to
+# `any` if the specific phase isn't listed.
+
+welcome:
+  onboarding: team_welcome
+  trial: team_welcome
+
+weekly_approval:
+  paid_active: team_weekly_approval
+  paid_at_risk: team_weekly_approval
+
+opt_out_confirmed:
+  any: team_opt_out_confirmation
+
+dsr_acknowledged:
+  any: team_dsr_acknowledgment
+
+agent_stuck:
+  any: team_agent_stuck_escalation
+
+status_ping:
+  any: team_status_ping
+
+unable_to_complete:
+  any: team_unable_to_complete_request
+
+error_handler:
+  any: team_error_handler
