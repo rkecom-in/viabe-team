@@ -1,0 +1,130 @@
+---
+config:
+  theme: base
+  themeVariables:
+    background: '#ffffff'
+    primaryColor: '#ffffff'
+    primaryBorderColor: '#9ca3af'
+    primaryTextColor: '#1f2937'
+    lineColor: '#6b7280'
+    secondaryColor: '#f9fafb'
+    tertiaryColor: '#f3f4f6'
+    edgeLabelBackground: '#ffffff'
+    clusterBkg: '#ffffff'
+    clusterBorder: '#d1d5db'
+---
+%% Viabe Team — Architecture Flow with Completion-State Color Coding
+%% Generated 2026-05-26 14:10 IST by Cowork. Light-mode lock per CLAUDE.md
+%% dashboard-discipline rule. DO NOT override theme to dark.
+%% Color legend:
+%%   done      — shipped to main (green fill, green border)
+%%   inflight  — pr-ready / queued / in-flight (blue fill, blue border)
+%%   backlog   — Sprint 1 critical-path, not started (amber fill, amber border)
+%%   held      — SHIP-GATE / Fazal-owned / phantom-Done corrected (red fill, red border)
+%%   deferred  — Phase 2+ / post-launch (gray fill, dashed border)
+
+flowchart LR
+    subgraph inbound[Inbound]
+        WA["WhatsApp Webhook<br/>VT-3.3"]:::done
+        SCHED["Scheduled Triggers<br/>VT-28 shells"]:::done
+        TG["Telegram Inbound<br/>OpsAssistant"]:::done
+    end
+
+    subgraph pipeline[Orchestrator Pipeline]
+        PRE["Pre-Filter Gate<br/>VT-31"]:::done
+        ORCH["Orchestrator-Agent<br/>Opus 4.7 · VT-32"]:::done
+        HLIM["Hard Limits<br/>VT-35"]:::done
+        SUP["Supervisor<br/>VT-3.4"]:::done
+        SR["SR-Agent<br/>VT-4 ship-thin"]:::done
+        SE["Self-Evaluate<br/>VT-36"]:::done
+        CP["CampaignPlan v1.0<br/>VT-37"]:::done
+        TC["Tool-Contract<br/>VT-39"]:::done
+        COMP["Unified Composer<br/>VT-30"]:::backlog
+        OUT["WhatsApp + Telegram<br/>dispatch"]:::backlog
+    end
+
+    subgraph memory[Memory Tiers]
+        L0["L0 Workspace<br/>VT-126"]:::backlog
+        L1["L1 KG pgvector<br/>migration 019"]:::done
+        L2["L2 Episodic<br/>VT-7.3"]:::deferred
+        L3["L3 Mem0<br/>CL-324"]:::deferred
+        OI["owner_inputs<br/>VT-146 SHIP-GATE"]:::held
+    end
+
+    subgraph obs[Observability Stack]
+        PII["PII Redactor<br/>VT-104"]:::done
+        PLOG["pipeline_log<br/>VT-102"]:::done
+        COST["Cost Dashboard<br/>VT-103"]:::done
+        LF["Pydantic Logfire EU<br/>VT-171 honors CL-56"]:::done
+        RTRACE["Reasoning Trace<br/>VT-104"]:::done
+    end
+
+    subgraph billing[Billing]
+        ATTR["attributions table<br/>VT-175 pr-ready"]:::inflight
+        D39["Day-39 Evaluator<br/>VT-175 pr-ready"]:::inflight
+        SHELLS["Shell to Real Bodies<br/>VT-176 queued"]:::inflight
+        PAY["razorpay_events<br/>migration 004"]:::done
+        SUB["subscriptions<br/>migration 003"]:::done
+        REF["Refund Execution"]:::backlog
+        IMPACT["Monthly Impact PDF"]:::backlog
+    end
+
+    subgraph compliance[Privacy and Compliance]
+        STATE["21-Transition SM<br/>VT-3.2"]:::done
+        DSR["DSR Purge<br/>VT-150"]:::done
+        AUDIT["Privacy Audit Log<br/>migration 008"]:::done
+        DPA["Anthropic DPA + ZDR<br/>CL-374"]:::done
+        NOTICE["Privacy Notice<br/>CL-389/390"]:::held
+        DLT["VILPOWER DLT<br/>CL-44 submitted"]:::inflight
+    end
+
+    subgraph infra[Substrate]
+        DBOS["DBOS Workflows<br/>CL-36"]:::done
+        PG["Supabase Postgres<br/>RLS app_current_tenant"]:::done
+        REPO["viabe-team repo<br/>+ branch protection"]:::done
+        TWILIO["Twilio account<br/>CL-50"]:::done
+        WAT["WhatsApp Templates<br/>Tier-A 5 + Tier-B 17"]:::inflight
+        DAEMON["Agent-Loop Daemon<br/>VT-166 STOPd"]:::done
+    end
+
+    WA --> PRE
+    SCHED --> ORCH
+    TG --> PRE
+    PRE --> ORCH
+    ORCH --> HLIM
+    HLIM --> SUP
+    SUP --> SR
+    SR --> SE
+    SE --> CP
+    CP --> COMP
+    SR --> TC
+    COMP --> OUT
+
+    L0 -.-> ORCH
+    L1 -.-> ORCH
+    OI -.-> ORCH
+
+    PII -.-> PLOG
+    PII -.-> LF
+    PLOG --> COST
+    SR -.->|traced_node| LF
+
+    SCHED --> ATTR
+    SCHED --> D39
+    SCHED --> IMPACT
+    PAY --> ATTR
+    D39 --> SHELLS
+    D39 -.->|refund branch| REF
+
+    STATE -.-> ORCH
+    AUDIT -.-> PII
+    DPA -.-> NOTICE
+    SUP --> DBOS
+    PLOG --> PG
+    ATTR --> PG
+
+    classDef done fill:#dcfce7,stroke:#16a34a,color:#14532d,stroke-width:1.5px
+    classDef inflight fill:#dbeafe,stroke:#2563eb,color:#1e3a8a,stroke-width:1.5px
+    classDef backlog fill:#fef3c7,stroke:#d97706,color:#78350f,stroke-width:1.5px
+    classDef held fill:#fee2e2,stroke:#dc2626,color:#7f1d1d,stroke-width:1.5px
+    classDef deferred fill:#f3f4f6,stroke:#9ca3af,color:#374151,stroke-width:1px,stroke-dasharray:4
