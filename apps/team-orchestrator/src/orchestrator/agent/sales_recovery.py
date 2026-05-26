@@ -655,7 +655,7 @@ def run_sales_recovery_agent(
         # Every gate.run() — emit a self_evaluate event so production
         # REVISE-frequency and per-attempt verdicts are observable in
         # pipeline_steps. Best-effort; routing failure does NOT re-raise.
-        _emit_self_evaluate_attempt(
+        _emit_self_evaluate_gate(
             context=context,
             attempt_number=gate_outcome.attempt_number,
             outcome=gate_outcome.outcome,
@@ -754,7 +754,7 @@ def run_sales_recovery_agent(
     )
 
 
-def _emit_self_evaluate_attempt(
+def _emit_self_evaluate_gate(
     *,
     context: SalesRecoveryContext,
     attempt_number: int,
@@ -765,7 +765,8 @@ def _emit_self_evaluate_attempt(
     """Write one pipeline_steps row per gate.run() — per-attempt
     self_evaluate telemetry (VT-SalesRecovery-Agent wiring).
 
-    step_kind = 'self_evaluate_attempt'. output_envelope carries the
+    step_kind = 'self_evaluate_gate' (canonical per VT-179 Option A;
+    renamed from legacy 'self_evaluate_attempt'). output_envelope carries the
     attempt number + verdict + reasons (list-per-category preserved
     when present). RLS-scoped via tenant_connection. Best-effort —
     observability MUST NOT break the run."""
@@ -806,7 +807,7 @@ def _emit_self_evaluate_attempt(
                 """
                 INSERT INTO pipeline_steps
                     (run_id, tenant_id, step_seq, step_kind, output_envelope, status)
-                VALUES (%s, %s, %s, 'self_evaluate_attempt', %s, 'completed')
+                VALUES (%s, %s, %s, 'self_evaluate_gate', %s, 'completed')
                 """,
                 (
                     context.run_id,

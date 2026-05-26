@@ -21,7 +21,7 @@ Cases:
   Non-proposed terminal-verdict path (``record_terminal_verdict`` via
   ``collapse_node`` dispatch, CL-294):
     5. ``out_of_scope``: ``collapse_node`` completes cleanly; one
-       ``pipeline_steps`` row with ``step_kind='campaign_plan_terminal'``
+       ``pipeline_steps`` row with ``step_kind='campaign_plan_emitted'``
        carries the variant + ``out_of_scope_reason``; no ``campaigns`` row.
     6. ``insufficient_data``: same shape; ``missing_data`` lands in the
        ``output_envelope``; no ``campaigns`` row.
@@ -288,7 +288,7 @@ def test_collapse_campaign_plan_raises_on_non_proposed_guard(rls_ctx):
 def test_collapse_node_out_of_scope_records_verdict_no_campaign(rls_ctx):
     """CL-294: ``out_of_scope`` terminal verdict — ``collapse_node`` completes
     cleanly, writes one ``pipeline_steps`` row with
-    ``step_kind='campaign_plan_terminal'`` carrying the variant +
+    ``step_kind='campaign_plan_emitted'`` carrying the variant +
     ``out_of_scope_reason``, and creates NO ``campaigns`` row."""
     from orchestrator.collapse import collapse_node
     from orchestrator.db import tenant_connection
@@ -314,7 +314,7 @@ def test_collapse_node_out_of_scope_records_verdict_no_campaign(rls_ctx):
         step_rows = conn.execute(
             "SELECT step_kind, output_envelope, decision_rationale "
             "FROM pipeline_steps WHERE run_id = %s "
-            "AND step_kind = 'campaign_plan_terminal'",
+            "AND step_kind = 'campaign_plan_emitted'",
             (run_id,),
         ).fetchall()
 
@@ -360,7 +360,7 @@ def test_collapse_node_insufficient_data_records_verdict_no_campaign(rls_ctx):
         step_rows = conn.execute(
             "SELECT step_kind, output_envelope, decision_rationale "
             "FROM pipeline_steps WHERE run_id = %s "
-            "AND step_kind = 'campaign_plan_terminal'",
+            "AND step_kind = 'campaign_plan_emitted'",
             (run_id,),
         ).fetchall()
 
@@ -413,13 +413,13 @@ def test_collapse_node_proposed_still_persists_campaign(rls_ctx):
         # path — that surface is for non-proposed only.
         n_terminal_steps = conn.execute(
             "SELECT count(*) AS n FROM pipeline_steps WHERE run_id = %s "
-            "AND step_kind = 'campaign_plan_terminal'",
+            "AND step_kind = 'campaign_plan_emitted'",
             (run_id,),
         ).fetchone()["n"]
 
     assert n_campaigns == 1, "proposed must create exactly one campaigns row"
     assert n_terminal_steps == 0, (
-        "proposed must NOT write a campaign_plan_terminal step"
+        "proposed must NOT write a campaign_plan_emitted step"
     )
 
 

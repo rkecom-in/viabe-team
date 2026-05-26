@@ -131,7 +131,7 @@ def _log_decision(failure: FailureRecord, strategy: Strategy) -> None:
                 INSERT INTO pipeline_steps
                     (run_id, tenant_id, step_seq, step_kind,
                      output_envelope, error, decision_rationale, status)
-                VALUES (%s, %s, %s, 'error_router_decision', %s, %s, %s, 'completed')
+                VALUES (%s, %s, %s, 'error', %s, %s, %s, 'completed')
                 """,
                 (
                     str(failure.run_id),
