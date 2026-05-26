@@ -160,7 +160,7 @@ def run_canary() -> int:
     tenant_a = uuid4()
     tenant_b = uuid4()
     seed_a = _seed_subject(pool, tenant_a, label="a")
-    seed_b = _seed_subject(pool, tenant_b, label="b")
+    _seed_subject(pool, tenant_b, label="b")  # tenant_b for cross-tenant safety check
 
     def _counts_for_tenant(tid: UUID) -> dict[str, int]:
         counts: dict[str, int] = {}
