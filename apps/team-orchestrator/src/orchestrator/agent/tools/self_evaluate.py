@@ -194,6 +194,21 @@ class SelfEvaluateTool(MCPTool[SelfEvaluateInput, SelfEvaluateOutput]):
     per VT-39 / CL-265): semantic cases the Pydantic model can't
     catch; Opus over Sonnet/Haiku because false negatives erode owner
     trust irrecoverably; per-eval cost ~₹10-15 within budget.
+
+    VT-181 retrofit DEFERRED to follow-up row: ``MCPTool`` subclass's
+    ``execute(self, ctx, inputs)`` signature does not bind cleanly through
+    the @tool_step decorator (which validates ``input_dict`` from
+    inspect.signature.bind — yields ``{self, ctx, inputs}`` rather than
+    the ``inputs`` model's fields). Options for follow-up:
+      (a) extract execute body into a module-level
+          ``_self_evaluate_impl(inputs, model, client) -> SelfEvaluateOutput``
+          + decorate THAT;
+      (b) extend @tool_step with an ``argument_picker`` parameter for
+          method-style tools.
+    Existing ``_emit_self_evaluate_gate`` helper in sales_recovery.py
+    already writes the observability row for this tool path (VT-179
+    Option A canonical rename), so the data-log coverage is intact —
+    only the @tool_step uniformity is deferred.
     """
 
     name = "self_evaluate"
