@@ -1,0 +1,4 @@
+[2026-05-26T16:55:00+05:30] PICKUP: VT-30 brief-ready. Sprint 1 exec 7. Composer-as-tool. HEAD=f78d97b. Rule #16 compliant (30 cl_decisions_checked).
+[2026-05-26T16:56:00+05:30] STEP-0 ground-truth: send_template_message ✓ at utils/twilio_send.py:94 (@DBOS.step). 8 Tier-A templates in config/twilio_templates.yaml. NO send_whatsapp_message free-form wrapper exists (defer to downstream row; composer outputs ComposedOutput, actual send only for template path in this PR).
+[2026-05-26T16:57:00+05:30] STEP-0 types: SubscriberState fields confirmed (phase, escalation_pending, last_owner_message_at, etc.). AgentResult at agent/types.py — status, terminated_by (HardLimitAxis), output, tokens_used, cost_paise, raw_messages.
+[2026-05-26T16:58:00+05:30] STEP-0 tool registration pattern: self_evaluate.py is precedent at agent/tools/. Composer-tool registers via same shape.
