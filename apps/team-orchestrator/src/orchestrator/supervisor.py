@@ -173,9 +173,21 @@ def build_supervisor_graph(
         model=model, extra_tools=[spawn_sales_recovery]
     )
 
-    # VT-183 retrofit: every supervisor StateGraph node wrapped with
-    # `with_state_transition_hook` so each execution writes one
+    # VT-183 retrofit: 3 function-based supervisor StateGraph nodes wrapped
+    # with `with_state_transition_hook` so each execution writes one
     # `state_transition` pipeline_steps row via VT-180 write_step.
+    #
+    # ``orchestrator`` is a CompiledStateGraph (returned by
+    # `build_orchestrator_agent`) — LangGraph's `add_node` coerces compiled
+    # subgraphs through a different signature-inspection path that does not
+    # tolerate function wrappers; wrapping the compiled subgraph trips
+    # `descriptor '__call__' for 'type' objects doesn't apply to a
+    # CompiledStateGraph` (caught in CI run 26474435891). The orchestrator
+    # subgraph emits its own internal state transitions; the supervisor's
+    # 3 function nodes around it capture the parent-graph transitions.
+    # If pipeline_steps coverage of inside-orchestrator transitions becomes
+    # required, follow-up VT-N row wires a hook inside `build_orchestrator_agent`.
+    #
     # Caller MUST enter `observability_context(...)` before invoking
     # the compiled graph or the hooks skip with a warning (best-effort
     # per CL-122). Q1/Q2/Q3 Option A locked per Cowork plan-review.
@@ -184,10 +196,7 @@ def build_supervisor_graph(
     )
 
     graph = StateGraph(AgentGraphState)
-    graph.add_node(
-        "orchestrator_agent",
-        with_state_transition_hook(orchestrator, node_name="orchestrator_agent"),
-    )
+    graph.add_node("orchestrator_agent", orchestrator)
     graph.add_node(
         "sales_recovery_agent",
         with_state_transition_hook(_sales_recovery_node, node_name="sales_recovery_agent"),

@@ -74,7 +74,7 @@ def _preflight():
         sys.exit(2)
     print(
         f"PREFLIGHT OK — supabase: {_supabase_host()}; "
-        f"ANTHROPIC_API_KEY: <absent — defense-in-depth>"
+        "ANTHROPIC_API_KEY: <absent — defense-in-depth>"
     )
 
 
@@ -235,31 +235,25 @@ def run_canary() -> int:
         expected={"all_status": "completed", "all_errors_none": True},
     )
 
-    # A5: all 4 supervisor.py nodes wired (verified by importing supervisor +
-    # checking the graph has 4 nodes with the with_state_transition_hook
-    # signature). Static check.
-    from orchestrator.supervisor import build_supervisor_graph
-
-    # build_supervisor_graph needs a model — provide stub or skip the graph
-    # build and check the supervisor source for the 4 add_node calls instead.
-    supervisor_source = Path(SRC / "orchestrator" / "supervisor.py").read_text()
+    # A5: 3 function-based supervisor nodes wired (sales_recovery_agent,
+    # collapse, orchestrator_terminal). The 4th node (orchestrator_agent)
+    # is a CompiledStateGraph subgraph — LangGraph's add_node coerces
+    # compiled subgraphs through a path that rejects function wrappers,
+    # so it stays unwrapped (CI run 26474435891 caught this). Static
+    # source check.
+    supervisor_source = (SRC / "orchestrator" / "supervisor.py").read_text()
     wired_nodes = [
-        n for n in (
-            "orchestrator_agent", "sales_recovery_agent",
-            "collapse", "orchestrator_terminal",
-        )
-        if (
-            f'with_state_transition_hook(' in supervisor_source
-            and f'node_name="{n}"' in supervisor_source
-        )
+        n
+        for n in ("sales_recovery_agent", "collapse", "orchestrator_terminal")
+        if f'node_name="{n}"' in supervisor_source
     ]
-    pass_5 = len(wired_nodes) == 4
+    pass_5 = len(wired_nodes) == 3
     assertion(
         5,
-        "supervisor.py 4 nodes wired with with_state_transition_hook (static source check)",
+        "supervisor.py 3 function nodes wired with with_state_transition_hook (orchestrator_agent skipped — CompiledStateGraph subgraph)",
         pass_5,
         observed={"wired_nodes": wired_nodes},
-        expected={"wired_count": 4},
+        expected={"wired_count": 3},
     )
 
     # --------------------------------------------------------------
