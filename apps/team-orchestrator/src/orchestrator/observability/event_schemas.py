@@ -164,6 +164,31 @@ EVENT_SCHEMAS: dict[str, dict[str, Validator]] = {
         "status": _required_str,
         "trigger_reason": _required_str,
     },
+    # VT-175 released event types (formerly reserved by VT-28). The
+    # canonical completion events for attribution-close + day-39 — no
+    # longer SHELL forms now that the schema substrate + deterministic
+    # evaluators ship in this row. Production emission via
+    # `orchestrator.billing.attribution_close.close_attribution` +
+    # `orchestrator.billing.day39_evaluator.evaluate_day39`. The shell
+    # event types above stay registered so VT-176's body-swap rollout
+    # can ship without an intermediate schema break.
+    "attribution_closed": {
+        "campaign_id": _required_str,
+        "tenant_id": _required_str,
+        "total_arrr_paise": _required_int,
+    },
+    "day39_continue": {
+        "tenant_id": _required_str,
+        "verdict": _required_str,
+        "arrr_paise": _required_int,
+        "cumulative_fees_paise": _required_int,
+    },
+    "day39_refund_triggered": {
+        "tenant_id": _required_str,
+        "verdict": _required_str,
+        "arrr_paise": _required_int,
+        "cumulative_fees_paise": _required_int,
+    },
 }
 
 
