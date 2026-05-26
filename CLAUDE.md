@@ -43,6 +43,8 @@ After those three, you have full project context. The remaining files below are 
 | Session log entries | `docs/clau/entries/CL-<N>.md` (369 files) | Notion Clau_Session_Log (read-only archive) |
 | Standing decisions | `docs/clau/decisions-ledger.md` | — |
 | Latest snapshot | `docs/clau/latest-snapshot.md` | — |
+| Launch milestones | `.viabe/launch-tracker.md` (Cowork-managed; 35/48 milestones extracted from Notion 2026-05-26; surface overdue + due-this-week at session start) | Notion `Viabe_Launch_Tracker` (data source `413be4ab-...`) — now archival, do NOT edit |
+| WhatsApp template registry | `.viabe/templates.md` (Cowork-managed; 8 Meta-approved templates with Twilio Content SIDs; canonical `template_name → SID` map for runtime) | scattered hard-coded SIDs in code (none yet; this file IS the contract) |
 | Discipline rules | `docs/clau/discipline-rules.md` | — |
 | Operating brief | `docs/clau/operating-brief.md` | — |
 | Resurrection file | `docs/clau/resurrection-file.md` *(pending Clau dump)* | — |
