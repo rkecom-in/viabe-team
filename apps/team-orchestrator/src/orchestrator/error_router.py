@@ -17,8 +17,9 @@ Routing rule
 Logging
 -------
 Each routing decision lands in ``pipeline_steps`` (the VT-12.2 column
-list — error_envelope captures the failure, output_envelope captures
-the chosen strategy + rationale). Logging goes through
+list — ``error`` captures the failure, ``output_envelope`` captures
+the chosen strategy + ``decision_rationale`` — both renamed under
+VT-187 / CL-417 schema normalization). Logging goes through
 ``tenant_connection`` so RLS is enforced (CL-122 / Pillar 3).
 
 If ``failure.tenant_id`` / ``failure.run_id`` are absent (e.g. a
@@ -119,7 +120,7 @@ def _log_decision(failure: FailureRecord, strategy: Strategy) -> None:
             # dict_row factory is configured on the pool (graph.py); mypy can't
             # see it through psycopg's generic Row type, so cast at the seam.
             raw = conn.execute(
-                "SELECT COALESCE(MAX(step_index), 0) + 1 AS next "
+                "SELECT COALESCE(MAX(step_seq), 0) + 1 AS next "
                 "FROM pipeline_steps WHERE run_id = %s",
                 (str(failure.run_id),),
             ).fetchone()
@@ -128,9 +129,9 @@ def _log_decision(failure: FailureRecord, strategy: Strategy) -> None:
             conn.execute(
                 """
                 INSERT INTO pipeline_steps
-                    (run_id, tenant_id, step_index, step_kind,
-                     output_envelope, error_envelope, rationale)
-                VALUES (%s, %s, %s, 'error_router_decision', %s, %s, %s)
+                    (run_id, tenant_id, step_seq, step_kind,
+                     output_envelope, error, decision_rationale, status)
+                VALUES (%s, %s, %s, 'error_router_decision', %s, %s, %s, 'completed')
                 """,
                 (
                     str(failure.run_id),

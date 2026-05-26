@@ -1,14 +1,16 @@
 -- 005_pipeline_runs.sql — one row per orchestrator/specialist pipeline run.
 --
--- VT-178 docstring amendment (2026-05-26): this table's column shape on main
--- differs from the VT-122 design doc §2.1 specification. Actual columns:
--- `id, tenant_id, run_type, status, started_at, ended_at, trigger_payload (JSONB),
--- terminal_state_metadata (JSONB), cost_paise`. Brief §2.1 names several
--- separate columns (`trigger_kind`, `trigger_source_ref`, `final_outcome`,
--- `step_count`, `error_summary`) that this schema instead carries as JSONB
--- payload fields (`trigger_payload`, `terminal_state_metadata`). Schema
--- normalization to §2.1 spec deferred to VT-187 (Cowork files post-VT-178).
--- VT-178 ships only the composite indexes via `024_pipeline_observability_indexes.sql`.
+-- VT-178 docstring amendment (2026-05-26): this table originally had column
+-- shape `id, tenant_id, run_type, status, started_at, ended_at, trigger_payload
+-- (JSONB), terminal_state_metadata (JSONB), cost_paise`. VT-178 added composite
+-- indexes via `024_pipeline_observability_indexes.sql`.
+--
+-- VT-187 docstring amendment (2026-05-26): schema normalized to §2.1 spec
+-- via `025_pipeline_observability_normalize.sql`. Added canonical columns
+-- `trigger_kind, trigger_source_ref, final_outcome, step_count, error_summary`
+-- (back-filled from `trigger_payload` + `terminal_state_metadata` JSONB).
+-- Renamed `cost_paise` → `total_cost_paise`. Original JSONB payload columns
+-- preserved for backwards compatibility. See CL-417 for normalization rationale.
 
 CREATE TABLE pipeline_runs (
     id                      UUID PRIMARY KEY DEFAULT gen_random_uuid(),
