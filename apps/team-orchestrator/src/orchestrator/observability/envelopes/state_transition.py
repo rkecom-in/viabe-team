@@ -16,8 +16,11 @@ from .base import StepEnvelope
 class StateTransitionInput(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    from_state: str
-    to_state: str
+    # VT-183 (Cowork plan-review Q2 lock): field names match the brief
+    # spec + LangGraph terminology — nodes have node identifiers, not
+    # workflow-state identifiers. Renamed from from_state/to_state.
+    from_node: str
+    to_node: str
     langgraph_command: dict[str, Any]
 
 
