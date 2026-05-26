@@ -72,6 +72,25 @@ jobs:
           fi
           echo "No deprecated create_react_agent imports found."
 
+  gate-no-langsmith-imports:
+    name: gate-no-langsmith-imports
+    runs-on: ubuntu-latest
+    # CL-56 (Standing 2026-05-16): LangSmith is replaced by Pydantic Logfire.
+    # VT-171 hot-fix shipped the migration; this gate prevents silent re-
+    # introduction. Any new `from langsmith` or `import langsmith` in src/
+    # fails the build. Tests, canaries, and docs are exempt (they may
+    # reference langsmith historically).
+    steps:
+      - uses: actions/checkout@v4
+      - name: Block langsmith imports under apps/team-orchestrator/src
+        run: |
+          if grep -rnE '^\s*(from langsmith|import langsmith)\b' \
+              --include="*.py" apps/team-orchestrator/src; then
+            echo "::error::LangSmith import detected. CL-56 directs Logfire; use orchestrator.observability.logfire (VT-171)."
+            exit 1
+          fi
+          echo "No langsmith imports found in apps/team-orchestrator/src."
+
   gate-sr-agent-prompt-token-cap:
     name: gate-sr-agent-prompt-token-cap
     runs-on: ubuntu-latest
