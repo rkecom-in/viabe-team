@@ -1,0 +1,64 @@
+PREFLIGHT OK — supabase host: aws-1-ap-northeast-2.pooler.supabase.com:5432; anthropic host: api.anthropic.com (env-loaded)
+[1] PASS — VT-101 regression: redact_for_langsmith preserves byte-identical tokens
+    observed: {'leaked': [], 'phone_tok': True, 'body_tok': True, 'name_redaction': True, 'blob_sample': '{"k": "Customer phone_tok_f2ea340fb281b63f cancellation", "customer_name": "<redacted:customer_name:len=12>", "body": "body_tok_90e746b0c330df2a"}'}
+[2] PASS — VT-102 regression: pipeline_log persists byte-identical legacy tokens
+    observed: {'row_payload': {'k': 'Customer phone_tok_f2ea340fb281b63f cancellation', 'body': 'body_tok_90e746b0c330df2a', 'customer_name': '<redacted:customer_name:len=12>'}}
+[3] PASS — Phone E.164 + 10-digit Indian + space-split all redacted
+    observed: [('+919876543210', 'phone_tok_f2ea340fb281b63f'), ('9876543210', 'phone_tok_6f904c88cde8dfda'), ('call me at 98765 43210', 'call me at phone_tok_6f904c88cde8dfda')]
+[4] PASS — Email redacted to <email:hash:HEX> with no @ in output
+    observed: [('fazal@viabe.ai', '<email:hash:de1b3b3d031fe049>'), ('customer.support@gmail.com', '<email:hash:c977f6a89d7f3616>')]
+[5] PASS — PAN/Aadhaar/IFSC/GST patterns redacted to type markers
+    observed: {'pan': '<pan:redacted>', 'aadhaar': '<aadhaar:redacted>', 'ifsc': '<ifsc:redacted>', 'gst': '<gst:redacted>'}
+[6] PASS — CC Luhn-valid redacted; Luhn-invalid 16-digit sequence unchanged
+    observed: {'valid': '<cc:redacted>', 'invalid': '1234567890123456'}
+[7] PASS — Long body (>200 chars) hashed; short body (<200) unchanged
+    observed: {'long_marker_prefix': '<body:hash:fcdfba19645cea80>', 'short_unchanged': True}
+[8] PASS — Customer-name registry: known match redacted; unknown name unchanged (Phase-1 acknowledged false-negative)
+    observed: {'input': 'Hi Rajesh Kumar are you there? Random Person not in registry.', 'output': 'Hi <customer_name> are you there? Random Person not in registry.'}
+[9] PASS — Idempotent on nested PII; depth-5 leaf still redacted
+    observed: {'once_eq_twice': True, 'deep_redacted': True, 'once_keys': ['phone', 'body', 'customer_name', 'msg', 'nested']}
+[10] PASS — Real Anthropic Haiku call with PII-stripped prompt; cost < ₹1
+    observed: {'host': 'api.anthropic.com', 'pii_stripped_in_sent_prompt': True, 'anthropic_ok': True, 'anthropic_err': None, 'in_tokens': 39, 'out_tokens': 5, 'cost_paise': 0, 'redacted_prompt_sent': "Customer phone_tok_f2ea340fb281b63f (<customer_name>) wants to cancel. Reply with 'ack' only."}
+
+=== CANARY SUMMARY ===
+  [1] PASS — VT-101 regression: redact_for_langsmith preserves byte-identical tokens
+  [2] PASS — VT-102 regression: pipeline_log persists byte-identical legacy tokens
+  [3] PASS — Phone E.164 + 10-digit Indian + space-split all redacted
+  [4] PASS — Email redacted to <email:hash:HEX> with no @ in output
+  [5] PASS — PAN/Aadhaar/IFSC/GST patterns redacted to type markers
+  [6] PASS — CC Luhn-valid redacted; Luhn-invalid 16-digit sequence unchanged
+  [7] PASS — Long body (>200 chars) hashed; short body (<200) unchanged
+  [8] PASS — Customer-name registry: known match redacted; unknown name unchanged (Phase-1 acknowledged false-negative)
+  [9] PASS — Idempotent on nested PII; depth-5 leaf still redacted
+  [10] PASS — Real Anthropic Haiku call with PII-stripped prompt; cost < ₹1
+
+=== Anthropic cost captured: 0 paise (₹0.0000) ===
+
+=== AUDIT ARTIFACT — top-10 inserted canary rows ===
+[
+  {
+    "id": "4414d832-41cf-4b86-bf37-5d6324589111",
+    "run_id": "5b978ac0-cb88-45e0-a9fe-91ba494026f2",
+    "tenant_id": "00000000-0000-4000-8000-000000aaa104",
+    "event_type": "canary_test",
+    "severity": "info",
+    "component": "canary",
+    "payload": {
+      "k": "Customer phone_tok_f2ea340fb281b63f cancellation",
+      "body": "body_tok_90e746b0c330df2a",
+      "customer_name": "<redacted:customer_name:len=12>"
+    },
+    "duration_ms": null,
+    "created_at": "2026-05-25T21:50:52.088732+00:00"
+  }
+]
+
+ALL 10 ASSERTIONS PASSED
+couldn't stop thread 'pool-1-worker-0' within 5.0 seconds
+hint: you can try to call 'close()' explicitly or to use the pool as context manager
+couldn't stop thread 'pool-1-worker-1' within 5.0 seconds
+hint: you can try to call 'close()' explicitly or to use the pool as context manager
+couldn't stop thread 'pool-1-worker-2' within 5.0 seconds
+hint: you can try to call 'close()' explicitly or to use the pool as context manager
+couldn't stop thread 'pool-1-scheduler' within 5.0 seconds
+hint: you can try to call 'close()' explicitly or to use the pool as context manager

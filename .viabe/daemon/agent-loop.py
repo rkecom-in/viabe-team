@@ -31,9 +31,21 @@ import hooks  # noqa: E402
 def _build_options():
     from claude_agent_sdk import ClaudeAgentOptions, HookMatcher  # type: ignore[import-not-found]
 
+    # MAX-EFFORT config (Fazal directive, 2026-05-25 IST).
+    #   - model: Opus 4.7 — most capable. SDK default is Sonnet.
+    #   - max_thinking_tokens: 32K — extended thinking budget so the model can
+    #     reason hard about architecture, edge cases, multi-file changes before
+    #     writing.
+    #   - max_budget_usd: $25 per call — 5× the conservative $5 default; gives
+    #     headroom for long sessions without removing the safety ceiling.
+    #     `notify` short-circuits LLM use anyway, so the cap is irrelevant for
+    #     trivial signals.
+    #   - max_turns left as None — bounded implicitly by the cost cap.
     return ClaudeAgentOptions(
         permission_mode="bypassPermissions",
         setting_sources=["project"],
+        model="claude-opus-4-7",
+        max_thinking_tokens=32000,
         max_budget_usd=core.PER_CALL_BUDGET_USD,
         resume=None,  # set per-call via process_signal → save_session_id
         hooks={
