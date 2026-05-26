@@ -1,0 +1,87 @@
+Logfire project URL: https://logfire-eu.pydantic.dev/rkecom/viabe-team-dev
+/Users/fazalkhan/development/viabe-team/apps/team-orchestrator/.venv/lib/python3.13/site-packages/logfire/_internal/config.py:1729: UserWarning: Logfire API returned status code 401. Detail: Invalid token
+  warnings.warn(
+Failed to export span batch code: 401, reason: Unauthorized
+Logfire project URL: https://logfire-eu.pydantic.dev/rkecom/viabe-team-dev
+Logfire project URL: https://logfire-eu.pydantic.dev/rkecom/viabe-team-dev
+PREFLIGHT OK — supabase host: aws-1-ap-northeast-2.pooler.supabase.com:5432; anthropic host: api.anthropic.com; logfire host: https://logfire-eu.pydantic.dev; logfire token prefix: pylf_v...(masked)
+[1] PASS — VT-101 byte-identical: redact_for_otel_span == redact_for_langsmith + legacy token format preserved
+    observed: {'canonical': {'k': 'Customer phone_tok_84484386658c9154 cancellation', 'customer_name': '<redacted:customer_name:len=12>', 'body': 'body_tok_bb4a5cea7e2a87d5', 'email': '<redacted:email>'}, 'legacy': {'k': 'Customer phone_tok_84484386658c9154 cancellation', 'customer_name': '<redacted:customer_name:len=12>', 'body': 'body_tok_bb4a5cea7e2a87d5', 'email': '<redacted:email>'}}
+[2] PASS — VT-102 regression: pipeline_log payload redacted, legacy token format preserved
+    observed: {'row_payload': {'k': 'Customer phone_tok_84484386658c9154 cancellation', 'body': 'body_tok_bb4a5cea7e2a87d5', 'email': '<redacted:email>', 'customer_name': '<redacted:customer_name:len=12>'}}
+[3] PASS — VT-104 multi-pattern redactor regression + idempotency + bigram parens-strip
+    observed: {'once': '<pan:redacted> email me at <email:hash:2cc0cc0c60221027> or phone_tok_2632f3648b376243; Aadhaar <aadhaar:redacted>; IFSC <ifsc:redacted>; GST <gst:redacted>; CC <cc:redacted>.', 'idempotent': True, 'name_out': 'Hi (<customer_name>) please'}
+[4] PASS — configure_logfire returned True; is_enabled() True; LOGFIRE_TOKEN present
+    observed: {'configure_returned': True, 'is_enabled': True}
+05:24:44.437 vt171_canary_span
+[5] PASS — traced_node decorator emits redacted-payload Logfire span (no crash on real backend)
+    observed: {'redacted_args_preview': [{'phone': 'phone_tok_84484386658c9154', 'customer_name': '<redacted:customer_name:len=12>'}]}
+[6] PASS — Logfire ingest reachable: tracer provider non-NoOp + force_flush called without exception
+    observed: {'flushed_return': False, 'tracer_provider': 'ProxyTracerProvider', 'tracer_real': True, 'logfire_host': 'https://logfire-eu.pydantic.dev', 'note': "Logfire SDK prints 'Logfire project URL: <eu-host>' to stderr at end-of-run when spans land — that is the on-the-wire confirm."}
+[7] PASS — Q3 contract: Logfire registered as global OTel TracerProvider (DBOS spans route through it)
+    observed: {'provider_type': 'ProxyTracerProvider', 'is_real_provider': True}
+[8] PASS — Logfire first-party instrumentations available (instrument_anthropic + instrument_pydantic)
+    observed: {'instrument_anthropic': True, 'instrument_pydantic': True}
+05:24:44.878 Message with 'claude-haiku-4-5-20251001' [LLM]
+[9] PASS — Real Anthropic Haiku call with PII-stripped prompt; cost < ₹1
+    observed: {'host': 'api.anthropic.com', 'pii_stripped': True, 'anthropic_ok': True, 'anthropic_err': None, 'in_tokens': 38, 'out_tokens': 5, 'cost_paise': 0, 'redacted_prompt_sent': "Customer phone_tok_84484386658c9154 (<customer_name>) wants to cancel. Reply with 'ack' only."}
+05:24:46.587 vt171_canary_bad_token
+[10] PASS — Logfire outage / invalid token: pipeline does NOT crash; decorator still passes through
+    observed: {'crashed': False}
+[11] PASS — No-credentials path: configure returns False + stderr breadcrumb (graceful degradation)
+    observed: {'captured_warn': True}
+
+=== CANARY SUMMARY ===
+  [1] PASS — VT-101 byte-identical: redact_for_otel_span == redact_for_langsmith + legacy token format preserved
+  [2] PASS — VT-102 regression: pipeline_log payload redacted, legacy token format preserved
+  [3] PASS — VT-104 multi-pattern redactor regression + idempotency + bigram parens-strip
+  [4] PASS — configure_logfire returned True; is_enabled() True; LOGFIRE_TOKEN present
+  [5] PASS — traced_node decorator emits redacted-payload Logfire span (no crash on real backend)
+  [6] PASS — Logfire ingest reachable: tracer provider non-NoOp + force_flush called without exception
+  [7] PASS — Q3 contract: Logfire registered as global OTel TracerProvider (DBOS spans route through it)
+  [8] PASS — Logfire first-party instrumentations available (instrument_anthropic + instrument_pydantic)
+  [9] PASS — Real Anthropic Haiku call with PII-stripped prompt; cost < ₹1
+  [10] PASS — Logfire outage / invalid token: pipeline does NOT crash; decorator still passes through
+  [11] PASS — No-credentials path: configure returns False + stderr breadcrumb (graceful degradation)
+
+=== Anthropic cost captured: 0 paise (₹0.0000) — DR-15 budget ₹1 ===
+
+=== SAMPLE LOGFIRE SPAN (attributes — redacted-only payload) ===
+{
+  "args": [
+    {
+      "phone": "phone_tok_84484386658c9154",
+      "customer_name": "<redacted:customer_name:len=12>"
+    }
+  ],
+  "node.name": "vt171_canary_span"
+}
+
+=== AUDIT ARTIFACT — top-5 inserted pipeline_log rows ===
+[
+  {
+    "id": "1e9d7555-6d54-42ba-abd9-d24e1e1cf36a",
+    "run_id": "318641bb-c705-4e36-af16-a84cfe9ff3dd",
+    "tenant_id": "00000000-0000-4000-8000-000000aaa171",
+    "event_type": "canary_test",
+    "severity": "info",
+    "component": "canary",
+    "payload": {
+      "k": "Customer phone_tok_84484386658c9154 cancellation",
+      "body": "body_tok_bb4a5cea7e2a87d5",
+      "email": "<redacted:email>",
+      "customer_name": "<redacted:customer_name:len=12>"
+    },
+    "created_at": "2026-05-25T23:54:43.654588+00:00"
+  }
+]
+
+ALL 11 ASSERTIONS PASSED
+couldn't stop thread 'pool-1-worker-0' within 5.0 seconds
+hint: you can try to call 'close()' explicitly or to use the pool as context manager
+couldn't stop thread 'pool-1-worker-1' within 5.0 seconds
+hint: you can try to call 'close()' explicitly or to use the pool as context manager
+couldn't stop thread 'pool-1-worker-2' within 5.0 seconds
+hint: you can try to call 'close()' explicitly or to use the pool as context manager
+couldn't stop thread 'pool-1-scheduler' within 5.0 seconds
+hint: you can try to call 'close()' explicitly or to use the pool as context manager

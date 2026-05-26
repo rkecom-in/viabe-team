@@ -143,6 +143,27 @@ EVENT_SCHEMAS: dict[str, dict[str, Validator]] = {
         "ok": lambda v: None if isinstance(v, bool) else f"expected bool, got {type(v).__name__}",
         # Optional fields: result (any, redacted), error (str, redacted).
     },
+    # VT-28 scheduled-trigger event types. Three SHELL events (plumbing-
+    # mode per CL-274 + phantom-Done prevention per CL-318/319/380) +
+    # one full-implementation weekly_cadence event. The corresponding
+    # completion event names (`attribution_closed`, `day39_evaluated`,
+    # `monthly_impact_started`) are RESERVED for VT-176 and intentionally
+    # NOT registered here.
+    "weekly_cadence_fired": {
+        "trigger_reason": _required_str,
+    },
+    "attribution_close_shell": {
+        "status": _required_str,
+        "trigger_reason": _required_str,
+    },
+    "day39_shell": {
+        "status": _required_str,
+        "trigger_reason": _required_str,
+    },
+    "monthly_impact_shell": {
+        "status": _required_str,
+        "trigger_reason": _required_str,
+    },
 }
 
 

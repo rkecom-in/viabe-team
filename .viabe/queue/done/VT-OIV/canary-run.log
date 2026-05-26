@@ -1,0 +1,11 @@
+============================= test session starts ==============================
+platform darwin -- Python 3.13.5, pytest-9.0.3, pluggy-1.6.0 -- /Users/fazalkhan/development/viabe-team/apps/team-orchestrator/.venv/bin/python
+cachedir: .pytest_cache
+rootdir: /Users/fazalkhan/development/viabe-team/apps/team-orchestrator
+configfile: pyproject.toml
+plugins: langsmith-0.8.5, anyio-4.13.0
+collecting ... collected 1 item
+
+tests/orchestrator/test_owner_inputs_canary_real_anthropic.py::test_owner_inputs_canary_real_anthropic PASSED [100%]
+
+============================== 1 passed in 28.99s ==============================
