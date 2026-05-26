@@ -76,6 +76,7 @@ from orchestrator.agent.self_evaluate import (
 from orchestrator.agent.types import AgentResult
 from orchestrator.error_router import route_failure
 from orchestrator.failures import FailureRecord, FailureType, HardLimitAxis
+from orchestrator.observability.agent_callback import with_reasoning_capture
 
 _logger = logging.getLogger(__name__)
 
@@ -204,9 +205,6 @@ def _dispatch_tool(
         return cast(dict[str, Any], handler(tool_input))
     except Exception as exc:  # noqa: BLE001 — surface as tool_error result
         return {"tool_name": tool_name, "is_error": True, "content": str(exc)}
-
-
-from orchestrator.observability.agent_callback import with_reasoning_capture
 
 
 @with_reasoning_capture
