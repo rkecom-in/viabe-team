@@ -189,6 +189,14 @@ EVENT_SCHEMAS: dict[str, dict[str, Validator]] = {
         "arrr_paise": _required_int,
         "cumulative_fees_paise": _required_int,
     },
+    # VT-176 released event type (downstream PDF generator from VT-9.6
+    # successor consumes this). Schema is intentionally minimal: only
+    # the routing fields are required (tenant_id + target_month). The
+    # PDF generator pulls cost/attribution context itself.
+    "monthly_impact_started": {
+        "tenant_id": _required_str,
+        "target_month": _required_str,
+    },
 }
 
 
