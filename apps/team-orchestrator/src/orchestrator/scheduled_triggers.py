@@ -45,7 +45,7 @@ analog).
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -166,10 +166,11 @@ def run_weekly_cadence_body(now: datetime | None = None) -> UUID:
 
 
 # ---------------------------------------------------------------------------
-# 2. Attribution close — SHELL form (VT-175 will fill the SQL body)
+# 2. Attribution close — REAL body (VT-176)
 # ---------------------------------------------------------------------------
 
-ATTRIBUTION_CLOSE_SHELL_EVENT = "attribution_close_shell"
+ATTRIBUTION_CLOSE_SHELL_EVENT = "attribution_close_shell"  # historical (VT-28); kept for audit-trail
+ATTRIBUTION_CLOSED_EVENT = "attribution_closed"
 
 
 def attribution_close_scheduled(
@@ -180,32 +181,60 @@ def attribution_close_scheduled(
     run_attribution_close_body(now=actual_time)
 
 
-def run_attribution_close_body(now: datetime | None = None) -> UUID:
-    """Attribution close body — SHELL.
+def run_attribution_close_body(now: datetime | None = None) -> list[UUID]:
+    """Attribution close body — REAL (VT-176).
 
-    VT-175 will add the ``attributions`` table + ``campaigns
-    .attribution_close_at`` columns + the ARRR aggregation SQL. Until
-    then this body emits ``attribution_close_shell`` with ``status:
-    skipped_schema_pending``. The completion event name
-    ``attribution_closed`` is RESERVED — not emitted from here (phantom-
-    Done prevention per CL-318/319/380).
+    Scans eligible campaigns (`attribution_close_at <= now AND
+    attribution_closed_at IS NULL AND status='sent'`) and delegates to
+    :func:`orchestrator.billing.attribution_close.close_attribution` per
+    campaign. The billing module owns the ``attribution_closed`` event
+    emission; this body returns the list of closed campaign ids for
+    canary inspection.
 
     NO LLM CALL ever — Pillar 1 deterministic path enforced by the
     ``gate-no-llm-in-deterministic-triggers`` CI gate.
     """
+    from orchestrator.billing.attribution_close import close_attribution
+
     now = now or datetime.now(timezone.utc)
-    return _emit_shell_event(
-        ATTRIBUTION_CLOSE_SHELL_EVENT,
-        component="scheduled_trigger",
-        now=now,
-    )
+    eligible = _scan_attribution_close_eligible(now)
+    closed: list[UUID] = []
+    for campaign_id in eligible:
+        try:
+            close_attribution(campaign_id)
+            closed.append(campaign_id)
+        except Exception:  # noqa: BLE001 — per-campaign failure must not halt sweep
+            logger.exception(
+                "attribution_close failed for campaign %s; sweep continues",
+                campaign_id,
+            )
+    return closed
+
+
+def _scan_attribution_close_eligible(now: datetime) -> list[UUID]:
+    """Return campaign ids ready for attribution-close (service-role read)."""
+    from orchestrator.graph import get_pool
+    from psycopg.rows import dict_row
+
+    with get_pool().connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            "SELECT id FROM campaigns "
+            "WHERE attribution_close_at IS NOT NULL "
+            "  AND attribution_close_at <= %s "
+            "  AND attribution_closed_at IS NULL "
+            "  AND status = 'sent'",
+            (now,),
+        )
+        return [row["id"] for row in cur.fetchall()]
 
 
 # ---------------------------------------------------------------------------
-# 3. Day-39 evaluation — SHELL form (VT-175 will wire the evaluator)
+# 3. Day-39 evaluation — REAL body (VT-176)
 # ---------------------------------------------------------------------------
 
-DAY39_SHELL_EVENT = "day39_shell"
+DAY39_SHELL_EVENT = "day39_shell"  # historical (VT-28); kept for audit-trail
+DAY39_CONTINUE_EVENT = "day39_continue"
+DAY39_REFUND_TRIGGERED_EVENT = "day39_refund_triggered"
 
 
 def day39_evaluation_scheduled(
@@ -216,30 +245,118 @@ def day39_evaluation_scheduled(
     run_day39_evaluation_body(now=actual_time)
 
 
-def run_day39_evaluation_body(now: datetime | None = None) -> UUID:
-    """Day-39 evaluation body — SHELL.
+def run_day39_evaluation_body(now: datetime | None = None) -> list[Any]:
+    """Day-39 evaluation body — REAL (VT-176).
 
-    VT-175 will add ``tenants.paid_conversion_at`` + VT-Billing VT-10.4
-    evaluator wiring. The two reserved completion event names
-    (``day39_continue`` + ``day39_refund_triggered``) and the
-    ``apply_transition`` to ``refunded`` phase are NOT emitted from this
-    body — they ship under VT-176.
+    Scans tenants where ``paid_conversion_at + 39 days <= now`` and phase
+    ∈ {paid_active, paid_at_risk}, with no prior day39_* event. For each:
+    calls :func:`orchestrator.billing.day39_evaluator.evaluate_day39`.
+    Refund branch ALSO calls :func:`orchestrator.transitions.apply_transition`
+    with event ``day39_refund_triggered`` — the TRANSITIONS table maps
+    that to ``refunded`` phase (CL-104; apply_transition is the SOLE
+    public phase mutator).
 
-    NO LLM CALL ever — Pillar 1 deterministic path.
+    ``apply_transition`` is a ``@DBOS.step``; calling it from a
+    synchronous test path outside a DBOS workflow can fail (DBOS context
+    not available). Wrap defensively + log; production runs inside the
+    @DBOS.scheduled handler so context is always present.
+
+    NO LLM CALL ever.
     """
+    from orchestrator.billing.day39_evaluator import evaluate_day39
+
     now = now or datetime.now(timezone.utc)
-    return _emit_shell_event(
-        DAY39_SHELL_EVENT,
-        component="scheduled_trigger",
-        now=now,
-    )
+    eligible = _scan_day39_eligible(now)
+    verdicts: list[Any] = []
+    for tenant_id in eligible:
+        try:
+            verdict = evaluate_day39(tenant_id)
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "day39 evaluate_day39 failed for tenant %s; sweep continues",
+                tenant_id,
+            )
+            continue
+        verdicts.append(verdict)
+
+        if verdict.verdict == "refund_triggered" and not verdict.already_decided:
+            _apply_day39_refund_transition(tenant_id)
+    return verdicts
+
+
+def _scan_day39_eligible(now: datetime) -> list[UUID]:
+    """Tenants whose day-39 window is reached + no prior day39_* event."""
+    from orchestrator.graph import get_pool
+    from psycopg.rows import dict_row
+
+    with get_pool().connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            "SELECT t.id "
+            "  FROM tenants t "
+            " WHERE t.paid_conversion_at IS NOT NULL "
+            "   AND t.paid_conversion_at + interval '39 days' <= %s "
+            "   AND t.phase IN ('paid_active', 'paid_at_risk') "
+            "   AND NOT EXISTS ("
+            "       SELECT 1 FROM pipeline_log p "
+            "        WHERE p.tenant_id = t.id "
+            "          AND p.event_type IN ('day39_continue', 'day39_refund_triggered'))",
+            (now,),
+        )
+        return [row["id"] for row in cur.fetchall()]
+
+
+def _apply_day39_refund_transition(tenant_id: UUID) -> None:
+    """Best-effort phase transition to ``refunded`` for the day-39 refund branch.
+
+    Builds a minimal SubscriberState (fresh ``run_id``, current ``phase``
+    loaded from ``tenants``) and calls :func:`apply_transition` with event
+    ``day39_refund_triggered``. The TRANSITIONS table maps
+    ``(paid_active|paid_at_risk, day39_refund_triggered) -> refunded``.
+
+    ``apply_transition`` is a ``@DBOS.step`` — under the production
+    ``@DBOS.scheduled`` workflow context it runs cleanly; under a direct
+    synchronous canary call it may fail when DBOS can't locate the
+    workflow context. Log + continue rather than propagate, since the
+    primary signal is the ``day39_refund_triggered`` pipeline_log event
+    already emitted by :mod:`orchestrator.billing.day39_evaluator`.
+    """
+    from orchestrator.graph import get_pool
+    from orchestrator.state import new_subscriber_state
+    from orchestrator.transitions import apply_transition
+    from psycopg.rows import dict_row
+
+    try:
+        with get_pool().connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+            cur.execute("SELECT phase FROM tenants WHERE id = %s", (str(tenant_id),))
+            row = cur.fetchone()
+            if row is None:
+                return
+            current_phase = row["phase"]
+        if current_phase not in ("paid_active", "paid_at_risk"):
+            logger.warning(
+                "day39 refund: tenant %s phase=%s not eligible for transition; skipped",
+                tenant_id,
+                current_phase,
+            )
+            return
+        state = new_subscriber_state(
+            tenant_id=tenant_id, run_id=uuid4(), phase=current_phase
+        )
+        apply_transition(state, "day39_refund_triggered", {"reason": "day39_refund"})
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "day39 apply_transition failed for tenant %s; the day39_refund_triggered "
+            "pipeline_log event was emitted by the evaluator and remains the primary signal",
+            tenant_id,
+        )
 
 
 # ---------------------------------------------------------------------------
-# 4. Monthly impact — SHELL form (VT-175 will wire the metrics aggregator)
+# 4. Monthly impact — REAL body (VT-176, partial — PDF generation downstream)
 # ---------------------------------------------------------------------------
 
-MONTHLY_IMPACT_SHELL_EVENT = "monthly_impact_shell"
+MONTHLY_IMPACT_SHELL_EVENT = "monthly_impact_shell"  # historical (VT-28); kept for audit-trail
+MONTHLY_IMPACT_STARTED_EVENT = "monthly_impact_started"
 
 
 def monthly_impact_scheduled(
@@ -250,21 +367,54 @@ def monthly_impact_scheduled(
     run_monthly_impact_body(now=actual_time)
 
 
-def run_monthly_impact_body(now: datetime | None = None) -> UUID:
-    """Monthly impact body — SHELL.
+def run_monthly_impact_body(now: datetime | None = None) -> list[UUID]:
+    """Monthly impact body — REAL (VT-176, partial).
 
-    VT-175 will add the per-tenant metrics aggregation + Resend hand-off
-    + VT-OwnerSurface VT-9.6 PDF generation wiring. Reserved completion
-    event ``monthly_impact_started`` ships under VT-176.
+    Scans tenants where ``phase='paid_active' AND paid_conversion_at <= now -
+    30 days``. For each, emits a ``monthly_impact_started`` event with the
+    target month + tenant_id. Downstream PDF generation (VT-9.6 successor)
+    consumes these events to render + email impact reports.
 
-    NO LLM CALL ever — Pillar 1 deterministic path.
+    NO LLM CALL — Pillar 1 deterministic path.
     """
+    from orchestrator.graph import get_pool
+    from psycopg.rows import dict_row
+
     now = now or datetime.now(timezone.utc)
-    return _emit_shell_event(
-        MONTHLY_IMPACT_SHELL_EVENT,
-        component="scheduled_trigger",
-        now=now,
-    )
+    cutoff = now - timedelta(days=30)
+    target_month = now.strftime("%Y-%m")
+
+    with get_pool().connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            "SELECT id FROM tenants "
+            "WHERE phase = 'paid_active' "
+            "  AND paid_conversion_at IS NOT NULL "
+            "  AND paid_conversion_at <= %s",
+            (cutoff,),
+        )
+        eligible = [row["id"] for row in cur.fetchall()]
+
+    notified: list[UUID] = []
+    for tenant_id in eligible:
+        log_event(
+            event_type=MONTHLY_IMPACT_STARTED_EVENT,
+            run_id=uuid4(),
+            tenant_id=tenant_id,
+            severity="info",
+            component="scheduled_trigger",
+            payload={
+                "tenant_id": str(tenant_id),
+                "target_month": target_month,
+                "scheduled_at_utc": now.astimezone(timezone.utc).isoformat(),
+                "trigger_reason": "monthly_impact",
+                "note": (
+                    "VT-176 emission. Downstream PDF generator (VT-9.6 "
+                    "successor) consumes monthly_impact_started events."
+                ),
+            },
+        )
+        notified.append(tenant_id)
+    return notified
 
 
 # ---------------------------------------------------------------------------
@@ -324,12 +474,16 @@ def register_scheduled_triggers() -> None:
 
 
 __all__ = [
+    "ATTRIBUTION_CLOSED_EVENT",
     "ATTRIBUTION_CLOSE_CRON",
     "ATTRIBUTION_CLOSE_SHELL_EVENT",
+    "DAY39_CONTINUE_EVENT",
     "DAY39_EVALUATION_CRON",
+    "DAY39_REFUND_TRIGGERED_EVENT",
     "DAY39_SHELL_EVENT",
     "MONTHLY_IMPACT_CRON",
     "MONTHLY_IMPACT_SHELL_EVENT",
+    "MONTHLY_IMPACT_STARTED_EVENT",
     "SHELL_STATUS",
     "WEEKLY_CADENCE_CRON",
     "WEEKLY_CADENCE_EVENT",
