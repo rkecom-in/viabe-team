@@ -16,9 +16,10 @@ pure DDL inspection + RLS round-trip; ANTHROPIC_API_KEY ABSENT at PREFLIGHT.
 Wall-clock budget ≤ 30s. Cost budget: 0 paise.
 
 8 assertions across 4 groups (A column-level audit / B RLS isolation /
-C index presence / D zero-LLM). Column audit asserts ACTUAL on-main
-columns (per VT-178 review §Q1 verdict — schema normalization to
-design-doc §2.1 deferred to VT-187).
+C index presence / D zero-LLM). Column audit asserts CANONICAL §2.1
+columns (post-VT-187 / migration 025 schema normalization — column
+renames applied, additive canonical columns present, customer_id
+present without FK per CL-417 Cond 1).
 """
 
 from __future__ import annotations
@@ -121,53 +122,75 @@ def run_canary() -> int:
             )
             return {row["column_name"] for row in cur.fetchall()}
 
-    # Assertion 1 — pipeline_runs ACTUAL columns.
+    # Assertion 1 — pipeline_runs CANONICAL §2.1 columns (post-VT-187).
     expected_pr = {
         "id", "tenant_id", "run_type", "status", "started_at", "ended_at",
-        "trigger_payload", "terminal_state_metadata", "cost_paise",
+        "trigger_payload", "terminal_state_metadata",
+        # VT-187 canonical additions + rename:
+        "trigger_kind", "trigger_source_ref", "final_outcome",
+        "step_count", "error_summary", "total_cost_paise",
     }
     actual_pr = _cols("pipeline_runs")
     SAMPLE_SCHEMA["pipeline_runs"] = sorted(actual_pr)
-    pass_1 = expected_pr <= actual_pr
+    pass_1 = expected_pr <= actual_pr and "cost_paise" not in actual_pr
     assertion(
         1,
-        "pipeline_runs actual columns superset of expected (VT-178 Q1 — schema as-is)",
+        "pipeline_runs CANONICAL §2.1 columns present; cost_paise renamed",
         pass_1,
-        observed={"actual_columns": sorted(actual_pr), "missing": sorted(expected_pr - actual_pr)},
-        expected={"superset_of": sorted(expected_pr)},
+        observed={
+            "actual_columns": sorted(actual_pr),
+            "missing": sorted(expected_pr - actual_pr),
+            "legacy_cost_paise_present": "cost_paise" in actual_pr,
+        },
+        expected={"superset_of": sorted(expected_pr), "legacy_cost_paise_present": False},
     )
 
-    # Assertion 2 — pipeline_steps ACTUAL columns.
+    # Assertion 2 — pipeline_steps CANONICAL §2.1 columns (post-VT-187).
     expected_ps = {
-        "id", "run_id", "tenant_id", "step_index", "step_kind",
-        "input_envelope", "output_envelope", "rationale",
-        "started_at", "ended_at", "cost_paise", "duration_ms", "error_envelope",
+        "id", "run_id", "tenant_id", "step_seq", "step_kind",
+        "input_envelope", "output_envelope", "decision_rationale",
+        "started_at", "ended_at", "cost_paise", "duration_ms", "error",
+        # VT-187 canonical additions:
+        "step_name", "parent_step_id", "tool_calls", "status",
+        "model_used", "tokens_input", "tokens_output",
     }
     actual_ps = _cols("pipeline_steps")
     SAMPLE_SCHEMA["pipeline_steps"] = sorted(actual_ps)
-    pass_2 = expected_ps <= actual_ps
+    legacy_present = bool({"step_index", "rationale", "error_envelope"} & actual_ps)
+    pass_2 = expected_ps <= actual_ps and not legacy_present
     assertion(
         2,
-        "pipeline_steps actual columns superset of expected",
+        "pipeline_steps CANONICAL §2.1 columns present; legacy names retired",
         pass_2,
-        observed={"actual_columns": sorted(actual_ps), "missing": sorted(expected_ps - actual_ps)},
-        expected={"superset_of": sorted(expected_ps)},
+        observed={
+            "actual_columns": sorted(actual_ps),
+            "missing": sorted(expected_ps - actual_ps),
+            "legacy_present": sorted({"step_index", "rationale", "error_envelope"} & actual_ps),
+        },
+        expected={"superset_of": sorted(expected_ps), "legacy_present": []},
     )
 
-    # Assertion 3 — phone_token_resolutions ACTUAL columns.
+    # Assertion 3 — phone_token_resolutions CANONICAL §2.1 columns (post-VT-187).
     expected_pt = {
-        "token", "tenant_id", "phone_number_encrypted",
-        "resolved_count", "last_resolved_at", "created_at",
+        "phone_token", "tenant_id", "phone_number_encrypted",
+        "resolved_count", "last_accessed_at", "created_at",
+        # VT-187 canonical addition (NO FK per CL-417 Cond 1):
+        "customer_id",
     }
     actual_pt = _cols("phone_token_resolutions")
     SAMPLE_SCHEMA["phone_token_resolutions"] = sorted(actual_pt)
-    pass_3 = expected_pt <= actual_pt
+    legacy_pt_present = bool({"token", "last_resolved_at"} & actual_pt)
+    pass_3 = expected_pt <= actual_pt and not legacy_pt_present
     assertion(
         3,
-        "phone_token_resolutions actual columns superset of expected",
+        "phone_token_resolutions CANONICAL §2.1 columns present; legacy names retired",
         pass_3,
-        observed={"actual_columns": sorted(actual_pt), "missing": sorted(expected_pt - actual_pt)},
-        expected={"superset_of": sorted(expected_pt)},
+        observed={
+            "actual_columns": sorted(actual_pt),
+            "missing": sorted(expected_pt - actual_pt),
+            "legacy_present": sorted({"token", "last_resolved_at"} & actual_pt),
+        },
+        expected={"superset_of": sorted(expected_pt), "legacy_present": []},
     )
 
     # -------------------------------------------------------------------
@@ -188,15 +211,15 @@ def run_canary() -> int:
             (str(run_a), str(tenant_a)),
         )
         cur.execute(
-            "INSERT INTO pipeline_steps (id, run_id, tenant_id, step_index, step_kind, started_at) "
-            "VALUES (gen_random_uuid(), %s, %s, 1, 'canary', now()) RETURNING id",
+            "INSERT INTO pipeline_steps (id, run_id, tenant_id, step_seq, step_kind, started_at, status) "
+            "VALUES (gen_random_uuid(), %s, %s, 1, 'canary', now(), 'completed') RETURNING id",
             (str(run_a), str(tenant_a)),
         )
         INSERTED_STEP_IDS.append(str(cur.fetchone()["id"]))
         token_a = f"cust_tok_{uuid4().hex[:24]}"
         INSERTED_TOKEN_IDS.append(token_a)
         cur.execute(
-            "INSERT INTO phone_token_resolutions (token, tenant_id, phone_number_encrypted) "
+            "INSERT INTO phone_token_resolutions (phone_token, tenant_id, phone_number_encrypted) "
             "VALUES (%s, %s, %s)",
             (token_a, str(tenant_a), "encrypted_blob"),
         )
@@ -250,7 +273,7 @@ def run_canary() -> int:
     try:
         with tenant_connection(tenant_a) as conn, conn.cursor() as cur:
             cur.execute(
-                "SELECT COUNT(*) AS c FROM phone_token_resolutions WHERE token = %s",
+                "SELECT COUNT(*) AS c FROM phone_token_resolutions WHERE phone_token = %s",
                 (token_a,),
             )
             _ = cur.fetchone()
@@ -259,7 +282,7 @@ def run_canary() -> int:
     try:
         with tenant_connection(tenant_b) as conn, conn.cursor() as cur:
             cur.execute(
-                "SELECT COUNT(*) AS c FROM phone_token_resolutions WHERE token = %s",
+                "SELECT COUNT(*) AS c FROM phone_token_resolutions WHERE phone_token = %s",
                 (token_a,),
             )
             _ = cur.fetchone()
@@ -269,7 +292,7 @@ def run_canary() -> int:
     # Service-role retains read access (verified positively).
     with pool.connection() as conn, conn.cursor() as cur:
         cur.execute(
-            "SELECT COUNT(*) AS c FROM phone_token_resolutions WHERE token = %s",
+            "SELECT COUNT(*) AS c FROM phone_token_resolutions WHERE phone_token = %s",
             (token_a,),
         )
         service_count = int(cur.fetchone()["c"])
@@ -355,7 +378,7 @@ def _finalise(pool):
         with pool.connection() as conn, conn.cursor() as cur:
             cur.execute("DELETE FROM pipeline_steps WHERE id = ANY(%s)", (INSERTED_STEP_IDS,))
             cur.execute("DELETE FROM pipeline_runs WHERE id = ANY(%s)", (INSERTED_RUN_IDS,))
-            cur.execute("DELETE FROM phone_token_resolutions WHERE token = ANY(%s)", (INSERTED_TOKEN_IDS,))
+            cur.execute("DELETE FROM phone_token_resolutions WHERE phone_token = ANY(%s)", (INSERTED_TOKEN_IDS,))
             cur.execute("DELETE FROM tenants WHERE id = ANY(%s)", (INSERTED_TENANT_IDS,))
     except BaseException as exc:  # noqa: BLE001
         print(f"cleanup partial: {exc!r}", file=sys.stderr)

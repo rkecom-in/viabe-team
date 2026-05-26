@@ -19,7 +19,8 @@ class Strategy(str, Enum):
     """The five recovery strategies a classified failure can route to.
 
     Values are strings so a ``Strategy`` round-trips cleanly through the
-    JSONB ``pipeline_steps.error_envelope`` column (CL-122 / VT-12.2).
+    JSONB ``pipeline_steps.error`` column (renamed from error_envelope
+    under VT-187 / CL-417 schema normalization; CL-122 / VT-12.2).
     """
 
     RETRY_WITH_BACKOFF = "retry_with_backoff"

@@ -205,7 +205,7 @@ def record_terminal_verdict(
     try:
         with tenant_connection(tenant_id) as conn, conn.transaction():
             raw = conn.execute(
-                "SELECT COALESCE(MAX(step_index), 0) + 1 AS next "
+                "SELECT COALESCE(MAX(step_seq), 0) + 1 AS next "
                 "FROM pipeline_steps WHERE run_id = %s",
                 (str(run_id),),
             ).fetchone()
@@ -214,9 +214,9 @@ def record_terminal_verdict(
             conn.execute(
                 """
                 INSERT INTO pipeline_steps
-                    (run_id, tenant_id, step_index, step_kind,
-                     output_envelope, rationale)
-                VALUES (%s, %s, %s, 'campaign_plan_terminal', %s, %s)
+                    (run_id, tenant_id, step_seq, step_kind,
+                     output_envelope, decision_rationale, status)
+                VALUES (%s, %s, %s, 'campaign_plan_terminal', %s, %s, 'completed')
                 """,
                 (
                     str(run_id),

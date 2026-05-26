@@ -337,7 +337,7 @@ def test_route_failure_persists_decision_to_pipeline_steps(rls_ctx):
 
     with tenant_connection(tenant_id) as conn:
         row = conn.execute(
-            "SELECT step_kind, output_envelope, error_envelope "
+            "SELECT step_kind, output_envelope, error "
             "FROM pipeline_steps WHERE run_id = %s",
             (run_id,),
         ).fetchone()
@@ -345,5 +345,5 @@ def test_route_failure_persists_decision_to_pipeline_steps(rls_ctx):
     assert row is not None
     assert row["step_kind"] == "error_router_decision"
     assert row["output_envelope"] == {"strategy": "retry_with_backoff"}
-    assert row["error_envelope"]["failure_type"] == "tool_call_timeout"
-    assert row["error_envelope"]["vendor"] == "anthropic"
+    assert row["error"]["failure_type"] == "tool_call_timeout"
+    assert row["error"]["vendor"] == "anthropic"

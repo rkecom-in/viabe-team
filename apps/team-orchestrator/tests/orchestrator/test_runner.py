@@ -1,8 +1,9 @@
 """VT-3.3a-fix-3 (CL-96) tests — pipeline_steps writers are replay-idempotent.
 
 record_brain_pending / record_webhook_received use ON CONFLICT (run_id,
-step_index) DO NOTHING so a DBOS step re-execution after a crash (SQL committed
+step_seq) DO NOTHING so a DBOS step re-execution after a crash (SQL committed
 but the step not yet recorded) cannot duplicate an observability row.
+(Column renamed step_index→step_seq under VT-187 / migration 025.)
 
 Require a live Postgres via ``DATABASE_URL`` plus the dbos stack; run in the CI
 ``orchestrator`` job.
@@ -60,12 +61,12 @@ def _new_run(dsn: str) -> tuple[str, str]:
     return str(tenant_id), run_id
 
 
-def _step_count(dsn: str, run_id: str, step_index: int) -> int:
+def _step_count(dsn: str, run_id: str, step_seq: int) -> int:
     with psycopg.connect(dsn, autocommit=True) as conn:
         return conn.execute(
             "SELECT count(*) FROM pipeline_steps "
-            "WHERE run_id = %s AND step_index = %s",
-            (run_id, step_index),
+            "WHERE run_id = %s AND step_seq = %s",
+            (run_id, step_seq),
         ).fetchone()[0]
 
 

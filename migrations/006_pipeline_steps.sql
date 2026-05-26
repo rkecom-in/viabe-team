@@ -1,14 +1,18 @@
 -- 006_pipeline_steps.sql — ordered steps within a pipeline run.
 --
--- VT-178 docstring amendment (2026-05-26): actual on-main columns are
--- `id, run_id, tenant_id, step_index, step_kind, input_envelope (JSONB),
+-- VT-178 docstring amendment (2026-05-26): this table originally had column
+-- shape `id, run_id, tenant_id, step_index, step_kind, input_envelope (JSONB),
 -- output_envelope (JSONB), rationale, started_at, ended_at, cost_paise,
--- duration_ms, error_envelope (JSONB)`. Brief §2.1 names additional
--- columns (`step_name`, `parent_step_id`, `tool_calls`, `status`,
--- `model_used`, `tokens_input`, `tokens_output`) and uses `step_seq`
--- where actual uses `step_index`. Composite index from VT-178's
--- migration 024 (`pipeline_steps_run_step_idx`) references the ACTUAL
--- column name. Schema normalization deferred to VT-187.
+-- duration_ms, error_envelope (JSONB)`. VT-178 added composite index
+-- `pipeline_steps_run_step_idx` via migration 024.
+--
+-- VT-187 docstring amendment (2026-05-26): schema normalized to §2.1 spec
+-- via `025_pipeline_observability_normalize.sql`. Renamed `step_index` →
+-- `step_seq`, `rationale` → `decision_rationale`, `error_envelope` → `error`.
+-- Added canonical columns `step_name, parent_step_id, tool_calls, status,
+-- model_used, tokens_input, tokens_output`. PostgreSQL auto-updated the
+-- composite UNIQUE constraint and `pipeline_steps_run_step_idx` to reference
+-- the renamed `step_seq` column. See CL-417 for normalization rationale.
 --
 -- NOTE: the VT-122.1 column list reaches the tenant only via run_id. Pillar 3
 -- requires `tenant_id NOT NULL` on *every* multi-tenant table, so tenant_id is

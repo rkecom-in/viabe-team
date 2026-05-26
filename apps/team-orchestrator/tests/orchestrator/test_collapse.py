@@ -312,7 +312,7 @@ def test_collapse_node_out_of_scope_records_verdict_no_campaign(rls_ctx):
             (run_id,),
         ).fetchone()["n"]
         step_rows = conn.execute(
-            "SELECT step_kind, output_envelope, rationale "
+            "SELECT step_kind, output_envelope, decision_rationale "
             "FROM pipeline_steps WHERE run_id = %s "
             "AND step_kind = 'campaign_plan_terminal'",
             (run_id,),
@@ -329,7 +329,7 @@ def test_collapse_node_out_of_scope_records_verdict_no_campaign(rls_ctx):
         "Request concerns review-reputation"
     )
     assert envelope["suggested_specialist"] == "reputation"
-    assert step_rows[0]["rationale"] == "agent terminal verdict: out_of_scope"
+    assert step_rows[0]["decision_rationale"] == "agent terminal verdict: out_of_scope"
 
 
 def test_collapse_node_insufficient_data_records_verdict_no_campaign(rls_ctx):
@@ -358,7 +358,7 @@ def test_collapse_node_insufficient_data_records_verdict_no_campaign(rls_ctx):
             (run_id,),
         ).fetchone()["n"]
         step_rows = conn.execute(
-            "SELECT step_kind, output_envelope, rationale "
+            "SELECT step_kind, output_envelope, decision_rationale "
             "FROM pipeline_steps WHERE run_id = %s "
             "AND step_kind = 'campaign_plan_terminal'",
             (run_id,),
@@ -378,7 +378,7 @@ def test_collapse_node_insufficient_data_records_verdict_no_campaign(rls_ctx):
         "No dormant-customer rows"
     )
     assert (
-        step_rows[0]["rationale"]
+        step_rows[0]["decision_rationale"]
         == "agent terminal verdict: insufficient_data"
     )
 
