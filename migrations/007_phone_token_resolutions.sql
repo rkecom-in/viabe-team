@@ -1,5 +1,19 @@
 -- 007_phone_token_resolutions.sql — phone-number tokenisation (Pillar 7).
 --
+-- VT-178 docstring amendment (2026-05-26): actual on-main column shape
+-- differs from brief §2.1. Actual: `token, tenant_id, phone_number_encrypted,
+-- resolved_count, last_resolved_at, created_at`. Brief §2.1 expects
+-- `phone_token, tenant_id, customer_id, phone_e164, created_at,
+-- last_accessed_at`. Composite index in VT-178's migration 024
+-- (`phone_token_resolutions_tenant_token_idx`) uses actual `token`.
+--
+-- RLS is the SAME as the other tenant-scoped tables (4 policies via
+-- `app_current_tenant()`). Brief §2.1 calls for STRICTER RLS — operator-
+-- role required for resolution, NOT just tenant role. That stricter
+-- substrate (new `app_operator_role` + `tenant_connection_operator()`
+-- wrapper) deferred to VT-188 (Cowork files post-VT-178; required
+-- before VT-123 Ops UI ships).
+--
 -- Phone numbers are the one PII field stored encrypted. Everything else
 -- references the opaque token (format: cust_tok_<hash>). The write path,
 -- encryption, and resolution logic are built in VT-8 — this migration only
