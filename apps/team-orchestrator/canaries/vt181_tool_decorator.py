@@ -28,7 +28,6 @@ Wall-clock budget ≤ 30s. Cost budget: 0 paise.
 
 from __future__ import annotations
 
-import json
 import os
 import sys
 from pathlib import Path
