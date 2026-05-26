@@ -197,6 +197,13 @@ EVENT_SCHEMAS: dict[str, dict[str, Validator]] = {
         "tenant_id": _required_str,
         "target_month": _required_str,
     },
+    # VT-30 composer-invocation audit event. Emitted when the orchestrator-
+    # agent dispatches the composer tool. Payload carries the
+    # ComposedOutput envelope (post-redaction at the writer boundary).
+    "composer_invoked": {
+        "intent_or_trigger": _required_str,
+        "message_type": _required_str,
+    },
 }
 
 

@@ -162,6 +162,19 @@ jobs:
                           f"billing/{name}: forbidden token '{hit.group(0)}' in module"
                       )
 
+          # 3. output_composer.py — VT-30 extension. Whole-file scan; the
+          # composer is deterministic by spec (Pillar 1) and must stay free
+          # of LLM imports.
+          composer_path = "apps/team-orchestrator/src/orchestrator/output_composer.py"
+          if not os.path.isfile(composer_path):
+              bad.append(f"{composer_path} missing — VT-30 expected this module on main")
+          else:
+              code = _strip_docs_and_comments(open(composer_path).read())
+              for hit in forbidden.finditer(code):
+                  bad.append(
+                      f"output_composer.py: forbidden token '{hit.group(0)}' in module"
+                  )
+
           if bad:
               for entry in bad:
                   print(f"::error::{entry}")
