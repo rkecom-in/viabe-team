@@ -20,6 +20,7 @@ from orchestrator.api import router
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     from dbos_config import launch_dbos, shutdown_dbos
     from orchestrator.dbos_purge import register_purge_scheduler
+    from orchestrator.scheduled_triggers import register_scheduled_triggers
 
     # Register scheduled workflows BEFORE launch_dbos so the registered
     # set is in the registry when ``_launch`` (``_dbos.py:523``) computes
@@ -43,6 +44,10 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     # (``_dbos.py:256``) instead of submitting to the destroyed
     # instance's None executor.
     register_purge_scheduler()
+    # VT-28: 4 scheduled trigger workflows. Same register-before-launch
+    # contract as register_purge_scheduler — see scheduled_triggers.py
+    # docstring for the DBOS app_version invariant.
+    register_scheduled_triggers()
     launch_dbos()
     yield
     shutdown_dbos()

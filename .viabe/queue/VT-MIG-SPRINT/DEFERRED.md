@@ -1,0 +1,1 @@
+Deferred 2026-05-24 by Cowork per Fazal directive — sequencing (b): build VT-AGENTSDK-LOOP first so the agent-loop daemon takes over before the sprint migration runs. Re-queue (status → `queued`) once VT-AGENTSDK-LOOP is merged and the daemon is running.

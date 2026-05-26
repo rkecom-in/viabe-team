@@ -1,0 +1,237 @@
+[2026-05-24T15:30:59Z] Cowork-catchup log initialized. Poller will append one-line summaries of every run; Cowork-in-chat reads tail of this file at start of each meaningful response.
+[2026-05-24T15:37:11Z] poll-20260524T153711Z empty-poll
+[2026-05-24T15:40:19Z] poll-20260524T154019Z empty-poll
+[2026-05-24T15:43:07Z] poll-20260524T154307Z-5 empty-poll
+[2026-05-24T15:46:08Z] poll-20260524T154612Z empty-poll
+[2026-05-24T15:49:08Z] poll-20260524T154908Z empty-poll
+[2026-05-24T15:52:11Z] 20260524T155211Z-poll empty-poll
+[2026-05-24T15:55:09Z] poll-20260524T155509Z-5 empty-poll
+[2026-05-24T15:58:13Z] poll-20260524T155813Z empty-poll
+[2026-05-24T16:01:23Z] poll-20260524T160123Z empty-poll
+[2026-05-24T16:04:17Z] poll-20260524T160417Z empty-poll
+[2026-05-24T16:07:06Z] poll-20260524T160712Z empty-poll
+[2026-05-24T16:10:10Z] poll-20260524T161010Z empty-poll
+[2026-05-24T16:13:08Z] poll-20260524T161308Z empty-poll
+[2026-05-24T16:16:10Z] poll-20260524T161610Z empty-poll
+[2026-05-24T16:19:05Z] 20260524T161908Z-poll empty-poll
+[2026-05-24T16:22:08Z] poll-20260524T162208Z empty-poll
+[2026-05-24T16:25:13Z] poll-20260524T162513Z empty-poll
+[2026-05-24T16:28:09Z] poll-20260524T162809Z empty-poll
+[2026-05-24T16:31:04Z] poll-20260524T163104Z task-result VT-OIV success → merged PR #53 (sha 440dca2); VT-AGENTSDK-LOOP queued; notified via notify-signal + log + catchup; macOS/TG no-op (sandbox network/host blocked — CC must relay)
+[2026-05-24T16:34:11Z] poll-20260524T163411Z empty-poll
+[2026-05-24T16:37:30Z] poll-20260524T163730Z plan-ready VT-AGENTSDK-LOOP → review APPROVED-with-condition (4 inline conditions: SDK-error backoff, notify short-circuit, USD↔tokens budget spec, _active_signal_context try/finally). Answered 4 open questions; signalled to CC; status remains 'review' (CC flips to 'implementing' on pickup). No Fazal notify (routine plan review, no Type-3 decision needed).
+[2026-05-24T16:41:00Z] poll-20260524T164100Z empty-poll
+[2026-05-24T16:43:11Z] 20260524T164311Z-7b494960 empty-poll
+[2026-05-24T16:46:04Z] poll-20260524T164609Z-5 empty-poll
+[2026-05-24T16:49:05Z] poll-20260524T164909Z empty-poll
+[2026-05-24T16:52:12Z] poll-20260524T165212Z empty-poll
+[2026-05-24T16:56:23Z] poll-2026-05-24T16:56:23Z pr-ready VT-AGENTSDK-LOOP — PR #54 (sha dc09638) verified local-ref match; 4/4 review conditions addressed inline with tests; notified via notify-signal HIGH + log; status was already in-pr; CC will dispatch macOS+TG
+[2026-05-24T16:58:08Z] poll-20260524T165808Z empty-poll
+[2026-05-24T17:01:12Z] poll-20260524T170112Z empty-poll
+[2026-05-24T17:04:08Z] poll-20260524T170408Z empty-poll
+[2026-05-24T17:07:09Z] poll-20260524T170709Z empty-poll
+[2026-05-24T17:10:10Z] poll-20260524T171010Z empty-poll
+[2026-05-24T17:13:39Z] poll-2026-05-24T17:13:39Z task-result VT-AGENTSDK-LOOP — pr54-merge-failed pr-title-gate notify-high written
+[2026-05-24T17:16:08Z] poll-20260524T171608Z empty-poll
+[2026-05-24T17:19:09Z] poll-20260524T171909Z empty-poll
+[2026-05-24T17:22:04Z] poll-20260524T172204Z task-result VT-166 — pr54-retry-failed title-ok merge-blocked-stale-check notify-high written
+[2026-05-24T17:29:08Z] poll-20260524-172908 empty-poll
+[2026-05-24T17:29:56Z] poll-20260524T172956Z empty-poll
+[2026-05-24T17:57:08Z] manual-cowork-in-chat task-result+done+notify VT-166 — PR #54 MERGED at sha 3921e4f; queue dir done/VT-AGENTSDK-LOOP → done/VT-166; signals moved to processed; poller offline (post-22:59 IST window); Fazal informed
+[2026-05-24T18:01:55Z] poll-20260524T180155Z empty-poll
+[2026-05-24T18:04:10Z] poll-20260524T180410Z empty-poll
+[2026-05-24T18:07:14Z] poll-20260524T180714Z plan-ready VT-168 — APPROVED, signalled CC, status=review (no Fazal-attention needed)
+[2026-05-24T18:10:10Z] poll-20260524T181010Z pr-ready VT-168 — PR #55 (485f5ff) verified local; notify-high written; status in-pr; CC dispatches
+[2026-05-24T18:13:09Z] poll-20260524T181309Z empty-poll
+[2026-05-24T18:16:09Z] poll-20260524T181609Z empty-poll
+[2026-05-24T18:19:20Z] poll-20260524T181920Z-5 empty-poll
+[2026-05-24T18:22:13Z] poll-20260524T182213Z empty-poll
+[2026-05-24T18:25:10Z] poll-20260524T182510Z empty-poll
+[2026-05-24T18:28:17Z] poll-20260524T182817Z empty-poll
+[2026-05-24T18:31:11Z] poll-1779647471 empty-poll
+[2026-05-24T18:34:12Z] 20260524T183412Z-poll-5 empty-poll
+[2026-05-24T18:37:16Z] poll-183716 empty-poll
+[2026-05-24T18:40:09Z] poll-20260524T184009Z-5 empty-poll
+[2026-05-24T18:43:10Z] poll-20260524T184310Z empty-poll
+[2026-05-24T18:46:10Z] poll-20260524T184610Z empty-poll
+[2026-05-24T18:49:04Z] poll-20260524T184904Z task-result VT-168 — PR #55 merged (9c4d73e); status already done; queue dir already moved by CC
+[2026-05-24T18:49:04Z] poll-20260524T184904Z notify VT-168 — high-priority merge notify acknowledged; CC already TG-dispatched at 18:48:32Z
+[2026-05-24T18:49:04Z] poll-20260524T184904Z done VT-168 — close-out acknowledged; queue dir confirmed at .viabe/queue/done/VT-168/; main on 9c4d73e verified
+[2026-05-24T18:52:10Z] poll-20260524T185210Z empty-poll
+[2026-05-24T18:55:10Z] poll-20260524T185510Z-5 empty-poll
+[2026-05-24T18:58:10Z] poll-20260524T185810Z empty-poll
+[2026-05-24T19:01:10Z] poll-20260524T190110Z empty-poll
+[2026-05-24T19:04:09Z] poll-20260524T190409Z empty-poll
+[2026-05-24T19:07:09Z] poll-20260524T190709Z-5 empty-poll
+[2026-05-24T19:10:11Z] poll-20260524T191011Z empty-poll
+[2026-05-24T19:13:12Z] poll-20260524T191312Z empty-poll
+[2026-05-24T19:16:10Z] poll-20260524T191610Z empty-poll
+[2026-05-24T19:19:18Z] poll-20260524T191918Z empty-poll
+[2026-05-24T19:22:12Z] poll-20260524T192212Z empty-poll
+[2026-05-24T19:25:15Z] poll-20260524T192515Z-5 empty-poll
+[2026-05-24T19:28:10Z] poll-20260524T192810Z empty-poll
+[2026-05-24T19:31:11Z] poll-20260524T193111Z empty-poll
+[2026-05-24T19:34:23Z] poll-20260524T193423Z empty-poll
+[2026-05-24T19:37:09Z] poll-20260524T193709Z-5 empty-poll
+[2026-05-24T19:40:11Z] poll-20260524T194011Z empty-poll
+[2026-05-24T19:43:07Z] poll-20260524T194307Z empty-poll
+[2026-05-24T19:46:12Z] poll-20260524T194612Z empty-poll
+[2026-05-24T19:49:19Z] poll-20260524T194919Z empty-poll
+[2026-05-24T19:52:10Z] poll-20260524T195210Z empty-poll
+[2026-05-24T19:55:15Z] poll-20260524T195515Z empty-poll
+[2026-05-24T19:58:12Z] poll-20260524T195812Z empty-poll
+[2026-05-24T20:01:09Z] poll-20260524T200109Z empty-poll
+[2026-05-24T20:04:11Z] poll-20260524T200411Z empty-poll
+[2026-05-24T20:07:10Z] poll-20260524T200710Z empty-poll
+[2026-05-24T20:10:09Z] poll-20260524T201009Z empty-poll
+[2026-05-24T20:13:12Z] poll-20260524T201312Z empty-poll
+[2026-05-24T20:16:11Z] poll-1779653771 empty-poll
+[2026-05-24T20:19:13Z] poll-20260524T201913Z empty-poll
+[2026-05-24T20:22:20Z] poll-2026-05-24T20:22:20Z empty-poll
+[2026-05-24T20:25:17Z] poll-20260524T202517Z empty-poll
+[2026-05-24T20:28:09Z] poll-20260524T202809Z empty-poll
+[2026-05-24T20:31:11Z] poll-1779654671 empty-poll
+[2026-05-24T20:34:12Z] poll-20260524T203412Z empty-poll
+[2026-05-24T20:37:10Z] poll-20260524T203710Z empty-poll
+[2026-05-24T20:40:11Z] poll-2026-05-24T20:40:11Z empty-poll
+[2026-05-24T20:43:11Z] poll-20260524T204311Z empty-poll
+[2026-05-24T20:46:10Z] poll-20260524T204610Z empty-poll
+[2026-05-24T20:49:11Z] poll-20260524T204911Z empty-poll
+[2026-05-24T20:52:14Z] poll-20260524T205214Z empty-poll
+[2026-05-24T20:55:09Z] poll-20260524T205509Z empty-poll
+[2026-05-24T20:58:16Z] poll-20260524T205816Z empty-poll
+[2026-05-24T21:01:09Z] poll-20260524T210109Z empty-poll
+[2026-05-24T21:04:10Z] poll-20260524T210410Z empty-poll
+[2026-05-24T21:07:14Z] poll-2026-05-24T21:07:14Z empty-poll
+[2026-05-24T21:10:12Z] poll-20260524T211012Z empty-poll
+[2026-05-24T21:13:13Z] poll-20260524T211313Z empty-poll
+[2026-05-24T21:16:08Z] poll-20260524T211608Z empty-poll
+[2026-05-24T21:19:16Z] poll-20260524T211916Z empty-poll
+[2026-05-24T21:22:15Z] poll-20260524T212215Z empty-poll
+[2026-05-24T21:25:10Z] poll-20260524T212510Z empty-poll
+[2026-05-24T21:28:07Z] poll-1779658096 empty-poll
+[2026-05-24T21:31:22Z] poll-213122 empty-poll
+[2026-05-24T21:34:08Z] poll-20260524T213408Z empty-poll
+[2026-05-24T21:37:15Z] poll-1779658635 empty-poll
+[2026-05-24T21:40:04Z] poll-20260524T214009Z empty-poll
+[2026-05-24T21:43:11Z] poll-20260524T214311Z empty-poll
+[2026-05-24T21:46:28Z] poll-20260524T214628Z empty-poll
+[2026-05-24T21:49:12Z] poll-20260524T214912Z empty-poll
+[2026-05-24T21:52:11Z] poll-20260524T215211Z empty-poll
+[2026-05-24T21:55:11Z] 20260524T215511Z-poll empty-poll
+[2026-05-24T21:58:09Z] poll-20260524T215809Z-5 empty-poll
+[2026-05-24T22:01:10Z] poll-20260524T220110Z empty-poll
+[2026-05-24T22:04:11Z] poll-1779660251 empty-poll
+[2026-05-24T22:07:24Z] poll-20260524T220724Z empty-poll
+[2026-05-24T22:10:10Z] poll-20260524T221010Z empty-poll
+[2026-05-24T22:13:11Z] poll-20260524T221311Z-5 empty-poll
+[2026-05-24T22:16:10Z] poll-20260524T221610Z empty-poll
+[2026-05-24T22:19:11Z] poll-20260524T221911Z-f421915a empty-poll
+[2026-05-24T22:22:15Z] poll-20260524T222215Z empty-poll
+[2026-05-24T22:25:08Z] poll-20260524T222508Z empty-poll
+[2026-05-24T22:28:14Z] poll-20260524T222814Z empty-poll
+[2026-05-24T22:31:09Z] poll-20260524T223109Z empty-poll
+[2026-05-24T22:34:10Z] poll-20260524T223410Z empty-poll
+[2026-05-24T22:37:13Z] poll-20260524T223713Z empty-poll
+[2026-05-24T22:40:10Z] 20260524T224010Z-poll empty-poll
+[2026-05-24T22:43:13Z] poll-20260524T224313Z empty-poll
+[2026-05-24T22:46:12Z] poll-2026-05-24T22:46:12Z empty-poll
+[2026-05-24T22:49:10Z] poll-20260524T224910Z empty-poll
+[2026-05-24T22:52:10Z] 20260524T225210Z-poll empty-poll
+[2026-05-24T22:55:05Z] poll-20260524T225510Z empty-poll
+[2026-05-24T22:58:14Z] poll-20260524T225814Z empty-poll
+[2026-05-24T23:01:12Z] poll-20260524T230112Z empty-poll
+[2026-05-24T23:04:11Z] poll-20260524T230411Z-5 empty-poll
+[2026-05-24T23:07:08Z] poll-20260524T230708Z empty-poll
+[2026-05-24T23:10:11Z] poll-20260524T231011Z empty-poll
+[2026-05-24T23:13:13Z] poll-20260524T231313Z empty-poll
+[2026-05-24T23:16:11Z] poll-20260524T231611Z-b9b4 empty-poll
+[2026-05-24T23:19:23Z] poll-20260524T231923Z empty-poll
+[2026-05-24T23:22:10Z] poll-20260524-232210 empty-poll
+[2026-05-24T23:25:05Z] poll-1779665110 empty-poll
+[2026-05-24T23:28:10Z] poll-20260524T232810Z empty-poll
+[2026-05-24T23:31:10Z] poll-20260524T233110Z empty-poll
+[2026-05-24T23:34:10Z] poll-20260524T233410Z empty-poll
+[2026-05-24T23:37:11Z] poll-20260524T233711Z empty-poll
+[2026-05-24T23:40:17Z] poll-20260524-234017-5 empty-poll
+[2026-05-24T23:43:10Z] poll-20260524T234310Z empty-poll
+[2026-05-24T23:46:15Z] poll-1779666375 empty-poll
+[2026-05-24T23:49:09Z] poll-20260524T234909Z empty-poll
+[2026-05-24T23:52:21Z] poll-20260524T235221Z empty-poll
+[2026-05-24T23:55:21Z] poll-20260524T235521Z empty-poll
+[2026-05-24T23:58:12Z] poll-20260524T235820Z empty-poll
+[2026-05-25T00:01:04Z] poll-1779667269 empty-poll
+[2026-05-25T00:04:21Z] poll-20260525T000421Z empty-poll
+[2026-05-25T00:07:22Z] 092df132 empty-poll
+[2026-05-25T00:10:10Z] poll-20260525T001010Z empty-poll
+[2026-05-25T00:13:10Z] poll-20260525T001310Z empty-poll
+[2026-05-25T00:16:14Z] poll-20260525-001614 empty-poll
+[2026-05-25T06:59:59Z] poll-20260525T065959Z empty-poll
+[2026-05-25T07:01:12Z] poll-20260525T070112Z empty-poll
+[2026-05-25T07:04:11Z] poll-20260525T070411Z empty-poll
+[2026-05-25T07:07:13Z] poll-20260525T070713Z-5 empty-poll
+[2026-05-25T07:10:12Z] poll-20260525T071012Z empty-poll
+[2026-05-25T07:13:14Z] poll-20260525T071314Z empty-poll
+[2026-05-25T07:16:15Z] poll-20260525T071615Z empty-poll
+[2026-05-25T07:19:20Z] poll-20260525T071920Z empty-poll
+[2026-05-25T07:22:14Z] poll-20260525T072214Z empty-poll
+[2026-05-25T07:25:14Z] poll-20260525T072514Z empty-poll
+[2026-05-25T07:28:11Z] poll-20260525T072811Z empty-poll
+[2026-05-25T07:31:06Z] poll-20260525T073114Z empty-poll
+[2026-05-25T07:34:14Z] poll-20260525T073414Z empty-poll
+[2026-05-25T07:37:09Z] poll-20260525T073709Z empty-poll
+[2026-05-25T07:40:16Z] poll-20260525-074016 empty-poll
+[2026-05-25T07:43:09Z] poll-20260525T074309Z empty-poll
+[2026-05-25T13:24:36Z] 20260525T132436Z-poll empty-poll
+[2026-05-25T13:27:34Z] poll-20260525T132734Z empty-poll
+[2026-05-25T13:30:38Z] poll-20260525T133038Z empty-poll
+[2026-05-25T13:33:36Z] poll-20260525T133336Z empty-poll
+[2026-05-25T13:36:38Z] poll-20260525T133638Z empty-poll
+[2026-05-25T13:39:37Z] poll-20260525T133937Z empty-poll
+[2026-05-25T13:42:36Z] poll-20260525T134236Z empty-poll
+[2026-05-25T13:45:40Z] poll-1779716740 empty-poll
+[2026-05-25T13:48:36Z] poll-20260525T134836Z empty-poll
+[2026-05-25T13:51:38Z] poll-20260525T135138Z empty-poll
+[2026-05-25T13:54:35Z] poll-20260525T135435Z empty-poll
+[2026-05-25T13:57:38Z] poll-20260525T135738Z empty-poll
+[2026-05-25T14:00:41Z] poll-20260525T140041Z empty-poll
+[2026-05-25T14:03:40Z] poll-20260525T140340Z empty-poll
+[2026-05-25T14:06:37Z] poll-20260525T140637Z empty-poll
+[2026-05-25T14:09:41Z] poll-20260525T140941Z empty-poll
+[2026-05-25T14:12:40Z] poll-20260525T141240Z empty-poll
+[2026-05-25T14:15:36Z] poll-20260525T141536Z empty-poll
+[2026-05-25T14:18:37Z] poll-141837 empty-poll
+[2026-05-25T14:43:27Z] poll-20260525T144327Z empty-poll
+[2026-05-25T14:45:36Z] poll-20260525T144536Z empty-poll
+[2026-05-25T14:48:38Z] 6a968515 empty-poll
+[2026-05-25T14:57:45Z] poll-145131 plan-ready VT-101 — approved, 3 questions answered (single PR, title confirmed, Telegram helper-only), notify signal HIGH written for CC host dispatch
+[2026-05-25T14:58:22Z] poll-20260525T145822Z empty-poll
+[2026-05-25T15:00:37Z] poll-20260525T150037Z empty-poll
+[2026-05-25T15:03:37Z] poll-20260525T150337Z empty-poll
+[2026-05-25T15:07:25Z] poll-20260525T150725Z pr-ready VT-101 — PR #56 ready, notified Fazal HIGH via notify-signal
+[2026-05-25T15:09:35Z] poll-20260525T150935Z empty-poll
+[2026-05-25T15:12:35Z] poll-20260525T151235Z-5 empty-poll
+[2026-05-25T15:15:38Z] poll-20260525T151538Z empty-poll
+[2026-05-25T15:18:38Z] poll-20260525T151838Z empty-poll
+[2026-05-25T15:21:39Z] poll-20260525T152139Z empty-poll
+[2026-05-25T15:24:38Z] poll-20260525T152438Z empty-poll
+[2026-05-25T15:27:38Z] poll-20260525T152738Z empty-poll
+[2026-05-25T15:30:31Z] 38d24796 empty-poll
+[2026-05-25T15:33:37Z] poll-20260525T153337Z empty-poll
+[2026-05-25T15:36:43Z] poll-20260525T153643Z empty-poll
+[2026-05-25T15:39:37Z] poll-20260525T153937Z empty-poll
+[2026-05-25T15:42:37Z] poll-20260525T154237Z empty-poll
+[2026-05-25T15:45:38Z] poll-20260525T154538Z empty-poll
+[2026-05-25T18:29:10Z] manual-cowork-in-chat VT-101 closure signals processed (pre-merge-result x2, ci-green notify, merged notify, task-result-merge, plan-ready-VT-102) — all moved to processed/; PR #56 merged at sha 449a98b; VT-102 plan reviewed APPROVED-with-2-conditions
+[2026-05-25T19:43:31Z] manual-cowork-in-chat VT-102 PR #57 supplement signal received with full per-assertion evidence + 48.5s wall-clock + Supabase Seoul host (vs Mumbai brief — VT-169 follow-up post-merge); type:task merge signal queued for sha 957887e with explicit CI verification gate
+[2026-05-25T19:56:26Z] manual-cowork-in-chat PR #57 (VT-102 pipeline_log) MERGED at sha e5c4cdc; 9 files/1617 insertions; CI 12/12 at sha 957887e; Sprint 1 active 1→0, Done 38→39 (after status reconciliation); next per Exec Order = VT-103; filing VT-169 region-residency follow-up now
+[2026-05-25T20:22:51Z] manual-cowork-in-chat VT-103 plan-ready processed; review APPROVED-with-3-conditions (ARRR plan-tier approx documented; anomaly+runaway floors for new-tenant + min ₹100 window; cost_category as optional convention in event_schemas.py); signal queued for CC
+[2026-05-25T20:43:59Z] manual-cowork-in-chat VT-103 pr-ready processed; PR #58 open; canary 8/8 PASS verbatim audit captured; awaiting CC ci-green notify before queueing Fazal-auth merge
+[2026-05-25T21:27:27Z] manual-cowork-in-chat VT-103 CI was failing on sha 556d50f (orchestrator job — 2 integration tests with shared module-level UUIDs polluting state); CC pushed fix as a0adba0 (per-test fresh UUIDs + relative ordering); CI now 12/12 GREEN; Fazal-authorized merge type:task queued; VT-104 ready to flip Queued post-merge
+[2026-05-25T21:29:18Z] manual-cowork-in-chat VT-103 PR #58 MERGED at sha 95d9f29 (Fazal-auth via type:task); CC processed task-result+done+notify cleanly; VT-103 sprint file Done; queue dir moved to done/; Sprint 1 active 1→0, Done 39→40; next per Exec Order = VT-104 PII redactor (consolidates inline pii.py from VT-101/102/103); flipping VT-104 Queued + queue brief-ready now
+[2026-05-25T21:40:03Z] manual-cowork-in-chat VT-104 plan-ready processed; review APPROVED-with-3-conditions written to .viabe/queue/VT-104/review.md + signal dispatched; Q1=ship-with-callable-fallback (NOT create customers table → VT-170 follow-up Cowork-files post-merge); Q2=APPROVED preserve VT-101 token format byte-identical; conditions: 1) document bank-account narrowing in docstring + sprint-Out-of-scope, 2) re-run VT-101+VT-102 canaries post-consolidation paste full stdout in pre-merge-result, 3) reasoning_trace.py docstring forward-pointing note re VT-4 agent SDK; 175K/180K ceiling acceptable single-PR; awaiting CC implementing→pr-ready
+[2026-05-25T22:16:17Z] manual-cowork-in-chat VT-104 PR #59 ready: 12/12 CI green sha 51c541b; canary 10/10 PASS (24.23s); regression VT-101 7/7 + VT-102 7/7 PASS post-consolidation; 3 real bugs caught (greedy phone regex eating Aadhaar/CC, re-hash idempotency break, bigram parenthesis); cost 0 paise; all 3 conditions applied verbatim; Fazal-authorized merge type:task queued; awaiting CC task-result+done+notify; next per Exec Order = VT-28 (4 DBOS scheduled triggers, exec 5)
+[2026-05-25T22:28:27Z] manual-cowork-in-chat VT-104 MERGED sha 3593ce7 (PR #59 Fazal-auth); CC clean closure (task-result+done+notify); Sprint 1 active 1→0, Done 40→41; Sprint 1 observability quartet (VT-101/102/103/104) COMPLETE; cumulative Rule #15 = 9+ real bugs caught across 4 PRs; VT-104 queue dir moved to done/; VT-170 follow-up filed (customers table, Backlog/Medium, sequenced post-L1/L2-KG or DSR); VT-28 normalized (CodeX→Clau+Fazal, dev→main, PR title VT-28) + Rule #15 Canary section appended (10 assertions across 5 groups: regression+idempotency+deterministic-NO-LLM+real-Anthropic+DBOS-auto-resume); VT-28 flipped Backlog→Queued; brief-ready signal dispatched; next per Exec Order = VT-121 after VT-28
+[2026-05-25T23:35:08Z] manual-cowork-in-chat MAJOR EVENT: VT-101 LangSmith drift surfaced by Clau at VT-28 plan-review; CL-56 (Standing 2026-05-16, LangSmith→Pydantic Logfire) missed by Cowork on VT-101 brief-ready. Fazal-issued Rule #16 (PRE-BRIEF-READY ACTIVE-CONTEXT CHECK MANDATORY) + DR-16 codified. New structural fix shipped: docs/clau/active-context-summary.md (Cowork-maintained digest) + scripts/check_brief_against_ledger.py + cl_decisions_checked frontmatter requirement on brief-ready signals (CC bounces missing-field signals). Memory file feedback_active_context_summary.md saved. CLAUDE.md bootstrap updated. Then: independently re-validated CL-56 via WebSearch + web_fetch (current Logfire pricing 10M spans free + DBOS first-party integration confirmed via docs.dbos.dev/integrations/logfire). Fazal approved honoring CL-56 + provisioned Logfire EU dev credentials at .viabe/secrets/logfire-dev.env. Allocated VT-171 (next peek VT-172); wrote VT-171 sprint file (exec_order 4.5 to slot between VT-104 and VT-28; supersedes_implementation_of VT-101). brief-ready signal dispatched with cl_decisions_checked=[37 rows surfaced by check script]. VT-28 status flipped review → blocked-on-VT-171. Sprint 1 active 1→1 (VT-28 paused, VT-171 active)
+[2026-05-25T23:44:06Z] manual-cowork-in-chat VT-171 plan-ready processed (5-min turnaround from brief-ready); review APPROVED-with-1-condition; Q1=fallback-no-pause (write token may lack read scope; force_flush + UI verify), Q2=YES gate-no-langsmith-imports CI gate, Q3=APPROVED-B env-var-driven OTLP with configure_logfire() setting OTEL_* env vars before launch_dbos(); 1 condition = verify Anthropic instrumentation coverage at PICKUP (LangChain wrapper vs direct Messages SDK per CL-249); 125K/180K single-PR; CC concurred on canaries/vt101_langsmith.py deletion (Group A #1 = assertion of record); after VT-171 merges: file VT-172 (deprecation cleanup) + VT-173 (retroactive Brief Artifacts amendments for VT-101/102/103/104)
+[2026-05-26T00:10:16Z] manual-cowork-in-chat VT-171 merge-auth dispatched (Fazal type:task authorized PR #60 sha 2bbad51); CC will execute merge async. Major incident: ground-truth check during VT-171 pre-merge surfaced 188 untracked files including entire migration output + Cowork operating layer (CLAUDE.md, docs/clau/, scripts/check_brief_against_ledger.py, 166 sprint files, 369 CL entries, active-context-summary.md, etc). Drift is accidental per Fazal confirmation — no deliberate un-tracking decision exists. Fazal authorized VT-172 rescue PR in same chat. Allocated VT-172 (rescue, Cowork-owned), wrote sprint file. Execution waits on VT-171 merge to land (clean main for rescue branch base). Pre-existing 3 dirty files (.viabe/daemon/agent-loop.py + core.py + .viabe/sprint/VT-104.md) bundle into VT-172 commit. Logfire-EU ingest confirmed via SDK stderr: https://logfire-eu.pydantic.dev/rkecom/viabe-team-dev. Anthropic cost: 0 paise. Q3 pivot (env-var → SDK-managed TracerProvider) noted as minor process gap (no plan-updated signal) but architecturally correct

@@ -29,6 +29,10 @@ venv/
 .idea/
 .vscode/
 *.log
+# Audit logs under the Cowork pipeline are intentionally tracked despite
+# the *.log rule above — they're durable evidence, not ephemeral output.
+!.viabe/queue/done/**/*.log
+!.viabe/notifications/cowork-catchup.log
 
 # Test / coverage
 coverage/
@@ -37,3 +41,11 @@ coverage/
 supabase/
 .running/
 .viabe/secrets/
+
+# Cowork runtime state (NOT tracked — substrate lives in .viabe/sprint/*.md
+# and docs/clau/ instead)
+.viabe/sprint/.lock
+.viabe/sprint/.next-id.bak
+.viabe/queue/*/status
+.viabe/daemon/STOP
+.viabe/daemon/*.pid

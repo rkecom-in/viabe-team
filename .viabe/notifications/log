@@ -1,0 +1,21 @@
+[2026-05-24T15:01:30Z] VT-OIV pre-merge-result passed — PR #53 ready for Fazal merge (retroactive log of 14:31 poll output that didn't reach this chat)
+[2026-05-24T15:08:13Z] VT-OIV telegram-constraint — Type-3 needed: CC Telegram plugin reply-only; Cowork recommends Option A (drop telegram:true), defer Option B to VT-AGENTSDK-LOOP
+[2026-05-24T16:31:04Z] VT-OIV task-result success — PR #53 merged (440dca2), VT-AGENTSDK-LOOP unblocked → queued; macOS/TG send no-op from sandbox — relay via notify-signal
+[2026-05-24T16:56:23Z] VT-AGENTSDK-LOOP pr-ready — PR #54 dc09638; 4/4 conditions addressed (named tests); 27 pytest pass; ready for Fazal merge
+2026-05-24T16:59:51Z TG sent: VT-AGENTSDK-LOOP PR #54
+2026-05-24T17:11:48Z TG sent: PR #54 merge BLOCKED notify
+[2026-05-24T17:13:39Z] VT-AGENTSDK-LOOP pr54-merge-failed — pr-title gate rejected hyphen in VT-ID; 3 options awaiting Fazal
+2026-05-24T17:13:56Z TG sent: PR #54 merge FAILED notify (cowork mirror)
+2026-05-24T17:21:48Z TG sent: PR #54 retry blocked notify
+[2026-05-24T17:22:04Z] VT-166 pr54-retry-failed — title renamed OK, pr-title gate still red (stale check from pre-rename run); 3 unblock options surfaced (A=empty commit recommended, B=close/reopen, C=--admin); CC awaiting fresh task; notify-high written
+2026-05-24T17:22:48Z TG sent: VT-166 retry-failed mirror
+2026-05-24T17:42:25Z TG sent: VT-166 --admin blocked notify
+2026-05-24T17:53:46Z TG sent: VT-166 MERGED
+[2026-05-24T18:07:14Z] VT-168 plan-review APPROVED — one-line ci.yml types: addition
+[2026-05-24T18:10:10Z] VT-168 pr-ready — PR #55 (sha 485f5ff) verified local-ref match; one-line ci.yml types: addition; status=in-pr; notify-high written; CC will dispatch macOS+TG
+[2026-05-24T23:41:10+0530] telegram sent: {"ok":true,"result":{"message_id":2689,"from":{"id":8267097969,"is_bot":true,"first_name":"ViabeDev","username":"viabedev_bot"},"chat":{"id":8765762250,"first_name":"RkeCom","last_name":"Services","ty
+2026-05-24T18:48:32Z TG sent: VT-168 MERGED
+[2026-05-24T18:49:04Z] VT-168 task-result success — PR #55 MERGED at 2026-05-24T18:47:40Z, sha 9c4d73e, branch deleted, main fast-forwarded; CI now self-heals on title edits (edited event added to pull_request trigger)
+[2026-05-24T18:49:04Z] VT-168 done — closed out; queue/VT-168 → queue/done/VT-168; no dependency unblocks (VT-MIG-SPRINT still deferred); watch loop continues
+[2026-05-25T14:57:45Z] VT-101 plan-approved — CC implementing single PR, Telegram helper-only scope deviation flagged
+[2026-05-25T15:07:25Z] VT-101 pr-ready — PR #56 ready, status→In PR, notified Fazal HIGH

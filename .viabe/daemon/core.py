@@ -39,7 +39,11 @@ POLL_SECONDS = 30
 # Per-call ceiling — applies to a single query() invocation regardless of
 # signal type. Sized to comfortably cover a brief-ready dispatch for a
 # 3-hour task. notify is short-circuited so this cap is irrelevant for it.
-PER_CALL_BUDGET_USD = 5.0
+# MAX-EFFORT bump from $5 → $25 (2026-05-25 IST, Fazal directive). The cap
+# now sits well above the most expensive observed call (~$0.50 for VT-168
+# review) — practically unbounded for routine work, still a safety floor
+# against runaway loops.
+PER_CALL_BUDGET_USD = 25.0
 _BACKOFF_SLEEPS = [5, 30]
 LLM_REQUIRED_TYPES = {
     "brief-ready",

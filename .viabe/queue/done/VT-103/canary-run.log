@@ -1,0 +1,361 @@
+PREFLIGHT OK — resolved host: aws-1-ap-northeast-2.pooler.supabase.com:5432 (env-loaded)
+[1] PASS — Seed 50 external_api_call events for tenant_A across 5 categories
+    observed: host=aws-1-ap-northeast-2.pooler.supabase.com:5432 seeded_rows=50
+[2] PASS — get_tenant_cost returns aggregate + per-category match within ±1 paise
+    observed: {'total_paise': 12750, 'expected_total_paise': 12750, 'by_category': {'apify': 2650, 'infra_allocated': 2750, 'llm': 2350, 'razorpay': 2550, 'twilio': 2450}, 'expected_by_category': {'llm': 2350, 'twilio': 2450, 'razorpay': 2550, 'apify': 2650, 'infra_allocated': 2750}, 'event_count': 50}
+[3] PASS — REFRESH MATERIALIZED VIEW tenant_cost_daily aggregates match raw events
+    observed: {'mv_total': 12750, 'expected_total': 12750, 'refresh_err': None}
+[4] PASS — Cross-tenant: get_tenant_cost(A) unaffected by tenant_B; get_tenant_cost(B) returns B's total
+    observed: {'a_total_via_fn': 12750, 'a_total_expected': 12750, 'b_total_via_fn': 1470, 'b_total_expected': 1470, 'sql_count_a': 50, 'sql_count_b': 20}
+[5] PASS — Top-10 ranking: seeded tenants sorted descending; lowest 2 excluded
+    observed: {'top_ids_observed': ['00000000-0000-4000-8000-000000aaa1a3', '00000000-0000-4000-8000-000000bbb1a3', '00000000-0000-4000-8000-00000001a30b', '00000000-0000-4000-8000-00000001a30a', '00000000-0000-4000-8000-00000001a309', '00000000-0000-4000-8000-00000001a308', '00000000-0000-4000-8000-00000001a307', '00000000-0000-4000-8000-00000001a306', '00000000-0000-4000-8000-00000001a305', '00000000-0000-4000-8000-00000001a304'], 'seeded_in_top10': ['00000000-0000-4000-8000-00000001a30b', '00000000-0000-4000-8000-00000001a30a', '00000000-0000-4000-8000-00000001a309', '00000000-0000-4000-8000-00000001a308', '00000000-0000-4000-8000-00000001a307', '00000000-0000-4000-8000-00000001a306', '00000000-0000-4000-8000-00000001a305', '00000000-0000-4000-8000-00000001a304'], 'expected_top10': ['00000000-0000-4000-8000-00000001a30b', '00000000-0000-4000-8000-00000001a30a', '00000000-0000-4000-8000-00000001a309', '00000000-0000-4000-8000-00000001a308', '00000000-0000-4000-8000-00000001a307', '00000000-0000-4000-8000-00000001a306', '00000000-0000-4000-8000-00000001a305', '00000000-0000-4000-8000-00000001a304', '00000000-0000-4000-8000-00000001a303', '00000000-0000-4000-8000-00000001a302'], 'excluded': ['00000000-0000-4000-8000-00000001a301', '00000000-0000-4000-8000-00000001a300']}
+[6] PASS — Anomaly: 3× spike tenant flagged; steady tenant not flagged
+    observed: {'flagged_count': 1, 'flagged': [{'tenant_id': '00000000-0000-4000-8000-000000a4d103', 'baseline_per_day': 5000, 'window_per_day': 15000, 'multiplier_observed': 3.0}]}
+[7] PASS — Unit economics: STANDARD plan ₹1000/month vs ₹250 cost → ratio≈4.0
+    observed: {'arrr_paise': 100000, 'cost_paise': 25000, 'ratio': 4.0}
+[8] PASS — Cleanup ran; residual canary rows count captured for audit
+    observed: {'cleanup_err': None, 'residual_rows': 0, 'refresh_after_err': None}
+
+=== CANARY SUMMARY ===
+  [1] PASS — Seed 50 external_api_call events for tenant_A across 5 categories
+  [2] PASS — get_tenant_cost returns aggregate + per-category match within ±1 paise
+  [3] PASS — REFRESH MATERIALIZED VIEW tenant_cost_daily aggregates match raw events
+  [4] PASS — Cross-tenant: get_tenant_cost(A) unaffected by tenant_B; get_tenant_cost(B) returns B's total
+  [5] PASS — Top-10 ranking: seeded tenants sorted descending; lowest 2 excluded
+  [6] PASS — Anomaly: 3× spike tenant flagged; steady tenant not flagged
+  [7] PASS — Unit economics: STANDARD plan ₹1000/month vs ₹250 cost → ratio≈4.0
+  [8] PASS — Cleanup ran; residual canary rows count captured for audit
+
+=== AUDIT ARTIFACT — top-20 inserted canary rows + outputs ===
+[
+  {
+    "id": "5f9a0f48-f4e5-4372-8541-9e5b379c6f06",
+    "run_id": "2bbf2f23-8cd3-4ef3-b49b-6e26dba9b5a9",
+    "tenant_id": "00000000-0000-4000-8000-000000a4d103",
+    "event_type": "external_api_call",
+    "severity": "info",
+    "component": "canary",
+    "payload": {
+      "vendor": "anthropic",
+      "endpoint": "/canary",
+      "cost_paise": 5000,
+      "cost_category": "llm"
+    },
+    "duration_ms": null,
+    "created_at": "2026-04-27T20:33:32.156054+00:00"
+  },
+  {
+    "id": "df321537-48c4-4d6a-af7e-12ff4bb0cb08",
+    "run_id": "4928c5c7-a3ff-441a-b0c3-77b995787bfd",
+    "tenant_id": "00000000-0000-4000-8000-000000a4d103",
+    "event_type": "external_api_call",
+    "severity": "info",
+    "component": "canary",
+    "payload": {
+      "vendor": "anthropic",
+      "endpoint": "/canary",
+      "cost_paise": 5000,
+      "cost_category": "llm"
+    },
+    "duration_ms": null,
+    "created_at": "2026-04-28T20:33:32.156054+00:00"
+  },
+  {
+    "id": "4a3e0746-d8a4-4b4f-ae5f-46f5f9ddc6ae",
+    "run_id": "49540a09-b41f-4d50-be45-4d1b8eae742b",
+    "tenant_id": "00000000-0000-4000-8000-000000a4d103",
+    "event_type": "external_api_call",
+    "severity": "info",
+    "component": "canary",
+    "payload": {
+      "vendor": "anthropic",
+      "endpoint": "/canary",
+      "cost_paise": 5000,
+      "cost_category": "llm"
+    },
+    "duration_ms": null,
+    "created_at": "2026-04-29T20:33:32.156054+00:00"
+  },
+  {
+    "id": "df837ac8-061b-4094-b170-02844f8dff21",
+    "run_id": "23ee12f4-45ea-43c0-b539-beb4dad63338",
+    "tenant_id": "00000000-0000-4000-8000-000000a4d103",
+    "event_type": "external_api_call",
+    "severity": "info",
+    "component": "canary",
+    "payload": {
+      "vendor": "anthropic",
+      "endpoint": "/canary",
+      "cost_paise": 5000,
+      "cost_category": "llm"
+    },
+    "duration_ms": null,
+    "created_at": "2026-04-30T20:33:32.156054+00:00"
+  },
+  {
+    "id": "1d13915f-2c97-41e8-8450-032b465ff6c0",
+    "run_id": "094670ed-085e-4a2f-ab62-1a1a60bce494",
+    "tenant_id": "00000000-0000-4000-8000-000000a4d103",
+    "event_type": "external_api_call",
+    "severity": "info",
+    "component": "canary",
+    "payload": {
+      "vendor": "anthropic",
+      "endpoint": "/canary",
+      "cost_paise": 5000,
+      "cost_category": "llm"
+    },
+    "duration_ms": null,
+    "created_at": "2026-05-01T20:33:32.156054+00:00"
+  },
+  {
+    "id": "0397b5b0-86fe-4312-bce0-0afc513def84",
+    "run_id": "159b943b-b6cf-49e0-aa7c-1b5b892b9c6c",
+    "tenant_id": "00000000-0000-4000-8000-000000a4d103",
+    "event_type": "external_api_call",
+    "severity": "info",
+    "component": "canary",
+    "payload": {
+      "vendor": "anthropic",
+      "endpoint": "/canary",
+      "cost_paise": 5000,
+      "cost_category": "llm"
+    },
+    "duration_ms": null,
+    "created_at": "2026-05-02T20:33:32.156054+00:00"
+  },
+  {
+    "id": "dd82f91b-617e-4ee4-80fe-7962b1a37b86",
+    "run_id": "59bff029-1e71-4070-84a7-1c70e3f444d3",
+    "tenant_id": "00000000-0000-4000-8000-000000a4d103",
+    "event_type": "external_api_call",
+    "severity": "info",
+    "component": "canary",
+    "payload": {
+      "vendor": "anthropic",
+      "endpoint": "/canary",
+      "cost_paise": 5000,
+      "cost_category": "llm"
+    },
+    "duration_ms": null,
+    "created_at": "2026-05-03T20:33:32.156054+00:00"
+  },
+  {
+    "id": "37880a8c-d823-41d9-9ca9-c090f8b647b1",
+    "run_id": "fc426b23-4178-4465-b163-1ba0615aef04",
+    "tenant_id": "00000000-0000-4000-8000-000000a4d103",
+    "event_type": "external_api_call",
+    "severity": "info",
+    "component": "canary",
+    "payload": {
+      "vendor": "anthropic",
+      "endpoint": "/canary",
+      "cost_paise": 5000,
+      "cost_category": "llm"
+    },
+    "duration_ms": null,
+    "created_at": "2026-05-04T20:33:32.156054+00:00"
+  },
+  {
+    "id": "728f13bc-b8ce-4037-9e60-6ed32d165bf5",
+    "run_id": "710de414-c7cd-417f-9fee-01364ad0ae75",
+    "tenant_id": "00000000-0000-4000-8000-000000a4d103",
+    "event_type": "external_api_call",
+    "severity": "info",
+    "component": "canary",
+    "payload": {
+      "vendor": "anthropic",
+      "endpoint": "/canary",
+      "cost_paise": 5000,
+      "cost_category": "llm"
+    },
+    "duration_ms": null,
+    "created_at": "2026-05-05T20:33:32.156054+00:00"
+  },
+  {
+    "id": "b9b419d1-b3e4-4010-bfe3-33eab9193fbf",
+    "run_id": "a641e35c-779e-4c23-98f2-f7b77d6f92ee",
+    "tenant_id": "00000000-0000-4000-8000-000000a4d103",
+    "event_type": "external_api_call",
+    "severity": "info",
+    "component": "canary",
+    "payload": {
+      "vendor": "anthropic",
+      "endpoint": "/canary",
+      "cost_paise": 5000,
+      "cost_category": "llm"
+    },
+    "duration_ms": null,
+    "created_at": "2026-05-06T20:33:32.156054+00:00"
+  },
+  {
+    "id": "41c2863b-30b9-4759-ba61-44cf5f8c8096",
+    "run_id": "c534cfb8-8222-4d2c-925f-5d844c1da7f8",
+    "tenant_id": "00000000-0000-4000-8000-000000a4d103",
+    "event_type": "external_api_call",
+    "severity": "info",
+    "component": "canary",
+    "payload": {
+      "vendor": "anthropic",
+      "endpoint": "/canary",
+      "cost_paise": 5000,
+      "cost_category": "llm"
+    },
+    "duration_ms": null,
+    "created_at": "2026-05-07T20:33:32.156054+00:00"
+  },
+  {
+    "id": "d630a076-eda3-4078-9d9e-5b9899324802",
+    "run_id": "e962aa0d-c0bb-4679-a0e2-6640155967fb",
+    "tenant_id": "00000000-0000-4000-8000-000000a4d103",
+    "event_type": "external_api_call",
+    "severity": "info",
+    "component": "canary",
+    "payload": {
+      "vendor": "anthropic",
+      "endpoint": "/canary",
+      "cost_paise": 5000,
+      "cost_category": "llm"
+    },
+    "duration_ms": null,
+    "created_at": "2026-05-08T20:33:32.156054+00:00"
+  },
+  {
+    "id": "40d4b1a6-e7c0-4063-a829-a95a3279db87",
+    "run_id": "991b282e-0625-45a7-8b4a-815ea90266c0",
+    "tenant_id": "00000000-0000-4000-8000-000000a4d103",
+    "event_type": "external_api_call",
+    "severity": "info",
+    "component": "canary",
+    "payload": {
+      "vendor": "anthropic",
+      "endpoint": "/canary",
+      "cost_paise": 5000,
+      "cost_category": "llm"
+    },
+    "duration_ms": null,
+    "created_at": "2026-05-09T20:33:32.156054+00:00"
+  },
+  {
+    "id": "d7b50e80-b77c-49ec-b1a5-fe16216259a1",
+    "run_id": "84842a2c-042a-4c4f-8c2e-60b6560c8639",
+    "tenant_id": "00000000-0000-4000-8000-000000a4d103",
+    "event_type": "external_api_call",
+    "severity": "info",
+    "component": "canary",
+    "payload": {
+      "vendor": "anthropic",
+      "endpoint": "/canary",
+      "cost_paise": 5000,
+      "cost_category": "llm"
+    },
+    "duration_ms": null,
+    "created_at": "2026-05-10T20:33:32.156054+00:00"
+  },
+  {
+    "id": "3605975b-a525-4cd9-915e-f728b9d5898e",
+    "run_id": "4ce4cee5-cdc0-42c2-87a7-332dea890418",
+    "tenant_id": "00000000-0000-4000-8000-000000a4d103",
+    "event_type": "external_api_call",
+    "severity": "info",
+    "component": "canary",
+    "payload": {
+      "vendor": "anthropic",
+      "endpoint": "/canary",
+      "cost_paise": 5000,
+      "cost_category": "llm"
+    },
+    "duration_ms": null,
+    "created_at": "2026-05-11T20:33:32.156054+00:00"
+  },
+  {
+    "id": "50423f99-8f21-46e9-999d-9d5e51bc5c8e",
+    "run_id": "a98c5b25-3e58-48a9-92a0-9febc14fa966",
+    "tenant_id": "00000000-0000-4000-8000-000000a4d103",
+    "event_type": "external_api_call",
+    "severity": "info",
+    "component": "canary",
+    "payload": {
+      "vendor": "anthropic",
+      "endpoint": "/canary",
+      "cost_paise": 5000,
+      "cost_category": "llm"
+    },
+    "duration_ms": null,
+    "created_at": "2026-05-12T20:33:32.156054+00:00"
+  },
+  {
+    "id": "426c8326-78d7-461d-8d11-871fd02f6313",
+    "run_id": "f12d06ef-0827-4b24-a903-2b70cbe7fc86",
+    "tenant_id": "00000000-0000-4000-8000-000000a4d103",
+    "event_type": "external_api_call",
+    "severity": "info",
+    "component": "canary",
+    "payload": {
+      "vendor": "anthropic",
+      "endpoint": "/canary",
+      "cost_paise": 5000,
+      "cost_category": "llm"
+    },
+    "duration_ms": null,
+    "created_at": "2026-05-13T20:33:32.156054+00:00"
+  },
+  {
+    "id": "3c53e973-eb51-477f-96da-27d52a82b36a",
+    "run_id": "3ce03270-78d0-4047-be60-e3a14abaf9b5",
+    "tenant_id": "00000000-0000-4000-8000-000000a4d103",
+    "event_type": "external_api_call",
+    "severity": "info",
+    "component": "canary",
+    "payload": {
+      "vendor": "anthropic",
+      "endpoint": "/canary",
+      "cost_paise": 5000,
+      "cost_category": "llm"
+    },
+    "duration_ms": null,
+    "created_at": "2026-05-14T20:33:32.156054+00:00"
+  },
+  {
+    "id": "bece901c-50a5-4f0b-9236-a3a752546073",
+    "run_id": "8546ecc8-5337-4eee-a579-a3f3e7066d17",
+    "tenant_id": "00000000-0000-4000-8000-000000a4d103",
+    "event_type": "external_api_call",
+    "severity": "info",
+    "component": "canary",
+    "payload": {
+      "vendor": "anthropic",
+      "endpoint": "/canary",
+      "cost_paise": 5000,
+      "cost_category": "llm"
+    },
+    "duration_ms": null,
+    "created_at": "2026-05-15T20:33:32.156054+00:00"
+  },
+  {
+    "id": "9c8589e3-728f-490f-b77f-51376116a613",
+    "run_id": "8ca29e9c-7f99-4c40-88a6-06ee1aed919c",
+    "tenant_id": "00000000-0000-4000-8000-000000a4d103",
+    "event_type": "external_api_call",
+    "severity": "info",
+    "component": "canary",
+    "payload": {
+      "vendor": "anthropic",
+      "endpoint": "/canary",
+      "cost_paise": 5000,
+      "cost_category": "llm"
+    },
+    "duration_ms": null,
+    "created_at": "2026-05-16T20:33:32.156054+00:00"
+  }
+]
+
+ALL 8 ASSERTIONS PASSED
+couldn't stop thread 'pool-1-worker-0' within 5.0 seconds
+hint: you can try to call 'close()' explicitly or to use the pool as context manager
+couldn't stop thread 'pool-1-worker-1' within 5.0 seconds
+hint: you can try to call 'close()' explicitly or to use the pool as context manager
+couldn't stop thread 'pool-1-worker-2' within 5.0 seconds
+hint: you can try to call 'close()' explicitly or to use the pool as context manager
+couldn't stop thread 'pool-1-scheduler' within 5.0 seconds
+hint: you can try to call 'close()' explicitly or to use the pool as context manager
