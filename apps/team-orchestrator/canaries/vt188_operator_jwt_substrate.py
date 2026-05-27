@@ -228,10 +228,22 @@ def run_canary() -> int:
         phone_token=token_a,
         operator_id=operator_id,
     )
-    pass_4 = exc is None and result == phone_a
+    # VT-191: resolve_phone_token_audited returns the ciphertext column
+    # value (the stored function is a thin SELECT — it does NOT decrypt
+    # like phone_tokens.resolve_phone_token does). Client-side decrypt
+    # happens in the team-web route (VT-192) or, here, via decrypt_phone.
+    from orchestrator.observability.phone_tokens import decrypt_phone as _decrypt
+    from cryptography.fernet import InvalidToken as _InvalidToken
+    decrypted_result: str | None = None
+    if isinstance(result, str):
+        try:
+            decrypted_result = _decrypt(result)
+        except _InvalidToken:
+            pass
+    pass_4 = exc is None and decrypted_result == phone_a
     assertion(
         4,
-        "valid operator claim + tenant_a GUC → SELECT returns row",
+        "valid operator claim + tenant_a GUC → SELECT returns row (ciphertext; decrypt-client-side returns phone)",
         pass_4,
         observed={"resolved": result, "exc": repr(exc) if exc else None},
         expected={"resolved": phone_a},
