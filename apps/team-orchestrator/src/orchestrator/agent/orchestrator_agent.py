@@ -40,6 +40,7 @@ from uuid import UUID
 
 from langchain.agents import AgentState, create_agent
 from langchain_anthropic import ChatAnthropic
+from langchain_core.messages import SystemMessage
 from langchain_core.tools import BaseTool, tool
 
 from orchestrator.agent.tools.compose_output import compose_owner_output_tool
@@ -63,6 +64,25 @@ logger = logging.getLogger("orchestrator.agent")
 
 _PROMPT_PATH = Path(__file__).parent.parent / "prompts" / "orchestrator_agent_system.md"
 ORCHESTRATOR_AGENT_SYSTEM_PROMPT = _PROMPT_PATH.read_text(encoding="utf-8")
+
+# VT-194 prompt caching: wrap the system prompt in a SystemMessage whose
+# content is a structured block list carrying ``cache_control:
+# {"type": "ephemeral"}``. Anthropic caches the marked prefix for 5 min;
+# subsequent dispatches within the TTL read the cached tokens at ~10%
+# of the input-token cost (90% discount on the cached prefix). Per
+# Anthropic docs, when a system block is cached and tool schemas follow
+# in the same request, the tool schemas are typically cached as part of
+# the same prefix (validated empirically in VT-194 canary A1 — see
+# ``vt194_prompt_caching.py``). Q1 Option A locked per Cowork plan-review.
+ORCHESTRATOR_AGENT_SYSTEM_MESSAGE = SystemMessage(
+    content=[
+        {
+            "type": "text",
+            "text": ORCHESTRATOR_AGENT_SYSTEM_PROMPT,
+            "cache_control": {"type": "ephemeral"},
+        }
+    ]
+)
 
 # Pinned exactly in pyproject (langgraph / langchain-* == ): the agent's model
 # behaviour is version-sensitive, so model + library bumps are Type 2 changes.
@@ -159,48 +179,11 @@ def query_l0(
     )
 
 
-@tool
-def send_whatsapp_template_stub(
-    tenant_id: str, template_name: str, variables: dict[str, str]
-) -> str:
-    """STUB — send a Twilio Content API template message.
-
-    TODO(VT-5.7): wire real Twilio send. Today logs the intent and
-    returns a placeholder SID so the orchestrator-agent can express
-    send intent.
-    """
-    logger.info(
-        "[VT-5.7 STUB] send_whatsapp_template tenant_id=%s template=%s vars=%s",
-        tenant_id, template_name, variables,
-    )
-    return f"[stub] template send intent logged: {template_name}"
-
-
-@tool
-def get_subscriber_state_stub(tenant_id: str) -> dict[str, str]:
-    """STUB — fetch subscriber state.
-
-    TODO(VT-5.2): wire real read against ``subscriber_states`` table.
-    Today returns a minimal placeholder.
-    """
-    logger.info("[VT-5.2 STUB] get_subscriber_state tenant_id=%s", tenant_id)
-    return {"tenant_id": tenant_id, "phase": "unknown", "stub": "true"}
-
-
-@tool
-def query_pipeline_history_stub(
-    tenant_id: str, lookback_hours: int = 24
-) -> list[dict[str, str]]:
-    """STUB — query recent pipeline_runs for a tenant.
-
-    TODO(VT-5.3): wire real SELECT against pipeline_runs + pipeline_steps.
-    Today returns an empty list.
-    """
-    logger.info(
-        "[VT-5.3 STUB] query_pipeline_history tenant_id=%s lookback_hours=%d",
-        tenant_id, lookback_hours,
-    )
-    return []
+# VT-194 dropped 3 STUBs (send_whatsapp_template_stub /
+# get_subscriber_state_stub / query_pipeline_history_stub). Each carried
+# ~300 tokens of schema text in the agent's prompt (~900 tokens total)
+# with no real implementation. Restore when VT-5.7 / VT-5.2 / VT-5.3
+# ship the real surfaces.
 
 
 # Base tools every orchestrator-agent has, regardless of context. Specialist
@@ -217,9 +200,6 @@ ORCHESTRATOR_AGENT_TOOLS: list[BaseTool] = [
     compose_owner_output_tool,
     write_l0_fragment,
     query_l0,
-    send_whatsapp_template_stub,
-    get_subscriber_state_stub,
-    query_pipeline_history_stub,
 ]
 
 
@@ -268,7 +248,7 @@ def build_orchestrator_agent(
     return create_agent(
         model=model,
         tools=[*ORCHESTRATOR_AGENT_TOOLS, *extra_tools],
-        system_prompt=ORCHESTRATOR_AGENT_SYSTEM_PROMPT,
+        system_prompt=ORCHESTRATOR_AGENT_SYSTEM_MESSAGE,
         name="orchestrator_agent",
         state_schema=OrchestratorAgentState,
     )
