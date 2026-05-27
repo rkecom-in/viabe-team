@@ -314,8 +314,9 @@ def run_canary() -> int:
     expected_subset = {
         "escalate_to_fazal",
         "compose_owner_output_tool",
-        "write_l0_fragment_stub",
-        "query_l0_stub",
+        # VT-126 replaced VT-125 L0 stubs with real @tool_step-decorated impls.
+        "write_l0_fragment",
+        "query_l0",
         "send_whatsapp_template_stub",
         "get_subscriber_state_stub",
         "query_pipeline_history_stub",

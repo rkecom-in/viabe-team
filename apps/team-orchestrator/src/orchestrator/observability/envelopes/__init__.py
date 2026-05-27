@@ -59,6 +59,16 @@ from .error import (
     FailureType,
     Strategy,
 )
+from .l0_query import (
+    L0QueryEnvelope,
+    L0QueryInput,
+    L0QueryOutput,
+)
+from .l0_write import (
+    L0WriteEnvelope,
+    L0WriteInput,
+    L0WriteOutput,
+)
 from .mcp_tool_call import (
     McpToolCallEnvelope,
     McpToolCallInput,
@@ -122,6 +132,8 @@ STEP_KIND_REGISTRY: dict[str, type[StepEnvelope]] = {
     "error": ErrorEnvelope,
     "context_truncation": ContextTruncationEnvelope,
     "tenant_isolation_breach": TenantIsolationBreachEnvelope,
+    "l0_write": L0WriteEnvelope,
+    "l0_query": L0QueryEnvelope,
 }
 
 
@@ -211,6 +223,8 @@ __all__ = [
     "ErrorEnvelope",
     "ContextTruncationEnvelope",
     "TenantIsolationBreachEnvelope",
+    "L0WriteEnvelope",
+    "L0QueryEnvelope",
     # Input/Output sub-models
     "WebhookReceivedInput",
     "WebhookClassifiedInput",
@@ -245,4 +259,8 @@ __all__ = [
     "Strategy",
     "ContextTruncationInput",
     "TenantIsolationBreachInput",
+    "L0WriteInput",
+    "L0WriteOutput",
+    "L0QueryInput",
+    "L0QueryOutput",
 ]

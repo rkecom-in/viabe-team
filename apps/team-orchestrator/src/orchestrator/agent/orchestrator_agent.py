@@ -35,7 +35,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from uuid import UUID
 
 from langchain.agents import AgentState, create_agent
@@ -43,6 +43,20 @@ from langchain_anthropic import ChatAnthropic
 from langchain_core.tools import BaseTool, tool
 
 from orchestrator.agent.tools.compose_output import compose_owner_output_tool
+from orchestrator.observability.decorators import tool_step
+from orchestrator.observability.envelopes.l0_query import (
+    L0QueryInput,
+    L0QueryOutput,
+)
+from orchestrator.observability.envelopes.l0_write import (
+    L0WriteInput,
+    L0WriteOutput,
+)
+from orchestrator.observability.l0_memory import (
+    FragmentType,
+    query_l0 as _query_l0_impl,
+    write_l0_fragment as _write_l0_fragment_impl,
+)
 from orchestrator.types.trigger_reason import TriggerReason
 
 logger = logging.getLogger("orchestrator.agent")
@@ -78,33 +92,71 @@ def escalate_to_fazal(run_id: str, reason: str, context: str) -> str:
     return f"[skeleton] escalation logged for run_id={run_id}"
 
 
+# VT-126: real L0 memory tools (replaced VT-125 stubs).
+#
+# The langchain @tool decorator wraps an observability-decorated impl: the
+# inner ``_write_l0_fragment_impl`` / ``_query_l0_impl`` are wrapped at
+# import time via @tool_step, so each tool call writes one
+# pipeline_steps row with step_kind='l0_write' / 'l0_query' (CL-220) and
+# the TOOL_STEP_REGISTRY entry is created exactly once per process.
+
+_write_l0_fragment_observed = tool_step(
+    step_kind="l0_write",
+    envelope_in=L0WriteInput,
+    envelope_out=L0WriteOutput,
+    step_name="write_l0_fragment",
+)(_write_l0_fragment_impl)
+
+_query_l0_observed = tool_step(
+    step_kind="l0_query",
+    envelope_in=L0QueryInput,
+    envelope_out=L0QueryOutput,
+    step_name="query_l0",
+)(_query_l0_impl)
+
+
 @tool
-def write_l0_fragment_stub(tenant_id: str, content: str, tags: list[str]) -> str:
-    """STUB — append an L0 memory fragment.
+def write_l0_fragment(
+    fragment_type: str,
+    cohort_key: str,
+    content: dict[str, Any],
+) -> dict[str, Any]:
+    """Append a cohort-keyed L0 memory fragment.
 
-    TODO(VT-126): wire real L0 memory write. Today this logs the intent
-    and returns a placeholder ack so the orchestrator-agent can express
-    memory-write intent without crashing.
+    Use for routing decisions, specialist outcomes, or trigger patterns
+    you'd want a future invocation to see — fragments are aggregated
+    across tenants under k-anonymity (CL-28, k=10). NEVER embed tenant-
+    identifying content; the runtime PII gate rejects writes that
+    redact under ``redact_for_log``.
     """
-    logger.info(
-        "[VT-126 STUB] write_l0_fragment tenant_id=%s tags=%s content_len=%d",
-        tenant_id, tags, len(content),
+    # langchain @tool exposes a JSON-schema with `str` (the Literal narrowing
+    # happens inside the impl + DB CHECK constraint). cast keeps mypy --strict
+    # happy at the impl boundary.
+    return _write_l0_fragment_observed(
+        fragment_type=cast("FragmentType", fragment_type),
+        cohort_key=cohort_key,
+        content=content,
     )
-    return "[stub] fragment intent logged; real write deferred to VT-126"
 
 
 @tool
-def query_l0_stub(tenant_id: str, query: str, k: int = 5) -> list[str]:
-    """STUB — query L0 memory.
+def query_l0(
+    fragment_type: str,
+    cohort_key: str,
+    k: int = 5,
+) -> dict[str, Any]:
+    """Recall up to ``k`` L0 fragments for a cohort_key + fragment_type.
 
-    TODO(VT-126): wire real L0 recall. Today returns an empty list so
-    the orchestrator-agent can express memory-read intent.
+    Returns an empty list when no fragment has reached the k-anonymity
+    threshold (observation_count >= 10). Use the recalled fragments as
+    PRIORS for the current routing decision; don't treat them as
+    authoritative.
     """
-    logger.info(
-        "[VT-126 STUB] query_l0 tenant_id=%s k=%d query=%r",
-        tenant_id, k, query,
+    return _query_l0_observed(
+        fragment_type=cast("FragmentType", fragment_type),
+        cohort_key=cohort_key,
+        k=k,
     )
-    return []
 
 
 @tool
@@ -163,8 +215,8 @@ def query_pipeline_history_stub(
 ORCHESTRATOR_AGENT_TOOLS: list[BaseTool] = [
     escalate_to_fazal,
     compose_owner_output_tool,
-    write_l0_fragment_stub,
-    query_l0_stub,
+    write_l0_fragment,
+    query_l0,
     send_whatsapp_template_stub,
     get_subscriber_state_stub,
     query_pipeline_history_stub,
