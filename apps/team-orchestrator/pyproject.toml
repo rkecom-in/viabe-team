@@ -37,6 +37,10 @@ dependencies = [
     "uvicorn[standard]",
     "twilio",
     "logfire>=4.0,<5",
+    # VT-191 — Fernet encryption-at-rest for phone numbers in
+    # phone_token_resolutions. Closes the VT-184 Phase-1 plaintext
+    # loophole (Cond 1 follow-up).
+    "cryptography>=44.0.0",
 ]
 
 [dependency-groups]

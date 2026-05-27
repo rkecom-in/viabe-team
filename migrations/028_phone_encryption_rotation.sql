@@ -1,0 +1,31 @@
+-- 028_phone_encryption_rotation.sql — VT-191 pre-prod gate.
+--
+-- VT-184 Phase-1 stored phone_e164 as PLAINTEXT in
+-- ``phone_token_resolutions.phone_number_encrypted`` with a 3-layer
+-- ⚠️  WARNING (migration 026 COMMENT + module docstring + function
+-- docstring). VT-191 makes the column name honest: Fernet symmetric
+-- encryption via ``TEAM_PHONE_ENCRYPTION_KEY`` env.
+--
+-- This migration ONLY updates the COMMENT (schema metadata). Data
+-- transformation (encrypt existing plaintext rows) lives in a
+-- companion script: ``scripts/vt191_encrypt_existing_rows.py`` (Q2
+-- Option A1 — Cowork plan-review 2026-05-27 locked separation of
+-- concerns: SQL changes schema, Python handles row content).
+--
+-- The script is idempotent (try Fernet.decrypt on each row; if it
+-- succeeds the row is already ciphertext, skip; if it raises
+-- InvalidToken the row is plaintext, encrypt + UPDATE). VT-191 canary
+-- assertion 9 (Cowork Cond 1) verifies ZERO plaintext orphans remain
+-- post-back-fill — the "I forgot to run the script" failure mode is
+-- a CI red, not a silent production lie.
+--
+-- Pure SQL can't call Fernet, so the encryption logic must live in
+-- Python. The pgcrypto extension was considered but rejected (Cowork
+-- plan-review Q2): mismatched encryption layer between writer
+-- (Python Fernet) and migration (SQL pgcrypto) is brittle.
+--
+-- Per CL-417: column SEMANTICS changed (plaintext → ciphertext); no
+-- column name rename. VT-187 §2.1 canonical schema preserved.
+
+COMMENT ON COLUMN phone_token_resolutions.phone_number_encrypted IS
+    'Fernet-encrypted phone_e164 per VT-191. Decrypt via phone_tokens.decrypt_phone(). Key rotation: phone_tokens._rotate_encryption_key().';
