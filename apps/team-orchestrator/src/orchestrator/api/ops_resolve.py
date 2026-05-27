@@ -6,7 +6,7 @@ Flow (per CL-390 + VT-188 + VT-191):
 1. Verify ``X-Internal-Secret`` header (CL-72 — internal API secret).
 2. Verify ``X-Operator-Jwt`` header carries an HS256-signed operator
    claim (signed by team-web's ``issueOperatorJwt`` with
-   ``SUPABASE_JWT_SECRET``). The orchestrator validates the same secret.
+   ``OPERATOR_JWT_SECRET``). The orchestrator validates the same secret.
 3. Set ``app.jwt.operator_claim`` GUC + ``app.current_tenant`` if known
    (RLS substrate from VT-188).
 4. Call ``resolve_phone_token_audited(phone_token, operator_id)`` —
@@ -61,10 +61,10 @@ def _verify_operator_jwt(jwt_str: str | None) -> dict[str, Any]:
     """
     if not jwt_str:
         raise HTTPException(status_code=403, detail="X-Operator-Jwt missing")
-    secret = os.environ.get("SUPABASE_JWT_SECRET", "")
+    secret = os.environ.get("OPERATOR_JWT_SECRET", "")
     if not secret:
         raise HTTPException(
-            status_code=500, detail="SUPABASE_JWT_SECRET not configured"
+            status_code=500, detail="OPERATOR_JWT_SECRET not configured"
         )
     try:
         payload = pyjwt.decode(

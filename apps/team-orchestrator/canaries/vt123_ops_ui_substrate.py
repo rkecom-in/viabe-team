@@ -24,7 +24,7 @@ Wall-clock budget ≤ 60s. Cost budget: 0 paise.
 - A2: orchestrator proxy returns 403 with valid internal-secret but
   missing operator-JWT
 - A3: orchestrator proxy returns decrypted phone with valid internal-
-  secret + valid operator-claim JWT (signed via SUPABASE_JWT_SECRET);
+  secret + valid operator-claim JWT (signed via OPERATOR_JWT_SECRET);
   audit row written to ``privacy_audit_log``
 - A4: synthetic 50-step pipeline_run fixture inserts cleanly under
   service-role
@@ -38,7 +38,7 @@ Wall-clock budget ≤ 60s. Cost budget: 0 paise.
 - A8: operator-claim JWT TTL is 5 min (matches lib/auth/operator-jwt.ts)
 - A9: ANTHROPIC ABSENT preflight (defense-in-depth)
 
-If `SUPABASE_JWT_SECRET` / `FAZAL_OWNER_UUID` / `INTERNAL_API_SECRET`
+If `OPERATOR_JWT_SECRET` / `FAZAL_OWNER_UUID` / `INTERNAL_API_SECRET`
 are absent from the env (Q2 Fazal-async drop pending), the live
 assertions skip with a BLOCKED status — canary returns exit 0 with
 the BLOCKED reason printed so Cowork can route appropriately.
@@ -97,7 +97,7 @@ def _preflight() -> None:
         )
         sys.exit(2)
     extras = {
-        "SUPABASE_JWT_SECRET": bool(os.environ.get("SUPABASE_JWT_SECRET")),
+        "OPERATOR_JWT_SECRET": bool(os.environ.get("OPERATOR_JWT_SECRET")),
         "INTERNAL_API_SECRET": bool(os.environ.get("INTERNAL_API_SECRET")),
         "TEAM_PHONE_ENCRYPTION_KEY": bool(
             os.environ.get("TEAM_PHONE_ENCRYPTION_KEY")
@@ -114,7 +114,7 @@ def _have_live_proxy_env() -> bool:
     return all(
         os.environ.get(k)
         for k in (
-            "SUPABASE_JWT_SECRET",
+            "OPERATOR_JWT_SECRET",
             "INTERNAL_API_SECRET",
             "TEAM_PHONE_ENCRYPTION_KEY",
         )
@@ -125,7 +125,7 @@ def _issue_test_jwt(operator_id: str) -> str:
     """Mirrors lib/auth/operator-jwt.ts ``issueOperatorJwt`` shape."""
     import jwt as pyjwt
 
-    secret = os.environ["SUPABASE_JWT_SECRET"]
+    secret = os.environ["OPERATOR_JWT_SECRET"]
     now = int(time.time())
     payload = {
         "sub": operator_id,
@@ -315,7 +315,7 @@ def run_canary() -> int:
         encoded = _issue_test_jwt(op_id)
         decoded = pyjwt.decode(
             encoded,
-            os.environ["SUPABASE_JWT_SECRET"],
+            os.environ["OPERATOR_JWT_SECRET"],
             algorithms=["HS256"],
             audience="authenticated",
         )
@@ -332,7 +332,7 @@ def run_canary() -> int:
         blocked(
             8,
             "operator-claim JWT TTL check",
-            "SUPABASE_JWT_SECRET absent (Q2 Fazal-async drop pending)",
+            "OPERATOR_JWT_SECRET absent (Q2 Fazal-async drop pending)",
         )
 
     # ---------------- A1-A3 — proxy endpoint flows ----------------

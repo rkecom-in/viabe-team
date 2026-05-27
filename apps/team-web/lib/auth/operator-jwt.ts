@@ -4,7 +4,7 @@
  * The orchestrator's stored function `resolve_phone_token_audited` is
  * granted to `app_operator_role`; the RLS policy on the audit log table
  * inspects the JWT for `operator_claim=true` + `operator_id`. This module
- * mints + verifies HS256 tokens against `SUPABASE_JWT_SECRET`.
+ * mints + verifies HS256 tokens against `OPERATOR_JWT_SECRET`.
  *
  * Per CL-88: every JWT carries `aud='authenticated'` + a `sub` (UUID).
  * Per CL-390: every resolve is audit-logged; the `operator_id` claim
@@ -13,7 +13,7 @@
 
 import { SignJWT, jwtVerify, type JWTPayload } from 'jose'
 
-const JWT_SECRET = process.env.SUPABASE_JWT_SECRET ?? ''
+const JWT_SECRET = process.env.OPERATOR_JWT_SECRET ?? ''
 const _OPERATOR_TOKEN_TTL_SEC = 60 * 5  // 5 min — short-lived for [resolve].
 
 
@@ -28,7 +28,7 @@ export interface OperatorClaim extends JWTPayload {
 function _secretBytes(): Uint8Array {
   if (!JWT_SECRET) {
     throw new Error(
-      'operator-jwt: SUPABASE_JWT_SECRET env must be set on server',
+      'operator-jwt: OPERATOR_JWT_SECRET env must be set on server',
     )
   }
   return new TextEncoder().encode(JWT_SECRET)
