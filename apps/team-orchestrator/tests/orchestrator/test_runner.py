@@ -1,9 +1,12 @@
 """VT-3.3a-fix-3 (CL-96) tests — pipeline_steps writers are replay-idempotent.
 
-record_brain_pending / record_webhook_received use ON CONFLICT (run_id,
-step_seq) DO NOTHING so a DBOS step re-execution after a crash (SQL committed
-but the step not yet recorded) cannot duplicate an observability row.
+``record_webhook_received`` uses ON CONFLICT (run_id, step_seq) DO NOTHING
+so a DBOS step re-execution after a crash (SQL committed but the step not
+yet recorded) cannot duplicate an observability row.
 (Column renamed step_index→step_seq under VT-187 / migration 025.)
+VT-193 deleted ``record_brain_pending`` + its idempotency test since the
+brain path now invokes the supervisor graph via ``dispatch_brain``; DBOS
+workflow-id boundary handles re-execution at that layer.
 
 Require a live Postgres via ``DATABASE_URL`` plus the dbos stack; run in the CI
 ``orchestrator`` job.
@@ -68,17 +71,6 @@ def _step_count(dsn: str, run_id: str, step_seq: int) -> int:
             "WHERE run_id = %s AND step_seq = %s",
             (run_id, step_seq),
         ).fetchone()[0]
-
-
-def test_record_brain_pending_idempotent(runner_ctx):
-    """A re-executed record_brain_pending leaves exactly one row, no exception."""
-    from orchestrator.runner import record_brain_pending
-
-    tenant_id, run_id = _new_run(runner_ctx.dsn)
-    record_brain_pending(tenant_id, run_id, "substantive owner message")
-    record_brain_pending(tenant_id, run_id, "substantive owner message")  # replay
-
-    assert _step_count(runner_ctx.dsn, run_id, 1) == 1
 
 
 def test_record_webhook_received_idempotent(runner_ctx):

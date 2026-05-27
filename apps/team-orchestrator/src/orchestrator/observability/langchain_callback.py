@@ -109,6 +109,16 @@ class OrchestratorReasoningCallback(BaseCallbackHandler):
                         output_tokens=usage_data.get("output_tokens", 0),
                     )
                     self.usage.cost_paise += incremental_cost
+                    # VT-193 fix: propagate the per-step cost into the
+                    # write_step row. Prior VT-125 shape only updated
+                    # ``self.usage.cost_paise`` cumulatively; the
+                    # ``write_step`` row received cost_paise=0 because
+                    # the dict had no ``cost_paise`` key. pipeline_runs.
+                    # total_cost_paise sums these per-step values, so
+                    # the bug silently zeroed every brain-wired run's
+                    # cost reporting (surfaced by sprint1_e2e_smoke.py
+                    # A3 + vt193_brain_wiring A2 / A6).
+                    usage_data["cost_paise"] = incremental_cost
                 except Exception as exc:  # noqa: BLE001
                     logger.warning(
                         "VT-125 cost computation skipped",

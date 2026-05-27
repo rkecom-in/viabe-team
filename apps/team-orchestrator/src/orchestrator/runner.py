@@ -225,26 +225,6 @@ def record_inbound_message_sid(tenant_id: str, message_sid: str) -> bool:
         return cur.rowcount == 1
 
 
-@DBOS.step()
-def record_brain_pending(tenant_id: str, run_id: str, reason: str) -> None:
-    """Record that this run is awaiting the brain (step_seq=1, VT-3.4 unwired).
-
-    Idempotency is provided by the DBOS workflow-id boundary for COMPLETED
-    steps. A crash between the SQL commit and DBOS recording the step causes
-    re-execution on workflow resume — hence the ON CONFLICT (run_id, step_seq)
-    DO NOTHING clause. Migration 014's UNIQUE (run_id, step_seq) constraint
-    makes ON CONFLICT well-defined.
-    """
-    with tenant_connection(tenant_id) as conn:
-        conn.execute(
-            "INSERT INTO pipeline_steps "
-            "(run_id, tenant_id, step_seq, step_kind, output_envelope, status) "
-            "VALUES (%s, %s, 1, 'agent_invocation', %s, 'completed') "
-            "ON CONFLICT (run_id, step_seq) DO NOTHING",
-            (run_id, tenant_id, Jsonb({"reason": reason})),
-        )
-
-
 @DBOS.workflow()
 def webhook_pipeline_run(
     tenant_id: str, run_id: str, twilio_fields: dict
@@ -301,10 +281,20 @@ def webhook_pipeline_run(
         handler_name = result.handler_name
         HANDLERS[handler_name](event, state)
     elif result.kind == "brain":
-        # VT-3.4 brain not yet wired — record a brain-pending step and mark the
-        # run 'escalated' so it is not silently reported as completed (Pillar 7).
-        record_brain_pending(tenant_id, run_id, result.reason)
-        final_status = "escalated"
+        # VT-193: brain wired into supervisor graph via dispatch_brain.
+        # Replaces the VT-3.4 placeholder (record_brain_pending + 'escalated'
+        # final status) that the 2026-05-27 E2E surfaced. Imported lazily
+        # so non-brain webhook paths don't pay the langchain/langgraph
+        # import cost.
+        from orchestrator.agent.dispatch import dispatch_brain
+
+        dispatch_result = dispatch_brain(
+            event=event,
+            state=state,
+            run_id=UUID(run_id),
+            tenant_id=UUID(tenant_id),
+        )
+        final_status = dispatch_result.final_status
     # result.kind == "reject" → observability-only; the run ends clean (completed).
 
     close_webhook_run(tenant_id, run_id, final_status)
