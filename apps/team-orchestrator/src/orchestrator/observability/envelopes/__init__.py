@@ -52,6 +52,17 @@ from .dsr_processed import (
     DsrProcessedInput,
     DsrProcessedOutput,
 )
+from .aborted_hard_limit import (
+    AbortedHardLimitEnvelope,
+    AbortedHardLimitInput,
+    AbortedHardLimitOutput,
+    HardLimitAxis,
+)
+from .compose_output import (
+    ComposeOutputEnvelope,
+    ComposeOutputInput,
+    ComposeOutputOutput,
+)
 from .error import (
     ErrorEnvelope,
     ErrorInput,
@@ -134,6 +145,8 @@ STEP_KIND_REGISTRY: dict[str, type[StepEnvelope]] = {
     "tenant_isolation_breach": TenantIsolationBreachEnvelope,
     "l0_write": L0WriteEnvelope,
     "l0_query": L0QueryEnvelope,
+    "compose_output": ComposeOutputEnvelope,
+    "aborted_hard_limit": AbortedHardLimitEnvelope,
 }
 
 
@@ -225,6 +238,8 @@ __all__ = [
     "TenantIsolationBreachEnvelope",
     "L0WriteEnvelope",
     "L0QueryEnvelope",
+    "ComposeOutputEnvelope",
+    "AbortedHardLimitEnvelope",
     # Input/Output sub-models
     "WebhookReceivedInput",
     "WebhookClassifiedInput",
@@ -263,4 +278,9 @@ __all__ = [
     "L0WriteOutput",
     "L0QueryInput",
     "L0QueryOutput",
+    "ComposeOutputInput",
+    "ComposeOutputOutput",
+    "AbortedHardLimitInput",
+    "AbortedHardLimitOutput",
+    "HardLimitAxis",
 ]
