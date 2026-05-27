@@ -41,27 +41,51 @@ message is minimal; bound prevents runaway).
 - A7: wall-clock total < 30s
 - A8: total Anthropic cost < 10 paise (synthetic input bound)
 
-## Findings (2026-05-27 first run)
+## Pre-VT-193 results (2026-05-27 first run; sha 2404096 + 791d89e)
 
-Substrate proven at 6/8 PASS. The 2 FAIL surface a real structural
-seam — NOT a regression:
+Substrate proven at 6/8 PASS. The 2 FAIL surfaced the missing
+runner → supervisor seam:
 
-- A1 FAIL (`status='escalated'` not in {completed, terminal})
-- A3 FAIL (zero `cost_paise > 0` rows)
+- A1 FAIL (`status='escalated'` — `runner.py:303-307` placeholder)
+- A3 FAIL (zero `cost_paise > 0` rows — no real Anthropic call)
 
-**Finding 3 (CORRECTED 2026-05-27):** The `agent_invocation` envelope
-visible in step_kinds is `record_brain_pending`'s placeholder write per
-``runner.py:303-307``, NOT a real ``OrchestratorAgentDriver`` invocation.
-The supervisor + agent + callback + L0 code is built across
-VT-125/126/27/180/182/183 but the call site from
-``pre_filter.brain`` → supervisor graph does not exist. **VT-193 closes
-that seam.** After VT-193 lands, re-run this canary; expect
-``agent_reasoning_step`` rows + ``total_cost_paise > 0`` (A1 → completed,
-A3 → PASS).
+VT-193 (PR #84 sha `f7de7a1`) closed that seam.
 
-Three legitimate Sprint 2 followups (allocated separately by Cowork):
-``TEAM_TWILIO_MOCK_MODE``, ``twilio_inbound_events`` FK cascade, DBOS
-``purge_workflow_inputs_scheduled`` registration.
+## Post-VT-193 results (2026-05-27 re-run; sha f7de7a1)
+
+**Sprint 1 close-out PROVEN — load-bearing assertions PASS.**
+
+```
+[1] PASS — pipeline_runs status='completed' (was 'escalated' pre-VT-193)
+[2] PASS — pipeline_steps with canonical per-field columns; 5 step_kinds:
+           agent_invocation + webhook_received + agent_reasoning_step +
+           state_transition + compose_output
+[3] PASS — ≥1 anthropic-mediated step row; cost_paise>0; model_used=opus-4-7
+[4] PASS — 3 envelope rows with non-null output_envelope
+[5] PASS — privacy_audit_log rows = 0 for this run
+[6] PASS — L0 query empty for fresh cohort (k=10 gate working)
+[7] FAIL — wall-clock 30.58s > 30s budget (Opus 4.7 reasoning overhead;
+           budget set in pre-brain-wired era; revise to <60s in follow-up)
+[8] FAIL — total_cost_paise 819 > 10 paise budget (₹8.19 actual cost per
+           Opus 4.7 dispatch; 5351 input tokens + 334 output tokens;
+           budget set in pre-brain-wired era; revise to <1500 paise in
+           follow-up; cost-architecture finding tracked as Sprint 2 CL +
+           VT-N for prompt caching)
+```
+
+A7 + A8 are honest budget overruns — load-bearing wiring proof (A1+A3)
+holds. Sprint 1 close-out passes.
+
+### Sprint 2 follow-ups (Cowork-allocated)
+
+- **prompt caching** (Sprint 2 anchor) — Anthropic `cache_control` markers
+  on system prompt + tool inventory; target <100 paise/dispatch
+- **canary refinement** — revise A7 (<60s) + A8 (<1500 paise) budgets;
+  also moves VT-193's A5 to in-process call for deterministic trip
+- **TEAM_TWILIO_MOCK_MODE** — env flag for status_ping send path during E2E
+- **twilio_inbound_events FK CASCADE** — cleanup parity for DSR-purge
+- **DBOS purge_workflow_inputs_scheduled** — registration fix (background
+  scheduler warning)
 """
 
 from __future__ import annotations
