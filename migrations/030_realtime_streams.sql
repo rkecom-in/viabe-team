@@ -42,10 +42,19 @@ ALTER TABLE pipeline_steps REPLICA IDENTITY FULL;
 ALTER TABLE pipeline_runs REPLICA IDENTITY FULL;
 
 -- 2. Add to Realtime publication. `supabase_realtime` is the default
--- publication created by the Supabase Realtime extension. Use a defensive
--- DO block so re-running the migration is idempotent.
+-- publication created by the Supabase Realtime extension. CI runs
+-- against vanilla Postgres without that extension; the DO block
+-- short-circuits when the publication doesn't exist so the migration
+-- stays idempotent in both environments. Production Supabase deploys
+-- have the publication; the table will be added there.
 DO $$
 BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_publication WHERE pubname = 'supabase_realtime'
+    ) THEN
+        RAISE NOTICE 'supabase_realtime publication absent — skipping ADD TABLE (vanilla Postgres / CI env)';
+        RETURN;
+    END IF;
     IF NOT EXISTS (
         SELECT 1 FROM pg_publication_tables
         WHERE pubname = 'supabase_realtime'
