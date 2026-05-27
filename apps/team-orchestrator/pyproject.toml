@@ -41,6 +41,9 @@ dependencies = [
     # phone_token_resolutions. Closes the VT-184 Phase-1 plaintext
     # loophole (Cond 1 follow-up).
     "cryptography>=44.0.0",
+    # VT-123 — verify HS256 operator-claim JWTs signed by team-web
+    # (lib/auth/operator-jwt.ts) for the resolve-phone decrypt proxy.
+    "pyjwt>=2.10.0",
 ]
 
 [dependency-groups]
