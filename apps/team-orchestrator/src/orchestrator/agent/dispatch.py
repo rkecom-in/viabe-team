@@ -139,11 +139,17 @@ def dispatch_brain(
     # Cowork brief correction (the VT-179 canonical kind).
     _write_dispatch_entry(run_id=run_id, tenant_id=tenant_id, event=event)
 
-    if not os.environ.get("ANTHROPIC_API_KEY"):
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    # Tests monkeypatch this env to sentinel values like "test-sentinel"
+    # (see test_twilio_ingress.py) to exercise non-brain seams without
+    # making real SDK calls. Real Anthropic keys are sk-ant-…; gate on
+    # that prefix so tests with sentinel values fall through to the
+    # placeholder escalated-status path.
+    if not api_key.startswith("sk-ant-"):
         logger.warning(
-            "dispatch_brain: ANTHROPIC_API_KEY absent; skipping supervisor "
-            "invocation + returning escalated (test-mode + pre-prod-key "
-            "fallback)",
+            "dispatch_brain: ANTHROPIC_API_KEY missing or sentinel-shaped; "
+            "skipping supervisor invocation + returning escalated "
+            "(test-mode + pre-prod-key fallback)",
             extra={"run_id": str(run_id), "tenant_id": str(tenant_id)},
         )
         return DispatchResult(
