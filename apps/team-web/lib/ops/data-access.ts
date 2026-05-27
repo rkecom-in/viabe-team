@@ -1,7 +1,7 @@
 /**
  * Server-side data-access helpers for the Ops Console (VT-123).
  *
- * All queries run via `serverServiceRoleClient()` (CL-52 cold-read
+ * All queries run via `serverSecretClient()` (CL-52 cold-read
  * pattern); RLS is bypassed by service-role. Callers MUST have already
  * passed `requireFazal()` before invoking these.
  *
@@ -12,7 +12,7 @@
  * predicates; rollups are a separate VT-N.
  */
 
-import { serverServiceRoleClient } from '@/lib/supabase-client'
+import { serverSecretClient } from '@/lib/supabase-client'
 
 export interface WorkspaceCounters {
   in_flight_runs: number
@@ -89,7 +89,7 @@ export interface PipelineStepRow {
 
 
 export async function fetchWorkspaceCounters(): Promise<WorkspaceCounters> {
-  const client = serverServiceRoleClient()
+  const client = serverSecretClient()
   const todayStart = new Date()
   todayStart.setUTCHours(0, 0, 0, 0)
   const todayIso = todayStart.toISOString()
@@ -130,7 +130,7 @@ export async function fetchWorkspaceCounters(): Promise<WorkspaceCounters> {
 
 
 export async function fetchTopTenants(limit = 10): Promise<TopTenantRow[]> {
-  const client = serverServiceRoleClient()
+  const client = serverSecretClient()
   const todayStart = new Date()
   todayStart.setUTCHours(0, 0, 0, 0)
   const { data } = await client.rpc('ops_top_tenants_today', {
@@ -142,7 +142,7 @@ export async function fetchTopTenants(limit = 10): Promise<TopTenantRow[]> {
 
 
 export async function fetchInFlightRuns(limit = 20): Promise<InFlightRun[]> {
-  const client = serverServiceRoleClient()
+  const client = serverSecretClient()
   const { data } = await client
     .from('pipeline_runs')
     .select('id, tenant_id, status, started_at')
@@ -166,7 +166,7 @@ export async function fetchInFlightRuns(limit = 20): Promise<InFlightRun[]> {
 export async function fetchTenantProfile(
   tenantId: string,
 ): Promise<TenantProfile | null> {
-  const client = serverServiceRoleClient()
+  const client = serverSecretClient()
   const { data } = await client
     .from('tenants')
     .select('id, business_name, plan_tier, phase')
@@ -186,7 +186,7 @@ export async function fetchTenantTimeline(
   tenantId: string,
   days = 30,
 ): Promise<TenantTimelineEntry[]> {
-  const client = serverServiceRoleClient()
+  const client = serverSecretClient()
   const since = new Date()
   since.setUTCDate(since.getUTCDate() - days)
   const { data } = await client
@@ -222,7 +222,7 @@ export async function fetchRecentCampaigns(
   tenantId: string,
   limit = 5,
 ): Promise<RecentCampaign[]> {
-  const client = serverServiceRoleClient()
+  const client = serverSecretClient()
   const { data } = await client
     .from('campaigns')
     .select('id, status, generated_at')
@@ -245,7 +245,7 @@ export async function fetchPrivacyAudit(
   tenantId: string,
   limit = 20,
 ): Promise<PrivacyAuditEntry[]> {
-  const client = serverServiceRoleClient()
+  const client = serverSecretClient()
   const { data } = await client
     .from('privacy_audit_log')
     .select('id, event_type, actor, created_at, payload')
@@ -265,7 +265,7 @@ export async function fetchPrivacyAudit(
 export async function fetchRunReplay(
   runId: string,
 ): Promise<PipelineStepRow[]> {
-  const client = serverServiceRoleClient()
+  const client = serverSecretClient()
   const { data } = await client
     .from('pipeline_steps')
     .select(
