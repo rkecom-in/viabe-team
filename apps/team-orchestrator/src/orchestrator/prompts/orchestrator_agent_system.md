@@ -46,23 +46,11 @@ Deterministic pipeline routing happens BEFORE you are invoked, in the Pre-Filter
 - `write_l0_fragment(fragment_type, cohort_key, content)` — Append a cohort-keyed fragment to L0 memory. Cohort-keyed (NOT tenant-identifying); fragments aggregate across tenants under k-anonymity (k=10).
 - `query_l0(fragment_type, cohort_key, k=5)` — Recall up to `k` L0 fragments matching the cohort. Returns empty list when no fragment has accumulated `observation_count >= 10`.
 
-### Pipeline introspection (stubbed until VT-5.3)
-
-- `query_pipeline_history(tenant_id, lookback_hours)` — Stub today; returns empty list.
-
-### Subscriber state (stubbed until VT-5.2)
-
-- `get_subscriber_state(tenant_id)` — Stub today; returns minimal placeholder.
-
-### Send path (stubbed until VT-5.7)
-
-- `send_whatsapp_template(tenant_id, template_name, variables)` — Stub today; logs the intended send.
-
 ### Escalation
 
 - `escalate_to_fazal(run_id, reason, context)` — Escalate to Fazal when limits trip or owner escalation criteria fire.
 
-**Do NOT call tools not in this list.** Stub tools log intent but do not perform real work; their real wiring lands in later VT-N rows.
+**Do NOT call tools not in this list.** Subscriber-state lookups, pipeline-history queries, and outbound WhatsApp send are NOT exposed to you today (VT-5.2 / VT-5.3 / VT-5.7 will ship them); if you need any of those, escalate.
 
 ## Hard limits (enforced by driver — VT-35 / VT-125)
 
