@@ -31,7 +31,6 @@ from dataclasses import dataclass, field
 from typing import Any
 from uuid import UUID
 
-from orchestrator.agent.cost import compute_cost_paise
 from orchestrator.observability.decorators import _observability_context
 
 logger = logging.getLogger(__name__)
