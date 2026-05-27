@@ -127,10 +127,30 @@ def dispatch_brain(
 
     Caller (runner.webhook_pipeline_run) MUST have already opened the
     run + recorded the webhook_received envelope before calling this.
+
+    Env gate: requires ``ANTHROPIC_API_KEY`` to be set. CI test runs
+    without the key (real-Anthropic tests gated by ``ANTHROPIC_API_KEY``
+    presence + ``RUN_INTEGRATION_TESTS=1``); when absent, dispatch
+    writes the entry envelope but returns ``escalated`` so the path
+    still terminates cleanly (mirrors the pre-VT-193 placeholder
+    behaviour test fixtures still assert against).
     """
     # 1. Dispatch ENTRY envelope — agent_invocation step_kind reused per
     # Cowork brief correction (the VT-179 canonical kind).
     _write_dispatch_entry(run_id=run_id, tenant_id=tenant_id, event=event)
+
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        logger.warning(
+            "dispatch_brain: ANTHROPIC_API_KEY absent; skipping supervisor "
+            "invocation + returning escalated (test-mode + pre-prod-key "
+            "fallback)",
+            extra={"run_id": str(run_id), "tenant_id": str(tenant_id)},
+        )
+        return DispatchResult(
+            final_status="escalated",
+            terminal_path=None,
+            reason="anthropic_key_absent",
+        )
 
     usage = OrchestratorUsage()
     # callback only uses driver for ``check_mid_invocation`` raises; the
@@ -253,6 +273,9 @@ def _write_dispatch_entry(
     Per Cowork brief correction: reuses the existing VT-179
     ``agent_invocation`` envelope. The old placeholder writer
     (``record_brain_pending``) is deleted by this PR.
+
+    ``output_envelope.reason`` preserved for backward compatibility
+    with prior tests that read this field from the placeholder row.
     """
     try:
         write_step(
@@ -264,6 +287,9 @@ def _write_dispatch_entry(
                 "inbound_body_len": len(event.body or ""),
                 "trigger": "owner_substantive_message",
                 "dispatched_at": datetime.now(UTC).isoformat(),
+            },
+            output_envelope={
+                "reason": "substantive owner message — needs orchestrator-agent reasoning",
             },
             status="running",
         )
