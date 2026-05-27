@@ -30,6 +30,12 @@ class AgentReasoningStepOutput(BaseModel):
     # round-trip; None when Logfire is disabled or no active span.
     # Surfaced via opentelemetry.trace.get_current_span() in agent_callback.
     logfire_trace_id: str | None = None
+    # VT-194 — Anthropic prompt-caching observability. Default 0 keeps
+    # backward compatibility with pre-VT-194 rows (CL-417 per-field
+    # column shape). First dispatch within TTL: cache_creation_input_tokens > 0.
+    # Subsequent dispatches within TTL: cache_read_input_tokens > 0.
+    cache_creation_input_tokens: int = 0
+    cache_read_input_tokens: int = 0
 
 
 class AgentReasoningStepEnvelope(StepEnvelope):

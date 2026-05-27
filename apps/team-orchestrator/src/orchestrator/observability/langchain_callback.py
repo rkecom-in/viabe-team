@@ -179,6 +179,17 @@ class OrchestratorReasoningCallback(BaseCallbackHandler):
             if isinstance(usage, dict):
                 out["input_tokens"] = int(usage.get("input_tokens", 0) or 0)
                 out["output_tokens"] = int(usage.get("output_tokens", 0) or 0)
+                # VT-194 prompt-caching fields. Present when
+                # ``cache_control`` markers are set on the system prompt
+                # (per orchestrator_agent.ORCHESTRATOR_AGENT_SYSTEM_MESSAGE).
+                # First dispatch within TTL: cache_creation_input_tokens > 0.
+                # Subsequent dispatches within TTL: cache_read_input_tokens > 0.
+                out["cache_creation_input_tokens"] = int(
+                    usage.get("cache_creation_input_tokens", 0) or 0
+                )
+                out["cache_read_input_tokens"] = int(
+                    usage.get("cache_read_input_tokens", 0) or 0
+                )
             model = llm_output.get("model_name") or llm_output.get("model")
             if model:
                 out["model"] = model
@@ -199,6 +210,18 @@ class OrchestratorReasoningCallback(BaseCallbackHandler):
                             out["output_tokens"] = int(
                                 usage_md.get("output_tokens", 0) or 0
                             )
+                            # VT-194: also scan usage_metadata for cache
+                            # fields when the primary llm_output surface
+                            # didn't carry them.
+                            if not out.get("cache_creation_input_tokens"):
+                                input_details = usage_md.get("input_token_details", {})
+                                if isinstance(input_details, dict):
+                                    out["cache_creation_input_tokens"] = int(
+                                        input_details.get("cache_creation", 0) or 0
+                                    )
+                                    out["cache_read_input_tokens"] = int(
+                                        input_details.get("cache_read", 0) or 0
+                                    )
                         response_md = getattr(msg, "response_metadata", None)
                         if isinstance(response_md, dict) and "model" not in out:
                             model = response_md.get("model_name") or response_md.get(
@@ -251,6 +274,15 @@ class OrchestratorReasoningCallback(BaseCallbackHandler):
                     "action": None,
                     "action_args": None,
                     "logfire_trace_id": None,
+                    # VT-194 prompt-caching observability — surfaces per-step
+                    # cache creation/read so the canary + Ops Console can
+                    # report cache effectiveness.
+                    "cache_creation_input_tokens": int(
+                        usage_data.get("cache_creation_input_tokens", 0) or 0
+                    ),
+                    "cache_read_input_tokens": int(
+                        usage_data.get("cache_read_input_tokens", 0) or 0
+                    ),
                 },
                 decision_rationale=(
                     think_text_redacted[:400] if think_text_redacted else None
