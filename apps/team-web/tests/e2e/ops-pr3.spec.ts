@@ -52,18 +52,16 @@ test.describe('VT-201 PR-3 — operator-awareness affordances', () => {
     fazalJwt,
   }) => {
     expect(fazalJwt).toBeTruthy()
-    const res = await page.goto('/team/ops')
+    // Navigate to /team/ops/stream rather than /team/ops because
+    // /team/ops/page.tsx (VT-123) has no try/catch on its Supabase
+    // calls — without a real backing DB it 500s on Promise.all.
+    // The banner lives in the shared ops/layout.tsx so any /team/ops/*
+    // path renders it; /ops/stream is already Supabase-failure-tolerant
+    // (per VT-201 PR-3 fix-1). Banner severity is layout-level state.
+    const res = await page.goto('/team/ops/stream')
     expect(page.url(), `landed on ${page.url()} (status ${res?.status() ?? '?'})`).not.toContain('/login')
-    // Diagnostic: log the page HTML if the banner isn't found so we
-    // can see the actual rendered output in CI artifacts.
     const banner = page.locator('[data-component="sticky-banner-live"]').first()
-    try {
-      await expect(banner).toBeVisible({ timeout: 5_000 })
-    } catch (err) {
-      const body = await page.content()
-      console.error('A10 page HTML (first 3000 chars):', body.slice(0, 3000))
-      throw err
-    }
+    await expect(banner).toBeVisible({ timeout: 10_000 })
     const severity = await banner.getAttribute('data-severity')
     expect(['green', 'yellow', 'red']).toContain(severity)
   })
