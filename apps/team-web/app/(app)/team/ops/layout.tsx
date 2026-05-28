@@ -14,22 +14,29 @@ import { fetchBannerCounts } from '@/lib/ops/banner'
 export const dynamic = 'force-dynamic'
 
 export default async function OpsLayout({ children }: { children: ReactNode }) {
-  // The banner is only useful to authed operators; render-time auth
-  // mismatch is rare in Phase-1 (single Fazal). Skip the banner on
-  // auth failure rather than redirect — child pages handle their own
-  // requireFazal + redirect. Likewise tolerate transient Supabase
-  // failures (CI stub, dev offline) — the page-level data fetches
-  // still surface their own errors; the banner is not load-bearing.
-  let counts = null
+  // The banner is only useful to authed operators; on auth failure
+  // hide it entirely. On data-fetch failure (Supabase stub, transient
+  // outage) render the banner with zero counts — the client poll
+  // recovers as soon as the backend is reachable.
+  let counts: Awaited<ReturnType<typeof fetchBannerCounts>> | null = null
+  let isAuthed = false
   try {
     await requireFazal()
-    counts = await fetchBannerCounts()
+    isAuthed = true
   } catch (err) {
-    if (err instanceof UnauthorizedError) {
-      counts = null
-    } else {
-      console.error('OpsLayout: banner fetch failed; skipping banner', err)
-      counts = null
+    if (!(err instanceof UnauthorizedError)) throw err
+  }
+  if (isAuthed) {
+    try {
+      counts = await fetchBannerCounts()
+    } catch (err) {
+      console.error('OpsLayout: banner fetch failed; rendering zero counts', err)
+      counts = {
+        escalations_24h: 0,
+        aborted_hard_limits_24h: 0,
+        errors_24h: 0,
+        refreshed_at: new Date().toISOString(),
+      }
     }
   }
 
