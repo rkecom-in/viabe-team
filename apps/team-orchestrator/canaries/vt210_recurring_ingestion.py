@@ -233,7 +233,7 @@ def run_canary() -> int:
     app.include_router(router)
     client = TestClient(app)
 
-    push_secret = "vt210-canary-secret"
+    push_secret = "canary-" + uuid4().hex[:12]  # gitleaks:allow
     with pool.connection() as conn:
         # Seed a tenant_oauth_tokens row with push_secret for google_sheet
         from cryptography.fernet import Fernet
