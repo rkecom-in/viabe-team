@@ -35,6 +35,14 @@ PR-1 assertions (4 of 6):
 
 PR-2 will add A3 (history query <3s). PR-3 will add A4 (free-text
 <1s after tsvector migration).
+
+VT-216 update:
+- A9 reframed from ILIKE → tsvector @@ plainto_tsquery + EXPLAIN check
+  verifying the GIN index ``pipeline_steps_envelope_search_tsv_gin`` is
+  picked by the planner.
+- A14 added: synthetic 1M-row p95 < 200ms scale check. **Gated by
+  ``VT216_SCALE_CANARY=1``** — run during release prep, not CI (seed
+  step is ~30s + 1M rows × 20 query samples is heavy).
 """
 
 from __future__ import annotations
@@ -357,24 +365,108 @@ def run_canary() -> int:
         expected={"pages": 3, "total_ids": 15, "distinct": 15},
     )
 
-    # A9 — ILIKE free-text search (per Cowork lock; tsvector deferred to VT-215)
+    # A9 — tsvector free-text search (VT-216 replaces VT-201 PR-2 ILIKE)
+    # Parity check: same marker returns same row-set vs the prior
+    # ILIKE behavior. EXPLAIN check: query plan uses the GIN index.
     with pool.connection() as conn, conn.cursor() as cur:
         cur.execute(
             "SELECT id FROM pipeline_steps "
-            "WHERE id = ANY(%s) AND output_envelope::text ILIKE %s",
-            (history_step_ids, f"%{marker}%"),
+            "WHERE id = ANY(%s) "
+            "AND envelope_search_tsv @@ plainto_tsquery('english', %s)",
+            (history_step_ids, marker),
         )
         matches = cur.fetchall()
-    pass_9 = len(matches) == 1
+
+        cur.execute(
+            "EXPLAIN SELECT id FROM pipeline_steps "
+            "WHERE envelope_search_tsv @@ plainto_tsquery('english', %s)",
+            (marker,),
+        )
+        plan_rows = cur.fetchall()
+    plan_text = "\n".join(
+        (r[0] if isinstance(r, tuple) else next(iter(r.values()))) for r in plan_rows
+    )
+    pass_9 = (
+        len(matches) == 1
+        and "pipeline_steps_envelope_search_tsv_gin" in plan_text
+    )
     assertion(
         9,
-        f"ILIKE free-text: distinctive marker '{marker}' returns 1 row",
+        f"tsvector free-text: marker '{marker}' returns 1 row + GIN index used",
         pass_9,
-        observed={"match_count": len(matches), "marker": marker},
-        expected={"match_count": 1},
+        observed={
+            "match_count": len(matches),
+            "marker": marker,
+            "plan_uses_gin": "pipeline_steps_envelope_search_tsv_gin" in plan_text,
+            "plan_excerpt": plan_text[:300],
+        },
+        expected={"match_count": 1, "plan_uses_gin": True},
     )
 
+    # A14 — synthetic 1M-row p95 < 200ms (VT-216 scale check)
+    # Gated by VT216_SCALE_CANARY=1 so CI default-skips this heavy seed.
+    # Manual run during release prep when proving the GIN index holds
+    # under projected Phase-2+ load.
+    if os.environ.get("VT216_SCALE_CANARY") == "1":
+        _run_a14_scale_check(pool)
+
     return _finalise(pool)
+
+
+def _run_a14_scale_check(pool: Any) -> None:
+    """Seed ~1M synthetic pipeline_steps + measure p95 query latency.
+
+    Gated by VT216_SCALE_CANARY=1. Heavy: ~30s seed + ~20 query iterations.
+    """
+    import time as _time
+
+    scale_run_id = uuid4()
+    scale_tenant_id = uuid4()
+    with pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO pipeline_runs (id, tenant_id, status, trigger_kind, started_at) "
+            "VALUES (%s, %s, 'completed', 'manual', now()) "
+            "ON CONFLICT (id) DO NOTHING",
+            (str(scale_run_id), str(scale_tenant_id)),
+        )
+        INSERTED_RUN_IDS.append(str(scale_run_id))
+        # Chunked seed: 1M rows in 100k-row chunks via generate_series
+        for chunk in range(10):
+            conn.execute(
+                "INSERT INTO pipeline_steps "
+                "(id, run_id, tenant_id, step_seq, step_kind, started_at, "
+                " input_envelope, output_envelope) "
+                "SELECT gen_random_uuid(), %s, %s, gs, 'tool_call', now(), "
+                "  jsonb_build_object('q', 'searchable_term_' || gs), "
+                "  jsonb_build_object('result', 'distinctive_payload_' || gs) "
+                "FROM generate_series(%s, %s) gs",
+                (str(scale_run_id), str(scale_tenant_id),
+                 chunk * 100_000 + 1, (chunk + 1) * 100_000),
+            )
+
+    samples: list[float] = []
+    with pool.connection() as conn, conn.cursor() as cur:
+        for i in range(20):
+            term = f"searchable_term_{(i + 1) * 50_000}"
+            t0 = _time.perf_counter()
+            cur.execute(
+                "SELECT count(*) FROM pipeline_steps "
+                "WHERE envelope_search_tsv @@ plainto_tsquery('english', %s)",
+                (term,),
+            )
+            cur.fetchone()
+            samples.append((_time.perf_counter() - t0) * 1000.0)
+
+    samples.sort()
+    p95_ms = samples[int(0.95 * len(samples))]
+    pass_14 = p95_ms < 200.0
+    assertion(
+        14,
+        f"1M-row tsvector p95 < 200ms (observed {p95_ms:.1f}ms)",
+        pass_14,
+        observed={"p95_ms": round(p95_ms, 1), "sample_count": len(samples)},
+        expected={"p95_ms_lt": 200.0},
+    )
 
 
 def _finalise(pool: Any) -> int:
