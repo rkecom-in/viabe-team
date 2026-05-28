@@ -23,8 +23,9 @@ import os
 from datetime import UTC, datetime
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
-from uuid import UUID
+from types import SimpleNamespace
+from typing import Any, cast
+from uuid import UUID, uuid4
 
 import yaml
 from dbos import DBOS
@@ -63,13 +64,57 @@ def _templates() -> dict[str, dict[str, Any]]:
     return dict(data or {})
 
 
+class _MockTwilioMessages:
+    """Mock Twilio messages namespace — logs the would-send and returns a
+    fake successful response. NEVER use in production; only when
+    ``TEAM_TWILIO_MOCK_MODE=1`` (VT-200 hygiene fix 1).
+    """
+
+    @staticmethod
+    def create(**kwargs: Any) -> Any:
+        safe_kwargs = {
+            k: v for k, v in kwargs.items()
+            if k not in ("body", "content_variables")
+        }
+        logger.warning(
+            "[TEAM_TWILIO_MOCK_MODE] would-send: %s", safe_kwargs
+        )
+        return SimpleNamespace(
+            sid=f"MK{uuid4().hex[:30]}",
+            status="queued",
+            error_code=None,
+            error_message=None,
+        )
+
+
+class _MockTwilioClient:
+    """Mock Twilio REST client used when ``TEAM_TWILIO_MOCK_MODE=1``.
+
+    Surfaces the same ``client.messages.create(...)`` shape the real Twilio
+    SDK exposes. Sends never hit the network; each call logs and returns a
+    SimpleNamespace shaped like a successful Twilio response so callers
+    (``send_template_message`` + canaries) traverse the success branch.
+    """
+
+    messages = _MockTwilioMessages()
+
+
 @lru_cache(maxsize=1)
 def _client() -> Client:
     """Build the Twilio REST client from env.
 
     Lazy (not import-time) so importing this module needs no Twilio creds —
-    the CI ``orchestrator`` job has none and tests mock the send.
+    the CI ``orchestrator`` job has none and tests mock the send. When
+    ``TEAM_TWILIO_MOCK_MODE=1``, returns a mock client that logs sends
+    instead of dispatching them. Default OFF; the flag is explicit + the
+    log line surfaces every send so production drift is loud.
     """
+    if os.environ.get("TEAM_TWILIO_MOCK_MODE", "0") == "1":
+        logger.warning(
+            "TEAM_TWILIO_MOCK_MODE=1 — NOT making real Twilio API calls. "
+            "All sends will log and return a mock SID."
+        )
+        return cast(Client, _MockTwilioClient())  # type: ignore[arg-type]
     return Client(
         os.environ["TEAM_TWILIO_ACCOUNT_SID"],
         os.environ["TEAM_TWILIO_AUTH_TOKEN"],
