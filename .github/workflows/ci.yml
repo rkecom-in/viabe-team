@@ -363,6 +363,77 @@ jobs:
       - run: uv sync --frozen && uv run pytest -q
         working-directory: packages/team-shared
 
+  e2e-playwright:
+    name: e2e-playwright
+    runs-on: ubuntu-latest
+    # VT-211: Playwright e2e on team-web. Tests that need real auth/Supabase
+    # state self-skip via `test.skip(!ENV_VAR, ...)` so this job runs as a
+    # lint-grade check today; we light up the full matrix when secrets are
+    # provisioned. The single unauth → /login redirect test runs always.
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Install Playwright browsers
+        working-directory: apps/team-web
+        run: pnpm exec playwright install --with-deps chromium
+      - name: Build team-web
+        working-directory: apps/team-web
+        env:
+          NEXT_PUBLIC_TEAM_SUPABASE_URL: http://localhost:0
+          NEXT_PUBLIC_TEAM_SUPABASE_PUBLISHABLE_KEY: ci-publishable-stub
+          NEXT_PUBLIC_SITE_URL: http://localhost:3000
+        run: pnpm build
+      - name: Start team-web dev server (background)
+        working-directory: apps/team-web
+        env:
+          INTERNAL_API_SECRET: ci-test-internal-secret
+          TEAM_ORCHESTRATOR_URL: http://localhost:8001
+          FAZAL_TENANT_ID: 00000000-0000-4000-8000-000000aaaaaa
+          NEXT_PUBLIC_TEAM_SUPABASE_URL: http://localhost:0
+          NEXT_PUBLIC_TEAM_SUPABASE_PUBLISHABLE_KEY: ci-publishable-stub
+          NEXT_PUBLIC_SITE_URL: http://localhost:3000
+        run: |
+          nohup pnpm start > /tmp/team-web.log 2>&1 &
+          # Wait for the server to accept TCP; any HTTP response (incl. 404
+          # on bare /) means up. The default Next.js home is not defined for
+          # this app — pages are under /team/* — so we cannot use curl -f.
+          for i in {1..30}; do
+            if curl -s -o /dev/null -w '%{http_code}' http://localhost:3000 | grep -qE '^[1-5][0-9]{2}$'; then
+              echo "team-web up"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "team-web failed to start"
+          cat /tmp/team-web.log
+          exit 1
+      - name: Run Playwright tests
+        working-directory: apps/team-web
+        env:
+          TEAM_WEB_BASE_URL: http://localhost:3000
+          INTERNAL_API_SECRET: ci-test-internal-secret
+          TEAM_ORCHESTRATOR_URL: http://localhost:8001
+          FAZAL_TENANT_ID: 00000000-0000-4000-8000-000000aaaaaa
+        # VT-211 scope: only the VT-211 spec. ops-ui.spec.ts pre-existed
+        # against a Python-canary-seeded environment and is brought into
+        # CI by a separate follow-up row (per Cowork lock: "do NOT touch
+        # ops-ui.spec.ts beyond the CI-step bringing it along for the
+        # ride" — bringing it along is correct directionally but its
+        # first assertion expects already-seeded auth, which CI lacks).
+        run: pnpm exec playwright test tests/e2e/onboard.spec.ts
+      - name: Upload Playwright trace on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-trace
+          path: apps/team-web/test-results/
+          retention-days: 7
+
   migrations:
     name: migrations
     runs-on: ubuntu-latest

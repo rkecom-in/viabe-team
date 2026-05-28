@@ -43,3 +43,68 @@ export async function forwardToOrchestrator(
     return { ok: false, workflowId: null, reason: timedOut ? 'timeout' : 'error' }
   }
 }
+
+/** VT-211 onboard-step result envelope. */
+export interface OnboardStepResult {
+  ok: boolean
+  /** When ok=true: the agent's next phase. */
+  nextPhase: string | null
+  /** When ok=true: the agent's next prompt for the owner (rendered on page reload). */
+  nextPrompt: string | null
+  /** Always present — http_<n> | timeout | error | tenant_not_configured | server_error. */
+  reason: string
+}
+
+const _ONBOARD_STEP_TIMEOUT_MS = 30_000
+
+/**
+ * Forward an owner's onboarding answer to the orchestrator. The orchestrator
+ * invokes the integration_agent subgraph directly (NOT the supervisor — no
+ * brain pass needed for an explicit web-driven step; per VT-211 Cowork
+ * correction 2026-05-28). Persists phase transitions; returns the next
+ * prompt text the page should render.
+ *
+ * Never throws — callers (Pillar 7) must not 5xx.
+ */
+export async function forwardOnboardStep(
+  tenantId: string,
+  answer: string,
+): Promise<OnboardStepResult> {
+  const base = process.env.TEAM_ORCHESTRATOR_URL ?? _ORCHESTRATOR_DEFAULT
+  const secret = process.env.INTERNAL_API_SECRET ?? ''
+  try {
+    const res = await fetch(
+      `${base}/api/orchestrator/integrations/onboard-step`,
+      {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'X-Internal-Secret': secret,
+        },
+        body: JSON.stringify({ tenant_id: tenantId, answer }),
+        signal: AbortSignal.timeout(_ONBOARD_STEP_TIMEOUT_MS),
+      },
+    )
+    if (!res.ok) {
+      return { ok: false, nextPhase: null, nextPrompt: null, reason: `http_${res.status}` }
+    }
+    const data = (await res.json()) as {
+      next_phase?: string | null
+      next_prompt?: string | null
+    }
+    return {
+      ok: true,
+      nextPhase: data.next_phase ?? null,
+      nextPrompt: data.next_prompt ?? null,
+      reason: 'ok',
+    }
+  } catch (err) {
+    const timedOut = err instanceof Error && err.name === 'TimeoutError'
+    return {
+      ok: false,
+      nextPhase: null,
+      nextPrompt: null,
+      reason: timedOut ? 'timeout' : 'error',
+    }
+  }
+}
