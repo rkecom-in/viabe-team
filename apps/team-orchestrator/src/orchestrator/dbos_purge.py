@@ -267,5 +267,14 @@ def register_purge_scheduler() -> None:
     filter that other tests in the same pytest process depend on
     (``_recovery.py:58`` filters pending workflows by
     ``app_version``).
+
+    VT-200 hygiene fix 3: applies ``@DBOS.workflow`` BEFORE
+    ``@DBOS.scheduled`` so the registry sees the function as both a
+    workflow + scheduled poller. Before this fix the scheduler emitted
+    ``DBOSWorkflowFunctionNotFoundError`` every minute because the
+    function was registered as a scheduled poller but not as a
+    workflow. The same ordering is used by VT-210's
+    ``register_ingestion_scheduler``.
     """
+    DBOS.workflow()(purge_workflow_inputs_scheduled)
     DBOS.scheduled(_PURGE_CRON)(purge_workflow_inputs_scheduled)
