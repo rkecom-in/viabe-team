@@ -21,7 +21,6 @@ import asyncio
 import json
 import logging
 import os
-from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 from orchestrator.alerts.clients import send_resend_email, send_telegram

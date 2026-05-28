@@ -24,7 +24,6 @@ Wall-clock budget ≤ 30s.
 
 from __future__ import annotations
 
-import json
 import os
 import re
 import sys
@@ -171,9 +170,7 @@ def run_canary() -> int:
         from orchestrator.alerts.dispatch import (
             dispatch_alert,
             is_canary_tenant,
-            retry_pending_sends,
         )
-        from orchestrator.alerts.pii_scrub import scrub_pii
         from orchestrator.alerts.triggers import (
             Trigger,
             detect_critical_for_run,
@@ -239,7 +236,7 @@ def run_canary() -> int:
         )
 
         # ---------------- A3 — daily digest dispatch ----------------
-        from orchestrator.alerts.scheduler import _build_digest_html, daily_digest_body
+        from orchestrator.alerts.scheduler import daily_digest_body
         RESEND_CALLS.clear()
         daily_digest_body(datetime.now(UTC), datetime.now(UTC))
         pass_3 = len(RESEND_CALLS) >= 1

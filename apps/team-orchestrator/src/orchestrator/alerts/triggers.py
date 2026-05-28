@@ -23,7 +23,6 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from typing import Any, Literal
 from uuid import UUID
 
@@ -206,13 +205,15 @@ def detect_slow_triggers(tenant_id: UUID) -> list[Trigger]:
                 payload={"observed": observed, "baseline": baseline_vol},
             ))
 
-    # Error envelope sweep — recent pipeline_steps with error_envelope kind.
+    # Error envelope sweep — recent pipeline_steps with the canonical
+    # 'error' step_kind (the VT-179 step_kind for error envelopes —
+    # see STEP_KIND_REGISTRY in observability/envelopes/__init__.py).
     with pool.connection() as conn, conn.cursor() as cur:
         cur.execute(
             """
             SELECT run_id, step_name FROM pipeline_steps
             WHERE tenant_id = %s
-              AND step_kind = 'error_envelope'
+              AND step_kind = 'error'
               AND started_at > now() - interval '5 minutes'
             ORDER BY started_at DESC LIMIT 10
             """,
