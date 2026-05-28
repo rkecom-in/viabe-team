@@ -394,6 +394,8 @@ jobs:
           INTERNAL_API_SECRET: ci-test-internal-secret
           TEAM_ORCHESTRATOR_URL: http://localhost:8001
           FAZAL_TENANT_ID: 00000000-0000-4000-8000-000000aaaaaa
+          FAZAL_OWNER_UUID: 00000000-0000-4000-8000-0000000fa2a1
+          OPERATOR_JWT_SECRET: ci-test-operator-jwt-secret-32bytes-min
           NEXT_PUBLIC_TEAM_SUPABASE_URL: http://localhost:0
           NEXT_PUBLIC_TEAM_SUPABASE_PUBLISHABLE_KEY: ci-publishable-stub
           NEXT_PUBLIC_SITE_URL: http://localhost:3000
@@ -419,13 +421,13 @@ jobs:
           INTERNAL_API_SECRET: ci-test-internal-secret
           TEAM_ORCHESTRATOR_URL: http://localhost:8001
           FAZAL_TENANT_ID: 00000000-0000-4000-8000-000000aaaaaa
-        # VT-211 scope: only the VT-211 spec. ops-ui.spec.ts pre-existed
-        # against a Python-canary-seeded environment and is brought into
-        # CI by a separate follow-up row (per Cowork lock: "do NOT touch
-        # ops-ui.spec.ts beyond the CI-step bringing it along for the
-        # ride" — bringing it along is correct directionally but its
-        # first assertion expects already-seeded auth, which CI lacks).
-        run: pnpm exec playwright test tests/e2e/onboard.spec.ts
+          FAZAL_OWNER_UUID: 00000000-0000-4000-8000-0000000fa2a1
+          OPERATOR_JWT_SECRET: ci-test-operator-jwt-secret-32bytes-min
+        # VT-211 scope: onboard.spec.ts.
+        # VT-201 PR-3 scope: ops-pr3.spec.ts. Both mint operator JWTs
+        # inline via the lib/auth/operator-jwt helper so requireFazal()
+        # passes without a pre-provisioned cookie.
+        run: pnpm exec playwright test tests/e2e/onboard.spec.ts tests/e2e/ops-pr3.spec.ts
       - name: Upload Playwright trace on failure
         if: failure()
         uses: actions/upload-artifact@v4

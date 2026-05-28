@@ -4,10 +4,8 @@ import { cookies } from 'next/headers'
 import { redirect } from 'next/navigation'
 
 import { StreamFeed } from '@/components/ops/stream-feed'
-import { StickyBanner } from '@/components/ops/sticky-banner'
 import { issueOperatorJwt } from '@/lib/auth/operator-jwt'
 import { requireFazal, UnauthorizedError } from '@/lib/auth/require-fazal'
-import { fetchBannerCounts } from '@/lib/ops/banner'
 import { fetchTopTenants } from '@/lib/ops/data-access'
 
 export const dynamic = 'force-dynamic'
@@ -21,10 +19,7 @@ export default async function OpsStreamPage() {
     throw err
   }
 
-  const [banner, tenants] = await Promise.all([
-    fetchBannerCounts(),
-    fetchTopTenants(20),
-  ])
+  const tenants = await fetchTopTenants(20)
 
   // Mint a short-lived operator JWT for the browser Supabase Realtime
   // subscription. 5-min TTL per lib/auth/operator-jwt.ts; client-side
@@ -38,8 +33,6 @@ export default async function OpsStreamPage() {
       <header>
         <h1>Ops Console — Live Stream</h1>
       </header>
-
-      <StickyBanner counts={banner} />
 
       <StreamFeed
         operatorJwt={operatorJwt}

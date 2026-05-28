@@ -262,6 +262,52 @@ export async function fetchPrivacyAudit(
 }
 
 
+/**
+ * VT-201 PR-3 — find prev/next pipeline_runs for the same tenant.
+ * Used by the run-detail page's "previous run" / "next run" links.
+ */
+export interface PrevNextRun {
+  prevRunId: string | null
+  nextRunId: string | null
+}
+
+export async function fetchPrevNextRun(
+  tenantId: string,
+  runId: string,
+): Promise<PrevNextRun> {
+  const client = serverSecretClient()
+  const current = await client
+    .from('pipeline_runs')
+    .select('id, started_at')
+    .eq('id', runId)
+    .maybeSingle()
+  if (!current.data) return { prevRunId: null, nextRunId: null }
+  const startedAt = (current.data as { started_at: string }).started_at
+  const [prev, next] = await Promise.all([
+    client
+      .from('pipeline_runs')
+      .select('id')
+      .eq('tenant_id', tenantId)
+      .lt('started_at', startedAt)
+      .order('started_at', { ascending: false })
+      .limit(1)
+      .maybeSingle(),
+    client
+      .from('pipeline_runs')
+      .select('id')
+      .eq('tenant_id', tenantId)
+      .gt('started_at', startedAt)
+      .order('started_at', { ascending: true })
+      .limit(1)
+      .maybeSingle(),
+  ])
+  return {
+    prevRunId: (prev.data as { id: string } | null)?.id ?? null,
+    nextRunId: (next.data as { id: string } | null)?.id ?? null,
+  }
+}
+
+
 export async function fetchRunReplay(
   runId: string,
 ): Promise<PipelineStepRow[]> {
