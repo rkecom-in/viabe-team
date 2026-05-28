@@ -11,13 +11,13 @@ export const dynamic = 'force-dynamic'
  * deferred to VT-122.
  */
 export async function GET() {
-  const url = process.env.NEXT_PUBLIC_TEAM_SUPABASE_URL
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL
   if (!url) {
     return NextResponse.json(
       {
         status: 'error',
         supabase: 'unreachable',
-        reason: 'NEXT_PUBLIC_TEAM_SUPABASE_URL not set',
+        reason: 'NEXT_PUBLIC_SUPABASE_URL not set',
       },
       { status: 503 },
     )
