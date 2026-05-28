@@ -38,11 +38,16 @@ Wall-clock budget ≤ 60s. Anthropic cost budget ≤ 50 paise.
 - A4: exactly 1 ``compose_output`` row carrying the unified-output
   payload (template_name / content_sid present on output_envelope OR
   ``body_preview`` non-null)
-- A5: hard-limit termination: separate sub-flow patches the
-  callback's tool_call_limit to 2 + drives tool calls → run closes
-  ``status='aborted_hard_limit'`` + ``aborted_hard_limit`` envelope
-  written (Pillar 8 error-taxonomy: clean termination, no DBOS retry)
-- A6: wall-clock < 60s; total Anthropic cost < 50 paise
+- A5: hard-limit termination (VT-199 refactor) — in-process call to
+  ``dispatch_brain()`` with ``_NullDriver.cost_limit_paise = 0`` patched
+  so any non-zero usage trips immediately on first Anthropic response.
+  Deterministic trip; restored in try/finally. Asserts
+  ``DispatchResult.final_status == 'aborted_hard_limit'`` +
+  ``aborted_hard_limit`` envelope row written (Pillar 8 clean-
+  termination contract, no DBOS retry).
+- A6: wall-clock < 60s; total Anthropic cost < 1000 paise (Opus 4.7
+  baseline; revised from <50 per VT-199 brief — post-VT-194 prompt
+  caching could tighten further but tightening = own row).
 """
 
 from __future__ import annotations
@@ -261,33 +266,58 @@ def run_canary() -> int:
         expected={"compose_output_count": 1, "payload_signal": True},
     )
 
-    # ---------------- A5 — hard-limit termination ----------------
-    # Patch the _NullDriver's class attribute so the next dispatch_brain
-    # sees a tool_call_limit of 2. Synthetic input drives tool spam by
-    # asking for multiple distinct lookups; the orchestrator-agent's
-    # current Phase-1 inventory is small (compose_output_tool +
-    # escalate_to_fazal + L0 stubs) — the canary asserts only that IF
-    # the agent crosses the limit, the dispatch path closes the run
-    # with status='aborted_hard_limit' AND writes the envelope. If the
-    # agent's tool selection on the synthetic input doesn't trip
-    # tool_calls > 2 (which is possible — Opus may respond directly),
-    # this assertion is marked BLOCKED with the observed status so the
-    # canary doesn't false-fail on the agent's reasonable response.
+    # ---------------- A5 — hard-limit termination (VT-199 refactor) ----------------
+    # Deterministic in-process trip. We bypass the HTTP/DBOS path entirely and
+    # call ``dispatch_brain()`` directly with a synthesized WebhookEvent +
+    # SubscriberState. With ``_NullDriver.cost_limit_paise = 0``, the first
+    # Anthropic response (any non-zero cost) trips ``HardLimitExceeded`` inside
+    # the callback's ``check_mid_invocation``; ``dispatch_brain`` then closes
+    # the run with ``final_status='aborted_hard_limit'`` and writes the
+    # envelope. Class attribute restored in finally so subsequent canaries
+    # (and future re-runs of this canary in the same pytest process) see the
+    # original 500 paise limit.
+    from uuid import uuid4 as _u4
+
     from orchestrator.agent.dispatch import _NullDriver as NullDriver
-    original_limit = NullDriver.tool_call_limit
-    NullDriver.tool_call_limit = 2
-    try:
-        hl_phone = f"+9199777{uuid4().hex[:6]}"
-        _seed_tenant(pool, hl_phone)
-        hl_body = (
-            "please look up all my customers, then check each one's order history, "
-            "then summarize their spending patterns, then suggest a campaign for "
-            "each segment"
+    from orchestrator.agent.dispatch import dispatch_brain
+    from orchestrator.state import new_subscriber_state
+    from orchestrator.types import WebhookEvent
+
+    hl_phone = f"+9199777{_u4().hex[:6]}"
+    hl_tenant_id = _seed_tenant(pool, hl_phone)
+    hl_run_id = str(_u4())
+    INSERTED_RUN_IDS.append(hl_run_id)
+    # Pre-INSERT pipeline_runs row so ``dispatch_brain``'s envelope writes
+    # (which FK to pipeline_runs.id via pipeline_steps) succeed.
+    with pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO pipeline_runs (id, tenant_id, status, trigger_kind) "
+            "VALUES (%s, %s, 'running', 'inbound_whatsapp')",
+            (hl_run_id, hl_tenant_id),
         )
-        hl_run_id = _fire_webhook(orch_base, hl_phone, hl_body)
-        hl_status = _wait_for_terminal(pool, hl_run_id, max_wait_s=45.0)
+
+    hl_event = WebhookEvent(
+        body="please walk me through how my restaurant performed last week",
+        sender_phone=hl_phone,
+        twilio_message_sid=f"SM{_u4().hex}",
+    )
+    from uuid import UUID
+
+    hl_state = new_subscriber_state(
+        tenant_id=UUID(hl_tenant_id), run_id=UUID(hl_run_id), phase="paid_active"
+    )
+
+    original_cost_limit = NullDriver.cost_limit_paise
+    NullDriver.cost_limit_paise = 0
+    try:
+        dispatch_result = dispatch_brain(
+            event=hl_event,
+            state=hl_state,
+            run_id=UUID(hl_run_id),
+            tenant_id=UUID(hl_tenant_id),
+        )
     finally:
-        NullDriver.tool_call_limit = original_limit
+        NullDriver.cost_limit_paise = original_cost_limit
 
     with pool.connection() as conn, conn.cursor() as cur:
         cur.execute(
@@ -297,38 +327,31 @@ def run_canary() -> int:
         )
         ahl_row = cur.fetchone()
     ahl_count = int(ahl_row["n"]) if ahl_row else 0
-    if hl_status == "aborted_hard_limit" and ahl_count == 1:
-        pass_5 = True
-        observed_5: dict[str, Any] = {"status": hl_status, "aborted_hard_limit_rows": ahl_count}
-    else:
-        # Agent didn't trip the limit (responded directly or via single
-        # tool). Marked BLOCKED rather than FAIL — the limit-enforcement
-        # path is structurally available (canary patches the class
-        # attribute successfully); deterministic forced-trip would
-        # require monkey-patching the agent itself.
-        pass_5 = False
-        observed_5 = {
-            "status": hl_status,
-            "aborted_hard_limit_rows": ahl_count,
-            "note": "agent may not have triggered enough tool calls; structural path present but not exercised",
-        }
+    pass_5 = (
+        dispatch_result.final_status == "aborted_hard_limit"
+        and ahl_count == 1
+    )
     assertion(
         5,
-        "hard-limit termination: tool_call_limit=2 → status='aborted_hard_limit' + envelope",
+        "in-process hard-limit trip: cost_limit_paise=0 → final_status='aborted_hard_limit' + envelope",
         pass_5,
-        observed=observed_5,
-        expected={"status": "aborted_hard_limit", "aborted_hard_limit_rows": 1},
+        observed={
+            "final_status": dispatch_result.final_status,
+            "terminal_path": dispatch_result.terminal_path,
+            "reason": dispatch_result.reason,
+            "aborted_hard_limit_rows": ahl_count,
+        },
+        expected={"final_status": "aborted_hard_limit", "aborted_hard_limit_rows": 1},
     )
 
-    # ---------------- A6 — budgets ----------------
-    # Brief said "<50 paise" but that assumed minimal-input synthetic
-    # cost — real Opus 4.7 calls cost ~400-1000 paise per invocation on
-    # substantive English queries. Per-invocation hard-limit is 500
-    # paise (₹5) per VT-125 ORCHESTRATOR_COST_HARD_LIMIT_PAISE. Two
-    # invocations × 500 = 1000 paise budget at the cap; bump to
-    # 5000 paise (₹50) for slack. Wall-clock 60s budget retained per
-    # brief but realistic for 2 sequential graph invocations is ~90s
-    # (Opus latency); bump to 180s.
+    # ---------------- A6 — budgets (VT-199 revision) ----------------
+    # Tightened from <5000 paise to <1000 paise per VT-199 brief AC-2.
+    # Observed baseline ~895 paise per VT-194 cost analysis. VT-194 prompt
+    # caching is now landed (PR #86) — post-caching baseline would allow
+    # further tightening to ~200 paise, but VT-199 brief explicitly says
+    # do NOT tighten beyond <1000 in this row; tightening = separate row.
+    # Wall-clock <60s retained per brief; A5 in-process invocation keeps
+    # total under one happy-path + one in-process dispatch_brain call.
     total_elapsed = time.monotonic() - t_start
     with pool.connection() as conn, conn.cursor() as cur:
         cur.execute(
@@ -338,13 +361,13 @@ def run_canary() -> int:
         )
         cost_row = cur.fetchone()
     total_cost = int(cost_row["total_cost"]) if cost_row else 0
-    pass_6 = total_elapsed < 180.0 and total_cost < 5000
+    pass_6 = total_elapsed < 60.0 and total_cost < 1000
     assertion(
         6,
-        "wall-clock < 180s AND total Anthropic cost < 5000 paise (Opus 4.7 realistic)",
+        "wall-clock < 60s AND total Anthropic cost < 1000 paise (Opus 4.7 baseline)",
         pass_6,
         observed={"elapsed_s": round(total_elapsed, 2), "total_cost_paise": total_cost},
-        expected={"elapsed_s_lt": 180.0, "total_cost_paise_lt": 5000},
+        expected={"elapsed_s_lt": 60.0, "total_cost_paise_lt": 1000},
     )
 
     return _finalise(pool, t_start)
@@ -358,7 +381,7 @@ def _finalise(pool: Any, t_start: float) -> int:
 
     total = time.monotonic() - t_start
     print(f"\n=== Total wall-clock: {total:.1f}s ===")
-    print("=== Anthropic cost budget: < 50 paise ===")
+    print("=== Anthropic cost budget: < 1000 paise (Opus 4.7 baseline; VT-199) ===")
 
     try:
         with pool.connection() as conn, conn.cursor() as cur:
