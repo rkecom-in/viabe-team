@@ -6,3 +6,9 @@
 # VT-210 canary fixture push_secret (now replaced with per-run uuid in
 # commit 76d897d; flagged in the previous commit only).
 4db9ccff6c6407f9c43db5ed220973f7390ed1e6:apps/team-orchestrator/canaries/vt210_recurring_ingestion.py:generic-api-key:236
+
+# VT-201 PR-3: CI OPERATOR_JWT_SECRET fixture value in ci.yml
+# (commit 9342bfc has the high-entropy string; afeb9d0 replaced with
+# zero-entropy. Historical scan-by-commit still flags 9342bfc).
+9342bfc937863b6e062496e6db9791ddaa994111:.github/workflows/ci.yml:generic-api-key:398
+9342bfc937863b6e062496e6db9791ddaa994111:.github/workflows/ci.yml:generic-api-key:425

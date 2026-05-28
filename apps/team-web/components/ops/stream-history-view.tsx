@@ -14,8 +14,9 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
+import { QuickFilterPills } from '@/components/ops/quick-filter-pills'
 import { StreamRowList } from '@/components/ops/stream-row-list'
-import type { PipelineStepEvent } from '@/lib/ops/stream'
+import type { PipelineStepEvent, StreamFilters } from '@/lib/ops/stream'
 import type { TenantOption } from '@/components/ops/stream-feed'
 
 const _STEP_KIND_OPTIONS = [
@@ -296,6 +297,25 @@ export function StreamHistoryView({ initialDate, availableTenants }: StreamHisto
           />
         </fieldset>
       </aside>
+
+      <QuickFilterPills
+        filters={
+          {
+            tenantIds: filters.tenantIds.length ? filters.tenantIds : undefined,
+            stepKinds: filters.stepKinds.length ? filters.stepKinds : undefined,
+            statuses: filters.statuses.length ? filters.statuses : undefined,
+          } as StreamFilters
+        }
+        availableTenants={availableTenants}
+        onChange={(f) =>
+          setFilters((cur) => ({
+            ...cur,
+            tenantIds: f.tenantIds ?? [],
+            stepKinds: f.stepKinds ?? [],
+            statuses: f.statuses ?? [],
+          }))
+        }
+      />
 
       <section data-section="status">
         {loading && <span data-element="loading">Loading…</span>}

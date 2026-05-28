@@ -20,6 +20,7 @@ import {
   type PipelineStepEvent,
   type StreamFilters,
 } from '@/lib/ops/stream'
+import { QuickFilterPills } from '@/components/ops/quick-filter-pills'
 import { StreamRowList } from '@/components/ops/stream-row-list'
 
 const _MAX_ROWS_IN_MEMORY = 200
@@ -101,7 +102,11 @@ export function StreamFeed({ operatorJwt, availableTenants }: StreamFeedProps) {
         filters={filters}
         onChange={setFilters}
       />
-      <QuickFilterPills filters={filters} onChange={setFilters} />
+      <QuickFilterPills
+        filters={filters}
+        availableTenants={availableTenants}
+        onChange={setFilters}
+      />
       <section data-section="connection-status">
         Realtime: {connected ? 'connected' : 'disconnected'}
       </section>
@@ -191,52 +196,3 @@ function FilterSidebar({ availableTenants, filters, onChange }: FilterSidebarPro
 }
 
 
-interface QuickFilterPillsProps {
-  filters: StreamFilters
-  onChange: (f: StreamFilters) => void
-}
-
-function QuickFilterPills({ filters, onChange }: QuickFilterPillsProps) {
-  const onlyFailures = filters.statuses?.length === 1 && filters.statuses[0] === 'failed'
-  const onlyEscalations = filters.stepKinds?.length === 1 && filters.stepKinds[0] === 'aborted_hard_limit'
-
-  return (
-    <div data-component="quick-filter-pills">
-      <button
-        type="button"
-        data-pill="failures-only"
-        aria-pressed={onlyFailures}
-        onClick={() =>
-          onChange(
-            onlyFailures
-              ? { ...filters, statuses: undefined }
-              : { ...filters, statuses: ['failed'] },
-          )
-        }
-      >
-        {onlyFailures ? '✓ ' : ''}failures only
-      </button>
-      <button
-        type="button"
-        data-pill="escalations-only"
-        aria-pressed={onlyEscalations}
-        onClick={() =>
-          onChange(
-            onlyEscalations
-              ? { ...filters, stepKinds: undefined }
-              : { ...filters, stepKinds: ['aborted_hard_limit'] },
-          )
-        }
-      >
-        {onlyEscalations ? '✓ ' : ''}escalations only
-      </button>
-      <button
-        type="button"
-        data-pill="clear"
-        onClick={() => onChange({})}
-      >
-        clear filters
-      </button>
-    </div>
-  )
-}
