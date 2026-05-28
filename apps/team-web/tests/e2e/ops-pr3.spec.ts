@@ -52,9 +52,12 @@ test.describe('VT-201 PR-3 — operator-awareness affordances', () => {
     fazalJwt,
   }) => {
     expect(fazalJwt).toBeTruthy()
-    await page.goto('/team/ops')
-    // The layout-level banner wraps `<StickyBannerLive>` with a
-    // data-severity attribute (green/yellow/red).
+    const res = await page.goto('/team/ops')
+    // Diagnostic: if requireFazal failed, the response is a redirect
+    // to /login. The locator timeout would then fire on a different
+    // page than expected — flag explicitly so the failure cause is
+    // obvious in CI.
+    expect(page.url(), `landed on ${page.url()} (status ${res?.status() ?? '?'})`).not.toContain('/login')
     const banner = page.locator('[data-component="sticky-banner-live"]').first()
     await expect(banner).toBeVisible({ timeout: 10_000 })
     const severity = await banner.getAttribute('data-severity')
