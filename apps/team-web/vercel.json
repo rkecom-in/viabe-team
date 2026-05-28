@@ -7,6 +7,6 @@
   "outputDirectory": ".next",
   "regions": ["bom1"],
   "github": {
-    "silent": true
+    "silent": false
   }
 }
