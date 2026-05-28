@@ -77,6 +77,13 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     from orchestrator.alerts.scheduler import register_alert_scheduler
 
     register_alert_scheduler()
+    # VT-222: Drive Push delta workflow + 6h renewal + 10min polling
+    # fallback. Same register-before-launch contract.
+    from orchestrator.integrations.drive_push import (
+        register_drive_push_scheduler,
+    )
+
+    register_drive_push_scheduler()
     launch_dbos()
     yield
     shutdown_dbos()

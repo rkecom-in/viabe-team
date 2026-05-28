@@ -1,5 +1,18 @@
 """VT-207 Apps Script template generator.
 
+DEPRECATED per CL-421 (2026-05-29). The Apps Script paste flow is
+customer-hostile (target persona = SMB owner, not developer). VT-222
+replaces this substrate with Drive Push Notifications
+(``GoogleSheetConnector.register_drive_push_channel``) primary +
+10-minute polling fallback. New onboarding flows must NOT generate or
+relay Apps Script bodies.
+
+Kept for backward compatibility — existing Apps-Script-onboarded
+tenants continue to push via the legacy webhook while they migrate.
+Do not extend. Do not reference from new prompts
+(``integration_agent_system.md``) or onboarding flows
+(``/team/onboard`` page).
+
 Owner pastes the rendered script into their Sheet's Extensions →
 Apps Script panel. The ``onEdit`` trigger POSTs changed rows to the
 orchestrator's ``/api/orchestrator/integrations/sheet/push`` endpoint
