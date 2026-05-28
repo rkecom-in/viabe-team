@@ -28,6 +28,12 @@ def admin_integration_health(
         oauth_row = cur.fetchone()
 
         cur.execute(
+            "SELECT count(*) AS n FROM tenant_drive_channels "
+            "WHERE expires_at > now()"
+        )
+        drive_row = cur.fetchone()
+
+        cur.execute(
             """
             SELECT tenant_id::text AS tenant_id,
                    connector_id,
@@ -44,6 +50,9 @@ def admin_integration_health(
     active_oauth_tokens = (
         oauth_row["n"] if isinstance(oauth_row, dict) else oauth_row[0]
     ) if oauth_row else 0
+    active_drive_channels = (
+        drive_row["n"] if isinstance(drive_row, dict) else drive_row[0]
+    ) if drive_row else 0
 
     last_ingestion: list[dict[str, Any]] = []
     for r in ingestion_rows:
@@ -64,7 +73,7 @@ def admin_integration_health(
 
     result = {
         "active_oauth_tokens": int(active_oauth_tokens),
-        "active_drive_channels": 0,  # VT-222 plumbs real count
+        "active_drive_channels": int(active_drive_channels),
         "last_ingestion": last_ingestion,
     }
     log_admin_call(

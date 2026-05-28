@@ -38,7 +38,20 @@ logger = logging.getLogger(__name__)
 
 _OAUTH_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 _OAUTH_TOKEN_URL = "https://oauth2.googleapis.com/token"
-_SCOPE = "https://www.googleapis.com/auth/spreadsheets.readonly"
+# Scopes per CL-390 + CL-421:
+#   spreadsheets.readonly   — pull rows (VT-207 substrate)
+#   drive.metadata.readonly — register Drive Push channels (VT-222)
+# Tenants onboarded pre-VT-222 may have only the spreadsheets scope;
+# they fall back to polling (no Drive Push registration). See VT-222
+# sheet-integration-runbook.md for the scope migration story.
+_SCOPE_SHEETS = "https://www.googleapis.com/auth/spreadsheets.readonly"
+_SCOPE_DRIVE_METADATA = "https://www.googleapis.com/auth/drive.metadata.readonly"
+_SCOPE = f"{_SCOPE_SHEETS} {_SCOPE_DRIVE_METADATA}"
+
+_DRIVE_WATCH_URL = "https://www.googleapis.com/drive/v3/files/{file_id}/watch"
+_DRIVE_STOP_URL = "https://www.googleapis.com/drive/v3/channels/stop"
+_DRIVE_CHANNEL_TTL = timedelta(days=7)  # Drive max
+_DRIVE_RENEW_WINDOW = timedelta(hours=48)
 
 
 @dataclass(frozen=True)
@@ -331,7 +344,14 @@ class GoogleSheetConnector(ConnectorBase):
         return [row_data] if row_data else []
 
     def setup_push(self, tenant_id: UUID, spreadsheet_id: str) -> dict[str, str]:
-        """Generate Apps Script template + return push_secret.
+        """DEPRECATED per CL-421 (2026-05-29). Apps Script paste flow is
+        customer-hostile. VT-222 replaces this with Drive Push
+        Notifications (``register_drive_push_channel``). Kept for
+        backward compatibility while existing Apps-Script-onboarded
+        tenants migrate. New onboarding flows must use
+        ``register_drive_push_channel`` exclusively.
+
+        Generate Apps Script template + return push_secret.
 
         Owner pastes the script into the Sheet's Extensions → Apps
         Script panel. Script's ``onEdit`` POSTs changed rows to
@@ -367,6 +387,162 @@ class GoogleSheetConnector(ConnectorBase):
             push_secret=push_secret,
         )
         return {"apps_script": script}
+
+    # ---------- DRIVE PUSH NOTIFICATIONS (VT-222 / CL-421) ----------
+
+    def register_drive_push_channel(
+        self, tenant_id: UUID, spreadsheet_id: str
+    ) -> dict[str, Any]:
+        """Register a Drive Push channel for the given Sheet.
+
+        Calls Drive API ``files.watch`` with our webhook URL as the
+        target. Persists channel into ``tenant_drive_channels``. Returns
+        the channel descriptor (channel_id, expires_at, resource_id).
+
+        Requires the tenant's OAuth token to carry the
+        ``drive.metadata.readonly`` scope. Tenants onboarded pre-VT-222
+        may lack it; this method raises ``RuntimeError`` in that case
+        and the caller falls back to polling.
+        """
+        from uuid import uuid4
+
+        access_token = self.get_access_token(tenant_id)
+        channel_id = str(uuid4())
+        channel_token = secrets.token_urlsafe(32)
+        expires_at = datetime.now(UTC) + _DRIVE_CHANNEL_TTL
+        orchestrator_base = os.environ.get(
+            "ORCHESTRATOR_BASE_URL", "http://localhost:8001"
+        )
+        webhook_url = f"{orchestrator_base}/api/orchestrator/integrations/sheet/drive_push"
+
+        resp = httpx.post(
+            _DRIVE_WATCH_URL.format(file_id=spreadsheet_id),
+            headers={
+                "Authorization": f"Bearer {access_token}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "id": channel_id,
+                "type": "web_hook",
+                "address": webhook_url,
+                "token": channel_token,
+                "expiration": int(expires_at.timestamp() * 1000),
+            },
+            timeout=15.0,
+        )
+        if resp.status_code != 200:
+            raise RuntimeError(
+                f"Drive files.watch failed: HTTP {resp.status_code} "
+                f"body={resp.text[:200]}"
+            )
+
+        resp_body = resp.json()
+        # Drive returns its own resourceId we persist as the canonical
+        # handle alongside our channel_id; both are needed for stop()
+        resource_id = str(resp_body.get("resourceId", spreadsheet_id))
+        # Drive may return a different expiration than we requested
+        # (their max could be shorter for some accounts); honour theirs
+        if resp_body.get("expiration"):
+            expires_at = datetime.fromtimestamp(
+                int(resp_body["expiration"]) / 1000, tz=UTC
+            )
+
+        pool = get_pool()
+        with pool.connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO tenant_drive_channels
+                    (tenant_id, connector_id, resource_id, channel_id,
+                     channel_token, expires_at)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    str(tenant_id),
+                    self.connector_id,
+                    resource_id,
+                    channel_id,
+                    channel_token,
+                    expires_at,
+                ),
+            )
+        return {
+            "channel_id": channel_id,
+            "resource_id": resource_id,
+            "expires_at": expires_at.isoformat(),
+        }
+
+    def unregister_drive_push_channel(
+        self, channel_id: str, resource_id: str
+    ) -> None:
+        """Stop a Drive Push channel via Drive ``channels.stop``.
+
+        Removes the matching row from ``tenant_drive_channels``.
+        Idempotent: missing channel raises silently (already stopped).
+        """
+        # Look up the tenant for token resolution
+        pool = get_pool()
+        with pool.connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT tenant_id FROM tenant_drive_channels WHERE channel_id = %s",
+                (channel_id,),
+            )
+            row = cur.fetchone()
+        if row is None:
+            return  # already stopped or never existed
+        tenant_id = UUID(
+            row["tenant_id"] if isinstance(row, dict) else row[0]
+        )
+        access_token = self.get_access_token(tenant_id)
+
+        resp = httpx.post(
+            _DRIVE_STOP_URL,
+            headers={
+                "Authorization": f"Bearer {access_token}",
+                "Content-Type": "application/json",
+            },
+            json={"id": channel_id, "resourceId": resource_id},
+            timeout=10.0,
+        )
+        # 204 = stopped; 404 = already stopped (acceptable)
+        if resp.status_code not in (204, 404):
+            logger.warning(
+                "Drive channels.stop returned HTTP %d for channel=%s: %s",
+                resp.status_code,
+                channel_id,
+                resp.text[:200],
+            )
+
+        with pool.connection() as conn:
+            conn.execute(
+                "DELETE FROM tenant_drive_channels WHERE channel_id = %s",
+                (channel_id,),
+            )
+
+    def renew_drive_push_channel(
+        self, channel_row: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Renew an expiring channel.
+
+        Atomic-ish: register the new channel FIRST so there's no gap
+        in notification coverage, then stop the old one. If register
+        fails, the old channel stays active and the caller can retry.
+        """
+        tenant_id = UUID(str(channel_row["tenant_id"]))
+        spreadsheet_id = str(channel_row["resource_id"])
+        old_channel_id = str(channel_row["channel_id"])
+        old_resource_id = str(channel_row["resource_id"])
+
+        new = self.register_drive_push_channel(tenant_id, spreadsheet_id)
+        try:
+            self.unregister_drive_push_channel(old_channel_id, old_resource_id)
+        except Exception:  # noqa: BLE001 — never block renewal on stop failure
+            logger.exception(
+                "Drive channel renewal: stopping old channel %s failed; "
+                "new channel %s already active",
+                old_channel_id,
+                new["channel_id"],
+            )
+        return new
 
 
 __all__ = [

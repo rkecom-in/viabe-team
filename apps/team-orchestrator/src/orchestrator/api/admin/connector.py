@@ -237,7 +237,7 @@ def admin_drive_channels(
     request: Request,
     fp: RateLimitedAdmin,
 ) -> list[dict[str, Any]]:
-    """VT-222 substrate stub. Returns empty list pre-VT-222."""
+    """VT-222: list active Drive Push channels for the tenant."""
     try:
         UUID(tenant_id)
     except ValueError:
@@ -247,13 +247,45 @@ def admin_drive_channels(
             response_status=400,
         )
         raise HTTPException(400, "tenant_id must be a UUID") from None
+
+    pool = get_pool()
+    with pool.connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT channel_id, resource_id, expires_at, created_at, "
+            "       last_notification_at, connector_id "
+            "FROM tenant_drive_channels WHERE tenant_id = %s "
+            "ORDER BY created_at DESC",
+            (tenant_id,),
+        )
+        rows = cur.fetchall()
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        if isinstance(r, dict):
+            out.append({
+                "channel_id": r["channel_id"],
+                "resource_id": r["resource_id"],
+                "connector_id": r["connector_id"],
+                "expires_at": r["expires_at"].isoformat() if r["expires_at"] else None,
+                "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+                "last_notification_at": r["last_notification_at"].isoformat()
+                if r["last_notification_at"] else None,
+            })
+        else:
+            out.append({
+                "channel_id": r[0],
+                "resource_id": r[1],
+                "connector_id": r[5],
+                "expires_at": r[2].isoformat() if r[2] else None,
+                "created_at": r[3].isoformat() if r[3] else None,
+                "last_notification_at": r[4].isoformat() if r[4] else None,
+            })
     log_admin_call(
         request=request,
         endpoint="GET /api/orchestrator/admin/connector/drive_channels",
         response_status=200,
         tenant_id=tenant_id,
     )
-    return []
+    return out
 
 
 @router.post("/api/orchestrator/admin/connector/drive_channels/{channel_id}/renew")
@@ -262,13 +294,40 @@ def admin_drive_channels_renew(
     request: Request,
     fp: RateLimitedAdmin,
 ) -> dict[str, Any]:
-    """VT-222 substrate stub. Returns 501 pre-VT-222."""
+    """VT-222: manually renew a Drive Push channel."""
+    pool = get_pool()
+    with pool.connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT tenant_id, connector_id, resource_id, channel_id, "
+            "       channel_token, expires_at "
+            "FROM tenant_drive_channels WHERE channel_id = %s",
+            (channel_id,),
+        )
+        row = cur.fetchone()
+    if row is None:
+        log_admin_call(
+            request=request,
+            endpoint="POST /api/orchestrator/admin/connector/drive_channels/{channel_id}/renew",
+            response_status=404,
+        )
+        raise HTTPException(404, "channel_id not found")
+
+    row_dict = dict(row) if not isinstance(row, dict) else row
+    try:
+        new = GoogleSheetConnector().renew_drive_push_channel(row_dict)
+    except Exception as exc:  # noqa: BLE001
+        log_admin_call(
+            request=request,
+            endpoint="POST /api/orchestrator/admin/connector/drive_channels/{channel_id}/renew",
+            response_status=500,
+            tenant_id=str(row_dict["tenant_id"]),
+            error_message=repr(exc)[:200],
+        )
+        raise HTTPException(500, f"renew failed: {exc}") from exc
     log_admin_call(
         request=request,
         endpoint="POST /api/orchestrator/admin/connector/drive_channels/{channel_id}/renew",
-        response_status=501,
+        response_status=200,
+        tenant_id=str(row_dict["tenant_id"]),
     )
-    raise HTTPException(
-        status_code=501,
-        detail="drive_channels/renew is not implemented until VT-222 ships",
-    )
+    return new
