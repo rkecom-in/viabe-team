@@ -347,7 +347,7 @@ export interface HistoryFetchOpts {
   stepKinds?: string[]
   agentRoles?: string[]
   statuses?: string[]
-  /** Free-text — ILIKE on envelope_payload::text (VT-201 PR-2 fallback; tsvector follow-up = VT-215). */
+  /** Free-text — tsvector match on envelope_search_tsv (VT-216). */
   q?: string
   /** Max rows per page. Default 100. */
   limit?: number
@@ -406,13 +406,13 @@ export async function fetchHistoricalSteps(
     q = q.in('status', opts.statuses)
   }
   if (opts.q) {
-    // ILIKE on the envelope_payload JSON-cast-to-text. tsvector + GIN
-    // index is VT-215 follow-up; at 30-day × ~10K/day ≈ 300K rows this
-    // is acceptable.
-    const safe = opts.q.replace(/[%_]/g, '\\$&')
-    q = q.or(
-      `output_envelope::text.ilike.%${safe}%,input_envelope::text.ilike.%${safe}%`,
-    )
+    // VT-216: tsvector @@ plainto_tsquery on the generated
+    // envelope_search_tsv column (spans both input_envelope +
+    // output_envelope). Replaces ILIKE fallback.
+    q = q.textSearch('envelope_search_tsv', opts.q, {
+      config: 'english',
+      type: 'plain',
+    })
   }
   // agentRoles is a derived dimension (step_kind + envelope payload);
   // Phase-1 omits server-side filtering and lets the client filter
