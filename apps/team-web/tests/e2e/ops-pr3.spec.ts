@@ -65,4 +65,23 @@ test.describe('VT-201 PR-3 — operator-awareness affordances', () => {
     const severity = await banner.getAttribute('data-severity')
     expect(['green', 'yellow', 'red']).toContain(severity)
   })
+
+  test('A13 — /team/ops degrades on Supabase fetch failure (VT-217)', async ({
+    page,
+    fazalJwt,
+  }) => {
+    expect(fazalJwt).toBeTruthy()
+    // CI boots team-web with NEXT_PUBLIC_SUPABASE_URL=http://localhost:0
+    // (per .github/workflows/ci.yml e2e-playwright job env). All three
+    // data-access calls in /team/ops/page.tsx therefore fail. VT-217's
+    // per-section try/catch must render the shell + a "couldn't load"
+    // placeholder for each failing section instead of letting the page
+    // 500. Asserts: HTTP 200 + at least one data-section-error visible.
+    const res = await page.goto('/team/ops')
+    expect(res?.status()).toBe(200)
+    expect(page.url(), `landed on ${page.url()} (status ${res?.status() ?? '?'})`).not.toContain('/login')
+    const errorPlaceholder = page.locator('[data-section-error]').first()
+    await expect(errorPlaceholder).toBeVisible({ timeout: 10_000 })
+    await expect(errorPlaceholder).toContainText(/couldn.{1,3}t load/i)
+  })
 })
