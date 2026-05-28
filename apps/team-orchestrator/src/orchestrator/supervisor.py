@@ -48,7 +48,7 @@ from orchestrator.agent.schemas.campaign_plan import parse_campaign_plan
 from orchestrator.agent.tools.self_evaluate import SelfEvaluateAdapter
 from orchestrator.collapse import collapse_node
 from orchestrator.db import tenant_connection
-from orchestrator.handoffs import spawn_sales_recovery
+from orchestrator.handoffs import spawn_integration, spawn_sales_recovery
 from orchestrator.routing import orchestrator_terminal_node, route_after_orchestrator
 from orchestrator.state.agent_graph_state import AgentGraphState
 
@@ -170,8 +170,14 @@ def build_supervisor_graph(
     checkpointing; PR 1/3 callers pass nothing and compile checkpoint-free.
     """
     orchestrator = build_orchestrator_agent(
-        model=model, extra_tools=[spawn_sales_recovery]
+        model=model, extra_tools=[spawn_sales_recovery, spawn_integration]
     )
+    # VT-206: build integration_agent subgraph alongside sales_recovery.
+    # Mirrors orchestrator subgraph wiring; observability:opt-out same
+    # CompiledStateGraph constraint as the orchestrator node.
+    from orchestrator.agent.integration_agent import build_integration_agent
+
+    integration = build_integration_agent(model=model)
 
     # VT-183 retrofit: 3 function-based supervisor StateGraph nodes wrapped
     # with `with_state_transition_hook` so each execution writes one
@@ -202,6 +208,10 @@ def build_supervisor_graph(
         "sales_recovery_agent",
         with_state_transition_hook(_sales_recovery_node, node_name="sales_recovery_agent"),
     )
+    # VT-206 — Integration Agent subgraph node. CompiledStateGraph (no
+    # function wrapper) for parity with the orchestrator node.
+    # observability:opt-out reason=CompiledStateGraph-subgraph-rejects-function-wrappers-per-VT-183
+    graph.add_node("integration_agent", integration)
     graph.add_node(
         "collapse",
         with_state_transition_hook(collapse_node, node_name="collapse"),
@@ -214,9 +224,19 @@ def build_supervisor_graph(
     graph.add_conditional_edges(
         "orchestrator_agent",
         route_after_orchestrator,
-        {"spawn": "sales_recovery_agent", "terminal": "orchestrator_terminal"},
+        {
+            "spawn": "sales_recovery_agent",
+            "spawn_integration": "integration_agent",
+            "terminal": "orchestrator_terminal",
+        },
     )
     graph.add_edge("sales_recovery_agent", "collapse")
+    # VT-206 — integration_agent's own subgraph emits internal state
+    # transitions; the supervisor only routes the spawn handoff. Once
+    # the integration_agent subgraph reaches its own END, control
+    # returns to the supervisor's END (no collapse needed — no campaign
+    # plan to persist).
+    graph.add_edge("integration_agent", END)
     graph.add_edge("collapse", END)
     graph.add_edge("orchestrator_terminal", END)
 
