@@ -1,6 +1,10 @@
-"""VT-207 OAuth callback router.
+"""VT-207 OAuth callback router (path aligned via VT-212 manual walk).
 
-Endpoint: ``GET /api/orchestrator/integrations/oauth/callback``.
+Endpoint: ``GET /api/orchestrator/integrations/google/callback``.
+
+Path aligns with ``GOOGLE_OAUTH_REDIRECT_URI`` env var (was
+``/oauth/callback`` which 404'd because Google redirected to the
+env-configured path). VT-212 manual walk surfaced the mismatch.
 
 Google redirects the owner here after they grant the OAuth scope.
 Query carries ``code`` + ``state`` (tenant_id). The handler calls
@@ -18,6 +22,7 @@ import logging
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Query
+from fastapi.responses import RedirectResponse
 
 from orchestrator.integrations.connectors.google_sheet import (
     GoogleSheetConnector,
@@ -27,7 +32,27 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
-@router.get("/api/orchestrator/integrations/oauth/callback")
+@router.get("/api/orchestrator/integrations/google_sheet/setup")
+def google_sheet_setup(tenant_id: str = Query(...)) -> RedirectResponse:
+    """Start the Google OAuth flow.
+
+    Owner hits this URL → server builds the Google consent URL with the
+    correct ``redirect_uri`` + scope + ``state=tenant_id`` → 302
+    redirects the browser there. VT-212 manual walk uses this as the
+    single entry point Cowork relays to Fazal.
+    """
+    try:
+        tenant_uuid = UUID(tenant_id)
+    except ValueError:
+        raise HTTPException(
+            status_code=400,
+            detail=f"tenant_id must be a UUID; got {tenant_id!r}",
+        ) from None
+    auth_url = GoogleSheetConnector().build_auth_url(tenant_uuid)
+    return RedirectResponse(url=auth_url, status_code=302)
+
+
+@router.get("/api/orchestrator/integrations/google/callback")
 def oauth_callback(
     code: str = Query(...),
     state: str = Query(...),
