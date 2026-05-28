@@ -395,7 +395,7 @@ jobs:
           TEAM_ORCHESTRATOR_URL: http://localhost:8001
           FAZAL_TENANT_ID: 00000000-0000-4000-8000-000000aaaaaa
           FAZAL_OWNER_UUID: 00000000-0000-4000-8000-0000000fa2a1
-          OPERATOR_JWT_SECRET: ci-test-operator-jwt-secret-32bytes-min
+          OPERATOR_JWT_SECRET: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
           NEXT_PUBLIC_TEAM_SUPABASE_URL: http://localhost:0
           NEXT_PUBLIC_TEAM_SUPABASE_PUBLISHABLE_KEY: ci-publishable-stub
           NEXT_PUBLIC_SITE_URL: http://localhost:3000
@@ -422,7 +422,7 @@ jobs:
           TEAM_ORCHESTRATOR_URL: http://localhost:8001
           FAZAL_TENANT_ID: 00000000-0000-4000-8000-000000aaaaaa
           FAZAL_OWNER_UUID: 00000000-0000-4000-8000-0000000fa2a1
-          OPERATOR_JWT_SECRET: ci-test-operator-jwt-secret-32bytes-min
+          OPERATOR_JWT_SECRET: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
         # VT-211 scope: onboard.spec.ts.
         # VT-201 PR-3 scope: ops-pr3.spec.ts. Both mint operator JWTs
         # inline via the lib/auth/operator-jwt helper so requireFazal()

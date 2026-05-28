@@ -35,15 +35,33 @@ export default async function RunReplayPage({ params }: PageProps) {
   }
   const { runId } = await params
 
-  const [steps, tenantId] = await Promise.all([
-    fetchRunReplay(runId),
-    fetchRunTenant(runId),
-  ])
+  // Be tolerant of Supabase failures (CI stub, transient outage):
+  // a 500 here surfaces the wrong signal to operators. notFound() is
+  // the right negative outcome.
+  let steps: Awaited<ReturnType<typeof fetchRunReplay>> = []
+  let tenantId: string | null = null
+  try {
+    ;[steps, tenantId] = await Promise.all([
+      fetchRunReplay(runId),
+      fetchRunTenant(runId),
+    ])
+  } catch (err) {
+    console.error('RunReplayPage: fetch failed', err)
+    notFound()
+  }
   if (steps.length === 0) notFound()
 
-  const prevNext = tenantId
-    ? await fetchPrevNextRun(tenantId, runId)
-    : { prevRunId: null, nextRunId: null }
+  let prevNext: Awaited<ReturnType<typeof fetchPrevNextRun>> = {
+    prevRunId: null,
+    nextRunId: null,
+  }
+  if (tenantId) {
+    try {
+      prevNext = await fetchPrevNextRun(tenantId, runId)
+    } catch (err) {
+      console.error('RunReplayPage: prev/next fetch failed', err)
+    }
+  }
 
   return (
     <main className="ops-run-replay" data-area="team-ops-run" data-run-id={runId}>

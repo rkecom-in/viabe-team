@@ -17,13 +17,20 @@ export default async function OpsLayout({ children }: { children: ReactNode }) {
   // The banner is only useful to authed operators; render-time auth
   // mismatch is rare in Phase-1 (single Fazal). Skip the banner on
   // auth failure rather than redirect — child pages handle their own
-  // requireFazal + redirect.
+  // requireFazal + redirect. Likewise tolerate transient Supabase
+  // failures (CI stub, dev offline) — the page-level data fetches
+  // still surface their own errors; the banner is not load-bearing.
   let counts = null
   try {
     await requireFazal()
     counts = await fetchBannerCounts()
   } catch (err) {
-    if (!(err instanceof UnauthorizedError)) throw err
+    if (err instanceof UnauthorizedError) {
+      counts = null
+    } else {
+      console.error('OpsLayout: banner fetch failed; skipping banner', err)
+      counts = null
+    }
   }
 
   return (

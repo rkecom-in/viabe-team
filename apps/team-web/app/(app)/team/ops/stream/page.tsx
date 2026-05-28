@@ -19,7 +19,12 @@ export default async function OpsStreamPage() {
     throw err
   }
 
-  const tenants = await fetchTopTenants(20)
+  let tenants: Awaited<ReturnType<typeof fetchTopTenants>> = []
+  try {
+    tenants = await fetchTopTenants(20)
+  } catch (err) {
+    console.error('OpsStreamPage: fetchTopTenants failed', err)
+  }
 
   // Mint a short-lived operator JWT for the browser Supabase Realtime
   // subscription. 5-min TTL per lib/auth/operator-jwt.ts; client-side
