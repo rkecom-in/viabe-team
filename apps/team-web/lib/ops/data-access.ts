@@ -278,3 +278,111 @@ export async function fetchRunReplay(
     .order('step_seq', { ascending: true })
   return ((data ?? []) as unknown as PipelineStepRow[])
 }
+
+
+/**
+ * VT-201 PR-2 — fetch historical pipeline_steps for the /ops/stream/history
+ * page. Keyset paginated on (started_at DESC, id DESC) so large days stay
+ * fast. Per Cowork lock: ILIKE-based free-text search for now (no tsvector
+ * generated column yet — that's VT-215 follow-up).
+ *
+ * Hour-scoped by default per Cowork clarification 2026-05-28: a busy day
+ * could have ~10K steps; one hour is ~400-1000 steps, well-bounded for the
+ * client-side replay timer.
+ */
+export interface HistoryFetchOpts {
+  /** YYYY-MM-DD (IST). Required. */
+  date: string
+  /** 0-23 (IST). Optional — when set, scopes to that hour only. */
+  hour?: number
+  /** Keyset cursor: opaque string of form `<started_at_iso>|<id>`. */
+  cursor?: string | null
+  tenantIds?: string[]
+  stepKinds?: string[]
+  agentRoles?: string[]
+  statuses?: string[]
+  /** Free-text — ILIKE on envelope_payload::text (VT-201 PR-2 fallback; tsvector follow-up = VT-215). */
+  q?: string
+  /** Max rows per page. Default 100. */
+  limit?: number
+}
+
+export interface HistoryFetchResult {
+  rows: PipelineStepRow[]
+  nextCursor: string | null
+}
+
+export async function fetchHistoricalSteps(
+  opts: HistoryFetchOpts,
+): Promise<HistoryFetchResult> {
+  const client = serverSecretClient()
+  const limit = Math.min(opts.limit ?? 100, 500)
+
+  // IST window — convert IST hour boundaries to UTC for the query.
+  // IST = UTC+5:30. Day starts at 00:00 IST = previous day 18:30 UTC.
+  const istOffsetMs = (5 * 60 + 30) * 60_000
+  const dayStartIst = new Date(`${opts.date}T00:00:00.000Z`).getTime()
+  const dayStartUtc = dayStartIst - istOffsetMs
+  let rangeStart = dayStartUtc
+  let rangeEnd = dayStartUtc + 24 * 3600_000
+  if (typeof opts.hour === 'number') {
+    rangeStart = dayStartUtc + opts.hour * 3600_000
+    rangeEnd = rangeStart + 3600_000
+  }
+
+  let q = client
+    .from('pipeline_steps')
+    .select(
+      'id, run_id, tenant_id, step_seq, step_kind, step_name, parent_step_id, status, ' +
+        'decision_rationale, model_used, tokens_input, tokens_output, ' +
+        'cost_paise, duration_ms, tool_calls, input_envelope, output_envelope, ' +
+        'error, started_at, ended_at',
+    )
+    .gte('started_at', new Date(rangeStart).toISOString())
+    .lt('started_at', new Date(rangeEnd).toISOString())
+    .order('started_at', { ascending: false })
+    .order('id', { ascending: false })
+    .limit(limit + 1)
+
+  if (opts.cursor) {
+    const [iso, id] = opts.cursor.split('|')
+    if (iso && id) {
+      q = q.or(`started_at.lt.${iso},and(started_at.eq.${iso},id.lt.${id})`)
+    }
+  }
+  if (opts.tenantIds && opts.tenantIds.length > 0) {
+    q = q.in('tenant_id', opts.tenantIds)
+  }
+  if (opts.stepKinds && opts.stepKinds.length > 0) {
+    q = q.in('step_kind', opts.stepKinds)
+  }
+  if (opts.statuses && opts.statuses.length > 0) {
+    q = q.in('status', opts.statuses)
+  }
+  if (opts.q) {
+    // ILIKE on the envelope_payload JSON-cast-to-text. tsvector + GIN
+    // index is VT-215 follow-up; at 30-day × ~10K/day ≈ 300K rows this
+    // is acceptable.
+    const safe = opts.q.replace(/[%_]/g, '\\$&')
+    q = q.or(
+      `output_envelope::text.ilike.%${safe}%,input_envelope::text.ilike.%${safe}%`,
+    )
+  }
+  // agentRoles is a derived dimension (step_kind + envelope payload);
+  // Phase-1 omits server-side filtering and lets the client filter
+  // post-fetch if needed.
+
+  const { data, error } = await q
+  if (error) throw new Error(`fetchHistoricalSteps: ${error.message}`)
+  const all = (data ?? []) as unknown as Array<PipelineStepRow & { tenant_id: string }>
+  let nextCursor: string | null = null
+  let rows = all
+  if (all.length > limit) {
+    rows = all.slice(0, limit)
+    const last = rows[rows.length - 1]
+    if (last) {
+      nextCursor = `${last.started_at}|${last.id}`
+    }
+  }
+  return { rows: rows as PipelineStepRow[], nextCursor }
+}
