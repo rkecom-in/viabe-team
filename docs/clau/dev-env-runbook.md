@@ -95,8 +95,8 @@ Server-only by default unless `NEXT_PUBLIC_` prefix.
 
 | Var | Source | Notes |
 |---|---|---|
-| `NEXT_PUBLIC_TEAM_SUPABASE_URL` | supabase-dev.env | client-side Supabase URL |
-| `NEXT_PUBLIC_TEAM_SUPABASE_PUBLISHABLE_KEY` | supabase-dev.env | client-side RLS-safe key |
+| `NEXT_PUBLIC_SUPABASE_URL` | supabase-dev.env | client-side Supabase URL |
+| `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` | supabase-dev.env | client-side RLS-safe key |
 | `NEXT_PUBLIC_SITE_URL` | (your Vercel URL) | for `lib/auth/require-fazal.ts` cookie domain |
 | `OPERATOR_JWT_SECRET` | supabase-dev.env | server-side; same as Railway |
 | `INTERNAL_API_SECRET` | supabase-dev.env | same as Railway |
