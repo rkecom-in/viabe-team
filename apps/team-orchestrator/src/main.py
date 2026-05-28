@@ -73,6 +73,10 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     )
 
     register_ingestion_scheduler()
+    # VT-202: proactive alerts sweep + daily digest. Same contract.
+    from orchestrator.alerts.scheduler import register_alert_scheduler
+
+    register_alert_scheduler()
     launch_dbos()
     yield
     shutdown_dbos()
