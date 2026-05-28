@@ -1,0 +1,75 @@
+name: Deploy dev
+
+# Triggered on push to main only. No untrusted event payload values
+# are interpolated into run: blocks — only repo secrets, which are
+# safe per the GitHub Actions security model.
+
+on:
+  push:
+    branches: [main]
+
+# One deploy at a time per branch — both apps share Supabase; concurrent
+# migrations would race.
+concurrency:
+  group: deploy-dev
+  cancel-in-progress: false
+
+jobs:
+  pre-deploy-checks:
+    name: pre-deploy-checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @viabe/team-web typecheck
+      - run: pnpm --filter @viabe/team-web lint
+      - uses: astral-sh/setup-uv@v5
+      - run: uvx ruff check apps/team-orchestrator
+
+  deploy-orchestrator:
+    name: Deploy orchestrator (Railway)
+    needs: pre-deploy-checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Railway CLI
+        run: npm install -g @railway/cli@latest
+      - name: Deploy to Railway
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+          RAILWAY_SERVICE_ID: ${{ secrets.RAILWAY_SERVICE_ID }}
+        run: railway up --service "$RAILWAY_SERVICE_ID" --detach
+
+  deploy-team-web:
+    name: Deploy team-web (Vercel)
+    needs: pre-deploy-checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Deploy to Vercel
+        uses: amondnet/vercel-action@v25
+        with:
+          vercel-token: ${{ secrets.VERCEL_TOKEN }}
+          vercel-org-id: ${{ secrets.VERCEL_ORG_ID }}
+          vercel-project-id: ${{ secrets.VERCEL_PROJECT_ID }}
+          working-directory: apps/team-web
+          vercel-args: '--prod'
+
+  post-deploy-smoke:
+    name: Post-deploy smoke
+    needs: [deploy-orchestrator, deploy-team-web]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Wait for both deploys to settle
+        run: sleep 60
+      - name: Run dev-env smoke
+        env:
+          RAILWAY_DEV_URL: ${{ secrets.RAILWAY_DEV_URL }}
+          VERCEL_DEV_URL: ${{ secrets.VERCEL_DEV_URL }}
+        run: bash scripts/dev-env-smoke.sh

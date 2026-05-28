@@ -1,0 +1,25 @@
+# Railway service config — orchestrator (dev env, VT-218).
+#
+# Build context = repo root (set on Railway dashboard: Settings → Service →
+# "Root Directory" stays at repo root so the Dockerfile sees both
+# apps/team-orchestrator/ AND packages/team-shared/ + migrations/).
+# The Dockerfile path below is relative to the build context.
+
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "apps/team-orchestrator/Dockerfile"
+
+[deploy]
+# Health endpoint defined in apps/team-orchestrator/src/main.py:79.
+# Allow 60s for DBOS + uvicorn cold start.
+healthcheckPath = "/health"
+healthcheckTimeout = 60
+# On crash, restart up to 3 times before marking the deploy failed.
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 3
+# Migrations + uvicorn — startCommand overrides Dockerfile CMD if set.
+# Leaving unset so the Dockerfile CMD applies. Documented here for visibility.
+
+[experimental]
+# Railway's recent Pro tier defaults to 2 vCPU / 2 GB; orchestrator is
+# happy with that. No explicit resource block needed.
