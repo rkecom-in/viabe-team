@@ -47,6 +47,13 @@ def route_after_orchestrator(state: AgentGraphState) -> str:
     for tc in tool_calls:
         if tc.get("name") == "spawn_sales_recovery":
             return "spawn"
+        if tc.get("name") == "spawn_integration":
+            # VT-206 — orchestrator-agent decided to hand off to the
+            # Integration Agent. Same conditional-edge precedence
+            # discussion as spawn_sales_recovery (Command.PARENT vs
+            # explicit edge); both targets agree on goto so safe either
+            # way.
+            return "spawn_integration"
     return "terminal"
 
 

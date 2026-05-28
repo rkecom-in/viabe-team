@@ -139,6 +139,39 @@ def _build_sales_recovery_update(state: dict[str, Any]) -> dict[str, Any]:
     return {"sales_recovery_context": bundle}
 
 
+def _build_integration_update(state: dict[str, Any]) -> dict[str, Any]:
+    """Build the ``spawn_integration`` Command.update extension (VT-206).
+
+    Minimal: integration agent reads everything from tenant_integration_state
+    on its own; no specialist bundle needed at handoff time. Fail-loud
+    on missing tenant_id / run_id per CL-195 + Pillar 3.
+    """
+    tenant_id = state.get("tenant_id")
+    if tenant_id is None:
+        raise TenantIsolationError(
+            "spawn_integration: tenant_id missing from state"
+        )
+    run_id = state.get("run_id")
+    if run_id is None:
+        raise TenantIsolationError(
+            "spawn_integration: run_id missing from state"
+        )
+    return {}
+
+
+spawn_integration = make_spawn_tool(
+    agent_name="integration_agent",
+    tool_name="spawn_integration",
+    description=(
+        "Hand off to the Integration Agent for owner onboarding "
+        "(connecting Shopify / Google Sheets / etc.). Use when the "
+        "conversation indicates the owner wants to add or configure a "
+        "data source."
+    ),
+    update_builder=_build_integration_update,
+)
+
+
 spawn_sales_recovery = make_spawn_tool(
     agent_name="sales_recovery_agent",
     tool_name="spawn_sales_recovery",

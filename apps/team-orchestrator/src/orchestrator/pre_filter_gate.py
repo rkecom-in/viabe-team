@@ -51,6 +51,25 @@ _STATUS_PING = re.compile(
     re.IGNORECASE,
 )
 
+# VT-206 Q4 — integration intent classifier. Precise regex; biases
+# toward false-negative per Cowork flag (ambiguous "use" phrases must
+# NOT match — fall through to brain for classification). Two patterns
+# UNION'd: (a) verb + integration-noun, (b) generic onboarding phrases.
+_INTEGRATION_INTENT_RE = re.compile(
+    r"\b("
+    # (a) verb + integration noun / connector name
+    r"(add|connect|setup|set\s*up|configure|integrate)\s+(my\s+|the\s+)?"
+    r"(integration|shopify|sheet|spreadsheet|crm|gohighlevel|woocommerce|"
+    r"google\s*analytics|ga4|amazon|razorpay|meta\s*ads|pixel|connector|data\s*source)"
+    r"|"
+    # (b) generic onboarding phrases
+    r"onboard(ing)?|set\s*me\s*up|connect\s*my\s*data|i\s+want\s+to\s+use\s+"
+    r"(shopify|sheet|spreadsheet|crm|gohighlevel|woocommerce|"
+    r"google\s*analytics|ga4|amazon|razorpay|meta\s*ads)"
+    r")\b",
+    re.IGNORECASE,
+)
+
 
 def _normalize(body: str) -> str:
     """Collapse whitespace and case-fold for exact keyword comparison."""
@@ -106,7 +125,14 @@ def pre_filter(event: WebhookEvent, state: SubscriberState) -> PreFilterResult:
     if _STATUS_PING.match(event.body):
         return RouteToDirectHandler(handler_name="status_ping_handler")
 
-    # Rule g — everything else needs the orchestrator-agent brain (VT-3.9).
+    # Rule g — integration intent (VT-206 Q4). Precise regex bias toward
+    # false-negative: ambiguous phrases fall through to brain.
+    if _INTEGRATION_INTENT_RE.search(event.body):
+        return RouteToBrain(
+            reason="integration_intent — owner wants to add/connect a data source"
+        )
+
+    # Rule h — everything else needs the orchestrator-agent brain (VT-3.9).
     if event.message_type == "unknown":
         return RouteToBrain(reason="unknown message type — needs reasoning")
     return RouteToBrain(
