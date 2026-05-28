@@ -6,5 +6,7 @@ concrete connector subclasses ``ConnectorBase`` and matches a
 """
 
 from orchestrator.integrations.connectors.base import ConnectorBase
+from orchestrator.integrations.connectors.google_sheet import GoogleSheetConnector
+from orchestrator.integrations.connectors.shopify import ShopifyConnector
 
-__all__ = ["ConnectorBase"]
+__all__ = ["ConnectorBase", "GoogleSheetConnector", "ShopifyConnector"]
