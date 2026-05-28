@@ -257,6 +257,38 @@ jobs:
             echo "No tools test dir yet (VT-5.x not landed). Gate passes vacuously."
           fi
 
+  gate-connector-registry-schema:
+    name: gate-connector-registry-schema
+    runs-on: ubuntu-latest
+    # VT-205 acceptance criterion: every entry in the connector
+    # registry validates against ConnectorSpec. Schema drift fails
+    # CI fast. Re-uses the orchestrator's installed Pydantic; runs
+    # against the source tree directly.
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: Validate every connector spec
+        working-directory: apps/team-orchestrator
+        run: |
+          uv run --no-project --with pydantic python -c "
+          import sys
+          sys.path.insert(0, 'src')
+          from orchestrator.integrations.registry import REGISTRY
+          from orchestrator.integrations.schemas import ConnectorSpec
+          drift = []
+          for cid, spec in REGISTRY.items():
+              try:
+                  ConnectorSpec.model_validate(spec.model_dump())
+              except Exception as exc:
+                  drift.append(f'{cid}: {exc!r}')
+          if drift:
+              print('::error::connector registry schema drift:')
+              for d in drift:
+                  print(f'::error::{d}')
+              sys.exit(1)
+          print(f'Validated {len(REGISTRY)} connector specs.')
+          "
+
   gate-vt35-hard-limit-constants:
     name: gate-vt35-hard-limit-constants
     runs-on: ubuntu-latest
