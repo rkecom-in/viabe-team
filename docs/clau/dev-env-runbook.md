@@ -161,3 +161,38 @@ Exits 0 on full pass; non-zero (with which assertion failed) on any red.
 ## Prod environment
 
 Out of scope for VT-218. Filed as separate row when ready to promote. Same shape (Railway + Vercel + Supabase prod project) but separate URLs, separate secrets, separate Resend/Telegram bots.
+
+## Preview Deploys (VT-223)
+
+### Vercel dashboard toggle
+
+To enable PR-side preview deploys:
+
+1. Vercel dashboard → `viabe-team` project → Settings → Git
+2. Locate the "Pull Request Previews" toggle (exact label may vary by Vercel version)
+3. Enable for the `viabe-team` GitHub repository
+4. Verify by pushing a feature branch with a touched `apps/team-web/` file — preview check should appear within ~2 min on the PR
+
+### `vercel.json` `github.silent`
+
+Set to `false` (per VT-223). When `true`, Vercel suppresses commit-status checks on PRs even if previews fire — debugging deploy issues becomes opaque. The trade-off is more PR-noise; we accept that vs flying blind.
+
+### `vercel.json` `ignoreCommand`
+
+`git diff --quiet HEAD^ HEAD ./` — skips Vercel build when the PR diff doesn't touch `apps/team-web/`. Kept (per VT-223) for build-cost optimization.
+
+To force a deploy on a docs-only PR (e.g., to test identity propagation, rebuild env, etc.), include any 1-line edit under `apps/team-web/` — e.g., append a blank line to `apps/team-web/README.md`. VT-221 used this pattern.
+
+### Sticky-deploy recovery
+
+If a Vercel deploy is stuck in-progress (>10 min for what should be a 2-min build):
+
+1. Vercel dashboard → Deployments → click the stuck deploy → "Cancel"
+2. Open the latest commit on `main` → "Redeploy"
+3. Verify status reaches `Ready` within ~3 min
+
+For diagnosis, see `.viabe/queue/VT-223/diagnostic.md`. Most-likely cause from the 2026-05-28 incident: webhook race during a force-push leaving Vercel with an orphan deploy reference. Avoid force-pushes during active deploys when possible.
+
+### Future work — deployment-status webhooks
+
+To get telemetry on stuck deploys, enable Vercel deployment-status webhooks (`deployment.error` / `deployment.canceled` / `deployment.created` events) and forward into the VT-202 alert substrate. Filed as note in `.viabe/queue/VT-223/diagnostic.md`. Allocate a VT row when ready to wire it.
