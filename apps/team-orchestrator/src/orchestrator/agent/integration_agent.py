@@ -176,12 +176,42 @@ def confirm_field_mapping_stub(
 def setup_recurring_ingestion_stub(
     tenant_id: str, connector_id: str, cadence: str
 ) -> dict[str, str]:
-    """STUB — schedule recurring pulls. TODO(VT-210) DBOS scheduled workflow."""
+    """Schedule recurring pulls (VT-210). Inserts/updates ``tenant_connector_status``.
+
+    Cadence is a Phase-1 daily cron expression (``"M H * * *"``). The
+    scheduler (``orchestrator.integrations.scheduler``) scans this table
+    every 5 minutes and fires per-(tenant, connector) workflows on due
+    rows. ``next_scheduled_run`` is computed from ``cadence`` at insert
+    time; subsequent runs update it via the same parser.
+    """
+    from uuid import UUID
+
+    from orchestrator.graph import get_pool
+    from orchestrator.integrations.scheduler import _compute_next_run
+    from datetime import datetime, UTC
+
+    next_run = _compute_next_run(cadence, datetime.now(UTC))
+    pool = get_pool()
+    with pool.connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO tenant_connector_status (
+                tenant_id, connector_id, pull_cadence,
+                next_scheduled_run, enabled
+            ) VALUES (%s, %s, %s, %s, TRUE)
+            ON CONFLICT (tenant_id, connector_id) DO UPDATE SET
+                pull_cadence = EXCLUDED.pull_cadence,
+                next_scheduled_run = EXCLUDED.next_scheduled_run,
+                enabled = TRUE,
+                updated_at = now()
+            """,
+            (str(UUID(tenant_id)), connector_id, cadence, next_run),
+        )
     logger.info(
-        "[VT-210 STUB] setup_recurring_ingestion tenant=%s connector=%s cadence=%s",
-        tenant_id, connector_id, cadence,
+        "setup_recurring_ingestion tenant=%s connector=%s cadence=%s next=%s",
+        tenant_id, connector_id, cadence, next_run.isoformat(),
     )
-    return {"scheduled": "true", "stub": "true"}
+    return {"scheduled": "true", "next_run": next_run.isoformat()}
 
 
 @tool

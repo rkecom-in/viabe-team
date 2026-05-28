@@ -1,0 +1,8 @@
+# Allowlisted findings — historical commits where the flagged token is
+# a canary fixture string, not a real secret.
+#
+# Format: <commit-sha>:<file-path>:<rule-id>:<line>
+
+# VT-210 canary fixture push_secret (now replaced with per-run uuid in
+# commit 76d897d; flagged in the previous commit only).
+4db9ccff6c6407f9c43db5ed220973f7390ed1e6:apps/team-orchestrator/canaries/vt210_recurring_ingestion.py:generic-api-key:236
