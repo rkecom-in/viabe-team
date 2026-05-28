@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """VT-200 hygiene bundle canary (Rule #15, DR-15).
 
-Three deterministic assertions — one per fix:
+Four deterministic assertions — one per fix:
 
 - A1: TEAM_TWILIO_MOCK_MODE=1 yields a mock client; send() returns a
   mock SID without raising on absent TEAM_TWILIO_ACCOUNT_SID / AUTH_TOKEN.
@@ -10,6 +10,9 @@ Three deterministic assertions — one per fix:
 - A3: register_purge_scheduler() applies @DBOS.workflow before
   @DBOS.scheduled — no DBOSWorkflowFunctionNotFoundError after scheduler
   registers the purge function.
+- A4 (VT-215): register_ingestion_scheduler() applies @DBOS.workflow
+  before @DBOS.scheduled for ingestion_scheduler_body — same fix shape
+  as A3, different function.
 
 Subshell-source supabase-dev.env:
 
@@ -255,6 +258,68 @@ def run_canary() -> int:
         )
     finally:
         logging.getLogger().removeHandler(cap)
+
+    # ---------------- A4 (VT-215) — DBOS ingestion workflow registration ----
+    # Same shape as A3 but for ``ingestion_scheduler_body``. Calling
+    # ``register_ingestion_scheduler()`` after the purge register is safe —
+    # both go through idempotent module-level apply-decorator calls.
+    captured_a4: list[str] = []
+    handler_seen_records_a4: list[logging.LogRecord] = []
+
+    class _CaptureA4(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            handler_seen_records_a4.append(record)
+            captured_a4.append(self.format(record))
+
+    cap_a4 = _CaptureA4()
+    cap_a4.setLevel(logging.DEBUG)
+    logging.getLogger().addHandler(cap_a4)
+    try:
+        from orchestrator.integrations.scheduler import (
+            ingestion_scheduler_body,
+            register_ingestion_scheduler,
+        )
+
+        try:
+            register_ingestion_scheduler()
+        except Exception as exc:  # noqa: BLE001
+            assertion(
+                4,
+                "register_ingestion_scheduler applies @DBOS.workflow before @DBOS.scheduled",
+                False,
+                observed={"register_raised": repr(exc)},
+                expected="no exception",
+            )
+            return _finalise(pool)
+
+        from dbos._dbos import _dbos_global_registry
+
+        reg_a4 = _dbos_global_registry
+        wf_map_a4 = getattr(reg_a4, "workflow_info_map", {}) if reg_a4 else {}
+        ingest_qualname = ingestion_scheduler_body.__qualname__
+        registered_keys_a4 = [
+            k for k in wf_map_a4 if "ingestion_scheduler_body" in k
+        ]
+        not_found_warnings_a4 = [
+            r for r in handler_seen_records_a4
+            if "DBOSWorkflowFunctionNotFoundError" in r.getMessage()
+            and "ingestion_scheduler_body" in r.getMessage()
+        ]
+        pass_4 = len(not_found_warnings_a4) == 0 and len(registered_keys_a4) > 0
+        assertion(
+            4,
+            "DBOS workflow registered: ingestion_scheduler_body in workflow_info_map + no NotFoundError",
+            pass_4,
+            observed={
+                "registered_keys": registered_keys_a4,
+                "wf_map_size": len(wf_map_a4),
+                "ingest_qualname": ingest_qualname,
+                "not_found_warnings": [r.getMessage() for r in not_found_warnings_a4],
+            },
+            expected={"registered_keys_nonempty": True, "not_found_warnings": []},
+        )
+    finally:
+        logging.getLogger().removeHandler(cap_a4)
 
     _cleanup(pool)
     return _finalise(pool)

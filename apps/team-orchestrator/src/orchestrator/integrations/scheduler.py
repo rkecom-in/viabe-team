@@ -297,8 +297,14 @@ def register_ingestion_scheduler() -> None:
 
     Called from ``main.py`` lifespan BEFORE ``launch_dbos()``. Mirrors
     ``register_purge_scheduler`` so import-time stays side-effect-free.
+
+    VT-215 hygiene fix: ``ingestion_scheduler_body`` gets
+    ``@DBOS.workflow`` BEFORE ``@DBOS.scheduled``. Without it the
+    scheduler poller emits ``DBOSWorkflowFunctionNotFoundError`` every
+    cron tick (same bug VT-200 closed for the purge scheduler).
     """
     DBOS.workflow()(ingest_one_connector)
+    DBOS.workflow()(ingestion_scheduler_body)
     DBOS.scheduled(_SCHEDULER_CRON)(ingestion_scheduler_body)
 
 
