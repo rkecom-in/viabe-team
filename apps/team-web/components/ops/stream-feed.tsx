@@ -20,6 +20,7 @@ import {
   type PipelineStepEvent,
   type StreamFilters,
 } from '@/lib/ops/stream'
+import { StreamRowList } from '@/components/ops/stream-row-list'
 
 const _MAX_ROWS_IN_MEMORY = 200
 
@@ -104,29 +105,7 @@ export function StreamFeed({ operatorJwt, availableTenants }: StreamFeedProps) {
       <section data-section="connection-status">
         Realtime: {connected ? 'connected' : 'disconnected'}
       </section>
-      <ol data-section="stream-rows">
-        {rows.map((step) => (
-          <li
-            key={step.id}
-            data-step-id={step.id}
-            data-step-kind={step.step_kind}
-            data-step-status={step.status}
-          >
-            <span data-col="started_at">
-              {new Date(step.started_at).toLocaleTimeString()}
-            </span>
-            <span data-col="tenant_name">{tenantName(step.tenant_id)}</span>
-            <a data-col="run_id" href={`/team/ops/runs/${step.run_id}`}>
-              {step.run_id.slice(0, 8)}
-            </a>
-            <span data-col="step_kind">{step.step_kind}</span>
-            <span data-col="step_name">{step.step_name ?? '—'}</span>
-            <span data-col="status">{step.status}</span>
-            <span data-col="cost_paise">{step.cost_paise ?? 0}p</span>
-            <span data-col="duration_ms">{step.duration_ms ?? '—'}ms</span>
-          </li>
-        ))}
-      </ol>
+      <StreamRowList rows={rows} tenantName={tenantName} />
     </div>
   )
 }

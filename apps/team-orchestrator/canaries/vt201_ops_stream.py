@@ -43,6 +43,7 @@ import os
 import sys
 from pathlib import Path
 from typing import Any
+import json
 from uuid import uuid4
 
 SRC = Path(__file__).resolve().parent.parent / "src"
@@ -260,6 +261,117 @@ def run_canary() -> int:
             "op_claim_count": op_claim_count,
         },
         expected={"no_claim_count": 0, "op_claim_count": 2},
+    )
+
+    # ============================================================
+    # VT-201 PR-2 — history view assertions (A7-A9)
+    # ============================================================
+    # Use the same run_a + run_b already seeded. Insert a few
+    # pipeline_steps with distinct started_at + envelope shapes so the
+    # history endpoint's keyset pagination + ILIKE search can be
+    # exercised deterministically.
+    from datetime import UTC, datetime, timedelta
+    import time as _time
+
+    history_run = run_a
+    base_started = datetime.now(UTC)
+    history_step_ids: list[str] = []
+    marker = f"vt201-pr2-marker-{uuid4().hex[:8]}"
+    with pool.connection() as conn:
+        for i in range(15):
+            step_id = uuid4()
+            started = base_started - timedelta(minutes=i)
+            envelope = {"reasoning": marker if i == 7 else f"step {i}"}
+            conn.execute(
+                """
+                INSERT INTO pipeline_steps
+                    (id, run_id, tenant_id, step_seq, step_kind, status,
+                     started_at, output_envelope)
+                VALUES (%s, %s, %s, %s, 'agent_reasoning_step', 'completed',
+                        %s, %s::jsonb)
+                """,
+                (str(step_id), str(history_run), tenant_a, 100 + i,
+                 started, json.dumps(envelope)),
+            )
+            history_step_ids.append(str(step_id))
+
+    # A7 — history date-range query within 3s
+    t7_start = _time.monotonic()
+    with pool.connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT COUNT(*) AS n FROM pipeline_steps "
+            "WHERE id = ANY(%s)",
+            (history_step_ids,),
+        )
+        row = cur.fetchone()
+    elapsed_s = _time.monotonic() - t7_start
+    pass_7 = (row is not None and int(row["n"]) == 15 and elapsed_s < 3.0)
+    assertion(
+        7,
+        "history query: 15 rows for target date within 3s",
+        pass_7,
+        observed={"count": int(row["n"]) if row else None, "elapsed_s": round(elapsed_s, 3)},
+        expected={"count": 15, "elapsed_s_lt": 3.0},
+    )
+
+    # A8 — keyset cursor pagination (walk 3 pages with limit=5)
+    paginated_ids: list[str] = []
+    cursor = None
+    pages = 0
+    while pages < 5:
+        with pool.connection() as conn, conn.cursor() as cur:
+            params = [history_step_ids]
+            sql = (
+                "SELECT id, started_at FROM pipeline_steps "
+                "WHERE id = ANY(%s) "
+            )
+            if cursor:
+                iso, last_id = cursor.split("|")
+                sql += (
+                    "AND (started_at < %s OR (started_at = %s AND id < %s)) "
+                )
+                params.extend([iso, iso, last_id])
+            sql += "ORDER BY started_at DESC, id DESC LIMIT 5"
+            cur.execute(sql, tuple(params))
+            page_rows = cur.fetchall()
+        if not page_rows:
+            break
+        for r in page_rows:
+            paginated_ids.append(str(r["id"]))
+        last = page_rows[-1]
+        cursor = f"{last['started_at'].isoformat()}|{last['id']}"
+        pages += 1
+        if len(page_rows) < 5:
+            break
+
+    pass_8 = (
+        len(paginated_ids) == 15
+        and len(set(paginated_ids)) == 15  # no duplicates
+        and pages == 3  # exactly 3 pages of 5
+    )
+    assertion(
+        8,
+        "keyset cursor: 3 pages × 5 rows = 15; no duplicates",
+        pass_8,
+        observed={"pages": pages, "total_ids": len(paginated_ids), "distinct": len(set(paginated_ids))},
+        expected={"pages": 3, "total_ids": 15, "distinct": 15},
+    )
+
+    # A9 — ILIKE free-text search (per Cowork lock; tsvector deferred to VT-215)
+    with pool.connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT id FROM pipeline_steps "
+            "WHERE id = ANY(%s) AND output_envelope::text ILIKE %s",
+            (history_step_ids, f"%{marker}%"),
+        )
+        matches = cur.fetchall()
+    pass_9 = len(matches) == 1
+    assertion(
+        9,
+        f"ILIKE free-text: distinctive marker '{marker}' returns 1 row",
+        pass_9,
+        observed={"match_count": len(matches), "marker": marker},
+        expected={"match_count": 1},
     )
 
     return _finalise(pool)
