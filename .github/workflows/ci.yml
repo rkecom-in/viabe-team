@@ -387,6 +387,14 @@ jobs:
           NEXT_PUBLIC_TEAM_SUPABASE_URL: http://localhost:0
           NEXT_PUBLIC_TEAM_SUPABASE_PUBLISHABLE_KEY: ci-publishable-stub
           NEXT_PUBLIC_SITE_URL: http://localhost:3000
+          # Next.js may freeze module-scope `process.env.X` reads at build
+          # time. Provide the same server-side env at build + start so
+          # runtime requireFazal can read them.
+          INTERNAL_API_SECRET: ci-test-internal-secret
+          TEAM_ORCHESTRATOR_URL: http://localhost:8001
+          FAZAL_TENANT_ID: 00000000-0000-4000-8000-000000aaaaaa
+          FAZAL_OWNER_UUID: 00000000-0000-4000-8000-0000000fa2a1
+          OPERATOR_JWT_SECRET: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
         run: pnpm build
       - name: Start team-web dev server (background)
         working-directory: apps/team-web
