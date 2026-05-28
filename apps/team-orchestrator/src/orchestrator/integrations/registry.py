@@ -52,7 +52,7 @@ REGISTRY: dict[str, ConnectorSpec] = {
             requests_per_day=100_000,
             notes="Sheets API quota per project; per-user 60 req/min default.",
         ),
-        push_supported=False,
+        push_supported=True,
         pull_default_cadence="0 9 * * *",
         implementation_vt_row="VT-207",
         summary="Pull customer/order rows from a Google Sheets tab via read-only OAuth.",

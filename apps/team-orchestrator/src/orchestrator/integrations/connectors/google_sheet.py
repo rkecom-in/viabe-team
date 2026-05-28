@@ -298,6 +298,38 @@ class GoogleSheetConnector(ConnectorBase):
             for i, _ in enumerate(values)
         ]
 
+    def verify_push_signature(
+        self, body: bytes, headers: dict[str, str], push_secret: str
+    ) -> bool:
+        """Verify Apps Script HMAC-SHA256 signature.
+
+        Header name: ``X-Viabe-Signature`` (lowercase hex digest).
+        VT-210 Q4 lock: previously a standalone helper in
+        ``apps_script_template``; promoted into the connector class so
+        the generic VT-210 push receiver invokes one interface.
+        """
+        from orchestrator.integrations.connectors.apps_script_template import (
+            verify_push_signature as _legacy_verify,
+        )
+
+        signature = headers.get("x-viabe-signature") or headers.get(
+            "X-Viabe-Signature", ""
+        )
+        return _legacy_verify(
+            body=body, signature=signature, push_secret=push_secret
+        )
+
+    def parse_push_payload(self, body: bytes) -> list[dict[str, Any]]:
+        """Apps Script POST body shape: ``{"row_data": {...}, ...}``.
+
+        Returns a one-element list (single-row append events).
+        """
+        import json as _json
+
+        payload = _json.loads(body.decode("utf-8"))
+        row_data = payload.get("row_data") or {}
+        return [row_data] if row_data else []
+
     def setup_push(self, tenant_id: UUID, spreadsheet_id: str) -> dict[str, str]:
         """Generate Apps Script template + return push_secret.
 

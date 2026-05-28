@@ -67,6 +67,12 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     # contract as register_purge_scheduler — see scheduled_triggers.py
     # docstring for the DBOS app_version invariant.
     register_scheduled_triggers()
+    # VT-210: fan-out ingestion scheduler. Same contract.
+    from orchestrator.integrations.scheduler import (
+        register_ingestion_scheduler,
+    )
+
+    register_ingestion_scheduler()
     launch_dbos()
     yield
     shutdown_dbos()
