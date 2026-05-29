@@ -198,12 +198,15 @@ def test_scope_discipline_envelope_routing(
     ctx = _ctx(trigger_reason=trigger_reason, pending=pending)
     result = run_sales_recovery_agent(ctx)
 
-    assert result.status == expected_status, (
-        f"expected status={expected_status}, got {result.status} "
-        f"with envelope {envelope}"
+    # AgentResult.status is the LangGraph-node lifecycle state (completed /
+    # terminated); the CampaignPlan envelope's status (out_of_scope /
+    # proposed / etc.) lives on result.output['status'].
+    envelope_status = (result.output or {}).get("status")
+    assert envelope_status == expected_status, (
+        f"expected envelope status={expected_status}, got {envelope_status} "
+        f"with output {result.output}"
     )
     if expected_specialist is not None:
-        # output may carry suggested_specialist on out_of_scope envelopes
         suggested = (result.output or {}).get("suggested_specialist")
         assert suggested == expected_specialist, (
             f"expected suggested_specialist={expected_specialist}, got {suggested}"
@@ -229,7 +232,8 @@ def test_scope_discipline_real_api_smoke() -> None:
     """
     ctx = _ctx(pending=[SCENARIOS[4].values[1][0]])  # scenario E pending input
     result = run_sales_recovery_agent(ctx)
-    assert result.status == "out_of_scope", (
-        f"real model returned status={result.status}; "
+    envelope_status = (result.output or {}).get("status")
+    assert envelope_status == "out_of_scope", (
+        f"real model returned envelope status={envelope_status}; "
         f"scope discipline regression on scenario E"
     )
