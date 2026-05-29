@@ -98,6 +98,24 @@ describe('VT-203 — Ops Console login surface', () => {
     expect(setCookie).toContain('Path=/team')
   })
 
+  it('A5 — callback Set-Cookie carries 7-day Max-Age (VT-236)', async () => {
+    const verifyOtp = vi.fn().mockResolvedValue({
+      data: { session: { user: { id: FAZAL_UUID_TEST } } },
+      error: null,
+    })
+    vi.doMock('@/lib/supabase-client', () => ({
+      serverSecretClient: () => ({ auth: { verifyOtp } }),
+    }))
+    const { GET } = await import('@/app/api/ops/login/callback/route')
+    const req = new Request(
+      'http://test/api/ops/login/callback?token_hash=abc&type=magiclink',
+    )
+    const res = await GET(req)
+    const setCookie = res.headers.get('set-cookie') ?? ''
+    // 7 days = 604800 seconds
+    expect(setCookie).toMatch(/Max-Age=604800/)
+  })
+
   it('A4 — callback with verified session BUT user NOT in operator allowlist → 302 /team/ops/login?error=not_authorized + NO cookie', async () => {
     const verifyOtp = vi.fn().mockResolvedValue({
       data: {
