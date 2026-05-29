@@ -34,9 +34,14 @@ export default async function OpsStreamPage() {
   const operatorJwt = await issueOperatorJwt(fazalUuid)
 
   return (
-    <main className="ops-stream" data-area="team-ops-stream">
+    <main
+      className="ops-stream bg-gray-50 min-h-screen p-6 space-y-6"
+      data-area="team-ops-stream"
+    >
       <header>
-        <h1>Ops Console — Live Stream</h1>
+        <h1 className="text-2xl font-semibold text-gray-900">
+          Ops Console — Live Stream
+        </h1>
       </header>
 
       <StreamFeed
