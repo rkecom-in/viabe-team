@@ -84,6 +84,12 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     )
 
     register_drive_push_scheduler()
+    # VT-227: daily 3 AM IST purge of twilio_inbound_replay rows >24h.
+    from orchestrator.observability.twilio_replay_purge import (
+        register_twilio_replay_purge_scheduler,
+    )
+
+    register_twilio_replay_purge_scheduler()
     launch_dbos()
     yield
     shutdown_dbos()
