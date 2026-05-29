@@ -45,10 +45,13 @@ describe('VT-230 — onboard auth flow', () => {
     // — smoke the module's source. Real visual + redirect verified at
     // playwright e2e + manual canary time.
     const { readFile } = await import('fs/promises')
-    const src = await readFile(
-      'apps/team-web/app/(app)/team/onboard/page.tsx',
-      'utf8',
+    const path = await import('path')
+    // CWD is apps/team-web during `pnpm --filter @viabe/team-web test`
+    const filePath = path.resolve(
+      process.cwd(),
+      'app/(app)/team/onboard/page.tsx',
     )
+    const src = await readFile(filePath, 'utf8')
     expect(src).toContain("/team/ops/login?next=/team/onboard")
     expect(src).not.toContain("redirect('/login')")
   })
