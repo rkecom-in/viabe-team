@@ -22,7 +22,6 @@ import logging
 from datetime import date
 from typing import Any
 
-from psycopg import errors as pg_errors
 from pydantic import BaseModel, ConfigDict, Field
 
 logger = logging.getLogger(__name__)
@@ -149,11 +148,17 @@ def query_customer_ledger(
                     ledger_entries=entries,
                     total_balance_paise=total,
                 )
-        except pg_errors.UndefinedTable:
-            # Forward-target schema not landed yet. Return empty
-            # gracefully so callers can advance development without the
-            # migration. Future VT row adds the table; this branch
-            # becomes unreachable.
+        except Exception as exc:  # noqa: BLE001
+            # psycopg.errors.UndefinedTable is the load-bearing case
+            # (forward-target schema not landed yet). Caught broadly so
+            # the import stays psycopg-free at module load; type name
+            # match keeps the intent obvious.
+            type_name = type(exc).__name__
+            if type_name != "UndefinedTable":
+                raise
+            # Return empty gracefully so callers can advance development
+            # without the migration. Future VT row adds the table; this
+            # branch becomes unreachable.
             logger.info(
                 "query_customer_ledger: customers/ledger schema absent "
                 "(tenant=%s); returning empty result",

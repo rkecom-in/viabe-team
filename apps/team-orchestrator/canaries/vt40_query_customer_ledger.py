@@ -45,12 +45,10 @@ def _fake_pool(*, customer_row: Any, ledger_rows: list[Any] | None = None,
                 raise_undefined_table: bool = False) -> Any:
     cur = MagicMock()
     if raise_undefined_table:
-        from psycopg import errors as pg_errors
-
-        def _execute(_q: str, _p: tuple | None = None) -> None:
-            raise pg_errors.UndefinedTable("relation does not exist")
-
-        cur.execute.side_effect = _execute
+        # Match the tool's type-name check; no psycopg import needed.
+        cur.execute.side_effect = type(
+            "UndefinedTable", (Exception,), {},
+        )("relation does not exist")
     else:
         cur.fetchone.return_value = customer_row
         cur.fetchall.return_value = ledger_rows or []
