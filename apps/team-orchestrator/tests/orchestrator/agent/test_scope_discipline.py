@@ -69,21 +69,16 @@ def _patched_client(response: Any) -> Any:
 
 def _ctx(trigger_reason: str = "owner_initiated", pending: list[str] | None = None
 ) -> SalesRecoveryContext:
+    """Minimal SalesRecoveryContext — CL-190 safe-empty defaults cover all
+    bundle sections; we only set the load-bearing fields for scope-
+    discipline scenarios.
+    """
+    user_request = pending[0] if pending else "(no owner input)"
     return SalesRecoveryContext(
         tenant_id=UUID("00000000-0000-4000-8000-000000000001"),
         run_id=UUID("00000000-0000-4000-8000-00000000000a"),
+        user_request=user_request,
         trigger_reason=trigger_reason,
-        business_archetype="restaurant",
-        tier=2,
-        plan_tier="standard",
-        owner_locale="en-IN",
-        timezone="Asia/Kolkata",
-        recent_campaigns=[],
-        recent_campaigns_truncated=False,
-        pending_owner_inputs=pending or [],
-        pending_owner_inputs_truncated=False,
-        hard_limit_axes=[],
-        config_snapshot={},
     )
 
 
@@ -203,8 +198,8 @@ def test_scope_discipline_envelope_routing(
     ctx = _ctx(trigger_reason=trigger_reason, pending=pending)
     result = run_sales_recovery_agent(ctx)
 
-    assert result.status_value == expected_status, (
-        f"expected status={expected_status}, got {result.status_value} "
+    assert result.status == expected_status, (
+        f"expected status={expected_status}, got {result.status} "
         f"with envelope {envelope}"
     )
     if expected_specialist is not None:
@@ -234,7 +229,7 @@ def test_scope_discipline_real_api_smoke() -> None:
     """
     ctx = _ctx(pending=[SCENARIOS[4].values[1][0]])  # scenario E pending input
     result = run_sales_recovery_agent(ctx)
-    assert result.status_value == "out_of_scope", (
-        f"real model returned status={result.status_value}; "
+    assert result.status == "out_of_scope", (
+        f"real model returned status={result.status}; "
         f"scope discipline regression on scenario E"
     )
