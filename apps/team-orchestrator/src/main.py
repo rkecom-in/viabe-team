@@ -90,6 +90,13 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     )
 
     register_twilio_replay_purge_scheduler()
+    # VT-226: webhook_metrics writer DBOS workflow (no schedule; invoked
+    # imperatively by the admin endpoint).
+    from orchestrator.observability.webhook_metrics_writer import (
+        register_webhook_metrics_workflow,
+    )
+
+    register_webhook_metrics_workflow()
     launch_dbos()
     yield
     shutdown_dbos()

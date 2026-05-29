@@ -5,6 +5,7 @@ import type { NextRequest } from 'next/server'
 
 import { redactForLog } from '@/lib/log-redact'
 import { forwardToOrchestrator } from '@/lib/orchestrator-client'
+import { emitWebhookMetric } from '@/lib/orchestrator-metrics'
 import { serverSecretClient } from '@/lib/supabase-client'
 import { parseTwilioBody, verifyTwilioSignature } from '@/lib/twilio'
 
@@ -68,6 +69,12 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     console.warn(
       redactForLog(JSON.stringify({ event: 'twilio_rate_limited', source_ip: sourceIp })),
     )
+    emitWebhookMetric({
+      source: 'twilio',
+      event: 'rate_limit_rejected',
+      source_ip: sourceIp,
+      response_status: 429,
+    })
     return new NextResponse('too many requests', { status: 429 })
   }
 
@@ -86,8 +93,21 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
         }),
       ),
     )
+    emitWebhookMetric({
+      source: 'twilio',
+      event: 'sig_fail',
+      source_ip: sourceIp,
+      response_status: 403,
+    })
     return new NextResponse('forbidden', { status: 403 })
   }
+  emitWebhookMetric({
+    source: 'twilio',
+    event: 'sig_pass',
+    message_sid: params.MessageSid ?? null,
+    source_ip: sourceIp,
+    response_status: 200,
+  })
 
   const messageSid = params.MessageSid ?? ''
 
@@ -113,6 +133,13 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
               }),
             ),
           )
+          emitWebhookMetric({
+            source: 'twilio',
+            event: 'replay_rejected',
+            message_sid: messageSid,
+            source_ip: sourceIp,
+            response_status: 200,
+          })
           return twimlOk()
         }
         // Other DB errors: continue with orchestrator forward; don't
