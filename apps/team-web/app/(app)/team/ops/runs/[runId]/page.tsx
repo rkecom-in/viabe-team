@@ -75,6 +75,13 @@ export default async function RunReplayPage({ params }: PageProps) {
           run_id: <code className="font-mono text-xs text-gray-700">{runId}</code> | tenant_id:{' '}
           <code className="font-mono text-xs text-gray-700">{tenantId ?? '—'}</code> | steps: {steps.length}
         </p>
+        <a
+          href={`/team/ops/runs/${runId}/debug`}
+          data-element="debug-view-link"
+          className="inline-block bg-blue-50 text-blue-700 px-3 py-1 rounded text-sm hover:bg-blue-100"
+        >
+          Debug view
+        </a>
         <nav data-section="prev-next-run">
           {prevNext.prevRunId ? (
             <a
