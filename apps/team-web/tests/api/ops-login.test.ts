@@ -93,7 +93,8 @@ describe('VT-203 — Ops Console login surface', () => {
     expect(setCookie.toLowerCase()).toContain('httponly')
     expect(setCookie.toLowerCase()).toContain('secure')
     expect(setCookie.toLowerCase()).toContain('samesite=lax')
-    expect(setCookie).toContain('Path=/team/ops')
+    // VT-230 widened cookie path from /team/ops to /team
+    expect(setCookie).toContain('Path=/team')
   })
 
   it('A4 — callback with verified session BUT user NOT in operator allowlist → 302 /team/ops/login?error=not_authorized + NO cookie', async () => {

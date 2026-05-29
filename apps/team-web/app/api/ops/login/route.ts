@@ -18,14 +18,21 @@ export const dynamic = 'force-dynamic'
 
 export async function POST(req: Request) {
   let email: string | undefined
+  let next: string | undefined
   const ct = req.headers.get('content-type') ?? ''
   if (ct.includes('application/json')) {
-    const body = (await req.json().catch(() => ({}))) as { email?: unknown }
+    const body = (await req.json().catch(() => ({}))) as {
+      email?: unknown
+      next?: unknown
+    }
     if (typeof body.email === 'string') email = body.email
+    if (typeof body.next === 'string') next = body.next
   } else {
     const form = await req.formData().catch(() => null)
     const v = form?.get('email')
     if (typeof v === 'string') email = v
+    const n = form?.get('next')
+    if (typeof n === 'string') next = n
   }
 
   if (!email || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
@@ -36,7 +43,12 @@ export async function POST(req: Request) {
   }
 
   const origin = new URL(req.url).origin
-  const redirectTo = `${origin}/api/ops/login/callback`
+  // VT-230: forward ?next= through the magic-link callback URL so the
+  // callback can validate against its allowlist + redirect Fazal to
+  // the originally-requested page.
+  const callbackUrl = new URL('/api/ops/login/callback', origin)
+  if (next) callbackUrl.searchParams.set('next', next)
+  const redirectTo = callbackUrl.toString()
 
   try {
     const supabase = serverSecretClient()
