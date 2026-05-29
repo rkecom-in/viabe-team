@@ -31,9 +31,14 @@ export default async function OpsStreamHistoryPage(props: OpsStreamHistoryPagePr
   const tenants = await fetchTopTenants(20)
 
   return (
-    <main className="ops-stream-history-page" data-area="team-ops-stream-history">
+    <main
+      className="ops-stream-history-page bg-gray-50 min-h-screen p-6 space-y-6"
+      data-area="team-ops-stream-history"
+    >
       <header>
-        <h1>Ops Console — Stream History</h1>
+        <h1 className="text-2xl font-semibold text-gray-900">
+          Ops Console — Stream History
+        </h1>
       </header>
 
       <StreamHistoryView
