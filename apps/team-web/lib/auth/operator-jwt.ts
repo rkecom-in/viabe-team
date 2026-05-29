@@ -14,7 +14,14 @@
 import { SignJWT, jwtVerify, type JWTPayload } from 'jose'
 
 const JWT_SECRET = process.env.OPERATOR_JWT_SECRET ?? ''
-const _OPERATOR_TOKEN_TTL_SEC = 60 * 5  // 5 min — short-lived for [resolve].
+
+// VT-236: default extended to 7d for operator-session cookie ergonomics.
+// Resolve-phone + stream-subscribe callers MUST pass the short TTL
+// explicitly — those tokens cross the orchestrator audit boundary and
+// stay short-lived per CL-390.
+const _OPERATOR_DEFAULT_TTL_SEC = 60 * 60 * 24 * 7  // 7 days
+export const OPERATOR_RESOLVE_TTL_SEC = 60 * 5  // 5 min — [resolve] short-lived
+export const OPERATOR_STREAM_TTL_SEC = 60 * 5  // 5 min — SSE subscribe short-lived
 
 
 export interface OperatorClaim extends JWTPayload {
@@ -35,7 +42,11 @@ function _secretBytes(): Uint8Array {
 }
 
 
-export async function issueOperatorJwt(operatorId: string): Promise<string> {
+export async function issueOperatorJwt(
+  operatorId: string,
+  opts: { ttlSec?: number } = {},
+): Promise<string> {
+  const ttl = opts.ttlSec ?? _OPERATOR_DEFAULT_TTL_SEC
   return await new SignJWT({
     operator_id: operatorId,
     operator_claim: true,
@@ -44,7 +55,7 @@ export async function issueOperatorJwt(operatorId: string): Promise<string> {
     .setSubject(operatorId)
     .setAudience('authenticated')
     .setIssuedAt()
-    .setExpirationTime(Math.floor(Date.now() / 1000) + _OPERATOR_TOKEN_TTL_SEC)
+    .setExpirationTime(Math.floor(Date.now() / 1000) + ttl)
     .sign(_secretBytes())
 }
 

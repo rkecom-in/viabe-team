@@ -17,7 +17,10 @@ import { serverSecretClient } from '@/lib/supabase-client'
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
 
-const COOKIE_TTL_SEC = 60 * 60  // 1 hour
+// VT-236: extended from 1h → 7d for single-operator phase-1 ergonomics.
+// FAZAL_OWNER_UUID allowlist gate (VT-203 fix-2) keeps the threat surface
+// equivalent — only Fazal's UUID issues a JWT.
+const COOKIE_TTL_SEC = 60 * 60 * 24 * 7  // 7 days
 
 export async function GET(req: Request) {
   const url = new URL(req.url)

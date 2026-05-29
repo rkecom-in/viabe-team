@@ -4,7 +4,7 @@ import { cookies } from 'next/headers'
 import { redirect } from 'next/navigation'
 
 import { StreamFeed } from '@/components/ops/stream-feed'
-import { issueOperatorJwt } from '@/lib/auth/operator-jwt'
+import { issueOperatorJwt, OPERATOR_STREAM_TTL_SEC } from '@/lib/auth/operator-jwt'
 import { requireFazal, UnauthorizedError } from '@/lib/auth/require-fazal'
 import { fetchTopTenants } from '@/lib/ops/data-access'
 
@@ -27,11 +27,13 @@ export default async function OpsStreamPage() {
   }
 
   // Mint a short-lived operator JWT for the browser Supabase Realtime
-  // subscription. 5-min TTL per lib/auth/operator-jwt.ts; client-side
-  // re-fetches via API route on expiry. Phase-1 single-operator
-  // (Fazal); Phase-2 migrates to server-side SSE per migration 030
-  // header note.
-  const operatorJwt = await issueOperatorJwt(fazalUuid)
+  // subscription. 5-min TTL (VT-236: explicit short TTL; default
+  // extended to 7d for the auth cookie path). Client-side re-fetches
+  // via API route on expiry. Phase-1 single-operator (Fazal);
+  // Phase-2 migrates to server-side SSE per migration 030 header note.
+  const operatorJwt = await issueOperatorJwt(fazalUuid, {
+    ttlSec: OPERATOR_STREAM_TTL_SEC,
+  })
 
   return (
     <main
