@@ -19,7 +19,7 @@ export default async function OpsWorkspacePage() {
   try {
     await requireFazal()
   } catch (err) {
-    if (err instanceof UnauthorizedError) redirect('/login')
+    if (err instanceof UnauthorizedError) redirect('/team/ops/login?next=/team/ops')
     throw err
   }
 

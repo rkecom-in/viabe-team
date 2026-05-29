@@ -15,7 +15,7 @@ export default async function OpsStreamPage() {
   try {
     ;({ fazalUuid } = await requireFazal())
   } catch (err) {
-    if (err instanceof UnauthorizedError) redirect('/login')
+    if (err instanceof UnauthorizedError) redirect('/team/ops/login?next=/team/ops/stream')
     throw err
   }
 

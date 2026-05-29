@@ -22,7 +22,7 @@ export default async function OnboardPage() {
   try {
     await requireFazal()
   } catch (err) {
-    if (err instanceof UnauthorizedError) redirect('/login')
+    if (err instanceof UnauthorizedError) redirect('/team/ops/login?next=/team/onboard')
     throw err
   }
 

@@ -89,12 +89,42 @@ export async function GET(req: Request) {
     }
 
     const opJwt = await issueOperatorJwt(userId)
-    const res = NextResponse.redirect(new URL('/team/ops', req.url), { status: 302 })
+
+    // VT-230 open-redirect defense: honor ?next= ONLY if it matches the
+    // allowlist of /team/* paths. Anything off-allowlist (external URL,
+    // traversal, protocol-relative `//`) → ignore + default to /team/ops.
+    const NEXT_ALLOWLIST = [
+      '/team/ops',
+      '/team/ops/stream',
+      '/team/ops/stream/history',
+      '/team/onboard',
+      '/team/dashboard',
+    ]
+    const nextParam = url.searchParams.get('next')
+    let next = '/team/ops'
+    if (nextParam) {
+      const safe =
+        nextParam.startsWith('/team/') &&
+        !nextParam.includes('//') &&
+        !nextParam.includes('..') &&
+        NEXT_ALLOWLIST.some(
+          (p) =>
+            nextParam === p ||
+            nextParam.startsWith(`${p}/`) ||
+            nextParam.startsWith(`${p}?`),
+        )
+      if (safe) next = nextParam
+    }
+
+    const res = NextResponse.redirect(new URL(next, req.url), { status: 302 })
+    // VT-230 cookie path widened from /team/ops → /team so the JWT is
+    // sent on /team/onboard + /team/dashboard requests too. Stays out
+    // of /api/* and / root per VT-203 LOCK 2.
     res.cookies.set('viabe_ops_jwt', opJwt, {
       httpOnly: true,
       secure: true,
       sameSite: 'lax',
-      path: '/team/ops',
+      path: '/team',
       maxAge: COOKIE_TTL_SEC,
     })
     return res
