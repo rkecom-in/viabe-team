@@ -21,7 +21,7 @@ import {
   type StreamFilters,
 } from '@/lib/ops/stream'
 import { QuickFilterPills } from '@/components/ops/quick-filter-pills'
-import { StreamRowList } from '@/components/ops/stream-row-list'
+import { StreamTerminalView } from '@/components/ops/stream-terminal-view'
 
 const _MAX_ROWS_IN_MEMORY = 200
 
@@ -110,7 +110,7 @@ export function StreamFeed({ operatorJwt, availableTenants }: StreamFeedProps) {
       <section data-section="connection-status">
         Realtime: {connected ? 'connected' : 'disconnected'}
       </section>
-      <StreamRowList rows={rows} tenantName={tenantName} />
+      <StreamTerminalView rows={rows} tenantName={tenantName} />
     </div>
   )
 }
