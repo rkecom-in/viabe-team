@@ -20,7 +20,7 @@ export default async function TenantDashboardPage({ params }: PageProps) {
   try {
     await requireFazal()
   } catch (err) {
-    if (err instanceof UnauthorizedError) redirect('/login')
+    if (err instanceof UnauthorizedError) redirect('/team/ops/login?next=/team/ops')
     throw err
   }
   const { tenantId } = await params

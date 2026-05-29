@@ -22,7 +22,7 @@ export default async function OpsStreamHistoryPage(props: OpsStreamHistoryPagePr
   try {
     await requireFazal()
   } catch (err) {
-    if (err instanceof UnauthorizedError) redirect('/login')
+    if (err instanceof UnauthorizedError) redirect('/team/ops/login?next=/team/ops/stream/history')
     throw err
   }
 
