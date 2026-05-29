@@ -18,7 +18,7 @@
 import { NextResponse } from 'next/server'
 
 import { requireFazal, UnauthorizedError } from '@/lib/auth/require-fazal'
-import { issueOperatorJwt } from '@/lib/auth/operator-jwt'
+import { issueOperatorJwt, OPERATOR_RESOLVE_TTL_SEC } from '@/lib/auth/operator-jwt'
 
 export const runtime = 'nodejs'
 
@@ -52,7 +52,9 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: 'phone_token required' }, { status: 400 })
   }
 
-  const jwt = await issueOperatorJwt(fazalUuid)
+  // VT-236: explicit short TTL — resolve-phone crosses orchestrator
+  // audit boundary; CL-390 keeps this token short-lived.
+  const jwt = await issueOperatorJwt(fazalUuid, { ttlSec: OPERATOR_RESOLVE_TTL_SEC })
   const upstream = await fetch(`${ORCHESTRATOR_BASE}/api/orchestrator/ops/resolve-phone`, {
     method: 'POST',
     headers: {

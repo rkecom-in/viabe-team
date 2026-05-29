@@ -18,7 +18,8 @@ import { serverSecretClient } from '@/lib/supabase-client'
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
 
-const COOKIE_TTL_SEC = 60 * 60 // 1 hour
+// VT-236: 1h → 7d for single-operator phase-1; allowlist gate intact.
+const COOKIE_TTL_SEC = 60 * 60 * 24 * 7 // 7 days
 
 export async function POST(req: Request) {
   let body: { access_token?: unknown; next?: unknown }

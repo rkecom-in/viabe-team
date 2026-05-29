@@ -105,5 +105,7 @@ describe('VT-233 — finalize-hash POST', () => {
     const setCookie = res.headers.get('set-cookie') ?? ''
     expect(setCookie).toContain('viabe_ops_jwt=')
     expect(setCookie).toContain('Path=/team')
+    // VT-236: 7-day Max-Age
+    expect(setCookie).toMatch(/Max-Age=604800/)
   })
 })
