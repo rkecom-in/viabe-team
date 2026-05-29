@@ -36,6 +36,10 @@ dependencies = [
     "fastapi",
     "uvicorn[standard]",
     "twilio",
+    # VT-198 — emoji-only-body detection uses \\p{Extended_Pictographic}
+    # which stdlib `re` does not support; PyPI `regex` package backs the
+    # is_emoji_only_body() classifier in orchestrator/feedback/.
+    "regex>=2024.0.0",
     "logfire>=4.0,<5",
     # VT-191 — Fernet encryption-at-rest for phone numbers in
     # phone_token_resolutions. Closes the VT-184 Phase-1 plaintext
