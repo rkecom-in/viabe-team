@@ -11,6 +11,7 @@
 import { NextResponse } from 'next/server'
 
 import { issueOperatorJwt } from '@/lib/auth/operator-jwt'
+import { safeNext } from '@/lib/auth/safe-next'
 import { serverSecretClient } from '@/lib/supabase-client'
 
 export const runtime = 'nodejs'
@@ -25,10 +26,17 @@ export async function GET(req: Request) {
   const type = url.searchParams.get('type')
 
   if (!code && !tokenHash) {
-    return NextResponse.redirect(
-      new URL('/team/ops/login?error=missing_token', req.url),
-      { status: 302 },
-    )
+    // VT-233: Supabase implicit flow lands here with the session in the
+    // URL fragment (`#access_token=...`). Server-side routes can never
+    // read fragments. Bounce to the client-side finalize page; preserve
+    // the `?next=` allowlist so the client posts it back when it has the
+    // token in hand.
+    const nextParam = url.searchParams.get('next') ?? ''
+    const finalize = new URL('/team/ops/login/finalize', req.url)
+    if (nextParam) finalize.searchParams.set('next', nextParam)
+    // The browser appends the fragment unchanged on a 302, so the
+    // client sees `…/finalize?next=…#access_token=…` and can read it.
+    return NextResponse.redirect(finalize, { status: 302 })
   }
 
   try {
@@ -90,31 +98,9 @@ export async function GET(req: Request) {
 
     const opJwt = await issueOperatorJwt(userId)
 
-    // VT-230 open-redirect defense: honor ?next= ONLY if it matches the
-    // allowlist of /team/* paths. Anything off-allowlist (external URL,
-    // traversal, protocol-relative `//`) → ignore + default to /team/ops.
-    const NEXT_ALLOWLIST = [
-      '/team/ops',
-      '/team/ops/stream',
-      '/team/ops/stream/history',
-      '/team/onboard',
-      '/team/dashboard',
-    ]
-    const nextParam = url.searchParams.get('next')
-    let next = '/team/ops'
-    if (nextParam) {
-      const safe =
-        nextParam.startsWith('/team/') &&
-        !nextParam.includes('//') &&
-        !nextParam.includes('..') &&
-        NEXT_ALLOWLIST.some(
-          (p) =>
-            nextParam === p ||
-            nextParam.startsWith(`${p}/`) ||
-            nextParam.startsWith(`${p}?`),
-        )
-      if (safe) next = nextParam
-    }
+    // VT-233: open-redirect allowlist extracted to shared helper for reuse
+    // by finalize-hash endpoint.
+    const next = safeNext(url.searchParams.get('next'))
 
     const res = NextResponse.redirect(new URL(next, req.url), { status: 302 })
     // VT-230 cookie path widened from /team/ops → /team so the JWT is
