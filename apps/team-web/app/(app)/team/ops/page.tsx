@@ -54,60 +54,116 @@ export default async function OpsWorkspacePage() {
   }
 
   return (
-    <main className="ops-workspace" data-area="team-ops-workspace">
+    <main
+      className="ops-workspace bg-gray-50 min-h-screen p-6 space-y-6"
+      data-area="team-ops-workspace"
+    >
       <header>
-        <h1>Ops Console — Workspace</h1>
+        <h1 className="text-2xl font-semibold text-gray-900">
+          Ops Console — Workspace
+        </h1>
       </header>
 
-      <section data-section="counters">
-        <h2>Today</h2>
+      <section
+        data-section="counters"
+        className="bg-white rounded-lg shadow-sm border border-gray-200 p-6"
+      >
+        <h2 className="text-lg font-medium text-gray-800 mb-4">Today</h2>
         {counters ? (
-          <dl>
-            <div>
-              <dt>In-flight runs</dt>
-              <dd data-counter="in_flight_runs">{counters.in_flight_runs}</dd>
+          <dl className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+            <div className="p-4 bg-gray-50 rounded">
+              <dt className="text-xs uppercase tracking-wide text-gray-500">
+                In-flight runs
+              </dt>
+              <dd
+                data-counter="in_flight_runs"
+                className="text-3xl font-bold text-gray-900 mt-1"
+              >
+                {counters.in_flight_runs}
+              </dd>
             </div>
-            <div>
-              <dt>Total runs today</dt>
-              <dd data-counter="total_runs_today">{counters.total_runs_today}</dd>
+            <div className="p-4 bg-gray-50 rounded">
+              <dt className="text-xs uppercase tracking-wide text-gray-500">
+                Total runs today
+              </dt>
+              <dd
+                data-counter="total_runs_today"
+                className="text-3xl font-bold text-gray-900 mt-1"
+              >
+                {counters.total_runs_today}
+              </dd>
             </div>
-            <div>
-              <dt>Escalations today</dt>
-              <dd data-counter="escalations_today">{counters.escalations_today}</dd>
+            <div className="p-4 bg-gray-50 rounded">
+              <dt className="text-xs uppercase tracking-wide text-gray-500">
+                Escalations today
+              </dt>
+              <dd
+                data-counter="escalations_today"
+                className="text-3xl font-bold text-gray-900 mt-1"
+              >
+                {counters.escalations_today}
+              </dd>
             </div>
-            <div>
-              <dt>Cost burn today (paise)</dt>
-              <dd data-counter="cost_burn_today_paise">
+            <div className="p-4 bg-gray-50 rounded">
+              <dt className="text-xs uppercase tracking-wide text-gray-500">
+                Cost burn today (paise)
+              </dt>
+              <dd
+                data-counter="cost_burn_today_paise"
+                className="text-3xl font-bold text-gray-900 mt-1"
+              >
                 {counters.cost_burn_today_paise}
               </dd>
             </div>
           </dl>
         ) : (
-          <p data-section-error>couldn&apos;t load: {countersError}</p>
+          <p
+            data-section-error
+            className="text-sm text-red-700 bg-red-50 border border-red-200 rounded p-3"
+          >
+            couldn&apos;t load: {countersError}
+          </p>
         )}
       </section>
 
-      <section data-section="top-tenants">
-        <h2>Top tenants by activity</h2>
+      <section
+        data-section="top-tenants"
+        className="bg-white rounded-lg shadow-sm border border-gray-200 p-6"
+      >
+        <h2 className="text-lg font-medium text-gray-800 mb-4">
+          Top tenants by activity
+        </h2>
         {topTenantsError ? (
-          <p data-section-error>couldn&apos;t load: {topTenantsError}</p>
+          <p
+            data-section-error
+            className="text-sm text-red-700 bg-red-50 border border-red-200 rounded p-3"
+          >
+            couldn&apos;t load: {topTenantsError}
+          </p>
         ) : (
-          <table>
-            <thead>
+          <table className="min-w-full divide-y divide-gray-200">
+            <thead className="bg-gray-50">
               <tr>
-                <th>Tenant</th>
-                <th>Runs</th>
+                <th className="px-4 py-2 text-xs font-medium uppercase text-gray-500 text-left">
+                  Tenant
+                </th>
+                <th className="px-4 py-2 text-xs font-medium uppercase text-gray-500 text-left">
+                  Runs
+                </th>
               </tr>
             </thead>
-            <tbody>
+            <tbody className="divide-y divide-gray-200">
               {topTenants.map((t) => (
-                <tr key={t.tenant_id}>
-                  <td>
-                    <a href={`/team/ops/tenants/${t.tenant_id}`}>
+                <tr key={t.tenant_id} className="hover:bg-gray-50 transition-colors">
+                  <td className="px-4 py-3 text-sm">
+                    <a
+                      href={`/team/ops/tenants/${t.tenant_id}`}
+                      className="text-blue-600 hover:underline font-mono text-xs"
+                    >
                       {t.business_name ?? t.tenant_id}
                     </a>
                   </td>
-                  <td>{t.runs_count}</td>
+                  <td className="px-4 py-3 text-sm text-gray-700">{t.runs_count}</td>
                 </tr>
               ))}
             </tbody>
@@ -115,29 +171,57 @@ export default async function OpsWorkspacePage() {
         )}
       </section>
 
-      <section data-section="in-flight">
-        <h2>In-flight runs</h2>
+      <section
+        data-section="in-flight"
+        className="bg-white rounded-lg shadow-sm border border-gray-200 p-6"
+      >
+        <h2 className="text-lg font-medium text-gray-800 mb-4">
+          In-flight runs
+        </h2>
         {inFlightError ? (
-          <p data-section-error>couldn&apos;t load: {inFlightError}</p>
+          <p
+            data-section-error
+            className="text-sm text-red-700 bg-red-50 border border-red-200 rounded p-3"
+          >
+            couldn&apos;t load: {inFlightError}
+          </p>
         ) : (
-          <table>
-            <thead>
+          <table className="min-w-full divide-y divide-gray-200">
+            <thead className="bg-gray-50">
               <tr>
-                <th>Run</th>
-                <th>Tenant</th>
-                <th>Started</th>
+                <th className="px-4 py-2 text-xs font-medium uppercase text-gray-500 text-left">
+                  Run
+                </th>
+                <th className="px-4 py-2 text-xs font-medium uppercase text-gray-500 text-left">
+                  Tenant
+                </th>
+                <th className="px-4 py-2 text-xs font-medium uppercase text-gray-500 text-left">
+                  Started
+                </th>
               </tr>
             </thead>
-            <tbody>
+            <tbody className="divide-y divide-gray-200">
               {inFlight.map((r) => (
-                <tr key={r.run_id}>
-                  <td>
-                    <a href={`/team/ops/runs/${r.run_id}`}>{r.run_id}</a>
+                <tr key={r.run_id} className="hover:bg-gray-50 transition-colors">
+                  <td className="px-4 py-3">
+                    <a
+                      href={`/team/ops/runs/${r.run_id}`}
+                      className="font-mono text-xs text-blue-600 hover:underline"
+                    >
+                      {r.run_id}
+                    </a>
                   </td>
-                  <td>
-                    <a href={`/team/ops/tenants/${r.tenant_id}`}>{r.tenant_id}</a>
+                  <td className="px-4 py-3">
+                    <a
+                      href={`/team/ops/tenants/${r.tenant_id}`}
+                      className="font-mono text-xs text-blue-600 hover:underline"
+                    >
+                      {r.tenant_id}
+                    </a>
                   </td>
-                  <td>{new Date(r.started_at).toLocaleString()}</td>
+                  <td className="px-4 py-3 text-sm text-gray-500">
+                    {new Date(r.started_at).toLocaleString()}
+                  </td>
                 </tr>
               ))}
             </tbody>

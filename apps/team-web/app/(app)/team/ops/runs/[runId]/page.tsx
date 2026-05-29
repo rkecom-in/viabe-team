@@ -64,12 +64,16 @@ export default async function RunReplayPage({ params }: PageProps) {
   }
 
   return (
-    <main className="ops-run-replay" data-area="team-ops-run" data-run-id={runId}>
-      <header>
-        <h1>Run replay</h1>
-        <p>
-          run_id: <code>{runId}</code> | tenant_id:{' '}
-          <code>{tenantId ?? '—'}</code> | steps: {steps.length}
+    <main
+      className="ops-run-replay bg-gray-50 min-h-screen p-6 space-y-6"
+      data-area="team-ops-run"
+      data-run-id={runId}
+    >
+      <header className="bg-white rounded-lg shadow-sm border border-gray-200 p-6 space-y-2">
+        <h1 className="text-2xl font-semibold text-gray-900">Run replay</h1>
+        <p className="text-sm text-gray-600">
+          run_id: <code className="font-mono text-xs text-gray-700">{runId}</code> | tenant_id:{' '}
+          <code className="font-mono text-xs text-gray-700">{tenantId ?? '—'}</code> | steps: {steps.length}
         </p>
         <nav data-section="prev-next-run">
           {prevNext.prevRunId ? (

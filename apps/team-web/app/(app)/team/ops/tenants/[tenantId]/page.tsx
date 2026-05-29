@@ -35,12 +35,18 @@ export default async function TenantDashboardPage({ params }: PageProps) {
   if (!profile) notFound()
 
   return (
-    <main className="ops-tenant" data-area="team-ops-tenant" data-tenant-id={tenantId}>
-      <header>
-        <h1>Tenant — {profile.business_name ?? profile.tenant_id}</h1>
-        <p>
+    <main
+      className="ops-tenant bg-gray-50 min-h-screen p-6 space-y-6"
+      data-area="team-ops-tenant"
+      data-tenant-id={tenantId}
+    >
+      <header className="bg-white rounded-lg shadow-sm border border-gray-200 p-6 space-y-2">
+        <h1 className="text-2xl font-semibold text-gray-900">
+          Tenant — {profile.business_name ?? profile.tenant_id}
+        </h1>
+        <p className="text-sm text-gray-600">
           phase: {profile.phase} | plan: {profile.plan_tier} | tenant_id:{' '}
-          <code>{profile.tenant_id}</code>
+          <code className="font-mono text-xs text-gray-700">{profile.tenant_id}</code>
         </p>
       </header>
 
