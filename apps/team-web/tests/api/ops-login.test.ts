@@ -47,7 +47,8 @@ describe('VT-203 — Ops Console login surface', () => {
     // setup that the Next test env doesn't provide here. Smoke-check
     // the module's surface instead — full visual render verified at
     // playwright e2e time.
-    const mod = await import('@/app/(app)/team/ops/login/page')
+    // VT-232 lifted login page from (app) → (auth) route group
+    const mod = await import('@/app/(auth)/team/ops/login/page')
     expect(typeof mod.default).toBe('function')
     expect(mod.dynamic).toBe('force-dynamic')
   })
