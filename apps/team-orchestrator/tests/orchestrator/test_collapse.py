@@ -409,7 +409,12 @@ def test_collapse_node_proposed_still_persists_campaign(rls_ctx):
     """CL-294: ``collapse_node``'s variant dispatch routes ``proposed`` plans
     to ``collapse_campaign_plan`` unchanged. End-to-end via the node — the
     direct-call happy-path test already covers the function; this test
-    pins the DISPATCH for the proposed branch."""
+    pins the DISPATCH for the proposed branch.
+
+    VT-47: a PERSISTED proposed campaign is a Pillar-7 sensitive action, so
+    collapse_node now ALSO attaches a ``pending_approval_request`` to state
+    (route_after_collapse keys on it to send the run to the owner-approval
+    gate). The campaign row is still written exactly once."""
     from orchestrator.collapse import collapse_node
     from orchestrator.db import tenant_connection
 
@@ -424,7 +429,12 @@ def test_collapse_node_proposed_still_persists_campaign(rls_ctx):
             "campaign_plan": plan,
         }
     )
-    assert update == {}
+    # VT-47: proposed-success attaches the approval request (campaign_send).
+    assert "pending_approval_request" in update
+    req = update["pending_approval_request"]
+    assert req["approval_type"] == "campaign_send"
+    assert req["campaign_id"] is not None
+    assert req["details"]["cohort_size"] == 1
 
     with tenant_connection(tenant) as conn:
         n_campaigns = conn.execute(

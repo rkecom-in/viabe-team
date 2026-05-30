@@ -86,6 +86,8 @@ def test_cron_expressions_match_brief() -> None:
     assert st.ATTRIBUTION_CLOSE_CRON == "0 2 * * *"
     assert st.DAY39_EVALUATION_CRON == "0 6 * * *"
     assert st.MONTHLY_IMPACT_CRON == "0 8 1 * *"
+    # VT-47 — 5th trigger: owner-approval timeout sweep, every 30 min.
+    assert st.APPROVAL_TIMEOUT_SWEEP_CRON == "*/30 * * * *"
 
 
 # ---------------------------------------------------------------------------
@@ -275,6 +277,121 @@ def test_weekly_cadence_emits_full_event_not_shell(monkeypatch) -> None:
 
 
 # ---------------------------------------------------------------------------
+# VT-47 — owner-approval timeout sweep body (5th trigger)
+# ---------------------------------------------------------------------------
+
+
+class _SweepConn:
+    """Captures the UPDATE pipeline_runs the sweep issues after a resume."""
+
+    def __init__(self):
+        self.updates: list[tuple] = []
+
+    def execute(self, sql, params=None):
+        if "UPDATE pipeline_runs" in sql:
+            self.updates.append((sql, params))
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def test_approval_timeout_sweep_resolves_and_resumes(monkeypatch) -> None:
+    """VT-47: a past-timeout open approval is resolved with decision='timeout'
+    and its paused run is resumed via resume_run('timeout'). The body returns
+    the resolved approval ids for canary inspection."""
+    captured = _captured_payloads(monkeypatch)
+    tid = str(uuid4())
+    rid = str(uuid4())
+    aid = str(uuid4())
+
+    monkeypatch.setattr(
+        st, "_scan_timed_out_approvals",
+        lambda now: [{"id": aid, "tenant_id": tid, "run_id": rid}],
+    )
+
+    # No real DB: tenant_connection yields a capture conn; mark_resolved + resume
+    # are stubbed. Patch the symbols where the body imports them.
+    sweep_conn = _SweepConn()
+    monkeypatch.setattr(
+        "orchestrator.db.tenant_connection", lambda t: sweep_conn
+    )
+    marked: list[tuple] = []
+    monkeypatch.setattr(
+        "orchestrator.agent.approval_resume.mark_approval_resolved",
+        lambda conn, approval_id, decision, **kw: marked.append((approval_id, decision)),
+    )
+    resumed: list[tuple] = []
+    monkeypatch.setattr(
+        "orchestrator.agent.approval_resume.resume_run",
+        lambda run_id, decision: resumed.append((run_id, decision)) or {},
+    )
+
+    out = st.run_approval_timeout_sweep_body(
+        now=datetime(2026, 5, 31, 12, 0, tzinfo=timezone.utc)
+    )
+
+    assert out == [UUID(aid)]
+    assert marked == [(aid, "timeout")]
+    assert resumed == [(rid, "timeout")]
+    # The original paused run was driven to completed.
+    assert sweep_conn.updates, "sweep must close the paused run"
+    # CL-390: the emitted event carries ids + decision only, no PII.
+    time.sleep(0.05)
+    assert captured
+    event_type, _, _, _, _, payload, _ = captured[0]
+    assert event_type == st.APPROVAL_TIMED_OUT_EVENT
+    assert payload["decision"] == "timeout"
+    assert payload["approval_id"] == aid
+    assert "phone" not in str(payload).lower()
+
+
+def test_approval_timeout_sweep_empty_is_noop(monkeypatch) -> None:
+    """No timed-out approvals -> empty result, no resume calls."""
+    monkeypatch.setattr(st, "_scan_timed_out_approvals", lambda now: [])
+    out = st.run_approval_timeout_sweep_body(
+        now=datetime(2026, 5, 31, 12, 0, tzinfo=timezone.utc)
+    )
+    assert out == []
+
+
+def test_approval_timeout_sweep_one_failure_does_not_halt(monkeypatch) -> None:
+    """Per-approval try/except: one stuck resume must not abort the sweep."""
+    tid, r1, r2 = str(uuid4()), str(uuid4()), str(uuid4())
+    a1, a2 = str(uuid4()), str(uuid4())
+    monkeypatch.setattr(
+        st, "_scan_timed_out_approvals",
+        lambda now: [
+            {"id": a1, "tenant_id": tid, "run_id": r1},
+            {"id": a2, "tenant_id": tid, "run_id": r2},
+        ],
+    )
+    monkeypatch.setattr(
+        "orchestrator.db.tenant_connection", lambda t: _SweepConn()
+    )
+    monkeypatch.setattr(
+        "orchestrator.agent.approval_resume.mark_approval_resolved",
+        lambda conn, approval_id, decision, **kw: None,
+    )
+
+    def _resume(run_id, decision):
+        if run_id == r1:
+            raise RuntimeError("stuck")
+        return {}
+
+    monkeypatch.setattr(
+        "orchestrator.agent.approval_resume.resume_run", _resume
+    )
+    out = st.run_approval_timeout_sweep_body(
+        now=datetime(2026, 5, 31, 12, 0, tzinfo=timezone.utc)
+    )
+    # a1 failed; a2 still resolved — the sweep continued.
+    assert out == [UUID(a2)]
+
+
+# ---------------------------------------------------------------------------
 # 5. Pillar 1 — deterministic bodies must NOT import LLM modules
 # ---------------------------------------------------------------------------
 
@@ -372,6 +489,7 @@ def test_register_scheduled_triggers_idempotent(monkeypatch) -> None:
     first = call_count["n"]
     st.register_scheduled_triggers()
     second = call_count["n"]
-    assert first == 4, "expected 4 triggers registered on first call"
-    assert second == 4, "second call must short-circuit (idempotent)"
+    # VT-47 added the 5th trigger (owner-approval timeout sweep).
+    assert first == 5, "expected 5 triggers registered on first call"
+    assert second == 5, "second call must short-circuit (idempotent)"
     st._registered = False
