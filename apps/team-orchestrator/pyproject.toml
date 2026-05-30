@@ -54,6 +54,12 @@ dependencies = [
     "google-auth>=2.30.0",
     "google-auth-oauthlib>=1.2.0",
     "google-api-python-client>=2.140.0",
+    # VT-86 — monthly impact report PDF rendering. weasyprint renders the
+    # HTML+CSS report to PDF with proper Hindi/Devanagari text-shaping (pango).
+    # Needs cairo/pango/gdk-pixbuf system libs (see apps/team-orchestrator/
+    # Dockerfile); imported lazily so dev machines without those libs still
+    # load the module (the PDF-bytes path is canary/Docker-verified).
+    "weasyprint>=63.0",
 ]
 
 [dependency-groups]
