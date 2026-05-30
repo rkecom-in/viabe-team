@@ -16,7 +16,10 @@ from __future__ import annotations
 import os
 from typing import Any, Protocol
 
-REPORTS_BUCKET = os.environ.get("MONTHLY_REPORTS_BUCKET", "monthly-reports")
+# Env var is TEAM_-namespaced + singular "REPORT" to avoid the reserved
+# cross-product prefix owned by the Viabe Reports product (enforced by
+# scripts/lint-cross-product-env.mjs).
+REPORT_BUCKET = os.environ.get("TEAM_MONTHLY_REPORT_BUCKET", "monthly-reports")
 
 
 class _StorageClient(Protocol):
@@ -58,7 +61,7 @@ def store_report_pdf(
     pdf_bytes: bytes,
     *,
     client: _StorageClient | None = None,
-    bucket: str = REPORTS_BUCKET,
+    bucket: str = REPORT_BUCKET,
 ) -> str:
     """Upload the report PDF to tenant-scoped storage; return the object path.
 
@@ -77,4 +80,4 @@ def store_report_pdf(
     return path
 
 
-__all__ = ["REPORTS_BUCKET", "report_storage_path", "store_report_pdf"]
+__all__ = ["REPORT_BUCKET", "report_storage_path", "store_report_pdf"]
