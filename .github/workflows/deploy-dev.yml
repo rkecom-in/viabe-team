@@ -51,9 +51,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # VT-244-fix-2: the repo is a pnpm monorepo; the Vercel project's
+      # install command is `pnpm install --frozen-lockfile`, so `vercel
+      # build` needs pnpm on the runner (was failing `sh: 1: pnpm: not
+      # found`). Mirror ci.yml's proven setup — pnpm/action-setup reads
+      # the packageManager pin (pnpm@10.33.4) from package.json.
+      - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+          cache: pnpm
       # VT-244: amondnet/vercel-action@v25 pins vercel CLI 25.1.0, which
       # Vercel's API now rejects ("requires version 47.2.2 or later").
       # Replaced with the current official CLI flow (pull → build → deploy
