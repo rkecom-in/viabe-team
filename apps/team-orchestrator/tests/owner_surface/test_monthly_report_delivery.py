@@ -95,6 +95,17 @@ def test_email_html_hindi():
     assert "Hi Sharma Cafe" not in html
 
 
+def test_email_html_escapes_business_name():
+    """VT-86-fix-1: owner-set business_name is HTML-escaped before email
+    interpolation (no HTML/script injection) — matches the PDF renderer."""
+    out = report_email_html(
+        _report(business_name="<script>alert(1)</script>Cafe"),
+        "https://viabe.ai/team",
+    )
+    assert "<script>" not in out
+    assert "&lt;script&gt;" in out
+
+
 def test_pdf_attachment_is_base64():
     att = pdf_attachment(_report(), b"%PDF-1.7 body")
     assert att["filename"] == "viabe-impact-2026-04.pdf"

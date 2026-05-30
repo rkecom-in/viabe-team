@@ -14,6 +14,7 @@ pass a mock; the canary does a real send to a TEST recipient behind an env flag
 from __future__ import annotations
 
 import base64
+import html
 from collections.abc import Awaitable, Callable
 
 from orchestrator.alerts.clients import send_resend_email
@@ -42,8 +43,12 @@ def report_email_html(report: MonthlyReport, portal_url: str) -> str:
     """Pure 2-paragraph EN/HI email body + portal link. No PII (CL-390)."""
     period = _period_label(report.year_month)
     arrr = money_inr(report.arrr_paise)
+    # Escape the owner-set business_name before HTML interpolation (it is the
+    # only free-text, owner-controlled field in this body) — consistent with
+    # the PDF renderer's _esc(). Prevents HTML/script injection into the email.
+    biz = html.escape(report.business_name)
     if report.language == "hi":
-        p1 = (f"नमस्ते {report.business_name}, {period} की आपकी प्रभाव रिपोर्ट तैयार है। "
+        p1 = (f"नमस्ते {biz}, {period} की आपकी प्रभाव रिपोर्ट तैयार है। "
               f"इस महीने जिम्मेदार राजस्व: <b>{arrr}</b>, भेजे गए अभियान: "
               f"{report.campaigns_sent}, नए ग्राहक: {report.customers_added}।")
         if report.zero_arrr:
@@ -51,7 +56,7 @@ def report_email_html(report: MonthlyReport, portal_url: str) -> str:
         p2 = (f'पूरी रिपोर्ट संलग्न PDF में है। पोर्टल पर देखें: '
               f'<a href="{portal_url}">{portal_url}</a>')
     else:
-        p1 = (f"Hi {report.business_name}, your impact report for {period} is ready. "
+        p1 = (f"Hi {biz}, your impact report for {period} is ready. "
               f"Attributed revenue this month: <b>{arrr}</b>, campaigns sent: "
               f"{report.campaigns_sent}, new customers: {report.customers_added}.")
         if report.zero_arrr:
