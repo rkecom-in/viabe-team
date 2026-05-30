@@ -86,3 +86,21 @@ def route_after_collapse(state: AgentGraphState) -> str:
     if state.get("pending_approval_request") is not None:
         return "approval_gate"
     return "end"
+
+
+def route_after_approval(state: AgentGraphState) -> str:
+    """VT-251 — route after the request_owner_approval node resolves.
+
+    'campaign_execute' — owner_decision is 'approved'; fan out the campaign.
+    'end'              — any other decision (rejected / needs_changes /
+                         timeout / send_failed) or no decision set. The
+                         campaign is NOT sent (Pillar 7: non-approved decisions
+                         must NEVER proceed to send).
+
+    Keying on state['owner_decision'] keeps the execute-branch strictly tied
+    to the authoritative Pillar-7 gate outcome.
+    """
+    decision = state.get("owner_decision")
+    if decision == "approved":
+        return "campaign_execute"
+    return "end"
