@@ -11,6 +11,7 @@
 
 import { NextResponse } from 'next/server'
 
+import { isOperator } from '@/lib/auth/operator-allowlist'
 import { issueOperatorJwt } from '@/lib/auth/operator-jwt'
 import { safeNext } from '@/lib/auth/safe-next'
 import { serverSecretClient } from '@/lib/supabase-client'
@@ -54,9 +55,9 @@ export async function POST(req: Request) {
     )
   }
 
-  // OPERATOR ALLOWLIST gate — same defense as VT-203 fix-2.
-  const operatorAllowlist = (process.env.FAZAL_OWNER_UUID ?? '').trim()
-  if (!operatorAllowlist || userId !== operatorAllowlist) {
+  // OPERATOR ALLOWLIST gate (VT-228) — DB-backed allowlist + Fazal
+  // break-glass; replaces the hardcoded FAZAL_OWNER_UUID compare.
+  if (!(await isOperator(userId))) {
     return NextResponse.json(
       { ok: false, error: 'not_authorized' },
       { status: 403 },

@@ -10,6 +10,7 @@
 
 import { NextResponse } from 'next/server'
 
+import { isOperator } from '@/lib/auth/operator-allowlist'
 import { issueOperatorJwt } from '@/lib/auth/operator-jwt'
 import { safeNext } from '@/lib/auth/safe-next'
 import { serverSecretClient } from '@/lib/supabase-client'
@@ -87,12 +88,10 @@ export async function GET(req: Request) {
 
     // OPERATOR ALLOWLIST gate — Supabase Auth merely proves the email
     // was deliverable. Without this check, anyone with an email could
-    // become an operator (privilege escalation). Phase 1 = single
-    // operator (Fazal); compare against FAZAL_OWNER_UUID env. Multi-
-    // operator (Phase 2) replaces this with an `operators` table
-    // lookup or a Supabase app_metadata.role='operator' claim check.
-    const operatorAllowlist = (process.env.FAZAL_OWNER_UUID ?? '').trim()
-    if (!operatorAllowlist || userId !== operatorAllowlist) {
+    // become an operator (privilege escalation). VT-228: DB-backed
+    // operator_allowlist (Fazal break-glass + granted operators), replaces
+    // the hardcoded FAZAL_OWNER_UUID compare.
+    if (!(await isOperator(userId))) {
       return NextResponse.redirect(
         new URL('/team/ops/login?error=not_authorized', req.url),
         { status: 302 },
