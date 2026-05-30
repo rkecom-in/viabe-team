@@ -41,6 +41,10 @@ jobs:
       - run: pnpm --filter @viabe/team-web lint
       # Lint rule: no-cross-product-env-vars (fails on REPORTS_* env vars).
       - run: node scripts/lint-cross-product-env.mjs
+      # VT-253 security: reject committed URL auth-token values (magic-link /
+      # OAuth) that gitleaks misses (query-param tokens). From the session-export
+      # leak (VT-252). Value-matching, so narrative/elided forms pass.
+      - run: bash scripts/check_no_url_tokens.sh
       # Python lint.
       - uses: astral-sh/setup-uv@v7
       - run: uvx ruff check apps/team-orchestrator apps/team-ingestion-worker
