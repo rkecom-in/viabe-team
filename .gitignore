@@ -52,3 +52,8 @@ migrations/.lock
 .viabe/daemon/STOP
 .viabe/daemon/*.pid
 .claude/scheduled_tasks.lock
+
+# VT-252 (security): raw Cowork session-export dirs carry permissionMode:bypassPermissions
+# + Supabase magic-link auth tokens (token=... URLs) in metadata.json — must NEVER be
+# committed. Curated *.md exports (token-scrubbed) may still be tracked deliberately.
+cowork_sessions/session-export-*/
