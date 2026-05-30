@@ -38,7 +38,7 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm --filter @viabe/team-web typecheck
       - run: pnpm --filter @viabe/team-web lint
-      - uses: astral-sh/setup-uv@v8
+      - uses: astral-sh/setup-uv@v7
       - run: uvx ruff check apps/team-orchestrator
 
   deploy-orchestrator:
