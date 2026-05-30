@@ -21,6 +21,7 @@
 
 import { cookies } from 'next/headers'
 
+import { isOperator } from './operator-allowlist'
 import { verifyOperatorJwt } from './operator-jwt'
 
 const FAZAL_UUID = process.env.FAZAL_OWNER_UUID ?? ''
@@ -48,6 +49,7 @@ async function _defaultCookieJar(): Promise<CookieJar> {
 
 export async function requireFazal(
   getCookieJar: () => Promise<CookieJar> = _defaultCookieJar,
+  isOperatorCheck: (userId: string) => Promise<boolean> = isOperator,
 ): Promise<{ fazalUuid: string }> {
   if (!FAZAL_UUID) {
     throw new UnauthorizedError('FAZAL_OWNER_UUID not configured on server')
@@ -63,9 +65,13 @@ export async function requireFazal(
   } catch (err) {
     throw new UnauthorizedError(`JWT verify failed: ${(err as Error).message}`)
   }
-  if (claim.sub !== FAZAL_UUID) {
+  // VT-228: per-request operator-allowlist check (immediate revoke, 30s
+  // cached). Fazal's UUID passes via the break-glass inside isOperator, so
+  // the single-operator path is unchanged; granted operators are gated
+  // here too and a revoked operator's still-valid JWT stops working ≤30s.
+  if (!(await isOperatorCheck(claim.sub))) {
     throw new UnauthorizedError(
-      `JWT subject mismatch — got ${claim.sub}, expected ${FAZAL_UUID}`,
+      `operator not allowlisted (or revoked): ${claim.sub}`,
     )
   }
   return { fazalUuid: claim.sub }

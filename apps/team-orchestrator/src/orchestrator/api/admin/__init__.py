@@ -11,6 +11,7 @@ from fastapi import APIRouter
 
 from orchestrator.api.admin.connector import router as connector_router
 from orchestrator.api.admin.health import router as health_router
+from orchestrator.api.admin.operator import router as operator_router
 from orchestrator.api.admin.webhook_metrics import (
     router as webhook_metrics_router,
 )
@@ -21,5 +22,6 @@ router.include_router(connector_router)
 router.include_router(workflow_router)
 router.include_router(health_router)
 router.include_router(webhook_metrics_router)
+router.include_router(operator_router)
 
 __all__ = ["router"]
