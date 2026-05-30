@@ -14,7 +14,7 @@ pytest.importorskip("pydantic")
 
 
 def _pool(*, real_ids: list[str]) -> tuple[Any, list[tuple[str, tuple]]]:
-    """Stub: SET LOCAL, SELECT real customer ids (fetchall), N inserts."""
+    """Stub: set_config, SELECT real customer ids (fetchall), N inserts."""
     calls: list[tuple[str, tuple]] = []
     cur = MagicMock()
 
@@ -98,4 +98,4 @@ def test_sets_tenant_guc_first() -> None:
         tenant_id="tenant_z", campaign_id="camp1",
         customer_ids=["c1"], pool=pool,
     )
-    assert "SET LOCAL app.current_tenant" in calls[0][0]
+    assert "set_config('app.current_tenant'" in calls[0][0]

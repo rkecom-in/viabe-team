@@ -22,7 +22,7 @@ def _future(minutes: int = 0, days: int = 0) -> datetime:
 
 def _pool(*, insert_returns: Any, existing_row: Any = None,
            raise_exc: Exception | None = None) -> tuple[Any, list[str]]:
-    """Stub: SET LOCAL, INSERT ... RETURNING (fetchone), optional
+    """Stub: set_config, INSERT ... RETURNING (fetchone), optional
     re-SELECT existing (fetchone)."""
     issued: list[str] = []
     cur = MagicMock()
@@ -67,7 +67,7 @@ def test_happy_path_scheduled() -> None:
     out = schedule_followup(_input(), pool=pool)
     assert out.status == "scheduled"
     assert out.scheduled_id == "sched_1"
-    assert "SET LOCAL app.current_tenant" in issued[0]
+    assert "set_config('app.current_tenant'" in issued[0]
 
 
 def test_idempotent_duplicate_key() -> None:
@@ -144,7 +144,7 @@ def test_sets_tenant_guc_before_insert() -> None:
     schedule_followup(_input(tenant_id="tenant_xyz"), pool=pool)
     # GUC must be set before the INSERT (RLS path).
     set_idx = next(i for i, s in enumerate(issued)
-                   if "SET LOCAL app.current_tenant" in s)
+                   if "set_config('app.current_tenant'" in s)
     ins_idx = next(i for i, s in enumerate(issued)
                    if "INSERT INTO scheduled_followups" in s)
     assert set_idx < ins_idx

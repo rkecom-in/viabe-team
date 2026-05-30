@@ -25,7 +25,7 @@ pytest.importorskip("langchain")
 def _fake_pool(*, customer_row: Any, ledger_rows: list[Any] | None = None,
                 raise_undefined_table: bool = False) -> Any:
     """Minimal psycopg pool stub. Two sequential cursor.execute calls:
-    SET LOCAL + customer SELECT + ledger SELECT (fetchone + fetchall).
+    set_config + customer SELECT + ledger SELECT (fetchone + fetchall).
     """
     cur = MagicMock()
     if raise_undefined_table:

@@ -187,7 +187,8 @@ def _fetch_candidate_ledger(
     with pool.connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                "SET LOCAL app.current_tenant = %s", (tenant_id,),
+                "SELECT set_config('app.current_tenant', %s, false)",
+                (tenant_id,),
             )
             try:
                 cur.execute(
