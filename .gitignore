@@ -47,6 +47,7 @@ supabase/
 .viabe/queue/
 .viabe/sprint/.lock
 .viabe/sprint/.next-id.bak
+migrations/.lock
 .viabe/queue/*/status
 .viabe/daemon/STOP
 .viabe/daemon/*.pid

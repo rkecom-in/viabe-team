@@ -76,6 +76,7 @@ If you ever find yourself about to query Notion for VT row state, **stop** — r
 | Recent merges | `git log --oneline -10` |
 | Open PRs | `gh pr list --state open` |
 | The next VT-ID for a new row | `python scripts/vt_id_allocate.py --peek` (consume: drop `--peek`) |
+| The next migration number | `python scripts/migration_id_allocate.py --peek` (consume: drop `--peek`) — **MANDATORY for new migrations; never hand-pick the number** (CL-424) |
 | Current dashboard | open the Cowork artifact `viabe-team-pm-dashboard` (Cowork sessions only) |
 
 ---
@@ -181,6 +182,10 @@ When sandbox `git add` fails with `fatal: Unable to create '.git/index.lock': Fi
 **Exec Order first.** Within-sprint ordering = sort by `exec_order` then VT-N. Not Priority. Not dep-graph guesswork. Read the brief's Dependencies section explicitly.
 
 **VT-IDs numeric only.** Never invent text-suffix IDs like `VT-FOO`. Allocator at `scripts/vt_id_allocate.py` claims monotonic numeric IDs under flock.
+
+**Migration numbers via the allocator only.** New migrations MUST claim their number through `scripts/migration_id_allocate.py` (flock-serialized, like the VT-ID allocator) — never hand-pick by scanning `migrations/`. Unlocked directory-scan picking is the recurring collision source under parallel work (e.g. VT-240 + VT-86 both reaching for 047). CL-424.
+
+**Ultracode + parallel fan-out (CL-424).** CC runs xhigh ultracode for all tasks; dynamic-workflow fan-out happens when the orchestrator warrants it. Binding guardrails: (1) allocate every VT-ID and migration number ONCE up-front, before any parallel phase — never let parallel subagents grab IDs/numbers concurrently (both allocators are flock-serialized but the discipline is to assign before fan-out, not race the lock); (2) one coherent PR per numeric VT row regardless of subagent count; (3) Cowork plan-first review still applies on big/risky rows; (4) Pillar-7 Fazal-authorized merge is unchanged.
 
 **Don't re-litigate Standing decisions.** If it's in the ledger, it's settled.
 
