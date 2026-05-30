@@ -42,7 +42,7 @@ def _pool(
     tenant_count: int = 0,
     customer_count: int = 0,
     raise_on_send_idem_insert: Exception | None = None,
-    raise_on_set_local: Exception | None = None,
+    raise_on_set_tenant: Exception | None = None,
 ) -> tuple[Any, list[tuple[str, Any]]]:
     """Build a MagicMock pool that hands back controlled query results.
 
@@ -63,8 +63,8 @@ def _pool(
 
     def _execute(sql: str, params: tuple | None = None) -> None:
         executed.append((sql, params))
-        if raise_on_set_local and "SET LOCAL" in sql:
-            raise raise_on_set_local
+        if raise_on_set_tenant and "set_config('app.current_tenant'" in sql:
+            raise raise_on_set_tenant
         if raise_on_send_idem_insert and "INSERT INTO send_idempotency_keys" in sql:
             raise raise_on_send_idem_insert
 
@@ -128,7 +128,7 @@ def test_happy_path_sent() -> None:
 
     # GUC must be set before any read.
     sql_list = [sql for sql, _ in executed]
-    set_idx = next(i for i, s in enumerate(sql_list) if "SET LOCAL" in s)
+    set_idx = next(i for i, s in enumerate(sql_list) if "set_config('app.current_tenant'" in s)
     idem_idx = next(i for i, s in enumerate(sql_list) if "send_idempotency_keys" in s and "SELECT" in s)
     assert set_idx < idem_idx
 
@@ -375,7 +375,7 @@ def test_db_error_returns_envelope_never_raises() -> None:
     from orchestrator.agent.tools.send_whatsapp_message import send_whatsapp_message
 
     exc = Exception("connection refused")
-    pool, _ = _pool(raise_on_set_local=exc)
+    pool, _ = _pool(raise_on_set_tenant=exc)
     out = send_whatsapp_message(_input(), pool=pool, send_fn=_send_fn)
 
     assert out.status == "error"
