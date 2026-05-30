@@ -155,3 +155,5 @@ This summary currently covers only Standing decisions extracted from `docs/clau/
 |---|---|---|
 | 2026-05-26 04:20 IST | Cowork | Initial extraction from `decisions-ledger.md` (batch 1) — 70 Standing rows + 7 superseded. Triggered by CL-56 LangSmith→Logfire drift incident. |
 | 2026-05-26 04:35 IST | Cowork | Pivot per Fazal: renamed `ledger-index.md` → `active-context-summary.md`; reframed as Cowork-maintained digest (not "external ledger"); added Sweep TODO + maintenance log. |
+
+- **CL-422** (2026-05-29, STANDING with launch-gate sunset) — Dev DB Seoul-accepted (free-tier); prod = Mumbai (VT-231 launch-blocker); hard constraint: no real customer data on dev until prod ships.
