@@ -19,17 +19,50 @@ NO PII (CL-390): logged fields are txn_id + counts only. VPA and
 payer_name are consumed by the matcher but NEVER logged or returned
 verbatim. match_basis is a short tag ("amount+time", "amount+vpa") —
 not the raw values.
+
+VT-240: each declared match also carries an ``attribution_method``
+(exact_match / window_match) derived deterministically from
+``match_basis`` via ``attribution_method_from_match_basis``. This is the
+provenance substrate that attribution rows (migration 047) will store —
+``attribution_method`` ← this field, ``attribution_confidence`` ← the
+existing ``confidence`` field. The mapper is pure + reproducible (no float
+ambiguity in the method choice) for the day-39 reproducibility gate.
+VT-240 does NOT build the attributions writer (no writer exists yet —
+VT-176) and does NOT lift VT-43.
 """
 
 from __future__ import annotations
 
 import logging
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, computed_field
 
 logger = logging.getLogger(__name__)
+
+# The three values attributions.attribution_method may hold (migration 047
+# CHECK). The matcher only ever PRODUCES the first two; manual_owner is
+# owner-asserted via a separate path and never derived from a match_basis.
+AttributionMethod = Literal["exact_match", "window_match", "manual_owner"]
+
+
+def attribution_method_from_match_basis(match_basis: str) -> str:
+    """Map a declared match's ``match_basis`` tag → ``attribution_method``.
+
+    Pure + deterministic (Fazal day-39 reproducibility gate — same basis
+    always yields the same method, no float comparison involved):
+
+      - basis contains ``vpa`` (a strong payer identifier) → ``exact_match``
+      - otherwise (``amount`` / ``amount+time``) → ``window_match``
+
+    Only ever called on a DECLARED match, whose basis always contains
+    ``amount`` (the matcher requires amount-exact for a match). ``manual_owner``
+    is NOT produced here — it is owner-asserted on a different path. The
+    non-vpa fallback is ``window_match`` (the weaker, conservative claim), so an
+    unexpected basis can never be over-attributed as an exact match.
+    """
+    return "exact_match" if "vpa" in match_basis.split("+") else "window_match"
 
 
 class TransactionInput(BaseModel):
@@ -54,7 +87,14 @@ class MatchTransactionsInput(BaseModel):
 
 
 class TransactionMatch(BaseModel):
-    """One matched transaction → ledger entry."""
+    """One matched transaction → ledger entry.
+
+    VT-240: ``attribution_method`` is a computed field derived from
+    ``match_basis`` so it can never drift from the basis — the mapper is the
+    single source of truth. ``confidence`` doubles as the future
+    ``attributions.attribution_confidence`` (already in [0,1]); no separate
+    field is needed.
+    """
 
     model_config = ConfigDict(frozen=True)
 
@@ -62,6 +102,13 @@ class TransactionMatch(BaseModel):
     ledger_entry_id: str
     confidence: float = Field(..., ge=0.0, le=1.0)
     match_basis: str
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def attribution_method(self) -> str:
+        """Provenance method (exact_match / window_match), derived from
+        ``match_basis`` via the deterministic mapper."""
+        return attribution_method_from_match_basis(self.match_basis)
 
 
 class UnmatchedTransaction(BaseModel):
@@ -244,10 +291,12 @@ def match_transactions(
 
 
 __all__ = [
+    "AttributionMethod",
     "MatchTransactionsInput",
     "MatchTransactionsOutput",
     "TransactionInput",
     "TransactionMatch",
     "UnmatchedTransaction",
+    "attribution_method_from_match_basis",
     "match_transactions",
 ]
