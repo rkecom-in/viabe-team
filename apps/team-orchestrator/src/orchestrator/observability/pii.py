@@ -19,19 +19,30 @@ Public exports
 from __future__ import annotations
 
 import warnings
-from typing import Any
+from typing import Any, Callable
 
 from orchestrator.privacy.pii_redactor import redact
 
 
-def redact_for_otel_span(value: Any, _depth: int = 0) -> Any:
+def redact_for_otel_span(
+    value: Any,
+    _depth: int = 0,
+    *,
+    name_registry: Callable[[str], bool] | None = None,
+) -> Any:
     """Return a PII-safe copy of ``value`` for an OTel-style span sink.
 
     Delegates to :func:`orchestrator.privacy.pii_redactor.redact`. The
     ``_depth`` parameter preserves VT-101's call signature for callers
     that still pass it positionally; mapped to the canonical ``depth``.
+
+    VT-170: ``name_registry`` (default ``None`` — None-safe, no behaviour
+    change for the many call-sites without tenant context) lets a
+    tenant-scoped caller inject the customer-name registry callable from
+    :func:`orchestrator.privacy.customer_registry.make_name_registry` so
+    known customer names get redacted by exact match.
     """
-    return redact(value, depth=_depth)
+    return redact(value, depth=_depth, name_registry=name_registry)
 
 
 # pipeline_log writer — same redactor; call-site clarity at non-Logfire
