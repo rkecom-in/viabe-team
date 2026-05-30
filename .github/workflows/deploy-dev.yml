@@ -41,19 +41,12 @@ jobs:
       - uses: astral-sh/setup-uv@v7
       - run: uvx ruff check apps/team-orchestrator
 
-  deploy-orchestrator:
-    name: Deploy orchestrator (Railway)
-    needs: pre-deploy-checks
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      - name: Install Railway CLI
-        run: npm install -g @railway/cli@latest
-      - name: Deploy to Railway
-        env:
-          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
-          RAILWAY_SERVICE_ID: ${{ secrets.RAILWAY_SERVICE_ID }}
-        run: railway up --service "$RAILWAY_SERVICE_ID" --detach
+  # VT-246: the orchestrator service deploys NATIVELY via Railway's GitHub
+  # integration (source=rkecom-in/viabe-team, branch=main, auto-deploy ON,
+  # "Wait for CI" ON). The old `railway up` CLI job here was redundant AND
+  # its failure blocked the native deploy (Wait-for-CI gates on every Action
+  # passing). Removed. Railway redeploys itself once this workflow is green.
+  # Now-unused secrets: RAILWAY_TOKEN, RAILWAY_SERVICE_ID, RAILWAY_DEV_URL.
 
   deploy-team-web:
     name: Deploy team-web (Vercel)
@@ -93,16 +86,10 @@ jobs:
           vercel build --prod --token="$VERCEL_TOKEN"
           vercel deploy --prebuilt --prod --token="$VERCEL_TOKEN"
 
-  post-deploy-smoke:
-    name: Post-deploy smoke
-    needs: [deploy-orchestrator, deploy-team-web]
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      - name: Wait for both deploys to settle
-        run: sleep 60
-      - name: Run dev-env smoke
-        env:
-          RAILWAY_DEV_URL: ${{ secrets.RAILWAY_DEV_URL }}
-          VERCEL_DEV_URL: ${{ secrets.VERCEL_DEV_URL }}
-        run: bash scripts/dev-env-smoke.sh
+  # VT-246: post-deploy-smoke removed. It (a) `needs:` the deleted Railway
+  # job, and (b) curled RAILWAY_DEV_URL/health — but the orchestrator's
+  # native deploy fires only AFTER this workflow is green (Wait-for-CI), so
+  # a CI-time orchestrator smoke can't see the fresh deploy and would
+  # re-block the very wait-for-CI gate we need green. The Railway deploy is
+  # now verified Railway-side (dashboard). scripts/dev-env-smoke.sh is kept
+  # in-repo for manual/scheduled runs but is no longer wired into deploy-dev.
