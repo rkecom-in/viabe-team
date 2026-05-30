@@ -38,6 +38,7 @@ from orchestrator.context_builder import (  # noqa: E402 — post importorskip
     LedgerSummary,
     OwnerInput,
     SalesRecoveryContext,
+    _DEFAULT_RECOVERY_TARGET_MULTIPLIER,
     _DEFAULT_TARGET_RECOVERED_PAISE,
     serialize_bundle_for_prompt,
 )
@@ -274,3 +275,92 @@ def test_serializer_handles_empty_owner_inputs() -> None:
         "##", 1
     )[0]
     assert "count: 0" in owner_block
+
+
+# --- VT-164: per-tenant recovery-target config tests --------------------------
+
+
+def _seeded_context_with_config(
+    *,
+    last_7d_paise: int = 0,
+    multiplier: float = _DEFAULT_RECOVERY_TARGET_MULTIPLIER,
+    floor_paise: int = _DEFAULT_TARGET_RECOVERED_PAISE,
+) -> SalesRecoveryContext:
+    """Seeded context with explicit per-tenant recovery-target config fields."""
+    base = _seeded_context(last_7d_paise=last_7d_paise)
+    return SalesRecoveryContext(
+        tenant_id=base.tenant_id,
+        run_id=base.run_id,
+        user_request=base.user_request,
+        trigger_reason=base.trigger_reason,
+        business_profile=base.business_profile,
+        customer_ledger_summary=base.customer_ledger_summary,
+        recent_campaigns=base.recent_campaigns,
+        attribution_snapshot=base.attribution_snapshot,
+        pending_owner_inputs=base.pending_owner_inputs,
+        meta=base.meta,
+        data_completeness=base.data_completeness,
+        recovery_target_multiplier=multiplier,
+        recovery_target_floor_paise=floor_paise,
+    )
+
+
+def test_target_uses_multiplier_when_above_floor() -> None:
+    """(VT-164-e1) last_7d * multiplier > floor → multiplier dominates.
+    last_7d=80_000, multiplier=1.1 → round(88_000) = 88_000 > 50_000."""
+    ctx = _seeded_context_with_config(last_7d_paise=80_000, multiplier=1.1, floor_paise=50_000)
+    rendered = serialize_bundle_for_prompt(ctx)
+    assert "target_recovered_paise: 88000" in rendered
+
+
+def test_target_uses_floor_when_7d_low() -> None:
+    """(VT-164-e2) last_7d * multiplier < floor → floor dominates.
+    last_7d=10_000, multiplier=1.1 → round(11_000) < 50_000 → 50_000."""
+    ctx = _seeded_context_with_config(last_7d_paise=10_000, multiplier=1.1, floor_paise=50_000)
+    rendered = serialize_bundle_for_prompt(ctx)
+    assert "target_recovered_paise: 50000" in rendered
+
+
+def test_target_override_multiplier_and_floor() -> None:
+    """(VT-164-e3) Custom multiplier + floor → override reflected.
+    last_7d=80_000, multiplier=1.5 → round(120_000) > 100_000 → 120_000."""
+    ctx = _seeded_context_with_config(last_7d_paise=80_000, multiplier=1.5, floor_paise=100_000)
+    rendered = serialize_bundle_for_prompt(ctx)
+    assert "target_recovered_paise: 120000" in rendered
+
+
+def test_target_floor_dominates_at_override() -> None:
+    """(VT-164-e3b) Custom floor larger than multiplier result → floor wins.
+    last_7d=80_000, multiplier=1.5 → 120_000 but floor=200_000 → 200_000."""
+    ctx = _seeded_context_with_config(last_7d_paise=80_000, multiplier=1.5, floor_paise=200_000)
+    rendered = serialize_bundle_for_prompt(ctx)
+    assert "target_recovered_paise: 200000" in rendered
+
+
+def test_target_zero_last_7d_uses_floor() -> None:
+    """(VT-164-e4) Zero last_7d → multiplier produces 0 → floor wins."""
+    ctx = _seeded_context_with_config(last_7d_paise=0, multiplier=1.1, floor_paise=50_000)
+    rendered = serialize_bundle_for_prompt(ctx)
+    assert f"target_recovered_paise: {_DEFAULT_TARGET_RECOVERED_PAISE}" in rendered
+
+
+def test_default_context_fields_reproduce_pre_vt164_behaviour() -> None:
+    """(VT-164 behavioural-change guard) Default-config context must produce
+    the same target as the pre-VT-164 inline formula:
+    max(int(last_7d * 1.1), 50_000). last_7d=100_000 → 110_000."""
+    ctx = _seeded_context(last_7d_paise=100_000)
+    rendered = serialize_bundle_for_prompt(ctx)
+    # Pre-VT-164: int(100_000 * 1.1) = 110_000 (int truncates, identical to round here)
+    assert "target_recovered_paise: 110000" in rendered
+
+
+def test_salesrecoverycontext_default_fields() -> None:
+    """(VT-164) SalesRecoveryContext default fields match module constants."""
+    from uuid import uuid4
+    ctx = SalesRecoveryContext(
+        tenant_id=uuid4(),
+        run_id=uuid4(),
+        user_request="test",
+    )
+    assert ctx.recovery_target_multiplier == _DEFAULT_RECOVERY_TARGET_MULTIPLIER
+    assert ctx.recovery_target_floor_paise == _DEFAULT_TARGET_RECOVERED_PAISE
