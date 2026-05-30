@@ -435,6 +435,59 @@ def test_operator_allowlist_deny_all_rls_and_grant_revoke(migrated):
         assert retained == 1, "revoked row kept for audit"
 
 
+def test_monthly_reports_rls_unique_and_year_month_check(migrated):
+    """VT-86 (migration 048): monthly_reports RLS cross-tenant isolation +
+    UNIQUE(tenant_id, year_month) + the year_month format CHECK."""
+    dsn = migrated["dsn"]
+
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        tenant_a = conn.execute(
+            "INSERT INTO tenants (business_name, plan_tier, phase) "
+            "VALUES ('Report Tenant A', 'founding', 'paid_active') RETURNING id"
+        ).fetchone()[0]
+        tenant_b = conn.execute(
+            "INSERT INTO tenants (business_name, plan_tier, phase) "
+            "VALUES ('Report Tenant B', 'standard', 'paid_active') RETURNING id"
+        ).fetchone()[0]
+        rep_a = conn.execute(
+            "INSERT INTO monthly_reports (tenant_id, year_month, arrr_paise) "
+            "VALUES (%s, '2026-04', 500000) RETURNING id",
+            (tenant_a,),
+        ).fetchone()[0]
+
+        # UNIQUE(tenant_id, year_month): a second 2026-04 for A is rejected.
+        with pytest.raises(psycopg.errors.UniqueViolation):
+            conn.execute(
+                "INSERT INTO monthly_reports (tenant_id, year_month) "
+                "VALUES (%s, '2026-04')",
+                (tenant_a,),
+            )
+
+        # year_month CHECK: malformed period rejected; fees/net NULLABLE.
+        with pytest.raises(psycopg.errors.CheckViolation):
+            conn.execute(
+                "INSERT INTO monthly_reports (tenant_id, year_month) "
+                "VALUES (%s, '2026-13')",  # month 13 invalid
+                (tenant_a,),
+            )
+
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute("SET ROLE rls_tester")
+
+        # Scoped to B: A's report is invisible.
+        conn.execute("SELECT set_config('app.current_tenant', %s, false)", (str(tenant_b),))
+        visible = {r[0] for r in conn.execute("SELECT id FROM monthly_reports")}
+        assert rep_a not in visible
+
+        # Insert-for-A while scoped to B is rejected by WITH CHECK.
+        with pytest.raises(psycopg.Error):
+            conn.execute(
+                "INSERT INTO monthly_reports (tenant_id, year_month) "
+                "VALUES (%s, '2026-05')",
+                (tenant_a,),
+            )
+
+
 def test_attribution_method_confidence_columns(migrated):
     """VT-240 (migration 047): attributions gains nullable attribution_method
     + attribution_confidence. CHECKs reject bad method / out-of-range

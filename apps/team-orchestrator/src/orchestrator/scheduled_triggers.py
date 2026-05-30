@@ -408,11 +408,35 @@ def run_monthly_impact_body(now: datetime | None = None) -> list[UUID]:
                 "scheduled_at_utc": now.astimezone(timezone.utc).isoformat(),
                 "trigger_reason": "monthly_impact",
                 "note": (
-                    "VT-176 emission. Downstream PDF generator (VT-9.6 "
-                    "successor) consumes monthly_impact_started events."
+                    "VT-176 emission. VT-86 consumes inline below: "
+                    "generate + render + store + (email when owner-email exists)."
                 ),
             },
         )
+        # VT-86 (D8): generate + store the monthly report inline (deterministic,
+        # Pillar 1). owner_email is None until an owner-email field exists — the
+        # report is still generated, stored, and portal-downloadable; email
+        # delivery (module built + canary-tested) activates when that field
+        # lands. Per-tenant try/except: one tenant's failure must not abort the
+        # batch (observability-safe, matches the rest of this module).
+        from orchestrator.db import tenant_connection
+        from orchestrator.owner_surface.monthly_report_runner import (
+            run_monthly_report,
+        )
+
+        try:
+            with tenant_connection(tenant_id) as report_conn:
+                run_monthly_report(
+                    str(tenant_id),
+                    target_month,
+                    conn=report_conn,
+                    owner_email=None,  # no owner-email substrate yet (follow-up)
+                )
+        except Exception:
+            logger.exception(
+                "monthly_impact: report generation failed tenant=%s month=%s",
+                tenant_id, target_month,
+            )
         notified.append(tenant_id)
     return notified
 
