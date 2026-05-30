@@ -150,6 +150,7 @@ def test_vt4_ship_thin_first_real_end_to_end_run(rls_ctx: Any, monkeypatch: pyte
     from anthropic import Anthropic as _RealAnthropic  # noqa: E402
 
     from orchestrator.agent.sales_recovery import (  # noqa: E402
+        _resolve_model,
         run_sales_recovery_agent,
     )
     from orchestrator.agent.schemas.campaign_plan import (  # noqa: E402
@@ -241,7 +242,10 @@ def test_vt4_ship_thin_first_real_end_to_end_run(rls_ctx: Any, monkeypatch: pyte
     # --- PROOF-OF-CALL (CL-272) ---------------------------------------
     assert len(_LedgerClient.calls_to_real_anthropic) >= 1, diag
     first_call = _LedgerClient.calls_to_real_anthropic[0]
-    assert first_call["model"] == "claude-opus-4-7", diag
+    # VT-165: derive the expected model from the canonical resolver (the test
+    # already pins VIABE_ENV=production → Opus) rather than hardcoding the id —
+    # strictly stronger, and survives a model bump in config/models.yaml.
+    assert first_call["model"] == _resolve_model("sales_recovery"), diag
     # Serialized bundle reached the SDK — the rendered block leads with
     # the markdown header.
     assert "Sales Recovery Context" in (
