@@ -50,3 +50,4 @@ supabase/
 .viabe/queue/*/status
 .viabe/daemon/STOP
 .viabe/daemon/*.pid
+.claude/scheduled_tasks.lock
