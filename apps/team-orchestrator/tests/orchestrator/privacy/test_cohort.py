@@ -5,6 +5,13 @@ from __future__ import annotations
 from typing import Any
 from unittest.mock import MagicMock
 
+import pytest
+
+# cohort.py imports pydantic; CI's stdlib-only smoke job (uv run
+# --no-project --with pytest) doesn't install it. Full coverage runs in
+# the orchestrator job (uv sync --frozen).
+pytest.importorskip("pydantic")
+
 
 def _pool(*, real_ids: list[str]) -> tuple[Any, list[tuple[str, tuple]]]:
     """Stub: SET LOCAL, SELECT real customer ids (fetchall), N inserts."""

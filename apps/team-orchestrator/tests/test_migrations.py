@@ -217,11 +217,16 @@ def test_customers_rls_and_cohort_integrity(migrated):
             "VALUES (%s, 'Bob B') RETURNING id",
             (tenant_b,),
         ).fetchone()[0]
+        run_a = conn.execute(
+            "INSERT INTO pipeline_runs (tenant_id, run_type, status) "
+            "VALUES (%s, 'campaign', 'running') RETURNING id",
+            (tenant_a,),
+        ).fetchone()[0]
         camp_a = conn.execute(
             "INSERT INTO campaigns (tenant_id, run_id, plan_json, status, "
-            "generated_at) VALUES (%s, gen_random_uuid(), '{}'::jsonb, "
+            "generated_at) VALUES (%s, %s, '{}'::jsonb, "
             "'proposed', now()) RETURNING id",
-            (tenant_a,),
+            (tenant_a, run_a),
         ).fetchone()[0]
 
     with psycopg.connect(dsn, autocommit=True) as conn:
