@@ -4,6 +4,8 @@
 
 **Owner:** Cowork. Established 2026-05-26 IST as the HUMAN-readable companion to `apps/team-orchestrator/config/twilio_templates.yaml` (which already existed since VT-3.3c shipped). The yaml is the runtime source of truth (name → SID for code); this markdown file adds the bodies, variable signatures, tier categorization, and approval-status notes that the yaml deliberately doesn't carry. When templates are added or rotated, BOTH files update in lockstep.
 
+**VT-163 update (2026-05-31):** Variable signatures are now ALSO machine-readable in `twilio_templates.yaml` under the `variables:` key (ordered list of snake_case param names; index i = positional `{{i+1}}`). This file remains the human-readable companion with message body copy. The yaml `variables:` lists are sourced from the signatures documented here. They update in lockstep — when a template is added or its signature changes, update both.
+
 **Correction to my earlier framing 2026-05-26 17:05 IST:** I initially wrote this file claiming the 8 SIDs had "no repo presence" — that was a grep-mistake on my side; the yaml has had them since VT-3.3c. The actual gap is that the COPY (message text) + variable signatures + tier categorization aren't in either the yaml OR the Meta/Twilio consoles in a way that Cowork or Claude Code can reference at brief-time. THIS file closes THAT gap.
 
 **Source authority:** Meta-approval status owned by Fazal (vendor relationship). Twilio Content SIDs are the canonical runtime identifier — assigned when the template is uploaded to Twilio Content API after Meta approval. The `template_name` is the human-readable handle used in code.
