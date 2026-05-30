@@ -43,6 +43,10 @@ from orchestrator.agent.schemas.campaign_plan import (
     CampaignPlanProposed,
 )
 from orchestrator.db import tenant_connection
+from orchestrator.privacy.cohort import (
+    CohortRejectedError,
+    resolve_cohort_recipients,
+)
 from orchestrator.state.agent_graph_state import AgentGraphState
 
 logger = logging.getLogger(__name__)
@@ -114,6 +118,22 @@ def collapse_campaign_plan(
         ).fetchone()
         campaign_row = cast("dict[str, Any]", raw_campaign)
         campaign_id = UUID(str(campaign_row["id"]))
+
+        # VT-241: link the cohort to campaign_recipients IN THIS TRANSACTION
+        # (cur-injected, same tenant_connection). FAIL-CLOSED — if any id is
+        # unresolvable / cross-tenant, raise CohortRejectedError; the
+        # transaction unwinds → the campaign INSERT + any recipients roll
+        # back → nothing persisted. The caller (collapse_node) surfaces the
+        # structured rejection to the owner (count only) + audit log (full).
+        with conn.cursor() as cohort_cur:
+            cohort = resolve_cohort_recipients(
+                tenant_id=str(tenant_id),
+                campaign_id=str(campaign_id),
+                customer_ids=[str(c) for c in campaign_plan.target_cohort.customer_ids],
+                cur=cohort_cur,
+            )
+        if cohort.rejected:
+            raise CohortRejectedError(cohort)
 
         raw_phase = conn.execute(
             "SELECT phase FROM tenants WHERE id = %s",
@@ -267,9 +287,31 @@ def collapse_node(state: AgentGraphState) -> dict[str, Any]:
         )
 
     if isinstance(plan, CampaignPlanProposed):
-        collapse_campaign_plan(
-            tenant_id=tenant_id, run_id=run_id, campaign_plan=plan
-        )
+        try:
+            collapse_campaign_plan(
+                tenant_id=tenant_id, run_id=run_id, campaign_plan=plan
+            )
+        except CohortRejectedError as exc:
+            # VT-241 FAIL-CLOSED: the campaign was NOT persisted (the whole
+            # transaction rolled back). Audit the full rejected-id list to
+            # the log layer (operator-visible — a cross-tenant cohort id is
+            # a real anomaly) but surface only a COUNT to the owner: the
+            # owner message must not become a cross-tenant existence oracle
+            # (Cowork privacy guard). Under tenant-scoped RLS the resolver
+            # can't distinguish cross-tenant from non-existent ids (both are
+            # "not found"); the logged ids let operators investigate.
+            res = exc.resolution
+            logger.warning(
+                "collapse: campaign REJECTED (fail-closed) tenant=%s run=%s "
+                "rejected_count=%d rejected_ids=%s — campaign NOT persisted",
+                tenant_id, run_id, len(res.rejected), res.rejected,
+            )
+            return {
+                "campaign_rejected": {
+                    "reason": "unresolved_cohort",
+                    "rejected_count": len(res.rejected),
+                }
+            }
     else:
         # out_of_scope / insufficient_data — terminal-but-valid.
         record_terminal_verdict(
