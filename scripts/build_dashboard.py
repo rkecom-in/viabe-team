@@ -31,7 +31,11 @@ IST = dt.timezone(dt.timedelta(hours=5, minutes=30))
 SPRINT_ORDER = [
     "Pre-Sprint 0 - Pillars & Setup",
     "Sprint 1 - Foundation",
+    "Sprint 1.5 - Hardening",
+    "Sprint 2 - Integration Agent (re-anchored)",
+    "Sprint 2 - Cost + Moat",
     "Sprint 2 - SR Agent Skeleton",
+    "Sprint 2 - Owner Surface",
     "Sprint 3 - Ingestion Methods 1-2",
     "Sprint 4 - Ingestion Methods 3-5",
     "Sprint 5 - Online Methods 6-9",
@@ -45,7 +49,11 @@ SPRINT_ORDER = [
 SPRINT_SHORT = {
     "Pre-Sprint 0 - Pillars & Setup": "Pre-0 Pillars",
     "Sprint 1 - Foundation": "S1 Foundation",
+    "Sprint 1.5 - Hardening": "S1.5 Hardening",
+    "Sprint 2 - Integration Agent (re-anchored)": "S2 IntegAgent",
+    "Sprint 2 - Cost + Moat": "S2 Cost+Moat",
     "Sprint 2 - SR Agent Skeleton": "S2 SR-Agent",
+    "Sprint 2 - Owner Surface": "S2 OwnerSurf",
     "Sprint 3 - Ingestion Methods 1-2": "S3 Ingest 1-2",
     "Sprint 4 - Ingestion Methods 3-5": "S4 Ingest 3-5",
     "Sprint 5 - Online Methods 6-9": "S5 Online 6-9",

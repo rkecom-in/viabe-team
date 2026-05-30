@@ -43,7 +43,8 @@ supabase/
 .viabe/secrets/
 
 # Cowork runtime state (NOT tracked — substrate lives in .viabe/sprint/*.md
-# and docs/clau/ instead)
+# and docs/clau/entries/*.md). Queue dirs regenerate per task.
+.viabe/queue/
 .viabe/sprint/.lock
 .viabe/sprint/.next-id.bak
 .viabe/queue/*/status
