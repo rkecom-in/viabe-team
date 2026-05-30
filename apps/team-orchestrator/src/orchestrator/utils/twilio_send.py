@@ -222,3 +222,37 @@ def send_template_message(
         template_name=template_name,
         recipient_phone_token=recipient_token,
     )
+
+
+def send_freeform_message(body: str, recipient_phone: str) -> str:
+    """Send a free-form WhatsApp message via Twilio (VT-44).
+
+    Parallel to send_template_message but uses Body= instead of content_sid.
+    Honors TEAM_TWILIO_MOCK_MODE; never logs the recipient phone in plaintext
+    (CL-390 — only the hashed token appears in logs).
+
+    Returns the Twilio message SID (str) on success.
+    Raises TwilioRestException on 4xx (permanent) or 5xx (transient).
+    The caller (send_whatsapp_message) handles the exception split — this
+    function does NOT swallow errors so the caller can record them cleanly.
+
+    Note: NOT a @DBOS.step — the idempotency is handled at the DB layer
+    (send_idempotency_keys table) by the standalone tool, not DBOS replay.
+    """
+    recipient_token = hash_phone(recipient_phone)
+    logger.info(
+        "twilio-send: freeform -> %s body_len=%d",
+        recipient_token,
+        len(body),
+    )
+    message = _client().messages.create(
+        body=body,
+        from_=os.environ["TEAM_TWILIO_FROM_NUMBER"],
+        to=recipient_phone,
+    )
+    logger.info(
+        "twilio-send: freeform sent -> %s (sid=%s)",
+        recipient_token,
+        message.sid,
+    )
+    return message.sid
