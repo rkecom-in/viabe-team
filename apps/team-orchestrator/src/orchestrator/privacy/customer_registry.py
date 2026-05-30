@@ -10,8 +10,8 @@ UPSERT. NOT an LRU eviction cache — Phase-1 single-process, bounded by
 tenant count; invalidate(tenant_id) is called by the customer write path.
 
 NO PII leak (CL-390): names are held in-process only for redaction
-matching; never logged. RLS via SET LOCAL app.current_tenant on the
-read.
+matching; never logged. RLS via set_config('app.current_tenant', ...) on
+the read.
 """
 
 from __future__ import annotations
@@ -54,7 +54,7 @@ def get_customer_names_for_tenant(
         with pool.connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "SET LOCAL app.current_tenant = %s", (tenant_id,)
+                    "SELECT set_config('app.current_tenant', %s, false)", (tenant_id,)
                 )
                 cur.execute(
                     """

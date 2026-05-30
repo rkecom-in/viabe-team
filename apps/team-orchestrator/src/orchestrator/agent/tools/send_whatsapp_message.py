@@ -132,7 +132,7 @@ def _check_customer_rate_limit(cur: Any, tenant_id: str, customer_id: str) -> bo
 def _resolve_customer(
     cur: Any, tenant_id: str, customer_id: str
 ) -> dict[str, Any] | None:
-    """Resolve customer record under RLS (SET LOCAL must have already been called).
+    """Resolve customer record under RLS (set_config('app.current_tenant') must already be called).
 
     Returns dict with phone_e164 and last_inbound_at, or None if not visible
     (cross-tenant attempt or customer doesn't exist).
@@ -201,7 +201,8 @@ def send_whatsapp_message(
             with conn.cursor() as cur:
                 # RLS: scope all reads + writes to this tenant.
                 cur.execute(
-                    "SET LOCAL app.current_tenant = %s", (payload.tenant_id,)
+                    "SELECT set_config('app.current_tenant', %s, false)",
+                    (payload.tenant_id,),
                 )
 
                 # --- Idempotency check ---

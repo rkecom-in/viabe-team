@@ -30,7 +30,7 @@ def _fake_pool(
 ) -> Any:
     """Stub psycopg pool. Tracks execute call index so multiple SELECTs
     return the right fixture row in order:
-    [0] SET LOCAL, [1] SELECT tenants, [2] SELECT tenant_connector_status,
+    [0] set_config, [1] SELECT tenants, [2] SELECT tenant_connector_status,
     [3] SELECT tenant_l1_profile.
     """
     cur = MagicMock()

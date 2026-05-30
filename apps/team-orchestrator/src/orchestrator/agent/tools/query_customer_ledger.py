@@ -68,7 +68,8 @@ def query_customer_ledger(
     `pool`: psycopg connection pool. Defaults to the DBOS-managed pool.
     Tests inject a mock pool.
 
-    RLS: SET LOCAL app.current_tenant for the duration of the SELECT.
+    RLS: scopes app.current_tenant for the connection via set_config
+    (session-scoped; pool reset clears it on return — see graph._reset_connection).
     """
     if pool is None:
         from orchestrator.graph import get_pool
@@ -79,7 +80,8 @@ def query_customer_ledger(
         try:
             with conn.cursor() as cur:
                 cur.execute(
-                    "SET LOCAL app.current_tenant = %s", (payload.tenant_id,),
+                    "SELECT set_config('app.current_tenant', %s, false)",
+                    (payload.tenant_id,),
                 )
                 cur.execute(
                     """

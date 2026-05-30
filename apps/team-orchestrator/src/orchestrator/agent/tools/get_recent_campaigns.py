@@ -78,7 +78,8 @@ def get_recent_campaigns(
     with pool.connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                "SET LOCAL app.current_tenant = %s", (payload.tenant_id,),
+                "SELECT set_config('app.current_tenant', %s, false)",
+                (payload.tenant_id,),
             )
             try:
                 cur.execute(

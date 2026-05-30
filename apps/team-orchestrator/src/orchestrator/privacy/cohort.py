@@ -17,7 +17,7 @@ product ruling are VT-241. Until VT-241 wires it, campaign_recipients
 stays empty — VT-43's cohort_size lift (VT-240) must wait for VT-241,
 not point at an empty COUNT.
 
-Pillar 1: deterministic, no LLM. RLS via SET LOCAL app.current_tenant.
+Pillar 1: deterministic, no LLM. RLS via set_config('app.current_tenant', ...).
 """
 
 from __future__ import annotations
@@ -121,7 +121,9 @@ def resolve_cohort_recipients(
     if pool is None:
         raise ValueError("resolve_cohort_recipients: pass either pool or cur")
     with pool.connection() as conn, conn.cursor() as own_cur:
-        own_cur.execute("SET LOCAL app.current_tenant = %s", (tenant_id,))
+        own_cur.execute(
+            "SELECT set_config('app.current_tenant', %s, false)", (tenant_id,)
+        )
         return _resolve_core(own_cur, tenant_id, campaign_id, unique_ids)
 
 
