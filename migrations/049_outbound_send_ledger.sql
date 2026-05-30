@@ -55,8 +55,13 @@ CREATE POLICY send_idempotency_keys_delete ON public.send_idempotency_keys
 
 -- =================== campaign_messages ================================
 -- Per-message outbound record. Nullable campaign_id = freeform send (VT-44).
--- campaign_id + tenant_id composite FK mirrors 045 pattern; campaign_id
--- is nullable (freeform sends have no campaign context).
+-- A same-tenant composite FK (tenant_id, campaign_id) -> campaigns(tenant_id, id)
+-- mirrors the 045 cohort-integrity pattern (campaigns_tenant_id_uniq enables it):
+-- MATCH SIMPLE means the FK is enforced ONLY when campaign_id is set, so freeform
+-- sends (campaign_id NULL) skip it while VT-45 template sends get real referential
+-- integrity + cross-tenant-link prevention. customer_id is intentionally NOT FK'd:
+-- this is an append-only audit ledger, so a send record must survive customer
+-- deletion (per Cowork review).
 
 CREATE TABLE IF NOT EXISTS public.campaign_messages (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -70,7 +75,12 @@ CREATE TABLE IF NOT EXISTS public.campaign_messages (
                         'template_sent')),
     message_type    TEXT NOT NULL DEFAULT 'freeform'
                     CHECK (message_type IN ('freeform', 'template')),
-    created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    -- Same-tenant composite FK: enforced only when campaign_id is set
+    -- (MATCH SIMPLE); freeform sends (NULL) are exempt.
+    CONSTRAINT campaign_messages_campaign_fk
+        FOREIGN KEY (tenant_id, campaign_id)
+        REFERENCES public.campaigns (tenant_id, id) ON DELETE CASCADE
 );
 
 -- Lookup index: per-campaign messages + per-tenant audit window.

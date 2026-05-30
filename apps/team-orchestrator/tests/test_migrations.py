@@ -571,3 +571,46 @@ def test_campaign_messages_rls_and_tables_exist(migrated):
                 "VALUES (%s, NULL, 'SM_attack', 'sent', 'freeform')",
                 (tenant_a,),
             )
+
+
+def test_campaign_messages_campaign_fk(migrated):
+    """VT-44 (Cowork review fix): campaign_messages composite FK
+    (tenant_id, campaign_id) -> campaigns(tenant_id, id). MATCH SIMPLE →
+    enforced only when campaign_id is set: freeform (NULL) is exempt,
+    same-tenant link is allowed, a cross-tenant link is rejected at the DB.
+    Superuser conn isolates the FK behaviour from RLS."""
+    dsn = migrated["dsn"]
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        ta = conn.execute(
+            "INSERT INTO tenants (business_name, plan_tier, phase) "
+            "VALUES ('FK A', 'founding', 'onboarding') RETURNING id"
+        ).fetchone()[0]
+        tb = conn.execute(
+            "INSERT INTO tenants (business_name, plan_tier, phase) "
+            "VALUES ('FK B', 'standard', 'onboarding') RETURNING id"
+        ).fetchone()[0]
+        run = conn.execute(
+            "INSERT INTO pipeline_runs (tenant_id, run_type, status) "
+            "VALUES (%s, 'orchestrator', 'running') RETURNING id", (ta,)
+        ).fetchone()[0]
+        camp = conn.execute(
+            "INSERT INTO campaigns (tenant_id, run_id, plan_json, status, generated_at) "
+            "VALUES (%s, %s, '{}'::jsonb, 'sent', now()) RETURNING id", (ta, run)
+        ).fetchone()[0]
+
+        # Freeform (NULL campaign_id) — FK exempt.
+        conn.execute(
+            "INSERT INTO campaign_messages (tenant_id, campaign_id, send_status, "
+            "message_type) VALUES (%s, NULL, 'sent', 'freeform')", (ta,)
+        )
+        # Same-tenant campaign link — allowed.
+        conn.execute(
+            "INSERT INTO campaign_messages (tenant_id, campaign_id, send_status, "
+            "message_type) VALUES (%s, %s, 'template_sent', 'template')", (ta, camp)
+        )
+        # Cross-tenant: tenant B + tenant A's campaign — FK rejects.
+        with pytest.raises(psycopg.errors.ForeignKeyViolation):
+            conn.execute(
+                "INSERT INTO campaign_messages (tenant_id, campaign_id, send_status, "
+                "message_type) VALUES (%s, %s, 'template_sent', 'template')", (tb, camp)
+            )
