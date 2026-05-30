@@ -48,8 +48,15 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 # `psycopg[binary]` works without libpq-dev, but tini gives a clean
 # signal-handler so DBOS shutdown_dbos runs on SIGTERM.
+# VT-86: weasyprint (monthly report PDF) needs pango at runtime — the minimal
+# Debian set is libpango-1.0-0 + libpangoft2-1.0-0 (cairo is pulled in). plus
+# fonts-indic so the Hindi/Devanagari report variant shapes correctly rather
+# than rendering tofu. Kept minimal (no gdk-pixbuf — the report uses inline
+# SVG, no raster images).
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends tini ca-certificates \
+    && apt-get install -y --no-install-recommends \
+        tini ca-certificates \
+        libpango-1.0-0 libpangoft2-1.0-0 fonts-indic \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /repo/apps/team-orchestrator

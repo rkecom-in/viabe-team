@@ -100,9 +100,16 @@ def test_bar_svg_handles_zero_total():
 
 
 def test_render_pdf_produces_pdf_bytes():
-    """weasyprint render — skipped where cairo/pango aren't installed (dev
-    macOS); the canary verifies this in an env with the libs."""
-    pytest.importorskip("weasyprint")
-    pdf = render_report_pdf(_report())
+    """weasyprint render — skipped where cairo/pango system libs aren't
+    installed (dev macOS / CI without the libs): the package imports fine but
+    write_pdf() raises OSError on the missing native libs. The Docker image
+    (Dockerfile installs libpango) + the canary verify real bytes there."""
+    try:
+        pdf = render_report_pdf(_report())
+    except (OSError, ImportError) as exc:
+        # weasyprint imports its native libs (libgobject/pango) at import time;
+        # absent on dev macOS / CI without the libs → OSError, not ImportError,
+        # so importorskip can't catch it. Docker image + canary verify real bytes.
+        pytest.skip(f"weasyprint unavailable: {str(exc)[:60]}")
     assert isinstance(pdf, bytes)
     assert pdf[:5] == b"%PDF-"
