@@ -433,3 +433,63 @@ def test_operator_allowlist_deny_all_rls_and_grant_revoke(migrated):
             (op_a,),
         ).fetchone()[0]
         assert retained == 1, "revoked row kept for audit"
+
+
+# --- Migration 050: tenants.owner_phone OTP-auth anchor (VT-250) --------------
+
+
+def test_tenant_owner_phone_globally_unique(migrated):
+    """VT-250 (D1): owner_phone is a GLOBALLY-unique (E.164) anchor — one
+    phone maps to exactly one tenant ACROSS the whole table (not per-tenant).
+    NULL owner_phone is allowed on many tenants (partial index)."""
+    dsn = migrated["dsn"]
+
+    # Column exists + is nullable TEXT.
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        col = conn.execute(
+            "SELECT data_type, is_nullable FROM information_schema.columns "
+            "WHERE table_name = 'tenants' AND column_name = 'owner_phone'"
+        ).fetchone()
+    assert col is not None, "owner_phone column must exist"
+    assert col[0] == "text"
+    assert col[1] == "YES", "owner_phone must be nullable"
+
+    # Randomized per-run E.164 so the test is idempotent across re-runs (the
+    # global-unique index would otherwise collide with a prior run's row).
+    phone = f"+9198{uuid4().int % 10**8:08d}"
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        t1 = conn.execute(
+            "INSERT INTO tenants (business_name, plan_tier, phase, owner_phone) "
+            "VALUES ('Owner Phone T1', 'founding', 'onboarding', %s) RETURNING id",
+            (phone,),
+        ).fetchone()[0]
+        assert t1 is not None
+
+        # GLOBAL uniqueness: a DIFFERENT tenant cannot claim the same
+        # owner_phone — one phone = one tenant for launch.
+        with pytest.raises(psycopg.errors.UniqueViolation):
+            conn.execute(
+                "INSERT INTO tenants (business_name, plan_tier, phase, owner_phone) "
+                "VALUES ('Owner Phone T2', 'standard', 'onboarding', %s)",
+                (phone,),
+            )
+
+    # Partial index: many tenants with NULL owner_phone are allowed.
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute(
+            "INSERT INTO tenants (business_name, plan_tier, phase, owner_phone) "
+            "VALUES ('Null Owner A', 'founding', 'onboarding', NULL)"
+        )
+        conn.execute(
+            "INSERT INTO tenants (business_name, plan_tier, phase, owner_phone) "
+            "VALUES ('Null Owner B', 'standard', 'onboarding', NULL)"
+        )
+
+    # The unique anchor index exists by name.
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        idx = conn.execute(
+            "SELECT indexname FROM pg_indexes "
+            "WHERE tablename = 'tenants' "
+            "AND indexname = 'idx_tenants_owner_phone_unique'"
+        ).fetchone()
+    assert idx is not None, "owner_phone unique anchor index must exist"
