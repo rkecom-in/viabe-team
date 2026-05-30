@@ -4,8 +4,22 @@ on:
   pull_request:
     branches: [main]
     types: [opened, synchronize, reopened, edited]
+    # VT-245 trigger-diet: skip the 17-job suite when a PR touches ONLY
+    # non-code paths (docs, sprint substrate, Cowork session exports, or
+    # the deploy-dev workflow — which CI never tests). paths-ignore only
+    # skips when EVERY changed file matches; a mixed code+docs PR still
+    # runs. main has no branch protection, so a skipped run does NOT
+    # block merge.
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/**'
+      - '.viabe/**'
+      - 'cowork_sessions/**'
+      - '.github/workflows/deploy-dev.yml'
 
-# Required status checks (branch protection on main): lint, typecheck, test.
+# CI runs on pull_request only (no push trigger) — avoids double-running
+# push+PR for the same SHA. main has NO branch protection; CI is a
+# non-blocking backstop, the local pre-push hook is the safety gate.
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
