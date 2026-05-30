@@ -190,6 +190,85 @@ def test_whatsapp_number_lookup_uses_index(migrated):
     assert "tenants_whatsapp_number_idx" in plan, plan
 
 
+# --- Migration 044: scheduled_followups (VT-48) -------------------------------
+
+
+def test_scheduled_followups_idempotency_and_rls(migrated):
+    """VT-48: UNIQUE(tenant_id, follow_up_key) idempotency + RLS isolation
+    on scheduled_followups (migration 044)."""
+    from datetime import datetime, timedelta, timezone
+
+    dsn = migrated["dsn"]
+    fire_at = datetime.now(timezone.utc) + timedelta(days=3)
+
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        tenant_a = conn.execute(
+            "INSERT INTO tenants (business_name, plan_tier, phase) "
+            "VALUES ('SF Tenant A', 'founding', 'onboarding') RETURNING id"
+        ).fetchone()[0]
+        tenant_b = conn.execute(
+            "INSERT INTO tenants (business_name, plan_tier, phase) "
+            "VALUES ('SF Tenant B', 'standard', 'onboarding') RETURNING id"
+        ).fetchone()[0]
+
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute("SET ROLE rls_tester")
+
+        # Tenant A schedules a follow-up.
+        conn.execute("SELECT set_config('app.current_tenant', %s, false)", (str(tenant_a),))
+        conn.execute(
+            "INSERT INTO scheduled_followups "
+            "(tenant_id, follow_up_type, follow_up_key, fire_at, payload) "
+            "VALUES (%s, 'campaign_followup', 'cfk_1', %s, '{}'::jsonb)",
+            (tenant_a, fire_at),
+        )
+
+        # Idempotency: same (tenant, key) again → ON CONFLICT DO NOTHING (0 rows).
+        inserted = conn.execute(
+            "INSERT INTO scheduled_followups "
+            "(tenant_id, follow_up_type, follow_up_key, fire_at, payload) "
+            "VALUES (%s, 'campaign_followup', 'cfk_1', %s, '{}'::jsonb) "
+            "ON CONFLICT (tenant_id, follow_up_key) DO NOTHING",
+            (tenant_a, fire_at),
+        ).rowcount
+        assert inserted == 0
+
+        # Exactly one row visible to A.
+        count_a = conn.execute(
+            "SELECT count(*) FROM scheduled_followups WHERE follow_up_key = 'cfk_1'"
+        ).fetchone()[0]
+        assert count_a == 1
+
+        # RLS: tenant B sees none of A's rows.
+        conn.execute("SELECT set_config('app.current_tenant', %s, false)", (str(tenant_b),))
+        leaked = conn.execute(
+            "SELECT count(*) FROM scheduled_followups WHERE tenant_id = %s",
+            (tenant_a,),
+        ).fetchone()[0]
+        assert leaked == 0
+
+        # B may reuse the SAME follow_up_key (different tenant → different row).
+        conn.execute(
+            "INSERT INTO scheduled_followups "
+            "(tenant_id, follow_up_type, follow_up_key, fire_at, payload) "
+            "VALUES (%s, 'campaign_followup', 'cfk_1', %s, '{}'::jsonb)",
+            (tenant_b, fire_at),
+        )
+        count_b = conn.execute(
+            "SELECT count(*) FROM scheduled_followups WHERE follow_up_key = 'cfk_1'"
+        ).fetchone()[0]
+        assert count_b == 1  # only B's row visible under B's scope
+
+        # Attack: scoped to B, inserting for A is rejected by WITH CHECK.
+        with pytest.raises(psycopg.Error):
+            conn.execute(
+                "INSERT INTO scheduled_followups "
+                "(tenant_id, follow_up_type, follow_up_key, fire_at, payload) "
+                "VALUES (%s, 'campaign_followup', 'cfk_attack', %s, '{}'::jsonb)",
+                (tenant_a, fire_at),
+            )
+
+
 # --- Migration 045: customers + campaign_recipients cohort integrity (VT-170) -
 
 
