@@ -12,7 +12,7 @@ Fields planned for later PRs:
 
 from __future__ import annotations
 
-from typing import Annotated
+from typing import Annotated, Any
 from uuid import UUID
 
 from langchain_core.messages import AnyMessage
@@ -51,3 +51,16 @@ class AgentGraphState(TypedDict, total=False):
     trigger_reason: TriggerReason | None
     sales_recovery_context: SalesRecoveryContext | None
     terminated_without_spawn: bool
+    # VT-47 — Pillar-7 owner-approval gate (additive, total=False):
+    #   pending_approval_request: the approval payload the collapse path
+    #     attaches when a proposed campaign needs owner sign-off. Routing
+    #     to the approval-gate node keys on its presence.
+    #   owner_decision: the resolved decision the gate node returns after
+    #     resume ('approved'|'rejected'|'needs_changes'|'timeout') or
+    #     'send_failed' when the template send failed (no pause fired).
+    #   approval_id / approval_error: the durable pending_approvals row id +
+    #     (on send failure) the structured error envelope.
+    pending_approval_request: dict[str, Any] | None
+    owner_decision: str | None
+    approval_id: UUID | None
+    approval_error: dict[str, Any] | None

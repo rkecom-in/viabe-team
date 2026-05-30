@@ -12,7 +12,11 @@ pytest.importorskip("langchain_core")
 
 from langchain_core.messages import AIMessage, ToolCall
 
-from orchestrator.routing import orchestrator_terminal_node, route_after_orchestrator
+from orchestrator.routing import (
+    orchestrator_terminal_node,
+    route_after_collapse,
+    route_after_orchestrator,
+)
 from orchestrator.state.agent_graph_state import AgentGraphState
 
 
@@ -38,6 +42,24 @@ def test_route_no_tool_calls_returns_terminal() -> None:
 def test_route_escalate_only_returns_terminal() -> None:
     """§4.5 case 3 — escalate_to_fazal is not a spawn; routes to 'terminal'."""
     assert _route([{"name": "escalate_to_fazal", "args": {}, "id": "1"}]) == "terminal"
+
+
+# --- VT-47: route_after_collapse (the owner-approval gate routing) -----------
+
+
+def test_route_after_collapse_with_pending_request_goes_to_gate() -> None:
+    """A persisted proposed campaign attaches pending_approval_request ->
+    route to the request_owner_approval gate node."""
+    state = AgentGraphState(
+        pending_approval_request={"approval_type": "campaign_send"}
+    )
+    assert route_after_collapse(state) == "approval_gate"
+
+
+def test_route_after_collapse_without_request_goes_to_end() -> None:
+    """No approval request (refusal / defer / fail-closed rejection) -> END."""
+    assert route_after_collapse(AgentGraphState()) == "end"
+    assert route_after_collapse(AgentGraphState(campaign_rejected={})) == "end"
 
 
 def test_route_spawn_and_escalate_returns_spawn() -> None:

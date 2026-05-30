@@ -84,8 +84,12 @@ from orchestrator.types import WebhookEvent
 logger = logging.getLogger(__name__)
 
 
-FinalStatus = Literal["completed", "escalated", "aborted_hard_limit"]
-TerminalPath = Literal["terminal", "collapse", "escalated"]
+# VT-47: 'paused' is a NEW distinct terminal — the run halted on an owner-
+# approval interrupt() and is waiting for the owner's decision (resume path /
+# timeout sweep drives it onward to 'completed'). It is NOT an error and NOT
+# 'completed'. Threaded through pipeline_runs.status (migration 052 CHECK).
+FinalStatus = Literal["completed", "escalated", "aborted_hard_limit", "paused"]
+TerminalPath = Literal["terminal", "collapse", "escalated", "paused"]
 
 
 @dataclass(frozen=True)
@@ -185,10 +189,42 @@ def dispatch_brain(
 
     try:
         with observability_context(run_id=run_id, tenant_id=tenant_id):
-            graph = build_supervisor_graph(model=_resolve_model())
+            # VT-47: compile the supervisor graph WITH the module-level
+            # checkpointer + a thread_id == run_id config so the owner-approval
+            # gate's interrupt() can persist + later resume on the same run.
+            # Before VT-47 this built checkpoint-free, so a pause could not
+            # survive (decision D1). The checkpointer is the same PostgresSaver
+            # the substrate set up + RLS'd (graph._setup_checkpoint_rls keys
+            # checkpoint rows on thread_id -> pipeline_runs.tenant_id).
+            from orchestrator.graph import get_checkpointer
+
+            graph = build_supervisor_graph(
+                model=_resolve_model(), checkpointer=get_checkpointer()
+            )
             terminal_state: dict[str, Any] = graph.invoke(
                 initial_state,
-                config={"callbacks": [callback]},
+                config={
+                    "callbacks": [callback],
+                    "configurable": {"thread_id": str(run_id)},
+                },
+            )
+        # VT-47: a pause surfaces as the ``__interrupt__`` key in the returned
+        # state (langgraph swallows GraphInterrupt internally and surfaces it
+        # here — verified empirically against langgraph==1.2.0; it does NOT
+        # raise to this caller). Map it to the NEW 'paused' terminal: the DBOS
+        # workflow exits cleanly (non-error), the run sits at status='paused'
+        # until resume/timeout. NO compose-output is forced (the agent has not
+        # produced an owner-facing send — the owner is being ASKED, not told).
+        if terminal_state.get("__interrupt__"):
+            logger.info(
+                "dispatch_brain: run PAUSED on owner-approval interrupt "
+                "run=%s tenant=%s",
+                str(run_id), str(tenant_id),
+            )
+            return DispatchResult(
+                final_status="paused",
+                terminal_path="paused",
+                reason="owner_approval_pending",
             )
         # Inspect terminal state to determine final_status + terminal_path.
         terminal_path, final_status, reason, specialist_result = _classify_terminal(

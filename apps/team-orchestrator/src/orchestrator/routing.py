@@ -64,3 +64,25 @@ def orchestrator_terminal_node(state: AgentGraphState) -> dict[str, Any]:
     observability, billing) distinguish this from a normal spawn-and-return.
     """
     return {"terminated_without_spawn": True}
+
+
+def route_after_collapse(state: AgentGraphState) -> str:
+    """VT-47 — route after the collapse node persists the specialist's verdict.
+
+    'approval_gate' — the collapse path persisted a PROPOSED campaign and
+        attached ``pending_approval_request`` (a campaign send is a Pillar-7
+        sensitive action that requires the owner's authoritative approval).
+        Path map routes to the ``request_owner_approval`` node, which pauses
+        the run via ``interrupt()`` until the owner decides.
+    'end' — no approval needed (the agent declined to act: out_of_scope /
+        insufficient_data, or the cohort was fail-closed rejected). The run
+        completes without an owner prompt.
+
+    Keying on ``pending_approval_request`` presence (set by collapse_node on
+    the proposed-success path) keeps this decision in one place — collapse
+    owns "did we propose something that needs sign-off", routing owns "go to
+    the gate".
+    """
+    if state.get("pending_approval_request") is not None:
+        return "approval_gate"
+    return "end"

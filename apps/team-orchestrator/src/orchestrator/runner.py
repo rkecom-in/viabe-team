@@ -10,6 +10,7 @@ recovery is safe.
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 from uuid import UUID
 
@@ -33,6 +34,8 @@ from orchestrator.utils.phone_token import hash_phone
 # Flipping this is a reviewed code change by design — do not convert
 # to an env var.
 OWNER_INPUTS_EXTRACTION_ENABLED = False
+
+logger = logging.getLogger(__name__)
 
 
 @DBOS.step()
@@ -225,6 +228,64 @@ def record_inbound_message_sid(tenant_id: str, message_sid: str) -> bool:
         return cur.rowcount == 1
 
 
+@DBOS.step()
+def try_resume_pending_approval(
+    tenant_id: str, body: str, message_sid: str | None
+) -> str | None:
+    """VT-47 — if the tenant has a PAUSED run awaiting owner approval, treat
+    this inbound message as the approval decision and resume that run.
+
+    Returns the resolved decision verb ('approved'|'rejected'|'needs_changes')
+    if this message was consumed as an approval reply, else None (the message
+    is a normal inbound — fall through to pre_filter/dispatch).
+
+    Pillar 7: an unclear reply (other / low-confidence) does NOT resolve the
+    gate (resolve_decision_from_reply returns None) — the run stays paused and
+    the message falls through. We never guess approval.
+
+    Steps (all under the tenant GUC so RLS is real):
+      1. Find the most-recent open pending_approvals for the tenant.
+      2. Classify the reply (VT-49). None -> not consumed.
+      3. Mark the row resolved (decision + status + resolved_at).
+      4. Resume the paused LangGraph run with Command(resume={decision}).
+      5. Drive the ORIGINAL paused run's pipeline_runs.status -> 'completed'.
+    """
+    from orchestrator.agent.approval_resume import (
+        find_open_approval_for_tenant,
+        mark_approval_resolved,
+        resolve_decision_from_reply,
+        resume_run,
+    )
+
+    with tenant_connection(tenant_id) as conn:
+        approval = find_open_approval_for_tenant(conn, tenant_id)
+    if approval is None:
+        return None
+
+    decision = resolve_decision_from_reply(body)
+    if decision is None:
+        # Unclear reply — leave the gate paused (Pillar 7: no guessing).
+        return None
+
+    with tenant_connection(tenant_id) as conn:
+        mark_approval_resolved(
+            conn, approval["id"], decision, owner_message_sid=message_sid
+        )
+
+    # Resume the suspended graph (re-enters the interrupting node; the node's
+    # arm_pause_request is a no-op now the row is resolved). Then close the
+    # original paused run.
+    paused_run_id = approval["run_id"]
+    resume_run(paused_run_id, decision)
+    close_webhook_run(tenant_id, paused_run_id, "completed")
+
+    logger.info(
+        "approval-resume: resolved tenant=%s approval=%s run=%s decision=%s",
+        tenant_id, approval["id"], paused_run_id, decision,
+    )
+    return decision
+
+
 @DBOS.workflow()
 def webhook_pipeline_run(
     tenant_id: str, run_id: str, twilio_fields: dict
@@ -273,6 +334,27 @@ def webhook_pipeline_run(
     # privacy notice clear. See the constant's comment above.
     if OWNER_INPUTS_EXTRACTION_ENABLED:
         run_extraction_for_event(UUID(tenant_id), UUID(run_id), event)
+
+    # VT-47 — owner-approval RESUME gate. If this tenant has a run PAUSED on
+    # an owner-approval interrupt, an inbound owner message is the approval
+    # decision: classify it (VT-49), resolve the pending_approvals row, and
+    # resume the paused run via Command(resume=...). Status callbacks are not
+    # decisions, so only inbound_message events are considered. When consumed,
+    # THIS inbound run ends cleanly (the work was the resume); we do not also
+    # route it through pre_filter/dispatch (that would double-handle the reply).
+    if event.message_type == "inbound_message" and not event.dupe_status:
+        resumed_decision = try_resume_pending_approval(
+            tenant_id, event.body or "", event.twilio_message_sid
+        )
+        if resumed_decision is not None:
+            close_webhook_run(tenant_id, run_id, "completed")
+            return {
+                "run_id": run_id,
+                "tenant_id": tenant_id,
+                "routed": "approval_resume",
+                "handler": None,
+                "decision": resumed_decision,
+            }
 
     result = pre_filter(event, state)
     handler_name: str | None = None

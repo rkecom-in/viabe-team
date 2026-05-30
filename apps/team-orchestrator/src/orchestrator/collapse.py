@@ -288,7 +288,7 @@ def collapse_node(state: AgentGraphState) -> dict[str, Any]:
 
     if isinstance(plan, CampaignPlanProposed):
         try:
-            collapse_campaign_plan(
+            campaign_id = collapse_campaign_plan(
                 tenant_id=tenant_id, run_id=run_id, campaign_plan=plan
             )
         except CohortRejectedError as exc:
@@ -312,9 +312,44 @@ def collapse_node(state: AgentGraphState) -> dict[str, Any]:
                     "rejected_count": len(res.rejected),
                 }
             }
-    else:
-        # out_of_scope / insufficient_data — terminal-but-valid.
-        record_terminal_verdict(
-            tenant_id=tenant_id, run_id=run_id, campaign_plan=plan
-        )
+        # VT-47 Pillar-7: a PERSISTED proposed campaign is a sensitive action
+        # that requires the owner's AUTHORITATIVE approval before any send.
+        # Attach the approval request to state; route_after_collapse keys on
+        # its presence to send the run to the request_owner_approval gate node
+        # (which pauses via interrupt() until the owner decides). The campaign
+        # is persisted as 'proposed' — it does NOT advance to 'sent' until the
+        # resume path resolves an 'approved' decision (the send path is a
+        # separate VT, structurally downstream of this gate).
+        return {
+            "pending_approval_request": _build_approval_request(
+                plan=plan, campaign_id=campaign_id,
+            )
+        }
+    # out_of_scope / insufficient_data — terminal-but-valid.
+    record_terminal_verdict(
+        tenant_id=tenant_id, run_id=run_id, campaign_plan=plan
+    )
     return {}
+
+
+def _build_approval_request(
+    *, plan: CampaignPlanProposed, campaign_id: UUID
+) -> dict[str, Any]:
+    """Build the ``pending_approval_request`` payload the gate node consumes.
+
+    CL-390: carries NO PII — a short summary + the campaign id + the cohort
+    size. Template params for the approval message are looked up by the gate
+    against the VT-163 registry; we pass a best-effort recovery figure when
+    the plan exposes one, else an empty dict (the gate dry-runs the send in
+    CI/canary regardless).
+    """
+    cohort_size = len(getattr(plan.target_cohort, "customer_ids", []) or [])
+    return {
+        "approval_type": "campaign_send",
+        "summary": f"Approve sending a recovery campaign to {cohort_size} customers?",
+        "campaign_id": campaign_id,
+        "details": {"cohort_size": cohort_size},
+        "template_params": {},
+        "language": "en",
+        "timeout_hours": 48,
+    }
