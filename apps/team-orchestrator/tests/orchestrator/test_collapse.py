@@ -25,6 +25,13 @@ Cases:
        carries the variant + ``out_of_scope_reason``; no ``campaigns`` row.
     6. ``insufficient_data``: same shape; ``missing_data`` lands in the
        ``output_envelope``; no ``campaigns`` row.
+
+  VT-241 fail-closed cohort wiring (``collapse_node``):
+    7. Unresolvable cohort id: ``collapse_node`` returns a
+       ``campaign_rejected`` dict (count only) and persists ZERO campaigns +
+       ZERO campaign_recipients — the whole transaction rolls back.
+    8. Mixed cohort (one real + one bogus id): still fully rejected and
+       rolled back — the resolved recipient does NOT leak (atomicity).
 """
 
 from __future__ import annotations
@@ -89,6 +96,19 @@ def _new_run(dsn: str, tenant_id: str) -> str:
     return run_id
 
 
+def _seed_customer(dsn: str, tenant_id: str) -> str:
+    """VT-241: seed a customers row so the cohort resolves (collapse now
+    fail-closes on unresolvable cohort ids). Returns the customer id."""
+    cid = str(uuid4())
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute(
+            "INSERT INTO customers (id, tenant_id, display_name) "
+            "VALUES (%s, %s, 'collapse-test-customer')",
+            (cid, tenant_id),
+        )
+    return cid
+
+
 def _plan(tenant_id: str, run_id: str, *, customer_id: str | None = None):
     """Build a valid v1.0 ``proposed`` CampaignPlan for collapse tests."""
     from orchestrator.agent.schemas.campaign_plan import (
@@ -147,7 +167,7 @@ def test_collapse_persists_campaign_and_updates_subscriber_state(rls_ctx):
 
     tenant = _new_tenant(rls_ctx.dsn)
     run_id = _new_run(rls_ctx.dsn, tenant)
-    plan = _plan(tenant, run_id)
+    plan = _plan(tenant, run_id, customer_id=_seed_customer(rls_ctx.dsn, tenant))
 
     campaign_id = collapse_campaign_plan(
         tenant_id=UUID(tenant), run_id=UUID(run_id), campaign_plan=plan
@@ -204,7 +224,9 @@ def test_collapse_does_not_change_phase(rls_ctx):
         ).fetchone()["phase"]
 
     collapse_campaign_plan(
-        tenant_id=UUID(tenant), run_id=UUID(run_id), campaign_plan=_plan(tenant, run_id)
+        tenant_id=UUID(tenant),
+        run_id=UUID(run_id),
+        campaign_plan=_plan(tenant, run_id, customer_id=_seed_customer(rls_ctx.dsn, tenant)),
     )
 
     with tenant_connection(tenant) as conn:
@@ -393,7 +415,7 @@ def test_collapse_node_proposed_still_persists_campaign(rls_ctx):
 
     tenant = _new_tenant(rls_ctx.dsn)
     run_id = _new_run(rls_ctx.dsn, tenant)
-    plan = _plan(tenant, run_id)
+    plan = _plan(tenant, run_id, customer_id=_seed_customer(rls_ctx.dsn, tenant))
 
     update = collapse_node(
         {
@@ -435,7 +457,7 @@ def test_collapse_does_not_cross_tenant_boundary(rls_ctx):
     collapse_campaign_plan(
         tenant_id=UUID(tenant_a),
         run_id=UUID(run_a),
-        campaign_plan=_plan(tenant_a, run_a),
+        campaign_plan=_plan(tenant_a, run_a, customer_id=_seed_customer(rls_ctx.dsn, tenant_a)),
     )
 
     with tenant_connection(tenant_b) as conn:
@@ -446,3 +468,130 @@ def test_collapse_does_not_cross_tenant_boundary(rls_ctx):
 
     assert b_campaigns == 0, "tenant B must see no campaigns rows from tenant A's collapse"
     assert b_sub == 0, "tenant B must see no subscriber_states rows from tenant A's collapse"
+
+
+def test_collapse_node_fails_closed_on_unresolvable_cohort(rls_ctx):
+    """VT-241: a cohort whose customer_id is not a real same-tenant customer
+    is REJECTED fail-closed — the node returns a count-only ``campaign_rejected``
+    dict and NOTHING is persisted (campaign INSERT + recipient INSERTs roll
+    back atomically). The owner surface gets a count, never the rejected ids."""
+    from orchestrator.collapse import collapse_node
+    from orchestrator.db import tenant_connection
+
+    tenant = _new_tenant(rls_ctx.dsn)
+    run_id = _new_run(rls_ctx.dsn, tenant)
+    # No _seed_customer — the cohort id is a random, non-existent uuid.
+    plan = _plan(tenant, run_id)
+
+    update = collapse_node(
+        {
+            "tenant_id": UUID(tenant),
+            "run_id": UUID(run_id),
+            "campaign_plan": plan,
+        }
+    )
+
+    assert update == {
+        "campaign_rejected": {"reason": "unresolved_cohort", "rejected_count": 1}
+    }, "unresolvable cohort must return a count-only rejection (no ids leaked)"
+
+    with tenant_connection(tenant) as conn:
+        n_campaigns = conn.execute(
+            "SELECT count(*) AS n FROM campaigns WHERE run_id = %s", (run_id,)
+        ).fetchone()["n"]
+        n_recipients = conn.execute(
+            "SELECT count(*) AS n FROM campaign_recipients"
+        ).fetchone()["n"]
+        n_subs = conn.execute(
+            "SELECT count(*) AS n FROM subscriber_states WHERE tenant_id = %s",
+            (tenant,),
+        ).fetchone()["n"]
+
+    assert n_campaigns == 0, "fail-closed: NO campaigns row may persist on reject"
+    assert n_recipients == 0, "fail-closed: NO campaign_recipients may persist on reject"
+    assert n_subs == 0, "fail-closed: subscriber_states activity must not advance on reject"
+
+
+def test_collapse_node_fails_closed_atomic_on_mixed_cohort(rls_ctx):
+    """VT-241 atomicity: a cohort with one REAL + one bogus id is still fully
+    rejected. The real recipient must NOT leak into campaign_recipients — the
+    whole transaction unwinds, all-or-nothing. Proves the resolve runs inside
+    collapse's transaction (cur-injected), not a separate committed one."""
+    from orchestrator.agent.schemas.campaign_plan import (
+        CampaignPlanProposed,
+        CampaignWindow,
+        ConfidenceLevel,
+        EvidenceRef,
+        EvidenceSourceKind,
+        ExpectedARRR,
+        Language,
+        MessagePlan,
+        TargetCohort,
+    )
+    from orchestrator.collapse import collapse_node
+    from orchestrator.db import tenant_connection
+
+    tenant = _new_tenant(rls_ctx.dsn)
+    run_id = _new_run(rls_ctx.dsn, tenant)
+    real_id = _seed_customer(rls_ctx.dsn, tenant)
+    bogus_id = str(uuid4())
+
+    now = datetime.now(UTC)
+    plan = CampaignPlanProposed(
+        tenant_id=UUID(tenant),
+        run_id=UUID(run_id),
+        generated_at=now,
+        campaign_window=CampaignWindow(
+            start=now + timedelta(hours=1), end=now + timedelta(days=7)
+        ),
+        target_cohort=TargetCohort(
+            customer_ids=[UUID(real_id), UUID(bogus_id)],
+            cohort_label="mixed",
+            cohort_size=2,
+            selection_reason="mixed cohort [E1].",
+        ),
+        expected_arrr=ExpectedARRR(
+            low_paise=10_000_00,
+            high_paise=30_000_00,
+            confidence=ConfidenceLevel.MEDIUM,
+            basis="prior yields [E1].",
+        ),
+        evidence_refs=[
+            EvidenceRef(
+                claim_id="E1",
+                source_kind=EvidenceSourceKind.TOOL_CALL,
+                source_id="test-evidence",
+            )
+        ],
+        message_plan=MessagePlan(
+            template_id="team_winback_v1",
+            template_params={"first_name": "Owner", "discount": "10"},
+            language=Language.EN,
+            personalization="owner-first-name.",
+        ),
+    )
+
+    update = collapse_node(
+        {
+            "tenant_id": UUID(tenant),
+            "run_id": UUID(run_id),
+            "campaign_plan": plan,
+        }
+    )
+
+    assert update == {
+        "campaign_rejected": {"reason": "unresolved_cohort", "rejected_count": 1}
+    }, "one bogus id rejects the whole campaign (count = 1 unresolved)"
+
+    with tenant_connection(tenant) as conn:
+        n_campaigns = conn.execute(
+            "SELECT count(*) AS n FROM campaigns WHERE run_id = %s", (run_id,)
+        ).fetchone()["n"]
+        n_recipients = conn.execute(
+            "SELECT count(*) AS n FROM campaign_recipients"
+        ).fetchone()["n"]
+
+    assert n_campaigns == 0, "mixed-cohort reject: NO campaigns row may persist"
+    assert n_recipients == 0, (
+        "atomicity: the RESOLVED recipient must roll back too — no partial leak"
+    )
