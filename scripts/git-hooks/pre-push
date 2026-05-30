@@ -1,0 +1,104 @@
+#!/usr/bin/env bash
+# VT-245 — local pre-push gate.
+#
+# main protection is an account-level ruleset; "Require status checks to
+# pass" was turned OFF 2026-05-30, so CI no longer blocks merges. This
+# hook is the safety gate: it runs the FAST CI-equivalent suite locally
+# and aborts the push on failure, so "green locally ≈ green in CI".
+#
+# Scope = FAST checks only (ruff + dep-less smoke + web tsc/vitest/lint +
+# a conditional orchestrator docker build). It deliberately EXCLUDES the
+# slow live-DB migration tests, canaries, and integration suites — those
+# run in CI / on demand.
+#
+# Escape hatch: `git push --no-verify` skips this hook (use sparingly).
+#
+# Install: scripts/install-hooks.sh
+
+set -uo pipefail
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+cd "$REPO_ROOT" || exit 1
+
+FAIL=0
+say()  { printf '\033[1;36m[pre-push]\033[0m %s\n' "$*"; }
+warn() { printf '\033[1;33m[pre-push WARN]\033[0m %s\n' "$*"; }
+err()  { printf '\033[1;31m[pre-push FAIL]\033[0m %s\n' "$*"; }
+
+# --- Determine the changed files across the push range ----------------
+# stdin: <local_ref> <local_sha> <remote_ref> <remote_sha> per ref.
+# Fall back to diff against origin/main when the remote sha is unknown
+# (new branch -> remote_sha is all-zeros).
+ZERO="0000000000000000000000000000000000000000"
+RANGE_BASE=""
+while read -r _local_ref local_sha _remote_ref remote_sha; do
+  [ -z "${local_sha:-}" ] && continue
+  if [ "$remote_sha" = "$ZERO" ] || [ -z "$remote_sha" ]; then
+    RANGE_BASE="$(git merge-base origin/main "$local_sha" 2>/dev/null || echo origin/main)"
+  else
+    RANGE_BASE="$remote_sha"
+  fi
+  RANGE_HEAD="$local_sha"
+done
+
+# No stdin (manual run) -> compare working HEAD against origin/main.
+if [ -z "$RANGE_BASE" ]; then
+  RANGE_BASE="$(git merge-base origin/main HEAD 2>/dev/null || echo origin/main)"
+  RANGE_HEAD="HEAD"
+fi
+
+CHANGED="$(git diff --name-only "$RANGE_BASE" "$RANGE_HEAD" 2>/dev/null || true)"
+if [ -z "$CHANGED" ]; then
+  say "no changed files in push range — nothing to check."
+  exit 0
+fi
+
+changed_match() { printf '%s\n' "$CHANGED" | grep -qE "$1"; }
+
+ORCH_CHANGED=0; WEB_CHANGED=0; DOCKER_RELEVANT=0
+changed_match '^apps/team-orchestrator/'     && ORCH_CHANGED=1
+changed_match '^apps/team-ingestion-worker/' && ORCH_CHANGED=1
+changed_match '^packages/team-shared/'       && ORCH_CHANGED=1
+changed_match '^apps/team-web/'              && WEB_CHANGED=1
+changed_match '^apps/team-orchestrator/(Dockerfile|pyproject\.toml|src/)' && DOCKER_RELEVANT=1
+
+# --- 1. Python: ruff + dep-less smoke (catches importorskip-guard misses)
+if [ "$ORCH_CHANGED" = 1 ]; then
+  say "ruff check (orchestrator + ingestion-worker)"
+  uvx ruff check apps/team-orchestrator apps/team-ingestion-worker || { err "ruff"; FAIL=1; }
+
+  say "smoke pytest (uv --no-project --with pytest) — dep-less, mirrors CI 'test' job"
+  ( cd apps/team-orchestrator && uv run --no-project --with pytest pytest -q ) \
+    || { err "orchestrator smoke pytest"; FAIL=1; }
+fi
+
+# --- 2. team-web: tsc + vitest + lint ---------------------------------
+if [ "$WEB_CHANGED" = 1 ]; then
+  say "team-web tsc --noEmit"
+  ( cd apps/team-web && npx --no-install tsc --noEmit ) || { err "tsc"; FAIL=1; }
+  say "team-web vitest run"
+  ( cd apps/team-web && npx --no-install vitest run ) || { err "vitest"; FAIL=1; }
+  say "team-web lint"
+  pnpm --filter @viabe/team-web lint || { err "team-web lint"; FAIL=1; }
+fi
+
+# --- 3. orchestrator docker build (Railway deploys via Docker) --------
+# Conditional + skip-when-unavailable (Cowork ruling): only when
+# orchestrator image inputs changed AND the docker daemon is up. A bad
+# RAILWAY_TOKEN (auth) is NOT catchable here — only build/dep/startup.
+if [ "$DOCKER_RELEVANT" = 1 ]; then
+  if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+    say "docker build orchestrator image (catches build/dep/startup, NOT auth)"
+    docker build -f apps/team-orchestrator/Dockerfile -t viabe-orch:prepush apps/team-orchestrator \
+      || { err "docker build orchestrator"; FAIL=1; }
+  else
+    warn "docker unavailable; orchestrator image build NOT verified locally — CI/Railway remote build is the backstop."
+  fi
+fi
+
+if [ "$FAIL" -ne 0 ]; then
+  err "push aborted. Fix the above, or bypass with: git push --no-verify"
+  exit 1
+fi
+say "all fast checks passed — pushing."
+exit 0
