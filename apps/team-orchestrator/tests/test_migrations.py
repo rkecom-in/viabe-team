@@ -435,7 +435,313 @@ def test_operator_allowlist_deny_all_rls_and_grant_revoke(migrated):
         assert retained == 1, "revoked row kept for audit"
 
 
-# --- Migration 050: tenants.owner_phone OTP-auth anchor (VT-250) --------------
+def test_monthly_reports_rls_unique_and_year_month_check(migrated):
+    """VT-86 (migration 048): monthly_reports RLS cross-tenant isolation +
+    UNIQUE(tenant_id, year_month) + the year_month format CHECK."""
+    dsn = migrated["dsn"]
+
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        tenant_a = conn.execute(
+            "INSERT INTO tenants (business_name, plan_tier, phase) "
+            "VALUES ('Report Tenant A', 'founding', 'paid_active') RETURNING id"
+        ).fetchone()[0]
+        tenant_b = conn.execute(
+            "INSERT INTO tenants (business_name, plan_tier, phase) "
+            "VALUES ('Report Tenant B', 'standard', 'paid_active') RETURNING id"
+        ).fetchone()[0]
+        rep_a = conn.execute(
+            "INSERT INTO monthly_reports (tenant_id, year_month, arrr_paise) "
+            "VALUES (%s, '2026-04', 500000) RETURNING id",
+            (tenant_a,),
+        ).fetchone()[0]
+
+        # UNIQUE(tenant_id, year_month): a second 2026-04 for A is rejected.
+        with pytest.raises(psycopg.errors.UniqueViolation):
+            conn.execute(
+                "INSERT INTO monthly_reports (tenant_id, year_month) "
+                "VALUES (%s, '2026-04')",
+                (tenant_a,),
+            )
+
+        # year_month CHECK: malformed period rejected; fees/net NULLABLE.
+        with pytest.raises(psycopg.errors.CheckViolation):
+            conn.execute(
+                "INSERT INTO monthly_reports (tenant_id, year_month) "
+                "VALUES (%s, '2026-13')",  # month 13 invalid
+                (tenant_a,),
+            )
+
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute("SET ROLE rls_tester")
+
+        # Scoped to B: A's report is invisible.
+        conn.execute("SELECT set_config('app.current_tenant', %s, false)", (str(tenant_b),))
+        visible = {r[0] for r in conn.execute("SELECT id FROM monthly_reports")}
+        assert rep_a not in visible
+
+        # Insert-for-A while scoped to B is rejected by WITH CHECK.
+        with pytest.raises(psycopg.Error):
+            conn.execute(
+                "INSERT INTO monthly_reports (tenant_id, year_month) "
+                "VALUES (%s, '2026-05')",
+                (tenant_a,),
+            )
+
+
+def test_attribution_method_confidence_columns(migrated):
+    """VT-240 (migration 047): attributions gains nullable attribution_method
+    + attribution_confidence. CHECKs reject bad method / out-of-range
+    confidence; a pre-047-shape insert (both omitted) still succeeds."""
+    dsn = migrated["dsn"]
+
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        tenant = conn.execute(
+            "INSERT INTO tenants (business_name, plan_tier, phase) "
+            "VALUES ('Attr Tenant', 'founding', 'onboarding') RETURNING id"
+        ).fetchone()[0]
+        run = conn.execute(
+            "INSERT INTO pipeline_runs (tenant_id, run_type, status) "
+            "VALUES (%s, 'campaign', 'running') RETURNING id",
+            (tenant,),
+        ).fetchone()[0]
+        camp = conn.execute(
+            "INSERT INTO campaigns (tenant_id, run_id, plan_json, status, "
+            "generated_at) VALUES (%s, %s, '{}'::jsonb, 'proposed', now()) "
+            "RETURNING id",
+            (tenant, run),
+        ).fetchone()[0]
+
+        # 1. Populated insert: method + confidence persist + read back.
+        attr = conn.execute(
+            "INSERT INTO attributions (tenant_id, campaign_id, attributed_paise, "
+            "attribution_method, attribution_confidence) "
+            "VALUES (%s, %s, 50000, 'exact_match', 0.87) RETURNING id",
+            (tenant, camp),
+        ).fetchone()[0]
+        method, conf = conn.execute(
+            "SELECT attribution_method, attribution_confidence "
+            "FROM attributions WHERE id = %s",
+            (attr,),
+        ).fetchone()
+        assert method == "exact_match"
+        assert conf == pytest.approx(0.87, abs=1e-4)
+
+        # 2. Pre-047-shape insert (both omitted) → NULLs, still valid.
+        legacy = conn.execute(
+            "INSERT INTO attributions (tenant_id, campaign_id, attributed_paise) "
+            "VALUES (%s, %s, 12000) RETURNING id",
+            (tenant, camp),
+        ).fetchone()[0]
+        lmethod, lconf = conn.execute(
+            "SELECT attribution_method, attribution_confidence "
+            "FROM attributions WHERE id = %s",
+            (legacy,),
+        ).fetchone()
+        assert lmethod is None and lconf is None
+
+        # 3. window_match + manual_owner are accepted by the CHECK.
+        for valid_method in ("window_match", "manual_owner"):
+            conn.execute(
+                "INSERT INTO attributions (tenant_id, campaign_id, attributed_paise, "
+                "attribution_method) VALUES (%s, %s, 1, %s)",
+                (tenant, camp, valid_method),
+            )
+
+        # 4. Bad method → CHECK rejects.
+        with pytest.raises(psycopg.Error):
+            conn.execute(
+                "INSERT INTO attributions (tenant_id, campaign_id, attributed_paise, "
+                "attribution_method) VALUES (%s, %s, 1, 'bogus_method')",
+                (tenant, camp),
+            )
+
+        # 5. Out-of-range confidence (>1 and <0) → CHECK rejects.
+        for bad_conf in (1.5, -0.1):
+            with pytest.raises(psycopg.Error):
+                conn.execute(
+                    "INSERT INTO attributions (tenant_id, campaign_id, "
+                    "attributed_paise, attribution_confidence) "
+                    "VALUES (%s, %s, 1, %s)",
+                    (tenant, camp, bad_conf),
+                )
+
+
+def test_send_idempotency_keys_rls_and_unique(migrated):
+    """VT-44: send_idempotency_keys UNIQUE(tenant_id, idempotency_key) +
+    RLS cross-tenant isolation (migration 049)."""
+    dsn = migrated["dsn"]
+
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        tenant_a = conn.execute(
+            "INSERT INTO tenants (business_name, plan_tier, phase) "
+            "VALUES ('Idem Tenant A', 'founding', 'onboarding') RETURNING id"
+        ).fetchone()[0]
+        tenant_b = conn.execute(
+            "INSERT INTO tenants (business_name, plan_tier, phase) "
+            "VALUES ('Idem Tenant B', 'standard', 'onboarding') RETURNING id"
+        ).fetchone()[0]
+
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute("SET ROLE rls_tester")
+
+        # Tenant A writes a ledger row.
+        conn.execute(
+            "SELECT set_config('app.current_tenant', %s, false)", (str(tenant_a),)
+        )
+        conn.execute(
+            "INSERT INTO send_idempotency_keys "
+            "(tenant_id, idempotency_key, customer_id, message_sid, send_status) "
+            "VALUES (%s, 'idem-key-1', NULL, 'SM_test_1', 'sent')",
+            (tenant_a,),
+        )
+
+        # Idempotency: same (tenant, key) again → ON CONFLICT DO NOTHING (0 rows).
+        inserted = conn.execute(
+            "INSERT INTO send_idempotency_keys "
+            "(tenant_id, idempotency_key, customer_id, message_sid, send_status) "
+            "VALUES (%s, 'idem-key-1', NULL, 'SM_test_dup', 'sent') "
+            "ON CONFLICT (tenant_id, idempotency_key) DO NOTHING",
+            (tenant_a,),
+        ).rowcount
+        assert inserted == 0, "duplicate idempotency key must be a no-op"
+
+        # Exactly one row visible to A.
+        count_a = conn.execute(
+            "SELECT count(*) FROM send_idempotency_keys WHERE idempotency_key = 'idem-key-1'"
+        ).fetchone()[0]
+        assert count_a == 1
+
+        # RLS: tenant B sees none of A's rows.
+        conn.execute(
+            "SELECT set_config('app.current_tenant', %s, false)", (str(tenant_b),)
+        )
+        leaked = conn.execute(
+            "SELECT count(*) FROM send_idempotency_keys WHERE tenant_id = %s",
+            (tenant_a,),
+        ).fetchone()[0]
+        assert leaked == 0, "RLS must block tenant B from seeing tenant A's ledger rows"
+
+        # B may reuse the same idempotency_key (different tenant → different row).
+        conn.execute(
+            "INSERT INTO send_idempotency_keys "
+            "(tenant_id, idempotency_key, customer_id, message_sid, send_status) "
+            "VALUES (%s, 'idem-key-1', NULL, 'SM_test_b', 'sent')",
+            (tenant_b,),
+        )
+        count_b = conn.execute(
+            "SELECT count(*) FROM send_idempotency_keys WHERE idempotency_key = 'idem-key-1'"
+        ).fetchone()[0]
+        assert count_b == 1, "only tenant B's row should be visible under B's scope"
+
+        # Attack: scoped to B, inserting for A is rejected by WITH CHECK.
+        with pytest.raises(psycopg.Error):
+            conn.execute(
+                "INSERT INTO send_idempotency_keys "
+                "(tenant_id, idempotency_key, customer_id, message_sid, send_status) "
+                "VALUES (%s, 'attack-key', NULL, 'SM_attack', 'sent')",
+                (tenant_a,),
+            )
+
+
+def test_campaign_messages_rls_and_tables_exist(migrated):
+    """VT-44: campaign_messages table exists with RLS; cross-tenant isolation."""
+    dsn = migrated["dsn"]
+
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        # Verify both tables exist.
+        tables = {
+            row[0]
+            for row in conn.execute(
+                "SELECT tablename FROM pg_tables WHERE schemaname = 'public'"
+            )
+        }
+        assert "send_idempotency_keys" in tables, "send_idempotency_keys table missing"
+        assert "campaign_messages" in tables, "campaign_messages table missing"
+
+        tenant_a = conn.execute(
+            "INSERT INTO tenants (business_name, plan_tier, phase) "
+            "VALUES ('CM Tenant A', 'founding', 'onboarding') RETURNING id"
+        ).fetchone()[0]
+        tenant_b = conn.execute(
+            "INSERT INTO tenants (business_name, plan_tier, phase) "
+            "VALUES ('CM Tenant B', 'standard', 'onboarding') RETURNING id"
+        ).fetchone()[0]
+
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute("SET ROLE rls_tester")
+
+        # Tenant A writes a campaign_message row (freeform send, no campaign_id).
+        conn.execute(
+            "SELECT set_config('app.current_tenant', %s, false)", (str(tenant_a),)
+        )
+        conn.execute(
+            "INSERT INTO campaign_messages "
+            "(tenant_id, customer_id, message_sid, send_status, message_type) "
+            "VALUES (%s, NULL, 'SM_cm_test_a', 'sent', 'freeform')",
+            (tenant_a,),
+        )
+
+        # Tenant B sees none of A's rows.
+        conn.execute(
+            "SELECT set_config('app.current_tenant', %s, false)", (str(tenant_b),)
+        )
+        leaked = conn.execute(
+            "SELECT count(*) FROM campaign_messages WHERE tenant_id = %s",
+            (tenant_a,),
+        ).fetchone()[0]
+        assert leaked == 0, "RLS must block tenant B from seeing tenant A's messages"
+
+        # Attack: scoped to B, inserting for A is rejected by WITH CHECK.
+        with pytest.raises(psycopg.Error):
+            conn.execute(
+                "INSERT INTO campaign_messages "
+                "(tenant_id, customer_id, message_sid, send_status, message_type) "
+                "VALUES (%s, NULL, 'SM_attack', 'sent', 'freeform')",
+                (tenant_a,),
+            )
+
+
+def test_campaign_messages_campaign_fk(migrated):
+    """VT-44 (Cowork review fix): campaign_messages composite FK
+    (tenant_id, campaign_id) -> campaigns(tenant_id, id). MATCH SIMPLE →
+    enforced only when campaign_id is set: freeform (NULL) is exempt,
+    same-tenant link is allowed, a cross-tenant link is rejected at the DB.
+    Superuser conn isolates the FK behaviour from RLS."""
+    dsn = migrated["dsn"]
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        ta = conn.execute(
+            "INSERT INTO tenants (business_name, plan_tier, phase) "
+            "VALUES ('FK A', 'founding', 'onboarding') RETURNING id"
+        ).fetchone()[0]
+        tb = conn.execute(
+            "INSERT INTO tenants (business_name, plan_tier, phase) "
+            "VALUES ('FK B', 'standard', 'onboarding') RETURNING id"
+        ).fetchone()[0]
+        run = conn.execute(
+            "INSERT INTO pipeline_runs (tenant_id, run_type, status) "
+            "VALUES (%s, 'orchestrator', 'running') RETURNING id", (ta,)
+        ).fetchone()[0]
+        camp = conn.execute(
+            "INSERT INTO campaigns (tenant_id, run_id, plan_json, status, generated_at) "
+            "VALUES (%s, %s, '{}'::jsonb, 'sent', now()) RETURNING id", (ta, run)
+        ).fetchone()[0]
+
+        # Freeform (NULL campaign_id) — FK exempt.
+        conn.execute(
+            "INSERT INTO campaign_messages (tenant_id, campaign_id, send_status, "
+            "message_type) VALUES (%s, NULL, 'sent', 'freeform')", (ta,)
+        )
+        # Same-tenant campaign link — allowed.
+        conn.execute(
+            "INSERT INTO campaign_messages (tenant_id, campaign_id, send_status, "
+            "message_type) VALUES (%s, %s, 'template_sent', 'template')", (ta, camp)
+        )
+        # Cross-tenant: tenant B + tenant A's campaign — FK rejects.
+        with pytest.raises(psycopg.errors.ForeignKeyViolation):
+            conn.execute(
+                "INSERT INTO campaign_messages (tenant_id, campaign_id, send_status, "
+                "message_type) VALUES (%s, %s, 'template_sent', 'template')", (tb, camp)
+            )
 
 
 def test_tenant_owner_phone_globally_unique(migrated):

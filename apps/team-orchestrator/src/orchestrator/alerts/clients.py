@@ -61,17 +61,28 @@ async def send_resend_email(
     to_addr: str,
     subject: str,
     html: str,
+    attachments: list[dict] | None = None,
 ) -> bool:
     """POST an email via Resend API.
 
     Resend accepts ``from``, ``to`` (string or list), ``subject``, and
-    one of ``html`` / ``text``. Returns True on 2xx.
+    one of ``html`` / ``text``. ``attachments`` (optional, VT-86) is a list of
+    ``{"filename": str, "content": <base64 str>}`` dicts per the Resend API.
+    Returns True on 2xx.
     """
     if not api_key or not from_addr or not to_addr:
         logger.warning(
             "send_resend_email: missing api_key/from/to; skip send"
         )
         return False
+    payload: dict = {
+        "from": from_addr,
+        "to": [to_addr],
+        "subject": subject,
+        "html": html,
+    }
+    if attachments:
+        payload["attachments"] = attachments
     try:
         async with httpx.AsyncClient(timeout=_RESEND_TIMEOUT_S) as client:
             resp = await client.post(
@@ -80,12 +91,7 @@ async def send_resend_email(
                     "Authorization": f"Bearer {api_key}",
                     "Content-Type": "application/json",
                 },
-                json={
-                    "from": from_addr,
-                    "to": [to_addr],
-                    "subject": subject,
-                    "html": html,
-                },
+                json=payload,
             )
     except httpx.HTTPError as exc:
         logger.warning("send_resend_email: HTTP error: %s", repr(exc))
