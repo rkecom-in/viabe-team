@@ -7,6 +7,16 @@ name: Deploy dev
 on:
   push:
     branches: [main]
+    # VT-245 trigger-diet: don't redeploy dev when a merge touches ONLY
+    # docs / sprint substrate / session exports / the ci.yml workflow —
+    # none of that changes the deployed apps. paths-ignore skips only
+    # when EVERY changed file matches.
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/**'
+      - '.viabe/**'
+      - 'cowork_sessions/**'
+      - '.github/workflows/ci.yml'
 
 # One deploy at a time per branch — both apps share Supabase; concurrent
 # migrations would race.
