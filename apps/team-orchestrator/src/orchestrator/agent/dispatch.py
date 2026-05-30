@@ -194,6 +194,16 @@ def dispatch_brain(
         terminal_path, final_status, reason, specialist_result = _classify_terminal(
             terminal_state
         )
+        # VT-241: a fail-closed cohort rejection routes the owner message to
+        # the Tier-A catch-all template (Cowork ruling a — no count-bearing
+        # template until VT-108 approval). Owner gets "couldn't complete
+        # your request"; the rejected-id detail stays in the operator audit
+        # log. The reason discriminator keeps these runs distinguishable
+        # from real campaign sends in observability/day-39 rollups.
+        if reason is not None and reason.startswith(
+            "campaign_not_sent_invalid_cohort"
+        ):
+            intent_or_trigger = "campaign_not_sent_invalid_cohort"
     except HardLimitExceeded as hle:
         _write_aborted_hard_limit(
             run_id=run_id,
@@ -251,6 +261,23 @@ def _classify_terminal(
         if name == "escalate_to_fazal":
             reason_text = getattr(msg, "content", None) or "agent_escalation"
             return ("escalated", "escalated", str(reason_text), None)
+
+    # VT-241: a fail-closed cohort rejection (collapse rolled the campaign
+    # back) — checked BEFORE campaign_plan, since the plan object is still
+    # in state even though nothing persisted. The run itself completed
+    # cleanly (fail-closed is a valid terminal — no new pipeline_runs.status
+    # value, so no CHECK-constraint change). The owner-facing message
+    # (count only — never which ids / cross-tenant) is composed downstream;
+    # the full rejected-id list is already in the audit log (collapse_node).
+    cohort_rejected = terminal_state.get("campaign_rejected")
+    if cohort_rejected is not None:
+        n = cohort_rejected.get("rejected_count", 0)
+        return (
+            "collapse",
+            "completed",
+            f"campaign_not_sent_invalid_cohort:{n}",
+            None,
+        )
 
     campaign_plan = terminal_state.get("campaign_plan")
     if campaign_plan is not None:
