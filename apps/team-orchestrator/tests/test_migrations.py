@@ -799,3 +799,85 @@ def test_tenant_owner_phone_globally_unique(migrated):
             "AND indexname = 'idx_tenants_owner_phone_unique'"
         ).fetchone()
     assert idx is not None, "owner_phone unique anchor index must exist"
+
+
+# --- Migration 051: per-tenant recovery-target config (VT-164) ----------------
+
+
+def test_tenant_recovery_target_columns(migrated):
+    """VT-164 (migration 051): tenants gains recovery_target_multiplier (NUMERIC)
+    + recovery_target_floor_paise (BIGINT) with correct DEFAULTs and CHECKs."""
+    dsn = migrated["dsn"]
+
+    # 1. Columns exist with the right types.
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        cols = {
+            row[0]: row[1]
+            for row in conn.execute(
+                "SELECT column_name, data_type FROM information_schema.columns "
+                "WHERE table_name = 'tenants' "
+                "AND column_name IN ('recovery_target_multiplier', 'recovery_target_floor_paise')"
+            )
+        }
+    assert "recovery_target_multiplier" in cols, "recovery_target_multiplier column missing"
+    assert "recovery_target_floor_paise" in cols, "recovery_target_floor_paise column missing"
+    assert cols["recovery_target_multiplier"] == "numeric", (
+        f"multiplier type should be numeric, got {cols['recovery_target_multiplier']!r}"
+    )
+    assert cols["recovery_target_floor_paise"] in ("bigint", "integer"), (
+        f"floor_paise type should be bigint/integer, got {cols['recovery_target_floor_paise']!r}"
+    )
+
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        # 2. DEFAULT backfill: a freshly-inserted tenant gets the expected defaults.
+        tenant_id = conn.execute(
+            "INSERT INTO tenants (business_name, plan_tier, phase) "
+            "VALUES ('VT-164 Default Test', 'founding', 'onboarding') RETURNING id"
+        ).fetchone()[0]
+        row = conn.execute(
+            "SELECT recovery_target_multiplier, recovery_target_floor_paise "
+            "FROM tenants WHERE id = %s",
+            (tenant_id,),
+        ).fetchone()
+        assert float(row[0]) == 1.1, f"default multiplier should be 1.1, got {row[0]!r}"
+        assert int(row[1]) == 50000, f"default floor should be 50000, got {row[1]!r}"
+
+        # 3. Override persists correctly.
+        conn.execute(
+            "UPDATE tenants SET recovery_target_multiplier = 1.5, "
+            "recovery_target_floor_paise = 100000 WHERE id = %s",
+            (tenant_id,),
+        )
+        updated = conn.execute(
+            "SELECT recovery_target_multiplier, recovery_target_floor_paise "
+            "FROM tenants WHERE id = %s",
+            (tenant_id,),
+        ).fetchone()
+        assert float(updated[0]) == 1.5
+        assert int(updated[1]) == 100000
+
+        # 4. CHECK rejects multiplier <= 0.
+        for bad_mul in (0, -1):
+            with pytest.raises(psycopg.errors.CheckViolation):
+                conn.execute(
+                    "UPDATE tenants SET recovery_target_multiplier = %s WHERE id = %s",
+                    (bad_mul, tenant_id),
+                )
+
+        # 5. CHECK rejects floor_paise < 0.
+        with pytest.raises(psycopg.errors.CheckViolation):
+            conn.execute(
+                "UPDATE tenants SET recovery_target_floor_paise = -1 WHERE id = %s",
+                (tenant_id,),
+            )
+
+        # 6. Zero floor is allowed (CHECK is >=0).
+        conn.execute(
+            "UPDATE tenants SET recovery_target_floor_paise = 0 WHERE id = %s",
+            (tenant_id,),
+        )
+        zero_floor = conn.execute(
+            "SELECT recovery_target_floor_paise FROM tenants WHERE id = %s",
+            (tenant_id,),
+        ).fetchone()[0]
+        assert int(zero_floor) == 0
