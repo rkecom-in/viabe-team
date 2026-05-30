@@ -3,7 +3,10 @@ name: CI
 on:
   pull_request:
     branches: [main]
-    types: [opened, synchronize, reopened, edited]
+    # VT-255 Actions-diet: dropped `edited` — a PR title/body edit must NOT
+    # re-run the ~17-job suite (CL-423 numeric-title churn fired it constantly).
+    # The cheap title gate lives in pr-title.yml, which still runs on `edited`.
+    types: [opened, synchronize, reopened]
     # VT-245 trigger-diet: skip the 17-job suite when a PR touches ONLY
     # non-code paths (docs, sprint substrate, Cowork session exports, or
     # the deploy-dev workflow — which CI never tests). paths-ignore only
@@ -674,37 +677,8 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  pr-title:
-    name: pr-title
-    runs-on: ubuntu-latest
-    steps:
-      - name: PR title must reference a numeric VT row
-        env:
-          PR_TITLE: ${{ github.event.pull_request.title }}
-        run: |
-          printf 'PR title: %s\n' "$PR_TITLE"
-          # PR title must end with a parenthesised NUMERIC VT reference.
-          # Grammar: VT-<N>(-fix-<M>)? where N and M are integers.
-          #
-          # VT-239 / Fazal 2026-05-30: every PR references a REAL numeric VT
-          # row from the file-based allocator (scripts/vt_id_allocate.py).
-          # Text-suffix pseudo-parents (VT-Foundation, VT-CI, VT-MCP-Tools,
-          # VT-FOO) and dotted legacy subtask IDs (VT-3.3a) are NO LONGER
-          # accepted — the Notion auto_increment is gone and all new rows are
-          # numeric. See docs/clau/decisions-ledger.md (numeric-VT standing
-          # rule, 2026-05-30).
-          #
-          # Examples:
-          #   (VT-43)        — row reference            [pass]
-          #   (VT-43-fix-1)  — first fix to that row    [pass]
-          #   (VT-Foundation)/(VT-CI)/(VT-FOO)          [fail]
-          #   (VT-3.3a)      — legacy dotted subtask    [fail]
-          #
-          # Regex is POSIX ERE (grep -E): a plain group, not Python's (?:...).
-          if ! printf '%s' "$PR_TITLE" | grep -qE '\(VT-[0-9]+(-fix-[0-9]+)?\)$'; then
-            echo "::error::PR title must end with a numeric VT ref, e.g. (VT-43) or (VT-43-fix-1) — text suffixes like (VT-Foundation) are rejected (VT-239)"
-            exit 1
-          fi
+  # NOTE: the pr-title gate moved to .github/workflows/pr-title.yml (VT-255)
+  # so a title/body `edited` event re-runs ONLY that 1 job, not this suite.
 
   # Non-blocking (continue-on-error + `|| true`): reports mypy --strict status
   # and uploads logs, but does NOT gate merge. NOT in branch protection's
