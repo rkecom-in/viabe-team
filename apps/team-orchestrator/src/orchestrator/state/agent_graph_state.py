@@ -64,3 +64,11 @@ class AgentGraphState(TypedDict, total=False):
     owner_decision: str | None
     approval_id: UUID | None
     approval_error: dict[str, Any] | None
+    # VT-251 — campaign execution seam (additive, total=False):
+    #   campaign_execution_summary: count-only summary from execute_approved_campaign
+    #     {sent, skipped_opt_out, failed}. Set when owner_decision='approved' and
+    #     the fan-out runs. CL-390: counts only, no PII.
+    #   campaign_execution_error: exception type name if the seam errors
+    #     (e.g. RuntimeError from a missing campaign row). Absent on success.
+    campaign_execution_summary: dict[str, int] | None
+    campaign_execution_error: str | None

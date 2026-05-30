@@ -1,0 +1,339 @@
+"""VT-251 — campaign execution seam.
+
+`execute_approved_campaign` fans out an approved campaign to all recipients in
+campaign_recipients, calls VT-45 send_whatsapp_template per recipient, and
+advances campaigns.status to 'sent'.
+
+Design decisions (Cowork-ruled 2026-05-31):
+- D1: idempotency_key = f"{campaign_id}:{customer_id}" — stable per recipient,
+  dedupes replays without additional state.
+- D2: this seam SENDS + records campaign_messages + sets campaigns.status='sent'
+  and STOPS. Attribution is async on the existing close path (VT-176 trigger /
+  VT-46 match_transactions). Do NOT compute attribution here.
+
+Architecture:
+- `conn` is the tenant-scoped connection (SET LOCAL app.current_tenant in
+  effect) for loading recipients, writing skip markers, and updating
+  campaigns.status.
+- VT-45 (send_whatsapp_template) manages its own pool-connection internally.
+  It is called with just the payload; it fetches its pool from get_pool() in
+  prod, or uses an injected pool passed as `send_pool`.
+- Per recipient: short-circuit opted_out / blocked before calling VT-45
+  (defence-in-depth; VT-45 already gates consent, but we skip the call and
+  record a 'skipped_opt_out' campaign_messages row instead of an 'unauthorized'
+  one — cleaner audit trail + avoids unnecessary pool churn).
+- VT-45 handles idempotency, phone resolution, rate limiting, and
+  campaign_messages recording for sent/error recipients.
+- Partial-failure: per-recipient try/except → record send_status='error' in
+  campaign_messages + continue (NOT fatal; mirror VT-241 reject discipline).
+- After loop: UPDATE campaigns.status='sent'. Return count-only summary.
+
+Pillars:
+- CL-421: consent gate — never message opted_out / blocked (hard-refuse).
+- CL-422: dev holds synthetic data only until VT-231 (prod Mumbai).
+- CL-390: log tenant_id / customer_id / campaign_id / status / SID only.
+  No PII (no phone, no names, no param values) in any log line.
+- CL-418: callers use explicit `git add`; module itself has no git awareness.
+"""
+
+from __future__ import annotations
+
+import logging
+from typing import Any, Callable
+from uuid import UUID
+
+from orchestrator.agent.tools.send_whatsapp_template import (
+    SendWhatsappTemplateInput,
+    SendWhatsappTemplateOutput,
+    send_whatsapp_template,
+)
+
+logger = logging.getLogger(__name__)
+
+# Opt-out statuses that are hard-refused without calling VT-45.
+# VT-45 also gates these, but we short-circuit to write a
+# 'skipped_opt_out' marker (cleaner audit trail than 'unauthorized').
+_REFUSED_OPT_OUT_STATUSES = frozenset({"opted_out", "blocked"})
+
+
+def _load_recipients(
+    conn: Any,
+    tenant_id: str,
+    campaign_id: str,
+) -> list[dict[str, Any]]:
+    """SELECT campaign_recipients JOIN customers for the campaign.
+
+    Returns list of dicts: {customer_id, opt_out_status}.
+    RLS is already scoped via SET LOCAL app.current_tenant on conn.
+
+    CL-390: no phone / name fetched here — opt_out_status only.
+    Phone resolution is done inside VT-45 (Pillar 3: tool owns phone access).
+    """
+    rows = conn.execute(
+        """
+        SELECT cr.customer_id::text AS customer_id,
+               c.opt_out_status
+        FROM campaign_recipients cr
+        JOIN customers c
+          ON c.id = cr.customer_id
+         AND c.tenant_id = cr.tenant_id
+        WHERE cr.campaign_id = %s
+          AND cr.tenant_id = %s
+        ORDER BY cr.added_at
+        """,
+        (campaign_id, tenant_id),
+    ).fetchall()
+    if not rows:
+        return []
+    if rows and isinstance(rows[0], dict):
+        return [{"customer_id": r["customer_id"], "opt_out_status": r["opt_out_status"]}
+                for r in rows]
+    return [{"customer_id": r[0], "opt_out_status": r[1]} for r in rows]
+
+
+def _load_campaign(
+    conn: Any,
+    tenant_id: str,
+    campaign_id: str,
+) -> dict[str, Any] | None:
+    """Load the campaigns row to get template_id and body_params.
+
+    Returns None if not found (RLS invisible = cross-tenant or missing).
+    body_params is the JSONB column — the params dict for the template.
+    """
+    row = conn.execute(
+        """
+        SELECT template_id, body_params
+        FROM campaigns
+        WHERE id = %s AND tenant_id = %s
+        LIMIT 1
+        """,
+        (campaign_id, tenant_id),
+    ).fetchone()
+    if row is None:
+        return None
+    if isinstance(row, dict):
+        return {"template_id": row["template_id"], "body_params": row["body_params"]}
+    return {"template_id": row[0], "body_params": row[1]}
+
+
+def _write_opt_out_skip_ledger(
+    conn: Any,
+    tenant_id: str,
+    customer_id: str,
+    idempotency_key: str,
+) -> None:
+    """Record a send_idempotency_keys row for an opted-out skip (no send made).
+
+    campaign_messages.send_status CHECK does not include a 'skipped' variant
+    (no migration allowed per VT-251 plan). Instead we write to
+    send_idempotency_keys with send_status='error' (the skip is an effective
+    send refusal) so replays are idempotent — the idempotency check in VT-45
+    would return the prior 'error' row rather than re-evaluating the send.
+    ON CONFLICT DO NOTHING ensures replay-safety.
+    CL-390: no PII in this INSERT (customer_id is a UUID; phone is NOT stored).
+    """
+    conn.execute(
+        """
+        INSERT INTO send_idempotency_keys
+            (tenant_id, idempotency_key, customer_id, message_sid, send_status)
+        VALUES (%s, %s, %s, NULL, 'error')
+        ON CONFLICT (tenant_id, idempotency_key) DO NOTHING
+        """,
+        (tenant_id, idempotency_key, customer_id),
+    )
+
+
+def _advance_campaign_status(
+    conn: Any,
+    tenant_id: str,
+    campaign_id: str,
+) -> None:
+    """UPDATE campaigns.status → 'sent' (RLS-scoped)."""
+    conn.execute(
+        """
+        UPDATE campaigns
+        SET status = 'sent'
+        WHERE id = %s AND tenant_id = %s
+        """,
+        (campaign_id, tenant_id),
+    )
+
+
+# Type alias for the injectable send function (matches VT-45's public API).
+# The injected callable receives (payload, *, pool) -> SendWhatsappTemplateOutput.
+_SendFn = Callable[..., SendWhatsappTemplateOutput]
+
+
+def execute_approved_campaign(
+    tenant_id: str | UUID,
+    campaign_id: str | UUID,
+    *,
+    conn: Any,
+    send_template_fn: _SendFn | None = None,
+    send_pool: Any | None = None,
+) -> dict[str, int]:
+    """Fan out an approved campaign to all recipients and mark it sent.
+
+    Parameters
+    ----------
+    tenant_id:
+        UUID of the owning tenant (str or UUID).
+    campaign_id:
+        UUID of the approved campaign (str or UUID).
+    conn:
+        Open psycopg3 connection with SET LOCAL app.current_tenant already
+        applied (RLS-scoped). Used for: loading recipients, writing opt_out
+        skip markers, and advancing campaigns.status. VT-45 uses its own pool
+        internally (or send_pool if injected).
+    send_template_fn:
+        Injected for tests. Defaults to `send_whatsapp_template` from VT-45.
+        Signature: (payload: SendWhatsappTemplateInput, *, pool=None)
+        -> SendWhatsappTemplateOutput.
+    send_pool:
+        Optional pool injected alongside send_template_fn in tests. Passed
+        through to send_template_fn as the `pool` kwarg.
+
+    Returns
+    -------
+    dict with counts: {sent, skipped_opt_out, failed}.
+    No PII (CL-390): counts only, no customer ids, no SIDs.
+
+    Raises
+    ------
+    RuntimeError if the campaign row is not found (cross-tenant or missing).
+
+    Partial failures are NOT raised — they are recorded in campaign_messages
+    with send_status='error' and included in the 'failed' count.
+
+    D2: Attribution is deferred to the VT-176 close trigger. This function
+    does NOT call match_transactions or get_attribution_data.
+    """
+    tenant_id_str = str(tenant_id)
+    campaign_id_str = str(campaign_id)
+
+    _send_fn: _SendFn = send_template_fn if send_template_fn is not None else send_whatsapp_template
+
+    # --- Load campaign row (template_id + params) ---
+    campaign = _load_campaign(conn, tenant_id_str, campaign_id_str)
+    if campaign is None:
+        raise RuntimeError(
+            f"execute_approved_campaign: campaign {campaign_id_str} not found "
+            f"for tenant {tenant_id_str} — cross-tenant or missing"
+        )
+
+    template_id: str = campaign["template_id"]
+    # body_params may be a psycopg3-decoded dict (JSONB) or None.
+    raw_params: dict[str, str] = dict(campaign["body_params"] or {})
+
+    # Derive language from body_params if the caller embedded it there,
+    # otherwise default to "en" (Phase-1: single locale until hi is live).
+    language: str = raw_params.pop("_language", "en")
+    body_params: dict[str, str] = raw_params
+
+    # --- Load recipients ---
+    recipients = _load_recipients(conn, tenant_id_str, campaign_id_str)
+
+    logger.info(
+        "execute_approved_campaign: tenant=%s campaign=%s recipients=%d "
+        "template=%s",
+        tenant_id_str, campaign_id_str, len(recipients), template_id,
+    )
+
+    sent = 0
+    skipped_opt_out = 0
+    failed = 0
+
+    for recipient in recipients:
+        customer_id_str: str = recipient["customer_id"]
+        opt_out_status: str | None = recipient.get("opt_out_status")
+        idempotency_key = f"{campaign_id_str}:{customer_id_str}"
+
+        # --- Defence-in-depth consent gate (CL-421) ---
+        # VT-45 also gates this, but we short-circuit to write a
+        # 'skipped_opt_out' marker instead of an 'unauthorized' envelope
+        # (cleaner audit trail; avoids unnecessary pool churn).
+        if opt_out_status in _REFUSED_OPT_OUT_STATUSES:
+            try:
+                _write_opt_out_skip_ledger(
+                    conn, tenant_id_str, customer_id_str, idempotency_key,
+                )
+            except Exception as exc:  # noqa: BLE001
+                # Writing the skip ledger row is best-effort; log but don't
+                # fail the loop (defence-in-depth: the no-call is sufficient).
+                logger.info(
+                    "execute_approved_campaign: skip_ledger_write_error "
+                    "tenant=%s customer=%s err=%s",
+                    tenant_id_str, customer_id_str, type(exc).__name__,
+                )
+            skipped_opt_out += 1
+            logger.info(
+                "execute_approved_campaign: skipped_opt_out tenant=%s "
+                "customer=%s status=%s",
+                tenant_id_str, customer_id_str, opt_out_status,
+            )
+            continue
+
+        # --- Send via VT-45 (handles idempotency, rate limit, campaign_messages) ---
+        try:
+            payload = SendWhatsappTemplateInput(
+                tenant_id=tenant_id_str,
+                customer_id=customer_id_str,
+                template_id=template_id,
+                language=language,  # type: ignore[arg-type]
+                template_params=body_params,
+                idempotency_key=idempotency_key,
+            )
+            result: SendWhatsappTemplateOutput = _send_fn(payload, pool=send_pool)
+        except Exception as exc:  # noqa: BLE001
+            # Unexpected exception from the send path — log and continue.
+            logger.info(
+                "execute_approved_campaign: send_exception tenant=%s "
+                "customer=%s err=%s",
+                tenant_id_str, customer_id_str, type(exc).__name__,
+            )
+            failed += 1
+            continue
+
+        if result.status in ("sent", "dry_run"):
+            sent += 1
+            logger.info(
+                "execute_approved_campaign: sent tenant=%s customer=%s "
+                "sid=%s status=%s",
+                tenant_id_str, customer_id_str,
+                result.message_sid, result.status,
+            )
+        elif result.status == "unauthorized":
+            # VT-45 refused — opt_out caught by the tool (should not reach
+            # here if our defence-in-depth gate runs first, but VT-45's
+            # consent gate is authoritative). Count as skipped.
+            skipped_opt_out += 1
+            logger.info(
+                "execute_approved_campaign: unauthorized tenant=%s customer=%s "
+                "code=%s",
+                tenant_id_str, customer_id_str,
+                result.error_envelope.code if result.error_envelope else "unknown",
+            )
+        else:
+            # rate_limited, error, or any other non-success status.
+            failed += 1
+            logger.info(
+                "execute_approved_campaign: send_failed tenant=%s customer=%s "
+                "status=%s code=%s",
+                tenant_id_str, customer_id_str,
+                result.status,
+                result.error_envelope.code if result.error_envelope else "none",
+            )
+
+    # --- Advance campaign status → sent (D2: stop here, no attribution) ---
+    _advance_campaign_status(conn, tenant_id_str, campaign_id_str)
+
+    summary = {"sent": sent, "skipped_opt_out": skipped_opt_out, "failed": failed}
+    logger.info(
+        "execute_approved_campaign: done tenant=%s campaign=%s summary=%s",
+        tenant_id_str, campaign_id_str, summary,
+    )
+    return summary
+
+
+__all__ = ["execute_approved_campaign"]

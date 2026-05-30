@@ -54,6 +54,7 @@ from orchestrator.db import tenant_connection
 from orchestrator.handoffs import spawn_integration, spawn_sales_recovery
 from orchestrator.routing import (
     orchestrator_terminal_node,
+    route_after_approval,
     route_after_collapse,
     route_after_orchestrator,
 )
@@ -146,6 +147,59 @@ def _sales_recovery_node(state: AgentGraphState) -> dict[str, Any]:
         plan = plan.model_copy(update=overrides)
 
     return {"campaign_plan": plan}
+
+
+def _campaign_execute_node(state: AgentGraphState) -> dict[str, Any]:
+    """VT-251 — fan out the approved campaign to all recipients.
+
+    Called only when owner_decision == 'approved' (routed by route_after_approval).
+    Reads campaign_id from state['pending_approval_request']['campaign_id'],
+    opens a tenant-scoped connection, and calls execute_approved_campaign.
+
+    Returns execution summary (counts only, CL-390 no PII) as
+    state['campaign_execution_summary']. On error, surfaces the exception
+    message as state['campaign_execution_error'] and does NOT re-raise (the
+    graph run completes; the error is observable via pipeline_steps / logs).
+
+    D2 (Cowork ruling 2026-05-31): attribution is NOT computed here — it is
+    deferred to the VT-176 async close trigger.
+    """
+    from orchestrator.campaign.execute import execute_approved_campaign
+
+    tenant_id = state.get("tenant_id")
+    if tenant_id is None:
+        raise RuntimeError(
+            "_campaign_execute_node: tenant_id missing from state — "
+            "the graph entry point must set it"
+        )
+
+    approval_req = state.get("pending_approval_request") or {}
+    campaign_id = approval_req.get("campaign_id")
+    if campaign_id is None:
+        raise RuntimeError(
+            "_campaign_execute_node: pending_approval_request['campaign_id'] "
+            "is missing — collapse must have attached it before routing to "
+            "the approval gate"
+        )
+
+    tenant_id_str = str(tenant_id)
+    campaign_id_str = str(campaign_id)
+
+    try:
+        with tenant_connection(tenant_id_str) as conn:
+            summary = execute_approved_campaign(
+                tenant_id_str,
+                campaign_id_str,
+                conn=conn,
+            )
+        return {"campaign_execution_summary": summary}
+    except Exception as exc:  # noqa: BLE001
+        import logging
+        logging.getLogger(__name__).info(
+            "_campaign_execute_node: error tenant=%s campaign=%s err=%s",
+            tenant_id_str, campaign_id_str, type(exc).__name__,
+        )
+        return {"campaign_execution_error": type(exc).__name__}
 
 
 def build_supervisor_graph(
@@ -264,7 +318,24 @@ def build_supervisor_graph(
             "end": END,
         },
     )
-    graph.add_edge("request_owner_approval", END)
+    # VT-251 — campaign execution seam: when the owner approves, fan out
+    # the campaign before ending the run. Non-approved decisions go directly
+    # to END (Pillar 7: rejected / needs_changes / timeout / send_failed
+    # must NEVER proceed to send).
+    # observability:opt-out reason=deterministic-post-gate-node-no-interrupt-VT-251
+    graph.add_node(
+        "campaign_execute",
+        with_state_transition_hook(_campaign_execute_node, node_name="campaign_execute"),
+    )
+    graph.add_conditional_edges(
+        "request_owner_approval",
+        route_after_approval,
+        {
+            "campaign_execute": "campaign_execute",
+            "end": END,
+        },
+    )
+    graph.add_edge("campaign_execute", END)
     graph.add_edge("orchestrator_terminal", END)
 
     if checkpointer is not None:
