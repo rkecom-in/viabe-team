@@ -30,7 +30,7 @@ team_welcome:
     - trial_end_date
   languages:
     en: HX1b66c0daaa52dc0b8575e50eebadfdd1
-    # hi: <Fazal drops the Hindi SID here later — DATA ONLY, no code change>
+    hi: HXf154fc0f582955f65c75b6306662388a
 
 team_weekly_approval:
   audience: customer
@@ -41,7 +41,7 @@ team_weekly_approval:
     - projected_recovery_inr
   languages:
     en: HX44b053c946a230ea0d2d3d2dc6118964
-    # hi: <Fazal drops the Hindi SID here later — DATA ONLY, no code change>
+    hi: HX4c63feb64d392ada48b0fe11cb1d067d
 
 team_opt_out_confirmation:
   audience: customer
@@ -50,7 +50,7 @@ team_opt_out_confirmation:
     - owner_name
   languages:
     en: HX6365c429e75c2e191bf396e1c6ba8708
-    # hi: <Fazal drops the Hindi SID here later — DATA ONLY, no code change>
+    hi: HX960b6de9033e0a5954a38fc09b25da2b
 
 team_dsr_acknowledgment:
   audience: customer
@@ -61,7 +61,7 @@ team_dsr_acknowledgment:
     - completion_deadline_date
   languages:
     en: HXcda0b9bb6ea92c072fb8eb7d06163ef0
-    # hi: <Fazal drops the Hindi SID here later — DATA ONLY, no code change>
+    hi: HXac6e8f1193d97252c1afeb3516d4c9b6
 
 team_agent_stuck_escalation:
   audience: customer
@@ -72,7 +72,7 @@ team_agent_stuck_escalation:
     - context
   languages:
     en: HX6f15db7fee7037c570ba122387f39b10
-    # hi: <Fazal drops the Hindi SID here later — DATA ONLY, no code change>
+    hi: HX913b93eecd3bf9401116365f268a1008
 
 team_status_ping:
   audience: customer
@@ -83,7 +83,7 @@ team_status_ping:
     - next_up_description
   languages:
     en: HX11199e6fc93eaa1f8b26071995614476
-    # hi: <Fazal drops the Hindi SID here later — DATA ONLY, no code change>
+    hi: HXa386953554630e233f5875299f2d2c94
 
 team_unable_to_complete_request:
   audience: owner
@@ -94,7 +94,7 @@ team_unable_to_complete_request:
     - failure_reason
   languages:
     en: HXb545fe12033d79293f61bc614baa4caf
-    # hi: <Fazal drops the Hindi SID here later — DATA ONLY, no code change>
+    hi: HXa232c5bc481f90bb5f8b32d05591859a
 
 team_error_handler:
   audience: owner
@@ -105,4 +105,4 @@ team_error_handler:
     - possible_reasons
   languages:
     en: HXe9212e16b8647a5d9ab6fcff647bf600
-    # hi: <Fazal drops the Hindi SID here later — DATA ONLY, no code change>
+    hi: HXe02bb244729c5e829fcad2453e0262ec
