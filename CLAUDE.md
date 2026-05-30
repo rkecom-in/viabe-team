@@ -145,6 +145,15 @@ Main protection is an account-level ruleset, but **"Require status checks to pas
 - Route-via-PR remains the convention (not enforced).
 - Recurring flakes (being fixed in VT-245): RLS service_count + chrono-order in `test_pipeline_log.py` — rerun via `gh pr checks <N> --watch` if they trip pre-fix.
 
+### Deploy topology (ground truth, 2026-05-30 — check this BEFORE debugging a failing deploy)
+
+A `railway up` CLI job was debugged for an hour this session chasing `RAILWAY_TOKEN` — it was redundant with Railway's native auto-deploy, and its failure was *blocking* that native deploy. Root cause: the topology lived only in the Railway dashboard. So, the ground truth:
+
+- **Orchestrator (`apps/team-orchestrator`)** → **Railway NATIVE GitHub auto-deploy**. The Railway service is connected to `rkecom-in/viabe-team`, branch `main`, "Auto deploys on push" ON, "Wait for CI" ON. **There is NO `railway up` in CI** (the redundant job was removed in VT-246 / #154). Railway redeploys itself once `deploy-dev` is green. No `RAILWAY_TOKEN` in CI (secret unused/deletable).
+- **team-web (`apps/team-web`)** → **Vercel CLI job in `deploy-dev.yml`** (`vercel pull/build/deploy --prebuilt`, `VERCEL_TOKEN`; runs at repo root, project root-dir = `apps/team-web`; needs pnpm via `pnpm/action-setup`). Triggers on push to main.
+- **`deploy-dev.yml`** = `pre-deploy-checks` + the Vercel job only. Because Railway's "Wait for CI" skips the native deploy if ANY Action on the push fails, **keeping `deploy-dev` green is what lets the orchestrator deploy** — a red CI run silently blocks it.
+- **Discipline:** before "fixing" a failing deploy/CI step, check this topology first — don't repair a step that's redundant with platform-native config (Railway/Vercel dashboards own the actual deploy).
+
 ### FUSE lock workflow
 
 The sandbox cannot unlink `.git/index.lock` files left by interrupted writes — FUSE mount denies the operation. Only Fazal's native Mac terminal can `rm` the lock.
