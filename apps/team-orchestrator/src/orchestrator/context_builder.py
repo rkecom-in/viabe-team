@@ -117,6 +117,9 @@ class ContextMeta:
     cursor_info: dict[str, Any]
 
 
+_DEFAULT_TARGET_RECOVERED_PAISE: int = 50_000  # default per-tenant recovery-target floor (paise)
+_DEFAULT_RECOVERY_TARGET_MULTIPLIER: float = 1.1  # default per-tenant recovery-target multiplier
+
 _DEFAULT_SECTION_KEYS = (
     "business_profile",
     "customer_ledger_summary",
@@ -161,6 +164,11 @@ class SalesRecoveryContext:
     data_completeness: dict[str, bool] = field(
         default_factory=_default_data_completeness
     )
+    # VT-164: per-tenant recovery-target config — read from tenants table in
+    # build_sales_recovery_context; defaults = module constants so a missing
+    # DB read never silently changes the computed target.
+    recovery_target_multiplier: float = _DEFAULT_RECOVERY_TARGET_MULTIPLIER
+    recovery_target_floor_paise: int = _DEFAULT_TARGET_RECOVERED_PAISE
 
 
 # --- token estimation --------------------------------------------------------
@@ -298,6 +306,42 @@ def _build_pending_owner_inputs(tenant_id: UUID) -> tuple[list[OwnerInput], bool
     return inputs, bool(inputs)
 
 
+def _build_recovery_target_config(tenant_id: UUID) -> tuple[float, int]:
+    """Read per-tenant recovery-target config from the tenants table (VT-164).
+
+    Returns ``(multiplier, floor_paise)`` sourced from the DB.  On any read
+    failure (no row, exception) falls back to the module-level defaults so the
+    computed target is UNCHANGED from pre-VT-164 behaviour (CL-191 safe-empty
+    / fallback contract).
+
+    RLS note: tenant_connection sets ``app.current_tenant`` GUC so the SELECT
+    can only return the one row whose ``id = app_current_tenant()``.  The
+    explicit ``WHERE id = %s`` is belt-and-braces (plan: not using
+    ``assert_tenant_scoped`` because the tenants self-read row key is ``id``,
+    not ``tenant_id`` — would be a field mismatch; inline assertion instead).
+    """
+    try:
+        with tenant_connection(tenant_id) as conn:
+            row = conn.execute(
+                "SELECT id, recovery_target_multiplier, recovery_target_floor_paise "
+                "FROM tenants WHERE id = %s",
+                (str(tenant_id),),
+            ).fetchone()
+    except Exception:  # noqa: BLE001 — any DB error → fallback, logged below
+        row = None
+
+    if not row:
+        return (_DEFAULT_RECOVERY_TARGET_MULTIPLIER, _DEFAULT_TARGET_RECOVERED_PAISE)
+
+    # Belt-and-braces: the RLS GUC already scopes the row, but assert the id
+    # matches what we asked for (catches any future policy misconfiguration).
+    assert row["id"] == tenant_id or str(row["id"]) == str(tenant_id), (
+        f"_build_recovery_target_config: tenant_id mismatch "
+        f"(asked {tenant_id!r}, got {row['id']!r})"
+    )
+    return (float(row["recovery_target_multiplier"]), int(row["recovery_target_floor_paise"]))
+
+
 # --- the bundle constructor --------------------------------------------------
 
 
@@ -332,6 +376,7 @@ def build_sales_recovery_context(
     recent_campaigns, rc_ok = _build_recent_campaigns(tenant_id)
     attribution_snapshot, as_ok = _build_attribution_snapshot(tenant_id)
     pending_owner_inputs, oi_ok = _build_pending_owner_inputs(tenant_id)
+    recovery_target_multiplier, recovery_target_floor_paise = _build_recovery_target_config(tenant_id)
 
     data_completeness = {
         "business_profile": bp_ok,
@@ -403,6 +448,8 @@ def build_sales_recovery_context(
         pending_owner_inputs=pending_owner_inputs,
         meta=meta,
         data_completeness=data_completeness,
+        recovery_target_multiplier=recovery_target_multiplier,
+        recovery_target_floor_paise=recovery_target_floor_paise,
     )
 
 
@@ -427,8 +474,6 @@ _PHASE1_APPROVED_TEMPLATES: tuple[str, ...] = (
     "team_winback_v2",
     "team_seasonal_v1",
 )
-_DEFAULT_TARGET_RECOVERED_PAISE: int = 50_000  # ~₹500 baseline target
-
 
 def serialize_bundle_for_prompt(
     context: SalesRecoveryContext,
@@ -455,9 +500,16 @@ def serialize_bundle_for_prompt(
     message content.
     """
     if target_recovered_paise is None:
+        # VT-164: use per-tenant config from context (populated by
+        # _build_recovery_target_config in build_sales_recovery_context).
+        # Falls back to the module-level defaults when context fields are
+        # their defaults — so a missing DB read never changes the number.
         target_recovered_paise = max(
-            int(context.attribution_snapshot.last_7d_recovered_paise * 1.1),
-            _DEFAULT_TARGET_RECOVERED_PAISE,
+            round(
+                context.attribution_snapshot.last_7d_recovered_paise
+                * context.recovery_target_multiplier
+            ),
+            context.recovery_target_floor_paise,
         )
 
     parts: list[str] = ["# Sales Recovery Context"]
