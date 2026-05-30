@@ -1,43 +1,108 @@
-# twilio_templates.yaml — name -> Twilio Content API content_sid mapping (VT-3.3c).
+# twilio_templates.yaml — name -> language -> Twilio Content API content_sid mapping (VT-163).
 #
 # Pillar 8: template *content* lives in the Twilio Console + the Meta WABA.
-# This file is a name->sid lookup only — no copy, no logic.
+# This file is a name->lang->sid lookup only — no copy, no logic.
 #
-# audience is informational for VT-3.3c (all sends go to tenant.whatsapp_number
-# / the inbound sender). VT-6 routes owner-audience sends to a separate inbox.
+# audience: informational (customer = WhatsApp customer of the business owner;
+#           owner = the business owner themselves).
 #
-# A template with `content_sid: null` is the stub-pending-approval path —
-# send_template_message returns success=False / error_code=template_not_yet_approved
-# without calling Twilio. Supported; no entry uses it today.
+# variables: ordered list of positional param names (index i = positional {{i+1}}).
+#   Source of truth for variable signatures; sourced from .viabe/templates.md.
+#   Machine-readable companion to the human-readable markdown.
+#
+# languages: lang -> content_sid map. Only 'en' is present until Fazal supplies
+#   Hindi SIDs — resolving (name, 'hi') raises UnknownLanguageVariantError until then.
+#   Dropping a 'hi' SID is a DATA-ONLY change; no code change required.
+#
+# agent_selectable: true if the SR agent may propose this template in message_plan.
+#   Only templates with agent_selectable: true are returned by approved_template_names().
+#   Default (absent) = false (system/compliance/direct-handler invoked only).
+#   D5 ruling (Cowork, 2026-05-30): only team_weekly_approval is agent-selectable at Phase 1.
+#
+# A template with a content_sid of null is the stub-pending-approval path.
+# Supported; no entry uses it today.
 
 team_welcome:
-  content_sid: HX1b66c0daaa52dc0b8575e50eebadfdd1
   audience: customer
+  agent_selectable: false
+  variables:
+    - owner_name
+    - trial_end_date
+  languages:
+    en: HX1b66c0daaa52dc0b8575e50eebadfdd1
+    # hi: <Fazal drops the Hindi SID here later — DATA ONLY, no code change>
 
 team_weekly_approval:
-  content_sid: HX44b053c946a230ea0d2d3d2dc6118964
   audience: customer
+  agent_selectable: true
+  variables:
+    - customer_segment
+    - campaign_mode
+    - projected_recovery_inr
+  languages:
+    en: HX44b053c946a230ea0d2d3d2dc6118964
+    # hi: <Fazal drops the Hindi SID here later — DATA ONLY, no code change>
 
 team_opt_out_confirmation:
-  content_sid: HX6365c429e75c2e191bf396e1c6ba8708
   audience: customer
+  agent_selectable: false
+  variables:
+    - owner_name
+  languages:
+    en: HX6365c429e75c2e191bf396e1c6ba8708
+    # hi: <Fazal drops the Hindi SID here later — DATA ONLY, no code change>
 
 team_dsr_acknowledgment:
-  content_sid: HXcda0b9bb6ea92c072fb8eb7d06163ef0
   audience: customer
+  agent_selectable: false
+  variables:
+    - owner_name
+    - dsr_type
+    - completion_deadline_date
+  languages:
+    en: HXcda0b9bb6ea92c072fb8eb7d06163ef0
+    # hi: <Fazal drops the Hindi SID here later — DATA ONLY, no code change>
 
 team_agent_stuck_escalation:
-  content_sid: HX6f15db7fee7037c570ba122387f39b10
   audience: customer
+  agent_selectable: false
+  variables:
+    - owner_name
+    - stuck_on
+    - context
+  languages:
+    en: HX6f15db7fee7037c570ba122387f39b10
+    # hi: <Fazal drops the Hindi SID here later — DATA ONLY, no code change>
 
 team_status_ping:
-  content_sid: HX11199e6fc93eaa1f8b26071995614476
   audience: customer
+  agent_selectable: false
+  variables:
+    - owner_name
+    - last_activity_description
+    - next_up_description
+  languages:
+    en: HX11199e6fc93eaa1f8b26071995614476
+    # hi: <Fazal drops the Hindi SID here later — DATA ONLY, no code change>
 
 team_unable_to_complete_request:
-  content_sid: HXb545fe12033d79293f61bc614baa4caf
   audience: owner
+  agent_selectable: false
+  variables:
+    - owner_name
+    - request_description
+    - failure_reason
+  languages:
+    en: HXb545fe12033d79293f61bc614baa4caf
+    # hi: <Fazal drops the Hindi SID here later — DATA ONLY, no code change>
 
 team_error_handler:
-  content_sid: HXe9212e16b8647a5d9ab6fcff647bf600
   audience: owner
+  agent_selectable: false
+  variables:
+    - owner_name
+    - action_tried
+    - possible_reasons
+  languages:
+    en: HXe9212e16b8647a5d9ab6fcff647bf600
+    # hi: <Fazal drops the Hindi SID here later — DATA ONLY, no code change>

@@ -27,13 +27,16 @@ from types import SimpleNamespace
 from typing import Any, cast
 from uuid import UUID, uuid4
 
-import yaml
 from dbos import DBOS
 from pydantic import BaseModel
 from twilio.base.exceptions import TwilioRestException
 from twilio.rest import Client
 
 from orchestrator.db import tenant_connection
+from orchestrator.templates_registry import (
+    UnknownTemplateError,
+    resolve as _registry_resolve,
+)
 from orchestrator.utils.phone_token import hash_phone
 
 logger = logging.getLogger(__name__)
@@ -53,15 +56,37 @@ class SendResult(BaseModel):
     recipient_phone_token: str  # hash_phone() token — never plaintext
 
 
-class TemplateNotConfigured(ValueError):
-    """Raised when template_name is not present in twilio_templates.yaml."""
+# TemplateNotConfigured is an alias for UnknownTemplateError (D4, VT-163).
+# Kept here for back-compat: existing callers that catch TemplateNotConfigured
+# continue to work unchanged; the registry raises UnknownTemplateError which IS
+# TemplateNotConfigured.
+TemplateNotConfigured = UnknownTemplateError
 
 
-@lru_cache(maxsize=1)
-def _templates() -> dict[str, dict[str, Any]]:
-    """Load + cache the name -> {content_sid, audience} template map."""
-    data = yaml.safe_load(_TEMPLATES_FILE.read_text())
-    return dict(data or {})
+def _templates(*, lang: str = "en") -> dict[str, dict[str, Any]]:
+    """Return a {template_name: {content_sid, audience}} dict via the registry.
+
+    Replaces the old @lru_cache yaml loader (D1 migration, VT-163). The
+    registry's 60s TTL cache is the single load path. The returned dict
+    shape is compatible with callers that read ``template.get("content_sid")``.
+
+    ``lang`` is the language variant to resolve SIDs for; defaults to "en"
+    to match the previous implicit behavior.
+    """
+    # pylint: disable=protected-access
+    from orchestrator.templates_registry import _get_cached  # avoid circular at module level
+    raw = _get_cached()
+    out: dict[str, dict[str, Any]] = {}
+    for name, entry in raw.items():
+        if not isinstance(entry, dict):
+            continue
+        langs = entry.get("languages") or {}
+        content_sid = langs.get(lang)
+        out[name] = {
+            "content_sid": content_sid,
+            "audience": entry.get("audience", ""),
+        }
+    return out
 
 
 class _MockTwilioMessages:
@@ -145,15 +170,19 @@ def send_template_message(
 ) -> SendResult:
     """Send a Meta-approved WhatsApp template via Twilio. See the module docstring.
 
-    Raises TemplateNotConfigured if template_name is unknown. A 4xx Twilio
-    error returns success=False; a 5xx / network error is re-raised so the
-    DBOS step retries.
+    Raises TemplateNotConfigured (alias: UnknownTemplateError) if template_name
+    is unknown. A 4xx Twilio error returns success=False; a 5xx / network error
+    is re-raised so the DBOS step retries.
+
+    SID resolution is delegated to templates_registry.resolve() (D1, VT-163).
+    Language defaults to "en" — the pre-VT-163 implicit behaviour.
     """
-    template = _templates().get(template_name)
-    if template is None:
-        raise TemplateNotConfigured(
-            f"template '{template_name}' not in twilio_templates.yaml"
-        )
+    # Resolve via registry (D1 migration). Raises UnknownTemplateError (== TemplateNotConfigured)
+    # for unknown names, UnknownLanguageVariantError for missing language variants.
+    try:
+        entry = _registry_resolve(template_name, "en")
+    except UnknownTemplateError:
+        raise  # propagates as TemplateNotConfigured (alias)
 
     recipient = recipient_phone or get_tenant_whatsapp_number(tenant_id)
     if not recipient:
@@ -164,7 +193,7 @@ def send_template_message(
     recipient_token = hash_phone(recipient)
     attempted_at = datetime.now(UTC)
 
-    content_sid = template.get("content_sid")
+    content_sid = entry.content_sid
     if content_sid is None:
         # Stub-pending-approval: the template is configured but its Meta
         # content_sid is not approved yet. No Twilio call (Pillar 7 — honest).

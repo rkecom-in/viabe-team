@@ -67,12 +67,18 @@ def test_send_returns_success_when_content_sid_present(send_ctx, twilio_create):
 
 
 def test_send_returns_stub_when_content_sid_null(send_ctx, twilio_create, monkeypatch):
+    from types import SimpleNamespace
+
     from orchestrator.utils import twilio_send
 
+    # VT-163: send_template_message resolves via the registry (_registry_resolve),
+    # not the legacy _templates() dict. Monkeypatch the resolver to return a
+    # registered template whose content_sid is null (pending Meta approval) so
+    # the stub path is exercised.
     monkeypatch.setattr(
         twilio_send,
-        "_templates",
-        lambda: {"team_pending": {"content_sid": None, "audience": "owner"}},
+        "_registry_resolve",
+        lambda name, lang="en": SimpleNamespace(content_sid=None, audience="owner"),
     )
     result = twilio_send.send_template_message(
         uuid4(), "team_pending", {}, recipient_phone="+919812300002"
