@@ -20,6 +20,7 @@
 import { timingSafeEqual } from 'node:crypto'
 import { NextResponse } from 'next/server'
 
+import { isOperator } from '@/lib/auth/operator-allowlist'
 import { issueOperatorSessionRedirect } from '@/lib/auth/issue-operator-session'
 import { serverSecretClient } from '@/lib/supabase-client'
 
@@ -90,6 +91,16 @@ async function handleEnvPasswordSignIn(
   if (!emailMatch || !passwordMatch) {
     return NextResponse.redirect(
       new URL('/team/ops/login?error=invalid_credentials', req.url),
+      { status: 302 },
+    )
+  }
+
+  // VT-228: even the env-password path passes the operator allowlist gate
+  // on its UUID (operatorUuid === FAZAL_OWNER_UUID → break-glass true).
+  // Keeps the gate consistent across all login paths.
+  if (!(await isOperator(operatorUuid))) {
+    return NextResponse.redirect(
+      new URL('/team/ops/login?error=not_authorized', req.url),
       { status: 302 },
     )
   }

@@ -384,3 +384,52 @@ def test_customers_partial_unique_phone(migrated):
             (tenant,),
         ).fetchone()[0]
         assert n == 2
+
+
+# --- Migration 046: operator_allowlist (VT-228) -------------------------------
+
+
+def test_operator_allowlist_deny_all_rls_and_grant_revoke(migrated):
+    """VT-228: operator_allowlist applies; deny-all RLS (rls_tester sees
+    nothing even with rows present); grant/revoke semantics."""
+    from uuid import uuid4
+
+    dsn = migrated["dsn"]
+    op_a = str(uuid4())
+
+    # Service role (superuser, bypasses RLS) can grant + read.
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute(
+            "INSERT INTO operator_allowlist (user_id, notes) VALUES (%s, 'vt228 synthetic')",
+            (op_a,),
+        )
+        active = conn.execute(
+            "SELECT count(*) FROM operator_allowlist WHERE user_id = %s AND revoked_at IS NULL",
+            (op_a,),
+        ).fetchone()[0]
+        assert active == 1
+
+    # Deny-all RLS: a non-superuser role (rls_tester, created earlier) sees
+    # NOTHING — operator_allowlist has FORCE RLS + no policies.
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute("SET ROLE rls_tester")
+        visible = conn.execute("SELECT count(*) FROM operator_allowlist").fetchone()[0]
+        assert visible == 0, "deny-all RLS: app/tenant role must see no operators"
+
+    # Revoke (service role): active count → 0, row retained for audit.
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute(
+            "UPDATE operator_allowlist SET revoked_at = now(), revoke_reason = 'test' "
+            "WHERE user_id = %s AND revoked_at IS NULL",
+            (op_a,),
+        )
+        active = conn.execute(
+            "SELECT count(*) FROM operator_allowlist WHERE user_id = %s AND revoked_at IS NULL",
+            (op_a,),
+        ).fetchone()[0]
+        assert active == 0
+        retained = conn.execute(
+            "SELECT count(*) FROM operator_allowlist WHERE user_id = %s",
+            (op_a,),
+        ).fetchone()[0]
+        assert retained == 1, "revoked row kept for audit"
