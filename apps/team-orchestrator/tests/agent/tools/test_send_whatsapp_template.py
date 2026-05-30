@@ -189,12 +189,20 @@ def test_unknown_template() -> None:
 # Test 3: Unsupported language
 # ---------------------------------------------------------------------------
 
-def test_unsupported_language() -> None:
+def test_unsupported_language(monkeypatch) -> None:
+    from orchestrator import templates_registry
     from orchestrator.agent.tools.send_whatsapp_template import send_whatsapp_template
 
+    # Both input languages (en, hi) are now configured for all 8 templates
+    # (hi populated by VT-163-fix-1), so an unconfigured variant is no longer
+    # reachable via the en|hi Literal input. Simulate the registry raising
+    # UnknownLanguageVariantError to exercise the tool's catch → error envelope.
+    def _raise(name, lang, *a, **k):
+        raise templates_registry.UnknownLanguageVariantError(name, lang)
+
+    monkeypatch.setattr(templates_registry, "resolve", _raise)
     send_fn = MagicMock()
     pool, _ = _pool()
-    # "hi" not configured for team_weekly_approval yet.
     out = send_whatsapp_template(
         _input(language="hi"),
         pool=pool,

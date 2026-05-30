@@ -142,12 +142,18 @@ def test_unknown_template_error_is_value_error():
 # ---------------------------------------------------------------------------
 
 
-def test_resolve_hi_before_sid_configured_raises():
-    """Hindi SIDs are not in the yaml yet — must raise UnknownLanguageVariantError."""
+def test_resolve_hi_returns_sid():
+    """VT-163-fix-1: Hindi SIDs are now populated (Fazal addendum) — hi resolves."""
+    entry = resolve("team_weekly_approval", "hi", _path=_REAL_YAML_PATH)
+    assert entry.content_sid == "HX4c63feb64d392ada48b0fe11cb1d067d"
+
+
+def test_resolve_absent_language_raises():
+    """A genuinely-absent language variant (only en+hi configured) raises."""
     with pytest.raises(UnknownLanguageVariantError) as exc_info:
-        resolve("team_weekly_approval", "hi", _path=_REAL_YAML_PATH)
+        resolve("team_weekly_approval", "ta", _path=_REAL_YAML_PATH)
     assert "team_weekly_approval" in str(exc_info.value)
-    assert "hi" in str(exc_info.value)
+    assert "ta" in str(exc_info.value)
 
 
 def test_unknown_language_variant_error_attrs():
@@ -222,10 +228,11 @@ def test_approved_template_names_en_returns_only_selectable():
         assert name not in names, f"{name} should not be agent_selectable"
 
 
-def test_approved_template_names_hi_empty_before_sids_configured():
-    """No Hindi SIDs exist yet — hi result should be empty."""
+def test_approved_template_names_hi_populated():
+    """VT-163-fix-1: hi SIDs populated — the agent-selectable template
+    (team_weekly_approval) now has a hi variant, so hi names are non-empty."""
     names = approved_template_names("hi", _path=_REAL_YAML_PATH)
-    assert names == ()
+    assert names == ("team_weekly_approval",)
 
 
 # ---------------------------------------------------------------------------
