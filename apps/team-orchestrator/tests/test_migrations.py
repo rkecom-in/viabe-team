@@ -433,3 +433,81 @@ def test_operator_allowlist_deny_all_rls_and_grant_revoke(migrated):
             (op_a,),
         ).fetchone()[0]
         assert retained == 1, "revoked row kept for audit"
+
+
+def test_attribution_method_confidence_columns(migrated):
+    """VT-240 (migration 047): attributions gains nullable attribution_method
+    + attribution_confidence. CHECKs reject bad method / out-of-range
+    confidence; a pre-047-shape insert (both omitted) still succeeds."""
+    dsn = migrated["dsn"]
+
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        tenant = conn.execute(
+            "INSERT INTO tenants (business_name, plan_tier, phase) "
+            "VALUES ('Attr Tenant', 'founding', 'onboarding') RETURNING id"
+        ).fetchone()[0]
+        run = conn.execute(
+            "INSERT INTO pipeline_runs (tenant_id, run_type, status) "
+            "VALUES (%s, 'campaign', 'running') RETURNING id",
+            (tenant,),
+        ).fetchone()[0]
+        camp = conn.execute(
+            "INSERT INTO campaigns (tenant_id, run_id, plan_json, status, "
+            "generated_at) VALUES (%s, %s, '{}'::jsonb, 'proposed', now()) "
+            "RETURNING id",
+            (tenant, run),
+        ).fetchone()[0]
+
+        # 1. Populated insert: method + confidence persist + read back.
+        attr = conn.execute(
+            "INSERT INTO attributions (tenant_id, campaign_id, attributed_paise, "
+            "attribution_method, attribution_confidence) "
+            "VALUES (%s, %s, 50000, 'exact_match', 0.87) RETURNING id",
+            (tenant, camp),
+        ).fetchone()[0]
+        method, conf = conn.execute(
+            "SELECT attribution_method, attribution_confidence "
+            "FROM attributions WHERE id = %s",
+            (attr,),
+        ).fetchone()
+        assert method == "exact_match"
+        assert conf == pytest.approx(0.87, abs=1e-4)
+
+        # 2. Pre-047-shape insert (both omitted) → NULLs, still valid.
+        legacy = conn.execute(
+            "INSERT INTO attributions (tenant_id, campaign_id, attributed_paise) "
+            "VALUES (%s, %s, 12000) RETURNING id",
+            (tenant, camp),
+        ).fetchone()[0]
+        lmethod, lconf = conn.execute(
+            "SELECT attribution_method, attribution_confidence "
+            "FROM attributions WHERE id = %s",
+            (legacy,),
+        ).fetchone()
+        assert lmethod is None and lconf is None
+
+        # 3. window_match + manual_owner are accepted by the CHECK.
+        for valid_method in ("window_match", "manual_owner"):
+            conn.execute(
+                "INSERT INTO attributions (tenant_id, campaign_id, attributed_paise, "
+                "attribution_method) VALUES (%s, %s, 1, %s)",
+                (tenant, camp, valid_method),
+            )
+
+        # 4. Bad method → CHECK rejects.
+        with pytest.raises(psycopg.Error):
+            conn.execute(
+                "INSERT INTO attributions (tenant_id, campaign_id, attributed_paise, "
+                "attribution_method) VALUES (%s, %s, 1, 'bogus_method')",
+                (tenant, camp),
+            )
+
+        # 5. Out-of-range confidence (>1 and <0) → CHECK rejects.
+        for bad_conf in (1.5, -0.1):
+            with pytest.raises(psycopg.Error):
+                conn.execute(
+                    "INSERT INTO attributions (tenant_id, campaign_id, "
+                    "attributed_paise, attribution_confidence) "
+                    "VALUES (%s, %s, 1, %s)",
+                    (tenant, camp, bad_conf),
+                )
