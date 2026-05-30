@@ -45,11 +45,18 @@ from orchestrator.agent.limits.wallclock_timer import WALL_CLOCK_HARD_LIMIT_S
 from orchestrator.agent.orchestrator_agent import build_orchestrator_agent
 from orchestrator.agent.sales_recovery import run_sales_recovery_agent
 from orchestrator.agent.schemas.campaign_plan import parse_campaign_plan
+from orchestrator.agent.tools.request_owner_approval import (
+    request_owner_approval_node,
+)
 from orchestrator.agent.tools.self_evaluate import SelfEvaluateAdapter
 from orchestrator.collapse import collapse_node
 from orchestrator.db import tenant_connection
 from orchestrator.handoffs import spawn_integration, spawn_sales_recovery
-from orchestrator.routing import orchestrator_terminal_node, route_after_orchestrator
+from orchestrator.routing import (
+    orchestrator_terminal_node,
+    route_after_collapse,
+    route_after_orchestrator,
+)
 from orchestrator.state.agent_graph_state import AgentGraphState
 
 
@@ -220,6 +227,14 @@ def build_supervisor_graph(
         "orchestrator_terminal",
         with_state_transition_hook(orchestrator_terminal_node, node_name="orchestrator_terminal"),
     )
+    # VT-47 — the Pillar-7 owner-approval gate node. NOT wrapped with
+    # with_state_transition_hook: this node calls langgraph.types.interrupt(),
+    # which raises GraphInterrupt mid-execution for the pregel loop to catch +
+    # checkpoint. A state-transition hook around it would observe a partial
+    # (interrupting) execution and could swallow / mis-time the GraphInterrupt.
+    # The node's own CL-390 logging is the observability substrate here.
+    # observability:opt-out reason=interrupt-raising-control-node-must-not-be-hook-wrapped-VT-47
+    graph.add_node("request_owner_approval", request_owner_approval_node)
     graph.add_edge(START, "orchestrator_agent")
     graph.add_conditional_edges(
         "orchestrator_agent",
@@ -237,7 +252,19 @@ def build_supervisor_graph(
     # returns to the supervisor's END (no collapse needed — no campaign
     # plan to persist).
     graph.add_edge("integration_agent", END)
-    graph.add_edge("collapse", END)
+    # VT-47 — after collapse persists a PROPOSED campaign it attaches
+    # pending_approval_request; route_after_collapse sends that to the
+    # approval gate (which pauses via interrupt()). Every other collapse
+    # terminal (refusal / defer / fail-closed rejection) goes straight to END.
+    graph.add_conditional_edges(
+        "collapse",
+        route_after_collapse,
+        {
+            "approval_gate": "request_owner_approval",
+            "end": END,
+        },
+    )
+    graph.add_edge("request_owner_approval", END)
     graph.add_edge("orchestrator_terminal", END)
 
     if checkpointer is not None:

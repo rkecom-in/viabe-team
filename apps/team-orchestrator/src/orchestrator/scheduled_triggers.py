@@ -442,6 +442,117 @@ def run_monthly_impact_body(now: datetime | None = None) -> list[UUID]:
 
 
 # ---------------------------------------------------------------------------
+# 5. Owner-approval timeout sweep — REAL body (VT-47)
+# ---------------------------------------------------------------------------
+#
+# CL-240: EXTEND the existing scheduled-trigger surface — do NOT add a parallel
+# poller. This is the 5th @DBOS.scheduled handler, registered alongside the
+# other four in register_scheduled_triggers(). It marks owner-approval pauses
+# that blew past their timeout_at as timed_out and resumes the affected run
+# with decision='timeout' (an explicit NON-approval terminal — Pillar 7:
+# timeout never auto-approves).
+
+APPROVAL_TIMEOUT_SWEEP_CRON = "*/30 * * * *"  # every 30 minutes
+APPROVAL_TIMED_OUT_EVENT = "approval_timed_out"
+
+
+def approval_timeout_sweep_scheduled(
+    scheduled_time: datetime,
+    actual_time: datetime,
+) -> None:
+    """DBOS scheduled handler — fires every 30 min. Resumes timed-out pauses.
+
+    NO LLM CALL — the timeout decision is a fixed verb, not classified.
+    """
+    run_approval_timeout_sweep_body(now=actual_time)
+
+
+def _scan_timed_out_approvals(now: datetime) -> list[dict[str, Any]]:
+    """Return open approvals past timeout_at (service-role read, workspace-wide).
+
+    Workspace-level scan (no GUC) so it sees every tenant's stale pauses; the
+    per-row resume below sets the tenant GUC for each (R4 — RLS on the
+    checkpoint + pending_approvals tables needs the tenant context per resume).
+    """
+    from orchestrator.graph import get_pool
+    from psycopg.rows import dict_row
+
+    with get_pool().connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            """
+            SELECT id::text AS id, tenant_id::text AS tenant_id,
+                   run_id::text AS run_id
+            FROM pending_approvals
+            WHERE resolved_at IS NULL AND timeout_at <= %s
+            ORDER BY timeout_at ASC
+            """,
+            (now,),
+        )
+        return [dict(row) for row in cur.fetchall()]
+
+
+def run_approval_timeout_sweep_body(now: datetime | None = None) -> list[UUID]:
+    """Owner-approval timeout sweep body — REAL (VT-47).
+
+    For each open approval past its timeout_at: resolve it with
+    decision='timeout' (status='timed_out') and resume the paused run so the
+    graph reaches a terminal state (the gate node returns owner_decision=
+    'timeout'; the campaign does NOT send — Pillar 7). Returns the list of
+    resolved approval ids for canary inspection.
+
+    Callable directly with an injected ``now`` (mirrors the other four bodies)
+    so the canary can drive a past-timeout row without waiting for the cron.
+
+    Per-approval try/except: one stuck resume must not halt the sweep
+    (observability-safe, matches attribution_close / day39 bodies).
+    """
+    from orchestrator.agent.approval_resume import mark_approval_resolved, resume_run
+    from orchestrator.db import tenant_connection
+
+    now = now or datetime.now(timezone.utc)
+    timed_out = _scan_timed_out_approvals(now)
+    resolved: list[UUID] = []
+    for approval in timed_out:
+        approval_id = approval["id"]
+        tenant_id = approval["tenant_id"]
+        run_id = approval["run_id"]
+        try:
+            # Set the tenant GUC for the resolve write (RLS).
+            with tenant_connection(tenant_id) as conn:
+                mark_approval_resolved(conn, approval_id, "timeout")
+            # Resume the suspended run with the timeout decision, then close
+            # the original paused run.
+            resume_run(run_id, "timeout")
+            with tenant_connection(tenant_id) as conn:
+                conn.execute(
+                    "UPDATE pipeline_runs SET status = 'completed', ended_at = now() "
+                    "WHERE id = %s",
+                    (run_id,),
+                )
+            log_event(
+                event_type=APPROVAL_TIMED_OUT_EVENT,
+                run_id=UUID(run_id),
+                tenant_id=UUID(tenant_id),
+                severity="info",
+                component="scheduled_trigger",
+                payload={
+                    # CL-390: ids + decision only; no PII.
+                    "approval_id": approval_id,
+                    "decision": "timeout",
+                    "swept_at_utc": now.astimezone(timezone.utc).isoformat(),
+                },
+            )
+            resolved.append(UUID(approval_id))
+        except Exception:  # noqa: BLE001 — one stuck resume must not halt the sweep
+            logger.exception(
+                "approval_timeout_sweep: resume failed for approval %s "
+                "(tenant=%s run=%s); sweep continues",
+                approval_id, tenant_id, run_id,
+            )
+    return resolved
+
+
+# ---------------------------------------------------------------------------
 # Deterministic workflow_id derivation (DBOS exactly-once short-circuit)
 # ---------------------------------------------------------------------------
 
@@ -473,7 +584,7 @@ _registered = False
 
 
 def register_scheduled_triggers() -> None:
-    """Apply the ``@DBOS.scheduled`` decoration to the 4 trigger handlers.
+    """Apply the ``@DBOS.scheduled`` decoration to the 5 trigger handlers.
 
     Call this BEFORE :func:`dbos_config.launch_dbos`. Same ordering rule
     as :func:`orchestrator.dbos_purge.register_purge_scheduler`:
@@ -486,6 +597,9 @@ def register_scheduled_triggers() -> None:
     (which would re-register the same poller and shift
     ``app_version`` mid-run, breaking the recovery filter at
     ``_recovery.py:58``).
+
+    VT-47 (CL-240): the 5th handler is the owner-approval timeout sweep —
+    EXTENDING this surface, NOT a parallel poller.
     """
     global _registered
     if _registered:
@@ -494,10 +608,13 @@ def register_scheduled_triggers() -> None:
     DBOS.scheduled(ATTRIBUTION_CLOSE_CRON)(attribution_close_scheduled)
     DBOS.scheduled(DAY39_EVALUATION_CRON)(day39_evaluation_scheduled)
     DBOS.scheduled(MONTHLY_IMPACT_CRON)(monthly_impact_scheduled)
+    DBOS.scheduled(APPROVAL_TIMEOUT_SWEEP_CRON)(approval_timeout_sweep_scheduled)
     _registered = True
 
 
 __all__ = [
+    "APPROVAL_TIMED_OUT_EVENT",
+    "APPROVAL_TIMEOUT_SWEEP_CRON",
     "ATTRIBUTION_CLOSED_EVENT",
     "ATTRIBUTION_CLOSE_CRON",
     "ATTRIBUTION_CLOSE_SHELL_EVENT",
@@ -511,6 +628,7 @@ __all__ = [
     "SHELL_STATUS",
     "WEEKLY_CADENCE_CRON",
     "WEEKLY_CADENCE_EVENT",
+    "approval_timeout_sweep_scheduled",
     "attribution_close_scheduled",
     "attribution_close_workflow_id",
     "day39_evaluation_scheduled",
@@ -518,6 +636,7 @@ __all__ = [
     "monthly_impact_scheduled",
     "monthly_workflow_id",
     "register_scheduled_triggers",
+    "run_approval_timeout_sweep_body",
     "run_attribution_close_body",
     "run_day39_evaluation_body",
     "run_monthly_impact_body",

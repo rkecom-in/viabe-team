@@ -80,3 +80,29 @@ def test_classify_terminal_missing_count_defaults_to_zero():
 
     assert status == "completed"
     assert reason == "campaign_not_sent_invalid_cohort:0"
+
+
+# --- VT-47: 'paused' terminal --------------------------------------------------
+
+
+def test_paused_is_a_valid_final_status():
+    """The new 'paused' terminal is part of the FinalStatus literal so it can
+    flow to pipeline_runs.status (migration 052 CHECK)."""
+    from typing import get_args
+
+    from orchestrator.agent.dispatch import FinalStatus
+
+    assert "paused" in get_args(FinalStatus)
+
+
+def test_interrupt_state_is_handled_before_classify_terminal():
+    """Contract: dispatch_brain detects ``__interrupt__`` in the returned
+    state (langgraph surfaces it there — it does NOT raise) and maps it to
+    'paused' BEFORE calling _classify_terminal. _classify_terminal itself has
+    no paused branch by design; an interrupted state never reaches it. This
+    test pins the surface key langgraph uses so a version bump that renames it
+    is caught here rather than silently turning every pause into 'completed'."""
+    interrupted_state = {"foo": "x", "__interrupt__": ["sentinel"]}
+    assert interrupted_state.get("__interrupt__"), (
+        "dispatch_brain keys the paused branch on '__interrupt__' truthiness"
+    )

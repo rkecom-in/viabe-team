@@ -54,6 +54,12 @@ def build_graph() -> StateGraph:
 
 _pool: ConnectionPool | None = None
 _compiled: Any | None = None
+# VT-47: the module-level PostgresSaver is exposed so the dispatch path
+# (dispatch.py) can compile the SUPERVISOR graph with the same checkpointer.
+# The owner-approval gate's interrupt()/resume requires a checkpointer +
+# thread_id; before VT-47 the supervisor graph was compiled checkpoint-free
+# (dispatch.py:188) so a pause could not persist.
+_saver: Any | None = None
 
 
 def _reset_connection(conn: Any) -> None:
@@ -95,7 +101,7 @@ def init_substrate(database_url: str) -> None:
     per-call connection. ``setup()`` creates the checkpoint tables; RLS is
     applied immediately after (Pillar 3, no retrofit).
     """
-    global _pool, _compiled
+    global _pool, _compiled, _saver
     if _compiled is not None:
         return
     _pool = ConnectionPool(
@@ -109,6 +115,7 @@ def init_substrate(database_url: str) -> None:
     saver = PostgresSaver(_pool)
     saver.setup()
     _setup_checkpoint_rls(_pool)
+    _saver = saver
     _compiled = build_graph().compile(checkpointer=saver)
 
 
@@ -126,14 +133,27 @@ def get_pool() -> ConnectionPool:
     return _pool
 
 
+def get_checkpointer() -> Any:
+    """Return the module-level PostgresSaver (VT-47).
+
+    Used by dispatch.py to compile the supervisor graph with the SAME
+    checkpointer the substrate set up + RLS'd, so the owner-approval gate's
+    interrupt()/resume persists. Raises if init_substrate() has not run.
+    """
+    if _saver is None:
+        raise RuntimeError("init_substrate() not called — launch_dbos() first")
+    return _saver
+
+
 def reset_substrate() -> None:
     """Close and clear the module-level substrate.
 
     Used by shutdown_dbos() so a later launch_dbos() rebuilds cleanly — e.g.
     when a test suite cycles DBOS across more than one module.
     """
-    global _pool, _compiled
+    global _pool, _compiled, _saver
     if _pool is not None:
         _pool.close()
     _pool = None
     _compiled = None
+    _saver = None

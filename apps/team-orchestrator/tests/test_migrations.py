@@ -881,3 +881,145 @@ def test_tenant_recovery_target_columns(migrated):
             (tenant_id,),
         ).fetchone()[0]
         assert int(zero_floor) == 0
+
+
+# --- Migration 052: pending_approvals + pipeline_runs 'paused' (VT-47) --------
+
+
+def test_pipeline_runs_status_accepts_paused(migrated):
+    """VT-47 (migration 052): the pipeline_runs.status CHECK is altered to
+    accept the NEW 'paused' terminal; a bogus value is still rejected."""
+    dsn = migrated["dsn"]
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        tenant = conn.execute(
+            "INSERT INTO tenants (business_name, plan_tier, phase) "
+            "VALUES ('Paused Status Test', 'founding', 'onboarding') RETURNING id"
+        ).fetchone()[0]
+
+        # 'paused' is accepted.
+        run = conn.execute(
+            "INSERT INTO pipeline_runs (tenant_id, run_type, status) "
+            "VALUES (%s, 'orchestrator', 'paused') RETURNING id",
+            (tenant,),
+        ).fetchone()[0]
+        assert run is not None
+
+        # A run can transition paused -> completed (resume / timeout path).
+        conn.execute(
+            "UPDATE pipeline_runs SET status = 'completed' WHERE id = %s", (run,)
+        )
+
+        # An unknown status is still rejected by the (re-added) CHECK.
+        with pytest.raises(psycopg.errors.CheckViolation):
+            conn.execute(
+                "INSERT INTO pipeline_runs (tenant_id, run_type, status) "
+                "VALUES (%s, 'orchestrator', 'bogus_status')",
+                (tenant,),
+            )
+
+    # The constraint exists by its canonical (auto-)name and lists 'paused'.
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        condef = conn.execute(
+            "SELECT pg_get_constraintdef(oid) FROM pg_constraint "
+            "WHERE conrelid = 'pipeline_runs'::regclass "
+            "AND conname = 'pipeline_runs_status_check'"
+        ).fetchone()
+    assert condef is not None, "pipeline_runs_status_check must exist after 052"
+    assert "paused" in condef[0]
+
+
+def test_pending_approvals_rls_and_decision_check(migrated):
+    """VT-47 (migration 052): pending_approvals RLS cross-tenant isolation +
+    the decision CHECK rejects an unknown verb; a pending row (decision NULL)
+    is valid."""
+    dsn = migrated["dsn"]
+
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        tenant_a = conn.execute(
+            "INSERT INTO tenants (business_name, plan_tier, phase) "
+            "VALUES ('PA Tenant A', 'founding', 'onboarding') RETURNING id"
+        ).fetchone()[0]
+        tenant_b = conn.execute(
+            "INSERT INTO tenants (business_name, plan_tier, phase) "
+            "VALUES ('PA Tenant B', 'standard', 'onboarding') RETURNING id"
+        ).fetchone()[0]
+        run_a = conn.execute(
+            "INSERT INTO pipeline_runs (tenant_id, run_type, status) "
+            "VALUES (%s, 'orchestrator', 'paused') RETURNING id",
+            (tenant_a,),
+        ).fetchone()[0]
+
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute("SET ROLE rls_tester")
+
+        # Tenant A writes a pending approval (decision NULL).
+        conn.execute(
+            "SELECT set_config('app.current_tenant', %s, false)", (str(tenant_a),)
+        )
+        conn.execute(
+            "INSERT INTO pending_approvals "
+            "(tenant_id, run_id, approval_type, summary, timeout_at) "
+            "VALUES (%s, %s, 'campaign_send', 'approve?', now() + interval '48 hours')",
+            (tenant_a, run_a),
+        )
+        count_a = conn.execute(
+            "SELECT count(*) FROM pending_approvals WHERE tenant_id = %s",
+            (tenant_a,),
+        ).fetchone()[0]
+        assert count_a == 1
+
+        # RLS: tenant B sees none of A's approvals.
+        conn.execute(
+            "SELECT set_config('app.current_tenant', %s, false)", (str(tenant_b),)
+        )
+        leaked = conn.execute(
+            "SELECT count(*) FROM pending_approvals WHERE tenant_id = %s",
+            (tenant_a,),
+        ).fetchone()[0]
+        assert leaked == 0, "RLS must block tenant B from seeing tenant A's approvals"
+
+        # Attack: scoped to B, inserting for A is rejected by WITH CHECK.
+        with pytest.raises(psycopg.Error):
+            conn.execute(
+                "INSERT INTO pending_approvals "
+                "(tenant_id, run_id, approval_type, summary, timeout_at) "
+                "VALUES (%s, %s, 'campaign_send', 'x', now() + interval '1 hour')",
+                (tenant_a, run_a),
+            )
+
+    # decision CHECK: a bogus verb is rejected (superuser, bypasses RLS).
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        with pytest.raises(psycopg.errors.CheckViolation):
+            conn.execute(
+                "INSERT INTO pending_approvals "
+                "(tenant_id, run_id, approval_type, summary, timeout_at, decision) "
+                "VALUES (%s, %s, 'campaign_send', 'x', now() + interval '1 hour', 'bogus')",
+                (tenant_a, run_a),
+            )
+        # The valid verbs are accepted.
+        for verb in ("approved", "rejected", "needs_changes", "timeout"):
+            conn.execute(
+                "INSERT INTO pending_approvals "
+                "(tenant_id, run_id, approval_type, summary, timeout_at, decision, "
+                " status, resolved_at) "
+                "VALUES (%s, %s, 'campaign_send', 'x', now(), %s, 'approved', now())",
+                (tenant_a, run_a, verb),
+            )
+
+
+def test_pending_approvals_run_fk_same_tenant(migrated):
+    """VT-47: pending_approvals.run_id FK to pipeline_runs — a run that does
+    not exist is rejected (referential integrity for the resume key)."""
+    dsn = migrated["dsn"]
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        tenant = conn.execute(
+            "INSERT INTO tenants (business_name, plan_tier, phase) "
+            "VALUES ('PA FK Tenant', 'founding', 'onboarding') RETURNING id"
+        ).fetchone()[0]
+        with pytest.raises(psycopg.errors.ForeignKeyViolation):
+            conn.execute(
+                "INSERT INTO pending_approvals "
+                "(tenant_id, run_id, approval_type, summary, timeout_at) "
+                "VALUES (%s, %s, 'campaign_send', 'x', now() + interval '1 hour')",
+                (tenant, str(uuid4())),  # non-existent run_id
+            )
