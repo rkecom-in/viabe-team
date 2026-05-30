@@ -433,3 +433,141 @@ def test_operator_allowlist_deny_all_rls_and_grant_revoke(migrated):
             (op_a,),
         ).fetchone()[0]
         assert retained == 1, "revoked row kept for audit"
+
+
+# --- Migration 049: send_idempotency_keys + campaign_messages (VT-44) ----------
+
+
+def test_send_idempotency_keys_rls_and_unique(migrated):
+    """VT-44: send_idempotency_keys UNIQUE(tenant_id, idempotency_key) +
+    RLS cross-tenant isolation (migration 049)."""
+    dsn = migrated["dsn"]
+
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        tenant_a = conn.execute(
+            "INSERT INTO tenants (business_name, plan_tier, phase) "
+            "VALUES ('Idem Tenant A', 'founding', 'onboarding') RETURNING id"
+        ).fetchone()[0]
+        tenant_b = conn.execute(
+            "INSERT INTO tenants (business_name, plan_tier, phase) "
+            "VALUES ('Idem Tenant B', 'standard', 'onboarding') RETURNING id"
+        ).fetchone()[0]
+
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute("SET ROLE rls_tester")
+
+        # Tenant A writes a ledger row.
+        conn.execute(
+            "SELECT set_config('app.current_tenant', %s, false)", (str(tenant_a),)
+        )
+        conn.execute(
+            "INSERT INTO send_idempotency_keys "
+            "(tenant_id, idempotency_key, customer_id, message_sid, send_status) "
+            "VALUES (%s, 'idem-key-1', NULL, 'SM_test_1', 'sent')",
+            (tenant_a,),
+        )
+
+        # Idempotency: same (tenant, key) again → ON CONFLICT DO NOTHING (0 rows).
+        inserted = conn.execute(
+            "INSERT INTO send_idempotency_keys "
+            "(tenant_id, idempotency_key, customer_id, message_sid, send_status) "
+            "VALUES (%s, 'idem-key-1', NULL, 'SM_test_dup', 'sent') "
+            "ON CONFLICT (tenant_id, idempotency_key) DO NOTHING",
+            (tenant_a,),
+        ).rowcount
+        assert inserted == 0, "duplicate idempotency key must be a no-op"
+
+        # Exactly one row visible to A.
+        count_a = conn.execute(
+            "SELECT count(*) FROM send_idempotency_keys WHERE idempotency_key = 'idem-key-1'"
+        ).fetchone()[0]
+        assert count_a == 1
+
+        # RLS: tenant B sees none of A's rows.
+        conn.execute(
+            "SELECT set_config('app.current_tenant', %s, false)", (str(tenant_b),)
+        )
+        leaked = conn.execute(
+            "SELECT count(*) FROM send_idempotency_keys WHERE tenant_id = %s",
+            (tenant_a,),
+        ).fetchone()[0]
+        assert leaked == 0, "RLS must block tenant B from seeing tenant A's ledger rows"
+
+        # B may reuse the same idempotency_key (different tenant → different row).
+        conn.execute(
+            "INSERT INTO send_idempotency_keys "
+            "(tenant_id, idempotency_key, customer_id, message_sid, send_status) "
+            "VALUES (%s, 'idem-key-1', NULL, 'SM_test_b', 'sent')",
+            (tenant_b,),
+        )
+        count_b = conn.execute(
+            "SELECT count(*) FROM send_idempotency_keys WHERE idempotency_key = 'idem-key-1'"
+        ).fetchone()[0]
+        assert count_b == 1, "only tenant B's row should be visible under B's scope"
+
+        # Attack: scoped to B, inserting for A is rejected by WITH CHECK.
+        with pytest.raises(psycopg.Error):
+            conn.execute(
+                "INSERT INTO send_idempotency_keys "
+                "(tenant_id, idempotency_key, customer_id, message_sid, send_status) "
+                "VALUES (%s, 'attack-key', NULL, 'SM_attack', 'sent')",
+                (tenant_a,),
+            )
+
+
+def test_campaign_messages_rls_and_tables_exist(migrated):
+    """VT-44: campaign_messages table exists with RLS; cross-tenant isolation."""
+    dsn = migrated["dsn"]
+
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        # Verify both tables exist.
+        tables = {
+            row[0]
+            for row in conn.execute(
+                "SELECT tablename FROM pg_tables WHERE schemaname = 'public'"
+            )
+        }
+        assert "send_idempotency_keys" in tables, "send_idempotency_keys table missing"
+        assert "campaign_messages" in tables, "campaign_messages table missing"
+
+        tenant_a = conn.execute(
+            "INSERT INTO tenants (business_name, plan_tier, phase) "
+            "VALUES ('CM Tenant A', 'founding', 'onboarding') RETURNING id"
+        ).fetchone()[0]
+        tenant_b = conn.execute(
+            "INSERT INTO tenants (business_name, plan_tier, phase) "
+            "VALUES ('CM Tenant B', 'standard', 'onboarding') RETURNING id"
+        ).fetchone()[0]
+
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute("SET ROLE rls_tester")
+
+        # Tenant A writes a campaign_message row (freeform send, no campaign_id).
+        conn.execute(
+            "SELECT set_config('app.current_tenant', %s, false)", (str(tenant_a),)
+        )
+        conn.execute(
+            "INSERT INTO campaign_messages "
+            "(tenant_id, customer_id, message_sid, send_status, message_type) "
+            "VALUES (%s, NULL, 'SM_cm_test_a', 'sent', 'freeform')",
+            (tenant_a,),
+        )
+
+        # Tenant B sees none of A's rows.
+        conn.execute(
+            "SELECT set_config('app.current_tenant', %s, false)", (str(tenant_b),)
+        )
+        leaked = conn.execute(
+            "SELECT count(*) FROM campaign_messages WHERE tenant_id = %s",
+            (tenant_a,),
+        ).fetchone()[0]
+        assert leaked == 0, "RLS must block tenant B from seeing tenant A's messages"
+
+        # Attack: scoped to B, inserting for A is rejected by WITH CHECK.
+        with pytest.raises(psycopg.Error):
+            conn.execute(
+                "INSERT INTO campaign_messages "
+                "(tenant_id, customer_id, message_sid, send_status, message_type) "
+                "VALUES (%s, NULL, 'SM_attack', 'sent', 'freeform')",
+                (tenant_a,),
+            )
