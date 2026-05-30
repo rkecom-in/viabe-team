@@ -64,6 +64,9 @@ _EXPECTED_FIELDS = {
     "pending_owner_inputs",
     "meta",
     "data_completeness",
+    # VT-164: per-tenant recovery-target config fields
+    "recovery_target_multiplier",
+    "recovery_target_floor_paise",
 }
 
 
