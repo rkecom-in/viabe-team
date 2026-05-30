@@ -36,6 +36,7 @@ a logic change that belongs in its own row):
 
 from __future__ import annotations
 
+import json
 import os
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -43,8 +44,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 psycopg = pytest.importorskip("psycopg")
-from psycopg import errors as pg_errors  # noqa: E402 — after the psycopg gate
-from psycopg.rows import dict_row  # noqa: E402
+from psycopg.rows import dict_row  # noqa: E402 — after the psycopg gate
 
 pytestmark = pytest.mark.skipif(
     not os.environ.get("DATABASE_URL"),
@@ -146,17 +146,25 @@ def _seed_run(conn, tenant_id: str) -> str:
     )
 
 
-def _seed_campaign(conn, tenant_id: str, run_id: str, status: str = "proposed") -> str:
+def _seed_campaign(
+    conn,
+    tenant_id: str,
+    run_id: str,
+    template_id: str = "tmpl_x",
+    status: str = "proposed",
+) -> str:
     # Post-mig-018 campaigns shape: subscriber_id/template_id/body_params/
-    # proposed_by dropped, proposed_at→generated_at, plan_json added.
+    # proposed_by dropped, proposed_at→generated_at, template lives in
+    # plan_json -> 'message_plan' ->> 'template_id' (CampaignPlan v1.0).
+    plan = json.dumps({"message_plan": {"template_id": template_id}})
     return str(
         conn.execute(
             """
             INSERT INTO campaigns (tenant_id, run_id, status, generated_at, plan_json)
-            VALUES (%s, %s, %s, now(), '{}'::jsonb)
+            VALUES (%s, %s, %s, now(), %s::jsonb)
             RETURNING id
             """,
-            (tenant_id, run_id, status),
+            (tenant_id, run_id, status, plan),
         ).fetchone()[0]
     )
 
@@ -354,28 +362,36 @@ def test_match_transactions_set_config_runs_no_syntax_error(dsn, tenants):
     assert [u.txn_id for u in out.unmatched] == ["t1"]
 
 
-def test_get_recent_campaigns_set_config_runs_reaches_campaigns(dsn, tenants):
+def test_get_recent_campaigns_denies_cross_tenant(dsn, tenants, seed_conn):
+    # VT-256: get_recent_campaigns now reads generated_at + plan_json->
+    # 'message_plan'->>'template_id' (mig-018-reconciled). This was VT-254's
+    # pytest.raises(UndefinedColumn) placeholder — now a real success+denial
+    # assertion. Seeds a campaign per tenant; scoped to A, only A's is visible.
     from orchestrator.agent.tools.get_recent_campaigns import (
         GetRecentCampaignsInput,
         get_recent_campaigns,
     )
 
-    a, _ = tenants
+    a, b = tenants
+    camp_a = _seed_campaign(seed_conn, a, _seed_run(seed_conn, a), template_id="tmpl_a")
+    camp_b = _seed_campaign(seed_conn, b, _seed_run(seed_conn, b), template_id="tmpl_b")
     pool = _RlsPool(dsn)
 
-    # get_recent_campaigns SELECTs c.proposed_at / c.template_id, which mig 018
-    # renamed (proposed_at→generated_at) and dropped (template_id). The tool only
-    # swallows UndefinedTable, so it raises UndefinedColumn against the landed
-    # schema. Reaching the campaigns query proves the set_config statement
-    # executed (pre-fix the SET LOCAL form SyntaxError'd first). The stale-column
-    # reads are a SEPARATE latent bug flagged to Cowork, not in VT-254 scope.
-    with pytest.raises(pg_errors.UndefinedColumn):
-        get_recent_campaigns(
-            GetRecentCampaignsInput(tenant_id=a, days_back=365), pool=pool
-        )
+    out = get_recent_campaigns(
+        GetRecentCampaignsInput(tenant_id=a, days_back=365, limit=200), pool=pool
+    )
+    by_id = {c.campaign_id: c for c in out.campaigns}
+    assert camp_a in by_id
+    assert by_id[camp_a].template_id == "tmpl_a"  # plan_json read works
+    assert camp_b not in by_id  # RLS hides B's campaign from A
+    assert _count_other(dsn, scoped_to=a, table="campaigns", other=b) == 0
 
 
-def test_query_customer_ledger_set_config_runs_reaches_customers(dsn, tenants):
+def test_query_customer_ledger_degrades_gracefully(dsn, tenants):
+    # VT-257: customer_ledger_entries (table) AND customers.phone_token (column)
+    # are both forward-target/unlanded. The tool now swallows UndefinedColumn as
+    # well as UndefinedTable → graceful empty instead of the runtime crash VT-254
+    # caught. (Was VT-254's pytest.raises(UndefinedColumn) placeholder.)
     from orchestrator.agent.tools.query_customer_ledger import (
         QueryCustomerLedgerInput,
         query_customer_ledger,
@@ -384,13 +400,10 @@ def test_query_customer_ledger_set_config_runs_reaches_customers(dsn, tenants):
     a, _ = tenants
     pool = _RlsPool(dsn)
 
-    # The tool queries customers.phone_token, which the landed schema lacks
-    # (mig 045 has phone_e164). It only swallows UndefinedTable, so it raises
-    # UndefinedColumn here. That we reach the customers query — rather than a SET
-    # syntax error — proves the set_config statement executed. The
-    # phone_token/phone_e164 mismatch is a SEPARATE latent bug flagged to Cowork.
-    with pytest.raises(pg_errors.UndefinedColumn):
-        query_customer_ledger(
-            QueryCustomerLedgerInput(tenant_id=a, customer_phone_token="tok-x"),
-            pool=pool,
-        )
+    out = query_customer_ledger(
+        QueryCustomerLedgerInput(tenant_id=a, customer_phone_token="tok-x"),
+        pool=pool,
+    )
+    assert out.customer_id is None
+    assert out.ledger_entries == []
+    assert out.total_balance_paise == 0

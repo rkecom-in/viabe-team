@@ -3,11 +3,13 @@
 Deterministic per-tenant recent-campaign rollup. Pydantic IO; standalone
 callable. NOT wired to an Agent yet (VT-4 SDK skeleton still Backlog).
 
-Substrate map
+Substrate map (post-mig-018 — VT-256 reconciled to the landed schema)
 - campaign_id ← campaigns.id
-- sent_at ← campaigns.proposed_at (closest analog; no separate sent_at
-  column yet)
-- template_id ← campaigns.template_id
+- sent_at ← campaigns.generated_at (mig 018 renamed proposed_at→generated_at)
+- template_id ← campaigns.plan_json -> 'message_plan' ->> 'template_id'
+  (mig 018 dropped the standalone template_id column; the template lives in
+  the CampaignPlan v1.0 plan_json blob now). '' for variants with no
+  message_plan (out_of_scope / insufficient_data).
 - status ← campaigns.status
 - recipients_count ← always 1 per row (campaign row = one subscriber);
   callers may roll up by template_id externally
@@ -84,10 +86,19 @@ def get_recent_campaigns(
             try:
                 cur.execute(
                     """
+                    -- VT-256: mig 018 renamed proposed_at→generated_at and
+                    -- DROPPED template_id/body_params, collapsing the campaign
+                    -- into plan_json (CampaignPlan v1.0). Read generated_at and
+                    -- source template_id from plan_json->'message_plan' (mirrors
+                    -- the VT-140 execute.py fix). COALESCE so non-proposed
+                    -- variants (no message_plan) yield '' not a NULL→"None".
+                    -- GROUP BY c.id (PK) covers the other selected columns.
                     SELECT
                         c.id::text AS campaign_id,
-                        c.proposed_at AS sent_at,
-                        c.template_id,
+                        c.generated_at AS sent_at,
+                        COALESCE(
+                            c.plan_json -> 'message_plan' ->> 'template_id', ''
+                        ) AS template_id,
                         c.status,
                         COUNT(a.id) AS response_count
                     FROM campaigns c
@@ -95,9 +106,9 @@ def get_recent_campaigns(
                       ON a.campaign_id = c.id
                      AND a.tenant_id = c.tenant_id
                     WHERE c.tenant_id = %s
-                      AND c.proposed_at >= now() - make_interval(days => %s)
-                    GROUP BY c.id, c.proposed_at, c.template_id, c.status
-                    ORDER BY c.proposed_at DESC
+                      AND c.generated_at >= now() - make_interval(days => %s)
+                    GROUP BY c.id
+                    ORDER BY c.generated_at DESC
                     LIMIT %s
                     """,
                     (payload.tenant_id, payload.days_back, payload.limit),
