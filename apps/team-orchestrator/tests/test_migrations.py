@@ -267,3 +267,120 @@ def test_scheduled_followups_idempotency_and_rls(migrated):
                 "VALUES (%s, 'campaign_followup', 'cfk_attack', %s, '{}'::jsonb)",
                 (tenant_a, fire_at),
             )
+
+
+# --- Migration 045: customers + campaign_recipients cohort integrity (VT-170) -
+
+
+def test_customers_rls_and_cohort_integrity(migrated):
+    """VT-170: customers RLS isolation + campaign_recipients same-tenant
+    composite-FK integrity (cross-tenant linkage rejected at the DB)."""
+    dsn = migrated["dsn"]
+
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        tenant_a = conn.execute(
+            "INSERT INTO tenants (business_name, plan_tier, phase) "
+            "VALUES ('Cust Tenant A', 'founding', 'onboarding') RETURNING id"
+        ).fetchone()[0]
+        tenant_b = conn.execute(
+            "INSERT INTO tenants (business_name, plan_tier, phase) "
+            "VALUES ('Cust Tenant B', 'standard', 'onboarding') RETURNING id"
+        ).fetchone()[0]
+        cust_a = conn.execute(
+            "INSERT INTO customers (tenant_id, display_name) "
+            "VALUES (%s, 'Alice A') RETURNING id",
+            (tenant_a,),
+        ).fetchone()[0]
+        cust_b = conn.execute(
+            "INSERT INTO customers (tenant_id, display_name) "
+            "VALUES (%s, 'Bob B') RETURNING id",
+            (tenant_b,),
+        ).fetchone()[0]
+        run_a = conn.execute(
+            "INSERT INTO pipeline_runs (tenant_id, run_type, status) "
+            "VALUES (%s, 'campaign', 'running') RETURNING id",
+            (tenant_a,),
+        ).fetchone()[0]
+        camp_a = conn.execute(
+            "INSERT INTO campaigns (tenant_id, run_id, plan_json, status, "
+            "generated_at) VALUES (%s, %s, '{}'::jsonb, "
+            "'proposed', now()) RETURNING id",
+            (tenant_a, run_a),
+        ).fetchone()[0]
+
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute("SET ROLE rls_tester")
+
+        # RLS: scoped to A, only A's customer is visible.
+        conn.execute("SELECT set_config('app.current_tenant', %s, false)", (str(tenant_a),))
+        visible = {r[0] for r in conn.execute("SELECT id FROM customers")}
+        assert cust_a in visible
+        assert cust_b not in visible
+
+        # Valid same-tenant linkage succeeds.
+        conn.execute(
+            "INSERT INTO campaign_recipients (campaign_id, customer_id, tenant_id) "
+            "VALUES (%s, %s, %s)",
+            (camp_a, cust_a, tenant_a),
+        )
+        cohort_size = conn.execute(
+            "SELECT count(*) FROM campaign_recipients WHERE campaign_id = %s",
+            (camp_a,),
+        ).fetchone()[0]
+        assert cohort_size == 1
+
+        # Cross-tenant linkage: A's campaign + B's customer is REJECTED by
+        # the same-tenant composite FK (B's customer is invisible to A and
+        # the FK requires matching tenant_id on both sides).
+        with pytest.raises(psycopg.Error):
+            conn.execute(
+                "INSERT INTO campaign_recipients (campaign_id, customer_id, tenant_id) "
+                "VALUES (%s, %s, %s)",
+                (camp_a, cust_b, tenant_a),
+            )
+
+    # opt_out_status default + CHECK (superuser, bypasses RLS).
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        default_status = conn.execute(
+            "SELECT opt_out_status FROM customers WHERE id = %s", (cust_a,)
+        ).fetchone()[0]
+        assert default_status == "subscribed"
+        with pytest.raises(psycopg.Error):
+            conn.execute(
+                "INSERT INTO customers (tenant_id, display_name, opt_out_status) "
+                "VALUES (%s, 'X', 'bogus_status')",
+                (tenant_a,),
+            )
+
+
+def test_customers_partial_unique_phone(migrated):
+    """VT-170: (tenant_id, phone_e164) unique when phone present; NULL ok."""
+    dsn = migrated["dsn"]
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        tenant = conn.execute(
+            "INSERT INTO tenants (business_name, plan_tier, phase) "
+            "VALUES ('Phone Tenant', 'founding', 'onboarding') RETURNING id"
+        ).fetchone()[0]
+        conn.execute(
+            "INSERT INTO customers (tenant_id, phone_e164) VALUES (%s, '+919990000001')",
+            (tenant,),
+        )
+        # Duplicate phone same tenant → conflict.
+        with pytest.raises(psycopg.Error):
+            conn.execute(
+                "INSERT INTO customers (tenant_id, phone_e164) VALUES (%s, '+919990000001')",
+                (tenant,),
+            )
+    # Multiple NULL phones allowed.
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute(
+            "INSERT INTO customers (tenant_id, phone_e164) VALUES (%s, NULL)", (tenant,)
+        )
+        conn.execute(
+            "INSERT INTO customers (tenant_id, phone_e164) VALUES (%s, NULL)", (tenant,)
+        )
+        n = conn.execute(
+            "SELECT count(*) FROM customers WHERE tenant_id = %s AND phone_e164 IS NULL",
+            (tenant,),
+        ).fetchone()[0]
+        assert n == 2
