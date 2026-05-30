@@ -1,45 +1,44 @@
 # Latest State Snapshot
 
-**As of:** 2026-05-29 22:45 IST (Cowork-authored, end of marathon session).
-**Main HEAD:** `d8a3e20` (PR #134 VT-237 password auth). **Branch tip:** `d6ba63d` (VT-40 fix-1, unmerged). **Reports-Jun15 in 17 days.**
+**As of:** 2026-05-30 (Cowork-authored, Opus session on the new canonical machine; reconciled against `git fetch` + `git log origin/main`).
+**Main HEAD:** `9f2f38d` (PR #141 session export; = `origin/main`, verified in sync). **Reports-Jun15 in 16 days.**
+
+> Reconciled live: local HEAD == `origin/main` == `9f2f38d`. The prior snapshot was stale at `d8a3e20` and claimed VT-40/41/42/46/238 in flight — all of those merged (PRs #135–139) plus the two session-close PRs (#140, #141). Zero in flight at this baseline.
 
 ---
 
 ## CRITICAL PATH
 
-Sprint 2 substrate is shipped + Ops Console hot-fixes are done. The day cleared the Sprint 2 Integration Agent epic + Sprint 2 Cost+Moat (the parts non-blocked by Razorpay) + Sprint 9 docs cluster + 4 hot-fixes from Fazal's manual walks through the dev env (VT-230 /login redirect, VT-232 login styling, VT-233 Supabase fragment, VT-235 Ops Console styling, VT-236 7-day session, VT-237 password auth). Auth works end-to-end: magic-link OR password → 7-day operator JWT cookie → Ops Console pages styled + functional. Customer-data substrate is consent-gated + RLS-isolated. Next critical-path cluster: terminal-style stream view (VT-238, queued + dispatched but CC unresponsive), 4 SR-Agent MCP tools (VT-40 in-flight, VT-41/42/46 not started), and the dynamic operator allowlist (VT-228 deferred until VT-237 verified). After those: Sprint 8 launch cluster, mostly Fazal/vendor blocked.
+Sprint 2 substrate is shipped and the Ops Console works end-to-end. The 2026-05-29 marathon cleared the Sprint 2 Integration Agent epic, the non-Razorpay parts of Sprint 2 Cost+Moat, the Sprint 9 docs cluster, all Fazal-surfaced auth hot-fixes (VT-230/232/233/235/236), env-password auth (VT-237), the 4 SR-Agent MCP tools (VT-40/41/42/46), and the terminal-stream redesign (VT-238). Auth is live: magic-link OR env-password → 7-day operator JWT cookie → styled Ops Console. Customer-data substrate is consent-gated + RLS-isolated. **Remaining path to Reports-Jun15:** the launch-blocker is VT-231 (prod Supabase in Mumbai) — Fazal-side, and the CL-422 hard constraint means no real customer data touches dev until it closes. Everything else toward launch is either ship-thin feature work (batch 11 candidates below) or vendor/Fazal-blocked.
 
 ## IN FLIGHT
 
-**48 merges shipped today.** Final 5 unfinished items handed off for tomorrow's Opus 4.8 session: VT-40 PR #135 (query_customer_ledger MCP tool, fix-1 on branch awaiting CI green/auto-merge — resume with `gh pr checks 135 --watch`); VT-41/VT-42/VT-46 (get_business_profile + get_recent_campaigns + match_transactions MCP tools, not started; standalone callable like VT-49 pattern; brief intact at `.running/to-claudecode/20260529T215000Z-brief-ready-batch10-VT-237-40-41-42-46.md`); VT-238 (terminal-style stream view redesign, brief dispatched but not picked up; brief at `.running/to-claudecode/20260529T223000Z-brief-ready-VT-238-terminal-stream.md`; visual layer replacement only — VT-201 Realtime substrate preserved). CC orchestrator stopped responding ~22:25 IST after VT-40 fix-1; direct status-check signal sent 22:40 IST got no reply. Likely orchestrator daemon crash, paused, or context budget hit. Tomorrow's session should `ps aux | grep cc-orchestrator` first thing — restart if needed.
+**Nothing.** Zero open Cowork→CC work items at this baseline. `.running/to-cowork/` is empty; the dangerous stale `20260530T002000Z-task-session-close-commit-substrate` signal was retracted (`_RETRACTED-` in `processed/`). `.running/to-claudecode/` holds 67 already-handled signals awaiting an archive sweep (hygiene, not work). No PR is open that this session can see — note CI/PR-state is not checkable from the Cowork sandbox (see Operating reality).
 
 ## BLOCKED ON
 
-VT-225 design doc review (Fazal-side, low priority — L0 per-tenant k-anonymity admission doc shipped via PR #128; awaits Fazal review). VT-228 dynamic operator allowlist (auth-surface coordination — touches same files as VT-237/VT-233/VT-236; deferred to ship after VT-237 is verified working). VT-231 prod Mumbai provisioning (Fazal-side, launch-blocker — provision viabe-team-prod Supabase in ap-south-1 with all migrations + secrets rotation; hard constraint per CL-422: no real customer data on dev until VT-231 closes). Sprint 8 launch cluster (Fazal/vendor blocked — Razorpay Live KYC, Twilio DLT, landing page copy). VT-108/109/111/113/114/115 vendor approvals (Fazal-side — Meta templates, Razorpay Live, Twilio DLT, Apify, Resend DMARC, LangSmith billing, DPDP final review).
+VT-231 prod Mumbai provisioning (Fazal-side, **launch-blocker** — provision viabe-team-prod Supabase in ap-south-1 with migrations + secret rotation + Railway/Vercel prod wiring; CL-422 gate). VT-225 design-doc review (Fazal-side — L0 per-tenant k-anonymity admission doc shipped PR #128, awaits review before implementation). VT-228 dynamic operator allowlist (deferred — touches the VT-237/233/236 auth surface; ship after VT-237 is verified working in Vercel). Sprint 8 launch cluster (Fazal/vendor-blocked — Razorpay Live KYC, Twilio DLT, landing copy). Vendor approvals VT-108/109/111/113/114/115 (Meta templates, Razorpay Live, Twilio DLT, Apify, Resend DMARC, LangSmith billing, DPDP final review).
 
 ## NEXT ACTION
 
-Tomorrow's Opus 4.8 Cowork session: (1) read this snapshot + `docs/clau/decisions-ledger.md` first; (2) check git log + `ls .running/to-cowork` for any CC signals arrived overnight; (3) verify VT-237 env vars are set in Vercel (`OPERATOR_EMAIL` + `OPERATOR_PASSWORD`) and confirm Fazal can log in with password; (4) resume VT-40 PR #135 (re-run CI or merge if green); (5) re-dispatch VT-41/42/46 + VT-238 if CC is alive again; otherwise file as "next session" backlog; (6) after in-flight queue closes, propose batch 11 — VT-228 dynamic operator allowlist + remaining SR-Agent tools (VT-43/44/45/47/48 with appropriate substrate gates) + any Fazal-surfaced product feedback from overnight testing.
+Moving to implementation (batch 11). Top candidates, ship-thin toward Reports-Jun15: VT-228 (dynamic operator allowlist — now that VT-237 env-password is shipped), VT-225 implementation (after Fazal reviews the design doc), remaining SR-Agent MCP tools VT-43/44/45/47/48 (standalone-callable like the VT-40/49 pattern; check substrate gates per Rule #16), VT-189 Ops Console V2 sub-row decomposition, and Sprint 8 rows that don't need Razorpay Live yet (VT-87 read-only owner portal, VT-86 monthly impact-report PDF substrate). Confirm Fazal has set `OPERATOR_EMAIL` + `OPERATOR_PASSWORD` in Vercel before leaning on password login.
 
 ## DO NOT
 
-Do NOT re-litigate Standing decisions in `docs/clau/decisions-ledger.md`. Three new entries today: **CL-421** (zero-paste connectors, Locked Standing), **CL-422** (Seoul dev DB accepted, Standing-with-sunset). Do NOT re-architect VT-237 env-password auth — Fazal explicitly chose env-var-stored password over Supabase Auth password. When VT-228 multi-operator allowlist ships, the env-password approach migrates to per-operator hashes in the allowlist table; documented in VT-237 brief as Phase-2 migration note. Do NOT trigger magic-link emails during testing — VT-237 password path is the operator's primary login now. Do NOT roll back VT-235 Ops Console card styling for the terminal redesign — VT-238 ONLY replaces `/team/ops/stream` (live stream). Workspace + history + per-run + per-tenant pages keep gray-50/card aesthetic.
+Do NOT re-litigate Standing decisions in `docs/clau/decisions-ledger.md` — **CL-421** (zero-paste connectors, Locked) and **CL-422** (Seoul dev DB accepted; Mumbai = prod; no real customer data on dev until VT-231) are settled. Do NOT re-architect VT-237 env-password auth (Fazal's explicit choice; migrates to per-operator hashes when VT-228 ships). Do NOT roll back VT-235 card styling for the terminal redesign — VT-238 only touched `/team/ops/stream`. Do NOT push directly to main (protected, 11 checks; route via PR). Do NOT auto-merge (Pillar 7). Do NOT trust this snapshot's HEAD without re-running `git fetch` + `git log origin/main` (Rule #14).
 
 ---
 
-## What changed since 2026-05-25 ~23:40 IST (prior snapshot)
+## Operating reality (new this session — 2026-05-30)
 
-| Change | Where to read more |
+| Fact | Detail |
 |---|---|
-| **48 merges in one session** — Sprint 2 Integration Agent epic + Sprint 2 Cost+Moat partial + Sprint 9 docs cluster + 4 Ops Console hot-fixes + VT-237 password auth | `git log --oneline -50` |
-| CL-421 filed — all integration-agent connectors zero-manual-paste after OAuth | `decisions-ledger.md` |
-| CL-422 filed — dev DB Seoul-accepted (free-tier); prod = Mumbai (VT-231 launch-blocker) | `decisions-ledger.md` |
-| 5 follow-up rows from batch 8 — VT-225 (L0 k-anon design doc, shipped), VT-226 (webhook_metrics async, shipped), VT-227 (twilio replay purge, shipped), VT-228 (allowlist table, queued), VT-229 (region canary, cancelled per CL-422), VT-231 (prod Mumbai, queued) | `.viabe/sprint/VT-22*` |
-| Ops Console end-to-end working — magic-link → fragment-finalize → operator JWT → styled UI; password login at `/team/ops/login` once Vercel env vars set | `apps/team-web/app/(auth)/team/ops/login/` |
-| Cookie path + TTL hardened — path=/team, 7-day TTL, FAZAL_OWNER_UUID allowlist gate, constant-time password compare | `apps/team-web/app/api/ops/login/route.ts` |
-| GitHub Actions billing block hit + resolved — Fazal raised on-demand budget | (no code change) |
-| Memory updates: dev-DB Seoul accepted, self-triggered CC poll | `~/Library/.../memory/*` |
+| **Canonical machine migration done** | New machine is the single canonical instance; repo + `~/.claude/` copied over, old machine retired. Shared-tree discipline (CL-418) now applies here. |
+| **Queue poller scheduled** | `viabe-team-queue-poller`, `*/15`, git-only (CI-blind). Triages `.running/to-cowork/`, reconciles via git, flags snapshot drift; never merges or dispatches (Pillar 7). |
+| **dashboard-regen NOT scheduled** | Fazal dropped it — dashboards regenerate on demand via `scripts/build_dashboard.py` + `build_sprint_dashboard.py` → artifacts `viabe-team-pm-dashboard` / `viabe-team-sprint-dashboard` (re-registered this session). |
+| **Sandbox git access** | Repo is **private**; read-only PAT in `.git/config` remote URL. `git fetch`/`log`/`ls-remote` work. `gh` not installed; `api.github.com` blocked → no CI/PR-state from sandbox (terminal-side only). |
+| **Pending PR** | CLAUDE.md v2 (incl. public→private fix) + this snapshot regen staged for a docs PR Fazal pushes terminal-side (Cowork token is read-only). |
 
 ## How to read this snapshot
 
-Per Clau's operating brief §4 item 1, this is the FIRST file a fresh session reads. Then `docs/clau/decisions-ledger.md`. Then if something is unclear, the relevant `docs/clau/entries/CL-<N>.md`. Tomorrow's session: status check CC first, then resume the deferred queue.
+Per the bootstrap order, this is read after `operating-brief.md`. It is a hypothesis until `git fetch` + `git log origin/main` confirm the HEAD (Rule #14). The `viabe-team-queue-poller` flags drift but does not regenerate this file — regeneration is a Fazal-authorized step.
