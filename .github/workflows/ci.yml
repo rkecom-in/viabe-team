@@ -8,8 +8,8 @@ on:
     # non-code paths (docs, sprint substrate, Cowork session exports, or
     # the deploy-dev workflow — which CI never tests). paths-ignore only
     # skips when EVERY changed file matches; a mixed code+docs PR still
-    # runs. main has no branch protection, so a skipped run does NOT
-    # block merge.
+    # runs. main's ruleset has "Require status checks to pass" OFF
+    # (2026-05-30), so a skipped run does NOT block merge.
     paths-ignore:
       - '**/*.md'
       - 'docs/**'
@@ -18,8 +18,9 @@ on:
       - '.github/workflows/deploy-dev.yml'
 
 # CI runs on pull_request only (no push trigger) — avoids double-running
-# push+PR for the same SHA. main has NO branch protection; CI is a
-# non-blocking backstop, the local pre-push hook is the safety gate.
+# push+PR for the same SHA. main's ruleset has require-status-checks OFF
+# (2026-05-30, VT-245); CI is a non-blocking backstop, the local
+# pre-push hook is the safety gate.
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
@@ -29,9 +30,9 @@ jobs:
     name: lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v6
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v6
         with:
           node-version: 22
           cache: pnpm
@@ -41,7 +42,7 @@ jobs:
       # Lint rule: no-cross-product-env-vars (fails on REPORTS_* env vars).
       - run: node scripts/lint-cross-product-env.mjs
       # Python lint.
-      - uses: astral-sh/setup-uv@v5
+      - uses: astral-sh/setup-uv@v8
       - run: uvx ruff check apps/team-orchestrator apps/team-ingestion-worker
       # Pillar 1: the deterministic subtree (Pre-Filter Gate + phase machine)
       # must contain no LLM calls.
@@ -76,7 +77,7 @@ jobs:
     name: gate-no-deprecated-langgraph-imports
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Block deprecated create_react_agent import
         run: |
           if grep -rE "from langgraph\.prebuilt import.*create_react_agent" \
@@ -96,7 +97,7 @@ jobs:
     # reasoning path. Function-body scoped grep mirrors VT-171's
     # gate-no-langsmith-imports pattern.
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Forbid LLM references in deterministic trigger + billing bodies
         run: |
           set -euo pipefail
@@ -205,7 +206,7 @@ jobs:
     # fails the build. Tests, canaries, and docs are exempt (they may
     # reference langsmith historically).
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Block langsmith imports under apps/team-orchestrator/src
         run: |
           if grep -rnE '^\s*(from langsmith|import langsmith)\b' \
@@ -229,8 +230,8 @@ jobs:
     # CI). When Anthropic ships a public local tokenizer or we have an
     # API-key-bearing CI workflow, swap to the real count.
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v8
       - name: Token cap (4000) on sales_recovery_v1 system prompt
         run: |
           uv run --no-project --with tiktoken python - <<'PY'
@@ -254,7 +255,7 @@ jobs:
     # Empty today (no tools on main yet — framework lands first); the
     # gate guards future VT-5.x PRs.
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Tool tests must import run_tool_test
         run: |
           TOOLS_TEST_DIR=apps/team-orchestrator/tests/orchestrator/agent/tools
@@ -279,8 +280,8 @@ jobs:
     # CI fast. Re-uses the orchestrator's installed Pydantic; runs
     # against the source tree directly.
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v8
       - name: Validate every connector spec
         working-directory: apps/team-orchestrator
         run: |
@@ -312,7 +313,7 @@ jobs:
     # mismatch — bumping a budget is a Type-3-governance decision
     # carrying its own brief, not a quiet code change.
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Token budget = 80_000
         run: |
           grep -qE '^_RUN_LEVEL_TOKEN_HARD_LIMIT = 80_000$' \
@@ -339,9 +340,9 @@ jobs:
     name: typecheck
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v6
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v6
         with:
           node-version: 22
           cache: pnpm
@@ -352,9 +353,9 @@ jobs:
     name: test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v6
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v6
         with:
           node-version: 22
           cache: pnpm
@@ -366,7 +367,7 @@ jobs:
       # Python unit tests (smoke). Heavy deps are not installed here — tests
       # import only stdlib + the package under test. DB-backed migration tests
       # skip themselves (no psycopg / no DATABASE_URL); they run in `migrations`.
-      - uses: astral-sh/setup-uv@v5
+      - uses: astral-sh/setup-uv@v8
       - run: uv run --no-project --with pytest pytest
         working-directory: apps/team-orchestrator
       - run: uv run --no-project --with pytest pytest
@@ -385,9 +386,9 @@ jobs:
     # lint-grade check today; we light up the full matrix when secrets are
     # provisioned. The single unauth → /login redirect test runs always.
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v6
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v6
         with:
           node-version: 22
           cache: pnpm
@@ -476,8 +477,8 @@ jobs:
           --health-timeout 5s
           --health-retries 5
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v8
       # Applies /migrations/ via the runner, then asserts RLS tenant isolation.
       - name: Apply migrations + RLS attack tests
         env:
@@ -503,8 +504,8 @@ jobs:
           --health-timeout 5s
           --health-retries 5
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v8
         with:
           python-version: "3.12"
       # VT-3.1 DBOS-wrapped LangGraph substrate: DBOS auto-resume, checkpoint
@@ -560,7 +561,7 @@ jobs:
     # for ast); ubuntu-latest already has python3.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Assert every graph.add_node is hooked or opt-out (AST)
         run: |
           python3 <<'PY'
@@ -630,7 +631,7 @@ jobs:
     # pattern (Q2 Option B fallback noted in plan-review verdict).
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Assert every @tool is @tool_step decorated
         run: |
           set -e
@@ -662,7 +663,7 @@ jobs:
       contents: read
       pull-requests: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
       - uses: gitleaks/gitleaks-action@v2
@@ -709,8 +710,8 @@ jobs:
     runs-on: ubuntu-latest
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v8
         with:
           python-version: "3.12"
       - name: mypy --strict (apps/team-orchestrator)

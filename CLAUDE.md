@@ -32,7 +32,7 @@ If the snapshot's HEAD / IN FLIGHT / NEXT ACTION doesn't match what `git log` sh
 
 **Binding launch milestone:** Reports-Jun15 (2026-06-15). Sprints 1+2 ship for that gate; everything else is ship-thin.
 
-**Repo:** `github.com/rkecom-in/viabe-team` (**private** — auth required for fetch/clone). Local clone at `/Users/fazalkhan/development/viabe-team`. **Main is protected** — 11 required status checks; direct push rejected. All commits route via PR.
+**Repo:** `github.com/rkecom-in/viabe-team` (**private** — auth required for fetch/clone). Local clone at `/Users/fazalkhan/development/viabe-team`. **Main protection = an account-level ruleset; "Require status checks to pass" was turned OFF 2026-05-30 (VT-245)** — CI checks no longer block merges. The **local pre-push hook** (`scripts/git-hooks/pre-push`, install via `scripts/install-hooks.sh`) is the safety gate; CI is a non-blocking backstop on PRs. Route-via-PR remains a convention, not an enforced gate.
 
 ---
 
@@ -136,13 +136,14 @@ Fazal grants scope at **batch level** ("ship batch 9," "complete the queued task
 
 **New scope = new explicit grant.** You don't ask mid-batch for every step, but you also don't widen scope without asking.
 
-### Branch protection workflow
+### Merge workflow (post-VT-245, 2026-05-30)
 
-Main requires 11 status checks; direct push rejected. All commits — including session-close substrate, doc-only PRs, even one-line gitignore patches — route via PR.
+Main protection is an account-level ruleset, but **"Require status checks to pass" is OFF** (Fazal, 2026-05-30) — CI no longer gates merges. The **local pre-push hook is the safety gate**; run `scripts/install-hooks.sh` once after cloning. CI is a non-blocking backstop on PRs.
 
-- Plan ~5–10 min CI per PR
-- Recurring flakes on docs-only PRs: RLS service_count + chrono-order — safe to rerun via `gh pr checks <N> --watch`
-- Force-merge only if checks have retried 2+ times AND code is clean AND Fazal authorized
+- **Before every push:** the `pre-push` hook runs the fast CI-equivalent suite (ruff + dep-less smoke + team-web tsc/vitest/lint + a conditional orchestrator docker build). It aborts the push on failure. Bypass with `git push --no-verify` (sparingly). Never push code the hook (or the equivalent local commands) hasn't passed — failing CI burns Actions minutes.
+- **Trigger-diet (VT-245):** ci.yml + deploy-dev.yml `paths-ignore` docs/sprint/session/cross-workflow changes, so those PRs/merges run 0 jobs.
+- Route-via-PR remains the convention (not enforced).
+- Recurring flakes (being fixed in VT-245): RLS service_count + chrono-order in `test_pipeline_log.py` — rerun via `gh pr checks <N> --watch` if they trip pre-fix.
 
 ### FUSE lock workflow
 

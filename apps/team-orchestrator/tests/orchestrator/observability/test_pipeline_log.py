@@ -245,6 +245,24 @@ def _seed_tenant(pool, tenant_id: UUID) -> None:
         )
 
 
+def _poll_until(fn, want, *, timeout: float = 10.0, interval: float = 0.1):
+    """VT-245: poll fn() until it equals `want` or timeout.
+
+    `log_event` writes are not synchronous w.r.t. the caller; a fixed
+    `time.sleep` raced the commit-visibility under CI load (the
+    RLS service_count + chrono-order flakes: count came up short). Polling
+    until the expected row count lands removes the timing dependency
+    entirely — deterministic regardless of how fast/slow the writes commit.
+    Returns the last observed value (caller asserts on it).
+    """
+    deadline = time.monotonic() + timeout
+    last = fn()
+    while last != want and time.monotonic() < deadline:
+        time.sleep(interval)
+        last = fn()
+    return last
+
+
 @pytest.mark.integration
 def test_append_only_under_app_role(_dbpool) -> None:
     """Suite 1 — UPDATE / DELETE under app_role raise permission denied."""
@@ -282,10 +300,12 @@ def test_query_run_returns_chronologically_ordered(_dbpool) -> None:
             {"k": f"v{i}"},
             duration_ms=i,
         )
-    time.sleep(0.5)
 
+    # VT-245: poll until all 50 land (was a fixed sleep(0.5) that raced the
+    # async commit under CI load → intermittent `assert len == 50` with 47/48).
+    count = _poll_until(lambda: len(query_run(run_id)), 50)
     events = query_run(run_id)
-    assert len(events) == 50
+    assert len(events) == 50, f"expected 50 events, got {count}"
     timestamps = [e.created_at for e in events]
     assert timestamps == sorted(timestamps), "events not chronological"
 
@@ -317,13 +337,19 @@ def test_workspace_null_tenant_not_visible_under_app_role(_dbpool) -> None:
     _seed_tenant(_dbpool, CANARY_TENANT_A)
     run_id = uuid4()
     log_event("canary_test", run_id, None, "info", "test", {"k": "workspace"})
-    time.sleep(0.3)
 
-    # Service role sees it
-    with _dbpool.connection() as conn, conn.cursor() as cur:
-        cur.execute("SELECT COUNT(*) AS c FROM pipeline_log WHERE run_id = %s", (str(run_id),))
-        service_count = cur.fetchone()["c"]
-    # app_role does not
+    def _service_count() -> int:
+        with _dbpool.connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT COUNT(*) AS c FROM pipeline_log WHERE run_id = %s",
+                (str(run_id),),
+            )
+            return cur.fetchone()["c"]
+
+    # VT-245: poll until the async NULL-tenant write lands (was sleep(0.3)
+    # that raced the commit → intermittent `assert service_count == 1` with 0).
+    service_count = _poll_until(_service_count, 1)
+    # app_role does not see workspace-level rows
     from orchestrator.db import tenant_connection
 
     with tenant_connection(CANARY_TENANT_A) as conn, conn.cursor() as cur:
