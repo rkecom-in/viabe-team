@@ -95,20 +95,22 @@ def test_make_name_registry_predicate() -> None:
 
 
 def test_redactor_uses_registry_none_safe() -> None:
-    # None-safe: no registry → name passes through (current behaviour).
-    from orchestrator.observability.pii import redact_for_log
+    # Import the canonical redactor directly (smoke-safe — the
+    # observability.pii wrapper pulls a heavy observability/__init__ chain
+    # not present in the stdlib-only smoke job; the wrapper just forwards
+    # name_registry to this same function).
+    from orchestrator.privacy.pii_redactor import redact
 
-    out_none = redact_for_log({"customer_name": "Ravi Kumar"})
-    # Without a registry the redactor still tokenizes by key heuristics;
-    # assert it does not crash and returns a dict.
+    # None-safe: no registry → does not crash, returns a dict.
+    out_none = redact({"customer_name": "Ravi Kumar"})
     assert isinstance(out_none, dict)
 
 
 def test_redactor_redacts_known_name_with_registry() -> None:
-    from orchestrator.observability.pii import redact_for_log
     from orchestrator.privacy.customer_registry import make_name_registry
+    from orchestrator.privacy.pii_redactor import redact
 
     reg = make_name_registry("t1", pool=_pool([{"display_name": "Ravi Kumar"}]))
-    out = redact_for_log({"note": "Ravi Kumar called"}, name_registry=reg)
+    out = redact({"note": "Ravi Kumar called"}, name_registry=reg)
     # The known name should not survive verbatim in a free-text field.
     assert "Ravi Kumar" not in str(out)
