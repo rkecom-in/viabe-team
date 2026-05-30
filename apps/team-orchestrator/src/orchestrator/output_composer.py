@@ -50,6 +50,12 @@ from typing import Any, Literal
 
 import yaml
 
+from orchestrator import templates_registry
+from orchestrator.templates_registry import (
+    UnknownLanguageVariantError,
+    UnknownTemplateError,
+)
+
 
 _ROUTING_PATH = (
     Path(__file__).resolve().parent.parent.parent
@@ -133,15 +139,18 @@ def load_template_routing(path: Path | None = None) -> dict[str, Any]:
 
 
 def load_twilio_templates(path: Path | None = None) -> dict[str, Any]:
-    """Parse ``twilio_templates.yaml`` into the name → record dict."""
-    p = path or _TEMPLATES_PATH
-    if not p.exists():
-        raise FileNotFoundError(f"twilio_templates.yaml not found at {p}")
-    with p.open("r", encoding="utf-8") as fh:
-        data = yaml.safe_load(fh) or {}
-    if not isinstance(data, dict):
-        raise ValueError(f"twilio_templates.yaml must be a mapping; got {type(data).__name__}")
-    return data
+    """Return the raw name → yaml-record dict from twilio_templates.yaml.
+
+    Delegates to templates_registry's internal loader so the registry's
+    60s TTL cache is the single load path (D1 — one source of truth).
+
+    Kept for backward-compat with tests that assert routing names are
+    present in the template map. The routing test uses the returned dict
+    keys only (not the ``content_sid`` flat field), so the nested-language
+    yaml shape is transparent here.
+    """
+    # pylint: disable=protected-access
+    return templates_registry._load_raw(path or _TEMPLATES_PATH)
 
 
 def _tenant_preferred_language(_state: Any) -> PreferredLanguage:
@@ -162,12 +171,21 @@ def _resolve_template(
     phase: str,
     routing: dict[str, Any],
     templates: dict[str, Any],
+    language: str = "en",
 ) -> tuple[str | None, str | None]:
     """Look up ``(intent, phase)`` → ``(template_name, content_sid)``.
 
     Falls through to the ``any`` phase key when the specific phase isn't
     listed. Returns ``(None, None)`` when no template applies (caller
     routes to free-form path).
+
+    SID resolution is delegated to ``templates_registry.resolve()`` so the
+    single yaml load path and 60s TTL cache apply (D1 migration, VT-163).
+    The ``templates`` dict is used only for routing-name existence checks
+    (back-compat with the test seam that injects custom template dicts).
+    When ``templates`` is the real on-disk data (nested-lang shape), we fall
+    through to registry resolution; when it's a test-injected dict, we
+    attempt a best-effort flat ``content_sid`` read.
     """
     bucket = routing.get(intent_or_trigger)
     if bucket is None:
@@ -175,6 +193,15 @@ def _resolve_template(
     template_name = bucket.get(phase) or bucket.get("any")
     if not template_name:
         return None, None
+
+    # Prefer registry resolution (real path) — catches language-keyed SIDs.
+    try:
+        entry = templates_registry.resolve(template_name, language)
+        return template_name, entry.content_sid
+    except (UnknownTemplateError, UnknownLanguageVariantError):
+        pass
+
+    # Fallback: test-injected dict may use flat {content_sid: ...} shape.
     sid_row = templates.get(template_name)
     if sid_row is None:
         return template_name, None
@@ -365,9 +392,14 @@ def compose_owner_output(
     if not within_window and template_name is None:
         template_name = "team_unable_to_complete_request"
         _, content_sid = _resolve_template("unable_to_complete", "any", routing, templates)
-        # Hardcoded direct lookup in templates yaml as last resort.
-        if content_sid is None and template_name in templates:
-            content_sid = templates[template_name].get("content_sid")
+        # Hardcoded direct lookup via registry as last resort (D1 migration).
+        if content_sid is None:
+            try:
+                content_sid = templates_registry.resolve(template_name, "en").content_sid
+            except (UnknownTemplateError, UnknownLanguageVariantError):
+                # Test-injected dict fallback (flat content_sid shape).
+                if template_name in templates:
+                    content_sid = templates[template_name].get("content_sid")
 
     # Build the message body. Template path keeps the body short (variable
     # substitution lives in template_params); free-form path uses

@@ -39,9 +39,13 @@ from orchestrator.context_builder import (  # noqa: E402 — post importorskip
     OwnerInput,
     SalesRecoveryContext,
     _DEFAULT_TARGET_RECOVERED_PAISE,
-    _PHASE1_APPROVED_TEMPLATES,
     serialize_bundle_for_prompt,
 )
+from orchestrator.templates_registry import approved_template_names
+
+# VT-163: _PHASE1_APPROVED_TEMPLATES was replaced by the live registry call.
+# Tests that referenced it now use the real registry-derived set.
+_PHASE1_APPROVED_TEMPLATES = approved_template_names("en")
 
 
 def _seeded_context(

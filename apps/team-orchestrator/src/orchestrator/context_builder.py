@@ -34,6 +34,7 @@ import yaml
 
 from orchestrator._tenant_guard import assert_tenant_scoped, emit_pipeline_step
 from orchestrator.db import tenant_connection
+from orchestrator.templates_registry import approved_template_names
 from orchestrator.types.trigger_reason import TriggerReason
 
 _BUDGETS_PATH = Path(__file__).parent.parent.parent / "config" / "context_budgets.yaml"
@@ -406,34 +407,28 @@ def build_sales_recovery_context(
     )
 
 
-# --- bundle → prompt serializer (VT-4 ship-thin) -----------------------------
+# --- bundle → prompt serializer (VT-4 ship-thin / VT-163 registry wiring) ----
 #
-# ship-thin scaffolding: the system prompt at ``sales_recovery_v1.md:48-52``
-# expects the orchestrator to supply ``cohort``, ``template``, and
-# ``expected outcome`` IN THE INPUT CONTEXT before the agent can return
-# ``status='proposed'``. The bundle carries cohort-adjacent data
-# (customer_ledger_summary.dormant_cohorts + top_spenders); ``templates``
-# and ``expected outcome`` are NOT bundle fields today — the
-# ``approved_templates.yaml`` registry + per-tenant attribution targets
-# are separate VT rows. Until those land, this serializer supplies them
-# inline as ship-thin defaults so the agent's first end-to-end run can
-# reach a real proposed/insufficient_data verdict instead of starving on
-# missing inputs. When the registries land, the inline defaults are
-# replaced with reads from those modules — no change to the serializer's
-# public surface.
+# VT-163: replaced the ship-thin _PHASE1_APPROVED_TEMPLATES placeholder with
+# a live call to templates_registry.approved_template_names("en"). The default
+# is computed at call time (not import time) so the registry's 60s TTL cache
+# applies — a yaml data edit is picked up without a restart.
+#
+# Back-compat: serialize_bundle_for_prompt still accepts a caller-supplied
+# templates_available override (test seam unchanged).
 
-_PHASE1_APPROVED_TEMPLATES: tuple[str, ...] = (
-    "team_winback_v1",
-    "team_winback_v2",
-    "team_seasonal_v1",
-)
 _DEFAULT_TARGET_RECOVERED_PAISE: int = 50_000  # ~₹500 baseline target
+
+
+def _default_templates_available() -> tuple[str, ...]:
+    """Live read of agent-selectable template names from the registry."""
+    return approved_template_names("en")
 
 
 def serialize_bundle_for_prompt(
     context: SalesRecoveryContext,
     *,
-    templates_available: tuple[str, ...] = _PHASE1_APPROVED_TEMPLATES,
+    templates_available: tuple[str, ...] | None = None,
     target_recovered_paise: int | None = None,
 ) -> str:
     """Render the SalesRecoveryContext bundle as a markdown context block
@@ -454,6 +449,8 @@ def serialize_bundle_for_prompt(
     caller can use the returned string directly as the first user
     message content.
     """
+    if templates_available is None:
+        templates_available = _default_templates_available()
     if target_recovered_paise is None:
         target_recovered_paise = max(
             int(context.attribution_snapshot.last_7d_recovered_paise * 1.1),
