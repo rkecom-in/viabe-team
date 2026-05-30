@@ -161,3 +161,74 @@ Per CL-5: target counts are 5 Tier-A launch-blocking + 17 Tier-B concierge-until
 ## Status history
 
 - 2026-05-26 17:05 IST: file created by Cowork. 8 approved templates + Twilio Content SIDs recorded from Fazal-provided list. Substrate gap closed (CL-5 + CL-11 referenced template counts but never the SIDs).
+
+## Hindi (hi) variants + team_monthly_report (VT-163-fix-1/2/3)
+
+Twilio issues a SEPARATE SID per language; the registry key is `(template_name, language) -> content_sid` (config/twilio_templates.yaml). Keywords (YES/NO/EDIT/START/CANCEL/ESCALATE) stay English (literal handler triggers).
+
+### `team_monthly_report`  *(VT-163-fix-2 — system-invoked by VT-86, not agent-selectable)*
+
+- **Twilio Content SID:** `HX7a247e236782425866a8e20fd78df275` (en) / `HX252be212f9372e187caa03df117adc02` (hi)
+- **Type:** Media (document/PDF header) + body. Category: Utility.
+- **Variables:** `{{1}}` = owner name, `{{2}}` = month, `{{3}}` = recovered ₹
+
+```
+Hi {{1}}, your Viabe Team report for {{2}} is ready — I've attached the full PDF. It covers the campaigns I ran with your approval, the customers reached, and the revenue attributed to them: ₹{{3}} this month. Tap the document above to view the details.
+```
+
+```
+नमस्ते {{1}}, {{2}} के लिए आपकी Viabe Team रिपोर्ट तैयार है — मैंने पूरी PDF संलग्न कर दी है। इसमें वे कैंपेन शामिल हैं जो मैंने आपकी मंज़ूरी से चलाए, कितने ग्राहकों तक पहुँचा गया, और उनसे जुड़ा राजस्व: इस महीने ₹{{3}}। विवरण देखने के लिए ऊपर दिए दस्तावेज़ पर टैप करें।
+```
+
+---
+
+### Hindi bodies for the 8 existing templates
+
+**`team_welcome` [hi]** — `HXf154fc0f582955f65c75b6306662388a`
+
+```
+नमस्ते {{1}}, आपका Viabe Team अकाउंट अब सक्रिय हो गया है। आपकी ट्रायल अवधि {{2}} को समाप्त होगी। इस दौरान, आपका एजेंट आपके व्यवसाय के डेटा की समीक्षा करेगा और आपकी समीक्षा के लिए अपना पहला कैंपेन प्रस्ताव तैयार करेगा। प्रस्ताव तैयार होने पर आपको यहीं WhatsApp पर संदेश मिलेगा।
+```
+
+**`team_weekly_approval` [hi]** — `HX4c63feb64d392ada48b0fe11cb1d067d`
+
+```
+इस हफ़्ते मैं {{1}} ग्राहकों को लक्षित करते हुए एक {{2}} कैंपेन चलाना चाहता हूँ। इसी तरह के कैंपेन के आधार पर, इससे लगभग ₹{{3}} का राजस्व वापस मिल सकता है। मंज़ूरी देने के लिए YES लिखें, इस हफ़्ते छोड़ने के लिए NO, या बदलाव पर चर्चा के लिए EDIT लिखें। कुछ भी भेजने से पहले मैं आपके जवाब का इंतज़ार करूँगा।
+```
+
+**`team_opt_out_confirmation` [hi]** — `HX960b6de9033e0a5954a38fc09b25da2b`
+
+```
+ठीक है, {{1}}। मैंने सभी स्वचालित संदेश और कैंपेन तुरंत रोक दिए हैं। बिलिंग के लिए आपकी सदस्यता सक्रिय रहेगी, लेकिन जब तक आप दोबारा शुरू करने के लिए नहीं कहते, मैं कुछ भी नया शुरू नहीं करूँगा। फिर से शुरू करने के लिए START लिखें। अपनी सदस्यता पूरी तरह रद्द करने के लिए CANCEL लिखें और मैं उसे प्रोसेस कर दूँगा। बताने के लिए धन्यवाद।
+```
+
+**`team_dsr_acknowledgment` [hi]** — `HXac6e8f1193d97252c1afeb3516d4c9b6`
+
+```
+नमस्ते {{1}}, मुझे आपका {{2}} अनुरोध मिल गया है। डिजिटल पर्सनल डेटा प्रोटेक्शन अधिनियम के अनुसार, मेरे पास पूरी तरह जवाब देने के लिए 30 दिन हैं। मैं आपका अनुरोध {{3}} तक पूरा करूँगा और पूरा होने पर यहीं WhatsApp पर पुष्टि करूँगा। इस बीच कोई सवाल हो, तो इस संदेश का जवाब दें और मैं एक कार्यदिवस के भीतर आपसे संपर्क करूँगा।
+```
+
+**`team_agent_stuck_escalation` [hi]** — `HX913b93eecd3bf9401116365f268a1008`
+
+```
+नमस्ते {{1}}, मैं {{2}} पर अटक गया हूँ। {{3}}। क्या आप यहाँ अपना मार्गदर्शन देकर जवाब दे सकते हैं? या अगर आप सीधे किसी व्यक्ति से बात करना चाहें, तो ESCALATE लिखें और Viabe टीम का कोई सदस्य आपसे संपर्क करेगा। ग़लत अनुमान लगाकर गलती करने से बेहतर है कि मैं रुककर पूछूँ।
+```
+
+**`team_unable_to_complete_request` [hi]** — `HXa232c5bc481f90bb5f8b32d05591859a`
+
+```
+नमस्ते {{1}}, हमने आपका अनुरोध पूरा करने की कोशिश की: {{2}}। यह इस वजह से पूरा नहीं हो सका: {{3}}। हम इस पर काम करते रहेंगे और आपको अपडेट देंगे। अगर आप तरीका बदलना चाहें, तो यहीं जवाब दें।
+```
+
+**`team_error_handler` [hi]** — `HXe02bb244729c5e829fcad2453e0262ec`
+
+```
+नमस्ते {{1}}, हम {{2}} करने की कोशिश कर रहे हैं लेकिन बार-बार दिक्कतों का सामना कर रहे हैं। संभावित कारण: {{3}}। हमने फ़िलहाल इसे रोक दिया है। आप कैसे आगे बढ़ना चाहते हैं यह यहाँ जवाब देकर बताएँ, वरना हम 24 घंटे में कोई दूसरा तरीका आज़माएँगे।
+```
+
+**`team_status_ping` [hi]** — `HXa386953554630e233f5875299f2d2c94`
+
+```
+नमस्ते {{1}}, सब कुछ ठीक चल रहा है। आपके अकाउंट पर आख़िरी गतिविधि: {{2}}। अगला कदम: {{3}}।
+```
+
