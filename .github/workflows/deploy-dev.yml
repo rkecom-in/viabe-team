@@ -29,16 +29,16 @@ jobs:
     name: pre-deploy-checks
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v6
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v6
         with:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm --filter @viabe/team-web typecheck
       - run: pnpm --filter @viabe/team-web lint
-      - uses: astral-sh/setup-uv@v5
+      - uses: astral-sh/setup-uv@v7
       - run: uvx ruff check apps/team-orchestrator
 
   deploy-orchestrator:
@@ -46,7 +46,7 @@ jobs:
     needs: pre-deploy-checks
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Install Railway CLI
         run: npm install -g @railway/cli@latest
       - name: Deploy to Railway
@@ -60,14 +60,14 @@ jobs:
     needs: pre-deploy-checks
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       # VT-244-fix-2: the repo is a pnpm monorepo; the Vercel project's
       # install command is `pnpm install --frozen-lockfile`, so `vercel
       # build` needs pnpm on the runner (was failing `sh: 1: pnpm: not
       # found`). Mirror ci.yml's proven setup — pnpm/action-setup reads
       # the packageManager pin (pnpm@10.33.4) from package.json.
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v6
         with:
           node-version: 22
           cache: pnpm
@@ -98,7 +98,7 @@ jobs:
     needs: [deploy-orchestrator, deploy-team-web]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Wait for both deploys to settle
         run: sleep 60
       - name: Run dev-env smoke
