@@ -51,10 +51,16 @@ _BODY_PARAMS = {
 def _campaign_row(
     template_id: str = _TEMPLATE_ID,
     body_params: dict | None = None,
+    language: str = "en",
 ) -> dict[str, Any]:
+    """The shape _load_campaign reads from ``plan_json -> message_plan`` (VT-140
+    fix). Migration 018 dropped the dedicated template_id/body_params columns;
+    the seam now SELECTs template_id, template_params, language out of the JSONB
+    ``plan_json``. The mock returns those exact keys."""
     return {
         "template_id": template_id,
-        "body_params": body_params if body_params is not None else dict(_BODY_PARAMS),
+        "template_params": body_params if body_params is not None else dict(_BODY_PARAMS),
+        "language": language,
     }
 
 

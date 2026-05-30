@@ -96,14 +96,26 @@ def _load_campaign(
     tenant_id: str,
     campaign_id: str,
 ) -> dict[str, Any] | None:
-    """Load the campaigns row to get template_id and body_params.
+    """Load the campaign's template_id + body_params from ``plan_json``.
 
     Returns None if not found (RLS invisible = cross-tenant or missing).
-    body_params is the JSONB column — the params dict for the template.
+
+    VT-140 fix: migration 018 (campaigns_v1) DROPPED the dedicated
+    ``template_id`` + ``body_params`` columns and replaced them with a single
+    ``plan_json`` JSONB carrying the full CampaignPlan v1.0. The send template +
+    its params therefore live at ``plan_json -> 'message_plan' ->
+    {template_id, template_params, language}`` (collapse persists
+    ``CampaignPlanProposed.model_dump(mode='json')``). The original VT-251 query
+    read the dropped columns and raised UndefinedColumn against the real schema
+    (the unit tests used MagicMock connections, so the break never surfaced).
+    Read from plan_json instead. The language is carried alongside the params so
+    the execute loop can pass it to VT-45 without a second column.
     """
     row = conn.execute(
         """
-        SELECT template_id, body_params
+        SELECT plan_json -> 'message_plan' ->> 'template_id'  AS template_id,
+               plan_json -> 'message_plan' ->  'template_params' AS template_params,
+               plan_json -> 'message_plan' ->> 'language'     AS language
         FROM campaigns
         WHERE id = %s AND tenant_id = %s
         LIMIT 1
@@ -113,8 +125,18 @@ def _load_campaign(
     if row is None:
         return None
     if isinstance(row, dict):
-        return {"template_id": row["template_id"], "body_params": row["body_params"]}
-    return {"template_id": row[0], "body_params": row[1]}
+        template_id = row["template_id"]
+        params = dict(row["template_params"] or {})
+        language = row["language"]
+    else:
+        template_id = row[0]
+        params = dict(row[1] or {})
+        language = row[2]
+    # Carry language inside body_params under the reserved _language key; the
+    # execute loop pops it back out (keeps _load_campaign's return shape stable).
+    if language:
+        params["_language"] = language
+    return {"template_id": template_id, "body_params": params}
 
 
 def _write_opt_out_skip_ledger(
