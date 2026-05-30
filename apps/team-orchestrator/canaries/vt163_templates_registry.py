@@ -59,7 +59,7 @@ def main() -> None:
 
     logger.info("vt163 canary: structural check PASSED")
 
-    # --- Step 2: spot-check expected SID shapes for all 8 en variants ---
+    # --- Step 2: spot-check expected SID shapes for all 9 templates ---
     expected_names = [
         "team_welcome",
         "team_weekly_approval",
@@ -69,6 +69,7 @@ def main() -> None:
         "team_status_ping",
         "team_unable_to_complete_request",
         "team_error_handler",
+        "team_monthly_report",  # VT-163-fix-2 (9th; system-invoked by VT-86)
     ]
     import re
     sid_re = re.compile(r"^HX[0-9a-f]{32}$")

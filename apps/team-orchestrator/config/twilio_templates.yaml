@@ -106,3 +106,14 @@ team_error_handler:
   languages:
     en: HXe9212e16b8647a5d9ab6fcff647bf600
     hi: HXe02bb244729c5e829fcad2453e0262ec
+
+team_monthly_report:
+  audience: owner
+  agent_selectable: false  # system-invoked by the monthly-impact trigger (VT-86), not agent-chosen
+  variables:
+    - owner_name
+    - month
+    - recovered_inr
+  languages:
+    en: HX7a247e236782425866a8e20fd78df275
+    hi: HX252be212f9372e187caa03df117adc02
