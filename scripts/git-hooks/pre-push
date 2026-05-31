@@ -96,6 +96,53 @@ if [ "$DOCKER_RELEVANT" = 1 ]; then
   fi
 fi
 
+# --- 4. orchestrator + migrations DB jobs (VT-260) --------------------
+# The dep-less smoke (step 1) does NOT exercise the DB-backed CI jobs
+# (`orchestrator` = DBOS+postgres, `migrations`) — exactly where failures slip
+# through to CI (vt-163 failed `orchestrator` x2). When orchestrator code changed
+# AND a local Postgres is reachable, run those jobs against a throwaway DB so the
+# failure is caught BEFORE push. Graceful-degrade (warn, don't block) when pg is
+# absent — CI's fresh ephemeral pg is the backstop, same pattern as the docker step.
+#
+# Opt-out: VIABE_PREPUSH_SKIP_DB=1. Override the admin DSN: VIABE_PREPUSH_DB_URL
+# (default postgres://localhost:5432/postgres).
+if [ "$ORCH_CHANGED" = 1 ] && [ "${VIABE_PREPUSH_SKIP_DB:-0}" != 1 ]; then
+  ADMIN_DSN="${VIABE_PREPUSH_DB_URL:-postgres://localhost:5432/postgres}"
+  if command -v pg_isready >/dev/null 2>&1 \
+     && command -v psql >/dev/null 2>&1 \
+     && pg_isready -d "$ADMIN_DSN" -q >/dev/null 2>&1; then
+    DBNAME="viabe_prepush_$$"
+    DBURL="${ADMIN_DSN%/*}/$DBNAME"
+    say "local Postgres reachable — running migrations + orchestrator DB jobs vs throwaway $DBNAME"
+    # Mimic CI's FRESH cluster: mig 015/027 CREATE ROLE is NOT idempotent, so
+    # drop the throwaway DB FIRST (clears its privilege deps), THEN the cluster
+    # roles, THEN recreate — else apply halts at 015 (VT-260 / local-halt lesson).
+    psql "$ADMIN_DSN" -tAqc "DROP DATABASE IF EXISTS $DBNAME WITH (FORCE)" >/dev/null 2>&1
+    for _r in app_role app_operator_role rls_tester; do
+      psql "$ADMIN_DSN" -tAqc "DROP ROLE IF EXISTS $_r" >/dev/null 2>&1
+    done
+    psql "$ADMIN_DSN" -tAqc "CREATE DATABASE $DBNAME" >/dev/null 2>&1
+    # migrations job (fresh DB → clean-apply assertions hold) FIRST, then the
+    # orchestrator job (fixtures re-apply = noop). Exclude the known SIGKILL-timing
+    # flake (test_dbos_auto_resumes_after_sigkill) — a flaky test must not gate
+    # every push; CI still runs it (Cowork ruling VT-260).
+    say "  migrations job"
+    ( cd apps/team-orchestrator \
+      && DATABASE_URL="$DBURL" uv run --no-project --with 'psycopg[binary]' --with pytest \
+         pytest tests/test_migrations.py -q ) \
+      || { err "migrations job (pre-push DB coverage)"; FAIL=1; }
+    say "  orchestrator job (-k 'not sigkill')"
+    ( cd apps/team-orchestrator \
+      && DATABASE_URL="$DBURL" RUN_INTEGRATION_TESTS=1 \
+         INTERNAL_API_SECRET=prepush-local TEAM_PHONE_HASH_SALT=prepush-local \
+         uv run pytest tests/orchestrator/ -q -k 'not sigkill' ) \
+      || { err "orchestrator job (pre-push DB coverage)"; FAIL=1; }
+    psql "$ADMIN_DSN" -tAqc "DROP DATABASE IF EXISTS $DBNAME WITH (FORCE)" >/dev/null 2>&1
+  else
+    warn "local Postgres not reachable; orchestrator + migrations DB jobs NOT run locally — CI is the backstop (set VIABE_PREPUSH_DB_URL to enable)."
+  fi
+fi
+
 if [ "$FAIL" -ne 0 ]; then
   err "push aborted. Fix the above, or bypass with: git push --no-verify"
   exit 1
