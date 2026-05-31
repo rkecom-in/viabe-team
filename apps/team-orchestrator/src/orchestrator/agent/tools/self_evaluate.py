@@ -56,6 +56,7 @@ from orchestrator.agent.self_evaluate import (
     SelfEvaluateVerdict,
     SelfEvaluator,
 )
+from orchestrator.observability.decorators import tool_step
 from team_shared.mcp import (
     MCPTool,
     ToolContext,
@@ -178,6 +179,110 @@ def _load_prompt() -> str:
 
 
 # ---------------------------------------------------------------------------
+# Observability-wrapped impl (VT-190)
+# ---------------------------------------------------------------------------
+#
+# VT-181 deferred the @tool_step retrofit because ``SelfEvaluateTool`` is an
+# MCPTool subclass: ``execute(self, ctx, inputs)`` binds to ``{self, ctx,
+# inputs}`` under ``inspect.signature.bind``, not the input model's fields, so
+# the decorator's ``envelope_in.model_validate`` could never see the real
+# args. VT-190 resolves this with the row's Option A: extract the execute body
+# into a module-level function whose KEYWORD signature mirrors
+# ``SelfEvaluateInput`` exactly, then decorate THAT. ``sig.bind`` now yields
+# ``{draft_campaign_plan, context_summary, attempt_number}`` — clean
+# validation against ``envelope_in=SelfEvaluateInput``. This is the same
+# pattern used by the L0 memory tools in ``orchestrator_agent.py`` (the impl
+# is plain; the decorator wraps it; the MCPTool/langchain layer calls the
+# wrapped function).
+#
+# step_kind is ``mcp_tool_call`` (the generic tool-call kind, matching
+# ``compose_owner_output_tool``), NOT ``self_evaluate_gate``. The
+# ``self_evaluate_gate`` step_kind is owned by the gate-level emitter
+# ``sales_recovery._emit_self_evaluate_gate``, which records per-gate-attempt
+# verdict + RETRY/REJECT telemetry the tool layer cannot see (the tool only
+# sees one Opus call's args/result). Routing the tool's ``{outcome, feedback}``
+# payload through the ``self_evaluate_gate`` envelope would soft-fail
+# write_step validation (that envelope is ``{verdict, reasons}`` /
+# ``extra='forbid'``). ``mcp_tool_call`` wraps args/result into the canonical
+# ``{tool_name, tool_args}`` / ``{tool_result, cost_paise, duration_ms}`` shape
+# the decorator already constructs.
+
+
+@tool_step(
+    step_kind="mcp_tool_call",
+    envelope_in=SelfEvaluateInput,
+    envelope_out=SelfEvaluateOutput,
+    step_name="self_evaluate",
+)
+def _self_evaluate_impl(
+    *,
+    draft_campaign_plan: dict[str, Any],
+    context_summary: dict[str, Any],
+    attempt_number: int,
+) -> SelfEvaluateOutput:
+    """Run the Opus quality-gate evaluation for one draft.
+
+    Keyword-only signature mirrors ``SelfEvaluateInput`` so the
+    ``@tool_step`` decorator's ``inspect.signature.bind`` produces a dict
+    that validates against ``envelope_in=SelfEvaluateInput``. The model pin
+    and Anthropic client are resolved INSIDE the impl (dependency resolution,
+    not bound args) — keeping them off the signature so they never pollute
+    the observability envelope, mirroring how the L0 tools resolve
+    ``get_pool()`` internally.
+
+    The client is constructed via ``SelfEvaluateTool._make_client`` so the
+    test injection seam (``classmethod`` patched on the type) keeps working.
+    """
+    client = SelfEvaluateTool._make_client()
+    model = _resolve_self_evaluate_model()
+    system_prompt = _load_prompt()
+
+    user_payload = {
+        "draft_campaign_plan": draft_campaign_plan,
+        "context_summary": context_summary,
+        "attempt_number": attempt_number,
+    }
+    # mypy: anthropic Messages.create's overloads are TypedDict-heavy
+    # — typing the plain-dict messages list to match would add
+    # noise without value (same precedent as sales_recovery.py).
+    response = client.messages.create(
+        model=model,
+        max_tokens=_MAX_OUTPUT_TOKENS,
+        system=system_prompt,
+        messages=[
+            {"role": "user", "content": json.dumps(user_payload)},
+        ],
+    )
+
+    # Extract text content from the assistant turn. Anthropic's
+    # response.content is a list of blocks; we want concatenated
+    # text only.
+    raw_text = ""
+    for block in getattr(response, "content", []) or []:
+        text = getattr(block, "text", None)
+        if isinstance(text, str):
+            raw_text += text
+    raw_text = raw_text.strip()
+
+    # Tolerate a markdown code-fence wrapper.
+    fence_match = _CODE_FENCE_RE.match(raw_text)
+    if fence_match is not None:
+        raw_text = fence_match.group("body").strip()
+
+    try:
+        parsed = json.loads(raw_text)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(
+            f"self_evaluate Opus emitted unparseable JSON: {exc}"
+        ) from exc
+
+    # SelfEvaluateOutput validation enforces the contract; the
+    # framework's output-validation layer would otherwise catch
+    # this, but parsing it here gives a clearer error path.
+    return SelfEvaluateOutput.model_validate(parsed)
+
+
+# ---------------------------------------------------------------------------
 # The tool
 # ---------------------------------------------------------------------------
 
@@ -195,20 +300,20 @@ class SelfEvaluateTool(MCPTool[SelfEvaluateInput, SelfEvaluateOutput]):
     catch; Opus over Sonnet/Haiku because false negatives erode owner
     trust irrecoverably; per-eval cost ~₹10-15 within budget.
 
-    VT-181 retrofit DEFERRED to follow-up row: ``MCPTool`` subclass's
-    ``execute(self, ctx, inputs)`` signature does not bind cleanly through
-    the @tool_step decorator (which validates ``input_dict`` from
-    inspect.signature.bind — yields ``{self, ctx, inputs}`` rather than
-    the ``inputs`` model's fields). Options for follow-up:
-      (a) extract execute body into a module-level
-          ``_self_evaluate_impl(inputs, model, client) -> SelfEvaluateOutput``
-          + decorate THAT;
-      (b) extend @tool_step with an ``argument_picker`` parameter for
-          method-style tools.
-    Existing ``_emit_self_evaluate_gate`` helper in sales_recovery.py
-    already writes the observability row for this tool path (VT-179
-    Option A canonical rename), so the data-log coverage is intact —
-    only the @tool_step uniformity is deferred.
+    VT-190 retrofit (Option A): the Opus call body now lives in the
+    module-level ``_self_evaluate_impl`` wrapped by ``@tool_step`` so each
+    invocation writes a ``mcp_tool_call`` pipeline_steps row via VT-180's
+    write_step (uniform with ``compose_owner_output_tool`` + the L0 tools).
+    ``execute`` is a thin shim that forwards the validated input-model fields
+    to the wrapped impl. The MCPTool ``execute(self, ctx, inputs)`` signature
+    that VT-181 could not bind is sidestepped: the decorator wraps the plain
+    keyword-only impl, not the bound method.
+
+    The gate-level emitter ``sales_recovery._emit_self_evaluate_gate`` is
+    RETAINED as a compatibility shim — it records per-gate-attempt
+    (attempt_number + RETRY/REJECT verdict) telemetry under step_kind
+    ``self_evaluate_gate``, which is a different granularity than the
+    per-Opus-call ``mcp_tool_call`` row this decorator now writes.
     """
 
     name = "self_evaluate"
@@ -242,53 +347,17 @@ class SelfEvaluateTool(MCPTool[SelfEvaluateInput, SelfEvaluateOutput]):
         ctx: ToolContext,
         inputs: SelfEvaluateInput,
     ) -> SelfEvaluateOutput:
-        client = self._make_client()
-        model = _resolve_self_evaluate_model()
-        system_prompt = _load_prompt()
-
-        user_payload = {
-            "draft_campaign_plan": inputs.draft_campaign_plan,
-            "context_summary": inputs.context_summary,
-            "attempt_number": inputs.attempt_number,
-        }
-        # mypy: anthropic Messages.create's overloads are TypedDict-heavy
-        # — typing the plain-dict messages list to match would add
-        # noise without value (same precedent as sales_recovery.py).
-        response = client.messages.create(
-            model=model,
-            max_tokens=_MAX_OUTPUT_TOKENS,
-            system=system_prompt,
-            messages=[
-                {"role": "user", "content": json.dumps(user_payload)},
-            ],
+        # Thin shim over the @tool_step-wrapped impl (VT-190). The
+        # decorator reads the ``observability_context`` ContextVar to write
+        # one mcp_tool_call pipeline_steps row per invocation; absent the
+        # ContextVar it logs + skips (best-effort, CL-122). Forward the
+        # validated input-model fields as keyword args so the decorator's
+        # signature.bind validates them against envelope_in=SelfEvaluateInput.
+        return _self_evaluate_impl(
+            draft_campaign_plan=inputs.draft_campaign_plan,
+            context_summary=inputs.context_summary,
+            attempt_number=inputs.attempt_number,
         )
-
-        # Extract text content from the assistant turn. Anthropic's
-        # response.content is a list of blocks; we want concatenated
-        # text only.
-        raw_text = ""
-        for block in getattr(response, "content", []) or []:
-            text = getattr(block, "text", None)
-            if isinstance(text, str):
-                raw_text += text
-        raw_text = raw_text.strip()
-
-        # Tolerate a markdown code-fence wrapper.
-        fence_match = _CODE_FENCE_RE.match(raw_text)
-        if fence_match is not None:
-            raw_text = fence_match.group("body").strip()
-
-        try:
-            parsed = json.loads(raw_text)
-        except json.JSONDecodeError as exc:
-            raise RuntimeError(
-                f"self_evaluate Opus emitted unparseable JSON: {exc}"
-            ) from exc
-
-        # SelfEvaluateOutput validation enforces the contract; the
-        # framework's output-validation layer would otherwise catch
-        # this, but parsing it here gives a clearer error path.
-        return SelfEvaluateOutput.model_validate(parsed)
 
 
 def _dump_output_with_wire_keys(output: SelfEvaluateOutput) -> dict[str, Any]:

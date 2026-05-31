@@ -631,10 +631,13 @@ jobs:
     # VT-186 / VT-181: every langchain `@tool` function in
     # `apps/team-orchestrator/src/orchestrator/agent/tools/` must ALSO
     # be wrapped by `@observability.tool_step` so each invocation writes
-    # a pipeline_steps row via VT-180 write_step. Exception: self_evaluate.py
-    # — retrofit deferred per VT-181 docstring (MCPTool subclass signature
-    # mismatch); follow-up tracked under VT-190 (Cowork commits to file).
-    # If exceptions accumulate (>2-3), promote to per-tool annotation
+    # a pipeline_steps row via VT-180 write_step.
+    #
+    # VT-190 removed the self_evaluate.py exception: the SelfEvaluateTool
+    # (an MCPTool subclass, not a langchain `@tool` — so it never matched
+    # the `^@tool$` grep anyway) is now retrofitted via the module-level
+    # `_self_evaluate_impl` wrapped by `@observability.tool_step`.
+    # If new exceptions accumulate (>2-3), promote to per-tool annotation
     # pattern (Q2 Option B fallback noted in plan-review verdict).
     runs-on: ubuntu-latest
     steps:
@@ -646,10 +649,6 @@ jobs:
           for f in $(grep -lrE '^@tool$' \
               apps/team-orchestrator/src/orchestrator/agent/tools/ \
               --include='*.py' 2>/dev/null); do
-            # Exception: self_evaluate.py (VT-181 deferred; VT-190 follow-up)
-            case "$f" in
-              */self_evaluate.py) continue ;;
-            esac
             if ! grep -q 'tool_step' "$f"; then
               OFFENDERS+=("$f")
             fi
