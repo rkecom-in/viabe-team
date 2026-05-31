@@ -277,10 +277,12 @@ def test_vt140_e2e_sr_agent_full_loop(
                 assert r[1], "each recorded send must carry a (mock) message_sid"
 
             # opted_out skip recorded in send_idempotency_keys (the execute
-            # seam's skip ledger) — proves the skip path ran.
+            # seam's skip ledger) — proves the skip path ran. VT-261/migration
+            # 053: skips are recorded as send_status='skipped' (was 'error' pre-
+            # 053, which polluted error telemetry — see _write_opt_out_skip_ledger).
             skip_rows = conn.execute(
                 "SELECT customer_id FROM send_idempotency_keys "
-                "WHERE tenant_id = %s AND message_sid IS NULL AND send_status = 'error'",
+                "WHERE tenant_id = %s AND message_sid IS NULL AND send_status = 'skipped'",
                 (str(t1.tenant_id),),
             ).fetchall()
             skip_ids = {str(r[0]) for r in skip_rows}
