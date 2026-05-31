@@ -41,4 +41,5 @@ def _apply_migrations_for_billing_tests():
         sys.path.insert(0, str(scripts_dir))
     import apply_migrations
 
-    apply_migrations.apply(dsn=dsn)
+    r = apply_migrations.apply(dsn=dsn)
+    assert not r["failed"], r["failed"]

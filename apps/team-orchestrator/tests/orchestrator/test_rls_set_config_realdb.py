@@ -64,7 +64,8 @@ def dsn():
     import apply_migrations  # lazy: keeps module import-light for --no-project
 
     d = os.environ["DATABASE_URL"]
-    apply_migrations.apply(dsn=d)
+    r = apply_migrations.apply(dsn=d)
+    assert not r["failed"], r["failed"]
 
     with psycopg.connect(d, autocommit=True) as conn:
         # CREATE-if-absent (no DROP: a DROP would fail once privileges have been
