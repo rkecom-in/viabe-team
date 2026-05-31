@@ -142,6 +142,19 @@ Hi {{1}}, things are running. Last activity on your account: {{2}}. {{3}} is up 
 
 ---
 
+### `team_campaign_not_sent`  *(VT-248 — SYSTEM-invoked on fail-closed campaign rejection, NOT agent-selectable)*
+
+- **Twilio Content SID:** `HXcedcda2a0bc1e8f47b37950ef458feb4` (en) / `HXcd2688e6ea1862c063378b18e382e700` (hi)
+- **Category:** Utility · **Content type:** Text
+- **Variables:** `{{1}}` = owner name, `{{2}}` = count of targets that couldn't be verified
+- **Privacy invariant (VT-241):** the owner sees the COUNT only — never ids, never a cross-tenant distinction. The full rejected-id list stays in the operator audit log.
+
+```
+Hi {{1}}, I couldn't send this week's campaign: {{2}} of the targeted customers couldn't be verified, so I held the entire campaign — nothing was sent. Reply here to retry or adjust the targeting.
+```
+
+---
+
 ## Implications for code
 
 When code in `apps/team-orchestrator/` starts sending WhatsApp messages (currently only the orchestrator + supervisor + SR-Agent skeleton exist; output composer VT-30 is Backlog), it needs:
@@ -230,5 +243,11 @@ Hi {{1}}, your Viabe Team report for {{2}} is ready — I've attached the full P
 
 ```
 नमस्ते {{1}}, सब कुछ ठीक चल रहा है। आपके अकाउंट पर आख़िरी गतिविधि: {{2}}। अगला कदम: {{3}}।
+```
+
+**`team_campaign_not_sent` [hi]** — `HXcd2688e6ea1862c063378b18e382e700`  *(VT-248)*
+
+```
+नमस्ते {{1}}, मैं इस हफ़्ते का कैंपेन नहीं भेज सका: लक्षित ग्राहकों में से {{2}} की पुष्टि नहीं हो सकी, इसलिए मैंने पूरा कैंपेन रोक दिया — कुछ भी नहीं भेजा गया। दोबारा कोशिश करने या लक्ष्यीकरण बदलने के लिए यहाँ उत्तर दें।
 ```
 

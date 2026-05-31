@@ -459,12 +459,36 @@ def compose_owner_output(
 # Internal — body / param / urgency / follow-up derivations
 # ---------------------------------------------------------------------------
 
+def _owner_name(state: Any) -> str:
+    """Best-effort owner display name from state; "" when unavailable.
+
+    Phase 1 has no wired owner-name source (the column lands later), so this
+    returns "" — the {{1}} slot renders empty rather than crashing the send
+    contract (validate_params checks param KEYS, not values).
+    """
+    name = state.get("owner_name") if hasattr(state, "get") else None
+    return str(name) if name else ""
+
+
 def _derive_template_params(
     intent_or_trigger: str, specialist_result: Any, state: Any
 ) -> dict[str, str]:
     """Build the variable-substitution map for the template send."""
     params: dict[str, str] = {}
     out = (specialist_result.output if specialist_result else None) or {}
+    if not isinstance(out, dict):
+        out = {}
+
+    # VT-248: the fail-closed campaign-rejection surface. The owner is told the
+    # COUNT of targets that couldn't be verified — never ids, never a
+    # cross-tenant distinction (VT-241 privacy invariant; the full rejected-id
+    # list stays in the operator audit log). rejected_count is threaded from
+    # the campaign_rejected terminal dict via dispatch._classify_terminal.
+    if intent_or_trigger == "campaign_not_sent_invalid_cohort":
+        params["owner_name"] = _owner_name(state)
+        params["unverified_count"] = str(int(out.get("rejected_count", 0)))
+        return params
+
     if isinstance(out, dict):
         for key in ("customer_name", "amount_paise", "campaign_name", "month"):
             if key in out:

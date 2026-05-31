@@ -32,7 +32,10 @@ def test_classify_terminal_cohort_rejected_is_clean_completed():
     assert status == "completed"
     # count-only discriminator — never the rejected ids.
     assert reason == "campaign_not_sent_invalid_cohort:3"
-    assert result is None
+    # VT-248: the carrier hands ONLY the count to the composer (the
+    # team_campaign_not_sent {{2}} param) — never ids, never the plan object.
+    assert result is not None
+    assert result.output == {"rejected_count": 3}
 
 
 def test_classify_terminal_cohort_reject_wins_over_stale_plan():
@@ -49,7 +52,12 @@ def test_classify_terminal_cohort_reject_wins_over_stale_plan():
     )
 
     assert reason == "campaign_not_sent_invalid_cohort:1"
-    assert result is None, "must not hand the stale plan object to the composer"
+    # VT-248: the composer receives the count-only carrier, NOT the stale plan.
+    # The plan is a SimpleNamespace(status=...); the carrier has no `status`.
+    assert result.output == {"rejected_count": 1}
+    assert not hasattr(result, "status"), (
+        "must not hand the stale plan object to the composer"
+    )
     assert (path, status) == ("collapse", "completed")
 
 
@@ -80,6 +88,20 @@ def test_classify_terminal_missing_count_defaults_to_zero():
 
     assert status == "completed"
     assert reason == "campaign_not_sent_invalid_cohort:0"
+
+
+def test_classify_terminal_threads_count_to_composer_carrier():
+    """VT-248: the cohort-rejected carrier exposes ``.output['rejected_count']``
+    — the channel the composer reads to fill the team_campaign_not_sent {{2}}
+    count. Count only; the carrier never holds ids."""
+    from orchestrator.agent.dispatch import _CohortRejectedResult, _classify_terminal
+
+    _, _, _, result = _classify_terminal(
+        {"campaign_rejected": {"reason": "unresolved_cohort", "rejected_count": 9}}
+    )
+    assert isinstance(result, _CohortRejectedResult)
+    assert result.rejected_count == 9
+    assert result.output == {"rejected_count": 9}
 
 
 # --- VT-47: 'paused' terminal --------------------------------------------------

@@ -425,3 +425,35 @@ def test_canary_load_accepts_null_sid_stub(tmp_path):
         }
     }))
     canary_load(valid)  # must not raise
+
+
+# ---------------------------------------------------------------------------
+# VT-248 — team_campaign_not_sent (count-bearing rejection template)
+# ---------------------------------------------------------------------------
+
+def test_campaign_not_sent_resolves_en_and_hi():
+    en = resolve("team_campaign_not_sent", "en", _path=_REAL_YAML_PATH)
+    hi = resolve("team_campaign_not_sent", "hi", _path=_REAL_YAML_PATH)
+    assert en.content_sid == "HXcedcda2a0bc1e8f47b37950ef458feb4"
+    assert hi.content_sid == "HXcd2688e6ea1862c063378b18e382e700"
+    assert en.audience == "owner"
+    # {{1}} owner_name, {{2}} count of unverified targets.
+    assert tuple(en.variables) == ("owner_name", "unverified_count")
+
+
+def test_campaign_not_sent_is_not_agent_selectable():
+    """SYSTEM-invoked on the rejection path — the agent-selectable set stays
+    {team_weekly_approval} (D5). It must NOT appear in approved_template_names."""
+    assert "team_campaign_not_sent" not in approved_template_names(
+        "en", _path=_REAL_YAML_PATH
+    )
+
+
+def test_campaign_not_sent_validate_params_accepts_signature():
+    # Exactly the two registry variables → no VariableSignatureMismatchError.
+    validate_params(
+        "team_campaign_not_sent",
+        "en",
+        {"owner_name": "Asha", "unverified_count": "3"},
+        _path=_REAL_YAML_PATH,
+    )

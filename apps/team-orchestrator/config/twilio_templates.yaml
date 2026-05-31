@@ -117,3 +117,16 @@ team_monthly_report:
   languages:
     en: HX7a247e236782425866a8e20fd78df275
     hi: HX252be212f9372e187caa03df117adc02
+
+team_campaign_not_sent:
+  audience: owner
+  # VT-248: SYSTEM-invoked on the fail-closed campaign-rejection path
+  # (campaign_not_sent_invalid_cohort). NOT agent-selectable — the SR agent's
+  # selectable set stays {team_weekly_approval} (D5 ruling).
+  agent_selectable: false
+  variables:
+    - owner_name        # {{1}}
+    - unverified_count  # {{2}} — count of targets that couldn't be verified
+  languages:
+    en: HXcedcda2a0bc1e8f47b37950ef458feb4
+    hi: HXcd2688e6ea1862c063378b18e382e700
