@@ -27,6 +27,7 @@ from orchestrator.agent.self_evaluate import (  # noqa: E402
 from orchestrator.agent.tools.self_evaluate import (  # noqa: E402
     SelfEvaluateAdapter,
     SelfEvaluateInput,
+    SelfEvaluateOutput,
     SelfEvaluateTool,
 )
 from team_shared.mcp import ErrorCode, ToolContext, ToolStatus, run_tool_test  # noqa: E402
@@ -339,6 +340,133 @@ def test_tolerates_markdown_fence_around_json(monkeypatch):
     adapter = SelfEvaluateAdapter(ctx=_ctx())
     verdict = adapter.evaluate(_draft(), criteria=[])
     assert verdict.outcome is SelfEvaluateOutcome.PASS
+
+
+# ---------- 14-17. VT-190 @tool_step retrofit --------------------------------
+
+
+def test_impl_is_registered_in_tool_step_registry():
+    """VT-190: ``_self_evaluate_impl`` is wrapped by ``@tool_step`` and so
+    registers under step_name='self_evaluate' with step_kind='mcp_tool_call'
+    and the SelfEvaluate envelopes. This is what keeps the
+    gate-mcp-tools-have-observability-decorator + gate-envelope-schema
+    -registered CI gates green for this tool."""
+    from orchestrator.observability.decorators import TOOL_STEP_REGISTRY
+
+    meta = TOOL_STEP_REGISTRY["self_evaluate"]
+    assert meta["step_kind"] == "mcp_tool_call"
+    assert meta["envelope_in"] is SelfEvaluateInput
+    assert meta["envelope_out"] is SelfEvaluateOutput
+
+
+def test_tool_step_registry_step_kind_is_in_envelope_registry():
+    """VT-190 / VT-186: the retrofitted tool's step_kind must be a key in
+    STEP_KIND_REGISTRY so ``validate_tool_step_registry`` (the boot hook the
+    gate-envelope-schema-registered CI gate runs) stays clean."""
+    from orchestrator.observability.decorators import validate_tool_step_registry
+    from orchestrator.observability.envelopes import STEP_KIND_REGISTRY
+
+    assert "mcp_tool_call" in STEP_KIND_REGISTRY
+    # Raises EnvelopeRegistryDrift if any decorated tool's step_kind drifts.
+    validate_tool_step_registry()
+
+
+def test_execute_still_returns_output_through_wrapped_impl(monkeypatch):
+    """VT-190: ``execute`` now delegates to the decorated impl but the
+    return contract is unchanged — a clean draft yields outcome=pass."""
+    monkeypatch.setenv("VIABE_ENV", "test")
+    payload = {
+        "outcome": "pass",
+        "feedback": {"schema": None, "pillar": None, "consistency": None, "legal": None},
+    }
+    _patch_client_to_return(monkeypatch, json.dumps(payload))
+
+    out = SelfEvaluateTool().execute(
+        _ctx(),
+        SelfEvaluateInput(
+            draft_campaign_plan=_draft(), context_summary={}, attempt_number=1
+        ),
+    )
+    assert out.outcome == "pass"
+
+
+def test_tool_step_writes_pipeline_row_when_context_set(monkeypatch):
+    """VT-190: with an ``observability_context`` active, invoking the tool
+    routes a single mcp_tool_call row through ``write_step`` — the uniform
+    decorator path replacing the manual emit fallback. We patch write_step
+    (DB-free) and assert the canonical envelope shape the decorator builds
+    for a self_evaluate call."""
+    monkeypatch.setenv("VIABE_ENV", "test")
+    payload = {
+        "outcome": "revise",
+        "feedback": {
+            "schema": ["cohort_size mismatch."],
+            "pillar": None,
+            "consistency": None,
+            "legal": None,
+        },
+    }
+    _patch_client_to_return(monkeypatch, json.dumps(payload))
+
+    from orchestrator.observability import decorators as deco_mod
+    from orchestrator.observability.decorators import observability_context
+
+    calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        deco_mod, "write_step", lambda **kw: calls.append(kw)
+    )
+
+    run_id = uuid4()
+    tenant_id = uuid4()
+    with observability_context(run_id=run_id, tenant_id=tenant_id):
+        SelfEvaluateTool().execute(
+            _ctx(),
+            SelfEvaluateInput(
+                draft_campaign_plan=_draft(), context_summary={}, attempt_number=1
+            ),
+        )
+
+    assert len(calls) == 1, "exactly one pipeline_steps row per tool call"
+    kw = calls[0]
+    assert kw["step_kind"] == "mcp_tool_call"
+    assert kw["step_name"] == "self_evaluate"
+    assert kw["run_id"] == run_id
+    assert kw["tenant_id"] == tenant_id
+    assert kw["status"] == "completed"
+    # Input envelope carries the bound tool args (the SelfEvaluateInput fields).
+    assert kw["input_envelope"]["tool_name"] == "self_evaluate"
+    assert kw["input_envelope"]["tool_args"]["attempt_number"] == 1
+    assert "reasoning_chain" not in kw["input_envelope"]["tool_args"]
+    # Output envelope carries the tool's verdict result.
+    assert kw["output_envelope"]["tool_result"]["outcome"] == "revise"
+
+
+def test_tool_step_skips_write_when_no_context(monkeypatch):
+    """VT-190: observability is best-effort (CL-122). With NO
+    ``observability_context`` active, the decorator logs + skips write_step
+    but the tool STILL returns its verdict — the call must never break."""
+    monkeypatch.setenv("VIABE_ENV", "test")
+    payload = {
+        "outcome": "pass",
+        "feedback": {"schema": None, "pillar": None, "consistency": None, "legal": None},
+    }
+    _patch_client_to_return(monkeypatch, json.dumps(payload))
+
+    from orchestrator.observability import decorators as deco_mod
+
+    calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        deco_mod, "write_step", lambda **kw: calls.append(kw)
+    )
+
+    out = SelfEvaluateTool().execute(
+        _ctx(),
+        SelfEvaluateInput(
+            draft_campaign_plan=_draft(), context_summary={}, attempt_number=1
+        ),
+    )
+    assert out.outcome == "pass"
+    assert calls == [], "no ContextVar → no write_step call"
 
 
 # ---------- Canary: real-API, env-gated, NEVER runs in CI --------------------
