@@ -156,15 +156,22 @@ def query_customer_ledger(
                     total_balance_paise=total,
                 )
         except Exception as exc:  # noqa: BLE001
-            # Forward-target schema not landed yet (VT-257). Two cases:
-            #   UndefinedTable  — customer_ledger_entries absent.
-            #   UndefinedColumn — customers.phone_token absent (landed
-            #                     customers has phone_e164; token-keyed
-            #                     lookup lands with the ledger migration).
-            # Both → graceful empty. Caught broadly (type-name match) so the
-            # import stays psycopg-free at module load. Anything else re-raises.
+            # VT-264: swallow ONLY the SPECIFIC forward-target absences, so a real
+            # query typo / schema drift still RAISES (not masquerades as an empty
+            # result — the false-green class VT-254/256/257 fixed). Narrowed from
+            # the broad VT-257 catch:
+            #   - UndefinedTable for customer_ledger_entries (not in main yet)
+            #   - UndefinedColumn for customers.phone_token (landed customers has
+            #     phone_e164; the token-keyed lookup lands with the ledger migration)
+            # ANY other UndefinedTable/UndefinedColumn (or other error) re-raises.
+            # Type-name + message match keeps the import psycopg-free at load.
             type_name = type(exc).__name__
-            if type_name not in ("UndefinedTable", "UndefinedColumn"):
+            msg = str(exc).lower()
+            known_forward_absent = (
+                (type_name == "UndefinedTable" and "customer_ledger_entries" in msg)
+                or (type_name == "UndefinedColumn" and "phone_token" in msg)
+            )
+            if not known_forward_absent:
                 raise
             # Return empty gracefully so callers can advance development
             # without the migration. Future VT row adds the table; this
