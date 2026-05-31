@@ -38,13 +38,16 @@ status_ping:
 unable_to_complete:
   any: team_unable_to_complete_request
 
-# VT-241: a fail-closed campaign rejection (cohort had unresolvable /
-# cross-tenant ids → campaign not persisted) surfaces to the owner via the
-# Tier-A catch-all "couldn't complete your request" template (Cowork ruling
-# a — no count-bearing template until VT-108 Meta approval). The rejected-id
-# detail lives in the operator audit log, not the owner message.
+# VT-241 → VT-248: a fail-closed campaign rejection (cohort had unresolvable /
+# cross-tenant ids → campaign not persisted) surfaces to the owner. VT-241
+# shipped the interim generic "couldn't complete your request" template (no
+# count, ruling a — pending Meta approval). VT-248 (SIDs in hand, VT-108 gate
+# satisfied for this template) re-routes to the dedicated count-bearing
+# team_campaign_not_sent: owner sees the COUNT of unverifiable targets only —
+# never ids, never a cross-tenant distinction (VT-241 privacy invariant; the
+# full rejected-id list stays in the operator audit log).
 campaign_not_sent_invalid_cohort:
-  any: team_unable_to_complete_request
+  any: team_campaign_not_sent
 
 error_handler:
   any: team_error_handler

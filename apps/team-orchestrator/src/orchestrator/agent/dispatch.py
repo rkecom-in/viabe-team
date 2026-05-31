@@ -302,6 +302,24 @@ def dispatch_brain(
     )
 
 
+@dataclass(frozen=True)
+class _CohortRejectedResult:
+    """Carries the fail-closed rejection COUNT to the composer (VT-248).
+
+    The composer reads ``specialist_result.output['rejected_count']`` — the
+    same channel every terminal path uses — to populate the
+    team_campaign_not_sent {{2}} count. Count ONLY reaches this object: no ids,
+    no cross-tenant distinction (VT-241 privacy invariant; the full rejected-id
+    list stays in the operator audit log written by collapse_node).
+    """
+
+    rejected_count: int
+
+    @property
+    def output(self) -> dict[str, int]:
+        return {"rejected_count": self.rejected_count}
+
+
 def _classify_terminal(
     terminal_state: dict[str, Any],
 ) -> tuple[TerminalPath, FinalStatus, str | None, Any]:
@@ -328,12 +346,14 @@ def _classify_terminal(
     # the full rejected-id list is already in the audit log (collapse_node).
     cohort_rejected = terminal_state.get("campaign_rejected")
     if cohort_rejected is not None:
-        n = cohort_rejected.get("rejected_count", 0)
+        n = int(cohort_rejected.get("rejected_count", 0))
+        # VT-248: thread the count to the composer so team_campaign_not_sent
+        # gets its {{2}} param. Count only — no ids (VT-241 privacy invariant).
         return (
             "collapse",
             "completed",
             f"campaign_not_sent_invalid_cohort:{n}",
-            None,
+            _CohortRejectedResult(rejected_count=n),
         )
 
     campaign_plan = terminal_state.get("campaign_plan")

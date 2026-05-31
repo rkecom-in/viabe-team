@@ -356,3 +356,50 @@ def test_composed_output_frozen() -> None:
     )
     with pytest.raises(Exception):
         out.message_body = "y"  # type: ignore[misc]
+
+
+# ---------------------------------------------------------------------------
+# VT-248 — fail-closed campaign rejection → count-bearing owner template
+# ---------------------------------------------------------------------------
+
+def test_campaign_not_sent_routes_to_count_template_with_count_param() -> None:
+    """The campaign_not_sent_invalid_cohort intent resolves the dedicated
+    team_campaign_not_sent template and maps rejected_count → {{2}}."""
+    now = datetime(2026, 5, 26, 12, 0, tzinfo=timezone.utc)
+    state = _state(last_owner_message_at=now - timedelta(hours=48))
+    # The dispatch carrier hands the composer ONLY the count (no ids).
+    result = SimpleNamespace(output={"rejected_count": 3})
+    out = compose_owner_output(
+        result, state, "campaign_not_sent_invalid_cohort", now=now
+    )
+    assert out.template_name == "team_campaign_not_sent"
+    assert out.message_type == "template"
+    # {{1}} owner_name (empty in Phase 1), {{2}} the COUNT — never ids.
+    assert out.template_params == {"owner_name": "", "unverified_count": "3"}
+
+
+def test_campaign_not_sent_params_match_registry_signature() -> None:
+    """The composer's params for the rejection intent satisfy the registry
+    variable signature exactly, so a downstream send validates cleanly."""
+    now = datetime(2026, 5, 26, 12, 0, tzinfo=timezone.utc)
+    state = _state(last_owner_message_at=now - timedelta(hours=48))
+    result = SimpleNamespace(output={"rejected_count": 7})
+    out = compose_owner_output(
+        result, state, "campaign_not_sent_invalid_cohort", now=now
+    )
+    templates = load_twilio_templates()
+    variables = set(templates["team_campaign_not_sent"]["variables"])
+    assert set(out.template_params.keys()) == variables
+    assert out.template_params["unverified_count"] == "7"
+
+
+def test_campaign_not_sent_count_defaults_zero_when_absent() -> None:
+    """Defensive: a carrier without rejected_count still composes (count 0)
+    rather than crashing the deterministic composer."""
+    now = datetime(2026, 5, 26, 12, 0, tzinfo=timezone.utc)
+    state = _state(last_owner_message_at=now - timedelta(hours=48))
+    out = compose_owner_output(
+        SimpleNamespace(output={}), state, "campaign_not_sent_invalid_cohort", now=now
+    )
+    assert out.template_name == "team_campaign_not_sent"
+    assert out.template_params["unverified_count"] == "0"
