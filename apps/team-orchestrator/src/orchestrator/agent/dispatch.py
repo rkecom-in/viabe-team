@@ -64,7 +64,7 @@ from typing import Any, Literal, cast
 from uuid import UUID
 
 from langchain_anthropic import ChatAnthropic
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import HumanMessage, SystemMessage
 
 from orchestrator.agent.orchestrator_agent_driver import (
     HardLimitExceeded,
@@ -174,8 +174,29 @@ def dispatch_brain(
         tenant_id=tenant_id,
     )
 
+    # VT-195 Phase 2: pre-inject the tenant's L1 identity as a SEPARATE system
+    # block AFTER the VT-194 cached prefix (D2). langchain_anthropic merges this
+    # SystemMessage into the Anthropic `system` param as a distinct block FOLLOWING
+    # the cached system_prompt — the cached prefix block stays first + byte-
+    # identical, so the VT-194 cache still HITs (verified structurally;
+    # vt195_l1_phase2 canary asserts the live cache_read + that the model uses the
+    # block). L1 is enrichment: a read failure must never break dispatch.
+    _messages: list[Any] = [HumanMessage(content=event.body or "")]
+    try:
+        from orchestrator.knowledge import assemble_context_bundle
+
+        l1_block = assemble_context_bundle(tenant_id)
+    except Exception:  # noqa: BLE001 — L1 enrichment is best-effort
+        logger.warning(
+            "dispatch: L1 context assembly failed (tenant=%s); proceeding without",
+            tenant_id,
+        )
+        l1_block = None
+    if l1_block:
+        _messages.insert(0, SystemMessage(content=l1_block))
+
     initial_state: dict[str, Any] = {
-        "messages": [HumanMessage(content=event.body or "")],
+        "messages": _messages,
         "tenant_id": tenant_id,
         "run_id": run_id,
         "trigger_reason": "weekly_cadence",  # Phase-1 default; VT-N for real
