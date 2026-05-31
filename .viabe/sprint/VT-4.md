@@ -1,7 +1,7 @@
 ---
 vt_id: VT-4
 title: VT-SalesRecovery-Agent — Anthropic Agent SDK, system prompt, hard limits
-status: Backlog
+status: Done
 priority: Critical
 sprint: Sprint 2 - SR Agent Skeleton
 type: Feature
