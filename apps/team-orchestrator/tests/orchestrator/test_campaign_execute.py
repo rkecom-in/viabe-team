@@ -178,12 +178,15 @@ def test_opted_out_recipient_skipped() -> None:
     # VT-45 called only for the subscribed recipient.
     assert send_fn.call_count == 1
 
-    # Idempotency ledger rows written for the two opt-out skips.
+    # Idempotency ledger rows written for the two opt-out skips, each as
+    # send_status='skipped' (VT-261 / migration 053), not 'error'.
     skip_inserts = [
         sql for sql, _ in conn._execute_calls
         if "INSERT INTO send_idempotency_keys" in sql
     ]
     assert len(skip_inserts) == 2
+    assert all("'skipped'" in sql for sql in skip_inserts)
+    assert not any("'error'" in sql for sql in skip_inserts)
 
 
 # ---------------------------------------------------------------------------
