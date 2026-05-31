@@ -275,6 +275,10 @@ def _as_dict(value: Any) -> dict[str, Any]:
 # inject) -> Phase 2 injects nothing rather than an empty header.
 
 BUSINESS_PROFILE_ENTITY_TYPE = "business_profile"
+# VT-197: the agent's learned calibration — a SEPARATE, agent-owned entity, NEVER
+# the owner-curated business_profile. Rendered in its own labeled section so the
+# model never confuses agent inference with owner-stated policy.
+AGENT_REFLECTION_ENTITY_TYPE = "agent_reflection"
 
 # Token-safety bound for the rendered block (chars; ~4 chars/token heuristic) —
 # a stray huge owner note must not blow the context window.
@@ -291,6 +295,15 @@ _L1_BLOCK_FIELDS: tuple[tuple[str, str], ...] = (
     ("owner_curated_context", "Owner notes"),
 )
 
+# Rendered fields (in order) from the agent_reflection entity's attributes (VT-197).
+_REFLECTION_FIELDS: tuple[tuple[str, str], ...] = (
+    ("summary", "Summary"),
+    ("verdict", "Day-39 verdict"),
+    ("arrr_paise", "Attributed recovery (paise)"),
+    ("cumulative_fees_paise", "Cumulative fees (paise)"),
+    ("decided_at", "Decided at"),
+)
+
 
 def _render_l1_value(value: Any) -> str:
     if isinstance(value, (dict, list)):
@@ -298,31 +311,49 @@ def _render_l1_value(value: Any) -> str:
     return str(value)
 
 
-def assemble_context_bundle(tenant_id: UUID | str) -> str | None:
-    """Render the tenant's L1 'business_profile' identity as a system block.
-
-    Reads the single ``business_profile`` entity via ``search_entities`` (no
-    embedding -> created_at-DESC; tenant_connection -> RLS real) and renders the
-    populated identity fields into a compact, token-bounded block. Returns None
-    when there is no business_profile entity OR it carries no content.
-
-    CL-390: owner_curated_context is owner-authored business context, not
-    customer PII. Never logs attribute values — only tenant_id + block length.
-    """
-    tid = tenant_id if isinstance(tenant_id, UUID) else UUID(str(tenant_id))
-    entities = search_entities(tid, entity_type=BUSINESS_PROFILE_ENTITY_TYPE, limit=1)
-    if not entities:
-        return None
-    attrs = entities[0].attributes or {}
-    lines = ["# Tenant context (L1)"]
-    for key, label in _L1_BLOCK_FIELDS:
+def _render_l1_section(
+    title: str, attrs: dict[str, Any], fields: tuple[tuple[str, str], ...]
+) -> list[str]:
+    """Render one labeled section; [] when no field is populated."""
+    lines: list[str] = []
+    for key, label in fields:
         val = attrs.get(key)
         if val in (None, "", {}, []):
             continue
         lines.append(f"- {label}: {_render_l1_value(val)}")
-    if len(lines) == 1:  # only the header -> no usable content
+    return [f"## {title}", *lines] if lines else []
+
+
+def assemble_context_bundle(tenant_id: UUID | str) -> str | None:
+    """Render the tenant's L1 context as a system block, in two labeled sections.
+
+    Reads BOTH the owner-curated ``business_profile`` and the agent-owned
+    ``agent_reflection`` entities (RLS-scoped via search_entities) and renders
+    them as DISTINCT sections — "Owner-stated (business profile)" vs
+    "Agent-learned (Day-39)" — so the model never treats an agent reflection as
+    owner policy (VT-197 scope guard). Returns None when neither carries content.
+    Phase 2 pre-injects the result as a separate system block after the VT-194
+    cached prefix.
+
+    CL-390: owner_curated_context is owner-authored business context, not customer
+    PII. Never logs attribute values — only tenant_id + block length.
+    """
+    tid = tenant_id if isinstance(tenant_id, UUID) else UUID(str(tenant_id))
+    profile = search_entities(tid, entity_type=BUSINESS_PROFILE_ENTITY_TYPE, limit=1)
+    reflection = search_entities(tid, entity_type=AGENT_REFLECTION_ENTITY_TYPE, limit=1)
+
+    sections: list[str] = []
+    if profile:
+        sections += _render_l1_section(
+            "Owner-stated (business profile)", profile[0].attributes or {}, _L1_BLOCK_FIELDS
+        )
+    if reflection:
+        sections += _render_l1_section(
+            "Agent-learned (Day-39)", reflection[0].attributes or {}, _REFLECTION_FIELDS
+        )
+    if not sections:
         return None
-    block = "\n".join(lines)
+    block = "# Tenant context (L1)\n" + "\n".join(sections)
     if len(block) > _L1_BLOCK_MAX_CHARS:
         block = block[:_L1_BLOCK_MAX_CHARS] + "\n- [truncated]"
     return block
@@ -349,6 +380,35 @@ def upsert_business_profile(
             INSERT INTO l1_entities (tenant_id, entity_type, attributes)
             VALUES (%s, 'business_profile', %s)
             ON CONFLICT (tenant_id) WHERE entity_type = 'business_profile'
+            DO UPDATE SET attributes = EXCLUDED.attributes
+            RETURNING id
+            """,
+            (str(tid), Jsonb(attributes)),
+        ).fetchone()
+    return _as_uuid(row["id"] if isinstance(row, dict) else row[0])
+
+
+def upsert_agent_reflection(
+    tenant_id: UUID | str, attributes: dict[str, Any]
+) -> UUID:
+    """Idempotent upsert of the tenant's single AGENT-owned 'agent_reflection'
+    L1 entity (VT-197 — the Day-39 learning loop's latest calibration).
+
+    RLS-scoped via tenant_connection. ON CONFLICT targets the partial unique
+    index l1_entities_one_agent_reflection_per_tenant (migration 056, one latest
+    reflection per tenant) and replaces the attributes. Returns the entity id.
+
+    SCOPE GUARD: this writes ONLY the 'agent_reflection' entity — NEVER the
+    owner-curated 'business_profile' (Fazal D3; VT-268). Keep it LLM-free at the
+    callsite (the Day-39 trigger subtree is deterministic, Pillar 1).
+    """
+    tid = _as_uuid(tenant_id)
+    with tenant_connection(tid) as conn:
+        row = conn.execute(
+            """
+            INSERT INTO l1_entities (tenant_id, entity_type, attributes)
+            VALUES (%s, 'agent_reflection', %s)
+            ON CONFLICT (tenant_id) WHERE entity_type = 'agent_reflection'
             DO UPDATE SET attributes = EXCLUDED.attributes
             RETURNING id
             """,
