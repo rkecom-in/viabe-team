@@ -60,6 +60,8 @@ dependencies = [
     # Dockerfile); imported lazily so dev machines without those libs still
     # load the module (the PDF-bytes path is canary/Docker-verified).
     "weasyprint>=63.0",
+    "pillow>=12.2.0",
+    "pillow-heif>=1.3.0",
 ]
 
 [dependency-groups]

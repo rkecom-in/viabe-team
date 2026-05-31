@@ -38,3 +38,12 @@ self_evaluate:
 owner_input_classifier:
   production: claude-haiku-4-5
   test: claude-haiku-4-5
+
+# VT-52 vision_extraction — shared Vision-LLM primitive (VT-6.1). Production =
+# Sonnet 4.6 (the VT-52 row's explicit pin — a specific override of the CL-248
+# Opus default; Opus is overkill for OCR-style extraction, Sonnet is the vision
+# $/quality sweet-spot). Canary/iteration = Haiku 4.5 (CL-274 two-mode + CL-248
+# cheap dev runs). Resolver: vision_extraction._resolve_vision_model.
+vision_extraction:
+  production: claude-sonnet-4-6
+  test: claude-haiku-4-5
