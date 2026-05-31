@@ -22,18 +22,28 @@ import pytest
 pytest.importorskip("langchain")
 
 
+def _typed_exc(type_name: str, message: str) -> Exception:
+    """Build an exception whose class NAME matches what the tool checks
+    (psycopg-free; the tool matches on type(exc).__name__ + message)."""
+    return type(type_name, (Exception,), {})(message)
+
+
 def _fake_pool(*, customer_row: Any, ledger_rows: list[Any] | None = None,
-                raise_undefined_table: bool = False) -> Any:
+                raise_undefined_table: bool = False,
+                raise_exc: Exception | None = None) -> Any:
     """Minimal psycopg pool stub. Two sequential cursor.execute calls:
     set_config + customer SELECT + ledger SELECT (fetchone + fetchall).
     """
     cur = MagicMock()
-    if raise_undefined_table:
-        # Class name must be 'UndefinedTable' — tool matches on type
-        # name to stay psycopg-free at module load.
-        cur.execute.side_effect = type(
-            "UndefinedTable", (Exception,), {},
-        )("relation does not exist")
+    if raise_exc is not None:
+        cur.execute.side_effect = raise_exc
+    elif raise_undefined_table:
+        # The real forward-target: customer_ledger_entries is absent. Message
+        # must carry the table name (VT-264 narrowing matches on it).
+        cur.execute.side_effect = _typed_exc(
+            "UndefinedTable",
+            'relation "customer_ledger_entries" does not exist',
+        )
     else:
         cur.fetchone.return_value = customer_row
         cur.fetchall.return_value = ledger_rows or []
@@ -140,6 +150,55 @@ def test_query_returns_empty_on_undefined_table() -> None:
     assert result.customer_id is None
     assert result.ledger_entries == []
     assert result.total_balance_paise == 0
+
+
+def _input_any():
+    from orchestrator.agent.tools.query_customer_ledger import QueryCustomerLedgerInput
+
+    return QueryCustomerLedgerInput(tenant_id="tenant_a", customer_phone_token="tok")
+
+
+def test_known_phone_token_undefined_column_returns_empty() -> None:
+    """VT-264: the SPECIFIC forward-absent customers.phone_token → graceful empty."""
+    if os.environ.get("VT40_REAL_DB") == "1":
+        pytest.skip("real-DB mode active")
+    from orchestrator.agent.tools.query_customer_ledger import query_customer_ledger
+
+    pool = _fake_pool(
+        customer_row=None,
+        raise_exc=_typed_exc("UndefinedColumn", 'column "phone_token" does not exist'),
+    )
+    result = query_customer_ledger(_input_any(), pool=pool)
+    assert result.customer_id is None and result.ledger_entries == []
+
+
+def test_foreign_undefined_column_RAISES() -> None:
+    """VT-264 narrowing: an UndefinedColumn that is NOT phone_token must RAISE —
+    a real query typo/schema-drift bug surfaces, not a silent empty result."""
+    if os.environ.get("VT40_REAL_DB") == "1":
+        pytest.skip("real-DB mode active")
+    from orchestrator.agent.tools.query_customer_ledger import query_customer_ledger
+
+    pool = _fake_pool(
+        customer_row=None,
+        raise_exc=_typed_exc("UndefinedColumn", 'column "totally_bogus_col" does not exist'),
+    )
+    with pytest.raises(Exception, match="totally_bogus_col"):
+        query_customer_ledger(_input_any(), pool=pool)
+
+
+def test_foreign_undefined_table_RAISES() -> None:
+    """VT-264 narrowing: an UndefinedTable that is NOT customer_ledger_entries RAISES."""
+    if os.environ.get("VT40_REAL_DB") == "1":
+        pytest.skip("real-DB mode active")
+    from orchestrator.agent.tools.query_customer_ledger import query_customer_ledger
+
+    pool = _fake_pool(
+        customer_row=None,
+        raise_exc=_typed_exc("UndefinedTable", 'relation "some_other_table" does not exist'),
+    )
+    with pytest.raises(Exception, match="some_other_table"):
+        query_customer_ledger(_input_any(), pool=pool)
 
 
 def test_input_rejects_invalid_limit() -> None:
