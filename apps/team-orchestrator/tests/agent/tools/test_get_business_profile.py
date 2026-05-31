@@ -31,7 +31,7 @@ def _fake_pool(
     """Stub psycopg pool. Tracks execute call index so multiple SELECTs
     return the right fixture row in order:
     [0] set_config, [1] SELECT tenants, [2] SELECT tenant_connector_status,
-    [3] SELECT tenant_l1_profile.
+    [3] SELECT l1_entities (VT-195: business_profile entity).
     """
     cur = MagicMock()
 
@@ -44,7 +44,7 @@ def _fake_pool(
         execute_calls[0] += 1
         if connector_table_missing and "tenant_connector_status" in sql:
             raise _undefined_table_exc()
-        if l1_table_missing and "tenant_l1_profile" in sql:
+        if l1_table_missing and "l1_entities" in sql:
             raise _undefined_table_exc()
 
     cur.execute.side_effect = _execute

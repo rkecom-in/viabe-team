@@ -134,14 +134,18 @@ def get_business_profile(
                 ]
 
             owner_curated_context: str | None = None
-            # L1 substrate not in main yet (VT-195/VT-225). Probe
-            # forward-target table; absent → null gracefully.
+            # VT-195: read the tenant's L1 'business_profile' entity (the real L1
+            # substrate, mig 019 l1_entities) — owner_curated_context lives in its
+            # attributes JSONB. Replaces an orphaned probe of `tenant_l1_profile`,
+            # a flat table that was never built (the L1 KG is the entity graph).
+            # _safe_query_undefined keeps the graceful-None path.
             l1_cur = _safe_query_undefined(
                 cur,
                 """
-                SELECT owner_curated_context
-                FROM tenant_l1_profile
-                WHERE tenant_id = %s
+                SELECT attributes ->> 'owner_curated_context'
+                       AS owner_curated_context
+                FROM l1_entities
+                WHERE tenant_id = %s AND entity_type = 'business_profile'
                 LIMIT 1
                 """,
                 (payload.tenant_id,),
