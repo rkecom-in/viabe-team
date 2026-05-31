@@ -262,3 +262,67 @@ def _as_dict(value: Any) -> dict[str, Any]:
         if isinstance(loaded, dict):
             return loaded
     return {}
+
+
+# --- VT-195: Context Composer read path ------------------------------------
+#
+# L1's per-tenant IDENTITY lives as ONE entity per tenant: entity_type =
+# BUSINESS_PROFILE_ENTITY_TYPE, durable attributes in `attributes`.
+# `assemble_context_bundle` reads it (RLS-scoped via search_entities ->
+# tenant_connection) and renders a compact, token-bounded system block that
+# Phase 2 pre-injects as a SEPARATE system block AFTER the VT-194 cached prefix
+# (D2). Returns None when the tenant has no business_profile entity (nothing to
+# inject) -> Phase 2 injects nothing rather than an empty header.
+
+BUSINESS_PROFILE_ENTITY_TYPE = "business_profile"
+
+# Token-safety bound for the rendered block (chars; ~4 chars/token heuristic) —
+# a stray huge owner note must not blow the context window.
+_L1_BLOCK_MAX_CHARS = 4000
+
+# Rendered fields (in order) from the business_profile entity's attributes.
+_L1_BLOCK_FIELDS: tuple[tuple[str, str], ...] = (
+    ("business_archetype", "Business archetype"),
+    ("owner_persona", "Owner persona"),
+    ("working_hours", "Working hours"),
+    ("integration_map", "Integrations"),
+    ("escalation_thresholds", "Escalation thresholds"),
+    ("communication_prefs", "Communication preferences"),
+    ("owner_curated_context", "Owner notes"),
+)
+
+
+def _render_l1_value(value: Any) -> str:
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, sort_keys=True)
+    return str(value)
+
+
+def assemble_context_bundle(tenant_id: UUID | str) -> str | None:
+    """Render the tenant's L1 'business_profile' identity as a system block.
+
+    Reads the single ``business_profile`` entity via ``search_entities`` (no
+    embedding -> created_at-DESC; tenant_connection -> RLS real) and renders the
+    populated identity fields into a compact, token-bounded block. Returns None
+    when there is no business_profile entity OR it carries no content.
+
+    CL-390: owner_curated_context is owner-authored business context, not
+    customer PII. Never logs attribute values — only tenant_id + block length.
+    """
+    tid = tenant_id if isinstance(tenant_id, UUID) else UUID(str(tenant_id))
+    entities = search_entities(tid, entity_type=BUSINESS_PROFILE_ENTITY_TYPE, limit=1)
+    if not entities:
+        return None
+    attrs = entities[0].attributes or {}
+    lines = ["# Tenant context (L1)"]
+    for key, label in _L1_BLOCK_FIELDS:
+        val = attrs.get(key)
+        if val in (None, "", {}, []):
+            continue
+        lines.append(f"- {label}: {_render_l1_value(val)}")
+    if len(lines) == 1:  # only the header -> no usable content
+        return None
+    block = "\n".join(lines)
+    if len(block) > _L1_BLOCK_MAX_CHARS:
+        block = block[:_L1_BLOCK_MAX_CHARS] + "\n- [truncated]"
+    return block
