@@ -1,7 +1,7 @@
 ---
 vt_id: VT-3
 title: VT-Orchestrator — LangGraph, dispatch, triggers, error handling
-status: Backlog
+status: Done
 priority: Critical
 sprint: Sprint 1 - Foundation
 type: Feature
@@ -99,3 +99,6 @@ Subtask body rewrites are tracked in Clau_Session_Log entries CL-22 (orchestrato
 
 ## Status history
 - 2026-05-25 03:45 IST: migrated from Notion (notion_legacy_id: 356387c2-cc5a-814d-a104-fb4c186f7e22)
+
+## Closed 2026-05-31 (delivered-umbrella, closeout batch)
+All granular children delivered + merged; epic marked Done as a delivered umbrella. See decisions-ledger + latest-snapshot.
