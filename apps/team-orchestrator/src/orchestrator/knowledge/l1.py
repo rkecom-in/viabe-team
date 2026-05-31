@@ -326,3 +326,32 @@ def assemble_context_bundle(tenant_id: UUID | str) -> str | None:
     if len(block) > _L1_BLOCK_MAX_CHARS:
         block = block[:_L1_BLOCK_MAX_CHARS] + "\n- [truncated]"
     return block
+
+
+def upsert_business_profile(
+    tenant_id: UUID | str, attributes: dict[str, Any]
+) -> UUID:
+    """Idempotent upsert of the tenant's single 'business_profile' L1 entity.
+
+    RLS-scoped via tenant_connection (SET ROLE app_role + GUC). Re-runs are safe:
+    ON CONFLICT targets the partial unique index l1_entities_one_business_profile_
+    _per_tenant (migration 055, one business_profile per tenant) and replaces the
+    attributes. Returns the entity id. The write path for the Cowork-curated seed
+    + future onboarding (VT-267) / dashboard edits.
+
+    CL-390: attributes are the tenant's OWN business identity (archetype, owner
+    persona, operating notes), NOT customer PII.
+    """
+    tid = _as_uuid(tenant_id)
+    with tenant_connection(tid) as conn:
+        row = conn.execute(
+            """
+            INSERT INTO l1_entities (tenant_id, entity_type, attributes)
+            VALUES (%s, 'business_profile', %s)
+            ON CONFLICT (tenant_id) WHERE entity_type = 'business_profile'
+            DO UPDATE SET attributes = EXCLUDED.attributes
+            RETURNING id
+            """,
+            (str(tid), Jsonb(attributes)),
+        ).fetchone()
+    return _as_uuid(row["id"] if isinstance(row, dict) else row[0])

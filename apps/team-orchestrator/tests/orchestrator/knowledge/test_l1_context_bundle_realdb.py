@@ -130,6 +130,36 @@ def test_assemble_context_bundle_cross_tenant_rls_denial(substrate):
     assert n == 0
 
 
+def test_upsert_business_profile_idempotent(substrate):
+    """VT-195 Phase 3: upsert_business_profile is idempotent (one row per tenant,
+    re-run updates in place) and the rendered bundle reflects the latest values."""
+    import psycopg
+
+    from orchestrator.knowledge import assemble_context_bundle, upsert_business_profile
+
+    a = _new_tenant(substrate.dsn, "Upsert Co")
+    id1 = upsert_business_profile(
+        a, {"business_archetype": "archetype_v1", "owner_curated_context": "note v1"}
+    )
+    id2 = upsert_business_profile(
+        a, {"business_archetype": "archetype_v2", "owner_curated_context": "note v2"}
+    )
+    assert id1 == id2  # same entity — upsert, not a duplicate
+
+    block = assemble_context_bundle(a)
+    assert block is not None
+    assert "archetype_v2" in block and "archetype_v1" not in block  # updated in place
+
+    # Exactly one business_profile row for the tenant (the partial unique index).
+    with psycopg.connect(substrate.dsn) as conn:
+        n = conn.execute(
+            "SELECT count(*) FROM l1_entities WHERE tenant_id = %s "
+            "AND entity_type = 'business_profile'",
+            (str(a),),
+        ).fetchone()[0]
+    assert n == 1
+
+
 def test_get_business_profile_reads_l1_owner_curated_context(substrate):
     """VT-195 reconcile: get_business_profile reads owner_curated_context from the
     l1_entities 'business_profile' entity (was an orphaned tenant_l1_profile probe)."""
