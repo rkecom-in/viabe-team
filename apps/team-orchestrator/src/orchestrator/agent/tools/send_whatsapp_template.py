@@ -158,10 +158,25 @@ def _build_content_variables(
     return {str(i + 1): template_params[var] for i, var in enumerate(variables)}
 
 
+# VT-262: statuses the output Literal can represent. A ledger row whose
+# send_status is NOT one of these (e.g. a 'skipped' consent marker, or a foreign
+# status written by another tool sharing send_idempotency_keys) is NOT a prior
+# deliverable send — echoing it would raise a pydantic ValidationError that the
+# broad except turns into a phantom db_error AND wrongly suppress the send.
+_IDEMPOTENT_HIT_STATUSES = frozenset(
+    {"sent", "dry_run", "rate_limited", "unauthorized", "error"}
+)
+
+
 def _check_idempotency(
     cur: Any, tenant_id: str, idempotency_key: str,
 ) -> dict[str, Any] | None:
-    """Return existing ledger row if the key was used within 24h, else None."""
+    """Return existing ledger row if the key was used within 24h, else None.
+
+    Returns None for a row whose send_status the output cannot represent (VT-262)
+    — the caller re-evaluates (consent gate / send) rather than echoing an
+    invalid status.
+    """
     cur.execute(
         """
         SELECT id::text, message_sid, send_status, created_at
@@ -177,13 +192,28 @@ def _check_idempotency(
     if row is None:
         return None
     if isinstance(row, dict):
-        return {
+        result = {
             "id": row["id"],
             "message_sid": row["message_sid"],
             "send_status": row["send_status"],
             "created_at": row["created_at"],
         }
-    return {"id": row[0], "message_sid": row[1], "send_status": row[2], "created_at": row[3]}
+    else:
+        result = {
+            "id": row[0],
+            "message_sid": row[1],
+            "send_status": row[2],
+            "created_at": row[3],
+        }
+    if result["send_status"] not in _IDEMPOTENT_HIT_STATUSES:
+        logger.info(
+            "send_whatsapp_template: ignoring non-deliverable idempotency marker "
+            "(tenant=%s status=%s)",
+            tenant_id,
+            result["send_status"],
+        )
+        return None
+    return result
 
 
 def _check_tenant_rate_limit(cur: Any, tenant_id: str) -> bool:

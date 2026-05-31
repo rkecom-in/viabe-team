@@ -58,21 +58,30 @@ def test_opt_out_skip_records_skipped_not_error(dsn):
         # RLS-scoped conn). The send_status CHECK is enforced regardless of role.
         conn.execute("SELECT set_config('app.current_tenant', %s, false)", (tenant,))
         customer_id = str(uuid4())
-        idem_key = "vt261-skip-1"
+        idem_key = "campaign-x:cust-y"  # the bare live-send key shape
 
         # Pre-053 this raised a CHECK violation ('skipped' not allowed). Post-053
-        # it succeeds and lands as 'skipped'.
+        # it succeeds and lands as 'skipped'. VT-262: under a DISTINCT 'skip:'
+        # key namespace, never the bare live-send key.
         _write_opt_out_skip_ledger(conn, tenant, customer_id, idem_key)
 
         row = conn.execute(
             "SELECT send_status, customer_id FROM send_idempotency_keys "
             "WHERE tenant_id = %s AND idempotency_key = %s",
-            (tenant, idem_key),
+            (tenant, f"skip:{idem_key}"),
         ).fetchone()
+        # VT-262: the bare live-send key must NOT carry the skip marker (else a
+        # legitimate re-send to the same pair would collide with it).
+        bare = conn.execute(
+            "SELECT count(*) AS n FROM send_idempotency_keys "
+            "WHERE tenant_id = %s AND idempotency_key = %s",
+            (tenant, idem_key),
+        ).fetchone()["n"]
 
     assert row is not None
     assert row["send_status"] == "skipped"  # not 'error'
     assert str(row["customer_id"]) == customer_id
+    assert bare == 0  # skip marker is decoupled from the live-send key
 
 
 def test_skipped_is_a_valid_campaign_messages_status(dsn):
@@ -93,3 +102,42 @@ def test_skipped_is_a_valid_campaign_messages_status(dsn):
             (tenant,),
         ).fetchone()["n"]
     assert n == 1
+
+
+@pytest.mark.parametrize("tool", ["template", "message"])
+def test_check_idempotency_ignores_non_deliverable_skipped_marker(dsn, tool):
+    """VT-262: a 'skipped' marker row must NOT be returned as an idempotent hit.
+
+    Echoing 'skipped' into the tool's output Literal (which lacks it) raised a
+    pydantic ValidationError that the broad except swallowed as a phantom
+    db_error AND suppressed a legitimate re-send for 24h. The guard returns None
+    for non-deliverable statuses so the caller re-evaluates. A real 'sent' row is
+    still returned (positive control).
+    """
+    if tool == "template":
+        from orchestrator.agent.tools.send_whatsapp_template import _check_idempotency
+    else:
+        from orchestrator.agent.tools.send_whatsapp_message import _check_idempotency
+
+    with psycopg.connect(dsn, autocommit=True, row_factory=dict_row) as conn:
+        tenant = _seed_tenant(conn)
+        conn.execute("SELECT set_config('app.current_tenant', %s, false)", (tenant,))
+        # A 'skipped' marker under some key, and a real 'sent' row under another.
+        conn.execute(
+            "INSERT INTO send_idempotency_keys "
+            "(tenant_id, idempotency_key, customer_id, message_sid, send_status) "
+            "VALUES (%s, 'k-skip', %s, NULL, 'skipped')",
+            (tenant, str(uuid4())),
+        )
+        conn.execute(
+            "INSERT INTO send_idempotency_keys "
+            "(tenant_id, idempotency_key, customer_id, message_sid, send_status) "
+            "VALUES (%s, 'k-sent', %s, 'SMxxxx', 'sent')",
+            (tenant, str(uuid4())),
+        )
+        with conn.cursor() as cur:
+            skipped_hit = _check_idempotency(cur, tenant, "k-skip")
+            sent_hit = _check_idempotency(cur, tenant, "k-sent")
+
+    assert skipped_hit is None  # non-deliverable marker → not an idempotent hit
+    assert sent_hit is not None and sent_hit["send_status"] == "sent"  # real hit preserved

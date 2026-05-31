@@ -147,15 +147,19 @@ def _write_opt_out_skip_ledger(
 ) -> None:
     """Record a send_idempotency_keys row for an opted-out skip (no send made).
 
-    send_status='skipped' (VT-261 / migration 053 added it to the CHECK). Before
-    053 this wrote 'error', which polluted error telemetry and conflated a
-    deliberate consent skip (opted_out / blocked, CL-421) with a real send
-    failure. The skip is still an idempotency anchor — the VT-45 idempotency
-    check returns the prior row by (tenant_id, idempotency_key) regardless of
-    status, so replays don't re-evaluate the send. ON CONFLICT DO NOTHING
-    ensures replay-safety.
+    send_status='skipped' (VT-261 / migration 053). The skip marker is written
+    under a DISTINCT ``skip:`` key namespace (VT-262), NOT the live-send key, so
+    it dedupes repeated skips (ON CONFLICT DO NOTHING) WITHOUT colliding with the
+    real-send idempotency key. The prior bug: writing 'skipped' under the bare
+    send key {campaign_id}:{customer_id} meant a later legitimate send to the
+    same pair (e.g. after the customer re-subscribes) hit that 'skipped' row in
+    _check_idempotency, which echoed a status the VT-45 output Literal cannot
+    represent -> pydantic ValidationError -> swallowed as a phantom db_error AND
+    the re-eligible recipient suppressed for 24h. Decoupling the namespace fixes
+    it: a real re-send sees no prior row under its own key.
     CL-390: no PII in this INSERT (customer_id is a UUID; phone is NOT stored).
     """
+    skip_key = f"skip:{idempotency_key}"
     conn.execute(
         """
         INSERT INTO send_idempotency_keys
@@ -163,7 +167,7 @@ def _write_opt_out_skip_ledger(
         VALUES (%s, %s, %s, NULL, 'skipped')
         ON CONFLICT (tenant_id, idempotency_key) DO NOTHING
         """,
-        (tenant_id, idempotency_key, customer_id),
+        (tenant_id, skip_key, customer_id),
     )
 
 

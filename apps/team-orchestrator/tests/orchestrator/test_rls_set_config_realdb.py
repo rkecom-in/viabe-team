@@ -296,6 +296,20 @@ def test_send_whatsapp_message_sends_and_denies(dsn, tenants, seed_conn):
         send_fn=_fake_send,
     )
     assert out_x.status == "unauthorized"
+
+    # VT-263: make the RLS backstops REAL (the review found these were vacuous /
+    # WHERE-clause-shaped — they passed even with RLS disabled).
+    # (1) The 'unauthorized' above is WHERE-clause-enforced; prove RLS *also*
+    #     hides B's customer row under A's GUC (B's customer genuinely exists).
+    assert _count_other(dsn, scoped_to=a, table="customers", other=b) == 0
+    # (2) Seed a B-owned send_idempotency_keys row (superuser bypasses RLS) so the
+    #     count below tests RLS, not table-emptiness — A's send wrote only A's row.
+    seed_conn.execute(
+        "INSERT INTO send_idempotency_keys "
+        "(tenant_id, idempotency_key, customer_id, message_sid, send_status) "
+        "VALUES (%s, 'k-b-decoy', %s, 'SMb', 'sent')",
+        (b, cust_b),
+    )
     assert _count_other(dsn, scoped_to=a, table="send_idempotency_keys", other=b) == 0
 
 
@@ -319,6 +333,10 @@ def test_cohort_resolve_denies_cross_tenant(dsn, tenants, seed_conn):
     assert cust_a in res.resolved
     assert cust_b in res.rejected
     assert cust_b not in res.resolved
+    # VT-263: the rejection above is WHERE-clause-enforced (tenant_id = A filter);
+    # prove RLS *also* hides B's customer row under A's GUC (real RLS backstop —
+    # B's customer genuinely exists, so 0 means RLS hid it).
+    assert _count_other(dsn, scoped_to=a, table="customers", other=b) == 0
 
 
 def test_customer_registry_denies_cross_tenant(dsn, tenants, seed_conn):
@@ -333,7 +351,10 @@ def test_customer_registry_denies_cross_tenant(dsn, tenants, seed_conn):
     names = customer_registry.get_customer_names_for_tenant(a, pool=pool, use_cache=False)
     # Registry lower-cases names for redaction matching.
     assert "asha" in names
-    assert "bhavna" not in names  # RLS hides B's customer name from A
+    assert "bhavna" not in names  # WHERE-clause tenant filter excludes B
+    # VT-263: real RLS backstop — B's customer row exists, so 0 means RLS (not
+    # just the WHERE clause) hides it under A's GUC.
+    assert _count_other(dsn, scoped_to=a, table="customers", other=b) == 0
 
 
 # --------------------------------------------------------------------------- #
