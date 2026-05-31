@@ -214,7 +214,11 @@ def test_sets_tenant_guc_before_query() -> None:
         GetAttributionDataInput(tenant_id="tenant_x", campaign_id="c1"),
         pool=pool,
     )
-    assert "SET LOCAL app.current_tenant" in issued[0]
+    # VT-140 fix: the tenant GUC is set via set_config('app.current_tenant',
+    # ...) — the parameterizable form. "SET LOCAL ... = %s" is a Postgres
+    # syntax error ($1 cannot bind into a SET statement); the original code
+    # raised against real Postgres and only the MagicMock cursor masked it.
+    assert "set_config('app.current_tenant'" in issued[0]
 
 
 def test_undefined_table_graceful_empty() -> None:

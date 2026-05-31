@@ -66,7 +66,10 @@ def _pool(
 
     def _execute(sql: str, params: tuple | None = None) -> None:
         executed.append((sql, params))
-        if raise_on_set_local and "SET LOCAL" in sql:
+        # VT-140 fix: the GUC is set via set_config('app.current_tenant', ...)
+        # (parameterizable) — NOT "SET LOCAL ... = %s" (a Postgres syntax error).
+        # Match on the GUC name so this stays valid across the corrected SQL.
+        if raise_on_set_local and "app.current_tenant" in sql:
             raise raise_on_set_local
         if raise_on_campaign_messages_insert and "INSERT INTO campaign_messages" in sql:
             raise raise_on_campaign_messages_insert
@@ -153,8 +156,10 @@ def test_happy_path_sent() -> None:
     assert out.error_envelope is None
 
     sql_list = [sql for sql, _ in executed]
-    # GUC before any query.
-    set_idx = next(i for i, s in enumerate(sql_list) if "SET LOCAL" in s)
+    # GUC before any query. VT-140 fix: set via set_config('app.current_tenant',
+    # ...) — match on the GUC name (the corrected SQL is set_config, not SET
+    # LOCAL, which cannot bind a parameter).
+    set_idx = next(i for i, s in enumerate(sql_list) if "app.current_tenant" in s)
     idem_idx = next(i for i, s in enumerate(sql_list) if "send_idempotency_keys" in s and "SELECT" in s)
     assert set_idx < idem_idx
 

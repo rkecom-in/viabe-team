@@ -318,8 +318,15 @@ def send_whatsapp_template(
         with pool.connection() as conn:
             with conn.cursor() as cur:
                 # RLS: scope all reads + writes to this tenant.
+                # VT-140 fix: ``SET LOCAL <name> = %s`` cannot bind a parameter
+                # ($1 is a syntax error in a SET statement), so the original
+                # line raised SyntaxError against real Postgres and the send
+                # silently failed (the MagicMock-cursor unit tests masked it).
+                # Use set_config() — the parameterizable form the canonical
+                # tenant_connection wrapper uses (db/tenant_connection.py).
                 cur.execute(
-                    "SET LOCAL app.current_tenant = %s", (payload.tenant_id,)
+                    "SELECT set_config('app.current_tenant', %s, false)",
+                    (payload.tenant_id,),
                 )
 
                 # --- Idempotency check ---

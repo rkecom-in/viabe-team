@@ -297,8 +297,13 @@ def get_attribution_data(
 
     with pool.connection() as conn:
         with conn.cursor() as cur:
+            # VT-140 fix: ``SET LOCAL <name> = %s`` is a syntax error ($1 cannot
+            # bind into a SET statement) against real Postgres — the original
+            # line raised and the MagicMock-cursor unit tests masked it. Use
+            # set_config(), the parameterizable form (db/tenant_connection.py).
             cur.execute(
-                "SET LOCAL app.current_tenant = %s", (payload.tenant_id,),
+                "SELECT set_config('app.current_tenant', %s, false)",
+                (payload.tenant_id,),
             )
             try:
                 if payload.campaign_id is not None:
