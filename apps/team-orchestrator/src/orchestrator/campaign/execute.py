@@ -125,19 +125,20 @@ def _write_opt_out_skip_ledger(
 ) -> None:
     """Record a send_idempotency_keys row for an opted-out skip (no send made).
 
-    campaign_messages.send_status CHECK does not include a 'skipped' variant
-    (no migration allowed per VT-251 plan). Instead we write to
-    send_idempotency_keys with send_status='error' (the skip is an effective
-    send refusal) so replays are idempotent — the idempotency check in VT-45
-    would return the prior 'error' row rather than re-evaluating the send.
-    ON CONFLICT DO NOTHING ensures replay-safety.
+    send_status='skipped' (VT-261 / migration 053 added it to the CHECK). Before
+    053 this wrote 'error', which polluted error telemetry and conflated a
+    deliberate consent skip (opted_out / blocked, CL-421) with a real send
+    failure. The skip is still an idempotency anchor — the VT-45 idempotency
+    check returns the prior row by (tenant_id, idempotency_key) regardless of
+    status, so replays don't re-evaluate the send. ON CONFLICT DO NOTHING
+    ensures replay-safety.
     CL-390: no PII in this INSERT (customer_id is a UUID; phone is NOT stored).
     """
     conn.execute(
         """
         INSERT INTO send_idempotency_keys
             (tenant_id, idempotency_key, customer_id, message_sid, send_status)
-        VALUES (%s, %s, %s, NULL, 'error')
+        VALUES (%s, %s, %s, NULL, 'skipped')
         ON CONFLICT (tenant_id, idempotency_key) DO NOTHING
         """,
         (tenant_id, idempotency_key, customer_id),
