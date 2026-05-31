@@ -1,7 +1,7 @@
 ---
 vt_id: VT-2
 title: VT-Foundation — repo, Supabase, RLS, secrets, dev/prod, CI
-status: Backlog
+status: Done
 priority: Critical
 sprint: Sprint 1 - Foundation
 type: Infrastructure
@@ -70,3 +70,6 @@ This parent is also where the Reports/Team coexistence boundary gets enforced. T
 
 ## Status history
 - 2026-05-25 03:45 IST: migrated from Notion (notion_legacy_id: 356387c2-cc5a-819f-9e17-e9f61f48eb3c)
+
+## Closed 2026-05-31 (delivered-umbrella, closeout batch)
+All granular children delivered + merged; epic marked Done as a delivered umbrella. See decisions-ledger + latest-snapshot.
