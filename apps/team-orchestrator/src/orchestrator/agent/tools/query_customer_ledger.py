@@ -4,13 +4,18 @@ Deterministic per-tenant ledger lookup. Pydantic IO is the binding
 contract; standalone callable. NOT wired to an Agent yet (VT-4 SDK
 skeleton is Backlog).
 
-Schema gap: there is no `customer_ledger_entries` table in main yet
-(migrations 000-043; matches the pii_redactor comment for the parallel
-`customers` gap). The tool implements the contract using the
-forward-target schema and returns an empty ledger gracefully when the
-relation is missing. The future VT row that adds the migration
-replaces the graceful-empty branch with real rows without changing
-the Pydantic IO.
+Schema gap (forward-target — VT-257): the tool reads two not-yet-landed
+schema elements and returns an empty ledger gracefully for BOTH:
+- `customer_ledger_entries` table does not exist in main.
+- `customers.phone_token` does not exist either — the landed customers
+  table (mig 045) carries `phone_e164`; the token-keyed customer lookup
+  lands with the ledger migration. (phone tokens currently live in
+  `phone_token_resolutions.token`, which is not joined to `customers`.)
+Both surface as UndefinedTable / UndefinedColumn and are caught → empty
+result, never a runtime crash. The future VT row that lands the ledger +
+token-keyed customer schema replaces the graceful-empty branch with real
+rows without changing the Pydantic IO. (VT-254 real-DB tests caught the
+UndefinedColumn crash this tolerance now prevents.)
 
 NO PII in logs (CL-390): only tenant_id + counts logged; phone tokens
 are referenced but never logged.
@@ -68,7 +73,8 @@ def query_customer_ledger(
     `pool`: psycopg connection pool. Defaults to the DBOS-managed pool.
     Tests inject a mock pool.
 
-    RLS: SET LOCAL app.current_tenant for the duration of the SELECT.
+    RLS: scopes app.current_tenant for the connection via set_config
+    (session-scoped; pool reset clears it on return — see graph._reset_connection).
     """
     if pool is None:
         from orchestrator.graph import get_pool
@@ -79,7 +85,8 @@ def query_customer_ledger(
         try:
             with conn.cursor() as cur:
                 cur.execute(
-                    "SET LOCAL app.current_tenant = %s", (payload.tenant_id,),
+                    "SELECT set_config('app.current_tenant', %s, false)",
+                    (payload.tenant_id,),
                 )
                 cur.execute(
                     """
@@ -149,12 +156,15 @@ def query_customer_ledger(
                     total_balance_paise=total,
                 )
         except Exception as exc:  # noqa: BLE001
-            # psycopg.errors.UndefinedTable is the load-bearing case
-            # (forward-target schema not landed yet). Caught broadly so
-            # the import stays psycopg-free at module load; type name
-            # match keeps the intent obvious.
+            # Forward-target schema not landed yet (VT-257). Two cases:
+            #   UndefinedTable  — customer_ledger_entries absent.
+            #   UndefinedColumn — customers.phone_token absent (landed
+            #                     customers has phone_e164; token-keyed
+            #                     lookup lands with the ledger migration).
+            # Both → graceful empty. Caught broadly (type-name match) so the
+            # import stays psycopg-free at module load. Anything else re-raises.
             type_name = type(exc).__name__
-            if type_name != "UndefinedTable":
+            if type_name not in ("UndefinedTable", "UndefinedColumn"):
                 raise
             # Return empty gracefully so callers can advance development
             # without the migration. Future VT row adds the table; this

@@ -108,7 +108,7 @@ def schedule_followup(
 
     Idempotent on (tenant_id, follow_up_key) via ON CONFLICT DO NOTHING.
     Never raises into the caller — schema-absent / DB errors surface as
-    an `error` envelope. RLS via SET LOCAL app.current_tenant.
+    an `error` envelope. RLS via set_config('app.current_tenant', ...).
     """
     err = _validate(payload)
     if err is not None:
@@ -128,7 +128,8 @@ def schedule_followup(
         with pool.connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "SET LOCAL app.current_tenant = %s", (payload.tenant_id,)
+                    "SELECT set_config('app.current_tenant', %s, false)",
+                    (payload.tenant_id,),
                 )
                 cur.execute(
                     """
