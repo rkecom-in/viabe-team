@@ -279,9 +279,52 @@ def run_day39_evaluation_body(now: datetime | None = None) -> list[Any]:
             continue
         verdicts.append(verdict)
 
+        # VT-197: close the learning loop — distill the FRESH verdict into the
+        # tenant's agent_reflection L1 entity (calibrates the next context
+        # bundle). Skip already-decided (idempotent, mirrors the refund branch).
+        if not verdict.already_decided:
+            _write_day39_reflection(tenant_id, verdict)
+
         if verdict.verdict == "refund_triggered" and not verdict.already_decided:
             _apply_day39_refund_transition(tenant_id)
     return verdicts
+
+
+def _write_day39_reflection(tenant_id: Any, verdict: Any) -> None:
+    """VT-197: write the agent-owned 'agent_reflection' L1 entity from a Day-39
+    verdict. LLM-FREE — a deterministic distillation (no agent/LLM call; keeps
+    the no-LLM-in-deterministic-triggers gate green). NEVER touches the owner-
+    curated 'business_profile' entity (Fazal D3 / VT-268). Best-effort: a write
+    failure logs + the sweep continues."""
+    try:
+        from orchestrator.knowledge import upsert_agent_reflection
+
+        recovered = verdict.arrr_paise
+        fees = verdict.cumulative_fees_paise
+        note = (
+            "recovery on track; sustain the current cadence."
+            if verdict.verdict == "continue"
+            else "recovery under target; favor higher-yield campaigns next cycle."
+        )
+        upsert_agent_reflection(
+            str(tenant_id),
+            {
+                "source": "day39",
+                "verdict": verdict.verdict,
+                "arrr_paise": recovered,
+                "cumulative_fees_paise": fees,
+                "decided_at": verdict.decided_at.isoformat(),
+                "summary": (
+                    f"Day-39 {verdict.verdict}: attributed recovery {recovered}p "
+                    f"vs cumulative fees {fees}p — {note}"
+                ),
+            },
+        )
+    except Exception:  # noqa: BLE001 — reflection is best-effort enrichment
+        logger.exception(
+            "day39 reflection write failed for tenant %s; sweep continues",
+            tenant_id,
+        )
 
 
 def _scan_day39_eligible(now: datetime) -> list[UUID]:

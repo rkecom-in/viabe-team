@@ -160,6 +160,72 @@ def test_upsert_business_profile_idempotent(substrate):
     assert n == 1
 
 
+def test_agent_reflection_renders_labeled_and_separate(substrate):
+    """VT-197: an agent_reflection renders in its OWN labeled section, distinct
+    from the owner business_profile, and writing it never touches business_profile."""
+    import psycopg
+
+    from orchestrator.knowledge import (
+        assemble_context_bundle,
+        upsert_agent_reflection,
+        upsert_business_profile,
+    )
+
+    a = _new_tenant(substrate.dsn, "Reflection Co")
+    upsert_business_profile(
+        a, {"business_archetype": "owner_archetype", "owner_curated_context": "owner rule X"}
+    )
+    upsert_agent_reflection(
+        a,
+        {
+            "source": "day39",
+            "verdict": "continue",
+            "arrr_paise": 12345,
+            "summary": "Day-39 continue: recovery on track.",
+        },
+    )
+
+    block = assemble_context_bundle(a)
+    assert block is not None
+    assert "## Owner-stated (business profile)" in block
+    assert "## Agent-learned (Day-39)" in block
+    assert "owner_archetype" in block  # owner section
+    assert "recovery on track" in block  # reflection section
+    assert block.index("Owner-stated") < block.index("Agent-learned")  # owner first
+
+    # Scope guard: the reflection write never created/modified a business_profile.
+    with psycopg.connect(substrate.dsn) as conn:
+        bp = conn.execute(
+            "SELECT attributes->>'business_archetype' AS a FROM l1_entities "
+            "WHERE tenant_id = %s AND entity_type = 'business_profile'",
+            (str(a),),
+        ).fetchall()
+    assert len(bp) == 1 and bp[0][0] == "owner_archetype"
+
+
+def test_agent_reflection_cross_tenant_rls_denial(substrate):
+    """VT-197: reflections are tenant-scoped — B's reflection invisible under A's GUC."""
+    from orchestrator.db import tenant_connection
+    from orchestrator.knowledge import assemble_context_bundle, upsert_agent_reflection
+
+    a = _new_tenant(substrate.dsn, "Refl A")
+    b = _new_tenant(substrate.dsn, "Refl B")
+    upsert_agent_reflection(a, {"summary": "a-reflection"})
+    upsert_agent_reflection(b, {"summary": "b-reflection-SECRET"})
+
+    block_a = assemble_context_bundle(a)
+    assert block_a is not None and "a-reflection" in block_a
+    assert "b-reflection-SECRET" not in block_a
+
+    with tenant_connection(a) as conn:
+        n = conn.execute(
+            "SELECT count(*) AS n FROM l1_entities WHERE tenant_id = %s "
+            "AND entity_type = 'agent_reflection'",
+            (str(b),),
+        ).fetchone()
+    assert (n["n"] if isinstance(n, dict) else n[0]) == 0
+
+
 def test_get_business_profile_reads_l1_owner_curated_context(substrate):
     """VT-195 reconcile: get_business_profile reads owner_curated_context from the
     l1_entities 'business_profile' entity (was an orphaned tenant_l1_profile probe)."""
