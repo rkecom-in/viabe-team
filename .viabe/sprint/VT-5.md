@@ -1,7 +1,7 @@
 ---
 vt_id: VT-5
 title: VT-MCP-Tools — 11 tools + framework + harness
-status: Backlog
+status: Done
 priority: Critical
 sprint: Sprint 2 - SR Agent Skeleton
 type: Feature
