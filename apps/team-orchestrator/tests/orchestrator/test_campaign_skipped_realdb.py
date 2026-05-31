@@ -35,7 +35,8 @@ def dsn():
     import apply_migrations  # lazy: keep module import-light for --no-project
 
     d = os.environ["DATABASE_URL"]
-    apply_migrations.apply(dsn=d)
+    r = apply_migrations.apply(dsn=d)
+    assert not r["failed"], r["failed"]
     return d
 
 

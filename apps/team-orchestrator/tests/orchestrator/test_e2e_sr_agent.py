@@ -75,7 +75,8 @@ def substrate() -> Any:
     from orchestrator import graph as graphmod
 
     dsn = os.environ["DATABASE_URL"]
-    apply_migrations.apply(dsn=dsn)
+    r = apply_migrations.apply(dsn=dsn)
+    assert not r["failed"], r["failed"]
     os.environ["TEAM_SUPABASE_DB_URL"] = dsn
 
     graphmod.reset_substrate()

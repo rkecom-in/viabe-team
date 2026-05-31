@@ -37,7 +37,8 @@ def ingress():
     import apply_migrations
 
     dsn = os.environ["DATABASE_URL"]
-    apply_migrations.apply(dsn=dsn)
+    r = apply_migrations.apply(dsn=dsn)
+    assert not r["failed"], r["failed"]
     os.environ["TEAM_SUPABASE_DB_URL"] = dsn
     os.environ["INTERNAL_API_SECRET"] = _SECRET
     os.environ.setdefault("TEAM_PHONE_HASH_SALT", "vt-3-3-test-salt")

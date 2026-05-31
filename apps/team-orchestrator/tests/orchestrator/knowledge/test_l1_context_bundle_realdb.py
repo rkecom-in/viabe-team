@@ -38,7 +38,8 @@ def substrate():  # type: ignore[no-untyped-def]
     import apply_migrations
 
     dsn = os.environ["DATABASE_URL"]
-    apply_migrations.apply(dsn=dsn)
+    r = apply_migrations.apply(dsn=dsn)
+    assert not r["failed"], r["failed"]
     os.environ["TEAM_SUPABASE_DB_URL"] = dsn
 
     from dbos_config import launch_dbos, shutdown_dbos
