@@ -76,6 +76,21 @@ def _seed_tenant_and_l1(pool: Any) -> tuple[str, str]:
     return tenant_id, phone
 
 
+def _seed_tenant_no_l1(pool: Any) -> tuple[str, str]:
+    """A baseline tenant with NO l1_entities row — assemble_context_bundle
+    returns None, so no L1 block is injected. Used for the A3 token-delta."""
+    tenant_id = str(uuid4())
+    INSERTED_TENANT_IDS.append(tenant_id)
+    phone = f"+9199666{uuid4().hex[:6]}"
+    with pool.connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO tenants (id, business_name, plan_tier, phase, whatsapp_number) "
+            "VALUES (%s, %s, 'standard', 'paid_active', %s) ON CONFLICT (id) DO NOTHING",
+            (tenant_id, f"vt195 baseline {tenant_id[:6]}", phone),
+        )
+    return tenant_id, phone
+
+
 def _fire_webhook(orch_base: str, phone: str, body: str) -> str:
     import httpx
 
@@ -127,6 +142,33 @@ def _reasoning_step(pool: Any, run_id: str) -> dict[str, Any] | None:
     return dict(row) if row else None
 
 
+def _finalise(pool: Any) -> None:
+    """VT-266: best-effort cleanup of the synthetic rows this canary seeded.
+
+    Delete the run's pipeline_steps/_runs + the tenants' l1_entities first (no
+    ON DELETE CASCADE on those FKs), then the tenants (cascades the CASCADE-FK
+    children). Each step is best-effort — cleanup must never fail the canary.
+    """
+    for run_id in INSERTED_RUN_IDS:
+        for tbl, col in (("pipeline_steps", "run_id"), ("pipeline_runs", "id")):
+            try:
+                with pool.connection() as conn:
+                    conn.execute(f"DELETE FROM {tbl} WHERE {col} = %s", (run_id,))  # noqa: S608
+            except Exception:  # noqa: BLE001
+                pass
+    for tid in INSERTED_TENANT_IDS:
+        try:
+            with pool.connection() as conn:
+                conn.execute("DELETE FROM l1_entities WHERE tenant_id = %s", (tid,))
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            with pool.connection() as conn:
+                conn.execute("DELETE FROM tenants WHERE id = %s", (tid,))
+        except Exception:  # noqa: BLE001
+            pass
+
+
 def run_canary() -> int:
     orch_base = _preflight()
     if orch_base is None:
@@ -158,32 +200,62 @@ def run_canary() -> int:
     if not block or _MARKER not in block:
         failures.append(f"A1 assemble_context_bundle missing marker: {block!r}")
 
-    # Two dispatches for the same tenant.
+    # Dispatch 1 (tenant WITH L1): first reasoning step's tokens_input includes
+    # the injected (uncached) L1 block → the with-L1 input measurement.
     run_1 = _fire_webhook(orch_base, phone, body)
     _wait_terminal(pool, run_1)
+    step_1 = _reasoning_step(pool, run_1)
+    tokens_with = int((step_1 or {}).get("tokens_input") or 0)
+
+    # Dispatch 2 (SAME tenant): A2 — cached prefix still HITs despite the block.
     time.sleep(2.0)
     run_2 = _fire_webhook(orch_base, phone, body)
     _wait_terminal(pool, run_2)
     step_2 = _reasoning_step(pool, run_2)
 
+    # Baseline dispatch (tenant WITHOUT an L1 entity): no block injected.
+    _base_id, base_phone = _seed_tenant_no_l1(pool)
+    run_b = _fire_webhook(orch_base, base_phone, body)
+    _wait_terminal(pool, run_b)
+    step_b = _reasoning_step(pool, run_b)
+    tokens_base = int((step_b or {}).get("tokens_input") or 0)
+
+    # A2 — cache HIT preserved despite the extra L1 system block (the binding gate).
     if step_2 is None:
-        failures.append("A2/A3 second dispatch produced no agent_reasoning_step")
+        failures.append("A2 second dispatch produced no agent_reasoning_step")
     else:
-        env_2 = step_2.get("output_envelope") or {}
-        cache_read_2 = int(env_2.get("cache_read_input_tokens", 0) or 0)
+        cache_read_2 = int(
+            (step_2.get("output_envelope") or {}).get("cache_read_input_tokens", 0) or 0
+        )
         if cache_read_2 <= 0:
             failures.append(
-                f"A2 cache_read_input_tokens not > 0 on 2nd dispatch ({cache_read_2}) "
-                "— L1 block may have broken the VT-194 cached prefix"
+                f"A2 cache_read not > 0 on 2nd dispatch ({cache_read_2}) — L1 block "
+                "broke the VT-194 cached prefix"
             )
-        # A3: marker reached the model (appears in the reasoning envelope).
-        if _MARKER not in json.dumps(env_2, default=str):
-            failures.append("A3 marker token absent from 2nd reasoning envelope")
+
+    # A3 — the L1 block reaches the model's INPUT. Same body / tools / system
+    # prefix in both runs; the only difference is the injected (uncached) L1
+    # block, so the with-L1 first-step tokens_input must exceed the no-L1
+    # baseline by ~the block's tokens. Deterministic — no model-compliance
+    # dependence (the reasoning envelope carries only action+think_text, so a
+    # content-echo check is impossible). A 10-token margin guards against noise.
+    if step_1 is None or step_b is None:
+        failures.append("A3 missing reasoning step (with-L1 or baseline)")
+    elif tokens_with < tokens_base + 10:
+        failures.append(
+            f"A3 L1 block not reflected in input tokens: with={tokens_with} "
+            f"baseline={tokens_base} (expected with >= baseline+10)"
+        )
+
+    _finalise(pool)  # VT-266: clean the synthetic rows this run seeded.
 
     if failures:
         print("vt195-p2 canary FAILED:\n" + "\n".join(failures), file=sys.stderr)
         return 1
-    print("vt195-p2 canary: ALL CHECKS PASSED (L1 injected, cache HIT, marker reached model)")
+    print(
+        "vt195-p2 canary: ALL CHECKS PASSED — block built; cache HIT (A2); "
+        f"L1 reached model input (A3: tokens_with={tokens_with} > baseline={tokens_base})"
+    )
     return 0
 
 

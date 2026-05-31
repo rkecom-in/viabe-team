@@ -9,6 +9,7 @@ from orchestrator.knowledge.l1 import (
     assemble_context_bundle,
     search_entities,
     traverse_relationships,
+    upsert_business_profile,
 )
 
 __all__ = [
@@ -20,4 +21,5 @@ __all__ = [
     "assemble_context_bundle",
     "search_entities",
     "traverse_relationships",
+    "upsert_business_profile",
 ]
