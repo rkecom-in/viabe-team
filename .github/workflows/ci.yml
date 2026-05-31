@@ -29,8 +29,47 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # VT-259 per-path gating: this setup job computes which app trees a PR
+  # touches; single-app PRs then skip the other app's jobs. Conservative —
+  # a `.github/workflows/**` or root lockfile/package.json change sets `ci`
+  # true and EVERYTHING runs (we can't reason about workflow/dep changes
+  # safely); `packages/team-shared/**` (cross-app types) sets BOTH orchestrator
+  # and web. When in doubt, run the job — an extra job costs less than a missed
+  # bug. main's ruleset has require-status-checks OFF (VT-245), so a gated-out
+  # job never blocks merge. RE-CHECK before re-enabling required checks: a
+  # check required-by-name that gets gated out never reports → would block.
+  changes:
+    name: changes
+    runs-on: ubuntu-latest
+    outputs:
+      orchestrator: ${{ steps.f.outputs.orchestrator }}
+      web: ${{ steps.f.outputs.web }}
+      ci: ${{ steps.f.outputs.ci }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dorny/paths-filter@v3
+        id: f
+        with:
+          filters: |
+            orchestrator:
+              - 'apps/team-orchestrator/**'
+              - 'apps/team-ingestion-worker/**'
+              - 'packages/team-shared/**'
+            web:
+              - 'apps/team-web/**'
+              - 'packages/team-shared/**'
+            ci:
+              - '.github/workflows/**'
+              - 'pnpm-lock.yaml'
+              - 'package.json'
+              - 'uv.lock'
+
   lint:
     name: lint
+    needs: changes
+    # Mixed job (web ESLint + ruff Python + scripts) → run if either app tree
+    # or a ci/lockfile path changed.
+    if: needs.changes.outputs.web == 'true' || needs.changes.outputs.orchestrator == 'true' || needs.changes.outputs.ci == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -82,6 +121,8 @@ jobs:
 
   gate-no-deprecated-langgraph-imports:
     name: gate-no-deprecated-langgraph-imports
+    needs: changes
+    if: needs.changes.outputs.orchestrator == 'true' || needs.changes.outputs.ci == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -96,6 +137,8 @@ jobs:
 
   gate-no-llm-in-deterministic-triggers:
     name: gate-no-llm-in-deterministic-triggers
+    needs: changes
+    if: needs.changes.outputs.orchestrator == 'true' || needs.changes.outputs.ci == 'true'
     runs-on: ubuntu-latest
     # VT-28 Pillar 1 enforcement: the 3 deterministic scheduled triggers
     # (attribution close, day-39 evaluation, monthly impact) MUST NOT
@@ -206,6 +249,8 @@ jobs:
 
   gate-no-langsmith-imports:
     name: gate-no-langsmith-imports
+    needs: changes
+    if: needs.changes.outputs.orchestrator == 'true' || needs.changes.outputs.ci == 'true'
     runs-on: ubuntu-latest
     # CL-56 (Standing 2026-05-16): LangSmith is replaced by Pydantic Logfire.
     # VT-171 hot-fix shipped the migration; this gate prevents silent re-
@@ -225,6 +270,8 @@ jobs:
 
   gate-sr-agent-prompt-token-cap:
     name: gate-sr-agent-prompt-token-cap
+    needs: changes
+    if: needs.changes.outputs.orchestrator == 'true' || needs.changes.outputs.ci == 'true'
     runs-on: ubuntu-latest
     # VT-33 (system prompt v1.0) acceptance criterion: the sales_recovery
     # system prompt is capped at 4_000 tokens. A prompt with no size
@@ -256,6 +303,8 @@ jobs:
 
   gate-vt39-tools-harness-import:
     name: gate-vt39-tools-harness-import
+    needs: changes
+    if: needs.changes.outputs.orchestrator == 'true' || needs.changes.outputs.ci == 'true'
     runs-on: ubuntu-latest
     # VT-39 acceptance criterion: every individual tool's tests import
     # `run_tool_test` so the harness contract is uniformly exercised.
@@ -281,6 +330,8 @@ jobs:
 
   gate-connector-registry-schema:
     name: gate-connector-registry-schema
+    needs: changes
+    if: needs.changes.outputs.orchestrator == 'true' || needs.changes.outputs.ci == 'true'
     runs-on: ubuntu-latest
     # VT-205 acceptance criterion: every entry in the connector
     # registry validates against ConnectorSpec. Schema drift fails
@@ -313,6 +364,8 @@ jobs:
 
   gate-vt35-hard-limit-constants:
     name: gate-vt35-hard-limit-constants
+    needs: changes
+    if: needs.changes.outputs.orchestrator == 'true' || needs.changes.outputs.ci == 'true'
     runs-on: ubuntu-latest
     # VT-35 acceptance criterion: the four hard-limit constants
     # (80_000 / 25 / 8 / 300) are Type 3 commitments. Changing any of
@@ -345,6 +398,10 @@ jobs:
 
   typecheck:
     name: typecheck
+    needs: changes
+    # Pure TS/JS typecheck (team-web + workspaces). A shared-types change sets
+    # web=true too. Re-run on any ci/lockfile change.
+    if: needs.changes.outputs.web == 'true' || needs.changes.outputs.ci == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -358,6 +415,11 @@ jobs:
 
   test:
     name: test
+    needs: changes
+    # Mixed job (JS/TS unit + team-web route tests + Python orchestrator/worker
+    # smoke + team-shared pytest) → run if either app tree or a ci/lockfile
+    # path changed.
+    if: needs.changes.outputs.web == 'true' || needs.changes.outputs.orchestrator == 'true' || needs.changes.outputs.ci == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -387,6 +449,10 @@ jobs:
 
   e2e-playwright:
     name: e2e-playwright
+    needs: changes
+    # team-web e2e (chromium + next build — the heaviest job). Skip on
+    # orchestrator-only PRs. Shared-types change sets web=true.
+    if: needs.changes.outputs.web == 'true' || needs.changes.outputs.ci == 'true'
     runs-on: ubuntu-latest
     # VT-211: Playwright e2e on team-web. Tests that need real auth/Supabase
     # state self-skip via `test.skip(!ENV_VAR, ...)` so this job runs as a
@@ -468,6 +534,8 @@ jobs:
 
   migrations:
     name: migrations
+    needs: changes
+    if: needs.changes.outputs.orchestrator == 'true' || needs.changes.outputs.ci == 'true'
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -495,6 +563,8 @@ jobs:
 
   orchestrator:
     name: orchestrator
+    needs: changes
+    if: needs.changes.outputs.orchestrator == 'true' || needs.changes.outputs.ci == 'true'
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -554,6 +624,8 @@ jobs:
 
   gate-langgraph-nodes-have-observability-hook:
     name: gate-langgraph-nodes-have-observability-hook
+    needs: changes
+    if: needs.changes.outputs.orchestrator == 'true' || needs.changes.outputs.ci == 'true'
     # VT-186 / VT-183: every `graph.add_node(NAME, callable)` call in
     # the orchestrator src tree must wrap the callable with
     # `with_state_transition_hook(...)` OR carry a
@@ -628,6 +700,8 @@ jobs:
 
   gate-mcp-tools-have-observability-decorator:
     name: gate-mcp-tools-have-observability-decorator
+    needs: changes
+    if: needs.changes.outputs.orchestrator == 'true' || needs.changes.outputs.ci == 'true'
     # VT-186 / VT-181: every langchain `@tool` function in
     # `apps/team-orchestrator/src/orchestrator/agent/tools/` must ALSO
     # be wrapped by `@observability.tool_step` so each invocation writes
@@ -684,6 +758,8 @@ jobs:
   # required checks. Re-evaluate gate-or-drop at Sprint 1 end (CL-83).
   mypy:
     name: mypy (non-blocking)
+    needs: changes
+    if: needs.changes.outputs.orchestrator == 'true' || needs.changes.outputs.ci == 'true'
     runs-on: ubuntu-latest
     continue-on-error: true
     steps:
