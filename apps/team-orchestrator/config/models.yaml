@@ -55,3 +55,18 @@ vision_extraction:
 owner_typed_extraction:
   production: claude-haiku-4-5
   test: claude-haiku-4-5
+
+# VT-59 voice_transcription — Sarvam Indic ASR for cash-book voice notes. NOT a
+# Claude model: this is Sarvam's STT model id (India residency, DPDP-favorable,
+# CL-422). Both slots = saarika:v2 (ASR, not reasoning). Resolver:
+# voice_transcription._resolve_model. Key = TEAM_SARVAM_API_KEY.
+voice_transcription:
+  production: saarika:v2
+  test: saarika:v2
+
+# VT-59 cash_book_merge — Sonnet multimodal reconcile of photo entries vs voice
+# narration (the both-inputs path). Sonnet 4.6 (vision $/quality sweet-spot, same
+# as vision_extraction); Haiku canary. Resolver: methods.cash_book._resolve_merge_model.
+cash_book_merge:
+  production: claude-sonnet-4-6
+  test: claude-haiku-4-5
