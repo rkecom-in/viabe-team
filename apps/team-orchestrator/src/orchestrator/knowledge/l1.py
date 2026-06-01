@@ -362,16 +362,23 @@ def assemble_context_bundle(tenant_id: UUID | str) -> str | None:
 def upsert_business_profile(
     tenant_id: UUID | str, attributes: dict[str, Any]
 ) -> UUID:
-    """Idempotent upsert of the tenant's single 'business_profile' L1 entity.
+    """Idempotent MERGE of attributes into the tenant's single 'business_profile'.
 
     RLS-scoped via tenant_connection (SET ROLE app_role + GUC). Re-runs are safe:
     ON CONFLICT targets the partial unique index l1_entities_one_business_profile_
-    _per_tenant (migration 055, one business_profile per tenant) and replaces the
-    attributes. Returns the entity id. The write path for the Cowork-curated seed
-    + future onboarding (VT-267) / dashboard edits.
+    _per_tenant (migration 055, one business_profile per tenant).
 
-    CL-390: attributes are the tenant's OWN business identity (archetype, owner
-    persona, operating notes), NOT customer PII.
+    MERGE-NOT-CLOBBER (VT-267 F3/D3, Cowork 2026-06-01): the update is a top-level
+    JSONB merge (``existing || incoming``), NOT a wholesale replace. New top-level
+    keys merge in; keys present in ``attributes`` overwrite; SIBLING top-level keys
+    NOT in this write are PRESERVED. So floor capture, later enrichment (VT-197),
+    wizard edits, and the *_context writers (apify_gbp/swiggy/zomato) no longer
+    destroy each other's keys. Atomic (no read-modify-write race). The merge is
+    top-level: a caller writing a whole nested object (e.g. ``gbp_context``) replaces
+    that object; to update one field inside it, read-merge-write that object first.
+
+    Returns the entity id. CL-390: attributes are the tenant's OWN business identity
+    (archetype, owner persona, operating notes), NOT customer PII.
     """
     tid = _as_uuid(tenant_id)
     with tenant_connection(tid) as conn:
@@ -380,7 +387,7 @@ def upsert_business_profile(
             INSERT INTO l1_entities (tenant_id, entity_type, attributes)
             VALUES (%s, 'business_profile', %s)
             ON CONFLICT (tenant_id) WHERE entity_type = 'business_profile'
-            DO UPDATE SET attributes = EXCLUDED.attributes
+            DO UPDATE SET attributes = l1_entities.attributes || EXCLUDED.attributes
             RETURNING id
             """,
             (str(tid), Jsonb(attributes)),
