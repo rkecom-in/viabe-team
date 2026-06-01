@@ -102,19 +102,23 @@ def record_imported_transactions(
     to_ledger: list[ImportedTxnIn] = []
     with tenant_connection(tenant_id) as conn:
         for row in rows:
+            # Attributed AT IMPORT (customer_id set via a strong VPA/phone signal,
+            # and promoted to the ledger below) = 'confirmed'; else 'unattributed'
+            # (the VT-275 bridge may later set 'tentative'). N3.
+            status = "confirmed" if row.customer_id is not None else "unattributed"
             cur = conn.execute(
                 """
                 INSERT INTO imported_transactions
                     (tenant_id, customer_id, source, provider_ref, amount_paise,
-                     txn_date, direction, notes)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                     txn_date, direction, notes, attribution_status)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (tenant_id, source, provider_ref) DO NOTHING
                 """,
                 (
                     str(tenant_id),
                     str(row.customer_id) if row.customer_id is not None else None,
                     acquired_via, row.provider_ref, row.amount_paise,
-                    row.txn_date, row.direction, row.notes,
+                    row.txn_date, row.direction, row.notes, status,
                 ),
             )
             if cur.rowcount and cur.rowcount > 0:
