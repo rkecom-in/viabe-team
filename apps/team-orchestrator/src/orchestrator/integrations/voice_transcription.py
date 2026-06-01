@@ -138,12 +138,20 @@ def transcribe(
     if not transcript:
         raise TranscriptionError("Sarvam returned an empty transcript")
     detected = str(payload.get("language_code") or language or "unknown")
+    # Sarvam saarika:v2.5 returns language_probability — use it as the confidence
+    # when present (else the structured-ASR default). Clamp to [0,1].
+    prob = payload.get("language_probability")
+    confidence = (
+        min(1.0, max(0.0, float(prob)))
+        if isinstance(prob, (int, float))
+        else _TRANSCRIPT_CONF
+    )
     logger.info(
         "voice_transcription: tenant=%s model=%s language=%s chars=%d",
         tenant_id, resolved_model, detected, len(transcript),
     )
     return TranscriptionResult(
-        transcript_text=transcript, language=detected, confidence=_TRANSCRIPT_CONF
+        transcript_text=transcript, language=detected, confidence=confidence
     )
 
 

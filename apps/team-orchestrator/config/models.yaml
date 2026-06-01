@@ -58,11 +58,12 @@ owner_typed_extraction:
 
 # VT-59 voice_transcription — Sarvam Indic ASR for cash-book voice notes. NOT a
 # Claude model: this is Sarvam's STT model id (India residency, DPDP-favorable,
-# CL-422). Both slots = saarika:v2 (ASR, not reasoning). Resolver:
-# voice_transcription._resolve_model. Key = TEAM_SARVAM_API_KEY.
+# CL-422). saarika:v2.5 is the current/valid model (saarika:v2 was deprecated →
+# HTTP 400, caught by the VT-278 live canary). Resolver:
+# voice_transcription._resolve_model. Key = SARVAM_API_KEY (.viabe/secrets/sarvam.env).
 voice_transcription:
-  production: saarika:v2
-  test: saarika:v2
+  production: saarika:v2.5
+  test: saarika:v2.5
 
 # VT-59 cash_book_merge — Sonnet multimodal reconcile of photo entries vs voice
 # narration (the both-inputs path). Sonnet 4.6 (vision $/quality sweet-spot, same
