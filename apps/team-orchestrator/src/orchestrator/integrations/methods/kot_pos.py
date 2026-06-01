@@ -6,17 +6,19 @@ Two flavors, both over the shared adapter (Pillar 8):
 acquired_via='kot_pos'.
 
 UNATTRIBUTED rows: POS often does NOT capture the customer (no phone/name). Such
-rows are COUNTED (summary.dropped) but NOT persisted — there is no customer to
-anchor to and customer_ledger_entries requires one (NOT NULL FK). Persisting
-unattributed transactions for later match_transactions attribution is the
-`imported_transactions` path (CC systemic-fork proposal 2026-06-01; Cowork ruling
-pending) — DEFERRED. ATTRIBUTED rows (phone/name present) → dedup_and_merge +
-record_ledger_entries now; that path is final (no rework when the park-store lands).
+rows are now PARKED in imported_transactions (migration 062, VT-276) via
+ingest_entries(park_unattributed=True) for later match_transactions attribution
+(VT-275) — they are NO LONGER dropped (VT-58 completion, post-imported_transactions
+2026-06-01). ATTRIBUTED rows (phone/name present) → dedup_and_merge +
+record_ledger_entries (the clean ledger). Both flavors (CSV/JSON + receipt photo)
+opt into parking.
 
-Idempotency: attributed rows use the content-based entry_key today; a
-(tenant, source, bill_number) generalizable guard table is the VT-57 enhancement —
-deferred. Vendor parsers (PetPooja/Posist/Slick): the generic CSV/JSON header-sniff
-covers the common shape; vendor-specific stubs are a follow-up. PII never logged.
+Idempotency: the parked rows key on imported_transactions UNIQUE(tenant, source,
+provider_ref) — bill_number (mapped to the 'provider_ref' field) when the export
+has one, else a deterministic content+ordinal fallback. Attributed rows use the
+ledger's content entry_key. Vendor parsers (PetPooja/Posist/Slick): the generic
+CSV/JSON header-sniff covers the common shape; vendor-specific stubs are a
+follow-up. PII never logged.
 """
 
 from __future__ import annotations
@@ -48,6 +50,9 @@ _AMOUNT_KEYS = {"amount", "total", "total_amount", "total_amount_paise", "bill_a
 _DATE_KEYS = {"date", "transaction_date", "bill_date", "order_date", "datetime"}
 _PHONE_KEYS = {"phone", "mobile", "customer_phone", "phone_number", "contact"}
 _NAME_KEYS = {"customer", "customer_name", "name"}
+_BILL_KEYS = {"bill_number", "bill_no", "billno", "order_id", "order_no",
+              "invoice", "invoice_no", "invoice_number", "receipt_no", "txn_id",
+              "transaction_id", "ref", "reference"}
 
 
 def _row_to_entry(row: dict[str, Any]) -> ExtractionResult | None:
@@ -72,6 +77,10 @@ def _row_to_entry(row: dict[str, Any]) -> ExtractionResult | None:
     name = next((low[k] for k in _NAME_KEYS if low.get(k) not in (None, "")), None)
     if name is not None:
         fields.append(ExtractedField(name="customer_name", value=str(name), confidence=_CONF))
+    # bill/order id → provider_ref: the idempotency key for an unattributed park.
+    bill = next((low[k] for k in _BILL_KEYS if low.get(k) not in (None, "")), None)
+    if bill is not None:
+        fields.append(ExtractedField(name="provider_ref", value=str(bill), confidence=_CONF))
     return ExtractionResult(fields=tuple(fields), acquired_via="kot_pos", model="parse")
 
 
@@ -102,12 +111,19 @@ def ingest_kot_pos(
             fmt = "json" if head[:1] in (b"{", b"[") else "csv"
 
     if fmt == "image_kot":
-        # A receipt photo: ingest_image (vision → entries → attributed commit).
-        return ingest_image(tenant_id, file_bytes, acquired_via="kot_pos", media_type=media_type)
+        # A receipt photo: ingest_image (vision → entries → attributed commit;
+        # unattributed receipts parked in imported_transactions for VT-275).
+        return ingest_image(
+            tenant_id, file_bytes, acquired_via="kot_pos",
+            media_type=media_type, park_unattributed=True,
+        )
 
     entries = _parse_records(file_bytes.decode("utf-8", errors="replace"), fmt)
     logger.info("ingest_kot_pos: tenant=%s format=%s rows=%d", tenant_id, fmt, len(entries))
-    return ingest_entries(tenant_id, entries, acquired_via="kot_pos")
+    # POS rows without a customer → park for later attribution (VT-275), not drop.
+    return ingest_entries(
+        tenant_id, entries, acquired_via="kot_pos", park_unattributed=True,
+    )
 
 
 __all__ = ["FileFormat", "ingest_kot_pos"]

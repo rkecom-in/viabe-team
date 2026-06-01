@@ -42,6 +42,12 @@ def test_parse_csv_and_json():
     assert len(_parse_records(j, "json")) == 1
 
 
+def test_row_extracts_bill_number_as_provider_ref():
+    e = _row_to_entry({"Total": "1500", "Bill Number": "B-9"})
+    names = {f.name: f.value for f in e.fields}
+    assert names["provider_ref"] == "B-9"  # idempotency key for an unattributed park
+
+
 # --- DB -----------------------------------------------------------------------
 
 pytest.importorskip("dbos")
@@ -103,18 +109,38 @@ def test_attributed_row_commits_customer_and_ledger(db_ctx):
 
 
 @_DB
-def test_unattributed_row_dropped_not_persisted(db_ctx):
+def test_unattributed_row_parked_in_imported_transactions(db_ctx):
+    """VT-58 completion: no phone/name → PARKED in imported_transactions (not dropped)."""
     from orchestrator.db import tenant_connection
     from orchestrator.integrations.methods.kot_pos import ingest_kot_pos
 
     tenant = _tenant(db_ctx.dsn)
-    # No phone/name → unattributed → counted dropped, NOT persisted.
-    summary = ingest_kot_pos(tenant, b"Total,Bill Date\n1500,2026-06-01\n", "csv")
-    assert summary.committed == 0 and summary.dropped == 1
+    summary = ingest_kot_pos(
+        tenant, b"Total,Bill Date,Bill Number\n1500,2026-06-01,B-100\n", "csv")
+    assert summary.committed == 0 and summary.parked == 1 and summary.dropped == 0
     with tenant_connection(tenant) as conn:
-        led = conn.execute("SELECT count(*) AS n FROM customer_ledger_entries").fetchone()["n"]
+        imp = conn.execute(
+            "SELECT count(*) AS n FROM imported_transactions").fetchone()["n"]
+        led = conn.execute(
+            "SELECT count(*) AS n FROM customer_ledger_entries").fetchone()["n"]
         cust = conn.execute("SELECT count(*) AS n FROM customers").fetchone()["n"]
-    assert led == 0 and cust == 0
+    assert imp == 1 and led == 0 and cust == 0  # raw-parked, no attributed surfaces
+
+
+@_DB
+def test_unattributed_reimport_idempotent(db_ctx):
+    """Re-import of the same unattributed export → no duplicate parked rows."""
+    from orchestrator.db import tenant_connection
+    from orchestrator.integrations.methods.kot_pos import ingest_kot_pos
+
+    tenant = _tenant(db_ctx.dsn)
+    csv = b"Total,Bill Date,Bill Number\n1500,2026-06-01,B-200\n"
+    ingest_kot_pos(tenant, csv, "csv")
+    ingest_kot_pos(tenant, csv, "csv")  # re-import same export
+    with tenant_connection(tenant) as conn:
+        imp = conn.execute(
+            "SELECT count(*) AS n FROM imported_transactions").fetchone()["n"]
+    assert imp == 1, "re-import duplicated parked rows (provider_ref idempotency)"
 
 
 @_DB
