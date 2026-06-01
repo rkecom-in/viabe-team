@@ -71,3 +71,11 @@ voice_transcription:
 cash_book_merge:
   production: claude-sonnet-4-6
   test: claude-haiku-4-5
+
+# VT-61 zomato_theme_extraction — cluster IDENTITY-STRIPPED public review text into
+# ABSTRACT theme labels (e.g. "slow delivery", "great biryani") — NEVER verbatim
+# quotes. Haiku both slots (theme clustering = classification, not reasoning).
+# Resolver: methods.apify_food._resolve_theme_model. Gated on owner_inputs (CL-390).
+zomato_theme_extraction:
+  production: claude-haiku-4-5
+  test: claude-haiku-4-5
