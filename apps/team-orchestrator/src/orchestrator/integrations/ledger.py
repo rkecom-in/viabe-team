@@ -132,6 +132,14 @@ def resolve_customer_by_phone_token(
     established phone_token_resolutions access pattern (that table grants to the
     owner role, not app_role; ``tenant_connection``/app_role lacks SELECT on it).
     Tenant-scoped by the WHERE clause (P3): a foreign tenant matches no row → None.
+
+    COWORK FLAG (VT-273 review): this is the ONE owner-pool + explicit-WHERE
+    manual-tenant-filter path (phone_token_resolutions grants to the owner role,
+    not app_role, so tenant_connection can't SELECT it). The cross-tenant denial
+    test (test_ledger.test_resolve_customer_by_phone_token) is LOAD-BEARING —
+    never delete/weaken it. Do NOT reuse owner-pool+WHERE elsewhere without an
+    equivalent cross-tenant test. Clau: evaluate adding an RLS policy + app_role
+    GRANT on phone_token_resolutions so this can use tenant_connection.
     """
     from orchestrator.graph import get_pool
 

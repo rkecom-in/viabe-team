@@ -230,3 +230,44 @@ def test_oversized_image_downscaled_and_reencoded():
 
     img = Image.open(io.BytesIO(out_bytes))
     assert max(img.size) <= 1568
+
+
+# --- VT-55 multi-entry extraction ---------------------------------------------
+
+def test_extract_entries_returns_one_result_per_entry():
+    from orchestrator.integrations.vision_extraction import extract_entries_from_image
+
+    payload = json.dumps({"entries": [
+        {"fields": [{"name": "customer_name", "value": "Asha", "confidence": 0.9},
+                    {"name": "phone", "value": "9000000001", "confidence": 0.92}]},
+        {"fields": [{"name": "customer_name", "value": "Ravi", "confidence": 0.88}]},
+    ]})
+    out = extract_entries_from_image(
+        _png_bytes(), tenant_id=_TENANT, target_fields=["customer_name", "phone"],
+        acquired_via="paper_book", media_type="image/png",
+        client=_FakeClient(payload), consent_check=_ALLOW,
+    )
+    assert len(out) == 2
+    assert out[0].fields[0].value == "Asha" and out[1].fields[0].value == "Ravi"
+
+
+def test_extract_entries_consent_fail_closed():
+    from orchestrator.integrations.vision_extraction import extract_entries_from_image
+
+    with pytest.raises(ConsentRejectedError):
+        extract_entries_from_image(
+            _png_bytes(), tenant_id=_TENANT, target_fields=["customer_name"],
+            acquired_via="paper_book", media_type="image/png",
+            client=_ExplodingClient(), consent_check=_DENY,
+        )
+
+
+def test_extract_entries_missing_entries_key_raises():
+    from orchestrator.integrations.vision_extraction import extract_entries_from_image
+
+    with pytest.raises(VisionExtractionError):
+        extract_entries_from_image(
+            _png_bytes(), tenant_id=_TENANT, target_fields=["x"],
+            acquired_via="paper_book", media_type="image/png",
+            client=_FakeClient(json.dumps({"fields": []})), consent_check=_ALLOW,
+        )

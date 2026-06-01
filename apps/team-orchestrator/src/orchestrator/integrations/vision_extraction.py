@@ -352,12 +352,146 @@ def extract_from_image(
     )
 
 
+def _build_entries_prompt(target_fields: list[str]) -> str:
+    """Multi-entry variant of the extraction prompt (VT-55 image methods).
+
+    A paper ledger/contact page holds MANY entries; this asks for a JSON array,
+    one object per entry, each with the same per-field {value, confidence} shape.
+    """
+    base_path = (
+        Path(__file__).resolve().parents[1]
+        / "agent"
+        / "prompts"
+        / "vision_extraction_v1.md"
+    )
+    base = base_path.read_text(encoding="utf-8")
+    fields_block = "\n".join(f"  - {name}" for name in target_fields)
+    return (
+        f"{base}\n\nThis image contains MULTIPLE entries (e.g. rows in a "
+        "handwritten ledger or contact list). Return a single JSON object:\n"
+        '{"entries": [{"fields": [{"name": ..., "value": ..., "confidence": ...}]}]}'
+        "\nONE entries[] object per row you can read. Each entry's fields use the "
+        f"SAME rules above. FIELDS TO EXTRACT per entry:\n{fields_block}\n"
+    )
+
+
+def extract_entries_from_image(
+    image_bytes: bytes,
+    *,
+    tenant_id: UUID,
+    target_fields: list[str],
+    acquired_via: str,
+    media_type: str = "image/jpeg",
+    client: Anthropic | None = None,
+    model: str | None = None,
+    consent_check: Callable[[UUID], bool] | None = None,
+) -> list[ExtractionResult]:
+    """Multi-entry extraction: one ExtractionResult per row in the image.
+
+    Same consent gate (fail-closed), preprocessing, model split, and per-field
+    confidence as ``extract_from_image`` — just returns a LIST (a ledger photo is
+    many customers). Malformed output → VisionExtractionError (P8; caller routes
+    to VT-53). Used by the image ingestion methods (VT-55, kot_pos, cash_book).
+    """
+    if consent_check is None:
+        from orchestrator.memory.l0_writer import _owner_inputs_enabled
+
+        consent_check = _owner_inputs_enabled
+    if not consent_check(tenant_id):
+        logger.info(
+            "extract_entries_from_image: consent absent (tenant=%s) — not transmitting",
+            tenant_id,
+        )
+        raise ConsentRejectedError(
+            "tenant.owner_inputs disabled — image NOT transmitted to Anthropic"
+        )
+
+    payload, payload_media_type = _preprocess_image(image_bytes, media_type)
+    if client is None:
+        client = Anthropic()
+    resolved_model = model or _resolve_vision_model()
+    b64 = base64.standard_b64encode(payload).decode("ascii")
+    resp = client.messages.create(
+        model=resolved_model,
+        max_tokens=4096,  # multi-entry → larger budget than the single-record path
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": payload_media_type,
+                            "data": b64,
+                        },
+                    },
+                    {"type": "text", "text": _build_entries_prompt(target_fields)},
+                ],
+            }
+        ],
+    )
+    raw = "".join(
+        b.text for b in resp.content if getattr(b, "type", "") == "text"
+    ).strip()
+    if raw.startswith("```"):
+        raw = raw.strip("`")
+        if raw.lower().startswith("json"):
+            raw = raw[4:]
+        raw = raw.strip()
+    if not raw:
+        raise VisionExtractionError("vision model returned empty content")
+    try:
+        parsed: Any = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise VisionExtractionError(
+            f"vision model returned non-JSON: {raw[:200]!r}"
+        ) from exc
+
+    entries = parsed.get("entries") if isinstance(parsed, dict) else None
+    if not isinstance(entries, list):
+        raise VisionExtractionError(
+            f"vision output missing 'entries' list: {str(parsed)[:200]!r}"
+        )
+
+    results: list[ExtractionResult] = []
+    for ent in entries:
+        rows = ent.get("fields") if isinstance(ent, dict) else None
+        if not isinstance(rows, list):
+            raise VisionExtractionError(
+                f"entry missing 'fields' list: {str(ent)[:160]!r}"
+            )
+        try:
+            fields = tuple(
+                ExtractedField(
+                    name=str(r["name"]),
+                    value=(None if r.get("value") in (None, "") else str(r["value"])),
+                    confidence=float(r["confidence"]),
+                )
+                for r in rows
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise VisionExtractionError(
+                f"vision field row failed validation: {str(rows)[:160]!r}"
+            ) from exc
+        results.append(
+            ExtractionResult(fields=fields, acquired_via=acquired_via, model=resolved_model)
+        )
+
+    logger.info(
+        "extract_entries_from_image: tenant=%s acquired_via=%s entries=%d model=%s",
+        tenant_id, acquired_via, len(results), resolved_model,
+    )
+    return results
+
+
 __all__ = [
     "ConsentRejectedError",
     "ExtractedField",
     "ExtractionResult",
     "ImagePreprocessError",
     "VisionExtractionError",
+    "extract_entries_from_image",
     "extract_from_image",
     "route_field",
 ]
