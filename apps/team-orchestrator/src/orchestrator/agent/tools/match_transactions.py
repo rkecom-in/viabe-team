@@ -203,7 +203,12 @@ def _fetch_candidate_ledger(
                 )
                 rows = cur.fetchall()
             except Exception as exc:  # noqa: BLE001
-                if type(exc).__name__ != "UndefinedTable":
+                # VT-273 landed customer_ledger_entries with the CANONICAL schema,
+                # which differs from this VT-46 stub's speculative columns
+                # (entry_ts / ref_vpa). Stay graceful-empty on UndefinedColumn too
+                # until VT-46 is wired to the canonical schema (its own row);
+                # UndefinedTable kept for pre-061 environments.
+                if type(exc).__name__ not in ("UndefinedTable", "UndefinedColumn"):
                     raise
                 return []
     out: list[dict[str, Any]] = []
