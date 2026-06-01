@@ -1,14 +1,24 @@
 """VT-208 — Shopify connector.
 
-Shopify Admin REST API 2024-04. Custom-app access_token flow — owner
-generates the token in Shopify admin (Apps → Develop apps → Create app
-→ API scopes → Install) and pastes into the Integration Agent. No OAuth
-PKCE; tokens are long-lived (Q1 lock per Cowork plan-review 2026-05-28).
+Shopify Admin REST API 2024-04. CLIENT-CREDENTIALS grant (VT-208 rework
+2026-06-01): Shopify removed in-UI Admin API access-token paste, so auth is now
+the OAuth2 client_credentials grant — app Client ID + Client Secret → POST the
+store token endpoint → short-lived access_token. ZERO manual paste (CL-421).
+Works because the app + dev store are in the SAME ORG (dev: the eComVibe Dev
+Dashboard app + the kk4xva-di dev store; CL-422 synthetic only).
+
+Grant (confirmed vs shopify.dev get-api-access-tokens, Cowork 2026-06-01):
+    POST https://{SHOPIFY_STORE_DOMAIN}/admin/oauth/access_token
+    Content-Type: application/x-www-form-urlencoded
+    body: grant_type=client_credentials, client_id=SHOPIFY_API_KEY,
+          client_secret=SHOPIFY_API_SECRET
+    → { access_token, scope, expires_in }   (expires_in is 86399 = ~24h)
+The access_token is X-Shopify-Access-Token for the Admin API. SHOPIFY_API_KEY /
+SHOPIFY_API_SECRET / SHOPIFY_STORE_DOMAIN come from .viabe/secrets/shopify-dev.env.
 
 Q1: Reuse ``tenant_oauth_tokens`` for credential storage. The
-``refresh_token_encrypted`` column is overloaded — google_sheet rows
-hold OAuth refresh tokens; shopify rows hold Admin API access_tokens.
-Column COMMENT in migration 035 spells this out.
+``refresh_token_encrypted`` column holds the Admin API access_token; expires_at /
+last_refreshed_at track the 24h TTL → proactive re-grant within a 5-min skew.
 
 Q2: Real-Shopify webhook delivery deferred to VT-213 (mirrors VT-212 for
 google_sheet OAuth). PR-1 canary is deterministic via stubbed httpx.
@@ -30,6 +40,7 @@ import logging
 import os
 import secrets
 from base64 import b64decode, b64encode
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 from uuid import UUID
@@ -49,16 +60,58 @@ logger = logging.getLogger(__name__)
 
 
 _SHOPIFY_API_VERSION = "2024-04"
-_REQUIRED_SCOPES = {
-    "read_customers",
-    "read_orders",
-    "read_products",
-    "read_checkouts",
-}
+# Scopes the app is granted in the Dev Dashboard (Cowork VT-208). read_orders
+# covers abandoned checkouts; if the live walk 403s the /checkouts.json pull,
+# read_checkouts must be added in the Dashboard (flag for the live canary).
+_REQUIRED_SCOPES = {"read_customers", "read_orders", "read_products"}
+_TOKEN_PATH = "/admin/oauth/access_token"
+_EXPIRY_SKEW = timedelta(minutes=5)  # proactive re-grant before the 24h TTL lapses
+
+# (store_domain, client_id, client_secret) -> Shopify grant JSON
+# ({access_token, scope, expires_in}). Injectable so tests run without the network.
+GrantFn = Callable[[str, str, str], dict[str, Any]]
 
 
 class AuthValidationError(Exception):
-    """Raised when the pasted Admin API token fails validation."""
+    """Raised when the client_credentials grant is rejected by Shopify."""
+
+
+class ShopifyConfigError(Exception):
+    """Raised when the SHOPIFY_API_KEY / _SECRET / _STORE_DOMAIN env is absent."""
+
+
+def _shopify_env() -> tuple[str, str, str]:
+    """(client_id, client_secret, store_domain) from .viabe/secrets/shopify-dev.env."""
+    cid = os.environ.get("SHOPIFY_API_KEY")
+    secret = os.environ.get("SHOPIFY_API_SECRET")
+    domain = os.environ.get("SHOPIFY_STORE_DOMAIN")
+    if not (cid and secret and domain):
+        raise ShopifyConfigError(
+            "SHOPIFY_API_KEY / SHOPIFY_API_SECRET / SHOPIFY_STORE_DOMAIN must be set "
+            "(.viabe/secrets/shopify-dev.env)"
+        )
+    return cid, secret, domain
+
+
+def _default_grant(store_domain: str, client_id: str, client_secret: str) -> dict[str, Any]:
+    """Real Shopify client_credentials grant (form-encoded POST)."""
+    resp = httpx.post(
+        f"https://{store_domain}{_TOKEN_PATH}",
+        data={
+            "grant_type": "client_credentials",
+            "client_id": client_id,
+            "client_secret": client_secret,
+        },
+        timeout=15.0,
+    )
+    if resp.status_code != 200:
+        # shop_not_permitted (app+store not same org) is Shopify's #1 failure —
+        # surface it verbatim, never mask (Cowork live-walk flag).
+        raise AuthValidationError(
+            f"Shopify client_credentials grant failed: HTTP {resp.status_code} "
+            f"body={resp.text[:300]}"
+        )
+    return cast("dict[str, Any]", resp.json())
 
 
 class ShopifyConnector(ConnectorBase):
@@ -66,74 +119,53 @@ class ShopifyConnector(ConnectorBase):
 
     connector_id: str = "shopify"
 
+    def __init__(self, *, grant_fn: GrantFn | None = None) -> None:
+        # grant_fn injectable for tests (default = the real client_credentials POST).
+        self._grant_fn: GrantFn = grant_fn or _default_grant
+
     @property
     def spec(self) -> ConnectorSpec:
         return get_connector("shopify")
 
-    # ---------- AUTH ----------
+    # ---------- AUTH (client_credentials grant — zero paste, CL-421) ----------
 
     def start_auth(self, tenant_id: UUID) -> dict[str, Any]:
-        """Return the walkthrough envelope the agent shows the owner."""
+        """Zero-paste: the grant is server-side (app creds in env, app+store same
+        org). Nothing for the owner to copy — just a confirm."""
         return {
-            "next_action": "show_walkthrough_and_prompt_token",
-            "walkthrough": [
-                "Open your Shopify admin → Settings → Apps and sales channels",
-                "Click 'Develop apps' (top-right) → 'Create an app'",
-                "Name the app 'Viabe Integration'",
-                "Open the new app → 'Configure Admin API scopes'",
-                "Enable scopes: " + ", ".join(sorted(_REQUIRED_SCOPES)),
-                "Click 'Save' → 'Install app' → 'Reveal token once'",
-                "Paste the token here, along with your shop URL "
-                "(e.g. rkecom.myshopify.com)",
-            ],
-            "prompt_kind": "shopify_admin_token",
+            "next_action": "client_credentials_connect",
+            "prompt_kind": "none",
+            "message": (
+                "Connecting your Shopify store automatically — no token to copy."
+            ),
+            "scopes": sorted(_REQUIRED_SCOPES),
         }
 
-    def complete_auth(
-        self, tenant_id: UUID, auth_payload: dict[str, Any]
-    ) -> dict[str, Any]:
-        """Validate token + persist encrypted with shop_url."""
-        access_token = auth_payload.get("access_token") or auth_payload.get(
-            "token"
-        )
-        shop_url = auth_payload.get("shop_url")
+    def _grant_and_store(self, tenant_id: UUID) -> dict[str, Any]:
+        """Run the client_credentials grant + persist the token (encrypted, 24h TTL)."""
+        client_id, client_secret, store_domain = _shopify_env()
+        grant = self._grant_fn(store_domain, client_id, client_secret)
+        access_token = grant.get("access_token")
         if not access_token:
-            raise ValueError("complete_auth: 'access_token' missing")
-        if not shop_url:
-            raise ValueError("complete_auth: 'shop_url' missing")
-
-        # Validate: hit GET /shop.json. 200 + valid JSON proves the
-        # token has at least one accepted scope. 401 = bad token.
-        url = f"https://{shop_url}/admin/api/{_SHOPIFY_API_VERSION}/shop.json"
-        resp = httpx.get(
-            url,
-            headers={"X-Shopify-Access-Token": access_token},
-            timeout=15.0,
-        )
-        if resp.status_code == 401:
             raise AuthValidationError(
-                f"Shopify token rejected: HTTP 401 for shop={shop_url}"
+                f"grant returned no access_token: {str(grant)[:200]!r}"
             )
-        if resp.status_code != 200:
-            raise RuntimeError(
-                f"Shopify token validation failed: HTTP {resp.status_code} "
-                f"body={resp.text[:200]}"
-            )
-
-        encrypted = encrypt_value(access_token)
+        expires_in = int(grant.get("expires_in") or 86399)
+        scope_str = grant.get("scope") or ""
+        scopes = (
+            [s.strip() for s in scope_str.split(",") if s.strip()]
+            if scope_str else sorted(_REQUIRED_SCOPES)
+        )
+        encrypted = encrypt_value(str(access_token))
+        expires_at = datetime.now(UTC) + timedelta(seconds=expires_in)
         push_secret = secrets.token_urlsafe(32)
-        # Long-lived; record a far-future expiry so the schema's
-        # expires_at column stays NOT NULL-compatible.
-        expires_at = datetime.now(UTC) + timedelta(days=365)
-
         pool = get_pool()
         with pool.connection() as conn:
             conn.execute(
                 """
                 INSERT INTO tenant_oauth_tokens (
                     tenant_id, connector_id, refresh_token_encrypted,
-                    scopes, push_secret, shop_url,
-                    last_refreshed_at, expires_at
+                    scopes, push_secret, shop_url, last_refreshed_at, expires_at
                 )
                 VALUES (%s, %s, %s, %s, %s, %s, now(), %s)
                 ON CONFLICT (tenant_id, connector_id) DO UPDATE SET
@@ -148,32 +180,45 @@ class ShopifyConnector(ConnectorBase):
                 """,
                 (
                     str(tenant_id), self.connector_id, encrypted,
-                    sorted(_REQUIRED_SCOPES), push_secret, shop_url,
-                    expires_at,
+                    scopes, push_secret, store_domain, expires_at,
                 ),
             )
-        return {
-            "success": True,
-            "shop_url": shop_url,
-            "scopes": sorted(_REQUIRED_SCOPES),
-        }
+        return {"success": True, "shop_url": store_domain, "scopes": scopes}
 
-    def get_access_token(self, tenant_id: UUID) -> tuple[str, str]:
-        """Return ``(access_token, shop_url)`` for a connected tenant."""
+    def complete_auth(
+        self, tenant_id: UUID, auth_payload: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        """Perform the client_credentials grant + persist. ``auth_payload`` is
+        unused (zero-paste) — kept for the ConnectorBase contract."""
+        return self._grant_and_store(tenant_id)
+
+    def _read_token_row(self, tenant_id: UUID) -> dict[str, Any] | None:
         pool = get_pool()
         with pool.connection() as conn, conn.cursor() as cur:
             cur.execute(
-                "SELECT refresh_token_encrypted, shop_url "
-                "FROM tenant_oauth_tokens "
-                "WHERE tenant_id = %s AND connector_id = %s",
+                "SELECT refresh_token_encrypted, shop_url, expires_at "
+                "FROM tenant_oauth_tokens WHERE tenant_id = %s AND connector_id = %s",
                 (str(tenant_id), self.connector_id),
             )
             raw = cur.fetchone()
-        if raw is None:
-            raise RuntimeError(
-                f"no Shopify token for tenant {tenant_id}"
-            )
-        row = cast("dict[str, Any]", raw)
+        return cast("dict[str, Any] | None", raw)
+
+    def get_access_token(self, tenant_id: UUID) -> tuple[str, str]:
+        """Return ``(access_token, shop_url)``; grant on first use, proactively
+        re-grant within a 5-min skew of the 24h expiry."""
+        row = self._read_token_row(tenant_id)
+        expires_at = row["expires_at"] if row else None
+        if (
+            row is None
+            or expires_at is None
+            or expires_at <= datetime.now(UTC) + _EXPIRY_SKEW
+        ):
+            self._grant_and_store(tenant_id)  # first connect OR proactive refresh
+            row = self._read_token_row(tenant_id)
+            if row is None:
+                raise RuntimeError(
+                    f"Shopify grant did not persist a token for {tenant_id}"
+                )
         return decrypt_value(row["refresh_token_encrypted"]), row["shop_url"]
 
     # ---------- PULL ----------
