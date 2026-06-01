@@ -18,8 +18,8 @@ the VT-272 privacy-notice sub-processor list. Dev/canary = SYNTHETIC audio only
 The audio bytes are passed IN (the Twilio media-URL fetch is the webhook layer's
 job — VT-3.3 — same boundary as the VT-55 image methods, which take bytes too).
 The HTTP call is injectable (``http_post``) so tests run without the network /
-key; the real call is gated on TEAM_SARVAM_API_KEY (the canary fails-not-skips
-when the key is present). PII never logged (CL-390).
+key; the real call is gated on SARVAM_API_KEY (the canary fails-not-skips when the
+key is present). PII never logged (CL-390).
 """
 
 from __future__ import annotations
@@ -41,7 +41,9 @@ logger = logging.getLogger(__name__)
 # config/models.yaml — parents: [0]=integrations [1]=orchestrator [2]=src [3]=team-orchestrator.
 _MODELS_YAML = Path(__file__).resolve().parents[3] / "config" / "models.yaml"
 _SARVAM_STT_URL = "https://api.sarvam.ai/speech-to-text"
-_SARVAM_KEY_ENV = "TEAM_SARVAM_API_KEY"
+# Per-integration secret convention (Fazal 2026-06-01): SARVAM_API_KEY in
+# .viabe/secrets/sarvam.env (NOT the worker's TEAM_ prefix / a generic env).
+_SARVAM_KEY_ENV = "SARVAM_API_KEY"
 
 # Sarvam ASR doesn't return per-token confidence; a non-empty transcript from
 # structured ASR is treated as high-confidence. Per-FIELD confidence comes later
@@ -53,7 +55,7 @@ HttpPost = Callable[[bytes, str, str, str, str], dict[str, Any]]
 
 
 class SarvamConfigError(Exception):
-    """Raised when TEAM_SARVAM_API_KEY is absent (real transcription can't run)."""
+    """Raised when SARVAM_API_KEY is absent (real transcription can't run)."""
 
 
 class TranscriptionError(Exception):
@@ -126,7 +128,7 @@ def transcribe(
     key = api_key or os.environ.get(_SARVAM_KEY_ENV)
     if not key:
         raise SarvamConfigError(
-            f"{_SARVAM_KEY_ENV} not set — cannot transcribe (add to .viabe/secrets/team-dev.env)"
+            f"{_SARVAM_KEY_ENV} not set — cannot transcribe (add to .viabe/secrets/sarvam.env)"
         )
     resolved_model = model or _resolve_model()
     post = http_post or _default_post
