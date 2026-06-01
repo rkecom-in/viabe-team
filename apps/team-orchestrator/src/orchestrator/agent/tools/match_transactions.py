@@ -34,8 +34,10 @@ VT-176) and does NOT lift VT-43.
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from dataclasses import dataclass
+from datetime import datetime, time
 from typing import Any, Literal
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, computed_field
 
@@ -175,62 +177,45 @@ def _score(txn: TransactionInput, ledger: dict[str, Any]) -> tuple[float, str]:
 def _fetch_candidate_ledger(
     pool: Any, tenant_id: str, transactions: list[TransactionInput],
 ) -> list[dict[str, Any]]:
-    """Fetch ledger entries within ±24h of any input transaction.
+    """Fetch attributed ledger entries within ±1 day of any input transaction.
 
-    Returns empty list when the customer_ledger_entries table is absent
-    (forward-target schema; matches VT-40 pattern).
+    VT-275: reconciled to the CANONICAL customer_ledger_entries schema (061) —
+    windows on ``entry_date`` (a DATE), scores on ``amount_paise``, and carries
+    ``customer_id`` (the bridge attributes a parked import to that customer). The
+    canonical ledger has NO entry_ts / ref_vpa, so the date is synthesised to
+    midnight for the existing time-proximity scorer and ref_vpa is None (the
+    graceful-degrade is gone — the schema is real). VPA precision for UPI is the
+    UPI-scoped path (VT-57), not the shared ledger.
     """
     if not transactions:
         return []
-    earliest = min(t.timestamp for t in transactions)
-    latest = max(t.timestamp for t in transactions)
-    with pool.connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT set_config('app.current_tenant', %s, false)",
-                (tenant_id,),
-            )
-            try:
-                cur.execute(
-                    """
-                    SELECT id::text AS id, amount_paise, entry_ts, ref_vpa
-                    FROM customer_ledger_entries
-                    WHERE tenant_id = %s
-                      AND entry_ts >= %s - interval '1 day'
-                      AND entry_ts <= %s + interval '1 day'
-                    """,
-                    (tenant_id, earliest, latest),
-                )
-                rows = cur.fetchall()
-            except Exception as exc:  # noqa: BLE001
-                # VT-273 landed customer_ledger_entries with the CANONICAL schema,
-                # which differs from this VT-46 stub's speculative columns
-                # (entry_ts / ref_vpa). Stay graceful-empty on UndefinedColumn too
-                # until VT-46 is wired to the canonical schema (its own row);
-                # UndefinedTable kept for pre-061 environments.
-                if type(exc).__name__ not in ("UndefinedTable", "UndefinedColumn"):
-                    raise
-                return []
+    earliest = min(t.timestamp for t in transactions).date()
+    latest = max(t.timestamp for t in transactions).date()
+    with pool.connection() as conn, conn.cursor() as cur:
+        cur.execute("SELECT set_config('app.current_tenant', %s, false)", (tenant_id,))
+        cur.execute(
+            """
+            SELECT id::text AS id, customer_id::text AS customer_id,
+                   amount_paise, entry_date
+            FROM customer_ledger_entries
+            WHERE tenant_id = %s
+              AND entry_date >= %s - interval '1 day'
+              AND entry_date <= %s + interval '1 day'
+            """,
+            (tenant_id, earliest, latest),
+        )
+        rows = cur.fetchall()
     out: list[dict[str, Any]] = []
     for r in rows:
-        if isinstance(r, dict):
-            out.append(
-                {
-                    "id": r.get("id"),
-                    "amount_paise": r.get("amount_paise"),
-                    "entry_ts": r.get("entry_ts"),
-                    "ref_vpa": r.get("ref_vpa"),
-                },
-            )
-        else:
-            out.append(
-                {
-                    "id": r[0],
-                    "amount_paise": r[1],
-                    "entry_ts": r[2],
-                    "ref_vpa": r[3],
-                },
-            )
+        d = r if isinstance(r, dict) else {
+            "id": r[0], "customer_id": r[1], "amount_paise": r[2], "entry_date": r[3],
+        }
+        ed = d["entry_date"]
+        entry_ts = ed if isinstance(ed, datetime) else datetime.combine(ed, time.min)
+        out.append({
+            "id": d["id"], "customer_id": d.get("customer_id"),
+            "amount_paise": d["amount_paise"], "entry_ts": entry_ts, "ref_vpa": None,
+        })
     return out
 
 
@@ -296,13 +281,104 @@ def match_transactions(
     return MatchTransactionsOutput(matches=matches, unmatched=unmatched)
 
 
+@dataclass(frozen=True)
+class AttributionResult:
+    """VT-275 bridge counts — NO PII (CL-390)."""
+
+    scanned: int          # unattributed imported_transactions considered
+    tentative_set: int    # scored amount+date suggestions written (status=tentative)
+
+
+def attribute_imported_transactions(
+    tenant_id: UUID | str, *, pool: Any | None = None
+) -> AttributionResult:
+    """VT-275 bridge: SUGGEST customers for unattributed parked imports.
+
+    Reads ``imported_transactions`` WHERE customer_id IS NULL (status
+    'unattributed'), scores each against existing ATTRIBUTED ledger entries
+    (amount + entry_date ±1d, via ``match_transactions``), and on a qualifying
+    match sets a TENTATIVE link (customer_id + attribution_status='tentative' +
+    match_confidence) — it does NOT write the clean ledger (D2/Cowork: parked rows
+    carry no VPA, so amount+date alone is too weak to confirm). Promotion to
+    customer_ledger_entries happens only when status becomes 'confirmed' (owner
+    confirmation / strong signal — a follow-up surface).
+
+    Idempotent: only 'unattributed' rows are scanned, so a re-run never re-touches
+    an already-tentative row. tenant_id from invocation context (P3); RLS via
+    tenant_connection (CL-82/88). Returns counts only.
+    """
+    from orchestrator.db.tenant_connection import tenant_connection
+
+    with tenant_connection(tenant_id) as conn:
+        unattributed = conn.execute(
+            """
+            SELECT id::text AS id, amount_paise, txn_date
+            FROM imported_transactions
+            WHERE customer_id IS NULL AND attribution_status = 'unattributed'
+            """
+        ).fetchall()
+    rows = [r if isinstance(r, dict) else {"id": r[0], "amount_paise": r[1], "txn_date": r[2]}
+            for r in unattributed]
+    if not rows:
+        return AttributionResult(scanned=0, tentative_set=0)
+
+    txns = [
+        TransactionInput(
+            txn_id=str(r["id"]), amount_paise=int(r["amount_paise"]),
+            timestamp=datetime.combine(r["txn_date"], time.min),
+        )
+        for r in rows
+    ]
+    # Candidate attributed ledger entries (carry customer_id) in the date window.
+    if pool is None:
+        from orchestrator.graph import get_pool
+
+        pool = get_pool()
+    candidates = _fetch_candidate_ledger(pool, str(tenant_id), txns)
+    ledger_to_customer = {
+        c["id"]: c["customer_id"] for c in candidates if c.get("customer_id")
+    }
+
+    result = match_transactions(
+        MatchTransactionsInput(tenant_id=str(tenant_id), transactions=txns),
+        candidate_ledger=candidates,
+    )
+
+    tentative = 0
+    with tenant_connection(tenant_id) as conn:
+        for m in result.matches:
+            customer_id = ledger_to_customer.get(m.ledger_entry_id)
+            if customer_id is None:
+                continue  # matched a ledger entry with no customer (shouldn't happen)
+            cur = conn.execute(
+                """
+                UPDATE imported_transactions
+                   SET customer_id = %s,
+                       attribution_status = 'tentative',
+                       match_confidence = %s
+                 WHERE id = %s AND attribution_status = 'unattributed'
+                """,
+                (str(customer_id), m.confidence, m.txn_id),
+            )
+            if cur.rowcount and cur.rowcount > 0:
+                tentative += 1
+
+    logger.info(
+        "attribute_imported_transactions: tenant=%s scanned=%d tentative=%d",
+        tenant_id, len(rows), tentative,
+    )
+    return AttributionResult(scanned=len(rows), tentative_set=tentative)
+
+
 __all__ = [
     "AttributionMethod",
+    "AttributionResult",
     "MatchTransactionsInput",
     "MatchTransactionsOutput",
     "TransactionInput",
     "TransactionMatch",
     "UnmatchedTransaction",
+    "attribute_imported_transactions",
     "attribution_method_from_match_basis",
     "match_transactions",
 ]

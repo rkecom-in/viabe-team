@@ -279,3 +279,176 @@ def test_attribution_method_serialized_in_model_dump() -> None:
     assert dumped["attribution_method"] == "exact_match"
     # confidence doubles as attribution_confidence (already in [0,1]).
     assert 0.0 <= dumped["confidence"] <= 1.0
+
+
+# --- VT-275 attribution bridge (real Postgres, no mock cursors) ---------------
+
+import os  # noqa: E402
+from types import SimpleNamespace  # noqa: E402
+from uuid import uuid4  # noqa: E402
+
+pytest.importorskip("dbos")
+import psycopg  # noqa: E402
+
+_DB = pytest.mark.skipif(
+    not os.environ.get("DATABASE_URL"),
+    reason="DATABASE_URL not set — attribution-bridge DB tests skipped",
+)
+
+
+@pytest.fixture(scope="module")
+def db_ctx():
+    import apply_migrations
+
+    dsn = os.environ["DATABASE_URL"]
+    assert not apply_migrations.apply(dsn=dsn)["failed"]
+    os.environ["TEAM_SUPABASE_DB_URL"] = dsn
+    if not os.environ.get("TEAM_PHONE_ENCRYPTION_KEY"):
+        from cryptography.fernet import Fernet
+
+        os.environ["TEAM_PHONE_ENCRYPTION_KEY"] = Fernet.generate_key().decode()
+    from dbos_config import launch_dbos, shutdown_dbos
+
+    launch_dbos()
+    try:
+        yield SimpleNamespace(dsn=dsn)
+    finally:
+        shutdown_dbos()
+
+
+def _tenant(dsn: str) -> str:
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        return str(conn.execute(
+            "INSERT INTO tenants (business_name, plan_tier, phase) "
+            "VALUES ('VT-275 bridge test', 'founding', 'onboarding') RETURNING id"
+        ).fetchone()[0])
+
+
+def _attributed_ledger_entry(tenant: str, amount: int, d) -> str:
+    """Create a customer + an attributed ledger entry (amount, date) via the import seam."""
+    from datetime import date
+
+    from orchestrator.integrations.dedup_merge import dedup_and_merge
+    from orchestrator.integrations.imported_transactions import (
+        ImportedTxnIn,
+        record_imported_transactions,
+    )
+
+    phone = "+9190" + uuid4().int.__str__()[:8]
+    cid = dedup_and_merge(tenant, acquired_via="kot_pos", phone_e164=phone,
+                          display_name="Bridge Test").customer_id
+    assert cid is not None
+    record_imported_transactions(tenant, [ImportedTxnIn(
+        provider_ref=f"attr-{uuid4().hex[:8]}", amount_paise=amount,
+        txn_date=d if isinstance(d, date) else date.fromisoformat(d),
+        direction="credit", customer_id=cid, entry_type="sale")],
+        acquired_via="kot_pos")
+    return str(cid)
+
+
+def _park_unattributed(tenant: str, amount: int, d) -> str:
+    from datetime import date
+
+    from orchestrator.integrations.imported_transactions import (
+        ImportedTxnIn,
+        record_imported_transactions,
+    )
+
+    ref = f"unattr-{uuid4().hex[:8]}"
+    record_imported_transactions(tenant, [ImportedTxnIn(
+        provider_ref=ref, amount_paise=amount,
+        txn_date=d if isinstance(d, date) else date.fromisoformat(d),
+        direction="credit")], acquired_via="kot_pos")
+    return ref
+
+
+def _imported_row(tenant: str, ref: str):
+    from orchestrator.db import tenant_connection
+
+    with tenant_connection(tenant) as conn:
+        return conn.execute(
+            "SELECT customer_id::text AS customer_id, attribution_status, "
+            "match_confidence FROM imported_transactions WHERE provider_ref = %s",
+            (ref,)).fetchone()
+
+
+def _ledger_count(tenant: str) -> int:
+    from orchestrator.db import tenant_connection
+
+    with tenant_connection(tenant) as conn:
+        return conn.execute(
+            "SELECT count(*) AS n FROM customer_ledger_entries").fetchone()["n"]
+
+
+@_DB
+def test_bridge_sets_tentative_link_without_ledger_write(db_ctx):
+    """A parked import matching an attributed ledger entry → TENTATIVE link, NO ledger write."""
+    from datetime import date
+
+    from orchestrator.agent.tools.match_transactions import (
+        attribute_imported_transactions,
+    )
+
+    tenant = _tenant(db_ctx.dsn)
+    cid = _attributed_ledger_entry(tenant, 150000, date(2026, 6, 1))
+    ref = _park_unattributed(tenant, 150000, date(2026, 6, 1))  # same amount + date
+    ledger_before = _ledger_count(tenant)
+
+    res = attribute_imported_transactions(tenant)
+    assert res.scanned == 1 and res.tentative_set == 1
+
+    row = _imported_row(tenant, ref)
+    assert row["customer_id"] == cid
+    assert row["attribution_status"] == "tentative"  # N3: distinguishable, NOT confirmed
+    assert row["match_confidence"] is not None
+    assert _ledger_count(tenant) == ledger_before  # D2: no guess written to the clean ledger
+
+
+@_DB
+def test_bridge_no_amount_match_stays_unattributed(db_ctx):
+    from datetime import date
+
+    from orchestrator.agent.tools.match_transactions import (
+        attribute_imported_transactions,
+    )
+
+    tenant = _tenant(db_ctx.dsn)
+    _attributed_ledger_entry(tenant, 150000, date(2026, 6, 1))
+    ref = _park_unattributed(tenant, 999999, date(2026, 6, 1))  # amount mismatch
+
+    res = attribute_imported_transactions(tenant)
+    assert res.tentative_set == 0
+    row = _imported_row(tenant, ref)
+    assert row["customer_id"] is None and row["attribution_status"] == "unattributed"
+
+
+@_DB
+def test_bridge_idempotent(db_ctx):
+    from datetime import date
+
+    from orchestrator.agent.tools.match_transactions import (
+        attribute_imported_transactions,
+    )
+
+    tenant = _tenant(db_ctx.dsn)
+    _attributed_ledger_entry(tenant, 150000, date(2026, 6, 1))
+    _park_unattributed(tenant, 150000, date(2026, 6, 1))
+    attribute_imported_transactions(tenant)              # first pass → tentative
+    res2 = attribute_imported_transactions(tenant)       # re-run
+    assert res2.scanned == 0 and res2.tentative_set == 0  # tentative not re-scanned
+
+
+@_DB
+def test_bridge_cross_tenant(db_ctx):
+    from datetime import date
+
+    from orchestrator.agent.tools.match_transactions import (
+        attribute_imported_transactions,
+    )
+
+    a, b = _tenant(db_ctx.dsn), _tenant(db_ctx.dsn)
+    _attributed_ledger_entry(a, 150000, date(2026, 6, 1))   # A's ledger
+    ref = _park_unattributed(b, 150000, date(2026, 6, 1))   # B's parked import
+    res = attribute_imported_transactions(b)
+    assert res.tentative_set == 0  # B cannot match A's ledger entry (RLS)
+    assert _imported_row(b, ref)["attribution_status"] == "unattributed"
