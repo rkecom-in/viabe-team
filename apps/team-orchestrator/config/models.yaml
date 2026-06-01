@@ -47,3 +47,11 @@ owner_input_classifier:
 vision_extraction:
   production: claude-sonnet-4-6
   test: claude-haiku-4-5
+
+# VT-63 owner_typed_extraction — Method 9 owner-typed NL entries (WhatsApp).
+# Haiku in BOTH slots: extracting {name, phone, amount, date} from a short owner
+# message is structured extraction, not open-ended reasoning (same posture as
+# owner_input_classifier). Resolver: methods.owner_typed._resolve_owner_typed_model.
+owner_typed_extraction:
+  production: claude-haiku-4-5
+  test: claude-haiku-4-5
