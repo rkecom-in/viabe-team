@@ -111,13 +111,15 @@ def test_query_returns_entries_when_match() -> None:
         QueryCustomerLedgerInput,
         query_customer_ledger,
     )
+    # VT-258: customer resolved via phone_token_resolutions.customer_id; ledger
+    # rows carry the canonical `notes` column (mapped to the IO `description`).
     pool = _fake_pool(
-        customer_row={"id": "cust_42"},
+        customer_row={"customer_id": "cust_42"},
         ledger_rows=[
             {"entry_date": date(2026, 5, 1), "amount_paise": 1500,
-             "description": "invoice A"},
+             "notes": "invoice A"},
             {"entry_date": date(2026, 4, 1), "amount_paise": 800,
-             "description": "invoice B"},
+             "notes": "invoice B"},
         ],
     )
     result = query_customer_ledger(
@@ -129,27 +131,21 @@ def test_query_returns_entries_when_match() -> None:
     assert result.customer_id == "cust_42"
     assert len(result.ledger_entries) == 2
     assert result.total_balance_paise == 2300
+    assert result.ledger_entries[0].description == "invoice A"
 
 
-def test_query_returns_empty_on_undefined_table() -> None:
-    """Forward-target schema not landed yet — graceful empty."""
+def test_undefined_table_now_raises() -> None:
+    """VT-258: the ledger schema is LANDED (migration 061); the forward-target
+    graceful-empty tolerance is REMOVED. A genuine UndefinedTable now RAISES —
+    no silent empty masquerade."""
     if os.environ.get("VT40_REAL_DB") == "1":
         pytest.skip("real-DB mode active")
 
-    from orchestrator.agent.tools.query_customer_ledger import (
-        QueryCustomerLedgerInput,
-        query_customer_ledger,
-    )
+    from orchestrator.agent.tools.query_customer_ledger import query_customer_ledger
+
     pool = _fake_pool(customer_row=None, raise_undefined_table=True)
-    result = query_customer_ledger(
-        QueryCustomerLedgerInput(
-            tenant_id="tenant_a", customer_phone_token="tok_any",
-        ),
-        pool=pool,
-    )
-    assert result.customer_id is None
-    assert result.ledger_entries == []
-    assert result.total_balance_paise == 0
+    with pytest.raises(Exception, match="customer_ledger_entries"):
+        query_customer_ledger(_input_any(), pool=pool)
 
 
 def _input_any():
@@ -158,8 +154,10 @@ def _input_any():
     return QueryCustomerLedgerInput(tenant_id="tenant_a", customer_phone_token="tok")
 
 
-def test_known_phone_token_undefined_column_returns_empty() -> None:
-    """VT-264: the SPECIFIC forward-absent customers.phone_token → graceful empty."""
+def test_phone_token_undefined_column_now_raises() -> None:
+    """VT-258: the customers.phone_token tolerance is REMOVED — the tool now
+    resolves via phone_token_resolutions. A stray UndefinedColumn RAISES (no
+    silent empty); the VT-264 narrow-swallow is gone."""
     if os.environ.get("VT40_REAL_DB") == "1":
         pytest.skip("real-DB mode active")
     from orchestrator.agent.tools.query_customer_ledger import query_customer_ledger
@@ -168,8 +166,8 @@ def test_known_phone_token_undefined_column_returns_empty() -> None:
         customer_row=None,
         raise_exc=_typed_exc("UndefinedColumn", 'column "phone_token" does not exist'),
     )
-    result = query_customer_ledger(_input_any(), pool=pool)
-    assert result.customer_id is None and result.ledger_entries == []
+    with pytest.raises(Exception, match="phone_token"):
+        query_customer_ledger(_input_any(), pool=pool)
 
 
 def test_foreign_undefined_column_RAISES() -> None:
@@ -213,3 +211,78 @@ def test_input_rejects_invalid_limit() -> None:
         QueryCustomerLedgerInput(
             tenant_id="t1", customer_phone_token="tok", limit=2000,
         )
+
+
+# --- VT-258 real-DB: success + cross-tenant (real count backstop, no mock) ----
+
+pytest.importorskip("dbos")
+import psycopg  # noqa: E402
+from uuid import uuid4  # noqa: E402
+
+_DB = pytest.mark.skipif(
+    not os.environ.get("DATABASE_URL"),
+    reason="DATABASE_URL not set — query_customer_ledger real-DB test skipped",
+)
+
+
+@pytest.fixture(scope="module")
+def _ledger_db():
+    import apply_migrations
+
+    dsn = os.environ["DATABASE_URL"]
+    assert not apply_migrations.apply(dsn=dsn)["failed"]
+    os.environ["TEAM_SUPABASE_DB_URL"] = dsn
+    if not os.environ.get("TEAM_PHONE_ENCRYPTION_KEY"):
+        from cryptography.fernet import Fernet
+
+        os.environ["TEAM_PHONE_ENCRYPTION_KEY"] = Fernet.generate_key().decode()
+    from dbos_config import launch_dbos, shutdown_dbos
+
+    launch_dbos()
+    try:
+        yield dsn
+    finally:
+        shutdown_dbos()
+
+
+@_DB
+def test_real_ledger_read_and_cross_tenant(_ledger_db):
+    from datetime import date as _date
+
+    from orchestrator.agent.tools.query_customer_ledger import (
+        QueryCustomerLedgerInput,
+        query_customer_ledger,
+    )
+    from orchestrator.integrations.dedup_merge import dedup_and_merge
+    from orchestrator.integrations.ledger import LedgerEntryIn, record_ledger_entries
+    from orchestrator.observability.phone_tokens import _hash_phone
+
+    def _tenant():
+        with psycopg.connect(_ledger_db, autocommit=True) as c:
+            return str(c.execute(
+                "INSERT INTO tenants (business_name, plan_tier, phase) VALUES "
+                "('VT-258 test','founding','onboarding') RETURNING id").fetchone()[0])
+
+    ta, tb = _tenant(), _tenant()
+    phone = "+9190" + uuid4().int.__str__()[:8]
+    merged = dedup_and_merge(ta, acquired_via="paper_book", phone_e164=phone)
+    record_ledger_entries(
+        ta, merged.customer_id,
+        [LedgerEntryIn(amount_paise=150000, entry_type="sale",
+                       entry_date=_date(2026, 6, 1), confidence=0.9)],
+        acquired_via="paper_book",
+    )
+    token = _hash_phone(phone)
+
+    # A reads its own ledger (real rows — flipped from the old graceful-empty).
+    out_a = query_customer_ledger(
+        QueryCustomerLedgerInput(tenant_id=ta, customer_phone_token=token)
+    )
+    assert out_a.customer_id == str(merged.customer_id)
+    assert out_a.total_balance_paise == 150000 and len(out_a.ledger_entries) == 1
+
+    # Cross-tenant: B resolves nothing for A's token → empty (real backstop).
+    out_b = query_customer_ledger(
+        QueryCustomerLedgerInput(tenant_id=tb, customer_phone_token=token)
+    )
+    assert out_b.customer_id is None and out_b.ledger_entries == []
