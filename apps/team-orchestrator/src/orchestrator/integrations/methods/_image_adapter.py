@@ -89,12 +89,28 @@ def ingest_image(
         image_bytes, tenant_id=tenant_id, target_fields=TARGET_FIELDS,
         acquired_via=acquired_via, media_type=media_type, **extract_kwargs,
     )
+    return ingest_entries(tenant_id, results, acquired_via=acquired_via, now=now)
 
+
+def ingest_entries(
+    tenant_id: UUID | str,
+    entries: list[ExtractionResult],
+    *,
+    acquired_via: str,
+    now: datetime | None = None,
+) -> IngestionSummary:
+    """Route + commit PRE-EXTRACTED entries — the shared post-extraction step for
+    BOTH image (vision) and records (vCard/CSV/structured) methods. Per entry: any
+    field <0.7 → clarifying_flow (≤3 else drop, P4); else dedup_and_merge identity
+    + record_ledger_entries transactions (only when an amount field is present —
+    identity-only methods like contacts pass none). Returns counts only (no PII).
+    """
+    now = now or datetime.now(UTC)
     committed = pending = dropped = 0
-    for result in results:
+    for result in entries:
         by_name = {f.name: f for f in result.fields}
         present = [f for f in result.fields if f.value is not None]
-        # Route on the LOWEST-confidence present field (VT-55: any field <0.7 → ask).
+        # Route on the LOWEST-confidence present field (any field <0.7 → ask).
         low = [f for f in present if _route(f.confidence) == "ask_owner"]
 
         if low:
@@ -106,7 +122,7 @@ def ingest_image(
                 for f in low
             ]
             try:
-                open_clarification(tenant_id, f"image-ingest:{uuid4()}", questions)
+                open_clarification(tenant_id, f"ingest:{uuid4()}", questions)
                 pending += 1
             except TooManyQuestionsError:
                 dropped += 1  # too low-quality to repair via Q&A — drop (P4)
@@ -143,14 +159,14 @@ def ingest_image(
         committed += 1
 
     summary = IngestionSummary(
-        entries_extracted=len(results), committed=committed,
+        entries_extracted=len(entries), committed=committed,
         pending_clarification=pending, dropped=dropped,
     )
     logger.info(
-        "ingest_image: tenant=%s acquired_via=%s extracted=%d committed=%d pending=%d dropped=%d",
+        "ingest_entries: tenant=%s acquired_via=%s entries=%d committed=%d pending=%d dropped=%d",
         tenant_id, acquired_via, summary.entries_extracted, committed, pending, dropped,
     )
     return summary
 
 
-__all__ = ["IngestionSummary", "TARGET_FIELDS", "ingest_image"]
+__all__ = ["IngestionSummary", "TARGET_FIELDS", "ingest_entries", "ingest_image"]
