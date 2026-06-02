@@ -28,6 +28,8 @@ from uuid import UUID, uuid4
 
 import psycopg
 
+from orchestrator.utils.phone_token import hash_phone
+
 
 @dataclass
 class SeededTenant:
@@ -105,6 +107,7 @@ def _seed_tenant(
     customers: dict[UUID, str] = {}
     recent = datetime.now(UTC) - timedelta(hours=2)
     for i in range(n_subscribed):
+        phone = _synthetic_phone()
         crow = conn.execute(
             """
             INSERT INTO customers (tenant_id, display_name, phone_e164,
@@ -115,12 +118,25 @@ def _seed_tenant(
             (
                 str(tenant_id),
                 f"Synthetic Customer {i}",
-                _synthetic_phone(),
+                phone,
                 recent if i == 0 and seed_inbound else None,
             ),
         ).fetchone()
         cid = UUID(str(crow[0] if not isinstance(crow, dict) else crow["id"]))
         customers[cid] = "subscribed"
+        # VT-301 / CL-429: a business-initiated send now requires a recorded
+        # WhatsApp opt-in. Subscribed customers in the real flow opted in via
+        # the inbound/hook path (VT-287); seed the matching consent row so the
+        # send-gate lets the loop reach them. CL-390: only the token is stored.
+        conn.execute(
+            """
+            INSERT INTO record_of_consent
+                (tenant_id, phone_token, consent_text_version, consent_method, source)
+            VALUES (%s, %s, 'wa_inbound_optin_v0', 'wa_inbound_optin', 'vt140-synthetic')
+            ON CONFLICT (tenant_id, phone_token) DO NOTHING
+            """,
+            (str(tenant_id), hash_phone(phone)),
+        )
 
     for i in range(n_opted_out):
         crow = conn.execute(

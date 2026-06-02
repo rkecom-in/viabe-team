@@ -415,16 +415,12 @@ def send_whatsapp_template(
                         ),
                     )
 
-                # TODO(VT-85): messaging-gate scope pending Fazal ruling.
-                # record_of_consent (QR opt-in proof, privacy.consent.has_consent)
-                # is a SEPARATE consent surface from customers.opt_out_status
-                # checked above. It is deliberately NOT enforced here as a
-                # blanket precondition: owner-entered customers (VT-55/56/63,
-                # owner_inputs DPDP basis CL-425) never scanned a QR and MUST
-                # remain sendable. Whether outbound to owner-entered customers
-                # additionally requires QR consent is a Fazal product/legal
-                # decision. When ruled, gate the QR-acquired path here via
-                # privacy.consent.has_consent(tenant_id, phone_token).
+                # VT-301 / CL-429 (Fazal ruling 2026-06-02): gate ALL business-initiated
+                # sends on a recorded WhatsApp opt-in — enforced just below, once the phone
+                # is resolved (the consent surface is phone_token-keyed). owner_inputs
+                # (CL-425) is a basis to PROCESS, NOT a WhatsApp opt-in; owner-entered
+                # customers (VT-55/56/63) become sendable only after they opt in via the
+                # inbound/hook flow (VT-287 wa_inbound_optin). Supersedes the VT-85 carve-out.
                 phone_e164: str | None = customer["phone_e164"]
                 if not phone_e164:
                     return SendWhatsappTemplateOutput(
@@ -433,6 +429,27 @@ def send_whatsapp_template(
                         error_envelope=ErrorEnvelope(
                             code="no_phone",
                             message="Customer has no phone number on record.",
+                        ),
+                    )
+
+                # --- Opt-in gate (VT-301 / CL-429): fail-CLOSED, no opt-in record → refuse ---
+                from orchestrator.privacy import consent as _consent
+
+                if not _consent.has_consent_for_phone(payload.tenant_id, phone_e164):
+                    logger.info(
+                        "send_whatsapp_template: no_consent tenant=%s customer=%s",
+                        payload.tenant_id, payload.customer_id,
+                    )
+                    return SendWhatsappTemplateOutput(
+                        status="unauthorized",
+                        customer_id=payload.customer_id,
+                        error_envelope=ErrorEnvelope(
+                            code="recipient_not_opted_in",
+                            message=(
+                                "No WhatsApp opt-in on record for this customer. Business-"
+                                "initiated sends require a recorded opt-in (VT-301/CL-429); "
+                                "owner_inputs is a processing basis, not a WhatsApp opt-in."
+                            ),
                         ),
                     )
 
