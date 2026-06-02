@@ -1,0 +1,18 @@
+# VT-287 — affirmative opt-in keywords for the inbound-first WhatsApp flow.
+# A customer's reply matching one of these (exact, case-insensitive, whole trimmed
+# body) is treated as consent to the opt-in ask → record_of_consent(wa_inbound_optin).
+#
+# Deliberately CONSERVATIVE: only unambiguous affirmatives. Anything else does NOT
+# auto-consent (fail-closed — a false consent is a privacy/DPDP risk, CL-425). The
+# legally-binding consent COPY (what the customer is agreeing to) lives in
+# .viabe/consent-text.md (Cowork drafts + Fazal legal); this is just the trigger set.
+keywords:
+  - "YES"
+  - "Y"
+  - "YEAH"
+  - "OK"
+  - "OKAY"
+  - "START"
+  - "HAAN"
+  - "हां"
+  - "हाँ"

@@ -106,6 +106,15 @@ row ships on unit/DB coverage; the live walk happens at E2E).
   during E2E testing, not as a VT-283 gate → **VT-283 Done on unit tests**. Do
   NOT treat the OAuth path as production-proven until this E2E walk runs against
   a real merchant store. Not Reports-Jun15-blocking (owner reports are the gate).
+- **VT-286 WABA Embedded Signup — real-merchant Meta Embedded-Signup walk.** The
+  owner-owned WABA connect (`whatsapp/setup` → Meta ES popup → `embedded-callback`
+  → token exchange + dedicated-number provision → status `verifying`) is built +
+  unit/DB-tested with injected exchange/provision, but CANNOT be live-walked until
+  the Meta Tech Provider track + `whatsapp.env` creds land (Fazal initiates
+  separately). The live ES walk against a real merchant WABA is E2E-deferred. **Twilio
+  flag:** if the live walk shows tech-provider ES insufficient for owner-owned WABAs,
+  STOP + flag (do NOT switch to Meta Graph silently). Send is fail-CLOSED until WABA
+  `live`, so nothing ships to customers pre-walk. Not Reports-Jun15-blocking.
 
 ## Maintenance protocol
 
