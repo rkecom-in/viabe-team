@@ -15,6 +15,33 @@ Two endpoints, mirroring the google_sheet OAuth flow (api/oauth_callback.py):
 This is the PRODUCTION zero-paste path for real merchants (different org);
 client_credentials stays the dev/own-store path. CL-421 / CL-427.
 
+SECURITY — state is NOT yet CSRF-hardened (Phase-1; FLAGGED for Cowork ruling)
+-----------------------------------------------------------------------------
+``state`` carries the raw ``tenant_id`` and the callback trusts it. The HMAC
+proves the redirect came THROUGH Shopify, but NOT that *we* initiated this
+install for this tenant. An attacker can build their own authorize URL with
+``state=<victim_tenant>`` + their own ``*.myshopify.com`` shop, approve it, and
+the callback would bind THEIR shop token under the victim's tenant row
+(``tenant_oauth_tokens`` UPSERT) — an OAuth account-linking CSRF / tenant-
+integration hijack.
+
+This MIRRORS the existing Phase-1 google_sheet OAuth flow (api/oauth_callback.py),
+whose docstring already notes "Production deployments should sign + verify state
+to prevent CSRF; Phase-1 stores it raw." The proper fix is cross-cutting (affects
+both connectors) and is a Cowork/Clau architectural decision, not an in-task
+change:
+  * ``/setup`` authenticates the caller (team-web owner session / internal
+    secret) so only the tenant's owner can initiate an install, and mints a
+    single-use, expiring ``state`` nonce stored server-side bound to
+    (tenant_id, owner, shop).
+  * the callback looks the nonce up, verifies unused + unexpired, and derives
+    ``tenant_id`` from the STORED record — never from the URL.
+
+Current mitigations until that lands: CL-422 (dev = synthetic only, NO real
+merchant data until VT-231 Mumbai) + the live OAuth-install walk is E2E-deferred
+(this path is not exercised against a real merchant store pre-E2E). Hardening is
+rostered — do NOT onboard a real merchant on this path until it lands.
+
 # live OAuth-install walk deferred to E2E (Fazal 2026-06-02): cannot be live-
 # walked on our own dev store (same-org = client_credentials). Real-merchant
 # walk happens during end-to-end testing — see .viabe/launch-tracker.md.
@@ -75,10 +102,14 @@ def shopify_oauth_callback(
     state: str = Query(...),
 ) -> dict[str, str]:
     """OAuth redirect target. Verify HMAC + state, then exchange code → token."""
+    # SECURITY (see module docstring): state is the raw tenant_id and is trusted
+    # as the tenant identity — NOT yet CSRF-hardened (Phase-1, mirrors
+    # google_sheet; FLAGGED for Cowork ruling). HMAC below proves Shopify origin,
+    # not that we initiated this install for this tenant.
     tenant_uuid = _tenant_uuid(state)
 
     # Cowork #4: verify Shopify's HMAC over the FULL query (sans hmac) before
-    # trusting any of it — prevents forged callbacks.
+    # trusting any of it — prevents forged (non-Shopify) callbacks.
     client_secret = os.environ.get("SHOPIFY_API_SECRET", "")
     if not client_secret:
         logger.error("VT-283 callback: SHOPIFY_API_SECRET unset — cannot verify HMAC")
