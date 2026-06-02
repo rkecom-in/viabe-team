@@ -6,12 +6,19 @@ typed envelope with classification + confidence + suggested action.
 Standalone callable. NOT wired into an Agent yet (VT-4 SDK skeleton is
 Backlog). Importable as a function or class-method; tests mock the
 Anthropic client.
+
+VT-267 PR-B — prompt **v2.0** (Type-1 governance bump, logged in the decisions
+ledger): added the ``first_data_step_onboarding`` intent (owner initiating the
+first onboarding data step) + externalised the system prompt to
+``prompts/classify_owner_message_v2.md`` (versioned via its metadata header, same
+posture as self_evaluate + VT-63).
 """
 
 from __future__ import annotations
 
 import json
 import logging
+from pathlib import Path
 from typing import Literal
 
 from anthropic import Anthropic
@@ -20,7 +27,14 @@ from pydantic import BaseModel, ConfigDict, Field
 logger = logging.getLogger(__name__)
 
 
-Classification = Literal["approval", "rejection", "question", "feedback", "other"]
+Classification = Literal[
+    "approval",
+    "rejection",
+    "question",
+    "feedback",
+    "first_data_step_onboarding",
+    "other",
+]
 
 
 class ClassifyOwnerMessageInput(BaseModel):
@@ -42,46 +56,12 @@ class ClassifyOwnerMessageOutput(BaseModel):
     suggested_action: str
 
 
-_SYSTEM_PROMPT = """\
-You are a classifier for owner messages in the Viabe Team multi-agent system.
-
-Your only job: read the owner's incoming message + return a JSON envelope
-classifying their intent. The envelope MUST be a single JSON object with these
-three fields and NOTHING else:
-
-  classification: one of "approval" | "rejection" | "question" | "feedback" | "other"
-  confidence: a float in [0.0, 1.0] reflecting your certainty
-  suggested_action: a short (<= 80 chars) phrase describing what the orchestrator should do next
-
-Definitions:
-- approval: owner is saying yes to a pending campaign / plan / proposal
-  ("yes go ahead", "looks good run it", "approved", "send it")
-- rejection: owner is saying no
-  ("no don't do that", "cancel it", "stop this", "scrap")
-- question: owner is asking for information or clarification
-  ("how does this work?", "what would it cost?", "what segment?")
-- feedback: owner is commenting on a past run's outcome
-  ("the timing was off", "wrong customers got targeted", "the message was confusing")
-- other: greeting, off-topic, emoji-only, anything that doesn't fit the above
-
-Output JSON only. No markdown fences. No prose preamble.
-
-Examples:
-Input: "yes go ahead with that"
-Output: {"classification": "approval", "confidence": 0.95, "suggested_action": "execute the pending plan"}
-
-Input: "no cancel that"
-Output: {"classification": "rejection", "confidence": 0.95, "suggested_action": "abort the pending plan"}
-
-Input: "what is this going to cost me?"
-Output: {"classification": "question", "confidence": 0.9, "suggested_action": "answer cost question"}
-
-Input: "the timing was wrong on yesterday's campaign"
-Output: {"classification": "feedback", "confidence": 0.9, "suggested_action": "record feedback for next run"}
-
-Input: "good morning"
-Output: {"classification": "other", "confidence": 0.85, "suggested_action": "acknowledge greeting"}
-"""
+# VT-267 PR-B: system prompt externalised + versioned (v2.0). The version string
+# lives in the file's metadata header (Type-1 governance change).
+_PROMPT_PATH = (
+    Path(__file__).resolve().parent / "prompts" / "classify_owner_message_v2.md"
+)
+_SYSTEM_PROMPT = _PROMPT_PATH.read_text(encoding="utf-8")
 
 _MODEL = "claude-haiku-4-5-20251001"
 
