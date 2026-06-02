@@ -108,30 +108,33 @@ def run_canary() -> int:
     tenant_a = uuid4()
     INSERTED_TENANT_IDS.append(str(tenant_a))
 
-    # A1 — auth_url shape
-    auth_url = connector.build_auth_url(tenant_a)
+    # A1 — auth_url shape (VT-289: state is the opaque nonce, NOT the raw tenant_id)
+    state_nonce = "vt289_canary_state_nonce_abc123"
+    auth_url = connector.build_auth_url(tenant_a, state=state_nonce)
     client_id = os.environ["GOOGLE_OAUTH_CLIENT_ID"]
     pass_1 = (
         "accounts.google.com" in auth_url
         and "spreadsheets.readonly" in auth_url
         and client_id in auth_url
-        and str(tenant_a) in auth_url
+        and f"state={state_nonce}" in auth_url
+        and str(tenant_a) not in auth_url  # VT-289: raw tenant_id must NOT leak into the URL
         and "access_type=offline" in auth_url
         and "prompt=consent" in auth_url
     )
     assertion(
         1,
-        "build_auth_url: contains client_id + scope + redirect_uri + tenant state + offline+consent",
+        "build_auth_url: client_id + scope + redirect_uri + VT-289 nonce state (no raw tenant) + offline+consent",
         pass_1,
         observed={
             "host_ok": "accounts.google.com" in auth_url,
             "scope_ok": "spreadsheets.readonly" in auth_url,
             "client_id_ok": client_id in auth_url,
-            "tenant_state_ok": str(tenant_a) in auth_url,
+            "nonce_state_ok": f"state={state_nonce}" in auth_url,
+            "no_raw_tenant": str(tenant_a) not in auth_url,
             "offline_ok": "access_type=offline" in auth_url,
             "consent_ok": "prompt=consent" in auth_url,
         },
-        expected={"all_six": True},
+        expected={"all_seven": True},
     )
 
     # A2 — Fernet round-trip via shared helper

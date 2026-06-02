@@ -101,12 +101,13 @@ class GoogleSheetConnector(ConnectorBase):
 
     # ---------- AUTH ----------
 
-    def build_auth_url(self, tenant_id: UUID) -> str:
+    def build_auth_url(self, tenant_id: UUID, *, state: str) -> str:
         """Step 1 of OAuth — returns the URL the owner clicks.
 
-        ``state`` carries ``tenant_id`` so the callback can resolve the
-        write target. Production deployments should sign + verify
-        state to prevent CSRF; Phase-1 stores it raw.
+        VT-289: ``state`` is the single-use nonce minted by
+        ``oauth_state.mint_install_state`` (from the authenticated ``/setup`` path) —
+        NOT the raw tenant_id. The callback claims it and derives the tenant from the
+        stored record, so a forged ``state`` cannot bind a token to another tenant.
         """
         client_id = _env_required("GOOGLE_OAUTH_CLIENT_ID")
         redirect_uri = _env_required("GOOGLE_OAUTH_REDIRECT_URI")
@@ -117,14 +118,21 @@ class GoogleSheetConnector(ConnectorBase):
             "scope": _SCOPE,
             "access_type": "offline",
             "prompt": "consent",
-            "state": str(tenant_id),
+            "state": state,
         }
         encoded = "&".join(f"{k}={httpx.QueryParams({k: v})[k]}" for k, v in params.items())
         return f"{_OAUTH_AUTH_URL}?{encoded}"
 
     def start_auth(self, tenant_id: UUID) -> dict[str, Any]:
+        """ConnectorBase entry. Mints a VT-289 nonce (server-side) and returns the
+        authorize URL. The owner-facing HTTP path goes through the secured
+        ``/google_sheet/setup`` endpoint (INTERNAL_API_SECRET) — this programmatic
+        entry is for the registry/scheduler."""
+        from orchestrator.integrations.oauth_state import mint_install_state
+
+        state = mint_install_state(tenant_id, self.connector_id)
         return {
-            "auth_url": self.build_auth_url(tenant_id),
+            "auth_url": self.build_auth_url(tenant_id, state=state),
             "next_action": "show_auth_url_to_owner",
         }
 
