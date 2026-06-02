@@ -7,6 +7,7 @@ from fastapi import APIRouter
 from orchestrator.api.admin import router as admin_router
 from orchestrator.api.consent_capture import router as consent_capture_router
 from orchestrator.api.drive_push import router as drive_push_router
+from orchestrator.api.hook_links import router as hook_links_router
 from orchestrator.api.integration_push import router as integration_push_router
 from orchestrator.api.oauth_callback import router as oauth_callback_router
 from orchestrator.api.onboard_step import router as onboard_step_router
@@ -32,3 +33,4 @@ router.include_router(admin_router)
 router.include_router(drive_push_router)
 router.include_router(consent_capture_router)
 router.include_router(whatsapp_oauth_router)
+router.include_router(hook_links_router)

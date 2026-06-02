@@ -1,0 +1,22 @@
+# VT-288 — cold-start ramp governor config (tunable; Fazal can adjust without a deploy).
+#
+# A new WABA blasting a cold list trips Meta preemptive enforcement (rapid-list-growth /
+# high-velocity-low-engagement). The governor gates daily HOOK send volume per tenant on
+# observed engagement: start small, step up only as the opt-in/reply rate clears a bar AND
+# the WhatsApp quality rating hasn't dropped. The cap + the decision are observable (feed
+# the VT-296 watchdog later).
+#
+# Engagement rate = opt-ins (or replies) / hooks sent, over the trailing window.
+
+# Daily per-WABA hook-send caps, lowest tier first. Index 0 = cold start.
+tiers: [50, 100, 250, 500, 1000]
+
+# Promote to the next tier only when BOTH hold over the window:
+#   - engagement_rate >= engagement_threshold
+#   - WhatsApp quality rating is not GREEN->lower (no quality drop)
+engagement_threshold: 0.25      # 25% opt-in/reply rate
+window_days: 7                  # trailing window for the engagement measurement
+min_sends_before_step: 30       # need at least this many sends in-window before a step (avoid noise)
+
+# If the quality rating drops or engagement falls below this, step DOWN one tier.
+demote_below: 0.10
