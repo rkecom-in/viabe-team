@@ -16,6 +16,7 @@ from orchestrator.api.sheet_push import router as sheet_push_router
 from orchestrator.api.shopify_oauth import router as shopify_oauth_router
 from orchestrator.api.shopify_webhook import router as shopify_webhook_router
 from orchestrator.api.twilio_ingress import router as twilio_ingress_router
+from orchestrator.api.whatsapp_oauth import router as whatsapp_oauth_router
 
 router = APIRouter()
 router.include_router(twilio_ingress_router)
@@ -30,3 +31,4 @@ router.include_router(onboard_step_router)
 router.include_router(admin_router)
 router.include_router(drive_push_router)
 router.include_router(consent_capture_router)
+router.include_router(whatsapp_oauth_router)
