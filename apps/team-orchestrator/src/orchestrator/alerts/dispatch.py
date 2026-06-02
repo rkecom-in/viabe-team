@@ -138,17 +138,43 @@ def _format_alert(trigger: Trigger) -> tuple[str, str]:
     return scrub_pii(text), scrub_pii(subject)
 
 
-async def _dispatch_telegram(alert_id: UUID, scrubbed_text: str, is_canary: bool) -> None:
-    """Route to DEV bot for canary tenants; OPS bot otherwise."""
+async def _dispatch_telegram(
+    alert_id: UUID, scrubbed_text: str, is_canary: bool, tenant_id: UUID | None = None
+) -> None:
+    """Route to DEV bot for canary tenants; OPS bot + assigned-VTR fan-out otherwise.
+
+    VT-298 (Cowork DECISION 2 = BOTH): non-canary alerts go to the OPS chat (unchanged,
+    retry-tracked via telegram_sent_at) AND are pushed to each assigned VTR's VERIFIED
+    Telegram chat (best-effort immediate; Fazal: "report to VTR on Telegram immediately").
+    Canary tenants stay DEV-bot-only — NEVER real VTR chats (Cowork canary lock).
+    """
     if is_canary:
         bot_token = os.environ.get("TELEGRAM_DEV_BOT_TOKEN", "")
         chat_id = os.environ.get("TELEGRAM_DEV_CHAT_ID", "")
-    else:
-        bot_token = os.environ.get("TELEGRAM_OPS_BOT_TOKEN", "")
-        chat_id = os.environ.get("TELEGRAM_OPS_CHAT_ID", "")
+        ok = await send_telegram(bot_token, chat_id, scrubbed_text)
+        if ok:
+            _mark_telegram_sent(alert_id)
+        return
+
+    bot_token = os.environ.get("TELEGRAM_OPS_BOT_TOKEN", "")
+    chat_id = os.environ.get("TELEGRAM_OPS_CHAT_ID", "")
     ok = await send_telegram(bot_token, chat_id, scrubbed_text)
     if ok:
         _mark_telegram_sent(alert_id)
+
+    # VT-298: also push to the assigned VTR(s) for this tenant (verified chats only).
+    if tenant_id is not None:
+        from orchestrator.alerts.vtr_routing import resolve_assigned_vtr_chat_ids
+
+        try:
+            vtr_chats = resolve_assigned_vtr_chat_ids(tenant_id)
+        except Exception:  # noqa: BLE001 — VTR fan-out must never break the OPS path
+            logger.warning("VT-298: assigned-VTR resolution failed tenant=%s", tenant_id)
+            vtr_chats = []
+        for vtr_chat in vtr_chats:
+            # Same OPS bot; the VTR's own chat. Best-effort (the OPS channel is the
+            # retry-tracked durable one; per-recipient retry is a follow-up).
+            await send_telegram(bot_token, vtr_chat, scrubbed_text)
 
 
 async def _dispatch_email(alert_id: UUID, subject: str, html_body: str) -> None:
@@ -191,7 +217,7 @@ def dispatch_alert(trigger: Trigger) -> UUID | None:
     )
 
     async def _runner() -> None:
-        await _dispatch_telegram(alert_id, text, is_canary)
+        await _dispatch_telegram(alert_id, text, is_canary, trigger.tenant_id)
         # Canary path NEVER hits real email (Cowork lock).
         if force_immediate and not is_canary:
             await _dispatch_email(alert_id, subject, html)
