@@ -1,0 +1,162 @@
+"""VT-287 — inbound-first customer pipeline (Rule #15 canary, real Postgres).
+
+Deterministic handler, injected send (no Twilio). Verifies: intro-once re-send guard
+(Cowork's flag), YES→consent, STOP→opt_out, established→reply, and the fail-CLOSED
+send-gate (no send unless the WABA is `live`). State is recorded regardless. CL-422
+synthetic.
+"""
+
+from __future__ import annotations
+
+import os
+from types import SimpleNamespace
+from uuid import UUID, uuid4
+
+import pytest
+
+pytest.importorskip("dbos")
+
+import psycopg  # noqa: E402
+
+pytestmark = pytest.mark.skipif(
+    not os.environ.get("DATABASE_URL"),
+    reason="DATABASE_URL not set — VT-287 substrate tests skipped",
+)
+
+
+@pytest.fixture(scope="module")
+def substrate():  # type: ignore[no-untyped-def]
+    import apply_migrations
+
+    dsn = os.environ["DATABASE_URL"]
+    assert not apply_migrations.apply(dsn=dsn)["failed"]
+    os.environ["TEAM_SUPABASE_DB_URL"] = dsn
+    os.environ.setdefault("TEAM_PHONE_HASH_SALT", "vt287-salt")
+    if not os.environ.get("TEAM_PHONE_ENCRYPTION_KEY"):
+        from cryptography.fernet import Fernet
+
+        os.environ["TEAM_PHONE_ENCRYPTION_KEY"] = Fernet.generate_key().decode()
+    from dbos_config import launch_dbos, shutdown_dbos
+
+    launch_dbos()
+    try:
+        yield SimpleNamespace(dsn=dsn)
+    finally:
+        shutdown_dbos()
+
+
+def _tenant(dsn: str, *, wa_status: str | None = "live") -> str:
+    """Create a tenant; optionally give it a WABA at `wa_status` (None = no WABA)."""
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        tid = str(conn.execute(
+            "INSERT INTO tenants (business_name, plan_tier, phase) "
+            "VALUES ('VT-287 test', 'founding', 'paid_active') RETURNING id"
+        ).fetchone()[0])
+        if wa_status is not None:
+            conn.execute(
+                "INSERT INTO tenant_whatsapp_accounts (tenant_id, status, phone_number) "
+                "VALUES (%s, %s, %s)",
+                (tid, wa_status, f"+9180{uuid4().int % 10**8:08d}"),
+            )
+    return tid
+
+
+def _phone() -> str:
+    return f"+9199{uuid4().int % 10**8:08d}"
+
+
+class _Send:
+    def __init__(self):
+        self.calls = []
+
+    def __call__(self, body, recipient_phone):
+        self.calls.append((body, recipient_phone))
+        return f"SM{len(self.calls)}"
+
+
+def test_first_contact_intro_once(substrate):
+    """Two pre-consent inbounds → intro sent ONCE (re-send guard)."""
+    from orchestrator.integrations.customer_inbound import handle_customer_inbound
+
+    t = _tenant(substrate.dsn, wa_status="live")
+    phone = _phone()
+    send = _Send()
+    r1 = handle_customer_inbound(t, phone, "hello?", send_fn=send)
+    r2 = handle_customer_inbound(t, phone, "anyone there?", send_fn=send)
+    assert r1.action == "intro_sent" and r1.sent is True
+    assert r2.action == "intro_suppressed" and r2.sent is False
+    assert len(send.calls) == 1  # intro sent exactly once
+
+
+def test_yes_records_consent(substrate):
+    from orchestrator.integrations.customer_inbound import handle_customer_inbound
+    from orchestrator.privacy import consent
+    from orchestrator.utils.phone_token import hash_phone
+
+    t = _tenant(substrate.dsn, wa_status="live")
+    phone = _phone()
+    handle_customer_inbound(t, phone, "hi", send_fn=_Send())          # intro
+    r = handle_customer_inbound(t, phone, "YES", send_fn=_Send())     # opt-in
+    assert r.action == "consented"
+    assert consent.has_consent(t, hash_phone(phone)) is True
+
+
+def test_stop_opts_out(substrate):
+    from orchestrator.integrations.customer_inbound import handle_customer_inbound
+    from orchestrator.privacy import consent
+    from orchestrator.utils.phone_token import hash_phone
+
+    t = _tenant(substrate.dsn, wa_status="live")
+    phone = _phone()
+    handle_customer_inbound(t, phone, "hi", send_fn=_Send())
+    handle_customer_inbound(t, phone, "YES", send_fn=_Send())
+    token = hash_phone(phone)
+    assert consent.has_consent(t, token) is True
+    r = handle_customer_inbound(t, phone, "STOP", send_fn=_Send())
+    assert r.action == "opted_out"
+    assert consent.has_consent(t, token) is False
+
+
+def test_established_gets_reply(substrate):
+    from orchestrator.integrations.customer_inbound import handle_customer_inbound
+
+    t = _tenant(substrate.dsn, wa_status="live")
+    phone = _phone()
+    handle_customer_inbound(t, phone, "hi", send_fn=_Send())
+    handle_customer_inbound(t, phone, "YES", send_fn=_Send())
+    send = _Send()
+    r = handle_customer_inbound(t, phone, "do you have red sarees?", send_fn=send)
+    assert r.action == "reply" and r.sent is True and len(send.calls) == 1
+
+
+def test_send_gate_fail_closed_when_not_live(substrate):
+    """WABA not live → no outbound send, but state (intro marker) still recorded."""
+    from orchestrator.integrations.customer_inbound import handle_customer_inbound
+
+    t = _tenant(substrate.dsn, wa_status="verifying")  # not live
+    phone = _phone()
+    send = _Send()
+    r = handle_customer_inbound(t, phone, "hi", send_fn=send)
+    assert r.sent is False and r.action == "gated"
+    assert len(send.calls) == 0  # nothing sent
+
+    # STOP still recorded even when not live (never lose an opt-out)
+    from orchestrator.integrations.customer_inbound import handle_customer_inbound as h
+    from orchestrator.privacy import consent
+    from orchestrator.utils.phone_token import hash_phone
+    consent.record_consent(t, phone, consent_text_version="v", consent_method="wa_inbound_optin")
+    h(t, phone, "STOP", send_fn=_Send())
+    assert consent.has_consent(t, hash_phone(phone)) is False
+
+
+def test_cross_tenant_isolation(substrate):
+    from orchestrator.integrations.customer_inbound import handle_customer_inbound
+
+    t_a = _tenant(substrate.dsn, wa_status="live")
+    t_b = _tenant(substrate.dsn, wa_status="live")
+    phone = _phone()
+    handle_customer_inbound(t_a, phone, "hi", send_fn=_Send())   # intro for A
+    # same phone, tenant B → first-contact for B (A's conversation invisible via RLS)
+    r = handle_customer_inbound(t_b, phone, "hi", send_fn=_Send())
+    assert r.action == "intro_sent"
+    UUID(t_b)

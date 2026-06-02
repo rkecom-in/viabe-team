@@ -25,6 +25,7 @@ from pydantic import BaseModel
 from orchestrator.error_router import route_failure
 from orchestrator.failures import FailureRecord, FailureType
 from orchestrator.graph import get_pool
+from orchestrator.integrations.customer_inbound import customer_inbound_run
 from orchestrator.runner import webhook_pipeline_run
 from orchestrator.utils.phone_token import hash_phone
 
@@ -63,6 +64,24 @@ def _lookup_tenant(from_phone: str) -> str | None:
             (from_phone,),
         ).fetchone()
     return str(row["id"]) if row else None
+
+
+def _lookup_customer_inbound_tenant(to_phone: str) -> str | None:
+    """VT-287: resolve the tenant whose LIVE WABA number is ``to_phone``.
+
+    Customer-inbound (inbound-first) is the inverse of owner-inbound: the message is
+    addressed TO the business's WABA number (`To`), FROM a customer. Only `live` WABAs
+    are eligible (a tenant can't receive customer traffic pre-verification). Service
+    pool (this resolution has no tenant context yet)."""
+    if not to_phone:
+        return None
+    with get_pool().connection() as conn:
+        row = conn.execute(
+            "SELECT tenant_id FROM tenant_whatsapp_accounts "
+            "WHERE phone_number = %s AND status = 'live' LIMIT 1",
+            (to_phone,),
+        ).fetchone()
+    return str(row["tenant_id"]) if row else None
 
 
 # DBOS workflow statuses for a prior workflow that is still progressing — the
@@ -152,9 +171,25 @@ def twilio_ingress(
         raise HTTPException(status_code=400, detail="missing MessageSid")
 
     from_phone = str(fields.get("From", ""))
+    to_phone = str(fields.get("To", ""))
     try:
         tenant_id = _lookup_tenant(from_phone)
         if tenant_id is None:
+            # VT-287: not an owner inbound — try the customer-inbound path (message
+            # addressed TO a tenant's live WABA number). Deterministic, separate from
+            # the owner pipeline (Cowork ruling 2026-06-02).
+            customer_tenant = _lookup_customer_inbound_tenant(to_phone)
+            if customer_tenant is not None and _within_rate_limits(customer_tenant):
+                workflow_id = f"wa_customer_{message_sid}"
+                prior = DBOS.get_workflow_status(workflow_id)
+                with SetWorkflowID(workflow_id):
+                    DBOS.start_workflow(
+                        customer_inbound_run,
+                        customer_tenant,
+                        from_phone,
+                        str(fields.get("Body", "")),
+                    )
+                return {"workflow_id": workflow_id, "reason": _ingress_reason(prior)}
             logger.info(
                 "twilio-ingress: unknown_sender from=%s sid=%s",
                 hash_phone(from_phone) if from_phone else "<empty>",
