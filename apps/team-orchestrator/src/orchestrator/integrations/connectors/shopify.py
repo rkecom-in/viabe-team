@@ -30,6 +30,28 @@ Q4: Webhook secret rotation deferred to Sprint 3+ hardening.
 
 Subclasses ``ConnectorBase``. Mirrors ``GoogleSheetConnector`` shape so
 the scheduler + (eventual) generic push receiver can drive it uniformly.
+
+VT-283 — OWNER-FACING OAuth managed-install (the production zero-paste path)
+----------------------------------------------------------------------------
+client_credentials (above) only works when the app + store share an org, so it
+is the DEV/own-store path only (CL-427). A real merchant on a DIFFERENT org must
+install via the standard Shopify OAuth authorization-code flow: the owner types
+their ``*.myshopify.com`` domain once, approves on Shopify's consent screen, and
+Shopify redirects to our callback with ``code`` — zero paste (CL-421).
+
+The connector is DUAL-MODE — ``complete_auth`` branches on the payload:
+  * ``{code, shop}`` present  -> OAuth authorization-code (merchant install).
+  * empty / None              -> client_credentials (dev/own-store, existing).
+
+OAuth-install yields an OFFLINE access token (no expiry), stored with
+``expires_at = NULL`` — which is also the discriminator ``get_access_token``
+uses to skip the client_credentials re-grant for OAuth tenants.
+
+# live OAuth-install walk deferred to E2E (Fazal 2026-06-02): the install path
+# cannot be live-walked on our own dev store (same-org = client_credentials); a
+# real merchant store on a different org is needed. Fazal ruled the live walk
+# happens during end-to-end testing, NOT as a VT-283 gate — VT-283 is Done on
+# unit/DB coverage. See .viabe/launch-tracker.md (E2E real-merchant OAuth walk).
 """
 
 from __future__ import annotations
@@ -38,11 +60,13 @@ import hashlib
 import hmac
 import logging
 import os
+import re
 import secrets
 from base64 import b64decode, b64encode
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
+from urllib.parse import urlencode
 from uuid import UUID
 
 import httpx
@@ -65,11 +89,124 @@ _SHOPIFY_API_VERSION = "2024-04"
 # read_checkouts must be added in the Dashboard (flag for the live canary).
 _REQUIRED_SCOPES = {"read_customers", "read_orders", "read_products"}
 _TOKEN_PATH = "/admin/oauth/access_token"
+_AUTHORIZE_PATH = "/admin/oauth/authorize"
 _EXPIRY_SKEW = timedelta(minutes=5)  # proactive re-grant before the 24h TTL lapses
+
+# A merchant shop domain MUST match this before it is interpolated into a
+# redirect URL (Cowork VT-283 #1: never trust raw owner input into a redirect).
+_SHOP_DOMAIN_RE = re.compile(r"^[a-z0-9][a-z0-9-]*\.myshopify\.com$")
 
 # (store_domain, client_id, client_secret) -> Shopify grant JSON
 # ({access_token, scope, expires_in}). Injectable so tests run without the network.
 GrantFn = Callable[[str, str, str], dict[str, Any]]
+
+# (shop, client_id, client_secret, code) -> OAuth token JSON
+# ({access_token, scope}). Injectable so tests run without the network.
+ExchangeFn = Callable[[str, str, str, str], dict[str, Any]]
+
+
+class ShopDomainError(Exception):
+    """Raised when a merchant shop domain fails the ``*.myshopify.com`` check."""
+
+
+def _validate_shop_domain(shop: str) -> str:
+    """Return ``shop`` lower-cased if it is a well-formed ``*.myshopify.com``
+    domain; raise ``ShopDomainError`` otherwise (no scheme, no path, no port)."""
+    candidate = (shop or "").strip().lower()
+    if not _SHOP_DOMAIN_RE.match(candidate):
+        raise ShopDomainError(
+            f"shop must be a bare <name>.myshopify.com domain; got {shop!r}"
+        )
+    return candidate
+
+
+# Public alias — the OAuth-install router validates the owner-entered shop before
+# minting a VT-289 nonce (so an invalid domain never reaches the state store).
+validate_shop_domain = _validate_shop_domain
+
+
+def _shopify_oauth_creds() -> tuple[str, str]:
+    """(client_id, client_secret) for the OAuth-install flow — reuses the same
+    app credentials as client_credentials. STORE_DOMAIN is NOT needed (the shop
+    comes from the owner-entered domain), so this is a narrower check than
+    ``_shopify_env``."""
+    cid = os.environ.get("SHOPIFY_API_KEY")
+    secret = os.environ.get("SHOPIFY_API_SECRET")
+    if not (cid and secret):
+        raise ShopifyConfigError(
+            "SHOPIFY_API_KEY / SHOPIFY_API_SECRET must be set "
+            "(.viabe/secrets/shopify-dev.env)"
+        )
+    return cid, secret
+
+
+def _shopify_redirect_uri() -> str:
+    """The public team-web callback URL Shopify redirects to (Cowork VT-283 #2:
+    the Vercel deployment, registered in the Shopify app's allowed redirect
+    URLs — dev = the preview URL, prod = the real viabe domain)."""
+    uri = os.environ.get("SHOPIFY_OAUTH_REDIRECT_URI")
+    if not uri:
+        raise ShopifyConfigError(
+            "SHOPIFY_OAUTH_REDIRECT_URI must be set for the OAuth-install flow "
+            "(the public team-web callback URL; .viabe/secrets/shopify-dev.env)"
+        )
+    return uri
+
+
+def _default_oauth_exchange(
+    shop: str, client_id: str, client_secret: str, code: str
+) -> dict[str, Any]:
+    """Real Shopify OAuth authorization-code exchange (form-encoded POST).
+
+    Unlike Google, Shopify's token exchange does NOT take ``redirect_uri``;
+    the offline (no-expiry) access token is returned directly.
+    """
+    resp = httpx.post(
+        f"https://{shop}{_TOKEN_PATH}",
+        data={
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "code": code,
+        },
+        timeout=15.0,
+    )
+    if resp.status_code != 200:
+        raise AuthValidationError(
+            f"Shopify OAuth code-exchange failed: HTTP {resp.status_code} "
+            f"body={resp.text[:300]}"
+        )
+    return cast("dict[str, Any]", resp.json())
+
+
+def verify_oauth_hmac(
+    query_params: dict[str, str], client_secret: str
+) -> bool:
+    """Verify the HMAC Shopify appends to the OAuth redirect query.
+
+    Shopify signs the redirect query (sans ``hmac``/``signature``) with the app
+    secret: sort the remaining params lexicographically, join as ``k=v`` pairs
+    with ``&``, HMAC-SHA256 with the secret, HEX digest. (This is DISTINCT from
+    the webhook HMAC, which is base64 over the raw body — see
+    ``ShopifyConnector.verify_push_signature``.)
+
+    Returns False on a missing/mismatched hmac — never raises.
+    """
+    provided = query_params.get("hmac", "")
+    if not provided:
+        return False
+    message_pairs = sorted(
+        f"{k}={v}"
+        for k, v in query_params.items()
+        if k not in ("hmac", "signature")
+    )
+    message = "&".join(message_pairs)
+    expected = hmac.new(
+        client_secret.encode(), message.encode(), hashlib.sha256
+    ).hexdigest()
+    try:
+        return hmac.compare_digest(expected, provided)
+    except (TypeError, ValueError):
+        return False
 
 
 class AuthValidationError(Exception):
@@ -119,9 +256,15 @@ class ShopifyConnector(ConnectorBase):
 
     connector_id: str = "shopify"
 
-    def __init__(self, *, grant_fn: GrantFn | None = None) -> None:
-        # grant_fn injectable for tests (default = the real client_credentials POST).
+    def __init__(
+        self,
+        *,
+        grant_fn: GrantFn | None = None,
+        exchange_fn: ExchangeFn | None = None,
+    ) -> None:
+        # grant_fn / exchange_fn injectable for tests (defaults = the real POSTs).
         self._grant_fn: GrantFn = grant_fn or _default_grant
+        self._exchange_fn: ExchangeFn = exchange_fn or _default_oauth_exchange
 
     @property
     def spec(self) -> ConnectorSpec:
@@ -139,6 +282,88 @@ class ShopifyConnector(ConnectorBase):
                 "Connecting your Shopify store automatically — no token to copy."
             ),
             "scopes": sorted(_REQUIRED_SCOPES),
+        }
+
+    # ---------- AUTH (OWNER-FACING OAuth managed-install — VT-283) ----------
+
+    def build_oauth_install_url(
+        self, tenant_id: UUID, shop: str, *, state: str
+    ) -> str:
+        """Step 1 of the merchant OAuth install — the URL the owner is sent to.
+
+        ``shop`` is the owner-entered ``*.myshopify.com`` domain (validated before
+        interpolation — Cowork #1). VT-289: ``state`` is the single-use nonce minted
+        by ``oauth_state.mint_install_state`` (NOT the raw tenant_id) — the callback
+        claims it and derives the tenant from the stored record, so a forged ``state``
+        cannot bind a token to another tenant. Offline access is requested (Shopify's
+        default — ``grant_options[]`` is omitted; an online token would pass
+        ``grant_options[]=per-user``), so background pulls keep working after the
+        merchant session ends (Cowork #3).
+        """
+        shop = _validate_shop_domain(shop)
+        client_id, _ = _shopify_oauth_creds()
+        redirect_uri = _shopify_redirect_uri()
+        query = urlencode(
+            {
+                "client_id": client_id,
+                "scope": ",".join(sorted(_REQUIRED_SCOPES)),
+                "redirect_uri": redirect_uri,
+                "state": state,
+            }
+        )
+        return f"https://{shop}{_AUTHORIZE_PATH}?{query}"
+
+    def _oauth_exchange_and_store(
+        self, tenant_id: UUID, shop: str, code: str
+    ) -> dict[str, Any]:
+        """Exchange the merchant's OAuth ``code`` for an OFFLINE access token and
+        persist it encrypted. Offline tokens do not expire → ``expires_at = NULL``
+        (the discriminator ``get_access_token`` reads to skip the
+        client_credentials re-grant for OAuth tenants)."""
+        shop = _validate_shop_domain(shop)
+        client_id, client_secret = _shopify_oauth_creds()
+        token = self._exchange_fn(shop, client_id, client_secret, code)
+        access_token = token.get("access_token")
+        if not access_token:
+            raise AuthValidationError(
+                f"OAuth exchange returned no access_token: {str(token)[:200]!r}"
+            )
+        scope_str = token.get("scope") or ""
+        scopes = (
+            [s.strip() for s in scope_str.split(",") if s.strip()]
+            if scope_str else sorted(_REQUIRED_SCOPES)
+        )
+        encrypted = encrypt_value(str(access_token))
+        push_secret = secrets.token_urlsafe(32)
+        pool = get_pool()
+        with pool.connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO tenant_oauth_tokens (
+                    tenant_id, connector_id, refresh_token_encrypted,
+                    scopes, push_secret, shop_url, last_refreshed_at, expires_at
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, now(), NULL)
+                ON CONFLICT (tenant_id, connector_id) DO UPDATE SET
+                    refresh_token_encrypted = EXCLUDED.refresh_token_encrypted,
+                    scopes = EXCLUDED.scopes,
+                    push_secret = COALESCE(
+                        tenant_oauth_tokens.push_secret, EXCLUDED.push_secret
+                    ),
+                    shop_url = EXCLUDED.shop_url,
+                    last_refreshed_at = now(),
+                    expires_at = NULL
+                """,
+                (
+                    str(tenant_id), self.connector_id, encrypted,
+                    scopes, push_secret, shop,
+                ),
+            )
+        return {
+            "success": True,
+            "mode": "oauth_install",
+            "shop_url": shop,
+            "scopes": scopes,
         }
 
     def _grant_and_store(self, tenant_id: UUID) -> dict[str, Any]:
@@ -188,8 +413,24 @@ class ShopifyConnector(ConnectorBase):
     def complete_auth(
         self, tenant_id: UUID, auth_payload: dict[str, Any] | None = None
     ) -> dict[str, Any]:
-        """Perform the client_credentials grant + persist. ``auth_payload`` is
-        unused (zero-paste) — kept for the ConnectorBase contract."""
+        """Dual-mode (VT-283):
+
+        * ``auth_payload`` carries ``code`` + ``shop`` -> OAuth authorization-code
+          (merchant install) -> offline token persisted.
+        * empty / None -> client_credentials grant (dev/own-store, existing path).
+
+        Mode = presence of ``code``; ``shop`` is required alongside it (a code
+        without a shop is a malformed callback, not a client_credentials request).
+        """
+        if auth_payload and auth_payload.get("code"):
+            shop = auth_payload.get("shop")
+            if not shop:
+                raise ValueError(
+                    "complete_auth: OAuth 'code' present but 'shop' missing"
+                )
+            return self._oauth_exchange_and_store(
+                tenant_id, str(shop), str(auth_payload["code"])
+            )
         return self._grant_and_store(tenant_id)
 
     def _read_token_row(self, tenant_id: UUID) -> dict[str, Any] | None:
@@ -204,21 +445,30 @@ class ShopifyConnector(ConnectorBase):
         return cast("dict[str, Any] | None", raw)
 
     def get_access_token(self, tenant_id: UUID) -> tuple[str, str]:
-        """Return ``(access_token, shop_url)``; grant on first use, proactively
-        re-grant within a 5-min skew of the 24h expiry."""
+        """Return ``(access_token, shop_url)``.
+
+        OAuth-install tenants (offline token, ``expires_at IS NULL``) use the
+        stored token as-is — NEVER re-granting via client_credentials, which
+        would fail for a real merchant on a different org. client_credentials
+        tenants (24h TTL) grant on first use and proactively re-grant within a
+        5-min skew of expiry.
+        """
         row = self._read_token_row(tenant_id)
-        expires_at = row["expires_at"] if row else None
-        if (
-            row is None
-            or expires_at is None
-            or expires_at <= datetime.now(UTC) + _EXPIRY_SKEW
-        ):
-            self._grant_and_store(tenant_id)  # first connect OR proactive refresh
-            row = self._read_token_row(tenant_id)
-            if row is None:
-                raise RuntimeError(
-                    f"Shopify grant did not persist a token for {tenant_id}"
-                )
+        if row is not None:
+            expires_at = row["expires_at"]
+            if expires_at is None:
+                # offline OAuth-install token — no expiry, use as-is (VT-283).
+                return decrypt_value(row["refresh_token_encrypted"]), row["shop_url"]
+            if expires_at > datetime.now(UTC) + _EXPIRY_SKEW:
+                return decrypt_value(row["refresh_token_encrypted"]), row["shop_url"]
+        # No row (first client_credentials connect) OR a near-expiry
+        # client_credentials token → (re-)grant.
+        self._grant_and_store(tenant_id)
+        row = self._read_token_row(tenant_id)
+        if row is None:
+            raise RuntimeError(
+                f"Shopify grant did not persist a token for {tenant_id}"
+            )
         return decrypt_value(row["refresh_token_encrypted"]), row["shop_url"]
 
     # ---------- PULL ----------
@@ -413,4 +663,11 @@ def _b64_decode(value: str) -> bytes:
     return b64decode(value)
 
 
-__all__ = ["AuthValidationError", "ShopifyConnector"]
+__all__ = [
+    "AuthValidationError",
+    "ShopifyConfigError",
+    "ShopDomainError",
+    "ShopifyConnector",
+    "validate_shop_domain",
+    "verify_oauth_hmac",
+]
