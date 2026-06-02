@@ -2,7 +2,10 @@
 
 import { redirect } from 'next/navigation'
 
-import { requireFazal, UnauthorizedError } from '@/lib/auth/require-fazal'
+import { UnauthorizedError } from '@/lib/auth/require-fazal'
+import { requireOpsOperator } from '@/lib/auth/require-ops-operator'
+import { HomeTriage } from '@/components/ops/home-triage'
+import { fetchHomeTriage, type HomeTriageData } from '@/lib/ops/home'
 import {
   fetchInFlightRuns,
   fetchTopTenants,
@@ -16,11 +19,21 @@ type TopTenantsT = Awaited<ReturnType<typeof fetchTopTenants>>
 type InFlightT = Awaited<ReturnType<typeof fetchInFlightRuns>>
 
 export default async function OpsWorkspacePage() {
+  // VT-290: requireOpsOperator wraps requireFazal + adds role + assigned-tenant scoping.
+  let operator: Awaited<ReturnType<typeof requireOpsOperator>>
   try {
-    await requireFazal()
+    operator = await requireOpsOperator()
   } catch (err) {
     if (err instanceof UnauthorizedError) redirect('/team/ops/login?next=/team/ops')
     throw err
+  }
+
+  // VT-290 Home/Triage (urgency-first, scoped + de-identified). Degrades to null on error.
+  let homeTriage: HomeTriageData | null = null
+  try {
+    homeTriage = await fetchHomeTriage(operator)
+  } catch (err) {
+    console.error('OpsWorkspacePage: fetchHomeTriage failed', err)
   }
 
   // VT-217: per-fetch try/catch so one failing query degrades its
@@ -63,6 +76,9 @@ export default async function OpsWorkspacePage() {
           Ops Console — Workspace
         </h1>
       </header>
+
+      {/* VT-290 Home/Triage — urgency-first, role-scoped + de-identified. */}
+      {homeTriage && <HomeTriage data={homeTriage} />}
 
       <section
         data-section="counters"
