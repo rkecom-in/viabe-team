@@ -31,6 +31,18 @@ import pytest
 pytest.importorskip("langchain")
 
 
+# VT-301 / CL-429: the send path now gates on a recorded WhatsApp opt-in
+# (consent.has_consent_for_phone), which opens its OWN real tenant_connection —
+# the MagicMock pool below never sees it. Default it to True so the mock-pool
+# matrix exercises the OTHER behaviours; the opt-in gate itself is asserted
+# in test_optin_gate_refuses_unconsented (mock) + the real-PG canary
+# (tests/orchestrator/test_send_gate_optin_realdb.py).
+@pytest.fixture(autouse=True)
+def _grant_consent(monkeypatch):
+    from orchestrator.privacy import consent
+    monkeypatch.setattr(consent, "has_consent_for_phone", lambda *_a, **_k: True)
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -373,6 +385,31 @@ def test_blocked_recipient_refused() -> None:
     assert out.status == "unauthorized"
     assert out.error_envelope is not None
     assert out.error_envelope.code == "recipient_opted_out"
+    send_fn.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Test 9b: VT-301 / CL-429 opt-in gate — no recorded opt-in -> refused
+# ---------------------------------------------------------------------------
+
+def test_optin_gate_refuses_unconsented(monkeypatch) -> None:
+    from orchestrator.agent.tools.send_whatsapp_template import send_whatsapp_template
+    from orchestrator.privacy import consent
+
+    # Override the autouse grant: this customer has NO opt-in on record.
+    monkeypatch.setattr(consent, "has_consent_for_phone", lambda *_a, **_k: False)
+
+    # opt_out_status='subscribed' clears the opt-out check — the gate is what
+    # refuses (proving the gate is independent of opt_out_status, applies to
+    # owner-entered customers too: owner_inputs is not a WhatsApp opt-in).
+    pool, _ = _pool(customer_row=_customer(opt_out_status="subscribed"))
+    send_fn = MagicMock()
+
+    out = send_whatsapp_template(_input(), pool=pool, send_fn=send_fn)
+
+    assert out.status == "unauthorized"
+    assert out.error_envelope is not None
+    assert out.error_envelope.code == "recipient_not_opted_in"
     send_fn.assert_not_called()
 
 
