@@ -5,6 +5,7 @@ from __future__ import annotations
 from fastapi import APIRouter
 
 from orchestrator.api.admin import router as admin_router
+from orchestrator.api.consent_capture import router as consent_capture_router
 from orchestrator.api.drive_push import router as drive_push_router
 from orchestrator.api.integration_push import router as integration_push_router
 from orchestrator.api.oauth_callback import router as oauth_callback_router
@@ -26,3 +27,4 @@ router.include_router(shopify_webhook_router)
 router.include_router(onboard_step_router)
 router.include_router(admin_router)
 router.include_router(drive_push_router)
+router.include_router(consent_capture_router)

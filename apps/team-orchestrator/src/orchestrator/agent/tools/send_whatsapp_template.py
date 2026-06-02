@@ -415,6 +415,16 @@ def send_whatsapp_template(
                         ),
                     )
 
+                # TODO(VT-85): messaging-gate scope pending Fazal ruling.
+                # record_of_consent (QR opt-in proof, privacy.consent.has_consent)
+                # is a SEPARATE consent surface from customers.opt_out_status
+                # checked above. It is deliberately NOT enforced here as a
+                # blanket precondition: owner-entered customers (VT-55/56/63,
+                # owner_inputs DPDP basis CL-425) never scanned a QR and MUST
+                # remain sendable. Whether outbound to owner-entered customers
+                # additionally requires QR consent is a Fazal product/legal
+                # decision. When ruled, gate the QR-acquired path here via
+                # privacy.consent.has_consent(tenant_id, phone_token).
                 phone_e164: str | None = customer["phone_e164"]
                 if not phone_e164:
                     return SendWhatsappTemplateOutput(
