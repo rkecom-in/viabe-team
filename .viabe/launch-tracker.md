@@ -116,6 +116,26 @@ row ships on unit/DB coverage; the live walk happens at E2E).
   STOP + flag (do NOT switch to Meta Graph silently). Send is fail-CLOSED until WABA
   `live`, so nothing ships to customers pre-walk. Not Reports-Jun15-blocking.
 
+## Policy ↔ Implementation conformance (gate: customer-messaging go-live; NOT Reports-Jun15)
+
+Tracks where published `docs/policy/` claims must match shipped implementation before any real
+customer data / messaging goes live. Sourced from the 2026-06-03 conformance pass
+(CL-390/416/422). Reports-Jun15 is NOT gated on these; customer-messaging go-live IS.
+
+| Policy claim | Reality | Action / owner | Gate |
+|---|---|---|---|
+| Opt-in required before WhatsApp send | VT-301 enforces `has_consent_for_phone` fail-closed | merged #240 — CC | done (at merge) |
+| Phone encrypted at rest | consent tokenised + resolution seam Fernet-encrypted; `customers.phone_e164` PLAINTEXT (RLS/access-controlled) | claim corrected in privacy-policy §7 + DPA Annex C; **optional hardening row: encrypt `customers.phone_e164`** — Fazal to decide | pre-publish |
+| Hosted in India (Mumbai) | dev=Seoul (ap-northeast-2); prod-Mumbai = VT-231 (parked); CL-422 no real data until then | close VT-231 — Fazal/infra | before any real customer data |
+| Sub-processor: Voyage | not used in source | marked planned-not-active (done) | — |
+| Cookies: analytics | essential-only, no analytics | corrected to essential-only (done) | — |
+| Data-principal access/correction + Grievance Officer | erasure (`purge_consent`) ✓; access/correction UI + officer not built/appointed | build access/correction; appoint officer — build + Fazal | pre-publish |
+| Children's data not collected | no age controls; AUP prohibition only | decide controls — build/policy | pre-publish |
+
+**Hardening candidate (flag for Fazal, NOT rostered):** column-encrypt `customers.phone_e164`
+vs relying on RLS + access controls. Defensible either way — many systems keep operational PII
+access-controlled, not column-encrypted. Do not roster without Fazal's go.
+
 ## Maintenance protocol
 
 - **Updates:** Cowork edits this file when status changes (Fazal says "mark MS-N done" → edit YAML).
