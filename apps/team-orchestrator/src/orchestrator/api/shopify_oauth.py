@@ -1,46 +1,23 @@
-"""VT-283 — Shopify OWNER-FACING OAuth managed-install router.
+"""VT-283 — Shopify OWNER-FACING OAuth managed-install router. HARDENED by VT-289.
 
-Two endpoints, mirroring the google_sheet OAuth flow (api/oauth_callback.py):
+Two endpoints, mirroring the hardened google_sheet flow (api/oauth_callback.py):
 
-  GET /api/orchestrator/integrations/shopify/setup?tenant_id=&shop=
-      Owner-entered ``shop`` is validated, an authorize URL is built (state =
-      tenant_id), and the browser is 302'd to the MERCHANT's consent screen.
+  POST /api/orchestrator/integrations/shopify/setup   (body: tenant_id, shop)
+      INTERNAL_API_SECRET-guarded (team-web calls server-side after authenticating
+      the owner session). Validates the shop domain, mints a single-use VT-289
+      ``state`` nonce bound to (tenant, 'shopify', shop), and returns the authorize
+      URL as JSON; team-web 302s the browser to the merchant's consent screen.
 
   GET /api/orchestrator/integrations/shopify/oauth/callback?code=&shop=&hmac=&state=
-      Shopify's redirect target. BEFORE the code-exchange, two checks are
-      mandatory (Cowork VT-283 #4): the HMAC on the query verifies against the
-      app secret, AND state == the resolved tenant_id. Only then is the code
-      exchanged for an offline token and persisted.
+      Shopify's redirect target. Two mandatory checks BEFORE the code-exchange:
+      (1) HMAC over the query verifies (Shopify origin), and (2) the VT-289 nonce
+      claims successfully (single-use, unexpired, connector-matched). The tenant_id
+      is derived from the STORED nonce record — NEVER from the URL ``state`` — which
+      defeats the account-linking CSRF (an attacker's forged state was never minted
+      by us, so the claim fails). The shop is likewise taken from the minted record.
 
 This is the PRODUCTION zero-paste path for real merchants (different org);
 client_credentials stays the dev/own-store path. CL-421 / CL-427.
-
-SECURITY — state is NOT yet CSRF-hardened (Phase-1; FLAGGED for Cowork ruling)
------------------------------------------------------------------------------
-``state`` carries the raw ``tenant_id`` and the callback trusts it. The HMAC
-proves the redirect came THROUGH Shopify, but NOT that *we* initiated this
-install for this tenant. An attacker can build their own authorize URL with
-``state=<victim_tenant>`` + their own ``*.myshopify.com`` shop, approve it, and
-the callback would bind THEIR shop token under the victim's tenant row
-(``tenant_oauth_tokens`` UPSERT) — an OAuth account-linking CSRF / tenant-
-integration hijack.
-
-This MIRRORS the existing Phase-1 google_sheet OAuth flow (api/oauth_callback.py),
-whose docstring already notes "Production deployments should sign + verify state
-to prevent CSRF; Phase-1 stores it raw." The proper fix is cross-cutting (affects
-both connectors) and is a Cowork/Clau architectural decision, not an in-task
-change:
-  * ``/setup`` authenticates the caller (team-web owner session / internal
-    secret) so only the tenant's owner can initiate an install, and mints a
-    single-use, expiring ``state`` nonce stored server-side bound to
-    (tenant_id, owner, shop).
-  * the callback looks the nonce up, verifies unused + unexpired, and derives
-    ``tenant_id`` from the STORED record — never from the URL.
-
-Current mitigations until that lands: CL-422 (dev = synthetic only, NO real
-merchant data until VT-231 Mumbai) + the live OAuth-install walk is E2E-deferred
-(this path is not exercised against a real merchant store pre-E2E). Hardening is
-rostered — do NOT onboard a real merchant on this path until it lands.
 
 # live OAuth-install walk deferred to E2E (Fazal 2026-06-02): cannot be live-
 # walked on our own dev store (same-org = client_credentials). Real-merchant
@@ -49,22 +26,37 @@ rostered — do NOT onboard a real merchant on this path until it lands.
 
 from __future__ import annotations
 
+import hmac
 import logging
 import os
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException, Query, Request
-from fastapi.responses import RedirectResponse
+from fastapi import APIRouter, Header, HTTPException, Query, Request
+from pydantic import BaseModel
 
 from orchestrator.integrations.connectors.shopify import (
     ShopDomainError,
     ShopifyConfigError,
     ShopifyConnector,
+    validate_shop_domain,
     verify_oauth_hmac,
+)
+from orchestrator.integrations.oauth_state import (
+    claim_install_state,
+    mint_install_state,
 )
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+_CONNECTOR_ID = "shopify"
+
+
+def _verify_internal_secret(provided: str | None) -> bool:
+    expected = os.environ.get("INTERNAL_API_SECRET", "")
+    if not expected or not provided:
+        return False
+    return hmac.compare_digest(provided, expected)
 
 
 def _tenant_uuid(value: str) -> UUID:
@@ -76,22 +68,39 @@ def _tenant_uuid(value: str) -> UUID:
         ) from None
 
 
-@router.get("/api/orchestrator/integrations/shopify/setup")
+class ShopifySetupBody(BaseModel):
+    tenant_id: str
+    shop: str
+
+
+class ShopifySetupResponse(BaseModel):
+    authorize_url: str
+
+
+@router.post("/api/orchestrator/integrations/shopify/setup")
 def shopify_setup(
-    tenant_id: str = Query(...),
-    shop: str = Query(...),
-) -> RedirectResponse:
-    """Start the merchant OAuth install. 302s to Shopify's consent screen."""
-    tenant_uuid = _tenant_uuid(tenant_id)
+    body: ShopifySetupBody,
+    x_internal_secret: str | None = Header(default=None),
+) -> ShopifySetupResponse:
+    """Start the merchant OAuth install. team-web (owner-authenticated) calls this
+    server-side with INTERNAL_API_SECRET; we mint a VT-289 nonce + return the
+    authorize URL as JSON for team-web to 302 the browser to."""
+    if not _verify_internal_secret(x_internal_secret):
+        raise HTTPException(status_code=401, detail="unauthorized")
+    tenant_uuid = _tenant_uuid(body.tenant_id)
     try:
-        auth_url = ShopifyConnector().build_oauth_install_url(tenant_uuid, shop)
+        # validate the shop BEFORE minting / interpolation (Cowork #1).
+        shop = validate_shop_domain(body.shop)
+        state = mint_install_state(tenant_uuid, _CONNECTOR_ID, target=shop)
+        auth_url = ShopifyConnector().build_oauth_install_url(
+            tenant_uuid, shop, state=state
+        )
     except ShopDomainError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except ShopifyConfigError as exc:
-        # Missing app creds / redirect URI is an operator misconfig, not owner error.
         logger.error("VT-283 shopify_setup misconfig: %s", exc)
         raise HTTPException(status_code=503, detail="Shopify OAuth not configured") from exc
-    return RedirectResponse(url=auth_url, status_code=302)
+    return ShopifySetupResponse(authorize_url=auth_url)
 
 
 @router.get("/api/orchestrator/integrations/shopify/oauth/callback")
@@ -101,15 +110,11 @@ def shopify_oauth_callback(
     shop: str = Query(...),
     state: str = Query(...),
 ) -> dict[str, str]:
-    """OAuth redirect target. Verify HMAC + state, then exchange code → token."""
-    # SECURITY (see module docstring): state is the raw tenant_id and is trusted
-    # as the tenant identity — NOT yet CSRF-hardened (Phase-1, mirrors
-    # google_sheet; FLAGGED for Cowork ruling). HMAC below proves Shopify origin,
-    # not that we initiated this install for this tenant.
-    tenant_uuid = _tenant_uuid(state)
-
-    # Cowork #4: verify Shopify's HMAC over the FULL query (sans hmac) before
-    # trusting any of it — prevents forged (non-Shopify) callbacks.
+    """OAuth redirect target. VT-289 hardened: verify HMAC (Shopify origin) + claim
+    the nonce (we initiated it), derive tenant + shop from the STORED record, then
+    exchange code → offline token."""
+    # (1) HMAC over the full query (sans hmac) — proves Shopify origin. Done first
+    # so a forged (non-Shopify) request never consumes the single-use nonce.
     client_secret = os.environ.get("SHOPIFY_API_SECRET", "")
     if not client_secret:
         logger.error("VT-283 callback: SHOPIFY_API_SECRET unset — cannot verify HMAC")
@@ -119,15 +124,26 @@ def shopify_oauth_callback(
         logger.warning("VT-283 callback: HMAC verification failed (shop=%s)", shop)
         raise HTTPException(status_code=401, detail="invalid HMAC")
 
+    # (2) VT-289: claim the single-use nonce; tenant + shop come from the STORED
+    # record, never the URL. A forged/replayed/expired state → reject.
+    claimed = claim_install_state(state, _CONNECTOR_ID)
+    if claimed is None:
+        logger.warning("VT-283 callback: state claim rejected (forged/used/expired)")
+        raise HTTPException(status_code=401, detail="invalid or expired state")
+    tenant_uuid = claimed.tenant_id
+    shop_from_record = claimed.target or shop  # authoritative shop = the minted one
+
     connector = ShopifyConnector()
     try:
-        result = connector.complete_auth(tenant_uuid, {"code": code, "shop": shop})
+        result = connector.complete_auth(
+            tenant_uuid, {"code": code, "shop": shop_from_record}
+        )
     except ShopDomainError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         logger.exception(
             "VT-283 Shopify OAuth complete_auth failed",
-            extra={"tenant_id": state, "shop": shop, "code_prefix": code[:8]},
+            extra={"tenant_id": str(tenant_uuid), "code_prefix": code[:8]},
         )
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     return {

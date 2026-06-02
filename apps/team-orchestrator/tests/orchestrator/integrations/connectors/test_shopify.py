@@ -224,13 +224,18 @@ def test_build_oauth_install_url(monkeypatch):
     for k, v in _OAUTH_ENV.items():
         monkeypatch.setenv(k, v)
     tid = uuid4()
-    url = ShopifyConnector().build_oauth_install_url(tid, "merchant-store.myshopify.com")
+    # VT-289: state is the minted nonce, NOT the raw tenant_id.
+    nonce = "vt289_nonce_shopify_xyz"
+    url = ShopifyConnector().build_oauth_install_url(
+        tid, "merchant-store.myshopify.com", state=nonce
+    )
     parts = urlsplit(url)
     assert parts.netloc == "merchant-store.myshopify.com"
     assert parts.path == "/admin/oauth/authorize"
     q = parse_qs(parts.query)
     assert q["client_id"] == ["cid_test"]
-    assert q["state"] == [str(tid)]
+    assert q["state"] == [nonce]
+    assert str(tid) not in url  # VT-289: raw tenant_id must NOT be in the URL
     assert q["redirect_uri"] == [_OAUTH_ENV["SHOPIFY_OAUTH_REDIRECT_URI"]]
     # scopes present, comma-joined; offline (no grant_options[]=per-user).
     assert "read_customers" in q["scope"][0] and "read_orders" in q["scope"][0]
@@ -250,7 +255,7 @@ def test_build_oauth_install_url_rejects_bad_shop(monkeypatch, bad):
     for k, v in _OAUTH_ENV.items():
         monkeypatch.setenv(k, v)
     with pytest.raises(ShopDomainError):
-        ShopifyConnector().build_oauth_install_url(uuid4(), bad)
+        ShopifyConnector().build_oauth_install_url(uuid4(), bad, state="nonce")
 
 
 def test_verify_oauth_hmac():

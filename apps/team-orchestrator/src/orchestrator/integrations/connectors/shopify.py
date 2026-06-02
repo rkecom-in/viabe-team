@@ -120,6 +120,11 @@ def _validate_shop_domain(shop: str) -> str:
     return candidate
 
 
+# Public alias — the OAuth-install router validates the owner-entered shop before
+# minting a VT-289 nonce (so an invalid domain never reaches the state store).
+validate_shop_domain = _validate_shop_domain
+
+
 def _shopify_oauth_creds() -> tuple[str, str]:
     """(client_id, client_secret) for the OAuth-install flow — reuses the same
     app credentials as client_credentials. STORE_DOMAIN is NOT needed (the shop
@@ -281,15 +286,19 @@ class ShopifyConnector(ConnectorBase):
 
     # ---------- AUTH (OWNER-FACING OAuth managed-install — VT-283) ----------
 
-    def build_oauth_install_url(self, tenant_id: UUID, shop: str) -> str:
+    def build_oauth_install_url(
+        self, tenant_id: UUID, shop: str, *, state: str
+    ) -> str:
         """Step 1 of the merchant OAuth install — the URL the owner is sent to.
 
         ``shop`` is the owner-entered ``*.myshopify.com`` domain (validated before
-        interpolation — Cowork #1). ``state`` carries ``tenant_id`` so the callback
-        can resolve the write target AND be checked against the redirect. Offline
-        access is requested (Shopify's default — ``grant_options[]`` is omitted;
-        an online token would pass ``grant_options[]=per-user``), so background
-        pulls keep working after the merchant session ends (Cowork #3).
+        interpolation — Cowork #1). VT-289: ``state`` is the single-use nonce minted
+        by ``oauth_state.mint_install_state`` (NOT the raw tenant_id) — the callback
+        claims it and derives the tenant from the stored record, so a forged ``state``
+        cannot bind a token to another tenant. Offline access is requested (Shopify's
+        default — ``grant_options[]`` is omitted; an online token would pass
+        ``grant_options[]=per-user``), so background pulls keep working after the
+        merchant session ends (Cowork #3).
         """
         shop = _validate_shop_domain(shop)
         client_id, _ = _shopify_oauth_creds()
@@ -299,7 +308,7 @@ class ShopifyConnector(ConnectorBase):
                 "client_id": client_id,
                 "scope": ",".join(sorted(_REQUIRED_SCOPES)),
                 "redirect_uri": redirect_uri,
-                "state": str(tenant_id),
+                "state": state,
             }
         )
         return f"https://{shop}{_AUTHORIZE_PATH}?{query}"
@@ -659,5 +668,6 @@ __all__ = [
     "ShopifyConfigError",
     "ShopDomainError",
     "ShopifyConnector",
+    "validate_shop_domain",
     "verify_oauth_hmac",
 ]
