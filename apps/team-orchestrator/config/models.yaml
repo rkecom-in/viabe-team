@@ -79,3 +79,13 @@ cash_book_merge:
 zomato_theme_extraction:
   production: claude-haiku-4-5
   test: claude-haiku-4-5
+
+# VT-267 PR-B method_selector — ranks which record-keeping method to suggest first
+# to an owner during onboarding (paper_book/contacts/upi/kot_pos/cash_book/owner_typed;
+# scrape methods gbp/swiggy/zomato EXCLUDED). Haiku BOTH slots: picking a method from a
+# fixed candidate set given tenant context is classification, not open-ended reasoning
+# (same posture as owner_input_classifier / owner_typed_extraction). Resolver:
+# orchestrator.first_data_step.method_selector._resolve_method_selector_model.
+method_selector:
+  production: claude-haiku-4-5
+  test: claude-haiku-4-5
