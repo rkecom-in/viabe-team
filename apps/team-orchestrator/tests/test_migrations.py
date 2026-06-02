@@ -173,8 +173,10 @@ def test_pipeline_steps_step_seq_unique(migrated):
 
 
 def test_whatsapp_number_lookup_uses_index(migrated):
-    """DC2: the whatsapp_number lookup can use tenants_whatsapp_number_idx
-    rather than a sequential scan over tenants."""
+    """The whatsapp_number lookup uses an index, not a seq scan. VT-267 mig 066
+    promoted it to the UNIQUE identity index ``tenants_whatsapp_number_key``
+    (replacing the non-unique mig-014 ``tenants_whatsapp_number_idx`` per Fazal D1 —
+    supersedes CL-76 DC2). Assert the lookup is index-served (name-agnostic)."""
     dsn = migrated["dsn"]
     with psycopg.connect(dsn, autocommit=True) as conn:
         # Discourage seq scan so the planner reveals the index it *can* use —
@@ -187,7 +189,8 @@ def test_whatsapp_number_lookup_uses_index(migrated):
                 ("+919999900001",),
             )
         )
-    assert "tenants_whatsapp_number_idx" in plan, plan
+    assert "Index Scan" in plan and "whatsapp_number" in plan, plan
+    assert "tenants_whatsapp_number_key" in plan, plan  # the VT-267 unique identity index
 
 
 # --- Migration 044: scheduled_followups (VT-48) -------------------------------
