@@ -93,6 +93,20 @@ Notion statuses are mostly "Not Started" because the Launch Tracker hasn't been 
 
 13 milestones not yet extracted from Notion (MS-5/6/7/8/10/12/14/16/17/18/24/46/47). Cowork backfills opportunistically in subsequent sessions. None of the missing IDs are launch-gate headers (those are MS-35/37/42, all captured). Most missing items are likely vendor-approval intermediates or Sprint-2-3 sub-bullets that don't gate Reports-Jun15.
 
+## Deferred-to-E2E walks (don't lose these)
+
+Real-call walks deferred from a VT-row's Done gate to end-to-end testing (the
+row ships on unit/DB coverage; the live walk happens at E2E).
+
+- **VT-283 Shopify OAuth managed-install — real-merchant OAuth walk.** The
+  owner-facing OAuth install path (`shopify/setup` → consent → `oauth/callback`
+  → offline-token exchange) is built + unit/DB-tested, but CANNOT be live-walked
+  on our own dev store (same-org = client_credentials). A real merchant store on
+  a DIFFERENT org is required. Fazal ruled (2026-06-02) the live walk happens
+  during E2E testing, not as a VT-283 gate → **VT-283 Done on unit tests**. Do
+  NOT treat the OAuth path as production-proven until this E2E walk runs against
+  a real merchant store. Not Reports-Jun15-blocking (owner reports are the gate).
+
 ## Maintenance protocol
 
 - **Updates:** Cowork edits this file when status changes (Fazal says "mark MS-N done" → edit YAML).
