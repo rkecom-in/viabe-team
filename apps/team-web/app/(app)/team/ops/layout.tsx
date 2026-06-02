@@ -1,21 +1,20 @@
 import type { ReactNode } from 'react'
 
+import { OpsSideNav } from '@/components/ops/ops-side-nav'
+import { OverlayProvider } from '@/components/ops/overlay-context'
 import { StickyBannerLive } from '@/components/ops/sticky-banner-live'
+import { OperatorRole } from '@/lib/auth/roles'
+import { requireOpsOperator } from '@/lib/auth/require-ops-operator'
 import { fetchBannerCounts } from '@/lib/ops/banner'
 
 /**
- * Ops UI shell.
+ * Ops Console V2 shell (VT-290; extends the VT-201 banner shell).
  *
- * VT-201 PR-3: hoists the sticky banner here so all `/team/ops/**` pages
- * render the last-24h operator-awareness counts without per-page wiring.
- * Auth-gating happens at child-page level (each page calls requireFazal
- * before rendering its content); the layout itself is content-free
- * besides the banner so it doesn't need a separate auth gate.
- *
- * Banner is server-rendered with cached counts; client wrapper polls
- * `/api/ops/banner` every 30s. The API route gates on requireFazal,
- * so unauthenticated callers can't refresh + get fresh counts past the
- * initial render — the counts are aggregate (no per-tenant PII).
+ * Single console: hoists the sticky banner + the role-gated side nav + the overlay
+ * primitive (right-drawer; the "deep views are overlays, not detail pages" contract every
+ * VT-291..298 sub-row inherits). Auth: resolves the operator's ROLE here for the nav; the
+ * actual gate still lives per-page (each page calls requireOpsOperator/requireFazal +
+ * redirects) so an unauthenticated visitor sees no nav and the page redirects to login.
  */
 export const dynamic = 'force-dynamic'
 
@@ -33,10 +32,23 @@ export default async function OpsLayout({ children }: { children: ReactNode }) {
     }
   }
 
+  // Role for the nav (content-free fallback if unauthenticated — pages still gate + redirect).
+  let role: OperatorRole | null = null
+  try {
+    role = (await requireOpsOperator()).role
+  } catch {
+    role = null
+  }
+
   return (
     <section data-area="team-ops">
       <StickyBannerLive initialCounts={counts} />
-      {children}
+      <OverlayProvider>
+        <div data-ops-shell style={{ display: 'flex', gap: '1rem' }}>
+          {role && <OpsSideNav role={role} />}
+          <div data-ops-main style={{ flex: 1 }}>{children}</div>
+        </div>
+      </OverlayProvider>
     </section>
   )
 }
