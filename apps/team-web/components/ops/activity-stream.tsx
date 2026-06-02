@@ -79,8 +79,10 @@ export function ActivityStream({ runs }: { runs: ActivityRun[] }) {
                 Stream
               </button>
               <button type="button" disabled={pending} onClick={() => escalate(r)}>Escalate</button>
-              <button type="button" disabled={pending} onClick={() => control(r, 'pause')}>Pause</button>
-              <button type="button" disabled={pending} onClick={() => control(r, 'steer')}>Steer</button>
+              {/* VT-293 honesty (Cowork): these RECORD a control intent (ops_audit); live
+                  enforcement on the running agent is VT-300. Labels say "Request …". */}
+              <button type="button" disabled={pending} onClick={() => control(r, 'pause')} title="Records a pause request (enforcement: VT-300)">Request pause</button>
+              <button type="button" disabled={pending} onClick={() => control(r, 'steer')} title="Records a steer request (enforcement: VT-300)">Request steer</button>
             </td>
           </tr>
         ))}
