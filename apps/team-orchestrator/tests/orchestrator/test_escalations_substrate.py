@@ -1,0 +1,124 @@
+"""VT-292 — escalations + ops_audit substrate (Rule #15 canary, real Postgres).
+
+Deny-all FORCE RLS (service-role only; app_role denied). record_escalation idempotent on
+run_id; backfill seeds from pipeline_runs; record_ops_audit appends. CL-422 synthetic.
+"""
+
+from __future__ import annotations
+
+import os
+from types import SimpleNamespace
+from uuid import uuid4
+
+import pytest
+
+pytest.importorskip("dbos")
+
+import psycopg  # noqa: E402
+
+pytestmark = pytest.mark.skipif(
+    not os.environ.get("DATABASE_URL"),
+    reason="DATABASE_URL not set — VT-292 escalations tests skipped",
+)
+
+
+@pytest.fixture(scope="module")
+def substrate():  # type: ignore[no-untyped-def]
+    import apply_migrations
+
+    dsn = os.environ["DATABASE_URL"]
+    assert not apply_migrations.apply(dsn=dsn)["failed"]
+    os.environ["TEAM_SUPABASE_DB_URL"] = dsn
+    from dbos_config import launch_dbos, shutdown_dbos
+
+    launch_dbos()
+    try:
+        yield SimpleNamespace(dsn=dsn)
+    finally:
+        shutdown_dbos()
+
+
+def _tenant(dsn: str) -> str:
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        return str(conn.execute(
+            "INSERT INTO tenants (business_name, plan_tier, phase) "
+            "VALUES ('VT-292 test', 'founding', 'paid_active') RETURNING id"
+        ).fetchone()[0])
+
+
+def _run(dsn: str, tenant_id: str, status: str) -> str:
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        return str(conn.execute(
+            "INSERT INTO pipeline_runs (tenant_id, status, trigger_kind) "
+            "VALUES (%s, %s, 'test') RETURNING id",
+            (tenant_id, status),
+        ).fetchone()[0])
+
+
+def test_record_escalation_idempotent_on_run(substrate):
+    from orchestrator.escalations import record_escalation
+
+    t = _tenant(substrate.dsn)
+    run = _run(substrate.dsn, t, "running")
+    record_escalation(t, "hard_limit", severity="high", run_id=run)
+    record_escalation(t, "hard_limit", severity="high", run_id=run)  # idempotent
+    with psycopg.connect(substrate.dsn, autocommit=True) as c:
+        n = c.execute("SELECT count(*) FROM escalations WHERE run_id=%s", (run,)).fetchone()[0]
+    assert n == 1
+
+
+def test_record_escalation_rejects_bad_severity(substrate):
+    from orchestrator.escalations import record_escalation
+
+    with pytest.raises(ValueError, match="invalid severity"):
+        record_escalation(_tenant(substrate.dsn), "x", severity="critical")
+
+
+def test_backfill_from_pipeline_runs(substrate):
+    from orchestrator.escalations import backfill_from_pipeline_runs
+
+    t = _tenant(substrate.dsn)
+    _run(substrate.dsn, t, "aborted_hard_limit")
+    _run(substrate.dsn, t, "escalated")
+    _run(substrate.dsn, t, "running")  # not an escalation
+    n = backfill_from_pipeline_runs()
+    assert n >= 2  # at least the two we just seeded (idempotent across re-runs)
+    # the running one did NOT become an escalation
+    with psycopg.connect(substrate.dsn, autocommit=True) as c:
+        kinds = {
+            r[0] for r in c.execute(
+                "SELECT kind FROM escalations WHERE tenant_id=%s", (t,)
+            ).fetchall()
+        }
+    assert "hard_limit" in kinds and "agent_escalated" in kinds
+
+
+def test_record_ops_audit_appends(substrate):
+    from orchestrator.escalations import record_ops_audit
+
+    op = str(uuid4())
+    t = _tenant(substrate.dsn)
+    record_ops_audit(op, "resolve", "escalation", tenant_id=t, target_id="esc-1", detail="resolved")
+    with psycopg.connect(substrate.dsn, autocommit=True) as c:
+        n = c.execute(
+            "SELECT count(*) FROM ops_audit WHERE operator_id=%s AND action='resolve'", (op,)
+        ).fetchone()[0]
+    assert n == 1
+
+
+def test_deny_all_rls_blocks_app_role(substrate):
+    """Both escalations + ops_audit are service-role only — app_role sees ZERO."""
+    from orchestrator.db import tenant_connection
+    from orchestrator.escalations import record_escalation, record_ops_audit
+
+    t = _tenant(substrate.dsn)
+    record_escalation(t, "agent_escalated")
+    record_ops_audit(str(uuid4()), "override", "escalation", tenant_id=t)
+    with tenant_connection(t) as conn, conn.cursor() as cur:
+        cur.execute("SELECT count(*) AS n FROM escalations")
+        esc = (cur.fetchone() or {"n": -1})
+        cur.execute("SELECT count(*) AS n FROM ops_audit")
+        aud = (cur.fetchone() or {"n": -1})
+    esc_n = esc["n"] if isinstance(esc, dict) else esc[0]
+    aud_n = aud["n"] if isinstance(aud, dict) else aud[0]
+    assert esc_n == 0 and aud_n == 0

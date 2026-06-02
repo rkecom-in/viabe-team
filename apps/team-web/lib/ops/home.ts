@@ -12,7 +12,8 @@
 import { serverSecretClient } from '@/lib/supabase-client'
 
 import { OperatorRole } from '@/lib/auth/roles'
-import { maskForVtr, type MaskedOpsRow, type OpsRow } from '@/lib/ops/de-identify'
+import type { MaskedOpsRow } from '@/lib/ops/de-identify'
+import { fetchEscalations } from '@/lib/ops/escalations'
 
 export interface KpiTile {
   key: string
@@ -68,30 +69,12 @@ export async function fetchHomeTriage(
     { key: 'in_flight', label: 'In-flight agents', count: running, href: '/team/ops/activity?status=running' },
   ]
 
-  // Escalation snippet (first rows needing attention), scoped + de-identified for VTR.
+  // Escalation snippet — VT-292 repoint: now reads the canonical `escalations` table (was
+  // the pipeline_runs seam). fetchEscalations does the scoping + de-identification.
   let escalations: MaskedOpsRow[] = []
   const noAccess = assignedTenants !== null && assignedTenants.length === 0
   if (!noAccess) {
-    const base = client
-      .from('pipeline_runs')
-      .select('id, tenant_id, status, started_at')
-      .in('status', ['escalated', 'aborted_hard_limit'])
-      .gte('started_at', since)
-      .order('started_at', { ascending: false })
-      .limit(5)
-    const { data } = await _scope(base, assignedTenants)
-    const rows: OpsRow[] = (data ?? []).map((r: any) => ({
-      id: String(r.id),
-      tenant_id: String(r.tenant_id),
-      kind: r.status,
-      severity: r.status === 'aborted_hard_limit' ? 'high' : 'medium',
-      time: r.started_at,
-      status: 'open',
-    }))
-    // VTR always masked; VTAdmin would see full detail (here rows carry no PII anyway —
-    // pipeline_runs has no customer fields — but mask uniformly to enforce the contract
-    // for when the VT-292 escalations source adds richer rows).
-    escalations = rows.map(maskForVtr)
+    escalations = await fetchEscalations({ operatorId: '', role, assignedTenants }, client, 5)
   }
 
   return { role, kpis, escalations, scoped: assignedTenants !== null }
