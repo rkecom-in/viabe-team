@@ -118,6 +118,10 @@ _PURGE_ORDER: tuple[str, ...] = (
     "phase_transitions",
     "subscriptions",
     "phone_token_resolutions",
+    # VT-8.5: customer consent proof (migration 067). Leaf table (no FK in or
+    # out — phone_token-keyed, no customers FK), so order-insensitive; grouped
+    # with the privacy surfaces. Tenant-wide DSR must sweep it.
+    "record_of_consent",
     "twilio_inbound_events",
     "rate_limit_buckets",
 )
