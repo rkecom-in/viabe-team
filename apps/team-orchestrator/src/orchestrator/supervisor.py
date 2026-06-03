@@ -117,6 +117,14 @@ def _sales_recovery_node(state: AgentGraphState) -> dict[str, Any]:
     )
     evaluator = SelfEvaluateAdapter(ctx=tool_ctx)
 
+    # VT-73 PRE-FLIGHT context isolation: independently re-query every per-tenant
+    # id in the bundle against context.tenant_id BEFORE the specialist sees it
+    # (defense-in-depth over the builders' RLS reads). Raises
+    # ContextIsolationViolation (critical + Detector-1 alert) on any cross-tenant id.
+    from orchestrator.context_validator import validate_context_isolation
+
+    validate_context_isolation(context)
+
     agent_result = run_sales_recovery_agent(context, evaluator=evaluator)
 
     if agent_result.output is None:
