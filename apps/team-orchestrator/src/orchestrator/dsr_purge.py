@@ -89,9 +89,8 @@ from dataclasses import dataclass
 from typing import Any, cast
 from uuid import UUID
 
-from psycopg.types.json import Jsonb
-
 from orchestrator.graph import get_pool
+from orchestrator.observability.audit_log import log_privacy_event
 
 logger = logging.getLogger(__name__)
 
@@ -253,22 +252,17 @@ def _append_audit_event(
 ) -> None:
     """Append an event noting the purge intent.
 
-    The ``privacy_audit_log`` table (008) is the regulator-required
-    7-year retention surface. VT-8 owns the full hash-chain
-    enforcement; until that lands, this insert uses a placeholder
-    ``this_hash`` (the ticket UUID, hex-encoded) so the NOT NULL
-    constraint is satisfied. When VT-8 lands, this writer is updated
-    in lockstep.
+    The ``privacy_audit_log`` table (008) is the regulator-required 7-year
+    retention surface. VT-80 now owns the tamper-evident hash-chain:
+    ``log_privacy_event`` computes the real prev/this_hash under the chain
+    advisory lock (runs on this same BYPASSRLS purge transaction).
     """
-    conn.execute(
-        "INSERT INTO privacy_audit_log "
-        "(tenant_id, event_type, payload, this_hash, actor) "
-        "VALUES (%s, 'subject_data_purged', %s, %s, 'dsr_purge')",
-        (
-            str(tenant_id),
-            Jsonb({"ticket_id": str(ticket_id)}),
-            ticket_id.hex,
-        ),
+    log_privacy_event(
+        conn,
+        tenant_id=tenant_id,
+        event_type="subject_data_purged",
+        payload={"ticket_id": str(ticket_id)},
+        actor="dsr_purge",
     )
 
 
@@ -286,24 +280,19 @@ def _append_per_table_audit(
     audit trail captures actual purge granularity per table — CL-390
     compliance. Q1 Option A locked per Cowork plan-review 2026-05-26.
 
-    ``this_hash`` placeholder shared with the intent row pending VT-8's
-    hash-chain enforcement.
+    VT-80: appended through ``log_privacy_event`` (real hash-chain) on the same
+    purge transaction — same chain as the intent row.
     """
-    conn.execute(
-        "INSERT INTO privacy_audit_log "
-        "(tenant_id, event_type, payload, this_hash, actor) "
-        "VALUES (%s, 'subject_data_purged_table', %s, %s, 'dsr_purge')",
-        (
-            str(tenant_id),
-            Jsonb(
-                {
-                    "ticket_id": str(ticket_id),
-                    "table": table,
-                    "rows_deleted": rows_deleted,
-                }
-            ),
-            ticket_id.hex,
-        ),
+    log_privacy_event(
+        conn,
+        tenant_id=tenant_id,
+        event_type="subject_data_purged_table",
+        payload={
+            "ticket_id": str(ticket_id),
+            "table": table,
+            "rows_deleted": rows_deleted,
+        },
+        actor="dsr_purge",
     )
 
 

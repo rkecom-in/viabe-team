@@ -190,12 +190,17 @@ def _seed_full_tenant_data(dsn: str, tenant_id: UUID) -> dict[str, UUID]:
             (str(tenant_id), str(run_id), f"SM{uuid4().hex}"),
         )
 
-        # privacy_audit_log — pre-existing event, MUST survive purge
-        conn.execute(
-            "INSERT INTO privacy_audit_log (tenant_id, event_type, "
-            "payload, this_hash, actor) "
-            "VALUES (%s, 'pre_purge_event', '{}'::jsonb, %s, 'test')",
-            (str(tenant_id), uuid4().hex),
+        # privacy_audit_log — pre-existing event, MUST survive purge. VT-80:
+        # write through the real hash-chain writer (a seeded event_type that is
+        # NOT one of the purge events, so the purge-count assertions stay exact).
+        from orchestrator.observability.audit_log import log_privacy_event
+
+        log_privacy_event(
+            conn,
+            tenant_id=tenant_id,
+            event_type="phone_token_resolved",
+            payload={"note": "pre-purge fixture event"},
+            actor="test",
         )
 
     return ids

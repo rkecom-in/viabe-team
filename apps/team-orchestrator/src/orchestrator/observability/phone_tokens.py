@@ -50,9 +50,9 @@ from typing import Any
 from uuid import UUID
 
 from cryptography.fernet import Fernet, InvalidToken
-from psycopg.types.json import Jsonb
 
 from orchestrator.graph import get_pool
+from orchestrator.observability.audit_log import log_privacy_event
 
 logger = logging.getLogger(__name__)
 
@@ -70,19 +70,6 @@ def _hash_phone(phone_e164: str) -> str:
     """Byte-identical with VT-104 ``_hash_phone`` (``pii_redactor.py:140``)."""
     digest = hashlib.sha256(f"{_salt()}:phone:{phone_e164}".encode()).hexdigest()
     return f"phone_tok_{digest[:16]}"
-
-
-def _audit_this_hash(operator_id: str, phone_token: str) -> str:
-    """Phase-1 stub ``this_hash`` for ``privacy_audit_log``.
-
-    VT-150 owns the real hash-chain computation (prev_hash + this_hash
-    forming a tamper-evident chain). This writer emits a minimal
-    deterministic hash so the column constraint (NOT NULL) is
-    satisfied; full chain integrity becomes VT-150's responsibility
-    when that row's writer lands.
-    """
-    raw = f"{operator_id}:{phone_token}:{_salt()}"
-    return hashlib.sha256(raw.encode()).hexdigest()[:32]
 
 
 def _fernet() -> Fernet:
@@ -245,20 +232,14 @@ def resolve_phone_token(
             "resolved": payload_resolved,
             "operator_id": operator_id,
         }
-        conn.execute(
-            """
-            INSERT INTO privacy_audit_log (
-              tenant_id, event_type, payload, this_hash, actor
-            ) VALUES (
-              %s, 'phone_token_resolved', %s, %s, %s
-            )
-            """,
-            (
-                str(tenant_id),
-                Jsonb(payload),
-                _audit_this_hash(operator_id, phone_token),
-                operator_id,
-            ),
+        # VT-80: tamper-evident hash-chain append (replaces the Phase-1 stub).
+        # Runs on the same BYPASSRLS service conn + transaction.
+        log_privacy_event(
+            conn,
+            tenant_id=tenant_id,
+            event_type="phone_token_resolved",
+            payload=payload,
+            actor=operator_id,
         )
     return phone_e164
 
