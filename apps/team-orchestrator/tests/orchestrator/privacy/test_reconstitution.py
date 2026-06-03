@@ -46,6 +46,10 @@ def test_cron_is_utc_for_4am_ist():
 
 
 def test_sla_trigger_is_critical_and_pii_free():
+    # _build_sla_trigger imports orchestrator.alerts.triggers, whose module-level
+    # `from orchestrator.graph import get_pool` pulls in langgraph — absent from the
+    # dep-less smoke runner. Skip there; the full (deps-installed) suite covers it.
+    pytest.importorskip("langgraph")
     now = datetime(2026, 6, 4, 0, 0, tzinfo=timezone.utc)
     customer_id = str(uuid4())
     tenant_id = str(uuid4())
