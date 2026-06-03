@@ -24,7 +24,14 @@
 -- function. Can split into 000c_operator_helpers.sql later if more
 -- operator-specific helpers accumulate.
 
-CREATE ROLE app_operator_role NOLOGIN INHERIT;
+-- VT-271: guard CREATE ROLE (cluster-global, no IF NOT EXISTS) so re-apply is idempotent.
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'app_operator_role') THEN
+        CREATE ROLE app_operator_role NOLOGIN INHERIT;
+    END IF;
+END
+$$;
 
 GRANT USAGE ON SCHEMA public TO app_operator_role;
 GRANT EXECUTE ON FUNCTION app_current_tenant() TO app_operator_role;
