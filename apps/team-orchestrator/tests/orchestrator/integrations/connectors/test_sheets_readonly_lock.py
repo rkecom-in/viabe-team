@@ -14,8 +14,15 @@ from __future__ import annotations
 
 import inspect
 
-from orchestrator.integrations.connectors import google_sheet
-from orchestrator.integrations.connectors.google_sheet import GoogleSheetConnector
+import pytest
+
+# The CI `test` job is a DEP-LESS smoke (uv --no-project, stdlib + pytest only). The connector
+# imports pydantic/httpx, so guard the heavy import or collection ModuleNotFound-errors there
+# (the full orchestrator job + pre-push run it WITH deps). VT-268 follow-up fix.
+pytest.importorskip("orchestrator.integrations.connectors.google_sheet")
+
+from orchestrator.integrations.connectors import google_sheet  # noqa: E402
+from orchestrator.integrations.connectors.google_sheet import GoogleSheetConnector  # noqa: E402
 
 
 def test_oauth_scope_is_readonly_only():
