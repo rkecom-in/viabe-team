@@ -177,7 +177,7 @@ def test_resolve_path_drives_durable_row(substrate):
     def stub(_text):
         return SimpleNamespace(classification="approval", confidence=0.95)
 
-    decision = resolve_decision_from_reply("haan bhejo", classify_fn=stub)
+    decision = resolve_decision_from_reply("haan bhejo", tenant_id="t-vt270", classify_fn=stub)
     assert decision == "approved"
 
     with tenant_connection(tid) as conn:

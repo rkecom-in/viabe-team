@@ -101,7 +101,8 @@ def test_classify_owner_message_labels(
 
     fake = _patched_client(_fake_response(text=json.dumps(envelope)))
     result = classify_owner_message(
-        ClassifyOwnerMessageInput(text=text), client=fake,
+        ClassifyOwnerMessageInput(text=text, tenant_id="11111111-1111-1111-1111-111111111111"), client=fake,
+        consent_check=lambda _t: True,  # VT-270: consent on → exercise classification
     )
     assert result.classification == expected_label
     assert 0.0 <= result.confidence <= 1.0
@@ -117,7 +118,8 @@ def test_classify_owner_message_invalid_json_raises() -> None:
     fake = _patched_client(_fake_response(text="not a json"))
     with pytest.raises(ValueError, match="non-JSON"):
         classify_owner_message(
-            ClassifyOwnerMessageInput(text="anything"), client=fake,
+            ClassifyOwnerMessageInput(text="anything", tenant_id="11111111-1111-1111-1111-111111111111"), client=fake,
+            consent_check=lambda _t: True,
         )
 
 
@@ -134,7 +136,8 @@ def test_classify_owner_message_invalid_envelope_raises() -> None:
     ))
     with pytest.raises(ValueError, match="envelope validation"):
         classify_owner_message(
-            ClassifyOwnerMessageInput(text="anything"), client=fake,
+            ClassifyOwnerMessageInput(text="anything", tenant_id="11111111-1111-1111-1111-111111111111"), client=fake,
+            consent_check=lambda _t: True,
         )
 
 
@@ -155,6 +158,52 @@ def test_classify_owner_message_real_api_smoke() -> None:
         classify_owner_message,
     )
     result = classify_owner_message(
-        ClassifyOwnerMessageInput(text="yes looks good run it"),
+        ClassifyOwnerMessageInput(text="yes looks good run it", tenant_id="11111111-1111-1111-1111-111111111111"),
+        consent_check=lambda _t: True,
     )
     assert result.classification == "approval"
+
+
+# --- VT-270: owner_inputs consent gate (fail-closed, no transmit) -------------
+
+def test_classify_skips_transmit_when_consent_off() -> None:
+    """VT-270: owner_inputs OFF → the body is NEVER sent to Anthropic; skipped envelope returned."""
+    from unittest.mock import MagicMock
+
+    from orchestrator.agent.tools.classify_owner_message import (
+        ClassifyOwnerMessageInput,
+        classify_owner_message,
+    )
+
+    client = MagicMock()  # would record any transmit
+    result = classify_owner_message(
+        ClassifyOwnerMessageInput(text="please run the diwali campaign", tenant_id="11111111-1111-1111-1111-111111111111"),
+        client=client,
+        consent_check=lambda _t: False,
+    )
+    assert result.skipped_reason == "no_owner_inputs_consent"
+    assert result.classification == "other"   # → resolve_decision_from_reply maps to None (paused)
+    client.messages.create.assert_not_called()  # FAIL-CLOSED: no transmit to the sub-processor
+
+
+def test_classify_fails_closed_on_consent_check_error() -> None:
+    """VT-270: a consent-check error (bad tenant_id / DB hiccup) → fail-closed skip, no transmit."""
+    from unittest.mock import MagicMock
+
+    from orchestrator.agent.tools.classify_owner_message import (
+        ClassifyOwnerMessageInput,
+        classify_owner_message,
+    )
+
+    client = MagicMock()
+
+    def _boom(_t):
+        raise RuntimeError("db down")
+
+    result = classify_owner_message(
+        ClassifyOwnerMessageInput(text="anything", tenant_id="11111111-1111-1111-1111-111111111111"),
+        client=client,
+        consent_check=_boom,
+    )
+    assert result.skipped_reason == "consent_check_error"
+    client.messages.create.assert_not_called()
