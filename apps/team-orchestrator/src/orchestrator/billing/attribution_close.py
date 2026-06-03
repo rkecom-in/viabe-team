@@ -73,15 +73,27 @@ def close_attribution(campaign_id: UUID | str) -> AttributionCloseResult:
         # 3. Atomic UPDATE — race-safe. Only first writer flips
         # attribution_closed_at; second observes 0 rows updated.
         now = datetime.now(timezone.utc)
-        cur.execute(
-            "UPDATE campaigns SET "
-            "  total_arrr_paise      = %s, "
-            "  attribution_closed_at = %s "
-            "WHERE id = %s AND attribution_closed_at IS NULL "
-            "RETURNING attribution_closed_at",
-            (total_paise, now, cid),
-        )
-        update_row = cur.fetchone()
+        # VT-65 PR-2: the close UPDATE + the attribution_created emit (campaign
+        # arrr_paise aggregate → Campaign node) are atomic in one txn; only the
+        # race-winner emits. Per-transaction ATTRIBUTED edges are deferred — the
+        # attributions-row creation site is the per-edge emit point (PR notes).
+        with conn.transaction():
+            cur.execute(
+                "UPDATE campaigns SET "
+                "  total_arrr_paise      = %s, "
+                "  attribution_closed_at = %s "
+                "WHERE id = %s AND attribution_closed_at IS NULL "
+                "RETURNING attribution_closed_at",
+                (total_paise, now, cid),
+            )
+            update_row = cur.fetchone()
+            if update_row is not None:  # race-winner only
+                from orchestrator.knowledge.kg_emit import emit_kg_event
+                from orchestrator.knowledge.kg_vocab import KgEventType
+
+                emit_kg_event(conn, KgEventType.ATTRIBUTION_CREATED, tenant_id, {
+                    "campaign_id": cid, "arrr_paise": total_paise,
+                })
         if update_row is None:
             # Lost the race. Re-read the campaign to return the winner's data.
             cur.execute(
@@ -97,6 +109,12 @@ def close_attribution(campaign_id: UUID | str) -> AttributionCloseResult:
                 already_closed=True,
                 attribution_row_count=row_count,
             )
+
+    # VT-65 PR-2: drain the KG outbox post-commit (immediate, best-effort; the
+    # VT-307 sweep is the backstop). Idempotent; never raises.
+    from orchestrator.knowledge.kg_emit import drain_kg_events
+
+    drain_kg_events(tenant_id)
 
     # 4. Emit the canonical completion event — only the winning writer reaches here.
     log_event(
