@@ -67,6 +67,14 @@ _ALLOWLIST = frozenset(
         # DSR controller paths (VT-77) — service-role admin ops over many tables.
         "apps/team-orchestrator/src/orchestrator/dsr_purge.py",
         "apps/team-orchestrator/src/orchestrator/dsr_export.py",
+        # VT-74 k-anonymity admission gate — THE single sanctioned cross-tenant
+        # read (Pillar 8, Cowork-approved 20260603T195500Z). Queries only
+        # `tenants` (not a watched hot table, so it would not trip today) via the
+        # service role by design — k-anon counts tenants across the workspace and
+        # cannot run inside one tenant's RLS scope. Returns tenant UUIDs + a count
+        # only, never customer PII; eligible_tenant_ids are never logged/persisted.
+        # Allowlisted explicitly as the documented, audited cross-tenant exception.
+        "apps/team-orchestrator/src/orchestrator/privacy/k_anonymity.py",
     }
 )
 
