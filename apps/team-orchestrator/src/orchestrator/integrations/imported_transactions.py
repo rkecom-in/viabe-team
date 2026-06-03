@@ -100,33 +100,52 @@ def record_imported_transactions(
     # Rows NEWLY inserted this call that are attributed positive transactions —
     # the only ones promoted to the ledger (N2: re-imports never re-promote).
     to_ledger: list[ImportedTxnIn] = []
+    # VT-65 PR-2: emit transaction_created PER ROW inside a per-row txn so the
+    # emit is atomic with that row's INSERT — without changing batch behavior
+    # (a per-row txn preserves the existing per-row independence; a whole-loop
+    # txn would have made the batch all-or-nothing, which we deliberately avoid).
+    from orchestrator.knowledge.kg_emit import emit_kg_event
+    from orchestrator.knowledge.kg_vocab import KgEventType
+
     with tenant_connection(tenant_id) as conn:
         for row in rows:
             # Attributed AT IMPORT (customer_id set via a strong VPA/phone signal,
             # and promoted to the ledger below) = 'confirmed'; else 'unattributed'
             # (the VT-275 bridge may later set 'tentative'). N3.
             status = "confirmed" if row.customer_id is not None else "unattributed"
-            cur = conn.execute(
-                """
-                INSERT INTO imported_transactions
-                    (tenant_id, customer_id, source, provider_ref, amount_paise,
-                     txn_date, direction, notes, attribution_status)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT (tenant_id, source, provider_ref) DO NOTHING
-                """,
-                (
-                    str(tenant_id),
-                    str(row.customer_id) if row.customer_id is not None else None,
-                    acquired_via, row.provider_ref, row.amount_paise,
-                    row.txn_date, row.direction, row.notes, status,
-                ),
-            )
-            if cur.rowcount and cur.rowcount > 0:
-                written += 1
-                if row.customer_id is not None and row.direction == "credit":
-                    to_ledger.append(row)  # N1: debits NOT promoted (no ledger type)
-            else:
-                skipped += 1  # ON CONFLICT → idempotent no-op (re-import)
+            with conn.transaction():
+                inserted = conn.execute(
+                    """
+                    INSERT INTO imported_transactions
+                        (tenant_id, customer_id, source, provider_ref, amount_paise,
+                         txn_date, direction, notes, attribution_status)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (tenant_id, source, provider_ref) DO NOTHING
+                    RETURNING id
+                    """,
+                    (
+                        str(tenant_id),
+                        str(row.customer_id) if row.customer_id is not None else None,
+                        acquired_via, row.provider_ref, row.amount_paise,
+                        row.txn_date, row.direction, row.notes, status,
+                    ),
+                ).fetchone()
+                if inserted is not None:  # NULL on ON CONFLICT (re-import no-op)
+                    written += 1
+                    emit_kg_event(conn, KgEventType.TRANSACTION_CREATED, tenant_id, {
+                        "transaction_id": str(inserted["id"]),
+                        "customer_id": str(row.customer_id) if row.customer_id is not None else None,
+                        "amount_paise": row.amount_paise,
+                        "txn_date": str(row.txn_date),
+                    })
+                    if row.customer_id is not None and row.direction == "credit":
+                        to_ledger.append(row)  # N1: debits NOT promoted (no ledger type)
+                else:
+                    skipped += 1  # ON CONFLICT → idempotent no-op (re-import)
+
+    from orchestrator.knowledge.kg_emit import drain_kg_events
+
+    drain_kg_events(tenant_id)
 
     # Promote attributed credits to the clean ledger via the single-source writer.
     ledger_written = deferred = 0

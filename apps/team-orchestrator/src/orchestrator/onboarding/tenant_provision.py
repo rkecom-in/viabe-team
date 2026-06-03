@@ -47,23 +47,35 @@ def create_tenant_if_unknown(
 
     name = business_name or business_contact  # placeholder until onboarding fills it
     pool = get_pool()
-    with pool.connection() as conn, conn.cursor() as cur:
-        cur.execute(
-            """
-            INSERT INTO tenants
-                (business_name, plan_tier, phase, whatsapp_number, owner_contact, created_via)
-            VALUES (%s, 'founding', 'onboarding', %s, %s, %s)
-            ON CONFLICT (whatsapp_number) WHERE whatsapp_number IS NOT NULL
-            DO UPDATE SET
-                owner_contact = COALESCE(EXCLUDED.owner_contact, tenants.owner_contact)
-            RETURNING id, (xmax = 0) AS created
-            """,
-            (name, business_contact, owner_contact, created_via),
-        )
-        row = cast("dict[str, Any]", cur.fetchone())
-    return TenantProvisionResult(
-        tenant_id=UUID(str(row["id"])), created=bool(row["created"])
-    )
+    # VT-65 PR-2: INSERT + KG emit in one txn (atomic — the kg_events outbox row
+    # only lands if the tenant INSERT commits). Single-statement site → benign wrap.
+    with pool.connection() as conn, conn.transaction():
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO tenants
+                    (business_name, plan_tier, phase, whatsapp_number, owner_contact, created_via)
+                VALUES (%s, 'founding', 'onboarding', %s, %s, %s)
+                ON CONFLICT (whatsapp_number) WHERE whatsapp_number IS NOT NULL
+                DO UPDATE SET
+                    owner_contact = COALESCE(EXCLUDED.owner_contact, tenants.owner_contact)
+                RETURNING id, (xmax = 0) AS created
+                """,
+                (name, business_contact, owner_contact, created_via),
+            )
+            row = cast("dict[str, Any]", cur.fetchone())
+        tenant_uuid = UUID(str(row["id"]))
+        from orchestrator.knowledge.kg_emit import emit_kg_event
+        from orchestrator.knowledge.kg_vocab import KgEventType
+
+        emit_kg_event(conn, KgEventType.TENANT_CREATED, tenant_uuid, {
+            "business_name": name,
+        })
+
+    from orchestrator.knowledge.kg_emit import drain_kg_events
+
+    drain_kg_events(tenant_uuid)
+    return TenantProvisionResult(tenant_id=tenant_uuid, created=bool(row["created"]))
 
 
 __all__ = ["TenantProvisionResult", "create_tenant_if_unknown"]
