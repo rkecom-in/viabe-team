@@ -40,6 +40,10 @@ TriggerKind = Literal[
     "privacy_audit_event",
     "volume_spike",
     "outbound_failure",
+    # VT-79 breach detectors (Phase-1 slice).
+    "tenant_isolation_breach",  # Detector-1 (P0 — confirmed cross-tenant exposure)
+    "dsr_rate_anomaly",  # Detector-3 (DSR request-rate over threshold)
+    "pii_in_log",  # Detector-5 (unredacted PII found in pipeline_steps payloads)
 ]
 
 Severity = Literal["critical", "warning"]
@@ -54,7 +58,16 @@ _SEVERITY_BY_KIND: dict[TriggerKind, Severity] = {
     "cost_anomaly": "warning",
     "latency_anomaly": "warning",
     "volume_spike": "warning",
+    # VT-79 breach detectors.
+    "tenant_isolation_breach": "critical",
+    "dsr_rate_anomaly": "warning",
+    "pii_in_log": "critical",
 }
+
+# VT-79 Detector-3: DSR request-rate threshold (Phase-1 fixed value; cohort
+# baselines need real traffic — flagged for tuning, gate-live posture).
+_DSR_RATE_WINDOW_HOURS = 24
+_DSR_RATE_THRESHOLD = 10  # DSR tickets per tenant per window before alerting
 
 
 @dataclass(frozen=True)
@@ -146,9 +159,15 @@ def detect_slow_triggers(tenant_id: UUID) -> list[Trigger]:
             (str(tenant_id),),
         )
         baseline = cur.fetchone()
-    if baseline is None:
-        return triggers
-    base = dict(baseline) if not isinstance(baseline, dict) else baseline
+    # A missing baseline must NOT skip the whole sweep — the VT-79 breach
+    # detectors (tenant-isolation P0, DSR-rate) don't depend on baselines. The
+    # baseline-dependent checks (cost/latency/volume) already guard on `base`
+    # being populated, so an empty base simply no-ops them.
+    base = (
+        (dict(baseline) if not isinstance(baseline, dict) else baseline)
+        if baseline is not None
+        else {}
+    )
 
     # Cost + latency anomaly — sweep last 5-min terminal runs.
     with pool.connection() as conn, conn.cursor() as cur:
@@ -230,6 +249,91 @@ def detect_slow_triggers(tenant_id: UUID) -> list[Trigger]:
             payload={"step_name": rd.get("step_name")},
         ))
 
+    # VT-79 Detector-1 — tenant-isolation breach (P0). The RLS guard
+    # (_tenant_guard) emits a 'tenant_isolation_breach' pipeline_step on any
+    # cross-tenant leak; surface it as a critical trigger via the VT-202 path.
+    with pool.connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT run_id FROM pipeline_steps
+            WHERE tenant_id = %s
+              AND step_kind = 'tenant_isolation_breach'
+              AND started_at > now() - interval '5 minutes'
+            ORDER BY started_at DESC LIMIT 10
+            """,
+            (str(tenant_id),),
+        )
+        breaches = cur.fetchall()
+    for r in breaches:
+        rd = dict(r) if not isinstance(r, dict) else r
+        run_id = UUID(str(rd["run_id"]))
+        triggers.append(_make_trigger(
+            tenant_id, "tenant_isolation_breach",
+            f"P0 tenant-isolation breach on run {run_id}",
+            run_id=run_id,
+            payload={"severity_class": "P0"},
+        ))
+
+    # VT-79 Detector-3 — DSR request-rate anomaly (fixed Phase-1 threshold).
+    with pool.connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT COUNT(*) AS n FROM dsr_tickets "
+            "WHERE tenant_id = %s "
+            f"  AND acknowledged_at > now() - interval '{_DSR_RATE_WINDOW_HOURS} hours'",
+            (str(tenant_id),),
+        )
+        draw = cur.fetchone()
+    if draw is not None:
+        dcount = int((dict(draw) if not isinstance(draw, dict) else draw).get("n") or 0)
+        if dcount > _DSR_RATE_THRESHOLD:
+            triggers.append(_make_trigger(
+                tenant_id, "dsr_rate_anomaly",
+                f"DSR request rate {dcount} in {_DSR_RATE_WINDOW_HOURS}h "
+                f"exceeds threshold ({_DSR_RATE_THRESHOLD})",
+                payload={"count": dcount, "threshold": _DSR_RATE_THRESHOLD},
+            ))
+
+    return triggers
+
+
+def detect_pii_in_logs(tenant_id: UUID, *, lookback_hours: int = 24) -> list[Trigger]:
+    """VT-79 Detector-5 — scan recent pipeline_steps payloads for unredacted PII.
+
+    CL-390 regression catcher: bodies/phones must be redacted at the persistence
+    boundary (VT-144). Any payload that STILL matches a PII pattern is a leak →
+    critical. Reuses the alert pii_scrub patterns (one PII-pattern source).
+
+    The detection logic ships now (+ canary); the nightly DBOS.scheduled
+    registration is a fast-follow (VT-305) — same app_version posture as VT-304.
+    """
+    from orchestrator.alerts.pii_scrub import find_pii
+
+    pool = get_pool()
+    triggers: list[Trigger] = []
+    with pool.connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT id, run_id, input_envelope, output_envelope
+            FROM pipeline_steps
+            WHERE tenant_id = %s
+              AND started_at > now() - make_interval(hours => %s)
+            ORDER BY started_at DESC LIMIT 1000
+            """,
+            (str(tenant_id), lookback_hours),
+        )
+        rows = cur.fetchall()
+    for r in rows:
+        rd = dict(r) if not isinstance(r, dict) else r
+        blob = f"{rd.get('input_envelope')!s} {rd.get('output_envelope')!s}"
+        matches = find_pii(blob)
+        if matches:
+            triggers.append(_make_trigger(
+                tenant_id, "pii_in_log",
+                f"Unredacted PII in pipeline_step {rd.get('id')} "
+                f"(kinds: {sorted(set(matches))})",
+                run_id=UUID(str(rd["run_id"])) if rd.get("run_id") else None,
+                payload={"step_id": str(rd.get("id")), "pii_kinds": sorted(set(matches))},
+            ))
     return triggers
 
 
@@ -255,6 +359,7 @@ __all__ = [
     "TriggerKind",
     "all_active_tenant_ids",
     "detect_critical_for_run",
+    "detect_pii_in_logs",
     "detect_slow_triggers",
     "severity_for",
 ]

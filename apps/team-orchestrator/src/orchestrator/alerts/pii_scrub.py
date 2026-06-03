@@ -43,4 +43,26 @@ def scrub_pii(text: str) -> str:
     return text
 
 
-__all__ = ["scrub_pii"]
+def find_pii(text: str) -> list[str]:
+    """VT-79 Detector-5: return the PII-pattern kinds present in ``text``.
+
+    The detection counterpart of ``scrub_pii`` — reuses the SAME patterns (one
+    PII-pattern source, Pillar 8). Empty list = clean. Already-scrubbed text
+    (``[REDACTED:...]``) returns clean, so a redacted payload never false-fires.
+    Twilio SIDs are intentionally NOT flagged: they are an allowed provenance
+    handle (CL-390), not PII.
+    """
+    if not text:
+        return []
+    # Mask the allowed Twilio-SID shape first so its hex digits don't trip the
+    # phone / digit-run patterns.
+    masked = _TWILIO_SID_RE.sub("[SID]", text)
+    found: list[str] = []
+    if _E164_RE.search(masked):
+        found.append("phone")
+    if _DIGIT_RUN_RE.search(masked):
+        found.append("digits")
+    return found
+
+
+__all__ = ["find_pii", "scrub_pii"]
