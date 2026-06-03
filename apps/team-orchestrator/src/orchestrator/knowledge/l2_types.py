@@ -51,7 +51,7 @@ _SUMMARY_TEMPLATES: Final[dict[str, str]] = {
     L2EventType.CUSTOMER_HIGH_VALUE_THRESHOLD_CROSSED: "Customer crossed high-value threshold ({lifetime_paise} paise lifetime).",
     L2EventType.AGENT_DISPATCH_COMPLETED: "Agent dispatch completed ({outcome}).",
     L2EventType.AGENT_DISPATCH_TERMINATED: "Agent dispatch terminated ({reason}).",
-    L2EventType.OWNER_MESSAGE_RECEIVED: "Owner message received (intent: {intent}).",
+    L2EventType.OWNER_MESSAGE_RECEIVED: "Owner message received ({message_type}, {body_length} chars).",
     L2EventType.PHASE_TRANSITIONED: "Phase {from_phase} -> {to_phase}.",
     L2EventType.CLARIFICATION_RESOLVED: "Clarification resolved: {decision}.",
 }

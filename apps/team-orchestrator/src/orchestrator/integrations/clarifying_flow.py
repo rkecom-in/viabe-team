@@ -210,7 +210,10 @@ def record_reply(
     from orchestrator.db.tenant_connection import tenant_connection
 
     now = now or datetime.now(UTC)
-    with tenant_connection(tenant_id) as conn:
+    # VT-309: resolve + emit the L2 episodic clarification_resolved ATOMICALLY
+    # (the autocommit site the plan flagged; now wrapped per Cowork ruling
+    # 20260603T191000Z). Emit only when a pending row was actually resolved.
+    with tenant_connection(tenant_id) as conn, conn.transaction():
         cur = conn.execute(
             """
             UPDATE pending_clarifications
@@ -220,6 +223,27 @@ def record_reply(
             (Jsonb(resolution), now, str(clarification_id)),
         )
         updated = cur.rowcount
+        if updated > 0:
+            from orchestrator.knowledge.l2_types import L2EventType
+            from orchestrator.knowledge.l2_writer import (
+                deterministic_event_id,
+                record_episodic_event,
+            )
+
+            record_episodic_event(
+                tenant_id,
+                L2EventType.CLARIFICATION_RESOLVED,
+                payload={
+                    "clarification_id": str(clarification_id),
+                    "decision": "answered",
+                },
+                referenced_entity_type="clarification",
+                referenced_entity_id=clarification_id,
+                event_id=deterministic_event_id(
+                    tenant_id, L2EventType.CLARIFICATION_RESOLVED, clarification_id
+                ),
+                conn=conn,
+            )
     logger.info(
         "record_reply: tenant=%s id=%s updated=%d", tenant_id, clarification_id, updated
     )

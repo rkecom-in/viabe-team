@@ -61,7 +61,8 @@ def find_open_approval_for_tenant(
     """
     row = conn.execute(
         """
-        SELECT id::text AS id, run_id::text AS run_id, approval_type
+        SELECT id::text AS id, run_id::text AS run_id, approval_type,
+               campaign_id::text AS campaign_id
         FROM pending_approvals
         WHERE tenant_id = %s AND resolved_at IS NULL
         ORDER BY requested_at DESC
@@ -73,7 +74,10 @@ def find_open_approval_for_tenant(
         return None
     if isinstance(row, dict):
         return row
-    return {"id": row[0], "run_id": row[1], "approval_type": row[2]}
+    return {
+        "id": row[0], "run_id": row[1], "approval_type": row[2],
+        "campaign_id": row[3],
+    }
 
 
 def resolve_decision_from_reply(
