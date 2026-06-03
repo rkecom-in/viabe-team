@@ -44,6 +44,47 @@ export async function forwardToOrchestrator(
   }
 }
 
+/** VT-300 run-control forward result. */
+export interface RunControlForwardResult {
+  ok: boolean
+  /** ok | http_403 (not assigned) | http_404 (run gone) | http_<n> | timeout | error */
+  reason: string
+}
+
+/**
+ * Forward a VTR run-control (pause/steer/override) to the orchestrator's authoritative endpoint.
+ * The orchestrator RE-DERIVES the run's tenant + RE-CHECKS operator_assignments server-side
+ * (team-web auth is fail-open at the enforcement leg) and audits. NO tenant crosses the wire —
+ * only run_id + operator_id + control_type. Never throws.
+ */
+export async function forwardRunControl(
+  operatorId: string,
+  runId: string,
+  controlType: string,
+  directive?: string,
+): Promise<RunControlForwardResult> {
+  const base = process.env.TEAM_ORCHESTRATOR_URL ?? _ORCHESTRATOR_DEFAULT
+  const secret = process.env.INTERNAL_API_SECRET ?? ''
+  try {
+    const res = await fetch(`${base}/api/orchestrator/ops/run-control`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'X-Internal-Secret': secret },
+      body: JSON.stringify({
+        run_id: runId,
+        operator_id: operatorId,
+        control_type: controlType,
+        directive: directive ?? null,
+      }),
+      signal: AbortSignal.timeout(_FORWARD_TIMEOUT_MS),
+    })
+    if (!res.ok) return { ok: false, reason: `http_${res.status}` }
+    return { ok: true, reason: 'ok' }
+  } catch (err) {
+    const timedOut = err instanceof Error && err.name === 'TimeoutError'
+    return { ok: false, reason: timedOut ? 'timeout' : 'error' }
+  }
+}
+
 /** VT-211 onboard-step result envelope. */
 export interface OnboardStepResult {
   ok: boolean
