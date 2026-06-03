@@ -37,6 +37,7 @@ from typing import Any, Literal
 from uuid import UUID
 
 from orchestrator.integrations.field_mapping import _route
+from orchestrator.utils.phone_token import hash_phone
 
 logger = logging.getLogger(__name__)
 
@@ -167,8 +168,12 @@ def dedup_and_merge(
                     "phone_e164 = %s, acquired_via = %s, updated_at = %s WHERE id = %s",
                     (new_name, new_email, new_phone, new_acq, now, str(cid)),
                 )
+                # VT-315 / CL-390: emit the canonical phone HASH, never the raw
+                # phone — the kg_events outbox payload persists durably (rows are
+                # not deleted on drain, only drained_at stamped).
                 emit_kg_event(conn, KgEventType.CUSTOMER_UPDATED, tenant_id, {
-                    "customer_id": str(cid), "phone_e164": new_phone,
+                    "customer_id": str(cid),
+                    "phone_hash": hash_phone(new_phone) if new_phone else None,
                 })
             logger.info(
                 "dedup_and_merge MERGED tenant=%s customer=%s acquired_via=%s",
@@ -190,8 +195,10 @@ def dedup_and_merge(
                  [acquired_via], acquired_via),
             ).fetchone()
             cid = row["id"] if isinstance(row, dict) else row[0]
+            # VT-315 / CL-390: hash before emit (see CUSTOMER_UPDATED above).
             emit_kg_event(conn, KgEventType.CUSTOMER_CREATED, tenant_id, {
-                "customer_id": str(cid), "phone_e164": phone_e164,
+                "customer_id": str(cid),
+                "phone_hash": hash_phone(phone_e164) if phone_e164 else None,
             })
 
     # Register the privacy-preserving token outside the RLS block (its own

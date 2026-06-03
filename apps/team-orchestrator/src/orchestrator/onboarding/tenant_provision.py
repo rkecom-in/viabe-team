@@ -68,8 +68,12 @@ def create_tenant_if_unknown(
         from orchestrator.knowledge.kg_emit import emit_kg_event
         from orchestrator.knowledge.kg_vocab import KgEventType
 
+        # VT-315 / CL-390: emit the REAL business_name (None until onboarding
+        # captures it) — NEVER the `name` phone-fallback. The tenants row keeps
+        # the phone fallback (tenant identity); the durable kg_events payload
+        # must not carry the raw phone. _h_tenant_created tolerates None.
         emit_kg_event(conn, KgEventType.TENANT_CREATED, tenant_uuid, {
-            "business_name": name,
+            "business_name": business_name,
         })
 
     from orchestrator.knowledge.kg_emit import drain_kg_events
