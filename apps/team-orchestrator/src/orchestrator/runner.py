@@ -21,6 +21,7 @@ from dbos_config import WORKFLOW_TIMEOUT_SECONDS
 from orchestrator.db import tenant_connection
 from orchestrator.direct_handlers import HANDLERS
 from orchestrator.graph import OrchestratorState, get_compiled_graph
+from orchestrator.memory.l0_writer import _owner_inputs_enabled
 from orchestrator.owner_inputs import run_extraction_for_event
 from orchestrator.pre_filter_gate import pre_filter
 from orchestrator.state import new_subscriber_state
@@ -36,6 +37,24 @@ from orchestrator.utils.phone_token import hash_phone
 OWNER_INPUTS_EXTRACTION_ENABLED = False
 
 logger = logging.getLogger(__name__)
+
+
+def _brain_owner_inputs_ok(tenant_id: str) -> bool:
+    """VT-303 / CL-425 — fail-closed owner_inputs consent check for the brain.
+
+    The brain (dispatch_brain) transmits the owner's inbound body — which may
+    carry customer PII — to Anthropic (sub-processor). ``owner_inputs`` is the
+    lawful basis (CL-425). Any error reading the flag fails CLOSED (treat as not
+    consented): we never transmit on an unknown consent state.
+    """
+    try:
+        return _owner_inputs_enabled(UUID(tenant_id))
+    except Exception:  # noqa: BLE001 — fail-closed on any consent-check error
+        logger.warning(
+            "VT-303: owner_inputs consent check failed (tenant=%s); fail-closed",
+            tenant_id,
+        )
+        return False
 
 
 @DBOS.step()
@@ -358,31 +377,46 @@ def webhook_pipeline_run(
 
     result = pre_filter(event, state)
     handler_name: str | None = None
+    routed = result.kind
     final_status = "completed"
     if result.kind == "direct_handler":
         handler_name = result.handler_name
         HANDLERS[handler_name](event, state)
     elif result.kind == "brain":
-        # VT-193: brain wired into supervisor graph via dispatch_brain.
-        # Replaces the VT-3.4 placeholder (record_brain_pending + 'escalated'
-        # final status) that the 2026-05-27 E2E surfaced. Imported lazily
-        # so non-brain webhook paths don't pay the langchain/langgraph
-        # import cost.
-        from orchestrator.agent.dispatch import dispatch_brain
+        # VT-303 / CL-425 — owner_inputs consent gate on the brain transmit
+        # (Option B). The brain transmits the owner's inbound body (may carry
+        # customer PII) to Anthropic; owner_inputs is the lawful basis. Scope
+        # the gate to real inbound messages — status-callback brain routes carry
+        # no body, so there is nothing to gate. Fail-closed: FALSE/unknown →
+        # NO transmit; send the conservative enable-prompt instead. The owner
+        # turns it on via the enable keyword (data_inputs_enable_handler).
+        if event.message_type == "inbound_message" and not _brain_owner_inputs_ok(
+            tenant_id
+        ):
+            handler_name = "consent_required_handler"
+            routed = "consent_required"
+            HANDLERS[handler_name](event, state)
+        else:
+            # VT-193: brain wired into supervisor graph via dispatch_brain.
+            # Replaces the VT-3.4 placeholder (record_brain_pending + 'escalated'
+            # final status) that the 2026-05-27 E2E surfaced. Imported lazily
+            # so non-brain webhook paths don't pay the langchain/langgraph
+            # import cost.
+            from orchestrator.agent.dispatch import dispatch_brain
 
-        dispatch_result = dispatch_brain(
-            event=event,
-            state=state,
-            run_id=UUID(run_id),
-            tenant_id=UUID(tenant_id),
-        )
-        final_status = dispatch_result.final_status
+            dispatch_result = dispatch_brain(
+                event=event,
+                state=state,
+                run_id=UUID(run_id),
+                tenant_id=UUID(tenant_id),
+            )
+            final_status = dispatch_result.final_status
     # result.kind == "reject" → observability-only; the run ends clean (completed).
 
     close_webhook_run(tenant_id, run_id, final_status)
     return {
         "run_id": run_id,
         "tenant_id": tenant_id,
-        "routed": result.kind,
+        "routed": routed,
         "handler": handler_name,
     }
