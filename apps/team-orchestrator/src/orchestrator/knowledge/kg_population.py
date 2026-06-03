@@ -66,9 +66,12 @@ def _h_tenant_created(tid: UUID, p: dict[str, Any]) -> None:
 def _h_customer_upsert(tid: UUID, p: dict[str, Any]) -> None:
     cid = str(p["customer_id"])
     attrs: dict[str, Any] = {}
-    # CL-390: hash only, never raw phone/name.
-    if p.get("phone_e164"):
-        attrs["phone_hash"] = hash_phone(p["phone_e164"])
+    # CL-390: hash only, never raw phone/name. VT-315: emit sites now send the
+    # canonical phone_hash directly (raw phone never enters the outbox payload).
+    # Keep the legacy phone_e164→hash fallback for any pre-VT-315 undrained event.
+    ph = p.get("phone_hash") or (hash_phone(p["phone_e164"]) if p.get("phone_e164") else None)
+    if ph:
+        attrs["phone_hash"] = ph
     cust = upsert_entity(tid, EntityType.CUSTOMER, cid, attrs)
     add_relationship(tid, _tenant_node(tid), cust, RelationshipType.OWNS)
 
