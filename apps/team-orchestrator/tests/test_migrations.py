@@ -1026,3 +1026,36 @@ def test_pending_approvals_run_fk_same_tenant(migrated):
                 "VALUES (%s, %s, 'campaign_send', 'x', now() + interval '1 hour')",
                 (tenant, str(uuid4())),  # non-existent run_id
             )
+
+
+def test_create_role_guarded_and_idempotent(migrated):
+    """VT-271: CREATE ROLE in 015/027 is guarded (DO-block IF NOT EXISTS pg_roles), so a fresh-DB
+    apply on a cluster where the roles already exist (roles are cluster-global; the runner's
+    applied-tracking is per-DB) is a NO-OP instead of halting with 'role already exists'. That
+    removes the need for the pre-push hook's drop-roles workaround.
+
+    (a) regression-lock: both files carry the guard (a future bare CREATE ROLE fails here).
+    (b) the guard is genuinely idempotent against an already-existing role.
+    Scope is the ROLE creation only — not full-file re-runnability (other DDL like CREATE POLICY
+    is intentionally not idempotent)."""
+    role_files = [
+        p for p in apply_migrations.migration_files() if p.name.startswith(("015_", "027_"))
+    ]
+    assert len(role_files) == 2, [p.name for p in role_files]
+    for p in role_files:
+        src = p.read_text(encoding="utf-8")
+        assert "pg_roles WHERE rolname" in src, f"{p.name}: CREATE ROLE not guarded"
+        assert "CREATE ROLE" in src
+
+    dsn = migrated["dsn"]  # roles already created by the fixture
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        for role, opts in (("app_role", "NOLOGIN"), ("app_operator_role", "NOLOGIN INHERIT")):
+            # The exact guard form must be a no-op against the existing role (no DuplicateObject).
+            conn.execute(
+                f"DO $$ BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '{role}') "
+                f"THEN CREATE ROLE {role} {opts}; END IF; END $$;"
+            )
+            n = conn.execute(
+                "SELECT count(*) FROM pg_roles WHERE rolname = %s", (role,)
+            ).fetchone()[0]
+            assert n == 1, f"{role}: expected 1, got {n}"
