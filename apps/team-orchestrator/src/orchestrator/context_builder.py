@@ -18,6 +18,19 @@ via monkeypatched ``_build_*`` functions. The real read paths only get
 exercised once the substrates exist — that integration test is deferred to the
 VT-7.1-bundling PR. Do not claim cross-tenant isolation is tested end-to-end;
 what is tested is the dispatcher + the ``assert_tenant_scoped`` guard.
+
+WIRING STATUS (2026-06-03, Sprint 7 build-map) — this module is LIVE, not an
+orphan. ``build_sales_recovery_context`` is called on the live path at SPECIALIST
+HANDOFF: ``runner.webhook_pipeline_run`` -> ``dispatch_brain`` -> orchestrator-agent
+``spawn_sales_recovery`` tool -> ``handoffs._build_sales_recovery_update`` (line ~133).
+It is DISTINCT from ``orchestrator.knowledge.l1.assemble_context_bundle``, which is
+the SEPARATE orchestrator-prompt L1-enrichment seam injected unconditionally at
+``dispatch.py`` (~line 186). Two seams, two consumers — do NOT merge them. Of the
+``_build_*`` sections, recent_campaigns / pending_owner_inputs / recovery_target_config
+read live substrate today (mig 016/018 campaigns, mig 020 owner_inputs); business_profile
+(L1), ledger_summary (L2), attribution_snapshot remain CL-190 safe-empty pending their
+substrates (Sprint-7 build waves). The CL-190 note above is partially superseded: the
+campaigns + owner_inputs tables now EXIST and are read.
 """
 
 from __future__ import annotations
