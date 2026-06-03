@@ -525,6 +525,12 @@ def _run_supervisor_path(
         "_build_ledger_summary",
         lambda tid: (context_builder_mod.LedgerSummary(), True),
     )
+    # VT-69: _build_l3_priors is a live L3 read too — stub no-prior.
+    monkeypatch.setattr(
+        context_builder_mod,
+        "_build_l3_priors",
+        lambda tid, rid: (context_builder_mod.L3Priors(), False),
+    )
 
     route_keys: list[str] = []
     real_route = routing.route_after_orchestrator
@@ -699,6 +705,12 @@ def test_sales_recovery_node_passes_bundle_to_agent(
         "_build_ledger_summary",
         lambda tid: (context_builder_mod.LedgerSummary(), True),
     )
+    # VT-69: _build_l3_priors is a live L3 read too — stub no-prior.
+    monkeypatch.setattr(
+        context_builder_mod,
+        "_build_l3_priors",
+        lambda tid, rid: (context_builder_mod.L3Priors(), False),
+    )
 
     received: dict[str, Any] = {}
 
@@ -791,6 +803,12 @@ def test_spawn_sales_recovery_attaches_bundle_with_user_request(
         context_builder_mod,
         "_build_ledger_summary",
         lambda tid: (context_builder_mod.LedgerSummary(), True),
+    )
+    # VT-69: _build_l3_priors is a live L3 read too — stub no-prior.
+    monkeypatch.setattr(
+        context_builder_mod,
+        "_build_l3_priors",
+        lambda tid, rid: (context_builder_mod.L3Priors(), False),
     )
 
     tenant_id = uuid4()

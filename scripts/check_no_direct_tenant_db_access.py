@@ -75,6 +75,13 @@ _ALLOWLIST = frozenset(
         # only, never customer PII; eligible_tenant_ids are never logged/persisted.
         # Allowlisted explicitly as the documented, audited cross-tenant exception.
         "apps/team-orchestrator/src/orchestrator/privacy/k_anonymity.py",
+        # VT-68 L3 construction — the 2nd sanctioned cross-tenant service-role read
+        # (Pillar 8, Cowork-approved 20260604T004000Z). Aggregates campaigns +
+        # customers + attributions ACROSS tenants into anonymized priors; writes
+        # ONLY aggregates to l3_patterns (no tenant_id/customer id/city ever).
+        # k-anon contributor gate (≥10) per cohort; no assert_tenant_scoped → no
+        # Detector-1 false-trip. Same audited-exception discipline as k_anonymity.
+        "apps/team-orchestrator/src/orchestrator/knowledge/l3_construction.py",
     }
 )
 
