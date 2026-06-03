@@ -44,16 +44,19 @@ from orchestrator.failures import HardLimitAxis  # noqa: E402
 
 @pytest.fixture(autouse=True)
 def _stub_db_backed_campaigns_builder(monkeypatch: pytest.MonkeyPatch) -> None:
-    """VT-138 / VT-146: ``_build_recent_campaigns`` and
-    ``_build_pending_owner_inputs`` are now live DB reads via
-    ``tenant_connection``. The unit tests in this file never spin up a
-    DB substrate — they exercise the agent loop and node wrappers with
-    mocked Anthropic clients. Stub both DB-backed builders to
-    safe-empty so bundle construction stays pure-Python.
+    """VT-138 / VT-146 / VT-67: ``_build_recent_campaigns``,
+    ``_build_pending_owner_inputs`` and ``_build_ledger_summary`` (L2) are now
+    live DB reads via ``tenant_connection``. The unit tests in this file never
+    spin up a DB substrate — they exercise the agent loop and node wrappers with
+    mocked Anthropic clients. Stub the DB-backed builders to safe-empty so
+    bundle construction stays pure-Python.
     """
     monkeypatch.setattr(_cb_mod, "_build_recent_campaigns", lambda tid: ([], False))
     monkeypatch.setattr(
         _cb_mod, "_build_pending_owner_inputs", lambda tid: ([], False)
+    )
+    monkeypatch.setattr(
+        _cb_mod, "_build_ledger_summary", lambda tid: (_cb_mod.LedgerSummary(), True)
     )
 
 

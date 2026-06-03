@@ -27,10 +27,11 @@ It is DISTINCT from ``orchestrator.knowledge.l1.assemble_context_bundle``, which
 the SEPARATE orchestrator-prompt L1-enrichment seam injected unconditionally at
 ``dispatch.py`` (~line 186). Two seams, two consumers — do NOT merge them. Of the
 ``_build_*`` sections, recent_campaigns / pending_owner_inputs / recovery_target_config
-read live substrate today (mig 016/018 campaigns, mig 020 owner_inputs); business_profile
-(L1), ledger_summary (L2), attribution_snapshot remain CL-190 safe-empty pending their
-substrates (Sprint-7 build waves). The CL-190 note above is partially superseded: the
-campaigns + owner_inputs tables now EXIST and are read.
+read live substrate today (mig 016/018 campaigns, mig 020 owner_inputs); ledger_summary (L2)
+reads the live ``episodic_events`` substrate (mig 083, VT-67) — empty-but-live until VT-309
+wires the threshold emit sites; business_profile (L1) and attribution_snapshot remain CL-190
+safe-empty pending their substrates (Sprint-7 build waves). The CL-190 note above is partially
+superseded: the campaigns + owner_inputs + episodic_events tables now EXIST and are read.
 """
 
 from __future__ import annotations
@@ -47,6 +48,8 @@ import yaml
 
 from orchestrator._tenant_guard import assert_tenant_scoped, emit_pipeline_step
 from orchestrator.db import tenant_connection
+from orchestrator.knowledge import l2_query
+from orchestrator.knowledge.l2_types import L2EventType
 from orchestrator.templates_registry import approved_template_names
 from orchestrator.types.trigger_reason import TriggerReason
 
@@ -219,9 +222,60 @@ def _build_business_profile(tenant_id: UUID) -> tuple[BusinessProfile, bool]:
     return BusinessProfile(), False
 
 
+# Cap on L2 threshold events read per ledger build (clamped again by l2_query).
+_LEDGER_EVENT_CAP = 100
+
+
 def _build_ledger_summary(tenant_id: UUID) -> tuple[LedgerSummary, bool]:
-    """L2 episodic read — deferred to VT-7.1. Safe-empty until then."""
-    return LedgerSummary(), False
+    """L2 episodic read (VT-67) — derives the customer ledger summary LIVE from
+    L2 threshold events (``customer_high_value_threshold_crossed`` /
+    ``customer_dormant_threshold_crossed``), the agent's "what happened" log.
+
+    No longer CL-190 safe-empty: this reads the real ``episodic_events``
+    substrate via ``l2_query`` (tenant-scoped + assert_tenant_scoped inside).
+    Completeness flag is ``True`` whenever the read runs — the data is real L2
+    (no placeholder field, unlike recent_campaigns' recovered_paise). It is
+    legitimately empty until VT-309 wires the threshold emit sites on the live
+    path; an empty-but-live ledger is the honest current state.
+
+    - ``top_spenders``: distinct customers from recent high-value events (newest first).
+    - ``dormant_cohorts``: cohort -> count from recent dormancy events.
+    - ``total_customers``: distinct customers L2 has seen cross either threshold.
+    """
+    high_value = l2_query.recent_events(
+        tenant_id,
+        limit=_LEDGER_EVENT_CAP,
+        event_types=[L2EventType.CUSTOMER_HIGH_VALUE_THRESHOLD_CROSSED],
+    )
+    dormant = l2_query.recent_events(
+        tenant_id,
+        limit=_LEDGER_EVENT_CAP,
+        event_types=[L2EventType.CUSTOMER_DORMANT_THRESHOLD_CROSSED],
+    )
+
+    top_spenders: list[UUID] = []
+    seen: set[UUID] = set()
+    for ev in high_value:
+        cid = ev.referenced_entity_id
+        if cid is not None and cid not in seen:
+            seen.add(cid)
+            top_spenders.append(cid)
+
+    dormant_cohorts: dict[str, int] = {}
+    dormant_customers: set[UUID] = set()
+    for ev in dormant:
+        cohort = str(ev.payload.get("cohort") or "unknown")
+        dormant_cohorts[cohort] = dormant_cohorts.get(cohort, 0) + 1
+        if ev.referenced_entity_id is not None:
+            dormant_customers.add(ev.referenced_entity_id)
+
+    total_customers = len(seen | dormant_customers)
+    summary = LedgerSummary(
+        total_customers=total_customers,
+        dormant_cohorts=dormant_cohorts,
+        top_spenders=top_spenders,
+    )
+    return summary, True
 
 
 def _build_recent_campaigns(tenant_id: UUID) -> tuple[list[CampaignSnapshot], bool]:

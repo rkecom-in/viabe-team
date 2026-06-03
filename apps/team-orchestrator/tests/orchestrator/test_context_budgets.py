@@ -23,6 +23,7 @@ from orchestrator.context_builder import (
     BusinessProfile,
     CampaignSnapshot,
     ContextOverflowError,
+    LedgerSummary,
     OwnerInput,
     _estimate_tokens,
     build_sales_recovery_context,
@@ -32,16 +33,17 @@ from orchestrator.context_builder import (
 @pytest.fixture(autouse=True)
 def _stub_db_backed_builders(monkeypatch: pytest.MonkeyPatch) -> None:
     """VT-138 (`_build_recent_campaigns`) + VT-146
-    (`_build_pending_owner_inputs`) are both live DB reads. Tests in
-    this file exercise the bundle constructor's truncation / budget
-    logic with synthetic monkeypatched data, no DB required. Force
-    both DB-backed builders to safe-empty unless the individual test
-    explicitly overrides them.
+    (`_build_pending_owner_inputs`) + VT-67 (`_build_ledger_summary`, L2) are
+    all live DB reads. Tests in this file exercise the bundle constructor's
+    truncation / budget logic with synthetic monkeypatched data, no DB
+    required. Force the DB-backed builders to safe-empty unless the individual
+    test explicitly overrides them.
     """
     monkeypatch.setattr(cb, "_build_recent_campaigns", lambda tid: ([], False))
     monkeypatch.setattr(
         cb, "_build_pending_owner_inputs", lambda tid: ([], False)
     )
+    monkeypatch.setattr(cb, "_build_ledger_summary", lambda tid: (LedgerSummary(), True))
 
 
 _EFFECTIVE_CAP = 6400
