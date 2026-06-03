@@ -27,6 +27,10 @@ from orchestrator.utils.twilio_send import send_freeform_message
 # phrase). Surfaced here so the prompt tells the owner exactly what to send.
 _ENABLE_PHRASE = "ACTIVATE TEAM"
 
+# TODO(VT-272): final consent copy — this is INTERIM draft wording to unblock the
+# gate. The consent-bearing language MUST be swapped to the VT-272/legal-validated
+# text before real-customer go-live (same posture as consent-text.md). Cowork
+# 20260603T144500Z.
 _CONSENT_PROMPT = (
     "Your AI team is ready, but it needs your go-ahead before it can read your "
     "business data and start working.\n\n"
