@@ -54,8 +54,9 @@ _BASE_SQL = """
         t.business_type,
         t.city_tier,
         c.id            AS campaign_id,
-        c.template_id,
-        c.proposed_at,
+        -- template_id lives in the campaign plan JSONB (no dedicated column).
+        (c.plan_json -> 'message_plan' ->> 'template_id') AS template_id,
+        c.generated_at,
         cust.last_inbound_at,
         (a.id IS NOT NULL) AS converted
     FROM campaigns c
@@ -64,7 +65,7 @@ _BASE_SQL = """
     JOIN customers cust         ON cust.id = cr.customer_id
     LEFT JOIN attributions a    ON a.campaign_id = c.id AND a.customer_id = cr.customer_id
     WHERE c.status = 'sent'
-      AND c.proposed_at >= %s
+      AND c.generated_at >= %s
       AND t.signed_up_at < %s
       AND t.business_type IS NOT NULL
       AND t.city_tier IS NOT NULL
@@ -116,10 +117,10 @@ def construct_l3_patterns(*, now: datetime | None = None, run_id: UUID | None = 
         cid = rd["campaign_id"] if isinstance(rd["campaign_id"], UUID) else UUID(str(rd["campaign_id"]))
         bt = rd["business_type"]
         tier = rd["city_tier"]
-        band = recency_band(_days_since(rd["last_inbound_at"], rd["proposed_at"]))
+        band = recency_band(_days_since(rd["last_inbound_at"], rd["generated_at"]))
         converted = bool(rd["converted"])
-        hour = rd["proposed_at"].astimezone(UTC).hour  # send-time proxy = proposed_at (no sent_at)
-        template = rd["template_id"]
+        hour = rd["generated_at"].astimezone(UTC).hour  # send-time proxy = generated_at (no sent_at)
+        template = rd["template_id"] or "(none)"
 
         # Each pattern type keys its cohort differently (per the VT-68 spec).
         for ptype, ckey in (

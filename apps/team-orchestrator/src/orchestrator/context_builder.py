@@ -88,6 +88,24 @@ class LedgerSummary:
     top_spenders: list[UUID] = field(default_factory=list)
 
 
+_L3_NO_PRIOR_NOTE = (
+    "no L3 prior available — reason from this tenant's own data without "
+    "cross-tenant priors"
+)
+
+
+@dataclass(frozen=True, slots=True)
+class L3Priors:
+    """VT-69 — cross-tenant L3 priors for the tenant's cohort, or the structured
+    no-prior marker. ``patterns`` are aggregates only (no PII, no tenant id).
+    ``available=False`` + ``note`` is the marker for quarantine / no-match — NEVER
+    fabricated defaults (Pillar 4)."""
+
+    available: bool = False
+    patterns: list[dict[str, Any]] = field(default_factory=list)
+    note: str = _L3_NO_PRIOR_NOTE
+
+
 @dataclass(frozen=True, slots=True)
 class CampaignSnapshot:
     campaign_id: UUID
@@ -143,6 +161,7 @@ _DEFAULT_SECTION_KEYS = (
     "recent_campaigns",
     "attribution_snapshot",
     "pending_owner_inputs",
+    "l3_priors",
 )
 
 
@@ -175,6 +194,7 @@ class SalesRecoveryContext:
         default_factory=AttributionSnapshot
     )
     pending_owner_inputs: list[OwnerInput] = field(default_factory=list)
+    l3_priors: L3Priors = field(default_factory=L3Priors)
     meta: ContextMeta = field(default_factory=_default_meta)
     # CL-190: True = real data; False = safe-empty fallback (substrate absent
     # or no rows for tenant). Keys are the five section names below.
@@ -276,6 +296,45 @@ def _build_ledger_summary(tenant_id: UUID) -> tuple[LedgerSummary, bool]:
         top_spenders=top_spenders,
     )
     return summary, True
+
+
+def _build_l3_priors(tenant_id: UUID, run_id: UUID) -> tuple[L3Priors, bool]:
+    """L3 cross-tenant prior read (VT-69). Looks up ``cohort_response_rate``
+    priors for the tenant's (business_type, city_tier) across recency bands.
+
+    The 180-day quarantine + the no-match case both yield the structured
+    no-prior marker (available=False + note) — NEVER fabricated defaults
+    (Pillar 4). Completeness flag = True only when a real prior was found.
+    """
+    from orchestrator.knowledge.l3_query import lookup_pattern
+    from orchestrator.knowledge.l3_types import PatternType, RECENCY_BANDS
+    from orchestrator.knowledge.l3_types import cohort_key as _cohort_key
+
+    with tenant_connection(tenant_id) as conn:
+        raw = conn.execute(
+            "SELECT business_type, city_tier FROM tenants WHERE id = %s",
+            (str(tenant_id),),
+        ).fetchone()
+    row = cast("dict[str, Any]", raw) if raw else {}
+    bt, tier = row.get("business_type"), row.get("city_tier")
+    if not bt or not tier:
+        return L3Priors(available=False, note=_L3_NO_PRIOR_NOTE), False
+
+    patterns: list[dict[str, Any]] = []
+    for band in RECENCY_BANDS:
+        p = lookup_pattern(
+            tenant_id, PatternType.COHORT_RESPONSE_RATE,
+            _cohort_key(bt, tier, band), run_id=run_id,
+        )
+        if p is not None:
+            patterns.append({
+                "pattern_type": p.pattern_type, "cohort_key": p.cohort_key,
+                "metrics": p.metrics, "confidence_band": p.confidence_band,
+                "n_tenants": p.n_tenants,
+            })
+    if not patterns:
+        return L3Priors(available=False, note=_L3_NO_PRIOR_NOTE), False
+    return L3Priors(available=True, patterns=patterns, note=""), True
 
 
 def _build_recent_campaigns(tenant_id: UUID) -> tuple[list[CampaignSnapshot], bool]:
@@ -444,6 +503,7 @@ def build_sales_recovery_context(
     recent_campaigns, rc_ok = _build_recent_campaigns(tenant_id)
     attribution_snapshot, as_ok = _build_attribution_snapshot(tenant_id)
     pending_owner_inputs, oi_ok = _build_pending_owner_inputs(tenant_id)
+    l3_priors, l3_ok = _build_l3_priors(tenant_id, run_id)
     recovery_target_multiplier, recovery_target_floor_paise = _build_recovery_target_config(tenant_id)
 
     data_completeness = {
@@ -452,6 +512,7 @@ def build_sales_recovery_context(
         "recent_campaigns": rc_ok,
         "attribution_snapshot": as_ok,
         "pending_owner_inputs": oi_ok,
+        "l3_priors": l3_ok,
     }
 
     def _total() -> int:
@@ -461,12 +522,18 @@ def build_sales_recovery_context(
             + _estimate_tokens(recent_campaigns)
             + _estimate_tokens(attribution_snapshot)
             + _estimate_tokens(pending_owner_inputs)
+            + _estimate_tokens(l3_priors)
         )
 
-    # Truncation order (§3.3): oldest owner inputs -> campaigns down to 3 ->
-    # top_spenders 20/10/5 -> drop business hours -> overflow.
+    # Truncation order (§3.3): L3 priors (cross-tenant background, most droppable)
+    # -> oldest owner inputs -> campaigns down to 3 -> top_spenders 20/10/5 ->
+    # drop business hours -> overflow.
     truncated: list[str] = []
     while _total() > effective_cap:
+        if l3_priors.patterns:
+            l3_priors = L3Priors(available=False, note=_L3_NO_PRIOR_NOTE)
+            truncated.append("l3_priors")
+            continue
         if pending_owner_inputs:
             pending_owner_inputs = pending_owner_inputs[1:]
             truncated.append("pending_owner_inputs")
@@ -514,6 +581,7 @@ def build_sales_recovery_context(
         recent_campaigns=recent_campaigns,
         attribution_snapshot=attribution_snapshot,
         pending_owner_inputs=pending_owner_inputs,
+        l3_priors=l3_priors,
         meta=meta,
         data_completeness=data_completeness,
         recovery_target_multiplier=recovery_target_multiplier,
@@ -653,6 +721,23 @@ def serialize_bundle_for_prompt(
             f"- substrate_populated: "
             f"{context.data_completeness.get('pending_owner_inputs', False)}"
         )
+
+    l3 = context.l3_priors
+    parts.append("\n## L3 cross-tenant priors (anonymized, k>=10)")
+    if l3.available and l3.patterns:
+        prior_lines = "\n".join(
+            f"  - {p['cohort_key']}: response_rate="
+            f"{p.get('metrics', {}).get('response_rate', '?')} "
+            f"(n_tenants={p['n_tenants']}, confidence={p['confidence_band']})"
+            for p in l3.patterns
+        )
+        parts.append(
+            f"- priors:\n{prior_lines}\n"
+            "- These are anonymized cross-tenant aggregates — directional priors, "
+            "not this tenant's data. Weigh them against this tenant's own signals."
+        )
+    else:
+        parts.append(f"- {l3.note}")
 
     parts.append("\n## Available WhatsApp templates (orchestrator-approved)")
     parts.append(

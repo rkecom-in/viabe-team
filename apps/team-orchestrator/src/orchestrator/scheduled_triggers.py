@@ -65,6 +65,7 @@ WEEKLY_CADENCE_CRON = "0 9 * * MON"
 ATTRIBUTION_CLOSE_CRON = "0 2 * * *"
 DAY39_EVALUATION_CRON = "0 6 * * *"
 MONTHLY_IMPACT_CRON = "0 8 1 * *"
+L3_CONSTRUCTION_CRON = "0 3 * * *"  # VT-68 — nightly 3 AM IST L3 rebuild
 
 
 SHELL_STATUS = "skipped_schema_pending"
@@ -243,6 +244,21 @@ def day39_evaluation_scheduled(
 ) -> None:
     """DBOS scheduled handler — fires daily 6 AM IST. Pure SQL (no LLM)."""
     run_day39_evaluation_body(now=actual_time)
+
+
+def l3_construction_scheduled(
+    scheduled_time: datetime,
+    actual_time: datetime,
+) -> None:
+    """DBOS scheduled handler — fires daily 3 AM IST (VT-68). Rebuilds all L3
+    cross-tenant patterns (idempotent full rebuild). Pure SQL aggregation (no LLM).
+    Best-effort: a construction failure must not crash the scheduler."""
+    from orchestrator.knowledge.l3_construction import construct_l3_patterns
+
+    try:
+        construct_l3_patterns(now=actual_time)
+    except Exception:  # noqa: BLE001 — nightly rebuild is best-effort; next run retries
+        logger.exception("VT-68 L3 construction scheduled run failed")
 
 
 def run_day39_evaluation_body(now: datetime | None = None) -> list[Any]:
@@ -652,6 +668,7 @@ def register_scheduled_triggers() -> None:
     DBOS.scheduled(DAY39_EVALUATION_CRON)(day39_evaluation_scheduled)
     DBOS.scheduled(MONTHLY_IMPACT_CRON)(monthly_impact_scheduled)
     DBOS.scheduled(APPROVAL_TIMEOUT_SWEEP_CRON)(approval_timeout_sweep_scheduled)
+    DBOS.scheduled(L3_CONSTRUCTION_CRON)(l3_construction_scheduled)
     _registered = True
 
 
@@ -664,6 +681,7 @@ __all__ = [
     "DAY39_CONTINUE_EVENT",
     "DAY39_EVALUATION_CRON",
     "DAY39_REFUND_TRIGGERED_EVENT",
+    "L3_CONSTRUCTION_CRON",
     "DAY39_SHELL_EVENT",
     "MONTHLY_IMPACT_CRON",
     "MONTHLY_IMPACT_SHELL_EVENT",
