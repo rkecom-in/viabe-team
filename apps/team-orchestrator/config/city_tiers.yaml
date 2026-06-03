@@ -1,0 +1,91 @@
+# VT-75 — locality coarsening tier map (city → city_tier).
+#
+# Only the COARSE tier is ever stored/used (Pillar 6/7; the k-anon predicate
+# allowlist forbids raw city/locality). tier_1 = the 8 metros (Type-3 LOCKED —
+# board approval to change). tier_2 = census-top ~50 (Type-1 — PR-reviewable;
+# Fazal signs off the list). Everything else falls through to tier_3 (the most
+# conservative bucket). Names are normalized lower/trimmed; variants below map
+# to the canonical name BEFORE tier lookup.
+
+tier_1:
+  - mumbai
+  - delhi
+  - bangalore
+  - chennai
+  - kolkata
+  - hyderabad
+  - pune
+  - ahmedabad
+
+# ~50 next-largest cities (2025 census order, approximate). Type-1: extend via PR.
+tier_2:
+  - jaipur
+  - surat
+  - lucknow
+  - kanpur
+  - nagpur
+  - indore
+  - thane
+  - bhopal
+  - visakhapatnam
+  - patna
+  - vadodara
+  - ghaziabad
+  - ludhiana
+  - agra
+  - nashik
+  - faridabad
+  - meerut
+  - rajkot
+  - varanasi
+  - srinagar
+  - aurangabad
+  - dhanbad
+  - amritsar
+  - allahabad
+  - ranchi
+  - howrah
+  - coimbatore
+  - jabalpur
+  - gwalior
+  - vijayawada
+  - jodhpur
+  - madurai
+  - raipur
+  - kota
+  - guwahati
+  - chandigarh
+  - solapur
+  - hubli
+  - mysore
+  - tiruchirappalli
+  - bareilly
+  - aligarh
+  - moradabad
+  - gurgaon
+  - noida
+  - jalandhar
+  - bhubaneswar
+  - salem
+  - warangal
+  - guntur
+
+# Variant / former-name → canonical (applied before tier lookup).
+variants:
+  bengaluru: bangalore
+  bombay: mumbai
+  calcutta: kolkata
+  madras: chennai
+  gurugram: gurgaon
+  vizag: visakhapatnam
+  prayagraj: allahabad
+  mysuru: mysore
+  trichy: tiruchirappalli
+  pondicherry: puducherry
+
+# Same-name disambiguation: a city that exists outside India resolves to tier_3
+# UNLESS an in-region state is given. (e.g. Hyderabad: Telangana = tier_1;
+# Sindh [Pakistan] = tier_3.) No state given → assume the Indian city.
+disambiguation:
+  hyderabad:
+    allowed_states: [telangana, andhra pradesh]
