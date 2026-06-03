@@ -270,9 +270,16 @@ def build_integration_agent(
     is the supervisor graph's ``spawn_integration`` node (VT-27
     pattern; see ``handoffs.py``).
     """
+    tools = [*INTEGRATION_AGENT_TOOLS, *extra_tools]
+    # VT-268: fail-CLOSED guardrail — the integration agent must never hold a Sheets-write /
+    # ledger-write / direct-send tool (raises at build if it does). The accounts book (owner's
+    # Google Sheet) is read-only; ingestion writes go through the non-agent service path.
+    from orchestrator.agent.tool_guardrail import assert_agent_tools_safe
+
+    assert_agent_tools_safe(tools, surface="integration_agent")
     return create_agent(
         model=model,
-        tools=[*INTEGRATION_AGENT_TOOLS, *extra_tools],
+        tools=tools,
         system_prompt=INTEGRATION_AGENT_SYSTEM_MESSAGE,
         name="integration_agent",
         state_schema=IntegrationAgentState,

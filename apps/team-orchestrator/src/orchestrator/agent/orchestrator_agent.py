@@ -245,9 +245,15 @@ def build_orchestrator_agent(
     for hard-limit enforcement + ``OrchestratorReasoningCallback`` for
     observability. The agent itself is a plain runnable.
     """
+    tools = [*ORCHESTRATOR_AGENT_TOOLS, *extra_tools]
+    # VT-268: fail-CLOSED guardrail — the agent must never hold a direct
+    # send-to-customer / accounts-book-write / ledger-write tool (raises at build if it does).
+    from orchestrator.agent.tool_guardrail import assert_agent_tools_safe
+
+    assert_agent_tools_safe(tools, surface="orchestrator_agent")
     return create_agent(
         model=model,
-        tools=[*ORCHESTRATOR_AGENT_TOOLS, *extra_tools],
+        tools=tools,
         system_prompt=ORCHESTRATOR_AGENT_SYSTEM_MESSAGE,
         name="orchestrator_agent",
         state_schema=OrchestratorAgentState,

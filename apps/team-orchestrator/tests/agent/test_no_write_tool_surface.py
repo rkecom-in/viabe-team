@@ -1,0 +1,165 @@
+"""VT-268 — agent tool-surface guardrail tests (prove-and-lock the owner boundary).
+
+Locks the two owner guardrails at the agent's capability boundary:
+  - "never update the accounts book" → the agent holds NO Sheets-write / ledger-write tool.
+  - "no discount without my confirmation" → the agent holds NO direct customer-send tool;
+    every send is forced through the campaign approval gate (collapse → request_owner_approval,
+    Pillar-7). The agent cannot send 1:1 at all, so it cannot send an un-gated concession.
+
+Two layers:
+  1. ALLOWLIST pin — the exact agent tool surface. ANY new tool fails this test → forces review
+     (catches a future PR that wires a send/write tool, even cleverly named).
+  2. FAIL-CLOSED guard — `assert_agent_tools_safe` (wired at graph build) raises on a
+     forbidden-capability tool. Proven to trip on synthetic send/sheets/ledger tools and to pass
+     on the real surfaces; and `build_orchestrator_agent` raises if handed one.
+
+Ground truth (2026-06-03): send_whatsapp_message has no production caller + is not an agent tool;
+send_whatsapp_template is called only by execute_approved_campaign (already approval-gated). This
+test LOCKS that safe state.
+"""
+
+from __future__ import annotations
+
+from types import SimpleNamespace
+
+import pytest
+
+pytest.importorskip("langchain")
+
+
+def _names(tools):
+    return {getattr(t, "name", type(t).__name__) for t in tools}
+
+
+# --- allowlist pins --------------------------------------------------------
+
+ORCHESTRATOR_EXPECTED = {
+    "escalate_to_fazal",
+    "compose_owner_output_tool",
+    "write_l0_fragment",
+    "query_l0",
+}
+INTEGRATION_EXPECTED = {
+    "list_connectors_tool",
+    "start_connector_setup_stub",
+    "pull_sample_stub",
+    "propose_field_mapping_stub",
+    "confirm_field_mapping_stub",
+    "setup_recurring_ingestion_stub",
+    "dedupe_against_existing_stub",
+    "integration_escalate_to_fazal",
+}
+HANDOFF_EXPECTED = {"spawn_sales_recovery", "spawn_integration"}
+
+
+def test_orchestrator_tool_allowlist_pinned():
+    from orchestrator.agent.orchestrator_agent import ORCHESTRATOR_AGENT_TOOLS
+
+    # Exact match: a NEW tool (additions OR removals) fails → forces VT-268 review that the
+    # new capability is not a send/write boundary breach.
+    assert _names(ORCHESTRATOR_AGENT_TOOLS) == ORCHESTRATOR_EXPECTED
+
+
+def test_integration_tool_allowlist_pinned():
+    from orchestrator.agent.integration_agent import INTEGRATION_AGENT_TOOLS
+
+    assert _names(INTEGRATION_AGENT_TOOLS) == INTEGRATION_EXPECTED
+
+
+def test_handoff_tools_pinned():
+    from orchestrator.handoffs import spawn_integration, spawn_sales_recovery
+
+    assert _names([spawn_sales_recovery, spawn_integration]) == HANDOFF_EXPECTED
+
+
+def test_dangerous_standalone_functions_are_not_agent_tools():
+    """The 1:1 send tools + the ledger writer must NOT appear on any agent surface."""
+    from orchestrator.agent.integration_agent import INTEGRATION_AGENT_TOOLS
+    from orchestrator.agent.orchestrator_agent import ORCHESTRATOR_AGENT_TOOLS
+    from orchestrator.handoffs import spawn_integration, spawn_sales_recovery
+
+    all_names = _names(
+        [*ORCHESTRATOR_AGENT_TOOLS, *INTEGRATION_AGENT_TOOLS, spawn_sales_recovery, spawn_integration]
+    )
+    for forbidden in ("send_whatsapp_message", "send_whatsapp_template", "record_ledger_entries"):
+        assert forbidden not in all_names
+
+
+# --- fail-closed guard -----------------------------------------------------
+
+def test_guard_passes_real_surfaces():
+    from orchestrator.agent.integration_agent import INTEGRATION_AGENT_TOOLS
+    from orchestrator.agent.orchestrator_agent import ORCHESTRATOR_AGENT_TOOLS
+    from orchestrator.agent.tool_guardrail import assert_agent_tools_safe
+    from orchestrator.handoffs import spawn_integration, spawn_sales_recovery
+
+    # No raise.
+    assert_agent_tools_safe(
+        [*ORCHESTRATOR_AGENT_TOOLS, spawn_sales_recovery, spawn_integration],
+        surface="orchestrator_agent",
+    )
+    assert_agent_tools_safe(INTEGRATION_AGENT_TOOLS, surface="integration_agent")
+
+
+@pytest.mark.parametrize(
+    "bad_name",
+    [
+        "send_whatsapp_message",
+        "send_whatsapp_template",
+        "send_template_message",
+        "append_to_sheet",
+        "sheet_update",
+        "values_append",
+        "write_accounts_book",
+        "record_ledger_entries",
+        "write_ledger_entry",
+    ],
+)
+def test_guard_trips_on_forbidden_capability(bad_name):
+    from orchestrator.agent.tool_guardrail import (
+        ToolGuardrailViolation,
+        assert_agent_tools_safe,
+    )
+
+    bad = SimpleNamespace(name=bad_name)
+    with pytest.raises(ToolGuardrailViolation):
+        assert_agent_tools_safe([bad], surface="test")
+
+
+def test_guard_does_not_false_flag_benign_write_tools():
+    """write_l0_fragment / compose_owner_output_tool must NOT trip (specific patterns, not bare 'write')."""
+    from orchestrator.agent.tool_guardrail import find_forbidden_tools
+
+    benign = [
+        SimpleNamespace(name="write_l0_fragment"),
+        SimpleNamespace(name="compose_owner_output_tool"),
+        SimpleNamespace(name="query_l0"),
+        SimpleNamespace(name="setup_recurring_ingestion_stub"),
+    ]
+    assert find_forbidden_tools(benign) == []
+
+
+def test_build_orchestrator_agent_rejects_send_tool():
+    """Runtime fail-closed: handing the builder a send tool raises at build, not silently wires it."""
+    from langchain_core.tools import tool
+
+    from orchestrator.agent.orchestrator_agent import _MODEL, build_orchestrator_agent
+    from orchestrator.agent.tool_guardrail import ToolGuardrailViolation
+
+    @tool
+    def send_whatsapp_message_evil(customer_id: str) -> str:
+        """A would-be direct customer-send tool that must never reach the agent."""
+        return customer_id
+
+    with pytest.raises(ToolGuardrailViolation):
+        build_orchestrator_agent(_MODEL, extra_tools=[send_whatsapp_message_evil])
+
+
+def test_mcptool_registry_has_no_forbidden_tool():
+    """The @register MCPTool registry must expose no send/write tool (empty on main)."""
+    from orchestrator.agent.tool_guardrail import FORBIDDEN_CAPABILITY_SUBSTRINGS
+    from orchestrator.agent.tool_registry import _REGISTRY
+
+    for name in _REGISTRY:
+        low = name.lower()
+        assert not any(sub in low for sub in FORBIDDEN_CAPABILITY_SUBSTRINGS), name
