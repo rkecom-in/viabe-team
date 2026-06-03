@@ -1,7 +1,7 @@
 ---
 vt_id: VT-7
 title: VT-KnowledgeArchitecture — 4-layer KG/episodic/Layer-3/skill corpus
-status: Backlog
+status: Done
 priority: Critical
 sprint: Sprint 7 - Knowledge Architecture
 type: Feature
@@ -13,10 +13,23 @@ exec_order: 1
 branch: "feat/vt-knowledge"
 version: "v1.0"
 notion_legacy_id: 356387c2-cc5a-8108-8540-efd4a78e9188
-last_updated: 2026-05-25T03:45:00+05:30
+last_updated: 2026-06-04T06:10:00Z
 ---
 
 # VT-7 — VT-KnowledgeArchitecture — 4-layer KG/episodic/Layer-3/skill corpus
+
+## PHASE-1 BUILD COMPLETE 2026-06-04 — VT-7 → Done
+The 4-layer knowledge architecture is built + verified on main: **L1** entities/relationships (voyage
+vector(1024)+HNSW, hash-phone), **L2** episodic_events + kg_events dual-projection (VT-66/67/309), **L3**
+cross-tenant priors (n_tenants≥10 CHECK, VT-68/69), **L4** skills corpus (voyage-4-lite, VT-70), single
+**composition** (Pillar-8 build_sales_recovery_context, VT-71) — each canaried on the live composition path;
+adversarially verified sound. Owner_inputs (VT-146/155/159) + reconciliation rows Done.
+
+**Residual children — NOT Phase-1-build, tracked separately (none is an open CC code row):**
+- **VT-312** (Blocked) — detector thresholds → Fazal-gated (gate-live; reconstitution coverage grows with it).
+- **VT-311** (Backlog) — L2 18-month retention + 100K-event perf → Phase-2.
+- **VT-316** (Backlog) — pre-push hook fail-loud → rostered follow-up (CI-hygiene).
+Plus the Fazal-gated corpus/key launch-prereqs (VT-313 L4 corpus, VT-314 voyage billing) tracked in the launch checklist.
 
 ## Why this parent exists
 The agent reasons; tools execute; what does it reason over? The 4-layer knowledge architecture is the answer. L1 is per-subscriber business facts (a structured graph in Apache AGE). L2 is per-subscriber episodic memory of every campaign and message. L3 is the cross-subscriber learning layer — patterns built from many subscribers' outcomes, but only over groups of 10+ to satisfy k-anonymity (Pillar 6). L4 is hand-authored skill corpus on Sales Recovery domain knowledge.
