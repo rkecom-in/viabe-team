@@ -46,6 +46,10 @@ def _stub_db_backed_campaigns_builder(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         _cb_mod, "_build_ledger_summary", lambda tid: (_cb_mod.LedgerSummary(), True)
     )
+    # VT-69: _build_l3_priors is a live L3 read too — stub no-prior.
+    monkeypatch.setattr(
+        _cb_mod, "_build_l3_priors", lambda tid, rid: (_cb_mod.L3Priors(), False)
+    )
 
 
 def _fake_response(

@@ -185,4 +185,43 @@ def check_admission(
     )
 
 
-__all__ = ["AdmissionResult", "CohortPredicate", "K_MIN_FLOOR", "check_admission"]
+def check_contributor_admission(
+    tenant_ids: list[UUID] | set[UUID],
+    cohort_key: str,
+    k_min: int = 10,
+    *,
+    run_id: UUID | None = None,
+) -> AdmissionResult:
+    """VT-68 — k-anon over the set of tenants that ACTUALLY CONTRIBUTED to a
+    cohort (Cowork ruling 20260604T004000Z, Call 1 = a).
+
+    Distinct from :func:`check_admission`, which counts tenants by ATTRIBUTE.
+    L3 construction must NOT gate on the attribute set — a cohort with 50
+    attribute-matchers but only 9 contributors must be REJECTED, else k-anon is
+    weakened. The CALLER computes the contributing-tenant set (tenants with a
+    matching campaign in-window); this enforces the locked k≥10 floor (CL-28)
+    over THAT set + audits the decision.
+
+    Returns ``eligible_tenant_ids`` = the (deduped) contributor set when admitted,
+    for the caller's aggregation. NEVER logs the ids (CL-390).
+    """
+    assert k_min >= K_MIN_FLOOR, (  # CL-28 — never below 10
+        f"k_anonymity: k_min={k_min} below the locked floor {K_MIN_FLOOR} (CL-28)"
+    )
+    contributors = list({t if isinstance(t, UUID) else UUID(str(t)) for t in tenant_ids})
+    tenant_count = len(contributors)
+    admitted = tenant_count >= k_min
+    cohort_hash = hashlib.sha256(cohort_key.encode()).hexdigest()[:16]
+    _audit(run_id or uuid4(), cohort_hash, k_min, tenant_count, admitted)
+    return AdmissionResult(
+        admitted=admitted,
+        tenant_count=tenant_count,
+        reason="admitted" if admitted else "below_k_min",
+        eligible_tenant_ids=contributors if admitted else [],
+    )
+
+
+__all__ = [
+    "AdmissionResult", "CohortPredicate", "K_MIN_FLOOR",
+    "check_admission", "check_contributor_admission",
+]
