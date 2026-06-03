@@ -519,6 +519,12 @@ def _run_supervisor_path(
         "_build_pending_owner_inputs",
         lambda tid: ([], False),
     )
+    # VT-67: _build_ledger_summary is now a live L2 read too — stub empty-but-live.
+    monkeypatch.setattr(
+        context_builder_mod,
+        "_build_ledger_summary",
+        lambda tid: (context_builder_mod.LedgerSummary(), True),
+    )
 
     route_keys: list[str] = []
     real_route = routing.route_after_orchestrator
@@ -687,6 +693,12 @@ def test_sales_recovery_node_passes_bundle_to_agent(
         "_build_pending_owner_inputs",
         lambda tid: ([], False),
     )
+    # VT-67: _build_ledger_summary is now a live L2 read too — stub empty-but-live.
+    monkeypatch.setattr(
+        context_builder_mod,
+        "_build_ledger_summary",
+        lambda tid: (context_builder_mod.LedgerSummary(), True),
+    )
 
     received: dict[str, Any] = {}
 
@@ -773,6 +785,12 @@ def test_spawn_sales_recovery_attaches_bundle_with_user_request(
         context_builder_mod,
         "_build_pending_owner_inputs",
         lambda tid: ([], False),
+    )
+    # VT-67: _build_ledger_summary is now a live L2 read too — stub empty-but-live.
+    monkeypatch.setattr(
+        context_builder_mod,
+        "_build_ledger_summary",
+        lambda tid: (context_builder_mod.LedgerSummary(), True),
     )
 
     tenant_id = uuid4()

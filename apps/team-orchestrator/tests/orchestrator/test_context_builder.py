@@ -33,21 +33,22 @@ from orchestrator.context_builder import (
 
 @pytest.fixture(autouse=True)
 def _stub_db_backed_builders(monkeypatch: pytest.MonkeyPatch) -> None:
-    """``_build_recent_campaigns`` (VT-138) and
-    ``_build_pending_owner_inputs`` (VT-146) are both live DB reads
+    """``_build_recent_campaigns`` (VT-138), ``_build_pending_owner_inputs``
+    (VT-146) and ``_build_ledger_summary`` (VT-67, L2) are all live DB reads
     via ``tenant_connection``. The pure-Python tests in this file
     exercise the bundle constructor's dispatcher + safe-empty contract;
-    they must not require a DB. Monkeypatch both DB-backed builders
-    back to safe-empty for every test here.
+    they must not require a DB. Monkeypatch the DB-backed builders
+    back to safe-empty for every test here. ``_build_ledger_summary`` returns
+    flag ``True`` (empty-but-live) to mirror the real L2 read on a fresh tenant.
 
     The DB read paths themselves are covered by the substrate-fixture
-    suites in ``test_context_builder_campaigns_readpath.py`` and
-    ``test_context_builder_owner_inputs_readpath.py``.
+    suites (campaigns/owner_inputs readpath + ``knowledge/test_l2_episodic.py``).
     """
     monkeypatch.setattr(cb, "_build_recent_campaigns", lambda tid: ([], False))
     monkeypatch.setattr(
         cb, "_build_pending_owner_inputs", lambda tid: ([], False)
     )
+    monkeypatch.setattr(cb, "_build_ledger_summary", lambda tid: (LedgerSummary(), True))
 
 # §4.1 — the actual SalesRecoveryContext dataclass fields.
 # Exec-6.85: ``user_request`` joins the bundle so the specialist receives
@@ -82,21 +83,25 @@ def test_build_sales_recovery_context_returns_expected_top_level_fields() -> Non
 
 
 def test_build_sales_recovery_context_safe_empty_when_substrates_absent() -> None:
-    """§4.2 — with L1 KG + L2 episodic + campaigns/owner_inputs tables absent
-    (CL-190), every section is its safe-empty fallback and data_completeness
-    reports every section incomplete."""
+    """§4.2 — for a fresh tenant with no data, every section is its empty form.
+
+    business_profile (L1) + attribution_snapshot remain CL-190 safe-empty +
+    incomplete (substrates absent). customer_ledger_summary (L2, VT-67) now reads
+    the LIVE episodic_events substrate (mig 083): empty for a fresh tenant, but
+    the completeness flag is TRUE because the read ran (no placeholder field).
+    """
     bundle = build_sales_recovery_context(
         uuid4(), uuid4(), "weekly_cadence", "recover dormant customers"
     )
 
     assert bundle.business_profile == BusinessProfile()
-    assert bundle.customer_ledger_summary == LedgerSummary()
+    assert bundle.customer_ledger_summary == LedgerSummary()  # empty: no L2 events yet
     assert bundle.recent_campaigns == []
     assert bundle.pending_owner_inputs == []
     assert bundle.attribution_snapshot == AttributionSnapshot()
     assert bundle.data_completeness == {
         "business_profile": False,
-        "customer_ledger_summary": False,
+        "customer_ledger_summary": True,  # VT-67: L2 read ran (empty-but-live)
         "recent_campaigns": False,
         "attribution_snapshot": False,
         "pending_owner_inputs": False,

@@ -42,6 +42,10 @@ def _stub_db_backed_campaigns_builder(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         _cb_mod, "_build_pending_owner_inputs", lambda tid: ([], False)
     )
+    # VT-67: _build_ledger_summary is now a live L2 read too — stub empty-but-live.
+    monkeypatch.setattr(
+        _cb_mod, "_build_ledger_summary", lambda tid: (_cb_mod.LedgerSummary(), True)
+    )
 
 
 def _fake_response(

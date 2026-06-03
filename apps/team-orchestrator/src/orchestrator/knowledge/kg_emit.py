@@ -23,8 +23,68 @@ from psycopg.types.json import Jsonb
 
 from orchestrator.db import tenant_connection
 from orchestrator.knowledge.kg_population import KgEvent, process_kg_event
+from orchestrator.knowledge.kg_vocab import KgEventType
+from orchestrator.knowledge.l2_types import L2EventType
+from orchestrator.knowledge.l2_writer import record_episodic_event
 
 logger = logging.getLogger(__name__)
+
+# VT-66/67 — dual-projection map: which kg_events outbox types ALSO project to L2
+# episodic_events, and how. Only the OVERLAPPING types are here (campaign_sent,
+# attribution_created); the ~10 agent-decision L2 types get their own emit sites
+# in VT-309 (the cross-cutting live-path pass, plan-reviewed separately). Each
+# entry maps kg_event_type -> (l2_event_type, referenced_entity_type, payload_fn).
+# payload_fn returns the PII-free L2 payload (ids/counts/amounts only — CL-390).
+_L2_PROJECTION: dict[str, tuple[str, str, Any]] = {
+    KgEventType.CAMPAIGN_SENT: (
+        L2EventType.CAMPAIGN_SENT,
+        "campaign",
+        lambda p: {
+            "campaign_id": p.get("campaign_id"),
+            "recipient_count": len(p.get("customer_ids") or []),
+        },
+    ),
+    KgEventType.ATTRIBUTION_CREATED: (
+        L2EventType.ATTRIBUTION_CLOSED,
+        "campaign",
+        lambda p: {
+            "campaign_id": p.get("campaign_id"),
+            "arrr_paise": p.get("arrr_paise"),
+        },
+    ),
+}
+
+
+def _project_l2(tenant_id: UUID, event_id: UUID, kg_event_type: str, payload: dict[str, Any]) -> bool:
+    """Project an overlapping outbox event to L2 episodic_events (idempotent on
+    (tenant_id, event_id)). Returns True if there is nothing to project OR the
+    episodic row was written/already-present; False on a real write failure (so
+    the drain leaves the event undrained → re-drain retries → exactly-once).
+
+    Non-overlapping kg event types (tenant/customer/transaction/campaign_created)
+    have no L2 projection yet → True (nothing to do; the L1 projection covers them).
+    """
+    spec = _L2_PROJECTION.get(kg_event_type)
+    if spec is None:
+        return True
+    l2_type, ref_type, payload_fn = spec
+    try:
+        l2_payload = payload_fn(payload)
+        record_episodic_event(
+            tenant_id,
+            l2_type,
+            payload=l2_payload,
+            referenced_entity_type=ref_type,
+            referenced_entity_id=l2_payload.get("campaign_id"),
+            event_id=event_id,
+        )
+        return True
+    except Exception:  # noqa: BLE001 — drain is best-effort; leave undrained for re-drain
+        logger.exception(
+            "VT-66 L2 projection failed (tenant=%s event=%s type=%s)",
+            tenant_id, event_id, kg_event_type,
+        )
+        return False
 
 
 def emit_kg_event(
@@ -68,16 +128,22 @@ def drain_kg_events(tenant_id: UUID | str, *, limit: int = 500) -> dict[str, int
             ).fetchall()
         for r in rows:
             rd = dict(r)
-            result = process_kg_event(
-                KgEvent(
-                    UUID(str(rd["event_id"])), rd["event_type"], tid, rd.get("payload") or {}
-                )
-            )
-            if result in ("processed", "skipped"):
+            eid = UUID(str(rd["event_id"]))
+            payload = rd.get("payload") or {}
+            # Projection 1 — L1 entities/edges (idempotent via external_key + ledger).
+            result = process_kg_event(KgEvent(eid, rd["event_type"], tid, payload))
+            # Projection 2 — L2 episodic (overlapping event types only; idempotent
+            # via episodic_events UNIQUE(tenant_id, event_id)). VT-309 adds the
+            # agent-decision event types + their emit sites.
+            l2_ok = _project_l2(tid, eid, rd["event_type"], payload)
+            # Mark drained ONLY after BOTH projections succeed — a crash between
+            # them leaves it undrained → re-drain re-runs both (each idempotent)
+            # → exactly-once in L1 AND L2 (Cowork req-1).
+            if result in ("processed", "skipped") and l2_ok:
                 with tenant_connection(tid) as conn:
                     conn.execute(
                         "UPDATE kg_events SET drained_at = now() WHERE event_id = %s",
-                        (str(rd["event_id"]),),
+                        (str(eid),),
                     )
                 drained += 1
             else:
