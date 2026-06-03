@@ -1,7 +1,7 @@
 ---
 vt_id: VT-6
 title: VT-IntegrationInvention — 9 ingestion methods + vision-LLM + clarifying flow
-status: Backlog
+status: Done
 priority: Critical
 sprint: Sprint 3 - Ingestion Methods 1-2
 type: Feature
