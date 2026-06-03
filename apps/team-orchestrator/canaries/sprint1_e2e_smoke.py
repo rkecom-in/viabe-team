@@ -194,8 +194,11 @@ def run_canary() -> int:
     INSERTED_TENANT_IDS.append(str(tenant_id))
     with pool.connection() as conn, conn.cursor() as cur:
         cur.execute(
-            "INSERT INTO tenants (id, business_name, plan_tier, phase, whatsapp_number) "
-            "VALUES (%s, %s, 'standard', 'paid_active', %s) "
+            # owner_inputs=true: granted data-inputs basis so the substantive
+            # message reaches the brain (VT-303 consent gate).
+            "INSERT INTO tenants "
+            "(id, business_name, plan_tier, phase, whatsapp_number, owner_inputs) "
+            "VALUES (%s, %s, 'standard', 'paid_active', %s, true) "
             "ON CONFLICT (id) DO NOTHING",
             (str(tenant_id), "E2E Smoke RKeCom", tenant_phone),
         )

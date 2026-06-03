@@ -37,6 +37,13 @@ def _load_keywords(filename: str) -> list[str]:
 # Opt-out: exact match (case-insensitive) on the whole trimmed message body.
 _OPT_OUT_KEYWORDS = {kw.casefold() for kw in _load_keywords("opt_out_keywords.yaml")}
 
+# VT-303 — data-inputs ENABLE (opt-in / consent-grant): exact match (case-
+# insensitive) on the whole trimmed body, the inverse of opt-out. Routes to
+# data_inputs_enable_handler which sets tenants.owner_inputs = true.
+_ENABLE_KEYWORDS = {
+    kw.casefold() for kw in _load_keywords("data_inputs_enable_keywords.yaml")
+}
+
 # DSR: case-insensitive, word-boundary match anywhere in the body. Word
 # boundaries keep matching conservative (e.g. "my data" does not fire on
 # "my database").
@@ -112,6 +119,15 @@ def pre_filter(event: WebhookEvent, state: SubscriberState) -> PreFilterResult:
     if normalized in _OPT_OUT_KEYWORDS:
         return RouteToDirectHandler(
             handler_name="opt_out_handler", payload={"matched": normalized}
+        )
+
+    # Rule a2 — VT-303 data-inputs ENABLE keyword (exact, case-insensitive).
+    # The consent-grant phrase. Routed here (a direct handler, no LLM) so an
+    # owner whose owner_inputs is still FALSE can turn it on — the gate on the
+    # brain transmit lives in runner.webhook_pipeline_run.
+    if normalized in _ENABLE_KEYWORDS:
+        return RouteToDirectHandler(
+            handler_name="data_inputs_enable_handler", payload={"matched": normalized}
         )
 
     # Rule b — DSR keyword (case-insensitive word-boundary, EN + HI).

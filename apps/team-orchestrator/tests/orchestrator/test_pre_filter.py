@@ -118,6 +118,92 @@ def test_opt_out_keyword_hi_routes_and_sets_flag(gate):
     assert row == (True,)
 
 
+# --- VT-303 data-inputs ENABLE (opt-in) + brain consent gate -----------------
+
+
+def test_enable_keyword_routes_to_enable_handler(gate):
+    sub = _state(gate, _new_tenant(gate.dsn))
+    result = gate.pre_filter(_inbound(gate, "ACTIVATE TEAM"), sub)
+    assert isinstance(result, gate.t.RouteToDirectHandler)
+    assert result.handler_name == "data_inputs_enable_handler"
+
+
+def test_enable_keyword_is_case_and_space_insensitive(gate):
+    sub = _state(gate, _new_tenant(gate.dsn))
+    result = gate.pre_filter(_inbound(gate, "  enable data inputs  "), sub)
+    assert isinstance(result, gate.t.RouteToDirectHandler)
+    assert result.handler_name == "data_inputs_enable_handler"
+
+
+def test_data_inputs_enable_handler_sets_owner_inputs_true(gate, monkeypatch):
+    import importlib
+
+    # The submodule and its function share a name; __init__ binds the function
+    # over the submodule attribute, so import_module is needed to get the module.
+    h = importlib.import_module(
+        "orchestrator.direct_handlers.data_inputs_enable_handler"
+    )
+    monkeypatch.setattr(h, "send_freeform_message", lambda body, phone: "SMfake")
+    tenant_id = _new_tenant(gate.dsn)
+    sub = _state(gate, tenant_id)
+    outcome = h.data_inputs_enable_handler(_inbound(gate, "ACTIVATE TEAM"), sub)
+    assert outcome["owner_inputs_set"] is True
+    with psycopg.connect(gate.dsn, autocommit=True) as conn:
+        row = conn.execute(
+            "SELECT owner_inputs FROM tenants WHERE id = %s", (tenant_id,)
+        ).fetchone()
+    assert row == (True,)
+
+
+def test_consent_required_handler_sends_prompt_no_transmit(gate, monkeypatch):
+    import importlib
+
+    h = importlib.import_module(
+        "orchestrator.direct_handlers.consent_required_handler"
+    )
+    sent: dict[str, str] = {}
+
+    def _capture(body: str, phone: str) -> str:
+        sent["body"], sent["phone"] = body, phone
+        return "SMfake"
+
+    monkeypatch.setattr(h, "send_freeform_message", _capture)
+    sub = _state(gate, _new_tenant(gate.dsn))
+    outcome = h.consent_required_handler(_inbound(gate, "plan a campaign"), sub)
+    assert outcome["handler"] == "consent_required_handler"
+    assert outcome["consent_prompt_sent"] is True
+    # The prompt tells the owner exactly which phrase enables data inputs.
+    assert "ACTIVATE TEAM" in sent["body"]
+
+
+def test_brain_owner_inputs_ok_fail_closed_on_error(gate, monkeypatch):
+    """VT-303 / CL-425: a consent-check error fails CLOSED (no transmit)."""
+    import orchestrator.runner as runner_mod
+
+    def _boom(_tenant):  # noqa: ANN001, ANN202
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(runner_mod, "_owner_inputs_enabled", _boom)
+    assert runner_mod._brain_owner_inputs_ok(str(uuid4())) is False
+
+
+def test_brain_owner_inputs_ok_true_after_enable(gate, monkeypatch):
+    import importlib
+
+    import orchestrator.runner as runner_mod
+
+    h = importlib.import_module(
+        "orchestrator.direct_handlers.data_inputs_enable_handler"
+    )
+    monkeypatch.setattr(h, "send_freeform_message", lambda body, phone: "SMfake")
+    tenant_id = _new_tenant(gate.dsn)
+    # Default owner_inputs is FALSE -> gate would divert to consent_required.
+    assert runner_mod._brain_owner_inputs_ok(tenant_id) is False
+    # Owner enables -> gate now permits the brain transmit.
+    h.data_inputs_enable_handler(_inbound(gate, "ACTIVATE TEAM"), _state(gate, tenant_id))
+    assert runner_mod._brain_owner_inputs_ok(tenant_id) is True
+
+
 def test_dsr_keyword_routes_creates_ticket(gate):
     tenant_id = _new_tenant(gate.dsn)
     sub = _state(gate, tenant_id)

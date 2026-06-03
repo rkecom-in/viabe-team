@@ -54,8 +54,13 @@ def ingress():
 def _new_tenant(dsn: str, whatsapp_number: str) -> str:
     with psycopg.connect(dsn, autocommit=True) as conn:
         row = conn.execute(
+            # owner_inputs=true: these tenants have granted the data-inputs basis,
+            # so substantive messages reach the brain (VT-303 consent gate). The
+            # consent-OFF path is covered explicitly in test_brain_consent_gate +
+            # canary vt303.
             "INSERT INTO tenants (business_name, plan_tier, phase, phase_entered_at, "
-            "whatsapp_number) VALUES ('VT-3.3 Test', 'founding', 'trial', now(), %s) "
+            "whatsapp_number, owner_inputs) "
+            "VALUES ('VT-3.3 Test', 'founding', 'trial', now(), %s, true) "
             "RETURNING id",
             (whatsapp_number,),
         ).fetchone()
@@ -381,6 +386,70 @@ def test_substantive_message_marks_run_escalated(ingress):
     assert status == "escalated"
     assert step is not None, "no agent_invocation step record written"
     assert "owner message" in step[0]["reason"]
+
+
+# --- VT-303: owner_inputs consent gate on the brain transmit (Option B) -------
+
+
+def _new_tenant_no_consent(dsn: str, whatsapp_number: str) -> str:
+    """Seed a tenant WITHOUT owner_inputs consent (the gate's FALSE path)."""
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        row = conn.execute(
+            "INSERT INTO tenants (business_name, plan_tier, phase, phase_entered_at, "
+            "whatsapp_number, owner_inputs) "
+            "VALUES ('VT-303 NoConsent', 'founding', 'trial', now(), %s, false) "
+            "RETURNING id",
+            (whatsapp_number,),
+        ).fetchone()
+    assert row is not None
+    return str(row[0])
+
+
+def test_no_owner_inputs_consent_routes_to_consent_required(ingress):
+    """A substantive owner message from a tenant WITHOUT owner_inputs consent is
+    NOT transmitted to the brain — it degrades to consent_required (Option B).
+    No agent_invocation step is written → no Anthropic transmit (CL-425)."""
+    phone = _phone()
+    _new_tenant_no_consent(ingress.dsn, phone)
+    resp = _post(ingress, _fields(phone, Body="I want to plan a campaign"))
+    result = _await_workflow(resp.json()["workflow_id"])
+
+    assert result["routed"] == "consent_required"
+    assert result["handler"] == "consent_required_handler"
+    with psycopg.connect(ingress.dsn, autocommit=True) as conn:
+        brain_steps = conn.execute(
+            "SELECT count(*) FROM pipeline_steps "
+            "WHERE run_id = %s AND step_kind = 'agent_invocation'",
+            (result["run_id"],),
+        ).fetchone()[0]
+    assert brain_steps == 0, "brain was invoked despite no owner_inputs consent"
+
+
+def test_enable_keyword_grants_consent_then_brain_runs(ingress):
+    """The owner sends the enable phrase → owner_inputs flips true → a
+    subsequent substantive message then reaches the brain (full enable loop)."""
+    phone = _phone()
+    tenant_id = _new_tenant_no_consent(ingress.dsn, phone)
+
+    # 1. Enable phrase routes to the enable handler and flips owner_inputs.
+    r_enable = _await_workflow(
+        _post(ingress, _fields(phone, Body="ACTIVATE TEAM")).json()["workflow_id"]
+    )
+    assert r_enable["routed"] == "direct_handler"
+    assert r_enable["handler"] == "data_inputs_enable_handler"
+    with psycopg.connect(ingress.dsn, autocommit=True) as conn:
+        owner_inputs = conn.execute(
+            "SELECT owner_inputs FROM tenants WHERE id = %s", (tenant_id,)
+        ).fetchone()[0]
+    assert owner_inputs is True
+
+    # 2. With consent granted, a substantive message reaches the brain.
+    r_brain = _await_workflow(
+        _post(ingress, _fields(phone, Body="plan a diwali campaign")).json()[
+            "workflow_id"
+        ]
+    )
+    assert r_brain["routed"] == "brain"
 
 
 def test_status_callback_delivered_completes_clean(ingress):

@@ -1,0 +1,18 @@
+# VT-303 — owner data-inputs ENABLE keywords (the opt-in / consent-grant phrase).
+#
+# Deliberate, unambiguous opt-in phrases. Matched EXACTLY (case-insensitive, on
+# the whole normalized message body) by pre_filter — mirrors opt_out_keywords.yaml
+# but is the INVERSE (grant, not revoke). A bare "yes" is intentionally NOT here:
+# it is ambiguous (could be an approval reply, VT-47) and consent must be a
+# deliberate act (CL-425 framing). The conservative consent-required reply tells
+# the owner exactly which phrase to send.
+#
+# Matching this routes to data_inputs_enable_handler, which sets
+# tenants.owner_inputs = true. Keep phrases short + memorable + hard to trigger
+# accidentally.
+keywords:
+  - "activate team"
+  - "activate my team"
+  - "enable data inputs"
+  - "enable inputs"
+  - "activate inputs"
