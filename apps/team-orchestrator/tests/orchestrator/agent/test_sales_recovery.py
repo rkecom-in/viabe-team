@@ -61,6 +61,9 @@ def _stub_db_backed_campaigns_builder(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         _cb_mod, "_build_l3_priors", lambda tid, rid: (_cb_mod.L3Priors(), False)
     )
+    monkeypatch.setattr(
+        _cb_mod, "_build_l4_skills", lambda tid, req: (_cb_mod.L4Skills(), False)
+    )
 
 
 # --- 1. AgentResult contract -------------------------------------------------

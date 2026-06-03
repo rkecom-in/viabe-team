@@ -50,6 +50,10 @@ def _stub_db_backed_campaigns_builder(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         _cb_mod, "_build_l3_priors", lambda tid, rid: (_cb_mod.L3Priors(), False)
     )
+    # VT-70: _build_l4_skills is a live L4 read too — stub no-skills.
+    monkeypatch.setattr(
+        _cb_mod, "_build_l4_skills", lambda tid, req: (_cb_mod.L4Skills(), False)
+    )
 
 
 def _fake_response(
