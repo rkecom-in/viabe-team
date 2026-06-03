@@ -137,4 +137,29 @@ def apply_transition(
         # Invariants run before commit — a violation rolls back this transaction.
         check_invariants(new_state, conn, row["id"])
 
+        # VT-309: L2 episodic phase_transitioned, IN THIS TXN (atomic with the
+        # phase_transitions INSERT — an invariant rollback drops it too).
+        from orchestrator.knowledge.l2_types import L2EventType
+        from orchestrator.knowledge.l2_writer import (
+            deterministic_event_id,
+            record_episodic_event,
+        )
+
+        record_episodic_event(
+            state["tenant_id"],
+            L2EventType.PHASE_TRANSITIONED,
+            payload={
+                "from_phase": from_phase,
+                "to_phase": to_phase,
+                "event": event,
+                "run_id": str(state["run_id"]),
+            },
+            referenced_entity_type="tenant",
+            referenced_entity_id=state["tenant_id"],
+            event_id=deterministic_event_id(
+                state["tenant_id"], L2EventType.PHASE_TRANSITIONED, row["id"]
+            ),
+            conn=conn,
+        )
+
     return new_state

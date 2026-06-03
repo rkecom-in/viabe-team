@@ -11,13 +11,26 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from typing import Any
-from uuid import UUID
+from uuid import NAMESPACE_URL, UUID, uuid5
 
 from psycopg.types.json import Jsonb
 
 from orchestrator._tenant_guard import assert_tenant_scoped
 from orchestrator.db import tenant_connection
 from orchestrator.knowledge.l2_types import render_summary
+
+
+def deterministic_event_id(
+    tenant_id: UUID | str, event_type: str, source_id: UUID | str
+) -> UUID:
+    """A stable event_id for a direct (non-outbox) emit, so re-running the same
+    decision (DBOS step retry, redelivery) is a no-op via the episodic_events
+    ``UNIQUE(tenant_id, event_id)`` index. Mirrors kg_backfill's uuid5 scheme.
+
+    ``source_id`` is the natural key of the thing the event is about (run_id,
+    campaign_id, approval_id, clarification_id, phase_transition_id, …).
+    """
+    return uuid5(NAMESPACE_URL, f"l2:{tenant_id}:{event_type}:{source_id}")
 
 
 def record_episodic_event(
@@ -82,4 +95,4 @@ def record_episodic_event(
         return _do(own)
 
 
-__all__ = ["record_episodic_event"]
+__all__ = ["deterministic_event_id", "record_episodic_event"]

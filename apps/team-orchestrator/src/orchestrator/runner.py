@@ -160,7 +160,14 @@ def open_webhook_run(tenant_id: str, run_id: str, trigger_payload: dict) -> None
     the INSERT; the input dict is not mutated.
     """
     safe_payload = _redact_for_persistence(trigger_payload)
-    with tenant_connection(tenant_id) as conn:
+    # VT-309: record the run AND the L2 owner_message_received episodic event in
+    # ONE txn (atomic per Cowork ruling 20260603T191000Z). LIVE dispatch path —
+    # highest care: the payload carries ONLY derived/structural fields
+    # (message_type + body LENGTH), NEVER the raw body (CL-390 / CL-330). The
+    # body never enters the episodic row. Gated to real inbound messages (not
+    # status-callbacks, not dupes); deterministic event_id → idempotent on
+    # redelivery / DBOS step retry.
+    with tenant_connection(tenant_id) as conn, conn.transaction():
         conn.execute(
             "INSERT INTO pipeline_runs "
             "(id, tenant_id, run_type, status, trigger_payload) "
@@ -168,6 +175,32 @@ def open_webhook_run(tenant_id: str, run_id: str, trigger_payload: dict) -> None
             "ON CONFLICT (id) DO NOTHING",
             (run_id, tenant_id, Jsonb(safe_payload)),
         )
+        if (
+            trigger_payload.get("message_type") == "inbound_message"
+            and not trigger_payload.get("dupe_status")
+        ):
+            from orchestrator.knowledge.l2_types import L2EventType
+            from orchestrator.knowledge.l2_writer import (
+                deterministic_event_id,
+                record_episodic_event,
+            )
+
+            record_episodic_event(
+                tenant_id,
+                L2EventType.OWNER_MESSAGE_RECEIVED,
+                payload={
+                    "message_type": "inbound_message",
+                    "body_length": len(trigger_payload.get("body") or ""),
+                    "has_media": bool(trigger_payload.get("num_media", 0)),
+                    "run_id": run_id,
+                },
+                referenced_entity_type="run",
+                referenced_entity_id=run_id,
+                event_id=deterministic_event_id(
+                    tenant_id, L2EventType.OWNER_MESSAGE_RECEIVED, run_id
+                ),
+                conn=conn,
+            )
 
 
 @DBOS.step()
@@ -207,6 +240,58 @@ def close_webhook_run(tenant_id: str, run_id: str, status: str) -> None:
         conn.execute(
             "UPDATE pipeline_runs SET status = %s, ended_at = now() WHERE id = %s",
             (status, run_id),
+        )
+
+
+# Dispatch final_status values that mean the agent dispatch TERMINATED (failure/
+# limit), vs 'completed' (success) and 'paused' (not terminal — resumes later).
+_DISPATCH_TERMINATED_STATUSES = frozenset(
+    {"aborted_hard_limit", "escalated", "failed"}
+)
+
+
+@DBOS.step()
+def record_dispatch_terminal_episodic(
+    tenant_id: str, run_id: str, final_status: str, terminal_path: str | None
+) -> None:
+    """VT-309 — emit the L2 agent-dispatch lifecycle episodic event for a brain
+    dispatch's terminal status.
+
+    'completed' → agent_dispatch_completed; a terminated status → agent_dispatch_
+    terminated; 'paused' (and anything unrecognised) → no emit (not a terminal
+    decision — never guess). Best-effort: an emit failure must not fail the
+    durable workflow. Safely at-least-once, NOT txn-atomic with the pipeline_runs
+    status write — these are derived observability-lifecycle events (the run-status
+    row is the source of truth); the DBOS step boundary + deterministic event_id
+    make a retry a no-op (episodic_events UNIQUE(tenant_id, event_id)).
+    """
+    if final_status == "completed":
+        event_type = "agent_dispatch_completed"
+        payload = {"run_id": run_id, "outcome": terminal_path or final_status}
+    elif final_status in _DISPATCH_TERMINATED_STATUSES:
+        event_type = "agent_dispatch_terminated"
+        payload = {"run_id": run_id, "reason": final_status,
+                   "terminal_path": terminal_path}
+    else:
+        return  # paused / unrecognised → not a terminal decision
+    try:
+        from orchestrator.knowledge.l2_writer import (
+            deterministic_event_id,
+            record_episodic_event,
+        )
+
+        record_episodic_event(
+            tenant_id,
+            event_type,
+            payload=payload,
+            referenced_entity_type="run",
+            referenced_entity_id=run_id,
+            event_id=deterministic_event_id(tenant_id, event_type, run_id),
+        )
+    except Exception:  # noqa: BLE001 — L2 projection must never fail the workflow
+        logger.exception(
+            "VT-309 dispatch-terminal L2 emit failed (tenant=%s run=%s status=%s)",
+            tenant_id, run_id, final_status,
         )
 
 
@@ -286,10 +371,40 @@ def try_resume_pending_approval(
         # Unclear reply — leave the gate paused (Pillar 7: no guessing).
         return None
 
-    with tenant_connection(tenant_id) as conn:
+    # VT-309: resolve the approval + emit the L2 episodic decision ATOMICALLY
+    # (one txn — the autocommit site the plan flagged; now wrapped per Cowork
+    # ruling 20260603T191000Z). approved → campaign_approved, rejected →
+    # campaign_rejected; needs_changes has no L2 milestone type → no emit.
+    with tenant_connection(tenant_id) as conn, conn.transaction():
         mark_approval_resolved(
             conn, approval["id"], decision, owner_message_sid=message_sid
         )
+        _l2_event = {
+            "approved": "campaign_approved", "rejected": "campaign_rejected",
+        }.get(decision)
+        # Only campaign approvals map to an L2 milestone; other approval_types
+        # (sensitive_data_access, …) have no campaign_* episodic type.
+        if _l2_event is not None and approval.get("approval_type") == "campaign_send":
+            from orchestrator.knowledge.l2_writer import (
+                deterministic_event_id,
+                record_episodic_event,
+            )
+
+            _campaign_id = approval.get("campaign_id")
+            record_episodic_event(
+                tenant_id,
+                _l2_event,
+                payload={
+                    "campaign_id": _campaign_id,
+                    "approval_id": str(approval["id"]),
+                },
+                referenced_entity_type="campaign" if _campaign_id else "approval",
+                referenced_entity_id=_campaign_id or approval["id"],
+                event_id=deterministic_event_id(
+                    tenant_id, _l2_event, approval["id"]
+                ),
+                conn=conn,
+            )
 
     # Resume the suspended graph (re-enters the interrupting node; the node's
     # arm_pause_request is a no-op now the row is resolved). Then close the
@@ -411,6 +526,12 @@ def webhook_pipeline_run(
                 tenant_id=UUID(tenant_id),
             )
             final_status = dispatch_result.final_status
+            # VT-309: L2 agent-dispatch lifecycle event (completed/terminated).
+            # Brain path only — direct-handler/reject/consent runs are not agent
+            # dispatches. Skips 'paused' (resolves later on resume).
+            record_dispatch_terminal_episodic(
+                tenant_id, run_id, final_status, dispatch_result.terminal_path
+            )
     # result.kind == "reject" → observability-only; the run ends clean (completed).
 
     close_webhook_run(tenant_id, run_id, final_status)

@@ -129,6 +129,28 @@ def collapse_campaign_plan(
             "status": campaign_plan.status.value,
         })
 
+        # VT-309: L2 episodic campaign_proposed, IN THIS TXN (atomic with the
+        # campaign INSERT — a cohort rejection below rolls it back too). Direct
+        # in-txn emit (no outbox) + deterministic event_id → idempotent.
+        from orchestrator.knowledge.l2_types import L2EventType
+        from orchestrator.knowledge.l2_writer import (
+            deterministic_event_id,
+            record_episodic_event,
+        )
+
+        cohort_size = len(campaign_plan.target_cohort.customer_ids or [])
+        record_episodic_event(
+            tenant_id,
+            L2EventType.CAMPAIGN_PROPOSED,
+            payload={"campaign_id": str(campaign_id), "cohort_size": cohort_size},
+            referenced_entity_type="campaign",
+            referenced_entity_id=campaign_id,
+            event_id=deterministic_event_id(
+                tenant_id, L2EventType.CAMPAIGN_PROPOSED, campaign_id
+            ),
+            conn=conn,
+        )
+
         # VT-241: link the cohort to campaign_recipients IN THIS TRANSACTION
         # (cur-injected, same tenant_connection). FAIL-CLOSED — if any id is
         # unresolvable / cross-tenant, raise CohortRejectedError; the
