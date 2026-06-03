@@ -3,7 +3,7 @@
 import { describe, expect, it, vi } from 'vitest'
 
 import { OperatorRole } from '@/lib/auth/roles'
-import { escalateRun, fetchActiveRuns, fetchRunSteps } from '@/lib/ops/activity'
+import { escalateRun, fetchActiveRuns, fetchRunSteps, flagRunControl } from '@/lib/ops/activity'
 
 function runsClient(runs: any[]) {
   const chain: any = {
@@ -92,5 +92,58 @@ describe('VT-293 — escalateRun authz + writes (IDOR-hardened: tenant resolved 
     expect(insert).toHaveBeenCalledTimes(1)
     expect(insert.mock.calls[0]![0].action).toBe('escalate')
     expect(insert.mock.calls[0]![0].tenant_id).toBe('ta') // resolved tenant written
+  })
+})
+
+describe('VT-300 — flagRunControl forwards to the authoritative orchestrator endpoint', () => {
+  function runClient(runTenant: string | null) {
+    return {
+      from: (t: string) => {
+        if (t === 'pipeline_runs') {
+          return { select: () => ({ eq: () => ({ limit: async () => ({ data: runTenant ? [{ tenant_id: runTenant }] : [] }) }) }) }
+        }
+        return { insert: async () => ({ error: null }) }
+      },
+    }
+  }
+
+  it('unassigned tenant → rejected, endpoint NOT called (fast pre-check)', async () => {
+    const fwd = vi.fn(async () => ({ ok: true, reason: 'ok' }))
+    const res = await flagRunControl(
+      { operatorId: 'op', role: OperatorRole.VTR, assignedTenants: ['ta'] }, 'r1', 'pause',
+      runClient('tz') as never, fwd as never,
+    )
+    expect(res.ok).toBe(false)
+    expect(fwd).not.toHaveBeenCalled()
+  })
+
+  it('run not found → rejected', async () => {
+    const fwd = vi.fn(async () => ({ ok: true, reason: 'ok' }))
+    const res = await flagRunControl(
+      { operatorId: 'op', role: OperatorRole.VTADMIN, assignedTenants: null }, 'rX', 'override',
+      runClient(null) as never, fwd as never,
+    )
+    expect(res.ok).toBe(false)
+    expect(fwd).not.toHaveBeenCalled()
+  })
+
+  it('assigned → forwards (operator_id, run_id, control_type); endpoint is authoritative', async () => {
+    const fwd = vi.fn(async () => ({ ok: true, reason: 'ok' }))
+    const res = await flagRunControl(
+      { operatorId: 'op', role: OperatorRole.VTR, assignedTenants: ['ta'] }, 'r1', 'pause',
+      runClient('ta') as never, fwd as never,
+    )
+    expect(res.ok).toBe(true)
+    expect(fwd).toHaveBeenCalledWith('op', 'r1', 'pause')
+  })
+
+  it('endpoint 403 (orchestrator re-check denies) → surfaced', async () => {
+    const fwd = vi.fn(async () => ({ ok: false, reason: 'http_403' }))
+    const res = await flagRunControl(
+      { operatorId: 'op', role: OperatorRole.VTR, assignedTenants: ['ta'] }, 'r1', 'steer',
+      runClient('ta') as never, fwd as never,
+    )
+    expect(res.ok).toBe(false)
+    expect(res.reason).toBe('http_403')
   })
 })

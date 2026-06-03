@@ -191,3 +191,35 @@ def test_directive_pii_scrubbed(substrate):
             "SELECT directive FROM run_controls WHERE run_id = %s", (run,)
         ).fetchone()[0]
     assert "9812345678" not in (directive or "")  # phone digits scrubbed
+
+
+def test_consume_pending_control_claims_oldest_once(substrate):
+    """Effecting leg: consume_pending_control atomically claims the oldest 'requested' control,
+    marks it consumed, and never double-applies."""
+    from orchestrator.api.ops_runcontrol import run_control
+    from orchestrator.graph import get_pool
+    from orchestrator.run_control_handler import consume_pending_control, should_hold_send
+
+    tenant = _tenant(substrate)
+    run = _run(substrate, tenant)
+    op = _operator(substrate)
+    _assign(substrate, op, tenant)
+    # Two controls queued on the run (pause then override).
+    run_control(_body(run_id=run, operator_id=op, control_type="pause"), x_internal_secret=_SECRET)
+    run_control(_body(run_id=run, operator_id=op, control_type="override"), x_internal_secret=_SECRET)
+
+    pool = get_pool()
+    first = consume_pending_control(run, pool=pool)
+    assert first is not None and first["control_type"] == "pause"   # oldest first
+    assert should_hold_send(first) is True
+    second = consume_pending_control(run, pool=pool)
+    assert second is not None and second["control_type"] == "override"
+    third = consume_pending_control(run, pool=pool)
+    assert third is None                                            # nothing left → no hold
+    assert should_hold_send(third) is False
+    # both rows now consumed (none left 'requested')
+    with psycopg.connect(substrate, autocommit=True) as conn:
+        pending = conn.execute(
+            "SELECT count(*) FROM run_controls WHERE run_id = %s AND status='requested'", (run,)
+        ).fetchone()[0]
+    assert pending == 0

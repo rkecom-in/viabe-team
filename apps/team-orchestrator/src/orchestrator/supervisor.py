@@ -185,6 +185,26 @@ def _campaign_execute_node(state: AgentGraphState) -> dict[str, Any]:
     tenant_id_str = str(tenant_id)
     campaign_id_str = str(campaign_id)
 
+    # VT-300 — run-control gate at the send boundary (the meaningful coarse control point):
+    # a VTR's pause/steer/override on this run HOLDS the fan-out before any customer send.
+    run_id = state.get("run_id")
+    if run_id is not None:
+        from orchestrator.run_control_handler import consume_pending_control, should_hold_send
+
+        _control = consume_pending_control(run_id)
+        if should_hold_send(_control):
+            import logging
+            logging.getLogger(__name__).info(
+                "_campaign_execute_node: HELD by run-control tenant=%s campaign=%s control=%s",
+                tenant_id_str, campaign_id_str, (_control or {}).get("control_type"),
+            )
+            return {
+                "campaign_execution_summary": {
+                    "status": "held_by_run_control",
+                    "control_type": (_control or {}).get("control_type"),
+                }
+            }
+
     try:
         with tenant_connection(tenant_id_str) as conn:
             summary = execute_approved_campaign(
