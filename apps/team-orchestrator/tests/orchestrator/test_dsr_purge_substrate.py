@@ -533,3 +533,46 @@ def test_owner_inputs_dsr_purge_covers_substrate(substrate):  # type: ignore[no-
     assert _count_tenant_rows(substrate.dsn, "owner_inputs", tenant_alpha) == 0
     # tenant_bravo's row is untouched.
     assert _count_tenant_rows(substrate.dsn, "owner_inputs", tenant_bravo) == 1
+
+
+# --- VT-154: unscoped-DELETE guard (source-level, no DB) ---------------------
+
+
+def test_vt154_unscoped_delete_guard_tenant_predicate_present():
+    """VT-154 — fail-loud guard on the DSR purge privileged path.
+
+    ``purge_tenant_data`` runs on the BYPASSRLS service-role pool (see
+    dsr_purge module docstring), so the ``WHERE tenant_id = %s`` predicate is
+    the SOLE scoping surface — a future edit that silently drops it would
+    cross-tenant DELETE on a service-role connection. This source-level test
+    fails CI if (1) ``_delete_where_tenant`` loses its parametrized tenant
+    predicate, or (2) any ``DELETE FROM`` appears in the module without a
+    tenant_id predicate in the same statement. Mirrors the inspect.getsource
+    guard pattern of test_dbos_layer_not_synchronously_purged_documented_finding.
+    """
+    import inspect
+    import re
+
+    from orchestrator import dsr_purge
+
+    # (1) _delete_where_tenant MUST keep the parametrized tenant predicate.
+    delete_src = inspect.getsource(dsr_purge._delete_where_tenant)
+    assert re.search(
+        r"DELETE\s+FROM\s+\{table\}\s+WHERE\s+tenant_id\s*=\s*%s", delete_src
+    ), (
+        "VT-154: _delete_where_tenant lost its `WHERE tenant_id = %s` predicate — "
+        "the SOLE scoping surface on the BYPASSRLS purge path. Restore it or DSR "
+        "purge cross-tenant-deletes on the service-role connection."
+    )
+
+    # (2) No UNSCOPED DELETE anywhere in the module: EVERY `DELETE FROM <x>`
+    #     statement must carry a tenant_id predicate (no escape hatch — the one
+    #     legitimate DELETE is `DELETE FROM {table} WHERE tenant_id = %s`, which
+    #     contains the token; a new `DELETE FROM {table}` without WHERE is caught).
+    module_src = inspect.getsource(dsr_purge)
+    for match in re.finditer(r"DELETE\s+FROM\s+[^\n]*", module_src, re.IGNORECASE):
+        stmt = match.group(0).lower()
+        assert "tenant_id" in stmt, (
+            f"VT-154: unscoped DELETE found in dsr_purge: {match.group(0)!r}. "
+            "Every DELETE on the privileged purge path MUST be tenant-scoped."
+        )
