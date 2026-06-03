@@ -46,6 +46,7 @@ from typing import Any, Literal, cast
 from uuid import UUID
 
 import yaml
+from psycopg.types.json import Jsonb
 
 from orchestrator._tenant_guard import assert_tenant_scoped, emit_pipeline_step
 from orchestrator.db import tenant_connection
@@ -394,6 +395,7 @@ def _build_l4_skills(tenant_id: UUID, user_request: str) -> tuple[L4Skills, bool
         return L4Skills(available=False, note=_L4_NO_SKILLS_NOTE), False
     skills = [
         {
+            "id": str(d.id),  # for the VT-71 composition audit (l4_doc_ids)
             "title": d.title,
             "tags": d.tags,
             "priority": d.priority,
@@ -537,6 +539,43 @@ def _build_recovery_target_config(tenant_id: UUID) -> tuple[float, int]:
     return (float(row["recovery_target_multiplier"]), int(row["recovery_target_floor_paise"]))
 
 
+# --- VT-71 composition audit -------------------------------------------------
+
+
+def _write_composition_audit(
+    *,
+    tenant_id: UUID,
+    run_id: UUID,
+    cohort_key: str | None,
+    section_token_counts: dict[str, int],
+    total_token_count: int,
+    truncated_sections: list[str],
+    l3_cohort_keys: list[str],
+    l4_doc_ids: list[str],
+) -> None:
+    """Write one composition_audits row (Pillar-7 traceability). Best-effort —
+    a failure logs + is swallowed; the agent's bundle must never be blocked by
+    its own audit. Tenant-scoped (RLS via the GUC); lifetime retention (CL-416)."""
+    try:
+        with tenant_connection(tenant_id) as conn:
+            conn.execute(
+                "INSERT INTO composition_audits "
+                "(tenant_id, run_id, cohort_key, section_token_counts, "
+                " total_token_count, truncated_sections, l3_cohort_keys, l4_doc_ids) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+                (
+                    str(tenant_id), str(run_id), cohort_key,
+                    Jsonb(section_token_counts), total_token_count,
+                    truncated_sections, l3_cohort_keys,
+                    [UUID(x) for x in l4_doc_ids],
+                ),
+            )
+    except Exception:  # noqa: BLE001 — audit is best-effort; never break the bundle
+        logger.warning(
+            "VT-71 composition audit write failed (tenant=%s run=%s)", tenant_id, run_id
+        )
+
+
 # --- the bundle constructor --------------------------------------------------
 
 
@@ -575,6 +614,19 @@ def build_sales_recovery_context(
     l4_skills, l4_ok = _build_l4_skills(tenant_id, user_request)
     recovery_target_multiplier, recovery_target_floor_paise = _build_recovery_target_config(tenant_id)
 
+    # VT-71 cross-layer dedup: an L4 doc explicitly tagged with a live L3
+    # cohort_key is redundant with that prior's DATA — drop it (the L3 number
+    # supersedes; other L4 heuristics stay; no content collision). Conservative:
+    # only an EXACT cohort_key tag match dedups (generic tags like 'cafe' don't).
+    _l3_cohorts = {p["cohort_key"] for p in l3_priors.patterns}
+    if _l3_cohorts and l4_skills.skills:
+        _kept = [s for s in l4_skills.skills if not (set(s.get("tags") or []) & _l3_cohorts)]
+        if len(_kept) != len(l4_skills.skills):
+            l4_skills = L4Skills(
+                available=bool(_kept), skills=_kept,
+                note="" if _kept else _L4_NO_SKILLS_NOTE,
+            )
+
     data_completeness = {
         "business_profile": bp_ok,
         "customer_ledger_summary": ls_ok,
@@ -596,19 +648,14 @@ def build_sales_recovery_context(
             + _estimate_tokens(l4_skills)
         )
 
-    # Truncation order (§3.3): L4 skills + L3 priors (cross-tenant/global
-    # background, most droppable) -> oldest owner inputs -> campaigns down to 3 ->
-    # top_spenders 20/10/5 -> drop business hours -> overflow.
+    # Truncation order (VT-71, Cowork 20260604T015000Z): PROTECT the moat layers
+    # (L3 priors + L4 skills) — trim the per-tenant sections FIRST so a large L2
+    # (ledger top_spenders) cannot starve L3/L4. Order: oldest owner inputs ->
+    # campaigns down to 3 -> top_spenders 20/10/5 -> drop business hours -> L4
+    # skills -> L3 priors (last resort) -> overflow. (Previously L4/L3 dropped
+    # first — that starved the moat; reversed.)
     truncated: list[str] = []
     while _total() > effective_cap:
-        if l4_skills.skills:
-            l4_skills = L4Skills(available=False, note=_L4_NO_SKILLS_NOTE)
-            truncated.append("l4_skills")
-            continue
-        if l3_priors.patterns:
-            l3_priors = L3Priors(available=False, note=_L3_NO_PRIOR_NOTE)
-            truncated.append("l3_priors")
-            continue
         if pending_owner_inputs:
             pending_owner_inputs = pending_owner_inputs[1:]
             truncated.append("pending_owner_inputs")
@@ -629,6 +676,15 @@ def build_sales_recovery_context(
             business_profile = replace(business_profile, hours={})
             truncated.append("business_profile")
             continue
+        # Moat layers — only after the per-tenant sections are exhausted.
+        if l4_skills.skills:
+            l4_skills = L4Skills(available=False, note=_L4_NO_SKILLS_NOTE)
+            truncated.append("l4_skills")
+            continue
+        if l3_priors.patterns:
+            l3_priors = L3Priors(available=False, note=_L3_NO_PRIOR_NOTE)
+            truncated.append("l3_priors")
+            continue
         raise ContextOverflowError(
             f"bundle for tenant {tenant_id} exceeds {effective_cap} tokens "
             "after maximum truncation"
@@ -646,6 +702,29 @@ def build_sales_recovery_context(
         build_timestamp=datetime.now(UTC),
         cursor_info={},
     )
+
+    # VT-71 composition audit (Pillar 7) — one row per compose so ops can
+    # reconstruct what the agent saw. Best-effort: an audit failure must never
+    # break the bundle the agent needs.
+    _write_composition_audit(
+        tenant_id=tenant_id,
+        run_id=run_id,
+        cohort_key=None,
+        section_token_counts={
+            "business_profile": _estimate_tokens(business_profile),
+            "customer_ledger_summary": _estimate_tokens(ledger_summary),
+            "recent_campaigns": _estimate_tokens(recent_campaigns),
+            "attribution_snapshot": _estimate_tokens(attribution_snapshot),
+            "pending_owner_inputs": _estimate_tokens(pending_owner_inputs),
+            "l3_priors": _estimate_tokens(l3_priors),
+            "l4_skills": _estimate_tokens(l4_skills),
+        },
+        total_token_count=meta.token_count,
+        truncated_sections=list(dict.fromkeys(truncated)),
+        l3_cohort_keys=[p["cohort_key"] for p in l3_priors.patterns],
+        l4_doc_ids=[s["id"] for s in l4_skills.skills if s.get("id")],
+    )
+
     return SalesRecoveryContext(
         tenant_id=tenant_id,
         run_id=run_id,
