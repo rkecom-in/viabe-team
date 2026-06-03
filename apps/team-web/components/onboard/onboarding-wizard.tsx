@@ -1,0 +1,167 @@
+'use client'
+
+/**
+ * VT-267 PR-C — owner onboarding wizard (client). Renders inside the WhatsApp in-app browser.
+ *
+ * Review-&-Confirm: per-field edit states over the draft business_profile (save → MERGE via the
+ * orchestrator). Connect steps: a TAPPABLE link (target=_blank, rel=noopener) hands the OAuth off
+ * to the SYSTEM browser — NEVER a JS window.open popup (blocked in the WhatsApp WebView). After the
+ * owner returns, "I've connected" re-checks the true status server-side to resume (no client trust).
+ */
+
+import { useState, useTransition } from 'react'
+
+import {
+  checkConnectionAction,
+  saveProfileAction,
+  startConnectAction,
+} from '@/app/(app)/team/onboard/wizard/actions'
+import type { WizardConnector } from '@/lib/onboard/connect'
+import {
+  WIZARD_EDITABLE_FIELDS,
+  type EditableField,
+  type ProfileDraft,
+} from '@/lib/onboard/profile'
+
+const FIELD_LABEL: Record<EditableField, string> = {
+  business_name: 'Business name',
+  business_type: 'Business type',
+  preferred_language: 'Preferred language',
+  owner_curated_context: 'Anything else we should know',
+}
+
+export function OnboardingWizard({
+  draft,
+  initialSheets,
+  initialWhatsapp,
+}: {
+  draft: ProfileDraft
+  initialSheets: boolean
+  initialWhatsapp: boolean
+}) {
+  const [pending, startTransition] = useTransition()
+  const [fields, setFields] = useState<Record<EditableField, string>>({
+    business_name: draft.business_name,
+    business_type: draft.business_type,
+    preferred_language: draft.preferred_language,
+    owner_curated_context: draft.owner_curated_context,
+  })
+  const [editing, setEditing] = useState<EditableField | null>(null)
+  const [saveMsg, setSaveMsg] = useState<string>('')
+
+  const [connected, setConnected] = useState<Record<WizardConnector, boolean>>({
+    google_sheet: initialSheets,
+    whatsapp: initialWhatsapp,
+  })
+  const [authUrls, setAuthUrls] = useState<Partial<Record<WizardConnector, string>>>({})
+  const [connectMsg, setConnectMsg] = useState<Partial<Record<WizardConnector, string>>>({})
+
+  function saveField(field: EditableField) {
+    startTransition(async () => {
+      const res = await saveProfileAction({ [field]: fields[field] })
+      setSaveMsg(res.ok ? `Saved ${FIELD_LABEL[field]}` : `Couldn't save: ${res.reason}`)
+      if (res.ok) setEditing(null)
+    })
+  }
+
+  function beginConnect(connector: WizardConnector) {
+    startTransition(async () => {
+      const res = await startConnectAction(connector)
+      if (res.ok && res.authUrl) {
+        setAuthUrls((u) => ({ ...u, [connector]: res.authUrl! }))
+        setConnectMsg((m) => ({ ...m, [connector]: 'Open the link in your browser, then tap “I’ve connected”.' }))
+      } else {
+        setConnectMsg((m) => ({ ...m, [connector]: `Couldn't start: ${res.reason}` }))
+      }
+    })
+  }
+
+  function recheck(connector: WizardConnector) {
+    startTransition(async () => {
+      const res = await checkConnectionAction(connector)
+      setConnected((c) => ({ ...c, [connector]: res.connected }))
+      setConnectMsg((m) => ({
+        ...m,
+        [connector]: res.connected ? 'Connected ✓' : `Not connected yet (${res.detail})`,
+      }))
+    })
+  }
+
+  return (
+    <div data-onboard-wizard>
+      {/* Step 1: Review & Confirm */}
+      <section data-wizard-step="review" className="space-y-2">
+        <h2 className="text-lg font-medium">1. Confirm your details</h2>
+        {!draft.exists && (
+          <p data-wizard-draft-empty>
+            We couldn&apos;t draft your profile from public sources yet — fill these in.
+          </p>
+        )}
+        <ul>
+          {WIZARD_EDITABLE_FIELDS.map((field) => (
+            <li key={field} data-field={field} className="py-1">
+              <span className="font-medium">{FIELD_LABEL[field]}: </span>
+              {editing === field ? (
+                <>
+                  <input
+                    aria-label={FIELD_LABEL[field]}
+                    value={fields[field]}
+                    onChange={(e) => setFields((f) => ({ ...f, [field]: e.target.value }))}
+                  />
+                  <button type="button" disabled={pending} onClick={() => saveField(field)}>
+                    Save
+                  </button>
+                  <button type="button" disabled={pending} onClick={() => setEditing(null)}>
+                    Cancel
+                  </button>
+                </>
+              ) : (
+                <>
+                  <span data-field-value>{fields[field] || <em>(empty)</em>}</span>
+                  <button type="button" disabled={pending} onClick={() => setEditing(field)}>
+                    Edit
+                  </button>
+                </>
+              )}
+            </li>
+          ))}
+        </ul>
+        {saveMsg && <p data-wizard-save-msg>{saveMsg}</p>}
+      </section>
+
+      {/* Step 2: Connect data sources (system-browser handoff) */}
+      <section data-wizard-step="connect" className="space-y-3">
+        <h2 className="text-lg font-medium">2. Connect your tools</h2>
+        {(['whatsapp', 'google_sheet'] as WizardConnector[]).map((connector) => (
+          <div key={connector} data-connect={connector} className="py-1">
+            <span className="font-medium">
+              {connector === 'whatsapp' ? 'WhatsApp' : 'Google Sheets'}:{' '}
+            </span>
+            {connected[connector] ? (
+              <span data-connected="true">Connected ✓</span>
+            ) : (
+              <>
+                {!authUrls[connector] ? (
+                  <button type="button" disabled={pending} onClick={() => beginConnect(connector)}>
+                    Connect
+                  </button>
+                ) : (
+                  <>
+                    {/* Tappable handoff — opens the SYSTEM browser, never a JS popup. */}
+                    <a href={authUrls[connector]} target="_blank" rel="noopener noreferrer" data-connect-link>
+                      Open in your browser →
+                    </a>{' '}
+                    <button type="button" disabled={pending} onClick={() => recheck(connector)}>
+                      I&apos;ve connected
+                    </button>
+                  </>
+                )}
+                {connectMsg[connector] && <span data-connect-msg> {connectMsg[connector]}</span>}
+              </>
+            )}
+          </div>
+        ))}
+      </section>
+    </div>
+  )
+}

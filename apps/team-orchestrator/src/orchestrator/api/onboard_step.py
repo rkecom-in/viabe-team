@@ -43,6 +43,23 @@ class OnboardStepBody(BaseModel):
     answer: str
 
 
+class BusinessProfileSaveBody(BaseModel):
+    tenant_id: str
+    # Owner-edited fields from the wizard Review-&-Confirm step. Validated against an
+    # allowlist below — the wizard may ONLY edit the owner-facing identity fields, never
+    # arbitrary L1 attributes (e.g. derived archetype / enrichment keys).
+    attributes: dict[str, Any]
+
+
+# VT-267 PR-C: the only L1 business_profile keys the owner wizard may write. Everything else
+# (derived archetype, *_context enrichment from apify_gbp/swiggy/zomato, agent reflections) is
+# off-limits to the web edit surface. upsert_business_profile MERGEs (not clobbers), so writing
+# only these keys preserves the enrichment siblings.
+_WIZARD_EDITABLE_PROFILE_KEYS = frozenset(
+    {"business_name", "business_type", "preferred_language", "owner_curated_context"}
+)
+
+
 def _open_run(tenant_id: UUID) -> UUID:
     """Open a pipeline_runs row for observability of this onboarding turn."""
     run_id = uuid4()
@@ -130,3 +147,43 @@ async def onboard_step(
         "next_prompt": next_prompt,
         "run_id": str(run_id),
     }
+
+
+@router.post("/api/orchestrator/integrations/onboard/business-profile")
+def save_business_profile(
+    body: BusinessProfileSaveBody,
+    x_internal_secret: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """VT-267 PR-C — persist owner-edited business_profile fields from the wizard.
+
+    Validated against the editable allowlist, then MERGEd into the tenant's single L1
+    'business_profile' entity via ``upsert_business_profile`` (RLS-scoped, MERGE-not-clobber,
+    so enrichment siblings survive). team-web calls this server-side after authenticating the
+    owner session; INTERNAL_API_SECRET gates it. CL-390: business identity, not customer PII.
+    """
+    if not _verify_internal_secret(x_internal_secret):
+        raise HTTPException(status_code=401, detail="invalid internal secret")
+    try:
+        tenant_uuid = UUID(body.tenant_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="invalid tenant_id") from None
+
+    # Reject any key outside the owner-editable allowlist (don't let the web surface write
+    # derived/enrichment L1 attributes).
+    unknown = set(body.attributes) - _WIZARD_EDITABLE_PROFILE_KEYS
+    if unknown:
+        raise HTTPException(
+            status_code=400,
+            detail=f"non-editable profile keys rejected: {sorted(unknown)}",
+        )
+    if not body.attributes:
+        raise HTTPException(status_code=400, detail="no editable attributes provided")
+
+    from orchestrator.knowledge import upsert_business_profile
+
+    entity_id = upsert_business_profile(tenant_uuid, body.attributes)
+    logger.info(
+        "save_business_profile tenant=%s keys=%s entity=%s",
+        tenant_uuid, sorted(body.attributes), entity_id,
+    )
+    return {"ok": True, "entity_id": str(entity_id)}
