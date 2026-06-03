@@ -537,6 +537,12 @@ def _run_supervisor_path(
         "_build_l4_skills",
         lambda tid, req: (context_builder_mod.L4Skills(), False),
     )
+    # VT-73: pre-flight validate_context_isolation does a DB re-query; this unit
+    # test runs the node without a pool — stub no-op (the isolation check has its
+    # own live canary, tests/orchestrator/test_context_isolation.py).
+    monkeypatch.setattr(
+        "orchestrator.context_validator.validate_context_isolation", lambda ctx: None
+    )
 
     route_keys: list[str] = []
     real_route = routing.route_after_orchestrator
@@ -723,6 +729,12 @@ def test_sales_recovery_node_passes_bundle_to_agent(
         "_build_l4_skills",
         lambda tid, req: (context_builder_mod.L4Skills(), False),
     )
+    # VT-73: pre-flight validate_context_isolation does a DB re-query; this unit
+    # test runs the node without a pool — stub no-op (the isolation check has its
+    # own live canary, tests/orchestrator/test_context_isolation.py).
+    monkeypatch.setattr(
+        "orchestrator.context_validator.validate_context_isolation", lambda ctx: None
+    )
 
     received: dict[str, Any] = {}
 
@@ -827,6 +839,12 @@ def test_spawn_sales_recovery_attaches_bundle_with_user_request(
         context_builder_mod,
         "_build_l4_skills",
         lambda tid, req: (context_builder_mod.L4Skills(), False),
+    )
+    # VT-73: pre-flight validate_context_isolation does a DB re-query; this unit
+    # test runs the node without a pool — stub no-op (the isolation check has its
+    # own live canary, tests/orchestrator/test_context_isolation.py).
+    monkeypatch.setattr(
+        "orchestrator.context_validator.validate_context_isolation", lambda ctx: None
     )
 
     tenant_id = uuid4()
