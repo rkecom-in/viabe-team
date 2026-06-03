@@ -44,6 +44,8 @@ const HELP = [
   '/alerts — open escalations for your businesses',
   '/status — watchdog health (crash/stall/misbehaviour)',
   '/runs — recent agent runs',
+  '/ack REF#xxxxxx — acknowledge an escalation',
+  '/resolve REF#xxxxxx — resolve an escalation',
   '/help — this message',
 ].join('\n')
 

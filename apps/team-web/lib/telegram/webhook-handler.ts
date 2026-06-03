@@ -20,6 +20,7 @@ import { timingSafeEqual } from 'node:crypto'
 
 import { serverSecretClient } from '@/lib/supabase-client'
 
+import { actByReference } from '@/lib/telegram/actions'
 import { dispatchReadCommand, parseCommand } from '@/lib/telegram/commands'
 import { resolveOperatorFromTelegram } from '@/lib/telegram/identity'
 import { escapeHtml } from '@/lib/telegram/send'
@@ -96,6 +97,13 @@ export async function handleUpdate(
     return escapeHtml('Not authorized. Open the Viabe ops console, generate a link code, then send /link <code> here.')
   }
 
-  // 4b. Read commands (scoped + de-identified). Mutating actions are added next.
+  // 4b. Mutating actions (/ack, /resolve) — IDOR-safe: resolve the escalation within the
+  //     operator's OWN scoped set, act on the server-resolved tenant/id, audit (see actions.ts).
+  if (parsed.cmd === '/ack' || parsed.cmd === '/resolve') {
+    const action = parsed.cmd === '/ack' ? 'ack' : 'resolve'
+    return actByReference(operator, parsed.args[0] ?? '', action, client)
+  }
+
+  // 4c. Read commands (scoped + de-identified).
   return dispatchReadCommand(parsed, operator, client)
 }
