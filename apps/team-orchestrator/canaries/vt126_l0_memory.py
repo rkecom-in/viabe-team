@@ -1,6 +1,14 @@
 #!/usr/bin/env python3
 """VT-126 L0 memory orchestrator-agent integration canary (Rule #15, DR-15).
 
+SUPERSEDED-IN-PART by VT-225: the L0 read gate now counts DISTINCT contributing
+tenants (l0_cell_contributors), not row-level observation_count. A3/A4 below
+exercise the OLD observation-only gate — a 10-observation single-tenant cell is
+no longer admitted (that was the poisoning vector VT-225 closed). The current
+admission contract is canaried in-suite at
+``tests/orchestrator/observability/test_l0_kanon_admission.py`` (live PG, runs in
+pre-push). Update A3/A4 here to seed 10 DISTINCT tenants before re-running.
+
 Subshell-source ONLY ``.viabe/secrets/supabase-dev.env``:
 
     cd apps/team-orchestrator

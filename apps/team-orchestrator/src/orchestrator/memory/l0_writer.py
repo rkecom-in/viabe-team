@@ -69,10 +69,13 @@ def write_l0_fragment_workflow(
         }
 
     try:
+        # VT-225: pass the contributing tenant so per-tenant k-anon admission
+        # (l0_cell_contributors) is recorded atomically with the fragment write.
         result = write_l0_fragment(
             fragment_type=fragment_type,
             cohort_key=cohort_key,
             content=content,
+            tenant_id=tenant_uuid,
         )
     except PiiInContentError as exc:
         return {"status": "rejected_pii", "reason": str(exc)}
@@ -88,4 +91,5 @@ def write_l0_fragment_workflow(
         "fragment_id": result["fragment_id"],
         "observation_count": result["observation_count"],
         "inserted": result["inserted"],
+        "contributor_count": result["contributor_count"],
     }
