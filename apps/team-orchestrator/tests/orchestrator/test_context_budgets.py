@@ -45,6 +45,7 @@ def _stub_db_backed_builders(monkeypatch: pytest.MonkeyPatch) -> None:
     )
     monkeypatch.setattr(cb, "_build_ledger_summary", lambda tid: (LedgerSummary(), True))
     monkeypatch.setattr(cb, "_build_l3_priors", lambda tid, rid: (cb.L3Priors(), False))
+    monkeypatch.setattr(cb, "_build_l4_skills", lambda tid, req: (cb.L4Skills(), False))
 
 
 _EFFECTIVE_CAP = 6400
@@ -150,5 +151,6 @@ def test_meta_token_count_is_sum_of_five_content_sections() -> None:
         + _estimate_tokens(bundle.attribution_snapshot)
         + _estimate_tokens(bundle.pending_owner_inputs)
         + _estimate_tokens(bundle.l3_priors)
+        + _estimate_tokens(bundle.l4_skills)
     )
     assert bundle.meta.token_count == expected

@@ -37,6 +37,7 @@ superseded: the campaigns + owner_inputs + episodic_events tables now EXIST and 
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import asdict, dataclass, field, is_dataclass, replace
 from datetime import UTC, datetime
 from functools import lru_cache
@@ -52,6 +53,8 @@ from orchestrator.knowledge import l2_query
 from orchestrator.knowledge.l2_types import L2EventType
 from orchestrator.templates_registry import approved_template_names
 from orchestrator.types.trigger_reason import TriggerReason
+
+logger = logging.getLogger(__name__)
 
 _BUDGETS_PATH = Path(__file__).parent.parent.parent / "config" / "context_budgets.yaml"
 
@@ -104,6 +107,25 @@ class L3Priors:
     available: bool = False
     patterns: list[dict[str, Any]] = field(default_factory=list)
     note: str = _L3_NO_PRIOR_NOTE
+
+
+_L4_NO_SKILLS_NOTE = (
+    "no L4 domain-knowledge documents available — reason from first principles "
+    "and this tenant's own data"
+)
+
+
+@dataclass(frozen=True, slots=True)
+class L4Skills:
+    """VT-70 — lightweight L4 corpus pointers for the tenant's query (title +
+    excerpt + score). The agent pulls FULL doc bodies on demand via the
+    ``retrieve_l4_skills`` MCP tool; the bundle stays small. ``available=False`` +
+    ``note`` is the marker when the corpus is empty / retrieval unavailable —
+    NEVER fabricated knowledge (Pillar 4)."""
+
+    available: bool = False
+    skills: list[dict[str, Any]] = field(default_factory=list)
+    note: str = _L4_NO_SKILLS_NOTE
 
 
 @dataclass(frozen=True, slots=True)
@@ -162,6 +184,7 @@ _DEFAULT_SECTION_KEYS = (
     "attribution_snapshot",
     "pending_owner_inputs",
     "l3_priors",
+    "l4_skills",
 )
 
 
@@ -195,6 +218,7 @@ class SalesRecoveryContext:
     )
     pending_owner_inputs: list[OwnerInput] = field(default_factory=list)
     l3_priors: L3Priors = field(default_factory=L3Priors)
+    l4_skills: L4Skills = field(default_factory=L4Skills)
     meta: ContextMeta = field(default_factory=_default_meta)
     # CL-190: True = real data; False = safe-empty fallback (substrate absent
     # or no rows for tenant). Keys are the five section names below.
@@ -335,6 +359,50 @@ def _build_l3_priors(tenant_id: UUID, run_id: UUID) -> tuple[L3Priors, bool]:
     if not patterns:
         return L3Priors(available=False, note=_L3_NO_PRIOR_NOTE), False
     return L3Priors(available=True, patterns=patterns, note=""), True
+
+
+def _build_l4_skills(tenant_id: UUID, user_request: str) -> tuple[L4Skills, bool]:
+    """L4 corpus retrieval (VT-70) — embeds the owner request, returns the top
+    applicable domain-knowledge docs as LIGHTWEIGHT pointers (title + excerpt +
+    score); the agent pulls full bodies via the ``retrieve_l4_skills`` MCP tool.
+
+    Best-effort: L4 is enrichment — a missing VOYAGE_API_KEY, a voyage outage, or
+    an empty corpus yields the structured no-skills marker (NOT fabricated
+    knowledge, Pillar 4) and never breaks the bundle. Completeness flag = True
+    only when real docs are returned.
+    """
+    from orchestrator.knowledge.l4_query import retrieve_documents
+
+    try:
+        with tenant_connection(tenant_id) as conn:
+            raw = conn.execute(
+                "SELECT business_type, city_tier FROM tenants WHERE id = %s",
+                (str(tenant_id),),
+            ).fetchone()
+        row = cast("dict[str, Any]", raw) if raw else {}
+        docs = retrieve_documents(
+            user_request,
+            business_type=row.get("business_type"),
+            city_tier=row.get("city_tier"),
+            top_k=5,
+        )
+    except Exception:  # noqa: BLE001 — L4 is best-effort enrichment; never break dispatch
+        logger.warning("L4 retrieval failed (tenant=%s); proceeding without", tenant_id)
+        return L4Skills(available=False, note=_L4_NO_SKILLS_NOTE), False
+
+    if not docs:
+        return L4Skills(available=False, note=_L4_NO_SKILLS_NOTE), False
+    skills = [
+        {
+            "title": d.title,
+            "tags": d.tags,
+            "priority": d.priority,
+            "score": round(d.score, 4) if d.score is not None else None,
+            "excerpt": d.body[:300],
+        }
+        for d in docs
+    ]
+    return L4Skills(available=True, skills=skills, note=""), True
 
 
 def _build_recent_campaigns(tenant_id: UUID) -> tuple[list[CampaignSnapshot], bool]:
@@ -504,6 +572,7 @@ def build_sales_recovery_context(
     attribution_snapshot, as_ok = _build_attribution_snapshot(tenant_id)
     pending_owner_inputs, oi_ok = _build_pending_owner_inputs(tenant_id)
     l3_priors, l3_ok = _build_l3_priors(tenant_id, run_id)
+    l4_skills, l4_ok = _build_l4_skills(tenant_id, user_request)
     recovery_target_multiplier, recovery_target_floor_paise = _build_recovery_target_config(tenant_id)
 
     data_completeness = {
@@ -513,6 +582,7 @@ def build_sales_recovery_context(
         "attribution_snapshot": as_ok,
         "pending_owner_inputs": oi_ok,
         "l3_priors": l3_ok,
+        "l4_skills": l4_ok,
     }
 
     def _total() -> int:
@@ -523,13 +593,18 @@ def build_sales_recovery_context(
             + _estimate_tokens(attribution_snapshot)
             + _estimate_tokens(pending_owner_inputs)
             + _estimate_tokens(l3_priors)
+            + _estimate_tokens(l4_skills)
         )
 
-    # Truncation order (§3.3): L3 priors (cross-tenant background, most droppable)
-    # -> oldest owner inputs -> campaigns down to 3 -> top_spenders 20/10/5 ->
-    # drop business hours -> overflow.
+    # Truncation order (§3.3): L4 skills + L3 priors (cross-tenant/global
+    # background, most droppable) -> oldest owner inputs -> campaigns down to 3 ->
+    # top_spenders 20/10/5 -> drop business hours -> overflow.
     truncated: list[str] = []
     while _total() > effective_cap:
+        if l4_skills.skills:
+            l4_skills = L4Skills(available=False, note=_L4_NO_SKILLS_NOTE)
+            truncated.append("l4_skills")
+            continue
         if l3_priors.patterns:
             l3_priors = L3Priors(available=False, note=_L3_NO_PRIOR_NOTE)
             truncated.append("l3_priors")
@@ -582,6 +657,7 @@ def build_sales_recovery_context(
         attribution_snapshot=attribution_snapshot,
         pending_owner_inputs=pending_owner_inputs,
         l3_priors=l3_priors,
+        l4_skills=l4_skills,
         meta=meta,
         data_completeness=data_completeness,
         recovery_target_multiplier=recovery_target_multiplier,
@@ -738,6 +814,22 @@ def serialize_bundle_for_prompt(
         )
     else:
         parts.append(f"- {l3.note}")
+
+    l4 = context.l4_skills
+    parts.append("\n## L4 domain-knowledge skills (retrieved)")
+    if l4.available and l4.skills:
+        skill_lines = "\n".join(
+            f"  - {s['title']} (tags: {', '.join(s.get('tags') or []) or 'none'}; "
+            f"score: {s.get('score')}): {s.get('excerpt', '')}"
+            for s in l4.skills
+        )
+        parts.append(
+            f"- relevant docs:\n{skill_lines}\n"
+            "- Excerpts only — call ``retrieve_l4_skills`` for the full text of a "
+            "doc before relying on it."
+        )
+    else:
+        parts.append(f"- {l4.note}")
 
     parts.append("\n## Available WhatsApp templates (orchestrator-approved)")
     parts.append(

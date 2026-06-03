@@ -30,6 +30,10 @@ dependencies = [
     "pydantic",
     "supabase",
     "pgvector",
+    # VT-70 — L4 skill-corpus embeddings (voyage-4-lite, vector(1024)). The
+    # first production embedding call (L1 took caller-supplied vectors; the SDK
+    # was previously test-only via importorskip). Required for L4 retrieval.
+    "voyageai>=0.3",
     "psycopg[binary]",
     "psycopg-pool",
     "pyyaml",
