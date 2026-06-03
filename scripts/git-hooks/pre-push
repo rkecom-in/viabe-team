@@ -114,6 +114,11 @@ if [ "$ORCH_CHANGED" = 1 ] && [ "${VIABE_PREPUSH_SKIP_DB:-0}" != 1 ]; then
     DBNAME="viabe_prepush_$$"
     DBURL="${ADMIN_DSN%/*}/$DBNAME"
     say "local Postgres reachable — running migrations + orchestrator DB jobs vs throwaway $DBNAME"
+    # VT-310: reap leftover canary/throwaway DBs FIRST. They hold GRANTs on the
+    # shared roles, so without this the DROP ROLE below silently fails → stale
+    # grants → the RLS migration tests false-fail with "permission denied"
+    # (bit the L2 + L3 builds 3x). The reaper drops test DBs + the shared roles.
+    VIABE_REAP_DSN="$ADMIN_DSN" bash "$REPO_ROOT/scripts/reap_test_dbs.sh" >/dev/null 2>&1 || true
     # Mimic CI's FRESH cluster: mig 015/027 CREATE ROLE is NOT idempotent, so
     # drop the throwaway DB FIRST (clears its privilege deps), THEN the cluster
     # roles, THEN recreate — else apply halts at 015 (VT-260 / local-halt lesson).
