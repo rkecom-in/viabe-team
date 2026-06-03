@@ -10,7 +10,16 @@
 -- tables. It is NOLOGIN — entered only via SET ROLE from the privileged role
 -- that authenticates the connection.
 
-CREATE ROLE app_role NOLOGIN;
+-- VT-271: guard CREATE ROLE so re-applying on a cluster where the role already exists is a
+-- no-op (CREATE ROLE has no IF NOT EXISTS; the bare form errors on re-run). Roles are
+-- cluster-global, so a fresh DB on a dirty cluster (or a re-run) would otherwise halt here.
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'app_role') THEN
+        CREATE ROLE app_role NOLOGIN;
+    END IF;
+END
+$$;
 
 -- The public schema grants USAGE to PUBLIC by default, but be explicit.
 GRANT USAGE ON SCHEMA public TO app_role;
