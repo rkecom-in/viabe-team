@@ -26,6 +26,7 @@ from orchestrator.context_builder import (
     AttributionSnapshot,
     BusinessProfile,
     L3Priors,
+    L4Skills,
     LedgerSummary,
     SalesRecoveryContext,
     build_sales_recovery_context,
@@ -51,6 +52,7 @@ def _stub_db_backed_builders(monkeypatch: pytest.MonkeyPatch) -> None:
     )
     monkeypatch.setattr(cb, "_build_ledger_summary", lambda tid: (LedgerSummary(), True))
     monkeypatch.setattr(cb, "_build_l3_priors", lambda tid, rid: (L3Priors(), False))
+    monkeypatch.setattr(cb, "_build_l4_skills", lambda tid, req: (L4Skills(), False))
 
 # §4.1 — the actual SalesRecoveryContext dataclass fields.
 # Exec-6.85: ``user_request`` joins the bundle so the specialist receives
@@ -66,6 +68,7 @@ _EXPECTED_FIELDS = {
     "attribution_snapshot",
     "pending_owner_inputs",
     "l3_priors",
+    "l4_skills",
     "meta",
     "data_completeness",
     # VT-164: per-tenant recovery-target config fields
@@ -109,6 +112,7 @@ def test_build_sales_recovery_context_safe_empty_when_substrates_absent() -> Non
         "attribution_snapshot": False,
         "pending_owner_inputs": False,
         "l3_priors": False,  # VT-69: no prior (stubbed unavailable)
+        "l4_skills": False,  # VT-70: no corpus docs (stubbed unavailable)
     }
 
 
