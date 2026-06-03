@@ -23,6 +23,12 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
+from orchestrator.direct_handlers.consent_required_handler import (
+    consent_required_handler,
+)
+from orchestrator.direct_handlers.data_inputs_enable_handler import (
+    data_inputs_enable_handler,
+)
 from orchestrator.direct_handlers.dsr_handler import dsr_handler
 from orchestrator.direct_handlers.dupe_handler import dupe_handler
 from orchestrator.direct_handlers.opt_out_handler import opt_out_handler
@@ -39,4 +45,7 @@ HANDLERS: dict[str, Handler] = {
     "dupe_handler": dupe_handler,
     "status_ping_handler": status_ping_handler,
     "template_error_handler": template_error_handler,
+    # VT-303 — owner_inputs consent gate (Option B) + enable path.
+    "consent_required_handler": consent_required_handler,
+    "data_inputs_enable_handler": data_inputs_enable_handler,
 }
