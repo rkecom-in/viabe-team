@@ -44,6 +44,8 @@ TriggerKind = Literal[
     "tenant_isolation_breach",  # Detector-1 (P0 — confirmed cross-tenant exposure)
     "dsr_rate_anomaly",  # Detector-3 (DSR request-rate over threshold)
     "pii_in_log",  # Detector-5 (unredacted PII found in pipeline_steps payloads)
+    # VT-76 opt-out reconstitution SLA (fired by the daily reconstitution sweep).
+    "reconstitution_sla_breach",  # P0 — opted-out customer un-reconstituted past 8d
 ]
 
 Severity = Literal["critical", "warning"]
@@ -62,6 +64,8 @@ _SEVERITY_BY_KIND: dict[TriggerKind, Severity] = {
     "tenant_isolation_breach": "critical",
     "dsr_rate_anomaly": "warning",
     "pii_in_log": "critical",
+    # VT-76 opt-out reconstitution SLA.
+    "reconstitution_sla_breach": "critical",
 }
 
 # VT-79 Detector-3: DSR request-rate threshold (Phase-1 fixed value; cohort

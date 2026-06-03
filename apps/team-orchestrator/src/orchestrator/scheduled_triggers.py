@@ -261,6 +261,23 @@ def l3_construction_scheduled(
         logger.exception("VT-68 L3 construction scheduled run failed")
 
 
+def reconstitution_sweep_scheduled(
+    scheduled_time: datetime,
+    actual_time: datetime,
+) -> None:
+    """DBOS scheduled handler — fires daily 04:00 IST (VT-76). Runs the opt-out
+    7-day reconstitution sweep + 8-day SLA-breach detection (the privacy
+    mechanism over the VT-66 hook). Pure SQL (no LLM). Best-effort: a sweep
+    failure must not crash the scheduler (the next run + the SLA detector
+    re-catch any stuck customer)."""
+    from orchestrator.privacy.reconstitution import run_reconstitution_sweep_body
+
+    try:
+        run_reconstitution_sweep_body(now=actual_time)
+    except Exception:  # noqa: BLE001 — daily sweep is best-effort; next run retries
+        logger.exception("VT-76 reconstitution scheduled run failed")
+
+
 def run_day39_evaluation_body(now: datetime | None = None) -> list[Any]:
     """Day-39 evaluation body — REAL (VT-176).
 
@@ -669,6 +686,11 @@ def register_scheduled_triggers() -> None:
     DBOS.scheduled(MONTHLY_IMPACT_CRON)(monthly_impact_scheduled)
     DBOS.scheduled(APPROVAL_TIMEOUT_SWEEP_CRON)(approval_timeout_sweep_scheduled)
     DBOS.scheduled(L3_CONSTRUCTION_CRON)(l3_construction_scheduled)
+    # VT-76 (CL-240): 7th handler — opt-out reconstitution sweep. EXTENDS this
+    # surface, NOT a parallel poller. The cron + body live in privacy/reconstitution.
+    from orchestrator.privacy.reconstitution import RECONSTITUTION_CRON
+
+    DBOS.scheduled(RECONSTITUTION_CRON)(reconstitution_sweep_scheduled)
     _registered = True
 
 
@@ -696,6 +718,7 @@ __all__ = [
     "day39_workflow_id",
     "monthly_impact_scheduled",
     "monthly_workflow_id",
+    "reconstitution_sweep_scheduled",
     "register_scheduled_triggers",
     "run_approval_timeout_sweep_body",
     "run_attribution_close_body",
