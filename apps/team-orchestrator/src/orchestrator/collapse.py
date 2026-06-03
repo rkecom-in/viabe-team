@@ -119,6 +119,16 @@ def collapse_campaign_plan(
         campaign_row = cast("dict[str, Any]", raw_campaign)
         campaign_id = UUID(str(campaign_row["id"]))
 
+        # VT-65 PR-2: emit campaign_created to the KG outbox IN THIS TXN (atomic
+        # with the campaign INSERT — a cohort rejection below rolls both back).
+        from orchestrator.knowledge.kg_emit import emit_kg_event
+        from orchestrator.knowledge.kg_vocab import KgEventType
+
+        emit_kg_event(conn, KgEventType.CAMPAIGN_CREATED, tenant_id, {
+            "campaign_id": str(campaign_id),
+            "status": campaign_plan.status.value,
+        })
+
         # VT-241: link the cohort to campaign_recipients IN THIS TRANSACTION
         # (cur-injected, same tenant_connection). FAIL-CLOSED — if any id is
         # unresolvable / cross-tenant, raise CohortRejectedError; the
@@ -162,6 +172,11 @@ def collapse_campaign_plan(
             (str(tenant_id), current_phase, now, str(campaign_id)),
         )
 
+    # Post-commit: drain the outbox (immediate, best-effort; VT-307 sweep is the
+    # backstop). Idempotent — never double-applies, never raises.
+    from orchestrator.knowledge.kg_emit import drain_kg_events
+
+    drain_kg_events(tenant_id)
     return campaign_id
 
 

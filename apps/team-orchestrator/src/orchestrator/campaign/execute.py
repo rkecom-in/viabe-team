@@ -353,7 +353,18 @@ def execute_approved_campaign(
             )
 
     # --- Advance campaign status → sent (D2: stop here, no attribution) ---
-    _advance_campaign_status(conn, tenant_id_str, campaign_id_str)
+    # VT-65 PR-2: the status UPDATE + campaign_sent emit (with the cohort for
+    # TARGETED edges) atomic in one txn — NOT the I/O send loop above.
+    from orchestrator.knowledge.kg_emit import drain_kg_events, emit_kg_event
+    from orchestrator.knowledge.kg_vocab import KgEventType
+
+    with conn.transaction():
+        _advance_campaign_status(conn, tenant_id_str, campaign_id_str)
+        emit_kg_event(conn, KgEventType.CAMPAIGN_SENT, tenant_id_str, {
+            "campaign_id": campaign_id_str,
+            "customer_ids": [r["customer_id"] for r in recipients],
+        })
+    drain_kg_events(tenant_id_str)
 
     summary = {"sent": sent, "skipped_opt_out": skipped_opt_out, "failed": failed}
     logger.info(
