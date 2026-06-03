@@ -73,6 +73,37 @@ _observability_context: ContextVar[ObservabilityContext | None] = ContextVar(
 )
 
 
+def _assert_tool_tenant(
+    ctx: ObservabilityContext | None, tool_args: dict[str, Any], tool_name: str
+) -> None:
+    """VT-73 in-flight isolation seam. When the ambient dispatch context names a
+    tenant and the tool carries a tenant id (top-level ``tenant_id`` arg or a
+    ``payload``/``inputs`` model with a ``tenant_id``), they MUST match. A
+    mismatch raises ``ContextIsolationViolation`` (lazy import to avoid an
+    import-time cycle). Tools with no tenant arg (e.g. self_evaluate) are no-ops.
+    NOTE (VT-73 G2): only @tool_step-decorated tools pass through here; the plain
+    @tool DB functions self-enforce via WHERE tenant_id=%s. Pre-flight is the
+    load-bearing layer — this is belt-and-braces + future-proofing for new tools."""
+    if ctx is None:
+        return
+    tenant_arg: Any = tool_args.get("tenant_id")
+    if tenant_arg is None:
+        for key in ("payload", "inputs", "input"):
+            obj = tool_args.get(key)
+            tenant_arg = getattr(obj, "tenant_id", None)
+            if tenant_arg is not None:
+                break
+    if tenant_arg is None:
+        return
+    if str(tenant_arg) != str(ctx.tenant_id):
+        from orchestrator.context_validator import ContextIsolationViolation
+
+        raise ContextIsolationViolation(
+            f"VT-73 in-flight: tool {tool_name!r} tenant {tenant_arg} != dispatch "
+            f"tenant {ctx.tenant_id}"
+        )
+
+
 # Definition-time registry of decorated tools. Used by:
 # - validate_tool_step_registry() boot hook for envelope-drift check
 # - VT-186 CI gate (later) for static tool-coverage assertions
@@ -172,6 +203,12 @@ def tool_step(
             tokens_output: int | None = None
             model_used: str | None = None
             result: Any = None
+
+            # VT-73 IN-FLIGHT isolation: if the dispatch's observability context
+            # names a tenant AND this tool carries a tenant id, they MUST match —
+            # a mismatch means the tool would touch a tenant other than the
+            # dispatch's. Belt-and-braces over the tools' own WHERE tenant_id=%s.
+            _assert_tool_tenant(ctx, tool_args_dict, resolved_step_name)
 
             try:
                 result = func(*args, **kwargs)

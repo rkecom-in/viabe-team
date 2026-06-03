@@ -532,6 +532,12 @@ def webhook_pipeline_run(
             record_dispatch_terminal_episodic(
                 tenant_id, run_id, final_status, dispatch_result.terminal_path
             )
+            # VT-73 POST-FLIGHT isolation audit: service-role scan of this run's
+            # pipeline_steps — assert no step was logged under another tenant
+            # (catches a leak that escaped pre/in-flight). Best-effort detect+alert.
+            from orchestrator.context_validator import audit_run_isolation
+
+            audit_run_isolation(UUID(run_id), UUID(tenant_id))
     # result.kind == "reject" → observability-only; the run ends clean (completed).
 
     close_webhook_run(tenant_id, run_id, final_status)
