@@ -1,7 +1,7 @@
 ---
 vt_id: VT-1
 title: VT-Pillars — write concept-team-pillars.md
-status: Backlog
+status: Cancelled
 priority: Critical
 sprint: Pre-Sprint 0 - Pillars & Setup
 type: Documentation
@@ -17,6 +17,15 @@ last_updated: 2026-05-25T03:45:00+05:30
 ---
 
 # VT-1 — VT-Pillars — write concept-team-pillars.md
+
+## CLOSURE (2026-06-03, Cancelled — superseded)
+`concept-team-pillars.md` was never authored; the project shipped to near-launch with the pillars
+EMBEDDED + authoritative in `CLAUDE.md` (Pillar 7 = Fazal-authorized merges, enforced),
+`docs/clau/decisions-ledger.md` (CL-424/426 cite Pillar 7), and the CL entries (e.g. Pillar 1 =
+no-LLM-in-pre-filter). `concept-team.md` (VT-16's cross-link target) doesn't exist either.
+Manufacturing a canonical pillars doc from scattered/paraphrased sources is inaccuracy-risk +
+low launch value (Cowork-confirmed 2026-06-03). A clean canonical pillars doc, if ever wanted, is
+a deliberate FRESH task — not this stale Pre-Sprint-0 row. Closes VT-1 + children VT-15, VT-16.
 
 ## Why this parent exists
 Reports product fell into expensive drift through rounds R6→R9 because architectural commitments lived only in conversation. Fixes accumulated as patchwork — regex scrubs, hardcoded constants, value clamps — instead of routing through proper layers. Each round of fixes seeded two more leaks. Reports' `concept.md` was created retroactively, after the damage. Team product launches with `concept-team-pillars.md` from day one, before any code lands, so every CoderC commit and every CoderX review can be tested against an inviolable rulebook.
