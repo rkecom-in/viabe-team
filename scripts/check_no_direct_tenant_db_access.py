@@ -82,6 +82,15 @@ _ALLOWLIST = frozenset(
         # k-anon contributor gate (≥10) per cohort; no assert_tenant_scoped → no
         # Detector-1 false-trip. Same audited-exception discipline as k_anonymity.
         "apps/team-orchestrator/src/orchestrator/knowledge/l3_construction.py",
+        # VT-76 reconstitution sweep — the 3rd sanctioned cross-tenant service-role
+        # read (Cowork-approved 20260604T033000Z). The daily sweep's eligibility +
+        # 8-day-SLA scans find opted-out customers ACROSS the workspace, which a
+        # per-tenant RLS wrapper physically cannot do (it would need to enumerate
+        # tenants first). Both scans project ids + opt_out_at ONLY — never
+        # display_name/phone/email (CL-390). The actual anonymization write goes
+        # through `tenant_connection` (RLS), not direct access. Same documented,
+        # audited cross-tenant-exception discipline as k_anonymity / l3_construction.
+        "apps/team-orchestrator/src/orchestrator/privacy/reconstitution.py",
     }
 )
 
