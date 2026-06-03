@@ -10,6 +10,10 @@
 
 ---
 
+## Phase status (2026-06-04)
+
+**PHASE 1 (Sprint-7 Knowledge + Privacy Architecture) — BUILD COMPLETE + CLOSED.** VT-7 + VT-8 → Done (main `bb88cb7`). Knowledge moat (L1-L4 + composition, VT-66–71) + privacy architecture (wrappers/k-anon/coarsening/reconstitution/DSR + this session's DSR-hardening gates VT-154→160→153) built + canaried + adversarially verified. Residual is NOT Phase-1 build: **Fazal-gated customer-data-go-live prereqs** (VT-78 prod residency [Critical], VT-156 privacy-notice, VT-312 thresholds, VT-313/314/318, tier_2) + **Phase-2** (VT-149/161/311) + rostered fast-follows (VT-304–308/316/317/319). **VT-8 "Done" = build scope; VT-78 residency + VT-156 notice still gate customer-data-go-live (NOT Reports-Jun15).** Full state: `latest-snapshot.md`.
+
 ## Active Standing decisions (load-bearing, do not re-litigate)
 
 | CL/DR | Date | Domain tags | One-line | Status |

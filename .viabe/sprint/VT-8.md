@@ -1,7 +1,7 @@
 ---
 vt_id: VT-8
 title: VT-PrivacyArchitecture — typed wrappers, k-anon, opt-out, DSR, residency
-status: Backlog
+status: Done
 priority: Critical
 sprint: Sprint 7 - Knowledge Architecture
 type: Feature
@@ -13,10 +13,31 @@ exec_order: 2
 branch: "feat/vt-privacy"
 version: "v1.0"
 notion_legacy_id: 356387c2-cc5a-812d-8062-e895eabd76fc
-last_updated: 2026-05-25T03:45:00+05:30
+last_updated: 2026-06-04T06:10:00Z
 ---
 
 # VT-8 — VT-PrivacyArchitecture — typed wrappers, k-anon, opt-out, DSR, residency
+
+## PHASE-1 BUILD COMPLETE 2026-06-04 — VT-8 → Done
+The privacy architecture is built + verified on main: typed DB wrappers + no-direct-access lint (VT-72),
+context isolation pre/post audit (VT-73), k-anon admission k≥10 (VT-74), city coarsening (VT-75), opt-out
+7-day reconstitution (VT-76), DSR export/delete + purge-completable + unscoped-DELETE guard + tenant-anonymize
+completeness (VT-77/145/154/160), breach detection (VT-79), audit hash-chain (VT-80), body redaction
+forward + backfill (VT-144/153), owner_inputs consent gate (VT-303). DSR-purge L1 coverage (VT-158).
+
+**Residual children — NOT Phase-1-build (none is an open CC code row); these are customer-data-GO-LIVE
+prereqs, distinct from Reports-Jun15:**
+- **VT-78** (Backlog, **CRITICAL**) — "Data residency config (ap-south-1/ap-south-2)" = **prod Mumbai
+  residency = Fazal/infra go-live action** (the VT-231 cluster). The privacy CODE is region-agnostic + Done;
+  choosing the prod region is a deploy-time Fazal action, NOT a CC build. **This is a real customer-data-go-live
+  blocker — tracked in the launch checklist, NOT closed by this flip.**
+- **VT-156** (Queued) — privacy-notice publish → Fazal/counsel (customer-messaging-go-live gate, NOT Jun15).
+- **VT-149** (Backlog) — (tenant_id, message_sid) UNIQUE → Phase-2 (operational idempotency, already defended).
+- **VT-161** (Queued) — DBOS cloud-conductor recovery re-verify → Phase-2 (conditional; not wired).
+- VT-147 (Cancelled, dup of VT-153).
+
+VT-8 "Done" = the privacy-architecture BUILD scope. The Fazal-gated go-live prereqs (VT-78 residency, VT-156
+notice) gate **customer-data-go-live**, tracked separately — they do NOT gate Reports-Jun15.
 
 ## Why this parent exists
 DPDPA 2023 is now enforceable in India. A privacy incident in Year 1 ends the company. Reports product handles no PII (it works on retail-location data, not customer data). Team handles dormant-customer ledgers — the most sensitive consumer data the company has ever processed. Privacy cannot be retrofitted; it must be enforced at every architectural boundary from day one.
