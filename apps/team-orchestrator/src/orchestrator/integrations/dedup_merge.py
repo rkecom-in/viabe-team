@@ -101,6 +101,8 @@ def dedup_and_merge(
     from psycopg.types.json import Jsonb
 
     from orchestrator.db.tenant_connection import tenant_connection
+    from orchestrator.knowledge.kg_emit import drain_kg_events, emit_kg_event
+    from orchestrator.knowledge.kg_vocab import KgEventType
 
     now = now or datetime.now(UTC)
     fc = field_confidences
@@ -158,28 +160,39 @@ def dedup_and_merge(
             new_phone = existing["phone_e164"] or (
                 phone_e164 if _eligible("phone_e164", fc) else None
             )
-            conn.execute(
-                "UPDATE customers SET display_name = %s, email = %s, "
-                "phone_e164 = %s, acquired_via = %s, updated_at = %s WHERE id = %s",
-                (new_name, new_email, new_phone, new_acq, now, str(cid)),
-            )
+            # VT-65 PR-2: UPDATE + customer_updated emit atomic in one txn.
+            with conn.transaction():
+                conn.execute(
+                    "UPDATE customers SET display_name = %s, email = %s, "
+                    "phone_e164 = %s, acquired_via = %s, updated_at = %s WHERE id = %s",
+                    (new_name, new_email, new_phone, new_acq, now, str(cid)),
+                )
+                emit_kg_event(conn, KgEventType.CUSTOMER_UPDATED, tenant_id, {
+                    "customer_id": str(cid), "phone_e164": new_phone,
+                })
             logger.info(
                 "dedup_and_merge MERGED tenant=%s customer=%s acquired_via=%s",
                 tenant_id, cid, new_acq,
             )
+            drain_kg_events(tenant_id)
             return MergeResult("merged", cid, tuple(new_acq), None)
 
         # --- no match: INSERT (only eligible canonical fields) ---
         ins_name = display_name if _eligible("display_name", fc) else None
         ins_email = email if _eligible("email", fc) else None
-        row = conn.execute(
-            "INSERT INTO customers "
-            "(tenant_id, display_name, phone_e164, email, acquired_via, source) "
-            "VALUES (%s, %s, %s, %s, %s, %s) RETURNING id",
-            (str(tenant_id), ins_name, phone_e164, ins_email,
-             [acquired_via], acquired_via),
-        ).fetchone()
-        cid = row["id"] if isinstance(row, dict) else row[0]
+        # VT-65 PR-2: INSERT + customer_created emit atomic in one txn.
+        with conn.transaction():
+            row = conn.execute(
+                "INSERT INTO customers "
+                "(tenant_id, display_name, phone_e164, email, acquired_via, source) "
+                "VALUES (%s, %s, %s, %s, %s, %s) RETURNING id",
+                (str(tenant_id), ins_name, phone_e164, ins_email,
+                 [acquired_via], acquired_via),
+            ).fetchone()
+            cid = row["id"] if isinstance(row, dict) else row[0]
+            emit_kg_event(conn, KgEventType.CUSTOMER_CREATED, tenant_id, {
+                "customer_id": str(cid), "phone_e164": phone_e164,
+            })
 
     # Register the privacy-preserving token outside the RLS block (its own
     # connection), linking it to the new customer for the redaction layer.
@@ -195,6 +208,7 @@ def dedup_and_merge(
         "dedup_and_merge INSERTED tenant=%s customer=%s acquired_via=%s",
         tenant_id, cid, acquired_via,
     )
+    drain_kg_events(tenant_id)
     return MergeResult("inserted", cid, (acquired_via,), None)
 
 
