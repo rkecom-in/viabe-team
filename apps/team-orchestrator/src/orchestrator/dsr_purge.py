@@ -97,9 +97,20 @@ logger = logging.getLogger(__name__)
 
 # Anonymization values for the tenants row tombstone. Kept here (not
 # inlined) so a Fazal-driven policy change touches one constant set.
+#
+# VT-160: EVERY identifying column on tenants must be irreversibly scrubbed —
+# NULL (not a predictable token) for the PII anchors. The earlier set covered
+# only business_name/whatsapp_number; owner_phone (mig 050 — globally-UNIQUE-
+# indexed, the strongest re-id anchor), owner_contact (mig 066) and locality
+# (mig 001) were left intact, leaving the subject re-identifiable post-deletion
+# (DPDP-incomplete). city_tier is deliberately NOT scrubbed — it is already
+# coarsened (tier_1/2/3), not PII. opt_out is the operational flag, not PII.
 _TENANT_ANONYMIZE = {
     "business_name": "[deleted]",
     "whatsapp_number": None,
+    "owner_phone": None,    # mig 050 — globally-unique re-id anchor
+    "owner_contact": None,  # mig 066
+    "locality": None,       # mig 001 — geographic identifier
     "opt_out": True,
 }
 
@@ -358,15 +369,18 @@ def _anonymize_tenant_row(conn: Any, tenant_id: UUID) -> bool:
     leaves no recoverable subject identity behind. Returns True when
     the UPDATE affected one row.
     """
+    # Build the SET clause from _TENANT_ANONYMIZE so a newly-added identifying
+    # column = one dict entry (no dict/UPDATE drift — the exact gap VT-160
+    # closed). The keys are module-level constants (never user input), so
+    # interpolating them as column names is injection-safe; the VALUES are
+    # bound as parameters.
+    columns = list(_TENANT_ANONYMIZE)
+    set_clause = ", ".join(f"{col} = %s" for col in columns)
+    params = [_TENANT_ANONYMIZE[col] for col in columns]
+    params.append(str(tenant_id))
     cur = conn.execute(
-        "UPDATE tenants SET business_name = %s, whatsapp_number = %s, "
-        "opt_out = %s WHERE id = %s",
-        (
-            _TENANT_ANONYMIZE["business_name"],
-            _TENANT_ANONYMIZE["whatsapp_number"],
-            _TENANT_ANONYMIZE["opt_out"],
-            str(tenant_id),
-        ),
+        f"UPDATE tenants SET {set_clause} WHERE id = %s",  # noqa: S608 — keys are module constants
+        tuple(params),
     )
     return int(cur.rowcount) == 1
 
