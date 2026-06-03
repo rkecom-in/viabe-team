@@ -96,12 +96,21 @@ def test_tamper_detected(pool):
                 ('{"phone_token": "X", "resolved": false}', h),
             )
             result = verify_chain(conn)
+            # Restore the original payload so the shared-DB chain is left clean
+            # (other test files run whole-table verify_chain).
+            conn.execute(
+                "UPDATE privacy_audit_log SET payload = %s::jsonb WHERE this_hash = %s",
+                ('{"phone_token": "tamper-me", "resolved": true}', h),
+            )
         finally:
             conn.execute(
                 "ALTER TABLE privacy_audit_log ENABLE TRIGGER privacy_audit_log_no_row_mutate"
             )
     assert result.ok is False
     assert result.broken_seq is not None
+    # chain restored → whole-table verify is clean again
+    with pool.connection() as conn:
+        assert verify_chain(conn).ok
 
 
 def test_update_blocked_by_immutability_trigger(pool):
