@@ -11,6 +11,7 @@
 import { serverSecretClient } from '@/lib/supabase-client'
 
 import { OperatorRole } from '@/lib/auth/roles'
+import { forwardRunControl } from '@/lib/orchestrator-client'
 
 type Client = { from: (t: string) => any }
 
@@ -134,19 +135,20 @@ export async function escalateRun(
   return { ok: true }
 }
 
-/** Flag a run for an orchestrator control (pause/steer/override). v1: records the INTENT
- *  in ops_audit (observable, auditable); actual run-control wiring is the orchestrator-side
- *  follow-up (DBOS pause/redirect). Tenant RESOLVED server-side (no IDOR). */
+/** VT-300 — issue a run-control (pause/steer/override) on a live run. Fast team-web pre-check
+ *  (resolve tenant server-side + assignment) for UX, then forward to the orchestrator's
+ *  AUTHORITATIVE endpoint which re-derives the tenant + re-checks operator_assignments server-side
+ *  (the enforcement leg — team-web auth alone is fail-open) + writes run_controls + audits. The
+ *  graph holds the send at the next node boundary if a control is pending. */
 export async function flagRunControl(
   op: ActingOperator, runId: string, control: string,
   client: Client = serverSecretClient(),
+  forward: typeof forwardRunControl = forwardRunControl,
 ): Promise<{ ok: boolean; reason?: string }> {
   const tenantId = await _resolveRunTenant(client, runId)
   if (!tenantId) return { ok: false, reason: 'run not found' }
   if (!_authorized(op, tenantId)) return { ok: false, reason: 'not assigned to this tenant' }
-  await client.from('ops_audit').insert({
-    operator_id: op.operatorId, tenant_id: tenantId, action: 'control_requested',
-    target_kind: 'run', target_id: runId, detail: control,
-  })
-  return { ok: true }
+  // Authoritative enforcement + audit happen in the orchestrator (re-derive + re-check).
+  const res = await forward(op.operatorId, runId, control)
+  return res.ok ? { ok: true } : { ok: false, reason: res.reason }
 }
