@@ -61,10 +61,20 @@ def substrate():  # type: ignore[no-untyped-def]
 def _new_tenant(dsn: str, *, name: str = "DSR purge test") -> UUID:
     with psycopg.connect(dsn, autocommit=True) as conn:
         row = conn.execute(
+            # VT-160: seed every identifying column so the anonymize assertions
+            # have real PII to scrub (owner_phone is UNIQUE-indexed → keep it
+            # unique per tenant; locality + owner_contact carry subject PII).
             "INSERT INTO tenants (business_name, plan_tier, phase, "
-            "whatsapp_number) VALUES (%s, 'founding', 'paid_active', %s) "
+            "whatsapp_number, owner_phone, owner_contact, locality) "
+            "VALUES (%s, 'founding', 'paid_active', %s, %s, %s, %s) "
             "RETURNING id",
-            (name, f"+9199{uuid4().int % 10**8:08d}"),
+            (
+                name,
+                f"+9199{uuid4().int % 10**8:08d}",
+                f"+9188{uuid4().int % 10**8:08d}",
+                "Owner Contact PII",
+                "Andheri West",
+            ),
         ).fetchone()
     assert row is not None
     return UUID(str(row[0]))
@@ -220,7 +230,8 @@ def _tenant_row(dsn: str, tenant_id: UUID) -> dict[str, Any] | None:
     """Default psycopg row_factory returns tuples — index positionally."""
     with psycopg.connect(dsn, autocommit=True) as conn:
         row = conn.execute(
-            "SELECT business_name, whatsapp_number, opt_out FROM tenants "
+            "SELECT business_name, whatsapp_number, opt_out, "
+            "owner_phone, owner_contact, locality FROM tenants "
             "WHERE id = %s",
             (str(tenant_id),),
         ).fetchone()
@@ -230,6 +241,9 @@ def _tenant_row(dsn: str, tenant_id: UUID) -> dict[str, Any] | None:
         "business_name": row[0],
         "whatsapp_number": row[1],
         "opt_out": row[2],
+        "owner_phone": row[3],
+        "owner_contact": row[4],
+        "locality": row[5],
     }
 
 
@@ -575,4 +589,84 @@ def test_vt154_unscoped_delete_guard_tenant_predicate_present():
         assert "tenant_id" in stmt, (
             f"VT-154: unscoped DELETE found in dsr_purge: {match.group(0)!r}. "
             "Every DELETE on the privileged purge path MUST be tenant-scoped."
+        )
+
+
+# --- VT-160: tenant-anonymize completeness ----------------------------------
+
+
+def test_vt160_anonymize_scrubs_all_identifying_columns(substrate):  # type: ignore[no-untyped-def]
+    """VT-160 — DSR purge must irreversibly scrub EVERY identifying column on
+    the tenants row, not just business_name/whatsapp_number.
+
+    Pre-VT-160 the anonymize left owner_phone (mig 050, globally-UNIQUE-indexed
+    → the strongest re-id anchor), owner_contact (mig 066) and locality (mig 001)
+    intact — the subject stayed re-identifiable after a deletion DSR (DPDP-
+    incomplete). Asserts: post-anonymize NO original PII value survives in ANY
+    identifying column, the scrub is NULL (not a predictable/reversible token),
+    the tenants row is KEPT (FK integrity for privacy_audit_log + dsr_tickets),
+    and the scrub is idempotent on replay.
+    """
+    from orchestrator.dsr_purge import purge_tenant_data
+
+    tenant_id = _new_tenant(substrate.dsn, name="VT-160 subject")
+    before = _tenant_row(substrate.dsn, tenant_id)
+    assert before is not None
+    # Sanity: the seed actually planted PII in every identifying column.
+    seeded_pii = {
+        before["business_name"], before["whatsapp_number"],
+        before["owner_phone"], before["owner_contact"], before["locality"],
+    }
+    for col in ("whatsapp_number", "owner_phone", "owner_contact", "locality"):
+        assert before[col], f"seed planted no PII in {col}"
+
+    ticket_id = _open_dsr_ticket(substrate.dsn, tenant_id)
+    result = purge_tenant_data(ticket_id)
+    assert result.tenant_anonymized is True
+
+    after = _tenant_row(substrate.dsn, tenant_id)
+    assert after is not None, "tenants row must be KEPT (FK integrity), not deleted"
+    # business_name is tombstoned; every other identifying anchor is NULL.
+    assert after["business_name"] == "[deleted]"
+    assert after["whatsapp_number"] is None
+    assert after["owner_phone"] is None
+    assert after["owner_contact"] is None
+    assert after["locality"] is None
+    # No original PII survives anywhere on the row (no reversible token).
+    surviving = {v for v in after.values() if isinstance(v, str)}
+    leaked = (seeded_pii & surviving) - {"[deleted]"}
+    assert not leaked, f"VT-160: original PII survived the anonymize: {leaked}"
+
+    # Idempotent replay: the ticket is already completed → no-op, row stays scrubbed.
+    replay = purge_tenant_data(ticket_id)
+    assert replay.already_completed is True
+    after2 = _tenant_row(substrate.dsn, tenant_id)
+    assert after2["owner_phone"] is None
+    assert after2["owner_contact"] is None
+    assert after2["locality"] is None
+
+
+def test_vt160_anonymize_set_covers_every_anonymize_constant():
+    """VT-160 guard: ``_anonymize_tenant_row`` builds its UPDATE from
+    ``_TENANT_ANONYMIZE`` (dict-driven), so adding a new identifying column =
+    one dict entry with no dict/UPDATE drift. Asserts the SET clause is derived
+    from the dict keys (not a hand-listed column set that can silently fall out
+    of sync). Source-level — no DB."""
+    import inspect
+
+    from orchestrator import dsr_purge
+
+    src = inspect.getsource(dsr_purge._anonymize_tenant_row)
+    assert "_TENANT_ANONYMIZE" in src, (
+        "VT-160: _anonymize_tenant_row must derive its SET clause from "
+        "_TENANT_ANONYMIZE so new identifying columns can't drift out of the "
+        "UPDATE. Hand-listing columns reintroduces the gap VT-160 closed."
+    )
+    # The 3 columns VT-160 added must be present in the constant set.
+    for col in ("owner_phone", "owner_contact", "locality"):
+        assert col in dsr_purge._TENANT_ANONYMIZE, (
+            f"VT-160: {col} (identifying PII) missing from _TENANT_ANONYMIZE"
+        )
+        assert dsr_purge._TENANT_ANONYMIZE[col] is None, (
+            f"VT-160: {col} must scrub to NULL (irreversible), not a token"
         )
