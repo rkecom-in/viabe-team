@@ -262,7 +262,7 @@ def try_resume_pending_approval(
     if approval is None:
         return None
 
-    decision = resolve_decision_from_reply(body)
+    decision = resolve_decision_from_reply(body, tenant_id=tenant_id)
     if decision is None:
         # Unclear reply — leave the gate paused (Pillar 7: no guessing).
         return None
