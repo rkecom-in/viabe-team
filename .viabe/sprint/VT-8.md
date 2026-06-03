@@ -1,7 +1,7 @@
 ---
 vt_id: VT-8
 title: VT-PrivacyArchitecture — typed wrappers, k-anon, opt-out, DSR, residency
-status: Backlog
+status: Deferred
 priority: Critical
 sprint: Sprint 7 - Knowledge Architecture
 type: Feature
@@ -79,3 +79,6 @@ This parent owns the three independent enforcement layers Pillar 3 demands (Post
 
 ## Status history
 - 2026-05-25 03:45 IST: migrated from Notion (notion_legacy_id: 356387c2-cc5a-812d-8062-e895eabd76fc)
+
+## DEFER (2026-06-03, Cowork Sprint 7 reconcile)
+Parent privacy arch. Built: consent (VT-8.5), DSR deletion (VT-8.6 / dsr_purge.py), audit-log schema (mig 008). Unbuilt: typed wrappers, agent isolation, write-side k-anon gate, locality, residency, breach runbook. Parent DoD = all 9; NOT Jun15-blocking.

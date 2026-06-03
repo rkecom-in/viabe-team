@@ -1,7 +1,7 @@
 ---
 vt_id: VT-7
 title: VT-KnowledgeArchitecture — 4-layer KG/episodic/Layer-3/skill corpus
-status: Backlog
+status: Deferred
 priority: Critical
 sprint: Sprint 7 - Knowledge Architecture
 type: Feature
@@ -129,3 +129,6 @@ Full rationale in Clau_Session_Log CL-Mem0-decision (2026-05-16) + CL-L1-revisio
 
 ## Status history
 - 2026-05-25 03:45 IST: migrated from Notion (notion_legacy_id: 356387c2-cc5a-8108-8540-efd4a78e9188)
+
+## DEFER (2026-06-03, Cowork Sprint 7 reconcile)
+Parent 4-layer KG. Built substrate: L0 (VT-126/196 Done) + L1 (VT-142 Done). Unbuilt: L2/L3/L4 + composition (0 migrations/code/tests). Parent DoD = all layers; post-launch moat, NOT Reports-Jun15-blocking.
