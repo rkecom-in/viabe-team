@@ -115,6 +115,15 @@ row ships on unit/DB coverage; the live walk happens at E2E).
   flag:** if the live walk shows tech-provider ES insufficient for owner-owned WABAs,
   STOP + flag (do NOT switch to Meta Graph silently). Send is fail-CLOSED until WABA
   `live`, so nothing ships to customers pre-walk. Not Reports-Jun15-blocking.
+- **VT-267 PR-C owner onboarding wizard — real OAuth round-trip + WhatsApp-WebView E2E.** The
+  wizard (Review-&-Confirm + system-browser OAuth handoff + re-check resume) is built +
+  unit/DB-tested (20 vitest incl. a no-`window.open` source assertion + 5 real-PG canary). Two
+  walks are E2E-deferred: (1) the **profile-draft enrichment is Apify-key-gated** — the wizard
+  displays the existing L1 business_profile, EMPTY until Apify is provisioned (no live GBP/Swiggy/
+  Zomato scrape pre-keys); (2) the **real OAuth round-trip + WhatsApp in-app-browser handoff** can
+  only be walked on a real device against live Google/Meta OAuth (the no-popup anchor handoff is
+  source-asserted, but the actual WebView→system-browser→return hop is device-gated). Not
+  Reports-Jun15-blocking. (Cowork-flagged at PR-C merge, 2026-06-03.)
 
 ## Policy ↔ Implementation conformance (gate: customer-messaging go-live; NOT Reports-Jun15)
 
