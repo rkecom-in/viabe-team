@@ -79,6 +79,7 @@ def find_open_approval_for_tenant(
 def resolve_decision_from_reply(
     text: str,
     *,
+    tenant_id: UUID | str,
     classify_fn: Any | None = None,
 ) -> str | None:
     """Classify an owner reply (VT-49) and map it to a decision verb.
@@ -87,8 +88,10 @@ def resolve_decision_from_reply(
     the reply is not a clear decision (other / low-confidence) — None means
     "do not resume; leave paused" (Pillar 7: never guess approval).
 
-    ``classify_fn`` defaults to VT-49 classify_owner_message; tests inject a
-    stub so no live Anthropic call is made.
+    ``tenant_id`` (VT-270): threaded into classify so the transmit is owner_inputs-consent-gated;
+    a no-consent skip returns classification='other' → None → leave paused (conservative).
+    ``classify_fn`` defaults to VT-49 classify_owner_message; tests inject a stub so no live
+    Anthropic call is made.
     """
     if classify_fn is None:
         from orchestrator.agent.tools.classify_owner_message import (
@@ -97,7 +100,9 @@ def resolve_decision_from_reply(
         )
 
         def classify_fn(t: str) -> Any:  # noqa: ANN401
-            return classify_owner_message(ClassifyOwnerMessageInput(text=t))
+            return classify_owner_message(
+                ClassifyOwnerMessageInput(text=t, tenant_id=str(tenant_id))
+            )
 
     result = classify_fn(text)
     classification = getattr(result, "classification", None)

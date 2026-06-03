@@ -18,8 +18,10 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Callable
 from pathlib import Path
 from typing import Literal
+from uuid import UUID
 
 from anthropic import Anthropic
 from pydantic import BaseModel, ConfigDict, Field
@@ -38,11 +40,16 @@ Classification = Literal[
 
 
 class ClassifyOwnerMessageInput(BaseModel):
-    """Free-text owner message + locale hint."""
+    """Free-text owner message + locale hint.
+
+    VT-270: ``tenant_id`` is REQUIRED — classification transmits the raw body to Anthropic (a
+    sub-processor), so it sits behind the owner_inputs consent basis (CL-425), gated fail-closed.
+    """
 
     model_config = ConfigDict(frozen=True)
 
     text: str = Field(..., min_length=1, max_length=4000)
+    tenant_id: str = Field(..., min_length=1)
     locale: str = "en-IN"
 
 
@@ -54,6 +61,8 @@ class ClassifyOwnerMessageOutput(BaseModel):
     classification: Classification
     confidence: float = Field(..., ge=0.0, le=1.0)
     suggested_action: str
+    # VT-270: set when classification was SKIPPED without transmit (e.g. no owner_inputs consent).
+    skipped_reason: str | None = None
 
 
 # VT-267 PR-B: system prompt externalised + versioned (v2.0). The version string
@@ -66,23 +75,57 @@ _SYSTEM_PROMPT = _PROMPT_PATH.read_text(encoding="utf-8")
 _MODEL = "claude-haiku-4-5-20251001"
 
 
+def _skipped_envelope(reason: str) -> ClassifyOwnerMessageOutput:
+    """VT-270: a no-transmit result — the body was NEVER sent to Anthropic. classification='other'
+    maps to None ('leave paused') in resolve_decision_from_reply, so it's the conservative default."""
+    return ClassifyOwnerMessageOutput(
+        classification="other",
+        confidence=0.0,
+        suggested_action="classification skipped (no transmit)",
+        skipped_reason=reason,
+    )
+
+
 def classify_owner_message(
     input: ClassifyOwnerMessageInput,
     *,
     client: Anthropic | None = None,
+    consent_check: "Callable[[UUID], bool] | None" = None,
 ) -> ClassifyOwnerMessageOutput:
     """Classify an owner message.
 
     Args:
-      input: typed message + locale
+      input: typed message + tenant_id + locale
       client: optional Anthropic client (mockable for tests)
+      consent_check: tenant owner_inputs gate (default ``_owner_inputs_enabled``); injectable for tests
 
     Returns:
-      ClassifyOwnerMessageOutput envelope (Pydantic-validated)
+      ClassifyOwnerMessageOutput envelope (Pydantic-validated). A SKIPPED envelope (no transmit)
+      when owner_inputs consent is off / unverifiable.
 
     Raises:
       ValueError if the model returns invalid JSON or a non-conforming envelope
+
+    VT-270 (CL-390/CL-425): classification transmits the RAW body to Anthropic (a sub-processor),
+    so it is gated on the same owner_inputs basis as the L0 writer / vision pipeline — fail-CLOSED.
+    No consent (or any consent-check error / bad tenant_id) → skip the transmit + return the skipped
+    envelope; the body is never sent.
     """
+    if consent_check is None:
+        from orchestrator.memory.l0_writer import _owner_inputs_enabled
+
+        consent_check = _owner_inputs_enabled
+
+    # VT-270 consent gate — BEFORE any transmit. Fail-closed on bad tenant_id / check error.
+    try:
+        allowed = consent_check(UUID(input.tenant_id))
+    except Exception:  # noqa: BLE001 — any failure resolving/checking → fail-closed skip
+        logger.info("classify_owner_message: consent check failed; skipping transmit (fail-closed)")
+        return _skipped_envelope("consent_check_error")
+    if not allowed:
+        logger.info("classify_owner_message: owner_inputs disabled; skipping transmit")
+        return _skipped_envelope("no_owner_inputs_consent")
+
     if client is None:
         client = Anthropic()
 
