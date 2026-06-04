@@ -223,6 +223,15 @@ def _seed_full_tenant_data(dsn: str, tenant_id: UUID) -> dict[str, UUID]:
             (str(tenant_id),),
         )
 
+        # consent_records (VT-82): owner DPDPA consent proof. RETAINED on DSR (NOT in
+        # _PURGE_ORDER) like privacy_audit_log — PII-free proof of lawful processing.
+        conn.execute(
+            "INSERT INTO consent_records "
+            "(tenant_id, consent_dpdpa, consent_residency, dpdpa_version, residency_version) "
+            "VALUES (%s, true, true, 'dpdpa_v1_2026-06', 'residency_v1_2026-06')",
+            (str(tenant_id),),
+        )
+
         # privacy_audit_log — pre-existing event, MUST survive purge. VT-80:
         # write through the real hash-chain writer (a seeded event_type that is
         # NOT one of the purge events, so the purge-count assertions stay exact).
@@ -373,6 +382,35 @@ def test_purge_preserves_other_tenant_data(substrate):  # type: ignore[no-untype
     assert b_row["business_name"] == "Tenant B (untouched)"
     assert b_row["whatsapp_number"] is not None
     assert b_row["opt_out"] is False
+
+
+def test_purge_retains_owner_consent_records(substrate):  # type: ignore[no-untyped-def]
+    """VT-82: consent_records (owner DPDPA/residency consent proof) is RETAINED on a
+    tenant DSR — deliberately NOT in _PURGE_ORDER, like privacy_audit_log. It is
+    PII-free (tenant_id + booleans + version strings + ts) and is legal proof of
+    lawful processing. The purged tenant's row survives; a co-resident is untouched."""
+    from orchestrator.dsr_purge import _PURGE_ORDER, purge_tenant_data
+
+    assert "consent_records" not in _PURGE_ORDER, "consent_records must NOT be purged"
+
+    tenant_a = _new_tenant(substrate.dsn, name="Consent retention A")
+    tenant_b = _new_tenant(substrate.dsn, name="Consent retention B")
+    _seed_full_tenant_data(substrate.dsn, tenant_a)
+    _seed_full_tenant_data(substrate.dsn, tenant_b)
+    ticket_a = _open_dsr_ticket(substrate.dsn, tenant_a)
+
+    before_a = _count_tenant_rows(substrate.dsn, "consent_records", tenant_a)
+    before_b = _count_tenant_rows(substrate.dsn, "consent_records", tenant_b)
+    assert before_a >= 1 and before_b >= 1, "fixture broken: no consent row seeded"
+
+    purge_tenant_data(ticket_a)
+
+    assert _count_tenant_rows(substrate.dsn, "consent_records", tenant_a) == before_a, (
+        "consent_records must SURVIVE the purge (retention)"
+    )
+    assert _count_tenant_rows(substrate.dsn, "consent_records", tenant_b) == before_b, (
+        "co-resident tenant's consent_records must be untouched"
+    )
 
 
 def test_purge_preserves_privacy_audit_log_dpdp_retention(substrate):  # type: ignore[no-untyped-def]
