@@ -615,6 +615,12 @@ jobs:
           # when set). Without it the four test_dbos_purge_substrate
           # cases skip and the gate is theatre.
           RUN_INTEGRATION_TESTS: "1"
+          # VT-314: Voyage org is usage-tier-1 (Fazal added payment method +
+          # key). Wiring the repo secret here un-skips the VT-70 real-embedding
+          # canaries (test_voyage_embedding_dimension + test_l4_corpus, gated on
+          # VOYAGE_API_KEY) so they make a REAL voyage-4-lite call in CI. The
+          # embeddings.embed_texts backoff stays as cheap insurance.
+          VOYAGE_API_KEY: ${{ secrets.VOYAGE_API_KEY }}
         run: |
           uv sync --frozen
           uv run pytest tests/orchestrator/ -v
