@@ -158,6 +158,35 @@ def ingest_gbp(
         "ingest_gbp: tenant=%s context written (rating=%s reviews_count=%s)",
         tenant_id, agg.get("rating"), agg.get("reviews_count"),  # aggregate numbers, not PII
     )
+
+    # VT-325: ALSO persist the per-listing row + emit (distinct from the aggregate
+    # business_profile above). GBP = one listing per tenant (the business's own
+    # place); external_listing_id = Google placeId. Best-effort: a per-listing
+    # failure must NOT break the aggregate ingest.
+    place = items[0]
+    ext_id = place.get("placeId") or place.get("fid") or place.get("cid")
+    if ext_id:
+        try:
+            from orchestrator.integrations.platform_listings import (
+                write_platform_listing,
+            )
+
+            write_platform_listing(
+                tenant_id, "gbp", str(ext_id),
+                rating=place.get("totalScore"),
+                attributes={  # CL-390: structured non-PII facts only
+                    "name": place.get("title"),
+                    "category": place.get("categoryName"),
+                    "city": place.get("city"),
+                    "neighborhood": place.get("neighborhood"),
+                    "permanently_closed": bool(place.get("permanentlyClosed", False)),
+                },
+            )
+        except Exception as exc:  # noqa: BLE001 — per-listing best-effort
+            logger.warning(
+                "ingest_gbp: per-listing write failed (%s) — aggregate unaffected",
+                type(exc).__name__,
+            )
     return IngestionSummary(entries_extracted=1, committed=1, pending_clarification=0, dropped=0)
 
 

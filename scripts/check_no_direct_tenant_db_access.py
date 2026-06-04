@@ -29,6 +29,7 @@ _TABLES = (
     "pending_approvals",
     "owner_inputs",
     "phone_token_resolutions",
+    "platform_listings",  # VT-325: new tenant hot table — wrapper-only from day one
 )
 
 # A table token appearing right after a SQL clause keyword = direct access.
