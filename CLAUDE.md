@@ -23,11 +23,11 @@ If the snapshot's HEAD / IN FLIGHT / NEXT ACTION doesn't match what `git log` sh
 
 ## What this project is
 
-**Viabe Team** — a multi-agent system for small Indian business owners. WhatsApp-first, owner-facing portal at viabe.ai/team. Three deployable apps in a Python+Next.js monorepo:
+**Viabe Team** — a multi-agent system for small Indian business owners. WhatsApp-first, owner-facing portal at viabe.ai/team. A Python+Next.js monorepo with **two deployable apps today** (orchestrator + web); the ingestion worker is a Phase-1 scaffold, not deployed:
 
 - `apps/team-orchestrator/` (Python 3.13, DBOS + LangGraph + Anthropic SDK) — critical path
 - `apps/team-web/` (Next.js 16, React 19) — webhooks + marketing + dashboard + Ops Console
-- `apps/team-ingestion-worker/` (Python 3.13, Apify + Sarvam) — currently a SystemExit stub
+- `apps/team-ingestion-worker/` (Python 3.13, Apify + Sarvam) — **Phase-1 `SystemExit` scaffold (VT-17), NOT deployed.** Platform ingestion actually runs IN the orchestrator via the apify method path (`integrations/methods/apify_gbp.py`, `apify_food.py` → `business_profile` aggregate + VT-325 `platform_listings` per-listing rows), not in this worker.
 - `packages/team-shared/` (cross-app types)
 
 **Binding launch milestone:** Reports-Jun15 (2026-06-15). Sprints 1+2 ship for that gate; everything else is ship-thin.
