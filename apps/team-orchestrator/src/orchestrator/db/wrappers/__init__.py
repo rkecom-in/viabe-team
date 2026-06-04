@@ -12,6 +12,7 @@ exactly the stale thing the no-stale bar forbids.
 
 from __future__ import annotations
 
+import json
 from datetime import datetime
 from typing import Any
 from uuid import UUID
@@ -426,10 +427,55 @@ class PhoneTokenResolutionsWrapper(TenantScopedTable):
     _id_col = "phone_token"  # PK is the token, not `id`
 
 
+class PlatformListingsWrapper(TenantScopedTable):
+    _table = "platform_listings"
+
+    def upsert(
+        self,
+        tenant_id: UUID | str,
+        platform: str,
+        external_listing_id: str,
+        *,
+        rating: float | None = None,
+        attributes: dict[str, Any] | None = None,
+        conn: Any = None,
+    ) -> dict[str, Any]:
+        """Upsert one platform listing, keyed by (tenant, platform,
+        external_listing_id). Returns the row. Composes atomically with the VT-65
+        outbox emit when given ``conn``.
+
+        CL-390: ``attributes`` MUST be structured non-PII facts only
+        (name/category/cuisines/hours/items) — never raw review text. The caller
+        owns that contract; this layer just persists what it's handed.
+        """
+        tid = self._uuid(tenant_id)
+        with self._conn(tid, conn) as c:
+            row = c.execute(
+                """
+                INSERT INTO platform_listings
+                    (tenant_id, platform, external_listing_id, rating,
+                     attributes, fetched_at)
+                VALUES (%s, %s, %s, %s, %s::jsonb, now())
+                ON CONFLICT (tenant_id, platform, external_listing_id) DO UPDATE
+                    SET rating = EXCLUDED.rating,
+                        attributes = EXCLUDED.attributes,
+                        fetched_at = now(),
+                        updated_at = now()
+                RETURNING *
+                """,
+                (str(tid), platform, external_listing_id, rating,
+                 json.dumps(attributes or {})),
+            ).fetchone()
+        out = dict(row)
+        self._validate([out], tid)
+        return out
+
+
 __all__ = [
     "CampaignsWrapper",
     "CustomersWrapper",
     "OwnerInputsWrapper",
     "PendingApprovalsWrapper",
     "PhoneTokenResolutionsWrapper",
+    "PlatformListingsWrapper",
 ]
