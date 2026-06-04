@@ -34,6 +34,11 @@ class L2EventType:
     AGENT_DISPATCH_TERMINATED: Final = "agent_dispatch_terminated"
     PHASE_TRANSITIONED: Final = "phase_transitioned"
     CLARIFICATION_RESOLVED: Final = "clarification_resolved"
+    # VT-320: emitted when the agent ACTS on a specific customer (a campaign
+    # send) — a customer-referencing episodic row so VT-76 reconstitution has
+    # real rows to anonymize on opt-out. Distinct from the repurposed
+    # *_threshold_crossed names (semantics matter on this privacy taxonomy).
+    CUSTOMER_ACTION_TAKEN: Final = "customer_action_taken"
 
 
 L2_EVENT_TYPES: Final = (
@@ -43,6 +48,7 @@ L2_EVENT_TYPES: Final = (
     L2EventType.CUSTOMER_HIGH_VALUE_THRESHOLD_CROSSED, L2EventType.OWNER_MESSAGE_RECEIVED,
     L2EventType.AGENT_DISPATCH_COMPLETED, L2EventType.AGENT_DISPATCH_TERMINATED,
     L2EventType.PHASE_TRANSITIONED, L2EventType.CLARIFICATION_RESOLVED,
+    L2EventType.CUSTOMER_ACTION_TAKEN,
 )
 
 # Templated summaries — NO LLM, NO raw PII (use ids/counts/amounts, never names/phones).
@@ -60,6 +66,7 @@ _SUMMARY_TEMPLATES: Final[dict[str, str]] = {
     L2EventType.OWNER_MESSAGE_RECEIVED: "Owner message received ({message_type}, {body_length} chars).",
     L2EventType.PHASE_TRANSITIONED: "Phase {from_phase} -> {to_phase}.",
     L2EventType.CLARIFICATION_RESOLVED: "Clarification resolved: {decision}.",
+    L2EventType.CUSTOMER_ACTION_TAKEN: "Agent acted on a customer ({action}).",
 }
 
 
