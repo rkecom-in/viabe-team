@@ -60,6 +60,14 @@ def _seed_activity(conn, tenant):
     )
 
 
+def _as_app_role(conn, tenant_id):
+    """VT-306: switch the seeded conn to app_role + GUC, mirroring prod — the
+    scheduled sweep calls run_monthly_report inside a tenant_connection. The
+    wrappers reject a non-app_role conn (defense-in-depth)."""
+    conn.execute("SELECT set_config('app.current_tenant', %s, false)", (str(tenant_id),))
+    conn.execute("SET ROLE app_role")
+
+
 def _fakes(send_result=True):
     calls = {"sent": 0}
 
@@ -99,6 +107,7 @@ def test_generated_email_success_persists_row():
     with _conn() as conn:
         t = _tenant(conn)
         _seed_activity(conn, t)
+        _as_app_role(conn, t)
         render, store, send, calls = _fakes(send_result=True)
         res = run_monthly_report(str(t), "2026-04", conn=conn, owner_email="o@x.com",
                                  render=render, store=store, send=send)
@@ -117,6 +126,7 @@ def test_email_failure_bumps_count():
     with _conn() as conn:
         t = _tenant(conn)
         _seed_activity(conn, t)
+        _as_app_role(conn, t)
         render, store, send, _ = _fakes(send_result=False)
         run_monthly_report(str(t), "2026-04", conn=conn, owner_email="o@x.com",
                            render=render, store=store, send=send)
@@ -129,6 +139,7 @@ def test_no_owner_email_is_not_a_failure():
     with _conn() as conn:
         t = _tenant(conn)
         _seed_activity(conn, t)
+        _as_app_role(conn, t)
         render, store, send, calls = _fakes()
         run_monthly_report(str(t), "2026-04", conn=conn, owner_email=None,
                            render=render, store=store, send=send)
@@ -142,6 +153,7 @@ def test_retry_upsert_idempotent():
     with _conn() as conn:
         t = _tenant(conn)
         _seed_activity(conn, t)
+        _as_app_role(conn, t)
         # First run: email fails → count 1.
         render, store, fail_send, _ = _fakes(send_result=False)
         run_monthly_report(str(t), "2026-04", conn=conn, owner_email="o@x.com",

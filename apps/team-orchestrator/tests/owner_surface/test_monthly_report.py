@@ -154,6 +154,15 @@ def _customer(conn, tenant, created_at):
     )
 
 
+def _as_app_role(conn, tenant_id):
+    """VT-306: switch the seeded conn to app_role + GUC, mirroring prod (the sweep
+    runs generate_monthly_report inside a tenant_connection). The wrappers reject a
+    non-app_role conn (defense-in-depth), so the skip-check tests that never reach a
+    wrapper stay on the plain superuser conn."""
+    conn.execute("SELECT set_config('app.current_tenant', %s, false)", (str(tenant_id),))
+    conn.execute("SET ROLE app_role")
+
+
 def test_full_month_metrics_match_sql():
     with _conn() as conn:
         t = _tenant(conn)
@@ -179,6 +188,7 @@ def test_full_month_metrics_match_sql():
             _customer(conn, t, APR_START)
         _customer(conn, t, MAR_DATE)
 
+        _as_app_role(conn, t)
         report = generate_monthly_report(str(t), "2026-04", conn=conn)
 
     assert report is not None
@@ -202,6 +212,7 @@ def test_zero_arrr_month_is_honest():
         t = _tenant(conn)
         run = _run(conn, t)
         _campaign(conn, t, run, status="proposed", generated_at=APR_START)
+        _as_app_role(conn, t)
         report = generate_monthly_report(str(t), "2026-04", conn=conn)
     assert report is not None
     assert report.arrr_paise == 0
@@ -212,6 +223,7 @@ def test_zero_arrr_month_is_honest():
 def test_trial_tenant_gets_framing_not_skip():
     with _conn() as conn:
         t = _tenant(conn, phase="trial")
+        _as_app_role(conn, t)
         report = generate_monthly_report(str(t), "2026-04", conn=conn)
     assert report is not None
     assert report.trial_framing is True
@@ -241,6 +253,8 @@ def test_cross_tenant_isolation():
         _attr(conn, t_b, cb, 77777)
         _customer(conn, t_b, APR_START)
         # Tenant A has no activity → its report must not see B's ARRR/customers.
+        # VT-306: under A's tenant_connection scope, RLS (not just the WHERE) hides B.
+        _as_app_role(conn, t_a)
         report = generate_monthly_report(str(t_a), "2026-04", conn=conn)
     assert report is not None
     assert report.arrr_paise == 0
@@ -251,6 +265,7 @@ def test_cross_tenant_isolation():
 def test_hindi_language_propagates():
     with _conn() as conn:
         t = _tenant(conn, lang="hi")
+        _as_app_role(conn, t)
         report = generate_monthly_report(str(t), "2026-04", conn=conn)
     assert report is not None
     assert report.language == "hi"
