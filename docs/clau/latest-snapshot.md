@@ -38,7 +38,7 @@
 
 ## DO NOT
 
-- **Do NOT read "VT-8 Done" as "ready for real customer data."** VT-8 Done = the privacy-architecture BUILD scope. **VT-78 (prod residency) + VT-156 (privacy notice) gate customer-data-go-live and are still OPEN (Fazal/infra/legal).** Reports-Jun15 is NOT gated on them; customer-messaging-go-live IS.
+- **Do NOT read "VT-8 Done" as "ready for real customer data."** VT-8 Done = the privacy-architecture BUILD scope. **VT-78 (prod residency) + VT-156 (privacy notice) gate customer-data-go-live and are still OPEN (Fazal/infra/legal).** Reports-Jun15 is NOT gated on them; customer-messaging-go-live IS. **Full list: `.viabe/customer-data-go-live-prereqs.md`.**
 - Let **real customer data** touch dev pre-VT-231/Mumbai (CL-422). Dev = synthetic only.
 - Re-flag **Seoul dev** as a DPDP issue (CL-422 — accepted with launch-gate sunset).
 - Treat the **reconstitution sweep as live coverage** — correct + canaried but a no-op on real data until VT-312 emits customer-referencing episodic events.
