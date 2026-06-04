@@ -366,12 +366,29 @@ def test_customer_registry_denies_cross_tenant(dsn, tenants, seed_conn):
     _seed_customer(seed_conn, a, "+919900000020", display="Asha")
     _seed_customer(seed_conn, b, "+919900000021", display="Bhavna")
     customer_registry.invalidate_all()
-    pool = _RlsPool(dsn)
 
-    names = customer_registry.get_customer_names_for_tenant(a, pool=pool, use_cache=False)
+    # VT-306: get_customer_names_for_tenant reads via CustomersWrapper.list_display_names
+    # on its own tenant_connection (pool arg vestigial). Point the global pool at the
+    # test dsn; cross-tenant denial is then the wrapper's tenant_connection RLS.
+    from psycopg.rows import dict_row
+    from psycopg_pool import ConnectionPool
+
+    from orchestrator import graph as graph_mod
+
+    prev_pool = graph_mod._pool
+    graph_mod._pool = ConnectionPool(
+        dsn, min_size=1, max_size=2,
+        kwargs={"autocommit": True, "row_factory": dict_row}, open=True,
+    )
+    try:
+        names = customer_registry.get_customer_names_for_tenant(a, pool=None, use_cache=False)
+    finally:
+        graph_mod._pool.close()
+        graph_mod._pool = prev_pool
+
     # Registry lower-cases names for redaction matching.
     assert "asha" in names
-    assert "bhavna" not in names  # WHERE-clause tenant filter excludes B
+    assert "bhavna" not in names  # the wrapper's tenant_connection RLS excludes B
     # VT-263: real RLS backstop — B's customer row exists, so 0 means RLS (not
     # just the WHERE clause) hides it under A's GUC.
     assert _count_other(dsn, scoped_to=a, table="customers", other=b) == 0
