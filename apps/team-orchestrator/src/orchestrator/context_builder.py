@@ -50,8 +50,6 @@ from psycopg.types.json import Jsonb
 
 from orchestrator._tenant_guard import assert_tenant_scoped, emit_pipeline_step
 from orchestrator.db import tenant_connection
-from orchestrator.knowledge import l2_query
-from orchestrator.knowledge.l2_types import L2EventType
 from orchestrator.templates_registry import approved_template_names
 from orchestrator.types.trigger_reason import TriggerReason
 
@@ -87,9 +85,15 @@ class BusinessProfile:
 
 @dataclass(frozen=True, slots=True)
 class LedgerSummary:
+    """VT-312 brain-decides: RAW per-tenant customer-state distributions (NOT
+    fixed-threshold cohorts). The agent judges dormant / high-value contextually
+    from the tenant's OWN recency + spend distribution + business_type at
+    reasoning time. ``*_pctl`` map p25/p50/p75/p90 (empty when no data)."""
+
     total_customers: int = 0
-    dormant_cohorts: dict[str, int] = field(default_factory=dict)
-    top_spenders: list[UUID] = field(default_factory=list)
+    recency_days_pctl: dict[str, int] = field(default_factory=dict)
+    spend_paise_pctl: dict[str, int] = field(default_factory=dict)
+    business_type: str = ""
 
 
 _L3_NO_PRIOR_NOTE = (
@@ -267,58 +271,70 @@ def _build_business_profile(tenant_id: UUID) -> tuple[BusinessProfile, bool]:
     return BusinessProfile(), False
 
 
-# Cap on L2 threshold events read per ledger build (clamped again by l2_query).
-_LEDGER_EVENT_CAP = 100
+# VT-312 percentile points surfaced to the brain (raw distribution, not a fixed
+# threshold). float8[] back from percentile_cont(array[...]).
+_PCTLS = (0.25, 0.5, 0.75, 0.9)
+_PCTL_KEYS = ("p25", "p50", "p75", "p90")
+
+
+def _pctl_map(row: dict[str, Any] | None) -> dict[str, int]:
+    """Map a ``percentile_cont(_PCTLS)`` array row -> {p25..p90: int}. Empty when
+    the group had no rows (percentile_cont returns NULL)."""
+    if not row:
+        return {}
+    vals = row.get("p")
+    if not vals:
+        return {}
+    return {
+        k: int(round(v)) for k, v in zip(_PCTL_KEYS, vals, strict=False) if v is not None
+    }
 
 
 def _build_ledger_summary(tenant_id: UUID) -> tuple[LedgerSummary, bool]:
-    """L2 episodic read (VT-67) — derives the customer ledger summary LIVE from
-    L2 threshold events (``customer_high_value_threshold_crossed`` /
-    ``customer_dormant_threshold_crossed``), the agent's "what happened" log.
+    """VT-312 brain-decides — surface the tenant's OWN raw customer-state
+    distributions so the agent judges dormant / high-value contextually at
+    reasoning time, with NO fixed global threshold.
 
-    No longer CL-190 safe-empty: this reads the real ``episodic_events``
-    substrate via ``l2_query`` (tenant-scoped + assert_tenant_scoped inside).
-    Completeness flag is ``True`` whenever the read runs — the data is real L2
-    (no placeholder field, unlike recent_campaigns' recovered_paise). It is
-    legitimately empty until VT-309 wires the threshold emit sites on the live
-    path; an empty-but-live ledger is the honest current state.
+    Reads live per-tenant SQL via ``tenant_connection`` (RLS — the owner's own
+    data, lawful; no cross-tenant):
+    - ``recency_days_pctl``: p25/50/75/90 of days-since-last_inbound (customers).
+    - ``spend_paise_pctl``: p25/50/75/90 of per-customer total SALE paise
+      (customer_ledger_entries, entry_type='sale').
+    - ``business_type`` + ``total_customers``.
 
-    - ``top_spenders``: distinct customers from recent high-value events (newest first).
-    - ``dormant_cohorts``: cohort -> count from recent dormancy events.
-    - ``total_customers``: distinct customers L2 has seen cross either threshold.
+    The retired L2 threshold-detectors (``customer_*_threshold_crossed``) are no
+    longer read here — repurposed to agent-action customer markers (VT-320). The
+    fixed L3 cross-tenant ``recency_band`` (k-anon cohort dimension) is a SEPARATE
+    plane and is never derived from this per-tenant call (guard: VT-312 D3).
+    Completeness=True whenever the read runs (raw data is always available).
     """
-    high_value = l2_query.recent_events(
-        tenant_id,
-        limit=_LEDGER_EVENT_CAP,
-        event_types=[L2EventType.CUSTOMER_HIGH_VALUE_THRESHOLD_CROSSED],
-    )
-    dormant = l2_query.recent_events(
-        tenant_id,
-        limit=_LEDGER_EVENT_CAP,
-        event_types=[L2EventType.CUSTOMER_DORMANT_THRESHOLD_CROSSED],
-    )
+    tid = str(tenant_id)
+    with tenant_connection(tenant_id) as conn:
+        total_row = conn.execute(
+            "SELECT count(*) AS n FROM customers WHERE tenant_id = %s", (tid,)
+        ).fetchone()
+        recency_row = conn.execute(
+            "SELECT percentile_cont(%s) WITHIN GROUP "
+            "(ORDER BY (now()::date - last_inbound_at::date)) AS p "
+            "FROM customers WHERE tenant_id = %s AND last_inbound_at IS NOT NULL",
+            (list(_PCTLS), tid),
+        ).fetchone()
+        spend_row = conn.execute(
+            "WITH s AS ("
+            "  SELECT customer_id, sum(amount_paise) AS t FROM customer_ledger_entries "
+            "  WHERE tenant_id = %s AND entry_type = 'sale' GROUP BY customer_id) "
+            "SELECT percentile_cont(%s) WITHIN GROUP (ORDER BY t) AS p FROM s",
+            (tid, list(_PCTLS)),
+        ).fetchone()
+        bt_row = conn.execute(
+            "SELECT business_type FROM tenants WHERE id = %s", (tid,)
+        ).fetchone()
 
-    top_spenders: list[UUID] = []
-    seen: set[UUID] = set()
-    for ev in high_value:
-        cid = ev.referenced_entity_id
-        if cid is not None and cid not in seen:
-            seen.add(cid)
-            top_spenders.append(cid)
-
-    dormant_cohorts: dict[str, int] = {}
-    dormant_customers: set[UUID] = set()
-    for ev in dormant:
-        cohort = str(ev.payload.get("cohort") or "unknown")
-        dormant_cohorts[cohort] = dormant_cohorts.get(cohort, 0) + 1
-        if ev.referenced_entity_id is not None:
-            dormant_customers.add(ev.referenced_entity_id)
-
-    total_customers = len(seen | dormant_customers)
     summary = LedgerSummary(
-        total_customers=total_customers,
-        dormant_cohorts=dormant_cohorts,
-        top_spenders=top_spenders,
+        total_customers=int((total_row or {}).get("n") or 0),
+        recency_days_pctl=_pctl_map(recency_row),
+        spend_paise_pctl=_pctl_map(spend_row),
+        business_type=str((bt_row or {}).get("business_type") or ""),
     )
     return summary, True
 
@@ -650,10 +666,11 @@ def build_sales_recovery_context(
 
     # Truncation order (VT-71, Cowork 20260604T015000Z): PROTECT the moat layers
     # (L3 priors + L4 skills) — trim the per-tenant sections FIRST so a large L2
-    # (ledger top_spenders) cannot starve L3/L4. Order: oldest owner inputs ->
-    # campaigns down to 3 -> top_spenders 20/10/5 -> drop business hours -> L4
-    # skills -> L3 priors (last resort) -> overflow. (Previously L4/L3 dropped
-    # first — that starved the moat; reversed.)
+    # cannot starve L3/L4. Order: oldest owner inputs -> campaigns down to 3 ->
+    # drop business hours -> L4 skills -> L3 priors (last resort) -> overflow.
+    # (Previously L4/L3 dropped first — that starved the moat; reversed.)
+    # VT-312: the ledger summary is now a tiny fixed-size distribution (8 ints +
+    # business_type), no longer a growable top_spenders list — nothing to trim.
     truncated: list[str] = []
     while _total() > effective_cap:
         if pending_owner_inputs:
@@ -663,14 +680,6 @@ def build_sales_recovery_context(
         if len(recent_campaigns) > 3:
             recent_campaigns = recent_campaigns[: len(recent_campaigns) - 1]
             truncated.append("recent_campaigns")
-            continue
-        if len(ledger_summary.top_spenders) > 5:
-            n = len(ledger_summary.top_spenders)
-            keep = 20 if n > 20 else 10 if n > 10 else 5
-            ledger_summary = replace(
-                ledger_summary, top_spenders=ledger_summary.top_spenders[:keep]
-            )
-            truncated.append("customer_ledger_summary")
             continue
         if business_profile.hours:
             business_profile = replace(business_profile, hours={})
@@ -813,16 +822,19 @@ def serialize_bundle_for_prompt(
     )
 
     ls = context.customer_ledger_summary
-    parts.append("\n## Customer ledger summary")
-    cohort_lines = (
-        "\n".join(f"  - {name}: {count} customers" for name, count in ls.dormant_cohorts.items())
-        if ls.dormant_cohorts
-        else "  - (none recorded)"
+
+    def _pctl_fmt(d: dict[str, int]) -> str:
+        return ", ".join(f"{k}={d[k]}" for k in _PCTL_KEYS if k in d) or "(no data)"
+
+    parts.append(
+        "\n## Customer ledger summary (raw per-tenant distributions — YOU judge "
+        "dormant / high-value for THIS tenant; there is no fixed threshold)"
     )
     parts.append(
         f"- total_customers: {ls.total_customers}\n"
-        f"- dormant_cohorts:\n{cohort_lines}\n"
-        f"- top_spenders (count): {len(ls.top_spenders)}\n"
+        f"- business_type: {ls.business_type or '(unknown)'}\n"
+        f"- recency days-since-last-inbound (percentiles): {_pctl_fmt(ls.recency_days_pctl)}\n"
+        f"- spend paise per customer, lifetime sales (percentiles): {_pctl_fmt(ls.spend_paise_pctl)}\n"
         f"- substrate_populated: "
         f"{context.data_completeness.get('customer_ledger_summary', False)}"
     )

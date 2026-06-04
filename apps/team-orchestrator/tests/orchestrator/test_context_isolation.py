@@ -53,13 +53,23 @@ def _tenant(pool) -> str:
     return tid
 
 
-def _customer(pool, tid: str) -> str:
-    cid = str(uuid4())
+def _owner_input(pool, tid: str) -> str:
+    """Seed one owner_inputs row for ``tid`` and return its id.
+
+    VT-312: the cross-tenant leak vector moved off ``customer_ledger_summary``
+    (it no longer carries customer ids — it is raw percentile distributions
+    now). ``pending_owner_inputs`` is the lightest per-tenant entity-id-bearing
+    section the pre-flight validator re-queries, so the isolation canary drives
+    the leak through it instead. Same intent: an id from another tenant in A's
+    bundle must be caught + recorded for the Detector-1 sweep.
+    """
+    oid = str(uuid4())
     with pool.connection() as conn:
         conn.execute(
-            "INSERT INTO customers (id, tenant_id) VALUES (%s, %s)", (cid, tid),
+            "INSERT INTO owner_inputs (id, tenant_id, intent) VALUES (%s, %s, 'winback')",
+            (oid, tid),
         )
-    return cid
+    return oid
 
 
 def _run(pool, tid: str) -> str:
@@ -72,12 +82,26 @@ def _run(pool, tid: str) -> str:
     return rid
 
 
-def _ctx(tid: str, rid: str, *, top_spenders=None, l3=None, l4=None):
-    from orchestrator.context_builder import L3Priors, L4Skills, LedgerSummary, SalesRecoveryContext
+def _ctx(tid: str, rid: str, *, owner_input_ids=None, l3=None, l4=None):
+    from datetime import UTC, datetime
+
+    from orchestrator.context_builder import (
+        L3Priors,
+        L4Skills,
+        OwnerInput,
+        SalesRecoveryContext,
+    )
 
     return SalesRecoveryContext(
         tenant_id=UUID(tid), run_id=UUID(rid), user_request="re-engage dormants",
-        customer_ledger_summary=LedgerSummary(top_spenders=[UUID(x) for x in (top_spenders or [])]),
+        pending_owner_inputs=[
+            OwnerInput(
+                input_id=UUID(x),
+                received_at=datetime.now(UTC),
+                intent="winback",
+            )
+            for x in (owner_input_ids or [])
+        ],
         l3_priors=l3 or L3Priors(),
         l4_skills=l4 or L4Skills(),
     )
@@ -95,13 +119,13 @@ def _breaches(pool, rid: str) -> int:
 # --- pre-flight (the load-bearing layer) -------------------------------------
 
 
-def test_preflight_catches_cross_tenant_customer(pool):
+def test_preflight_catches_cross_tenant_entity(pool):
     from orchestrator.context_validator import ContextIsolationViolation, validate_context_isolation
 
     a, b = _tenant(pool), _tenant(pool)
-    b_cust = _customer(pool, b)        # belongs to tenant B
+    b_input = _owner_input(pool, b)    # belongs to tenant B
     rid = _run(pool, a)
-    ctx = _ctx(a, rid, top_spenders=[b_cust])  # A's bundle carries B's customer
+    ctx = _ctx(a, rid, owner_input_ids=[b_input])  # A's bundle carries B's input
 
     with pytest.raises(ContextIsolationViolation):
         validate_context_isolation(ctx)
@@ -112,9 +136,9 @@ def test_preflight_passes_clean(pool):
     from orchestrator.context_validator import validate_context_isolation
 
     a = _tenant(pool)
-    a_cust = _customer(pool, a)
+    a_input = _owner_input(pool, a)
     rid = _run(pool, a)
-    validate_context_isolation(_ctx(a, rid, top_spenders=[a_cust]))  # no raise
+    validate_context_isolation(_ctx(a, rid, owner_input_ids=[a_input]))  # no raise
     assert _breaches(pool, rid) == 0
 
 
@@ -127,7 +151,7 @@ def test_preflight_l3_l4_exempt(pool):
     rid = _run(pool, a)
     l3 = L3Priors(available=True, patterns=[{"cohort_key": "cafe|tier_2|60_90d", "n_tenants": 12}])
     l4 = L4Skills(available=True, skills=[{"id": str(uuid4()), "title": "x", "tags": [], "excerpt": ""}])
-    validate_context_isolation(_ctx(a, rid, top_spenders=[], l3=l3, l4=l4))  # no raise
+    validate_context_isolation(_ctx(a, rid, owner_input_ids=[], l3=l3, l4=l4))  # no raise
     assert _breaches(pool, rid) == 0
 
 
@@ -179,10 +203,10 @@ def test_breach_fires_detector_sweep(pool):
     from orchestrator.context_validator import ContextIsolationViolation, validate_context_isolation
 
     a, b = _tenant(pool), _tenant(pool)
-    b_cust = _customer(pool, b)
+    b_input = _owner_input(pool, b)
     rid = _run(pool, a)
     with pytest.raises(ContextIsolationViolation):
-        validate_context_isolation(_ctx(a, rid, top_spenders=[b_cust]))
+        validate_context_isolation(_ctx(a, rid, owner_input_ids=[b_input]))
 
     kinds = {t.trigger_kind for t in detect_slow_triggers(a)}
     assert "tenant_isolation_breach" in kinds
