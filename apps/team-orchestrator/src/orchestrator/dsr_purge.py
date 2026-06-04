@@ -120,6 +120,13 @@ _TENANT_ANONYMIZE = {
 _PURGE_ORDER: tuple[str, ...] = (
     "l1_relationships",
     "l1_entities",
+    # VT-323: L2 episodic memory. Leaf (references tenants — anonymized, NOT
+    # deleted — and no child tables point at it), so order-insensitive. payload
+    # CAN carry PII at rest, and there is NO ON DELETE CASCADE + no other
+    # hard-delete path (retention only soft-deletes, reconstitution only
+    # sentinels), so a tenant DSR-delete MUST sweep it here or the whole L2
+    # episodic store survives the purge.
+    "episodic_events",
     "owner_inputs",
     "campaigns",
     "pipeline_steps",
