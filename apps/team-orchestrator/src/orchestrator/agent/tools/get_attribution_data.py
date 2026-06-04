@@ -280,16 +280,15 @@ def get_attribution_data(
 
         pool = get_pool()
 
-    with pool.connection() as conn:
-        with conn.cursor() as cur:
-            # VT-140 fix: ``SET LOCAL <name> = %s`` is a syntax error ($1 cannot
-            # bind into a SET statement) against real Postgres — the original
-            # line raised and the MagicMock-cursor unit tests masked it. Use
-            # set_config(), the parameterizable form (db/tenant_connection.py).
-            cur.execute(
-                "SELECT set_config('app.current_tenant', %s, false)",
-                (payload.tenant_id,),
-            )
+    # VT-306 (bounce-2): the OUTER connection is a tenant_connection (SET ROLE
+    # app_role + GUC) — NOT pool.connection()+set_config — so the direct
+    # `attributions` read in _campaign_mode is RLS-enforced too (attributions has
+    # FORCE RLS, mig 023, inert under the BYPASSRLS pool role). ``pool`` is now
+    # vestigial. The campaigns reads still go through the wrapper (own conn).
+    _ = pool
+    from orchestrator.db import tenant_connection
+
+    with tenant_connection(payload.tenant_id) as cur:
             try:
                 if payload.campaign_id is not None:
                     out = _campaign_mode(cur, payload)

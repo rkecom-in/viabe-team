@@ -31,10 +31,16 @@ _T = "00000000-0000-4000-8000-000000000abc"
 # aggregate.
 _CAMPAIGN_ROW: list[Any] = [None]
 _WINDOW_ROWS: list[Any] = [None]
+# VT-306 bounce-2: get_attribution_data's OUTER conn is now a tenant_connection
+# (for the RLS-enforced attributions read). Patch it to yield the mock cur.
+_TC_CONN: list[Any] = [None]
+_TC_TENANTS: list[str] = []
 
 
 @pytest.fixture(autouse=True)
 def _patch_campaign_wrapper(monkeypatch):
+    from contextlib import contextmanager
+
     from orchestrator.db.wrappers import CampaignsWrapper
 
     monkeypatch.setattr(
@@ -45,8 +51,17 @@ def _patch_campaign_wrapper(monkeypatch):
         CampaignsWrapper, "attribution_window_summary",
         lambda self, tenant_id, ws, we, **kw: list(_WINDOW_ROWS[0] or []),
     )
+
+    @contextmanager
+    def _fake_tc(tenant_id):
+        _TC_TENANTS.append(str(tenant_id))
+        yield _TC_CONN[0]
+
+    monkeypatch.setattr("orchestrator.db.tenant_connection", _fake_tc)
     _CAMPAIGN_ROW[0] = None
     _WINDOW_ROWS[0] = None
+    _TC_CONN[0] = None
+    _TC_TENANTS.clear()
     yield
 
 
@@ -57,7 +72,8 @@ def _pool_campaign(*, campaign_row: Any, agg_row: Any,
     issued_sql: list[str] = []
     cur = MagicMock()
     _CAMPAIGN_ROW[0] = campaign_row  # served by the patched find_by_id
-    fetchone_q = [agg_row]  # cur now serves ONLY the (non-hot) attributions agg
+    _TC_CONN[0] = cur  # outer tenant_connection yields this cur (attributions read)
+    fetchone_q = [agg_row]  # cur serves ONLY the (non-hot) attributions agg
 
     def _execute(sql: str, params: tuple | None = None) -> Any:
         issued_sql.append(sql)
@@ -81,6 +97,7 @@ def _pool_campaign(*, campaign_row: Any, agg_row: Any,
 def _pool_window(*, rows: list[Any]) -> Any:
     _WINDOW_ROWS[0] = rows  # served by the patched attribution_window_summary
     cur = MagicMock()
+    _TC_CONN[0] = cur  # outer tenant_connection yields this cur (window mode: unused)
     cur.execute.side_effect = lambda sql, params=None: cur
     cur.fetchall.return_value = rows
     cur.__enter__ = MagicMock(return_value=cur)
@@ -251,11 +268,10 @@ def test_sets_tenant_guc_before_query() -> None:
         GetAttributionDataInput(tenant_id=_T, campaign_id="c1"),
         pool=pool,
     )
-    # VT-140 fix: the tenant GUC is set via set_config('app.current_tenant',
-    # ...) — the parameterizable form. "SET LOCAL ... = %s" is a Postgres
-    # syntax error ($1 cannot bind into a SET statement); the original code
-    # raised against real Postgres and only the MagicMock cursor masked it.
-    assert "set_config('app.current_tenant'" in issued[0]
+    # VT-306 bounce-2: scope is enforced by opening a tenant_connection (SET ROLE
+    # app_role + GUC) for the resolving tenant — NOT inline set_config on a raw
+    # pool conn. Assert that's what the read runs under.
+    assert _TC_TENANTS == [_T]
 
 
 def test_undefined_table_graceful_empty() -> None:

@@ -500,3 +500,50 @@ def test_query_customer_ledger_degrades_gracefully(dsn, tenants):
     assert out.customer_id is None
     assert out.ledger_entries == []
     assert out.total_balance_paise == 0
+
+
+def test_get_attribution_data_denies_cross_tenant(dsn, tenants, seed_conn):
+    """VT-306 bounce-2 e2e: get_attribution_data reads `attributions` DIRECTLY on
+    its outer connection — now a tenant_connection (SET ROLE app_role + GUC), so
+    that read is RLS-enforced. Tenant A querying B's campaign id must see NOTHING
+    (no campaign, no ARRR) — proves the direct attributions read can't cross
+    tenants even though `attributions` is not a VT-306 gate-flagged table."""
+    from orchestrator.agent.tools.get_attribution_data import (
+        GetAttributionDataInput,
+        get_attribution_data,
+    )
+
+    a, b = tenants
+    camp_b = _seed_campaign(seed_conn, b, _seed_run(seed_conn, b), status="sent")
+    seed_conn.execute(
+        "UPDATE campaigns SET attribution_close_at = now(), attribution_closed_at = now() "
+        "WHERE id = %s", (camp_b,),
+    )
+    # B-owned attribution — a cross-tenant leak would surface this 55555.
+    seed_conn.execute(
+        "INSERT INTO attributions (tenant_id, campaign_id, attributed_paise) "
+        "VALUES (%s, %s, 55555)", (b, camp_b),
+    )
+
+    from psycopg.rows import dict_row
+    from psycopg_pool import ConnectionPool
+
+    from orchestrator import graph as graph_mod
+
+    prev_pool = graph_mod._pool
+    graph_mod._pool = ConnectionPool(
+        dsn, min_size=1, max_size=2,
+        kwargs={"autocommit": True, "row_factory": dict_row}, open=True,
+    )
+    try:
+        out = get_attribution_data(
+            GetAttributionDataInput(tenant_id=a, campaign_id=camp_b)
+        )
+    finally:
+        graph_mod._pool.close()
+        graph_mod._pool = prev_pool
+
+    assert out.campaign is not None
+    # A cannot see B's campaign → not-found path; B's 55555 ARRR is NOT leaked.
+    assert out.campaign.attribution_status == "unknown"
+    assert out.campaign.arrr_paise == 0
