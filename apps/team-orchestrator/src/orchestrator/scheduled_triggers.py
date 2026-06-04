@@ -278,6 +278,71 @@ def reconstitution_sweep_scheduled(
         logger.exception("VT-76 reconstitution scheduled run failed")
 
 
+# VT-304: nightly audit-chain verify. 20:30 UTC = 02:00 IST (off-peak). Written
+# UTC-correct (matches reconstitution + alerts/scheduler); the exact off-peak
+# minute is immaterial to a nightly integrity check.
+AUDIT_CHAIN_VERIFY_CRON = "30 20 * * *"
+
+
+def audit_chain_verify_scheduled(
+    scheduled_time: datetime,
+    actual_time: datetime,
+) -> None:
+    """DBOS scheduled handler — nightly 02:00 IST (VT-304). Verifies the VT-80
+    ``privacy_audit_log`` tamper-evident hash-chain; on a break, raises a CRITICAL
+    workspace alert (tamper/corruption is surfaced, not just logged). Best-effort:
+    a verify failure must not crash the scheduler."""
+    from orchestrator.observability.audit_verify import run_audit_chain_verify_body
+
+    try:
+        result = run_audit_chain_verify_body(now=actual_time)
+        if not result.ok:
+            _alert_audit_chain_break(result)
+    except Exception:  # noqa: BLE001 — nightly verify is best-effort; next run retries
+        logger.exception("VT-304 audit-chain verify scheduled run failed")
+
+
+def _alert_audit_chain_break(result: Any) -> None:
+    """CRITICAL workspace alert for a privacy_audit_log chain break (VT-304).
+
+    Routes DIRECT to the OPS channel (Telegram + email), NOT the per-tenant
+    ``tenant_alerts`` path: the chain is global (spans NULL-tenant workspace
+    rows), so there is no single tenant to attribute and ``tenant_alerts.tenant_id``
+    is a NOT-NULL FK. The message carries seq + reason only — privacy_audit_log is
+    PII-free (CL-390), so no scrub needed. Best-effort send; the CRITICAL log in
+    ``run_audit_chain_verify_body`` is the durable record."""
+    import asyncio
+    import os
+
+    from orchestrator.alerts.clients import send_resend_email, send_telegram
+
+    text = (
+        "[CRITICAL] privacy_audit_log hash-chain BREAK (VT-80/VT-304) — "
+        f"tamper/corruption at seq={getattr(result, 'broken_seq', None)}: "
+        f"{getattr(result, 'reason', None)}. rows_checked="
+        f"{getattr(result, 'rows_checked', None)}."
+    )
+
+    async def _send() -> None:
+        await send_telegram(
+            os.environ.get("TELEGRAM_OPS_BOT_TOKEN", ""),
+            os.environ.get("TELEGRAM_OPS_CHAT_ID", ""),
+            text,
+        )
+        await send_resend_email(
+            os.environ.get("RESEND_API_KEY", ""),
+            os.environ.get("RESEND_FROM_EMAIL", ""),
+            os.environ.get("RESEND_TO_EMAIL", ""),
+            "Viabe CRITICAL: audit-chain break",
+            f"<pre>{text}</pre>",
+        )
+
+    try:
+        asyncio.run(_send())
+    except RuntimeError:  # already in an event loop
+        asyncio.get_event_loop().create_task(_send())
+
+
 def run_day39_evaluation_body(now: datetime | None = None) -> list[Any]:
     """Day-39 evaluation body — REAL (VT-176).
 
@@ -691,6 +756,9 @@ def register_scheduled_triggers() -> None:
     from orchestrator.privacy.reconstitution import RECONSTITUTION_CRON
 
     DBOS.scheduled(RECONSTITUTION_CRON)(reconstitution_sweep_scheduled)
+    # VT-304: 8th handler — nightly audit-chain verify. EXTENDS the surface
+    # (same register-before-launch posture; app_version shifts once, here).
+    DBOS.scheduled(AUDIT_CHAIN_VERIFY_CRON)(audit_chain_verify_scheduled)
     _registered = True
 
 
@@ -716,6 +784,8 @@ __all__ = [
     "attribution_close_workflow_id",
     "day39_evaluation_scheduled",
     "day39_workflow_id",
+    "AUDIT_CHAIN_VERIFY_CRON",
+    "audit_chain_verify_scheduled",
     "monthly_impact_scheduled",
     "monthly_workflow_id",
     "reconstitution_sweep_scheduled",
