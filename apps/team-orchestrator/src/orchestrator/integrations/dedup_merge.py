@@ -36,6 +36,7 @@ from datetime import UTC, datetime
 from typing import Any, Literal
 from uuid import UUID
 
+from orchestrator.db.wrappers import CustomersWrapper
 from orchestrator.integrations.field_mapping import _route
 from orchestrator.utils.phone_token import hash_phone
 
@@ -109,21 +110,14 @@ def dedup_and_merge(
     fc = field_confidences
 
     with tenant_connection(tenant_id) as conn:
-        # --- find candidate matches (RLS-scoped to this tenant) ---
+        # --- find candidate matches (VT-306: via the wrapper on this txn's conn,
+        #     atomic with the merge/insert + emit below) ---
         candidates: dict[str, dict[str, Any]] = {}
         if phone_e164:
-            for r in conn.execute(
-                "SELECT id, display_name, phone_e164, email, acquired_via "
-                "FROM customers WHERE phone_e164 = %s",
-                (phone_e164,),
-            ).fetchall():
+            for r in CustomersWrapper().find_by_phone(tenant_id, phone_e164, conn=conn):
                 candidates[str(r["id"])] = r
         if email:
-            for r in conn.execute(
-                "SELECT id, display_name, phone_e164, email, acquired_via "
-                "FROM customers WHERE email = %s",
-                (email,),
-            ).fetchall():
+            for r in CustomersWrapper().find_by_email(tenant_id, email, conn=conn):
                 candidates[str(r["id"])] = r
 
         # --- >1 distinct customer matched: AMBIGUOUS (P4, no auto-merge) ---
@@ -162,11 +156,12 @@ def dedup_and_merge(
                 phone_e164 if _eligible("phone_e164", fc) else None
             )
             # VT-65 PR-2: UPDATE + customer_updated emit atomic in one txn.
+            # VT-306: UPDATE via the wrapper (tenant-predicated) on this conn.
             with conn.transaction():
-                conn.execute(
-                    "UPDATE customers SET display_name = %s, email = %s, "
-                    "phone_e164 = %s, acquired_via = %s, updated_at = %s WHERE id = %s",
-                    (new_name, new_email, new_phone, new_acq, now, str(cid)),
+                CustomersWrapper().update_on_merge(
+                    tenant_id, cid,
+                    display_name=new_name, email=new_email, phone_e164=new_phone,
+                    acquired_via=new_acq, updated_at=now, conn=conn,
                 )
                 # VT-315 / CL-390: emit the canonical phone HASH, never the raw
                 # phone — the kg_events outbox payload persists durably (rows are
@@ -186,15 +181,20 @@ def dedup_and_merge(
         ins_name = display_name if _eligible("display_name", fc) else None
         ins_email = email if _eligible("email", fc) else None
         # VT-65 PR-2: INSERT + customer_created emit atomic in one txn.
+        # VT-306: INSERT via the wrapper (tenant_id forced) on this conn.
         with conn.transaction():
-            row = conn.execute(
-                "INSERT INTO customers "
-                "(tenant_id, display_name, phone_e164, email, acquired_via, source) "
-                "VALUES (%s, %s, %s, %s, %s, %s) RETURNING id",
-                (str(tenant_id), ins_name, phone_e164, ins_email,
-                 [acquired_via], acquired_via),
-            ).fetchone()
-            cid = row["id"] if isinstance(row, dict) else row[0]
+            row = CustomersWrapper().insert(
+                tenant_id,
+                {
+                    "display_name": ins_name,
+                    "phone_e164": phone_e164,
+                    "email": ins_email,
+                    "acquired_via": [acquired_via],
+                    "source": acquired_via,
+                },
+                conn=conn,
+            )
+            cid = row["id"]
             # VT-315 / CL-390: hash before emit (see CUSTOMER_UPDATED above).
             emit_kg_event(conn, KgEventType.CUSTOMER_CREATED, tenant_id, {
                 "customer_id": str(cid),

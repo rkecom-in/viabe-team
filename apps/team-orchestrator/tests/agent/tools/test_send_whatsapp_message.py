@@ -35,6 +35,26 @@ def _now_utc() -> datetime:
     return datetime.now(timezone.utc)
 
 
+# VT-306: _resolve_customer reads via CustomersWrapper.find_by_id on its own
+# tenant_connection (not the mock pool's cursor). Patch the wrapper to return the
+# row `_pool(customer_row=...)` stages.
+_RESOLVED_CUSTOMER: list[Any] = [None]
+
+
+@pytest.fixture(autouse=True)
+def _patch_customer_wrapper(monkeypatch):
+    from orchestrator.db.wrappers import CustomersWrapper
+
+    monkeypatch.setattr(
+        CustomersWrapper,
+        "find_by_id",
+        lambda self, tenant_id, row_id, **kw: _RESOLVED_CUSTOMER[0],
+    )
+    _RESOLVED_CUSTOMER[0] = None
+    yield
+    _RESOLVED_CUSTOMER[0] = None
+
+
 def _pool(
     *,
     customer_row: Any = None,
@@ -51,11 +71,12 @@ def _pool(
     """
     executed: list[tuple[str, Any]] = []
     cur = MagicMock()
+    _RESOLVED_CUSTOMER[0] = customer_row  # VT-306: served by the patched wrapper
 
-    # Response queue: idem check → customer query → tenant count → customer count
+    # Response queue: idem check → tenant count → customer count (customer resolve
+    # no longer hits this cursor — it's the patched CustomersWrapper.find_by_id).
     responses: list[Any] = [
         idem_row,        # _check_idempotency fetchone
-        customer_row,    # _resolve_customer fetchone
         {"count": tenant_count},   # _check_tenant_rate_limit fetchone
         {"count": customer_count}, # _check_customer_rate_limit fetchone
     ]

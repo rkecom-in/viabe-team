@@ -35,6 +35,8 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from orchestrator.db.wrappers import CampaignsWrapper
+
 logger = logging.getLogger(__name__)
 
 # One stable forward-target note string (deterministic — same bytes every run).
@@ -152,16 +154,13 @@ def _col(r: Any, key: str, idx: int) -> Any:
 def _campaign_mode(cur: Any, payload: GetAttributionDataInput) -> GetAttributionDataOutput:
     notes: list[str] = [_DEGRADE_NOTE]
 
-    cur.execute(
-        """
-        SELECT attribution_close_at, attribution_closed_at, total_arrr_paise
-        FROM campaigns
-        WHERE id = %s AND tenant_id = %s
-        LIMIT 1
-        """,
-        (payload.campaign_id, payload.tenant_id),
-    )
-    crow = cur.fetchone()
+    # VT-306: campaign row via the wrapper on the caller's tenant-scoped cur.
+    # The attributions aggregate below stays direct (attributions is NOT a hot
+    # table). find_by_id returns the full row; we read the 3 attribution fields.
+    # VT-306 (bounce fix): NO conn= — the surrounding cur is pool+set_config
+    # (BYPASSRLS, no SET ROLE app_role), so passing it would defeat layer-1 RLS.
+    # The wrapper opens its OWN tenant_connection (SET ROLE app_role + GUC).
+    crow = CampaignsWrapper().find_by_id(payload.tenant_id, payload.campaign_id)
     if crow is None:
         # No such campaign for this tenant — honest empty (Pillar 7).
         notes.append("campaign not found for tenant")
@@ -187,7 +186,9 @@ def _campaign_mode(cur: Any, payload: GetAttributionDataInput) -> GetAttribution
             "treat as indicative"
         )
 
-    cur.execute(
+    # cur is a tenant_connection (a Connection) — connection.execute() returns the
+    # cursor, so chain .fetchone() (Connection itself has no .fetchone).
+    arow = cur.execute(
         """
         SELECT
             COUNT(DISTINCT COALESCE(customer_id::text, razorpay_payment_id,
@@ -197,8 +198,7 @@ def _campaign_mode(cur: Any, payload: GetAttributionDataInput) -> GetAttribution
         WHERE campaign_id = %s AND tenant_id = %s
         """,
         (payload.campaign_id, payload.tenant_id),
-    )
-    arow = cur.fetchone()
+    ).fetchone()
     transacting = int(_col(arow, "transacting_count", 0) or 0)
     arrr = int(_col(arow, "arrr_paise", 1) or 0)
 
@@ -224,26 +224,12 @@ def _campaign_mode(cur: Any, payload: GetAttributionDataInput) -> GetAttribution
 def _window_mode(cur: Any, payload: GetAttributionDataInput) -> GetAttributionDataOutput:
     notes: list[str] = [_DEGRADE_NOTE]
 
-    cur.execute(
-        """
-        SELECT
-            c.id::text AS campaign_id,
-            c.attribution_closed_at,
-            COUNT(DISTINCT COALESCE(a.customer_id::text, a.razorpay_payment_id,
-                                    a.id::text)) AS transacting_count,
-            COALESCE(SUM(a.attributed_paise), 0) AS arrr_paise
-        FROM campaigns c
-        LEFT JOIN attributions a
-          ON a.campaign_id = c.id AND a.tenant_id = c.tenant_id
-        WHERE c.tenant_id = %s
-          AND c.attribution_close_at >= %s
-          AND c.attribution_close_at <= %s
-        GROUP BY c.id, c.attribution_closed_at
-        ORDER BY c.id ASC
-        """,
-        (payload.tenant_id, payload.window_start, payload.window_end),
+    # VT-306: the campaigns⋈attributions window rollup is encapsulated by the
+    # wrapper (tenant-matched join), on the caller's tenant-scoped cur.
+    # VT-306 (bounce fix): NO conn= — own tenant_connection (SET ROLE app_role).
+    rows = CampaignsWrapper().attribution_window_summary(
+        payload.tenant_id, payload.window_start, payload.window_end
     )
-    rows = cur.fetchall()
 
     summaries: list[CampaignAttributionSummary] = []
     total_transacting = 0
@@ -295,16 +281,15 @@ def get_attribution_data(
 
         pool = get_pool()
 
-    with pool.connection() as conn:
-        with conn.cursor() as cur:
-            # VT-140 fix: ``SET LOCAL <name> = %s`` is a syntax error ($1 cannot
-            # bind into a SET statement) against real Postgres — the original
-            # line raised and the MagicMock-cursor unit tests masked it. Use
-            # set_config(), the parameterizable form (db/tenant_connection.py).
-            cur.execute(
-                "SELECT set_config('app.current_tenant', %s, false)",
-                (payload.tenant_id,),
-            )
+    # VT-306 (bounce-2): the OUTER connection is a tenant_connection (SET ROLE
+    # app_role + GUC) — NOT pool.connection()+set_config — so the direct
+    # `attributions` read in _campaign_mode is RLS-enforced too (attributions has
+    # FORCE RLS, mig 023, inert under the BYPASSRLS pool role). ``pool`` is now
+    # vestigial. The campaigns reads still go through the wrapper (own conn).
+    _ = pool
+    from orchestrator.db import tenant_connection
+
+    with tenant_connection(payload.tenant_id) as cur:
             try:
                 if payload.campaign_id is not None:
                     out = _campaign_mode(cur, payload)

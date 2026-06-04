@@ -43,6 +43,7 @@ from orchestrator.agent.schemas.campaign_plan import (
     CampaignPlanProposed,
 )
 from orchestrator.db import tenant_connection
+from orchestrator.db.wrappers import CampaignsWrapper
 from orchestrator.privacy.cohort import (
     CohortRejectedError,
     resolve_cohort_recipients,
@@ -93,30 +94,20 @@ def collapse_campaign_plan(
         # The full v1.0 plan lands in plan_json; downstream consumers
         # read structured fields via JSONB operators.
         plan_dict = campaign_plan.model_dump(mode="json")
-        # dict_row factory is configured on the pool (graph.py); mypy
-        # can't see it through psycopg's generic Row type, so cast at
-        # the seam.
-        raw_campaign = conn.execute(
-            """
-            INSERT INTO campaigns
-                (tenant_id, run_id, plan_json, status, generated_at)
-            VALUES (%s, %s, %s, %s, %s)
-            RETURNING id
-            """,
-            (
-                str(tenant_id),
-                str(run_id),
-                Jsonb(plan_dict),
-                # status starts at the lifecycle-initial value
-                # 'proposed' (which happens to share the name with
-                # the agent-terminal state — the lifecycle progression
-                # is proposed → approved/rejected → sent/failed,
-                # owned by VT-6 / VT-5).
-                campaign_plan.status.value,
-                campaign_plan.generated_at,
-            ),
-        ).fetchone()
-        campaign_row = cast("dict[str, Any]", raw_campaign)
+        # VT-306: insert through the typed wrapper on the open transaction's conn
+        # (atomic with the campaign-proposed emit). status starts at the
+        # lifecycle-initial 'proposed' (progression proposed → approved/rejected →
+        # sent/failed, owned by VT-6/VT-5). tenant_id is forced by the wrapper.
+        campaign_row = CampaignsWrapper().insert(
+            tenant_id,
+            {
+                "run_id": str(run_id),
+                "plan_json": Jsonb(plan_dict),
+                "status": campaign_plan.status.value,
+                "generated_at": campaign_plan.generated_at,
+            },
+            conn=conn,
+        )
         campaign_id = UUID(str(campaign_row["id"]))
 
         # VT-65 PR-2: emit campaign_created to the KG outbox IN THIS TXN (atomic

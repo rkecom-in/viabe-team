@@ -48,8 +48,13 @@ from uuid import UUID
 import yaml
 from psycopg.types.json import Jsonb
 
-from orchestrator._tenant_guard import assert_tenant_scoped, emit_pipeline_step
+from orchestrator._tenant_guard import emit_pipeline_step
 from orchestrator.db import tenant_connection
+from orchestrator.db.wrappers import (
+    CampaignsWrapper,
+    CustomersWrapper,
+    OwnerInputsWrapper,
+)
 from orchestrator.templates_registry import approved_template_names
 from orchestrator.types.trigger_reason import TriggerReason
 
@@ -310,15 +315,13 @@ def _build_ledger_summary(tenant_id: UUID) -> tuple[LedgerSummary, bool]:
     """
     tid = str(tenant_id)
     with tenant_connection(tenant_id) as conn:
-        total_row = conn.execute(
-            "SELECT count(*) AS n FROM customers WHERE tenant_id = %s", (tid,)
-        ).fetchone()
-        recency_row = conn.execute(
-            "SELECT percentile_cont(%s) WITHIN GROUP "
-            "(ORDER BY (now()::date - last_inbound_at::date)) AS p "
-            "FROM customers WHERE tenant_id = %s AND last_inbound_at IS NOT NULL",
-            (list(_PCTLS), tid),
-        ).fetchone()
+        # VT-306: customers reads via the wrapper on this conn. spend
+        # (customer_ledger_entries) + business_type (tenants) are NOT hot tables —
+        # they stay direct.
+        total_customers = CustomersWrapper().count_all(tenant_id, conn=conn)
+        recency_row = CustomersWrapper().recency_days_percentiles(
+            tenant_id, list(_PCTLS), conn=conn
+        )
         spend_row = conn.execute(
             "WITH s AS ("
             "  SELECT customer_id, sum(amount_paise) AS t FROM customer_ledger_entries "
@@ -331,7 +334,7 @@ def _build_ledger_summary(tenant_id: UUID) -> tuple[LedgerSummary, bool]:
         ).fetchone()
 
     summary = LedgerSummary(
-        total_customers=int((total_row or {}).get("n") or 0),
+        total_customers=total_customers,
         recency_days_pctl=_pctl_map(recency_row),
         spend_paise_pctl=_pctl_map(spend_row),
         business_type=str((bt_row or {}).get("business_type") or ""),
@@ -446,13 +449,8 @@ def _build_recent_campaigns(tenant_id: UUID) -> tuple[list[CampaignSnapshot], bo
     cross-tenant row impossible, but the assertion logs + raises if it
     ever happens.
     """
-    with tenant_connection(tenant_id) as conn:
-        raw_rows = conn.execute(
-            "SELECT id, tenant_id, status, generated_at FROM campaigns "
-            "ORDER BY generated_at DESC LIMIT 5"
-        ).fetchall()
-    rows = cast("list[dict[str, Any]]", raw_rows)
-    assert_tenant_scoped(rows, tenant_id)
+    # VT-306: via the wrapper (own tenant_connection + assert_tenant_scoped).
+    rows = CampaignsWrapper().list_recent_basic(tenant_id, limit=5)
     snapshots = [
         CampaignSnapshot(
             campaign_id=row["id"],
@@ -495,17 +493,10 @@ def _build_pending_owner_inputs(tenant_id: UUID) -> tuple[list[OwnerInput], bool
     cross-tenant row impossible, but the assertion logs + raises if it
     ever happens.
     """
-    with tenant_connection(tenant_id) as conn:
-        raw_rows = conn.execute(
-            "SELECT id, tenant_id, intent, segment, occasion, created_at "
-            "FROM owner_inputs "
-            "WHERE consumed_at IS NULL "
-            "ORDER BY created_at DESC "
-            "LIMIT %s",
-            (_PENDING_OWNER_INPUTS_LIMIT,),
-        ).fetchall()
-    rows = cast("list[dict[str, Any]]", raw_rows)
-    assert_tenant_scoped(rows, tenant_id)
+    # VT-306: via the wrapper (own tenant_connection + assert_tenant_scoped).
+    rows = OwnerInputsWrapper().list_pending(
+        tenant_id, limit=_PENDING_OWNER_INPUTS_LIMIT
+    )
     inputs = [
         OwnerInput(
             input_id=row["id"],

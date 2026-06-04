@@ -321,7 +321,7 @@ def test_approval_timeout_sweep_resolves_and_resumes(monkeypatch) -> None:
     marked: list[tuple] = []
     monkeypatch.setattr(
         "orchestrator.agent.approval_resume.mark_approval_resolved",
-        lambda conn, approval_id, decision, **kw: marked.append((approval_id, decision)),
+        lambda conn, tenant_id, approval_id, decision, **kw: marked.append((approval_id, decision)),
     )
     resumed: list[tuple] = []
     monkeypatch.setattr(
@@ -373,7 +373,7 @@ def test_approval_timeout_sweep_one_failure_does_not_halt(monkeypatch) -> None:
     )
     monkeypatch.setattr(
         "orchestrator.agent.approval_resume.mark_approval_resolved",
-        lambda conn, approval_id, decision, **kw: None,
+        lambda conn, tenant_id, approval_id, decision, **kw: None,
     )
 
     def _resume(run_id, decision):

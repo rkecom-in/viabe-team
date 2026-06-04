@@ -33,6 +33,8 @@ from typing import Any, Callable, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from orchestrator.db.wrappers import CustomersWrapper
+
 logger = logging.getLogger(__name__)
 
 # Rate-limit constants.
@@ -235,25 +237,20 @@ def _check_tenant_rate_limit(cur: Any, tenant_id: str) -> bool:
 def _resolve_customer(
     cur: Any, tenant_id: str, customer_id: str,
 ) -> dict[str, Any] | None:
-    """Resolve customer record under RLS (SET LOCAL already called).
+    """Resolve a customer's send fields, or None if not visible.
 
-    Returns dict with phone_e164 and opt_out_status, or None if not visible.
+    VT-306: reads through CustomersWrapper on its OWN tenant_connection (SET ROLE
+    app_role + GUC + assert_tenant_scoped) — an upgrade from the prior inline
+    ``set_config`` (no SET ROLE). The ``cur`` param is now vestigial (the wrapper
+    owns its connection). Scope: ONLY this customers read migrates — the send
+    flow's send_idempotency_keys access stays on its own connection (not a hot
+    table / not gate-flagged), per Cowork 20260605T002000Z.
     """
-    cur.execute(
-        """
-        SELECT phone_e164, opt_out_status
-        FROM customers
-        WHERE id = %s AND tenant_id = %s
-        LIMIT 1
-        """,
-        (customer_id, tenant_id),
-    )
-    row = cur.fetchone()
+    _ = cur
+    row = CustomersWrapper().find_by_id(tenant_id, customer_id)
     if row is None:
         return None
-    if isinstance(row, dict):
-        return {"phone_e164": row["phone_e164"], "opt_out_status": row["opt_out_status"]}
-    return {"phone_e164": row[0], "opt_out_status": row[1]}
+    return {"phone_e164": row["phone_e164"], "opt_out_status": row["opt_out_status"]}
 
 
 def _write_idempotency_ledger(

@@ -43,6 +43,27 @@ def _grant_consent(monkeypatch):
     monkeypatch.setattr(consent, "has_consent_for_phone", lambda *_a, **_k: True)
 
 
+# VT-306: _resolve_customer now reads via CustomersWrapper.find_by_id on its own
+# tenant_connection (not the mock pool's cursor). Patch the wrapper to return the
+# row `_pool(customer_row=...)` stages, so the existing tests keep driving the
+# customer-resolution outcome without a live DB.
+_RESOLVED_CUSTOMER: list[Any] = [None]
+
+
+@pytest.fixture(autouse=True)
+def _patch_customer_wrapper(monkeypatch):
+    from orchestrator.db.wrappers import CustomersWrapper
+
+    monkeypatch.setattr(
+        CustomersWrapper,
+        "find_by_id",
+        lambda self, tenant_id, row_id, **kw: _RESOLVED_CUSTOMER[0],
+    )
+    _RESOLVED_CUSTOMER[0] = None
+    yield
+    _RESOLVED_CUSTOMER[0] = None
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -61,17 +82,17 @@ def _pool(
 ) -> tuple[Any, list[tuple[str, Any]]]:
     """Build a MagicMock pool that hands back controlled query results.
 
-    Response order:
+    Response order (VT-306: customer resolve no longer hits this cursor — it's
+    served by the patched CustomersWrapper.find_by_id, set from customer_row):
       1. idem_row (idempotency check SELECT)
-      2. customer_row (customer resolve SELECT)
-      3. tenant_count (rate limit COUNT)
+      2. tenant_count (rate limit COUNT)
     """
     executed: list[tuple[str, Any]] = []
     cur = MagicMock()
+    _RESOLVED_CUSTOMER[0] = customer_row  # served by the patched wrapper
 
     responses: list[Any] = [
         idem_row,                     # _check_idempotency fetchone
-        customer_row,                 # _resolve_customer fetchone
         {"count": tenant_count},      # _check_tenant_rate_limit fetchone
     ]
     response_idx = [0]

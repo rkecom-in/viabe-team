@@ -19,6 +19,8 @@ from __future__ import annotations
 import logging
 from typing import Any, Callable
 
+from orchestrator.db.wrappers import CustomersWrapper
+
 logger = logging.getLogger(__name__)
 
 # tenant_id -> frozenset of case-folded display names.
@@ -49,25 +51,14 @@ def get_customer_names_for_tenant(
     if use_cache and tenant_id in _CACHE:
         return _CACHE[tenant_id]
 
+    # VT-306: read through the typed tenant wrapper (RLS + GUC + result
+    # validation intrinsic). ``pool`` is now vestigial (the wrapper owns its
+    # tenant_connection) — retained on the signature for caller stability; a
+    # follow-up can drop it through make_name_registry + the redactor seam.
+    _ = pool
     names: set[str] = set()
     try:
-        with pool.connection() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "SELECT set_config('app.current_tenant', %s, false)", (tenant_id,)
-                )
-                cur.execute(
-                    """
-                    SELECT display_name
-                    FROM customers
-                    WHERE tenant_id = %s AND display_name IS NOT NULL
-                    """,
-                    (tenant_id,),
-                )
-                for row in cur.fetchall():
-                    val = row["display_name"] if isinstance(row, dict) else row[0]
-                    if val:
-                        names.add(str(val).casefold())
+        names = set(CustomersWrapper().list_display_names(tenant_id))
     except Exception as exc:  # noqa: BLE001
         if type(exc).__name__ != "UndefinedTable":
             raise

@@ -41,8 +41,7 @@ from uuid import UUID, uuid4
 import yaml
 from anthropic import Anthropic
 
-from orchestrator._tenant_guard import assert_tenant_scoped
-from orchestrator.db import tenant_connection
+from orchestrator.db.wrappers import OwnerInputsWrapper
 from orchestrator.types import WebhookEvent
 
 _logger = logging.getLogger(__name__)
@@ -210,31 +209,22 @@ def write_owner_input(
     function knows nothing about the original message text. Locking
     that surface is the whole point of the VT-146 derived-only design.
     """
+    # VT-306: write through the typed tenant wrapper. The wrapper forces
+    # tenant_id to the scoped tenant + validates the RETURNING row via
+    # assert_tenant_scoped (the belt-and-braces re-read is now intrinsic).
     new_id = uuid4()
-    with tenant_connection(tenant_id) as conn:
-        conn.execute(
-            "INSERT INTO owner_inputs "
-            "(id, tenant_id, run_id, message_sid, intent, segment, occasion) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s)",
-            (
-                str(new_id),
-                str(tenant_id),
-                str(run_id) if run_id is not None else None,
-                message_sid,
-                classification.intent,
-                classification.segment,
-                classification.occasion,
-            ),
-        )
-        # Belt-and-braces over RLS: re-read the just-written row + assert
-        # its tenant_id matches the expected value before returning.
-        raw = conn.execute(
-            "SELECT id, tenant_id FROM owner_inputs WHERE id = %s",
-            (str(new_id),),
-        ).fetchall()
-        rows = cast("list[dict[str, Any]]", raw)
-    assert_tenant_scoped(rows, tenant_id)
-    return new_id
+    row = OwnerInputsWrapper().insert(
+        tenant_id,
+        {
+            "id": str(new_id),
+            "run_id": str(run_id) if run_id is not None else None,
+            "message_sid": message_sid,
+            "intent": classification.intent,
+            "segment": classification.segment,
+            "occasion": classification.occasion,
+        },
+    )
+    return UUID(str(row["id"])) if row.get("id") else new_id
 
 
 def run_extraction_for_event(

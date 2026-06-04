@@ -44,29 +44,40 @@ _WRAPPER_DIR = _SRC / "db"
 # file touching the tables must NOT be added here — it must use a wrapper.
 _ALLOWLIST = frozenset(
     {
-        "apps/team-orchestrator/src/orchestrator/owner_surface/monthly_report.py",
-        "apps/team-orchestrator/src/orchestrator/privacy/cohort.py",
-        "apps/team-orchestrator/src/orchestrator/privacy/customer_registry.py",
-        "apps/team-orchestrator/src/orchestrator/agent/tools/send_whatsapp_message.py",
-        "apps/team-orchestrator/src/orchestrator/agent/tools/send_whatsapp_template.py",
-        "apps/team-orchestrator/src/orchestrator/integrations/dedup_merge.py",
-        "apps/team-orchestrator/src/orchestrator/collapse.py",
-        "apps/team-orchestrator/src/orchestrator/context_builder.py",
-        "apps/team-orchestrator/src/orchestrator/scheduled_triggers.py",
-        "apps/team-orchestrator/src/orchestrator/agent/tools/get_attribution_data.py",
-        "apps/team-orchestrator/src/orchestrator/agent/tools/get_recent_campaigns.py",
-        "apps/team-orchestrator/src/orchestrator/campaign/execute.py",
-        "apps/team-orchestrator/src/orchestrator/billing/attribution_close.py",
-        "apps/team-orchestrator/src/orchestrator/agent/approval_resume.py",
-        "apps/team-orchestrator/src/orchestrator/agent/tools/request_owner_approval.py",
-        "apps/team-orchestrator/src/orchestrator/owner_inputs/writer.py",
-        "apps/team-orchestrator/src/orchestrator/agent/tools/query_customer_ledger.py",
-        "apps/team-orchestrator/src/orchestrator/observability/phone_tokens.py",
-        "apps/team-orchestrator/src/orchestrator/integrations/dedupe.py",
-        "apps/team-orchestrator/src/orchestrator/integrations/ledger.py",
-        # DSR controller paths (VT-77) — service-role admin ops over many tables.
+        # VT-306 RESIDUAL: only sites that CANNOT use the per-tenant app_role
+        # wrapper (BYPASSRLS-by-design / operator-role / cross-tenant), each with a
+        # documented reason. The ~15 per-tenant Group-A sites were MIGRATED onto
+        # orchestrator.db.wrappers and removed from this list. NEVER re-add a
+        # "deferred, not-yet-migrated" site here — the residual stays structural.
+        #
+        # DSR controller paths (VT-77) — service-role admin ops over many tables;
+        # explicit WHERE tenant_id. Tenant-wide deletion/export cannot run inside a
+        # single tenant's RLS scope.
         "apps/team-orchestrator/src/orchestrator/dsr_purge.py",
         "apps/team-orchestrator/src/orchestrator/dsr_export.py",
+        # VT-28/176/47 scheduled-sweep eligibility scans — the nightly bodies scan
+        # ALL eligible campaigns (attribution-close) + ALL timed-out
+        # pending_approvals ACROSS tenants under BYPASSRLS, by design: a sweep
+        # cannot run inside one tenant's RLS scope. The per-row work then routes
+        # through tenant-scoped paths (close_attribution / mark_approval_resolved,
+        # tenant-predicated). Cross-tenant scan = residual, like the other sweeps.
+        "apps/team-orchestrator/src/orchestrator/scheduled_triggers.py",
+        # VT-176 attribution close — by-PK UPDATE of `campaigns` under BYPASSRLS in
+        # the scheduled cross-tenant sweep; the id is sourced from the INTERNAL
+        # sweep query, never client input (no IDOR surface) (Cowork 20260605T002000Z).
+        "apps/team-orchestrator/src/orchestrator/billing/attribution_close.py",
+        # phone_token_resolutions is OPERATOR-ROLE substrate (CL-82): mig 027 grants
+        # SELECT to app_operator_role; mig 007 has NO app_role grant, so a
+        # tenant_connection (SET ROLE app_role) read is permission-denied by
+        # construction. All access is service-role + explicit WHERE tenant_id, by
+        # necessity (Cowork 20260605T002800Z). phone_tokens + dedupe ADDITIONALLY
+        # bootstrap tenant context (resolve token -> FIND the tenant; no GUC can be
+        # set before the lookup). query_customer_ledger + ledger are in-context
+        # reads but still on the operator-role table.
+        "apps/team-orchestrator/src/orchestrator/observability/phone_tokens.py",
+        "apps/team-orchestrator/src/orchestrator/integrations/dedupe.py",
+        "apps/team-orchestrator/src/orchestrator/agent/tools/query_customer_ledger.py",
+        "apps/team-orchestrator/src/orchestrator/integrations/ledger.py",
         # VT-74 k-anonymity admission gate — THE single sanctioned cross-tenant
         # read (Pillar 8, Cowork-approved 20260603T195500Z). Queries only
         # `tenants` (not a watched hot table, so it would not trip today) via the

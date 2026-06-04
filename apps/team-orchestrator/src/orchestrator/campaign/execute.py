@@ -26,7 +26,7 @@ Architecture:
   campaign_messages recording for sent/error recipients.
 - Partial-failure: per-recipient try/except → record send_status='error' in
   campaign_messages + continue (NOT fatal; mirror VT-241 reject discipline).
-- After loop: UPDATE campaigns.status='sent'. Return count-only summary.
+- After loop: advance the campaign status to 'sent'. Return count-only summary.
 
 Pillars:
 - CL-421: consent gate — never message opted_out / blocked (hard-refuse).
@@ -51,6 +51,7 @@ import logging
 from typing import Any, Callable
 from uuid import UUID
 
+from orchestrator.db.wrappers import CampaignsWrapper, CustomersWrapper
 from orchestrator.knowledge.l2_writer import record_customer_action_marker
 from orchestrator.agent.tools.send_whatsapp_template import (
     SendWhatsappTemplateInput,
@@ -78,7 +79,7 @@ def _load_recipients(
     tenant_id: str,
     campaign_id: str,
 ) -> list[dict[str, Any]]:
-    """SELECT campaign_recipients JOIN customers for the campaign.
+    """Load campaign_recipients joined to their customer status flags.
 
     Returns list of dicts: {customer_id, opt_out_status, complaint_status}.
     RLS is already scoped via SET LOCAL app.current_tenant on conn.
@@ -88,41 +89,19 @@ def _load_recipients(
     rest). Phone resolution is done inside VT-45 (Pillar 3: tool owns phone
     access).
     """
-    rows = conn.execute(
-        """
-        SELECT cr.customer_id::text AS customer_id,
-               c.opt_out_status,
-               c.complaint_status
-        FROM campaign_recipients cr
-        JOIN customers c
-          ON c.id = cr.customer_id
-         AND c.tenant_id = cr.tenant_id
-        WHERE cr.campaign_id = %s
-          AND cr.tenant_id = %s
-        ORDER BY cr.added_at
-        """,
-        (campaign_id, tenant_id),
-    ).fetchall()
-    if not rows:
-        return []
-    if rows and isinstance(rows[0], dict):
-        # Fail-closed but tolerant: a dict row missing complaint_status (e.g. a
-        # pre-091 fixture / mock) is treated as None → sellable. The live SELECT
-        # always provides it; the send-loop gate only freezes on an explicit
-        # 'open'.
-        return [
-            {
-                "customer_id": r["customer_id"],
-                "opt_out_status": r["opt_out_status"],
-                "complaint_status": r.get("complaint_status"),
-            }
-            for r in rows
-        ]
+    # VT-306: the campaign_recipients⋈customers status read is encapsulated by the
+    # wrapper (tenant-matched join) on the caller's tenant-scoped conn.
+    rows = CustomersWrapper().list_recipients_for_campaign(
+        tenant_id, campaign_id, conn=conn
+    )
+    # Fail-closed but tolerant: a row missing complaint_status (e.g. a pre-091
+    # fixture) is treated as None → sellable; the send-loop gate only freezes on
+    # an explicit 'open'.
     return [
         {
-            "customer_id": r[0],
-            "opt_out_status": r[1],
-            "complaint_status": r[2] if len(r) > 2 else None,
+            "customer_id": r["customer_id"],
+            "opt_out_status": r["opt_out_status"],
+            "complaint_status": r.get("complaint_status"),
         }
         for r in rows
     ]
@@ -148,27 +127,15 @@ def _load_campaign(
     Read from plan_json instead. The language is carried alongside the params so
     the execute loop can pass it to VT-45 without a second column.
     """
-    row = conn.execute(
-        """
-        SELECT plan_json -> 'message_plan' ->> 'template_id'  AS template_id,
-               plan_json -> 'message_plan' ->  'template_params' AS template_params,
-               plan_json -> 'message_plan' ->> 'language'     AS language
-        FROM campaigns
-        WHERE id = %s AND tenant_id = %s
-        LIMIT 1
-        """,
-        (campaign_id, tenant_id),
-    ).fetchone()
+    # VT-306: load the campaign via the wrapper, then read message_plan from the
+    # plan_json dict in Python (find_by_id returns the full row; JSONB -> dict).
+    row = CampaignsWrapper().find_by_id(tenant_id, campaign_id, conn=conn)
     if row is None:
         return None
-    if isinstance(row, dict):
-        template_id = row["template_id"]
-        params = dict(row["template_params"] or {})
-        language = row["language"]
-    else:
-        template_id = row[0]
-        params = dict(row[1] or {})
-        language = row[2]
+    plan = (row.get("plan_json") or {}).get("message_plan") or {}
+    template_id = plan.get("template_id")
+    params = dict(plan.get("template_params") or {})
+    language = plan.get("language")
     # Carry language inside body_params under the reserved _language key; the
     # execute loop pops it back out (keeps _load_campaign's return shape stable).
     if language:
@@ -257,15 +224,8 @@ def _advance_campaign_status(
     tenant_id: str,
     campaign_id: str,
 ) -> None:
-    """UPDATE campaigns.status → 'sent' (RLS-scoped)."""
-    conn.execute(
-        """
-        UPDATE campaigns
-        SET status = 'sent'
-        WHERE id = %s AND tenant_id = %s
-        """,
-        (campaign_id, tenant_id),
-    )
+    """Advance the campaign status to sent (VT-306: via the wrapper, tenant-predicated)."""
+    CampaignsWrapper().set_status(tenant_id, campaign_id, "sent", conn=conn)
 
 
 # Type alias for the injectable send function (matches VT-45's public API).
