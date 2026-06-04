@@ -23,7 +23,21 @@ change goes through a CL first, then this doc reflects it.
   something different per tenant). Brain decisions are **per-tenant personalization ONLY** and must not leak
   into the cross-tenant band. The two planes stay separated.
 - **L4 skill corpus is HUMAN-authored, version-controlled, NOT LLM-generated (VT-313; Pillar 4/5).** Edits go
-  through PR review. Improvements happen via prompts + retrieval, never fine-tuning (Pillar 5).
+  through PR review. Improvements happen via prompts + retrieval, never fine-tuning (Pillar 5). The seed (VT-313)
+  is Fazal's 82-note Agent Operating Playbook at `apps/team-orchestrator/skill_corpus/` (~69 docs;
+  `authored_by: fazal`, verbatim). **Scope:** SaaS / web-storefront notes dropped for the SMB tenant base;
+  subscription/membership + online-seller notes are `applies_to_business_types`-tagged so they don't fire for
+  all tenants. **Locked tag taxonomy (no per-doc sprawl):** timing, festivals, whatsapp, sms, email, local,
+  in_person, retention, churn, win_back, referral, reviews, pricing, discount, bundling, loyalty, cadence,
+  onboarding, complaint, gated.
+- **Magnitudes in the corpus are SEED PRIORS, not ground truth.** Every doc carries a seed-prior header — the
+  agent + VTR validate the claims against real attribution (the reflection loop / L3), never treat them as
+  immutable (CL-426 flywheel).
+- **Gated levers carry a gated header naming the ENFORCEMENT, not the note.** Price / discount / public-voice
+  notes (#45/46/47/48/50/53/55, #21, #35/38) state enforcement = the structural boundary (no direct send/price
+  tool + `request_owner_approval`, Pillar-7); a missed retrieval can't unlock them. #20 complaint-freeze
+  (NON-configurable) → enforcement = the **VT-321** exclusion (open-complaint customers excluded from every send
+  cohort, fail-closed), not the note.
 - **Four knowledge layers:** L1 per-tenant entities/relationships · L2 per-tenant episodic · L3 cross-tenant
   k-anon priors · L4 skills corpus → one composition (`build_sales_recovery_context`, Pillar 8).
 
