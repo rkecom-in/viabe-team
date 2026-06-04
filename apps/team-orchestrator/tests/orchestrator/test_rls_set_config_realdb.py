@@ -398,7 +398,7 @@ def test_customer_registry_denies_cross_tenant(dsn, tenants, seed_conn):
         kwargs={"autocommit": True, "row_factory": dict_row}, open=True,
     )
     try:
-        names = customer_registry.get_customer_names_for_tenant(a, pool=None, use_cache=False)
+        names = customer_registry.get_customer_names_for_tenant(a, use_cache=False)
     finally:
         graph_mod._pool.close()
         graph_mod._pool = prev_pool

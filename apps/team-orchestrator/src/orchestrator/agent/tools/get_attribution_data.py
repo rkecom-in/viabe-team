@@ -267,26 +267,18 @@ def _window_mode(cur: Any, payload: GetAttributionDataInput) -> GetAttributionDa
 
 def get_attribution_data(
     payload: GetAttributionDataInput,
-    *,
-    pool: Any | None = None,
 ) -> GetAttributionDataOutput:
     """Read attribution snapshot for a campaign or a close-window.
 
     Reproducible: identical inputs → byte-identical model_dump_json().
-    RLS via SET LOCAL app.current_tenant. psycopg-free at import; an
-    absent attributions/campaigns schema surfaces as graceful empty.
+    Tenant scope via a tenant_connection (SET ROLE app_role + GUC). psycopg-free
+    at import; an absent attributions/campaigns schema surfaces as graceful empty.
     """
-    if pool is None:
-        from orchestrator.graph import get_pool
-
-        pool = get_pool()
-
-    # VT-306 (bounce-2): the OUTER connection is a tenant_connection (SET ROLE
-    # app_role + GUC) — NOT pool.connection()+set_config — so the direct
-    # `attributions` read in _campaign_mode is RLS-enforced too (attributions has
-    # FORCE RLS, mig 023, inert under the BYPASSRLS pool role). ``pool`` is now
-    # vestigial. The campaigns reads still go through the wrapper (own conn).
-    _ = pool
+    # VT-306 (bounce-2) / VT-324: the OUTER connection is a tenant_connection
+    # (SET ROLE app_role + GUC) — so the direct `attributions` read in
+    # _campaign_mode is RLS-enforced too (attributions has FORCE RLS, mig 023,
+    # inert under the BYPASSRLS pool role). The campaigns reads go through the
+    # wrapper (own conn). The vestigial ``pool`` param + get_pool() checkout dropped.
     from orchestrator.db import tenant_connection
 
     with tenant_connection(payload.tenant_id) as cur:

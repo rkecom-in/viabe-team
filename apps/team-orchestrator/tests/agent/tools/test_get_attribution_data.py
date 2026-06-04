@@ -138,7 +138,7 @@ def test_campaign_mode_closed_with_attributions() -> None:
         GetAttributionDataInput,
         get_attribution_data,
     )
-    pool, _ = _pool_campaign(
+    _pool_campaign(
         campaign_row={
             "tenant_id": UUID(_T),
             "attribution_close_at": T1,
@@ -148,7 +148,7 @@ def test_campaign_mode_closed_with_attributions() -> None:
         agg_row={"transacting_count": 3, "arrr_paise": 5000},
     )
     out = get_attribution_data(
-        GetAttributionDataInput(tenant_id=_T, campaign_id="c1"), pool=pool
+        GetAttributionDataInput(tenant_id=_T, campaign_id="c1")
     )
     assert out.mode == "campaign"
     assert out.campaign is not None
@@ -166,7 +166,7 @@ def test_campaign_mode_pending_emits_note() -> None:
         GetAttributionDataInput,
         get_attribution_data,
     )
-    pool, _ = _pool_campaign(
+    _pool_campaign(
         campaign_row={
             "tenant_id": UUID(_T),
             "attribution_close_at": T1,
@@ -176,7 +176,7 @@ def test_campaign_mode_pending_emits_note() -> None:
         agg_row={"transacting_count": 0, "arrr_paise": 0},
     )
     out = get_attribution_data(
-        GetAttributionDataInput(tenant_id=_T, campaign_id="c1"), pool=pool
+        GetAttributionDataInput(tenant_id=_T, campaign_id="c1")
     )
     assert out.campaign is not None
     assert out.campaign.attribution_status == "pending"
@@ -188,7 +188,7 @@ def test_campaign_mode_cached_mismatch_note() -> None:
         GetAttributionDataInput,
         get_attribution_data,
     )
-    pool, _ = _pool_campaign(
+    _pool_campaign(
         campaign_row={
             "tenant_id": UUID(_T),
             "attribution_close_at": T1,
@@ -198,7 +198,7 @@ def test_campaign_mode_cached_mismatch_note() -> None:
         agg_row={"transacting_count": 2, "arrr_paise": 4000},
     )
     out = get_attribution_data(
-        GetAttributionDataInput(tenant_id=_T, campaign_id="c1"), pool=pool
+        GetAttributionDataInput(tenant_id=_T, campaign_id="c1")
     )
     assert out.campaign is not None
     assert out.campaign.arrr_paise == 4000  # live SUM wins
@@ -210,7 +210,7 @@ def test_window_mode_aggregates() -> None:
         GetAttributionDataInput,
         get_attribution_data,
     )
-    pool = _pool_window(rows=[
+    _pool_window(rows=[
         {"campaign_id": "a", "attribution_closed_at": T1,
          "transacting_count": 2, "arrr_paise": 3000},
         {"campaign_id": "b", "attribution_closed_at": None,
@@ -218,7 +218,6 @@ def test_window_mode_aggregates() -> None:
     ])
     out = get_attribution_data(
         GetAttributionDataInput(tenant_id=_T, window_start=T0, window_end=T1),
-        pool=pool,
     )
     assert out.mode == "window"
     assert out.window is not None
@@ -237,7 +236,7 @@ def test_reproducibility_byte_identical() -> None:
     inp = GetAttributionDataInput(tenant_id=_T, campaign_id="c1")
 
     def _run() -> str:
-        pool, _ = _pool_campaign(
+        _pool_campaign(
             campaign_row={
             "tenant_id": UUID(_T),
                 "attribution_close_at": T1,
@@ -246,7 +245,7 @@ def test_reproducibility_byte_identical() -> None:
             },
             agg_row={"transacting_count": 3, "arrr_paise": 5000},
         )
-        return get_attribution_data(inp, pool=pool).model_dump_json()
+        return get_attribution_data(inp).model_dump_json()
 
     assert _run() == _run()  # byte-identical
 
@@ -256,7 +255,7 @@ def test_sets_tenant_guc_before_query() -> None:
         GetAttributionDataInput,
         get_attribution_data,
     )
-    pool, issued = _pool_campaign(
+    _pool_campaign(
         campaign_row={
             "tenant_id": UUID(_T),
             "attribution_close_at": T1, "attribution_closed_at": T1,
@@ -266,7 +265,6 @@ def test_sets_tenant_guc_before_query() -> None:
     )
     get_attribution_data(
         GetAttributionDataInput(tenant_id=_T, campaign_id="c1"),
-        pool=pool,
     )
     # VT-306 bounce-2: scope is enforced by opening a tenant_connection (SET ROLE
     # app_role + GUC) for the resolving tenant — NOT inline set_config on a raw
@@ -279,7 +277,7 @@ def test_undefined_table_graceful_empty() -> None:
         GetAttributionDataInput,
         get_attribution_data,
     )
-    pool, _ = _pool_campaign(
+    _pool_campaign(
         campaign_row={
             "tenant_id": UUID(_T),
             "attribution_close_at": T1, "attribution_closed_at": T1,
@@ -289,7 +287,7 @@ def test_undefined_table_graceful_empty() -> None:
         raise_undefined=True,
     )
     out = get_attribution_data(
-        GetAttributionDataInput(tenant_id=_T, campaign_id="c1"), pool=pool
+        GetAttributionDataInput(tenant_id=_T, campaign_id="c1")
     )
     assert out.campaign is not None
     assert out.campaign.transacting_count == 0

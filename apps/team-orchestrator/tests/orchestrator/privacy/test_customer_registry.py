@@ -39,7 +39,7 @@ def test_names_fetched_and_casefolded() -> None:
     from orchestrator.privacy.customer_registry import get_customer_names_for_tenant
 
     with _names({"ravi kumar", "priya"}):
-        names = get_customer_names_for_tenant("t1", pool=None)
+        names = get_customer_names_for_tenant("t1")
     assert "ravi kumar" in names
     assert "priya" in names
 
@@ -48,11 +48,11 @@ def test_cache_hit_skips_second_query() -> None:
     from orchestrator.privacy.customer_registry import get_customer_names_for_tenant
 
     with _names({"ravi"}):
-        get_customer_names_for_tenant("t1", pool=None)
+        get_customer_names_for_tenant("t1")
     # Second call must be served from cache — even though the wrapper would now
     # return empty, the cached set is returned.
     with _names(set()):
-        names = get_customer_names_for_tenant("t1", pool=None)
+        names = get_customer_names_for_tenant("t1")
     assert "ravi" in names
 
 
@@ -61,10 +61,10 @@ def test_invalidate_forces_refetch() -> None:
     from orchestrator.privacy.customer_registry import get_customer_names_for_tenant
 
     with _names({"old"}):
-        get_customer_names_for_tenant("t1", pool=None)
+        get_customer_names_for_tenant("t1")
     customer_registry.invalidate("t1")
     with _names({"new"}):
-        names = get_customer_names_for_tenant("t1", pool=None)
+        names = get_customer_names_for_tenant("t1")
     assert "new" in names
     assert "old" not in names
 
@@ -73,7 +73,7 @@ def test_undefined_table_returns_empty() -> None:
     from orchestrator.privacy.customer_registry import get_customer_names_for_tenant
 
     with _names(raise_undefined=True):
-        names = get_customer_names_for_tenant("t1", pool=None)
+        names = get_customer_names_for_tenant("t1")
     assert names == frozenset()
 
 
@@ -81,7 +81,7 @@ def test_make_name_registry_predicate() -> None:
     from orchestrator.privacy.customer_registry import make_name_registry
 
     with _names({"ravi kumar"}):
-        reg = make_name_registry("t1", pool=None)
+        reg = make_name_registry("t1")
     assert reg("ravi kumar") is True
     assert reg("RAVI KUMAR") is True
     assert reg("someone else") is False
@@ -99,6 +99,6 @@ def test_redactor_redacts_known_name_with_registry() -> None:
     from orchestrator.privacy.pii_redactor import redact
 
     with _names({"ravi kumar"}):
-        reg = make_name_registry("t1", pool=None)
+        reg = make_name_registry("t1")
     out = redact({"note": "Ravi Kumar called"}, name_registry=reg)
     assert "Ravi Kumar" not in str(out)

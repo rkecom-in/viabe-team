@@ -108,6 +108,15 @@ if [ "$ORCH_CHANGED" = 1 ]; then
   say "smoke pytest (uv --no-project --with pytest) — dep-less, mirrors CI 'test' job"
   ( cd apps/team-orchestrator && uv run --no-project --with pytest pytest -q ) \
     || { err "orchestrator smoke pytest"; FAIL=1; }
+
+  # VT-324: no-direct-tenant-db-access is now an ENFORCED blocking gate (was
+  # CI-only / report-labelled). Post-VT-245 CI status checks don't block merges,
+  # so the pre-push hook is the real safety gate — a NEW direct SQL read/write on
+  # a tenant-scoped hot table outside the wrapper layer (and off the 11-entry
+  # structural residual allowlist) aborts the push.
+  say "no-direct-tenant-db-access (VT-72/306 — enforced)"
+  python3 scripts/check_no_direct_tenant_db_access.py \
+    || { err "no-direct-tenant-db-access"; FAIL=1; }
 fi
 
 # --- 2. team-web: tsc + vitest + lint ---------------------------------

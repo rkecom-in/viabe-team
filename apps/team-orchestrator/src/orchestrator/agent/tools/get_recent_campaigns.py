@@ -66,8 +66,6 @@ class GetRecentCampaignsOutput(BaseModel):
 
 def get_recent_campaigns(
     payload: GetRecentCampaignsInput,
-    *,
-    pool: Any | None = None,
 ) -> GetRecentCampaignsOutput:
     """Read recent campaigns + per-campaign response counts.
 
@@ -75,10 +73,8 @@ def get_recent_campaigns(
     (forward-compat — table is in main as of migration 016).
     """
     # VT-306: the campaigns⋈attributions read (tenant-matched join, generated_at
-    # window, plan_json template_id COALESCE) is encapsulated by the wrapper.
-    # ``pool`` is now vestigial (the wrapper owns its tenant_connection) — kept on
-    # the signature for caller stability; a follow-up can drop it.
-    _ = pool
+    # window, plan_json template_id COALESCE) is encapsulated by the wrapper, which
+    # owns its tenant_connection. (VT-324: vestigial ``pool`` param dropped.)
     try:
         raw = CampaignsWrapper().list_recent_with_responses(
             payload.tenant_id,
