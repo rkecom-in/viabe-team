@@ -196,7 +196,9 @@ class PendingApprovalsWrapper(TenantScopedTable):
             cur = c.execute(
                 "UPDATE pending_approvals "
                 "SET decision = %s, status = %s, resolved_at = now(), "
-                "owner_message_sid = %s "
+                # COALESCE preserves an existing sid when the caller passes None
+                # (matches the pre-migration behaviour; a redelivery keeps the sid).
+                "owner_message_sid = COALESCE(%s, owner_message_sid) "
                 "WHERE tenant_id = %s AND id = %s AND resolved_at IS NULL",
                 (decision, status, owner_message_sid, str(tid), str(approval_id)),
             )
