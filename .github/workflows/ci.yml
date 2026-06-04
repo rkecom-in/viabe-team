@@ -273,17 +273,18 @@ jobs:
     needs: changes
     if: needs.changes.outputs.orchestrator == 'true' || needs.changes.outputs.ci == 'true'
     runs-on: ubuntu-latest
-    # VT-72 isolation layer-2: NEW direct SQL access to a tenant-scoped hot table
-    # (customers / campaigns / pending_approvals / owner_inputs /
+    # VT-72/306/324 isolation layer-2: direct SQL access to a tenant-scoped hot
+    # table (customers / campaigns / pending_approvals / owner_inputs /
     # phone_token_resolutions) outside orchestrator.db.wrappers fails the build.
-    # Existing sites are allowlisted in the script (layer-1 RLS protects them);
-    # VT-306 migrates them + flips this to hard-fail.
+    # VT-306 migrated every per-tenant site; the allowlist is now the 11 structural
+    # residuals only. VT-324 also enforces this in the pre-push hook (the real
+    # safety gate post-VT-245); this CI job is the non-blocking backstop.
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
-      - name: no-direct-tenant-db-access (report/allowlist mode)
+      - name: no-direct-tenant-db-access (enforced — hard-fail)
         run: python3 scripts/check_no_direct_tenant_db_access.py
 
   gate-sr-agent-prompt-token-cap:

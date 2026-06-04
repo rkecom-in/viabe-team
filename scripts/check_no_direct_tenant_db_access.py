@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
-"""VT-72 — `no-direct-tenant-db-access` lint (Phase-1: report/allowlist mode).
+"""VT-72 / VT-306 / VT-324 — `no-direct-tenant-db-access` ENFORCED gate.
 
-Forbids NEW direct SQL access to the tenant-scoped hot tables outside the
-wrapper layer. Existing accessor files are allowlisted (layer-1 RLS already
-protects them); a NEW non-allowlisted file touching these tables fails the gate.
+Forbids direct SQL access to the tenant-scoped hot tables outside the wrapper
+layer. VT-306 migrated every per-tenant call site onto orchestrator.db.wrappers
+and shrank the allowlist to the 11 STRUCTURAL residuals (BYPASSRLS / operator-role
+/ cross-tenant sweeps), each with a documented reason inline. VT-324 wires this as
+a BLOCKING pre-push check (post-VT-245, CI status checks don't gate merges, so the
+pre-push hook is the real safety gate) — no longer report-only.
 
-VT-306 owns the full call-site migration + flipping this to hard-fail (empty
-allowlist). Until then this gate's job is purely to stop regressions.
+Any non-allowlisted file touching these tables — a NEW direct-SQL site, or a
+migrated site that regresses — fails the gate.
 
-Exit 0 = clean (only allowlisted files / the wrapper layer touch the tables).
+Exit 0 = clean (only the 11 residual files / the wrapper layer touch the tables).
 Exit 1 = a non-allowlisted file directly accesses a tenant-scoped hot table.
 """
 
