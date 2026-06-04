@@ -31,6 +31,8 @@ adversarially verified sound. Owner_inputs (VT-146/155/159) + reconciliation row
 - **VT-316** (Backlog) — pre-push hook fail-loud → rostered follow-up (CI-hygiene).
 Plus the Fazal-gated corpus/key launch-prereqs (VT-313 L4 corpus, VT-314 voyage billing) tracked in the launch checklist.
 
+**LOUD go-live-prereq tracker: [`.viabe/customer-data-go-live-prereqs.md`](../customer-data-go-live-prereqs.md).**
+
 ## Why this parent exists
 The agent reasons; tools execute; what does it reason over? The 4-layer knowledge architecture is the answer. L1 is per-subscriber business facts (a structured graph in Apache AGE). L2 is per-subscriber episodic memory of every campaign and message. L3 is the cross-subscriber learning layer — patterns built from many subscribers' outcomes, but only over groups of 10+ to satisfy k-anonymity (Pillar 6). L4 is hand-authored skill corpus on Sales Recovery domain knowledge.
 This parent is the schedule risk. K-anon discipline cannot be cut, and L3 is where that discipline either holds or collapses. Reports product had no equivalent of L3 — its knowledge graph was per-locality only. Team's L3 introduces a structurally different problem: information must flow across tenants without leaking tenant-specific data. The wrong design here turns into a privacy incident.

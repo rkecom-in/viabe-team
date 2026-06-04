@@ -39,6 +39,8 @@ prereqs, distinct from Reports-Jun15:**
 VT-8 "Done" = the privacy-architecture BUILD scope. The Fazal-gated go-live prereqs (VT-78 residency, VT-156
 notice) gate **customer-data-go-live**, tracked separately — they do NOT gate Reports-Jun15.
 
+**LOUD go-live-prereq tracker: [`.viabe/customer-data-go-live-prereqs.md`](../customer-data-go-live-prereqs.md)** — VT-78/156/312 etc. with owner + gate.
+
 ## Why this parent exists
 DPDPA 2023 is now enforceable in India. A privacy incident in Year 1 ends the company. Reports product handles no PII (it works on retail-location data, not customer data). Team handles dormant-customer ledgers — the most sensitive consumer data the company has ever processed. Privacy cannot be retrofitted; it must be enforced at every architectural boundary from day one.
 This parent owns the three independent enforcement layers Pillar 3 demands (Postgres RLS from VT-2.4 is the first; this parent adds the second and third), the build-time k-anonymity invariant Pillar 6 demands, the data subject rights APIs DPDPA requires (export, correction, deletion), the data residency configuration that keeps everything in India, and a breach-detection runbook that must exist before launch.
