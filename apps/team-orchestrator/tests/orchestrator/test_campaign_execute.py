@@ -154,12 +154,13 @@ def test_full_cohort_all_sent() -> None:
     assert send_fn.call_count == 2
 
     # campaigns status was updated to 'sent'.
+    # VT-306: status is now a bound param (the wrapper's set_status), not inline.
     update_calls = [
-        sql for sql, _ in conn._execute_calls
+        (sql, params) for sql, params in conn._execute_calls
         if "UPDATE campaigns" in sql
     ]
     assert len(update_calls) == 1
-    assert "sent" in update_calls[0]
+    assert "sent" in update_calls[0][1]  # status bound as a param
 
 
 # ---------------------------------------------------------------------------

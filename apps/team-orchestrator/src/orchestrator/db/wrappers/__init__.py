@@ -165,6 +165,18 @@ class CustomersWrapper(TenantScopedTable):
 class CampaignsWrapper(TenantScopedTable):
     _table = "campaigns"
 
+    def set_status(
+        self, tenant_id: UUID | str, campaign_id: str, status: str, *, conn: Any = None
+    ) -> int:
+        """Set a campaign's status (tenant-predicated). Returns rows updated."""
+        tid = self._uuid(tenant_id)
+        with self._conn(tid, conn) as c:
+            cur = c.execute(
+                "UPDATE campaigns SET status = %s WHERE tenant_id = %s AND id = %s",
+                (status, str(tid), str(campaign_id)),
+            )
+            return cur.rowcount if cur.rowcount is not None else 0
+
     def count_by_status_in_range(
         self, tenant_id: UUID | str, start: Any, end: Any, *, conn: Any = None
     ) -> dict[str, int]:

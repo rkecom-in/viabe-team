@@ -224,15 +224,8 @@ def _advance_campaign_status(
     tenant_id: str,
     campaign_id: str,
 ) -> None:
-    """UPDATE campaigns.status → 'sent' (RLS-scoped)."""
-    conn.execute(
-        """
-        UPDATE campaigns
-        SET status = 'sent'
-        WHERE id = %s AND tenant_id = %s
-        """,
-        (campaign_id, tenant_id),
-    )
+    """UPDATE campaigns.status → 'sent' (VT-306: via the wrapper, tenant-predicated)."""
+    CampaignsWrapper().set_status(tenant_id, campaign_id, "sent", conn=conn)
 
 
 # Type alias for the injectable send function (matches VT-45's public API).
