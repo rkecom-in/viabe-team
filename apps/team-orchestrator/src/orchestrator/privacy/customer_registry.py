@@ -17,7 +17,7 @@ the read.
 from __future__ import annotations
 
 import logging
-from typing import Any, Callable
+from typing import Callable
 
 from orchestrator.db.wrappers import CustomersWrapper
 
@@ -40,7 +40,6 @@ def invalidate_all() -> None:
 def get_customer_names_for_tenant(
     tenant_id: str,
     *,
-    pool: Any,
     use_cache: bool = True,
 ) -> frozenset[str]:
     """Return the tenant's customer display names, case-folded.
@@ -51,11 +50,9 @@ def get_customer_names_for_tenant(
     if use_cache and tenant_id in _CACHE:
         return _CACHE[tenant_id]
 
-    # VT-306: read through the typed tenant wrapper (RLS + GUC + result
-    # validation intrinsic). ``pool`` is now vestigial (the wrapper owns its
-    # tenant_connection) — retained on the signature for caller stability; a
-    # follow-up can drop it through make_name_registry + the redactor seam.
-    _ = pool
+    # VT-306: read through the typed tenant wrapper (RLS + GUC + result validation
+    # intrinsic) — it owns its tenant_connection. (VT-324: vestigial ``pool`` param
+    # dropped through make_name_registry + the redactor seam.)
     names: set[str] = set()
     try:
         names = set(CustomersWrapper().list_display_names(tenant_id))
@@ -78,17 +75,16 @@ def get_customer_names_for_tenant(
 
 def make_name_registry(
     tenant_id: str,
-    *,
-    pool: Any,
 ) -> Callable[[str], bool]:
     """Build the redactor `name_registry` callable for a tenant.
 
     Returns a predicate: True iff `text` exact-matches (case-folded) a
     known customer display name. Pass the result as `name_registry=` to
     `redact_for_log` / `redact_for_otel_span`. None-safe by construction —
-    callers without tenant context simply don't build one.
+    callers without tenant context simply don't build one. (VT-324: vestigial
+    ``pool`` param dropped — the wrapper owns its tenant_connection.)
     """
-    names = get_customer_names_for_tenant(tenant_id, pool=pool)
+    names = get_customer_names_for_tenant(tenant_id)
 
     def _predicate(text: str) -> bool:
         return text.casefold() in names

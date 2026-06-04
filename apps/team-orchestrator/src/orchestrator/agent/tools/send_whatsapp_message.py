@@ -154,18 +154,17 @@ def _check_customer_rate_limit(cur: Any, tenant_id: str, customer_id: str) -> bo
 
 
 def _resolve_customer(
-    cur: Any, tenant_id: str, customer_id: str
+    tenant_id: str, customer_id: str
 ) -> dict[str, Any] | None:
     """Resolve a customer's send fields, or None if not visible (cross-tenant or
     absent).
 
     VT-306: reads through CustomersWrapper on its OWN tenant_connection (SET ROLE
     app_role + GUC + assert_tenant_scoped) — an upgrade from the prior inline
-    ``set_config`` (no SET ROLE). The ``cur`` param is now vestigial. Scope: ONLY
-    this customers read migrates — the send flow's send_idempotency_keys access
-    stays on its own connection (not a hot table), per Cowork 20260605T002000Z.
+    ``set_config`` (no SET ROLE). Scope: ONLY this customers read migrates — the
+    send flow's send_idempotency_keys access stays on its own connection (not a hot
+    table), per Cowork 20260605T002000Z. (VT-324: vestigial ``cur`` param dropped.)
     """
-    _ = cur
     row = CustomersWrapper().find_by_id(tenant_id, customer_id)
     if row is None:
         return None
@@ -238,7 +237,7 @@ def send_whatsapp_message(
                     )
 
                 # --- Resolve customer (RLS blocks cross-tenant) ---
-                customer = _resolve_customer(cur, payload.tenant_id, payload.customer_id)
+                customer = _resolve_customer(payload.tenant_id, payload.customer_id)
                 if customer is None:
                     logger.info(
                         "send_whatsapp_message: unauthorized tenant=%s customer=%s",
