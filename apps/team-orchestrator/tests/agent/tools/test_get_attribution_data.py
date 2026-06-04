@@ -25,6 +25,30 @@ def _undefined_table_exc() -> Exception:
 # VT-306: the campaign read goes through CampaignsWrapper (UUID-validates tenant).
 _T = "00000000-0000-4000-8000-000000000abc"
 
+# VT-306 bounce: _campaign_mode/_window_mode now read via the wrapper on its OWN
+# tenant_connection (NOT the surrounding pool+set_config cur). Patch the wrapper
+# methods to return the staged rows; the cur serves only the (non-hot) attributions
+# aggregate.
+_CAMPAIGN_ROW: list[Any] = [None]
+_WINDOW_ROWS: list[Any] = [None]
+
+
+@pytest.fixture(autouse=True)
+def _patch_campaign_wrapper(monkeypatch):
+    from orchestrator.db.wrappers import CampaignsWrapper
+
+    monkeypatch.setattr(
+        CampaignsWrapper, "find_by_id",
+        lambda self, tenant_id, row_id, **kw: _CAMPAIGN_ROW[0],
+    )
+    monkeypatch.setattr(
+        CampaignsWrapper, "attribution_window_summary",
+        lambda self, tenant_id, ws, we, **kw: list(_WINDOW_ROWS[0] or []),
+    )
+    _CAMPAIGN_ROW[0] = None
+    _WINDOW_ROWS[0] = None
+    yield
+
 
 def _pool_campaign(*, campaign_row: Any, agg_row: Any,
                     raise_undefined: bool = False) -> tuple[Any, list[str]]:
@@ -32,7 +56,8 @@ def _pool_campaign(*, campaign_row: Any, agg_row: Any,
     SELECT aggregate (fetchone)."""
     issued_sql: list[str] = []
     cur = MagicMock()
-    fetchone_q = [campaign_row, agg_row]
+    _CAMPAIGN_ROW[0] = campaign_row  # served by the patched find_by_id
+    fetchone_q = [agg_row]  # cur now serves ONLY the (non-hot) attributions agg
 
     def _execute(sql: str, params: tuple | None = None) -> Any:
         issued_sql.append(sql)
@@ -54,6 +79,7 @@ def _pool_campaign(*, campaign_row: Any, agg_row: Any,
 
 
 def _pool_window(*, rows: list[Any]) -> Any:
+    _WINDOW_ROWS[0] = rows  # served by the patched attribution_window_summary
     cur = MagicMock()
     cur.execute.side_effect = lambda sql, params=None: cur
     cur.fetchall.return_value = rows

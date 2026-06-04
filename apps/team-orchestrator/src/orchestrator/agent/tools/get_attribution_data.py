@@ -157,9 +157,10 @@ def _campaign_mode(cur: Any, payload: GetAttributionDataInput) -> GetAttribution
     # VT-306: campaign row via the wrapper on the caller's tenant-scoped cur.
     # The attributions aggregate below stays direct (attributions is NOT a hot
     # table). find_by_id returns the full row; we read the 3 attribution fields.
-    crow = CampaignsWrapper().find_by_id(
-        payload.tenant_id, payload.campaign_id, conn=cur
-    )
+    # VT-306 (bounce fix): NO conn= — the surrounding cur is pool+set_config
+    # (BYPASSRLS, no SET ROLE app_role), so passing it would defeat layer-1 RLS.
+    # The wrapper opens its OWN tenant_connection (SET ROLE app_role + GUC).
+    crow = CampaignsWrapper().find_by_id(payload.tenant_id, payload.campaign_id)
     if crow is None:
         # No such campaign for this tenant — honest empty (Pillar 7).
         notes.append("campaign not found for tenant")
@@ -224,8 +225,9 @@ def _window_mode(cur: Any, payload: GetAttributionDataInput) -> GetAttributionDa
 
     # VT-306: the campaigns⋈attributions window rollup is encapsulated by the
     # wrapper (tenant-matched join), on the caller's tenant-scoped cur.
+    # VT-306 (bounce fix): NO conn= — own tenant_connection (SET ROLE app_role).
     rows = CampaignsWrapper().attribution_window_summary(
-        payload.tenant_id, payload.window_start, payload.window_end, conn=cur
+        payload.tenant_id, payload.window_start, payload.window_end
     )
 
     summaries: list[CampaignAttributionSummary] = []

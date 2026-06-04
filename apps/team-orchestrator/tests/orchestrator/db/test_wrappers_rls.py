@@ -91,3 +91,19 @@ def test_wrapper_round_trip_and_cross_tenant_denial(pool):
         from orchestrator._tenant_guard import assert_tenant_scoped
         from uuid import UUID
         assert_tenant_scoped([{"tenant_id": UUID(tid_b)}], UUID(tid_a))
+
+
+def test_wrapper_rejects_non_app_role_conn(pool):
+    """VT-306 bounce: passing a RAW pool conn (no SET ROLE app_role) via conn= —
+    the exact broken shape get_attribution_data/cohort had — must be REJECTED.
+    A raw conn runs as the BYPASSRLS pool role, defeating layer-1 RLS; the wrapper
+    refuses it so isolation can never silently rest on the WHERE clause alone.
+    (Fails pre-hardening — no raise; passes post-hardening.)"""
+    from orchestrator._tenant_guard import TenantIsolationError
+    from orchestrator.db.wrappers import CustomersWrapper
+
+    tid = _tenant(pool, "wrap-raw")
+    # pool.connection() is the DATABASE_URL role, NOT app_role (no tenant_connection).
+    with pool.connection() as raw_conn:
+        with pytest.raises(TenantIsolationError):
+            CustomersWrapper().find_by_id(tid, str(uuid4()), conn=raw_conn)

@@ -340,14 +340,31 @@ def test_cohort_resolve_denies_cross_tenant(dsn, tenants, seed_conn):
     camp_a = _seed_campaign(seed_conn, a, _seed_run(seed_conn, a))
     cust_a = _seed_customer(seed_conn, a, "+919900000010")
     cust_b = _seed_customer(seed_conn, b, "+919900000011")
-    pool = _RlsPool(dsn)
 
-    res = resolve_cohort_recipients(
-        tenant_id=a,
-        campaign_id=camp_a,
-        customer_ids=[cust_a, cust_b],
-        pool=pool,
+    # VT-306 (bounce fix): the standalone path opens its own tenant_connection
+    # (SET ROLE app_role + GUC); pool is vestigial. Point the global pool at the
+    # test dsn so it works; cross-tenant denial is the tenant_connection RLS.
+    from psycopg.rows import dict_row
+    from psycopg_pool import ConnectionPool
+
+    from orchestrator import graph as graph_mod
+
+    prev_pool = graph_mod._pool
+    graph_mod._pool = ConnectionPool(
+        dsn, min_size=1, max_size=2,
+        kwargs={"autocommit": True, "row_factory": dict_row}, open=True,
     )
+    try:
+        res = resolve_cohort_recipients(
+            tenant_id=a,
+            campaign_id=camp_a,
+            customer_ids=[cust_a, cust_b],
+            pool=object(),
+        )
+    finally:
+        graph_mod._pool.close()
+        graph_mod._pool = prev_pool
+
     # A's customer resolves; B's customer is invisible under A's GUC → rejected,
     # never linked (Fazal requirement: never silently dropped).
     assert cust_a in res.resolved

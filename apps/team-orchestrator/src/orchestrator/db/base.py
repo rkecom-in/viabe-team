@@ -25,7 +25,7 @@ from contextlib import contextmanager
 from typing import Any, ClassVar
 from uuid import UUID
 
-from orchestrator._tenant_guard import assert_tenant_scoped
+from orchestrator._tenant_guard import TenantIsolationError, assert_tenant_scoped
 from orchestrator.db import tenant_connection
 
 
@@ -51,12 +51,35 @@ class TenantScopedTable:
     @contextmanager
     def _conn(self, tid: UUID, conn: Any) -> Iterator[Any]:
         """Yield the caller's ``conn`` if given (atomic composition), else open a
-        fresh tenant_connection for ``tid`` (RLS + GUC)."""
+        fresh tenant_connection for ``tid`` (RLS + GUC).
+
+        VT-306 (defense-in-depth): a caller-supplied ``conn`` MUST be a
+        tenant_connection (``SET ROLE app_role`` + GUC). If it isn't — e.g. a raw
+        ``get_pool()`` / ``pool.connection()`` + ``set_config`` cursor on a
+        BYPASSRLS pool role — layer-1 RLS is INERT and isolation would rest only
+        on the WHERE clause. We REJECT such a conn so that contract can't be
+        violated silently (the `conn=` path is load-bearing)."""
         if conn is not None:
+            self._assert_app_role(conn)
             yield conn
         else:
             with tenant_connection(tid) as own:
                 yield own
+
+    def _assert_app_role(self, conn: Any) -> None:
+        """Raise TenantIsolationError if ``conn`` is not running as ``app_role``.
+        Mock/closed conns (whose current_user isn't a real str) are skipped — the
+        guard targets real BYPASSRLS pool conns fed via ``conn=``."""
+        try:
+            row = conn.execute("SELECT current_user AS u").fetchone()
+        except Exception:  # noqa: BLE001 — can't introspect (mock/closed) → skip
+            return
+        user = (row.get("u") if isinstance(row, dict) else (row[0] if row else None))
+        if isinstance(user, str) and user != "app_role":
+            raise TenantIsolationError(
+                f"wrapper conn= must be a tenant_connection (app_role); got role "
+                f"{user!r} — a non-app_role conn defeats layer-1 RLS (VT-306)."
+            )
 
     def _validate(self, rows: list[dict[str, Any]], tenant_id: UUID) -> None:
         # belt-and-braces over RLS — raises TenantIsolationError + emits the

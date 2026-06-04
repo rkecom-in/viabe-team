@@ -117,11 +117,15 @@ def resolve_cohort_recipients(
 
     if pool is None:
         raise ValueError("resolve_cohort_recipients: pass either pool or cur")
-    with pool.connection() as conn, conn.cursor() as own_cur:
-        own_cur.execute(
-            "SELECT set_config('app.current_tenant', %s, false)", (tenant_id,)
-        )
-        return _resolve_core(own_cur, tenant_id, campaign_id, unique_ids)
+    # VT-306 (bounce fix): open a tenant_connection (SET ROLE app_role + GUC), NOT
+    # a raw pool.connection()+set_config — the latter runs as the BYPASSRLS pool
+    # role with RLS INERT, so isolation would rest only on the WHERE clause. ``pool``
+    # is retained for caller compat but unused (tenant_connection owns its conn).
+    _ = pool
+    from orchestrator.db import tenant_connection
+
+    with tenant_connection(tenant_id) as conn:
+        return _resolve_core(conn, tenant_id, campaign_id, unique_ids)
 
 
 __all__ = [

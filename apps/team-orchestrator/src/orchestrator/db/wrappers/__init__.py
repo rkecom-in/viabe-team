@@ -120,11 +120,13 @@ class CustomersWrapper(TenantScopedTable):
         tid = self._uuid(tenant_id)
         with self._conn(tid, conn) as c:
             rows = c.execute(
-                "SELECT id::text AS id FROM customers "
+                "SELECT id::text AS id, tenant_id FROM customers "
                 "WHERE tenant_id = %s AND id = ANY(%s::uuid[])",
                 (str(tid), list(ids)),
             ).fetchall()
-        return {dict(r)["id"] for r in rows}
+        out = [dict(r) for r in rows]
+        self._validate(out, tid)  # layer-2 (VT-306 bounce: was skipped)
+        return {r["id"] for r in out}
 
     def count_created_in_range(
         self,
@@ -282,6 +284,7 @@ class CampaignsWrapper(TenantScopedTable):
                 """
                 SELECT
                     c.id::text AS campaign_id,
+                    c.tenant_id,
                     c.attribution_closed_at,
                     COUNT(DISTINCT COALESCE(a.customer_id::text, a.razorpay_payment_id,
                                             a.id::text)) AS transacting_count,
@@ -292,12 +295,14 @@ class CampaignsWrapper(TenantScopedTable):
                 WHERE c.tenant_id = %s
                   AND c.attribution_close_at >= %s
                   AND c.attribution_close_at <= %s
-                GROUP BY c.id, c.attribution_closed_at
+                GROUP BY c.id, c.tenant_id, c.attribution_closed_at
                 ORDER BY c.id ASC
                 """,
                 (str(tid), window_start, window_end),
             ).fetchall()
-        return [dict(r) for r in rows]
+        out = [dict(r) for r in rows]
+        self._validate(out, tid)  # layer-2 (VT-306 bounce: was skipped)
+        return out
 
     def list_recent_with_responses(
         self,
