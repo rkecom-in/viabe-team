@@ -372,6 +372,51 @@ def pii_log_sweep_scheduled(
             )
 
 
+# VT-307: nightly KG-events outbox-drain sweep. 21:00 UTC = 02:30 IST (off-peak).
+KG_DRAIN_SWEEP_CRON = "0 21 * * *"
+
+
+def kg_drain_sweep_scheduled(
+    scheduled_time: datetime,
+    actual_time: datetime,
+) -> None:
+    """DBOS scheduled handler — nightly 02:30 IST (VT-307). The reliability
+    BACKSTOP for the VT-65 immediate post-commit kg_events drain: re-drains any
+    undrained outbox events across active tenants, and if a tenant has stragglers
+    the drain could NOT project (``drain_kg_events`` ``failed`` > 0), dispatches a
+    per-tenant ``kg_drain_straggler`` warning via the VT-202 path. Best-effort per
+    tenant: one tenant's failure must not halt the sweep."""
+    from orchestrator.alerts.dispatch import dispatch_alert
+    from orchestrator.alerts.triggers import (
+        Trigger,
+        all_active_tenant_ids,
+        severity_for,
+    )
+    from orchestrator.knowledge.kg_emit import drain_kg_events
+
+    for tenant_id in all_active_tenant_ids():
+        try:
+            result = drain_kg_events(tenant_id)
+            failed = int(result.get("failed", 0))
+            if failed > 0:
+                dispatch_alert(Trigger(
+                    tenant_id=tenant_id,
+                    trigger_kind="kg_drain_straggler",
+                    severity=severity_for("kg_drain_straggler"),
+                    message_text=(
+                        f"KG-events drain straggler: {failed} event(s) failed to "
+                        f"project for tenant {tenant_id} "
+                        f"(drained {result.get('drained', 0)})."
+                    ),
+                    payload={"failed": failed, "drained": int(result.get("drained", 0))},
+                ))
+        except Exception:  # noqa: BLE001 — per-tenant isolation; the sweep continues
+            logger.exception(
+                "VT-307 KG-drain sweep failed for tenant %s; sweep continues",
+                tenant_id,
+            )
+
+
 def run_day39_evaluation_body(now: datetime | None = None) -> list[Any]:
     """Day-39 evaluation body — REAL (VT-176).
 
@@ -790,6 +835,8 @@ def register_scheduled_triggers() -> None:
     DBOS.scheduled(AUDIT_CHAIN_VERIFY_CRON)(audit_chain_verify_scheduled)
     # VT-305: 9th handler — nightly PII-in-log sweep (VT-79 Detector-5).
     DBOS.scheduled(PII_LOG_SWEEP_CRON)(pii_log_sweep_scheduled)
+    # VT-307: 10th handler — nightly KG-events outbox-drain straggler sweep.
+    DBOS.scheduled(KG_DRAIN_SWEEP_CRON)(kg_drain_sweep_scheduled)
     _registered = True
 
 
@@ -816,8 +863,10 @@ __all__ = [
     "day39_evaluation_scheduled",
     "day39_workflow_id",
     "AUDIT_CHAIN_VERIFY_CRON",
+    "KG_DRAIN_SWEEP_CRON",
     "PII_LOG_SWEEP_CRON",
     "audit_chain_verify_scheduled",
+    "kg_drain_sweep_scheduled",
     "pii_log_sweep_scheduled",
     "monthly_impact_scheduled",
     "monthly_workflow_id",
