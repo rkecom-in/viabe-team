@@ -34,6 +34,15 @@ Pillars:
 - CL-390: log tenant_id / customer_id / campaign_id / status / SID only.
   No PII (no phone, no names, no param values) in any log line.
 - CL-418: callers use explicit `git add`; module itself has no git awareness.
+
+VT-321 (#20 complaint-freeze, NON-configurable, fail-closed):
+- An OPEN complaint freezes ALL selling to that customer — no exceptions, never
+  owner-overridable. This seam enforces it DETERMINISTICALLY: a recipient with
+  complaint_status == 'open' is skipped BEFORE the VT-45 send, a distinct
+  'skipped_complaint_freeze' marker is written, and it is counted separately
+  from opt-out skips. Fail-closed: only 'open' triggers the freeze; missing /
+  'none' / 'resolved' / NULL → sellable (status-only column, no complaint
+  content at rest — CL-390).
 """
 
 from __future__ import annotations
@@ -55,6 +64,13 @@ logger = logging.getLogger(__name__)
 # 'skipped_opt_out' marker (cleaner audit trail than 'unauthorized').
 _REFUSED_OPT_OUT_STATUSES = frozenset({"opted_out", "blocked"})
 
+# VT-321 (#20 complaint-freeze): an OPEN complaint freezes ALL selling to that
+# customer — non-configurable, no exceptions. Fail-closed: ONLY 'open' triggers
+# the freeze. 'none' / 'resolved' / NULL / missing → sellable. Single-value
+# frozenset (not a bare string) so the gate reads identically to the opt-out one
+# and any future freeze states slot in here.
+_COMPLAINT_FREEZE_STATUSES = frozenset({"open"})
+
 
 def _load_recipients(
     conn: Any,
@@ -63,16 +79,19 @@ def _load_recipients(
 ) -> list[dict[str, Any]]:
     """SELECT campaign_recipients JOIN customers for the campaign.
 
-    Returns list of dicts: {customer_id, opt_out_status}.
+    Returns list of dicts: {customer_id, opt_out_status, complaint_status}.
     RLS is already scoped via SET LOCAL app.current_tenant on conn.
 
-    CL-390: no phone / name fetched here — opt_out_status only.
-    Phone resolution is done inside VT-45 (Pillar 3: tool owns phone access).
+    CL-390: no phone / name fetched here — opt_out_status + complaint_status
+    only (both are status flags, not PII; VT-321 stores no complaint content at
+    rest). Phone resolution is done inside VT-45 (Pillar 3: tool owns phone
+    access).
     """
     rows = conn.execute(
         """
         SELECT cr.customer_id::text AS customer_id,
-               c.opt_out_status
+               c.opt_out_status,
+               c.complaint_status
         FROM campaign_recipients cr
         JOIN customers c
           ON c.id = cr.customer_id
@@ -86,9 +105,26 @@ def _load_recipients(
     if not rows:
         return []
     if rows and isinstance(rows[0], dict):
-        return [{"customer_id": r["customer_id"], "opt_out_status": r["opt_out_status"]}
-                for r in rows]
-    return [{"customer_id": r[0], "opt_out_status": r[1]} for r in rows]
+        # Fail-closed but tolerant: a dict row missing complaint_status (e.g. a
+        # pre-091 fixture / mock) is treated as None → sellable. The live SELECT
+        # always provides it; the send-loop gate only freezes on an explicit
+        # 'open'.
+        return [
+            {
+                "customer_id": r["customer_id"],
+                "opt_out_status": r["opt_out_status"],
+                "complaint_status": r.get("complaint_status"),
+            }
+            for r in rows
+        ]
+    return [
+        {
+            "customer_id": r[0],
+            "opt_out_status": r[1],
+            "complaint_status": r[2] if len(r) > 2 else None,
+        }
+        for r in rows
+    ]
 
 
 def _load_campaign(
@@ -139,13 +175,15 @@ def _load_campaign(
     return {"template_id": template_id, "body_params": params}
 
 
-def _write_opt_out_skip_ledger(
+def _write_skip_ledger(
     conn: Any,
     tenant_id: str,
     customer_id: str,
     idempotency_key: str,
+    *,
+    reason: str = "opt_out",
 ) -> None:
-    """Record a send_idempotency_keys row for an opted-out skip (no send made).
+    """Record a send_idempotency_keys row for a skip (no send made).
 
     send_status='skipped' (VT-261 / migration 053). The skip marker is written
     under a DISTINCT ``skip:`` key namespace (VT-262), NOT the live-send key, so
@@ -157,9 +195,17 @@ def _write_opt_out_skip_ledger(
     represent -> pydantic ValidationError -> swallowed as a phantom db_error AND
     the re-eligible recipient suppressed for 24h. Decoupling the namespace fixes
     it: a real re-send sees no prior row under its own key.
+
+    ``reason`` distinguishes skip kinds in the key namespace so an opt-out skip
+    and a VT-321 complaint-freeze skip for the SAME pair never collide
+    (``skip:opt_out:...`` vs ``skip:complaint_freeze:...``). send_status stays
+    'skipped' for both — the only value the CHECK (migration 053) permits; the
+    distinct REASON lives in the key namespace + the caller's counter/log line,
+    not in a new send_status value.
+
     CL-390: no PII in this INSERT (customer_id is a UUID; phone is NOT stored).
     """
-    skip_key = f"skip:{idempotency_key}"
+    skip_key = f"skip:{reason}:{idempotency_key}"
     conn.execute(
         """
         INSERT INTO send_idempotency_keys
@@ -168,6 +214,40 @@ def _write_opt_out_skip_ledger(
         ON CONFLICT (tenant_id, idempotency_key) DO NOTHING
         """,
         (tenant_id, skip_key, customer_id),
+    )
+
+
+def _write_opt_out_skip_ledger(
+    conn: Any,
+    tenant_id: str,
+    customer_id: str,
+    idempotency_key: str,
+) -> None:
+    """Opt-out skip marker (CL-421). Thin wrapper over ``_write_skip_ledger``.
+
+    Kept as a named entry point because VT-261's real-DB test imports it
+    directly. Writes under the ``skip:opt_out:`` namespace.
+    """
+    _write_skip_ledger(
+        conn, tenant_id, customer_id, idempotency_key, reason="opt_out"
+    )
+
+
+def _write_complaint_freeze_skip_ledger(
+    conn: Any,
+    tenant_id: str,
+    customer_id: str,
+    idempotency_key: str,
+) -> None:
+    """VT-321 (#20) complaint-freeze skip marker. Thin wrapper.
+
+    Writes under the DISTINCT ``skip:complaint_freeze:`` namespace so a freeze
+    skip never collides with an opt-out skip for the same campaign:customer pair
+    (the freeze and the opt-out are independent reasons; either alone suffices to
+    skip). send_status='skipped' like every other skip. CL-390: customer_id only.
+    """
+    _write_skip_ledger(
+        conn, tenant_id, customer_id, idempotency_key, reason="complaint_freeze"
     )
 
 
@@ -223,8 +303,13 @@ def execute_approved_campaign(
 
     Returns
     -------
-    dict with counts: {sent, skipped_opt_out, failed}.
+    dict with counts: {sent, skipped_opt_out, skipped_complaint_freeze, failed}.
     No PII (CL-390): counts only, no customer ids, no SIDs.
+
+    VT-321 (#20): a recipient whose customers.complaint_status == 'open' is
+    skipped BEFORE the VT-45 send (fail-closed, non-configurable), a distinct
+    'skipped_complaint_freeze' marker is written, and it is tallied in the
+    ``skipped_complaint_freeze`` count — separate from ``skipped_opt_out``.
 
     Raises
     ------
@@ -269,12 +354,41 @@ def execute_approved_campaign(
 
     sent = 0
     skipped_opt_out = 0
+    skipped_complaint_freeze = 0
     failed = 0
 
     for recipient in recipients:
         customer_id_str: str = recipient["customer_id"]
         opt_out_status: str | None = recipient.get("opt_out_status")
+        complaint_status: str | None = recipient.get("complaint_status")
         idempotency_key = f"{campaign_id_str}:{customer_id_str}"
+
+        # --- VT-321 complaint-freeze gate (#20, fail-closed, non-configurable) ---
+        # An OPEN complaint freezes ALL selling to this customer — no exceptions,
+        # never owner-overridable. Checked FIRST and independently of opt-out:
+        # we do NOT call VT-45, write a distinct 'complaint_freeze' skip marker,
+        # count it separately, and continue. Fail-closed: ONLY 'open' triggers;
+        # missing / 'none' / 'resolved' / NULL → sellable.
+        if complaint_status in _COMPLAINT_FREEZE_STATUSES:
+            try:
+                _write_complaint_freeze_skip_ledger(
+                    conn, tenant_id_str, customer_id_str, idempotency_key,
+                )
+            except Exception as exc:  # noqa: BLE001
+                # Skip-ledger write is best-effort; the no-call is the actual
+                # freeze. Log (no PII) but don't fail the loop.
+                logger.info(
+                    "execute_approved_campaign: complaint_skip_ledger_write_error "
+                    "tenant=%s customer=%s err=%s",
+                    tenant_id_str, customer_id_str, type(exc).__name__,
+                )
+            skipped_complaint_freeze += 1
+            logger.info(
+                "execute_approved_campaign: skipped_complaint_freeze tenant=%s "
+                "customer=%s status=%s",
+                tenant_id_str, customer_id_str, complaint_status,
+            )
+            continue
 
         # --- Defence-in-depth consent gate (CL-421) ---
         # VT-45 also gates this, but we short-circuit to write a
@@ -366,7 +480,12 @@ def execute_approved_campaign(
         })
     drain_kg_events(tenant_id_str)
 
-    summary = {"sent": sent, "skipped_opt_out": skipped_opt_out, "failed": failed}
+    summary = {
+        "sent": sent,
+        "skipped_opt_out": skipped_opt_out,
+        "skipped_complaint_freeze": skipped_complaint_freeze,
+        "failed": failed,
+    }
     logger.info(
         "execute_approved_campaign: done tenant=%s campaign=%s summary=%s",
         tenant_id_str, campaign_id_str, summary,
