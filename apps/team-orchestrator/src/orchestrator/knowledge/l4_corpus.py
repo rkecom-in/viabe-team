@@ -47,9 +47,16 @@ def parse_doc(path: Path) -> dict[str, Any]:
 
 
 def seed_l4_corpus(seed_dir: str | Path) -> dict[str, int]:
-    """Load every ``*.md`` under ``seed_dir`` into ``l4_documents`` (embedded,
-    UPSERT on title+version). Returns {'seeded': n}."""
-    docs = [parse_doc(p) for p in sorted(Path(seed_dir).glob("*.md"))]
+    """Load every skill-doc ``*.md`` under ``seed_dir`` into ``l4_documents``
+    (embedded, UPSERT on title+version). Returns {'seeded': n}.
+
+    ``README.md`` is the corpus's own documentation (no frontmatter) — skipped,
+    not parsed as a skill doc (else parse_doc raises 'missing YAML frontmatter')."""
+    docs = [
+        parse_doc(p)
+        for p in sorted(Path(seed_dir).glob("*.md"))
+        if p.name != "README.md"
+    ]
     if not docs:
         return {"seeded": 0}
     # Batch-embed the bodies as 'document' (asymmetric retrieval vs the query).
