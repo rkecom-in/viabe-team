@@ -417,6 +417,26 @@ def kg_drain_sweep_scheduled(
             )
 
 
+# VT-311: nightly L2 episodic retention soft-delete. 20:00 UTC = 01:30 IST (off-peak).
+L2_RETENTION_SWEEP_CRON = "0 20 * * *"
+
+
+def l2_retention_sweep_scheduled(
+    scheduled_time: datetime,
+    actual_time: datetime,
+) -> None:
+    """DBOS scheduled handler — nightly 01:30 IST (VT-311). Soft-deletes episodic
+    rows past the retention window (``TEAM_L2_RETENTION_DAYS``, default ~18 months)
+    so the L2 read path stays bounded. Best-effort: a sweep failure must not crash
+    the scheduler (the next run re-catches)."""
+    from orchestrator.knowledge.l2_retention import run_l2_retention_sweep_body
+
+    try:
+        run_l2_retention_sweep_body(now=actual_time)
+    except Exception:  # noqa: BLE001 — nightly sweep is best-effort; next run retries
+        logger.exception("VT-311 L2 retention sweep scheduled run failed")
+
+
 def run_day39_evaluation_body(now: datetime | None = None) -> list[Any]:
     """Day-39 evaluation body — REAL (VT-176).
 
@@ -837,6 +857,8 @@ def register_scheduled_triggers() -> None:
     DBOS.scheduled(PII_LOG_SWEEP_CRON)(pii_log_sweep_scheduled)
     # VT-307: 10th handler — nightly KG-events outbox-drain straggler sweep.
     DBOS.scheduled(KG_DRAIN_SWEEP_CRON)(kg_drain_sweep_scheduled)
+    # VT-311: 11th handler — nightly L2 episodic retention soft-delete sweep.
+    DBOS.scheduled(L2_RETENTION_SWEEP_CRON)(l2_retention_sweep_scheduled)
     _registered = True
 
 
@@ -864,9 +886,11 @@ __all__ = [
     "day39_workflow_id",
     "AUDIT_CHAIN_VERIFY_CRON",
     "KG_DRAIN_SWEEP_CRON",
+    "L2_RETENTION_SWEEP_CRON",
     "PII_LOG_SWEEP_CRON",
     "audit_chain_verify_scheduled",
     "kg_drain_sweep_scheduled",
+    "l2_retention_sweep_scheduled",
     "pii_log_sweep_scheduled",
     "monthly_impact_scheduled",
     "monthly_workflow_id",

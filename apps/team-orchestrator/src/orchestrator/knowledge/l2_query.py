@@ -60,7 +60,8 @@ def recent_events(
     """
     tid = _uuid(tenant_id)
     n = max(1, min(int(limit), _MAX_ROWS))
-    sql = f"SELECT {_COLS} FROM episodic_events WHERE tenant_id = %s"  # noqa: S608 — _COLS is a static literal
+    # VT-311: exclude retention-expired (soft-deleted) rows from the read path.
+    sql = f"SELECT {_COLS} FROM episodic_events WHERE tenant_id = %s AND deleted_at IS NULL"  # noqa: S608 — _COLS is a static literal
     params: list[Any] = [str(tid)]
     if event_types:
         sql += " AND event_type = ANY(%s)"
@@ -91,6 +92,7 @@ def events_for_entity(
         raw = conn.execute(
             f"SELECT {_COLS} FROM episodic_events "  # noqa: S608 — _COLS is a static literal
             "WHERE tenant_id = %s AND referenced_entity_id = %s "
+            "AND deleted_at IS NULL "  # VT-311: skip retention-expired rows
             "ORDER BY occurred_at DESC, created_at DESC LIMIT %s",
             (str(tid), str(_uuid(referenced_entity_id)), n),
         ).fetchall()
@@ -102,7 +104,8 @@ def events_for_entity(
 def count_events(tenant_id: UUID | str, *, event_types: list[str] | None = None) -> int:
     """Total episodic events for a tenant (optionally filtered by type)."""
     tid = _uuid(tenant_id)
-    sql = "SELECT count(*) AS n FROM episodic_events WHERE tenant_id = %s"
+    # VT-311: count live rows only (retention-expired rows are excluded from reads).
+    sql = "SELECT count(*) AS n FROM episodic_events WHERE tenant_id = %s AND deleted_at IS NULL"
     params: list[Any] = [str(tid)]
     if event_types:
         sql += " AND event_type = ANY(%s)"
