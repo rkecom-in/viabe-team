@@ -343,6 +343,35 @@ def _alert_audit_chain_break(result: Any) -> None:
         asyncio.get_event_loop().create_task(_send())
 
 
+# VT-305: nightly PII-in-log sweep. 21:30 UTC = 03:00 IST (off-peak, after the
+# 02:00 audit-chain verify). UTC-correct cron (matches reconstitution/audit-chain).
+PII_LOG_SWEEP_CRON = "30 21 * * *"
+
+
+def pii_log_sweep_scheduled(
+    scheduled_time: datetime,
+    actual_time: datetime,
+) -> None:
+    """DBOS scheduled handler — nightly 03:00 IST (VT-305). Sweeps the VT-79
+    Detector-5 (``detect_pii_in_logs``) across active tenants and dispatches a
+    per-tenant CRITICAL ``pii_in_log`` alert for each finding (unredacted PII left
+    in pipeline_steps payloads — a CL-390 regression catcher). Per-tenant, so it
+    uses the standard ``tenant_alerts`` path (unlike VT-304's workspace alert).
+    Best-effort per tenant: one tenant's failure must not halt the sweep."""
+    from orchestrator.alerts.dispatch import dispatch_alert
+    from orchestrator.alerts.triggers import all_active_tenant_ids, detect_pii_in_logs
+
+    for tenant_id in all_active_tenant_ids():
+        try:
+            for trigger in detect_pii_in_logs(tenant_id):
+                dispatch_alert(trigger)
+        except Exception:  # noqa: BLE001 — per-tenant isolation; the sweep continues
+            logger.exception(
+                "VT-305 PII-in-log sweep failed for tenant %s; sweep continues",
+                tenant_id,
+            )
+
+
 def run_day39_evaluation_body(now: datetime | None = None) -> list[Any]:
     """Day-39 evaluation body — REAL (VT-176).
 
@@ -759,6 +788,8 @@ def register_scheduled_triggers() -> None:
     # VT-304: 8th handler — nightly audit-chain verify. EXTENDS the surface
     # (same register-before-launch posture; app_version shifts once, here).
     DBOS.scheduled(AUDIT_CHAIN_VERIFY_CRON)(audit_chain_verify_scheduled)
+    # VT-305: 9th handler — nightly PII-in-log sweep (VT-79 Detector-5).
+    DBOS.scheduled(PII_LOG_SWEEP_CRON)(pii_log_sweep_scheduled)
     _registered = True
 
 
@@ -785,7 +816,9 @@ __all__ = [
     "day39_evaluation_scheduled",
     "day39_workflow_id",
     "AUDIT_CHAIN_VERIFY_CRON",
+    "PII_LOG_SWEEP_CRON",
     "audit_chain_verify_scheduled",
+    "pii_log_sweep_scheduled",
     "monthly_impact_scheduled",
     "monthly_workflow_id",
     "reconstitution_sweep_scheduled",
