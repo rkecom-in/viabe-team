@@ -754,7 +754,7 @@ def run_approval_timeout_sweep_body(now: datetime | None = None) -> list[UUID]:
         try:
             # Set the tenant GUC for the resolve write (RLS).
             with tenant_connection(tenant_id) as conn:
-                mark_approval_resolved(conn, approval_id, "timeout")
+                mark_approval_resolved(conn, tenant_id, approval_id, "timeout")
             # Resume the suspended run with the timeout decision, then close
             # the original paused run.
             resume_run(run_id, "timeout")

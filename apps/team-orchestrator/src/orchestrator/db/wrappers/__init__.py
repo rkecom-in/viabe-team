@@ -163,6 +163,22 @@ class CampaignsWrapper(TenantScopedTable):
 class PendingApprovalsWrapper(TenantScopedTable):
     _table = "pending_approvals"
 
+    def find_open_for_tenant(
+        self, tenant_id: UUID | str, *, conn: Any = None
+    ) -> dict[str, Any] | None:
+        """Most-recent UNRESOLVED approval for the tenant (any run), else None —
+        the runner's 'is this inbound an approval reply?' check."""
+        tid = self._uuid(tenant_id)
+        with self._conn(tid, conn) as c:
+            row = c.execute(
+                "SELECT id::text AS id, run_id::text AS run_id, approval_type, "
+                "campaign_id::text AS campaign_id FROM pending_approvals "
+                "WHERE tenant_id = %s AND resolved_at IS NULL "
+                "ORDER BY requested_at DESC LIMIT 1",
+                (str(tid),),
+            ).fetchone()
+        return dict(row) if row is not None else None
+
     def find_open_for_run(
         self, tenant_id: UUID | str, run_id: UUID | str, *, conn: Any = None
     ) -> dict[str, Any] | None:

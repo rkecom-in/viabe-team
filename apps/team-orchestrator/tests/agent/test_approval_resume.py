@@ -58,25 +58,32 @@ class _CaptureConn:
 
     def execute(self, sql, params=None):
         self.calls.append((" ".join(sql.split()), params))
+        # The wrapper reads cur.rowcount (real psycopg returns a cursor).
+        from types import SimpleNamespace
+
+        return SimpleNamespace(rowcount=1)
 
 
 def test_mark_resolved_sets_decision_status_and_guards_unresolved():
     conn = _CaptureConn()
+    tid = uuid4()
     aid = uuid4()
-    mark_approval_resolved(conn, aid, "approved", owner_message_sid="SMabc")
+    mark_approval_resolved(conn, tid, aid, "approved", owner_message_sid="SMabc")
     sql, params = conn.calls[0]
     assert "UPDATE pending_approvals" in sql
     assert "resolved_at = now()" in sql
-    assert "WHERE id = %s AND resolved_at IS NULL" in sql  # idempotent guard
+    # VT-306: now tenant-predicated (was WHERE id only — the IDOR gap).
+    assert "WHERE tenant_id = %s AND id = %s AND resolved_at IS NULL" in sql
     assert params[0] == "approved"  # decision
     assert params[1] == "approved"  # status (approved -> approved)
-    assert params[2] == "SMabc"
-    assert params[3] == str(aid)
+    assert params[2] == "SMabc"     # owner_message_sid (COALESCE'd)
+    assert params[3] == str(tid)    # tenant predicate
+    assert params[4] == str(aid)
 
 
 def test_needs_changes_collapses_status_to_rejected():
     conn = _CaptureConn()
-    mark_approval_resolved(conn, uuid4(), "needs_changes")
+    mark_approval_resolved(conn, uuid4(), uuid4(), "needs_changes")
     _, params = conn.calls[0]
     assert params[0] == "needs_changes"  # raw decision verb retained
     assert params[1] == "rejected"       # status collapses to non-approval
@@ -84,7 +91,7 @@ def test_needs_changes_collapses_status_to_rejected():
 
 def test_timeout_decision_maps_to_timed_out_status():
     conn = _CaptureConn()
-    mark_approval_resolved(conn, uuid4(), "timeout")
+    mark_approval_resolved(conn, uuid4(), uuid4(), "timeout")
     _, params = conn.calls[0]
     assert params[0] == "timeout"
     assert params[1] == "timed_out"

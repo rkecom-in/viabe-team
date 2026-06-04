@@ -27,6 +27,8 @@ import logging
 from typing import Any
 from uuid import UUID
 
+from orchestrator.db.wrappers import PendingApprovalsWrapper
+
 logger = logging.getLogger(__name__)
 
 # VT-49 Classification -> the durable pending_approvals.decision verb.
@@ -58,26 +60,9 @@ def find_open_approval_for_tenant(
 
     Tenant-scoped (RLS via the open tenant_connection). Used by the runner to
     decide whether an inbound message is an approval reply vs a normal message.
+    VT-306: reads through the typed wrapper on the caller's conn.
     """
-    row = conn.execute(
-        """
-        SELECT id::text AS id, run_id::text AS run_id, approval_type,
-               campaign_id::text AS campaign_id
-        FROM pending_approvals
-        WHERE tenant_id = %s AND resolved_at IS NULL
-        ORDER BY requested_at DESC
-        LIMIT 1
-        """,
-        (str(tenant_id),),
-    ).fetchone()
-    if row is None:
-        return None
-    if isinstance(row, dict):
-        return row
-    return {
-        "id": row[0], "run_id": row[1], "approval_type": row[2],
-        "campaign_id": row[3],
-    }
+    return PendingApprovalsWrapper().find_open_for_tenant(tenant_id, conn=conn)
 
 
 def resolve_decision_from_reply(
@@ -124,6 +109,7 @@ def resolve_decision_from_reply(
 
 def mark_approval_resolved(
     conn: Any,
+    tenant_id: UUID | str,
     approval_id: UUID | str,
     decision: str,
     *,
@@ -131,18 +117,20 @@ def mark_approval_resolved(
 ) -> None:
     """UPDATE the pending_approvals row with the resolved decision + status.
 
-    Tenant-scoped (RLS via the open tenant_connection). Idempotent-ish: only
-    updates rows still unresolved, so a redelivered reply does not re-resolve.
+    VT-306: now tenant-predicated. The pre-migration UPDATE was ``WHERE id`` only
+    — an IDOR-class gap (a stray approval_id could resolve another tenant's
+    approval). ``tenant_id`` is threaded from the caller (derived from the run /
+    the swept approval row, never a bare id). Idempotent-ish: only resolves rows
+    still unresolved, so a redelivered reply does not re-resolve.
     """
     status = _DECISION_TO_STATUS.get(decision, "rejected")
-    conn.execute(
-        """
-        UPDATE pending_approvals
-        SET decision = %s, status = %s, resolved_at = now(),
-            owner_message_sid = COALESCE(%s, owner_message_sid)
-        WHERE id = %s AND resolved_at IS NULL
-        """,
-        (decision, status, owner_message_sid, str(approval_id)),
+    PendingApprovalsWrapper().mark_resolved(
+        tenant_id,
+        approval_id,
+        decision=decision,
+        status=status,
+        owner_message_sid=owner_message_sid,
+        conn=conn,
     )
 
 
