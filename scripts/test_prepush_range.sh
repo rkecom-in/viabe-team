@@ -45,20 +45,31 @@ else
   ok "skip recovery test — branch not ahead of origin/main"
 fi
 
-# 3. FAIL-LOUD: an empty commit ahead of origin/main + degenerate range = no file
-#    diff anywhere while commits exist → MUST exit non-zero (never pass).
-git commit --allow-empty -q -m "vt316-test-empty (transient)"
-empty_head="$(git rev-parse HEAD)"
-set +e
-printf 'refs/heads/x %s refs/heads/x %s\n' "$empty_head" "$empty_head" \
-  | PREPUSH_RANGE_ONLY=1 bash "$HOOK" >/dev/null 2>&1
-rc=$?
-set -e 2>/dev/null || true
-git reset --hard -q "$HEAD_SHA"   # restore: drop the transient empty commit
-if [ "$rc" -ne 0 ]; then
-  ok "empty-commit-only range fails loud (exit $rc), does not silently pass"
+# 3. FAIL-LOUD: a commit ahead of origin/main with ZERO net file diff (an empty
+#    commit straight off origin/main) + a degenerate range = no files anywhere
+#    while a commit exists → MUST exit non-zero (never silently pass). Built on a
+#    detached HEAD off origin/main so the current branch is untouched.
+cur_ref="$(git symbolic-ref --quiet --short HEAD || git rev-parse HEAD)"
+# Run a COPY of the current (fixed) hook — a detached checkout of origin/main
+# would revert scripts/git-hooks/pre-push to the pre-fix version on disk.
+tmphook="$(mktemp)"; cp "$HOOK" "$tmphook"
+restore() { git checkout -q "$cur_ref" 2>/dev/null || true; rm -f "$tmphook"; }
+trap restore EXIT
+if git rev-parse --verify -q origin/main >/dev/null; then
+  git checkout -q --detach origin/main
+  git commit --allow-empty -q -m "vt316-test-empty (transient, detached)"
+  empty_head="$(git rev-parse HEAD)"
+  out="$(printf 'refs/heads/x %s refs/heads/x %s\n' "$empty_head" "$empty_head" \
+        | PREPUSH_RANGE_ONLY=1 bash "$tmphook" 2>&1)"; rc=$?
+  git checkout -q "$cur_ref"; rm -f "$tmphook"; trap - EXIT
+  if [ "$rc" -ne 0 ]; then
+    ok "empty-only range (commit, no file diff) fails loud (exit $rc)"
+  else
+    bad "empty-only range PASSED silently — the VT-316 bug is back: $out"
+  fi
 else
-  bad "empty-commit-only range PASSED silently (exit 0) — the VT-316 bug is back"
+  trap - EXIT
+  ok "skip fail-loud test — origin/main not available"
 fi
 
 # 4. GENUINE no-op: HEAD == origin/main → clean exit 0 (no RANGE_OK, no fail).
