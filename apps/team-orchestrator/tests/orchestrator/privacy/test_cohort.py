@@ -1,101 +1,116 @@
-"""VT-170 — resolve_cohort_recipients tests (mock pool)."""
+"""VT-170 — resolve_cohort_recipients tests.
+
+VT-306 (bounce fix): the standalone path now opens a ``tenant_connection``
+(SET ROLE app_role + GUC) instead of a raw pool.connection()+set_config, and the
+customers validate goes through CustomersWrapper.filter_existing_ids. These tests
+patch ``tenant_connection`` to yield a mock conn (no live DB) that serves the
+validate SELECT + records the campaign_recipients INSERTs.
+"""
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from typing import Any
 from unittest.mock import MagicMock
+from uuid import UUID
 
 import pytest
 
-# cohort.py imports pydantic; CI's stdlib-only smoke job (uv run
-# --no-project --with pytest) doesn't install it. Full coverage runs in
-# the orchestrator job (uv sync --frozen).
 pytest.importorskip("pydantic")
 
+# A real UUID tenant — the wrapper UUID-validates tenant_id.
+_T = "00000000-0000-4000-8000-000000000001"
 
-def _pool(*, real_ids: list[str]) -> tuple[Any, list[tuple[str, tuple]]]:
-    """Stub: set_config, SELECT real customer ids (fetchall), N inserts."""
+
+@contextmanager
+def _patch_tc(monkeypatch: Any, *, real_ids: list[str]):
+    """Patch orchestrator.db.tenant_connection to yield a mock conn. The conn's
+    customers SELECT returns ``real_ids`` (as {id, tenant_id} rows for the
+    wrapper's _validate); current_user reads as a mock (hardening skips it);
+    INSERTs are captured. Yields the captured calls list."""
     calls: list[tuple[str, tuple]] = []
     cur = MagicMock()
 
-    def _execute(sql: str, params: tuple | None = None) -> None:
+    def _execute(sql: str, params: tuple | None = None) -> Any:
         calls.append((sql, params or ()))
+        result = MagicMock()
+        if "FROM customers" in sql:
+            result.fetchall.return_value = [
+                {"id": cid, "tenant_id": UUID(_T)} for cid in real_ids
+            ]
+        else:
+            result.fetchall.return_value = []
+            result.fetchone.return_value = MagicMock()  # current_user etc.
+        return result
 
     cur.execute.side_effect = _execute
-    cur.fetchall.return_value = [{"id": cid} for cid in real_ids]
-    cur.__enter__ = MagicMock(return_value=cur)
-    cur.__exit__ = MagicMock(return_value=False)
-    conn = MagicMock()
-    conn.cursor.return_value = cur
-    conn.__enter__ = MagicMock(return_value=conn)
-    conn.__exit__ = MagicMock(return_value=False)
-    pool = MagicMock()
-    pool.connection.return_value = conn
-    return pool, calls
+
+    @contextmanager
+    def _fake_tc(tenant_id: Any):
+        calls.append(("__tenant_connection__", (str(tenant_id),)))
+        yield cur
+
+    monkeypatch.setattr("orchestrator.db.tenant_connection", _fake_tc)
+    yield calls
 
 
-def test_all_resolved() -> None:
+def test_all_resolved(monkeypatch) -> None:
     from orchestrator.privacy.cohort import resolve_cohort_recipients
 
-    pool, calls = _pool(real_ids=["c1", "c2"])
-    out = resolve_cohort_recipients(
-        tenant_id="t1", campaign_id="camp1",
-        customer_ids=["c1", "c2"], pool=pool,
-    )
+    with _patch_tc(monkeypatch, real_ids=["c1", "c2"]) as calls:
+        out = resolve_cohort_recipients(
+            tenant_id=_T, campaign_id="camp1", customer_ids=["c1", "c2"], pool=object(),
+        )
     assert sorted(out.resolved) == ["c1", "c2"]
     assert out.rejected == []
-    inserts = [c for c in calls if "INSERT INTO campaign_recipients" in c[0]]
-    assert len(inserts) == 2
+    assert len([c for c in calls if "INSERT INTO campaign_recipients" in c[0]]) == 2
 
 
-def test_unknown_id_rejected_not_dropped() -> None:
+def test_unknown_id_rejected_not_dropped(monkeypatch) -> None:
     from orchestrator.privacy.cohort import resolve_cohort_recipients
 
-    # c2 is NOT a real customer → must surface in rejected, never linked.
-    pool, calls = _pool(real_ids=["c1"])
-    out = resolve_cohort_recipients(
-        tenant_id="t1", campaign_id="camp1",
-        customer_ids=["c1", "c2"], pool=pool,
-    )
+    with _patch_tc(monkeypatch, real_ids=["c1"]) as calls:
+        out = resolve_cohort_recipients(
+            tenant_id=_T, campaign_id="camp1", customer_ids=["c1", "c2"], pool=object(),
+        )
     assert out.resolved == ["c1"]
     assert out.rejected == ["c2"]
-    # Every input id accounted for (no silent drop).
     assert set(out.resolved) | set(out.rejected) == {"c1", "c2"}
-    inserts = [c for c in calls if "INSERT INTO campaign_recipients" in c[0]]
-    assert len(inserts) == 1  # only the resolved id inserted
+    assert len([c for c in calls if "INSERT INTO campaign_recipients" in c[0]]) == 1
 
 
-def test_dedupes_and_orders() -> None:
+def test_dedupes_and_orders(monkeypatch) -> None:
     from orchestrator.privacy.cohort import resolve_cohort_recipients
 
-    pool, _ = _pool(real_ids=["a", "b"])
-    out = resolve_cohort_recipients(
-        tenant_id="t1", campaign_id="camp1",
-        customer_ids=["b", "a", "b", "a"], pool=pool,
-    )
-    # Deterministic sorted-unique output (reproducible).
+    with _patch_tc(monkeypatch, real_ids=["a", "b"]):
+        out = resolve_cohort_recipients(
+            tenant_id=_T, campaign_id="camp1",
+            customer_ids=["b", "a", "b", "a"], pool=object(),
+        )
     assert out.resolved == ["a", "b"]
 
 
-def test_empty_cohort_noop() -> None:
+def test_empty_cohort_noop(monkeypatch) -> None:
     from orchestrator.privacy.cohort import resolve_cohort_recipients
 
-    pool, calls = _pool(real_ids=[])
-    out = resolve_cohort_recipients(
-        tenant_id="t1", campaign_id="camp1", customer_ids=[], pool=pool,
-    )
+    with _patch_tc(monkeypatch, real_ids=[]) as calls:
+        out = resolve_cohort_recipients(
+            tenant_id=_T, campaign_id="camp1", customer_ids=[], pool=object(),
+        )
     assert out.resolved == []
     assert out.rejected == []
-    # No DB round-trip for an empty cohort.
-    pool.connection.assert_not_called()
+    # Empty cohort short-circuits before opening any connection.
+    assert calls == []
 
 
-def test_sets_tenant_guc_first() -> None:
+def test_opens_tenant_connection_for_scope(monkeypatch) -> None:
+    """VT-306: scope is enforced by tenant_connection (SET ROLE app_role + GUC),
+    opened for the resolving tenant — not a raw pool+set_config."""
     from orchestrator.privacy.cohort import resolve_cohort_recipients
 
-    pool, calls = _pool(real_ids=["c1"])
-    resolve_cohort_recipients(
-        tenant_id="tenant_z", campaign_id="camp1",
-        customer_ids=["c1"], pool=pool,
-    )
-    assert "set_config('app.current_tenant'" in calls[0][0]
+    with _patch_tc(monkeypatch, real_ids=["c1"]) as calls:
+        resolve_cohort_recipients(
+            tenant_id=_T, campaign_id="camp1", customer_ids=["c1"], pool=object(),
+        )
+    tc_calls = [c for c in calls if c[0] == "__tenant_connection__"]
+    assert tc_calls and tc_calls[0][1] == (_T,)

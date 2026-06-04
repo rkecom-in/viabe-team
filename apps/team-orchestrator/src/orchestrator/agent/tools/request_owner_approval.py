@@ -55,6 +55,7 @@ from uuid import UUID, uuid4
 from langgraph.types import interrupt
 from pydantic import BaseModel, ConfigDict, Field
 
+from orchestrator.db.wrappers import PendingApprovalsWrapper
 from orchestrator.state.agent_graph_state import AgentGraphState
 
 logger = logging.getLogger(__name__)
@@ -139,22 +140,9 @@ def _resolve_owner_phone(conn: Any, tenant_id: UUID) -> str | None:
 
 
 def _find_open_approval(conn: Any, tenant_id: UUID, run_id: UUID) -> dict[str, Any] | None:
-    """Return the most-recent UNRESOLVED approval row for this tenant/run, else None."""
-    row = conn.execute(
-        """
-        SELECT id::text AS id, decision, status, resolved_at
-        FROM pending_approvals
-        WHERE tenant_id = %s AND run_id = %s AND resolved_at IS NULL
-        ORDER BY requested_at DESC
-        LIMIT 1
-        """,
-        (str(tenant_id), str(run_id)),
-    ).fetchone()
-    if row is None:
-        return None
-    if isinstance(row, dict):
-        return row
-    return {"id": row[0], "decision": row[1], "status": row[2], "resolved_at": row[3]}
+    """Return the most-recent UNRESOLVED approval row for this tenant/run, else None.
+    VT-306: reads through the typed wrapper on the caller's conn."""
+    return PendingApprovalsWrapper().find_open_for_run(tenant_id, run_id, conn=conn)
 
 
 def arm_pause_request(
@@ -252,24 +240,23 @@ def arm_pause_request(
         timeout_at = datetime.now(UTC) + timedelta(hours=payload.timeout_hours)
         from psycopg.types.json import Jsonb
 
-        conn.execute(
-            """
-            INSERT INTO pending_approvals
-                (id, tenant_id, run_id, campaign_id, approval_type, summary,
-                 details, status, decision, owner_message_sid, timeout_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, 'pending', NULL, %s, %s)
-            """,
-            (
-                str(approval_id),
-                str(tenant_id),
-                str(run_id),
-                str(payload.campaign_id) if payload.campaign_id else None,
-                payload.approval_type,
-                payload.summary,
-                Jsonb(dict(payload.details)),
-                owner_message_sid,
-                timeout_at,
-            ),
+        # VT-306: insert through the typed wrapper on the caller's conn (atomic
+        # with the surrounding arm-pause txn; tenant_id forced to the scope).
+        PendingApprovalsWrapper().insert(
+            tenant_id,
+            {
+                "id": str(approval_id),
+                "run_id": str(run_id),
+                "campaign_id": str(payload.campaign_id) if payload.campaign_id else None,
+                "approval_type": payload.approval_type,
+                "summary": payload.summary,
+                "details": Jsonb(dict(payload.details)),
+                "status": "pending",
+                "decision": None,
+                "owner_message_sid": owner_message_sid,
+                "timeout_at": timeout_at,
+            },
+            conn=conn,
         )
 
     logger.info(

@@ -124,6 +124,7 @@ def test_open_complaint_freezes_send_none_customer_sent(dsn, monkeypatch):
         tenant = _seed_tenant(conn)
         # RLS-scope the connection (mirrors the seam's tenant-scoped conn).
         conn.execute("SELECT set_config('app.current_tenant', %s, false)", (tenant,))
+        conn.execute("SET ROLE app_role")  # VT-306: mirror tenant_connection (SET ROLE + GUC)
 
         run = _seed_run(conn, tenant)
         campaign = _seed_campaign(conn, tenant, run)
@@ -189,6 +190,7 @@ def test_resolved_and_default_complaint_status_are_sellable(dsn, monkeypatch):
     with psycopg.connect(dsn, autocommit=True, row_factory=dict_row) as conn:
         tenant = _seed_tenant(conn)
         conn.execute("SELECT set_config('app.current_tenant', %s, false)", (tenant,))
+        conn.execute("SET ROLE app_role")  # VT-306: mirror tenant_connection (SET ROLE + GUC)
         run = _seed_run(conn, tenant)
         campaign = _seed_campaign(conn, tenant, run)
 

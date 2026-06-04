@@ -1,7 +1,7 @@
 """VT-170 — cohort integrity primitive.
 
 `resolve_cohort_recipients` links a campaign's cohort (the
-`customer_ids` from campaigns.plan_json.target_cohort, mig 018) to real
+`customer_ids` out of the campaign plan_json.target_cohort, mig 018) to real
 `customers` rows via the normalized `campaign_recipients` table.
 
 The same-tenant composite FKs on `campaign_recipients` make cross-tenant
@@ -26,6 +26,8 @@ import logging
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
+
+from orchestrator.db.wrappers import CustomersWrapper
 
 logger = logging.getLogger(__name__)
 
@@ -60,15 +62,10 @@ def _resolve_core(
     """Core resolution against an already-tenant-scoped cursor. Caller
     guarantees `app.current_tenant` is set (pool path sets it; the
     cur-injected collapse path inherits it from tenant_connection)."""
-    cur.execute(
-        """
-        SELECT id::text
-        FROM customers
-        WHERE tenant_id = %s AND id = ANY(%s::uuid[])
-        """,
-        (tenant_id, unique_ids),
-    )
-    real = {(r["id"] if isinstance(r, dict) else r[0]) for r in cur.fetchall()}
+    # VT-306: the customers validate goes through the wrapper on the caller's
+    # (tenant-scoped) cur — atomic with the campaign_recipients INSERT below.
+    # campaign_recipients is NOT a hot table, so that INSERT stays direct.
+    real = CustomersWrapper().filter_existing_ids(tenant_id, unique_ids, conn=cur)
     resolved = [cid for cid in unique_ids if cid in real]
     rejected = [cid for cid in unique_ids if cid not in real]
     for cid in resolved:
@@ -120,11 +117,15 @@ def resolve_cohort_recipients(
 
     if pool is None:
         raise ValueError("resolve_cohort_recipients: pass either pool or cur")
-    with pool.connection() as conn, conn.cursor() as own_cur:
-        own_cur.execute(
-            "SELECT set_config('app.current_tenant', %s, false)", (tenant_id,)
-        )
-        return _resolve_core(own_cur, tenant_id, campaign_id, unique_ids)
+    # VT-306 (bounce fix): open a tenant_connection (SET ROLE app_role + GUC), NOT
+    # a raw pool.connection()+set_config — the latter runs as the BYPASSRLS pool
+    # role with RLS INERT, so isolation would rest only on the WHERE clause. ``pool``
+    # is retained for caller compat but unused (tenant_connection owns its conn).
+    _ = pool
+    from orchestrator.db import tenant_connection
+
+    with tenant_connection(tenant_id) as conn:
+        return _resolve_core(conn, tenant_id, campaign_id, unique_ids)
 
 
 __all__ = [

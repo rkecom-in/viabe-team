@@ -31,6 +31,8 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from orchestrator.db.wrappers import CampaignsWrapper, CustomersWrapper
+
 # The 5 real campaign lifecycle states (migration 016 CHECK). No 'cancelled'.
 CAMPAIGN_STATES: tuple[str, ...] = ("proposed", "approved", "rejected", "sent", "failed")
 
@@ -166,42 +168,23 @@ def generate_monthly_report(
         if should_skip(phase=phase, signed_up_at=signed_up_at, period_end=end):
             return None
 
+        # VT-306: campaign reads via CampaignsWrapper on the caller's tenant-scoped
+        # cur. The attributions side of the ARRR joins is scoped within the wrapper.
+        cw = CampaignsWrapper()
+
         # 1. Campaign-status counts (5 real states), filtered by generated_at.
-        cur.execute(
-            "SELECT status, count(*) AS n FROM campaigns "
-            "WHERE tenant_id = %s AND generated_at >= %s AND generated_at < %s "
-            "GROUP BY status",
-            (tenant_id, start, end),
-        )
         counts = {s: 0 for s in CAMPAIGN_STATES}
-        for r in cur.fetchall():
-            st = _scalar(r, "status", 0)
+        for st, n in cw.count_by_status_in_range(tenant_id, start, end, conn=cur).items():
             if st in counts:
-                counts[st] = int(_scalar(r, "n", 1))
+                counts[st] = n
 
         # 2. Month ARRR — attributed paise for campaigns CLOSING this month.
-        cur.execute(
-            "SELECT COALESCE(SUM(a.attributed_paise), 0) AS arrr "
-            "FROM attributions a JOIN campaigns c ON c.id = a.campaign_id "
-            "WHERE a.tenant_id = %s "
-            "AND c.attribution_closed_at >= %s AND c.attribution_closed_at < %s",
-            (tenant_id, start, end),
-        )
-        arrr_paise = int(_scalar(cur.fetchone(), "arrr", 0) or 0)
+        arrr_paise = cw.sum_arrr_closed_in_range(tenant_id, start, end, conn=cur)
 
         # 3. Top-5 campaigns by ARRR contribution this month.
-        cur.execute(
-            "SELECT c.id::text AS cid, COALESCE(SUM(a.attributed_paise), 0) AS arrr "
-            "FROM campaigns c JOIN attributions a ON a.campaign_id = c.id "
-            "WHERE c.tenant_id = %s "
-            "AND c.attribution_closed_at >= %s AND c.attribution_closed_at < %s "
-            "GROUP BY c.id ORDER BY arrr DESC, c.id LIMIT 5",
-            (tenant_id, start, end),
-        )
         top = [
-            TopCampaign(campaign_id=_scalar(r, "cid", 0),
-                        arrr_paise=int(_scalar(r, "arrr", 1) or 0))
-            for r in cur.fetchall()
+            TopCampaign(campaign_id=r["cid"], arrr_paise=int(r["arrr"] or 0))
+            for r in cw.top_campaigns_by_arrr_in_range(tenant_id, start, end, conn=cur)
         ]
 
         # 4. Customer growth — this month vs prior month (created_at).
@@ -227,12 +210,8 @@ def generate_monthly_report(
 
 
 def _count_customers(cur: Any, tenant_id: str, start: datetime, end: datetime) -> int:
-    cur.execute(
-        "SELECT count(*) AS n FROM customers "
-        "WHERE tenant_id = %s AND created_at >= %s AND created_at < %s",
-        (tenant_id, start, end),
-    )
-    return int(_scalar(cur.fetchone(), "n", 0) or 0)
+    # VT-306: via the wrapper on the caller's tenant-scoped cur.
+    return CustomersWrapper().count_created_in_range(tenant_id, start, end, conn=cur)
 
 
 def _prior_year_month(year_month: str) -> str:

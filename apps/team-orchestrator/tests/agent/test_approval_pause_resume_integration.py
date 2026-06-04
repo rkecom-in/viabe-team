@@ -183,7 +183,7 @@ def test_resolve_path_drives_durable_row(substrate):
     with tenant_connection(tid) as conn:
         approval = find_open_approval_for_tenant(conn, tid)
         assert approval is not None and approval["run_id"] == rid
-        mark_approval_resolved(conn, approval["id"], decision, owner_message_sid="SMxyz")
+        mark_approval_resolved(conn, tid, approval["id"], decision, owner_message_sid="SMxyz")
 
     with psycopg.connect(dsn, autocommit=True) as conn:
         d, s, resolved, sid = conn.execute(

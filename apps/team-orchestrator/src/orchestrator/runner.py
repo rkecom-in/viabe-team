@@ -377,7 +377,7 @@ def try_resume_pending_approval(
     # campaign_rejected; needs_changes has no L2 milestone type → no emit.
     with tenant_connection(tenant_id) as conn, conn.transaction():
         mark_approval_resolved(
-            conn, approval["id"], decision, owner_message_sid=message_sid
+            conn, tenant_id, approval["id"], decision, owner_message_sid=message_sid
         )
         _l2_event = {
             "approved": "campaign_approved", "rejected": "campaign_rejected",

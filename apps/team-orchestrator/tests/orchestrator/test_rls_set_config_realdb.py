@@ -277,26 +277,45 @@ def test_send_whatsapp_message_sends_and_denies(dsn, tenants, seed_conn):
     def _fake_send(body: str, recipient_phone: str) -> str:
         return "SM" + "a" * 32
 
-    out = send_whatsapp_message(
-        SendWhatsAppMessageInput(
-            tenant_id=a, customer_id=cust_a, body="hello", idempotency_key="k-a-1"
-        ),
-        pool=pool,
-        send_fn=_fake_send,
-    )
-    assert out.status == "sent"
-    assert out.message_sid is not None
+    # VT-306: _resolve_customer reads via CustomersWrapper on its own
+    # tenant_connection (SET ROLE app_role + GUC). The send flow keeps its
+    # injected pool for send_idempotency_keys; point the GLOBAL pool at the test
+    # dsn so the wrapper read works. Cross-tenant denial is then enforced by the
+    # wrapper's tenant_connection RLS (the customers cross-tenant-negative canary).
+    from psycopg.rows import dict_row
+    from psycopg_pool import ConnectionPool
 
-    # Cross-tenant denial THROUGH the tool: A sends to B's customer → RLS makes
-    # B's customer row invisible → tool returns 'unauthorized', never sends.
-    out_x = send_whatsapp_message(
-        SendWhatsAppMessageInput(
-            tenant_id=a, customer_id=cust_b, body="hello", idempotency_key="k-a-x"
-        ),
-        pool=pool,
-        send_fn=_fake_send,
+    from orchestrator import graph as graph_mod
+
+    prev_pool = graph_mod._pool
+    graph_mod._pool = ConnectionPool(
+        dsn, min_size=1, max_size=2,
+        kwargs={"autocommit": True, "row_factory": dict_row}, open=True,
     )
-    assert out_x.status == "unauthorized"
+    try:
+        out = send_whatsapp_message(
+            SendWhatsAppMessageInput(
+                tenant_id=a, customer_id=cust_a, body="hello", idempotency_key="k-a-1"
+            ),
+            pool=pool,
+            send_fn=_fake_send,
+        )
+        assert out.status == "sent"
+        assert out.message_sid is not None
+
+        # Cross-tenant denial THROUGH the tool: A sends to B's customer → the
+        # wrapper's tenant_connection RLS makes B's row invisible → 'unauthorized'.
+        out_x = send_whatsapp_message(
+            SendWhatsAppMessageInput(
+                tenant_id=a, customer_id=cust_b, body="hello", idempotency_key="k-a-x"
+            ),
+            pool=pool,
+            send_fn=_fake_send,
+        )
+        assert out_x.status == "unauthorized"
+    finally:
+        graph_mod._pool.close()
+        graph_mod._pool = prev_pool
 
     # VT-263: make the RLS backstops REAL (the review found these were vacuous /
     # WHERE-clause-shaped — they passed even with RLS disabled).
@@ -321,14 +340,31 @@ def test_cohort_resolve_denies_cross_tenant(dsn, tenants, seed_conn):
     camp_a = _seed_campaign(seed_conn, a, _seed_run(seed_conn, a))
     cust_a = _seed_customer(seed_conn, a, "+919900000010")
     cust_b = _seed_customer(seed_conn, b, "+919900000011")
-    pool = _RlsPool(dsn)
 
-    res = resolve_cohort_recipients(
-        tenant_id=a,
-        campaign_id=camp_a,
-        customer_ids=[cust_a, cust_b],
-        pool=pool,
+    # VT-306 (bounce fix): the standalone path opens its own tenant_connection
+    # (SET ROLE app_role + GUC); pool is vestigial. Point the global pool at the
+    # test dsn so it works; cross-tenant denial is the tenant_connection RLS.
+    from psycopg.rows import dict_row
+    from psycopg_pool import ConnectionPool
+
+    from orchestrator import graph as graph_mod
+
+    prev_pool = graph_mod._pool
+    graph_mod._pool = ConnectionPool(
+        dsn, min_size=1, max_size=2,
+        kwargs={"autocommit": True, "row_factory": dict_row}, open=True,
     )
+    try:
+        res = resolve_cohort_recipients(
+            tenant_id=a,
+            campaign_id=camp_a,
+            customer_ids=[cust_a, cust_b],
+            pool=object(),
+        )
+    finally:
+        graph_mod._pool.close()
+        graph_mod._pool = prev_pool
+
     # A's customer resolves; B's customer is invisible under A's GUC → rejected,
     # never linked (Fazal requirement: never silently dropped).
     assert cust_a in res.resolved
@@ -347,12 +383,29 @@ def test_customer_registry_denies_cross_tenant(dsn, tenants, seed_conn):
     _seed_customer(seed_conn, a, "+919900000020", display="Asha")
     _seed_customer(seed_conn, b, "+919900000021", display="Bhavna")
     customer_registry.invalidate_all()
-    pool = _RlsPool(dsn)
 
-    names = customer_registry.get_customer_names_for_tenant(a, pool=pool, use_cache=False)
+    # VT-306: get_customer_names_for_tenant reads via CustomersWrapper.list_display_names
+    # on its own tenant_connection (pool arg vestigial). Point the global pool at the
+    # test dsn; cross-tenant denial is then the wrapper's tenant_connection RLS.
+    from psycopg.rows import dict_row
+    from psycopg_pool import ConnectionPool
+
+    from orchestrator import graph as graph_mod
+
+    prev_pool = graph_mod._pool
+    graph_mod._pool = ConnectionPool(
+        dsn, min_size=1, max_size=2,
+        kwargs={"autocommit": True, "row_factory": dict_row}, open=True,
+    )
+    try:
+        names = customer_registry.get_customer_names_for_tenant(a, pool=None, use_cache=False)
+    finally:
+        graph_mod._pool.close()
+        graph_mod._pool = prev_pool
+
     # Registry lower-cases names for redaction matching.
     assert "asha" in names
-    assert "bhavna" not in names  # WHERE-clause tenant filter excludes B
+    assert "bhavna" not in names  # the wrapper's tenant_connection RLS excludes B
     # VT-263: real RLS backstop — B's customer row exists, so 0 means RLS (not
     # just the WHERE clause) hides it under A's GUC.
     assert _count_other(dsn, scoped_to=a, table="customers", other=b) == 0
@@ -397,15 +450,33 @@ def test_get_recent_campaigns_denies_cross_tenant(dsn, tenants, seed_conn):
     a, b = tenants
     camp_a = _seed_campaign(seed_conn, a, _seed_run(seed_conn, a), template_id="tmpl_a")
     camp_b = _seed_campaign(seed_conn, b, _seed_run(seed_conn, b), template_id="tmpl_b")
-    pool = _RlsPool(dsn)
 
-    out = get_recent_campaigns(
-        GetRecentCampaignsInput(tenant_id=a, days_back=365, limit=200), pool=pool
+    # VT-306: get_recent_campaigns now reads via CampaignsWrapper (tenant_connection
+    # = SET ROLE app_role + GUC). Point the global pool at the test dsn so the
+    # wrapper works; the cross-tenant denial is enforced by RLS through the wrapper
+    # (this is the wrapper's cross-tenant-negative canary for campaigns).
+    from psycopg.rows import dict_row
+    from psycopg_pool import ConnectionPool
+
+    from orchestrator import graph as graph_mod
+
+    prev = graph_mod._pool
+    graph_mod._pool = ConnectionPool(
+        dsn, min_size=1, max_size=2,
+        kwargs={"autocommit": True, "row_factory": dict_row}, open=True,
     )
+    try:
+        out = get_recent_campaigns(
+            GetRecentCampaignsInput(tenant_id=a, days_back=365, limit=200)
+        )
+    finally:
+        graph_mod._pool.close()
+        graph_mod._pool = prev
+
     by_id = {c.campaign_id: c for c in out.campaigns}
     assert camp_a in by_id
     assert by_id[camp_a].template_id == "tmpl_a"  # plan_json read works
-    assert camp_b not in by_id  # RLS hides B's campaign from A
+    assert camp_b not in by_id  # the wrapper's tenant_connection RLS hides B from A
     assert _count_other(dsn, scoped_to=a, table="campaigns", other=b) == 0
 
 
@@ -429,3 +500,50 @@ def test_query_customer_ledger_degrades_gracefully(dsn, tenants):
     assert out.customer_id is None
     assert out.ledger_entries == []
     assert out.total_balance_paise == 0
+
+
+def test_get_attribution_data_denies_cross_tenant(dsn, tenants, seed_conn):
+    """VT-306 bounce-2 e2e: get_attribution_data reads `attributions` DIRECTLY on
+    its outer connection — now a tenant_connection (SET ROLE app_role + GUC), so
+    that read is RLS-enforced. Tenant A querying B's campaign id must see NOTHING
+    (no campaign, no ARRR) — proves the direct attributions read can't cross
+    tenants even though `attributions` is not a VT-306 gate-flagged table."""
+    from orchestrator.agent.tools.get_attribution_data import (
+        GetAttributionDataInput,
+        get_attribution_data,
+    )
+
+    a, b = tenants
+    camp_b = _seed_campaign(seed_conn, b, _seed_run(seed_conn, b), status="sent")
+    seed_conn.execute(
+        "UPDATE campaigns SET attribution_close_at = now(), attribution_closed_at = now() "
+        "WHERE id = %s", (camp_b,),
+    )
+    # B-owned attribution — a cross-tenant leak would surface this 55555.
+    seed_conn.execute(
+        "INSERT INTO attributions (tenant_id, campaign_id, attributed_paise) "
+        "VALUES (%s, %s, 55555)", (b, camp_b),
+    )
+
+    from psycopg.rows import dict_row
+    from psycopg_pool import ConnectionPool
+
+    from orchestrator import graph as graph_mod
+
+    prev_pool = graph_mod._pool
+    graph_mod._pool = ConnectionPool(
+        dsn, min_size=1, max_size=2,
+        kwargs={"autocommit": True, "row_factory": dict_row}, open=True,
+    )
+    try:
+        out = get_attribution_data(
+            GetAttributionDataInput(tenant_id=a, campaign_id=camp_b)
+        )
+    finally:
+        graph_mod._pool.close()
+        graph_mod._pool = prev_pool
+
+    assert out.campaign is not None
+    # A cannot see B's campaign → not-found path; B's 55555 ARRR is NOT leaked.
+    assert out.campaign.attribution_status == "unknown"
+    assert out.campaign.arrr_paise == 0

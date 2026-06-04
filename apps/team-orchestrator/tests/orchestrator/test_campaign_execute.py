@@ -25,6 +25,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 from unittest.mock import MagicMock
+from uuid import UUID
 
 import pytest
 
@@ -53,14 +54,18 @@ def _campaign_row(
     body_params: dict | None = None,
     language: str = "en",
 ) -> dict[str, Any]:
-    """The shape _load_campaign reads from ``plan_json -> message_plan`` (VT-140
-    fix). Migration 018 dropped the dedicated template_id/body_params columns;
-    the seam now SELECTs template_id, template_params, language out of the JSONB
-    ``plan_json``. The mock returns those exact keys."""
+    """VT-306: _load_campaign now reads the campaign via CampaignsWrapper.find_by_id
+    (full row) then extracts plan_json -> message_plan in Python. The mock returns
+    the full row: tenant_id (find_by_id asserts scope) + the plan_json JSONB."""
     return {
-        "template_id": template_id,
-        "template_params": body_params if body_params is not None else dict(_BODY_PARAMS),
-        "language": language,
+        "tenant_id": UUID(_TENANT_ID),
+        "plan_json": {
+            "message_plan": {
+                "template_id": template_id,
+                "template_params": body_params if body_params is not None else dict(_BODY_PARAMS),
+                "language": language,
+            }
+        },
     }
 
 
@@ -106,7 +111,7 @@ def _make_conn(
     def _execute(sql: str, params: tuple | None = None) -> MagicMock:
         execute_calls.append((sql.strip(), params))
         result = MagicMock()
-        if "FROM campaigns" in sql and "WHERE id" in sql:
+        if "FROM campaigns" in sql:  # VT-306: wrapper SELECT * FROM campaigns WHERE tenant_id AND id
             result.fetchone.return_value = campaign_row
             result.fetchall.return_value = []
         elif "FROM campaign_recipients" in sql:
@@ -149,12 +154,13 @@ def test_full_cohort_all_sent() -> None:
     assert send_fn.call_count == 2
 
     # campaigns status was updated to 'sent'.
+    # VT-306: status is now a bound param (the wrapper's set_status), not inline.
     update_calls = [
-        sql for sql, _ in conn._execute_calls
+        (sql, params) for sql, params in conn._execute_calls
         if "UPDATE campaigns" in sql
     ]
     assert len(update_calls) == 1
-    assert "sent" in update_calls[0]
+    assert "sent" in update_calls[0][1]  # status bound as a param
 
 
 # ---------------------------------------------------------------------------
