@@ -25,7 +25,9 @@ from orchestrator.db.base import TenantScopedTable
 # take an optional ``conn`` so they can be ATOMIC with a sibling write (e.g. the
 # VT-65 PR-2 customers-write + kg_emit in one txn).
 
-_CUSTOMER_DEDUP_COLS = "id, display_name, phone_e164, email, acquired_via"
+# tenant_id is SELECTed so _validate (assert_tenant_scoped) can confirm scope —
+# every wrapper read that validates MUST return tenant_id.
+_CUSTOMER_DEDUP_COLS = "id, tenant_id, display_name, phone_e164, email, acquired_via"
 
 
 class CustomersWrapper(TenantScopedTable):
