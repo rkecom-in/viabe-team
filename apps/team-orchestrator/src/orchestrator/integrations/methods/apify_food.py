@@ -152,6 +152,32 @@ def ingest_swiggy(
     ctx["last_updated"] = now.isoformat()
     _merge_context(tenant_id, "swiggy_context", ctx)
     logger.info("ingest_swiggy: tenant=%s context written (rating=%s)", tenant_id, ctx.get("rating"))
+
+    # VT-325: ALSO persist the per-listing row + emit (distinct from the aggregate
+    # swiggy_context). external_listing_id = the Swiggy restaurant id (fallback:
+    # place_url). Best-effort — never break the aggregate ingest.
+    item = items[0]
+    ext_id = item.get("id") or item.get("restaurantId") or place_url
+    if ext_id:
+        try:
+            from orchestrator.integrations.platform_listings import (
+                write_platform_listing,
+            )
+
+            write_platform_listing(
+                tenant_id, "swiggy", str(ext_id),
+                rating=ctx.get("rating"),
+                attributes={  # CL-390: structured non-PII facts only
+                    "cuisines": ctx.get("cuisines"),
+                    "cost_for_two": ctx.get("cost_for_two"),
+                    "delivery_time": ctx.get("delivery_time"),
+                },
+            )
+        except Exception as exc:  # noqa: BLE001 — per-listing best-effort
+            logger.warning(
+                "ingest_swiggy: per-listing write failed (%s) — aggregate unaffected",
+                type(exc).__name__,
+            )
     return IngestionSummary(entries_extracted=1, committed=1, pending_clarification=0, dropped=0)
 
 
@@ -286,6 +312,31 @@ def ingest_zomato(
         "ingest_zomato: tenant=%s aggregate written (reviews=%d themes=%d)",
         tenant_id, len(items), len(themes),
     )
+
+    # VT-325: ALSO persist the per-listing row + emit. Zomato is reviews-based (no
+    # listing object), so external_listing_id = the restaurant URL (stable, non-PII).
+    # CL-390 / Cowork Q2: store ONLY the deterministic non-PII aggregate (rating +
+    # review_count + sentiment counts) — NOT the review-derived `themes` (those are a
+    # deferred separate row with scrub-at-ingest). Best-effort. Requires place_url.
+    if place_url:
+        try:
+            from orchestrator.integrations.platform_listings import (
+                write_platform_listing,
+            )
+
+            write_platform_listing(
+                tenant_id, "zomato", str(place_url),
+                rating=overall_rating,
+                attributes={
+                    "review_count": len(items),
+                    "sentiment_distribution": sentiment,
+                },
+            )
+        except Exception as exc:  # noqa: BLE001 — per-listing best-effort
+            logger.warning(
+                "ingest_zomato: per-listing write failed (%s) — aggregate unaffected",
+                type(exc).__name__,
+            )
     return IngestionSummary(entries_extracted=len(items), committed=1, pending_clarification=0, dropped=0)
 
 

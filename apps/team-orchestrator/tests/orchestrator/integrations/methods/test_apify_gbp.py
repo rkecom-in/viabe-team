@@ -25,6 +25,7 @@ from orchestrator.integrations.methods.apify_gbp import _aggregate, ingest_gbp  
 # none of which may ever reach storage.
 _PLACE_WITH_PII = {
     "title": "Asha Kirana Store",
+    "placeId": "ChIJ-asha-kirana-test",  # VT-325: GBP external_listing_id
     "totalScore": 4.6,
     "reviewsCount": 247,
     "categoryName": "Grocery store",
@@ -120,6 +121,19 @@ def _profile_attrs(tenant: str):
     return row["attributes"] if isinstance(row, dict) else row[0]
 
 
+def _listing_rows(tenant: str):
+    """VT-325: the per-listing platform_listings rows for the tenant."""
+    from orchestrator.db import tenant_connection
+
+    with tenant_connection(tenant) as conn:
+        return [
+            dict(r) for r in conn.execute(
+                "SELECT platform, external_listing_id, rating, attributes "
+                "FROM platform_listings"
+            ).fetchall()
+        ]
+
+
 @_DB
 def test_context_written_to_l1(db_ctx):
     tenant = _tenant(db_ctx.dsn)
@@ -131,6 +145,14 @@ def test_context_written_to_l1(db_ctx):
     assert attrs["gbp_context"]["reviews_count"] == 247
     assert attrs["gbp_context"]["acquired_via"] == "apify_gbp"
 
+    # VT-325: the per-listing row was ALSO written + emitted (distinct from the
+    # aggregate business_profile above) — the ingest→writer glue, end-to-end.
+    listings = _listing_rows(tenant)
+    assert len(listings) == 1
+    assert listings[0]["platform"] == "gbp"
+    assert listings[0]["external_listing_id"] == "ChIJ-asha-kirana-test"
+    assert float(listings[0]["rating"]) == 4.6
+
 
 @_DB
 def test_no_pii_reaches_storage(db_ctx):
@@ -138,7 +160,10 @@ def test_no_pii_reaches_storage(db_ctx):
     tenant = _tenant(db_ctx.dsn)
     ingest_gbp(tenant, place_url="https://maps.google.com/?cid=123",
                token="t", fetch_fn=_fetch(_PLACE_WITH_PII))
-    stored = json.dumps(_profile_attrs(tenant))
+    # VT-325: cover BOTH the aggregate AND the per-listing row — neither may carry PII.
+    stored = json.dumps(_profile_attrs(tenant)) + json.dumps(
+        _listing_rows(tenant), default=str
+    )
     for needle in _PII_NEEDLES:
         assert needle not in stored, f"PII {needle!r} reached L1 storage"
 

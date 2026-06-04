@@ -127,6 +127,11 @@ _PURGE_ORDER: tuple[str, ...] = (
     # sentinels), so a tenant DSR-delete MUST sweep it here or the whole L2
     # episodic store survives the purge.
     "episodic_events",
+    # VT-325: per-listing platform source. Leaf (FK tenants only — anonymized,
+    # NOT deleted, so the ON DELETE CASCADE never fires on a DSR), order-insensitive.
+    # MUST be swept here or a tenant's listings survive the purge (the VT-323
+    # episodic_events lesson, on a fresh table).
+    "platform_listings",
     "owner_inputs",
     "campaigns",
     "pipeline_steps",
