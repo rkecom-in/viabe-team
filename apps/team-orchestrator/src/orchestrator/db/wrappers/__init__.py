@@ -144,6 +144,31 @@ class CustomersWrapper(TenantScopedTable):
             ).fetchone()
         return int(dict(row)["n"]) if row else 0
 
+    def count_all(self, tenant_id: UUID | str, *, conn: Any = None) -> int:
+        """Total customers for the tenant (VT-312 ledger summary)."""
+        tid = self._uuid(tenant_id)
+        with self._conn(tid, conn) as c:
+            row = c.execute(
+                "SELECT count(*) AS n FROM customers WHERE tenant_id = %s",
+                (str(tid),),
+            ).fetchone()
+        return int(dict(row)["n"]) if row else 0
+
+    def recency_days_percentiles(
+        self, tenant_id: UUID | str, pctls: list[float], *, conn: Any = None
+    ) -> dict[str, Any] | None:
+        """percentile_cont of days-since-last-inbound over customers with a
+        last_inbound_at (VT-312). Returns the row dict ({"p": [...]}) or None."""
+        tid = self._uuid(tenant_id)
+        with self._conn(tid, conn) as c:
+            row = c.execute(
+                "SELECT percentile_cont(%s) WITHIN GROUP "
+                "(ORDER BY (now()::date - last_inbound_at::date)) AS p "
+                "FROM customers WHERE tenant_id = %s AND last_inbound_at IS NOT NULL",
+                (list(pctls), str(tid)),
+            ).fetchone()
+        return dict(row) if row else None
+
     def list_display_names(
         self, tenant_id: UUID | str, *, conn: Any = None
     ) -> set[str]:
@@ -164,6 +189,23 @@ class CustomersWrapper(TenantScopedTable):
 
 class CampaignsWrapper(TenantScopedTable):
     _table = "campaigns"
+
+    def list_recent_basic(
+        self, tenant_id: UUID | str, *, limit: int = 5, conn: Any = None
+    ) -> list[dict[str, Any]]:
+        """Recent campaigns (id, status, generated_at), newest first — the
+        context-builder snapshot. Adds the explicit tenant predicate the
+        pre-migration RLS-only query relied on."""
+        tid = self._uuid(tenant_id)
+        with self._conn(tid, conn) as c:
+            rows = c.execute(
+                "SELECT id, tenant_id, status, generated_at FROM campaigns "
+                "WHERE tenant_id = %s ORDER BY generated_at DESC LIMIT %s",
+                (str(tid), limit),
+            ).fetchall()
+        out = [dict(r) for r in rows]
+        self._validate(out, tid)
+        return out
 
     def set_status(
         self, tenant_id: UUID | str, campaign_id: str, status: str, *, conn: Any = None
@@ -355,6 +397,23 @@ class PendingApprovalsWrapper(TenantScopedTable):
 
 class OwnerInputsWrapper(TenantScopedTable):
     _table = "owner_inputs"
+
+    def list_pending(
+        self, tenant_id: UUID | str, *, limit: int, conn: Any = None
+    ) -> list[dict[str, Any]]:
+        """Unconsumed owner inputs, newest first (context-builder). Adds the
+        explicit tenant predicate the pre-migration RLS-only query relied on."""
+        tid = self._uuid(tenant_id)
+        with self._conn(tid, conn) as c:
+            rows = c.execute(
+                "SELECT id, tenant_id, intent, segment, occasion, created_at "
+                "FROM owner_inputs WHERE tenant_id = %s AND consumed_at IS NULL "
+                "ORDER BY created_at DESC LIMIT %s",
+                (str(tid), limit),
+            ).fetchall()
+        out = [dict(r) for r in rows]
+        self._validate(out, tid)
+        return out
 
 
 class PhoneTokenResolutionsWrapper(TenantScopedTable):
