@@ -86,6 +86,21 @@ class CustomersWrapper(TenantScopedTable):
                  str(tid), str(customer_id)),
             )
 
+    def filter_existing_ids(
+        self, tenant_id: UUID | str, ids: list[str], *, conn: Any = None
+    ) -> set[str]:
+        """Return the subset of ``ids`` that exist for this tenant (cohort
+        validate). Pass the caller's conn to stay atomic with a sibling write
+        (e.g. the campaign_recipients INSERT)."""
+        tid = self._uuid(tenant_id)
+        with self._conn(tid, conn) as c:
+            rows = c.execute(
+                "SELECT id::text AS id FROM customers "
+                "WHERE tenant_id = %s AND id = ANY(%s::uuid[])",
+                (str(tid), list(ids)),
+            ).fetchall()
+        return {dict(r)["id"] for r in rows}
+
     def count_created_in_range(
         self,
         tenant_id: UUID | str,

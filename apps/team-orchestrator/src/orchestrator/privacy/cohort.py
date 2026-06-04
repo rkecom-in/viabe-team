@@ -27,6 +27,8 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from orchestrator.db.wrappers import CustomersWrapper
+
 logger = logging.getLogger(__name__)
 
 
@@ -60,15 +62,10 @@ def _resolve_core(
     """Core resolution against an already-tenant-scoped cursor. Caller
     guarantees `app.current_tenant` is set (pool path sets it; the
     cur-injected collapse path inherits it from tenant_connection)."""
-    cur.execute(
-        """
-        SELECT id::text
-        FROM customers
-        WHERE tenant_id = %s AND id = ANY(%s::uuid[])
-        """,
-        (tenant_id, unique_ids),
-    )
-    real = {(r["id"] if isinstance(r, dict) else r[0]) for r in cur.fetchall()}
+    # VT-306: the customers validate goes through the wrapper on the caller's
+    # (tenant-scoped) cur — atomic with the campaign_recipients INSERT below.
+    # campaign_recipients is NOT a hot table, so that INSERT stays direct.
+    real = CustomersWrapper().filter_existing_ids(tenant_id, unique_ids, conn=cur)
     resolved = [cid for cid in unique_ids if cid in real]
     rejected = [cid for cid in unique_ids if cid not in real]
     for cid in resolved:

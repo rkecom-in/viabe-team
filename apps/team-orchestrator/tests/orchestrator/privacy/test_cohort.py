@@ -12,14 +12,20 @@ import pytest
 # the orchestrator job (uv sync --frozen).
 pytest.importorskip("pydantic")
 
+# VT-306: cohort's customers validate now goes through CustomersWrapper, which
+# UUID-validates tenant_id (a good tightening). The mock-cur tests therefore use a
+# real UUID tenant; customer_ids stay opaque (the mock cur ignores the ANY bind).
+_T = "00000000-0000-4000-8000-000000000001"
+
 
 def _pool(*, real_ids: list[str]) -> tuple[Any, list[tuple[str, tuple]]]:
     """Stub: set_config, SELECT real customer ids (fetchall), N inserts."""
     calls: list[tuple[str, tuple]] = []
     cur = MagicMock()
 
-    def _execute(sql: str, params: tuple | None = None) -> None:
+    def _execute(sql: str, params: tuple | None = None) -> Any:
         calls.append((sql, params or ()))
+        return cur  # real psycopg returns the cursor → wrapper chains .fetchall()
 
     cur.execute.side_effect = _execute
     cur.fetchall.return_value = [{"id": cid} for cid in real_ids]
@@ -39,7 +45,7 @@ def test_all_resolved() -> None:
 
     pool, calls = _pool(real_ids=["c1", "c2"])
     out = resolve_cohort_recipients(
-        tenant_id="t1", campaign_id="camp1",
+        tenant_id=_T, campaign_id="camp1",
         customer_ids=["c1", "c2"], pool=pool,
     )
     assert sorted(out.resolved) == ["c1", "c2"]
@@ -54,7 +60,7 @@ def test_unknown_id_rejected_not_dropped() -> None:
     # c2 is NOT a real customer → must surface in rejected, never linked.
     pool, calls = _pool(real_ids=["c1"])
     out = resolve_cohort_recipients(
-        tenant_id="t1", campaign_id="camp1",
+        tenant_id=_T, campaign_id="camp1",
         customer_ids=["c1", "c2"], pool=pool,
     )
     assert out.resolved == ["c1"]
@@ -70,7 +76,7 @@ def test_dedupes_and_orders() -> None:
 
     pool, _ = _pool(real_ids=["a", "b"])
     out = resolve_cohort_recipients(
-        tenant_id="t1", campaign_id="camp1",
+        tenant_id=_T, campaign_id="camp1",
         customer_ids=["b", "a", "b", "a"], pool=pool,
     )
     # Deterministic sorted-unique output (reproducible).
@@ -82,7 +88,7 @@ def test_empty_cohort_noop() -> None:
 
     pool, calls = _pool(real_ids=[])
     out = resolve_cohort_recipients(
-        tenant_id="t1", campaign_id="camp1", customer_ids=[], pool=pool,
+        tenant_id=_T, campaign_id="camp1", customer_ids=[], pool=pool,
     )
     assert out.resolved == []
     assert out.rejected == []
@@ -95,7 +101,7 @@ def test_sets_tenant_guc_first() -> None:
 
     pool, calls = _pool(real_ids=["c1"])
     resolve_cohort_recipients(
-        tenant_id="tenant_z", campaign_id="camp1",
+        tenant_id=_T, campaign_id="camp1",
         customer_ids=["c1"], pool=pool,
     )
     assert "set_config('app.current_tenant'" in calls[0][0]
