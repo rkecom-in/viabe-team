@@ -56,8 +56,38 @@ if [ -z "$RANGE_BASE" ]; then
 fi
 
 CHANGED="$(git diff --name-only "$RANGE_BASE" "$RANGE_HEAD" 2>/dev/null || true)"
+# VT-316 — NEVER silently skip the gate on an empty change-set. A previous bug
+# let a degenerate/empty push range (e.g. the hook's stdin consumed by a
+# compound `git commit <<EOF && git push` command) compute zero files and
+# `exit 0` PASS — pushing unverified code. An empty range is only LEGITIMATE
+# when HEAD is genuinely not ahead of origin/main (real no-op push). Otherwise:
+# recover via the HEAD-vs-origin/main diff, and if even THAT is empty while
+# commits exist, FAIL LOUD rather than pass blind.
 if [ -z "$CHANGED" ]; then
-  say "no changed files in push range — nothing to check."
+  _ahead="$(git rev-list --count origin/main..HEAD 2>/dev/null || echo 0)"
+  _fallback="$(git diff --name-only \
+    "$(git merge-base origin/main HEAD 2>/dev/null || echo origin/main)" HEAD \
+    2>/dev/null || true)"
+  if [ -n "$_fallback" ]; then
+    warn "push range yielded no files (suspect range — base=$RANGE_BASE head=$RANGE_HEAD); \
+falling back to HEAD vs origin/main (VT-316)."
+    CHANGED="$_fallback"
+  elif [ "${_ahead:-0}" != "0" ]; then
+    err "empty changed-file set, but HEAD is ${_ahead} commit(s) ahead of origin/main — \
+the push range was not determined correctly. Refusing to skip the gate silently (VT-316). \
+Re-run the push as a STANDALONE command (not chained after a heredoc), or --no-verify if truly intended."
+    exit 1
+  else
+    say "no changed files + HEAD not ahead of origin/main — genuinely nothing to check."
+    exit 0
+  fi
+fi
+
+# VT-316 testability: PREPUSH_RANGE_ONLY short-circuits AFTER range resolution
+# (prints the resolved change-set, runs no suite) so the empty-range fail-loud
+# logic can be exercised deterministically by scripts/test_prepush_range.sh.
+if [ -n "${PREPUSH_RANGE_ONLY:-}" ]; then
+  printf 'RANGE_OK\n%s\n' "$CHANGED"
   exit 0
 fi
 
