@@ -212,6 +212,17 @@ def _seed_full_tenant_data(dsn: str, tenant_id: UUID) -> dict[str, UUID]:
             (str(tenant_id), str(uuid4())),
         )
 
+        # platform_listings (VT-325): per-listing source. FK tenants ON DELETE
+        # CASCADE does NOT fire on a DSR (tenant is anonymized, not deleted), so the
+        # purge MUST hard-delete it here — the VT-323 lesson on a fresh table.
+        conn.execute(
+            "INSERT INTO platform_listings "
+            "(tenant_id, platform, external_listing_id, rating, attributes) "
+            "VALUES (%s, 'swiggy', 'dsr-seed-rest', 4.0, "
+            "'{\"cuisines\": [\"x\"]}'::jsonb)",
+            (str(tenant_id),),
+        )
+
         # privacy_audit_log — pre-existing event, MUST survive purge. VT-80:
         # write through the real hash-chain writer (a seeded event_type that is
         # NOT one of the purge events, so the purge-count assertions stay exact).
@@ -278,6 +289,7 @@ _PURGED_TABLES = (
     "l1_relationships",
     "l1_entities",
     "episodic_events",  # VT-323: L2 episodic memory must be swept by DSR purge
+    "platform_listings",  # VT-325: per-listing source must be swept by DSR purge
     "owner_inputs",
     "campaigns",
     "pipeline_steps",
