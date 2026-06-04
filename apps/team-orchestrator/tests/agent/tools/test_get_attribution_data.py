@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from typing import Any
+from uuid import UUID
 from unittest.mock import MagicMock
 
 import pytest
@@ -21,6 +22,10 @@ def _undefined_table_exc() -> Exception:
     return type("UndefinedTable", (Exception,), {})("relation does not exist")
 
 
+# VT-306: the campaign read goes through CampaignsWrapper (UUID-validates tenant).
+_T = "00000000-0000-4000-8000-000000000abc"
+
+
 def _pool_campaign(*, campaign_row: Any, agg_row: Any,
                     raise_undefined: bool = False) -> tuple[Any, list[str]]:
     """Stub for campaign mode: SET LOCAL, SELECT campaign (fetchone),
@@ -29,10 +34,11 @@ def _pool_campaign(*, campaign_row: Any, agg_row: Any,
     cur = MagicMock()
     fetchone_q = [campaign_row, agg_row]
 
-    def _execute(sql: str, params: tuple | None = None) -> None:
+    def _execute(sql: str, params: tuple | None = None) -> Any:
         issued_sql.append(sql)
         if raise_undefined and "FROM attributions" in sql:
             raise _undefined_table_exc()
+        return cur  # real psycopg returns the cursor → wrapper chains .fetchone()
 
     cur.execute.side_effect = _execute
     cur.fetchone.side_effect = lambda: fetchone_q.pop(0) if fetchone_q else None
@@ -49,7 +55,7 @@ def _pool_campaign(*, campaign_row: Any, agg_row: Any,
 
 def _pool_window(*, rows: list[Any]) -> Any:
     cur = MagicMock()
-    cur.execute.side_effect = lambda sql, params=None: None
+    cur.execute.side_effect = lambda sql, params=None: cur
     cur.fetchall.return_value = rows
     cur.__enter__ = MagicMock(return_value=cur)
     cur.__exit__ = MagicMock(return_value=False)
@@ -68,20 +74,20 @@ def test_xor_validation() -> None:
     )
     # both → error
     with pytest.raises(ValueError):
-        GetAttributionDataInput(tenant_id="t", campaign_id="c", window_start=T0)
+        GetAttributionDataInput(tenant_id=_T, campaign_id="c", window_start=T0)
     # neither → error
     with pytest.raises(ValueError):
-        GetAttributionDataInput(tenant_id="t")
+        GetAttributionDataInput(tenant_id=_T)
     # window with only one bound → error
     with pytest.raises(ValueError):
-        GetAttributionDataInput(tenant_id="t", window_start=T0)
+        GetAttributionDataInput(tenant_id=_T, window_start=T0)
     # reversed window → error
     with pytest.raises(ValueError):
-        GetAttributionDataInput(tenant_id="t", window_start=T1, window_end=T0)
+        GetAttributionDataInput(tenant_id=_T, window_start=T1, window_end=T0)
     # valid campaign
-    GetAttributionDataInput(tenant_id="t", campaign_id="c")
+    GetAttributionDataInput(tenant_id=_T, campaign_id="c")
     # valid window
-    GetAttributionDataInput(tenant_id="t", window_start=T0, window_end=T1)
+    GetAttributionDataInput(tenant_id=_T, window_start=T0, window_end=T1)
 
 
 def test_campaign_mode_closed_with_attributions() -> None:
@@ -91,6 +97,7 @@ def test_campaign_mode_closed_with_attributions() -> None:
     )
     pool, _ = _pool_campaign(
         campaign_row={
+            "tenant_id": UUID(_T),
             "attribution_close_at": T1,
             "attribution_closed_at": T1,
             "total_arrr_paise": 5000,
@@ -98,7 +105,7 @@ def test_campaign_mode_closed_with_attributions() -> None:
         agg_row={"transacting_count": 3, "arrr_paise": 5000},
     )
     out = get_attribution_data(
-        GetAttributionDataInput(tenant_id="t", campaign_id="c1"), pool=pool
+        GetAttributionDataInput(tenant_id=_T, campaign_id="c1"), pool=pool
     )
     assert out.mode == "campaign"
     assert out.campaign is not None
@@ -118,6 +125,7 @@ def test_campaign_mode_pending_emits_note() -> None:
     )
     pool, _ = _pool_campaign(
         campaign_row={
+            "tenant_id": UUID(_T),
             "attribution_close_at": T1,
             "attribution_closed_at": None,
             "total_arrr_paise": None,
@@ -125,7 +133,7 @@ def test_campaign_mode_pending_emits_note() -> None:
         agg_row={"transacting_count": 0, "arrr_paise": 0},
     )
     out = get_attribution_data(
-        GetAttributionDataInput(tenant_id="t", campaign_id="c1"), pool=pool
+        GetAttributionDataInput(tenant_id=_T, campaign_id="c1"), pool=pool
     )
     assert out.campaign is not None
     assert out.campaign.attribution_status == "pending"
@@ -139,6 +147,7 @@ def test_campaign_mode_cached_mismatch_note() -> None:
     )
     pool, _ = _pool_campaign(
         campaign_row={
+            "tenant_id": UUID(_T),
             "attribution_close_at": T1,
             "attribution_closed_at": T1,
             "total_arrr_paise": 9999,  # cached differs from live SUM
@@ -146,7 +155,7 @@ def test_campaign_mode_cached_mismatch_note() -> None:
         agg_row={"transacting_count": 2, "arrr_paise": 4000},
     )
     out = get_attribution_data(
-        GetAttributionDataInput(tenant_id="t", campaign_id="c1"), pool=pool
+        GetAttributionDataInput(tenant_id=_T, campaign_id="c1"), pool=pool
     )
     assert out.campaign is not None
     assert out.campaign.arrr_paise == 4000  # live SUM wins
@@ -165,7 +174,7 @@ def test_window_mode_aggregates() -> None:
          "transacting_count": 1, "arrr_paise": 1500},
     ])
     out = get_attribution_data(
-        GetAttributionDataInput(tenant_id="t", window_start=T0, window_end=T1),
+        GetAttributionDataInput(tenant_id=_T, window_start=T0, window_end=T1),
         pool=pool,
     )
     assert out.mode == "window"
@@ -182,11 +191,12 @@ def test_reproducibility_byte_identical() -> None:
         GetAttributionDataInput,
         get_attribution_data,
     )
-    inp = GetAttributionDataInput(tenant_id="t", campaign_id="c1")
+    inp = GetAttributionDataInput(tenant_id=_T, campaign_id="c1")
 
     def _run() -> str:
         pool, _ = _pool_campaign(
             campaign_row={
+            "tenant_id": UUID(_T),
                 "attribution_close_at": T1,
                 "attribution_closed_at": T1,
                 "total_arrr_paise": 5000,
@@ -205,13 +215,14 @@ def test_sets_tenant_guc_before_query() -> None:
     )
     pool, issued = _pool_campaign(
         campaign_row={
+            "tenant_id": UUID(_T),
             "attribution_close_at": T1, "attribution_closed_at": T1,
             "total_arrr_paise": 100,
         },
         agg_row={"transacting_count": 1, "arrr_paise": 100},
     )
     get_attribution_data(
-        GetAttributionDataInput(tenant_id="tenant_x", campaign_id="c1"),
+        GetAttributionDataInput(tenant_id=_T, campaign_id="c1"),
         pool=pool,
     )
     # VT-140 fix: the tenant GUC is set via set_config('app.current_tenant',
@@ -228,6 +239,7 @@ def test_undefined_table_graceful_empty() -> None:
     )
     pool, _ = _pool_campaign(
         campaign_row={
+            "tenant_id": UUID(_T),
             "attribution_close_at": T1, "attribution_closed_at": T1,
             "total_arrr_paise": 0,
         },
@@ -235,7 +247,7 @@ def test_undefined_table_graceful_empty() -> None:
         raise_undefined=True,
     )
     out = get_attribution_data(
-        GetAttributionDataInput(tenant_id="t", campaign_id="c1"), pool=pool
+        GetAttributionDataInput(tenant_id=_T, campaign_id="c1"), pool=pool
     )
     assert out.campaign is not None
     assert out.campaign.transacting_count == 0

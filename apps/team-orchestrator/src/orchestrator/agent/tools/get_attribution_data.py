@@ -35,6 +35,8 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from orchestrator.db.wrappers import CampaignsWrapper
+
 logger = logging.getLogger(__name__)
 
 # One stable forward-target note string (deterministic — same bytes every run).
@@ -152,16 +154,12 @@ def _col(r: Any, key: str, idx: int) -> Any:
 def _campaign_mode(cur: Any, payload: GetAttributionDataInput) -> GetAttributionDataOutput:
     notes: list[str] = [_DEGRADE_NOTE]
 
-    cur.execute(
-        """
-        SELECT attribution_close_at, attribution_closed_at, total_arrr_paise
-        FROM campaigns
-        WHERE id = %s AND tenant_id = %s
-        LIMIT 1
-        """,
-        (payload.campaign_id, payload.tenant_id),
+    # VT-306: campaign row via the wrapper on the caller's tenant-scoped cur.
+    # The attributions aggregate below stays direct (attributions is NOT a hot
+    # table). find_by_id returns the full row; we read the 3 attribution fields.
+    crow = CampaignsWrapper().find_by_id(
+        payload.tenant_id, payload.campaign_id, conn=cur
     )
-    crow = cur.fetchone()
     if crow is None:
         # No such campaign for this tenant — honest empty (Pillar 7).
         notes.append("campaign not found for tenant")
@@ -224,26 +222,11 @@ def _campaign_mode(cur: Any, payload: GetAttributionDataInput) -> GetAttribution
 def _window_mode(cur: Any, payload: GetAttributionDataInput) -> GetAttributionDataOutput:
     notes: list[str] = [_DEGRADE_NOTE]
 
-    cur.execute(
-        """
-        SELECT
-            c.id::text AS campaign_id,
-            c.attribution_closed_at,
-            COUNT(DISTINCT COALESCE(a.customer_id::text, a.razorpay_payment_id,
-                                    a.id::text)) AS transacting_count,
-            COALESCE(SUM(a.attributed_paise), 0) AS arrr_paise
-        FROM campaigns c
-        LEFT JOIN attributions a
-          ON a.campaign_id = c.id AND a.tenant_id = c.tenant_id
-        WHERE c.tenant_id = %s
-          AND c.attribution_close_at >= %s
-          AND c.attribution_close_at <= %s
-        GROUP BY c.id, c.attribution_closed_at
-        ORDER BY c.id ASC
-        """,
-        (payload.tenant_id, payload.window_start, payload.window_end),
+    # VT-306: the campaigns⋈attributions window rollup is encapsulated by the
+    # wrapper (tenant-matched join), on the caller's tenant-scoped cur.
+    rows = CampaignsWrapper().attribution_window_summary(
+        payload.tenant_id, payload.window_start, payload.window_end, conn=cur
     )
-    rows = cur.fetchall()
 
     summaries: list[CampaignAttributionSummary] = []
     total_transacting = 0

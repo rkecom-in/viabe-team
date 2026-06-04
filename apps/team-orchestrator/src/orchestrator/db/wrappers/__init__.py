@@ -140,6 +140,39 @@ class CustomersWrapper(TenantScopedTable):
 class CampaignsWrapper(TenantScopedTable):
     _table = "campaigns"
 
+    def attribution_window_summary(
+        self,
+        tenant_id: UUID | str,
+        window_start: Any,
+        window_end: Any,
+        *,
+        conn: Any = None,
+    ) -> list[dict[str, Any]]:
+        """Per-campaign attribution rollup over a close-at window (campaigns
+        LEFT JOIN attributions, tenant-matched on both sides), ordered by id."""
+        tid = self._uuid(tenant_id)
+        with self._conn(tid, conn) as c:
+            rows = c.execute(
+                """
+                SELECT
+                    c.id::text AS campaign_id,
+                    c.attribution_closed_at,
+                    COUNT(DISTINCT COALESCE(a.customer_id::text, a.razorpay_payment_id,
+                                            a.id::text)) AS transacting_count,
+                    COALESCE(SUM(a.attributed_paise), 0) AS arrr_paise
+                FROM campaigns c
+                LEFT JOIN attributions a
+                  ON a.campaign_id = c.id AND a.tenant_id = c.tenant_id
+                WHERE c.tenant_id = %s
+                  AND c.attribution_close_at >= %s
+                  AND c.attribution_close_at <= %s
+                GROUP BY c.id, c.attribution_closed_at
+                ORDER BY c.id ASC
+                """,
+                (str(tid), window_start, window_end),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
     def list_recent_with_responses(
         self,
         tenant_id: UUID | str,
