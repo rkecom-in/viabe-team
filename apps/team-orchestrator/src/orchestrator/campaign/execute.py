@@ -26,7 +26,7 @@ Architecture:
   campaign_messages recording for sent/error recipients.
 - Partial-failure: per-recipient try/except → record send_status='error' in
   campaign_messages + continue (NOT fatal; mirror VT-241 reject discipline).
-- After loop: UPDATE campaigns.status='sent'. Return count-only summary.
+- After loop: advance the campaign status to 'sent'. Return count-only summary.
 
 Pillars:
 - CL-421: consent gate — never message opted_out / blocked (hard-refuse).
@@ -79,7 +79,7 @@ def _load_recipients(
     tenant_id: str,
     campaign_id: str,
 ) -> list[dict[str, Any]]:
-    """SELECT campaign_recipients JOIN customers for the campaign.
+    """Load campaign_recipients joined to their customer status flags.
 
     Returns list of dicts: {customer_id, opt_out_status, complaint_status}.
     RLS is already scoped via SET LOCAL app.current_tenant on conn.
@@ -224,7 +224,7 @@ def _advance_campaign_status(
     tenant_id: str,
     campaign_id: str,
 ) -> None:
-    """UPDATE campaigns.status → 'sent' (VT-306: via the wrapper, tenant-predicated)."""
+    """Advance the campaign status to sent (VT-306: via the wrapper, tenant-predicated)."""
     CampaignsWrapper().set_status(tenant_id, campaign_id, "sent", conn=conn)
 
 

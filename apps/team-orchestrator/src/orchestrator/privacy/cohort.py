@@ -1,7 +1,7 @@
 """VT-170 — cohort integrity primitive.
 
 `resolve_cohort_recipients` links a campaign's cohort (the
-`customer_ids` from campaigns.plan_json.target_cohort, mig 018) to real
+`customer_ids` out of the campaign plan_json.target_cohort, mig 018) to real
 `customers` rows via the normalized `campaign_recipients` table.
 
 The same-tenant composite FKs on `campaign_recipients` make cross-tenant
