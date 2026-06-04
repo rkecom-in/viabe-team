@@ -186,7 +186,9 @@ def _campaign_mode(cur: Any, payload: GetAttributionDataInput) -> GetAttribution
             "treat as indicative"
         )
 
-    cur.execute(
+    # cur is a tenant_connection (a Connection) — connection.execute() returns the
+    # cursor, so chain .fetchone() (Connection itself has no .fetchone).
+    arow = cur.execute(
         """
         SELECT
             COUNT(DISTINCT COALESCE(customer_id::text, razorpay_payment_id,
@@ -196,8 +198,7 @@ def _campaign_mode(cur: Any, payload: GetAttributionDataInput) -> GetAttribution
         WHERE campaign_id = %s AND tenant_id = %s
         """,
         (payload.campaign_id, payload.tenant_id),
-    )
-    arow = cur.fetchone()
+    ).fetchone()
     transacting = int(_col(arow, "transacting_count", 0) or 0)
     arrr = int(_col(arow, "arrr_paise", 1) or 0)
 
