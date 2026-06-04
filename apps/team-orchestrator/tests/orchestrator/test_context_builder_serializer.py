@@ -77,8 +77,9 @@ def _seeded_context(
         ),
         customer_ledger_summary=LedgerSummary(
             total_customers=42,
-            dormant_cohorts={"30d_silent": 12, "60d_silent": 5},
-            top_spenders=[uuid4(), uuid4()],
+            business_type="cafe",
+            recency_days_pctl={"p25": 7, "p50": 30, "p75": 62, "p90": 95},
+            spend_paise_pctl={"p25": 5_000, "p50": 22_500, "p75": 80_000, "p90": 250_000},
         ),
         recent_campaigns=[
             CampaignSnapshot(
@@ -140,8 +141,14 @@ def test_serializer_propagates_bundle_values() -> None:
     assert "early_traction" in rendered
     assert "founding_tier_flag: True" in rendered
     assert "total_customers: 42" in rendered
-    assert "30d_silent: 12 customers" in rendered
-    assert "60d_silent: 5 customers" in rendered
+    # VT-312 brain-decides: raw percentile distributions surface (no fixed
+    # dormant/high-value cohorts). business_type appears in BOTH the business
+    # profile and the ledger summary block now.
+    ledger_block = rendered.split("## Customer ledger summary", 1)[1].split("##", 1)[0]
+    assert "p50=30" in ledger_block  # recency days-since-last-inbound median
+    assert "p90=95" in ledger_block
+    assert "p50=22500" in ledger_block  # spend-paise median
+    assert "business_type: cafe" in ledger_block
     assert "cumulative_recovered_paise: 240000" in rendered
     assert "last_30d_recovered_paise: 85000" in rendered
     assert "intent=customer_recovery" in rendered

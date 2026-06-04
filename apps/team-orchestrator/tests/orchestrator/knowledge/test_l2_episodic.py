@@ -1,13 +1,21 @@
 """VT-66/67 — L2 episodic memory canary + substrate tests.
 
 Live Postgres via DATABASE_URL. Proves the dual-projection exactly-once contract
-(Cowork req-1), the retrieval path (VT-67), the Composer wire (`_build_ledger_summary`
-reads L2 LIVE, not stale), tenant-scoping, and the VT-76 reconstitution hook.
+(Cowork req-1), the retrieval path (VT-67), tenant-scoping, and the VT-76
+reconstitution hook.
 
 Dual-projection model: the kg_events outbox is the single event stream; the drain
 projects each event to BOTH L1 (entities/edges) AND L2 (episodic_events). Only the
 overlapping types (campaign_sent, attribution_created) project to L2 here; the ~10
 agent-decision L2 types get their own emit sites in VT-309.
+
+VT-312 note: ``_build_ledger_summary`` NO LONGER reads L2 threshold events
+(``customer_*_threshold_crossed``) — under brain-decides it reads the tenant's
+OWN raw customers + customer_ledger_entries distributions directly. The retired
+Composer-wire-reads-L2 test that lived here is gone; the new percentile-
+distribution canary lives in ``test_vt312_ledger_distributions.py``. The L2
+threshold event TYPES still exist (dual-projection / kg_emit tests below are
+unchanged) — only their coupling to the ledger summary was removed.
 """
 
 from __future__ import annotations
@@ -201,13 +209,14 @@ def test_referenced_entity_anonymization_ready(pool):
     assert str(hits[0].referenced_entity_id) == cid
 
 
-# --- Composer wire: _build_ledger_summary reads L2 LIVE ----------------------
+# --- L2 threshold events still project (decoupled from the ledger, VT-312) ---
 
 
-def test_composer_ledger_summary_reads_l2_live(pool):
-    """The L2→Composer wire is live, not stale: a recorded high-value threshold
-    event surfaces in the bundle's customer_ledger_summary."""
-    from orchestrator.context_builder import _build_ledger_summary
+def test_threshold_events_still_project_to_l2(pool):
+    """VT-312: ``_build_ledger_summary`` no longer reads these threshold events,
+    but the event TYPES + their L2 episodic-write path are intact (repurposed to
+    agent-action customer markers, VT-320). Recording one must still land an
+    episodic_events row — the dual-projection substrate is unchanged."""
     from orchestrator.knowledge.l2_writer import record_episodic_event
 
     tid = _tenant(pool)
@@ -217,17 +226,7 @@ def test_composer_ledger_summary_reads_l2_live(pool):
         payload={"lifetime_paise": 500_000},
         referenced_entity_type="customer", referenced_entity_id=customer,
     )
-    record_episodic_event(
-        tid, "customer_dormant_threshold_crossed",
-        payload={"cohort": "90d", "days_dormant": 95},
-        referenced_entity_type="customer", referenced_entity_id=str(uuid4()),
-    )
-
-    summary, ok = _build_ledger_summary(UUID(tid))
-    assert ok is True  # the read ran (wire live)
-    assert str(customer) in [str(s) for s in summary.top_spenders]
-    assert summary.dormant_cohorts.get("90d") == 1
-    assert summary.total_customers == 2
+    assert _l2_count(pool, tid, "customer_high_value_threshold_crossed") == 1
 
 
 # --- tenant-scoping (RLS + assert_tenant_scoped) -----------------------------

@@ -6,8 +6,9 @@ each sufficient on its own (Pillar 3):
   * PRE-FLIGHT (`validate_context_isolation`) — the load-bearing layer. Called in
     the live dispatch path (supervisor `_sales_recovery_node`, before the agent
     SDK invoke). Independently RE-QUERIES every per-tenant entity id in the bundle
-    (customer / campaign / owner-input ids) against its tenant-scoped table under
-    `context.tenant_id`'s RLS. An id that doesn't resolve = a cross-tenant leak →
+    (campaign / owner-input ids — VT-312: the ledger summary no longer carries
+    customer ids) against its tenant-scoped table under `context.tenant_id`'s RLS.
+    An id that doesn't resolve = a cross-tenant leak →
     record + raise `ContextIsolationViolation`. This is genuine defense-in-depth:
     it re-checks the builders' output rather than trusting layer-1 RLS.
   * IN-FLIGHT — the `@tool_step` decorator (observability/decorators.py) asserts a
@@ -84,13 +85,16 @@ def validate_context_isolation(context: SalesRecoveryContext) -> None:
     ``context.tenant_id``. Raises ``ContextIsolationViolation`` (after recording a
     Detector-1 breach) on any cross-tenant id. L3/L4 are exempt."""
     tid = context.tenant_id
-    cust_ids = {str(c) for c in (context.customer_ledger_summary.top_spenders or [])}
+    # VT-312 brain-decides: the customer_ledger_summary no longer carries any
+    # per-customer entity ids (it is raw percentile DISTRIBUTIONS + business_type
+    # — see LedgerSummary). The ledger plane therefore cannot leak a customer id,
+    # so there is no customers re-query here. The remaining per-tenant entity-id
+    # bearing sections (recent_campaigns / pending_owner_inputs) are re-checked.
     camp_ids = {str(c.campaign_id) for c in (context.recent_campaigns or [])}
     input_ids = {str(oi.input_id) for oi in (context.pending_owner_inputs or [])}
 
     with tenant_connection(tid) as conn:
         leaks = {
-            "customers": _missing_ids(conn, "customers", tid, cust_ids),
             "campaigns": _missing_ids(conn, "campaigns", tid, camp_ids),
             "owner_inputs": _missing_ids(conn, "owner_inputs", tid, input_ids),
         }

@@ -21,6 +21,12 @@ class L2EventType:
     CAMPAIGN_REJECTED: Final = "campaign_rejected"
     CAMPAIGN_SENT: Final = "campaign_sent"
     ATTRIBUTION_CLOSED: Final = "attribution_closed"
+    # VT-312 (brain-decides): NO fixed-threshold DETECTOR emits these — the agent
+    # judges dormant / high-value contextually from the tenant's own distributions
+    # (context_builder._build_ledger_summary). REPURPOSED to agent-action customer
+    # markers: the brain emits a customer-referencing episodic row when it ACTS on
+    # a customer (the emit-site = VT-320), which is also what keeps VT-76's
+    # reconstitution sweep non-degenerate. Kept in the schema (no CHECK churn).
     CUSTOMER_DORMANT_THRESHOLD_CROSSED: Final = "customer_dormant_threshold_crossed"
     CUSTOMER_HIGH_VALUE_THRESHOLD_CROSSED: Final = "customer_high_value_threshold_crossed"
     OWNER_MESSAGE_RECEIVED: Final = "owner_message_received"
