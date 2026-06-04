@@ -28,6 +28,8 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from orchestrator.db.wrappers import CampaignsWrapper
+
 logger = logging.getLogger(__name__)
 
 
@@ -72,57 +74,26 @@ def get_recent_campaigns(
     Empty list returned gracefully when the campaigns table is absent
     (forward-compat — table is in main as of migration 016).
     """
-    if pool is None:
-        from orchestrator.graph import get_pool
-
-        pool = get_pool()
-
-    with pool.connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT set_config('app.current_tenant', %s, false)",
-                (payload.tenant_id,),
-            )
-            try:
-                cur.execute(
-                    """
-                    -- VT-256: mig 018 renamed proposed_at→generated_at and
-                    -- DROPPED template_id/body_params, collapsing the campaign
-                    -- into plan_json (CampaignPlan v1.0). Read generated_at and
-                    -- source template_id from plan_json->'message_plan' (mirrors
-                    -- the VT-140 execute.py fix). COALESCE so non-proposed
-                    -- variants (no message_plan) yield '' not a NULL→"None".
-                    -- GROUP BY c.id (PK) covers the other selected columns.
-                    SELECT
-                        c.id::text AS campaign_id,
-                        c.generated_at AS sent_at,
-                        COALESCE(
-                            c.plan_json -> 'message_plan' ->> 'template_id', ''
-                        ) AS template_id,
-                        c.status,
-                        COUNT(a.id) AS response_count
-                    FROM campaigns c
-                    LEFT JOIN attributions a
-                      ON a.campaign_id = c.id
-                     AND a.tenant_id = c.tenant_id
-                    WHERE c.tenant_id = %s
-                      AND c.generated_at >= now() - make_interval(days => %s)
-                    GROUP BY c.id
-                    ORDER BY c.generated_at DESC
-                    LIMIT %s
-                    """,
-                    (payload.tenant_id, payload.days_back, payload.limit),
-                )
-                raw = cur.fetchall()
-            except Exception as exc:  # noqa: BLE001
-                if type(exc).__name__ != "UndefinedTable":
-                    raise
-                logger.info(
-                    "get_recent_campaigns: campaigns/attributions absent "
-                    "(tenant=%s); returning empty",
-                    payload.tenant_id,
-                )
-                return GetRecentCampaignsOutput(campaigns=[])
+    # VT-306: the campaigns⋈attributions read (tenant-matched join, generated_at
+    # window, plan_json template_id COALESCE) is encapsulated by the wrapper.
+    # ``pool`` is now vestigial (the wrapper owns its tenant_connection) — kept on
+    # the signature for caller stability; a follow-up can drop it.
+    _ = pool
+    try:
+        raw = CampaignsWrapper().list_recent_with_responses(
+            payload.tenant_id,
+            days_back=payload.days_back,
+            limit=payload.limit,
+        )
+    except Exception as exc:  # noqa: BLE001
+        if type(exc).__name__ != "UndefinedTable":
+            raise
+        logger.info(
+            "get_recent_campaigns: campaigns/attributions absent "
+            "(tenant=%s); returning empty",
+            payload.tenant_id,
+        )
+        return GetRecentCampaignsOutput(campaigns=[])
 
     def _col(r: Any, key: str, idx: int) -> Any:
         return r[key] if isinstance(r, dict) else r[idx]

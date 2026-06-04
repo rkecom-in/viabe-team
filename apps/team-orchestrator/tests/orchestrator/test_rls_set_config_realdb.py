@@ -397,15 +397,33 @@ def test_get_recent_campaigns_denies_cross_tenant(dsn, tenants, seed_conn):
     a, b = tenants
     camp_a = _seed_campaign(seed_conn, a, _seed_run(seed_conn, a), template_id="tmpl_a")
     camp_b = _seed_campaign(seed_conn, b, _seed_run(seed_conn, b), template_id="tmpl_b")
-    pool = _RlsPool(dsn)
 
-    out = get_recent_campaigns(
-        GetRecentCampaignsInput(tenant_id=a, days_back=365, limit=200), pool=pool
+    # VT-306: get_recent_campaigns now reads via CampaignsWrapper (tenant_connection
+    # = SET ROLE app_role + GUC). Point the global pool at the test dsn so the
+    # wrapper works; the cross-tenant denial is enforced by RLS through the wrapper
+    # (this is the wrapper's cross-tenant-negative canary for campaigns).
+    from psycopg.rows import dict_row
+    from psycopg_pool import ConnectionPool
+
+    from orchestrator import graph as graph_mod
+
+    prev = graph_mod._pool
+    graph_mod._pool = ConnectionPool(
+        dsn, min_size=1, max_size=2,
+        kwargs={"autocommit": True, "row_factory": dict_row}, open=True,
     )
+    try:
+        out = get_recent_campaigns(
+            GetRecentCampaignsInput(tenant_id=a, days_back=365, limit=200)
+        )
+    finally:
+        graph_mod._pool.close()
+        graph_mod._pool = prev
+
     by_id = {c.campaign_id: c for c in out.campaigns}
     assert camp_a in by_id
     assert by_id[camp_a].template_id == "tmpl_a"  # plan_json read works
-    assert camp_b not in by_id  # RLS hides B's campaign from A
+    assert camp_b not in by_id  # the wrapper's tenant_connection RLS hides B from A
     assert _count_other(dsn, scoped_to=a, table="campaigns", other=b) == 0
 
 
