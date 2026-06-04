@@ -109,26 +109,49 @@ def test_audit_row_written_per_compose(pool, monkeypatch):
     assert [str(x) for x in a["l4_doc_ids"]] == [l4[0]["id"]]
 
 
-def test_moat_survives_truncation_under_large_l2(pool, monkeypatch):
-    """Cowork guardrail: a large L2 (1000 top_spenders) truncates the ledger,
-    NOT the moat — L3/L4 survive; audit records customer_ledger_summary trimmed."""
+def test_moat_survives_truncation_under_large_per_tenant_section(pool, monkeypatch):
+    """Cowork guardrail: a large PER-TENANT section (owner inputs) truncates the
+    per-tenant plane, NOT the moat — L3/L4 survive; audit records the per-tenant
+    section trimmed.
+
+    VT-312: the ledger summary is now a fixed-size distribution (8 ints +
+    business_type) — it is NOT a growable list and can no longer be the
+    overflow driver (the old ``top_spenders`` list is gone). The moat-survival
+    guardrail is identical; the overflow is now driven through
+    ``pending_owner_inputs`` (a real growable per-tenant section the truncation
+    loop trims first), proving the moat is still protected last.
+    """
+    from datetime import UTC, datetime
+
     import orchestrator.context_builder as cb
-    from orchestrator.context_builder import build_sales_recovery_context
+    from orchestrator.context_builder import OwnerInput, build_sales_recovery_context
 
     tid, rid = _tenant(pool), str(uuid4())
-    huge = cb.LedgerSummary(top_spenders=[uuid4() for _ in range(1000)])  # ~9k tokens > cap
+    # ~each row carries a ~100-char segment; 300 rows >> the 6400-token cap.
+    huge_inputs = [
+        OwnerInput(
+            input_id=uuid4(),
+            received_at=datetime.now(UTC),
+            intent="winback",
+            segment="x" * 100,
+        )
+        for _ in range(300)
+    ]
     l4 = [_skill("Festival timing", ["timing"])]
     _stub_builders(
         monkeypatch,
         l3_patterns=[{"cohort_key": "cafe|tier_2|90d_plus", "n_tenants": 11}],
-        l4_skills=l4, ledger=huge,
+        l4_skills=l4,
+    )
+    monkeypatch.setattr(
+        cb, "_build_pending_owner_inputs", lambda tid: (huge_inputs, True)
     )
     bundle = build_sales_recovery_context(UUID(tid), UUID(rid), "weekly_cadence", "x")
 
     assert bundle.l3_priors.available is True   # moat survived
     assert bundle.l4_skills.available is True
     a = _audit_rows(pool, rid)[0]
-    assert "customer_ledger_summary" in a["truncated_sections"]
+    assert "pending_owner_inputs" in a["truncated_sections"]
     assert "l3_priors" not in a["truncated_sections"]
     assert "l4_skills" not in a["truncated_sections"]
 
