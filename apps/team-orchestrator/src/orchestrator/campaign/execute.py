@@ -51,6 +51,7 @@ import logging
 from typing import Any, Callable
 from uuid import UUID
 
+from orchestrator.knowledge.l2_writer import record_customer_action_marker
 from orchestrator.agent.tools.send_whatsapp_template import (
     SendWhatsappTemplateInput,
     SendWhatsappTemplateOutput,
@@ -444,6 +445,21 @@ def execute_approved_campaign(
                 tenant_id_str, customer_id_str,
                 result.message_sid, result.status,
             )
+            # VT-320: the agent ACTED on this customer (a recovery contact) →
+            # record a customer-referencing L2 marker so VT-76's reconstitution
+            # sweep has real rows to anonymize on opt-out (else a forever no-op).
+            # Best-effort + idempotent per (customer, campaign): a marker failure
+            # must NOT break the send loop. Own tenant_connection (RLS GUC).
+            try:
+                record_customer_action_marker(
+                    tenant_id_str, customer_id_str,
+                    action="campaign_send", dedup_source=campaign_id_str,
+                )
+            except Exception:  # noqa: BLE001 — marker is best-effort observability
+                logger.info(
+                    "execute_approved_campaign: vt320_marker_error tenant=%s customer=%s",
+                    tenant_id_str, customer_id_str,
+                )
         elif result.status == "unauthorized":
             # VT-45 refused — opt_out caught by the tool (should not reach
             # here if our defence-in-depth gate runs first, but VT-45's

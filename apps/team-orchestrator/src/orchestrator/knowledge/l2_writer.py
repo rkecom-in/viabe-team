@@ -17,7 +17,7 @@ from psycopg.types.json import Jsonb
 
 from orchestrator._tenant_guard import assert_tenant_scoped
 from orchestrator.db import tenant_connection
-from orchestrator.knowledge.l2_types import render_summary
+from orchestrator.knowledge.l2_types import L2EventType, render_summary
 
 
 def deterministic_event_id(
@@ -93,6 +93,44 @@ def record_episodic_event(
         return _do(conn)
     with tenant_connection(tid) as own:
         return _do(own)
+
+
+def record_customer_action_marker(
+    tenant_id: UUID | str,
+    customer_id: UUID | str,
+    *,
+    action: str,
+    dedup_source: UUID | str | None = None,
+    conn: Any = None,
+) -> UUID:
+    """VT-320 — record that the agent ACTED on a specific customer (e.g. a campaign
+    contact). Emits a customer-referencing episodic row (``referenced_entity_type=
+    'customer'``, ``referenced_entity_id=customer_id``) so VT-76's reconstitution
+    sweep has real rows to anonymize on opt-out — otherwise that sweep is a forever
+    no-op (nothing sets referenced_entity_type='customer').
+
+    PII-free (CL-390): the payload carries the action verb + the customer_id (an
+    id, NOT PII) — never a name/phone. Idempotent per (customer, dedup_source):
+    pass e.g. the campaign_id so a re-send / step retry does not double-mark.
+    """
+    event_id = (
+        deterministic_event_id(
+            tenant_id,
+            L2EventType.CUSTOMER_ACTION_TAKEN,
+            f"{customer_id}:{dedup_source}",
+        )
+        if dedup_source is not None
+        else None
+    )
+    return record_episodic_event(
+        tenant_id,
+        L2EventType.CUSTOMER_ACTION_TAKEN,
+        payload={"action": action},
+        referenced_entity_type="customer",
+        referenced_entity_id=customer_id,
+        event_id=event_id,
+        conn=conn,
+    )
 
 
 __all__ = ["deterministic_event_id", "record_episodic_event"]
