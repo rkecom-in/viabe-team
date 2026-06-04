@@ -46,6 +46,8 @@ TriggerKind = Literal[
     "pii_in_log",  # Detector-5 (unredacted PII found in pipeline_steps payloads)
     # VT-76 opt-out reconstitution SLA (fired by the daily reconstitution sweep).
     "reconstitution_sla_breach",  # P0 — opted-out customer un-reconstituted past 8d
+    # VT-307 KG-events outbox-drain straggler (nightly drain sweep, warning).
+    "kg_drain_straggler",  # an outbox event the immediate + nightly drain failed to project
 ]
 
 Severity = Literal["critical", "warning"]
@@ -66,6 +68,8 @@ _SEVERITY_BY_KIND: dict[TriggerKind, Severity] = {
     "pii_in_log": "critical",
     # VT-76 opt-out reconstitution SLA.
     "reconstitution_sla_breach": "critical",
+    # VT-307 KG-drain straggler — reliability backstop signal (batched digest).
+    "kg_drain_straggler": "warning",
 }
 
 # VT-79 Detector-3: DSR request-rate threshold (Phase-1 fixed value; cohort
