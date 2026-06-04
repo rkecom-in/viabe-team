@@ -63,13 +63,15 @@ def test_opt_out_skip_records_skipped_not_error(dsn):
 
         # Pre-053 this raised a CHECK violation ('skipped' not allowed). Post-053
         # it succeeds and lands as 'skipped'. VT-262: under a DISTINCT 'skip:'
-        # key namespace, never the bare live-send key.
+        # key namespace, never the bare live-send key. VT-321: the namespace now
+        # carries the skip REASON (skip:opt_out:...) so opt-out and complaint-
+        # freeze skips for the same pair never collide.
         _write_opt_out_skip_ledger(conn, tenant, customer_id, idem_key)
 
         row = conn.execute(
             "SELECT send_status, customer_id FROM send_idempotency_keys "
             "WHERE tenant_id = %s AND idempotency_key = %s",
-            (tenant, f"skip:{idem_key}"),
+            (tenant, f"skip:opt_out:{idem_key}"),
         ).fetchone()
         # VT-262: the bare live-send key must NOT carry the skip marker (else a
         # legitimate re-send to the same pair would collide with it).
