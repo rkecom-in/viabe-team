@@ -489,9 +489,9 @@ def test_register_scheduled_triggers_idempotent(monkeypatch) -> None:
     first = call_count["n"]
     st.register_scheduled_triggers()
     second = call_count["n"]
-    # VT-47 added the 5th trigger (owner-approval timeout sweep); VT-68 the 6th
-    # (nightly L3 construction); VT-76 the 7th (reconstitution sweep); VT-304 the
-    # 8th (nightly audit-chain verify).
-    assert first == 8, "expected 8 triggers registered on first call"
-    assert second == 8, "second call must short-circuit (idempotent)"
+    # VT-47 5th (owner-approval timeout sweep); VT-68 6th (nightly L3 construction);
+    # VT-76 7th (reconstitution sweep); VT-304 8th (audit-chain verify); VT-305 9th
+    # (nightly PII-in-log sweep).
+    assert first == 9, "expected 9 triggers registered on first call"
+    assert second == 9, "second call must short-circuit (idempotent)"
     st._registered = False
