@@ -200,6 +200,18 @@ def _seed_full_tenant_data(dsn: str, tenant_id: UUID) -> dict[str, UUID]:
             (str(tenant_id), str(run_id), f"SM{uuid4().hex}"),
         )
 
+        # episodic_events (VT-323): L2 row with PII-bearing payload that MUST be
+        # hard-deleted by the purge (referenced_entity_type/id model the agent
+        # acting on a customer — VT-320).
+        conn.execute(
+            "INSERT INTO episodic_events "
+            "(tenant_id, event_type, summary, payload, referenced_entity_type, "
+            "referenced_entity_id, occurred_at) "
+            "VALUES (%s, 'customer_action_taken', 'dsr-seed', "
+            "'{\"action\": \"campaign_send\"}'::jsonb, 'customer', %s, now())",
+            (str(tenant_id), str(uuid4())),
+        )
+
         # privacy_audit_log — pre-existing event, MUST survive purge. VT-80:
         # write through the real hash-chain writer (a seeded event_type that is
         # NOT one of the purge events, so the purge-count assertions stay exact).
@@ -265,6 +277,7 @@ def _ticket_row(dsn: str, ticket_id: UUID) -> dict[str, Any]:
 _PURGED_TABLES = (
     "l1_relationships",
     "l1_entities",
+    "episodic_events",  # VT-323: L2 episodic memory must be swept by DSR purge
     "owner_inputs",
     "campaigns",
     "pipeline_steps",
@@ -670,3 +683,32 @@ def test_vt160_anonymize_set_covers_every_anonymize_constant():
         assert dsr_purge._TENANT_ANONYMIZE[col] is None, (
             f"VT-160: {col} must scrub to NULL (irreversible), not a token"
         )
+
+
+def test_purge_hard_deletes_episodic_events_l2(substrate):  # type: ignore[no-untyped-def]
+    """VT-323 — the explicit L2 privacy gate. A tenant DSR-delete HARD-deletes
+    its episodic_events (PII can sit in payload at rest), and a co-resident
+    tenant's L2 rows are untouched. Real PG (mock cursors hide the FK/scoping)."""
+    from orchestrator.dsr_purge import purge_tenant_data
+
+    tenant_a = _new_tenant(substrate.dsn, name="Tenant A (purgee)")
+    tenant_b = _new_tenant(substrate.dsn, name="Tenant B (untouched)")
+    _seed_full_tenant_data(substrate.dsn, tenant_a)
+    _seed_full_tenant_data(substrate.dsn, tenant_b)
+
+    # Pre: both have L2 rows.
+    assert _count_tenant_rows(substrate.dsn, "episodic_events", tenant_a) >= 1
+    assert _count_tenant_rows(substrate.dsn, "episodic_events", tenant_b) >= 1
+
+    result = purge_tenant_data(_open_dsr_ticket(substrate.dsn, tenant_a))
+    assert result.deleted_counts.get("episodic_events", 0) >= 1, (
+        "VT-323: purge must report episodic_events deletions"
+    )
+
+    # Post: A's L2 store is GONE; B's survives (scoping).
+    assert _count_tenant_rows(substrate.dsn, "episodic_events", tenant_a) == 0, (
+        "VT-323: tenant DSR-delete left L2 episodic rows behind (PII survives)"
+    )
+    assert _count_tenant_rows(substrate.dsn, "episodic_events", tenant_b) >= 1, (
+        "VT-323: cross-tenant leak — purging A wiped B's L2 rows"
+    )
