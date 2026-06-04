@@ -88,6 +88,29 @@ class CustomersWrapper(TenantScopedTable):
                  str(tid), str(customer_id)),
             )
 
+    def list_recipients_for_campaign(
+        self, tenant_id: UUID | str, campaign_id: str, *, conn: Any = None
+    ) -> list[dict[str, Any]]:
+        """Campaign recipients joined to their customer status flags (customer_id,
+        opt_out_status, complaint_status), oldest first. CL-390: status flags only,
+        never phone/name. The join is tenant-matched on both sides."""
+        tid = self._uuid(tenant_id)
+        with self._conn(tid, conn) as c:
+            rows = c.execute(
+                """
+                SELECT cr.customer_id::text AS customer_id,
+                       c.opt_out_status,
+                       c.complaint_status
+                FROM campaign_recipients cr
+                JOIN customers c
+                  ON c.id = cr.customer_id AND c.tenant_id = cr.tenant_id
+                WHERE cr.campaign_id = %s AND cr.tenant_id = %s
+                ORDER BY cr.added_at
+                """,
+                (campaign_id, str(tid)),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
     def filter_existing_ids(
         self, tenant_id: UUID | str, ids: list[str], *, conn: Any = None
     ) -> set[str]:
