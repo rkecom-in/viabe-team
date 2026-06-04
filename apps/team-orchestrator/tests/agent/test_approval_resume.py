@@ -57,10 +57,15 @@ class _CaptureConn:
         self.calls: list[tuple] = []
 
     def execute(self, sql, params=None):
-        self.calls.append((" ".join(sql.split()), params))
-        # The wrapper reads cur.rowcount (real psycopg returns a cursor).
         from types import SimpleNamespace
 
+        # VT-306: the wrapper's _assert_app_role probes `SELECT current_user`.
+        # It's not a real query — don't record it (keeps calls[] = the real SQL),
+        # and return fetchone()->None so the role check skips (None != app_role-str).
+        if "current_user" in sql:
+            return SimpleNamespace(fetchone=lambda: None, rowcount=0)
+        self.calls.append((" ".join(sql.split()), params))
+        # The wrapper reads cur.rowcount (real psycopg returns a cursor).
         return SimpleNamespace(rowcount=1)
 
 
