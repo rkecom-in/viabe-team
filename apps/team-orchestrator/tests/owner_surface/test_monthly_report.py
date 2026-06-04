@@ -108,7 +108,13 @@ OLD_SIGNUP = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
 
 def _conn():
-    return psycopg.connect(os.environ["DATABASE_URL"], autocommit=True)
+    # VT-306: dict_row matches the production pool (tenant_connection) — the
+    # wrappers generate_monthly_report now uses assume dict rows.
+    from psycopg.rows import dict_row
+
+    return psycopg.connect(
+        os.environ["DATABASE_URL"], autocommit=True, row_factory=dict_row
+    )
 
 
 def _tenant(conn, *, phase="paid_active", signed_up_at=OLD_SIGNUP, lang="en"):
@@ -116,14 +122,14 @@ def _tenant(conn, *, phase="paid_active", signed_up_at=OLD_SIGNUP, lang="en"):
         "INSERT INTO tenants (business_name, plan_tier, phase, signed_up_at, "
         "preferred_language) VALUES ('vt86-syn', 'founding', %s, %s, %s) RETURNING id",
         (phase, signed_up_at, lang),
-    ).fetchone()[0]
+    ).fetchone()["id"]
 
 
 def _run(conn, tenant):
     return conn.execute(
         "INSERT INTO pipeline_runs (tenant_id, run_type, status) "
         "VALUES (%s, 'orchestrator', 'running') RETURNING id", (tenant,),
-    ).fetchone()[0]
+    ).fetchone()["id"]
 
 
 def _campaign(conn, tenant, run, *, status, generated_at, closed_at=None):
@@ -131,7 +137,7 @@ def _campaign(conn, tenant, run, *, status, generated_at, closed_at=None):
         "INSERT INTO campaigns (tenant_id, run_id, plan_json, status, generated_at, "
         "attribution_closed_at) VALUES (%s, %s, '{}'::jsonb, %s, %s, %s) RETURNING id",
         (tenant, run, status, generated_at, closed_at),
-    ).fetchone()[0]
+    ).fetchone()["id"]
 
 
 def _attr(conn, tenant, campaign, paise):

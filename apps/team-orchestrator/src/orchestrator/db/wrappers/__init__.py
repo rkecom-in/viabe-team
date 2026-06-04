@@ -142,6 +142,53 @@ class CustomersWrapper(TenantScopedTable):
 class CampaignsWrapper(TenantScopedTable):
     _table = "campaigns"
 
+    def count_by_status_in_range(
+        self, tenant_id: UUID | str, start: Any, end: Any, *, conn: Any = None
+    ) -> dict[str, int]:
+        """{status: count} of campaigns generated in [start, end) — monthly report."""
+        tid = self._uuid(tenant_id)
+        with self._conn(tid, conn) as c:
+            rows = c.execute(
+                "SELECT status, count(*) AS n FROM campaigns "
+                "WHERE tenant_id = %s AND generated_at >= %s AND generated_at < %s "
+                "GROUP BY status",
+                (str(tid), start, end),
+            ).fetchall()
+        return {dict(r)["status"]: int(dict(r)["n"]) for r in rows}
+
+    def sum_arrr_closed_in_range(
+        self, tenant_id: UUID | str, start: Any, end: Any, *, conn: Any = None
+    ) -> int:
+        """Attributed paise for campaigns CLOSING in [start, end) (attributions ⋈
+        campaigns, tenant-scoped on attributions)."""
+        tid = self._uuid(tenant_id)
+        with self._conn(tid, conn) as c:
+            row = c.execute(
+                "SELECT COALESCE(SUM(a.attributed_paise), 0) AS arrr "
+                "FROM attributions a JOIN campaigns c ON c.id = a.campaign_id "
+                "WHERE a.tenant_id = %s "
+                "AND c.attribution_closed_at >= %s AND c.attribution_closed_at < %s",
+                (str(tid), start, end),
+            ).fetchone()
+        return int(dict(row)["arrr"]) if row else 0
+
+    def top_campaigns_by_arrr_in_range(
+        self, tenant_id: UUID | str, start: Any, end: Any, *, limit: int = 5, conn: Any = None
+    ) -> list[dict[str, Any]]:
+        """Top campaigns by attributed paise, closing in [start, end). Returns
+        rows of {cid, arrr}, descending."""
+        tid = self._uuid(tenant_id)
+        with self._conn(tid, conn) as c:
+            rows = c.execute(
+                "SELECT c.id::text AS cid, COALESCE(SUM(a.attributed_paise), 0) AS arrr "
+                "FROM campaigns c JOIN attributions a ON a.campaign_id = c.id "
+                "WHERE c.tenant_id = %s "
+                "AND c.attribution_closed_at >= %s AND c.attribution_closed_at < %s "
+                "GROUP BY c.id ORDER BY arrr DESC, c.id LIMIT %s",
+                (str(tid), start, end, limit),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
     def attribution_window_summary(
         self,
         tenant_id: UUID | str,
