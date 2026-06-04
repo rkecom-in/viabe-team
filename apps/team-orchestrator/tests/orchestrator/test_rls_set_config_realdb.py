@@ -277,26 +277,45 @@ def test_send_whatsapp_message_sends_and_denies(dsn, tenants, seed_conn):
     def _fake_send(body: str, recipient_phone: str) -> str:
         return "SM" + "a" * 32
 
-    out = send_whatsapp_message(
-        SendWhatsAppMessageInput(
-            tenant_id=a, customer_id=cust_a, body="hello", idempotency_key="k-a-1"
-        ),
-        pool=pool,
-        send_fn=_fake_send,
-    )
-    assert out.status == "sent"
-    assert out.message_sid is not None
+    # VT-306: _resolve_customer reads via CustomersWrapper on its own
+    # tenant_connection (SET ROLE app_role + GUC). The send flow keeps its
+    # injected pool for send_idempotency_keys; point the GLOBAL pool at the test
+    # dsn so the wrapper read works. Cross-tenant denial is then enforced by the
+    # wrapper's tenant_connection RLS (the customers cross-tenant-negative canary).
+    from psycopg.rows import dict_row
+    from psycopg_pool import ConnectionPool
 
-    # Cross-tenant denial THROUGH the tool: A sends to B's customer → RLS makes
-    # B's customer row invisible → tool returns 'unauthorized', never sends.
-    out_x = send_whatsapp_message(
-        SendWhatsAppMessageInput(
-            tenant_id=a, customer_id=cust_b, body="hello", idempotency_key="k-a-x"
-        ),
-        pool=pool,
-        send_fn=_fake_send,
+    from orchestrator import graph as graph_mod
+
+    prev_pool = graph_mod._pool
+    graph_mod._pool = ConnectionPool(
+        dsn, min_size=1, max_size=2,
+        kwargs={"autocommit": True, "row_factory": dict_row}, open=True,
     )
-    assert out_x.status == "unauthorized"
+    try:
+        out = send_whatsapp_message(
+            SendWhatsAppMessageInput(
+                tenant_id=a, customer_id=cust_a, body="hello", idempotency_key="k-a-1"
+            ),
+            pool=pool,
+            send_fn=_fake_send,
+        )
+        assert out.status == "sent"
+        assert out.message_sid is not None
+
+        # Cross-tenant denial THROUGH the tool: A sends to B's customer → the
+        # wrapper's tenant_connection RLS makes B's row invisible → 'unauthorized'.
+        out_x = send_whatsapp_message(
+            SendWhatsAppMessageInput(
+                tenant_id=a, customer_id=cust_b, body="hello", idempotency_key="k-a-x"
+            ),
+            pool=pool,
+            send_fn=_fake_send,
+        )
+        assert out_x.status == "unauthorized"
+    finally:
+        graph_mod._pool.close()
+        graph_mod._pool = prev_pool
 
     # VT-263: make the RLS backstops REAL (the review found these were vacuous /
     # WHERE-clause-shaped — they passed even with RLS disabled).

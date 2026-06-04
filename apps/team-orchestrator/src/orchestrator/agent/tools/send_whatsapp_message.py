@@ -28,6 +28,8 @@ from typing import Any, Callable, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from orchestrator.db.wrappers import CustomersWrapper
+
 logger = logging.getLogger(__name__)
 
 # Rate-limit constants (Decision D4, plan-confirmed).
@@ -154,26 +156,20 @@ def _check_customer_rate_limit(cur: Any, tenant_id: str, customer_id: str) -> bo
 def _resolve_customer(
     cur: Any, tenant_id: str, customer_id: str
 ) -> dict[str, Any] | None:
-    """Resolve customer record under RLS (set_config('app.current_tenant') must already be called).
+    """Resolve a customer's send fields, or None if not visible (cross-tenant or
+    absent).
 
-    Returns dict with phone_e164 and last_inbound_at, or None if not visible
-    (cross-tenant attempt or customer doesn't exist).
+    VT-306: reads through CustomersWrapper on its OWN tenant_connection (SET ROLE
+    app_role + GUC + assert_tenant_scoped) — an upgrade from the prior inline
+    ``set_config`` (no SET ROLE). The ``cur`` param is now vestigial. Scope: ONLY
+    this customers read migrates — the send flow's send_idempotency_keys access
+    stays on its own connection (not a hot table), per Cowork 20260605T002000Z.
     """
-    cur.execute(
-        """
-        SELECT phone_e164, last_inbound_at
-        FROM customers
-        WHERE id = %s AND tenant_id = %s
-        LIMIT 1
-        """,
-        (customer_id, tenant_id),
-    )
-    row = cur.fetchone()
+    _ = cur
+    row = CustomersWrapper().find_by_id(tenant_id, customer_id)
     if row is None:
         return None
-    if isinstance(row, dict):
-        return {"phone_e164": row["phone_e164"], "last_inbound_at": row["last_inbound_at"]}
-    return {"phone_e164": row[0], "last_inbound_at": row[1]}
+    return {"phone_e164": row["phone_e164"], "last_inbound_at": row["last_inbound_at"]}
 
 
 def _write_ledger(
