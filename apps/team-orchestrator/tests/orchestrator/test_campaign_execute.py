@@ -435,7 +435,12 @@ def test_empty_cohort_status_still_advanced() -> None:
         _TENANT_ID, _CAMPAIGN_ID, conn=conn, send_template_fn=send_fn
     )
 
-    assert summary == {"sent": 0, "skipped_opt_out": 0, "failed": 0}
+    assert summary == {
+        "sent": 0,
+        "skipped_opt_out": 0,
+        "skipped_complaint_freeze": 0,
+        "failed": 0,
+    }
     send_fn.assert_not_called()
 
     update_calls = [
