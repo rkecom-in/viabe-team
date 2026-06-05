@@ -294,3 +294,20 @@ def test_consent_records_is_pii_free_schema(pool):
             ).fetchall()
         }
     assert cols <= allowed, f"consent_records has unexpected (possibly-PII) columns: {cols - allowed}"
+
+
+def test_business_types_endpoint_serves_taxonomy(pool):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from orchestrator.api.signup import router
+
+    app = FastAPI()
+    app.include_router(router)
+    r = TestClient(app).get("/api/signup/business-types")
+    assert r.status_code == 200
+    opts = r.json()["business_types"]
+    keys = {o["key"] for o in opts}
+    assert "kirana" in keys and "other" in keys
+    # every option carries both language labels (no PII).
+    assert all(o.get("label_en") and o.get("label_hi") for o in opts)
