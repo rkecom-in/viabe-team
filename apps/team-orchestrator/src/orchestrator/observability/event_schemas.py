@@ -218,6 +218,11 @@ EVENT_SCHEMAS: dict[str, dict[str, Validator]] = {
         "decision": _required_str,  # refund | continue | discuss
         "source": _required_str,  # reply | timeout
     },
+    # VT-89: Razorpay webhook processing audit (one per deduped event).
+    "razorpay_event_processed": {
+        "razorpay_event_type": _required_str,
+        "action": _required_str,
+    },
     # VT-176 released event type (downstream PDF generator from VT-9.6
     # successor consumes this). Schema is intentionally minimal: only
     # the routing fields are required (tenant_id + target_month). The
