@@ -232,6 +232,15 @@ def _seed_full_tenant_data(dsn: str, tenant_id: UUID) -> dict[str, UUID]:
             (str(tenant_id),),
         )
 
+        # day39_evaluations (VT-92): billing decision-audit (ARRR/fees subject data) →
+        # MUST hard-delete on DSR (in _PURGE_ORDER).
+        conn.execute(
+            "INSERT INTO day39_evaluations "
+            "(tenant_id, verdict, arrr_paise, cumulative_fees_paise, evaluator_version) "
+            "VALUES (%s, 'continue', 10000, 5000, '1.0.0')",
+            (str(tenant_id),),
+        )
+
         # privacy_audit_log — pre-existing event, MUST survive purge. VT-80:
         # write through the real hash-chain writer (a seeded event_type that is
         # NOT one of the purge events, so the purge-count assertions stay exact).
@@ -299,6 +308,7 @@ _PURGED_TABLES = (
     "l1_entities",
     "episodic_events",  # VT-323: L2 episodic memory must be swept by DSR purge
     "platform_listings",  # VT-325: per-listing source must be swept by DSR purge
+    "day39_evaluations",  # VT-92: billing decision-audit must be swept by DSR purge
     "owner_inputs",
     "campaigns",
     "pipeline_steps",

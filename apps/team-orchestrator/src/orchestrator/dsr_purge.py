@@ -132,6 +132,10 @@ _PURGE_ORDER: tuple[str, ...] = (
     # MUST be swept here or a tenant's listings survive the purge (the VT-323
     # episodic_events lesson, on a fresh table).
     "platform_listings",
+    # VT-92: day-39 decision audit. Leaf (FK tenants only). Carries the tenant's
+    # ARRR/fees (subject billing data) → hard-deleted on DSR (CASCADE never fires on
+    # a DSR-anonymize). Order-insensitive.
+    "day39_evaluations",
     "owner_inputs",
     "campaigns",
     "pipeline_steps",

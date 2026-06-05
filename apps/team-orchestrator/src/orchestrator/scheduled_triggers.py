@@ -482,6 +482,10 @@ def run_day39_evaluation_body(now: datetime | None = None) -> list[Any]:
             continue
         verdicts.append(verdict)
 
+        # VT-92: persist the structured decision-audit (skip replays — idempotent).
+        if not verdict.already_decided:
+            _persist_day39_evaluation(tenant_id, verdict)
+
         # VT-197: close the learning loop — distill the FRESH verdict into the
         # tenant's agent_reflection L1 entity (calibrates the next context
         # bundle). Skip already-decided (idempotent, mirrors the refund branch).
@@ -491,6 +495,29 @@ def run_day39_evaluation_body(now: datetime | None = None) -> list[Any]:
         if verdict.verdict == "refund_triggered" and not verdict.already_decided:
             _apply_day39_refund_transition(tenant_id)
     return verdicts
+
+
+DAY39_EVALUATOR_VERSION = "1.0.0"  # VT-92 D4: bump = Type-3 governance.
+
+
+def _persist_day39_evaluation(tenant_id: Any, verdict: Any) -> None:
+    """VT-92: persist the structured decision to day39_evaluations (RLS-scoped).
+    Best-effort — the authoritative signal is the day39_* pipeline_log event."""
+    from orchestrator.db import tenant_connection
+
+    try:
+        with tenant_connection(tenant_id) as conn:
+            conn.execute(
+                "INSERT INTO day39_evaluations "
+                "(tenant_id, verdict, arrr_paise, cumulative_fees_paise, evaluator_version) "
+                "VALUES (%s, %s, %s, %s, %s)",
+                (str(tenant_id), verdict.verdict, int(verdict.arrr_paise),
+                 int(verdict.cumulative_fees_paise), DAY39_EVALUATOR_VERSION),
+            )
+    except Exception:  # noqa: BLE001 — audit persist is best-effort under the sweep
+        logger.exception(
+            "day39: persist evaluation failed tenant=%s; sweep continues", tenant_id
+        )
 
 
 def _write_day39_reflection(tenant_id: Any, verdict: Any) -> None:
@@ -536,6 +563,9 @@ def _scan_day39_eligible(now: datetime) -> list[UUID]:
     from psycopg.rows import dict_row
 
     with get_pool().connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+        # VT-92 suppression: a refund_triggered is terminal (never re-evaluate). A
+        # CONTINUE suppresses for 90 days, then the tenant is re-eligible (re-fire on
+        # ~day 129 if criteria still met) — so the continue exclusion is windowed.
         cur.execute(
             "SELECT t.id "
             "  FROM tenants t "
@@ -545,8 +575,13 @@ def _scan_day39_eligible(now: datetime) -> list[UUID]:
             "   AND NOT EXISTS ("
             "       SELECT 1 FROM pipeline_log p "
             "        WHERE p.tenant_id = t.id "
-            "          AND p.event_type IN ('day39_continue', 'day39_refund_triggered'))",
-            (now,),
+            "          AND p.event_type = 'day39_refund_triggered') "
+            "   AND NOT EXISTS ("
+            "       SELECT 1 FROM pipeline_log p "
+            "        WHERE p.tenant_id = t.id "
+            "          AND p.event_type = 'day39_continue' "
+            "          AND p.created_at > %s::timestamptz - interval '90 days')",
+            (now, now),
         )
         return [row["id"] for row in cur.fetchall()]
 
