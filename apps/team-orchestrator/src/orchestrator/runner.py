@@ -420,6 +420,40 @@ def try_resume_pending_approval(
     return decision
 
 
+def try_resume_pending_refund_offer(
+    tenant_id: str, body: str, message_sid: str | None
+) -> str | None:
+    """VT-85 — if the tenant is parked in ``refund_offered`` (a day-39 refund offer
+    awaiting the owner's decision), classify this inbound reply DETERMINISTICALLY
+    (Pillar 7 — no LLM guess on a financial decision) and act: REFUND ->
+    execute_refund, CONTINUE -> resume paid_active + 90-day suppress, DISCUSS ->
+    Fazal alert. Returns the decision verb if consumed, else None (an unclear reply
+    falls through to pre_filter so DSR/opt-out still work; the 48h timeout sweep
+    defaults an un-answered offer to CONTINUE).
+
+    PLAIN function (not a @DBOS.step): it calls execute_refund / apply_transition
+    (themselves @DBOS.steps) and a step may not call another step — so it runs in
+    the webhook_pipeline_run workflow context."""
+    from psycopg.rows import dict_row
+
+    with tenant_connection(tenant_id) as conn, conn.cursor(row_factory=dict_row) as cur:
+        cur.execute("SELECT phase FROM tenants WHERE id = %s", (str(tenant_id),))
+        row = cur.fetchone()
+    if row is None or row["phase"] != "refund_offered":
+        return None
+
+    from orchestrator.owner_inputs.refund_reply import (
+        classify_refund_reply,
+        handle_refund_decision,
+    )
+
+    decision = classify_refund_reply(body)
+    if decision is None:
+        return None  # unclear — fall through (Pillar 7: no guess); timeout defaults CONTINUE
+    handle_refund_decision(tenant_id, decision, message_sid)
+    return decision
+
+
 @DBOS.workflow()
 def webhook_pipeline_run(
     tenant_id: str, run_id: str, twilio_fields: dict
@@ -488,6 +522,25 @@ def webhook_pipeline_run(
                 "routed": "approval_resume",
                 "handler": None,
                 "decision": resumed_decision,
+            }
+
+    # VT-85 — day-39 refund-OFFER reply gate (mirrors the approval-resume gate). A
+    # tenant parked in 'refund_offered' replying with a clear REFUND/CONTINUE/DISCUSS
+    # is making the refund decision; classify deterministically + act. An unclear
+    # reply returns None and falls through (DSR/opt-out still work); the 48h timeout
+    # sweep defaults an un-answered offer to CONTINUE.
+    if event.message_type == "inbound_message" and not event.dupe_status:
+        refund_decision = try_resume_pending_refund_offer(
+            tenant_id, event.body or "", event.twilio_message_sid
+        )
+        if refund_decision is not None:
+            close_webhook_run(tenant_id, run_id, "completed")
+            return {
+                "run_id": run_id,
+                "tenant_id": tenant_id,
+                "routed": "refund_reply",
+                "handler": None,
+                "decision": refund_decision,
             }
 
     result = pre_filter(event, state)

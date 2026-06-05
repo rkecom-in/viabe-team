@@ -16,7 +16,7 @@ from orchestrator.db import tenant_connection
 from orchestrator.invariants import check_invariants
 from orchestrator.state import MAX_TRIAL_EXTENSIONS, Phase, SubscriberState
 
-# The 10 lifecycle events this machine consumes (event sources: VT-3.3 / 3.5 / 3.9).
+# The 11 lifecycle events this machine consumes (event sources: VT-3.3 / 3.5 / 3.9).
 ALL_EVENTS: tuple[str, ...] = (
     "signup",
     "card_captured",
@@ -25,6 +25,7 @@ ALL_EVENTS: tuple[str, ...] = (
     "weekly_low_engagement",
     "engagement_recovered",
     "cancellation_requested",
+    "day39_refund_offered",  # VT-85: day-39 refund OFFER (parks in refund_offered)
     "day39_refund_triggered",
     "day39_continue",
     "manual_cancel",
@@ -56,6 +57,15 @@ TRANSITIONS: dict[tuple[Phase, str], Phase] = {
     ("paid_at_risk", "day39_refund_triggered"): "refunded",
     ("paid_at_risk", "cancellation_requested"): "cancelled",
     ("paid_at_risk", "manual_cancel"): "cancelled",
+    # VT-85 day-39 refund OFFER (Pillar 7 — no auto-refund). The evaluator parks
+    # the tenant in refund_offered; the owner's REFUND/CONTINUE reply or the 48h
+    # timeout resolves it. The direct (paid_*, day39_refund_triggered) paths above
+    # stay for the manual_request refund (Fazal ops) — refund_offered is reached
+    # only via the offer.
+    ("paid_active", "day39_refund_offered"): "refund_offered",
+    ("paid_at_risk", "day39_refund_offered"): "refund_offered",
+    ("refund_offered", "day39_refund_triggered"): "refunded",  # REFUND reply -> execute_refund
+    ("refund_offered", "day39_continue"): "paid_active",  # CONTINUE reply / 48h timeout
 }
 
 

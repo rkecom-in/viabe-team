@@ -185,3 +185,17 @@ refund_completed:
   languages:
     en: null  # NEEDS-FAZAL: Meta SID pending
     hi: null  # NEEDS-FAZAL: Meta SID pending
+
+# VT-85 — day-39 refund OFFER (the conversation opener). NEEDS-FAZAL: copy + Meta
+# SID. Pillar 7: honest framing, the 3 options (REFUND/CONTINUE/DISCUSS) stated
+# plainly, no retention manipulation — Fazal reviews every word. Null SID fail-
+# closed; the offer state is set regardless (best-effort send).
+refund_offer:
+  audience: owner
+  agent_selectable: false
+  variables:
+    - refund_amount_inr    # {{1}}
+    - response_options     # {{2}} — "Reply REFUND, CONTINUE, or DISCUSS"
+  languages:
+    en: null  # NEEDS-FAZAL: Meta SID pending
+    hi: null  # NEEDS-FAZAL: Meta SID pending
