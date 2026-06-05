@@ -168,8 +168,13 @@ def dispatch_brain(
     from orchestrator.edge_cases_router import route_edge_case
 
     _edge = route_edge_case(tenant_id=tenant_id, event=event)
-    if _edge is not None:
+    if isinstance(_edge, DispatchResult):
         return _edge
+    # VT-335: the adhoc-campaign request returns the "owner_initiated" str marker, which
+    # overrides the trigger_reason; the agent then builds a plan that the approval gate
+    # confirms before any send. Validate the EXACT marker — a stray router str must never
+    # silently become a trigger_reason (defensive). Anything else keeps the default.
+    _trigger_reason = "owner_initiated" if _edge == "owner_initiated" else "weekly_cadence"
 
     usage = OrchestratorUsage()
     # callback only uses driver for ``check_mid_invocation`` raises; the
@@ -208,7 +213,7 @@ def dispatch_brain(
         "messages": _messages,
         "tenant_id": tenant_id,
         "run_id": run_id,
-        "trigger_reason": "weekly_cadence",  # Phase-1 default; VT-N for real
+        "trigger_reason": _trigger_reason,  # VT-335: 'owner_initiated' for adhoc, else default
     }
 
     final_status: FinalStatus = "completed"
