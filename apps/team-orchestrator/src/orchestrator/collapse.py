@@ -371,13 +371,23 @@ def _build_approval_request(
     the plan exposes one, else an empty dict (the gate dry-runs the send in
     CI/canary regardless).
     """
-    cohort_size = len(getattr(plan.target_cohort, "customer_ids", []) or [])
+    cohort = plan.target_cohort
+    cohort_size = cohort.cohort_size
+    low_rupees = plan.expected_arrr.low_paise // 100
+    high_rupees = plan.expected_arrr.high_paise // 100
     return {
         "approval_type": "campaign_send",
         "summary": f"Approve sending a recovery campaign to {cohort_size} customers?",
         "campaign_id": campaign_id,
         "details": {"cohort_size": cohort_size},
-        "template_params": {},
+        # VT-83: populate the team_weekly_approval params — {{1}} cohort segment /
+        # {{2}} campaign mode / {{3}} projected recovery ₹ range. Previously empty, which
+        # rendered a BLANK approval message to the owner (the actual bug).
+        "template_params": {
+            "1": cohort.cohort_label or str(cohort_size),
+            "2": "recovery",
+            "3": f"{low_rupees:,}–{high_rupees:,}",
+        },
         "language": "en",
         "timeout_hours": 48,
     }
