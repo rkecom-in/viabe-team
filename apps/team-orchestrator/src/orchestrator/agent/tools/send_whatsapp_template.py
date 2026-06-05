@@ -392,9 +392,10 @@ def send_whatsapp_template(
                         ),
                     )
 
-                # --- Consent check (CL-421: hard-refuse opted-out/blocked) ---
+                # --- Consent check (CL-421: hard-refuse opted-out/blocked; VT-84:
+                # owner_excluded — the owner's per-customer skip — also refuses) ---
                 opt_out_status: str | None = customer.get("opt_out_status")
-                if opt_out_status in ("opted_out", "blocked"):
+                if opt_out_status in ("opted_out", "blocked", "owner_excluded"):
                     logger.info(
                         "send_whatsapp_template: opted_out tenant=%s customer=%s status=%s",
                         payload.tenant_id, payload.customer_id, opt_out_status,
