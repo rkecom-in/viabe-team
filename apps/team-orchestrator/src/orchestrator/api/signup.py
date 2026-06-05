@@ -82,8 +82,8 @@ def signup(body: SignupBody) -> dict[str, object]:
     # tenant/consent-row creation on the BYPASSRLS pool (flooding); (2) number
     # SQUATTING — first-writer-wins on the unique whatsapp_number, so an attacker can
     # permanently 409-brick a number they don't own. The proper fix is OTP /
-    # proof-of-control BEFORE create (wire signup BEHIND the VT-250 owner-verify OTP)
-    # + a per-IP throttle. That's a launch-blocking security decision for Fazal/VT-250,
+    # proof-of-control BEFORE create (wire signup BEHIND the VT-326 OTP-before-create gate)
+    # + a per-IP throttle. That's a launch-blocking security decision for Fazal/VT-326,
     # NOT built in this PR. Do not expose /api/signup publicly until it lands.
     from orchestrator.onboarding.signup import SignupError, SignupInput, run_signup
 
