@@ -67,3 +67,42 @@ def _autostub_twilio(request):
     except Exception:
         return
     request.getfixturevalue("twilio_create")
+
+
+@pytest.fixture(scope="session")
+def _migrated_db():
+    """VT-339: apply migrations ONCE per session (idempotent → order-independent, the #352
+    fix). Returns the DATABASE_URL, or skips when unset."""
+    db_url = os.environ.get("DATABASE_URL")
+    if not db_url:
+        pytest.skip("DATABASE_URL not set; integration test requires real DB")
+    import apply_migrations
+
+    if apply_migrations.apply(dsn=db_url)["failed"]:
+        pytest.fail("migrations failed")
+    return db_url
+
+
+@pytest.fixture
+def _dbpool(_migrated_db):
+    """VT-339: shared real-PG service pool for @integration tests — replaces the per-file
+    copy-paste (owner_surface + api migrated; billing/observability are phase-2).
+
+    FUNCTION-scoped on purpose: a dbos-using test may shutdown_dbos and clear ``graph._pool``,
+    so we re-establish it each test (migrations are already done once via the session-scoped
+    ``_migrated_db``). Matches the original per-file behaviour."""
+    from orchestrator import graph as graph_mod
+    from orchestrator.graph import get_pool
+
+    if graph_mod._pool is None:
+        from psycopg.rows import dict_row
+        from psycopg_pool import ConnectionPool
+
+        graph_mod._pool = ConnectionPool(
+            _migrated_db,
+            min_size=1,
+            max_size=4,
+            kwargs={"autocommit": True, "row_factory": dict_row},
+            open=True,
+        )
+    return get_pool()

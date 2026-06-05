@@ -7,7 +7,6 @@ cross-tenant. Heavy imports guarded (VT-337 dep-less lesson).
 
 from __future__ import annotations
 
-import os
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -30,10 +29,16 @@ def test_last4(raw, out) -> None:
 def test_resolved_terminal_is_noop(monkeypatch) -> None:
     """A resolved terminal (completed/paused) → no ack, no escalate."""
     calls: dict[str, int] = {"ack": 0, "alert": 0}
-    monkeypatch.setattr(sb, "_send_handoff_ack", lambda *a, **k: calls.__setitem__("ack", calls["ack"] + 1))
-    monkeypatch.setattr(sb, "_alert_fazal_safe", lambda *a, **k: calls.__setitem__("alert", calls["alert"] + 1))
+    monkeypatch.setattr(
+        sb, "_send_handoff_ack", lambda *a, **k: calls.__setitem__("ack", calls["ack"] + 1)
+    )
+    monkeypatch.setattr(
+        sb, "_alert_fazal_safe", lambda *a, **k: calls.__setitem__("alert", calls["alert"] + 1)
+    )
     ev = SimpleNamespace(sender_phone="+910000000000")
-    out = sb.maybe_escalate_support(tenant_id=str(uuid4()), run_id="r", event=ev, final_status="completed")
+    out = sb.maybe_escalate_support(
+        tenant_id=str(uuid4()), run_id="r", event=ev, final_status="completed"
+    )
     assert out["action"] == "none"
     assert calls == {"ack": 0, "alert": 0}
 
@@ -51,27 +56,6 @@ def test_alert_is_pii_safe(monkeypatch) -> None:
 
 
 # ----------------------------- DB: the counter + escalate boundary ---------------------
-@pytest.fixture
-def _dbpool():
-    db_url = os.environ.get("DATABASE_URL")
-    if not db_url:
-        pytest.skip("DATABASE_URL not set; integration test requires real DB")
-    import apply_migrations
-
-    if apply_migrations.apply(dsn=db_url)["failed"]:
-        pytest.fail("migrations failed")
-    from orchestrator import graph as graph_mod
-    from orchestrator.graph import get_pool
-
-    if graph_mod._pool is None:
-        from psycopg.rows import dict_row
-        from psycopg_pool import ConnectionPool
-
-        graph_mod._pool = ConnectionPool(
-            db_url, min_size=1, max_size=4,
-            kwargs={"autocommit": True, "row_factory": dict_row}, open=True,
-        )
-    return get_pool()
 
 
 def _seed_runs(pool, tid, *, n: int, status: str = "escalated") -> None:
@@ -90,8 +74,12 @@ def _seed_runs(pool, tid, *, n: int, status: str = "escalated") -> None:
 
 def _patch_sends(monkeypatch) -> dict[str, int]:
     calls = {"ack": 0, "record": 0, "alert": 0}
-    monkeypatch.setattr(sb, "_send_handoff_ack", lambda *a, **k: calls.__setitem__("ack", calls["ack"] + 1))
-    monkeypatch.setattr(sb, "_alert_fazal_safe", lambda *a, **k: calls.__setitem__("alert", calls["alert"] + 1))
+    monkeypatch.setattr(
+        sb, "_send_handoff_ack", lambda *a, **k: calls.__setitem__("ack", calls["ack"] + 1)
+    )
+    monkeypatch.setattr(
+        sb, "_alert_fazal_safe", lambda *a, **k: calls.__setitem__("alert", calls["alert"] + 1)
+    )
     monkeypatch.setattr(
         "orchestrator.escalations.record_escalation",
         lambda *a, **k: calls.__setitem__("record", calls["record"] + 1),
@@ -105,7 +93,9 @@ def test_first_unresolved_is_ack_only(monkeypatch, _dbpool) -> None:
     tid = uuid4()
     _seed_runs(_dbpool, tid, n=1)  # this run = the 1st unresolved in 24h
     ev = SimpleNamespace(sender_phone="+919811111111")
-    out = sb.maybe_escalate_support(tenant_id=str(tid), run_id="r1", event=ev, final_status="escalated")
+    out = sb.maybe_escalate_support(
+        tenant_id=str(tid), run_id="r1", event=ev, final_status="escalated"
+    )
     assert out["action"] == "ack_only" and out["unresolved_24h"] == 1
     assert calls["ack"] == 1 and calls["record"] == 0 and calls["alert"] == 0  # ack, no escalate
 
@@ -116,7 +106,9 @@ def test_second_unresolved_escalates(monkeypatch, _dbpool) -> None:
     tid = uuid4()
     _seed_runs(_dbpool, tid, n=2)  # 2 unresolved in 24h → this is the 2nd+
     ev = SimpleNamespace(sender_phone="+919811111111")
-    out = sb.maybe_escalate_support(tenant_id=str(tid), run_id="r2", event=ev, final_status="aborted_hard_limit")
+    out = sb.maybe_escalate_support(
+        tenant_id=str(tid), run_id="r2", event=ev, final_status="aborted_hard_limit"
+    )
     assert out["action"] == "escalated" and out["unresolved_24h"] == 2
     assert calls["ack"] == 1 and calls["record"] == 1 and calls["alert"] == 1  # ack + escalate
 
