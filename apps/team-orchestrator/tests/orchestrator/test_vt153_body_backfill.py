@@ -23,7 +23,7 @@ pytestmark = pytest.mark.skipif(
     reason="DATABASE_URL not set — VT-153 backfill canary skipped",
 )
 
-import psycopg  # noqa: E402 — after the skip guard
+psycopg = pytest.importorskip("psycopg")  # noqa: E402 — dep-less collection-safe (was a bare import)
 
 _MIG = (
     Path(__file__).resolve().parents[4] / "migrations" / "090_vt153_backfill_body_scrub.sql"

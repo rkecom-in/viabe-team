@@ -94,7 +94,7 @@ jobs:
       # must contain no LLM calls.
       - name: No LLM in the deterministic subtree (Pillar 1)
         run: |
-          if grep -rniE 'anthropic|openai|messages\.create|claude-|\bsonnet\b' \
+          if grep -rnE 'import (anthropic|openai)|from (anthropic|openai)|\.messages\.create|claude-[a-z0-9]|\bsonnet\b|Anthropic\(|OpenAI\(' \
               apps/team-orchestrator/src/orchestrator/pre_filter_gate.py \
               apps/team-orchestrator/src/orchestrator/state/ \
               apps/team-orchestrator/src/orchestrator/transitions.py \

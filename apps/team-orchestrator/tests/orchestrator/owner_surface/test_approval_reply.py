@@ -9,6 +9,10 @@ from __future__ import annotations
 
 import pytest
 
+# Dep-less CI 'test' job (uv --no-project): owner_inputs/__init__ -> writer -> anthropic.
+# Skip the module cleanly when anthropic is absent; the full real-PG suite runs it.
+pytest.importorskip("anthropic")
+
 from orchestrator.owner_inputs.approval_reply import classify_approval_reply
 
 

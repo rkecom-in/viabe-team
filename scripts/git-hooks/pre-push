@@ -105,8 +105,13 @@ if [ "$ORCH_CHANGED" = 1 ]; then
   say "ruff check (orchestrator + ingestion-worker)"
   uvx ruff check apps/team-orchestrator apps/team-ingestion-worker || { err "ruff"; FAIL=1; }
 
-  say "smoke pytest (uv --no-project --with pytest) — dep-less, mirrors CI 'test' job"
-  ( cd apps/team-orchestrator && uv run --no-project --with pytest pytest -q ) \
+  say "smoke pytest (uv --no-project --isolated --with pytest --with pyyaml) — faithful dep-less, mirrors CI 'test'"
+  # VT-337: a plain LOCAL --no-project run resolves heavy deps (anthropic/psycopg) from the
+  # uv CACHE, masking a heavy-import trap that CI's clean runner catches (why #345/#347
+  # slipped). --isolated drops the cache; --with pyyaml restores the one dep CI's runner DOES
+  # have — so this faithfully mirrors CI's 'test' env (anthropic/psycopg absent, yaml present)
+  # and catches the trap class. A test importing a heavy dep must pytest.importorskip("<dep>").
+  ( cd apps/team-orchestrator && uv run --no-project --isolated --with pytest --with pyyaml pytest -q ) \
     || { err "orchestrator smoke pytest"; FAIL=1; }
 
   # VT-324: no-direct-tenant-db-access is now an ENFORCED blocking gate (was
