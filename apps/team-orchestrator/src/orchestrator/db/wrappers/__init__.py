@@ -201,6 +201,29 @@ class CustomersWrapper(TenantScopedTable):
             ).fetchone()
         return int(dict(row)["n"]) if row else 0
 
+    def top_customers_by_spend(
+        self, tenant_id: UUID | str, *, limit: int, conn: Any = None
+    ) -> list[dict[str, Any]]:
+        """Top customers by total ledger volume (SUM of amount_paise magnitudes) — VT-87
+        owner-portal index. Returns id, display_name, phone_e164 (RAW — the API endpoint
+        masks to last-4; raw never crosses the orchestrator boundary), spend_paise.
+        Tenant-predicated (RLS + explicit WHERE); excludes opted-out/owner-excluded."""
+        tid = self._uuid(tenant_id)
+        with self._conn(tid, conn) as c:
+            rows = c.execute(
+                "SELECT c.id, c.display_name, c.phone_e164, "
+                "       COALESCE(SUM(l.amount_paise), 0) AS spend_paise "
+                "FROM customers c "
+                "LEFT JOIN customer_ledger_entries l "
+                "  ON l.tenant_id = c.tenant_id AND l.customer_id = c.id "
+                "WHERE c.tenant_id = %s AND c.opt_out_status = 'subscribed' "
+                "GROUP BY c.id, c.display_name, c.phone_e164 "
+                "ORDER BY spend_paise DESC, c.id "
+                "LIMIT %s",
+                (str(tid), limit),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
     def recency_days_percentiles(
         self, tenant_id: UUID | str, pctls: list[float], *, conn: Any = None
     ) -> dict[str, Any] | None:
