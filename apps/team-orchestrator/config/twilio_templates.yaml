@@ -212,3 +212,15 @@ team_edge_case_ack:
   languages:
     en: null  # NEEDS-FAZAL: Meta SID pending
     hi: null  # NEEDS-FAZAL: Meta SID pending
+
+# VT-88: SupportBot escalation ack to the owner when the agent couldn't resolve their
+# message (the no-silence guarantee). NEEDS-FAZAL: a Meta-approved SID + Hindi. Copy is an
+# HONEST handoff — "Fazal will follow up" with NO time promise (SLA enforcement is Phase 2).
+support_handoff:
+  audience: owner
+  agent_selectable: false
+  variables:
+    - reference        # {{1}} — the run/ticket reference the owner can quote
+  languages:
+    en: null  # NEEDS-FAZAL: Meta SID pending
+    hi: null  # NEEDS-FAZAL: Meta SID pending
