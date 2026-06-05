@@ -115,6 +115,10 @@ def _dbpool():
     db_url = os.environ.get("DATABASE_URL")
     if not db_url:
         pytest.skip("DATABASE_URL not set; integration test requires real DB")
+    import apply_migrations  # idempotent — ensure the schema exists regardless of test order
+
+    if apply_migrations.apply(dsn=db_url)["failed"]:
+        pytest.fail("migrations failed")
     from orchestrator import graph as graph_mod
     from orchestrator.graph import get_pool
 
