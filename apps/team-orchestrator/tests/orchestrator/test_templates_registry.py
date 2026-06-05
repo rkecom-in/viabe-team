@@ -24,6 +24,7 @@ import re
 import time
 from pathlib import Path
 from typing import Any
+from uuid import UUID
 
 import pytest
 import yaml
@@ -457,3 +458,58 @@ def test_campaign_not_sent_validate_params_accepts_signature():
         {"owner_name": "Asha", "unverified_count": "3"},
         _path=_REAL_YAML_PATH,
     )
+
+
+# --------------------------------------------------------------------------- #
+# VT-45-wire (Fazal 2026-06-06) — the 5 business-initiated templates are LIVE
+# --------------------------------------------------------------------------- #
+_VT45_LIVE = (
+    "trial_ending",
+    "trial_extension_offered",
+    "trial_max_reached",
+    "refund_offer",
+    "refund_completed",
+)
+# The 3 in-window acks STAY null here — they become free-form (not templates) in VT-349.
+_VT45_FREEFORM_STILL_NULL = ("refund_processing", "support_handoff", "team_edge_case_ack")
+
+
+def test_vt45_wire_five_templates_resolve_live_sid_both_langs() -> None:
+    """Each of the 5 × {en, hi} resolves a non-null HX content_sid (no fail-closed stub)."""
+    for name in _VT45_LIVE:
+        for lang in ("en", "hi"):
+            sid = reg.content_sid_for(name, lang)
+            assert sid is not None, f"{name}[{lang}] still null (fail-closed)"
+            assert re.match(r"^HX[0-9a-f]{32}$", sid), f"{name}[{lang}] bad SID: {sid!r}"
+
+
+def test_vt45_freeform_acks_stay_null_until_vt349() -> None:
+    """The 3 in-window acks are NOT wired here (they go free-form in VT-349)."""
+    for name in _VT45_FREEFORM_STILL_NULL:
+        assert reg.content_sid_for(name, "en") is None
+
+
+def test_vt45_send_template_uses_wired_sid(monkeypatch) -> None:
+    """send_template_message resolves + sends the wired SID (stubbed Twilio — assert the
+    content_sid it would send, no Meta call). importorskip("dbos") first: the send path imports
+    dbos via twilio_send, absent in the dep-less smoke (skip there, run in the full suite)."""
+    pytest.importorskip("dbos")
+    from unittest.mock import MagicMock
+
+    from orchestrator.utils import twilio_send
+
+    create = MagicMock(return_value=MagicMock(sid="SM" + "0" * 32))
+    fake_client = MagicMock()
+    fake_client.messages.create = create
+    monkeypatch.setattr(twilio_send, "_client", lambda: fake_client)
+    monkeypatch.setenv("TEAM_TWILIO_FROM_NUMBER", "+910000000000")
+    monkeypatch.setenv("TEAM_PHONE_HASH_SALT", "t")
+
+    twilio_send.send_template_message(
+        UUID(int=1),
+        "refund_offer",
+        {"refund_amount_inr": "500", "response_options": "Reply REFUND, CONTINUE, or DISCUSS"},
+        recipient_phone="+919800000000",
+    )
+    _, kwargs = create.call_args
+    assert kwargs["content_sid"] == "HX188eba65b0de1ee521f7922435e76ae6"

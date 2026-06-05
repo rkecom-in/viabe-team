@@ -251,3 +251,20 @@ Hi {{1}}, your Viabe Team report for {{2}} is ready — I've attached the full P
 नमस्ते {{1}}, मैं इस हफ़्ते का कैंपेन नहीं भेज सका: लक्षित ग्राहकों में से {{2}} की पुष्टि नहीं हो सकी, इसलिए मैंने पूरा कैंपेन रोक दिया — कुछ भी नहीं भेजा गया। दोबारा कोशिश करने या लक्ष्यीकरण बदलने के लिए यहाँ उत्तर दें।
 ```
 
+## Business-initiated owner templates (VT-45-wire, Fazal 2026-06-06)
+
+The 5 owner-facing business-initiated templates (out-of-window) — SIDs provisioned by Fazal
+2026-06-06, wired into `twilio_templates.yaml` (was fail-closed `null`). **Cowork: the
+Meta-approved BODY COPY (EN + HI) for these 5 lives in the Twilio/Meta console; add the body
+text + variable signatures here at the next pass — I have the SID map, not the approved copy.**
+The 3 in-window acks (`refund_processing`, `support_handoff`, `team_edge_case_ack`) are NOT
+templates — they become free-form sends in VT-349 and are removed from the registry there.
+
+| template | tier | en SID | hi SID |
+|---|---|---|---|
+| `trial_ending` | VT-90 trial lifecycle | `HX7a7e4a40e500b632b65d4060d62da592` | `HX93ceca39d063ce4eaebefbc6751e01b3` |
+| `trial_extension_offered` | VT-90 trial lifecycle | `HX8324b93b9df5bfa06bf56efe17a917c2` | `HXfe73c83ad79f867f6dfcc3edac45237f` |
+| `trial_max_reached` | VT-90 trial lifecycle | `HX69a298407b209f3dc22141943f768f7a` | `HX025441f9544b9f8ad3a910488c89edb4` |
+| `refund_offer` | VT-85 day-39 offer | `HX188eba65b0de1ee521f7922435e76ae6` | `HXe78d29b842092b2fa3dd196fc1e652de` |
+| `refund_completed` | VT-93 refund (out-of-window) | `HX38a56278276122a6689edd8f3cb28137` | `HX161b11c468fc4216ff6d27c033b6bd7f` |
+
