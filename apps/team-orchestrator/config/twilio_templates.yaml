@@ -142,8 +142,8 @@ trial_ending:
     - owner_name        # {{1}}
     - trial_end_date    # {{2}}
   languages:
-    en: null  # NEEDS-FAZAL: Meta SID pending
-    hi: null  # NEEDS-FAZAL: Meta SID pending
+    en: HX7a7e4a40e500b632b65d4060d62da592  # VT-45-wire (Fazal 2026-06-06)
+    hi: HX93ceca39d063ce4eaebefbc6751e01b3  # VT-45-wire (Fazal 2026-06-06)
 
 trial_extension_offered:
   audience: customer
@@ -152,8 +152,8 @@ trial_extension_offered:
     - owner_name        # {{1}}
     - trial_end_date    # {{2}} — the new, extended end date
   languages:
-    en: null  # NEEDS-FAZAL: Meta SID pending
-    hi: null  # NEEDS-FAZAL: Meta SID pending
+    en: HX8324b93b9df5bfa06bf56efe17a917c2  # VT-45-wire (Fazal 2026-06-06)
+    hi: HXfe73c83ad79f867f6dfcc3edac45237f  # VT-45-wire (Fazal 2026-06-06)
 
 trial_max_reached:
   audience: customer
@@ -161,8 +161,8 @@ trial_max_reached:
   variables:
     - owner_name        # {{1}}
   languages:
-    en: null  # NEEDS-FAZAL: Meta SID pending
-    hi: null  # NEEDS-FAZAL: Meta SID pending
+    en: HX69a298407b209f3dc22141943f768f7a  # VT-45-wire (Fazal 2026-06-06)
+    hi: HX025441f9544b9f8ad3a910488c89edb4  # VT-45-wire (Fazal 2026-06-06)
 
 # VT-93 — refund-execution templates. NEEDS-FAZAL: provision the real Meta Content
 # SIDs + copy (Pillar 7 honesty gate — Fazal reviews every word; no retention
@@ -183,8 +183,8 @@ refund_completed:
   variables:
     - refund_amount_inr   # {{1}}
   languages:
-    en: null  # NEEDS-FAZAL: Meta SID pending
-    hi: null  # NEEDS-FAZAL: Meta SID pending
+    en: HX38a56278276122a6689edd8f3cb28137  # VT-45-wire (Fazal 2026-06-06)
+    hi: HX161b11c468fc4216ff6d27c033b6bd7f  # VT-45-wire (Fazal 2026-06-06)
 
 # VT-85 — day-39 refund OFFER (the conversation opener). NEEDS-FAZAL: copy + Meta
 # SID. Pillar 7: honest framing, the 3 options (REFUND/CONTINUE/DISCUSS) stated
@@ -197,8 +197,8 @@ refund_offer:
     - refund_amount_inr    # {{1}}
     - response_options     # {{2}} — "Reply REFUND, CONTINUE, or DISCUSS"
   languages:
-    en: null  # NEEDS-FAZAL: Meta SID pending
-    hi: null  # NEEDS-FAZAL: Meta SID pending
+    en: HX188eba65b0de1ee521f7922435e76ae6  # VT-45-wire (Fazal 2026-06-06)
+    hi: HXe78d29b842092b2fa3dd196fc1e652de  # VT-45-wire (Fazal 2026-06-06)
 
 # VT-84: the generic owner reply for an edge-case handler (exclusion / status_query).
 # {{1}} carries the handler's reply text. Null SID fail-closed (the handler's action —
