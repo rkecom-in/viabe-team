@@ -16,13 +16,14 @@ from orchestrator.db import tenant_connection
 from orchestrator.invariants import check_invariants
 from orchestrator.state import MAX_TRIAL_EXTENSIONS, Phase, SubscriberState
 
-# The 11 lifecycle events this machine consumes (event sources: VT-3.3 / 3.5 / 3.9).
+# The 12 lifecycle events this machine consumes (event sources: VT-3.3 / 3.5 / 3.9).
 ALL_EVENTS: tuple[str, ...] = (
     "signup",
     "card_captured",
     "trial_extension_granted",
     "trial_extension_exhausted",
     "weekly_low_engagement",
+    "payment_failed",  # VT-89: 3rd consecutive Razorpay payment.failed -> paid_at_risk
     "engagement_recovered",
     "cancellation_requested",
     "day39_refund_offered",  # VT-85: day-39 refund OFFER (parks in refund_offered)
@@ -57,6 +58,10 @@ TRANSITIONS: dict[tuple[Phase, str], Phase] = {
     ("paid_at_risk", "day39_refund_triggered"): "refunded",
     ("paid_at_risk", "cancellation_requested"): "cancelled",
     ("paid_at_risk", "manual_cancel"): "cancelled",
+    # VT-89: 3rd consecutive Razorpay payment.failed -> paid_at_risk. The
+    # paid_at_risk self-loop keeps a 4th+ failure from raising (idempotent).
+    ("paid_active", "payment_failed"): "paid_at_risk",
+    ("paid_at_risk", "payment_failed"): "paid_at_risk",
     # VT-85 day-39 refund OFFER (Pillar 7 — no auto-refund). The evaluator parks
     # the tenant in refund_offered; the owner's REFUND/CONTINUE reply or the 48h
     # timeout resolves it. The direct (paid_*, day39_refund_triggered) paths above
