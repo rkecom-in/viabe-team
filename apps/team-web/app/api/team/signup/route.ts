@@ -8,6 +8,13 @@ import { NextResponse } from 'next/server'
 const BASE = process.env.TEAM_ORCHESTRATOR_URL ?? 'http://localhost:8001'
 
 export async function POST(request: Request): Promise<Response> {
+  // VT-96/VT-326: inert-by-construction. The deployed proxy 404s everywhere until
+  // ENABLE_PUBLIC_SIGNUP=true is explicitly set — and flipping it on is part of
+  // VT-326's acceptance (OTP-before-create + per-IP throttle must land first). A
+  // comment is not a gate; this is.
+  if (process.env.ENABLE_PUBLIC_SIGNUP !== 'true') {
+    return NextResponse.json({ detail: { code: 'not_enabled' } }, { status: 404 })
+  }
   const body = await request.json().catch(() => null)
   if (!body) {
     return NextResponse.json({ detail: { code: 'invalid' } }, { status: 400 })
