@@ -14,6 +14,9 @@ from uuid import UUID, uuid4
 
 import pytest
 
+# Dep-less CI 'test' job: owner_inputs/__init__ -> writer -> anthropic. Skip if absent.
+pytest.importorskip("anthropic")
+
 from orchestrator.owner_inputs.exclusion import _extract_name, _extract_phone
 from orchestrator.owner_inputs.status_query import classify_status_query
 

@@ -12,6 +12,12 @@ from contextlib import contextmanager
 from typing import Any
 from unittest.mock import patch
 
+import pytest
+
+# Dep-less CI 'test' job: the patches target customer_registry -> db.wrappers ->
+# tenant_connection -> psycopg. Skip cleanly when psycopg is absent; the real-PG suite runs it.
+pytest.importorskip("psycopg")
+
 
 @contextmanager
 def _names(result: Any = None, *, raise_undefined: bool = False):
