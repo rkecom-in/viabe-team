@@ -52,7 +52,7 @@ def test_create_signup_tenant_atomic(pool):
     wa = _wa()
     res = create_signup_tenant(
         business_name="Asha Kirana", whatsapp_number=wa,
-        preferred_language="hi", consent_dpdpa=True, consent_residency=True,
+        preferred_language="hi", business_type="kirana", consent_dpdpa=True, consent_residency=True,
     )
     assert res.created is True
     assert res.plan_tier == "founding"  # stub until VT-10.6
@@ -60,7 +60,7 @@ def test_create_signup_tenant_atomic(pool):
     with pool.connection() as c:
         t = c.execute(
             "SELECT phase, plan_tier, preferred_language, trial_started_at, "
-            "signed_up_at, created_via FROM tenants WHERE id = %s",
+            "signed_up_at, created_via, business_type FROM tenants WHERE id = %s",
             (str(res.tenant_id),),
         ).fetchone()
         assert t["phase"] == "onboarding"
@@ -68,6 +68,7 @@ def test_create_signup_tenant_atomic(pool):
         assert t["preferred_language"] == "hi"
         assert t["trial_started_at"] is not None
         assert t["created_via"] == "web"
+        assert t["business_type"] == "kirana"
 
         cr = c.execute(
             "SELECT consent_dpdpa, consent_residency, dpdpa_version, residency_version "
@@ -84,11 +85,11 @@ def test_duplicate_whatsapp_number_not_created(pool):
     wa = _wa()
     r1 = create_signup_tenant(
         business_name="Branch One", whatsapp_number=wa,
-        preferred_language="en", consent_dpdpa=True, consent_residency=True,
+        preferred_language="en", business_type="kirana", consent_dpdpa=True, consent_residency=True,
     )
     r2 = create_signup_tenant(
         business_name="Branch One Again", whatsapp_number=wa,
-        preferred_language="en", consent_dpdpa=True, consent_residency=True,
+        preferred_language="en", business_type="kirana", consent_dpdpa=True, consent_residency=True,
     )
     assert r1.created is True
     assert r2.created is False  # endpoint maps this → 409
@@ -109,5 +110,16 @@ def test_consent_false_rejected(pool):
     with pytest.raises(ValueError):
         create_signup_tenant(
             business_name="No Consent Co", whatsapp_number=_wa(),
-            preferred_language="en", consent_dpdpa=True, consent_residency=False,
+            preferred_language="en", business_type="kirana", consent_dpdpa=True, consent_residency=False,
+        )
+
+
+def test_bad_business_type_rejected(pool):
+    from orchestrator.onboarding.signup import create_signup_tenant
+
+    with pytest.raises(ValueError):
+        create_signup_tenant(
+            business_name="Mystery Co", whatsapp_number=_wa(),
+            preferred_language="en", business_type="not_a_real_type",
+            consent_dpdpa=True, consent_residency=True,
         )

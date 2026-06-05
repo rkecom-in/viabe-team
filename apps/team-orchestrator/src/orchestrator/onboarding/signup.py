@@ -22,9 +22,19 @@ from typing import Any, Callable, cast
 from uuid import UUID
 
 # .../team-orchestrator/src/orchestrator/onboarding/signup.py → parents[3] = team-orchestrator
-_DISCLOSURES = (
-    Path(__file__).resolve().parents[3] / "config" / "disclosure_versions.yaml"
-)
+# .../team-orchestrator/src/orchestrator/onboarding/signup.py → parents[3] = team-orchestrator
+_CONFIG = Path(__file__).resolve().parents[3] / "config"
+_DISCLOSURES = _CONFIG / "disclosure_versions.yaml"
+_BUSINESS_TYPES = _CONFIG / "business_types.yaml"
+
+
+def valid_business_types() -> frozenset[str]:
+    """The constrained business_type taxonomy keys (VT-82 — NOT free text). Coarse
+    by design so L3/k-anon cohorts (business_type × city_tier) stay populated."""
+    import yaml
+
+    cfg = yaml.safe_load(_BUSINESS_TYPES.read_text(encoding="utf-8"))
+    return frozenset(bt["key"] for bt in cfg["business_types"])
 
 
 @dataclass(frozen=True)
@@ -58,6 +68,7 @@ def create_signup_tenant(
     business_name: str,
     whatsapp_number: str,
     preferred_language: str,
+    business_type: str,
     consent_dpdpa: bool,
     consent_residency: bool,
     founding_counter_fn: Callable[[], bool] | None = None,
@@ -74,6 +85,8 @@ def create_signup_tenant(
         raise ValueError("signup requires both DPDPA and residency consent (Pillar 7)")
     if not whatsapp_number:
         raise ValueError("whatsapp_number is the mandatory tenant identity")
+    if business_type not in valid_business_types():
+        raise ValueError(f"business_type {business_type!r} not in the taxonomy")
 
     from orchestrator.graph import get_pool
     from orchestrator.knowledge.kg_emit import drain_kg_events, emit_kg_event
@@ -89,14 +102,15 @@ def create_signup_tenant(
             """
             INSERT INTO tenants
                 (business_name, plan_tier, phase, whatsapp_number, preferred_language,
-                 signed_up_at, trial_started_at, phase_entered_at, created_via)
-            VALUES (%s, %s, 'onboarding', %s, %s, %s, %s, %s, 'web')
+                 business_type, signed_up_at, trial_started_at, phase_entered_at,
+                 created_via)
+            VALUES (%s, %s, 'onboarding', %s, %s, %s, %s, %s, %s, 'web')
             ON CONFLICT (whatsapp_number) WHERE whatsapp_number IS NOT NULL
             DO NOTHING
             RETURNING id
             """,
             (business_name, plan_tier, whatsapp_number, preferred_language,
-             now, now, now),
+             business_type, now, now, now),
         ).fetchone()
 
         if row is None:

@@ -1,0 +1,34 @@
+# VT-82 — business_type taxonomy (PROPOSED; flagged for Cowork/Fazal review).
+#
+# Signup (#6 field) constrains business_type to this list — NOT free text. It is
+# load-bearing: VT-312's brain-decides thresholds are business-type-dependent
+# (context_builder reads `SELECT business_type FROM tenants`), L3 cohorts key on
+# (business_type, city_tier), and L4 skills tag applies_to_business_types.
+#
+# DESIGN: kept COARSE on purpose (~14 buckets). L3/k-anon cohorts are keyed on
+# (business_type × city_tier); too many categories → tiny cohorts → the k=10 gate
+# (CL-28) starves and reports/cohort-matching fail. Coarse buckets keep cohorts
+# populated. A new bucket = a Type-2 change (re-cohorting), not a casual add.
+#
+# NO canonical list existed in the codebase (no enum/config; L4's
+# applies_to_business_types was only a field type). This is the proposed seed —
+# Cowork/Fazal review the buckets before this locks.
+#
+# `key` is the machine value stored on tenants.business_type; `label_en`/`label_hi`
+# are for the signup form (VT-96).
+
+business_types:
+  - {key: kirana,        label_en: "Kirana / grocery store",      label_hi: "किराना / जनरल स्टोर"}
+  - {key: restaurant,    label_en: "Restaurant / dhaba",          label_hi: "रेस्टोरेंट / ढाबा"}
+  - {key: cafe_bakery,   label_en: "Cafe / bakery",               label_hi: "कैफे / बेकरी"}
+  - {key: sweets,        label_en: "Sweets / mithai",             label_hi: "मिठाई की दुकान"}
+  - {key: salon_spa,     label_en: "Salon / spa / beauty",        label_hi: "सैलून / स्पा / ब्यूटी"}
+  - {key: apparel,       label_en: "Apparel / boutique",          label_hi: "कपड़े / बुटीक"}
+  - {key: pharmacy,      label_en: "Pharmacy / medical",          label_hi: "फार्मेसी / मेडिकल"}
+  - {key: electronics,   label_en: "Electronics / mobile",        label_hi: "इलेक्ट्रॉनिक्स / मोबाइल"}
+  - {key: hardware,      label_en: "Hardware / building supplies", label_hi: "हार्डवेयर / निर्माण सामग्री"}
+  - {key: services,      label_en: "Local services (repair etc.)", label_hi: "लोकल सर्विस (रिपेयर आदि)"}
+  - {key: fitness,       label_en: "Gym / fitness",               label_hi: "जिम / फिटनेस"}
+  - {key: education,     label_en: "Coaching / education",        label_hi: "कोचिंग / शिक्षा"}
+  - {key: healthcare,    label_en: "Clinic / healthcare",         label_hi: "क्लिनिक / हेल्थकेयर"}
+  - {key: other,         label_en: "Other",                       label_hi: "अन्य"}
