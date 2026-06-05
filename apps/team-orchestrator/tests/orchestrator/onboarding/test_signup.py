@@ -123,3 +123,134 @@ def test_bad_business_type_rejected(pool):
             preferred_language="en", business_type="not_a_real_type",
             consent_dpdpa=True, consent_residency=True,
         )
+
+
+def _valid_input(**over):
+    from orchestrator.onboarding.signup import SignupInput
+
+    base = dict(
+        business_name="Asha Kirana", owner_name="Asha Devi", whatsapp_number=_wa_91(),
+        preferred_language="hi", city="Bengaluru", business_type="kirana",
+        consent_dpdpa=True, consent_residency=True,
+    )
+    base.update(over)
+    return SignupInput(**base)
+
+
+def _wa_91() -> str:
+    # +91 + 10-digit mobile starting 6-9, unique per call.
+    import random
+    return "+919" + "".join(str(random.randint(0, 9)) for _ in range(9))
+
+
+def test_run_signup_full(pool):
+    from orchestrator.onboarding.signup import run_signup
+
+    calls = []
+    out = run_signup(
+        _valid_input(),
+        welcome_send_fn=lambda *a, **k: calls.append(a) or True,
+    )
+    assert out.plan_tier == "founding"
+    assert out.city_tier in {"tier_1", "tier_2", "tier_3"}
+    assert out.welcome_sent is True
+    assert len(calls) == 1  # welcome invoked once
+
+    with pool.connection() as c:
+        t = c.execute(
+            "SELECT business_type, city_tier, preferred_language FROM tenants WHERE id = %s",
+            (str(out.tenant_id),),
+        ).fetchone()
+        assert t["business_type"] == "kirana"
+        assert t["city_tier"] == out.city_tier  # VT-317 closed: city_tier populated
+        cr = c.execute(
+            "SELECT count(*) AS n FROM consent_records WHERE tenant_id = %s",
+            (str(out.tenant_id),),
+        ).fetchone()["n"]
+        assert cr == 1
+    # owner_name merged into business_profile (where the brain reads it).
+    from orchestrator.db import tenant_connection
+    with tenant_connection(out.tenant_id) as conn:
+        bp = conn.execute(
+            "SELECT attributes FROM l1_entities WHERE entity_type = 'business_profile'"
+        ).fetchone()
+    attrs = bp["attributes"] if isinstance(bp, dict) else bp[0]
+    assert attrs.get("owner_name") == "Asha Devi"
+
+
+def test_run_signup_duplicate_409(pool):
+    from orchestrator.onboarding.signup import SignupError, run_signup
+
+    wa = _wa_91()
+    run_signup(_valid_input(whatsapp_number=wa), welcome_send_fn=lambda *a, **k: True)
+    with pytest.raises(SignupError) as e:
+        run_signup(_valid_input(whatsapp_number=wa), welcome_send_fn=lambda *a, **k: True)
+    assert e.value.code == "duplicate"
+
+
+def test_run_signup_consent_false_no_tenant(pool):
+    from orchestrator.onboarding.signup import SignupError, run_signup
+
+    wa = _wa_91()
+    with pytest.raises(SignupError) as e:
+        run_signup(_valid_input(whatsapp_number=wa, consent_residency=False))
+    assert e.value.code == "consent"
+    # NO tenant created.
+    with pool.connection() as c:
+        n = c.execute(
+            "SELECT count(*) AS n FROM tenants WHERE whatsapp_number = %s", (wa,)
+        ).fetchone()["n"]
+    assert n == 0
+
+
+def test_run_signup_validation_negatives(pool):
+    from orchestrator.onboarding.signup import SignupError, run_signup
+
+    for over, code in [
+        ({"whatsapp_number": "+1202555"}, "invalid_phone"),
+        ({"preferred_language": "ta"}, "invalid_language"),
+        ({"city": "  "}, "invalid_city"),
+        ({"business_type": "spaceship"}, "invalid_business_type"),
+        ({"business_name": "viabe team"}, "invalid_name"),  # blocklist
+    ]:
+        with pytest.raises(SignupError) as e:
+            run_signup(_valid_input(**over))
+        assert e.value.code == code, f"{over} → expected {code}, got {e.value.code}"
+
+
+def test_signup_route_status_mapping(pool):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from orchestrator.api.signup import router
+
+    app = FastAPI()
+    app.include_router(router)
+    client = TestClient(app)
+
+    body = {
+        "business_name": "Asha Kirana", "owner_name": "Asha Devi",
+        "whatsapp_number": _wa_91(), "preferred_language": "en",
+        "city": "Mumbai", "business_type": "kirana",
+        "consent_dpdpa": True, "consent_residency": True,
+    }
+    r = client.post("/api/signup", json=body)
+    assert r.status_code == 201, r.text
+    assert r.json()["tenant_id"]
+    assert r.json()["city_tier"] == "tier_1"  # Mumbai → tier_1; VT-317 closed
+
+    # Duplicate → 409.
+    r_dup = client.post("/api/signup", json=body)
+    assert r_dup.status_code == 409
+    assert r_dup.json()["detail"]["code"] == "duplicate"
+
+    # Consent false → 400, no tenant.
+    r_consent = client.post("/api/signup", json={**body, "whatsapp_number": _wa_91(),
+                                                 "consent_residency": False})
+    assert r_consent.status_code == 400
+    assert r_consent.json()["detail"]["code"] == "consent"
+
+    # Bad phone → 400.
+    r_phone = client.post("/api/signup", json={**body, "whatsapp_number": "+1202555"})
+    assert r_phone.status_code == 400
+    assert r_phone.json()["detail"]["code"] == "invalid_phone"

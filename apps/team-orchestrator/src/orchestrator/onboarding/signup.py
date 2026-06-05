@@ -15,11 +15,21 @@ counter lands — never a half-built counter (no-stale).
 
 from __future__ import annotations
 
+import logging
+import re
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, cast
 from uuid import UUID
+
+logger = logging.getLogger(__name__)
+
+# Structural India-mobile E.164: +91 then a 10-digit number starting 6-9. Dep-free
+# (phonenumbers is not installed; a fuller-validation upgrade is a follow-up).
+_PHONE_RE = re.compile(r"^\+91[6-9]\d{9}$")
+_LANGUAGES = frozenset({"en", "hi"})
+_TRIAL_DAYS = 14
 
 # .../team-orchestrator/src/orchestrator/onboarding/signup.py → parents[3] = team-orchestrator
 # .../team-orchestrator/src/orchestrator/onboarding/signup.py → parents[3] = team-orchestrator
@@ -141,4 +151,141 @@ def create_signup_tenant(
     return SignupResult(tenant_id=tid, created=True, plan_tier=plan_tier)
 
 
-__all__ = ["SignupResult", "create_signup_tenant"]
+# --------------------------------------------------------------------------- #
+# Endpoint orchestration: validate → create → city_tier → owner_name → welcome
+# --------------------------------------------------------------------------- #
+
+class SignupError(Exception):
+    """Validation / conflict failure. ``code`` maps to an HTTP status at the route:
+    'invalid_*' / 'consent' → 400; 'duplicate' → 409."""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+@dataclass(frozen=True)
+class SignupInput:
+    business_name: str
+    owner_name: str
+    whatsapp_number: str
+    preferred_language: str
+    city: str
+    business_type: str
+    consent_dpdpa: bool
+    consent_residency: bool
+
+
+@dataclass(frozen=True)
+class SignupOutcome:
+    tenant_id: UUID
+    plan_tier: str
+    city_tier: str
+    welcome_sent: bool
+
+
+def _load_blocklist() -> list[str]:
+    import yaml
+
+    cfg = yaml.safe_load((_CONFIG / "signup_blocklist.yaml").read_text(encoding="utf-8"))
+    return [t.casefold() for t in (cfg.get("business_name") or [])]
+
+
+def _validate(inp: SignupInput) -> None:
+    if not (inp.consent_dpdpa and inp.consent_residency):
+        raise SignupError("consent", "both DPDPA and residency consent are required")
+    if not _PHONE_RE.match(inp.whatsapp_number):
+        raise SignupError("invalid_phone", "whatsapp_number must be a +91 mobile (E.164)")
+    if inp.preferred_language not in _LANGUAGES:
+        raise SignupError("invalid_language", "preferred_language must be 'en' or 'hi'")
+    if not inp.city.strip():
+        raise SignupError("invalid_city", "city is required")
+    if inp.business_type not in valid_business_types():
+        raise SignupError("invalid_business_type", "business_type not in the taxonomy")
+    blocked = _load_blocklist()
+    for field in (inp.business_name, inp.owner_name):
+        folded = (field or "").casefold()
+        if not folded.strip():
+            raise SignupError("invalid_name", "business_name and owner_name are required")
+        if any(term in folded for term in blocked):
+            raise SignupError("invalid_name", "name contains a disallowed term")
+
+
+def _default_welcome(
+    tenant_id: UUID, whatsapp_number: str, language: str,
+    owner_name: str, trial_end: datetime,
+) -> bool:
+    """STUB owner welcome-send seam (WABA stubbed/injectable, Cowork). The real
+    owner-WABA send is gate-live (same posture as customer-comms); until then this
+    logs intent. Tests inject a real recorder. NON-terminal: a failure here never
+    rolls back the signup."""
+    # TODO(owner-WABA): send `team_welcome` (lang SID) to the owner's number with
+    # {owner_name, trial_end_date} once the owner-WABA delivery path is live.
+    logger.info(
+        "signup: welcome queued tenant=%s lang=%s (owner-WABA send is gate-live)",
+        tenant_id, language,
+    )
+    return True
+
+
+def run_signup(
+    inp: SignupInput,
+    *,
+    welcome_send_fn: Callable[..., bool] | None = None,
+    founding_counter_fn: Callable[[], bool] | None = None,
+    now_fn: Callable[[], datetime] | None = None,
+) -> SignupOutcome:
+    """The signup orchestration. Validate (→ SignupError on any field/consent) →
+    atomic create (→ SignupError 'duplicate' on a repeat whatsapp_number) →
+    set_tenant_city_tier (closes VT-317) → merge owner_name into business_profile →
+    welcome send (injectable, non-terminal)."""
+    _validate(inp)
+    now = (now_fn or _utcnow)()
+
+    res = create_signup_tenant(
+        business_name=inp.business_name,
+        whatsapp_number=inp.whatsapp_number,
+        preferred_language=inp.preferred_language,
+        business_type=inp.business_type,
+        consent_dpdpa=inp.consent_dpdpa,
+        consent_residency=inp.consent_residency,
+        founding_counter_fn=founding_counter_fn,
+        now_fn=now_fn,
+    )
+    if not res.created:
+        raise SignupError("duplicate", "this whatsapp_number is already registered")
+
+    # VT-317: capture the city → coarsen → tenants.city_tier (raw city discarded).
+    from orchestrator.privacy.coarsening import set_tenant_city_tier
+
+    city_tier = str(set_tenant_city_tier(res.tenant_id, inp.city))
+
+    # owner_name lives on business_profile (where get_business_profile reads it),
+    # merged (not clobbered) so later enrichment is preserved.
+    from orchestrator.knowledge.l1 import upsert_business_profile
+
+    upsert_business_profile(res.tenant_id, {"owner_name": inp.owner_name})
+
+    trial_end = now + timedelta(days=_TRIAL_DAYS)
+    sent = (welcome_send_fn or _default_welcome)(
+        res.tenant_id, inp.whatsapp_number, inp.preferred_language,
+        inp.owner_name, trial_end,
+    )
+
+    return SignupOutcome(
+        tenant_id=res.tenant_id,
+        plan_tier=cast(str, res.plan_tier),
+        city_tier=city_tier,
+        welcome_sent=bool(sent),
+    )
+
+
+__all__ = [
+    "SignupError",
+    "SignupInput",
+    "SignupOutcome",
+    "SignupResult",
+    "create_signup_tenant",
+    "run_signup",
+    "valid_business_types",
+]

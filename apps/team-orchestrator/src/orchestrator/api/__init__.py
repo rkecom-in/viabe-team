@@ -16,6 +16,7 @@ from orchestrator.api.ops_resolve import router as ops_resolve_router
 from orchestrator.api.ops_runcontrol import router as ops_runcontrol_router
 from orchestrator.api.owner_verify import router as owner_verify_router
 from orchestrator.api.sheet_push import router as sheet_push_router
+from orchestrator.api.signup import router as signup_router
 from orchestrator.api.shopify_oauth import router as shopify_oauth_router
 from orchestrator.api.shopify_webhook import router as shopify_webhook_router
 from orchestrator.api.twilio_ingress import router as twilio_ingress_router
@@ -28,6 +29,7 @@ router.include_router(ops_runcontrol_router)
 router.include_router(owner_verify_router)
 router.include_router(oauth_callback_router)
 router.include_router(sheet_push_router)
+router.include_router(signup_router)
 router.include_router(integration_push_router)
 router.include_router(shopify_webhook_router)
 router.include_router(shopify_oauth_router)
