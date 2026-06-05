@@ -16,5 +16,14 @@ export default async function DashboardLayout({ children }: { children: ReactNod
     if (err instanceof OwnerUnauthorizedError) redirect('/team/login?next=/team/dashboard')
     throw err
   }
-  return <section data-area="team-dashboard">{children}</section>
+  return (
+    <section data-area="team-dashboard">
+      {/* VT-338: locale toggle — relative ?lang query preserves the current page; each
+          page resolves the active locale from ?lang (override) + the tenant default. */}
+      <nav aria-label="language" data-testid="locale-toggle">
+        <a href="?lang=en">English</a> <a href="?lang=hi">हिंदी</a>
+      </nav>
+      {children}
+    </section>
+  )
 }
