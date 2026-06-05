@@ -74,21 +74,17 @@ def get_business_profile(
     tenant row is missing (graceful negative outcome — caller treats
     as "tenant not in registry").
 
-    RLS: scopes app.current_tenant for the connection via set_config
-    (session-scoped; pool reset clears it on return — see graph._reset_connection).
+    RLS (VT-342/VT-306): runs under ``tenant_connection`` (SET ROLE app_role +
+    the ``app.current_tenant`` GUC), so the SELECT policies on tenants /
+    tenant_connector_status / l1_entities are a REAL second layer — isolation no
+    longer rests on the explicit ``WHERE id = %s`` alone (that stays as
+    defence-in-depth). ``pool`` is injectable for tests, threaded into
+    tenant_connection so a test still exercises the app_role path.
     """
-    if pool is None:
-        from orchestrator.graph import get_pool
+    from orchestrator.db.tenant_connection import tenant_connection
 
-        pool = get_pool()
-
-    with pool.connection() as conn:
+    with tenant_connection(payload.tenant_id, pool=pool) as conn:
         with conn.cursor() as cur:
-            cur.execute(
-                "SELECT set_config('app.current_tenant', %s, false)",
-                (payload.tenant_id,),
-            )
-
             cur.execute(
                 """
                 SELECT business_name, business_type, preferred_language,
