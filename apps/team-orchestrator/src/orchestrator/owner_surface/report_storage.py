@@ -14,6 +14,7 @@ PUT.
 from __future__ import annotations
 
 import os
+import re
 from typing import Any, Protocol
 
 # Env var is TEAM_-namespaced + singular "REPORT" to avoid the reserved
@@ -21,11 +22,19 @@ from typing import Any, Protocol
 # scripts/lint-cross-product-env.mjs).
 REPORT_BUCKET = os.environ.get("TEAM_MONTHLY_REPORT_BUCKET", "monthly-reports")
 
+# VT-341: the path builder self-validates year_month (defense-in-depth — a future caller
+# must not be able to build a traversal path even if it forgets to pre-validate).
+_YEAR_MONTH_RE = re.compile(r"^[0-9]{4}-(0[1-9]|1[0-2])$")
+# A leaked signed URL replays for this window — keep it SHORT (a PII document). Cowork req.
+_DEFAULT_SIGNED_URL_TTL_SECONDS = 300
+
 
 class _StorageClient(Protocol):
     """Minimal shape we need from a Supabase Storage client (or a test mock)."""
 
     def upload(self, path: str, file: bytes, file_options: dict[str, Any]) -> Any: ...
+
+    def create_signed_url(self, path: str, expires_in: int) -> Any: ...
 
 
 def report_storage_path(tenant_id: str, year_month: str) -> str:
@@ -80,4 +89,37 @@ def store_report_pdf(
     return path
 
 
-__all__ = ["REPORT_BUCKET", "report_storage_path", "store_report_pdf"]
+def report_download_signed_url(
+    tenant_id: str,
+    year_month: str,
+    *,
+    ttl_seconds: int = _DEFAULT_SIGNED_URL_TTL_SECONDS,
+    client: _StorageClient | None = None,
+    bucket: str = REPORT_BUCKET,
+) -> str | None:
+    """VT-341: mint a SHORT-TTL (default 300s) signed URL for {tenant_id}/{year_month}.pdf.
+
+    The tenant_id MUST be the SESSION-derived value; year_month is re-validated HERE
+    (defense-in-depth — the path builder self-defends even if a caller forgets), so a crafted
+    ym/tenant can never reach another tenant's PDF. Returns the signed URL, or None on a bad
+    ym / absent object / storage error (the caller maps to 404)."""
+    if not _YEAR_MONTH_RE.match(year_month):
+        return None
+    path = report_storage_path(tenant_id, year_month)
+    storage = client if client is not None else _supabase_storage(bucket)
+    try:
+        result = storage.create_signed_url(path, ttl_seconds)
+    except Exception:
+        return None
+    if not isinstance(result, dict):
+        return None
+    # storage3 key varies by version: signedURL | signedUrl | signed_url
+    return result.get("signedURL") or result.get("signedUrl") or result.get("signed_url")
+
+
+__all__ = [
+    "REPORT_BUCKET",
+    "report_download_signed_url",
+    "report_storage_path",
+    "store_report_pdf",
+]
