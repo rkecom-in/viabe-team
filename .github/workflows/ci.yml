@@ -135,6 +135,30 @@ jobs:
           fi
           echo "No deprecated create_react_agent imports found."
 
+  gate-no-price-literals:
+    name: gate-no-price-literals
+    needs: changes
+    if: needs.changes.outputs.web == 'true' || needs.changes.outputs.orchestrator == 'true' || needs.changes.outputs.ci == 'true'
+    runs-on: ubuntu-latest
+    # VT-331 Pillar 7: the PLAN prices are NEVER hardcoded — they live in
+    # config/plans.yaml (the orchestrator resolves them authoritatively from there +
+    # env). Reject the specific plan paise literals in non-config TS/PY so a price can't
+    # drift into code where a bug could charge/subscribe at the wrong amount. (Bare `₹`
+    # is intentionally NOT matched — it's used legitimately for cost budgets, display,
+    # and rupee parsing across the codebase.)
+    steps:
+      - uses: actions/checkout@v6
+      - name: No hardcoded plan prices (Pillar 7)
+        run: |
+          if grep -rnE '\b(249900|499900|1499900)\b' \
+              apps/team-web apps/team-orchestrator/src \
+              --include="*.ts" --include="*.tsx" --include="*.py" \
+              | grep -vE '/config/|\.test\.|/tests/|test_'; then
+            echo "::error::hardcoded plan-price literal (Pillar 7) — use config/plans.yaml + env"
+            exit 1
+          fi
+          echo "gate-no-price-literals: ok"
+
   gate-no-llm-in-deterministic-triggers:
     name: gate-no-llm-in-deterministic-triggers
     needs: changes

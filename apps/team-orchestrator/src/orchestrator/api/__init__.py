@@ -20,12 +20,14 @@ from orchestrator.api.signup import router as signup_router
 from orchestrator.api.shopify_oauth import router as shopify_oauth_router
 from orchestrator.api.shopify_webhook import router as shopify_webhook_router
 from orchestrator.api.razorpay_ingress import router as razorpay_ingress_router
+from orchestrator.api.razorpay_subscribe import router as razorpay_subscribe_router
 from orchestrator.api.twilio_ingress import router as twilio_ingress_router
 from orchestrator.api.whatsapp_oauth import router as whatsapp_oauth_router
 
 router = APIRouter()
 router.include_router(twilio_ingress_router)
 router.include_router(razorpay_ingress_router)  # VT-89
+router.include_router(razorpay_subscribe_router)  # VT-331
 router.include_router(ops_resolve_router)
 router.include_router(ops_runcontrol_router)
 router.include_router(owner_verify_router)
