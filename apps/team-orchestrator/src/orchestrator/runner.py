@@ -594,6 +594,22 @@ def webhook_pipeline_run(tenant_id: str, run_id: str, twilio_fields: dict) -> di
     # result.kind == "reject" → observability-only; the run ends clean (completed).
 
     close_webhook_run(tenant_id, run_id, final_status)
+
+    # VT-88 SupportBot: on an UNRESOLVED terminal the owner must get SOMETHING (not silence)
+    # — an ack; the 2nd+ unresolved run in 24h also escalates to Fazal. Runs AFTER the status
+    # is persisted (the deterministic counter includes this run). Best-effort — the fallback
+    # must never break the durable run.
+    try:
+        from orchestrator.owner_surface.support_bot import maybe_escalate_support
+
+        maybe_escalate_support(
+            tenant_id=tenant_id, run_id=run_id, event=event, final_status=final_status
+        )
+    except Exception:  # noqa: BLE001 — the fallback must never break the workflow
+        logger.exception(
+            "VT-88 support escalation hook failed (tenant=%s run=%s)", tenant_id, run_id
+        )
+
     return {
         "run_id": run_id,
         "tenant_id": tenant_id,
