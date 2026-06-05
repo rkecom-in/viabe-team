@@ -15,6 +15,7 @@ counter lands — never a half-built counter (no-stale).
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from dataclasses import dataclass
@@ -52,6 +53,7 @@ class SignupResult:
     tenant_id: UUID
     created: bool  # False ⇒ duplicate whatsapp_number (endpoint → 409)
     plan_tier: str | None  # None on a duplicate (no new tenant created)
+    city_tier: str | None  # None on a duplicate
 
 
 def _utcnow() -> datetime:
@@ -76,20 +78,25 @@ def _disclosure_versions() -> tuple[str, str]:
 def create_signup_tenant(
     *,
     business_name: str,
+    owner_name: str,
     whatsapp_number: str,
     preferred_language: str,
+    city: str,
     business_type: str,
     consent_dpdpa: bool,
     consent_residency: bool,
     founding_counter_fn: Callable[[], bool] | None = None,
     now_fn: Callable[[], datetime] | None = None,
 ) -> SignupResult:
-    """Atomically create the signup tenant + consent proof + trial init.
+    """Atomically create the signup tenant + consent proof + trial + city_tier +
+    owner_name, in ONE service_role transaction.
 
-    One service_role txn: INSERT tenants (ON CONFLICT whatsapp_number → no row, the
-    duplicate case) + INSERT consent_records + emit TENANT_CREATED. Drains post-commit.
-    Pillar-7: BOTH consents must be true — a false consent never reaches here (the
-    endpoint rejects it); this core asserts it as defense-in-depth.
+    EVERYTHING-or-nothing (review: half-built-tenant fix): the tenants row (incl
+    the coarsened city_tier, computed before the txn — raw city discarded, VT-317),
+    consent_records, and the business_profile owner_name merge all commit together.
+    A post-commit failure can no longer leave a burned whatsapp_number with NULL
+    city_tier. ON CONFLICT → no row = the duplicate case (endpoint 409).
+    Pillar-7: both consents required (defense-in-depth; the endpoint also gates).
     """
     if not (consent_dpdpa and consent_residency):
         raise ValueError("signup requires both DPDPA and residency consent (Pillar 7)")
@@ -101,10 +108,12 @@ def create_signup_tenant(
     from orchestrator.graph import get_pool
     from orchestrator.knowledge.kg_emit import drain_kg_events, emit_kg_event
     from orchestrator.knowledge.kg_vocab import KgEventType
+    from orchestrator.privacy.coarsening import coarsen_city
 
     now = (now_fn or _utcnow)()
     plan_tier = "founding" if (founding_counter_fn or _default_founding_counter)() else "standard"
     dpdpa_version, residency_version = _disclosure_versions()
+    city_tier = str(coarsen_city(city))  # VT-317: raw city is discarded here.
 
     pool = get_pool()
     with pool.connection() as conn, conn.transaction():
@@ -112,24 +121,23 @@ def create_signup_tenant(
             """
             INSERT INTO tenants
                 (business_name, plan_tier, phase, whatsapp_number, preferred_language,
-                 business_type, signed_up_at, trial_started_at, phase_entered_at,
-                 created_via)
-            VALUES (%s, %s, 'onboarding', %s, %s, %s, %s, %s, %s, 'web')
+                 business_type, city_tier, signed_up_at, trial_started_at,
+                 phase_entered_at, created_via)
+            VALUES (%s, %s, 'onboarding', %s, %s, %s, %s, %s, %s, %s, 'web')
             ON CONFLICT (whatsapp_number) WHERE whatsapp_number IS NOT NULL
             DO NOTHING
             RETURNING id
             """,
             (business_name, plan_tier, whatsapp_number, preferred_language,
-             business_type, now, now, now),
+             business_type, city_tier, now, now, now),
         ).fetchone()
 
         if row is None:
-            # Duplicate whatsapp_number — the unique identity already signed up.
             existing = conn.execute(
                 "SELECT id FROM tenants WHERE whatsapp_number = %s", (whatsapp_number,)
             ).fetchone()
             tid = UUID(str(cast("dict[str, Any]", existing)["id"]))
-            return SignupResult(tenant_id=tid, created=False, plan_tier=None)
+            return SignupResult(tenant_id=tid, created=False, plan_tier=None, city_tier=None)
 
         tid = UUID(str(cast("dict[str, Any]", row)["id"]))
         conn.execute(
@@ -142,13 +150,28 @@ def create_signup_tenant(
             (str(tid), consent_dpdpa, consent_residency,
              dpdpa_version, residency_version, now),
         )
-        # CL-390: emit the real business_name only (no phone in the durable payload).
+        # owner_name → business_profile (where get_business_profile reads it), merged
+        # in the SAME txn (BYPASSRLS service_role; l1_entities one-per-tenant index).
+        conn.execute(
+            """
+            INSERT INTO l1_entities (tenant_id, entity_type, attributes)
+            VALUES (%s, 'business_profile', %s::jsonb)
+            ON CONFLICT (tenant_id) WHERE entity_type = 'business_profile'
+            DO UPDATE SET attributes = l1_entities.attributes || EXCLUDED.attributes
+            """,
+            (str(tid), json.dumps({"owner_name": owner_name})),
+        )
+        # CL-390 (review: kg_events outbox is durable + not DSR-purged): emit ONLY
+        # the non-PII business_type (drives the KG CLASSIFIED_AS) — NEVER the
+        # owner-provided business_name (subject data that would survive a DSR purge).
         emit_kg_event(conn, KgEventType.TENANT_CREATED, tid, {
-            "business_name": business_name,
+            "business_type": business_type,
         })
 
     drain_kg_events(tid)
-    return SignupResult(tenant_id=tid, created=True, plan_tier=plan_tier)
+    return SignupResult(
+        tenant_id=tid, created=True, plan_tier=plan_tier, city_tier=city_tier
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -207,7 +230,9 @@ def _validate(inp: SignupInput) -> None:
         folded = (field or "").casefold()
         if not folded.strip():
             raise SignupError("invalid_name", "business_name and owner_name are required")
-        if any(term in folded for term in blocked):
+        # Word-boundary match (review: unbounded substring false-positives on
+        # legitimate names, e.g. a 3-letter blocked token inside a real word).
+        if any(re.search(rf"\b{re.escape(term)}\b", folded) for term in blocked):
             raise SignupError("invalid_name", "name contains a disallowed term")
 
 
@@ -236,47 +261,45 @@ def run_signup(
     now_fn: Callable[[], datetime] | None = None,
 ) -> SignupOutcome:
     """The signup orchestration. Validate (→ SignupError on any field/consent) →
-    atomic create (→ SignupError 'duplicate' on a repeat whatsapp_number) →
-    set_tenant_city_tier (closes VT-317) → merge owner_name into business_profile →
-    welcome send (injectable, non-terminal)."""
+    ATOMIC create (tenant + consent + city_tier + owner_name in one txn; → SignupError
+    'duplicate' on a repeat whatsapp_number) → welcome send (injectable, GUARDED +
+    non-terminal — a raising send never fails a committed signup)."""
     _validate(inp)
     now = (now_fn or _utcnow)()
+    _now = now_fn or (lambda: now)  # single instant for both create + trial_end
 
     res = create_signup_tenant(
         business_name=inp.business_name,
+        owner_name=inp.owner_name,
         whatsapp_number=inp.whatsapp_number,
         preferred_language=inp.preferred_language,
+        city=inp.city,
         business_type=inp.business_type,
         consent_dpdpa=inp.consent_dpdpa,
         consent_residency=inp.consent_residency,
         founding_counter_fn=founding_counter_fn,
-        now_fn=now_fn,
+        now_fn=_now,
     )
     if not res.created:
         raise SignupError("duplicate", "this whatsapp_number is already registered")
 
-    # VT-317: capture the city → coarsen → tenants.city_tier (raw city discarded).
-    from orchestrator.privacy.coarsening import set_tenant_city_tier
-
-    city_tier = str(set_tenant_city_tier(res.tenant_id, inp.city))
-
-    # owner_name lives on business_profile (where get_business_profile reads it),
-    # merged (not clobbered) so later enrichment is preserved.
-    from orchestrator.knowledge.l1 import upsert_business_profile
-
-    upsert_business_profile(res.tenant_id, {"owner_name": inp.owner_name})
-
+    # Welcome send: GUARDED + non-terminal. The tenant is already committed; a send
+    # failure must NOT 500 the signup — log + report welcome_sent=False.
     trial_end = now + timedelta(days=_TRIAL_DAYS)
-    sent = (welcome_send_fn or _default_welcome)(
-        res.tenant_id, inp.whatsapp_number, inp.preferred_language,
-        inp.owner_name, trial_end,
-    )
+    sent = False
+    try:
+        sent = bool((welcome_send_fn or _default_welcome)(
+            res.tenant_id, inp.whatsapp_number, inp.preferred_language,
+            inp.owner_name, trial_end,
+        ))
+    except Exception:  # noqa: BLE001 — welcome is best-effort; never fail the signup
+        logger.exception("signup: welcome send failed tenant=%s (non-terminal)", res.tenant_id)
 
     return SignupOutcome(
         tenant_id=res.tenant_id,
         plan_tier=cast(str, res.plan_tier),
-        city_tier=city_tier,
-        welcome_sent=bool(sent),
+        city_tier=cast(str, res.city_tier),
+        welcome_sent=sent,
     )
 
 

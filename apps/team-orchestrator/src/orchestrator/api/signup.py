@@ -31,7 +31,16 @@ class SignupBody(BaseModel):
 
 
 @router.post("/api/signup", status_code=201)
-def signup(body: SignupBody) -> dict[str, str]:
+def signup(body: SignupBody) -> dict[str, object]:
+    # NEEDS-FAZAL: this is the SOLE, intentionally pre-auth owner-acquisition front
+    # door. It has NO rate-limiting and NO proof-of-control of the whatsapp_number
+    # (the regex is structural only). Two real gaps the review flagged: (1) unbounded
+    # tenant/consent-row creation on the BYPASSRLS pool (flooding); (2) number
+    # SQUATTING — first-writer-wins on the unique whatsapp_number, so an attacker can
+    # permanently 409-brick a number they don't own. The proper fix is OTP /
+    # proof-of-control BEFORE create (wire signup BEHIND the VT-250 owner-verify OTP)
+    # + a per-IP throttle. That's a launch-blocking security decision for Fazal/VT-250,
+    # NOT built in this PR. Do not expose /api/signup publicly until it lands.
     from orchestrator.onboarding.signup import SignupError, SignupInput, run_signup
 
     try:
@@ -46,6 +55,7 @@ def signup(body: SignupBody) -> dict[str, str]:
         "tenant_id": str(out.tenant_id),
         "plan_tier": out.plan_tier,
         "city_tier": out.city_tier,
+        "welcome_sent": out.welcome_sent,
     }
 
 

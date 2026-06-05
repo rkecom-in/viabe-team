@@ -52,10 +52,11 @@ def test_create_signup_tenant_atomic(pool):
     wa = _wa()
     res = create_signup_tenant(
         business_name="Asha Kirana", whatsapp_number=wa,
-        preferred_language="hi", business_type="kirana", consent_dpdpa=True, consent_residency=True,
+        preferred_language="hi", owner_name="Owner X", city="Mumbai", business_type="kirana", consent_dpdpa=True, consent_residency=True,
     )
     assert res.created is True
-    assert res.plan_tier == "founding"  # stub until VT-10.6
+    assert res.plan_tier == "founding"
+    assert res.city_tier == "tier_1"  # Mumbai  # stub until VT-10.6
 
     with pool.connection() as c:
         t = c.execute(
@@ -85,11 +86,11 @@ def test_duplicate_whatsapp_number_not_created(pool):
     wa = _wa()
     r1 = create_signup_tenant(
         business_name="Branch One", whatsapp_number=wa,
-        preferred_language="en", business_type="kirana", consent_dpdpa=True, consent_residency=True,
+        preferred_language="en", owner_name="Owner X", city="Mumbai", business_type="kirana", consent_dpdpa=True, consent_residency=True,
     )
     r2 = create_signup_tenant(
         business_name="Branch One Again", whatsapp_number=wa,
-        preferred_language="en", business_type="kirana", consent_dpdpa=True, consent_residency=True,
+        preferred_language="en", owner_name="Owner X", city="Mumbai", business_type="kirana", consent_dpdpa=True, consent_residency=True,
     )
     assert r1.created is True
     assert r2.created is False  # endpoint maps this → 409
@@ -110,7 +111,7 @@ def test_consent_false_rejected(pool):
     with pytest.raises(ValueError):
         create_signup_tenant(
             business_name="No Consent Co", whatsapp_number=_wa(),
-            preferred_language="en", business_type="kirana", consent_dpdpa=True, consent_residency=False,
+            preferred_language="en", owner_name="Owner X", city="Mumbai", business_type="kirana", consent_dpdpa=True, consent_residency=False,
         )
 
 
@@ -119,8 +120,8 @@ def test_bad_business_type_rejected(pool):
 
     with pytest.raises(ValueError):
         create_signup_tenant(
-            business_name="Mystery Co", whatsapp_number=_wa(),
-            preferred_language="en", business_type="not_a_real_type",
+            business_name="Mystery Co", owner_name="X", whatsapp_number=_wa(),
+            preferred_language="en", city="Mumbai", business_type="not_a_real_type",
             consent_dpdpa=True, consent_residency=True,
         )
 
@@ -254,3 +255,42 @@ def test_signup_route_status_mapping(pool):
     r_phone = client.post("/api/signup", json={**body, "whatsapp_number": "+1202555"})
     assert r_phone.status_code == 400
     assert r_phone.json()["detail"]["code"] == "invalid_phone"
+
+
+def test_signup_kg_event_has_no_business_name_pii(pool):
+    """Review/CL-390: the TENANT_CREATED outbox payload (durable, NOT DSR-purged)
+    must NOT carry business_name (owner subject data) — only the non-PII business_type."""
+    from orchestrator.onboarding.signup import create_signup_tenant
+
+    res = create_signup_tenant(
+        business_name="Secret Biz Name", owner_name="X", whatsapp_number=_wa(),
+        preferred_language="en", city="Mumbai", business_type="kirana",
+        consent_dpdpa=True, consent_residency=True,
+    )
+    with pool.connection() as c:
+        rows = c.execute(
+            "SELECT payload FROM kg_events WHERE tenant_id = %s "
+            "AND event_type = 'tenant_created'", (str(res.tenant_id),),
+        ).fetchall()
+    assert rows, "no tenant_created event emitted"
+    for r in rows:
+        p = r["payload"]
+        assert "business_name" not in p, "business_name PII leaked into durable kg_events"
+        assert p.get("business_type") == "kirana"
+
+
+def test_consent_records_is_pii_free_schema(pool):
+    """Review: consent_records' DSR-retention safety RESTS on it being PII-free.
+    Enforce that — only the known booleans/versions/timestamps, no name/phone/email."""
+    allowed = {
+        "id", "tenant_id", "consent_dpdpa", "consent_residency",
+        "dpdpa_version", "residency_version", "signed_up_at", "created_at",
+    }
+    with pool.connection() as c:
+        cols = {
+            r["column_name"] for r in c.execute(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_name = 'consent_records'"
+            ).fetchall()
+        }
+    assert cols <= allowed, f"consent_records has unexpected (possibly-PII) columns: {cols - allowed}"

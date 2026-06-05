@@ -31,4 +31,8 @@ business_types:
   - {key: fitness,       label_en: "Gym / fitness",               label_hi: "जिम / फिटनेस"}
   - {key: education,     label_en: "Coaching / education",        label_hi: "कोचिंग / शिक्षा"}
   - {key: healthcare,    label_en: "Clinic / healthcare",         label_hi: "क्लिनिक / हेल्थकेयर"}
+  - {key: jewellery,     label_en: "Jewellery",                   label_hi: "ज्वेलरी / गहने"}
+  - {key: footwear,      label_en: "Footwear",                    label_hi: "जूते-चप्पल"}
+  - {key: dairy,         label_en: "Dairy / milk",                label_hi: "डेयरी / दूध"}
+  - {key: auto_garage,   label_en: "Auto / garage / spares",      label_hi: "ऑटो / गैराज / पार्ट्स"}
   - {key: other,         label_en: "Other",                       label_hi: "अन्य"}
