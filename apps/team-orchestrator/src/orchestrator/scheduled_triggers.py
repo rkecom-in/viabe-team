@@ -459,10 +459,12 @@ def run_day39_evaluation_body(now: datetime | None = None) -> list[Any]:
     Scans tenants where ``paid_conversion_at + 39 days <= now`` and phase
     ∈ {paid_active, paid_at_risk}, with no prior day39_* event. For each:
     calls :func:`orchestrator.billing.day39_evaluator.evaluate_day39`.
-    Refund branch ALSO calls :func:`orchestrator.transitions.apply_transition`
-    with event ``day39_refund_triggered`` — the TRANSITIONS table maps
-    that to ``refunded`` phase (CL-104; apply_transition is the SOLE
-    public phase mutator).
+    Refund branch (VT-85) sends an OFFER via :func:`_send_day39_refund_offer`: it
+    parks the tenant in ``refund_offered`` (apply_transition with event
+    ``day39_refund_offered``) — NO auto-refund. The owner's REFUND/CONTINUE/DISCUSS
+    reply (or the 48h timeout -> CONTINUE) resolves it; the actual refund fires only
+    on REFUND (VT-93 execute_refund). (CL-104; apply_transition is the SOLE public
+    phase mutator.)
 
     ``apply_transition`` is a ``@DBOS.step``; calling it from a
     synchronous test path outside a DBOS workflow can fail (DBOS context

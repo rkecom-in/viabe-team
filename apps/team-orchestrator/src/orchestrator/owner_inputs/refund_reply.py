@@ -36,11 +36,31 @@ _REFUND_KW = {"refund", "रिफंड", "रिफ़ंड"}
 _CONTINUE_KW = {"continue", "जारी", "रखें"}
 _DISCUSS_KW = {"discuss", "चर्चा"}
 
-# A reply that NEGATES or QUESTIONS is NOT a decision — a financial decision must
-# never be guessed from a benign sentence that merely contains a keyword ("I will
-# NOT refund", "Can I understand the refund policy?"). Any of these tokens (or a
-# '?') -> None (fall through; the 48h timeout defaults to CONTINUE).
-_NEGATION = {"not", "no", "never", "dont", "नहीं", "मत", "ना", "न"}
+# A reply that NEGATES, QUESTIONS, or signals OPT-OUT/DSR intent is NOT a refund
+# decision — a financial decision must never be guessed from a sentence that merely
+# contains a keyword. Apostrophes are stripped before matching so contractions
+# collapse ("don't" -> "dont", "won't" -> "wont") and the negation set catches them.
+_NEGATION = {
+    "not",
+    "no",
+    "never",
+    "nah",
+    "dont",
+    "wont",
+    "cant",
+    "shouldnt",
+    "wouldnt",
+    "couldnt",
+    "doesnt",
+    "didnt",
+    "isnt",
+    "arent",
+    "wasnt",
+    "नहीं",
+    "मत",
+    "ना",
+    "न",
+}
 _INTERROGATIVE = {
     "can",
     "could",
@@ -57,21 +77,33 @@ _INTERROGATIVE = {
     "कब",
     "कौन",
 }
+# Opt-out / DSR intent ALWAYS wins over a refund interpretation (DPDP) — "STOP ...
+# refund ...", "delete my data and refund me" must NOT auto-refund. Any of these
+# tokens -> None. (The runner gate ALSO bails on the authoritative pre_filter
+# opt-out/DSR patterns before this classifier runs — belt + suspenders.)
+_OPT_OUT_HINT = {"stop", "unsubscribe", "cancel", "quit", "remove", "delete", "erase"}
 
 
 def classify_refund_reply(body: str) -> RefundDecision | None:
     """Deterministic keyword-first classify. Returns the decision on a CLEAR,
     UNAMBIGUOUS single-category match, else None (zero matches OR more than one
     category present — never guess; the 48h timeout defaults to CONTINUE)."""
-    normalized = unicodedata.normalize("NFC", (body or "").strip().casefold())
+    # Strip apostrophes so contractions collapse (don't -> dont) BEFORE tokenizing,
+    # so the negation set matches them — otherwise "don't" -> {don, t} and the
+    # 'dont' negation token never fires (the BLOCKER: "don't refund me" -> REFUND).
+    normalized = (
+        unicodedata.normalize("NFC", (body or "").strip().casefold())
+        .replace("'", "")
+        .replace("’", "")
+    )
     if "?" in normalized:
         return None  # a question is not a decision (Pillar 7 — never guess)
     # Split on whitespace + punctuation ONLY — NOT [^\w], which shatters Devanagari
     # clusters: combining vowel signs (matras ◌ा ◌ी) are not \w, so जारी would split
     # into ज / र and never match. Whitespace/punct split keeps the cluster whole.
-    tokens = {t for t in re.split(r"[\s,.!?;:।/\\'-]+", normalized) if t}
-    if tokens & _NEGATION or tokens & _INTERROGATIVE:
-        return None  # negation / interrogative token -> never guess a financial decision
+    tokens = {t for t in re.split(r"[\s,.!?;:।/\\-]+", normalized) if t}
+    if tokens & _NEGATION or tokens & _INTERROGATIVE or tokens & _OPT_OUT_HINT:
+        return None  # negation / question / opt-out|DSR intent -> never guess a refund
     matched: list[RefundDecision] = []
     if tokens & _REFUND_KW:
         matched.append("refund")

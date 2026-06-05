@@ -55,6 +55,17 @@ def _phone_salt(monkeypatch):
         ("i will not refund", None),  # negation
         ("no refund", None),  # negation
         ("क्या बात है", None),  # benign HI ("what's up") — बात dropped + क्या interrogative
+        # B1 (Cowork blocker): contraction negations must NOT auto-refund:
+        ("don't refund me", None),
+        ("won't refund", None),
+        ("please don't refund me!", None),
+        ("i won't take the refund", None),
+        ("can't refund", None),
+        # B2 (Cowork blocker): opt-out / DSR intent must NOT auto-refund:
+        ("delete my data and refund me", None),
+        ("stop sending me refund messages", None),
+        ("please refund me also unsubscribe", None),
+        ("cancel and refund", None),
         ("", None),
     ],
 )
@@ -245,16 +256,29 @@ def test_inbound_gate_routes_only_refund_offered(_dbpool, _patch_transition, mon
 
 
 @pytest.mark.integration
-def test_unclear_reply_falls_through(_dbpool, _patch_transition) -> None:
-    """A refund_offered tenant's UNCLEAR reply (DSR/benign) must NOT be consumed —
-    returns None so pre_filter (DSR/opt-out) still handles it."""
+def test_unclear_reply_falls_through(_dbpool, _patch_transition, monkeypatch) -> None:
+    """A refund_offered tenant's UNCLEAR reply (benign/DSR/opt-out) must NOT be
+    consumed — returns None so pre_filter (DSR/opt-out) still handles it. Opt-out/DSR
+    ALWAYS win over a co-occurring refund keyword (Cowork B2); contraction negations
+    do not auto-refund (Cowork B1)."""
     from orchestrator.runner import try_resume_pending_refund_offer
 
+    # if the gate ever consumed one of these, execute_refund would fire — fail loud
+    monkeypatch.setattr(
+        "orchestrator.billing.refund_executor.execute_refund",
+        lambda tid, reason: pytest.fail("refund must NOT fire on a DSR/opt-out/negation reply"),
+    )
     tid = uuid4()
     _seed_paid(_dbpool, tid)
     _set_phase(_dbpool, tid, "refund_offered")
-    assert try_resume_pending_refund_offer(str(tid), "please delete my data", "SM3") is None
-    assert try_resume_pending_refund_offer(str(tid), "क्या बात है", "SM4") is None
+    for body in (
+        "please delete my data",
+        "क्या बात है",
+        "delete my data and refund me",  # B2: DSR + refund co-occur -> DSR wins
+        "stop sending me refund messages",  # B2: opt-out intent + refund -> None
+        "don't refund me",  # B1: contraction negation
+    ):
+        assert try_resume_pending_refund_offer(str(tid), body, "SMx") is None
     assert _phase(_dbpool, tid) == "refund_offered"  # untouched — Fazal/timeout resolves
 
 

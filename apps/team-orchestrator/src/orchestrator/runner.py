@@ -77,9 +77,7 @@ def invoke_graph(tenant_id: str, run_id: str, inbound: str) -> list[str]:
         "run_id": UUID(run_id),
         "history": [inbound],
     }
-    result = get_compiled_graph().invoke(
-        state, config={"configurable": {"thread_id": run_id}}
-    )
+    result = get_compiled_graph().invoke(state, config={"configurable": {"thread_id": run_id}})
     return list(result["history"])
 
 
@@ -93,8 +91,7 @@ def close_run(tenant_id: str, run_id: str) -> None:
     """
     with tenant_connection(tenant_id) as conn:
         conn.execute(
-            "UPDATE pipeline_runs SET status = 'completed', ended_at = now() "
-            "WHERE id = %s",
+            "UPDATE pipeline_runs SET status = 'completed', ended_at = now() WHERE id = %s",
             (run_id,),
         )
 
@@ -175,9 +172,8 @@ def open_webhook_run(tenant_id: str, run_id: str, trigger_payload: dict) -> None
             "ON CONFLICT (id) DO NOTHING",
             (run_id, tenant_id, Jsonb(safe_payload)),
         )
-        if (
-            trigger_payload.get("message_type") == "inbound_message"
-            and not trigger_payload.get("dupe_status")
+        if trigger_payload.get("message_type") == "inbound_message" and not trigger_payload.get(
+            "dupe_status"
         ):
             from orchestrator.knowledge.l2_types import L2EventType
             from orchestrator.knowledge.l2_writer import (
@@ -245,9 +241,7 @@ def close_webhook_run(tenant_id: str, run_id: str, status: str) -> None:
 
 # Dispatch final_status values that mean the agent dispatch TERMINATED (failure/
 # limit), vs 'completed' (success) and 'paused' (not terminal — resumes later).
-_DISPATCH_TERMINATED_STATUSES = frozenset(
-    {"aborted_hard_limit", "escalated", "failed"}
-)
+_DISPATCH_TERMINATED_STATUSES = frozenset({"aborted_hard_limit", "escalated", "failed"})
 
 
 @DBOS.step()
@@ -270,8 +264,7 @@ def record_dispatch_terminal_episodic(
         payload = {"run_id": run_id, "outcome": terminal_path or final_status}
     elif final_status in _DISPATCH_TERMINATED_STATUSES:
         event_type = "agent_dispatch_terminated"
-        payload = {"run_id": run_id, "reason": final_status,
-                   "terminal_path": terminal_path}
+        payload = {"run_id": run_id, "reason": final_status, "terminal_path": terminal_path}
     else:
         return  # paused / unrecognised → not a terminal decision
     try:
@@ -291,7 +284,9 @@ def record_dispatch_terminal_episodic(
     except Exception:  # noqa: BLE001 — L2 projection must never fail the workflow
         logger.exception(
             "VT-309 dispatch-terminal L2 emit failed (tenant=%s run=%s status=%s)",
-            tenant_id, run_id, final_status,
+            tenant_id,
+            run_id,
+            final_status,
         )
 
 
@@ -333,9 +328,7 @@ def record_inbound_message_sid(tenant_id: str, message_sid: str) -> bool:
 
 
 @DBOS.step()
-def try_resume_pending_approval(
-    tenant_id: str, body: str, message_sid: str | None
-) -> str | None:
+def try_resume_pending_approval(tenant_id: str, body: str, message_sid: str | None) -> str | None:
     """VT-47 — if the tenant has a PAUSED run awaiting owner approval, treat
     this inbound message as the approval decision and resume that run.
 
@@ -380,7 +373,8 @@ def try_resume_pending_approval(
             conn, tenant_id, approval["id"], decision, owner_message_sid=message_sid
         )
         _l2_event = {
-            "approved": "campaign_approved", "rejected": "campaign_rejected",
+            "approved": "campaign_approved",
+            "rejected": "campaign_rejected",
         }.get(decision)
         # Only campaign approvals map to an L2 milestone; other approval_types
         # (sensitive_data_access, …) have no campaign_* episodic type.
@@ -400,9 +394,7 @@ def try_resume_pending_approval(
                 },
                 referenced_entity_type="campaign" if _campaign_id else "approval",
                 referenced_entity_id=_campaign_id or approval["id"],
-                event_id=deterministic_event_id(
-                    tenant_id, _l2_event, approval["id"]
-                ),
+                event_id=deterministic_event_id(tenant_id, _l2_event, approval["id"]),
                 conn=conn,
             )
 
@@ -415,7 +407,10 @@ def try_resume_pending_approval(
 
     logger.info(
         "approval-resume: resolved tenant=%s approval=%s run=%s decision=%s",
-        tenant_id, approval["id"], paused_run_id, decision,
+        tenant_id,
+        approval["id"],
+        paused_run_id,
+        decision,
     )
     return decision
 
@@ -442,6 +437,15 @@ def try_resume_pending_refund_offer(
     if row is None or row["phase"] != "refund_offered":
         return None
 
+    # Opt-out / DSR ALWAYS win over a refund interpretation (DPDP): if the reply also
+    # matches an opt-out or DSR pattern, bail to fall-through so pre_filter routes it
+    # to the opt_out / dsr handler — a refund_offered tenant who says "delete my data
+    # and refund me" or "STOP" must NOT auto-refund.
+    from orchestrator.pre_filter_gate import matches_opt_out_or_dsr
+
+    if matches_opt_out_or_dsr(body):
+        return None
+
     from orchestrator.owner_inputs.refund_reply import (
         classify_refund_reply,
         handle_refund_decision,
@@ -455,9 +459,7 @@ def try_resume_pending_refund_offer(
 
 
 @DBOS.workflow()
-def webhook_pipeline_run(
-    tenant_id: str, run_id: str, twilio_fields: dict
-) -> dict[str, Any]:
+def webhook_pipeline_run(tenant_id: str, run_id: str, twilio_fields: dict) -> dict[str, Any]:
     """Durable inbound-webhook pipeline: dedup -> ingress -> Pre-Filter -> handler.
 
     Started by /api/orchestrator/twilio-ingress with a workflow_id derived from
@@ -558,9 +560,7 @@ def webhook_pipeline_run(
         # no body, so there is nothing to gate. Fail-closed: FALSE/unknown →
         # NO transmit; send the conservative enable-prompt instead. The owner
         # turns it on via the enable keyword (data_inputs_enable_handler).
-        if event.message_type == "inbound_message" and not _brain_owner_inputs_ok(
-            tenant_id
-        ):
+        if event.message_type == "inbound_message" and not _brain_owner_inputs_ok(tenant_id):
             handler_name = "consent_required_handler"
             routed = "consent_required"
             HANDLERS[handler_name](event, state)
