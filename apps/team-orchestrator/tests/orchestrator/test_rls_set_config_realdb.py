@@ -230,6 +230,20 @@ def test_get_business_profile_scopes_and_denies(dsn, tenants):
     # (tenants keys tenant identity on its own ``id`` column.)
     assert _count_other(dsn, scoped_to=a, table="tenants", other=b, col="id") == 0
 
+    # VT-342: get_business_profile now runs under tenant_connection (SET ROLE app_role + GUC),
+    # so RLS is a REAL second layer, not WHERE-id-only. Prove the SAME primitive it uses
+    # blocks cross-tenant — under GUC=A, B's row is invisible EVEN WHEN the WHERE matches B's
+    # id (RLS denies it, not the WHERE predicate).
+    from orchestrator.db.tenant_connection import tenant_connection
+
+    with tenant_connection(a, pool=pool) as conn:
+        assert (
+            conn.execute(
+                "SELECT business_name FROM tenants WHERE id = %s", (b,)
+            ).fetchone()
+            is None
+        )
+
 
 def test_schedule_followup_writes_and_denies(dsn, tenants, seed_conn):
     from orchestrator.agent.tools.schedule_followup import (
