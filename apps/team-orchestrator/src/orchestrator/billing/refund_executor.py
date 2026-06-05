@@ -301,6 +301,19 @@ def execute_refund(
             notification_pending=notification_pending,
         )
 
+    # VT-94: audit-only release of the founding slot (stamps released_at; the counter is
+    # NEVER decremented — no-reopen policy). Best-effort: a missed release leaves
+    # released_at NULL but never corrupts the counter (Cowork: zero integrity risk).
+    # Service-role pool — founding_tier_claims has no app_role UPDATE policy.
+    try:
+        from orchestrator.billing.founding_counter import release_founding_slot
+        from orchestrator.graph import get_pool
+
+        with get_pool().connection() as _fc_conn:
+            release_founding_slot(_fc_conn, tid)
+    except Exception:
+        logger.exception("founding-slot release failed (audit-only) tenant=%s", tid)
+
     # 5. Durable audit + observability.
     _audit(
         tid,

@@ -72,13 +72,6 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _default_founding_counter() -> bool:
-    """STUB until VT-10.6: every signup is 'founding'. Replace with the atomic
-    founding-counter CAS when it lands (injected via ``founding_counter_fn``)."""
-    # TODO(VT-10.6): gate on the atomic founding-tier counter (space → True).
-    return True
-
-
 def _disclosure_versions() -> tuple[str, str]:
     """(dpdpa_version, residency_version) from config — never free strings."""
     import yaml
@@ -97,7 +90,6 @@ def create_signup_tenant(
     business_type: str,
     consent_dpdpa: bool,
     consent_residency: bool,
-    founding_counter_fn: Callable[[], bool] | None = None,
     now_fn: Callable[[], datetime] | None = None,
 ) -> SignupResult:
     """Atomically create the signup tenant + consent proof + trial + city_tier +
@@ -117,13 +109,15 @@ def create_signup_tenant(
     if business_type not in valid_business_types():
         raise ValueError(f"business_type {business_type!r} not in the taxonomy")
 
+    from orchestrator.billing.founding_counter import try_claim_founding_slot
     from orchestrator.graph import get_pool
     from orchestrator.knowledge.kg_emit import drain_kg_events, emit_kg_event
     from orchestrator.knowledge.kg_vocab import KgEventType
     from orchestrator.privacy.coarsening import coarsen_city
 
     now = (now_fn or _utcnow)()
-    plan_tier = "founding" if (founding_counter_fn or _default_founding_counter)() else "standard"
+    # VT-94: default standard; upgraded to 'founding' IN-txn iff a counter slot is claimed.
+    plan_tier = "standard"
     dpdpa_version, residency_version = _disclosure_versions()
     city_tier = str(coarsen_city(city))  # VT-317: raw city is discarded here.
 
@@ -148,6 +142,14 @@ def create_signup_tenant(
             existing = conn.execute(
                 "SELECT id FROM tenants WHERE whatsapp_number = %s", (whatsapp_number,)
             ).fetchone()
+            if existing is None:
+                # Extreme race: the conflicting tenant was deleted between the INSERT
+                # conflict and this SELECT. Raise a CLEAR error instead of crashing on a
+                # None subscript (a cryptic AttributeError -> 500). (Pre-existing VT-82
+                # hardening, surfaced by the VT-94 review.)
+                raise RuntimeError(
+                    "signup conflict but the conflicting tenant vanished (concurrent delete)"
+                )
             tid = UUID(str(cast("dict[str, Any]", existing)["id"]))
             return SignupResult(tenant_id=tid, created=False, plan_tier=None, city_tier=None)
 
@@ -179,6 +181,15 @@ def create_signup_tenant(
         emit_kg_event(conn, KgEventType.TENANT_CREATED, tid, {
             "business_type": business_type,
         })
+        # VT-94: claim a founding slot as LATE as possible in the txn (shortest lock
+        # hold). Atomic with the tenant create — a rolled-back signup never leaks a slot
+        # (slots are never released, so a leak would be permanent). A claim upgrades the
+        # tenant 'standard' -> 'founding'; at cap it stays 'standard'.
+        if try_claim_founding_slot(conn, tid).claimed:
+            conn.execute(
+                "UPDATE tenants SET plan_tier = 'founding' WHERE id = %s", (str(tid),)
+            )
+            plan_tier = "founding"
 
     drain_kg_events(tid)
     return SignupResult(
@@ -269,7 +280,6 @@ def run_signup(
     inp: SignupInput,
     *,
     welcome_send_fn: Callable[..., bool] | None = None,
-    founding_counter_fn: Callable[[], bool] | None = None,
     now_fn: Callable[[], datetime] | None = None,
 ) -> SignupOutcome:
     """The signup orchestration. Validate (→ SignupError on any field/consent) →
@@ -289,7 +299,6 @@ def run_signup(
         business_type=inp.business_type,
         consent_dpdpa=inp.consent_dpdpa,
         consent_residency=inp.consent_residency,
-        founding_counter_fn=founding_counter_fn,
         now_fn=_now,
     )
     if not res.created:

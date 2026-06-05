@@ -152,6 +152,7 @@ _PURGE_ORDER: tuple[str, ...] = (
     # sets orchestrator.dsr_purge_in_progress so the completed-row immutability
     # trigger (mig 099) permits this delete.
     "refund_executions",
+    "founding_tier_claims",  # VT-94: per-tenant founding claim (audit) — hard-delete on DSR
     "owner_inputs",
     "campaigns",
     "pipeline_steps",
