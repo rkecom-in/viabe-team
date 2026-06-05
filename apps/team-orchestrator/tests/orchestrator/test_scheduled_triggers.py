@@ -146,7 +146,7 @@ def test_day39_body_delegates_and_invokes_refund_transition(monkeypatch) -> None
 
     transition_calls: list[UUID] = []
     monkeypatch.setattr(
-        st, "_apply_day39_refund_transition", lambda tid: transition_calls.append(tid)
+        st, "_send_day39_refund_offer", lambda tid, verdict: transition_calls.append(tid)
     )
 
     out = st.run_day39_evaluation_body(
@@ -176,7 +176,7 @@ def test_day39_body_continue_branch_skips_refund_transition(monkeypatch) -> None
 
     transition_calls: list[UUID] = []
     monkeypatch.setattr(
-        st, "_apply_day39_refund_transition", lambda tid: transition_calls.append(tid)
+        st, "_send_day39_refund_offer", lambda tid, verdict: transition_calls.append(tid)
     )
 
     st.run_day39_evaluation_body(now=datetime(2026, 5, 26, 6, 0, tzinfo=timezone.utc))
@@ -202,7 +202,7 @@ def test_day39_body_replays_skip_refund_transition(monkeypatch) -> None:
 
     transition_calls: list[UUID] = []
     monkeypatch.setattr(
-        st, "_apply_day39_refund_transition", lambda tid: transition_calls.append(tid)
+        st, "_send_day39_refund_offer", lambda tid, verdict: transition_calls.append(tid)
     )
 
     st.run_day39_evaluation_body(now=datetime(2026, 5, 26, 6, 0, tzinfo=timezone.utc))
@@ -492,7 +492,7 @@ def test_register_scheduled_triggers_idempotent(monkeypatch) -> None:
     # VT-47 5th (owner-approval timeout sweep); VT-68 6th (nightly L3 construction);
     # VT-76 7th (reconstitution sweep); VT-304 8th (audit-chain verify); VT-305 9th
     # (PII-in-log sweep); VT-307 10th (KG-drain straggler sweep); VT-311 11th
-    # (L2 retention soft-delete sweep).
-    assert first == 12, "expected 12 triggers registered on first call"
-    assert second == 12, "second call must short-circuit (idempotent)"
+    # (L2 retention soft-delete sweep); VT-85 12th (refund-offer 48h timeout sweep).
+    assert first == 13, "expected 13 triggers registered on first call"
+    assert second == 13, "second call must short-circuit (idempotent)"
     st._registered = False

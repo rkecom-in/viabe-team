@@ -40,16 +40,13 @@ _OPT_OUT_KEYWORDS = {kw.casefold() for kw in _load_keywords("opt_out_keywords.ya
 # VT-303 — data-inputs ENABLE (opt-in / consent-grant): exact match (case-
 # insensitive) on the whole trimmed body, the inverse of opt-out. Routes to
 # data_inputs_enable_handler which sets tenants.owner_inputs = true.
-_ENABLE_KEYWORDS = {
-    kw.casefold() for kw in _load_keywords("data_inputs_enable_keywords.yaml")
-}
+_ENABLE_KEYWORDS = {kw.casefold() for kw in _load_keywords("data_inputs_enable_keywords.yaml")}
 
 # DSR: case-insensitive, word-boundary match anywhere in the body. Word
 # boundaries keep matching conservative (e.g. "my data" does not fire on
 # "my database").
 _DSR_PATTERNS = [
-    re.compile(rf"\b{re.escape(kw)}\b", re.IGNORECASE)
-    for kw in _load_keywords("dsr_keywords.yaml")
+    re.compile(rf"\b{re.escape(kw)}\b", re.IGNORECASE) for kw in _load_keywords("dsr_keywords.yaml")
 ]
 
 # Status ping: narrow regex — matches ONLY a whole-message trivial query.
@@ -83,6 +80,17 @@ def _normalize(body: str) -> str:
     return " ".join(body.split()).casefold()
 
 
+def matches_opt_out_or_dsr(body: str) -> bool:
+    """True if ``body`` is an opt-out (exact normalized whole-body keyword) or
+    contains a DSR keyword (word-boundary). The VT-85 refund-offer reply gate calls
+    this to YIELD to opt-out / DSR routing — those ALWAYS win over a refund-decision
+    interpretation (DPDP): a refund_offered tenant who says "delete my data and
+    refund me" or "STOP" must reach the dsr/opt-out handler, not auto-refund."""
+    if _normalize(body) in _OPT_OUT_KEYWORDS:
+        return True
+    return any(pat.search(body or "") for pat in _DSR_PATTERNS)
+
+
 @DBOS.step()
 def pre_filter(event: WebhookEvent, state: SubscriberState) -> PreFilterResult:
     """Deterministically route a webhook event. See the module docstring.
@@ -106,9 +114,7 @@ def pre_filter(event: WebhookEvent, state: SubscriberState) -> PreFilterResult:
                 payload={"twilio_message_sid": event.twilio_message_sid},
             )
         if state in ("delivered", "read"):
-            return Reject(
-                reason=f"status callback '{state}' — observability only (VT-122)"
-            )
+            return Reject(reason=f"status callback '{state}' — observability only (VT-122)")
         # 'undelivered' or missing — conservative: let the brain decide.
         return RouteToBrain(reason=f"status callback state '{state}' — needs review")
 
@@ -117,9 +123,7 @@ def pre_filter(event: WebhookEvent, state: SubscriberState) -> PreFilterResult:
 
     # Rule a — opt-out keyword (exact, case-insensitive, EN + HI).
     if normalized in _OPT_OUT_KEYWORDS:
-        return RouteToDirectHandler(
-            handler_name="opt_out_handler", payload={"matched": normalized}
-        )
+        return RouteToDirectHandler(handler_name="opt_out_handler", payload={"matched": normalized})
 
     # Rule a2 — VT-303 data-inputs ENABLE keyword (exact, case-insensitive).
     # The consent-grant phrase. Routed here (a direct handler, no LLM) so an
@@ -144,13 +148,9 @@ def pre_filter(event: WebhookEvent, state: SubscriberState) -> PreFilterResult:
     # Rule g — integration intent (VT-206 Q4). Precise regex bias toward
     # false-negative: ambiguous phrases fall through to brain.
     if _INTEGRATION_INTENT_RE.search(event.body):
-        return RouteToBrain(
-            reason="integration_intent — owner wants to add/connect a data source"
-        )
+        return RouteToBrain(reason="integration_intent — owner wants to add/connect a data source")
 
     # Rule h — everything else needs the orchestrator-agent brain (VT-3.9).
     if event.message_type == "unknown":
         return RouteToBrain(reason="unknown message type — needs reasoning")
-    return RouteToBrain(
-        reason="substantive owner message — needs orchestrator-agent reasoning"
-    )
+    return RouteToBrain(reason="substantive owner message — needs orchestrator-agent reasoning")
