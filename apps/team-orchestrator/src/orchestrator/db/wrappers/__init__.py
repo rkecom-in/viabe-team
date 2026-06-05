@@ -49,6 +49,36 @@ class CustomersWrapper(TenantScopedTable):
         self._validate(out, tid)
         return out
 
+    def list_id_and_display_name(
+        self, tenant_id: UUID | str, *, conn: Any = None
+    ) -> list[dict[str, Any]]:
+        """(id, display_name) for customers with a non-null name — VT-84 fuzzy
+        owner-exclusion lookup. Tenant-predicated (RLS + explicit WHERE)."""
+        tid = self._uuid(tenant_id)
+        with self._conn(tid, conn) as c:
+            rows = c.execute(
+                "SELECT id, display_name FROM customers "
+                "WHERE tenant_id = %s AND display_name IS NOT NULL",
+                (str(tid),),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def set_owner_excluded(
+        self, tenant_id: UUID | str, customer_id: UUID | str, *, conn: Any = None
+    ) -> int:
+        """VT-84: owner-side exclude. Sets opt_out_status='owner_excluded' ONLY from
+        'subscribed' — a consumer 'opted_out'/'blocked' ALWAYS wins (precedence; never
+        downgrade a legal opt-out to an owner preference). Returns rows updated
+        (0 = already opted_out/blocked/excluded). Tenant-predicated."""
+        tid = self._uuid(tenant_id)
+        with self._conn(tid, conn) as c:
+            cur = c.execute(
+                "UPDATE customers SET opt_out_status = 'owner_excluded', updated_at = now() "
+                "WHERE tenant_id = %s AND id = %s AND opt_out_status = 'subscribed'",
+                (str(tid), str(customer_id)),
+            )
+            return cur.rowcount if cur.rowcount is not None else 0
+
     def find_by_email(
         self, tenant_id: UUID | str, email: str, *, conn: Any = None
     ) -> list[dict[str, Any]]:
@@ -154,6 +184,20 @@ class CustomersWrapper(TenantScopedTable):
             row = c.execute(
                 "SELECT count(*) AS n FROM customers WHERE tenant_id = %s",
                 (str(tid),),
+            ).fetchone()
+        return int(dict(row)["n"]) if row else 0
+
+    def count_by_opt_out_status(
+        self, tenant_id: UUID | str, statuses: tuple[str, ...], *, conn: Any = None
+    ) -> int:
+        """COUNT customers whose opt_out_status is in ``statuses`` — VT-84 status query
+        (e.g. ('opted_out', 'owner_excluded') for the owner's 'how many opt-outs')."""
+        tid = self._uuid(tenant_id)
+        with self._conn(tid, conn) as c:
+            row = c.execute(
+                "SELECT count(*) AS n FROM customers "
+                "WHERE tenant_id = %s AND opt_out_status = ANY(%s)",
+                (str(tid), list(statuses)),
             ).fetchone()
         return int(dict(row)["n"]) if row else 0
 

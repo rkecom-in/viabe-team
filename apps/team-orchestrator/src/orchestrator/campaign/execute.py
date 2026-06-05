@@ -64,7 +64,7 @@ logger = logging.getLogger(__name__)
 # Opt-out statuses that are hard-refused without calling VT-45.
 # VT-45 also gates these, but we short-circuit to write a
 # 'skipped_opt_out' marker (cleaner audit trail than 'unauthorized').
-_REFUSED_OPT_OUT_STATUSES = frozenset({"opted_out", "blocked"})
+_REFUSED_OPT_OUT_STATUSES = frozenset({"opted_out", "blocked", "owner_excluded"})  # VT-84
 
 # VT-321 (#20 complaint-freeze): an OPEN complaint freezes ALL selling to that
 # customer — non-configurable, no exceptions. Fail-closed: ONLY 'open' triggers
