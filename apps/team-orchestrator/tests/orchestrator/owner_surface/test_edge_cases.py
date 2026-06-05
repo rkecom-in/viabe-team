@@ -96,12 +96,13 @@ def test_router_routes_status(monkeypatch) -> None:
     assert out is not None and out.reason == "edge_case:status_query"
 
 
-@pytest.mark.parametrize("intent", ["approval", "adhoc_campaign_request", "template_error_followup", "other"])
+@pytest.mark.parametrize("intent", ["approval", "rejection", "question", "feedback", "other"])
 def test_router_falls_through(intent) -> None:
     import orchestrator.edge_cases_router as r
 
+    # These intents fall through to the agent (None). adhoc -> "owner_initiated" marker +
+    # template_error -> DispatchResult are PR-2 (tested in test_edge_cases_pr2.py).
     ev = SimpleNamespace(body="x", sender_phone=None)
-    # adhoc/template -> PR-2 (fall through to agent); approval/other -> agent. All -> None.
     assert r.route_edge_case(tenant_id="t", event=ev, classify_fn=lambda b: SimpleNamespace(classification=intent)) is None
 
 

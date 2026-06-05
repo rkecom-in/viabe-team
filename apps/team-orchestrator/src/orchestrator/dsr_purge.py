@@ -153,6 +153,7 @@ _PURGE_ORDER: tuple[str, ...] = (
     # trigger (mig 099) permits this delete.
     "refund_executions",
     "founding_tier_claims",  # VT-94: per-tenant founding claim (audit) — hard-delete on DSR
+    "template_error_reports",  # VT-335: owner template-error reports (PII free text) — hard-delete
     "owner_inputs",
     "campaigns",
     "pipeline_steps",
