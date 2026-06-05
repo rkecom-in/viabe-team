@@ -163,3 +163,25 @@ trial_max_reached:
   languages:
     en: null  # NEEDS-FAZAL: Meta SID pending
     hi: null  # NEEDS-FAZAL: Meta SID pending
+
+# VT-93 — refund-execution templates. NEEDS-FAZAL: provision the real Meta Content
+# SIDs + copy (Pillar 7 honesty gate — Fazal reviews every word; no retention
+# manipulation). Null SIDs fail-closed in templates_registry.resolve(); the refund
+# executor records notification_pending + alerts Fazal rather than sending.
+refund_processing:
+  audience: owner
+  agent_selectable: false
+  variables:
+    - refund_amount_inr   # {{1}}
+  languages:
+    en: null  # NEEDS-FAZAL: Meta SID pending
+    hi: null  # NEEDS-FAZAL: Meta SID pending
+
+refund_completed:
+  audience: owner
+  agent_selectable: false
+  variables:
+    - refund_amount_inr   # {{1}}
+  languages:
+    en: null  # NEEDS-FAZAL: Meta SID pending
+    hi: null  # NEEDS-FAZAL: Meta SID pending

@@ -132,6 +132,14 @@ def apply_transition(
             "UPDATE tenants SET phase = %s, phase_entered_at = %s WHERE id = %s",
             (to_phase, now, str(state["tenant_id"])),
         )
+        # VT-93: anchor the 30-day graceful-exit window atomically with the phase
+        # flip (graceful_exit.portal_access_allowed reads tenants.refunded_at; the
+        # atomic set avoids a phase=refunded / refunded_at=NULL window).
+        if event == "day39_refund_triggered":
+            conn.execute(
+                "UPDATE tenants SET refunded_at = %s WHERE id = %s",
+                (now, str(state["tenant_id"])),
+            )
         # TODO VT-122: also emit an observability step_record to pipeline_steps
         # via the @observability.step decorator when it ships.
         # Invariants run before commit — a violation rolls back this transaction.
