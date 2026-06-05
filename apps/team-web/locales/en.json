@@ -32,6 +32,6 @@
   "settings.business": "Business",
   "settings.plan": "Plan",
   "settings.privacy": "Privacy",
-  "settings.exportData": "Request data export",
-  "settings.deleteData": "Request data deletion"
+  "settings.exportData": "Download my data",
+  "settings.deleteContact": "To delete your data, please contact us."
 }

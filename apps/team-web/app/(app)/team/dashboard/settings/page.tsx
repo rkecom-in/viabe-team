@@ -54,13 +54,17 @@ export default async function SettingsPage({
 
       <section aria-label="privacy">
         <h2>{t(dict, 'settings.privacy')}</h2>
-        {/* DSR-init: owner-initiated requests to the existing endpoints — the only write-exception. */}
-        <a href="/api/dsr/export" data-testid="dsr-export">
-          {t(dict, 'settings.exportData')}
-        </a>
-        <a href="/api/dsr/delete" data-testid="dsr-delete">
-          {t(dict, 'settings.deleteData')}
-        </a>
+        {/* VT-341: EXPORT is self-serve (non-destructive, the owner's own PII-scrubbed data)
+            via a POST form — a GET <a> could be prefetch/crawler-triggered. DELETE is NOT a
+            self-serve control at launch (Fazal ruling 2026-06-06: an instant irreversible
+            purge from a button is too hot); the owner contacts us + Fazal/ops runs the
+            DSR-delete out-of-band. The request+grace self-serve model is VT-344 (post-launch). */}
+        <form method="POST" action="/api/dsr/export">
+          <button type="submit" data-testid="dsr-export">
+            {t(dict, 'settings.exportData')}
+          </button>
+        </form>
+        <p data-testid="dsr-delete-note">{t(dict, 'settings.deleteContact')}</p>
       </section>
     </main>
   )

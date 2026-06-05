@@ -141,6 +141,107 @@ def test_campaigns_endpoint_maps_and_gates(monkeypatch) -> None:
     assert exc.value.status_code == 403
 
 
+# ----------------------------- VT-341: report-download signed URL ----------------------
+def test_report_signed_url_normalizes_and_fails_safe() -> None:
+    from orchestrator.owner_surface.report_storage import report_download_signed_url
+
+    class _Ok:
+        def create_signed_url(self, path, ttl):  # noqa: ANN001
+            return {"signedURL": f"https://x/{path}?ttl={ttl}"}
+
+    url = report_download_signed_url("tid", "2026-05", client=_Ok())
+    assert url is not None and "tid/2026-05.pdf" in url
+
+    class _Err:
+        def create_signed_url(self, path, ttl):  # noqa: ANN001
+            raise RuntimeError("boom")
+
+    assert report_download_signed_url("tid", "2026-05", client=_Err()) is None
+
+
+def test_report_signed_url_short_ttl_and_self_validates() -> None:
+    """VT-341 amends: default TTL is short (300s, not 1h); the fn self-validates ym."""
+    from orchestrator.owner_surface.report_storage import (
+        _DEFAULT_SIGNED_URL_TTL_SECONDS,
+        report_download_signed_url,
+    )
+
+    assert _DEFAULT_SIGNED_URL_TTL_SECONDS == 300
+
+    seen: dict[str, int] = {}
+
+    class _Cap:
+        def create_signed_url(self, path, ttl):  # noqa: ANN001
+            seen["ttl"] = ttl
+            return {"signedURL": "https://x"}
+
+    report_download_signed_url("tid", "2026-05", client=_Cap())
+    assert seen["ttl"] == 300  # the default is short
+
+    # self-defending: a bad ym never builds a path / mints a URL (returns None directly)
+    for bad in ("2026-13", "../etc", "2026-05/../x", ""):
+        assert report_download_signed_url("tid", bad, client=_Cap()) is None
+
+
+def test_report_download_url_passes_short_ttl(monkeypatch) -> None:
+    """The endpoint passes ttl_seconds=300 explicitly (not the default)."""
+    import orchestrator.api.owner_dashboard as od
+
+    monkeypatch.setenv("INTERNAL_API_SECRET", "s")
+    seen: dict[str, int] = {}
+    monkeypatch.setattr(
+        "orchestrator.owner_surface.report_storage.report_download_signed_url",
+        lambda t, ym, *, ttl_seconds: (seen.__setitem__("ttl", ttl_seconds) or "https://u"),
+    )
+    body = od.ReportDownloadBody(tenant_id="t", year_month="2026-05")
+    od.report_download_url(body=body, x_internal_secret="s")
+    assert seen["ttl"] == 300
+
+
+def test_report_download_url_mints(monkeypatch) -> None:
+    import orchestrator.api.owner_dashboard as od
+
+    monkeypatch.setenv("INTERNAL_API_SECRET", "s")
+    monkeypatch.setattr(
+        "orchestrator.owner_surface.report_storage.report_download_signed_url",
+        lambda t, ym, **k: "https://signed/url",
+    )
+    body = od.ReportDownloadBody(tenant_id=str(uuid4()), year_month="2026-05")
+    assert od.report_download_url(body=body, x_internal_secret="s")["signed_url"] == "https://signed/url"
+
+
+@pytest.mark.parametrize("bad", ["2026-13", "2026-5", "../etc", "2026-05/../x", "", "abcd-12"])
+def test_report_download_url_rejects_bad_ym(monkeypatch, bad) -> None:
+    from fastapi import HTTPException
+
+    import orchestrator.api.owner_dashboard as od
+
+    monkeypatch.setenv("INTERNAL_API_SECRET", "s")
+    body = od.ReportDownloadBody(tenant_id="t", year_month=bad)
+    with pytest.raises(HTTPException) as exc:
+        od.report_download_url(body=body, x_internal_secret="s")
+    assert exc.value.status_code == 400  # no traversal / malformed ym
+
+
+def test_report_download_url_secret_and_404(monkeypatch) -> None:
+    from fastapi import HTTPException
+
+    import orchestrator.api.owner_dashboard as od
+
+    monkeypatch.setenv("INTERNAL_API_SECRET", "s")
+    body = od.ReportDownloadBody(tenant_id="t", year_month="2026-05")
+    with pytest.raises(HTTPException) as exc:
+        od.report_download_url(body=body, x_internal_secret="wrong")
+    assert exc.value.status_code == 403  # secret gate
+    monkeypatch.setattr(
+        "orchestrator.owner_surface.report_storage.report_download_signed_url",
+        lambda t, ym, **k: None,
+    )
+    with pytest.raises(HTTPException) as exc2:
+        od.report_download_url(body=body, x_internal_secret="s")
+    assert exc2.value.status_code == 404  # absent PDF
+
+
 def test_secret_gate_rejects_bad_secret(monkeypatch) -> None:
     from fastapi import HTTPException
 
