@@ -7,7 +7,6 @@ HARD-DELETE keystone + cross-tenant. Heavy imports local (dep-less smoke safe).
 
 from __future__ import annotations
 
-import os
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -29,7 +28,8 @@ def test_adhoc_returns_owner_initiated_marker_never_sends(monkeypatch) -> None:
     monkeypatch.setattr(r, "_send_edge_ack", lambda tid, phone, text: sent.append(text))
     ev = SimpleNamespace(body="send a campaign now", sender_phone="+910000000000")
     out = r.route_edge_case(
-        tenant_id="t", event=ev,
+        tenant_id="t",
+        event=ev,
         classify_fn=lambda b: SimpleNamespace(classification="adhoc_campaign_request"),
     )
     assert out == "owner_initiated"  # a str marker, not a DispatchResult
@@ -41,11 +41,19 @@ def test_owner_initiated_cannot_bypass_approval_gate() -> None:
     without owner_decision='approved' — route_after_approval keys on owner_decision ONLY."""
     from orchestrator.routing import route_after_approval
 
-    assert route_after_approval({"trigger_reason": "owner_initiated", "owner_decision": None}) == "end"
+    assert (
+        route_after_approval({"trigger_reason": "owner_initiated", "owner_decision": None}) == "end"
+    )
     assert route_after_approval({"trigger_reason": "owner_initiated"}) == "end"
     # only an explicit approval reaches execute — regardless of trigger_reason
-    assert route_after_approval({"trigger_reason": "owner_initiated", "owner_decision": "approved"}) == "campaign_execute"
-    assert route_after_approval({"trigger_reason": "weekly_cadence", "owner_decision": "rejected"}) == "end"
+    assert (
+        route_after_approval({"trigger_reason": "owner_initiated", "owner_decision": "approved"})
+        == "campaign_execute"
+    )
+    assert (
+        route_after_approval({"trigger_reason": "weekly_cadence", "owner_decision": "rejected"})
+        == "end"
+    )
 
 
 def test_template_error_routes_to_dispatchresult(monkeypatch) -> None:
@@ -54,11 +62,14 @@ def test_template_error_routes_to_dispatchresult(monkeypatch) -> None:
     monkeypatch.setattr(r, "_send_edge_ack", lambda tid, phone, text: None)
     monkeypatch.setattr(
         "orchestrator.owner_inputs.template_error.handle_template_error",
-        lambda tid, body: SimpleNamespace(report_id=uuid4(), recent_template_id="X", response_text="ok"),
+        lambda tid, body: SimpleNamespace(
+            report_id=uuid4(), recent_template_id="X", response_text="ok"
+        ),
     )
     ev = SimpleNamespace(body="the message you sent was wrong", sender_phone="+910000000000")
     out = r.route_edge_case(
-        tenant_id="t", event=ev,
+        tenant_id="t",
+        event=ev,
         classify_fn=lambda b: SimpleNamespace(classification="template_error_followup"),
     )
     assert out is not None and out.reason == "edge_case:template_error"
@@ -74,27 +85,6 @@ def test_purge_order_includes_template_error_after_founding() -> None:
 
 
 # ----------------------------- DB integration ------------------------------------------
-@pytest.fixture
-def _dbpool():
-    db_url = os.environ.get("DATABASE_URL")
-    if not db_url:
-        pytest.skip("DATABASE_URL not set; integration test requires real DB")
-    import apply_migrations  # idempotent — ensure the schema exists regardless of test order
-
-    if apply_migrations.apply(dsn=db_url)["failed"]:
-        pytest.fail("migrations failed")
-    from orchestrator import graph as graph_mod
-    from orchestrator.graph import get_pool
-
-    if graph_mod._pool is None:
-        from psycopg.rows import dict_row
-        from psycopg_pool import ConnectionPool
-
-        graph_mod._pool = ConnectionPool(
-            db_url, min_size=1, max_size=4,
-            kwargs={"autocommit": True, "row_factory": dict_row}, open=True,
-        )
-    return get_pool()
 
 
 def _tenant(pool) -> str:

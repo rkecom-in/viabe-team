@@ -7,7 +7,6 @@ cross-tenant + the X-Internal-Secret gate. Heavy imports guarded (VT-337 dep-les
 
 from __future__ import annotations
 
-import os
 from uuid import uuid4
 
 import pytest
@@ -42,16 +41,23 @@ def test_endpoint_mapping_campaign_id_and_mask(monkeypatch) -> None:
     monkeypatch.setenv("INTERNAL_API_SECRET", "s")
     monkeypatch.setattr(od.CustomersWrapper, "count_all", lambda self, t: 3)
     monkeypatch.setattr(
-        od.CustomersWrapper, "top_customers_by_spend",
+        od.CustomersWrapper,
+        "top_customers_by_spend",
         lambda self, t, *, limit: [
             {"display_name": "Asha", "phone_e164": "+919876543210", "spend_paise": 5000}
         ],
     )
     monkeypatch.setattr(
-        od.CampaignsWrapper, "list_recent_with_responses",
+        od.CampaignsWrapper,
+        "list_recent_with_responses",
         lambda self, t, *, days_back, limit: [
-            {"campaign_id": "camp-1", "status": "sent", "template_id": "tmpl",
-             "response_count": 4, "sent_at": "2026-06-01"}
+            {
+                "campaign_id": "camp-1",
+                "status": "sent",
+                "template_id": "tmpl",
+                "response_count": 4,
+                "sent_at": "2026-06-01",
+            }
         ],
     )
     out = od.dashboard_summary(tenant_id=str(uuid4()), x_internal_secret="s")
@@ -125,10 +131,16 @@ def test_campaigns_endpoint_maps_and_gates(monkeypatch) -> None:
 
     monkeypatch.setenv("INTERNAL_API_SECRET", "s")
     monkeypatch.setattr(
-        od.CampaignsWrapper, "list_recent_with_responses",
+        od.CampaignsWrapper,
+        "list_recent_with_responses",
         lambda self, t, *, days_back, limit: [
-            {"campaign_id": "c1", "status": "sent", "template_id": "tmpl",
-             "response_count": 3, "sent_at": "2026-06-01"}
+            {
+                "campaign_id": "c1",
+                "status": "sent",
+                "template_id": "tmpl",
+                "response_count": 3,
+                "sent_at": "2026-06-01",
+            }
         ],
     )
     out = od.dashboard_campaigns(
@@ -137,7 +149,9 @@ def test_campaigns_endpoint_maps_and_gates(monkeypatch) -> None:
     assert out["campaigns"][0]["campaign_id"] == "c1"
     assert out["campaigns"][0]["responses"] == 3
     with pytest.raises(HTTPException) as exc:
-        od.dashboard_campaigns(tenant_id=str(uuid4()), days_back=365, limit=50, x_internal_secret="x")
+        od.dashboard_campaigns(
+            tenant_id=str(uuid4()), days_back=365, limit=50, x_internal_secret="x"
+        )
     assert exc.value.status_code == 403
 
 
@@ -191,7 +205,7 @@ def test_report_download_url_passes_short_ttl(monkeypatch) -> None:
     seen: dict[str, int] = {}
     monkeypatch.setattr(
         "orchestrator.owner_surface.report_storage.report_download_signed_url",
-        lambda t, ym, *, ttl_seconds: (seen.__setitem__("ttl", ttl_seconds) or "https://u"),
+        lambda t, ym, *, ttl_seconds: seen.__setitem__("ttl", ttl_seconds) or "https://u",
     )
     body = od.ReportDownloadBody(tenant_id="t", year_month="2026-05")
     od.report_download_url(body=body, x_internal_secret="s")
@@ -207,7 +221,10 @@ def test_report_download_url_mints(monkeypatch) -> None:
         lambda t, ym, **k: "https://signed/url",
     )
     body = od.ReportDownloadBody(tenant_id=str(uuid4()), year_month="2026-05")
-    assert od.report_download_url(body=body, x_internal_secret="s")["signed_url"] == "https://signed/url"
+    assert (
+        od.report_download_url(body=body, x_internal_secret="s")["signed_url"]
+        == "https://signed/url"
+    )
 
 
 @pytest.mark.parametrize("bad", ["2026-13", "2026-5", "../etc", "2026-05/../x", "", "abcd-12"])
@@ -254,27 +271,6 @@ def test_secret_gate_rejects_bad_secret(monkeypatch) -> None:
 
 
 # ----------------------------- DB integration -----------------------------------------
-@pytest.fixture
-def _dbpool():
-    db_url = os.environ.get("DATABASE_URL")
-    if not db_url:
-        pytest.skip("DATABASE_URL not set; integration test requires real DB")
-    import apply_migrations  # idempotent — ensure the schema exists regardless of test order
-
-    if apply_migrations.apply(dsn=db_url)["failed"]:
-        pytest.fail("migrations failed")
-    from orchestrator import graph as graph_mod
-    from orchestrator.graph import get_pool
-
-    if graph_mod._pool is None:
-        from psycopg.rows import dict_row
-        from psycopg_pool import ConnectionPool
-
-        graph_mod._pool = ConnectionPool(
-            db_url, min_size=1, max_size=4,
-            kwargs={"autocommit": True, "row_factory": dict_row}, open=True,
-        )
-    return get_pool()
 
 
 def _seed(pool, tid, customers):
@@ -304,11 +300,15 @@ def _seed(pool, tid, customers):
 def test_summary_masks_and_orders(monkeypatch, _dbpool) -> None:
     monkeypatch.setenv("INTERNAL_API_SECRET", "s")
     tid = uuid4()
-    _seed(_dbpool, tid, [
-        ("Big Spender", "+919811111111", "subscribed", 500000),
-        ("Small", "+919822222222", "subscribed", 100),
-        ("OptedOut", "+919833333333", "opted_out", 999999),  # excluded
-    ])
+    _seed(
+        _dbpool,
+        tid,
+        [
+            ("Big Spender", "+919811111111", "subscribed", 500000),
+            ("Small", "+919822222222", "subscribed", 100),
+            ("OptedOut", "+919833333333", "opted_out", 999999),  # excluded
+        ],
+    )
     out = dashboard_summary(tenant_id=str(tid), x_internal_secret="s")
     assert out["customer_count"] == 3
     names = [c["display_name"] for c in out["top_customers"]]
@@ -339,7 +339,9 @@ def test_customers_paginated_masked(monkeypatch, _dbpool) -> None:
 
     monkeypatch.setenv("INTERNAL_API_SECRET", "s")
     tid = uuid4()
-    _seed(_dbpool, tid, [(f"Cust{i}", f"+91980000{i:04d}", "subscribed", i * 100) for i in range(5)])
+    _seed(
+        _dbpool, tid, [(f"Cust{i}", f"+91980000{i:04d}", "subscribed", i * 100) for i in range(5)]
+    )
     # NOTE: called directly (not via HTTP), so FastAPI Query() defaults aren't injected —
     # pass excluded_only explicitly (a bare Query(False) default is a truthy FieldInfo).
     out = dashboard_customers(
@@ -374,10 +376,14 @@ def test_customers_excluded_filter(monkeypatch, _dbpool) -> None:
 
     monkeypatch.setenv("INTERNAL_API_SECRET", "s")
     tid = uuid4()
-    _seed(_dbpool, tid, [
-        ("Sub", "+919811111111", "subscribed", 100),
-        ("Out", "+919822222222", "opted_out", 100),
-    ])
+    _seed(
+        _dbpool,
+        tid,
+        [
+            ("Sub", "+919811111111", "subscribed", 100),
+            ("Out", "+919822222222", "opted_out", 100),
+        ],
+    )
     out = dashboard_customers(
         tenant_id=str(tid), page=1, page_size=50, excluded_only=True, x_internal_secret="s"
     )
