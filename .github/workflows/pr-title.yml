@@ -25,25 +25,32 @@ jobs:
           PR_TITLE: ${{ github.event.pull_request.title }}
         run: |
           printf 'PR title: %s\n' "$PR_TITLE"
-          # PR title must end with a parenthesised NUMERIC VT reference.
-          # Grammar: VT-<N>(-fix-<M>)? where N and M are integers.
+          # PR title must CONTAIN a parenthesised NUMERIC VT reference.
+          # Grammar: (VT-<N>(-fix-<M>)?<sep>  where N,M are integers and <sep> is
+          # a separator — ')' or whitespace/';'/',' — so a descriptive suffix
+          # inside the parens is allowed: (VT-88 Phase 1), (VT-96; Cowork). The
+          # ref no longer has to be at the very END (titles often trail a squash
+          # "(#327)"). VT-340: the old end-anchored, no-suffix regex false-failed
+          # nearly every real title — this matches the convention while keeping
+          # the discipline.
           #
           # VT-239 / Fazal 2026-05-30: every PR references a REAL numeric VT
           # row from the file-based allocator (scripts/vt_id_allocate.py).
           # Text-suffix pseudo-parents (VT-Foundation, VT-CI, VT-MCP-Tools,
-          # VT-FOO) and dotted legacy subtask IDs (VT-3.3a) are NO LONGER
-          # accepted — the Notion auto_increment is gone and all new rows are
-          # numeric. See docs/clau/decisions-ledger.md (numeric-VT standing
-          # rule, 2026-05-30).
+          # VT-FOO) and dotted legacy subtask IDs (VT-3.3a) are STILL rejected —
+          # the numeric run must be followed by a separator, not '.' or a letter.
+          # See docs/clau/decisions-ledger.md (numeric-VT standing rule).
           #
           # Examples:
-          #   (VT-43)        — row reference            [pass]
-          #   (VT-43-fix-1)  — first fix to that row    [pass]
-          #   (VT-Foundation)/(VT-CI)/(VT-FOO)          [fail]
-          #   (VT-3.3a)      — legacy dotted subtask    [fail]
+          #   (VT-43)            — row reference            [pass]
+          #   (VT-43-fix-1)      — first fix to that row    [pass]
+          #   (VT-339 phase-1)   — descriptive suffix       [pass]
+          #   (VT-90) (#327)     — trailing squash ref      [pass]
+          #   (VT-Foundation)/(VT-CI)/(VT-FOO)              [fail]
+          #   (VT-3.3a)          — legacy dotted subtask    [fail]
           #
           # Regex is POSIX ERE (grep -E): a plain group, not Python's (?:...).
-          if ! printf '%s' "$PR_TITLE" | grep -qE '\(VT-[0-9]+(-fix-[0-9]+)?\)$'; then
-            echo "::error::PR title must end with a numeric VT ref, e.g. (VT-43) or (VT-43-fix-1) — text suffixes like (VT-Foundation) are rejected (VT-239)"
+          if ! printf '%s' "$PR_TITLE" | grep -qE '\(VT-[0-9]+(-fix-[0-9]+)?[ ;,)]'; then
+            echo "::error::PR title must contain a numeric VT ref, e.g. (VT-43), (VT-43-fix-1), or (VT-88 Phase 1) — text suffixes like (VT-Foundation) or dotted (VT-3.3a) are rejected (VT-239)"
             exit 1
           fi
