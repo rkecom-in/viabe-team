@@ -15,8 +15,11 @@ SEND (adhoc campaign) is deliberately NOT routed here — it stays behind the ap
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import TYPE_CHECKING, Any, Literal
 from uuid import UUID
+
+if TYPE_CHECKING:
+    from orchestrator.agent.dispatch import DispatchResult
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +45,7 @@ def _send_edge_ack(tenant_id: UUID | str, recipient_phone: str | None, text: str
 
 def route_edge_case(
     *, tenant_id: UUID | str, event: Any, classify_fn: Any | None = None
-) -> Any | None:
+) -> "DispatchResult | Literal['owner_initiated'] | None":
     """Classify the owner message; route the PR-1 edge-cases (exclusion / status_query) to
     their fast handlers and return a DispatchResult. Return None to fall through to the
     agent (any other intent, incl. the PR-2 adhoc/template intents). ``classify_fn`` is
@@ -92,6 +95,25 @@ def route_edge_case(
             final_status="completed", terminal_path="terminal", reason="edge_case:status_query"
         )
 
-    # adhoc_campaign_request + template_error_followup -> PR-2 (VT-335). Everything else
-    # falls through to the full agent (existing behaviour).
+    if classification == "template_error_followup":
+        from orchestrator.owner_inputs.template_error import handle_template_error
+
+        te_result = handle_template_error(tenant_id, body)
+        _send_edge_ack(tenant_id, sender_phone, te_result.response_text)
+        return DispatchResult(
+            final_status="completed",
+            terminal_path="terminal",
+            reason="edge_case:template_error",
+        )
+
+    if classification == "adhoc_campaign_request":
+        # Cowork Q4 hard invariant: a SEND must NEVER fire off a Haiku intent. We do NOT
+        # fast-path a send here — we return the "owner_initiated" trigger marker and FALL
+        # THROUGH to the agent, which builds a CampaignPlan that the standard
+        # request_owner_approval gate confirms before any execute. route_after_approval
+        # keys on owner_decision (not trigger_reason), so owner_initiated CANNOT bypass it.
+        return "owner_initiated"
+
+    # Everything else (approval / rejection / question / feedback / first_data_step /
+    # other) falls through to the full agent (existing behaviour).
     return None
