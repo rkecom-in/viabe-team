@@ -13,6 +13,10 @@ from uuid import uuid4
 
 import pytest
 
+# Dep-less CI 'test' job: some tests import owner_inputs.* (-> anthropic) or routing.
+# Skip the module cleanly when anthropic is absent; the full real-PG suite runs it.
+pytest.importorskip("anthropic")
+
 
 # ----------------------------- pure: adhoc marker + invariant --------------------------
 def test_adhoc_returns_owner_initiated_marker_never_sends(monkeypatch) -> None:
