@@ -130,3 +130,36 @@ team_campaign_not_sent:
   languages:
     en: HXcedcda2a0bc1e8f47b37950ef458feb4
     hi: HXcd2688e6ea1862c063378b18e382e700
+
+# VT-90 — trial-lifecycle templates. NEEDS-FAZAL: provision the real Meta Content
+# SIDs + the copy (honesty gate D4: no bait — Fazal reviews every word). The stub
+# SIDs below fail-closed in templates_registry.resolve() until replaced; the trial
+# sweep's owner notify is a stubbed/injectable seam, so nothing sends with these.
+trial_ending:
+  audience: customer
+  agent_selectable: false
+  variables:
+    - owner_name        # {{1}}
+    - trial_end_date    # {{2}}
+  languages:
+    en: HX_NEEDS_FAZAL_trial_ending_en
+    hi: HX_NEEDS_FAZAL_trial_ending_hi
+
+trial_extension_offered:
+  audience: customer
+  agent_selectable: false
+  variables:
+    - owner_name        # {{1}}
+    - trial_end_date    # {{2}} — the new, extended end date
+  languages:
+    en: HX_NEEDS_FAZAL_trial_extension_offered_en
+    hi: HX_NEEDS_FAZAL_trial_extension_offered_hi
+
+trial_max_reached:
+  audience: customer
+  agent_selectable: false
+  variables:
+    - owner_name        # {{1}}
+  languages:
+    en: HX_NEEDS_FAZAL_trial_max_reached_en
+    hi: HX_NEEDS_FAZAL_trial_max_reached_hi

@@ -64,6 +64,7 @@ logger = logging.getLogger(__name__)
 WEEKLY_CADENCE_CRON = "0 9 * * MON"
 ATTRIBUTION_CLOSE_CRON = "0 2 * * *"
 DAY39_EVALUATION_CRON = "0 6 * * *"
+TRIAL_EVALUATION_CRON = "0 7 * * *"  # VT-90 — daily 7 AM IST trial sweep (off-peak)
 MONTHLY_IMPACT_CRON = "0 8 1 * *"
 L3_CONSTRUCTION_CRON = "0 3 * * *"  # VT-68 — nightly 3 AM IST L3 rebuild
 
@@ -244,6 +245,16 @@ def day39_evaluation_scheduled(
 ) -> None:
     """DBOS scheduled handler — fires daily 6 AM IST. Pure SQL (no LLM)."""
     run_day39_evaluation_body(now=actual_time)
+
+
+def trial_evaluation_scheduled(
+    scheduled_time: datetime,
+    actual_time: datetime,
+) -> None:
+    """DBOS scheduled handler — fires daily 7 AM IST. VT-90 trial sweep. NO LLM."""
+    from orchestrator.billing.trial_sweep import run_trial_evaluation_body
+
+    run_trial_evaluation_body(now=actual_time)
 
 
 def l3_construction_scheduled(
@@ -842,6 +853,8 @@ def register_scheduled_triggers() -> None:
     DBOS.scheduled(WEEKLY_CADENCE_CRON)(weekly_cadence_scheduled)
     DBOS.scheduled(ATTRIBUTION_CLOSE_CRON)(attribution_close_scheduled)
     DBOS.scheduled(DAY39_EVALUATION_CRON)(day39_evaluation_scheduled)
+    # VT-90: 12th handler — daily trial-lifecycle sweep (extend/exhaust/warn).
+    DBOS.scheduled(TRIAL_EVALUATION_CRON)(trial_evaluation_scheduled)
     DBOS.scheduled(MONTHLY_IMPACT_CRON)(monthly_impact_scheduled)
     DBOS.scheduled(APPROVAL_TIMEOUT_SWEEP_CRON)(approval_timeout_sweep_scheduled)
     DBOS.scheduled(L3_CONSTRUCTION_CRON)(l3_construction_scheduled)
