@@ -35,6 +35,11 @@ Classification = Literal[
     "question",
     "feedback",
     "first_data_step_onboarding",
+    # VT-84 edge-case intents (routed by the stage-2 router to fast-path handlers).
+    "exclusion_request",
+    "adhoc_campaign_request",
+    "status_query",
+    "template_error_followup",
     "other",
 ]
 
@@ -68,7 +73,7 @@ class ClassifyOwnerMessageOutput(BaseModel):
 # VT-267 PR-B: system prompt externalised + versioned (v2.0). The version string
 # lives in the file's metadata header (Type-1 governance change).
 _PROMPT_PATH = (
-    Path(__file__).resolve().parent / "prompts" / "classify_owner_message_v2.md"
+    Path(__file__).resolve().parent / "prompts" / "classify_owner_message_v3.md"
 )
 _SYSTEM_PROMPT = _PROMPT_PATH.read_text(encoding="utf-8")
 

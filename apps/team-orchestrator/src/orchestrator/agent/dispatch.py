@@ -162,6 +162,15 @@ def dispatch_brain(
             reason="anthropic_key_absent",
         )
 
+    # VT-84: stage-2 edge-case router — intercept the deterministic edge-case intents
+    # (exclusion / status_query) and fast-path them to handlers, skipping the full agent.
+    # Returns a DispatchResult to terminate, or None to fall through to the agent below.
+    from orchestrator.edge_cases_router import route_edge_case
+
+    _edge = route_edge_case(tenant_id=tenant_id, event=event)
+    if _edge is not None:
+        return _edge
+
     usage = OrchestratorUsage()
     # callback only uses driver for ``check_mid_invocation`` raises; the
     # _NullDriver below provides that surface without the full driver's

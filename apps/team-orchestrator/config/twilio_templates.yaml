@@ -199,3 +199,16 @@ refund_offer:
   languages:
     en: null  # NEEDS-FAZAL: Meta SID pending
     hi: null  # NEEDS-FAZAL: Meta SID pending
+
+# VT-84: the generic owner reply for an edge-case handler (exclusion / status_query).
+# {{1}} carries the handler's reply text. Null SID fail-closed (the handler's action —
+# the owner_excluded flag / the read — lands regardless; only the reply is gated).
+# Fazal reviews the carrier-template wording.
+team_edge_case_ack:
+  audience: owner
+  agent_selectable: false
+  variables:
+    - reply_text           # {{1}} — the handler's response text
+  languages:
+    en: null  # NEEDS-FAZAL: Meta SID pending
+    hi: null  # NEEDS-FAZAL: Meta SID pending
