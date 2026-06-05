@@ -1,0 +1,18 @@
+# VT-331 — Team subscription plans (orchestrator-authoritative).
+#
+# Prices (paise) live HERE in config, NOT in code, so the gate-no-price-literals CI
+# gate stays clean. Razorpay plan IDs come from env (NEEDS-FAZAL; none committed). The
+# ORCHESTRATOR reads this authoritatively — it makes the vendor call + writes
+# subscriptions (service-role). team-web NEVER sees a resolved plan_id/amount; it sends
+# only plan_tier (Cowork Q1 — the money-authoritative mapping stays at the service-role
+# layer so a team-web bug can't create a subscription at the wrong plan/price).
+plans:
+  founding:
+    amount_paise: 249900
+    plan_id_env: FOUNDING_RZP_PLAN_ID
+  standard:
+    amount_paise: 499900
+    plan_id_env: STANDARD_RZP_PLAN_ID
+  pro:
+    amount_paise: 1499900
+    plan_id_env: PRO_RZP_PLAN_ID

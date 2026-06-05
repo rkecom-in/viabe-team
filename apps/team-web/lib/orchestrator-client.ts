@@ -44,6 +44,47 @@ export async function forwardToOrchestrator(
   }
 }
 
+/** VT-331 Razorpay-subscribe forward result. */
+export interface SubscribeForwardResult {
+  /** True when the orchestrator returned 2xx (subscription created or already existed). */
+  ok: boolean
+  /** created | exists | http_<n> | timeout | error */
+  status: string
+  razorpaySubscriptionId: string | null
+}
+
+/**
+ * Forward a subscription-create to the orchestrator's razorpay-subscribe — the
+ * money-authoritative layer (it resolves plan_tier -> plan_id/amount, makes the Razorpay
+ * vendor call, writes subscriptions). team-web sends only {tenant_id (server-derived),
+ * plan_tier} — never a resolved plan_id/amount (Cowork Q1). Never throws.
+ */
+export async function forwardSubscribe(
+  tenantId: string,
+  planTier: string,
+): Promise<SubscribeForwardResult> {
+  const base = process.env.TEAM_ORCHESTRATOR_URL ?? _ORCHESTRATOR_DEFAULT
+  const secret = process.env.INTERNAL_API_SECRET ?? ''
+  try {
+    const res = await fetch(`${base}/api/orchestrator/razorpay-subscribe`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'X-Internal-Secret': secret },
+      body: JSON.stringify({ tenant_id: tenantId, plan_tier: planTier }),
+      signal: AbortSignal.timeout(_FORWARD_TIMEOUT_MS),
+    })
+    if (!res.ok) return { ok: false, status: `http_${res.status}`, razorpaySubscriptionId: null }
+    const data = (await res.json()) as { status?: string; razorpay_subscription_id?: string }
+    return {
+      ok: true,
+      status: data.status ?? 'unknown',
+      razorpaySubscriptionId: data.razorpay_subscription_id ?? null,
+    }
+  } catch (err) {
+    const timedOut = err instanceof Error && err.name === 'TimeoutError'
+    return { ok: false, status: timedOut ? 'timeout' : 'error', razorpaySubscriptionId: null }
+  }
+}
+
 /** VT-89 Razorpay-event forward result. */
 export interface RazorpayForwardResult {
   /** True when the orchestrator DURABLY recorded the event (2xx). The webhook
