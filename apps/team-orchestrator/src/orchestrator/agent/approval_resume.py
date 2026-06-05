@@ -82,6 +82,16 @@ def resolve_decision_from_reply(
     ``classify_fn`` defaults to VT-49 classify_owner_message; tests inject a stub so no live
     Anthropic call is made.
     """
+    # VT-83: deterministic Pillar-7 fast-path for an UNAMBIGUOUS approve/reject — an LLM
+    # must never decide a clear owner approval (a misread Hindi/Hinglish "no" would send a
+    # campaign the owner REJECTED). A clear deterministic signal WINS; only genuinely
+    # ambiguous text falls through to the Haiku classifier below.
+    from orchestrator.owner_inputs.approval_reply import classify_approval_reply
+
+    fast = classify_approval_reply(text)
+    if fast is not None:
+        return fast
+
     if classify_fn is None:
         from orchestrator.agent.tools.classify_owner_message import (
             ClassifyOwnerMessageInput,
