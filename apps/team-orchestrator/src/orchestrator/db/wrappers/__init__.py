@@ -211,18 +211,58 @@ class CustomersWrapper(TenantScopedTable):
         tid = self._uuid(tenant_id)
         with self._conn(tid, conn) as c:
             rows = c.execute(
-                "SELECT c.id, c.display_name, c.phone_e164, "
+                "SELECT c.id, c.tenant_id, c.display_name, c.phone_e164, "
                 "       COALESCE(SUM(l.amount_paise), 0) AS spend_paise "
                 "FROM customers c "
                 "LEFT JOIN customer_ledger_entries l "
                 "  ON l.tenant_id = c.tenant_id AND l.customer_id = c.id "
                 "WHERE c.tenant_id = %s AND c.opt_out_status = 'subscribed' "
-                "GROUP BY c.id, c.display_name, c.phone_e164 "
+                "GROUP BY c.id, c.tenant_id, c.display_name, c.phone_e164 "
                 "ORDER BY spend_paise DESC, c.id "
                 "LIMIT %s",
                 (str(tid), limit),
             ).fetchall()
-        return [dict(r) for r in rows]
+        out = [dict(r) for r in rows]
+        self._validate(out, tid)  # VT-338 nit-1: layer-2 tenant-isolation backstop (was skipped)
+        return out
+
+    def list_customers_page(
+        self,
+        tenant_id: UUID | str,
+        *,
+        limit: int,
+        offset: int,
+        excluded_only: bool = False,
+        conn: Any = None,
+    ) -> list[dict[str, Any]]:
+        """Paginated customer list for the owner portal (VT-338). Returns id, tenant_id
+        (for _validate), display_name, phone_e164 (RAW — the API endpoint masks to last-4;
+        raw never crosses the boundary), opt_out_status, spend_paise. Newest first,
+        tenant-predicated. ``excluded_only`` filters to opted_out/owner_excluded."""
+        tid = self._uuid(tenant_id)
+        status_clause = (
+            "AND c.opt_out_status = ANY(%s) " if excluded_only else ""
+        )
+        params: list[Any] = [str(tid)]
+        if excluded_only:
+            params.append(["opted_out", "owner_excluded"])
+        params.extend([limit, offset])
+        with self._conn(tid, conn) as c:
+            rows = c.execute(
+                "SELECT c.id, c.tenant_id, c.display_name, c.phone_e164, c.opt_out_status, "
+                "       COALESCE(SUM(l.amount_paise), 0) AS spend_paise "
+                "FROM customers c "
+                "LEFT JOIN customer_ledger_entries l "
+                "  ON l.tenant_id = c.tenant_id AND l.customer_id = c.id "
+                f"WHERE c.tenant_id = %s {status_clause}"  # noqa: S608 — status_clause is a static literal
+                "GROUP BY c.id, c.tenant_id, c.display_name, c.phone_e164, c.opt_out_status "
+                "ORDER BY c.created_at DESC, c.id "
+                "LIMIT %s OFFSET %s",
+                tuple(params),
+            ).fetchall()
+        out = [dict(r) for r in rows]
+        self._validate(out, tid)  # layer-2 tenant-isolation backstop
+        return out
 
     def recency_days_percentiles(
         self, tenant_id: UUID | str, pctls: list[float], *, conn: Any = None
@@ -389,6 +429,7 @@ class CampaignsWrapper(TenantScopedTable):
                 """
                 SELECT
                     c.id::text AS campaign_id,
+                    c.tenant_id,
                     c.generated_at AS sent_at,
                     COALESCE(c.plan_json -> 'message_plan' ->> 'template_id', '') AS template_id,
                     c.status,
@@ -404,7 +445,9 @@ class CampaignsWrapper(TenantScopedTable):
                 """,
                 (str(tid), days_back, limit),
             ).fetchall()
-        return [dict(r) for r in rows]
+        out = [dict(r) for r in rows]
+        self._validate(out, tid)  # VT-338: layer-2 tenant-isolation backstop (nit-1 pattern)
+        return out
 
 
 class PendingApprovalsWrapper(TenantScopedTable):

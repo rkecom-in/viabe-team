@@ -64,6 +64,83 @@ def test_endpoint_mapping_campaign_id_and_mask(monkeypatch) -> None:
     assert "9876543210" not in json.dumps(out)  # raw phone never in the payload
 
 
+@pytest.mark.integration
+def test_settings_plan_and_trial(monkeypatch, _dbpool) -> None:
+    """Settings plan/trial: trial_ends_at = trial_started_at + 14d; secret gates."""
+    from fastapi import HTTPException
+
+    from orchestrator.api.owner_dashboard import dashboard_settings
+
+    monkeypatch.setenv("INTERNAL_API_SECRET", "s")
+    tid = uuid4()
+    with _dbpool.connection() as conn:
+        conn.execute(
+            "INSERT INTO tenants (id, business_name, plan_tier, phase, trial_started_at) "
+            "VALUES (%s, 'Shop', 'founding', 'onboarding', '2026-06-01T00:00:00+00:00')",
+            (str(tid),),
+        )
+    out = dashboard_settings(tenant_id=str(tid), x_internal_secret="s")
+    assert out["plan"]["plan_tier"] == "founding"
+    assert out["plan"]["trial_ends_at"].startswith("2026-06-15")  # +14d
+    with pytest.raises(HTTPException):
+        dashboard_settings(tenant_id=str(tid), x_internal_secret="wrong")
+
+
+@pytest.mark.integration
+def test_reports_lists_desc_with_pdf_flag(monkeypatch, _dbpool) -> None:
+    from fastapi import HTTPException
+
+    from orchestrator.api.owner_dashboard import dashboard_reports
+
+    monkeypatch.setenv("INTERNAL_API_SECRET", "s")
+    tid = uuid4()
+    with _dbpool.connection() as conn:
+        conn.execute(
+            "INSERT INTO tenants (id, business_name, plan_tier, phase) "
+            "VALUES (%s, 't', 'standard', 'onboarding')",
+            (str(tid),),
+        )
+        conn.execute(
+            "INSERT INTO monthly_reports (tenant_id, year_month, pdf_storage_path) "
+            "VALUES (%s, '2026-05', 'p/2026-05.pdf')",
+            (str(tid),),
+        )
+        conn.execute(
+            "INSERT INTO monthly_reports (tenant_id, year_month) VALUES (%s, '2026-04')",
+            (str(tid),),
+        )
+    out = dashboard_reports(tenant_id=str(tid), x_internal_secret="s")
+    assert [r["year_month"] for r in out["reports"]] == ["2026-05", "2026-04"]  # DESC
+    assert out["reports"][0]["has_pdf"] is True
+    assert out["reports"][1]["has_pdf"] is False
+    with pytest.raises(HTTPException):
+        dashboard_reports(tenant_id=str(tid), x_internal_secret="wrong")
+
+
+def test_campaigns_endpoint_maps_and_gates(monkeypatch) -> None:
+    """No-DB: dashboard_campaigns maps the wrapper keys + the secret gates (campaigns
+    carry no PII, so no masking to assert)."""
+    import orchestrator.api.owner_dashboard as od
+    from fastapi import HTTPException
+
+    monkeypatch.setenv("INTERNAL_API_SECRET", "s")
+    monkeypatch.setattr(
+        od.CampaignsWrapper, "list_recent_with_responses",
+        lambda self, t, *, days_back, limit: [
+            {"campaign_id": "c1", "status": "sent", "template_id": "tmpl",
+             "response_count": 3, "sent_at": "2026-06-01"}
+        ],
+    )
+    out = od.dashboard_campaigns(
+        tenant_id=str(uuid4()), days_back=365, limit=50, x_internal_secret="s"
+    )
+    assert out["campaigns"][0]["campaign_id"] == "c1"
+    assert out["campaigns"][0]["responses"] == 3
+    with pytest.raises(HTTPException) as exc:
+        od.dashboard_campaigns(tenant_id=str(uuid4()), days_back=365, limit=50, x_internal_secret="x")
+    assert exc.value.status_code == 403
+
+
 def test_secret_gate_rejects_bad_secret(monkeypatch) -> None:
     from fastapi import HTTPException
 
@@ -152,3 +229,56 @@ def test_summary_cross_tenant(monkeypatch, _dbpool) -> None:
     out_a = dashboard_summary(tenant_id=str(a), x_internal_secret="s")
     names = [c["display_name"] for c in out_a["top_customers"]]
     assert names == ["A-cust"] and "B-cust" not in names  # tenant A can't see B
+
+
+# ----------------------------- VT-338: customers list ---------------------------------
+@pytest.mark.integration
+def test_customers_paginated_masked(monkeypatch, _dbpool) -> None:
+    from orchestrator.api.owner_dashboard import dashboard_customers
+
+    monkeypatch.setenv("INTERNAL_API_SECRET", "s")
+    tid = uuid4()
+    _seed(_dbpool, tid, [(f"Cust{i}", f"+91980000{i:04d}", "subscribed", i * 100) for i in range(5)])
+    # NOTE: called directly (not via HTTP), so FastAPI Query() defaults aren't injected —
+    # pass excluded_only explicitly (a bare Query(False) default is a truthy FieldInfo).
+    out = dashboard_customers(
+        tenant_id=str(tid), page=1, page_size=2, excluded_only=False, x_internal_secret="s"
+    )
+    assert out["total"] == 5
+    assert out["page_size"] == 2 and len(out["customers"]) == 2
+    import json
+
+    assert "98000000" not in json.dumps(out)  # raw phone NEVER crosses the boundary
+    assert all(c["phone_last4"].startswith("••••") for c in out["customers"] if c["phone_last4"])
+
+
+@pytest.mark.integration
+def test_customers_cross_tenant(monkeypatch, _dbpool) -> None:
+    from orchestrator.api.owner_dashboard import dashboard_customers
+
+    monkeypatch.setenv("INTERNAL_API_SECRET", "s")
+    a, b = uuid4(), uuid4()
+    _seed(_dbpool, a, [("A", "+919700000001", "subscribed", 100)])
+    _seed(_dbpool, b, [("B", "+919700000002", "subscribed", 100)])
+    out = dashboard_customers(
+        tenant_id=str(a), page=1, page_size=50, excluded_only=False, x_internal_secret="s"
+    )
+    names = [c["display_name"] for c in out["customers"]]
+    assert names == ["A"] and "B" not in names
+
+
+@pytest.mark.integration
+def test_customers_excluded_filter(monkeypatch, _dbpool) -> None:
+    from orchestrator.api.owner_dashboard import dashboard_customers
+
+    monkeypatch.setenv("INTERNAL_API_SECRET", "s")
+    tid = uuid4()
+    _seed(_dbpool, tid, [
+        ("Sub", "+919811111111", "subscribed", 100),
+        ("Out", "+919822222222", "opted_out", 100),
+    ])
+    out = dashboard_customers(
+        tenant_id=str(tid), page=1, page_size=50, excluded_only=True, x_internal_secret="s"
+    )
+    names = [c["display_name"] for c in out["customers"]]
+    assert names == ["Out"] and "Sub" not in names

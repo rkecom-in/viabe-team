@@ -57,3 +57,130 @@ export async function fetchDashboardSummary(
     return null
   }
 }
+
+export interface Customer {
+  display_name: string | null
+  phone_last4: string | null // MASKED at source — never a raw phone
+  opt_out_status: string | null
+  spend_rupees: number
+}
+
+export interface CustomersPage {
+  page: number
+  page_size: number
+  total: number
+  customers: Customer[]
+}
+
+export async function fetchCustomers(
+  tenantId: string,
+  opts: { page?: number; pageSize?: number; excludedOnly?: boolean } = {},
+): Promise<CustomersPage | null> {
+  const { page = 1, pageSize = 20, excludedOnly = false } = opts
+  try {
+    const url =
+      `${_base()}/api/orchestrator/owner/dashboard-customers` +
+      `?tenant_id=${encodeURIComponent(tenantId)}` +
+      `&page=${page}&page_size=${pageSize}&excluded_only=${excludedOnly}`
+    const res = await fetch(url, {
+      method: 'GET',
+      headers: { 'X-Internal-Secret': _secret() },
+      signal: AbortSignal.timeout(_TIMEOUT_MS),
+      cache: 'no-store',
+    })
+    if (!res.ok) return null
+    return (await res.json()) as CustomersPage
+  } catch {
+    return null
+  }
+}
+
+export interface CampaignsList {
+  campaigns: RecentCampaign[]
+}
+
+export async function fetchCampaigns(
+  tenantId: string,
+  opts: { daysBack?: number; limit?: number } = {},
+): Promise<CampaignsList | null> {
+  const { daysBack = 365, limit = 50 } = opts
+  try {
+    const url =
+      `${_base()}/api/orchestrator/owner/dashboard-campaigns` +
+      `?tenant_id=${encodeURIComponent(tenantId)}&days_back=${daysBack}&limit=${limit}`
+    const res = await fetch(url, {
+      method: 'GET',
+      headers: { 'X-Internal-Secret': _secret() },
+      signal: AbortSignal.timeout(_TIMEOUT_MS),
+      cache: 'no-store',
+    })
+    if (!res.ok) return null
+    return (await res.json()) as CampaignsList
+  } catch {
+    return null
+  }
+}
+
+export interface OwnerSettings {
+  business: {
+    business_name: string | null
+    business_archetype: string | null
+    owner_name: string | null
+    locale: string | null
+    working_hours: string | null
+  } | null
+  plan: {
+    plan_tier: string | null
+    phase: string | null
+    trial_started_at: string | null
+    trial_ends_at: string | null
+    trial_extension_count: number | null
+    preferred_language: string | null
+  }
+}
+
+export async function fetchSettings(tenantId: string): Promise<OwnerSettings | null> {
+  try {
+    const url = `${_base()}/api/orchestrator/owner/dashboard-settings?tenant_id=${encodeURIComponent(
+      tenantId,
+    )}`
+    const res = await fetch(url, {
+      method: 'GET',
+      headers: { 'X-Internal-Secret': _secret() },
+      signal: AbortSignal.timeout(_TIMEOUT_MS),
+      cache: 'no-store',
+    })
+    if (!res.ok) return null
+    return (await res.json()) as OwnerSettings
+  } catch {
+    return null
+  }
+}
+
+export interface ReportItem {
+  year_month: string
+  generated_at: string | null
+  has_pdf: boolean
+}
+
+export interface ReportsList {
+  reports: ReportItem[]
+}
+
+export async function fetchReports(tenantId: string): Promise<ReportsList | null> {
+  try {
+    const url = `${_base()}/api/orchestrator/owner/dashboard-reports?tenant_id=${encodeURIComponent(
+      tenantId,
+    )}`
+    const res = await fetch(url, {
+      method: 'GET',
+      headers: { 'X-Internal-Secret': _secret() },
+      signal: AbortSignal.timeout(_TIMEOUT_MS),
+      cache: 'no-store',
+    })
+    if (!res.ok) return null
+    return (await res.json()) as ReportsList
+  } catch {
+    return null
+  }
+}
