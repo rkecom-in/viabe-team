@@ -79,13 +79,12 @@ def evaluate_trial(tenant_id: UUID | str, now: datetime | None = None) -> TrialV
         trial_start = t["trial_started_at"]
         trial_end = trial_start + timedelta(days=trial_days * (1 + count))
 
-        cur.execute(
-            "SELECT count(*) AS n FROM campaigns WHERE tenant_id = %s "
-            "AND status IN ('approved', 'sent') "
-            "AND generated_at >= %s AND generated_at < %s",
-            (str(tenant_id), trial_start, trial_end),
-        )
-        engaged = int(cur.fetchone()["n"]) >= engage_min
+    # Engagement: approved-or-sent campaigns in the trial window, through the wrapper
+    # (campaigns is a gate-watched hot table — no direct SQL site).
+    from orchestrator.db.wrappers import CampaignsWrapper
+
+    counts = CampaignsWrapper().count_by_status_in_range(tenant_id, trial_start, trial_end)
+    engaged = (counts.get("approved", 0) + counts.get("sent", 0)) >= engage_min
 
     if now >= trial_end:
         if engaged and count < max_ext:
