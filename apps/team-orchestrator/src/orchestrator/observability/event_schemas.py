@@ -189,6 +189,20 @@ EVENT_SCHEMAS: dict[str, dict[str, Validator]] = {
         "arrr_paise": _required_int,
         "cumulative_fees_paise": _required_int,
     },
+    # VT-93 refund execution audit (pipeline_log; the immutable copy goes to
+    # privacy_audit_log). Emitted by billing/refund_executor on completion.
+    # TAXONOMY (Cowork PB1, 20260605T095500Z): 'refund_executed' is the CLEAN
+    # terminal audit event for an EXECUTED refund. The phase-machine event
+    # 'day39_refund_triggered' (transitions.py) keeps its ORIGINAL meaning — it
+    # fires the paid_active/paid_at_risk -> refunded transition; it is NOT
+    # overloaded to mean "executed". 'refund_partial_failed' goes only to
+    # privacy_audit_log (its CHECK), not here. VT-85 owns the fuller
+    # day39_refund_offered / day39_refund_decision taxonomy.
+    "refund_executed": {
+        "tenant_id": _required_str,
+        "refund_reason": _required_str,
+        "total_refund_paise": _required_int,
+    },
     # VT-176 released event type (downstream PDF generator from VT-9.6
     # successor consumes this). Schema is intentionally minimal: only
     # the routing fields are required (tenant_id + target_month). The
