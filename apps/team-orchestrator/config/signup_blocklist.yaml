@@ -1,0 +1,14 @@
+# VT-82 — signup blocklist (business_name rejection).
+#
+# Exact + substring match, case-folded. NO LLM (deterministic, auditable). Ops/legal
+# curate the real list; this is the seed structure. A match → the signup endpoint
+# rejects the business_name with a bilingual validation error (4xx), no tenant created.
+# Keep it minimal + maintainable.
+
+business_name:
+  # Profanity / slurs (ops-curated; placeholders only here).
+  - "xxx"
+  - "test-blocked-name"
+  # Impersonation / reserved (a business can't claim to be the platform).
+  - "viabe"
+  - "viabe team"

@@ -1,0 +1,13 @@
+# VT-82 — owner signup disclosure versions.
+#
+# consent_records.{dpdpa,residency}_version reference these strings (NOT free text).
+# The full disclosure COPY is single-sourced + legal-owned in .viabe/consent-text.md;
+# this file only versions it. Updating a disclosure = bump `current` here (a Type-2
+# change: historical tenants keep their old version string as proof of exactly what
+# they consented to). The signup flow stamps `current` onto each new consent_records
+# row at create time.
+
+dpdpa:
+  current: "dpdpa_v1_2026-06"        # DPDP Act 2023 processing notice
+residency:
+  current: "residency_v1_2026-06"    # data-residency (Mumbai prod) disclosure
