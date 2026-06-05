@@ -1,0 +1,12 @@
+# VT-90 — trial-lifecycle tunables (config, not code; Cowork D-answer: tunable
+# without a deploy). The evaluator is deterministic + zero-LLM (Pillar 1).
+#
+# Engagement = the bar a trial tenant must clear by trial-end to earn an auto-
+# extension: at least N campaigns in {approved, sent} generated within the trial
+# window. Both count — an approval is real engagement with the flow.
+
+trial_days: 14                  # base trial length; each extension adds another 14
+grace_days: 7                   # post-trial-end grace before exhaust → cancelled
+warn_lead_days: 2               # day-12 warning = trial_end - 2 days
+engagement_min_campaigns: 1     # ≥1 approved-or-sent campaign in the window
+max_trial_extensions: 3         # mirrors state.MAX_TRIAL_EXTENSIONS (structural; Type-2 to change)
