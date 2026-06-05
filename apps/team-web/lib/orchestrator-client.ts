@@ -44,6 +44,46 @@ export async function forwardToOrchestrator(
   }
 }
 
+/** VT-89 Razorpay-event forward result. */
+export interface RazorpayForwardResult {
+  /** True when the orchestrator DURABLY recorded the event (2xx). The webhook
+   * returns 200 to Razorpay only when this is true (Q1 — else 5xx so Razorpay
+   * retries; never silently drop a financial event). */
+  ok: boolean
+  /** duplicate | processed | ignored | http_<n> | timeout | error */
+  status: string
+}
+
+/**
+ * Forward a verified Razorpay event to the orchestrator's razorpay-ingress (the
+ * durable inbox + sole writer of fee state + phase transitions), signed with
+ * INTERNAL_API_SECRET. ``ok`` reflects whether the orchestrator returned 2xx — the
+ * caller (the webhook route) returns 200 to Razorpay ONLY when ok, else 5xx so the
+ * event is retried (Q1 financial durability). Never throws.
+ */
+export async function forwardRazorpayEvent(
+  eventId: string,
+  eventType: string,
+  payload: Record<string, unknown>,
+): Promise<RazorpayForwardResult> {
+  const base = process.env.TEAM_ORCHESTRATOR_URL ?? _ORCHESTRATOR_DEFAULT
+  const secret = process.env.INTERNAL_API_SECRET ?? ''
+  try {
+    const res = await fetch(`${base}/api/orchestrator/razorpay-ingress`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'X-Internal-Secret': secret },
+      body: JSON.stringify({ event_id: eventId, event_type: eventType, payload }),
+      signal: AbortSignal.timeout(_FORWARD_TIMEOUT_MS),
+    })
+    if (!res.ok) return { ok: false, status: `http_${res.status}` }
+    const data = (await res.json()) as { status?: string }
+    return { ok: true, status: data.status ?? 'unknown' }
+  } catch (err) {
+    const timedOut = err instanceof Error && err.name === 'TimeoutError'
+    return { ok: false, status: timedOut ? 'timeout' : 'error' }
+  }
+}
+
 /** VT-300 run-control forward result. */
 export interface RunControlForwardResult {
   ok: boolean
