@@ -85,6 +85,7 @@ payload-level scrub is its own data-migration row.
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass
 from typing import Any, cast
 from uuid import UUID
@@ -93,6 +94,14 @@ from orchestrator.graph import get_pool
 from orchestrator.observability.audit_log import log_privacy_event
 
 logger = logging.getLogger(__name__)
+
+# VT-93 / Cowork-escalation 20260605T100800Z — refund_executions DSR mode. Default
+# HARD-DELETE (DPDP right-to-erasure). Set TEAM_REFUND_RETAIN_ON_DSR=1 to switch to
+# anonymize-retain: keep total_refund_paise + completed_at (Indian tax/accounting
+# retention may require refund amount+date 6-8 yrs even after an erasure request)
+# and scrub the Razorpay vendor detail. A config flip, not a refactor — Fazal's /
+# legal's ruling sets it. NEEDS-FAZAL: confirm the retention requirement.
+_REFUND_HARD_DELETE_ON_DSR = os.environ.get("TEAM_REFUND_RETAIN_ON_DSR", "0") != "1"
 
 
 # Anonymization values for the tenants row tombstone. Kept here (not
@@ -108,9 +117,9 @@ logger = logging.getLogger(__name__)
 _TENANT_ANONYMIZE = {
     "business_name": "[deleted]",
     "whatsapp_number": None,
-    "owner_phone": None,    # mig 050 — globally-unique re-id anchor
+    "owner_phone": None,  # mig 050 — globally-unique re-id anchor
     "owner_contact": None,  # mig 066
-    "locality": None,       # mig 001 — geographic identifier
+    "locality": None,  # mig 001 — geographic identifier
     "opt_out": True,
 }
 
@@ -136,6 +145,13 @@ _PURGE_ORDER: tuple[str, ...] = (
     # ARRR/fees (subject billing data) → hard-deleted on DSR (CASCADE never fires on
     # a DSR-anonymize). Order-insensitive.
     "day39_evaluations",
+    # VT-93: refund execution ledger. Leaf (FK tenants only; day39_evaluation_id
+    # is an id-copy, not a FK), order-insensitive. Carries subject billing data
+    # (total_refund_paise + Razorpay refund ids in refund_responses) → hard-
+    # deleted on DSR; the immutable privacy_audit_log copy survives. The purge txn
+    # sets orchestrator.dsr_purge_in_progress so the completed-row immutability
+    # trigger (mig 099) permits this delete.
+    "refund_executions",
     "owner_inputs",
     "campaigns",
     "pipeline_steps",
@@ -201,6 +217,10 @@ def purge_tenant_data(ticket_id: UUID) -> PurgeResult:
         tenant_id = _resolve_tenant_id_or_raise(conn, ticket_id)
 
         with conn.transaction():
+            # VT-93: exempt this purge txn from the refund_executions immutability
+            # trigger so a completed refund row can be hard-deleted (DPDP right-to-
+            # erasure). The durable record survives in privacy_audit_log (mig 099).
+            conn.execute("SET LOCAL orchestrator.dsr_purge_in_progress = 'on'")
             if _ticket_already_completed(conn, ticket_id):
                 return PurgeResult(
                     ticket_id=ticket_id,
@@ -213,15 +233,23 @@ def purge_tenant_data(ticket_id: UUID) -> PurgeResult:
             _append_audit_event(conn, tenant_id, ticket_id)
 
             for table in _PURGE_ORDER:
-                rows_deleted = _delete_where_tenant(conn, table, tenant_id)
+                if table == "refund_executions" and not _REFUND_HARD_DELETE_ON_DSR:
+                    # Anonymize-retain mode: keep amount+date (tax/accounting),
+                    # scrub vendor detail. Rows are RETAINED (0 deleted). Runs
+                    # under the dsr_purge_in_progress flag set above, so the
+                    # completed-row immutability trigger permits the UPDATE.
+                    from orchestrator.db import refund_executions as _refund_ledger
+
+                    _refund_ledger.anonymize_retain(conn, tenant_id)
+                    rows_deleted = 0
+                else:
+                    rows_deleted = _delete_where_tenant(conn, table, tenant_id)
                 deleted_counts[table] = rows_deleted
                 # VT-185 Q1 Option A: per-table audit row written AFTER
                 # each successful DELETE. Combined with the intent row
                 # above, total = 1 + N audit rows per purge. CL-390
                 # full-granularity audit compliance.
-                _append_per_table_audit(
-                    conn, tenant_id, ticket_id, table, rows_deleted
-                )
+                _append_per_table_audit(conn, tenant_id, ticket_id, table, rows_deleted)
 
             tenant_anonymized = _anonymize_tenant_row(conn, tenant_id)
             _mark_ticket_completed(conn, ticket_id)
@@ -253,11 +281,7 @@ def _resolve_tenant_id_or_raise(conn: Any, ticket_id: UUID) -> UUID:
         raise ValueError(f"dsr_tickets row not found: id={ticket_id}")
     row = cast("dict[str, Any]", raw)
     tenant_id_value = row["tenant_id"]
-    return (
-        tenant_id_value
-        if isinstance(tenant_id_value, UUID)
-        else UUID(str(tenant_id_value))
-    )
+    return tenant_id_value if isinstance(tenant_id_value, UUID) else UUID(str(tenant_id_value))
 
 
 def _ticket_already_completed(conn: Any, ticket_id: UUID) -> bool:
@@ -266,17 +290,12 @@ def _ticket_already_completed(conn: Any, ticket_id: UUID) -> bool:
         (str(ticket_id),),
     ).fetchone()
     if raw is None:
-        raise ValueError(
-            f"dsr_tickets row not found inside purge transaction: "
-            f"id={ticket_id}"
-        )
+        raise ValueError(f"dsr_tickets row not found inside purge transaction: id={ticket_id}")
     row = cast("dict[str, Any]", raw)
     return bool(row["status"] == "completed")
 
 
-def _append_audit_event(
-    conn: Any, tenant_id: UUID, ticket_id: UUID
-) -> None:
+def _append_audit_event(conn: Any, tenant_id: UUID, ticket_id: UUID) -> None:
     """Append an event noting the purge intent.
 
     The ``privacy_audit_log`` table (008) is the regulator-required 7-year
@@ -407,8 +426,7 @@ def _mark_ticket_completed(conn: Any, ticket_id: UUID) -> None:
     ``migrations/010_dsr_tickets.sql:8`` already permits
     ``'completed'`` — no migration needed."""
     conn.execute(
-        "UPDATE dsr_tickets SET status = 'completed', completed_at = now() "
-        "WHERE id = %s",
+        "UPDATE dsr_tickets SET status = 'completed', completed_at = now() WHERE id = %s",
         (str(ticket_id),),
     )
 
@@ -447,8 +465,7 @@ if __name__ == "__main__":  # pragma: no cover
         "--dry-run",
         action="store_true",
         help=(
-            "Count rows that would be deleted across pipeline observability "
-            "tables; commit nothing"
+            "Count rows that would be deleted across pipeline observability tables; commit nothing"
         ),
     )
     args = parser.parse_args()
