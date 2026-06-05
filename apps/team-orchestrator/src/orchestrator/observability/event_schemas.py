@@ -203,6 +203,21 @@ EVENT_SCHEMAS: dict[str, dict[str, Validator]] = {
         "refund_reason": _required_str,
         "total_refund_paise": _required_int,
     },
+    # VT-85 day-39 refund-conversation taxonomy. 'day39_refund_offered' replaces
+    # the old auto-fire 'day39_refund_triggered' EMIT on the refund verdict — the
+    # evaluator now makes an OFFER (no auto-refund). 'day39_refund_decision' records
+    # the owner's reply (or the 48h timeout default).
+    "day39_refund_offered": {
+        "tenant_id": _required_str,
+        "verdict": _required_str,
+        "arrr_paise": _required_int,
+        "cumulative_fees_paise": _required_int,
+    },
+    "day39_refund_decision": {
+        "tenant_id": _required_str,
+        "decision": _required_str,  # refund | continue | discuss
+        "source": _required_str,  # reply | timeout
+    },
     # VT-176 released event type (downstream PDF generator from VT-9.6
     # successor consumes this). Schema is intentionally minimal: only
     # the routing fields are required (tenant_id + target_month). The

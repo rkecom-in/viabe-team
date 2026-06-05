@@ -157,7 +157,7 @@ def _transition_to_refunded(tenant_id: UUID, refund_reason: str) -> bool:
         current_phase = row["phase"]
         if current_phase == "refunded":
             return True  # already flipped (idempotent re-entry)
-        if current_phase not in ("paid_active", "paid_at_risk"):
+        if current_phase not in ("paid_active", "paid_at_risk", "refund_offered"):
             logger.warning(
                 "refund: tenant %s phase=%s not transition-eligible; refund stands",
                 tenant_id,

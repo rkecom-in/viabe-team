@@ -18,6 +18,7 @@ Phase = Literal[
     "trial_extended",
     "paid_active",
     "paid_at_risk",
+    "refund_offered",  # VT-85: day-39 refund offer pending owner reply (non-terminal)
     "cancelled",
     "refunded",
 ]

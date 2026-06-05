@@ -73,7 +73,7 @@ def test_suppression_window(pool):
     cont_old = _paid_tenant(pool)
     _log_day39(pool, cont_old, "day39_continue", created_at=_NOW - timedelta(days=91))
     refunded = _paid_tenant(pool)
-    _log_day39(pool, refunded, "day39_refund_triggered", created_at=_NOW - timedelta(days=200))
+    _log_day39(pool, refunded, "refund_executed", created_at=_NOW - timedelta(days=200))
 
     eligible = {str(t) for t in _scan_day39_eligible(_NOW)}
     assert fresh in eligible

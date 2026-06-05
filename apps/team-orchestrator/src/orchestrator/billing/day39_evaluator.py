@@ -109,8 +109,12 @@ def evaluate_day39(tenant_id: UUID | str) -> Day39Verdict:
     # 5. Emit the verdict event. Outside the connection block — log_event
     # opens its own connection (fire-and-forget) per VT-102's writer
     # contract.
+    # VT-85: the refund verdict now emits an OFFER event (day39_refund_offered);
+    # the auto-fire day39_refund_triggered emit is gone — the offer + the owner's
+    # reply (or the 48h timeout) drive the actual refund. The verdict KIND stays
+    # "refund_triggered" (the eligibility verdict; day39_evaluations.verdict CHECK).
     event_type = (
-        "day39_continue" if verdict_kind == "continue" else "day39_refund_triggered"
+        "day39_continue" if verdict_kind == "continue" else "day39_refund_offered"
     )
     log_event(
         event_type=event_type,
@@ -145,7 +149,7 @@ def _prior_verdict(cur, tid: str) -> Day39Verdict | None:
         "SELECT event_type, payload, created_at "
         "FROM pipeline_log "
         "WHERE tenant_id = %s "
-        "  AND event_type IN ('day39_continue', 'day39_refund_triggered') "
+        "  AND event_type IN ('day39_continue', 'day39_refund_offered', 'day39_refund_triggered') "
         "ORDER BY created_at ASC "
         "LIMIT 1",
         (tid,),
