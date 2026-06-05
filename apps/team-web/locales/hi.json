@@ -32,6 +32,6 @@
   "settings.business": "व्यवसाय",
   "settings.plan": "योजना",
   "settings.privacy": "गोपनीयता",
-  "settings.exportData": "डेटा निर्यात का अनुरोध करें",
-  "settings.deleteData": "डेटा हटाने का अनुरोध करें"
+  "settings.exportData": "मेरा डेटा डाउनलोड करें",
+  "settings.deleteContact": "अपना डेटा हटाने के लिए कृपया हमसे संपर्क करें।"
 }

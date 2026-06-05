@@ -13,12 +13,17 @@ from __future__ import annotations
 
 import hmac
 import os
+import re
 from datetime import timedelta
 from typing import Any
 
 from fastapi import APIRouter, Header, HTTPException, Query
+from pydantic import BaseModel
 
 from orchestrator.db.wrappers import CampaignsWrapper, CustomersWrapper
+
+# VT-341: year_month must be YYYY-MM (no path traversal into another tenant / object).
+_YEAR_MONTH_RE = re.compile(r"^[0-9]{4}-(0[1-9]|1[0-2])$")
 
 router = APIRouter()
 
@@ -240,3 +245,34 @@ def dashboard_reports(
             for r in rows
         ],
     }
+
+
+class ReportDownloadBody(BaseModel):
+    tenant_id: str
+    year_month: str
+
+
+@router.post("/api/orchestrator/owner/report-download-url")
+def report_download_url(
+    body: ReportDownloadBody,
+    x_internal_secret: str | None = Header(default=None, alias="X-Internal-Secret"),
+) -> dict[str, Any]:
+    """VT-341: mint a SHORT-TTL signed Storage URL for the owner's monthly-report PDF. The
+    object path is {SESSION_tenant}/{validated_ym}.pdf — tenant_id is the session value the
+    team-web proxy forwards; year_month is regex-validated HERE (no path traversal into
+    another tenant / object). Read-only."""
+    if not _verify_internal_secret(x_internal_secret):
+        raise HTTPException(status_code=403, detail="X-Internal-Secret mismatch")
+    if not _YEAR_MONTH_RE.match(body.year_month):
+        raise HTTPException(status_code=400, detail="invalid year_month")
+    try:
+        from orchestrator.owner_surface.report_storage import report_download_signed_url
+
+        # Short TTL (5 min) passed EXPLICITLY — a leaked signed URL is a PII document; don't
+        # rely on the default (Cowork req).
+        url = report_download_signed_url(body.tenant_id, body.year_month, ttl_seconds=300)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail="signed-url mint failed") from exc
+    if not url:
+        raise HTTPException(status_code=404, detail="report not found")
+    return {"signed_url": url}
