@@ -9,6 +9,9 @@ welcome (injectable, non-terminal). Tenant-creation is PRE-tenant-context
 
 from __future__ import annotations
 
+import time
+from typing import Any
+
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
@@ -17,6 +20,12 @@ router = APIRouter()
 # SignupError.code → HTTP status. Everything but a duplicate is a 400 (bad input).
 _DUPLICATE_STATUS = 409
 _BAD_REQUEST_STATUS = 400
+
+# VT-94: in-process cache for the public founding-status endpoint (Cowork — a public
+# unauth endpoint must not be a per-request DB-load / DoS vector; the count changes only
+# on a signup, so a short stale window is fine).
+_FOUNDING_CACHE_TTL_SEC = 60.0
+_founding_cache: dict[str, Any] = {"value": None, "expiry": 0.0}
 
 
 class SignupBody(BaseModel):
@@ -37,6 +46,32 @@ def business_types() -> dict[str, object]:
     from orchestrator.onboarding.signup import business_type_options
 
     return {"business_types": business_type_options()}
+
+
+@router.get("/api/team/founding-status")
+def founding_status() -> dict[str, object]:
+    """VT-94: public founding-tier counter for the landing-site widget (VT-99 consumes
+    it). No auth — the count is non-sensitive. CACHED ~60s (Cowork): a public unauth
+    endpoint must not be a per-request DB-load / DoS vector; the count changes only on a
+    signup, so a short stale window is fine."""
+    from orchestrator.billing.founding_counter import get_founding_status
+    from orchestrator.graph import get_pool
+
+    now_m = time.monotonic()
+    cached = _founding_cache["value"]
+    if cached is not None and now_m < _founding_cache["expiry"]:
+        return cached  # type: ignore[no-any-return]
+    with get_pool().connection() as conn:
+        status = get_founding_status(conn)
+    result: dict[str, object] = {
+        "remaining": status.remaining,
+        "cap": status.cap,
+        "public_count": status.public_count,
+        "all_claimed": status.all_claimed,
+    }
+    _founding_cache["value"] = result
+    _founding_cache["expiry"] = now_m + _FOUNDING_CACHE_TTL_SEC
+    return result
 
 
 @router.post("/api/signup", status_code=201)
