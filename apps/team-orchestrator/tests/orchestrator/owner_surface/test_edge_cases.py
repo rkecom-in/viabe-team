@@ -8,7 +8,6 @@ cross-tenant. Heavy imports are local (dep-less smoke safe).
 
 from __future__ import annotations
 
-import os
 from types import SimpleNamespace
 from uuid import UUID, uuid4
 
@@ -69,16 +68,18 @@ def test_router_routes_exclusion(monkeypatch) -> None:
     import orchestrator.edge_cases_router as r
 
     calls: dict[str, object] = {}
-    monkeypatch.setattr(
-        r, "_send_edge_ack", lambda tid, phone, text: calls.update(sent=text)
-    )
+    monkeypatch.setattr(r, "_send_edge_ack", lambda tid, phone, text: calls.update(sent=text))
     monkeypatch.setattr(
         "orchestrator.owner_inputs.exclusion.handle_exclusion",
-        lambda tid, body: SimpleNamespace(action="excluded", customer_id=uuid4(), response_text="ok"),
+        lambda tid, body: SimpleNamespace(
+            action="excluded", customer_id=uuid4(), response_text="ok"
+        ),
     )
     ev = SimpleNamespace(body="exclude 9876543210", sender_phone="+910000000000")
     out = r.route_edge_case(
-        tenant_id="t", event=ev, classify_fn=lambda b: SimpleNamespace(classification="exclusion_request")
+        tenant_id="t",
+        event=ev,
+        classify_fn=lambda b: SimpleNamespace(classification="exclusion_request"),
     )
     assert out is not None and "edge_case:exclusion" in out.reason
     assert calls.get("sent") == "ok"
@@ -94,7 +95,9 @@ def test_router_routes_status(monkeypatch) -> None:
     )
     ev = SimpleNamespace(body="how many customers", sender_phone="+910000000000")
     out = r.route_edge_case(
-        tenant_id="t", event=ev, classify_fn=lambda b: SimpleNamespace(classification="status_query")
+        tenant_id="t",
+        event=ev,
+        classify_fn=lambda b: SimpleNamespace(classification="status_query"),
     )
     assert out is not None and out.reason == "edge_case:status_query"
 
@@ -106,31 +109,15 @@ def test_router_falls_through(intent) -> None:
     # These intents fall through to the agent (None). adhoc -> "owner_initiated" marker +
     # template_error -> DispatchResult are PR-2 (tested in test_edge_cases_pr2.py).
     ev = SimpleNamespace(body="x", sender_phone=None)
-    assert r.route_edge_case(tenant_id="t", event=ev, classify_fn=lambda b: SimpleNamespace(classification=intent)) is None
+    assert (
+        r.route_edge_case(
+            tenant_id="t", event=ev, classify_fn=lambda b: SimpleNamespace(classification=intent)
+        )
+        is None
+    )
 
 
 # ----------------------------- DB integration ------------------------------------------
-@pytest.fixture
-def _dbpool():
-    db_url = os.environ.get("DATABASE_URL")
-    if not db_url:
-        pytest.skip("DATABASE_URL not set; integration test requires real DB")
-    import apply_migrations  # idempotent — ensure the schema exists regardless of test order
-
-    if apply_migrations.apply(dsn=db_url)["failed"]:
-        pytest.fail("migrations failed")
-    from orchestrator import graph as graph_mod
-    from orchestrator.graph import get_pool
-
-    if graph_mod._pool is None:
-        from psycopg.rows import dict_row
-        from psycopg_pool import ConnectionPool
-
-        graph_mod._pool = ConnectionPool(
-            db_url, min_size=1, max_size=4,
-            kwargs={"autocommit": True, "row_factory": dict_row}, open=True,
-        )
-    return get_pool()
 
 
 def _seed(pool, tid: UUID, customers: list[tuple[str, str, str]]) -> None:
@@ -185,8 +172,14 @@ def test_exclusion_ambiguous_name_asks_for_phone(_dbpool) -> None:
     from orchestrator.owner_inputs.exclusion import handle_exclusion
 
     tid = uuid4()
-    _seed(_dbpool, tid, [("Rajesh Kumar", "+919811111112", "subscribed"),
-                         ("Rajesh Singh", "+919811111113", "subscribed")])
+    _seed(
+        _dbpool,
+        tid,
+        [
+            ("Rajesh Kumar", "+919811111112", "subscribed"),
+            ("Rajesh Singh", "+919811111113", "subscribed"),
+        ],
+    )
     res = handle_exclusion(tid, "don't message Rajesh")
     assert res.action == "ambiguous"  # 2 fuzzy matches -> never auto-pick
     # neither was excluded
@@ -198,9 +191,15 @@ def test_status_counts(_dbpool) -> None:
     from orchestrator.owner_inputs.status_query import answer_status_query
 
     tid = uuid4()
-    _seed(_dbpool, tid, [("A", "+919800000001", "subscribed"),
-                         ("B", "+919800000002", "opted_out"),
-                         ("C", "+919800000003", "owner_excluded")])
+    _seed(
+        _dbpool,
+        tid,
+        [
+            ("A", "+919800000001", "subscribed"),
+            ("B", "+919800000002", "opted_out"),
+            ("C", "+919800000003", "owner_excluded"),
+        ],
+    )
     assert "3 customers" in answer_status_query(tid, "how many customers")
     # opt_out_count = opted_out + owner_excluded = 2
     assert "2 customers are excluded" in answer_status_query(tid, "how many opt-outs?")
