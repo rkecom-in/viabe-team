@@ -30,6 +30,15 @@ class SignupBody(BaseModel):
     consent_residency: bool
 
 
+@router.get("/api/signup/business-types")
+def business_types() -> dict[str, object]:
+    """VT-96: the signup form's business_type options (key + en/hi labels) — the
+    config taxonomy as the single source of truth. Static, public, no PII, no auth."""
+    from orchestrator.onboarding.signup import business_type_options
+
+    return {"business_types": business_type_options()}
+
+
 @router.post("/api/signup", status_code=201)
 def signup(body: SignupBody) -> dict[str, object]:
     # NEEDS-FAZAL: this is the SOLE, intentionally pre-auth owner-acquisition front

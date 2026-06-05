@@ -48,6 +48,18 @@ def valid_business_types() -> frozenset[str]:
     return frozenset(bt["key"] for bt in cfg["business_types"])
 
 
+def business_type_options() -> list[dict[str, str]]:
+    """The taxonomy as {key, label_en, label_hi} rows (VT-96: the signup form's
+    dropdown — single source of truth, no client-side drift). Public, non-PII."""
+    import yaml
+
+    cfg = yaml.safe_load(_BUSINESS_TYPES.read_text(encoding="utf-8"))
+    return [
+        {"key": bt["key"], "label_en": bt["label_en"], "label_hi": bt["label_hi"]}
+        for bt in cfg["business_types"]
+    ]
+
+
 @dataclass(frozen=True)
 class SignupResult:
     tenant_id: UUID
