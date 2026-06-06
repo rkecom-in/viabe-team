@@ -9,6 +9,10 @@ Cowork-maintained `.viabe/sprint-brief.md` (NOT generated prose).
 
 Do NOT touch the PM-dashboard script — this is the SPRINT dashboard only.
 
+3.10-COMPATIBLE: the `viabe-team-dashboard-regen` scheduled task runs on Python 3.10 — keep this
+script 3.10-clean. In particular, NEVER put a backslash inside an f-string expression (a 3.12+
+feature) — hoist such pieces to a variable/helper (see `_gate_tag`).
+
 Usage:
     python scripts/build_sprint_dashboard.py [output.html]
 """
@@ -246,6 +250,12 @@ def _is_fazal(r: dict[str, str]) -> bool:
         and r["status"] not in _CLOSED
 
 
+def _gate_tag(r: dict[str, str]) -> str:
+    # Hoisted out of the f-string (no backslash-in-expression — 3.10-compatible; see file note).
+    return ('<span class="tag gate">GATE</span>' if _is_gate(r)
+            else '<span class="tag crit">FAZAL</span>')
+
+
 def build_html(rows: list[dict[str, str]], *, now: dt.datetime, brief: str,
                merges: list[tuple[str, str, str]]) -> str:
     total = len(rows)
@@ -308,8 +318,7 @@ def build_html(rows: list[dict[str, str]], *, now: dt.datetime, brief: str,
     ) or "      <li>(nothing in flight)</li>\n"
     gate_rows = [r for r in rows if _is_gate(r) or _is_fazal(r)]
     right = "".join(
-        f'      <li><code>{esc(r["vt_id"])}</code> {esc(r["title"])[:60]}'
-        f'{" <span class=\"tag gate\">GATE</span>" if _is_gate(r) else " <span class=\"tag crit\">FAZAL</span>"}</li>\n'
+        f'      <li><code>{esc(r["vt_id"])}</code> {esc(r["title"])[:60]} {_gate_tag(r)}</li>\n'
         for r in gate_rows
     ) or "      <li>(no open gates)</li>\n"
 
