@@ -117,6 +117,47 @@ def test_stop_opts_out(substrate):
     assert consent.has_consent(t, token) is False
 
 
+@pytest.mark.parametrize(
+    "body",
+    [
+        "please STOP",  # was MISSED by whole-body-exact (the VT-358 live bug)
+        "stop sending me these",
+        "please बंद करो",  # Devanagari opt-out mid-sentence
+        "band karo bhai",  # Hinglish opt-out
+        "ok roko",  # Hinglish
+    ],
+)
+def test_optout_phrase_containment(substrate, body):
+    """VT-358: a customer opt-out anywhere in the body (EN/Devanagari/Hinglish) is honored — the
+    whole-body-exact gate missed "please STOP" / "please बंद करो" (a DPDP/WhatsApp breach)."""
+    from orchestrator.integrations.customer_inbound import handle_customer_inbound
+    from orchestrator.privacy import consent
+    from orchestrator.utils.phone_token import hash_phone
+
+    t = _tenant(substrate.dsn, wa_status="live")
+    phone = _phone()
+    handle_customer_inbound(t, phone, "hi", send_fn=_Send())
+    handle_customer_inbound(t, phone, "YES", send_fn=_Send())
+    token = hash_phone(phone)
+    assert consent.has_consent(t, token) is True
+    r = handle_customer_inbound(t, phone, body, send_fn=_Send())
+    assert r.action == "opted_out"
+    assert consent.has_consent(t, token) is False
+
+
+def test_benign_message_not_optout(substrate):
+    """VT-358: containment must not over-fire — a benign reply with no opt-out keyword is a reply,
+    not an opt-out ("stopwatch"/"nonstop" don't fire; boundary-safe)."""
+    from orchestrator.integrations.customer_inbound import handle_customer_inbound
+
+    t = _tenant(substrate.dsn, wa_status="live")
+    phone = _phone()
+    handle_customer_inbound(t, phone, "hi", send_fn=_Send())
+    handle_customer_inbound(t, phone, "YES", send_fn=_Send())
+    r = handle_customer_inbound(t, phone, "my new stopwatch is great, nonstop fun", send_fn=_Send())
+    assert r.action != "opted_out"
+
+
 def test_established_gets_reply(substrate):
     from orchestrator.integrations.customer_inbound import handle_customer_inbound
 

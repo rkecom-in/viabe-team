@@ -12,12 +12,12 @@ in doubt, route to the brain.
 from __future__ import annotations
 
 import re
-import unicodedata
 from pathlib import Path
 
 import yaml
 from dbos import DBOS
 
+from orchestrator.keyword_match import boundary_patterns, nfc as _nfc
 from orchestrator.state import SubscriberState
 from orchestrator.types import (
     PreFilterResult,
@@ -35,28 +35,13 @@ def _load_keywords(filename: str) -> list[str]:
     return [str(keyword) for keyword in data.get("keywords", [])]
 
 
-def _nfc(body: str) -> str:
-    """NFC-normalize so nukta / compatibility variants of a keyword match the same canonical form
-    the patterns are compiled in — else a decomposed Devanagari body silently misses (VT-329)."""
-    return unicodedata.normalize("NFC", body or "")
-
-
 def _boundary_patterns(filename: str) -> list[re.Pattern[str]]:
-    """VT-329: boundary-safe CONTAINMENT patterns (anywhere in the body), used for BOTH opt-out
-    and DSR. `\\b` is DEAD for Devanagari — a matra (combining vowel sign ◌ा/◌ी, category Mc/Mn)
-    is NOT `\\w`, so a keyword ending in a matra (मेरा) can never anchor the trailing `\\b`; every
-    Devanagari pattern silently never fired. Unicode lookarounds `(?<!\\w)kw(?!\\w)` give boundary
-    semantics that work for BOTH scripts ("my data" still won't fire on "my database").
-
-    FAIL-SAFE over-match (by design, Cowork-confirmed): because matras ∉ \\w, a keyword that is a
-    strict prefix of a longer Devanagari word matches THROUGH a following matra — a stem "हटा"
-    fires inside "हटाओ". For DSR/opt-out that is conservative (over-route a deletion/opt-out
-    request, never miss one) and covers Devanagari inflections. Keywords are NFC-normalized at
-    compile so the body's NFC form matches. See the stem-through-matra test."""
-    return [
-        re.compile(rf"(?<!\w){re.escape(_nfc(kw))}(?!\w)", re.IGNORECASE | re.UNICODE)
-        for kw in _load_keywords(filename)
-    ]
+    """VT-329/VT-358: boundary-safe CONTAINMENT patterns from a keyword file, via the shared
+    `keyword_match` helper — the owner gate (here) + the customer opt-out path
+    (`integrations.customer_inbound`) compile from the SAME helper so they can't drift. `\\b` is
+    dead for Devanagari matras; see keyword_match for the rationale + the stem-through-matra
+    fail-safe over-match."""
+    return boundary_patterns(_load_keywords(filename))
 
 
 # Opt-out: VT-329 — boundary-safe CONTAINMENT (was whole-body-exact, which missed "please बंद
@@ -99,7 +84,7 @@ _INTEGRATION_INTENT_RE = re.compile(
 def _normalize(body: str) -> str:
     """Collapse whitespace, case-fold, NFC-normalize for exact keyword comparison (the enable
     gate). VT-329: NFC so a decomposed Devanagari body matches the canonical keyword form."""
-    return unicodedata.normalize("NFC", " ".join(body.split()).casefold())
+    return _nfc(" ".join(body.split()).casefold())
 
 
 def matches_opt_out_or_dsr(body: str) -> bool:

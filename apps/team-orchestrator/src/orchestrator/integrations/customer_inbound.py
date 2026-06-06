@@ -37,6 +37,7 @@ import yaml
 
 from orchestrator.db import tenant_connection
 from orchestrator.integrations.whatsapp_account import wa_send_allowed
+from orchestrator.keyword_match import boundary_patterns, contains_any
 from orchestrator.privacy import consent as consent_service
 from orchestrator.utils.phone_token import hash_phone
 
@@ -58,7 +59,11 @@ def _load_keywords(filename: str) -> set[str]:
     return {str(k).strip().casefold() for k in data.get("keywords", [])}
 
 
-_OPT_OUT_KEYWORDS = _load_keywords("opt_out_keywords.yaml")
+# VT-358: a CUSTOMER opt-out (STOP / बंद करो / band karo) is consent-critical — a missed STOP is a
+# DPDP/WhatsApp breach. Match by boundary-safe CONTAINMENT (not whole-body-exact), so "please STOP"
+# / "please बंद करो" route. Compiled from the SAME opt_out_keywords.yaml + the SAME shared helper
+# the owner gate uses (VT-329), so the two consent surfaces can't drift.
+_OPT_OUT_PATTERNS = boundary_patterns(_load_keywords("opt_out_keywords.yaml"))
 _OPTIN_KEYWORDS = _load_keywords("wa_optin_keywords.yaml")
 
 
@@ -132,8 +137,9 @@ def handle_customer_inbound(
         send(text, customer_phone)
         return True
 
-    # 1. STOP — withdraw consent. Always recorded (never lost), ack best-effort.
-    if norm in _OPT_OUT_KEYWORDS:
+    # 1. STOP — withdraw consent. Always recorded (never lost), ack best-effort. VT-358:
+    # boundary-safe containment on the raw body so "please STOP"/"please बंद करो" route.
+    if contains_any(body, _OPT_OUT_PATTERNS):
         consent_service.opt_out(tid, token)
         _touch_conversation(tid, token, mark_intro=False)
         sent = _maybe_send("You've been opted out. Reply START to opt back in.")
