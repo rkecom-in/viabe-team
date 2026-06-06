@@ -177,15 +177,22 @@ def razorpay_ingress(
                     # re-POST of the corrected event (same event_id) re-processes via F1 below and
                     # flips this row to 'replayed'. ON CONFLICT DO NOTHING keeps first_seen stable
                     # across Razorpay redeliveries of the same un-fixed event.
+                    # F4 (Cowork fold-in): do NOT enqueue a DL row for a malformed REDELIVERY of an
+                    # already-PROCESSED event (a phantom 'pending' that can never replay — the
+                    # event already applied). The SELECT…WHERE NOT EXISTS guard skips it.
                     cur.execute(
                         "INSERT INTO razorpay_webhook_dead_letter "
                         "(event_id, event_type, event_payload, error_reason) "
-                        "VALUES (%s, %s, %s, %s) ON CONFLICT (event_id) DO NOTHING",
+                        "SELECT %s, %s, %s, %s WHERE NOT EXISTS ("
+                        "  SELECT 1 FROM razorpay_webhook_events "
+                        "  WHERE event_id = %s AND processed_at IS NOT NULL) "
+                        "ON CONFLICT (event_id) DO NOTHING",
                         (
                             event_id,
                             event_type,
                             Jsonb(_safe_payload(payload)),
                             "non_int_charged_amount",
+                            event_id,
                         ),
                     )
                 else:
@@ -238,6 +245,18 @@ def razorpay_ingress(
                         action, pending_transition = _apply_event_sql(
                             cur, tenant_id, event_type, payload, event_id=event_id
                         )
+                    # VT-352 F1 (Cowork bounce): a REPLAY is "success" ONLY if the fee actually
+                    # applied. action 'ignored' (unknown / operator-typo'd subscription_id) or
+                    # 'subscription_missing' must NOT go terminal — raise 422 so the whole txn rolls
+                    # back to the re-replayable drop with the ORIGINAL payload intact (the corrected
+                    # payload was already written above). A typo must never destroy the raw evidence
+                    # + record a phantom success + lose the fee forever.
+                    if is_replay and action != "fees_incremented":
+                        raise HTTPException(
+                            status_code=422,
+                            detail=f"replay did not apply a fee (action={action}); "
+                            "drop left re-replayable",
+                        )
                     cur.execute(
                         "UPDATE razorpay_webhook_events SET processed_at = now() WHERE event_id = %s",
                         (event_id,),
@@ -251,6 +270,11 @@ def razorpay_ingress(
                             "WHERE event_id = %s",
                             (event_id,),
                         )
+    except HTTPException:
+        # A DELIBERATE 4xx (e.g. the F1 bad-replay 422) — NOT an infra failure. The txn already
+        # rolled back (restoring the re-replayable drop with its original payload); let it
+        # propagate as-is rather than masking it as a 500.
+        raise
     except Exception:
         # INFRA/pre-persist failure → 500 so team-web 5xx → Razorpay RETRIES (Q1: never
         # silently drop a financial event into the parse-drop 200). Idempotent on retry.

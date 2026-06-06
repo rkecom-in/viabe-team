@@ -337,24 +337,24 @@ def test_drop_then_replay_applies_fee(_dbpool, _transitions, monkeypatch) -> Non
     (same event_id), re-processes PAST the dedup → the fee IS applied (pre-VT-352 it hit the dedup
     and was silently lost) + the dead-letter row flips pending→replayed."""
     monkeypatch.setattr("orchestrator.billing.refund_executor._alert_fazal", lambda m: None)
-    tid, sub = uuid4(), "sub_replay"
+    tid, sub = uuid4(), "sub_dl_replay"
     _seed(_dbpool, tid, sub)
 
     # 1. drop (non-int amount) → dead-letter pending, NO fee.
-    assert _post("evt_rp", "subscription.charged", _charged(sub, "abc"))["status"] == "dropped_parse_error"
+    assert _post("evt_dl_replay", "subscription.charged", _charged(sub, "abc"))["status"] == "dropped_parse_error"
     assert _sub_state(_dbpool, tid)[0] == 0
-    dl = _dead_letter(_dbpool, f"{_RUN}_evt_rp")
+    dl = _dead_letter(_dbpool, f"{_RUN}_evt_dl_replay")
     assert dl is not None and dl["status"] == "pending" and dl["retry_count"] == 0
 
     # 2. replay the CORRECTED event (same event_id, valid amount) → fee applied.
-    out = _post("evt_rp", "subscription.charged", _charged(sub, 499900))
+    out = _post("evt_dl_replay", "subscription.charged", _charged(sub, 499900))
     assert out["status"] == "processed" and out["action"] == "fees_incremented"
     assert _sub_state(_dbpool, tid)[0] == 499900  # FEE APPLIED (was lost pre-VT-352)
-    dl2 = _dead_letter(_dbpool, f"{_RUN}_evt_rp")
+    dl2 = _dead_letter(_dbpool, f"{_RUN}_evt_dl_replay")
     assert dl2["status"] == "replayed" and dl2["retry_count"] == 1
 
     # 3. re-send the corrected event AGAIN → genuine duplicate, NO double-apply.
-    assert _post("evt_rp", "subscription.charged", _charged(sub, 499900))["status"] == "duplicate"
+    assert _post("evt_dl_replay", "subscription.charged", _charged(sub, 499900))["status"] == "duplicate"
     assert _sub_state(_dbpool, tid)[0] == 499900  # still single
 
 
@@ -364,9 +364,9 @@ def test_atomic_replay_failure_leaves_unprocessed(_dbpool, _transitions, monkeyp
     back to the un-applied drop — marker intact, fee not applied, dead-letter still pending →
     re-replayable, never half-applied."""
     monkeypatch.setattr("orchestrator.billing.refund_executor._alert_fazal", lambda m: None)
-    tid, sub = uuid4(), "sub_atomic"
+    tid, sub = uuid4(), "sub_dl_atomic"
     _seed(_dbpool, tid, sub)
-    assert _post("evt_at", "subscription.charged", _charged(sub, "abc"))["status"] == "dropped_parse_error"
+    assert _post("evt_dl_atomic", "subscription.charged", _charged(sub, "abc"))["status"] == "dropped_parse_error"
 
     import orchestrator.api.razorpay_ingress as ing
 
@@ -377,10 +377,67 @@ def test_atomic_replay_failure_leaves_unprocessed(_dbpool, _transitions, monkeyp
     from fastapi import HTTPException
 
     with pytest.raises(HTTPException) as exc:
-        _post("evt_at", "subscription.charged", _charged(sub, 499900))
+        _post("evt_dl_atomic", "subscription.charged", _charged(sub, 499900))
     assert exc.value.status_code == 500  # infra-fail → Razorpay retries
 
-    pay = _wh_payload(_dbpool, f"{_RUN}_evt_at")
+    pay = _wh_payload(_dbpool, f"{_RUN}_evt_dl_atomic")
     assert pay["_status"] == "dropped_parse_error"  # marker NOT overwritten (rolled back)
     assert _sub_state(_dbpool, tid)[0] == 0  # NO fee
-    assert _dead_letter(_dbpool, f"{_RUN}_evt_at")["status"] == "pending"  # NOT flipped
+    assert _dead_letter(_dbpool, f"{_RUN}_evt_dl_atomic")["status"] == "pending"  # NOT flipped
+
+
+@pytest.mark.integration
+def test_replay_apply_ignored_422_re_replayable(_dbpool, _transitions, monkeypatch) -> None:
+    """VT-352 F1 (Cowork bounce): a replay whose apply does NOT apply a fee (unknown/typo'd
+    subscription_id → 'ignored') is rejected 422 and the drop stays RE-REPLAYABLE with its
+    original payload — an operator typo must never record phantom success or destroy evidence."""
+    monkeypatch.setattr("orchestrator.billing.refund_executor._alert_fazal", lambda m: None)
+    tid, sub = uuid4(), "sub_dl_ignored"
+    _seed(_dbpool, tid, sub)
+    assert _post("evt_dl_ignored", "subscription.charged", _charged(sub, "abc"))["status"] == "dropped_parse_error"
+
+    from fastapi import HTTPException
+
+    with pytest.raises(HTTPException) as exc:  # corrected amount BUT an UNKNOWN subscription_id
+        _post("evt_dl_ignored", "subscription.charged", _charged("sub_UNKNOWN", 499900))
+    assert exc.value.status_code == 422
+
+    pay = _wh_payload(_dbpool, f"{_RUN}_evt_dl_ignored")
+    assert pay["_status"] == "dropped_parse_error"  # original marker intact (rolled back)
+    assert _sub_state(_dbpool, tid)[0] == 0  # no fee on the wrong tenant either
+    assert _dead_letter(_dbpool, f"{_RUN}_evt_dl_ignored")["status"] == "pending"  # still re-replayable
+
+
+@pytest.mark.integration
+def test_dead_letter_replay_wrong_sub_rejected(_dbpool, _transitions, monkeypatch) -> None:
+    """VT-352 F2 (Cowork bounce): dead_letter.replay() refuses a corrected payload whose
+    subscription_id != the dead-letter row's original — no cross-tenant fee application. The DL row
+    stays pending; the original payload is intact."""
+    monkeypatch.setattr("orchestrator.billing.refund_executor._alert_fazal", lambda m: None)
+    from orchestrator.billing import dead_letter
+
+    tid, sub = uuid4(), "sub_dl_wrongsub"
+    _seed(_dbpool, tid, sub)
+    assert _post("evt_dl_wrongsub", "subscription.charged", _charged(sub, "abc"))["status"] == "dropped_parse_error"
+    eid = f"{_RUN}_evt_dl_wrongsub"
+
+    with pytest.raises(ValueError, match="cross-tenant"):
+        dead_letter.replay(eid, _charged("sub_DIFFERENT", 499900))
+    assert _dead_letter(_dbpool, eid)["status"] == "pending"
+    assert _wh_payload(_dbpool, eid)["_status"] == "dropped_parse_error"  # original intact
+
+
+@pytest.mark.integration
+def test_dead_letter_replay_correct_sub_applies_fee(_dbpool, _transitions, monkeypatch) -> None:
+    """VT-352: dead_letter.replay() with the CORRECT subscription_id re-applies the fee (the F2
+    cross-check passes) — proves the guard doesn't block a legitimate replay."""
+    monkeypatch.setattr("orchestrator.billing.refund_executor._alert_fazal", lambda m: None)
+    from orchestrator.billing import dead_letter
+
+    tid, sub = uuid4(), "sub_dl_correctsub"
+    _seed(_dbpool, tid, sub)
+    assert _post("evt_dl_correctsub", "subscription.charged", _charged(sub, "abc"))["status"] == "dropped_parse_error"
+    out = dead_letter.replay(f"{_RUN}_evt_dl_correctsub", _charged(sub, 499900))
+    assert out["status"] == "processed" and out["action"] == "fees_incremented"
+    assert _sub_state(_dbpool, tid)[0] == 499900
+    assert _dead_letter(_dbpool, f"{_RUN}_evt_dl_correctsub")["status"] == "replayed"

@@ -293,3 +293,46 @@ def test_reconcile_detects_orphan_no_autocancel(_dbpool, monkeypatch) -> None:
     orphans = reconcile_subscription_orphans([known, "sub_orphan_xyz"])
     assert orphans == ["sub_orphan_xyz"]  # only the vendor sub with no DB row
     assert alerts and "sub_orphan_xyz" in alerts[0]  # Fazal alerted, names the orphan
+
+
+@pytest.mark.integration
+def test_commit_after_vendor_retry_no_orphan(_dbpool, monkeypatch) -> None:
+    """VT-352 F3 (Cowork bounce): vendor create succeeds but the txn fails ONCE; the retry (same
+    jti → same Idempotency-Key) returns the SAME vendor sub id → EXACTLY ONE subscriptions row, no
+    orphan. Two stub calls, identical key."""
+    import orchestrator.api.razorpay_subscribe as mod
+
+    real = mod._create_razorpay_subscription
+    calls: list[str] = []
+    state = {"fail_next": True}
+
+    def _flaky(plan, tenant_id, idempotency_key):
+        calls.append(idempotency_key)
+        result = real(plan, tenant_id, idempotency_key)  # deterministic id from the key
+        if state["fail_next"]:
+            state["fail_next"] = False
+            raise RuntimeError("simulated commit-after-vendor failure")
+        return result
+
+    monkeypatch.setattr(mod, "_create_razorpay_subscription", _flaky)
+    tid = uuid4()
+    _seed(_dbpool, tid, phase="trial")
+    jti = f"jti-retry-{tid.hex[:8]}"
+
+    def _post_jti():
+        return mod.razorpay_subscribe(
+            RazorpaySubscribeBody(tenant_id=str(tid), plan_tier="founding", jti=jti),
+            x_internal_secret=_SECRET,
+        )
+
+    # attempt 1 — vendor "succeeds" then the txn fails → rollback (no row; the jti consume rolls
+    # back too, so the token is reusable).
+    with pytest.raises(RuntimeError):
+        _post_jti()
+    assert len(_rows(_dbpool, tid)) == 0
+
+    # attempt 2 — same jti → same Idempotency-Key → same vendor sub id → exactly ONE row.
+    out = _post_jti()
+    assert out["status"] == "created"
+    assert len(_rows(_dbpool, tid)) == 1
+    assert len(calls) == 2 and calls[0] == calls[1]  # same key both attempts (no orphan at vendor)
