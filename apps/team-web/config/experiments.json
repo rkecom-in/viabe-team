@@ -1,0 +1,14 @@
+{
+  "_meta": "VT-100 A/B experiments. Adding/modifying an experiment is a Type-1 PR with Fazal sign-off. Phase 1 ships the framework + ONE inactive example; real experiments run post-launch.",
+  "experiments": [
+    {
+      "id": "homepage_hero_v1",
+      "name": "Homepage hero variant (framework demo)",
+      "variants": ["control", "variant_b"],
+      "traffic_split": [50, 50],
+      "active": false,
+      "start_at": null,
+      "end_at": null
+    }
+  ]
+}
