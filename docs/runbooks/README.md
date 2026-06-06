@@ -1,5 +1,13 @@
 # Ops runbooks
 
+> **📖 Canonical document** (VT-119)
+>
+> Authoritative for: **operational procedures** (production incident response).
+> NOT authoritative for: architectural decisions (→ `docs/adr/`) or current architecture (→ `docs/Viabe_Team_Technical_Reference_v1_0.md`).
+> Source-of-truth hierarchy: **parallel** to the Technical Reference (procedures, not architecture).
+> Update protocol: one runbook per incident class (per `0000-template.md`); each drills ≥ once before the Reports-Jun15 launch.
+> Last reviewed: 2026-06-06 · Next review: pre-launch drill pass.
+
 Operator-facing runbooks for production incidents. Each file follows the template (`0000-template.md`). Tabletop drill cadence: each runbook must drill ≥ once before Reports-Jun15 launch milestone.
 
 ## Index
