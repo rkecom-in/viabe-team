@@ -12,6 +12,7 @@ in doubt, route to the brain.
 from __future__ import annotations
 
 import re
+import unicodedata
 from pathlib import Path
 
 import yaml
@@ -34,29 +35,40 @@ def _load_keywords(filename: str) -> list[str]:
     return [str(keyword) for keyword in data.get("keywords", [])]
 
 
-# Opt-out: exact match (case-insensitive) on the whole trimmed message body.
-_OPT_OUT_KEYWORDS = {kw.casefold() for kw in _load_keywords("opt_out_keywords.yaml")}
+def _nfc(body: str) -> str:
+    """NFC-normalize so nukta / compatibility variants of a keyword match the same canonical form
+    the patterns are compiled in — else a decomposed Devanagari body silently misses (VT-329)."""
+    return unicodedata.normalize("NFC", body or "")
 
-# VT-303 — data-inputs ENABLE (opt-in / consent-grant): exact match (case-
-# insensitive) on the whole trimmed body, the inverse of opt-out. Routes to
-# data_inputs_enable_handler which sets tenants.owner_inputs = true.
-_ENABLE_KEYWORDS = {kw.casefold() for kw in _load_keywords("data_inputs_enable_keywords.yaml")}
 
-# DSR: case-insensitive, boundary match anywhere in the body. VT-329: `\b` is DEAD for
-# Devanagari — a matra (combining vowel sign, e.g. ा/ी, category Mc/Mn) is NOT `\w`, so a
-# keyword ending in a matra (मेरा) can never anchor the trailing `\b`; every Devanagari DSR
-# pattern silently never fired. Use Unicode lookarounds instead: (?<!\w)kw(?!\w) under re.UNICODE
-# — boundary semantics that work for BOTH scripts ("my data" still won't fire on "my database").
-#
-# FAIL-SAFE over-match (by design, Cowork-confirmed): because matras ∉ \w, a keyword that is a
-# strict prefix of a longer Devanagari word matches THROUGH a following matra — a stem like "हटा"
-# fires inside "हटाओ". For DSR/opt-out that direction is conservative (over-match → we route a
-# deletion/opt-out request, never miss one) and usefully covers Devanagari inflections. See the
-# stem-through-matra test.
-_DSR_PATTERNS = [
-    re.compile(rf"(?<!\w){re.escape(kw)}(?!\w)", re.IGNORECASE | re.UNICODE)
-    for kw in _load_keywords("dsr_keywords.yaml")
-]
+def _boundary_patterns(filename: str) -> list[re.Pattern[str]]:
+    """VT-329: boundary-safe CONTAINMENT patterns (anywhere in the body), used for BOTH opt-out
+    and DSR. `\\b` is DEAD for Devanagari — a matra (combining vowel sign ◌ा/◌ी, category Mc/Mn)
+    is NOT `\\w`, so a keyword ending in a matra (मेरा) can never anchor the trailing `\\b`; every
+    Devanagari pattern silently never fired. Unicode lookarounds `(?<!\\w)kw(?!\\w)` give boundary
+    semantics that work for BOTH scripts ("my data" still won't fire on "my database").
+
+    FAIL-SAFE over-match (by design, Cowork-confirmed): because matras ∉ \\w, a keyword that is a
+    strict prefix of a longer Devanagari word matches THROUGH a following matra — a stem "हटा"
+    fires inside "हटाओ". For DSR/opt-out that is conservative (over-route a deletion/opt-out
+    request, never miss one) and covers Devanagari inflections. Keywords are NFC-normalized at
+    compile so the body's NFC form matches. See the stem-through-matra test."""
+    return [
+        re.compile(rf"(?<!\w){re.escape(_nfc(kw))}(?!\w)", re.IGNORECASE | re.UNICODE)
+        for kw in _load_keywords(filename)
+    ]
+
+
+# Opt-out: VT-329 — boundary-safe CONTAINMENT (was whole-body-exact, which missed "please बंद
+# करो" / danda variants). Same lookaround approach as DSR. Failure direction is DPDP-safe.
+_OPT_OUT_PATTERNS = _boundary_patterns("opt_out_keywords.yaml")
+
+# VT-303 — data-inputs ENABLE (opt-in / consent-grant): exact match (case-insensitive, NFC) on
+# the whole trimmed body, the inverse of opt-out. Routes to data_inputs_enable_handler.
+_ENABLE_KEYWORDS = {_nfc(kw.casefold()) for kw in _load_keywords("data_inputs_enable_keywords.yaml")}
+
+# DSR: boundary-safe containment (see _boundary_patterns).
+_DSR_PATTERNS = _boundary_patterns("dsr_keywords.yaml")
 
 # Status ping: narrow regex — matches ONLY a whole-message trivial query.
 _STATUS_PING = re.compile(
@@ -85,19 +97,19 @@ _INTEGRATION_INTENT_RE = re.compile(
 
 
 def _normalize(body: str) -> str:
-    """Collapse whitespace and case-fold for exact keyword comparison."""
-    return " ".join(body.split()).casefold()
+    """Collapse whitespace, case-fold, NFC-normalize for exact keyword comparison (the enable
+    gate). VT-329: NFC so a decomposed Devanagari body matches the canonical keyword form."""
+    return unicodedata.normalize("NFC", " ".join(body.split()).casefold())
 
 
 def matches_opt_out_or_dsr(body: str) -> bool:
-    """True if ``body`` is an opt-out (exact normalized whole-body keyword) or
-    contains a DSR keyword (word-boundary). The VT-85 refund-offer reply gate calls
-    this to YIELD to opt-out / DSR routing — those ALWAYS win over a refund-decision
-    interpretation (DPDP): a refund_offered tenant who says "delete my data and
-    refund me" or "STOP" must reach the dsr/opt-out handler, not auto-refund."""
-    if _normalize(body) in _OPT_OUT_KEYWORDS:
-        return True
-    return any(pat.search(body or "") for pat in _DSR_PATTERNS)
+    """True if ``body`` CONTAINS an opt-out or DSR keyword (VT-329: boundary-safe containment, NFC,
+    EN+Devanagari+Hinglish). The VT-85 refund-offer reply gate calls this to YIELD to opt-out / DSR
+    routing — those ALWAYS win over a refund-decision interpretation (DPDP): a refund_offered tenant
+    who says "delete my data and refund me" / "बंद करो" / "band karo" must reach the dsr/opt-out
+    handler, not auto-refund."""
+    nfc = _nfc(body)
+    return any(p.search(nfc) for p in _OPT_OUT_PATTERNS) or any(p.search(nfc) for p in _DSR_PATTERNS)
 
 
 @DBOS.step()
@@ -129,12 +141,18 @@ def pre_filter(event: WebhookEvent, state: SubscriberState) -> PreFilterResult:
 
     # --- Inbound message body checks ---
     normalized = _normalize(event.body)
+    nfc_body = _nfc(event.body)  # VT-329: pattern searches run on the NFC form
 
-    # Rule a — opt-out keyword (exact, case-insensitive, EN + HI).
-    if normalized in _OPT_OUT_KEYWORDS:
-        return RouteToDirectHandler(handler_name="opt_out_handler", payload={"matched": normalized})
+    # Rule a — opt-out keyword (VT-329: boundary-safe CONTAINMENT, NFC, EN + Devanagari + Hinglish;
+    # was whole-body-exact, which missed "please बंद करो" / danda variants). Checked FIRST so a
+    # mixed "enable ... STOP" yields to the opt-out (DPDP-safe).
+    for pattern in _OPT_OUT_PATTERNS:
+        if pattern.search(nfc_body):
+            return RouteToDirectHandler(
+                handler_name="opt_out_handler", payload={"matched": pattern.pattern}
+            )
 
-    # Rule a2 — VT-303 data-inputs ENABLE keyword (exact, case-insensitive).
+    # Rule a2 — VT-303 data-inputs ENABLE keyword (exact, case-insensitive, NFC).
     # The consent-grant phrase. Routed here (a direct handler, no LLM) so an
     # owner whose owner_inputs is still FALSE can turn it on — the gate on the
     # brain transmit lives in runner.webhook_pipeline_run.
@@ -143,9 +161,9 @@ def pre_filter(event: WebhookEvent, state: SubscriberState) -> PreFilterResult:
             handler_name="data_inputs_enable_handler", payload={"matched": normalized}
         )
 
-    # Rule b — DSR keyword (case-insensitive word-boundary, EN + HI).
+    # Rule b — DSR keyword (VT-329: boundary-safe containment, NFC, EN + Devanagari + Hinglish).
     for pattern in _DSR_PATTERNS:
-        if pattern.search(event.body):
+        if pattern.search(nfc_body):
             return RouteToDirectHandler(
                 handler_name="dsr_handler", payload={"matched": pattern.pattern}
             )

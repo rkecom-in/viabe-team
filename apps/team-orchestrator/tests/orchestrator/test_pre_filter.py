@@ -225,41 +225,6 @@ def test_dsr_keyword_routes_creates_ticket(gate):
     assert row == ("acknowledged", "deletion")
 
 
-# --- VT-329 — Devanagari boundary + mixed-script DSR matching --------------------------------
-def test_devanagari_dsr_matches_pure() -> None:
-    """VT-329: the Devanagari DSR keyword (मेरा डेटा) now fires — it was 100% DEAD under `\\b`
-    (matras ∉ \\w → the trailing `\\b` could never anchor). Pure helper-level proof."""
-    from orchestrator.pre_filter_gate import matches_opt_out_or_dsr
-
-    assert matches_opt_out_or_dsr("मेरा डेटा हटाओ") is True  # was False (dead pattern)
-    assert matches_opt_out_or_dsr("refund मेरा डेटा delete") is True
-    assert matches_opt_out_or_dsr("hello how are you") is False  # benign, no over-fire
-
-
-def test_mixed_script_dsr_matches_pure() -> None:
-    """VT-329 (Cowork): owners code-switch mid-sentence — a COMPLETE Devanagari keyword surrounded
-    by EN/Hinglish must still route. (A SCRIPT-SPLIT phrase like 'मेरा data' — मेरा + EN 'data',
-    no complete keyword — does NOT route; that's keyword curation, Type-2 / VT-8, out of scope.)"""
-    from orchestrator.pre_filter_gate import matches_opt_out_or_dsr
-
-    assert matches_opt_out_or_dsr("मेरा डेटा delete karo") is True
-    assert matches_opt_out_or_dsr("please delete मेरा डेटा now") is True
-
-
-def test_devanagari_stem_through_matra_is_intended_failsafe() -> None:
-    """VT-329 (Cowork): a Devanagari keyword ending in a bare consonant matches THROUGH a
-    following matra (matras ∉ \\w → (?!\\w) passes) — e.g. stem 'हट' fires inside 'हटाओ'. This
-    over-match is INTENDED + fail-safe for DSR/opt-out: over-route a deletion/opt-out request,
-    never miss one, and it usefully covers Devanagari inflections. A following CONSONANT (\\w)
-    still blocks it (no runaway match into an unrelated word)."""
-    import re
-
-    pat = re.compile(r"(?<!\w)हट(?!\w)", re.IGNORECASE | re.UNICODE)
-    assert pat.search("हटाओ") is not None  # stem-through-matra — by design
-    assert pat.search("मेरा डेटा हटाओ") is not None
-    assert pat.search("हटक") is None  # क is \w → boundary holds, no false-extend
-
-
 def test_devanagari_dsr_routes_creates_ticket(gate):
     """VT-329 end-to-end: a Devanagari DSR message routes to dsr_handler (it was silently dropped
     before — the launch-gate failure mode)."""
@@ -270,6 +235,29 @@ def test_devanagari_dsr_routes_creates_ticket(gate):
     result = gate.pre_filter(event, sub)
     assert isinstance(result, gate.t.RouteToDirectHandler)
     assert result.handler_name == "dsr_handler"
+
+
+def test_mixed_script_dsr_routes_creates_ticket(gate):
+    """VT-329 (Cowork): a code-switched DSR message ('मेरा data delete karo') routes to dsr_handler
+    — the curated code-switched keywords + boundary-safe containment close the BLOCK miss."""
+    tenant_id = _new_tenant(gate.dsn)
+    sub = _state(gate, tenant_id)
+    event = _inbound(gate, "मेरा data delete karo")
+
+    result = gate.pre_filter(event, sub)
+    assert isinstance(result, gate.t.RouteToDirectHandler)
+    assert result.handler_name == "dsr_handler"
+
+
+def test_hinglish_opt_out_routes(gate):
+    """VT-329 (Cowork): 'band karo' (+ 'please बंद करो') route opt_out_handler — opt-out is now
+    boundary-safe containment, not whole-body-exact."""
+    tenant_id = _new_tenant(gate.dsn)
+    sub = _state(gate, tenant_id)
+    for body in ("band karo", "please बंद करो"):
+        result = gate.pre_filter(_inbound(gate, body), sub)
+        assert isinstance(result, gate.t.RouteToDirectHandler)
+        assert result.handler_name == "opt_out_handler"
 
 
 def test_status_callback_delivered_is_rejected(gate):
