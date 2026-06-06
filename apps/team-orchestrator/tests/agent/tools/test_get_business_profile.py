@@ -186,3 +186,31 @@ def test_connector_table_missing_returns_empty_integrations() -> None:
     )
     assert result is not None
     assert result.integration_summary == []
+
+
+def test_safe_query_degrades_on_insufficient_privilege() -> None:
+    """VT-347: _safe_query_undefined degrades to None on a MISSING GRANT (InsufficientPrivilege),
+    not just a missing table (UndefinedTable) — get_business_profile must never 500 on an optional
+    source. Any OTHER error still propagates. Matched by type NAME (psycopg-free)."""
+    from orchestrator.agent.tools.get_business_profile import _safe_query_undefined
+
+    class UndefinedTable(Exception):
+        pass
+
+    class InsufficientPrivilege(Exception):
+        pass
+
+    class SomethingElse(Exception):
+        pass
+
+    def _cur(exc: Exception) -> Any:
+        class _C:
+            def execute(self, sql: str, params: tuple) -> None:
+                raise exc
+
+        return _C()
+
+    assert _safe_query_undefined(_cur(UndefinedTable()), "SELECT 1", ()) is None
+    assert _safe_query_undefined(_cur(InsufficientPrivilege()), "SELECT 1", ()) is None
+    with pytest.raises(SomethingElse):
+        _safe_query_undefined(_cur(SomethingElse()), "SELECT 1", ())

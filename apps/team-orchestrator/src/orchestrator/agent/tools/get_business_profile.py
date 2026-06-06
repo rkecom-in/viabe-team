@@ -51,16 +51,21 @@ class GetBusinessProfileOutput(BaseModel):
 
 
 def _safe_query_undefined(cur: Any, sql: str, params: tuple) -> Any | None:
-    """Run query; return cursor result OR None if table absent.
+    """Run query; return the cursor OR None if the optional source is unreadable.
 
-    psycopg raises UndefinedTable; matched by type name to keep this
-    module psycopg-free at load time.
+    Degrades to None on a missing table (``UndefinedTable``) OR a missing SELECT grant
+    (``InsufficientPrivilege``) — both mean "this optional profile source can't be read" and
+    must yield a graceful null, never a 500 (VT-347). The app_role SELECT on
+    tenant_connector_status + l1_entities rides on mig 015's ALTER DEFAULT PRIVILEGES (both
+    created after 015); if that ever lapsed, this keeps get_business_profile degrading instead of
+    crashing. (mig 112 adds explicit GRANTs as belt-over-braces.) Matched by type NAME to keep
+    this module psycopg-free at load time.
     """
     try:
         cur.execute(sql, params)
         return cur
     except Exception as exc:  # noqa: BLE001
-        if type(exc).__name__ != "UndefinedTable":
+        if type(exc).__name__ not in ("UndefinedTable", "InsufficientPrivilege"):
             raise
         return None
 
