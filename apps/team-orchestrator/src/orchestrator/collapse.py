@@ -43,7 +43,8 @@ from orchestrator.agent.schemas.campaign_plan import (
     CampaignPlanProposed,
 )
 from orchestrator.db import tenant_connection
-from orchestrator.db.wrappers import CampaignsWrapper
+from orchestrator.db.wrappers import CampaignsWrapper, PendingApprovalsWrapper
+from orchestrator.observability.log import log_event
 from orchestrator.privacy.cohort import (
     CohortRejectedError,
     resolve_cohort_recipients,
@@ -51,6 +52,11 @@ from orchestrator.privacy.cohort import (
 from orchestrator.state.agent_graph_state import AgentGraphState
 
 logger = logging.getLogger(__name__)
+
+# VT-334 — per-week owner-messaging budget: at most this many campaign_send approval requests
+# per owner per 7 days (the owner-fatigue guard). At the cap, the campaign is still persisted as
+# 'proposed' (visible next sync) but NO approval prompt is sent this week.
+_WEEKLY_APPROVAL_BUDGET = 2
 
 
 def collapse_campaign_plan(
@@ -348,6 +354,28 @@ def collapse_node(state: AgentGraphState) -> dict[str, Any]:
         # is persisted as 'proposed' — it does NOT advance to 'sent' until the
         # resume path resolves an 'approved' decision (the send path is a
         # separate VT, structurally downstream of this gate).
+        # VT-334 per-week budget: if the owner has already had _WEEKLY_APPROVAL_BUDGET
+        # campaign_send requests in the last 7 days, SKIP a new prompt (owner-fatigue guard).
+        # The campaign stays persisted as 'proposed' — the owner sees it next sync; we just
+        # don't send a 3rd nudge this week. Silent by design (a "we didn't notify you" message
+        # would defeat the guard); logged for observability (no PII).
+        if (
+            PendingApprovalsWrapper().count_recent_campaign_requests(tenant_id, days=7)
+            >= _WEEKLY_APPROVAL_BUDGET
+        ):
+            log_event(
+                event_type="approval_budget_skipped",
+                run_id=run_id,
+                tenant_id=tenant_id,
+                severity="info",
+                component="collapse",
+                payload={
+                    "campaign_id": str(campaign_id),
+                    "window_days": 7,
+                    "budget": _WEEKLY_APPROVAL_BUDGET,
+                },
+            )
+            return {}
         return {
             "pending_approval_request": _build_approval_request(
                 plan=plan, campaign_id=campaign_id,
