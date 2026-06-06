@@ -1,9 +1,11 @@
 import Link from 'next/link'
 
 import { getLandingDictionary, resolveLocale, t } from '@/lib/i18n'
+import { launchMode } from '@/lib/launch-mode'
 import { planPrices } from '@/lib/team-pricing'
 
 import { FoundingCounterWidget, type FoundingStatus } from './founding-counter-widget'
+import { WaitlistForm } from './waitlist-form'
 
 /**
  * VT-95 — Viabe Team public landing page (bilingual EN + HI).
@@ -42,6 +44,18 @@ export default async function TeamLandingPage({
   const { lang } = await searchParams
   const locale = resolveLocale(lang)
   const d = getLandingDictionary(locale)
+
+  // VT-97 — one toggle picks the rendering tree (Pillar 8). maintenance → just the notice.
+  const mode = launchMode()
+  if (mode === 'maintenance') {
+    return (
+      <main lang={locale} className="maintenance">
+        <h1>{t(d, 'maintenance.title')}</h1>
+        <p>{t(d, 'maintenance.body')}</p>
+      </main>
+    )
+  }
+
   const initial = await fetchFoundingStatus()
   const prices = planPrices()
 
@@ -59,9 +73,23 @@ export default async function TeamLandingPage({
       <section aria-label="hero">
         <h1>{t(d, 'hero.title')}</h1>
         <p>{t(d, 'hero.subtitle')}</p>
-        <Link href="/team/signup" data-testid="hero-cta">
-          {t(d, 'hero.cta')}
-        </Link>
+        {mode === 'waitlist' ? (
+          <WaitlistForm
+            labels={{
+              notice: t(d, 'waitlist.notice'),
+              email: t(d, 'waitlist.email'),
+              phone: t(d, 'waitlist.phone'),
+              consent: t(d, 'waitlist.consent'),
+              submit: t(d, 'waitlist.submit'),
+              submitted: t(d, 'waitlist.submitted'),
+              error: t(d, 'waitlist.error'),
+            }}
+          />
+        ) : (
+          <Link href="/team/signup" data-testid="hero-cta">
+            {t(d, 'hero.cta')}
+          </Link>
+        )}
         <FoundingCounterWidget initial={initial} />
       </section>
 

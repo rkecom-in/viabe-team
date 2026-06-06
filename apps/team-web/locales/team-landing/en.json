@@ -57,5 +57,18 @@
   "footer.dpdpa": "DPDP disclosure",
   "footer.terms": "Terms",
   "footer.contact": "Contact",
-  "footer.rights": "© Viabe Team"
+  "footer.rights": "© Viabe Team",
+
+  "waitlist.cta": "Join the waitlist",
+  "waitlist.title": "Be first when we launch",
+  "waitlist.notice": "We'll use your email and WhatsApp number only to message you when Viabe Team launches — nothing else.",
+  "waitlist.email": "Email",
+  "waitlist.phone": "WhatsApp number (+91…)",
+  "waitlist.consent": "I agree to be contacted at launch (DPDP).",
+  "waitlist.submit": "Notify me at launch",
+  "waitlist.submitted": "You're on the list — we'll message you when we launch.",
+  "waitlist.error": "Something went wrong. Please try again.",
+
+  "maintenance.title": "We're back soon",
+  "maintenance.body": "Viabe Team is briefly down for maintenance. Please check back shortly."
 }

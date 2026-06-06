@@ -57,5 +57,18 @@
   "footer.dpdpa": "DPDP प्रकटीकरण",
   "footer.terms": "शर्तें",
   "footer.contact": "संपर्क",
-  "footer.rights": "© Viabe Team"
+  "footer.rights": "© Viabe Team",
+
+  "waitlist.cta": "वेटलिस्ट में शामिल हों",
+  "waitlist.title": "लॉन्च पर सबसे पहले जुड़ें",
+  "waitlist.notice": "हम आपके ईमेल और WhatsApp नंबर का उपयोग केवल Viabe Team लॉन्च होने पर आपको संदेश भेजने के लिए करेंगे — और कुछ नहीं।",
+  "waitlist.email": "ईमेल",
+  "waitlist.phone": "WhatsApp नंबर (+91…)",
+  "waitlist.consent": "मैं लॉन्च पर संपर्क किए जाने से सहमत हूँ (DPDP)।",
+  "waitlist.submit": "लॉन्च पर मुझे सूचित करें",
+  "waitlist.submitted": "आप सूची में हैं — लॉन्च होने पर हम आपको संदेश भेजेंगे।",
+  "waitlist.error": "कुछ गलत हुआ। कृपया पुनः प्रयास करें।",
+
+  "maintenance.title": "हम जल्द लौटेंगे",
+  "maintenance.body": "Viabe Team कुछ समय के लिए रखरखाव हेतु बंद है। कृपया थोड़ी देर बाद फिर देखें।"
 }

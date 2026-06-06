@@ -40,7 +40,7 @@ function _tokenizePhone(phoneE164: string): string {
 }
 
 function _hit(
-  kind: 'ip' | 'phone' | 'signup',
+  kind: 'ip' | 'phone' | 'signup' | 'waitlist',
   identifier: string,
   max: number,
   now: number,
@@ -104,6 +104,21 @@ export function checkSignupRateLimit(
   now: number = Date.now(),
 ): RateLimitResult {
   if (!_hit('signup', ip || 'unknown', OTP_MAX_PER_IP, now)) {
+    return { allowed: false, blockedBy: 'ip' }
+  }
+  return { allowed: true, blockedBy: null }
+}
+
+/**
+ * VT-97 — per-IP cap for waitlist capture. A DISTINCT 'waitlist' bucket so it has its own
+ * window (independent of signup/otp). A flood backstop behind the orchestrator dedup + the
+ * X-Internal-Secret; intentionally the same lenient 5/15 (CGNAT — see above).
+ */
+export function checkWaitlistRateLimit(
+  ip: string,
+  now: number = Date.now(),
+): RateLimitResult {
+  if (!_hit('waitlist', ip || 'unknown', OTP_MAX_PER_IP, now)) {
     return { allowed: false, blockedBy: 'ip' }
   }
   return { allowed: true, blockedBy: null }
