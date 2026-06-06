@@ -23,6 +23,10 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# VT-336: minimum Haiku confidence to route a mutating exclusion_request to the fast handler.
+# Below this, fall through to the agent (the misroute lands on reasoning, not an auto-exclude).
+_EXCLUSION_CONFIDENCE_FLOOR = 0.7
+
 def _send_edge_ack(tenant_id: UUID | str, recipient_phone: str | None, text: str) -> None:
     """VT-349: the edge-case ack is a DIRECT in-window reply to the owner's just-sent message →
     a FREE-FORM session message (not a template). The handler already computed `text`
@@ -57,7 +61,9 @@ def route_edge_case(
             )
 
     try:
-        classification = getattr(classify_fn(body), "classification", None)
+        _out = classify_fn(body)
+        classification = getattr(_out, "classification", None)
+        confidence = float(getattr(_out, "confidence", 0.0) or 0.0)
     except Exception:
         # A classify failure (bad model JSON / envelope validation) must NOT crash
         # dispatch or trigger a workflow retry — fall through to the agent (the prior
@@ -66,6 +72,16 @@ def route_edge_case(
         return None
 
     if classification == "exclusion_request":
+        # VT-336: exclusion MUTATES state (reversible + owner-acked, but still). Require a
+        # confidence floor — a low-confidence misroute falls through to the agent rather than
+        # auto-excluding. (status_query below is read-only, so it needs no floor.)
+        if confidence < _EXCLUSION_CONFIDENCE_FLOOR:
+            logger.info(
+                "route_edge_case: exclusion_request below confidence floor (%.2f < %.2f) — "
+                "fall through to the agent",
+                confidence, _EXCLUSION_CONFIDENCE_FLOOR,
+            )
+            return None
         from orchestrator.owner_inputs.exclusion import handle_exclusion
 
         result = handle_exclusion(tenant_id, body)
