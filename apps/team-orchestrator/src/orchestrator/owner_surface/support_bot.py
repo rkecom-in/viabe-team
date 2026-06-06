@@ -27,6 +27,7 @@ logger = logging.getLogger(__name__)
 # is deliberately excluded — including it would be dead code.
 _UNRESOLVED = frozenset({"aborted_hard_limit", "escalated"})
 _ESCALATE_THRESHOLD = 2  # the 2nd+ unresolved run in the window escalates to Fazal
+_FATIGUE_THRESHOLD = 3  # VT-343: 3+ escalations in 7 days → the alert flags proactive outreach
 
 
 def _last4(phone: str | None) -> str:
@@ -51,6 +52,20 @@ def _unresolved_count_24h(tenant_id: UUID | str) -> int:
     return int(dict(row)["n"]) if row else 0
 
 
+def _escalation_count_7d(tenant_id: UUID | str) -> int:
+    """VT-343: this tenant's escalations in the last 7 days (the escalations ledger, not runs).
+    Called when an escalation is recorded — the count INCLUDES the just-recorded one."""
+    from orchestrator.graph import get_pool
+
+    with get_pool().connection() as conn:
+        row = conn.execute(
+            "SELECT count(*) AS n FROM escalations "
+            "WHERE tenant_id = %s AND opened_at > now() - interval '7 days'",
+            (str(tenant_id),),
+        ).fetchone()
+    return int(dict(row)["n"]) if row else 0
+
+
 def _send_handoff_ack(tenant_id: UUID | str, sender_phone: str | None, reference: str) -> None:
     """VT-349: the handoff ack is a FREE-FORM in-window reply (not a template) — the owner just
     messaged, so we're inside the 24h window. Bilingual (owner's preferred_language); the
@@ -67,14 +82,27 @@ def _send_handoff_ack(tenant_id: UUID | str, sender_phone: str | None, reference
 
 
 def _alert_fazal_safe(tenant_id: UUID | str, sender_phone: str | None, run_id: str) -> None:
-    """PII-safe Fazal alert — ids + last-4 only; the raw owner message stays at rest."""
+    """PII-safe Fazal alert — ids + last-4 only; the raw owner message stays at rest. VT-343:
+    appends a FATIGUE line when this tenant has 3+ escalations in 7 days (proactive-outreach
+    nudge — a business-stability signal, not just per-incident)."""
     try:
         from orchestrator.billing.refund_executor import _alert_fazal
 
+        fatigue = ""
+        try:
+            count_7d = _escalation_count_7d(tenant_id)
+            if count_7d >= _FATIGUE_THRESHOLD:
+                fatigue = (
+                    f"\n⚠️ FATIGUE: {count_7d} escalations in 7 days — "
+                    f"consider proactive outreach (business-stability check)"
+                )
+        except Exception:
+            # The fatigue count is best-effort — a DB hiccup must never suppress the alert.
+            logger.exception("VT-343 fatigue-count failed (best-effort) tenant=%s", tenant_id)
         _alert_fazal(
             f"⚠️ SupportBot escalation (VT-88)\n"
             f"tenant={tenant_id}\nowner=****{_last4(sender_phone)}\nrun={run_id}\n"
-            f"(2+ unresolved in 24h — open the run in the Ops Console)"
+            f"(2+ unresolved in 24h — open the run in the Ops Console){fatigue}"
         )
     except Exception:
         logger.exception("VT-88 Fazal alert failed tenant=%s", tenant_id)
@@ -103,8 +131,9 @@ def maybe_escalate_support(
     # on run_id (one escalation per run), so a re-processed run won't double-escalate.
     from orchestrator.escalations import record_escalation
 
+    inserted = False
     try:
-        record_escalation(
+        inserted = record_escalation(
             tenant_id,
             kind="support_fallback",
             severity="medium",
@@ -113,5 +142,10 @@ def maybe_escalate_support(
         )
     except Exception:
         logger.exception("VT-88 record_escalation failed tenant=%s", tenant_id)
-    _alert_fazal_safe(tenant_id, sender_phone, run_id)
-    return {"action": "escalated", "unresolved_24h": count}
+    # VT-343 nit A: alert Fazal ONLY on a NEW escalation. A DBOS workflow replay re-runs this
+    # fn, but record_escalation's ON CONFLICT(run_id) makes the second write a no-op
+    # (inserted=False) → we skip the duplicate Telegram ping. The owner ack (step 1) already
+    # fired regardless, so the no-silence guarantee is unaffected.
+    if inserted:
+        _alert_fazal_safe(tenant_id, sender_phone, run_id)
+    return {"action": "escalated", "unresolved_24h": count, "alerted": inserted}

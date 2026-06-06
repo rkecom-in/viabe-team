@@ -80,10 +80,11 @@ def _patch_sends(monkeypatch) -> dict[str, int]:
     monkeypatch.setattr(
         sb, "_alert_fazal_safe", lambda *a, **k: calls.__setitem__("alert", calls["alert"] + 1)
     )
-    monkeypatch.setattr(
-        "orchestrator.escalations.record_escalation",
-        lambda *a, **k: calls.__setitem__("record", calls["record"] + 1),
-    )
+    def _rec(*a, **k):  # type: ignore[no-untyped-def]
+        calls["record"] = calls["record"] + 1
+        return True  # VT-343 nit A: simulate a NEW insert (the alert is gated on this bool)
+
+    monkeypatch.setattr("orchestrator.escalations.record_escalation", _rec)
     return calls
 
 
@@ -121,3 +122,67 @@ def test_counter_cross_tenant(monkeypatch, _dbpool) -> None:
     _seed_runs(_dbpool, b, n=1)  # tenant B: 1 (its own count, A's runs don't leak in)
     assert sb._unresolved_count_24h(a) == 3
     assert sb._unresolved_count_24h(b) == 1
+
+
+# ----------------------------- VT-343 Phase 2a -----------------------------------------
+
+
+@pytest.mark.integration
+def test_replay_does_not_redupe_fazal_alert(monkeypatch, _dbpool) -> None:
+    """VT-343 nit A: a DBOS replay (same run_id) does NOT re-fire the Fazal alert. The REAL
+    record_escalation's ON CONFLICT(run_id) makes the 2nd write a no-op (inserted=False) →
+    the alert is gated off. (record_escalation + _alert_fazal_safe are real here.)"""
+    alerts: list[str] = []
+    monkeypatch.setattr(sb, "_send_handoff_ack", lambda *a, **k: None)  # no real WhatsApp send
+    monkeypatch.setattr(
+        "orchestrator.billing.refund_executor._alert_fazal", lambda text: alerts.append(text)
+    )
+    tid = uuid4()
+    _seed_runs(_dbpool, tid, n=2)  # 2 unresolved in 24h → the escalate branch
+    ev = SimpleNamespace(sender_phone="+919811111111")
+    run_id = str(uuid4())
+
+    a = sb.maybe_escalate_support(tenant_id=str(tid), run_id=run_id, event=ev, final_status="escalated")
+    b = sb.maybe_escalate_support(tenant_id=str(tid), run_id=run_id, event=ev, final_status="escalated")
+    assert a["action"] == "escalated" and a["alerted"] is True  # new escalation → alerted
+    assert b["action"] == "escalated" and b["alerted"] is False  # replay (ON CONFLICT) → NOT re-alerted
+    assert len(alerts) == 1  # exactly one Fazal ping despite two passes
+
+
+@pytest.mark.integration
+def test_fatigue_flag_in_alert_at_threshold(monkeypatch, _dbpool) -> None:
+    """VT-343 #4: 3+ escalations in 7 days → the Fazal alert text carries a FATIGUE line."""
+    captured: list[str] = []
+    monkeypatch.setattr(
+        "orchestrator.billing.refund_executor._alert_fazal", lambda text: captured.append(text)
+    )
+    tid = uuid4()
+    with _dbpool.connection() as conn:
+        conn.execute(
+            "INSERT INTO tenants (id, business_name, plan_tier, phase) "
+            "VALUES (%s, 't', 'standard', 'onboarding') ON CONFLICT (id) DO NOTHING",
+            (str(tid),),
+        )
+        for _ in range(3):  # 3 escalations in the last 7 days
+            conn.execute(
+                "INSERT INTO escalations (tenant_id, kind, severity) "
+                "VALUES (%s, 'support_fallback', 'medium')",
+                (str(tid),),
+            )
+    sb._alert_fazal_safe(tid, "+919811111111", "run-x")
+    assert captured and "FATIGUE" in captured[0] and "proactive outreach" in captured[0]
+
+
+@pytest.mark.integration
+def test_ack_fires_even_with_none_sender_phone(monkeypatch, _dbpool) -> None:
+    """VT-343 nit B: a run with NO sender_phone still gets the no-silence ack attempt (the
+    free-form sender handles a None phone by falling back to the tenant whatsapp number)."""
+    calls = _patch_sends(monkeypatch)
+    tid = uuid4()
+    _seed_runs(_dbpool, tid, n=1)
+    ev = SimpleNamespace(sender_phone=None)
+    out = sb.maybe_escalate_support(
+        tenant_id=str(tid), run_id="r-none", event=ev, final_status="escalated"
+    )
+    assert out["action"] == "ack_only"  # 1st unresolved → ack only
+    assert calls["ack"] == 1  # the ack fired despite sender_phone=None
