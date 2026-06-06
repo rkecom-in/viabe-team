@@ -2,6 +2,13 @@
 vt_id: VT-9
 title: VT-OwnerSurface — Twilio, sign-up, weekly approval, refund convo, portal
 status: Backlog
+# VT-9 HELD OPEN (CC, Sprint-8 close-out) — DEVIATES from the "VT-9 → Done" close ruling, flagged
+# for Cowork. Ground truth (Rule #14): child VT-157 (Consent-capture mechanism) is status=Queued,
+# priority=Critical, LAUNCH-GATING (DPDP explicit consent before external-LLM processing). Flipping
+# VT-9 → Done over an open Critical launch-gate child would be premature. HYPOTHESIS: VT-157 may be
+# SUPERSEDED by VT-303 (ACTIVATE-TEAM data-inputs enable + the fail-closed _brain_owner_inputs_ok
+# consent gate) + the record_of_consent infra. Cowork's call: close VT-157 as superseded → then
+# VT-9 → Done; or keep VT-9 open until VT-157 ships. All OTHER OwnerSurface children are Done.
 priority: High
 sprint: Sprint 8 - Owner Surface & Billing
 type: Feature
