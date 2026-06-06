@@ -220,6 +220,10 @@ def _campaign_execute_node(state: AgentGraphState) -> dict[str, Any]:
                 campaign_id_str,
                 conn=conn,
             )
+        # VT-328: the enforcement lives INSIDE execute_approved_campaign (the single chokepoint).
+        # The node only reflects a block into clean graph state — no duplicate phase read here.
+        if summary.get("dispatch_blocked"):
+            return {"campaign_execution_blocked": {"reason": "tenant_phase_terminal"}}
         return {"campaign_execution_summary": summary}
     except Exception as exc:  # noqa: BLE001
         import logging
