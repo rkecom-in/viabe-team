@@ -66,6 +66,18 @@ def _phone_salt(monkeypatch):
         ("stop sending me refund messages", None),
         ("please refund me also unsubscribe", None),
         ("cancel and refund", None),
+        # VT-329: Hinglish (romanized Hindi) negation/opt-out must NOT auto-refund (money safety):
+        ("mujhe refund nahi chahiye", None),  # नहीं — "I don't want a refund"
+        ("refund mat do", None),  # मत — "don't give a refund"
+        ("refund na do", None),  # ना — short-token negation, standalone
+        ("nahin refund cancel karo", None),  # nahin + cancel
+        ("band karo refund", None),  # opt-out (band) over refund
+        ("roko ye refund", None),  # opt-out (roko)
+        # VT-329: Hinglish continue/discuss classify correctly:
+        ("jaari rakhein", "continue"),
+        ("charcha karni hai", "discuss"),
+        # VT-329: bare "baat" stays benign (NOT added — same reason बात was dropped):
+        ("kya baat hai", None),
         ("", None),
     ],
 )

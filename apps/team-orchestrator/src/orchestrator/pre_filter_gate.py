@@ -42,11 +42,20 @@ _OPT_OUT_KEYWORDS = {kw.casefold() for kw in _load_keywords("opt_out_keywords.ya
 # data_inputs_enable_handler which sets tenants.owner_inputs = true.
 _ENABLE_KEYWORDS = {kw.casefold() for kw in _load_keywords("data_inputs_enable_keywords.yaml")}
 
-# DSR: case-insensitive, word-boundary match anywhere in the body. Word
-# boundaries keep matching conservative (e.g. "my data" does not fire on
-# "my database").
+# DSR: case-insensitive, boundary match anywhere in the body. VT-329: `\b` is DEAD for
+# Devanagari — a matra (combining vowel sign, e.g. ा/ी, category Mc/Mn) is NOT `\w`, so a
+# keyword ending in a matra (मेरा) can never anchor the trailing `\b`; every Devanagari DSR
+# pattern silently never fired. Use Unicode lookarounds instead: (?<!\w)kw(?!\w) under re.UNICODE
+# — boundary semantics that work for BOTH scripts ("my data" still won't fire on "my database").
+#
+# FAIL-SAFE over-match (by design, Cowork-confirmed): because matras ∉ \w, a keyword that is a
+# strict prefix of a longer Devanagari word matches THROUGH a following matra — a stem like "हटा"
+# fires inside "हटाओ". For DSR/opt-out that direction is conservative (over-match → we route a
+# deletion/opt-out request, never miss one) and usefully covers Devanagari inflections. See the
+# stem-through-matra test.
 _DSR_PATTERNS = [
-    re.compile(rf"\b{re.escape(kw)}\b", re.IGNORECASE) for kw in _load_keywords("dsr_keywords.yaml")
+    re.compile(rf"(?<!\w){re.escape(kw)}(?!\w)", re.IGNORECASE | re.UNICODE)
+    for kw in _load_keywords("dsr_keywords.yaml")
 ]
 
 # Status ping: narrow regex — matches ONLY a whole-message trivial query.

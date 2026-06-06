@@ -33,8 +33,12 @@ RefundDecision = Literal["refund", "continue", "discuss"]
 # their decisive token (जारी/रखें = continue, चर्चा = discuss). 'बात' (= "thing/
 # talk") was DROPPED — too generic ("क्या बात है" = "what's up?") -> false DISCUSS.
 _REFUND_KW = {"refund", "रिफंड", "रिफ़ंड"}
-_CONTINUE_KW = {"continue", "जारी", "रखें"}
-_DISCUSS_KW = {"discuss", "चर्चा"}
+# VT-329: + Hinglish (romanized) continue/discuss. "jaari rakhein" = continue; "charcha" = चर्चा.
+# Bare "baat" is deliberately NOT added (same reason बात was dropped above — "kya baat hai" =
+# "what's up" → false DISCUSS). A missed continue is fail-safe anyway (the 48h timeout defaults
+# to CONTINUE), so these soft tokens carry no money risk.
+_CONTINUE_KW = {"continue", "जारी", "रखें", "jaari", "rakhein"}
+_DISCUSS_KW = {"discuss", "चर्चा", "charcha"}
 
 # A reply that NEGATES, QUESTIONS, or signals OPT-OUT/DSR intent is NOT a refund
 # decision — a financial decision must never be guessed from a sentence that merely
@@ -60,6 +64,18 @@ _NEGATION = {
     "मत",
     "ना",
     "न",
+    # VT-329: Hinglish (romanized Hindi) negation — "mujhe refund nahi chahiye" / "refund mat do"
+    # / "refund na do" must NOT auto-refund. SHORT tokens (na/mat/naa) are SAFE here because
+    # matching is token-EXACT (a whole standalone token, never a substring) and the failure
+    # direction is refund-SUPPRESSION (fail-safe — a stray match yields None, the 48h CONTINUE
+    # default, never a wrong refund). Do NOT "fix" this into substring matching.
+    "nahi",
+    "nahin",
+    "naheen",
+    "mat",
+    "maat",
+    "na",
+    "naa",
 }
 _INTERROGATIVE = {
     "can",
@@ -81,7 +97,13 @@ _INTERROGATIVE = {
 # refund ...", "delete my data and refund me" must NOT auto-refund. Any of these
 # tokens -> None. (The runner gate ALSO bails on the authoritative pre_filter
 # opt-out/DSR patterns before this classifier runs — belt + suspenders.)
-_OPT_OUT_HINT = {"stop", "unsubscribe", "cancel", "quit", "remove", "delete", "erase"}
+_OPT_OUT_HINT = {
+    "stop", "unsubscribe", "cancel", "quit", "remove", "delete", "erase",
+    # VT-329: Hinglish opt-out — "band karo" (stop) / "roko" (stop) / "hatao" (remove). Token-exact
+    # standalone; fail-safe (any hit → None, never a refund). pre_filter's opt-out gate also catches
+    # these upstream — belt + suspenders.
+    "band", "roko", "hatao",
+}
 
 
 def classify_refund_reply(body: str) -> RefundDecision | None:
