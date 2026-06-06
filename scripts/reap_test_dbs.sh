@@ -70,16 +70,22 @@ else
   done
 fi
 
-# Now the shared roles can be dropped cleanly (no DB still depends on them).
-for role in app_role app_operator_role rls_tester; do
+# Now the shared roles can be dropped cleanly (no DB still depends on them). VT-322: DROP OWNED BY
+# … CASCADE FIRST — even with the test DBs dropped, a role can still own residual grants/objects in
+# the admin DB (or a default-privilege grant), and a bare DROP ROLE then fails ("objects depend on
+# it") → the stale-grant state persists → the next pre-push RLS tests false-fail "permission
+# denied". DROP OWNED clears what the role owns in the connected DB, so DROP ROLE self-heals.
+# rls_ckpt_tester included (the VT-346 leak role — same class; the RLS-checkpoint test creates it).
+for role in app_role app_operator_role rls_tester rls_ckpt_tester; do
   if [ "$DRY_RUN" -eq 1 ]; then
-    echo "reap_test_dbs: --dry-run — would drop role $role"
+    echo "reap_test_dbs: --dry-run — would DROP OWNED BY + DROP ROLE $role"
   else
+    psql "$ADMIN_DSN" -tAqc "DROP OWNED BY $role CASCADE" >/dev/null 2>&1 || true
     psql "$ADMIN_DSN" -tAqc "DROP ROLE IF EXISTS $role" >/dev/null 2>&1 \
       && true || echo "  note: role $role not dropped (may still have deps)" >&2
   fi
 done
 
 remaining_roles="$(psql "$ADMIN_DSN" -tAc \
-  "SELECT count(*) FROM pg_roles WHERE rolname IN ('app_role','app_operator_role','rls_tester')")"
+  "SELECT count(*) FROM pg_roles WHERE rolname IN ('app_role','app_operator_role','rls_tester','rls_ckpt_tester')")"
 echo "reap_test_dbs: done. shared test roles remaining: $remaining_roles (0 = clean)."
