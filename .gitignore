@@ -6,6 +6,9 @@ node_modules/
 .next/
 dist/
 build/
+
+# Generated dashboards (regenerated from state; never tracked — VT-355)
+sprint_dashboard.html
 out/
 *.tsbuildinfo
 # next-env.d.ts is intentionally committed so CI typecheck works without a build.

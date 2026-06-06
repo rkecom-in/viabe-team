@@ -70,5 +70,9 @@
   "waitlist.error": "Something went wrong. Please try again.",
 
   "maintenance.title": "We're back soon",
-  "maintenance.body": "Viabe Team is briefly down for maintenance. Please check back shortly."
+  "maintenance.body": "Viabe Team is briefly down for maintenance. Please check back shortly.",
+
+  "social.heading": "What shop owners say",
+  "social.testimonials_placeholder": "Coming soon. We're launching with founding members — their real stories will appear here as they share results. We don't post testimonials we don't have.",
+  "social.metrics_placeholder": "Results will appear after launch, once we've earned real numbers across shops. We don't fabricate figures."
 }

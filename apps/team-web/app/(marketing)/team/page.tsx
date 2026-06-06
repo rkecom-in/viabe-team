@@ -4,7 +4,10 @@ import { getLandingDictionary, resolveLocale, t } from '@/lib/i18n'
 import { launchMode } from '@/lib/launch-mode'
 import { planPrices } from '@/lib/team-pricing'
 
+import socialProofData from '@/data/social-proof.json'
+
 import { FoundingCounterWidget, type FoundingStatus } from './founding-counter-widget'
+import { SocialProof, type SocialProofData } from './social-proof'
 import { WaitlistForm } from './waitlist-form'
 
 /**
@@ -102,6 +105,15 @@ export default async function TeamLandingPage({
           </article>
         ))}
       </section>
+
+      <SocialProof
+        data={socialProofData as SocialProofData}
+        labels={{
+          heading: t(d, 'social.heading'),
+          testimonials_placeholder: t(d, 'social.testimonials_placeholder'),
+          metrics_placeholder: t(d, 'social.metrics_placeholder'),
+        }}
+      />
 
       <section aria-label="pricing">
         <h2>{t(d, 'pricing.title')}</h2>
