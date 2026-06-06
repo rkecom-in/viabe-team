@@ -67,12 +67,13 @@ added (it would re-litigate VT-245).
 
 ## Gaps (anti-proliferation — fill small here, roster/accept the rest)
 
-- **GAP-1 — owner-surface edge cases (ROSTER-OR-ACCEPT, Cowork):** category 9 is the thinnest
-  canary set (`test_edge_cases.py` + `_pr2.py` + monthly-report + the VT-357 SLA substrate). Missing
-  edge cases worth a row IF wanted: approval-request retry/timeout races, DSR-request malformed-field
-  handling, dashboard state races. This is a category EXPANSION (>~1h, multiple substrate tests) —
-  **not** silently built here per anti-proliferation. Cowork: roster a follow-up VT row, or accept
-  the current depth (the owner surface is also covered indirectly via cats 3/4/5/10).
+- **GAP-1 — owner-surface edge cases (ACCEPTED — revisit post-launch, Cowork 20260606T225500Z):**
+  category 9 is the thinnest canary set (`test_edge_cases.py` + `_pr2.py` + monthly-report + the
+  VT-357 SLA substrate). Possible expansion (NOT built): approval-request retry/timeout races,
+  DSR-request malformed-field handling, dashboard state races. Cowork ruling: **ACCEPT, do not
+  roster** — VT-336 + VT-329 already gave that surface its adversarial pass, so the expansion is
+  breadth, not a gate; the owner surface is also covered indirectly via cats 3/4/5/10. Revisit
+  post-launch. (This manifest line is the durable record — no separate row.)
 - **GAP-2 — frontend all-unit (ACCEPT):** the 47 vitest files are unit-grade (mocks); this is by
   design — real frontend E2E is the `e2e-playwright` CI job (chromium + next build). No action.
 
