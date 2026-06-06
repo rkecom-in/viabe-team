@@ -470,8 +470,8 @@ _VT45_LIVE = (
     "refund_offer",
     "refund_completed",
 )
-# The 3 in-window acks STAY null here — they become free-form (not templates) in VT-349.
-_VT45_FREEFORM_STILL_NULL = ("refund_processing", "support_handoff", "team_edge_case_ack")
+# The 3 in-window acks are FREE-FORM (not templates) — REMOVED from the registry in VT-349.
+_VT349_FREEFORM_REMOVED = ("refund_processing", "support_handoff", "team_edge_case_ack")
 
 
 def test_vt45_wire_five_templates_resolve_live_sid_both_langs() -> None:
@@ -483,10 +483,14 @@ def test_vt45_wire_five_templates_resolve_live_sid_both_langs() -> None:
             assert re.match(r"^HX[0-9a-f]{32}$", sid), f"{name}[{lang}] bad SID: {sid!r}"
 
 
-def test_vt45_freeform_acks_stay_null_until_vt349() -> None:
-    """The 3 in-window acks are NOT wired here (they go free-form in VT-349)."""
-    for name in _VT45_FREEFORM_STILL_NULL:
-        assert reg.content_sid_for(name, "en") is None
+def test_vt349_freeform_acks_removed_from_registry() -> None:
+    """VT-349: the 3 in-window acks are FREE-FORM now (not templates) → removed from the
+    registry; resolving them raises UnknownTemplateError."""
+    from orchestrator.templates_registry import UnknownTemplateError
+
+    for name in _VT349_FREEFORM_REMOVED:
+        with pytest.raises(UnknownTemplateError):
+            reg.content_sid_for(name, "en")
 
 
 def test_vt45_send_template_uses_wired_sid(monkeypatch) -> None:

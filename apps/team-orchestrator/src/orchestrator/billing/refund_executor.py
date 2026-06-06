@@ -173,20 +173,41 @@ def _transition_to_refunded(tenant_id: UUID, refund_reason: str) -> bool:
 
 
 def _notify_owner(tenant_id: UUID, amount_paise: int) -> bool:
-    """Send the owner refund templates. Returns True if a template could not be
-    sent because its SID is null (NEEDS-FAZAL) — the caller records
-    notification_pending + alerts Fazal. A send gap NEVER fails the refund."""
-    from orchestrator.utils.twilio_send import send_template_message
+    """Notify the owner of the refund. VT-349 SPLIT:
+    - ``refund_processing`` — the IMMEDIATE ack is a DIRECT in-window reply to the owner's
+      "REFUND" message → FREE-FORM (bilingual), best-effort, does NOT gate `pending`.
+    - ``refund_completed`` — sent when the refund clears (up to 5 business days later =
+      OUTSIDE the window) → stays a TEMPLATE.
 
+    Returns True if ``refund_completed`` could not be sent (NEEDS-FAZAL SID) — the caller
+    records notification_pending + alerts Fazal. A send gap NEVER fails the refund."""
+    from orchestrator.owner_surface.freeform_acks import (
+        ack_body,
+        resolve_owner_locale,
+        send_freeform_ack,
+    )
+    from orchestrator.owner_surface.monthly_report_pdf import money_inr
+    from orchestrator.utils.twilio_send import (
+        get_tenant_whatsapp_number,
+        send_template_message,
+    )
+
+    # 1. refund_processing — FREE-FORM in-window ack (₹ Indian-grouped, no symbol in {amt}).
+    locale = resolve_owner_locale(tenant_id)
+    amt = money_inr(amount_paise).removeprefix("₹")
+    body = ack_body("refund_processing", locale, amt=amt)
+    send_freeform_ack(tenant_id, get_tenant_whatsapp_number(tenant_id), body)
+
+    # 2. refund_completed — TEMPLATE (out-of-window). Only this gates `pending`. Same grouped
+    # `amt` as the free-form ack so both messages read identically (₹2,499, not ₹2499).
     pending = False
-    params = {"1": str(round(amount_paise / 100))}  # ₹ amount placeholder
-    for template in ("refund_processing", "refund_completed"):
-        try:
-            result = send_template_message(tenant_id, template, params)
-        except Exception:  # noqa: BLE001 — never let a notify failure unwind a refund
-            logger.exception("refund: notify send raised for %s", template)
-            pending = True
-            continue
+    params = {"1": amt}
+    try:
+        result = send_template_message(tenant_id, "refund_completed", params)
+    except Exception:  # noqa: BLE001 — never let a notify failure unwind a refund
+        logger.exception("refund: notify send raised for refund_completed")
+        pending = True
+    else:
         if not result.success:
             pending = True
     return pending
