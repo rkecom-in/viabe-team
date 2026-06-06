@@ -259,6 +259,10 @@ def record_dispatch_terminal_episodic(
     row is the source of truth); the DBOS step boundary + deterministic event_id
     make a retry a no-op (episodic_events UNIQUE(tenant_id, event_id)).
     """
+    # VT-356: terminal_path is str | None (the terminated branch carries it raw), so the payload
+    # value type is str | None — annotate it, else mypy widens to dict[str, str] from the first
+    # branch and the 2nd branch's None-able entry is flagged.
+    payload: dict[str, str | None]
     if final_status == "completed":
         event_type = "agent_dispatch_completed"
         payload = {"run_id": run_id, "outcome": terminal_path or final_status}
@@ -564,7 +568,9 @@ def webhook_pipeline_run(tenant_id: str, run_id: str, twilio_fields: dict) -> di
 
     result = pre_filter(event, state)
     handler_name: str | None = None
-    routed = result.kind
+    # VT-356: `routed` is a local observability label (logged/returned), not the route-decision
+    # type — widen to str so the VT-303 'consent_required' branch (below) is assignable.
+    routed: str = result.kind
     final_status = "completed"
     if result.kind == "direct_handler":
         handler_name = result.handler_name
