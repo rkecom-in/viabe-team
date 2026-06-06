@@ -32,9 +32,20 @@ RefundDecision = Literal["refund", "continue", "discuss"]
 # substring like "refundable" must not fire). Multi-word HI phrases are keyed on
 # their decisive token (जारी/रखें = continue, चर्चा = discuss). 'बात' (= "thing/
 # talk") was DROPPED — too generic ("क्या बात है" = "what's up?") -> false DISCUSS.
+# VT-329 (Cowork adversarial review): "jaari"/"जारी" is AMBIGUOUS in reply to a refund OFFER —
+# "jaari karo" can mean "go ahead WITH THE REFUND", not "keep my plan". So continue requires the
+# KEEP-BIGRAM (jaari + rakhein/rakho, जारी + रखें/रखो); bare jaari/जारी → no continue (→ None /
+# re-ask). "continue" (EN) is unambiguous → single-token. Conservative beats guessing on money.
+# ACCEPTED DEVIATION (Cowork conditional-merge): consequently "refund jaari karo" classifies as a
+# single-category REFUND affirmative ("go ahead, issue the refund") — semantically correct (jaari
+# = "go ahead", refund = the subject), not the block's reflexive None. See the test asserting it.
 _REFUND_KW = {"refund", "रिफंड", "रिफ़ंड"}
-_CONTINUE_KW = {"continue", "जारी", "रखें"}
-_DISCUSS_KW = {"discuss", "चर्चा"}
+_CONTINUE_EN = {"continue"}
+_CONTINUE_KEEP_STEM = {"जारी", "jaari"}
+_CONTINUE_KEEP_VERB = {"रखें", "रखो", "rakhein", "rakho"}
+# Bare "baat" deliberately NOT added (same reason बात was dropped — "kya baat hai" = "what's up"
+# → false DISCUSS).
+_DISCUSS_KW = {"discuss", "चर्चा", "charcha"}
 
 # A reply that NEGATES, QUESTIONS, or signals OPT-OUT/DSR intent is NOT a refund
 # decision — a financial decision must never be guessed from a sentence that merely
@@ -60,6 +71,39 @@ _NEGATION = {
     "मत",
     "ना",
     "न",
+    # VT-329: Hinglish (romanized Hindi) negation — "mujhe refund nahi chahiye" / "refund mat do"
+    # / "refund na do" must NOT auto-refund. SHORT tokens (na/mat/naa) are SAFE here because
+    # matching is token-EXACT (a whole standalone token, never a substring) and the failure
+    # direction is refund-SUPPRESSION (fail-safe — a stray match yields None, the 48h CONTINUE
+    # default, never a wrong refund). Do NOT "fix" this into substring matching.
+    "nahi",
+    "nahin",
+    "naheen",
+    "mat",
+    "maat",
+    "na",
+    "naa",
+    # VT-329 (Cowork adversarial review): casual spellings the subagent EXECUTED into a refund.
+    # नही (no anusvara) is the commonest casual नहीं; + नहि; romanized nhi/nai/nhin; clipped mt;
+    # the नको/nako variant; and the idiomatic decline "rehne/rahne do" ("let it be"). All
+    # suppression-only → fail-safe (a stray hit yields None / the 48h CONTINUE default).
+    "नही",
+    "नहि",
+    "नको",
+    "nhi",
+    "nai",
+    "nhin",
+    "mt",
+    "nako",
+    "rehne",
+    "rahne",
+    # VT-329 (Cowork conditional-merge): residual spellings one step from the block class —
+    # nakko (the common romanized-Marathi "no", plausibly MORE frequent than nako), naako, nay,
+    # नईं. Suppression-only → fail-safe. "refund nakko" was still executing a refund.
+    "nakko",
+    "naako",
+    "nay",
+    "नईं",
 }
 _INTERROGATIVE = {
     "can",
@@ -81,7 +125,13 @@ _INTERROGATIVE = {
 # refund ...", "delete my data and refund me" must NOT auto-refund. Any of these
 # tokens -> None. (The runner gate ALSO bails on the authoritative pre_filter
 # opt-out/DSR patterns before this classifier runs — belt + suspenders.)
-_OPT_OUT_HINT = {"stop", "unsubscribe", "cancel", "quit", "remove", "delete", "erase"}
+_OPT_OUT_HINT = {
+    "stop", "unsubscribe", "cancel", "quit", "remove", "delete", "erase",
+    # VT-329: Hinglish opt-out — "band karo" (stop) / "roko" (stop) / "hatao" (remove). Token-exact
+    # standalone; fail-safe (any hit → None, never a refund). pre_filter's opt-out gate also catches
+    # these upstream — belt + suspenders.
+    "band", "roko", "hatao",
+}
 
 
 def classify_refund_reply(body: str) -> RefundDecision | None:
@@ -107,7 +157,9 @@ def classify_refund_reply(body: str) -> RefundDecision | None:
     matched: list[RefundDecision] = []
     if tokens & _REFUND_KW:
         matched.append("refund")
-    if tokens & _CONTINUE_KW:
+    # VT-329: continue = EN "continue" OR the keep-BIGRAM (jaari/जारी + rakhein/rakho/रखें/रखो).
+    # Bare jaari/जारी alone is ambiguous against a refund offer → NOT continue (re-ask).
+    if tokens & _CONTINUE_EN or (tokens & _CONTINUE_KEEP_STEM and tokens & _CONTINUE_KEEP_VERB):
         matched.append("continue")
     if tokens & _DISCUSS_KW:
         matched.append("discuss")

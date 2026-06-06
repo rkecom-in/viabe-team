@@ -7,3 +7,12 @@ keywords:
   - my data
   - GDPR
   - मेरा डेटा
+  # VT-329 (Cowork adversarial review): code-switched / Hinglish DSR — real owners mix scripts
+  # mid-sentence ("मेरा data delete karo" / "data delete karo refund"). Boundary-safe containment
+  # (the lookaround patterns) keeps these conservative; the failure direction is fail-safe
+  # (over-route a deletion request, never miss one).
+  - data delete
+  - delete karo
+  - डिलीट
+  - हटाओ
+  - मुझे हटा

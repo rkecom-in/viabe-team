@@ -225,6 +225,41 @@ def test_dsr_keyword_routes_creates_ticket(gate):
     assert row == ("acknowledged", "deletion")
 
 
+def test_devanagari_dsr_routes_creates_ticket(gate):
+    """VT-329 end-to-end: a Devanagari DSR message routes to dsr_handler (it was silently dropped
+    before — the launch-gate failure mode)."""
+    tenant_id = _new_tenant(gate.dsn)
+    sub = _state(gate, tenant_id)
+    event = _inbound(gate, "मेरा डेटा हटाओ please")
+
+    result = gate.pre_filter(event, sub)
+    assert isinstance(result, gate.t.RouteToDirectHandler)
+    assert result.handler_name == "dsr_handler"
+
+
+def test_mixed_script_dsr_routes_creates_ticket(gate):
+    """VT-329 (Cowork): a code-switched DSR message ('मेरा data delete karo') routes to dsr_handler
+    — the curated code-switched keywords + boundary-safe containment close the BLOCK miss."""
+    tenant_id = _new_tenant(gate.dsn)
+    sub = _state(gate, tenant_id)
+    event = _inbound(gate, "मेरा data delete karo")
+
+    result = gate.pre_filter(event, sub)
+    assert isinstance(result, gate.t.RouteToDirectHandler)
+    assert result.handler_name == "dsr_handler"
+
+
+def test_hinglish_opt_out_routes(gate):
+    """VT-329 (Cowork): 'band karo' (+ 'please बंद करो') route opt_out_handler — opt-out is now
+    boundary-safe containment, not whole-body-exact."""
+    tenant_id = _new_tenant(gate.dsn)
+    sub = _state(gate, tenant_id)
+    for body in ("band karo", "please बंद करो"):
+        result = gate.pre_filter(_inbound(gate, body), sub)
+        assert isinstance(result, gate.t.RouteToDirectHandler)
+        assert result.handler_name == "opt_out_handler"
+
+
 def test_status_callback_delivered_is_rejected(gate):
     result = gate.pre_filter(_callback(gate, "delivered"), _state(gate, uuid4()))
     assert isinstance(result, gate.t.Reject)
