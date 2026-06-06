@@ -42,8 +42,8 @@ def _phone_salt(monkeypatch):
         ("i want a refund", "refund"),
         ("रिफंड", "refund"),
         ("continue", "continue"),
-        ("जारी", "continue"),
-        ("जारी रखें", "continue"),
+        ("जारी रखें", "continue"),  # keep-bigram → continue
+        ("जारी रखो", "continue"),
         ("discuss", "discuss"),
         ("चर्चा", "discuss"),
         ("refund please", "refund"),  # short affirmative still classifies
@@ -66,6 +66,38 @@ def _phone_salt(monkeypatch):
         ("stop sending me refund messages", None),
         ("please refund me also unsubscribe", None),
         ("cancel and refund", None),
+        # VT-329: Hinglish (romanized Hindi) negation/opt-out must NOT auto-refund (money safety):
+        ("mujhe refund nahi chahiye", None),  # नहीं — "I don't want a refund"
+        ("refund mat do", None),  # मत — "don't give a refund"
+        ("refund na do", None),  # ना — short-token negation, standalone
+        ("nahin refund cancel karo", None),  # nahin + cancel
+        ("band karo refund", None),  # opt-out (band) over refund
+        ("roko ye refund", None),  # opt-out (roko)
+        # VT-329 (Cowork adversarial review — EXECUTED into a refund before the fix):
+        ("रिफंड नही चाहिए", None),  # नही (no anusvara) — commonest casual negation
+        ("refund nhi chahiye", None),  # nhi
+        ("refund nai chahiye", None),  # nai
+        ("refund mt do", None),  # clipped mt
+        ("refund nako", None),  # नको/nako
+        ("refund rehne do", None),  # idiomatic decline "let it be"
+        ("rahne do refund", None),  # rahne variant
+        # VT-329 (Cowork conditional-merge): residual spellings one step from the block class:
+        ("refund nakko", None),  # nakko — romanized-Marathi "no"
+        ("refund naako", None),  # naako
+        ("refund nay", None),  # nay
+        ("रिफंड नईं चाहिए", None),  # नईं
+        # VT-329 (Cowork): bare jaari/जारी is AMBIGUOUS vs a refund offer → NOT continue (re-ask):
+        ("jaari karo", None),
+        ("जारी", None),
+        # VT-329 (Cowork ACCEPTED DEVIATION): with jaari no longer a continue token, "refund jaari
+        # karo" is a single-category REFUND affirmative ("go ahead, issue the refund") → refund.
+        ("refund jaari karo", "refund"),
+        # VT-329: Hinglish continue/discuss with the keep-bigram / specific token:
+        ("jaari rakhein", "continue"),
+        ("jaari rakho", "continue"),
+        ("charcha karni hai", "discuss"),
+        # VT-329: bare "baat" stays benign (NOT added — same reason बात was dropped):
+        ("kya baat hai", None),
         ("", None),
     ],
 )

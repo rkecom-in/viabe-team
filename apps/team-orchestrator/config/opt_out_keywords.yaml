@@ -1,9 +1,14 @@
 # Initial draft for VT-3.8. VT-8 admission gate will own production keyword
 # curation. Adding/removing keywords requires Type 2 governance per Notion.
 #
-# Matching: exact, case-insensitive, against the whole trimmed message body.
+# Matching (VT-329): case-insensitive, NFC-normalized, boundary-safe PHRASE-CONTAINMENT anywhere
+# in the body (was whole-body-exact, which missed "please बंद करो" / danda variants). Same
+# lookaround approach as DSR. Failure direction is DPDP-safe (honour a possible opt-out).
 keywords:
   - STOP
   - UNSUBSCRIBE
   - बंद करो
   - चाहिएं नहीं
+  # VT-329 (Cowork adversarial review): Hinglish opt-out — "band karo" / "roko".
+  - band karo
+  - roko
