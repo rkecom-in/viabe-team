@@ -102,4 +102,56 @@ def record_ops_audit(
         )
 
 
-__all__ = ["record_escalation", "backfill_from_pipeline_runs", "record_ops_audit"]
+# VT-357 part 2 — SLA windows (IST): an escalation OPENED during business hours (10am–7pm) breaches
+# at +4h; otherwise +24h. The breach fires a SECOND Fazal alert; sla_alerted_at gates re-alerting.
+_SLA_BUSINESS_START_HOUR = 10
+_SLA_BUSINESS_END_HOUR = 19  # exclusive — [10am, 7pm) IST
+
+
+def run_sla_breach_sweep_body() -> list[str]:
+    """VT-357 part 2: alert Fazal a SECOND time on every OPEN escalation past its SLA (4h if opened
+    in business hours 10am–7pm IST, else 24h). `sla_alerted_at` makes this fire ONCE per breach
+    (the hourly sweep won't re-ping). Best-effort per row. Returns the breached escalation ids.
+
+    NO LLM (Pillar 1). Service-role (escalations is deny-all RLS)."""
+    from orchestrator.billing.refund_executor import _alert_fazal
+
+    breached: list[str] = []
+    with get_pool().connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT id, tenant_id FROM escalations
+            WHERE status = 'open' AND sla_alerted_at IS NULL
+              AND now() > opened_at + (
+                CASE
+                  WHEN EXTRACT(hour FROM opened_at AT TIME ZONE 'Asia/Kolkata') >= %s
+                   AND EXTRACT(hour FROM opened_at AT TIME ZONE 'Asia/Kolkata') < %s
+                  THEN interval '4 hours'
+                  ELSE interval '24 hours'
+                END)
+            """,
+            (_SLA_BUSINESS_START_HOUR, _SLA_BUSINESS_END_HOUR),
+        ).fetchall()
+        for row in rows:
+            r = dict(row)
+            eid, tid = str(r["id"]), str(r["tenant_id"])
+            try:
+                _alert_fazal(
+                    f"⚠️ SLA BREACH (VT-357) — escalation {eid} (tenant={tid}) is unresolved past "
+                    f"its SLA. Open it in the Ops Console."
+                )
+            except Exception:
+                logger.exception("VT-357 SLA alert failed escalation=%s", eid)
+            # Mark regardless (a failed Telegram ping must not loop the alert every hour).
+            conn.execute("UPDATE escalations SET sla_alerted_at = now() WHERE id = %s", (eid,))
+            breached.append(eid)
+    logger.info("VT-357 SLA sweep: %d breach alert(s)", len(breached))
+    return breached
+
+
+__all__ = [
+    "record_escalation",
+    "backfill_from_pipeline_runs",
+    "record_ops_audit",
+    "run_sla_breach_sweep_body",
+]
