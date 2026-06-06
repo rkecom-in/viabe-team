@@ -56,22 +56,23 @@ describe('Razorpay subscribe — 3-path auth resolver (VT-91)', () => {
     sessionMock.mockResolvedValue({ tenantId: OWNER_TENANT })
     const res = await POST(req({ plan_tier: 'founding' }))
     expect(res.status).toBe(200)
-    expect(fwdMock).toHaveBeenCalledWith(OWNER_TENANT, 'founding')
+    expect(fwdMock).toHaveBeenCalledWith(OWNER_TENANT, 'founding', null) // in-app path → no jti
   })
 
-  it('deep-link token -> tenant from the verified token (session absent)', async () => {
-    tokenMock.mockResolvedValue({ tenantId: TOKEN_TENANT })
+  it('deep-link token -> tenant + jti from the verified token (session absent)', async () => {
+    tokenMock.mockResolvedValue({ tenantId: TOKEN_TENANT, jti: 'jti-tok' })
     const res = await POST(req({ plan_tier: 'standard', token: 'jwt' }))
     expect(res.status).toBe(200)
     expect(tokenMock).toHaveBeenCalledWith('jwt')
-    expect(fwdMock).toHaveBeenCalledWith(TOKEN_TENANT, 'standard')
+    // VT-332: the token's jti is forwarded for the single-use consume.
+    expect(fwdMock).toHaveBeenCalledWith(TOKEN_TENANT, 'standard', 'jti-tok')
   })
 
   it('fazal fallback -> FAZAL_TENANT_ID (no session, no token)', async () => {
     fazalMock.mockResolvedValue(undefined as never)
     const res = await POST(req({ plan_tier: 'pro' }))
     expect(res.status).toBe(200)
-    expect(fwdMock).toHaveBeenCalledWith(FAZAL_TENANT, 'pro')
+    expect(fwdMock).toHaveBeenCalledWith(FAZAL_TENANT, 'pro', null)
   })
 
   it('no auth on any path -> 401, no forward', async () => {
@@ -82,9 +83,9 @@ describe('Razorpay subscribe — 3-path auth resolver (VT-91)', () => {
   })
 
   it('IDOR: a client tenant_id in the body is IGNORED (tenant from the verified token)', async () => {
-    tokenMock.mockResolvedValue({ tenantId: TOKEN_TENANT })
+    tokenMock.mockResolvedValue({ tenantId: TOKEN_TENANT, jti: 'jti-tok' })
     await POST(req({ plan_tier: 'founding', token: 'jwt', tenant_id: 'attacker-tenant' }))
-    expect(fwdMock).toHaveBeenCalledWith(TOKEN_TENANT, 'founding') // never 'attacker-tenant'
+    expect(fwdMock).toHaveBeenCalledWith(TOKEN_TENANT, 'founding', 'jti-tok') // never 'attacker-tenant'
   })
 
   it('bad/expired token -> 401, no forward', async () => {

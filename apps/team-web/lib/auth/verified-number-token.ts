@@ -50,6 +50,7 @@ export async function verifyVerifiedNumberToken(
   // Audience guard = the FIRST no-crossover line: an owner-session (aud='owner') or any
   // other-audience token fails here before any claim inspection.
   const { payload } = await jwtVerify(token, _secretBytes(), {
+    algorithms: ['HS256'], // VT-350: pin the alg (algorithm-confusion defense)
     audience: VERIFIED_NUMBER_AUDIENCE,
   })
   if (payload.number_verified !== true || typeof payload.phone_e164 !== 'string') {

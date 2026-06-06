@@ -71,6 +71,7 @@ export async function verifyOwnerJwt(jwt: string): Promise<OwnerClaim> {
   // any claim inspection. The distinct secret is the second line — an
   // operator token is not even signed with OWNER_JWT_SECRET.
   const { payload } = await jwtVerify(jwt, _secretBytes(), {
+    algorithms: ['HS256'], // VT-350: pin the alg (algorithm-confusion defense)
     audience: OWNER_AUDIENCE,
   })
   if (payload.owner_claim !== true || typeof payload.tenant_id !== 'string') {

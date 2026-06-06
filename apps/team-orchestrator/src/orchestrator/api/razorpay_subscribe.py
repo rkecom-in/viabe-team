@@ -46,6 +46,10 @@ class RazorpaySubscribeBody(BaseModel):
 
     tenant_id: str
     plan_tier: str
+    # VT-332: the trial-end token's jti, forwarded by team-web after it verifies the deep-link
+    # token. Present ONLY on the trial-end deep-link path; consumed single-use below. None on the
+    # in-app subscribe path (no token).
+    jti: str | None = None
 
 
 def _verify_internal_secret(provided: str | None) -> bool:
@@ -94,6 +98,20 @@ def razorpay_subscribe(
             # Concurrency: serialize per-tenant creates (VT-93-N1 pattern). A double-POST
             # race blocks here; the 2nd caller proceeds only after the 1st commits.
             cur.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (f"subscribe:{tenant_id}",))
+            # VT-332 single-use (the keystone): consume the trial-end token's jti ATOMICALLY —
+            # inside the lock, BEFORE the idempotency check + the vendor call. A replay (an
+            # already-consumed jti) → rowcount 0 → 403, so a replayed PAYMENT deep-link never
+            # reaches the vendor and never creates a 2nd subscription. The consume shares this
+            # txn with the create: jti is consumed IFF the subscribe commits (a failed create
+            # rolls back the consume → the token stays usable; a success spends it once).
+            if body.jti is not None:
+                cur.execute(
+                    "INSERT INTO consumed_subscribe_tokens (jti, tenant_id, plan_tier) "
+                    "VALUES (%s, %s, %s) ON CONFLICT (jti) DO NOTHING",
+                    (body.jti, tenant_id, body.plan_tier),
+                )
+                if cur.rowcount == 0:
+                    raise HTTPException(status_code=403, detail="token already used")
             # Idempotency BEFORE the vendor call: an existing bound subscription wins —
             # no second Razorpay subscription is ever created.
             cur.execute(

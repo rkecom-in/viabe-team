@@ -19,13 +19,16 @@ async function mint(opts: {
   tenant?: string
   aud?: string
   ttlSec?: number
+  jti?: string
+  alg?: string
 }): Promise<string> {
   const now = Math.floor(Date.now() / 1000)
   const builder = new SignJWT({ tenant_id: opts.tenant ?? TENANT })
-    .setProtectedHeader({ alg: 'HS256' })
+    .setProtectedHeader({ alg: opts.alg ?? 'HS256' })
     .setAudience(opts.aud ?? TRIAL_END_AUDIENCE)
     .setIssuedAt(now)
     .setExpirationTime(now + (opts.ttlSec ?? 3600))
+  if (opts.jti) builder.setJti(opts.jti)
   return await builder.sign(secretBytes())
 }
 
@@ -76,5 +79,24 @@ describe('verifyTrialEndToken (VT-91)', () => {
 
   it('rejects an empty token', async () => {
     await expect(verifyTrialEndToken('')).rejects.toBeInstanceOf(TrialEndTokenError)
+  })
+
+  // VT-332 ----------------------------------------------------------------- //
+  it('returns the jti (the single-use key forwarded to the consume)', async () => {
+    const { tenantId, jti } = await verifyTrialEndToken(await mint({ jti: 'jti-xyz' }))
+    expect(tenantId).toBe(TENANT)
+    expect(jti).toBe('jti-xyz')
+  })
+
+  it('jti is null when the token carries none (a legacy token)', async () => {
+    const { jti } = await verifyTrialEndToken(await mint({}))
+    expect(jti).toBeNull()
+  })
+
+  it('VT-350: rejects a token signed with a non-HS256 alg (algorithm pin)', async () => {
+    // A token whose header alg is not the pinned HS256 must be rejected even with the right key.
+    await expect(verifyTrialEndToken(await mint({ alg: 'HS384' }))).rejects.toBeInstanceOf(
+      TrialEndTokenError,
+    )
   })
 })

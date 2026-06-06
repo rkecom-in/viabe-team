@@ -18,22 +18,24 @@ import { forwardSubscribe } from '@/lib/orchestrator-client'
  * Throws an auth error if none authenticate. Returns '' only if Fazal authenticates but
  * FAZAL_TENANT_ID is unset (the caller maps that to 503).
  */
-async function resolveSubscribeTenant(token: string): Promise<string> {
+async function resolveSubscribeTenant(
+  token: string,
+): Promise<{ tenantId: string; jti: string | null }> {
   // 1. Portal owner session (cookie). Absent/invalid -> fall through to the next path.
   try {
     const { tenantId } = await requireOwnerSession()
-    return tenantId
+    return { tenantId, jti: null } // in-app path — no single-use token
   } catch (err) {
     if (!(err instanceof OwnerUnauthorizedError)) throw err
   }
   // 2. Trial-end deep-link token (body.token). A bad/expired/wrong-audience token throws.
+  // VT-332: carry the token's jti through so the orchestrator can consume it single-use.
   if (token) {
-    const { tenantId } = await verifyTrialEndToken(token)
-    return tenantId
+    return await verifyTrialEndToken(token)
   }
   // 3. Fazal / Ops fallback. Throws UnauthorizedError if not Fazal.
   await requireFazal()
-  return process.env.FAZAL_TENANT_ID ?? ''
+  return { tenantId: process.env.FAZAL_TENANT_ID ?? '', jti: null }
 }
 
 /**
@@ -57,9 +59,10 @@ export async function POST(request: NextRequest): Promise<Response> {
     return NextResponse.json({ ok: false, reason: 'plan_tier_required' }, { status: 400 })
   }
 
-  let tenantId: string
+  let tenantId = ''
+  let jti: string | null = null
   try {
-    tenantId = await resolveSubscribeTenant(token)
+    ;({ tenantId, jti } = await resolveSubscribeTenant(token))
   } catch (err) {
     if (
       err instanceof OwnerUnauthorizedError ||
@@ -74,8 +77,9 @@ export async function POST(request: NextRequest): Promise<Response> {
     return NextResponse.json({ ok: false, reason: 'tenant_not_configured' }, { status: 503 })
   }
 
-  // tenantId is server-derived from a verified claim — a client tenant_id is never used.
-  const result = await forwardSubscribe(tenantId, planTier)
+  // tenantId is server-derived from a verified claim — a client tenant_id is never used. jti
+  // (when present) flows to the orchestrator for the single-use consume (VT-332).
+  const result = await forwardSubscribe(tenantId, planTier, jti)
   if (!result.ok) {
     return NextResponse.json({ ok: false, reason: result.status }, { status: 502 })
   }
