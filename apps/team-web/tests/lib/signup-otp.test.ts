@@ -1,0 +1,90 @@
+/** VT-96 — the signup OTP flow: Bearer-token threading + generic (non-enumerating) errors. */
+
+import { describe, expect, it, vi } from 'vitest'
+
+import { requestSignupOtp, verifyOtpAndCreate } from '@/lib/signup-otp'
+
+function resp(status: number, body: unknown = {}): Response {
+  return { ok: status >= 200 && status < 300, status, json: async () => body } as Response
+}
+
+const PHONE = '+919876543210'
+const payload = { whatsapp_number: PHONE, business_name: 'Chai Co', preferred_language: 'en' }
+
+describe('VT-96 requestSignupOtp', () => {
+  it('200 → ok, posts to request-otp', async () => {
+    const f = vi.fn().mockResolvedValue(resp(200))
+    expect(await requestSignupOtp(PHONE, f)).toEqual({ ok: true })
+    expect(f).toHaveBeenCalledWith(
+      '/api/team/auth/request-otp',
+      expect.objectContaining({ method: 'POST' }),
+    )
+  })
+
+  it('429 → rate_limited', async () => {
+    const f = vi.fn().mockResolvedValue(resp(429))
+    expect(await requestSignupOtp(PHONE, f)).toEqual({ ok: false, error: 'rate_limited' })
+  })
+
+  it('5xx → generic', async () => {
+    const f = vi.fn().mockResolvedValue(resp(503))
+    expect(await requestSignupOtp(PHONE, f)).toEqual({ ok: false, error: 'generic' })
+  })
+})
+
+describe('VT-96 verifyOtpAndCreate', () => {
+  it('happy path threads Authorization: Bearer <token> to signup; code never in the signup body', async () => {
+    const f = vi
+      .fn()
+      .mockResolvedValueOnce(resp(200, { token: 'tok_abc' })) // verify-otp-for-signup
+      .mockResolvedValueOnce(resp(201)) // signup
+    expect(await verifyOtpAndCreate(payload, '123456', f)).toEqual({ ok: true })
+    const [url, init] = f.mock.calls[1] as [string, RequestInit]
+    expect(url).toBe('/api/team/signup')
+    expect(init.headers).toMatchObject({ authorization: 'Bearer tok_abc' })
+    expect(init.body).toBe(JSON.stringify(payload)) // the OTP code is NOT forwarded to signup
+  })
+
+  it('verify 429 → rate_limited, NO signup call', async () => {
+    const f = vi.fn().mockResolvedValueOnce(resp(429))
+    expect(await verifyOtpAndCreate(payload, '000000', f)).toEqual({
+      ok: false,
+      error: 'rate_limited',
+    })
+    expect(f).toHaveBeenCalledTimes(1)
+  })
+
+  it('invalid OR expired code → invalid_code (no enumeration), NO signup call', async () => {
+    const f = vi.fn().mockResolvedValueOnce(resp(401))
+    expect(await verifyOtpAndCreate(payload, '000000', f)).toEqual({
+      ok: false,
+      error: 'invalid_code',
+    })
+    expect(f).toHaveBeenCalledTimes(1)
+  })
+
+  it('verify ok but token missing → invalid_code, NO signup call', async () => {
+    const f = vi.fn().mockResolvedValueOnce(resp(200, {}))
+    expect(await verifyOtpAndCreate(payload, '123456', f)).toEqual({
+      ok: false,
+      error: 'invalid_code',
+    })
+    expect(f).toHaveBeenCalledTimes(1)
+  })
+
+  it('signup duplicate → duplicate', async () => {
+    const f = vi
+      .fn()
+      .mockResolvedValueOnce(resp(200, { token: 'tok' }))
+      .mockResolvedValueOnce(resp(409, { detail: { code: 'duplicate' } }))
+    expect(await verifyOtpAndCreate(payload, '123456', f)).toEqual({ ok: false, error: 'duplicate' })
+  })
+
+  it('signup other failure → generic', async () => {
+    const f = vi
+      .fn()
+      .mockResolvedValueOnce(resp(200, { token: 'tok' }))
+      .mockResolvedValueOnce(resp(500, {}))
+    expect(await verifyOtpAndCreate(payload, '123456', f)).toEqual({ ok: false, error: 'generic' })
+  })
+})
