@@ -62,6 +62,7 @@ export async function issueOperatorJwt(
 
 export async function verifyOperatorJwt(jwt: string): Promise<OperatorClaim> {
   const { payload } = await jwtVerify(jwt, _secretBytes(), {
+    algorithms: ['HS256'], // VT-350: pin the alg (algorithm-confusion defense)
     audience: 'authenticated',
   })
   if (

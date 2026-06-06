@@ -62,6 +62,7 @@ export interface SubscribeForwardResult {
 export async function forwardSubscribe(
   tenantId: string,
   planTier: string,
+  jti: string | null = null,
 ): Promise<SubscribeForwardResult> {
   const base = process.env.TEAM_ORCHESTRATOR_URL ?? _ORCHESTRATOR_DEFAULT
   const secret = process.env.INTERNAL_API_SECRET ?? ''
@@ -69,7 +70,9 @@ export async function forwardSubscribe(
     const res = await fetch(`${base}/api/orchestrator/razorpay-subscribe`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', 'X-Internal-Secret': secret },
-      body: JSON.stringify({ tenant_id: tenantId, plan_tier: planTier }),
+      // VT-332: forward jti ONLY on the trial-end token path (the orchestrator consumes it
+      // single-use). Omitted on the in-app path (no token → no jti).
+      body: JSON.stringify({ tenant_id: tenantId, plan_tier: planTier, ...(jti ? { jti } : {}) }),
       signal: AbortSignal.timeout(_FORWARD_TIMEOUT_MS),
     })
     if (!res.ok) return { ok: false, status: `http_${res.status}`, razorpaySubscriptionId: null }
