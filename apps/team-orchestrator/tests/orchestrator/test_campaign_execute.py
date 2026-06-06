@@ -96,10 +96,13 @@ def _make_conn(
     *,
     campaign_row: dict | None = None,
     recipients: list[dict] | None = None,
+    phase: str = "paid_active",
+    refunded_at: Any = None,
 ) -> Any:
     """Build a MagicMock conn that returns controlled SELECT results.
 
     Query order:
+      0. tenants phase SELECT (fetchone) — VT-328 dispatch guard
       1. campaigns SELECT (fetchone)
       2. campaign_recipients JOIN customers (fetchall)
       3. send_idempotency_keys INSERT (no return value)
@@ -111,7 +114,10 @@ def _make_conn(
     def _execute(sql: str, params: tuple | None = None) -> MagicMock:
         execute_calls.append((sql.strip(), params))
         result = MagicMock()
-        if "FROM campaigns" in sql:  # VT-306: wrapper SELECT * FROM campaigns WHERE tenant_id AND id
+        if "FROM tenants" in sql:  # VT-328: the dispatch guard reads phase + refunded_at
+            result.fetchone.return_value = {"phase": phase, "refunded_at": refunded_at}
+            result.fetchall.return_value = []
+        elif "FROM campaigns" in sql:  # VT-306: wrapper SELECT * FROM campaigns WHERE tenant_id AND id
             result.fetchone.return_value = campaign_row
             result.fetchall.return_value = []
         elif "FROM campaign_recipients" in sql:
@@ -454,3 +460,84 @@ def test_empty_cohort_status_still_advanced() -> None:
         if "UPDATE campaigns" in sql
     ]
     assert len(update_calls) == 1
+
+
+# ---------------------------------------------------------------------------
+# VT-328 — refunded/cancelled dispatch guard (the single chokepoint)
+# ---------------------------------------------------------------------------
+
+def test_dispatch_blocked_refunded() -> None:
+    """VT-328: a refunded tenant's campaign is blocked INSIDE execute_approved_campaign —
+    short-circuits BEFORE loading the campaign/recipients or calling send_fn (zero sends)."""
+    from orchestrator.campaign.execute import execute_approved_campaign
+
+    conn = _make_conn(
+        campaign_row=_campaign_row(),
+        recipients=[_recipient(_CUSTOMER_1)],
+        phase="refunded",
+    )
+    send_fn = MagicMock(return_value=_ok_send_result())
+
+    summary = execute_approved_campaign(
+        _TENANT_ID, _CAMPAIGN_ID, conn=conn, send_template_fn=send_fn
+    )
+
+    assert summary["dispatch_blocked"] == 1 and summary["sent"] == 0
+    assert send_fn.call_count == 0  # ZERO sends
+    # short-circuit: never loaded the campaign (no fan-out path reached)
+    assert not any("FROM campaigns" in sql for sql, _ in conn._execute_calls)
+
+
+def test_dispatch_blocked_cancelled() -> None:
+    """VT-328: a cancelled tenant is likewise blocked (window-independent)."""
+    from orchestrator.campaign.execute import execute_approved_campaign
+
+    conn = _make_conn(
+        campaign_row=_campaign_row(), recipients=[_recipient(_CUSTOMER_1)], phase="cancelled"
+    )
+    send_fn = MagicMock(return_value=_ok_send_result())
+    summary = execute_approved_campaign(
+        _TENANT_ID, _CAMPAIGN_ID, conn=conn, send_template_fn=send_fn
+    )
+    assert summary["dispatch_blocked"] == 1 and send_fn.call_count == 0
+
+
+def test_dispatch_allowed_active_sends_normally() -> None:
+    """VT-328: a paid_active tenant is NOT blocked — the guard doesn't over-reach."""
+    from orchestrator.campaign.execute import execute_approved_campaign
+
+    conn = _make_conn(
+        campaign_row=_campaign_row(), recipients=[_recipient(_CUSTOMER_1)], phase="paid_active"
+    )
+    send_fn = MagicMock(return_value=_ok_send_result())
+    summary = execute_approved_campaign(
+        _TENANT_ID, _CAMPAIGN_ID, conn=conn, send_template_fn=send_fn
+    )
+    assert "dispatch_blocked" not in summary
+    assert summary["sent"] == 1 and send_fn.call_count == 1
+
+
+def test_dispatch_allowed_rule_pure() -> None:
+    """VT-328: dispatch_allowed is window-INDEPENDENT — refunded/cancelled block outbound
+    regardless of refunded_at; active/trial allow it."""
+    from datetime import datetime, timedelta, timezone
+
+    from orchestrator.billing.graceful_exit import dispatch_allowed
+
+    long_ago = datetime.now(timezone.utc) - timedelta(days=90)
+    assert dispatch_allowed("refunded", long_ago) is False  # even past the 30d window
+    assert dispatch_allowed("refunded", None) is False
+    assert dispatch_allowed("cancelled", None) is False
+    assert dispatch_allowed("paid_active", None) is True
+    assert dispatch_allowed("trial", None) is True
+    assert dispatch_allowed("paid_at_risk", None) is True
+
+
+def test_inbound_dsr_detection_is_phase_agnostic() -> None:
+    """VT-328 canary 5: the inbound DSR/opt-out gate takes NO phase — it cannot consult the
+    dispatch guard, so a refunded tenant's DSR/opt-out still routes (the guard lives ONLY in the
+    outbound execute_approved_campaign chokepoint)."""
+    from orchestrator.pre_filter_gate import matches_opt_out_or_dsr
+
+    assert matches_opt_out_or_dsr("please delete my data") is True
+    assert matches_opt_out_or_dsr("STOP") is True
