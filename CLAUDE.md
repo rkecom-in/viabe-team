@@ -77,7 +77,7 @@ If you ever find yourself about to query Notion for VT row state, **stop** — r
 | Open PRs | `gh pr list --state open` |
 | The next VT-ID for a new row | `python scripts/vt_id_allocate.py --peek` (consume: drop `--peek`) |
 | The next migration number | `python scripts/migration_id_allocate.py --peek` (consume: drop `--peek`) — **MANDATORY for new migrations; never hand-pick the number** (CL-424) |
-| Current dashboard | open the Cowork artifact `viabe-team-pm-dashboard` (Cowork sessions only) |
+| Current dashboard | open the Cowork artifact `viabe-team-sprint-dashboard` (the ONE dashboard — full filterable per-row board; the PM dashboard was retired, CL-430) |
 
 ---
 
