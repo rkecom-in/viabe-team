@@ -20,13 +20,13 @@ table can't silently slip the purge:
 - **Retention bound** — `purge_stale_unnotified(months=6)` hard-deletes UN-notified rows older
   than 6 months (if launch slips), so pre-launch PII never sits unbounded.
 
-> **Enforcement status (current):** the two purge functions exist and are SQL-correct, but are
-> **runbook-manual** today — no scheduler invokes them yet. Auto-enforcement of the 6-month
-> retention bound is pending **VT-354** (wire `purge_stale_unnotified` to a DBOS scheduled job),
-> which is a **HARD pre-LIVE gate** on `ENABLE_WAITLIST_CAPTURE`: the retention bound must be
-> ENFORCED (not just documented) before any real waitlist PII is collected. Until VT-354 lands,
-> purge is an explicit ops step per this doc — and the surface stays dark (no real PII), so
-> nothing is unbounded in practice yet.
+> **Enforcement status (current):** the 6-month retention bound is **ENFORCED** (VT-354) — a
+> daily DBOS scheduled job (`waitlist_retention_purge_scheduled`, 4 AM IST → `run_waitlist_
+> retention_purge` → `purge_stale_unnotified(months=6)`) hard-deletes un-notified pre-launch PII
+> past the bound, automatically. The HARD pre-LIVE gate on `ENABLE_WAITLIST_CAPTURE` is satisfied:
+> the scheduler is live, so real waitlist PII can never sit unbounded on only a runbook promise.
+> `purge_notified_waitlist()` stays an explicit ops/launch-sweep step (post-announcement). Erasure
+> (`erase_waitlist`) accepts **email OR whatsapp_e164** — a principal may know only their number.
 
 ## CL-422 gate
 Real waitlist PII is collected ONLY when `ENABLE_WAITLIST_CAPTURE=true` — gated on **VT-231

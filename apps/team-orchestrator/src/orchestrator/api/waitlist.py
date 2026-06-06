@@ -15,6 +15,7 @@ ENABLE_PUBLIC_SIGNUP — the surface stays dark on dev (Seoul).
 from __future__ import annotations
 
 import hmac
+import logging
 import os
 import re
 from typing import Any
@@ -25,6 +26,7 @@ from pydantic import BaseModel, Field
 from orchestrator.graph import get_pool
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 _PHONE_RE = re.compile(r"^\+91[6-9]\d{9}$")
@@ -75,14 +77,27 @@ def join_waitlist(
 
 @router.delete("/api/waitlist")
 def erase_waitlist(
-    email: str, x_internal_secret: str | None = Header(default=None, alias="X-Internal-Secret")
+    email: str | None = None,
+    whatsapp_e164: str | None = None,
+    x_internal_secret: str | None = Header(default=None, alias="X-Internal-Secret"),
 ) -> dict[str, Any]:
-    """VT-97 #2 — ops erasure: HARD-delete a waitlist entry by email (an explicit erasure
-    request). Returns the deleted count (0 if not present — no enumeration concern, ops-only)."""
+    """VT-97 #2 / VT-354 NIT-3 — ops erasure: HARD-delete a waitlist entry by email OR
+    whatsapp_e164 (a principal exercising erasure may know only their number). At least one
+    identifier is required. Returns the deleted count (0 if not present — ops-only, no
+    enumeration concern)."""
     if not _verify_internal_secret(x_internal_secret):
         raise HTTPException(status_code=403, detail="invalid internal secret")
+    email_n = email.strip().lower() if email else None
+    phone_n = whatsapp_e164.strip() if whatsapp_e164 else None
+    if not email_n and not phone_n:
+        raise HTTPException(status_code=400, detail="email or whatsapp_e164 required")
     with get_pool().connection() as conn, conn.cursor() as cur:
-        cur.execute("DELETE FROM waitlist_signups WHERE email = %s", (email.strip().lower(),))
+        cur.execute(
+            "DELETE FROM waitlist_signups "
+            "WHERE (%s::text IS NOT NULL AND email = %s) "
+            "OR (%s::text IS NOT NULL AND whatsapp_e164 = %s)",
+            (email_n, email_n, phone_n, phone_n),
+        )
         deleted = cur.rowcount
     return {"deleted": deleted}
 
@@ -105,3 +120,13 @@ def purge_stale_unnotified(months: int = 6) -> int:
             (months,),
         )
         return cur.rowcount
+
+
+def run_waitlist_retention_purge(*, months: int = 6) -> int:
+    """VT-354: the SCHEDULED retention enforcer (wired to a daily DBOS job). Hard-deletes
+    un-notified waitlist rows older than ``months`` (the DPDP 6-month bound) so pre-launch PII
+    never sits unbounded — the bound is now ENFORCED, not runbook-manual. Idempotent + safe on an
+    empty/disabled waitlist (0 rows → 0 deleted). Returns + logs the deleted count."""
+    deleted = purge_stale_unnotified(months=months)
+    logger.info("VT-354 waitlist retention purge: deleted=%d (months=%d)", deleted, months)
+    return deleted

@@ -67,6 +67,7 @@ DAY39_EVALUATION_CRON = "0 6 * * *"
 TRIAL_EVALUATION_CRON = "0 7 * * *"  # VT-90 — daily 7 AM IST trial sweep (off-peak)
 MONTHLY_IMPACT_CRON = "0 8 1 * *"
 L3_CONSTRUCTION_CRON = "0 3 * * *"  # VT-68 — nightly 3 AM IST L3 rebuild
+WAITLIST_RETENTION_PURGE_CRON = "0 4 * * *"  # VT-354 — daily 4 AM IST waitlist 6-month bound
 
 
 SHELL_STATUS = "skipped_schema_pending"
@@ -258,6 +259,17 @@ def trial_evaluation_scheduled(
     from orchestrator.billing.trial_sweep import run_trial_evaluation_body
 
     run_trial_evaluation_body(now=actual_time)
+
+
+def waitlist_retention_purge_scheduled(
+    scheduled_time: datetime,
+    actual_time: datetime,
+) -> None:
+    """DBOS scheduled handler — fires daily 4 AM IST. VT-354: ENFORCE the waitlist 6-month
+    retention bound (un-notified pre-launch PII). NO LLM; idempotent; safe on an empty waitlist."""
+    from orchestrator.api.waitlist import run_waitlist_retention_purge
+
+    run_waitlist_retention_purge()
 
 
 def l3_construction_scheduled(
@@ -1012,6 +1024,9 @@ def register_scheduled_triggers() -> None:
     DBOS.scheduled(L2_RETENTION_SWEEP_CRON)(l2_retention_sweep_scheduled)
     # VT-85: 12th handler — day-39 refund-offer 48h timeout sweep (default CONTINUE).
     DBOS.scheduled(REFUND_OFFER_TIMEOUT_SWEEP_CRON)(refund_offer_timeout_sweep_scheduled)
+    # VT-354: waitlist 6-month retention purge — ENFORCES the DPDP pre-launch PII bound (was
+    # runbook-manual). EXTENDS this surface (same register-before-launch posture).
+    DBOS.scheduled(WAITLIST_RETENTION_PURGE_CRON)(waitlist_retention_purge_scheduled)
     _registered = True
 
 
