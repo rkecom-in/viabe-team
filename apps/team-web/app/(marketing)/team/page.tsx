@@ -6,6 +6,9 @@ import { planPrices } from '@/lib/team-pricing'
 
 import socialProofData from '@/data/social-proof.json'
 
+import { trackExperimentExposure } from '@/lib/analytics-events'
+import { getExperiment } from '@/lib/experiments'
+
 import { FoundingCounterWidget, type FoundingStatus } from './founding-counter-widget'
 import { SocialProof, type SocialProofData } from './social-proof'
 import { WaitlistForm } from './waitlist-form'
@@ -61,6 +64,10 @@ export default async function TeamLandingPage({
 
   const initial = await fetchFoundingStatus()
   const prices = planPrices()
+  // VT-100 — cookie-free A/B: the example experiment is inactive (returns 'control') in Phase 1;
+  // the framework is exercised end-to-end (assign → expose) for when real experiments run.
+  const heroVariant = await getExperiment('homepage_hero_v1')
+  trackExperimentExposure('homepage_hero_v1', heroVariant)
 
   return (
     <main lang={locale}>
@@ -73,7 +80,7 @@ export default async function TeamLandingPage({
         </nav>
       </header>
 
-      <section aria-label="hero">
+      <section aria-label="hero" data-experiment-variant={heroVariant}>
         <h1>{t(d, 'hero.title')}</h1>
         <p>{t(d, 'hero.subtitle')}</p>
         {mode === 'waitlist' ? (
