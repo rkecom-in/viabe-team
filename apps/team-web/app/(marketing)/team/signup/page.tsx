@@ -14,12 +14,16 @@
 
 import { useEffect, useState } from 'react'
 
+import { requestSignupOtp, verifyOtpAndCreate } from '@/lib/signup-otp'
+
 type Lang = 'en' | 'hi'
 type BizType = { key: string; label_en: string; label_hi: string }
 type MsgKey =
   | 'title' | 'business_name' | 'owner_name' | 'whatsapp_number' | 'city'
   | 'business_type' | 'language' | 'consent_dpdpa' | 'consent_residency'
   | 'submit' | 'invalid_phone' | 'required' | 'duplicate' | 'generic' | 'success'
+  | 'send_code' | 'code_sent' | 'enter_code' | 'verify_create' | 'invalid_code'
+  | 'rate_limited' | 'change_number'
 
 const MESSAGES: Record<Lang, Record<MsgKey, string>> = {
   en: {
@@ -38,6 +42,13 @@ const MESSAGES: Record<Lang, Record<MsgKey, string>> = {
     duplicate: 'This number is already registered.',
     generic: 'Something went wrong. Please try again.',
     success: 'Account created — check WhatsApp for your welcome message.',
+    send_code: 'Send code',
+    code_sent: 'We sent a code to your WhatsApp. Enter it below.',
+    enter_code: 'WhatsApp code',
+    verify_create: 'Verify & create account',
+    invalid_code: 'That code is invalid or expired. Try again.',
+    rate_limited: 'Too many attempts. Please wait a few minutes.',
+    change_number: 'Change number',
   },
   hi: {
     title: 'Viabe Team के लिए साइन अप करें',
@@ -55,6 +66,13 @@ const MESSAGES: Record<Lang, Record<MsgKey, string>> = {
     duplicate: 'यह नंबर पहले से पंजीकृत है।',
     generic: 'कुछ गलत हुआ। कृपया पुनः प्रयास करें।',
     success: 'खाता बन गया — स्वागत संदेश के लिए WhatsApp देखें।',
+    send_code: 'कोड भेजें',
+    code_sent: 'हमने आपके WhatsApp पर एक कोड भेजा है। नीचे दर्ज करें।',
+    enter_code: 'WhatsApp कोड',
+    verify_create: 'सत्यापित करें और खाता बनाएं',
+    invalid_code: 'यह कोड अमान्य या समाप्त है। फिर से कोशिश करें।',
+    rate_limited: 'बहुत अधिक प्रयास। कृपया कुछ मिनट प्रतीक्षा करें।',
+    change_number: 'नंबर बदलें',
   },
 }
 
@@ -75,6 +93,10 @@ export default function SignupPage() {
   const [error, setError] = useState<string | null>(null)
   const [done, setDone] = useState(false)
   const [submitting, setSubmitting] = useState(false)
+  // VT-96: a 2-step flow — details, then OTP-verify the WhatsApp number before create (the
+  // VT-326 gate requires a verified-number proof token, so a direct POST would 401).
+  const [step, setStep] = useState<'details' | 'verify'>('details')
+  const [otpCode, setOtpCode] = useState('')
   const t = MESSAGES[lang]
 
   useEffect(() => {
@@ -88,7 +110,9 @@ export default function SignupPage() {
     setForm((f) => ({ ...f, [k]: v }))
   }
 
-  async function onSubmit(e: React.FormEvent) {
+  // Step 1 — validate the details, then request an OTP to the WhatsApp number. The owner must
+  // OTP-prove control of the number before any tenant is created (the VT-326 gate).
+  async function onSendCode(e: React.FormEvent) {
     e.preventDefault()
     setError(null)
     if (
@@ -108,18 +132,43 @@ export default function SignupPage() {
     }
     setSubmitting(true)
     try {
-      const res = await fetch('/api/team/signup', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ ...form, preferred_language: lang }),
-      })
-      if (res.status === 201) {
+      const r = await requestSignupOtp(form.whatsapp_number)
+      if (!r.ok) {
+        setError(r.error === 'rate_limited' ? t.rate_limited : t.generic)
+        return
+      }
+      setStep('verify')
+    } catch {
+      setError(t.generic)
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  // Step 2 — verify the OTP → receive the pre-tenant verified-number token → create the tenant
+  // with `Authorization: Bearer <token>`. Invalid vs expired are NOT distinguished (generic —
+  // no enumeration). The token is threaded straight to the proxy; never logged (CL-390).
+  async function onVerifyAndCreate(e: React.FormEvent) {
+    e.preventDefault()
+    setError(null)
+    if (!otpCode.trim()) {
+      setError(t.invalid_code)
+      return
+    }
+    setSubmitting(true)
+    try {
+      const r = await verifyOtpAndCreate({ ...form, preferred_language: lang }, otpCode.trim())
+      if (r.ok) {
         setDone(true)
         return
       }
-      const body = await res.json().catch(() => ({}))
-      const code = body?.detail?.code
-      setError(code === 'duplicate' ? t.duplicate : t.generic)
+      const map = {
+        rate_limited: t.rate_limited,
+        invalid_code: t.invalid_code,
+        duplicate: t.duplicate,
+        generic: t.generic,
+      }
+      setError(map[r.error])
     } catch {
       setError(t.generic)
     } finally {
@@ -146,7 +195,8 @@ export default function SignupPage() {
         </button>
       </div>
       <h1>{t.title}</h1>
-      <form onSubmit={onSubmit}>
+      {step === 'details' ? (
+      <form onSubmit={onSendCode}>
         <label>
           {t.business_name}
           <input
@@ -220,10 +270,42 @@ export default function SignupPage() {
           {/* NEEDS-FAZAL: link to the residency disclosure copy (residency_v1_2026-06). */}
         </label>
         {error && <p className="signup-error" role="alert">{error}</p>}
-        <button type="submit" disabled={submitting}>
-          {t.submit}
+        <button
+          type="submit"
+          disabled={submitting || !form.consent_dpdpa || !form.consent_residency}
+        >
+          {t.send_code}
         </button>
       </form>
+      ) : (
+      <form onSubmit={onVerifyAndCreate}>
+        <p>{t.code_sent}</p>
+        <label>
+          {t.enter_code}
+          <input
+            value={otpCode}
+            onChange={(e) => setOtpCode(e.target.value)}
+            inputMode="numeric"
+            autoComplete="one-time-code"
+            required
+          />
+        </label>
+        {error && <p className="signup-error" role="alert">{error}</p>}
+        <button type="submit" disabled={submitting}>
+          {t.verify_create}
+        </button>
+        <button
+          type="button"
+          onClick={() => {
+            setStep('details')
+            setOtpCode('')
+            setError(null)
+          }}
+        >
+          {t.change_number}
+        </button>
+      </form>
+      )}
     </main>
   )
 }
