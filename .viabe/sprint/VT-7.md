@@ -98,6 +98,14 @@ This parent is the schedule risk. K-anon discipline cannot be cut, and L3 is whe
 Apache AGE is NOT supported on Supabase (verified via Supabase discussion #40285, Nov 2025; Nix-sandboxed Postgres images prevent extension compilation). The original spec encoded a 2024-era assumption that Supabase would support AGE. It doesn't, and the Supabase team has no roadmap to add it.
 
 ### New L1-L3 architecture: Mem0 OSS library + custom L0/L4
+
+> **⚠️ SUPERSEDED (VT-162 board-hygiene, 2026-06-06).** The Mem0-based design described in this
+> section was NOT shipped. The knowledge layers are **hand-built on Postgres + pgvector +
+> time-aware relational schema** (no Mem0, no Apache AGE — see `l1-knowledge-graph-no-age`). The
+> live L1/L2/L3 lives in `orchestrator/knowledge/` (e.g. `l1.py`, the `l1_*`/`l2_*`/`l3_*`
+> migrations + the k≥10 admission gate), NOT `mem0ai`. The text below is retained for design
+> history only — do not treat it as the implemented architecture.
+
 **Mem0 OSS** (`pip install mem0ai`, Apache 2.0 license) is the production-standard pattern in 2026 for exactly the use case this parent was designed for. Mem0 v1.0.0 implements:
 - Postgres + pgvector + entity linking (dual-store)
 - Multi-tenant scoping via `user_id`, `agent_id`, `run_id`, `app_id` filters with AND/OR composition
