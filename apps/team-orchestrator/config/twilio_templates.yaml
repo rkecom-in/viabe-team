@@ -164,19 +164,10 @@ trial_max_reached:
     en: HX69a298407b209f3dc22141943f768f7a  # VT-45-wire (Fazal 2026-06-06)
     hi: HX025441f9544b9f8ad3a910488c89edb4  # VT-45-wire (Fazal 2026-06-06)
 
-# VT-93 — refund-execution templates. NEEDS-FAZAL: provision the real Meta Content
-# SIDs + copy (Pillar 7 honesty gate — Fazal reviews every word; no retention
-# manipulation). Null SIDs fail-closed in templates_registry.resolve(); the refund
-# executor records notification_pending + alerts Fazal rather than sending.
-refund_processing:
-  audience: owner
-  agent_selectable: false
-  variables:
-    - refund_amount_inr   # {{1}}
-  languages:
-    en: null  # NEEDS-FAZAL: Meta SID pending
-    hi: null  # NEEDS-FAZAL: Meta SID pending
-
+# VT-93 — refund_completed (sent when the refund CLEARS, up to 5 business days later =
+# OUTSIDE the 24h window → stays a template). The immediate in-window "refund_processing" ack
+# is now a FREE-FORM session reply (VT-349), not a template — its bilingual copy lives in
+# orchestrator/owner_surface/freeform_acks.py.
 refund_completed:
   audience: owner
   agent_selectable: false
@@ -200,27 +191,7 @@ refund_offer:
     en: HX188eba65b0de1ee521f7922435e76ae6  # VT-45-wire (Fazal 2026-06-06)
     hi: HXe78d29b842092b2fa3dd196fc1e652de  # VT-45-wire (Fazal 2026-06-06)
 
-# VT-84: the generic owner reply for an edge-case handler (exclusion / status_query).
-# {{1}} carries the handler's reply text. Null SID fail-closed (the handler's action —
-# the owner_excluded flag / the read — lands regardless; only the reply is gated).
-# Fazal reviews the carrier-template wording.
-team_edge_case_ack:
-  audience: owner
-  agent_selectable: false
-  variables:
-    - reply_text           # {{1}} — the handler's response text
-  languages:
-    en: null  # NEEDS-FAZAL: Meta SID pending
-    hi: null  # NEEDS-FAZAL: Meta SID pending
-
-# VT-88: SupportBot escalation ack to the owner when the agent couldn't resolve their
-# message (the no-silence guarantee). NEEDS-FAZAL: a Meta-approved SID + Hindi. Copy is an
-# HONEST handoff — "Fazal will follow up" with NO time promise (SLA enforcement is Phase 2).
-support_handoff:
-  audience: owner
-  agent_selectable: false
-  variables:
-    - reference        # {{1}} — the run/ticket reference the owner can quote
-  languages:
-    en: null  # NEEDS-FAZAL: Meta SID pending
-    hi: null  # NEEDS-FAZAL: Meta SID pending
+# VT-349: team_edge_case_ack + support_handoff are NO LONGER templates — they are FREE-FORM
+# in-window owner replies (a direct reply to a message the owner just sent is inside the 24h
+# window, so no template is required). Their copy + send live in
+# orchestrator/owner_surface/freeform_acks.py. refund_processing moved the same way (above).
