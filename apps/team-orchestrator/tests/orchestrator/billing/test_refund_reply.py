@@ -81,9 +81,17 @@ def _phone_salt(monkeypatch):
         ("refund nako", None),  # नको/nako
         ("refund rehne do", None),  # idiomatic decline "let it be"
         ("rahne do refund", None),  # rahne variant
+        # VT-329 (Cowork conditional-merge): residual spellings one step from the block class:
+        ("refund nakko", None),  # nakko — romanized-Marathi "no"
+        ("refund naako", None),  # naako
+        ("refund nay", None),  # nay
+        ("रिफंड नईं चाहिए", None),  # नईं
         # VT-329 (Cowork): bare jaari/जारी is AMBIGUOUS vs a refund offer → NOT continue (re-ask):
         ("jaari karo", None),
         ("जारी", None),
+        # VT-329 (Cowork ACCEPTED DEVIATION): with jaari no longer a continue token, "refund jaari
+        # karo" is a single-category REFUND affirmative ("go ahead, issue the refund") → refund.
+        ("refund jaari karo", "refund"),
         # VT-329: Hinglish continue/discuss with the keep-bigram / specific token:
         ("jaari rakhein", "continue"),
         ("jaari rakho", "continue"),

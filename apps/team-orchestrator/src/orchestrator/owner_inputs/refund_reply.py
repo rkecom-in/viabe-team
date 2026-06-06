@@ -36,6 +36,9 @@ RefundDecision = Literal["refund", "continue", "discuss"]
 # "jaari karo" can mean "go ahead WITH THE REFUND", not "keep my plan". So continue requires the
 # KEEP-BIGRAM (jaari + rakhein/rakho, जारी + रखें/रखो); bare jaari/जारी → no continue (→ None /
 # re-ask). "continue" (EN) is unambiguous → single-token. Conservative beats guessing on money.
+# ACCEPTED DEVIATION (Cowork conditional-merge): consequently "refund jaari karo" classifies as a
+# single-category REFUND affirmative ("go ahead, issue the refund") — semantically correct (jaari
+# = "go ahead", refund = the subject), not the block's reflexive None. See the test asserting it.
 _REFUND_KW = {"refund", "रिफंड", "रिफ़ंड"}
 _CONTINUE_EN = {"continue"}
 _CONTINUE_KEEP_STEM = {"जारी", "jaari"}
@@ -94,6 +97,13 @@ _NEGATION = {
     "nako",
     "rehne",
     "rahne",
+    # VT-329 (Cowork conditional-merge): residual spellings one step from the block class —
+    # nakko (the common romanized-Marathi "no", plausibly MORE frequent than nako), naako, nay,
+    # नईं. Suppression-only → fail-safe. "refund nakko" was still executing a refund.
+    "nakko",
+    "naako",
+    "nay",
+    "नईं",
 }
 _INTERROGATIVE = {
     "can",
