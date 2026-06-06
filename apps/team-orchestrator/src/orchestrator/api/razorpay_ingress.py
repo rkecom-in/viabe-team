@@ -151,19 +151,41 @@ def razorpay_ingress(
                     # do NOT rely on auto-replay before then.) NO fee action. An INFRA failure
                     # HERE still raises → 500 (transient → Razorpay retries); the parse-drop 200
                     # below is reached ONLY after this commit succeeds.
-                    # F2: the WHERE guard means a previously-PROCESSED row (a good audit record)
-                    # is NEVER clobbered by a later parse-drop arriving on the same event_id.
+                    # The WHERE guard means a previously-PROCESSED row (a good audit record) is
+                    # NEVER clobbered by a later parse-drop arriving on the same event_id.
+                    # VT-352: processed_at is left NULL on a drop — the event is RECORDED but NOT
+                    # APPLIED (the invariant: applied IFF processed_at set). That NULL + the
+                    # dropped_parse_error marker is exactly what lets the corrected event replay
+                    # past the dedup below (F1); a genuinely-applied row has processed_at set and is
+                    # never re-applied. (VT-330 set processed_at=now() here, which silently made the
+                    # drop terminal — un-replayable — the very gap VT-352 closes.)
                     cur.execute(
                         "INSERT INTO razorpay_webhook_events "
-                        "(event_id, event_type, payload, received_at, processed_at) "
-                        "VALUES (%s, %s, %s, now(), now()) "
+                        "(event_id, event_type, payload, received_at) "
+                        "VALUES (%s, %s, %s, now()) "
                         "ON CONFLICT (event_id) DO UPDATE "
-                        "SET payload = EXCLUDED.payload, processed_at = now() "
+                        "SET payload = EXCLUDED.payload "
                         "WHERE razorpay_webhook_events.processed_at IS NULL",
                         (
                             event_id,
                             event_type,
                             Jsonb({"_status": "dropped_parse_error", "raw": payload}),
+                        ),
+                    )
+                    # VT-352: also enqueue a durable dead-letter row (PII-free routing only — the
+                    # raw is in the marker above). The queue is what an operator/sweep replays; a
+                    # re-POST of the corrected event (same event_id) re-processes via F1 below and
+                    # flips this row to 'replayed'. ON CONFLICT DO NOTHING keeps first_seen stable
+                    # across Razorpay redeliveries of the same un-fixed event.
+                    cur.execute(
+                        "INSERT INTO razorpay_webhook_dead_letter "
+                        "(event_id, event_type, event_payload, error_reason) "
+                        "VALUES (%s, %s, %s, %s) ON CONFLICT (event_id) DO NOTHING",
+                        (
+                            event_id,
+                            event_type,
+                            Jsonb(_safe_payload(payload)),
+                            "non_int_charged_amount",
                         ),
                     )
                 else:
@@ -177,10 +199,35 @@ def razorpay_ingress(
                         "ON CONFLICT (event_id) DO NOTHING RETURNING event_id",
                         (event_id, event_type, Jsonb(_safe_payload(payload))),
                     )
+                    is_replay = False
                     if cur.fetchone() is None:
-                        # processed_at stays NULL on a duplicate (early return) — that NULL
-                        # is the "was a replay" observability marker, not used in logic.
-                        return {"status": "duplicate", "action": "noop"}
+                        # Row already exists. VT-352 F1: a same-event_id arrival is a genuine
+                        # duplicate UNLESS the existing row is an un-applied parse-drop
+                        # (processed_at IS NULL AND _status='dropped_parse_error') — that is the
+                        # CORRECTED event replaying past the dedup, and its fee must NOW apply
+                        # (else a drop silently loses the charge forever). FOR UPDATE locks the
+                        # row for the apply below; a genuinely-processed row (processed_at set) is
+                        # never re-applied → no double-charge.
+                        cur.execute(
+                            "SELECT payload ->> '_status' AS drop_status "
+                            "FROM razorpay_webhook_events "
+                            "WHERE event_id = %s AND processed_at IS NULL FOR UPDATE",
+                            (event_id,),
+                        )
+                        existing = cur.fetchone()
+                        if existing is None or existing["drop_status"] != "dropped_parse_error":
+                            # processed_at stays NULL on a duplicate (early return) — that NULL
+                            # is the "was a replay" observability marker, not used in logic.
+                            return {"status": "duplicate", "action": "noop"}
+                        # F1 REPLAY: overwrite the drop marker with the corrected redacted payload,
+                        # then fall through to apply + processed_at + dead-letter, ALL in this one
+                        # txn. ATOMIC (Cowork sharpening): if the apply raises, the whole txn rolls
+                        # back to the un-applied drop → re-replayable, never half-applied.
+                        is_replay = True
+                        cur.execute(
+                            "UPDATE razorpay_webhook_events SET payload = %s WHERE event_id = %s",
+                            (Jsonb(_safe_payload(payload)), event_id),
+                        )
 
                     # Resolve tenant from the subscription (set at /subscribe). Unknown
                     # subscription → record the event (durable) but take no state action.
@@ -195,6 +242,15 @@ def razorpay_ingress(
                         "UPDATE razorpay_webhook_events SET processed_at = now() WHERE event_id = %s",
                         (event_id,),
                     )
+                    if is_replay:
+                        # F1: the corrected event applied → close out its dead-letter row.
+                        cur.execute(
+                            "UPDATE razorpay_webhook_dead_letter "
+                            "SET status = 'replayed', retry_count = retry_count + 1, "
+                            "    last_retry = now() "
+                            "WHERE event_id = %s",
+                            (event_id,),
+                        )
     except Exception:
         # INFRA/pre-persist failure → 500 so team-web 5xx → Razorpay RETRIES (Q1: never
         # silently drop a financial event into the parse-drop 200). Idempotent on retry.

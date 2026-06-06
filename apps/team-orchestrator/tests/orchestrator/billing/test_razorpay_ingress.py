@@ -318,3 +318,69 @@ def test_apply_event_charged_missing_subscription_alerts(_dbpool, monkeypatch) -
         )
     assert action == "subscription_missing"
     assert alerts, "no missing-subscription alert"
+
+
+# --- VT-352 — dead-letter + F1 replay-past-dedup -------------------------------------------------
+def _dead_letter(dbpool, event_id: str):
+    """The dead-letter (status, retry_count) for event_id, or None."""
+    with dbpool.connection() as conn:
+        r = conn.execute(
+            "SELECT status, retry_count FROM razorpay_webhook_dead_letter WHERE event_id = %s",
+            (event_id,),
+        ).fetchone()
+    return (dict(r) if isinstance(r, dict) else {"status": r[0], "retry_count": r[1]}) if r else None
+
+
+@pytest.mark.integration
+def test_drop_then_replay_applies_fee(_dbpool, _transitions, monkeypatch) -> None:
+    """VT-352 F1: a dropped charged event (non-int amount), REPLAYED with the corrected amount
+    (same event_id), re-processes PAST the dedup → the fee IS applied (pre-VT-352 it hit the dedup
+    and was silently lost) + the dead-letter row flips pending→replayed."""
+    monkeypatch.setattr("orchestrator.billing.refund_executor._alert_fazal", lambda m: None)
+    tid, sub = uuid4(), "sub_replay"
+    _seed(_dbpool, tid, sub)
+
+    # 1. drop (non-int amount) → dead-letter pending, NO fee.
+    assert _post("evt_rp", "subscription.charged", _charged(sub, "abc"))["status"] == "dropped_parse_error"
+    assert _sub_state(_dbpool, tid)[0] == 0
+    dl = _dead_letter(_dbpool, f"{_RUN}_evt_rp")
+    assert dl is not None and dl["status"] == "pending" and dl["retry_count"] == 0
+
+    # 2. replay the CORRECTED event (same event_id, valid amount) → fee applied.
+    out = _post("evt_rp", "subscription.charged", _charged(sub, 499900))
+    assert out["status"] == "processed" and out["action"] == "fees_incremented"
+    assert _sub_state(_dbpool, tid)[0] == 499900  # FEE APPLIED (was lost pre-VT-352)
+    dl2 = _dead_letter(_dbpool, f"{_RUN}_evt_rp")
+    assert dl2["status"] == "replayed" and dl2["retry_count"] == 1
+
+    # 3. re-send the corrected event AGAIN → genuine duplicate, NO double-apply.
+    assert _post("evt_rp", "subscription.charged", _charged(sub, 499900))["status"] == "duplicate"
+    assert _sub_state(_dbpool, tid)[0] == 499900  # still single
+
+
+@pytest.mark.integration
+def test_atomic_replay_failure_leaves_unprocessed(_dbpool, _transitions, monkeypatch) -> None:
+    """VT-352 F1 ATOMIC (Cowork sharpening): if the apply RAISES mid-replay, the whole txn rolls
+    back to the un-applied drop — marker intact, fee not applied, dead-letter still pending →
+    re-replayable, never half-applied."""
+    monkeypatch.setattr("orchestrator.billing.refund_executor._alert_fazal", lambda m: None)
+    tid, sub = uuid4(), "sub_atomic"
+    _seed(_dbpool, tid, sub)
+    assert _post("evt_at", "subscription.charged", _charged(sub, "abc"))["status"] == "dropped_parse_error"
+
+    import orchestrator.api.razorpay_ingress as ing
+
+    def _boom(*a, **k):
+        raise RuntimeError("apply failed mid-replay")
+
+    monkeypatch.setattr(ing, "_apply_event_sql", _boom)
+    from fastapi import HTTPException
+
+    with pytest.raises(HTTPException) as exc:
+        _post("evt_at", "subscription.charged", _charged(sub, 499900))
+    assert exc.value.status_code == 500  # infra-fail → Razorpay retries
+
+    pay = _wh_payload(_dbpool, f"{_RUN}_evt_at")
+    assert pay["_status"] == "dropped_parse_error"  # marker NOT overwritten (rolled back)
+    assert _sub_state(_dbpool, tid)[0] == 0  # NO fee
+    assert _dead_letter(_dbpool, f"{_RUN}_evt_at")["status"] == "pending"  # NOT flipped
