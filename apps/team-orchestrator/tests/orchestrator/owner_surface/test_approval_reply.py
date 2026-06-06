@@ -66,6 +66,54 @@ def test_classify_approval_reply(body, expected) -> None:
     assert classify_approval_reply(body) == expected
 
 
+@pytest.mark.parametrize(
+    ("body", "expected"),
+    [
+        # --- DEFER (VT-334) — EN ---
+        ("later", "defer"),
+        ("let's do it later", "defer"),
+        ("next week", "defer"),  # the next+week BIGRAM (not bare "next")
+        # --- DEFER — HI / Hinglish (incl. the nukta + non-nukta हफ़्ते/हफ्ते) ---
+        ("baad mein", "defer"),
+        ("बाद में", "defer"),
+        ("agle hafte pls", "defer"),
+        ("अगले हफ़्ते", "defer"),
+        ("अगले हफ्ते", "defer"),  # नुक़ता-less variant
+        # --- precedence: reject > defer (any negation still wins) ---
+        ("no, next week", "rejected"),
+        ("skip, do it later", "rejected"),  # reject keyword beats defer
+        # --- precedence: defer > approve ("approve the idea, but later") ---
+        ("ok but later", "defer"),
+        ("haan but next week", "defer"),
+    ],
+)
+def test_classify_defer(body, expected) -> None:
+    assert classify_approval_reply(body) == expected
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        # Bare "next"/"अगले" must NOT defer on an APPROVING reply (Cowork #377 bounce) — defer
+        # needs the next+WEEK bigram, so these stay 'approved'.
+        "approve the next campaign",
+        "yes, send the next one",
+        "अगले campaign ko approve karo",
+        "अगला wala bhejo",
+    ],
+)
+def test_bare_next_does_not_defer_on_approval(body) -> None:
+    assert classify_approval_reply(body) == "approved"
+
+
+def test_defer_no_negation_handling_known_limitation() -> None:
+    """VT-334 ACCEPTED limitation (Cowork 20260606T103500Z): defer keywords get no negation
+    handling, so a send-now phrasing that merely CONTAINS 'later' classifies as defer. This is
+    the FAIL-SAFE direction — the campaign is delayed + the owner re-asked, never an unconsented
+    send. Recorded here deliberately; VT-329 may add full negation treatment for defer."""
+    assert classify_approval_reply("send now instead of later") == "defer"
+
+
 def test_resolve_uses_deterministic_first_no_llm() -> None:
     """A CLEAR reply resolves deterministically — the Haiku classify_fn is NOT called."""
     ar = pytest.importorskip("orchestrator.agent.approval_resume")  # dep-less: skip

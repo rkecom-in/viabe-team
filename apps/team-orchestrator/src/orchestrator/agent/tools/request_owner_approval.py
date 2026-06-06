@@ -71,8 +71,10 @@ _MAX_TIMEOUT_HOURS = 168  # 7 days
 ApprovalType = Literal[
     "campaign_send", "cohort_size_exceeded", "sensitive_data_access", "other"
 ]
-# The raw owner decision verb recorded on pending_approvals.decision.
-Decision = Literal["approved", "rejected", "needs_changes", "timeout"]
+# The raw owner decision verb recorded on pending_approvals.decision. CL-428: this Literal is
+# the source of truth — migration 110 keeps the DB CHECK in exact sync ('defer' added in both,
+# same PR — VT-334).
+Decision = Literal["approved", "rejected", "needs_changes", "timeout", "defer"]
 
 
 class RequestOwnerApprovalInput(BaseModel):

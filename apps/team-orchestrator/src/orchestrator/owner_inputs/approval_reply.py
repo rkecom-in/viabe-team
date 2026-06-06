@@ -24,7 +24,7 @@ import re
 import unicodedata
 from typing import Literal
 
-ApprovalDecision = Literal["approved", "rejected"]
+ApprovalDecision = Literal["approved", "rejected", "defer"]
 
 # Affirmations — rarely negated; their presence alongside a negation is a CONTRADICTION
 # (-> ambiguous -> Haiku), not a reject.
@@ -33,6 +33,19 @@ _STRONG_APPROVE = {"yes", "approve", "approved", "ok", "okay", "sure", "haan", "
 _APPROVE_VERB = {"send", "go", "proceed", "bhejo", "भेजो", "theek", "ठीक", "thik"}
 # Explicit rejections (non-negation words).
 _REJECT_KW = {"reject", "skip", "stop", "cancel"}
+# VT-334 — owner asks to decide LATER (extends the window 48h, max 2, then rejected). EN +
+# Hindi + Hinglish. Two shapes:
+#   - BARE temporal tokens that mean "later" on their own: "later", "baad (mein)", "बाद (में)".
+#   - The NEXT-family ("next", "agle", "अगले") ONLY as the bigram "next WEEK" — bare "next"/"अगले"
+#     over-triggers on APPROVING replies ("approve the NEXT campaign", "अगले campaign bhejo"),
+#     which would silently delay an explicit approval (Cowork #377 bounce). So next-family defers
+#     only when immediately followed by a week-word (incl. the नुक़ता variant हफ़्ते / हफ्ते).
+# KNOWN LIMITATION (accepted, Cowork 20260606T103500Z): no negation handling — "send now instead
+# of later" classifies defer. That is the FAIL-SAFE direction (delay + re-ask, never an
+# unconsented send); VT-329 may revisit. Precedence is reject > defer > approve.
+_DEFER_BARE = {"later", "baad", "बाद"}
+_DEFER_NEXT = {"next", "agle", "अगले", "अगला"}
+_DEFER_WEEK = {"week", "hafte", "hafta", "हफ़्ते", "हफ्ते"}
 # Hedges — a qualified reply ("maybe ok", "perhaps", "शायद") is NOT a clear decision;
 # defer to the Haiku classifier (+ its confidence gate) rather than fire deterministically.
 _HEDGE = {"maybe", "perhaps", "might", "possibly", "guess", "probably", "शायद"}
@@ -79,7 +92,8 @@ def classify_approval_reply(body: str) -> ApprovalDecision | None:
     )
     if "?" in normalized:
         return None
-    tokens = {t for t in re.split(r"[\s,.!?;:।/\\-]+", normalized) if t}
+    token_list = [t for t in re.split(r"[\s,.!?;:।/\\-]+", normalized) if t]
+    tokens = set(token_list)
 
     # A hedged reply ("maybe ok") is not authoritative — defer to Haiku (Pillar 7).
     if tokens & _HEDGE:
@@ -90,6 +104,12 @@ def classify_approval_reply(body: str) -> ApprovalDecision | None:
     has_strong = bool(tokens & _STRONG_APPROVE)
     has_verb = bool(tokens & _APPROVE_VERB)
     has_contrast = bool(tokens & _CONTRAST)
+    # Bare temporal defer, OR the next+week bigram (adjacent tokens) — never bare next/अगले.
+    has_week_bigram = any(
+        token_list[i] in _DEFER_NEXT and token_list[i + 1] in _DEFER_WEEK
+        for i in range(len(token_list) - 1)
+    )
+    has_defer = bool(tokens & _DEFER_BARE) or has_week_bigram
 
     # GENUINE two-clause contradiction ONLY (a contrastive conjunction joins an
     # affirmation + a negation: "yes BUT don't send the discount one") -> ambiguous ->
@@ -103,6 +123,12 @@ def classify_approval_reply(body: str) -> ApprovalDecision | None:
     # word -> REJECT. The negation binds the approval — never send a negated reply.
     if has_neg or has_reject_kw:
         return "rejected"
+
+    # VT-334 — defer beats approve (reject > defer > approve): "ok but later" defers the timing
+    # rather than sending now. A negation above already won as reject, so defer is only reached
+    # on a non-negated reply.
+    if has_defer:
+        return "defer"
 
     if has_strong or has_verb:
         return "approved"

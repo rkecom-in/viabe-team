@@ -369,13 +369,21 @@ def try_resume_pending_approval(tenant_id: str, body: str, message_sid: str | No
     # ruling 20260603T191000Z). approved → campaign_approved, rejected →
     # campaign_rejected; needs_changes has no L2 milestone type → no emit.
     with tenant_connection(tenant_id) as conn, conn.transaction():
-        mark_approval_resolved(
+        resolved = mark_approval_resolved(
             conn, tenant_id, approval["id"], decision, owner_message_sid=message_sid
         )
-        _l2_event = {
-            "approved": "campaign_approved",
-            "rejected": "campaign_rejected",
-        }.get(decision)
+        # VT-334: a 'defer' that only EXTENDS the window returns resolved=False — the run stays
+        # paused (no L2 emit, no resume). The L2 + resume happen only on a real resolution
+        # (incl. an exhausted defer, which resolves as a rejection).
+        _l2_event = (
+            {
+                "approved": "campaign_approved",
+                "rejected": "campaign_rejected",
+                "defer": "campaign_rejected",  # an exhausted defer resolves as a rejection
+            }.get(decision)
+            if resolved
+            else None
+        )
         # Only campaign approvals map to an L2 milestone; other approval_types
         # (sensitive_data_access, …) have no campaign_* episodic type.
         if _l2_event is not None and approval.get("approval_type") == "campaign_send":
@@ -397,6 +405,15 @@ def try_resume_pending_approval(tenant_id: str, body: str, message_sid: str | No
                 event_id=deterministic_event_id(tenant_id, _l2_event, approval["id"]),
                 conn=conn,
             )
+
+    # VT-334: a defer that only EXTENDED the window leaves the run PAUSED — do not resume or
+    # close. The owner gets another 48h; the next reply re-enters here.
+    if not resolved:
+        logger.info(
+            "approval-resume: deferred (window extended) tenant=%s approval=%s",
+            tenant_id, approval["id"],
+        )
+        return decision
 
     # Resume the suspended graph (re-enters the interrupting node; the node's
     # arm_pause_request is a no-op now the row is resolved). Then close the

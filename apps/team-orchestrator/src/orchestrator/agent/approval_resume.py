@@ -52,6 +52,11 @@ _DECISION_TO_STATUS: dict[str, str] = {
 # owner try again (Pillar 7: never auto-approve on a guess).
 _MIN_CONFIDENCE = 0.5
 
+# VT-334 — an owner "defer" EXTENDS the window 48h; after this many defers it is treated as a
+# rejection (decision='defer', status='rejected'). With max=2: the 1st defer extends, the 2nd
+# is terminal (Cowork 20260606T103500Z (a)).
+_MAX_DEFERS = 2
+
 
 def find_open_approval_for_tenant(
     conn: Any, tenant_id: UUID | str
@@ -124,15 +129,35 @@ def mark_approval_resolved(
     decision: str,
     *,
     owner_message_sid: str | None = None,
-) -> None:
-    """UPDATE the pending_approvals row with the resolved decision + status.
+) -> bool:
+    """Resolve (or, for a defer, EXTEND) the pending_approvals row. Returns True if the row was
+    RESOLVED (the caller resumes the run), False if it was EXTENDED on a defer (the run STAYS
+    paused, the window pushed out 48h).
 
-    VT-306: now tenant-predicated. The pre-migration UPDATE was ``WHERE id`` only
-    — an IDOR-class gap (a stray approval_id could resolve another tenant's
-    approval). ``tenant_id`` is threaded from the caller (derived from the run /
-    the swept approval row, never a bare id). Idempotent-ish: only resolves rows
-    still unresolved, so a redelivered reply does not re-resolve.
-    """
+    VT-306: tenant-predicated (the pre-migration ``WHERE id`` UPDATE was an IDOR gap). Idempotent-
+    ish: only resolves rows still unresolved.
+
+    VT-334 defer: a 'defer' decision extends the window (defer_count++, timeout +48h, still
+    pending) until ``_MAX_DEFERS``, after which it resolves as decision='defer', status='rejected'
+    (the SAFE downstream behavior; the audit truth is decision='defer')."""
+    if decision == "defer":
+        new_count = PendingApprovalsWrapper().extend_on_defer(
+            tenant_id, approval_id, timeout_hours=48, conn=conn
+        )
+        if new_count < _MAX_DEFERS:
+            logger.info(
+                "approval defer extended approval_id=%s tenant=%s defer_count=%s",
+                approval_id, tenant_id, new_count,
+            )
+            return False  # still pending — do NOT resume
+        # Exhausted: resolve as a rejection (status), keep decision='defer' for the audit.
+        PendingApprovalsWrapper().mark_resolved(
+            tenant_id, approval_id,
+            decision="defer", status="rejected",
+            owner_message_sid=owner_message_sid, conn=conn,
+        )
+        return True
+
     status = _DECISION_TO_STATUS.get(decision, "rejected")
     PendingApprovalsWrapper().mark_resolved(
         tenant_id,
@@ -142,6 +167,7 @@ def mark_approval_resolved(
         owner_message_sid=owner_message_sid,
         conn=conn,
     )
+    return True
 
 
 def resume_run(run_id: UUID | str, decision: str) -> dict[str, Any]:
