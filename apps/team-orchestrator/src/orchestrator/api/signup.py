@@ -9,13 +9,24 @@ welcome (injectable, non-terminal). Tenant-creation is PRE-tenant-context
 
 from __future__ import annotations
 
+import hmac
+import os
 import time
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel, Field
 
 router = APIRouter()
+
+
+def _verify_internal_secret(provided: str | None) -> bool:
+    """VT-326 A2: only team-web (which holds INTERNAL_API_SECRET) may reach this
+    BYPASSRLS create surface — a constant-time match (CL-72 pattern)."""
+    expected = os.environ.get("INTERNAL_API_SECRET", "")
+    if not expected or not provided:
+        return False
+    return hmac.compare_digest(provided, expected)
 
 # SignupError.code → HTTP status. Everything but a duplicate is a 400 (bad input).
 _DUPLICATE_STATUS = 409
@@ -75,16 +86,18 @@ def founding_status() -> dict[str, object]:
 
 
 @router.post("/api/signup", status_code=201)
-def signup(body: SignupBody) -> dict[str, object]:
-    # NEEDS-FAZAL: this is the SOLE, intentionally pre-auth owner-acquisition front
-    # door. It has NO rate-limiting and NO proof-of-control of the whatsapp_number
-    # (the regex is structural only). Two real gaps the review flagged: (1) unbounded
-    # tenant/consent-row creation on the BYPASSRLS pool (flooding); (2) number
-    # SQUATTING — first-writer-wins on the unique whatsapp_number, so an attacker can
-    # permanently 409-brick a number they don't own. The proper fix is OTP /
-    # proof-of-control BEFORE create (wire signup BEHIND the VT-326 OTP-before-create gate)
-    # + a per-IP throttle. That's a launch-blocking security decision for Fazal/VT-326,
-    # NOT built in this PR. Do not expose /api/signup publicly until it lands.
+def signup(
+    body: SignupBody,
+    x_internal_secret: str | None = Header(default=None, alias="X-Internal-Secret"),
+) -> dict[str, object]:
+    # VT-326: the BYPASSRLS create surface is now defended at BOTH boundaries — team-web
+    # gates it (OTP-before-create proof + per-IP throttle) AND requires this
+    # X-Internal-Secret, so a topology/SSRF leak can't reach create unauthenticated
+    # (closes the flooding gap at the source, not just the edge). Number-squatting is
+    # closed by the team-web OTP proof-of-control before this is ever called.
+    if not _verify_internal_secret(x_internal_secret):
+        raise HTTPException(status_code=403, detail={"code": "forbidden"})
+
     from orchestrator.onboarding.signup import SignupError, SignupInput, run_signup
 
     try:

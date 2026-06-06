@@ -219,11 +219,14 @@ def test_run_signup_validation_negatives(pool):
         assert e.value.code == code, f"{over} → expected {code}, got {e.value.code}"
 
 
-def test_signup_route_status_mapping(pool):
+def test_signup_route_status_mapping(pool, monkeypatch):
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
 
     from orchestrator.api.signup import router
+
+    monkeypatch.setenv("INTERNAL_API_SECRET", "vt326-test-secret")
+    hdr = {"X-Internal-Secret": "vt326-test-secret"}
 
     app = FastAPI()
     app.include_router(router)
@@ -235,24 +238,32 @@ def test_signup_route_status_mapping(pool):
         "city": "Mumbai", "business_type": "kirana",
         "consent_dpdpa": True, "consent_residency": True,
     }
-    r = client.post("/api/signup", json=body)
+    r = client.post("/api/signup", json=body, headers=hdr)
     assert r.status_code == 201, r.text
     assert r.json()["tenant_id"]
     assert r.json()["city_tier"] == "tier_1"  # Mumbai → tier_1; VT-317 closed
 
     # Duplicate → 409.
-    r_dup = client.post("/api/signup", json=body)
+    r_dup = client.post("/api/signup", json=body, headers=hdr)
     assert r_dup.status_code == 409
+
+    # VT-326 A2: only team-web (holding INTERNAL_API_SECRET) may reach this BYPASSRLS
+    # create surface — a missing or wrong secret is 403 (closes flooding at the source).
+    assert client.post("/api/signup", json=body).status_code == 403
+    assert (
+        client.post("/api/signup", json=body, headers={"X-Internal-Secret": "wrong"}).status_code
+        == 403
+    )
     assert r_dup.json()["detail"]["code"] == "duplicate"
 
     # Consent false → 400, no tenant.
     r_consent = client.post("/api/signup", json={**body, "whatsapp_number": _wa_91(),
-                                                 "consent_residency": False})
+                                                 "consent_residency": False}, headers=hdr)
     assert r_consent.status_code == 400
     assert r_consent.json()["detail"]["code"] == "consent"
 
     # Bad phone → 400.
-    r_phone = client.post("/api/signup", json={**body, "whatsapp_number": "+1202555"})
+    r_phone = client.post("/api/signup", json={**body, "whatsapp_number": "+1202555"}, headers=hdr)
     assert r_phone.status_code == 400
     assert r_phone.json()["detail"]["code"] == "invalid_phone"
 
