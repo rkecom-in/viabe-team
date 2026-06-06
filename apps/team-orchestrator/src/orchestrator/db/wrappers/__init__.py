@@ -573,6 +573,37 @@ class OwnerInputsWrapper(TenantScopedTable):
         self._validate(out, tid)
         return out
 
+    def insert_idempotent(
+        self, tenant_id: UUID | str, payload: dict[str, Any], *, conn: Any = None
+    ) -> dict[str, Any]:
+        """VT-149: insert one owner_inputs row, IDEMPOTENT on (tenant_id, message_sid). On a
+        DBOS webhook_pipeline_run REPLAY the second write CONFLICTs on the UNIQUE partial index
+        (mig 111) → DO NOTHING; we then return the EXISTING row's id, so the replay does not
+        double-write. A NULL message_sid has no dedup key → a plain insert. tenant_id is forced
+        (the RLS WITH CHECK + the literal below); returns ``{"id": ...}``."""
+        tid = self._uuid(tenant_id)
+        msid = payload.get("message_sid")
+        with self._conn(tid, conn) as c:
+            row = c.execute(
+                "INSERT INTO owner_inputs "
+                "(id, tenant_id, run_id, message_sid, intent, segment, occasion) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s) "
+                "ON CONFLICT (tenant_id, message_sid) WHERE message_sid IS NOT NULL "
+                "DO NOTHING RETURNING id",
+                (
+                    payload["id"], str(tid), payload.get("run_id"), msid,
+                    payload["intent"], payload.get("segment"), payload.get("occasion"),
+                ),
+            ).fetchone()
+            if row is not None:
+                return dict(row)
+            # Conflict → a prior write for this message_sid exists; return its id (replay no-op).
+            existing = c.execute(
+                "SELECT id FROM owner_inputs WHERE tenant_id = %s AND message_sid = %s LIMIT 1",
+                (str(tid), msid),
+            ).fetchone()
+        return dict(existing) if existing else {"id": payload["id"]}
+
 
 class PhoneTokenResolutionsWrapper(TenantScopedTable):
     _table = "phone_token_resolutions"

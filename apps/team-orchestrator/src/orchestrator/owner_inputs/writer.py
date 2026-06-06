@@ -213,7 +213,9 @@ def write_owner_input(
     # tenant_id to the scoped tenant + validates the RETURNING row via
     # assert_tenant_scoped (the belt-and-braces re-read is now intrinsic).
     new_id = uuid4()
-    row = OwnerInputsWrapper().insert(
+    # VT-149: idempotent on (tenant_id, message_sid) — a DBOS replay of webhook_pipeline_run
+    # returns the FIRST write's id instead of inserting a duplicate owner_inputs row.
+    row = OwnerInputsWrapper().insert_idempotent(
         tenant_id,
         {
             "id": str(new_id),
