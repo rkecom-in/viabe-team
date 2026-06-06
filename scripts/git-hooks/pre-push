@@ -175,7 +175,13 @@ if [ "$ORCH_CHANGED" = 1 ] && [ "${VIABE_PREPUSH_SKIP_DB:-0}" != 1 ]; then
     # drop the throwaway DB FIRST (clears its privilege deps), THEN the cluster
     # roles, THEN recreate — else apply halts at 015 (VT-260 / local-halt lesson).
     psql "$ADMIN_DSN" -tAqc "DROP DATABASE IF EXISTS $DBNAME WITH (FORCE)" >/dev/null 2>&1
-    for _r in app_role app_operator_role rls_tester; do
+    # VT-346: include rls_ckpt_tester — an RLS-checkpoint test creates that CLUSTER role +
+    # owned objects; without dropping it, a SUBSEQUENT run's teardown fails with
+    # DependentObjectsStillExist and the local hook false-fails across runs (CI on a fresh
+    # runner is unaffected). DROP OWNED BY … CASCADE first (the role owns objects), then DROP
+    # ROLE — the reaper above clears the leftover test DBs that hold the cross-DB deps.
+    for _r in app_role app_operator_role rls_tester rls_ckpt_tester; do
+      psql "$ADMIN_DSN" -tAqc "DROP OWNED BY $_r CASCADE" >/dev/null 2>&1
       psql "$ADMIN_DSN" -tAqc "DROP ROLE IF EXISTS $_r" >/dev/null 2>&1
     done
     psql "$ADMIN_DSN" -tAqc "CREATE DATABASE $DBNAME" >/dev/null 2>&1
