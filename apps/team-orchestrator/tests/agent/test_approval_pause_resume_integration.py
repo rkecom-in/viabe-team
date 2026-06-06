@@ -137,6 +137,31 @@ def test_pause_then_resume_approved(substrate):
     assert n == 1, "resume re-execution must not create a second approval row"
 
 
+def test_owner_initiated_adhoc_pauses_at_approval_not_bypass(substrate):
+    """VT-336 keystone (Pillar 7): an ADHOC owner-initiated send (trigger_reason='owner_initiated')
+    must PAUSE at the approval interrupt — it does NOT bypass the gate to campaign_execute.
+    Green-locked: drives the real graph + asserts the interrupt (not a routing trace)."""
+    dsn = substrate["dsn"]
+    saver = substrate["graphmod"].get_checkpointer()
+    graph = _build_gate_graph(saver)
+    tid, rid = _seed(dsn)
+    cfg = {"configurable": {"thread_id": rid}}
+
+    req = _request(tid, rid)
+    req["trigger_reason"] = "owner_initiated"  # the adhoc trigger must NOT skip the gate
+    paused = graph.invoke(req, config=cfg)
+
+    assert "__interrupt__" in paused, "owner_initiated must PAUSE at the approval interrupt"
+    assert "owner_decision" not in paused  # no approval read → never reached campaign_execute
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        row = conn.execute(
+            "SELECT status, resolved_at FROM pending_approvals WHERE run_id = %s", (rid,)
+        ).fetchone()
+    assert row is not None and row[0] == "pending" and row[1] is None, (
+        "adhoc owner-initiated send left an unresolved approval — it did not bypass the gate"
+    )
+
+
 def test_resume_rejected_is_non_approval_terminal(substrate):
     from langgraph.types import Command
 

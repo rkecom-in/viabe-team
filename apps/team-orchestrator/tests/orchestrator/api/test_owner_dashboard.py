@@ -371,6 +371,24 @@ def test_customers_cross_tenant(monkeypatch, _dbpool) -> None:
 
 
 @pytest.mark.integration
+def test_customers_page_size_clamped_to_max(monkeypatch, _dbpool) -> None:
+    """VT-336: page_size=500 is CLAMPED to _MAX_PAGE_SIZE (100) — a caller can't pull an
+    unbounded page (limit = min(page_size, 100)). Locks the clamp against regression; the
+    cross-tenant IDOR boundary is covered by test_customers_cross_tenant above."""
+    from orchestrator.api.owner_dashboard import dashboard_customers
+
+    monkeypatch.setenv("INTERNAL_API_SECRET", "s")
+    tid = uuid4()
+    _seed(_dbpool, tid, [(f"C{i}", f"+9198{i:08d}", "subscribed", 0) for i in range(105)])
+    out = dashboard_customers(
+        tenant_id=str(tid), page=1, page_size=500, excluded_only=False, x_internal_secret="s"
+    )
+    assert out["page_size"] == 100  # clamped, not 500
+    assert len(out["customers"]) == 100  # capped at the clamp
+    assert out["total"] == 105  # total still reflects all rows
+
+
+@pytest.mark.integration
 def test_customers_excluded_filter(monkeypatch, _dbpool) -> None:
     from orchestrator.api.owner_dashboard import dashboard_customers
 

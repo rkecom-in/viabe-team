@@ -22,6 +22,9 @@ from orchestrator.owner_inputs.customer_lookup import resolve_customer
 
 # A phone-like run of 10-14 digits (optionally +, spaces, dashes).
 _PHONE_RE = re.compile(r"(\+?\d[\d\s\-]{8,13}\d)")
+# VT-336: the normalized result MUST be an Indian MOBILE in E.164 (+91, leading 6-9) — a
+# permissive digit-run alone would grab an invoice/order number; this validates the SHAPE.
+_E164_IN_RE = re.compile(r"^\+91[6-9]\d{9}$")
 # Tokens stripped before treating the remainder as a candidate name.
 _KEYWORDS = {
     "exclude",
@@ -78,13 +81,17 @@ def _extract_phone(body: str) -> str | None:
     if not m:
         return None
     digits = re.sub(r"\D", "", m.group(1))
+    candidate: str | None = None
     if len(digits) == 10:
-        return "+91" + digits
-    if len(digits) == 12 and digits.startswith("91"):
-        return "+" + digits
-    if len(digits) == 11 and digits.startswith("0"):
-        return "+91" + digits[1:]
-    return ("+" + digits) if digits else None
+        candidate = "+91" + digits
+    elif len(digits) == 12 and digits.startswith("91"):
+        candidate = "+" + digits
+    elif len(digits) == 11 and digits.startswith("0"):
+        candidate = "+91" + digits[1:]
+    # VT-336: only an India-shaped MOBILE (+91, leading 6-9) is a phone. A wrong length or a
+    # non-mobile leading digit (an invoice/order number) → None (not_found; never a wrong
+    # exclusion). The old permissive "+"+digits fallback grabbed those — removed.
+    return candidate if candidate and _E164_IN_RE.match(candidate) else None
 
 
 def _extract_name(body: str) -> str | None:

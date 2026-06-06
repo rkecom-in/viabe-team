@@ -79,10 +79,24 @@ def test_router_routes_exclusion(monkeypatch) -> None:
     out = r.route_edge_case(
         tenant_id="t",
         event=ev,
-        classify_fn=lambda b: SimpleNamespace(classification="exclusion_request"),
+        classify_fn=lambda b: SimpleNamespace(classification="exclusion_request", confidence=0.9),
     )
     assert out is not None and "edge_case:exclusion" in out.reason
     assert calls.get("sent") == "ok"
+
+
+def test_exclusion_below_confidence_floor_falls_through() -> None:
+    """VT-336: a LOW-confidence exclusion_request must NOT auto-exclude — it falls through to the
+    agent (the mutating fast-path requires the confidence floor; a misroute lands on reasoning)."""
+    import orchestrator.edge_cases_router as r
+
+    ev = SimpleNamespace(body="maybe remove someone later?", sender_phone="+910000000000")
+    out = r.route_edge_case(
+        tenant_id="t",
+        event=ev,
+        classify_fn=lambda b: SimpleNamespace(classification="exclusion_request", confidence=0.4),
+    )
+    assert out is None  # below floor → fall through, no exclusion fired
 
 
 def test_router_routes_status(monkeypatch) -> None:
@@ -216,3 +230,46 @@ def test_exclusion_cross_tenant(_dbpool) -> None:
     handle_exclusion(a, "exclude 9700000001")
     assert _status_of(_dbpool, a, "+919700000001") == "owner_excluded"
     assert _status_of(_dbpool, b, "+919700000002") == "subscribed"
+
+
+@pytest.mark.integration
+def test_exclusion_same_phone_cross_tenant(_dbpool) -> None:
+    """VT-336: tenant A + B share the SAME phone; A's exclude touches ONLY A's row — proves the
+    tenant-predicate (not just that unrelated rows are untouched, as the test above does)."""
+    from orchestrator.owner_inputs.exclusion import handle_exclusion
+
+    a, b = uuid4(), uuid4()
+    shared = "+919700000001"
+    _seed(_dbpool, a, [("A-Cust", shared, "subscribed")])
+    _seed(_dbpool, b, [("B-Cust", shared, "subscribed")])
+    handle_exclusion(a, "exclude 9700000001")
+    assert _status_of(_dbpool, a, shared) == "owner_excluded"  # A's row excluded
+    assert _status_of(_dbpool, b, shared) == "subscribed"  # B's identical-phone row UNTOUCHED
+
+
+@pytest.mark.integration
+def test_owner_exclude_respects_consumer_stop_consent_gate(_dbpool) -> None:
+    """VT-336: a consumer STOP (record_of_consent.opted_out_at) STILL fail-closes the send after
+    the owner separately excludes — the VT-45 consent gate is the real guard (a SEPARATE table
+    from customers.opt_out_status). Uses the REAL consent path (the prior test wrongly used
+    customers.opt_out_status='opted_out')."""
+    from orchestrator.owner_inputs.exclusion import handle_exclusion
+    from orchestrator.privacy.consent import (
+        has_consent_for_phone,
+        opt_out_for_phone,
+        record_consent,
+    )
+
+    tid = uuid4()
+    phone = "+919765000000"
+    _seed(_dbpool, tid, [("Rajesh", phone, "subscribed")])
+    record_consent(tid, phone, consent_text_version="qr_v0")
+    assert has_consent_for_phone(tid, phone) is True
+    opt_out_for_phone(tid, phone)  # consumer STOP → record_of_consent.opted_out_at set
+    assert has_consent_for_phone(tid, phone) is False  # the consent gate now fail-closes
+
+    res = handle_exclusion(tid, f"exclude {phone[3:]}")  # owner excludes (separate flag)
+    assert res.action == "excluded"
+    assert _status_of(_dbpool, tid, phone) == "owner_excluded"
+    # The guarantee: the consent gate is STILL closed (owner-exclude never clears a consumer STOP).
+    assert has_consent_for_phone(tid, phone) is False
