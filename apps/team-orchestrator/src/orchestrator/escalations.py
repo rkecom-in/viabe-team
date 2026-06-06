@@ -29,13 +29,15 @@ def record_escalation(
     severity: str = "medium",
     run_id: UUID | str | None = None,
     notes: str | None = None,
-) -> None:
-    """Record an escalation for the Ops queue. Idempotent on run_id (one escalation per
-    run) when run_id is provided."""
+) -> bool:
+    """Record an escalation for the Ops queue. Idempotent on run_id (one escalation per run)
+    when run_id is provided. Returns True if a row was INSERTED, False if it conflicted (an
+    idempotent hit) — the caller gates the Fazal alert on this so a DBOS workflow replay does
+    NOT re-fire the Telegram ping (VT-343 nit A)."""
     if severity not in _VALID_SEVERITY:
         raise ValueError(f"invalid severity {severity!r}; valid: {_VALID_SEVERITY}")
     with get_pool().connection() as conn:
-        conn.execute(
+        cur = conn.execute(
             """
             INSERT INTO escalations (tenant_id, run_id, kind, severity, notes)
             VALUES (%s, %s, %s, %s, %s)
@@ -43,7 +45,12 @@ def record_escalation(
             """,
             (str(tenant_id), str(run_id) if run_id else None, kind, severity, notes),
         )
-    logger.info("escalation recorded tenant=%s kind=%s severity=%s", tenant_id, kind, severity)
+        inserted = (cur.rowcount or 0) > 0
+    logger.info(
+        "escalation recorded tenant=%s kind=%s severity=%s inserted=%s",
+        tenant_id, kind, severity, inserted,
+    )
+    return inserted
 
 
 # map a pipeline_runs status → (kind, severity) for the v1 backfill.
