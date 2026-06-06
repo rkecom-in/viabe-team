@@ -510,6 +510,48 @@ class PendingApprovalsWrapper(TenantScopedTable):
             )
             return cur.rowcount if cur.rowcount is not None else 0
 
+    def extend_on_defer(
+        self,
+        tenant_id: UUID | str,
+        approval_id: UUID | str,
+        *,
+        timeout_hours: int = 48,
+        conn: Any = None,
+    ) -> int:
+        """VT-334: extend an OPEN approval on a defer — bump defer_count, push timeout_at out
+        ``timeout_hours``, keep it pending (resolved_at stays NULL). Tenant-predicated. Returns
+        the NEW defer_count (0 if the row was not open / not found)."""
+        tid = self._uuid(tenant_id)
+        with self._conn(tid, conn) as c:
+            row = c.execute(
+                "UPDATE pending_approvals "
+                "SET defer_count = defer_count + 1, "
+                "    timeout_at = now() + make_interval(hours => %s) "
+                "WHERE tenant_id = %s AND id = %s AND resolved_at IS NULL "
+                "RETURNING defer_count",
+                (timeout_hours, str(tid), str(approval_id)),
+            ).fetchone()
+        if not row:
+            return 0
+        return int(row["defer_count"] if isinstance(row, dict) else row[0])
+
+    def count_recent_campaign_requests(
+        self, tenant_id: UUID | str, *, days: int = 7, conn: Any = None
+    ) -> int:
+        """VT-334 per-week messaging budget: how many ``campaign_send`` approval requests this
+        tenant has had in the last ``days`` (the owner-fatigue guard skips a new one at >= 2)."""
+        tid = self._uuid(tenant_id)
+        with self._conn(tid, conn) as c:
+            row = c.execute(
+                "SELECT count(*) AS n FROM pending_approvals "
+                "WHERE tenant_id = %s AND approval_type = 'campaign_send' "
+                "AND created_at >= now() - make_interval(days => %s)",
+                (str(tid), days),
+            ).fetchone()
+        if not row:
+            return 0
+        return int(row["n"] if isinstance(row, dict) else row[0])
+
 
 class OwnerInputsWrapper(TenantScopedTable):
     _table = "owner_inputs"

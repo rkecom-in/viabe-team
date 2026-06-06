@@ -100,3 +100,72 @@ def test_timeout_decision_maps_to_timed_out_status():
     _, params = conn.calls[0]
     assert params[0] == "timeout"
     assert params[1] == "timed_out"
+
+
+class _DeferConn:
+    """Mock conn whose RETURNING defer_count yields a configurable value (the post-increment
+    count from extend_on_defer)."""
+
+    def __init__(self, defer_count_after: int):
+        self._dc = defer_count_after
+        self.calls: list[tuple] = []
+
+    def execute(self, sql, params=None):
+        from types import SimpleNamespace
+
+        if "current_user" in sql:
+            return SimpleNamespace(fetchone=lambda: None, rowcount=0)
+        self.calls.append((" ".join(sql.split()), params))
+        return SimpleNamespace(fetchone=lambda: {"defer_count": self._dc}, rowcount=1)
+
+
+def test_defer_first_time_extends_and_does_not_resolve():
+    """VT-334: the 1st defer (defer_count → 1 < max) EXTENDS — returns False (run stays paused),
+    no resolve UPDATE."""
+    conn = _DeferConn(defer_count_after=1)
+    resolved = mark_approval_resolved(conn, uuid4(), uuid4(), "defer")
+    assert resolved is False
+    assert any("defer_count = defer_count + 1" in s for s, _ in conn.calls)
+    assert any("timeout_at = now() + make_interval" in s for s, _ in conn.calls)
+    assert not any("resolved_at = now()" in s for s, _ in conn.calls)  # NOT resolved
+
+
+def test_defer_at_max_resolves_as_rejected():
+    """VT-334: the 2nd defer (defer_count → 2 == max) resolves — decision='defer', status='rejected'
+    (safe downstream; audit truth in decision). Returns True (the caller resumes)."""
+    conn = _DeferConn(defer_count_after=2)
+    resolved = mark_approval_resolved(conn, uuid4(), uuid4(), "defer")
+    assert resolved is True
+    resolve_calls = [(s, p) for s, p in conn.calls if "resolved_at = now()" in s]
+    assert resolve_calls, "expected a resolve UPDATE at max defers"
+    _, params = resolve_calls[0]
+    assert params[0] == "defer"  # decision (audit truth)
+    assert params[1] == "rejected"  # status (safe downstream)
+
+
+def test_count_recent_campaign_requests_sql_and_value():
+    """VT-334 per-week budget count: scopes to campaign_send + a created_at window, returns the
+    count (the collapse guard skips at >= _WEEKLY_APPROVAL_BUDGET)."""
+    from types import SimpleNamespace
+    from uuid import uuid4 as _uuid4
+
+    from orchestrator.db.wrappers import PendingApprovalsWrapper
+
+    class _CountConn:
+        def __init__(self):
+            self.calls: list[tuple] = []
+
+        def execute(self, sql, params=None):
+            if "current_user" in sql:
+                return SimpleNamespace(fetchone=lambda: None, rowcount=0)
+            self.calls.append((" ".join(sql.split()), params))
+            return SimpleNamespace(fetchone=lambda: {"n": 3}, rowcount=1)
+
+    conn = _CountConn()
+    n = PendingApprovalsWrapper().count_recent_campaign_requests(_uuid4(), days=7, conn=conn)
+    assert n == 3
+    sql, params = conn.calls[0]
+    assert "count(*)" in sql
+    assert "approval_type = 'campaign_send'" in sql
+    assert "created_at >= now() - make_interval(days => %s)" in sql
+    assert params[1] == 7
