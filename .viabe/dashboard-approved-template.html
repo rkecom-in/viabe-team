@@ -1,0 +1,560 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="light only">
+<title>Viabe Team — Sprint Dashboard (LAYOUT MOCK v2 for approval)</title>
+<style>
+:root { color-scheme: light only !important; }
+@media (prefers-color-scheme: dark) { html, body { background:#f7f8fa !important; color:#1b1f24 !important; } }
+html,body{margin:0;padding:0;background:#f7f8fa!important;color:#1b1f24!important;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Inter,system-ui,sans-serif;font-size:14px;line-height:1.45}
+.wrap{max-width:1240px;margin:0 auto;padding:20px 26px 52px}
+.mockbanner{background:#fff7e6;border:1px solid #f0d9a8;color:#7a5b13;border-radius:8px;padding:8px 14px;font-size:12px;font-weight:600;margin-bottom:14px}
+h1{font-size:21px;margin:0;font-weight:700}
+.meta{color:#5b6470;font-size:12px;margin:4px 0 16px}
+.meta b{color:#1b1f24}
+h2{font-size:13px;margin:26px 0 10px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:#2b3a55;border-bottom:1px solid #e4e7ea;padding-bottom:5px}
+.top{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:6px}
+.kpi{background:#fff;border:1px solid #e4e7ea;border-radius:10px;padding:14px 16px}
+.kpi .n{font-size:26px;font-weight:700;line-height:1.05}
+.kpi .l{font-size:11px;color:#5b6470;text-transform:uppercase;letter-spacing:.05em;margin-top:5px}
+.kpi.warn .n{color:#9b1c1c}
+.kpi.ok .n{color:#14532d}
+.brief{background:#fff;border:1px solid #e4e7ea;border-left:4px solid #2b6cb0;border-radius:10px;padding:13px 16px;font-size:13px;line-height:1.55;margin-top:12px}
+.brief b{color:#1b1f24}
+table.phases{width:100%;border-collapse:collapse;background:#fff;border:1px solid #e4e7ea;border-radius:10px;overflow:hidden}
+table.phases th{font-size:10px;text-transform:uppercase;letter-spacing:.06em;color:#5b6470;text-align:left;padding:9px 12px;background:#fbfcfd;border-bottom:1px solid #e4e7ea}
+table.phases td{padding:8px 12px;border-bottom:1px solid #f0f2f4;font-size:13px;vertical-align:middle}
+table.phases tr:last-child td{border-bottom:none}
+.ph-name{font-weight:600;white-space:nowrap}
+.bar{background:#eaecef;border-radius:5px;height:8px;min-width:130px;overflow:hidden}
+.bf{height:100%;border-radius:5px}
+.bf.g{background:#2da450}.bf.b{background:#2b6cb0}.bf.gr{background:#9aa3ad}
+.frac{font-size:12px;color:#5b6470;font-weight:600;white-space:nowrap}
+.badge{font-size:10px;font-weight:700;padding:3px 8px;border-radius:5px;letter-spacing:.04em;white-space:nowrap}
+.bg-done{background:#e7f5ea;color:#14532d}.bg-active{background:#e8f0fb;color:#1d4f91}.bg-hold{background:#f2f3f5;color:#5b6470}.bg-fazal{background:#fdeaea;color:#9b1c1c}
+.cols{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+.card{background:#fff;border:1px solid #e4e7ea;border-radius:10px;padding:13px 16px}
+.card h3{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;margin:0 0 8px;color:#5b6470}
+.card h3.red{color:#9b1c1c}
+.card ul{margin:0;padding-left:17px;font-size:13px}
+.card li{margin-bottom:5px;line-height:1.45}
+.card li code{background:#f2f3f5;padding:1px 5px;border-radius:4px;font-size:12px;font-weight:600}
+.tag{font-size:10px;font-weight:700;padding:1px 6px;border-radius:4px;margin-left:5px}
+.tag.crit{background:#fdeaea;color:#9b1c1c}.tag.gate{background:#fff3e0;color:#8a5a00}.tag.now{background:#e8f0fb;color:#1d4f91}
+.merges{background:#fff;border:1px solid #e4e7ea;border-radius:10px;padding:13px 16px}
+.m-row{display:flex;gap:10px;padding:5px 0;border-bottom:1px dashed #f0f2f4;font-size:12.5px;align-items:baseline}
+.m-row:last-child{border-bottom:none}
+.m-row code{color:#14532d;font-weight:700;white-space:nowrap}
+.m-row .pr{color:#5b6470;font-weight:600;white-space:nowrap}
+.footer{margin-top:28px;padding-top:14px;border-top:1px solid #e4e7ea;color:#5b6470;font-size:11.5px}
+
+/* sprint board */
+.pills{display:flex;gap:8px;align-items:center;margin:4px 0 16px;flex-wrap:wrap}
+.pill{border:1px solid #d6dade;background:#fff;color:#1b1f24;font-size:12.5px;font-weight:600;padding:7px 16px;border-radius:999px;cursor:pointer}
+.pill.active{background:#1b1f24;color:#fff;border-color:#1b1f24}
+.showing{margin-left:auto;font-size:12px;color:#5b6470}
+.sblock{background:#fff;border:1px solid #e4e7ea;border-radius:10px;padding:6px 16px 10px;margin-bottom:14px}
+.shead{display:flex;justify-content:space-between;align-items:baseline;padding:10px 0 6px}
+.sname{font-weight:700;font-size:15px}
+.scount{font-size:12px;color:#5b6470}
+table.srows{width:100%;border-collapse:collapse}
+table.srows td{padding:7px 8px;border-top:1px solid #f0f2f4;font-size:13px;vertical-align:baseline}
+.rid{font-weight:700;white-space:nowrap;width:70px}
+.rst{white-space:nowrap;width:120px;color:#3a4350}
+.dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:7px;vertical-align:middle}
+.rtitle{color:#1b1f24}
+.row.hid{display:none}
+.sblock.hid{display:none}
+
+</style>
+</head>
+<body><div class="wrap">
+
+<div class="mockbanner">LAYOUT MOCK — for your approval. Data below is live as of generation; nothing replaces the artifact until you sign off. Once approved, the generator emits exactly this layout every regen.</div>
+
+<h1>Viabe Team — Sprint Dashboard</h1>
+<div class="meta">Generated <b>2026-06-06 15:55 IST</b> · Source <b>.viabe/sprint/VT-*.md</b> + git · Milestone <b>Reports-Jun15</b> in <b style="color:#9b1c1c">9 days</b></div>
+
+<div class="top">
+  <div class="kpi ok"><div class="n">83%</div><div class="l">Overall · 291 / 349 rows closed</div></div>
+  <div class="kpi"><div class="n">10</div><div class="l">Rows merged this batch (Jun 6)</div></div>
+  <div class="kpi warn"><div class="n">4</div><div class="l">Launch gates open</div></div>
+  <div class="kpi warn"><div class="n">3</div><div class="l">Blocked on Fazal</div></div>
+</div>
+
+<div class="brief"><b>Sprint brief:</b> Sprint-8 critical path is <b>complete</b>; the Jun-6 autonomous batch merged 10 rows — the 5 Meta templates live (EN+HI), in-window acks → free-form bilingual, signup OTP-gate (dark), kg_events DSR sweep, Razorpay webhook hardening, bilingual landing + signup form, waitlist mode, and the trial-end single-use token. CC is building <b>VT-334</b>; next in queue VT-98 → VT-119 → VT-336 → VT-328 → <b>VT-329 (Critical, Hindi/Hinglish classifier)</b>. Launch is gated on: live Razorpay keys + KYC, the signup go-live flip (needs VT-329), VT-231 Mumbai prod DB, and the public legal pages (VT-353).</div>
+
+<h2>Phase status</h2>
+<table class="phases">
+<tr><th>Phase</th><th style="width:30%">Progress</th><th>Closed / Total</th><th>State</th><th>Note</th></tr>
+<tr><td class="ph-name">Sprints 0 – 5 (Foundation → Online Methods)</td><td><div class="bar"><div class="bf g" style="width:98%"></div></div></td><td class="frac">189 / 193</td><td><span class="badge bg-done">COMPLETE</span></td><td class="frac">4 deferred/backlog stragglers</td></tr>
+<tr><td class="ph-name">Sprint 7 — Knowledge Architecture</td><td><div class="bar"><div class="bf g" style="width:95%"></div></div></td><td class="frac">39 / 41</td><td><span class="badge bg-done">COMPLETE</span></td><td class="frac">1 blocked, 1 backlog (non-critical)</td></tr>
+<tr><td class="ph-name">Sprint 8 — Owner Surface &amp; Billing</td><td><div class="bar"><div class="bf b" style="width:65%"></div></div></td><td class="frac">36 / 55</td><td><span class="badge bg-active">ACTIVE</span></td><td class="frac">critical path done; queue + gates remain</td></tr>
+<tr><td class="ph-name">Sprint 8 — Billing &amp; Signup</td><td><div class="bar"><div class="bf b" style="width:67%"></div></div></td><td class="frac">2 / 3</td><td><span class="badge bg-active">ACTIVE</span></td><td class="frac">VT-326 done; flip is Fazal-gated</td></tr>
+<tr><td class="ph-name">Sprint 9 — Launch Surface + Polish &amp; E2E</td><td><div class="bar"><div class="bf b" style="width:43%"></div></div></td><td class="frac">3 / 7</td><td><span class="badge bg-active">ACTIVE</span></td><td class="frac">VT-119 queued; legal pages VT-353</td></tr>
+<tr><td class="ph-name">Hardening</td><td><div class="bar"><div class="bf gr" style="width:60%"></div></div></td><td class="frac">12 / 20</td><td><span class="badge bg-hold">ROLLING</span></td><td class="frac">4 queued, 3 backlog</td></tr>
+<tr><td class="ph-name">Sprint-Fazal</td><td><div class="bar"><div class="bf gr" style="width:0%"></div></div></td><td class="frac">0 / 11</td><td><span class="badge bg-fazal">NEEDS FAZAL</span></td><td class="frac">your queue — creds, copy, rulings</td></tr>
+<tr><td class="ph-name">Backlogs (Agent-Op Layer · Ingestion Ease)</td><td><div class="bar"><div class="bf gr" style="width:0%"></div></div></td><td class="frac">0 / 6</td><td><span class="badge bg-hold">PARKED</span></td><td class="frac">post-launch</td></tr>
+</table>
+
+<h2>Sprint 8 / 9 — working state</h2>
+<div class="cols">
+  <div class="card">
+    <h3>In flight + next (CC queue, exec order)</h3>
+    <ul>
+      <li><code>VT-334</code> weekly-approval defer + budget <span class="tag now">BUILDING</span></li>
+      <li><code>VT-98</code> social-proof placeholders · <code>VT-119</code> doc banners</li>
+      <li><code>VT-336</code> edge-case hardening · <code>VT-328</code> refunded-tenant block</li>
+      <li><code>VT-329</code> Hindi/Hinglish DSR-opt-out classifier <span class="tag crit">CRITICAL</span></li>
+      <li><code>VT-333</code> · <code>VT-343</code> · <code>VT-149</code> · then post-launch tail (344/345/346/347/351)</li>
+    </ul>
+  </div>
+  <div class="card">
+    <h3 class="red">Gates — launch-blocking</h3>
+    <ul>
+      <li><b>Fazal:</b> live Razorpay keys + KYC (<code>VT-10</code>) · signup go-live flip · <code>VT-231</code> Mumbai prod DB · landing/FAQ copy finalization</li>
+      <li><code>VT-353</code> public legal pages (privacy/DPDP/terms) <span class="tag gate">PRE-LIVE</span></li>
+      <li><code>VT-354</code> waitlist retention scheduler <span class="tag gate">PRE-LIVE</span></li>
+      <li><code>VT-352</code> Razorpay dead-letter + replay (+ vendor-orphan F1) <span class="tag gate">PRE-LIVE</span></li>
+      <li><code>VT-337</code> shows In&nbsp;Progress in substrate — actually merged (#350); reconcile pending</li>
+    </ul>
+  </div>
+</div>
+
+<h2>Recent merges</h2>
+<div class="merges">
+  <div class="m-row"><code>#376</code><span class="pr">VT-332</span><span>reconcile — drop dead plan_tier claim; F1/F4 → VT-352 gates</span></div>
+  <div class="m-row"><code>#375</code><span class="pr">VT-332</span><span>trial-end token mint + SINGLE-USE consume (closes VT-350)</span></div>
+  <div class="m-row"><code>#374</code><span class="pr">VT-97</span><span>reconcile — policy-doc honesty + roster VT-354</span></div>
+  <div class="m-row"><code>#373</code><span class="pr">VT-97</span><span>waitlist mode + pre-tenant capture (consent, erasure, dark)</span></div>
+  <div class="m-row"><code>#372</code><span class="pr">VT-96</span><span>signup form OTP step behind the VT-326 gate</span></div>
+  <div class="m-row"><code>#371</code><span class="pr">VT-95</span><span>bilingual viabe.ai/team landing page</span></div>
+  <div class="m-row"><code>#370</code><span class="pr">VT-330</span><span>Razorpay webhook hardening — poison-pill, HMAC e2e</span></div>
+  <div class="m-row"><code>#369</code><span class="pr">VT-327</span><span>kg_events outbox swept on tenant DSR</span></div>
+</div>
+
+<h2>Sprint board — all rows</h2>
+<div class="pills">
+<button class="pill active" data-f="all">All</button>
+<button class="pill" data-f="done">Done (280)</button>
+<button class="pill" data-f="flight">In-flight (7)</button>
+<button class="pill" data-f="back">Backlog (51)</button>
+<button class="pill" data-f="closed">Closed (11)</button>
+<span class="showing">Showing <b id="shn">349</b> of 349</span></div>
+<div class="sblock"><div class="shead"><span class="sname">Pre-Sprint 0 - Pillars &amp; Setup</span><span class="scount">0/3 done · 0 in-flight · 0 backlog</span></div><table class="srows">
+<tr class="row f-closed"><td class="rid">VT-1</td><td class="rst"><span class="dot" style="background:#b7a6e8"></span>Cancelled</td><td class="rtitle">VT-Pillars — write concept-team-pillars.md</td></tr>
+<tr class="row f-closed"><td class="rid">VT-15</td><td class="rst"><span class="dot" style="background:#b7a6e8"></span>Cancelled</td><td class="rtitle">Author concept-team-pillars.md v1.0</td></tr>
+<tr class="row f-closed"><td class="rid">VT-16</td><td class="rst"><span class="dot" style="background:#b7a6e8"></span>Cancelled</td><td class="rtitle">Cross-link pillars file from concept-team.md and CLAUDE.md</td></tr>
+</table></div>
+<div class="sblock"><div class="shead"><span class="sname">Sprint 1 - Foundation</span><span class="scount">55/57 done · 0 in-flight · 0 backlog</span></div><table class="srows">
+<tr class="row f-done"><td class="rid">VT-2</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">VT-Foundation — repo, Supabase, RLS, secrets, dev/prod, CI</td></tr>
+<tr class="row f-done"><td class="rid">VT-3</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">VT-Orchestrator — LangGraph, dispatch, triggers, error handling</td></tr>
+<tr class="row f-done"><td class="rid">VT-12</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">VT-Observability-Cost — LangSmith, structured logging, cost dashboard, token cap</td></tr>
+<tr class="row f-done"><td class="rid">VT-17</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Repo and monorepo layout (apps/team-web, apps/team-orchestrator, packages/team-shared)</td></tr>
+<tr class="row f-done"><td class="rid">VT-18</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Supabase dev (ap-south-1) and prod (ap-south-2) projects with backups</td></tr>
+<tr class="row f-done"><td class="rid">VT-19</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Base schema: 8 core tables + tenant_id on every multi-tenant table</td></tr>
+<tr class="row f-done"><td class="rid">VT-20</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">32 RLS policies + 7 attack tests proving cross-tenant isolation</td></tr>
+<tr class="row f-done"><td class="rid">VT-21</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Vercel + Railway dev/prod environments with GitHub Actions deploys</td></tr>
+<tr class="row f-done"><td class="rid">VT-22</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">INTERNAL_API_SECRET wiring across services with constant-time compare</td></tr>
+<tr class="row f-done"><td class="rid">VT-23</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Base CI: pytest + vitest + lint + Notion task ID check + gitleaks</td></tr>
+<tr class="row f-done"><td class="rid">VT-24</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">DBOS-wrapped LangGraph substrate (the orchestrator host)</td></tr>
+<tr class="row f-done"><td class="rid">VT-25</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">SubscriberState schema and phase transitions</td></tr>
+<tr class="row f-done"><td class="rid">VT-26</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Twilio inbound webhook + DBOS workflow ingress</td></tr>
+<tr class="row f-done"><td class="rid">VT-27</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">langgraph_supervisor handoff (orchestrator-agent → specialist seam)</td></tr>
+<tr class="row f-done"><td class="rid">VT-28</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">4 scheduled triggers (weekly cadence, attribution close, day-39, monthly impact)</td></tr>
+<tr class="row f-done"><td class="rid">VT-29</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Error-handling and retry framework with taxonomy</td></tr>
+<tr class="row f-done"><td class="rid">VT-30</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Unified-output composer</td></tr>
+<tr class="row f-done"><td class="rid">VT-31</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Pre-Filter Gate (Stage 1) + 5 direct handlers</td></tr>
+<tr class="row f-done"><td class="rid">VT-101</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">LangSmith + run_id propagation</td></tr>
+<tr class="row f-done"><td class="rid">VT-102</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">pipeline_log structured event store</td></tr>
+<tr class="row f-done"><td class="rid">VT-103</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Per-subscriber cost dashboard</td></tr>
+<tr class="row f-done"><td class="rid">VT-104</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Reasoning trace + PII redactor</td></tr>
+<tr class="row f-done"><td class="rid">VT-105</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">80K token + hard-limits instrumentation</td></tr>
+<tr class="row f-done"><td class="rid">VT-120</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Deployment shape (sibling repos, shared accounts, separate projects)</td></tr>
+<tr class="row f-closed"><td class="rid">VT-121</td><td class="rst"><span class="dot" style="background:#b7a6e8"></span>Cancelled</td><td class="rtitle">Daily Launch Tracker Telegram alert (overdue + due-this-week)</td></tr>
+<tr class="row f-done"><td class="rid">VT-122</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">VT-PipelineObservability</td></tr>
+<tr class="row f-done"><td class="rid">VT-123</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">VT-OpsConsole (MVP — launch-essential 3 views + [resolve])</td></tr>
+<tr class="row f-done"><td class="rid">VT-125</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Orchestrator-Agent system prompt + tool inventory</td></tr>
+<tr class="row f-done"><td class="rid">VT-126</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">L0 memory orchestrator-agent integration (tool registry + Context Composer hook)</td></tr>
+<tr class="row f-done"><td class="rid">VT-127</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Ingress hardening: dedup into workflow + reject empty MessageSid + port fix (VT-3.3a-fix-1)</td></tr>
+<tr class="row f-done"><td class="rid">VT-128</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Env unify: TWILIO_AUTH_TOKEN → TEAM_TWILIO_AUTH_TOKEN + real signature test (VT-3.3b-fix-1)</td></tr>
+<tr class="row f-done"><td class="rid">VT-129</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">SubscriberState typo rename: total_arrr_paise → total_recovered_paise (VT-3.2-fix-1)</td></tr>
+<tr class="row f-done"><td class="rid">VT-130</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">CI hardening: no-LLM grep extension + mypy non-blocking (VT-CI-fix-1)</td></tr>
+<tr class="row f-done"><td class="rid">VT-131</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">RouteToBrain step record + escalated status (VT-3.3a-fix-2)</td></tr>
+<tr class="row f-done"><td class="rid">VT-132</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Migration 014: whatsapp_number index + pipeline_steps UNIQUE constraint (VT-Foundation-fix-1)</td></tr>
+<tr class="row f-done"><td class="rid">VT-133</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Handler-side Twilio template send wiring (VT-3.3c)</td></tr>
+<tr class="row f-done"><td class="rid">VT-134</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Step idempotency + docstring honesty + reason field 4-bucket split (VT-3.3a-fix-3)</td></tr>
+<tr class="row f-done"><td class="rid">VT-171</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Replace LangSmith with Pydantic Logfire (CL-56 hot-fix)</td></tr>
+<tr class="row f-done"><td class="rid">VT-172</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Rescue uncommitted migration output + Cowork operating layer to git</td></tr>
+<tr class="row f-done"><td class="rid">VT-174</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Retroactive Brief Artifacts amendment — VT-101/102/103/104 (post-VT-171 Logfire migration)</td></tr>
+<tr class="row f-done"><td class="rid">VT-175</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">attributions table + cadence columns + day-39 evaluator</td></tr>
+<tr class="row f-done"><td class="rid">VT-176</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Replace VT-28 shell trigger bodies with real implementations</td></tr>
+<tr class="row f-closed"><td class="rid">VT-177</td><td class="rst"><span class="dot" style="background:#b7a6e8"></span>Cancelled</td><td class="rtitle">Migrate Viabe_Launch_Tracker from Notion to repo (.viabe/launch-tracker/MS-*.md)</td></tr>
+<tr class="row f-done"><td class="rid">VT-178</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">VT-122.1 — pipeline_runs + pipeline_steps + phone_token_resolutions schema review + RLS hardeni</td></tr>
+<tr class="row f-done"><td class="rid">VT-179</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">VT-122.2 — Pydantic envelope schemas for ~15 step_kinds at observability/envelopes/</td></tr>
+<tr class="row f-done"><td class="rid">VT-180</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">VT-122.3 — pipeline_observability.write_step() writer + atomic cumulative updates + SQLite buff</td></tr>
+<tr class="row f-done"><td class="rid">VT-181</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">VT-122.4 — @observability.tool_step decorator for MCP tools</td></tr>
+<tr class="row f-done"><td class="rid">VT-182</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">VT-122.5 — Anthropic Messages SDK observability callback (agent_reasoning_step per think/act/ob</td></tr>
+<tr class="row f-done"><td class="rid">VT-183</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">VT-122.6 — LangGraph node hooks for state transitions (one step record per node entry/exit)</td></tr>
+<tr class="row f-done"><td class="rid">VT-184</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">VT-122.7 — phone-tokenization extension + phone_token_resolutions resolution path with audit lo</td></tr>
+<tr class="row f-done"><td class="rid">VT-185</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">VT-122.8 — DSR-purge coverage for pipeline_runs + pipeline_steps + phone_token_resolutions</td></tr>
+<tr class="row f-done"><td class="rid">VT-186</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">VT-122.9 — CI checks (new LangGraph node without hook fails; new MCP tool without decorator fai</td></tr>
+<tr class="row f-done"><td class="rid">VT-187</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Schema normalization — pipeline_runs + pipeline_steps + phone_token_resolutions → design-doc §2</td></tr>
+<tr class="row f-done"><td class="rid">VT-188</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Operator-role substrate — JWT-with-operator-claim path for phone_token_resolutions stricter acc</td></tr>
+<tr class="row f-done"><td class="rid">VT-191</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Phone number encryption-at-rest for phone_token_resolutions (Fernet/AES + key management)</td></tr>
+<tr class="row f-done"><td class="rid">VT-192</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">team-web operator-resolve route + JWT validation wrapper (Next.js, defers from VT-188)</td></tr>
+<tr class="row f-done"><td class="rid">VT-193</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Brain wiring — runner.py:303-307 → build_supervisor_graph invocation</td></tr>
+</table></div>
+<div class="sblock"><div class="shead"><span class="sname">Sprint 1.5 - Hardening</span><span class="scount">10/10 done · 0 in-flight · 0 backlog</span></div><table class="srows">
+<tr class="row f-done"><td class="rid">VT-190</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">self_evaluate retrofit with @observability.tool_step (MCPTool signature workaround)</td></tr>
+<tr class="row f-done"><td class="rid">VT-239</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Enforce numeric VT-&lt;N&gt; reference in PR-title CI gate</td></tr>
+<tr class="row f-done"><td class="rid">VT-242</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Refresh latest-snapshot.md to current held-PR state (2026-05-30)</td></tr>
+<tr class="row f-done"><td class="rid">VT-243</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Reconcile sprint substrate — flip merged rows to Done + commit untracked rows (2026-05-30)</td></tr>
+<tr class="row f-done"><td class="rid">VT-255</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">CI Actions-diet — drop edited trigger + split pr-title; deeper job-gating + pre-push DB levers</td></tr>
+<tr class="row f-done"><td class="rid">VT-259</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Per-path CI job gating (skip web jobs for orchestrator-only PRs + vice versa)</td></tr>
+<tr class="row f-done"><td class="rid">VT-260</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Pre-push hook DB coverage (run orchestrator + migrations jobs vs local pg)</td></tr>
+<tr class="row f-done"><td class="rid">VT-264</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Narrow query_customer_ledger UndefinedColumn catch (avoid masking real query bugs)</td></tr>
+<tr class="row f-done"><td class="rid">VT-265</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Migration 053 DROP CONSTRAINT → IF EXISTS (re-apply idempotency)</td></tr>
+<tr class="row f-done"><td class="rid">VT-266</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Real-DB test dsn fixtures should surface apply_migrations failures</td></tr>
+</table></div>
+<div class="sblock"><div class="shead"><span class="sname">Sprint 2 - Cost + Moat</span><span class="scount">21/22 done · 0 in-flight · 0 backlog</span></div><table class="srows">
+<tr class="row f-done"><td class="rid">VT-194</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Prompt caching for orchestrator-agent (Anthropic cache_control; 10x cost lever)</td></tr>
+<tr class="row f-done"><td class="rid">VT-195</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">L1 tenant context substrate — per-tenant knowledge graph + Context Composer integration</td></tr>
+<tr class="row f-done"><td class="rid">VT-196</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">L0 production write wiring — orchestrator-agent writes L0 fragments through k-anonymity gate</td></tr>
+<tr class="row f-done"><td class="rid">VT-197</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Day-39 evaluator → context-bundle reflection loop (closes the learning cycle)</td></tr>
+<tr class="row f-done"><td class="rid">VT-198</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Owner feedback surfaces — 3-tier (implicit attribution + emoji reactions + dashboard review)</td></tr>
+<tr class="row f-done"><td class="rid">VT-199</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">VT-193 canary refinement — A5 in-process trip + A6 budget revision</td></tr>
+<tr class="row f-done"><td class="rid">VT-200</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Hygiene bundle — TEAM_TWILIO_MOCK_MODE + twilio_inbound_events FK CASCADE + DBOS purge_workflow</td></tr>
+<tr class="row f-done"><td class="rid">VT-201</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Operations live stream + history dashboard (real-time observability surface)</td></tr>
+<tr class="row f-done"><td class="rid">VT-202</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Proactive alerts — anomaly detection + threshold breaches → Telegram/email push</td></tr>
+<tr class="row f-done"><td class="rid">VT-203</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Ops Console login surface — minimal /login page that issues viabe_ops_jwt cookie</td></tr>
+<tr class="row f-done"><td class="rid">VT-216</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">pipeline_steps tsvector generated column + GIN index (free-text search at scale)</td></tr>
+<tr class="row f-done"><td class="rid">VT-217</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">/team/ops page.tsx resilience — try/catch Supabase Promise.all (matches /ops/stream pattern)</td></tr>
+<tr class="row f-done"><td class="rid">VT-225</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">L0 per-tenant k-anonymity admission gate (Option B)</td></tr>
+<tr class="row f-done"><td class="rid">VT-228</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Dynamic operator allowlist table (replaces single FAZAL_OWNER_UUID check)</td></tr>
+<tr class="row f-done"><td class="rid">VT-232</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Hot-fix Ops Console login page — unstyled HTML + sticky banner overlay</td></tr>
+<tr class="row f-done"><td class="rid">VT-233</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Hot-fix Supabase magic-link implicit-flow fragment handling</td></tr>
+<tr class="row f-done"><td class="rid">VT-235</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Hot-fix Ops Console styling pass — workspace + sticky banner + all (app)/team/ops/* subpages</td></tr>
+<tr class="row f-done"><td class="rid">VT-236</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Extend operator JWT cookie TTL 1h → 7d (Ops Console session length)</td></tr>
+<tr class="row f-done"><td class="rid">VT-237</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Add password-based operator login (eliminate magic-link email rate-limit pain)</td></tr>
+<tr class="row f-done"><td class="rid">VT-267</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Owner business-profile onboarding experience (Integration Agent → identity)</td></tr>
+<tr class="row f-done"><td class="rid">VT-268</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Business-profile guardrail ENFORCEMENT (policy ≠ context)</td></tr>
+<tr class="row f-closed"><td class="rid">VT-302</td><td class="rst"><span class="dot" style="background:#b7a6e8"></span>Cancelled</td><td class="rtitle">Concession DETECTION → owner-approval gate (the VT-268 deferred half)</td></tr>
+</table></div>
+<div class="sblock"><div class="shead"><span class="sname">Sprint 2 - SR Agent Skeleton</span><span class="scount">47/50 done · 0 in-flight · 3 backlog</span></div><table class="srows">
+<tr class="row f-done"><td class="rid">VT-4</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">VT-SalesRecovery-Agent — Anthropic Agent SDK, system prompt, hard limits</td></tr>
+<tr class="row f-done"><td class="rid">VT-5</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">VT-MCP-Tools — 11 tools + framework + harness</td></tr>
+<tr class="row f-done"><td class="rid">VT-32</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Anthropic Agent SDK skeleton wired into LangGraph as a node</td></tr>
+<tr class="row f-done"><td class="rid">VT-33</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">System prompt v1.0 (identity, scope, tools, output schema, refusals)</td></tr>
+<tr class="row f-done"><td class="rid">VT-34</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">SalesRecoveryContext bundle contract</td></tr>
+<tr class="row f-done"><td class="rid">VT-35</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Hard-limit enforcement at orchestrator/agent boundary</td></tr>
+<tr class="row f-done"><td class="rid">VT-36</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Self-evaluate step (Opus-backed, gates final output)</td></tr>
+<tr class="row f-done"><td class="rid">VT-37</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">CampaignPlan structured output schema</td></tr>
+<tr class="row f-done"><td class="rid">VT-38</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Scope-discipline tests catching cross-domain drift</td></tr>
+<tr class="row f-done"><td class="rid">VT-39</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Tool-contract framework + harness (decides whether draft_message_variants is</td></tr>
+<tr class="row f-done"><td class="rid">VT-40</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">query_customer_ledger MCP tool</td></tr>
+<tr class="row f-done"><td class="rid">VT-41</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">get_business_profile MCP tool</td></tr>
+<tr class="row f-done"><td class="rid">VT-42</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">get_recent_campaigns MCP tool</td></tr>
+<tr class="row f-done"><td class="rid">VT-43</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">get_attribution_data MCP tool</td></tr>
+<tr class="row f-done"><td class="rid">VT-44</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">send_whatsapp_message MCP tool</td></tr>
+<tr class="row f-done"><td class="rid">VT-45</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">send_whatsapp_template MCP tool</td></tr>
+<tr class="row f-done"><td class="rid">VT-46</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">match_transactions MCP tool</td></tr>
+<tr class="row f-done"><td class="rid">VT-47</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">request_owner_approval (Pillar-7 approval gate, LangGraph pause/resume)</td></tr>
+<tr class="row f-done"><td class="rid">VT-48</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">schedule_followup MCP tool</td></tr>
+<tr class="row f-done"><td class="rid">VT-49</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">classify_owner_message MCP tool (LLM-backed, Haiku)</td></tr>
+<tr class="row f-done"><td class="rid">VT-50</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">self_evaluate MCP tool (Opus-backed, gates final output)</td></tr>
+<tr class="row f-back"><td class="rid">VT-51</td><td class="rst"><span class="dot" style="background:#9aa3ad"></span>Deferred</td><td class="rtitle">draft_message_variants MCP tool (LLM-backed, optional v1)</td></tr>
+<tr class="row f-done"><td class="rid">VT-135</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">CampaignPlan v0.1→v1.0 consumer migration + campaigns write-path reconciliation</td></tr>
+<tr class="row f-done"><td class="rid">VT-136</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Wire SelfEvaluateAdapter into sales_recovery_node (activate the self-evaluate gate)</td></tr>
+<tr class="row f-done"><td class="rid">VT-137</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Switch supervisor dispatch from sales_recovery stub to run_sales_recovery_agent (production go-</td></tr>
+<tr class="row f-back"><td class="rid">VT-138</td><td class="rst"><span class="dot" style="background:#9aa3ad"></span>Deferred</td><td class="rtitle">Context Composer — orchestrator-side task-bundle assembly into SalesRecoveryContext</td></tr>
+<tr class="row f-back"><td class="rid">VT-139</td><td class="rst"><span class="dot" style="background:#9aa3ad"></span>Deferred</td><td class="rtitle">Wire Context Composer bundle through _sales_recovery_node — stop discarding it at the seam</td></tr>
+<tr class="row f-done"><td class="rid">VT-140</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Seeded-tenant end-to-end SR-agent canary — the Sprint 1+2 E2E harness</td></tr>
+<tr class="row f-done"><td class="rid">VT-141</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Wire _build_recent_campaigns to the live campaigns table (Composer recent_campaigns read path)</td></tr>
+<tr class="row f-done"><td class="rid">VT-150</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">DBOS workflow_status Body retention purge</td></tr>
+<tr class="row f-done"><td class="rid">VT-151</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">[STATUS OVERRIDE] VT-150 DBOS purge — effective status Done (PR #47 merged)</td></tr>
+<tr class="row f-done"><td class="rid">VT-152</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">owner_inputs SHIP-GATE re-enforcement (PR #48)</td></tr>
+<tr class="row f-done"><td class="rid">VT-163</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Approved-templates registry — replace inline _PHASE1_APPROVED_TEMPLATES, language-keyed (name,l</td></tr>
+<tr class="row f-done"><td class="rid">VT-164</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Per-tenant attribution recovery-target wiring — replace inline *1.1 / ₹500-floor default</td></tr>
+<tr class="row f-done"><td class="rid">VT-165</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Test hardening — SR-agent end-to-end test should import model constant, not hardcode &#x27;claude-op</td></tr>
+<tr class="row f-done"><td class="rid">VT-170</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">customers table + tenant customer registry (foundational — SR-Agent business substrate)</td></tr>
+<tr class="row f-done"><td class="rid">VT-240</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">attribution_method + attribution_confidence write-path substrate (unblocks VT-43 full breakdown</td></tr>
+<tr class="row f-done"><td class="rid">VT-241</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Wire resolve_cohort_recipients into campaign collapse path (+ reject-behavior ruling)</td></tr>
+<tr class="row f-done"><td class="rid">VT-248</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Dedicated count-bearing campaign-rejected owner template</td></tr>
+<tr class="row f-done"><td class="rid">VT-249</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Formalize ultracode standing decision + concurrency-safe migration-number allocator</td></tr>
+<tr class="row f-done"><td class="rid">VT-251</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Campaign execution seam — fan out approved campaign to recipients</td></tr>
+<tr class="row f-done"><td class="rid">VT-252</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Security — session-export secret leak (tokens + bypassPermissions)</td></tr>
+<tr class="row f-done"><td class="rid">VT-253</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Session-export secret-leak recurrence prevention (CI token-guard)</td></tr>
+<tr class="row f-done"><td class="rid">VT-254</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Sweep — fix SET LOCAL app.current_tenant = %s in 7 tools (RLS syntax error)</td></tr>
+<tr class="row f-done"><td class="rid">VT-256</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Fix get_recent_campaigns schema drift (read generated_at + plan_json template_id)</td></tr>
+<tr class="row f-done"><td class="rid">VT-257</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">query_customer_ledger graceful-degrade on unlanded schema (UndefinedColumn)</td></tr>
+<tr class="row f-done"><td class="rid">VT-258</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Wire query_customer_ledger to real customer/ledger data when customer_ledger_entries lands</td></tr>
+<tr class="row f-done"><td class="rid">VT-261</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Record opt-out skips as send_status=&#x27;skipped&#x27; (not &#x27;error&#x27;)</td></tr>
+<tr class="row f-done"><td class="rid">VT-262</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Decouple skip idempotency key + reject non-deliverable idempotency markers</td></tr>
+<tr class="row f-done"><td class="rid">VT-263</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Harden false-green RLS tests (real _count_other backstops)</td></tr>
+</table></div>
+<div class="sblock"><div class="shead"><span class="sname">Sprint 2 - Owner Surface</span><span class="scount">18/18 done · 0 in-flight · 0 backlog</span></div><table class="srows">
+<tr class="row f-done"><td class="rid">VT-189</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">VT-OpsConsole-V2 — Full-featured admin control panel (debug / trace / track / train / override </td></tr>
+<tr class="row f-done"><td class="rid">VT-234</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Ops Console V2 phase-1A — read-only debug view (step-by-step pipeline replay)</td></tr>
+<tr class="row f-done"><td class="rid">VT-238</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Redesign /team/ops/stream as terminal-style continuous log</td></tr>
+<tr class="row f-done"><td class="rid">VT-244</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Fix deploy-dev Vercel job — stale amondnet/vercel-action CLI 25.x rejected by Vercel API</td></tr>
+<tr class="row f-done"><td class="rid">VT-245</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">CI cost-control (trigger-diet) + local pre-push gate + workflow maintenance</td></tr>
+<tr class="row f-done"><td class="rid">VT-246</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Remove redundant railway-up CLI job from deploy-dev — rely on Railway native auto-deploy</td></tr>
+<tr class="row f-done"><td class="rid">VT-247</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Document deploy topology in CLAUDE.md (drift-prevention)</td></tr>
+<tr class="row f-done"><td class="rid">VT-290</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Ops Console shell + Home/Triage (urgency-first)</td></tr>
+<tr class="row f-done"><td class="rid">VT-291</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Ops Console — Fleet (agent health listing)</td></tr>
+<tr class="row f-done"><td class="rid">VT-292</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Ops Console — Escalations (queue + resolve/override/reassign)</td></tr>
+<tr class="row f-done"><td class="rid">VT-293</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Ops Console — Activity/Pipelines (live stream overlay)</td></tr>
+<tr class="row f-done"><td class="rid">VT-294</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Ops Console — Behaviour &amp; Training (decision quality)</td></tr>
+<tr class="row f-done"><td class="rid">VT-295</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Ops Console — Assignment (VTAdmin: business↔VTR)</td></tr>
+<tr class="row f-done"><td class="rid">VT-296</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Ops Console — Monitoring / Watchdog board</td></tr>
+<tr class="row f-done"><td class="rid">VT-297</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Ops Console — Telegram VTR bot (ops parity-by-function)</td></tr>
+<tr class="row f-done"><td class="rid">VT-298</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Autonomous watchdog → immediate Telegram VTR alerting</td></tr>
+<tr class="row f-done"><td class="rid">VT-300</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">VTR live run-control (DBOS pause / override / steer on a running workflow)</td></tr>
+<tr class="row f-done"><td class="rid">VT-301</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">WhatsApp send-gate — require recorded opt-in before business-initiated sends</td></tr>
+</table></div>
+<div class="sblock"><div class="shead"><span class="sname">Sprint 2 - Integration Agent (re-anchored)</span><span class="scount">18/19 done · 1 in-flight · 0 backlog</span></div><table class="srows">
+<tr class="row f-done"><td class="rid">VT-204</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Integration Agent — onboarding + recurring ingestion across all customer-data sources</td></tr>
+<tr class="row f-done"><td class="rid">VT-205</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Connector registry framework — per-tool knowledge base for Integration Agent</td></tr>
+<tr class="row f-done"><td class="rid">VT-206</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Integration Agent onboarding conversation flow</td></tr>
+<tr class="row f-done"><td class="rid">VT-207</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Google Sheet connector (RKeCom bootstrap data source)</td></tr>
+<tr class="row f-flight"><td class="rid">VT-208</td><td class="rst"><span class="dot" style="background:#2b6cb0"></span>In Progress</td><td class="rtitle">Shopify connector (Admin API access token, second concrete)</td></tr>
+<tr class="row f-done"><td class="rid">VT-209</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Field-mapping reasoner + dedupe primitive (shared substrate)</td></tr>
+<tr class="row f-done"><td class="rid">VT-210</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Recurring ingestion mechanism — schedule (pull) + webhook (push)</td></tr>
+<tr class="row f-done"><td class="rid">VT-211</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Integration Agent web onboarding — /team/onboard page (deferred from VT-206 PR-2)</td></tr>
+<tr class="row f-done"><td class="rid">VT-212</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">VT-207 PR-2 — real Google OAuth manual walk + integration verification</td></tr>
+<tr class="row f-done"><td class="rid">VT-213</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">VT-208 PR-2 — real Shopify webhook walk + integration verification</td></tr>
+<tr class="row f-done"><td class="rid">VT-215</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">VT-210 scheduler-body workflow registration retrofit (DBOS workflow decorator on ingest_one_con</td></tr>
+<tr class="row f-done"><td class="rid">VT-218</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Dev environment setup — Vercel (team-web) + Railway (orchestrator) + Supabase wiring + CI deplo</td></tr>
+<tr class="row f-done"><td class="rid">VT-219</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Fix NEXT_PUBLIC_SUPABASE_* env var naming inconsistency across team-web + runbook</td></tr>
+<tr class="row f-done"><td class="rid">VT-220</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Brief cleanup — replace TEAM_ORCHESTRATOR_BASE_URL with TEAM_ORCHESTRATOR_URL in VT-218 sprint </td></tr>
+<tr class="row f-done"><td class="rid">VT-222</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Sheet integration redesign — Drive Push Notifications primary + polling fallback (per CL-421)</td></tr>
+<tr class="row f-done"><td class="rid">VT-223</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Vercel preview deploys enable + sticky-deploy diagnosis</td></tr>
+<tr class="row f-done"><td class="rid">VT-224</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Admin HTTP endpoints suite — setup_push / sample_pull / inspect_token / replay_workflow / chann</td></tr>
+<tr class="row f-done"><td class="rid">VT-230</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Fix /team/onboard unauthorized redirect target (currently → /login → 404)</td></tr>
+<tr class="row f-done"><td class="rid">VT-283</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Shopify owner-facing OAuth managed-install (zero-paste production path)</td></tr>
+</table></div>
+<div class="sblock"><div class="shead"><span class="sname">Sprint 3 - Ingestion Methods 1-2</span><span class="scount">6/6 done · 0 in-flight · 0 backlog</span></div><table class="srows">
+<tr class="row f-done"><td class="rid">VT-6</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">VT-IntegrationInvention — 9 ingestion methods + vision-LLM + clarifying flow</td></tr>
+<tr class="row f-done"><td class="rid">VT-52</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Vision-LLM extraction pipeline (shared primitive)</td></tr>
+<tr class="row f-done"><td class="rid">VT-53</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Clarifying-question flow (shared primitive)</td></tr>
+<tr class="row f-done"><td class="rid">VT-54</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Dedup and merging logic (shared primitive)</td></tr>
+<tr class="row f-done"><td class="rid">VT-55</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Method 1: Paper book photograph</td></tr>
+<tr class="row f-done"><td class="rid">VT-56</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Method 2: Phone contacts list import</td></tr>
+</table></div>
+<div class="sblock"><div class="shead"><span class="sname">Sprint 3 - IntegrationInvention</span><span class="scount">10/12 done · 0 in-flight · 2 backlog</span></div><table class="srows">
+<tr class="row f-done"><td class="rid">VT-269</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Sub-processor / customer-PII transmission consent — DPDP decision (vision pipeline prod-enablem</td></tr>
+<tr class="row f-done"><td class="rid">VT-270</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">classify_owner_message transmits inbound body to Anthropic with NO consent gate (latent CL-390)</td></tr>
+<tr class="row f-done"><td class="rid">VT-271</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Migration idempotency — guard CREATE ROLE (015/027) with IF NOT EXISTS / DO blocks</td></tr>
+<tr class="row f-done"><td class="rid">VT-273</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">customer_ledger_entries schema + ledger write path (transaction history)</td></tr>
+<tr class="row f-back"><td class="rid">VT-274</td><td class="rst"><span class="dot" style="background:#9aa3ad"></span>Deferred</td><td class="rtitle">Ledger entry-key disambiguation — distinguish genuinely-repeated identical entries</td></tr>
+<tr class="row f-done"><td class="rid">VT-275</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Wire match_transactions to the canonical ledger (entry_date window + amount scoring)</td></tr>
+<tr class="row f-done"><td class="rid">VT-276</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">imported_transactions raw-import surface (two-surface txn model)</td></tr>
+<tr class="row f-done"><td class="rid">VT-286</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">WhatsApp WABA onboarding via Meta Embedded Signup</td></tr>
+<tr class="row f-done"><td class="rid">VT-287</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Inbound-first WhatsApp message pipeline + auto-reply</td></tr>
+<tr class="row f-done"><td class="rid">VT-288</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Email + SMS hook channels + cold-start ramp governor</td></tr>
+<tr class="row f-done"><td class="rid">VT-289</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">OAuth callback state-CSRF hardening (cross-connector)</td></tr>
+<tr class="row f-back"><td class="rid">VT-299</td><td class="rst"><span class="dot" style="background:#9aa3ad"></span>Backlog</td><td class="rtitle">Customer-facing reasoning agent for WhatsApp inbound (post-v1)</td></tr>
+</table></div>
+<div class="sblock"><div class="shead"><span class="sname">Sprint 4 - Ingestion Methods 3-5</span><span class="scount">4/5 done · 0 in-flight · 1 backlog</span></div><table class="srows">
+<tr class="row f-done"><td class="rid">VT-57</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Method 3: UPI transaction history export (PhonePe, GPay, Paytm)</td></tr>
+<tr class="row f-done"><td class="rid">VT-58</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Method 4: KOT/POS export</td></tr>
+<tr class="row f-done"><td class="rid">VT-59</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Method 5: Cash-book photograph + voice note</td></tr>
+<tr class="row f-back"><td class="rid">VT-277</td><td class="rst"><span class="dot" style="background:#9aa3ad"></span>Deferred</td><td class="rtitle">Capture tenant primary VPA at onboarding + filter non-tenant UPI VPAs</td></tr>
+<tr class="row f-done"><td class="rid">VT-278</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Live Sarvam ASR canary (real transcription + consent-gate) — prod-blocking</td></tr>
+</table></div>
+<div class="sblock"><div class="shead"><span class="sname">Sprint 5 - Online Methods 6-9</span><span class="scount">3/4 done · 0 in-flight · 0 backlog</span></div><table class="srows">
+<tr class="row f-closed"><td class="rid">VT-60</td><td class="rst"><span class="dot" style="background:#b7a6e8"></span>Cancelled</td><td class="rtitle">Method 6: Customer QR opt-in (ledger half)</td></tr>
+<tr class="row f-done"><td class="rid">VT-61</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Method 7: Apify Zomato/Swiggy/Magicpin (context only)</td></tr>
+<tr class="row f-done"><td class="rid">VT-62</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Method 8: Apify Google Business Profile reviews (context only)</td></tr>
+<tr class="row f-done"><td class="rid">VT-63</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Method 9: Owner-typed natural-language entries via WhatsApp</td></tr>
+</table></div>
+<div class="sblock"><div class="shead"><span class="sname">Sprint 7 - Knowledge Architecture</span><span class="scount">37/41 done · 1 in-flight · 1 backlog</span></div><table class="srows">
+<tr class="row f-done"><td class="rid">VT-7</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">VT-KnowledgeArchitecture — 4-layer KG/episodic/Layer-3/skill corpus</td></tr>
+<tr class="row f-done"><td class="rid">VT-8</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">VT-PrivacyArchitecture — typed wrappers, k-anon, opt-out, DSR, residency</td></tr>
+<tr class="row f-closed"><td class="rid">VT-64</td><td class="rst"><span class="dot" style="background:#b7a6e8"></span>Cancelled</td><td class="rtitle">L1 KG schema (Mem0 OSS — AGE retired, see body)</td></tr>
+<tr class="row f-done"><td class="rid">VT-65</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">L1 KG population pipeline</td></tr>
+<tr class="row f-done"><td class="rid">VT-66</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">L2 episodic memory schema</td></tr>
+<tr class="row f-done"><td class="rid">VT-67</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">L2 retrieval contract</td></tr>
+<tr class="row f-done"><td class="rid">VT-68</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">L3 pattern construction with k-anonymity at build</td></tr>
+<tr class="row f-done"><td class="rid">VT-69</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">L3 retrieval + 180-day quarantine</td></tr>
+<tr class="row f-done"><td class="rid">VT-70</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">L4 skill corpus seed (≥30 docs)</td></tr>
+<tr class="row f-done"><td class="rid">VT-71</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Composition layer + audit logging</td></tr>
+<tr class="row f-done"><td class="rid">VT-72</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Typed wrappers + no-direct-tenant-db-access lint</td></tr>
+<tr class="row f-done"><td class="rid">VT-73</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Agent context isolation (3rd layer)</td></tr>
+<tr class="row f-done"><td class="rid">VT-74</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">K-anonymity admission gate</td></tr>
+<tr class="row f-done"><td class="rid">VT-75</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Locality coarsening (city → city_tier)</td></tr>
+<tr class="row f-done"><td class="rid">VT-76</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Customer opt-out + 7-day reconstitution SLA</td></tr>
+<tr class="row f-done"><td class="rid">VT-77</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">DSR APIs (export-my-data, delete-my-data)</td></tr>
+<tr class="row f-done"><td class="rid">VT-79</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Breach detection + response runbook</td></tr>
+<tr class="row f-done"><td class="rid">VT-80</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Privacy audit log with hash chain</td></tr>
+<tr class="row f-closed"><td class="rid">VT-124</td><td class="rst"><span class="dot" style="background:#b7a6e8"></span>Cancelled</td><td class="rtitle">L0 workspace memory write path + retrieval (orchestrator-only)</td></tr>
+<tr class="row f-done"><td class="rid">VT-142</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">VT-7.1-R — L1 KG schema (hand-built Postgres+pgvector+relational) — supersedes</td></tr>
+<tr class="row f-done"><td class="rid">VT-146</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">owner_inputs structured-intent table + extraction writer + Composer read-path</td></tr>
+<tr class="row f-done"><td class="rid">VT-303</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">pre_filter owner_inputs consent gate on brain transmit (Option B) + enable path</td></tr>
+<tr class="row f-done"><td class="rid">VT-304</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Wire nightly audit-chain verify (DBOS.scheduled) + alert route</td></tr>
+<tr class="row f-done"><td class="rid">VT-305</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Wire nightly PII-in-log sweep (DBOS.scheduled) + alert route</td></tr>
+<tr class="row f-done"><td class="rid">VT-306</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Complete tenant-wrapper coverage + migrate call sites + flip lint to hard-fail</td></tr>
+<tr class="row f-done"><td class="rid">VT-307</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Wire nightly KG-events outbox drain (DBOS.scheduled) + alert route</td></tr>
+<tr class="row f-back"><td class="rid">VT-308</td><td class="rst"><span class="dot" style="background:#9aa3ad"></span>Backlog</td><td class="rtitle">Platform-listing KG ingestion + emitter + HAS_THEME edges</td></tr>
+<tr class="row f-done"><td class="rid">VT-309</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Full L2 agent-decision emit coverage (~10 sites)</td></tr>
+<tr class="row f-done"><td class="rid">VT-310</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Canary-DB reaper / local test-cluster hygiene</td></tr>
+<tr class="row f-done"><td class="rid">VT-311</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">L2 retention (18-month soft-delete) + 100K-event perf test</td></tr>
+<tr class="row f-done"><td class="rid">VT-312</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Customer-state (dormancy + high-value) → brain-decides from per-tenant distributions</td></tr>
+<tr class="row f-done"><td class="rid">VT-313</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">L4 skill corpus authoring (≥30 docs) — Fazal/Clau content deliverable</td></tr>
+<tr class="row f-done"><td class="rid">VT-314</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Voyage paid key (payment method) + CI secret for L4 embeddings</td></tr>
+<tr class="row f-done"><td class="rid">VT-315</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Strip raw PII from kg_events outbox payloads (emit-hash + backfill) — CL-390</td></tr>
+<tr class="row f-done"><td class="rid">VT-316</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Pre-push hook fail-loud on empty ref-range (never silently skip)</td></tr>
+<tr class="row f-done"><td class="rid">VT-317</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Wire city-capture at onboarding/profile → set_tenant_city_tier</td></tr>
+<tr class="row f-flight"><td class="rid">VT-318</td><td class="rst"><span class="dot" style="background:#c4451c"></span>Blocked</td><td class="rtitle">Inbound consumer STOP handler + opt-out immediate effects (gate-live)</td></tr>
+<tr class="row f-done"><td class="rid">VT-320</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Agent-action customer-marker L2 emit (keeps VT-76 reconstitution non-degenerate)</td></tr>
+<tr class="row f-done"><td class="rid">VT-321</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Complaint-freeze guardrail — exclude open-complaint customers from ALL send cohorts (#20)</td></tr>
+<tr class="row f-done"><td class="rid">VT-324</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Flip no-direct-tenant-db-access gate to enforced (pre-push blocking) + drop vestigial params</td></tr>
+<tr class="row f-done"><td class="rid">VT-325</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">platform_listings per-listing source — table + wrapper + ingestion writer + outbox emit</td></tr>
+</table></div>
+<div class="sblock"><div class="shead"><span class="sname">Sprint 8 - Owner Surface &amp; Billing</span><span class="scount">35/55 done · 1 in-flight · 18 backlog</span></div><table class="srows">
+<tr class="row f-back"><td class="rid">VT-9</td><td class="rst"><span class="dot" style="background:#9aa3ad"></span>Backlog</td><td class="rtitle">VT-OwnerSurface — Twilio, sign-up, weekly approval, refund convo, portal</td></tr>
+<tr class="row f-back"><td class="rid">VT-10</td><td class="rst"><span class="dot" style="background:#9aa3ad"></span>Backlog</td><td class="rtitle">VT-Billing-Trial-Refund — Razorpay, trial extension, day-39, founding counter</td></tr>
+<tr class="row f-back"><td class="rid">VT-11</td><td class="rst"><span class="dot" style="background:#9aa3ad"></span>Backlog</td><td class="rtitle">VT-LandingSite — viabe.ai/team, sign-up form, founding counter widget</td></tr>
+<tr class="row f-done"><td class="rid">VT-81</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Twilio webhook hardening</td></tr>
+<tr class="row f-done"><td class="rid">VT-82</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Sign-up flow (4 fields + consent + welcome)</td></tr>
+<tr class="row f-done"><td class="rid">VT-83</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Weekly approval UX</td></tr>
+<tr class="row f-done"><td class="rid">VT-84</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Edge-case interactions (exclusion / adhoc / status / template-error)</td></tr>
+<tr class="row f-done"><td class="rid">VT-85</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Refund-conversation engine (day-39 proactive)</td></tr>
+<tr class="row f-done"><td class="rid">VT-86</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Monthly impact report PDF + Resend email</td></tr>
+<tr class="row f-done"><td class="rid">VT-87</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Read-only owner portal at viabe.ai/team</td></tr>
+<tr class="row f-done"><td class="rid">VT-88</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">SupportBot escalation fallback</td></tr>
+<tr class="row f-done"><td class="rid">VT-89</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Razorpay Live + webhook (3 plan tiers)</td></tr>
+<tr class="row f-done"><td class="rid">VT-90</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">14-day trial + performance-based extension</td></tr>
+<tr class="row f-done"><td class="rid">VT-91</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Card capture at conversion</td></tr>
+<tr class="row f-done"><td class="rid">VT-92</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Day-39 deterministic SQL evaluator</td></tr>
+<tr class="row f-done"><td class="rid">VT-93</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Refund execution + graceful exit</td></tr>
+<tr class="row f-done"><td class="rid">VT-94</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Founding-tier counter (atomic, race-safe)</td></tr>
+<tr class="row f-done"><td class="rid">VT-95</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">viabe.ai/team landing page (Hindi + English)</td></tr>
+<tr class="row f-done"><td class="rid">VT-96</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Sign-up form (4 fields + consent + bilingual)</td></tr>
+<tr class="row f-done"><td class="rid">VT-97</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Waitlist mode + flag</td></tr>
+<tr class="row f-back"><td class="rid">VT-98</td><td class="rst"><span class="dot" style="background:#9aa3ad"></span>Backlog</td><td class="rtitle">Social proof structural placeholders</td></tr>
+<tr class="row f-done"><td class="rid">VT-99</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Live founding-tier counter widget</td></tr>
+<tr class="row f-back"><td class="rid">VT-100</td><td class="rst"><span class="dot" style="background:#9aa3ad"></span>Backlog</td><td class="rtitle">A/B testing framework (cookie-free)</td></tr>
+<tr class="row f-done"><td class="rid">VT-143</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Anthropic Commercial Terms confirmation + DPA + privacy disclosure (owner_inputs</td></tr>
+<tr class="row f-done"><td class="rid">VT-144</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">runner.py:222 body redaction — strip raw body before persist</td></tr>
+<tr class="row f-done"><td class="rid">VT-145</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">DSR deletion purge routine — make dsr_tickets completion reachable</td></tr>
+<tr class="row f-closed"><td class="rid">VT-147</td><td class="rst"><span class="dot" style="background:#b7a6e8"></span>Cancelled</td><td class="rtitle">Backfill-redact raw body from existing pipeline_runs / pipeline_steps rows</td></tr>
+<tr class="row f-done"><td class="rid">VT-148</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">DBOS workflow_inputs body retention — Step-0 ground-truth (replay-critical decision</td></tr>
+<tr class="row f-back"><td class="rid">VT-149</td><td class="rst"><span class="dot" style="background:#9aa3ad"></span>Backlog</td><td class="rtitle">Webhook replay double-write — add (tenant_id, message_sid) UNIQUE constraint</td></tr>
+<tr class="row f-back"><td class="rid">VT-231</td><td class="rst"><span class="dot" style="background:#9aa3ad"></span>Backlog</td><td class="rtitle">Provision viabe-team-prod Supabase project in ap-south-1 (Mumbai) — launch-blocking</td></tr>
+<tr class="row f-done"><td class="rid">VT-250</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Owner portal auth — phone + WhatsApp/SMS OTP via Twilio Verify</td></tr>
+<tr class="row f-back"><td class="rid">VT-329</td><td class="rst"><span class="dot" style="background:#9aa3ad"></span>Backlog</td><td class="rtitle">i18n DSR/opt-out/negation — Devanagari word-boundary + Hinglish (all routing + refund-conversat</td></tr>
+<tr class="row f-done"><td class="rid">VT-330</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">VT-89 Razorpay webhook hardening — poison-pill + amount==0 + e2e-HMAC + rowcount</td></tr>
+<tr class="row f-done"><td class="rid">VT-331</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Razorpay /subscribe endpoint + 3-tier plans.yaml + price-literal CI gate</td></tr>
+<tr class="row f-done"><td class="rid">VT-332</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Trial-end deep-link token — issuance + SINGLE-USE consumption (gates the deep-link path)</td></tr>
+<tr class="row f-back"><td class="rid">VT-333</td><td class="rst"><span class="dot" style="background:#9aa3ad"></span>Backlog</td><td class="rtitle">Founding-slot release on cancellation (audit-only, cancelled-transition path)</td></tr>
+<tr class="row f-back"><td class="rid">VT-334</td><td class="rst"><span class="dot" style="background:#9aa3ad"></span>Backlog</td><td class="rtitle">Weekly-approval &quot;defer&quot; decision + per-week messaging budget</td></tr>
+<tr class="row f-done"><td class="rid">VT-335</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Edge-case PR-2 — adhoc_campaign (via approval gate) + template_error report</td></tr>
+<tr class="row f-back"><td class="rid">VT-336</td><td class="rst"><span class="dot" style="background:#9aa3ad"></span>Backlog</td><td class="rtitle">VT-84 PR-1 hardening — exclusion confidence floor + phone-extract + 2 tests</td></tr>
+<tr class="row f-flight"><td class="rid">VT-337</td><td class="rst"><span class="dot" style="background:#2b6cb0"></span>In Progress</td><td class="rtitle">CI-hygiene — dep-less test traps + lint-gate false-match (deploy-unblocker)</td></tr>
+<tr class="row f-done"><td class="rid">VT-338</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Owner portal PR-2 — customers/campaigns/settings/reports + i18n</td></tr>
+<tr class="row f-done"><td class="rid">VT-339</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Test hygiene — session-scoped conftest migration fixture (replace _dbpool copy-paste)</td></tr>
+<tr class="row f-done"><td class="rid">VT-340</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">CI/portal polish — Lighthouse gate + green the e2e-playwright/pr-title PR checks</td></tr>
+<tr class="row f-done"><td class="rid">VT-341</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Wire team-web DSR + report-download proxy routes (dead links — PORTAL GO-LIVE GATE)</td></tr>
+<tr class="row f-done"><td class="rid">VT-342</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">get_business_profile VT-306 cleanup — SET ROLE app_role (RLS inert today)</td></tr>
+<tr class="row f-back"><td class="rid">VT-343</td><td class="rst"><span class="dot" style="background:#9aa3ad"></span>Backlog</td><td class="rtitle">SupportBot Phase 2 — completed-no-send + SLA + /resolve + escalation hardening</td></tr>
+<tr class="row f-back"><td class="rid">VT-344</td><td class="rst"><span class="dot" style="background:#9aa3ad"></span>Backlog</td><td class="rtitle">Self-serve DSR-delete (request + grace-window + reviewed purge) — POST-LAUNCH</td></tr>
+<tr class="row f-back"><td class="rid">VT-345</td><td class="rst"><span class="dot" style="background:#9aa3ad"></span>Backlog</td><td class="rtitle">Lighthouse-CI gate on the owner portal (CI signed-session) — POST-LAUNCH</td></tr>
+<tr class="row f-back"><td class="rid">VT-346</td><td class="rst"><span class="dot" style="background:#9aa3ad"></span>Backlog</td><td class="rtitle">pre-push hook — drop rls_ckpt_tester role so the full suite is rerun-clean</td></tr>
+<tr class="row f-back"><td class="rid">VT-347</td><td class="rst"><span class="dot" style="background:#9aa3ad"></span>Backlog</td><td class="rtitle">get_business_profile — _safe_query_undefined catches only UndefinedTable, not insufficient_priv</td></tr>
+<tr class="row f-done"><td class="rid">VT-348</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">team_edge_case_ack — Meta-approvable shape (all-variable body is rejected) [SUPERSEDED by VT-34</td></tr>
+<tr class="row f-done"><td class="rid">VT-349</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">In-window owner acks → free-form (not templates) — edge-case / support-handoff / refund-process</td></tr>
+<tr class="row f-done"><td class="rid">VT-350</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Pin algorithms:[&#x27;HS256&#x27;] across the JWT verify helpers — SOFT GATE on public-signup flip</td></tr>
+<tr class="row f-back"><td class="rid">VT-351</td><td class="rst"><span class="dot" style="background:#9aa3ad"></span>Backlog</td><td class="rtitle">kg_events outbox at-rest PII retention — redact-on-drain vs accept own-tenant retention (Fazal </td></tr>
+<tr class="row f-back"><td class="rid">VT-352</td><td class="rst"><span class="dot" style="background:#9aa3ad"></span>Backlog</td><td class="rtitle">Razorpay webhook dead-letter table (durable replay) — SOFT GATE on live Razorpay</td></tr>
+</table></div>
+<div class="sblock"><div class="shead"><span class="sname">Sprint 8 - Billing &amp; Signup</span><span class="scount">2/3 done · 0 in-flight · 1 backlog</span></div><table class="srows">
+<tr class="row f-done"><td class="rid">VT-326</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Signup OTP-before-create + per-IP throttle (LAUNCH-GATE for public signup)</td></tr>
+<tr class="row f-done"><td class="rid">VT-327</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">kg_events outbox → DSR _PURGE_ORDER (PII survives DSR via the durable outbox)</td></tr>
+<tr class="row f-back"><td class="rid">VT-328</td><td class="rst"><span class="dot" style="background:#9aa3ad"></span>Backlog</td><td class="rtitle">Refunded-tenant dispatch-block — server-side phase guard at the campaign-execution seam</td></tr>
+</table></div>
+<div class="sblock"><div class="shead"><span class="sname">Sprint 9 - Launch Surface</span><span class="scount">0/2 done · 0 in-flight · 2 backlog</span></div><table class="srows">
+<tr class="row f-back"><td class="rid">VT-353</td><td class="rst"><span class="dot" style="background:#9aa3ad"></span>Backlog</td><td class="rtitle">Public legal pages (privacy / DPDP disclosure / terms / contact) — launch-gate</td></tr>
+<tr class="row f-back"><td class="rid">VT-354</td><td class="rst"><span class="dot" style="background:#9aa3ad"></span>Backlog</td><td class="rtitle">Wire the waitlist retention purge to a scheduler — HARD pre-LIVE gate on ENABLE_WAITLIST_CAPTUR</td></tr>
+</table></div>
+<div class="sblock"><div class="shead"><span class="sname">Sprint 9 - Polish &amp; E2E</span><span class="scount">3/5 done · 0 in-flight · 2 backlog</span></div><table class="srows">
+<tr class="row f-back"><td class="rid">VT-14</td><td class="rst"><span class="dot" style="background:#9aa3ad"></span>Backlog</td><td class="rtitle">VT-EngineeringReference — Tech Reference, ADRs, runbooks, banners</td></tr>
+<tr class="row f-done"><td class="rid">VT-116</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Author Viabe_Team_Technical_Reference_v1_0.md</td></tr>
+<tr class="row f-done"><td class="rid">VT-117</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">ADR set (≥7 architectural decision records)</td></tr>
+<tr class="row f-done"><td class="rid">VT-118</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Runbook set (≥9 runbooks + tabletop drills)</td></tr>
+<tr class="row f-back"><td class="rid">VT-119</td><td class="rst"><span class="dot" style="background:#9aa3ad"></span>Backlog</td><td class="rtitle">Source-of-truth banners across 4 canonical docs</td></tr>
+</table></div>
+<div class="sblock"><div class="shead"><span class="sname">Hardening</span><span class="scount">11/20 done · 4 in-flight · 4 backlog</span></div><table class="srows">
+<tr class="row f-back"><td class="rid">VT-106</td><td class="rst"><span class="dot" style="background:#9aa3ad"></span>Backlog</td><td class="rtitle">Soak run infrastructure (7-day continuous load)</td></tr>
+<tr class="row f-back"><td class="rid">VT-107</td><td class="rst"><span class="dot" style="background:#9aa3ad"></span>Backlog</td><td class="rtitle">Edge-case test suite + CI integration</td></tr>
+<tr class="row f-done"><td class="rid">VT-153</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Pre-#45 backfill scrub — purge plaintext bodies from rows written before c7135da</td></tr>
+<tr class="row f-done"><td class="rid">VT-154</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Unscoped-DELETE guard — mandatory tenant_id predicate on DSR purge privileged</td></tr>
+<tr class="row f-done"><td class="rid">VT-155</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">owner_inputs feature verification before flag-flip (gating July ON)</td></tr>
+<tr class="row f-flight"><td class="rid">VT-156</td><td class="rst"><span class="dot" style="background:#0d8a8a"></span>Queued</td><td class="rtitle">Privacy notice — SYSTEM-LEVEL launch-gate: draft + lawyer review + publish</td></tr>
+<tr class="row f-flight"><td class="rid">VT-157</td><td class="rst"><span class="dot" style="background:#0d8a8a"></span>Queued</td><td class="rtitle">Consent-capture mechanism in owner-facing flow — build</td></tr>
+<tr class="row f-done"><td class="rid">VT-158</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">DSR-purge L1 coverage — confirm l1_entities + l1_relationships are in _PURGE_ORDER</td></tr>
+<tr class="row f-done"><td class="rid">VT-159</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">owner_inputs held brief — reconcile/retire vs shipped code on main</td></tr>
+<tr class="row f-done"><td class="rid">VT-160</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">DSR-purge anonymize completeness — confirm all tenants identifying columns scrubbed</td></tr>
+<tr class="row f-flight"><td class="rid">VT-161</td><td class="rst"><span class="dot" style="background:#0d8a8a"></span>Queued</td><td class="rtitle">DBOS conductor recovery path — re-verify ~2.5h retention if cloud conductor wired</td></tr>
+<tr class="row f-flight"><td class="rid">VT-162</td><td class="rst"><span class="dot" style="background:#0d8a8a"></span>Queued</td><td class="rtitle">Board-hygiene rollup — l1.py scope + VT-7 body Mem0 staleness + VT-7.1-R row status + migration</td></tr>
+<tr class="row f-done"><td class="rid">VT-166</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Agent-loop daemon — Python Agent SDK orchestrator (replaces bash watcher)</td></tr>
+<tr class="row f-back"><td class="rid">VT-167</td><td class="rst"><span class="dot" style="background:#9aa3ad"></span>Deferred</td><td class="rtitle">Sprint-board migration — export Notion ViabeTeam_Sprint to .viabe/sprint/ markdown files</td></tr>
+<tr class="row f-done"><td class="rid">VT-169</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Verify Supabase project regions match VT-18 spec (ap-south-1 dev / ap-south-2 prod) — DPDP resi</td></tr>
+<tr class="row f-done"><td class="rid">VT-226</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">webhook_metrics async DBOS workflow (replaces inline metrics in twilio webhook)</td></tr>
+<tr class="row f-done"><td class="rid">VT-227</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">twilio_inbound_replay TTL purge (daily DELETE)</td></tr>
+<tr class="row f-closed"><td class="rid">VT-229</td><td class="rst"><span class="dot" style="background:#b7a6e8"></span>Cancelled</td><td class="rtitle">VT-169 region canary manual run + DPDP verdict</td></tr>
+<tr class="row f-back"><td class="rid">VT-322</td><td class="rst"><span class="dot" style="background:#9aa3ad"></span>Backlog</td><td class="rtitle">Reaper ordering fix — drop/REVOKE test-DB grants BEFORE dropping shared roles (VT-310 fix-up)</td></tr>
+<tr class="row f-done"><td class="rid">VT-323</td><td class="rst"><span class="dot" style="background:#2da450"></span>Done</td><td class="rtitle">Add episodic_events to DSR _PURGE_ORDER — L2 store survives tenant DSR-delete</td></tr>
+</table></div>
+<div class="sblock"><div class="shead"><span class="sname">Sprint-Fazal</span><span class="scount">0/11 done · 0 in-flight · 11 backlog</span></div><table class="srows">
+<tr class="row f-back"><td class="rid">VT-13</td><td class="rst"><span class="dot" style="background:#9aa3ad"></span>Backlog</td><td class="rtitle">VT-Hardening-VendorApprovals — soak, Meta templates, Razorpay Live, KYC, etc.</td></tr>
+<tr class="row f-back"><td class="rid">VT-78</td><td class="rst"><span class="dot" style="background:#9aa3ad"></span>Backlog</td><td class="rtitle">Data residency config (ap-south-1 primary, ap-south-2 backup)</td></tr>
+<tr class="row f-back"><td class="rid">VT-108</td><td class="rst"><span class="dot" style="background:#9aa3ad"></span>Backlog</td><td class="rtitle">Meta WhatsApp templates (22 templates approved)</td></tr>
+<tr class="row f-back"><td class="rid">VT-109</td><td class="rst"><span class="dot" style="background:#9aa3ad"></span>Backlog</td><td class="rtitle">Razorpay Live verification + cutover</td></tr>
+<tr class="row f-back"><td class="rid">VT-110</td><td class="rst"><span class="dot" style="background:#9aa3ad"></span>Backlog</td><td class="rtitle">Apify actors approval + cutover</td></tr>
+<tr class="row f-back"><td class="rid">VT-111</td><td class="rst"><span class="dot" style="background:#9aa3ad"></span>Backlog</td><td class="rtitle">Twilio DLT registration + sender ID approval</td></tr>
+<tr class="row f-back"><td class="rid">VT-112</td><td class="rst"><span class="dot" style="background:#9aa3ad"></span>Backlog</td><td class="rtitle">KYC vendor decision (DigiLocker/Karza/Signzy)</td></tr>
+<tr class="row f-back"><td class="rid">VT-113</td><td class="rst"><span class="dot" style="background:#9aa3ad"></span>Backlog</td><td class="rtitle">Resend DMARC + email deliverability</td></tr>
+<tr class="row f-back"><td class="rid">VT-114</td><td class="rst"><span class="dot" style="background:#9aa3ad"></span>Backlog</td><td class="rtitle">LangSmith billing tier upgrade</td></tr>
+<tr class="row f-back"><td class="rid">VT-115</td><td class="rst"><span class="dot" style="background:#9aa3ad"></span>Backlog</td><td class="rtitle">Final security/privacy/legal launch review (DPDPA pass)</td></tr>
+<tr class="row f-back"><td class="rid">VT-272</td><td class="rst"><span class="dot" style="background:#9aa3ad"></span>Backlog</td><td class="rtitle">Privacy-policy owner_inputs framing — state AI sub-processor / customer-data transmission (laun</td></tr>
+</table></div>
+<div class="sblock"><div class="shead"><span class="sname">Backlog - Agent Operation Layer</span><span class="scount">0/4 done · 0 in-flight · 4 backlog</span></div><table class="srows">
+<tr class="row f-back"><td class="rid">VT-279</td><td class="rst"><span class="dot" style="background:#9aa3ad"></span>Backlog</td><td class="rtitle">VTR escalation classifier — knowledge-gap→VTR vs authority/preference→owner</td></tr>
+<tr class="row f-back"><td class="rid">VT-280</td><td class="rst"><span class="dot" style="background:#9aa3ad"></span>Backlog</td><td class="rtitle">Orchestrator → VTR daily + event digest (&quot;what the agent did&quot;)</td></tr>
+<tr class="row f-back"><td class="rid">VT-281</td><td class="rst"><span class="dot" style="background:#9aa3ad"></span>Backlog</td><td class="rtitle">PII-encrypted-from-VTR — de-identified VTR view (RLS/crypto enforcement)</td></tr>
+<tr class="row f-back"><td class="rid">VT-282</td><td class="rst"><span class="dot" style="background:#9aa3ad"></span>Backlog</td><td class="rtitle">VTR escalation-rate instrumentation + decay metric</td></tr>
+</table></div>
+<div class="sblock"><div class="shead"><span class="sname">Backlog - Ingestion Ease</span><span class="scount">0/2 done · 0 in-flight · 2 backlog</span></div><table class="srows">
+<tr class="row f-back"><td class="rid">VT-284</td><td class="rst"><span class="dot" style="background:#9aa3ad"></span>Backlog</td><td class="rtitle">UPI ingestion ease — forward PhonePe/GPay/Paytm statement to WhatsApp</td></tr>
+<tr class="row f-back"><td class="rid">VT-285</td><td class="rst"><span class="dot" style="background:#9aa3ad"></span>Backlog</td><td class="rtitle">POS connect ease — OAuth where the POS exposes it, file-upload fallback</td></tr>
+</table></div>
+
+<div class="footer">Light-mode locked · Sprint-level view — per-row detail lives on the PM dashboard · Regenerated by script; layout frozen to this approved template.</div>
+
+</div>
+<script>
+(function(){
+  var pills=document.querySelectorAll('.pill');
+  function apply(f){
+    var shown=0;
+    document.querySelectorAll('tr.row').forEach(function(r){
+      var ok=(f==='all')||r.classList.contains('f-'+f);
+      r.classList.toggle('hid',!ok); if(ok) shown++;
+    });
+    document.querySelectorAll('.sblock').forEach(function(b){
+      b.classList.toggle('hid', b.querySelectorAll('tr.row:not(.hid)').length===0);
+    });
+    document.getElementById('shn').textContent=shown;
+  }
+  pills.forEach(function(p){ p.addEventListener('click',function(){
+    pills.forEach(function(q){q.classList.remove('active')}); p.classList.add('active'); apply(p.dataset.f);
+  });});
+})();
+</script>
+
+</body>
+</html>
