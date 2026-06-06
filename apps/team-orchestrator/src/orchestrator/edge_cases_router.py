@@ -23,24 +23,14 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# NEEDS-FAZAL: a Meta-approved template carrying the reply text as {{1}}. Until its SID is
-# registered the send dry-runs/fails-safe — the handler's DB action still lands; only the
-# owner reply is gated on the template.
-_EDGE_ACK_TEMPLATE = "team_edge_case_ack"
-
-
 def _send_edge_ack(tenant_id: UUID | str, recipient_phone: str | None, text: str) -> None:
-    """Best-effort owner reply via the generic edge-case ack template. A send failure
+    """VT-349: the edge-case ack is a DIRECT in-window reply to the owner's just-sent message →
+    a FREE-FORM session message (not a template). The handler already computed `text`
+    (locale-aware), so we send it as-is. Best-effort + fail-safe — a window-closed/failed send
     never undoes the handler's already-applied action (the reply is informational)."""
-    from orchestrator.utils.twilio_send import send_template_message
+    from orchestrator.owner_surface.freeform_acks import send_freeform_ack
 
-    tid = tenant_id if isinstance(tenant_id, UUID) else UUID(str(tenant_id))
-    try:
-        send_template_message(
-            tid, _EDGE_ACK_TEMPLATE, {"1": text}, recipient_phone=recipient_phone or None
-        )
-    except Exception:
-        logger.exception("edge-case ack send failed tenant=%s", tenant_id)
+    send_freeform_ack(tenant_id, recipient_phone, text)
 
 
 def route_edge_case(

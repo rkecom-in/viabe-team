@@ -27,12 +27,6 @@ logger = logging.getLogger(__name__)
 # is deliberately excluded — including it would be dead code.
 _UNRESOLVED = frozenset({"aborted_hard_limit", "escalated"})
 _ESCALATE_THRESHOLD = 2  # the 2nd+ unresolved run in the window escalates to Fazal
-# NEEDS-FAZAL + LAUNCH-GATE: a Meta-approved template + Hindi. Copy = "Let me get Fazal to
-# help — he'll follow up." NO time promise (SLA enforcement is Phase 2; an honest ack,
-# Pillar 7). NOTE: until its SID is provisioned the ack send fails-safe → the owner gets NO
-# ack, so the no-silence guarantee is INERT. support_handoff MUST be provisioned before
-# owner-facing support goes live (VT-89 launch-gate).
-_HANDOFF_TEMPLATE = "support_handoff"
 
 
 def _last4(phone: str | None) -> str:
@@ -58,15 +52,18 @@ def _unresolved_count_24h(tenant_id: UUID | str) -> int:
 
 
 def _send_handoff_ack(tenant_id: UUID | str, sender_phone: str | None, reference: str) -> None:
-    from orchestrator.utils.twilio_send import send_template_message
+    """VT-349: the handoff ack is a FREE-FORM in-window reply (not a template) — the owner just
+    messaged, so we're inside the 24h window. Bilingual (owner's preferred_language); the
+    no-silence guarantee is now CODE (no SID dependency). Best-effort + fail-safe."""
+    from orchestrator.owner_surface.freeform_acks import (
+        ack_body,
+        resolve_owner_locale,
+        send_freeform_ack,
+    )
 
-    tid = tenant_id if isinstance(tenant_id, UUID) else UUID(str(tenant_id))
-    try:
-        send_template_message(
-            tid, _HANDOFF_TEMPLATE, {"1": reference}, recipient_phone=sender_phone or None
-        )
-    except Exception:
-        logger.exception("VT-88 handoff ack send failed tenant=%s", tenant_id)
+    locale = resolve_owner_locale(tenant_id)
+    body = ack_body("support_handoff", locale, ref=reference)
+    send_freeform_ack(tenant_id, sender_phone, body)
 
 
 def _alert_fazal_safe(tenant_id: UUID | str, sender_phone: str | None, run_id: str) -> None:

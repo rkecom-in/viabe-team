@@ -192,13 +192,15 @@ def test_refund_happy_path(_dbpool, _patch_transition) -> None:
         ).fetchone()
     assert trow["phase"] == "refunded"
     assert trow["refunded_at"] is not None
-    # templates fail-closed (null SID) -> notification_pending recorded
+    # VT-349 + VT-45-wire: refund_processing is now a FREE-FORM in-window ack (best-effort,
+    # never gates pending); refund_completed is a LIVE template (wired SID) that sends in mock
+    # mode → nothing fail-closed → notification_pending is False.
     with _dbpool.connection() as conn:
         rrow = conn.execute(
             "SELECT notification_pending, refund_responses FROM refund_executions WHERE tenant_id=%s",
             (str(tenant),),
         ).fetchone()
-    assert rrow["notification_pending"] is True
+    assert rrow["notification_pending"] is False
     steps = [r["step"] for r in rrow["refund_responses"]]
     assert steps == ["refund", "cancel"]
 
