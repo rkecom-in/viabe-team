@@ -76,20 +76,46 @@ def _subscription_id(payload: dict[str, Any]) -> str | None:
     return str(pay) if pay else None
 
 
+def _amount_paise_or_none(payload: dict[str, Any]) -> int | None:
+    """payload.payment.entity.amount in paise, or None if it is present-but-not-an-integer
+    (a DETERMINISTIC malformation). A missing/falsy amount → 0 (the normal absent case).
+    VT-330: never `int()`-raise — a non-int amount used to roll back the dedup txn → 500-loop."""
+    raw = payload.get("payment", {}).get("entity", {}).get("amount")
+    if not raw:
+        return 0
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
 def _amount_paise(payload: dict[str, Any]) -> int:
-    """payload.payment.entity.amount is in paise (Razorpay's INR minor unit)."""
-    return int(payload.get("payment", {}).get("entity", {}).get("amount") or 0)
+    """The fee amount, treating an unparseable amount as 0 (the caller guards the charged
+    poison-pill case up-front; this stays raise-free for the inbox/redaction path)."""
+    return _amount_paise_or_none(payload) or 0
 
 
 def _safe_payload(payload: dict[str, Any]) -> dict[str, Any]:
     """PII-free routing fields ONLY for the durable inbox (CL-390 — no customer PII at
     rest). The raw Razorpay payment entity carries email/contact/card; the inbox +
     audit need only the subscription id + amount. The full event was verified at the
-    HMAC boundary in team-web; it is NOT stored."""
+    HMAC boundary in team-web; it is NOT stored. amount_paise is raise-free (None on a
+    non-int) so a malformed amount can't roll back the dedup INSERT (VT-330)."""
     return {
         "subscription_id": _subscription_id(payload),
-        "amount_paise": _amount_paise(payload),
+        "amount_paise": _amount_paise_or_none(payload),
     }
+
+
+def _alert_fazal_safe(message: str) -> None:
+    """Best-effort Fazal alert for a money-path anomaly (parse-drop / amount==0 / missing
+    subscription). NEVER raises — the alert must not turn a recorded event into a 500."""
+    try:
+        from orchestrator.billing.refund_executor import _alert_fazal
+
+        _alert_fazal(message)
+    except Exception:
+        logger.exception("VT-330 Fazal alert failed")
 
 
 @router.post("/api/orchestrator/razorpay-ingress")
@@ -108,42 +134,80 @@ def razorpay_ingress(
     payload = body.payload
     sub_id = _subscription_id(payload)
 
+    # VT-330 poison-pill guard: a subscription.charged with a non-int amount is a
+    # DETERMINISTIC malformation (it can never apply; the old int()-raise rolled the dedup
+    # row back → infinite 500-retry, never deduping). Record-and-drop instead of looping.
+    charged_parse_drop = (
+        event_type == "subscription.charged" and _amount_paise_or_none(payload) is None
+    )
+
     try:
         with get_pool().connection() as conn, conn.cursor(row_factory=dict_row) as cur:
             with conn.transaction():
-                # Dedup = durable inbox. A replay CONFLICTs → inserted is None → no
-                # state change (the keystone: fees never double-count). The stored
-                # payload is REDACTED to PII-free routing fields (CL-390).
-                cur.execute(
-                    "INSERT INTO razorpay_webhook_events "
-                    "(event_id, event_type, payload, received_at) "
-                    "VALUES (%s, %s, %s, now()) "
-                    "ON CONFLICT (event_id) DO NOTHING RETURNING event_id",
-                    (event_id, event_type, Jsonb(_safe_payload(payload))),
-                )
-                if cur.fetchone() is None:
-                    # processed_at stays NULL on a duplicate (early return) — that NULL
-                    # is the "was a replay" observability marker, not used in logic.
-                    return {"status": "duplicate", "action": "noop"}
-
-                # Resolve tenant from the subscription (set at /subscribe). Unknown
-                # subscription → record the event (durable) but take no state action.
-                tenant_id = _resolve_tenant(cur, sub_id)
-                action = "ignored"
-                pending_transition: str | None = None
-                if tenant_id is not None:
-                    action, pending_transition = _apply_event_sql(
-                        cur, tenant_id, event_type, payload
+                if charged_parse_drop:
+                    # COMMIT the RAW event + a dropped_parse_error marker so the event is NOT
+                    # lost — recorded for MANUAL reconciliation. (A same-event_id programmatic
+                    # replay dedups today; the durable replay path is VT-352, a pre-LIVE gate —
+                    # do NOT rely on auto-replay before then.) NO fee action. An INFRA failure
+                    # HERE still raises → 500 (transient → Razorpay retries); the parse-drop 200
+                    # below is reached ONLY after this commit succeeds.
+                    # F2: the WHERE guard means a previously-PROCESSED row (a good audit record)
+                    # is NEVER clobbered by a later parse-drop arriving on the same event_id.
+                    cur.execute(
+                        "INSERT INTO razorpay_webhook_events "
+                        "(event_id, event_type, payload, received_at, processed_at) "
+                        "VALUES (%s, %s, %s, now(), now()) "
+                        "ON CONFLICT (event_id) DO UPDATE "
+                        "SET payload = EXCLUDED.payload, processed_at = now() "
+                        "WHERE razorpay_webhook_events.processed_at IS NULL",
+                        (
+                            event_id,
+                            event_type,
+                            Jsonb({"_status": "dropped_parse_error", "raw": payload}),
+                        ),
                     )
-                cur.execute(
-                    "UPDATE razorpay_webhook_events SET processed_at = now() WHERE event_id = %s",
-                    (event_id,),
-                )
+                else:
+                    # Dedup = durable inbox. A replay CONFLICTs → inserted is None → no
+                    # state change (the keystone: fees never double-count). The stored
+                    # payload is REDACTED to PII-free routing fields (CL-390).
+                    cur.execute(
+                        "INSERT INTO razorpay_webhook_events "
+                        "(event_id, event_type, payload, received_at) "
+                        "VALUES (%s, %s, %s, now()) "
+                        "ON CONFLICT (event_id) DO NOTHING RETURNING event_id",
+                        (event_id, event_type, Jsonb(_safe_payload(payload))),
+                    )
+                    if cur.fetchone() is None:
+                        # processed_at stays NULL on a duplicate (early return) — that NULL
+                        # is the "was a replay" observability marker, not used in logic.
+                        return {"status": "duplicate", "action": "noop"}
+
+                    # Resolve tenant from the subscription (set at /subscribe). Unknown
+                    # subscription → record the event (durable) but take no state action.
+                    tenant_id = _resolve_tenant(cur, sub_id)
+                    action = "ignored"
+                    pending_transition: str | None = None
+                    if tenant_id is not None:
+                        action, pending_transition = _apply_event_sql(
+                            cur, tenant_id, event_type, payload, event_id=event_id
+                        )
+                    cur.execute(
+                        "UPDATE razorpay_webhook_events SET processed_at = now() WHERE event_id = %s",
+                        (event_id,),
+                    )
     except Exception:
-        # Pre-persist failure → 500 so team-web 5xx → Razorpay RETRIES (Q1: never
-        # silently drop a financial event). Idempotent on retry (event not recorded).
+        # INFRA/pre-persist failure → 500 so team-web 5xx → Razorpay RETRIES (Q1: never
+        # silently drop a financial event into the parse-drop 200). Idempotent on retry.
         logger.exception("razorpay-ingress: persist failed event_id=%s", event_id)
         raise HTTPException(status_code=500, detail="ingress persist failed") from None
+
+    if charged_parse_drop:
+        # The raw event is durably committed above; alert + 200 so Razorpay STOPS retrying.
+        _alert_fazal_safe(
+            f"VT-330 razorpay parse-drop: event_id={event_id} — non-int charged amount; "
+            "recorded (dropped_parse_error) for manual reconciliation."
+        )
+        return {"status": "dropped_parse_error", "action": "drop"}
 
     # Phase transition AFTER the durable txn (apply_transition is a @DBOS.step with
     # its own txn). Best-effort: the event + fee state are already committed; a flip
@@ -174,21 +238,44 @@ def _resolve_tenant(cur: Any, subscription_id: str | None) -> str | None:
 
 
 def _apply_event_sql(
-    cur: Any, tenant_id: str, event_type: str, payload: dict[str, Any]
+    cur: Any,
+    tenant_id: str,
+    event_type: str,
+    payload: dict[str, Any],
+    *,
+    event_id: str | None = None,
 ) -> tuple[str, str | None]:
     """Apply the SQL state change for the event (inside the dedup txn) and return
     (action, pending_phase_event). The phase transition is applied by the caller
     after commit. Fees/phase are kept separate (captured→phase-only via card_captured;
-    charged→fees-only) so the first payment's money is never double-counted."""
+    charged→fees-only) so the first payment's money is never double-counted.
+
+    VT-330: every subscription UPDATE guards `cur.rowcount` (a deleted subscription row →
+    Fazal-alert, never a silent no-op), and a charged amount==0 alerts (a real charge is
+    never 0 → under-count → under-refund)."""
     if event_type == "subscription.charged":
         # The VT-93 refund-amount writer. Reset the failure counter on a success.
+        amount = _amount_paise(payload)  # parseable (the charged_parse_drop guard caught None)
         cur.execute(
             "UPDATE subscriptions "
             "SET cumulative_fees_paid_paise = cumulative_fees_paid_paise + %s, "
             "    consecutive_payment_failures = 0 "
             "WHERE tenant_id = %s",
-            (_amount_paise(payload), tenant_id),
+            (amount, tenant_id),
         )
+        if cur.rowcount == 0:
+            _alert_fazal_safe(
+                f"VT-330 razorpay: subscription.charged for tenant={tenant_id} but NO "
+                f"subscription row (event_id={event_id}) — fee NOT counted."
+            )
+            return "subscription_missing", None
+        if amount == 0:
+            # A real Razorpay charge is never 0 paise → a payload/parse problem. Adding 0
+            # silently under-counts cumulative_fees_paid_paise → under-refund (VT-93).
+            _alert_fazal_safe(
+                f"VT-330 razorpay: subscription.charged amount==0 for tenant={tenant_id} "
+                f"(event_id={event_id}) — under-count/under-refund risk."
+            )
         return "fees_incremented", None
 
     if event_type == "payment.captured":
@@ -198,6 +285,12 @@ def _apply_event_sql(
             "UPDATE subscriptions SET consecutive_payment_failures = 0 WHERE tenant_id = %s",
             (tenant_id,),
         )
+        if cur.rowcount == 0:
+            _alert_fazal_safe(
+                f"VT-330 razorpay: payment.captured for tenant={tenant_id} but NO "
+                f"subscription row (event_id={event_id})."
+            )
+            return "subscription_missing", None
         cur.execute("SELECT phase FROM tenants WHERE id = %s", (tenant_id,))
         row = cur.fetchone()
         phase = row["phase"] if row else None
@@ -214,7 +307,15 @@ def _apply_event_sql(
             (tenant_id,),
         )
         row = cur.fetchone()
-        count = int(row["consecutive_payment_failures"]) if row else 0
+        if row is None:
+            # RETURNING is empty → the subscription row was deleted (race). Alert, don't
+            # silently treat as 0 failures (which would never escalate a real failure run).
+            _alert_fazal_safe(
+                f"VT-330 razorpay: payment.failed for tenant={tenant_id} but NO "
+                f"subscription row (event_id={event_id})."
+            )
+            return "subscription_missing", None
+        count = int(row["consecutive_payment_failures"])
         if count >= _FAILURE_THRESHOLD:
             return "payment_failed_threshold", "payment_failed"
         return "payment_failed_counted", None

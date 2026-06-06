@@ -149,15 +149,11 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - name: No hardcoded plan prices (Pillar 7)
-        run: |
-          if grep -rnE '\b(249900|499900|1499900)\b' \
-              apps/team-web apps/team-orchestrator/src \
-              --include="*.ts" --include="*.tsx" --include="*.py" \
-              | grep -vE '/config/|\.test\.|/tests/|test_'; then
-            echo "::error::hardcoded plan-price literal (Pillar 7) — use config/plans.yaml + env"
-            exit 1
-          fi
-          echo "gate-no-price-literals: ok"
+        run: bash scripts/gate-no-price-literals.sh
+      - name: Self-test the price-literal gate (VT-330 #6)
+        # Plants a synthetic plan-price literal + asserts the gate FIRES (and passes clean) —
+        # regression-protects the gate's own regex against an edit that silently breaks it.
+        run: bash scripts/test-gate-no-price-literals.sh
 
   gate-no-llm-in-deterministic-triggers:
     name: gate-no-llm-in-deterministic-triggers

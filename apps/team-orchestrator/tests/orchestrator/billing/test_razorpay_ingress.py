@@ -220,3 +220,101 @@ def test_unknown_subscription_recorded_no_action(_dbpool, _transitions) -> None:
             (f"{_RUN}_evt_unknown",),
         ).fetchone()["n"]
     assert n == 1
+
+
+# --------------------------------------------------------------------------- #
+# VT-330 — webhook hardening
+# --------------------------------------------------------------------------- #
+def _wh_payload(dbpool, event_id: str):
+    """The razorpay_webhook_events payload (dict) for event_id, or None."""
+    with dbpool.connection() as conn:
+        r = conn.execute(
+            "SELECT payload FROM razorpay_webhook_events WHERE event_id = %s", (event_id,)
+        ).fetchone()
+    if r is None:
+        return None
+    return r["payload"] if isinstance(r, dict) else r[0]
+
+
+@pytest.mark.integration
+def test_charged_non_int_amount_records_drop_not_500(_dbpool, _transitions, monkeypatch) -> None:
+    """VT-330 poison-pill: a charged event with a NON-INT amount is RECORDED
+    (dropped_parse_error, RAW committed) + Fazal-alerted + 200(drop), NOT a 500-loop."""
+    alerts: list[str] = []
+    # F3: un-mock _alert_fazal_safe — mock the INNER _alert_fazal so the REAL wrapper runs
+    # (exercises the persist-in-txn → alert-after ordering).
+    monkeypatch.setattr(
+        "orchestrator.billing.refund_executor._alert_fazal", lambda m: alerts.append(m)
+    )
+    tid, sub = uuid4(), "sub_pp"
+    _seed(_dbpool, tid, sub)
+
+    out = _post(
+        "evt_pp",
+        "subscription.charged",
+        {"subscription": {"entity": {"id": sub}}, "payment": {"entity": {"amount": "abc"}}},
+    )
+    assert out["status"] == "dropped_parse_error"  # 200, not a raise/500
+    assert alerts, "Fazal was not alerted on the parse-drop"
+    # persist-on-drop (Cowork hard req): the RAW event is durably committed for reconciliation.
+    pay = _wh_payload(_dbpool, f"{_RUN}_evt_pp")
+    assert pay is not None, "raw event LOST on the drop path"
+    assert pay["_status"] == "dropped_parse_error"
+    assert pay["raw"]["payment"]["entity"]["amount"] == "abc"  # raw preserved for reconciliation
+    assert _sub_state(_dbpool, tid)[0] == 0  # NO fee applied
+
+
+def test_charged_parse_drop_infra_failure_still_500(monkeypatch) -> None:
+    """VT-330 F3: an INFRA failure on the drop-record path → HTTPException(500) (team-web 502 →
+    Razorpay RETRIES), NOT swallowed into the parse-drop 200. The split's whole point — a
+    transient error during the drop must not be lost. No DB needed (get_pool patched to raise)."""
+    from fastapi import HTTPException
+
+    import orchestrator.api.razorpay_ingress as ri
+
+    def _boom():  # noqa: ANN202
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(ri, "get_pool", _boom)
+    with pytest.raises(HTTPException) as exc:
+        _post(
+            "evt_infra",
+            "subscription.charged",
+            {"subscription": {"entity": {"id": "s"}}, "payment": {"entity": {"amount": "abc"}}},
+        )
+    assert exc.value.status_code == 500  # infra → 5xx, never the parse-drop 200
+
+
+@pytest.mark.integration
+def test_charged_amount_zero_alerts_under_count(_dbpool, _transitions, monkeypatch) -> None:
+    """VT-330: a charged event resolving amount==0 alerts Fazal (a real charge is never 0 →
+    under-count → under-refund). Fees unchanged (+0), event still processed."""
+    import orchestrator.api.razorpay_ingress as ri
+
+    alerts: list[str] = []
+    monkeypatch.setattr(ri, "_alert_fazal_safe", lambda m: alerts.append(m))
+    tid, sub = uuid4(), "sub_zero"
+    _seed(_dbpool, tid, sub)
+
+    out = _post("evt_zero", "subscription.charged", _charged(sub, 0))
+    assert out["status"] == "processed"
+    assert any("amount==0" in a for a in alerts), "no amount==0 alert"
+    assert _sub_state(_dbpool, tid)[0] == 0  # +0
+
+
+@pytest.mark.integration
+def test_apply_event_charged_missing_subscription_alerts(_dbpool, monkeypatch) -> None:
+    """VT-330 rowcount guard: _apply_event_sql for a tenant_id whose subscription row does NOT
+    exist → the UPDATE affects 0 rows → Fazal-alert + 'subscription_missing' (the
+    subscription-deleted race, staged directly since the handler's resolve uses the same row)."""
+    import orchestrator.api.razorpay_ingress as ri
+
+    alerts: list[str] = []
+    monkeypatch.setattr(ri, "_alert_fazal_safe", lambda m: alerts.append(m))
+    tid = uuid4()  # NO subscriptions row for this tenant
+    with _dbpool.connection() as conn, conn.cursor() as cur:
+        action, _ = ri._apply_event_sql(
+            cur, str(tid), "subscription.charged", _charged("sub_x", 5000), event_id="evt_x"
+        )
+    assert action == "subscription_missing"
+    assert alerts, "no missing-subscription alert"
