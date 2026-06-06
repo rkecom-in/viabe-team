@@ -20,6 +20,14 @@ table can't silently slip the purge:
 - **Retention bound** — `purge_stale_unnotified(months=6)` hard-deletes UN-notified rows older
   than 6 months (if launch slips), so pre-launch PII never sits unbounded.
 
+> **Enforcement status (current):** the two purge functions exist and are SQL-correct, but are
+> **runbook-manual** today — no scheduler invokes them yet. Auto-enforcement of the 6-month
+> retention bound is pending **VT-354** (wire `purge_stale_unnotified` to a DBOS scheduled job),
+> which is a **HARD pre-LIVE gate** on `ENABLE_WAITLIST_CAPTURE`: the retention bound must be
+> ENFORCED (not just documented) before any real waitlist PII is collected. Until VT-354 lands,
+> purge is an explicit ops step per this doc — and the surface stays dark (no real PII), so
+> nothing is unbounded in practice yet.
+
 ## CL-422 gate
 Real waitlist PII is collected ONLY when `ENABLE_WAITLIST_CAPTURE=true` — gated on **VT-231
 (Mumbai prod) + Fazal**, exactly like `ENABLE_PUBLIC_SIGNUP`. Dev (Seoul) collects ZERO real

@@ -49,7 +49,7 @@ class WaitlistBody(BaseModel):
 
 @router.post("/api/waitlist")
 def join_waitlist(
-    body: WaitlistBody, x_internal_secret: str | None = Header(default=None)
+    body: WaitlistBody, x_internal_secret: str | None = Header(default=None, alias="X-Internal-Secret")
 ) -> dict[str, Any]:
     """Capture a waitlist entry. Idempotent: a re-submit (same email OR number) is a no-op
     and ALWAYS returns ``queued`` — never leaks whether the entry already existed (no
@@ -75,7 +75,7 @@ def join_waitlist(
 
 @router.delete("/api/waitlist")
 def erase_waitlist(
-    email: str, x_internal_secret: str | None = Header(default=None)
+    email: str, x_internal_secret: str | None = Header(default=None, alias="X-Internal-Secret")
 ) -> dict[str, Any]:
     """VT-97 #2 — ops erasure: HARD-delete a waitlist entry by email (an explicit erasure
     request). Returns the deleted count (0 if not present — no enumeration concern, ops-only)."""
