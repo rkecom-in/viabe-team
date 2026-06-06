@@ -8,6 +8,7 @@ module (CI enforces).
 
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime
 
 from dbos import DBOS
@@ -15,6 +16,8 @@ from dbos import DBOS
 from orchestrator.db import tenant_connection
 from orchestrator.invariants import check_invariants
 from orchestrator.state import MAX_TRIAL_EXTENSIONS, Phase, SubscriberState
+
+logger = logging.getLogger(__name__)
 
 # The 12 lifecycle events this machine consumes (event sources: VT-3.3 / 3.5 / 3.9).
 ALL_EVENTS: tuple[str, ...] = (
@@ -184,5 +187,24 @@ def apply_transition(
             ),
             conn=conn,
         )
+
+    # VT-333: post-transition AUDIT-ONLY founding-slot release on a cancelled transition. Runs
+    # AFTER the deterministic txn commits (NOT in apply_transition's core) on the SERVICE-role
+    # pool — founding_tier_claims has no app_role UPDATE policy, so the RLS tenant_connection
+    # above cannot touch it. Best-effort + audit-only: a missed release just leaves released_at
+    # NULL, NEVER decrements the counter (no-reopen policy → zero integrity risk; Cowork
+    # 20260605T143300Z). Mirrors the VT-94 refund-path release.
+    if to_phase == "cancelled":
+        try:
+            from orchestrator.billing.founding_counter import release_founding_slot
+            from orchestrator.graph import get_pool
+
+            with get_pool().connection() as _fc_conn:
+                release_founding_slot(_fc_conn, state["tenant_id"])
+        except Exception:
+            logger.exception(
+                "VT-333 founding-slot release failed (audit-only) tenant=%s",
+                state["tenant_id"],
+            )
 
     return new_state
