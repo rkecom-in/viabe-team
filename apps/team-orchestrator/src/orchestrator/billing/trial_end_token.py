@@ -28,9 +28,13 @@ class TrialEndSecretMissing(RuntimeError):
     """OWNER_JWT_SECRET unset — cannot mint (fail closed, never mint an unsigned/blank-key token)."""
 
 
-def mint_trial_end_token(tenant_id: str, plan_tier: str) -> tuple[str, str]:
+def mint_trial_end_token(tenant_id: str) -> tuple[str, str]:
     """Mint an HS256 trial-end-subscribe token. Returns ``(token, jti)`` — the jti is the
-    single-use key, forwarded to razorpay-subscribe for the atomic consume. 7-day TTL."""
+    single-use key, forwarded to razorpay-subscribe for the atomic consume. 7-day TTL.
+
+    The token is pure AUTH: tenant + single-use jti. It carries NO plan_tier (VT-332 F3) — the
+    tier is the owner's choice at /subscribe (server-priced, never client-trusted); the deep-link
+    ``?plan=`` is only a hint. A tier claim the subscribe route never enforced was dead/ambiguous."""
     secret = os.environ.get("OWNER_JWT_SECRET", "")
     if not secret:
         raise TrialEndSecretMissing("OWNER_JWT_SECRET unset — cannot mint trial-end token")
@@ -39,7 +43,6 @@ def mint_trial_end_token(tenant_id: str, plan_tier: str) -> tuple[str, str]:
     token = pyjwt.encode(
         {
             "tenant_id": tenant_id,
-            "plan_tier": plan_tier,
             "aud": _AUDIENCE,
             "jti": jti,
             "iat": now,
