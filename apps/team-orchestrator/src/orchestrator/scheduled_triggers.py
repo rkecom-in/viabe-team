@@ -68,6 +68,7 @@ TRIAL_EVALUATION_CRON = "0 7 * * *"  # VT-90 — daily 7 AM IST trial sweep (off
 MONTHLY_IMPACT_CRON = "0 8 1 * *"
 L3_CONSTRUCTION_CRON = "0 3 * * *"  # VT-68 — nightly 3 AM IST L3 rebuild
 WAITLIST_RETENTION_PURGE_CRON = "0 4 * * *"  # VT-354 — daily 4 AM IST waitlist 6-month bound
+SLA_BREACH_SWEEP_CRON = "0 * * * *"  # VT-357 — hourly: alert Fazal on SLA-breached open escalations
 
 
 SHELL_STATUS = "skipped_schema_pending"
@@ -270,6 +271,17 @@ def waitlist_retention_purge_scheduled(
     from orchestrator.api.waitlist import run_waitlist_retention_purge
 
     run_waitlist_retention_purge()
+
+
+def sla_breach_sweep_scheduled(
+    scheduled_time: datetime,
+    actual_time: datetime,
+) -> None:
+    """DBOS scheduled handler — fires hourly. VT-357: a 2nd Fazal alert on any OPEN escalation past
+    its SLA (4h business-hours IST / 24h otherwise). NO LLM; idempotent (sla_alerted_at marker)."""
+    from orchestrator.escalations import run_sla_breach_sweep_body
+
+    run_sla_breach_sweep_body()
 
 
 def l3_construction_scheduled(
@@ -1027,6 +1039,8 @@ def register_scheduled_triggers() -> None:
     # VT-354: waitlist 6-month retention purge — ENFORCES the DPDP pre-launch PII bound (was
     # runbook-manual). EXTENDS this surface (same register-before-launch posture).
     DBOS.scheduled(WAITLIST_RETENTION_PURGE_CRON)(waitlist_retention_purge_scheduled)
+    # VT-357: hourly SLA-breach sweep — 2nd Fazal alert on overdue open escalations (marker-gated).
+    DBOS.scheduled(SLA_BREACH_SWEEP_CRON)(sla_breach_sweep_scheduled)
     _registered = True
 
 

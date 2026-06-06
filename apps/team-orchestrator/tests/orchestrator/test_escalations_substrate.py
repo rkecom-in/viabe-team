@@ -122,3 +122,71 @@ def test_deny_all_rls_blocks_app_role(substrate):
     esc_n = esc["n"] if isinstance(esc, dict) else esc[0]
     aud_n = aud["n"] if isinstance(aud, dict) else aud[0]
     assert esc_n == 0 and aud_n == 0
+
+
+# --- VT-357 part 2 — SLA-breach sweep --------------------------------------------------------
+def _seed_escalation(dsn, tenant, *, opened_sql: str, status: str = "open") -> str:
+    """Insert an escalation with an explicit opened_at (SQL expr) + status; return its id."""
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        return str(conn.execute(
+            f"INSERT INTO escalations (tenant_id, kind, severity, status, opened_at) "  # noqa: S608
+            f"VALUES (%s, 'support_fallback', 'medium', %s, {opened_sql}) RETURNING id",
+            (tenant, status),
+        ).fetchone()[0])
+
+
+def _sla_alerted_at(dsn, eid):
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        return conn.execute(
+            "SELECT sla_alerted_at FROM escalations WHERE id = %s", (eid,)
+        ).fetchone()[0]
+
+
+def test_sla_sweep_breaches_and_is_idempotent(substrate, monkeypatch):
+    """VT-357: a business-hours escalation past 4h breaches → 2nd Fazal alert + marker set; the
+    next sweep does NOT re-alert it (marker-gated). A fresh escalation does NOT breach."""
+    from orchestrator import escalations as esc
+
+    alerts: list[str] = []
+    monkeypatch.setattr(
+        "orchestrator.billing.refund_executor._alert_fazal", lambda text: alerts.append(text)
+    )
+    t = _tenant(substrate.dsn)
+    # opened in business hours (12:30 IST) days ago → past the 4h SLA.
+    breached = _seed_escalation(substrate.dsn, t, opened_sql="TIMESTAMPTZ '2026-06-01 12:30:00+05:30'")
+    fresh = _seed_escalation(substrate.dsn, t, opened_sql="now()")  # 0 elapsed → not breached
+
+    ids1 = esc.run_sla_breach_sweep_body()
+    assert breached in ids1  # breached → alerted
+    assert fresh not in ids1  # fresh → not breached
+    assert _sla_alerted_at(substrate.dsn, breached) is not None  # marker set
+    assert _sla_alerted_at(substrate.dsn, fresh) is None
+    n_after_first = len([a for a in alerts if breached in a])
+
+    ids2 = esc.run_sla_breach_sweep_body()  # re-run
+    assert breached not in ids2  # marker gates → NOT re-alerted
+    assert len([a for a in alerts if breached in a]) == n_after_first  # no second ping
+
+
+def test_sla_sweep_offhours_breaches_past_24h(substrate, monkeypatch):
+    """VT-357: an OFF-hours escalation (02:00 IST) days ago breaches the 24h window."""
+    from orchestrator import escalations as esc
+
+    monkeypatch.setattr("orchestrator.billing.refund_executor._alert_fazal", lambda text: None)
+    t = _tenant(substrate.dsn)
+    old_off = _seed_escalation(substrate.dsn, t, opened_sql="TIMESTAMPTZ '2026-06-01 02:00:00+05:30'")
+    assert old_off in esc.run_sla_breach_sweep_body()
+    assert _sla_alerted_at(substrate.dsn, old_off) is not None
+
+
+def test_sla_sweep_skips_resolved(substrate, monkeypatch):
+    """VT-357: a RESOLVED escalation past SLA is NOT alerted (status='open' filter)."""
+    from orchestrator import escalations as esc
+
+    monkeypatch.setattr("orchestrator.billing.refund_executor._alert_fazal", lambda text: None)
+    t = _tenant(substrate.dsn)
+    resolved = _seed_escalation(
+        substrate.dsn, t, opened_sql="TIMESTAMPTZ '2026-06-01 12:30:00+05:30'", status="resolved"
+    )
+    assert resolved not in esc.run_sla_breach_sweep_body()
+    assert _sla_alerted_at(substrate.dsn, resolved) is None
