@@ -1,0 +1,18 @@
+{
+  "draft.banner": "DRAFT — pending counsel review. This page is not final; the binding text is being prepared with legal counsel and is not yet in effect.",
+  "nav.home": "← Back to Viabe Team",
+  "updated.label": "Status",
+  "updated.value": "Draft — not yet effective",
+  "privacy.title": "Privacy Policy",
+  "privacy.intro": "How Viabe Team collects, uses, and protects your business and customer data.",
+  "privacy.body": "Viabe Team's privacy policy is being finalized with legal counsel. The binding version will describe what data we collect, how the AI assistant processes it, the third-party sub-processors involved (including the LLM provider), data residency, retention periods, and your rights under India's Digital Personal Data Protection Act, 2023 (DPDP). This draft does not yet bind Viabe or its users.",
+  "dpdp.title": "DPDP Disclosure",
+  "dpdp.intro": "Data residency and AI processing disclosure under the DPDP Act, 2023.",
+  "dpdp.body": "This disclosure (reference residency_v1_2026-06) explains where your data is stored, that messages may be processed by an automated AI assistant and a third-party large-language-model provider, and the lawful basis for that processing. It is referenced by the residency and DPDP consent at signup. The binding copy is pending counsel review.",
+  "terms.title": "Terms of Use",
+  "terms.intro": "The terms governing your use of Viabe Team.",
+  "terms.body": "Viabe Team's terms of use are being finalized with legal counsel. The binding version will cover the service description, subscription and billing terms, acceptable use, the owner's responsibilities for customer consent, limitation of liability, and governing law. This draft does not yet bind Viabe or its users.",
+  "contact.title": "Contact & Grievance Officer",
+  "contact.intro": "How to reach us, including the DPDP grievance officer.",
+  "contact.body": "Contact details, including the Data Protection / Grievance Officer required under the DPDP Act, are being finalized. Until this page is published, please reach us through your existing Viabe Team WhatsApp channel."
+}
