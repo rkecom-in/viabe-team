@@ -40,7 +40,7 @@ function _tokenizePhone(phoneE164: string): string {
 }
 
 function _hit(
-  kind: 'ip' | 'phone',
+  kind: 'ip' | 'phone' | 'signup',
   identifier: string,
   max: number,
   now: number,
@@ -85,6 +85,26 @@ export function checkOtpRateLimit(
   // Per-phone (tokenized — no plaintext in the map).
   if (!_hit('phone', _tokenizePhone(phoneE164), OTP_MAX_PER_PHONE, now)) {
     return { allowed: false, blockedBy: 'phone' }
+  }
+  return { allowed: true, blockedBy: null }
+}
+
+/**
+ * VT-326 — per-IP throttle for /api/signup. A BACKSTOP, not the primary defense:
+ * the OTP proof-of-control gate in front of it is the real anti-flood (an attacker
+ * must control a real WhatsApp number per attempt, which doesn't scale). Per-IP is
+ * unreliable in India anyway (CGNAT / shared carrier IPs mean many legitimate owners
+ * share one IP), so we keep the standard 5/15 and do NOT tighten (Cowork A3).
+ *
+ * Uses a DISTINCT bucket kind ('signup') so it has its own window — a signup attempt
+ * does not consume the request-otp per-IP budget, and vice versa.
+ */
+export function checkSignupRateLimit(
+  ip: string,
+  now: number = Date.now(),
+): RateLimitResult {
+  if (!_hit('signup', ip || 'unknown', OTP_MAX_PER_IP, now)) {
+    return { allowed: false, blockedBy: 'ip' }
   }
   return { allowed: true, blockedBy: null }
 }
