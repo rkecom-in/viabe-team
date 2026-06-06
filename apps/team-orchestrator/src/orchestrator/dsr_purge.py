@@ -141,6 +141,13 @@ _PURGE_ORDER: tuple[str, ...] = (
     # MUST be swept here or a tenant's listings survive the purge (the VT-323
     # episodic_events lesson, on a fresh table).
     "platform_listings",
+    # VT-327: KG transactional outbox + its consumer ledger. Leaf (both FK tenants only;
+    # kg_events_processed.event_id is a PK, NOT a FK to kg_events → order-insensitive between
+    # them). kg_events.payload carries the TENANT_CREATED business_name (owner PII) at rest,
+    # and the drain only stamps drained_at (never deletes) — so a tenant DSR MUST sweep both
+    # here or the outbox PII survives the purge (the episodic_events/platform_listings lesson).
+    "kg_events_processed",
+    "kg_events",
     # VT-92: day-39 decision audit. Leaf (FK tenants only). Carries the tenant's
     # ARRR/fees (subject billing data) → hard-deleted on DSR (CASCADE never fires on
     # a DSR-anonymize). Order-insensitive.
