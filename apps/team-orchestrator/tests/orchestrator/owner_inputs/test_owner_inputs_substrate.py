@@ -325,3 +325,54 @@ def test_composer_orders_most_recent_first(substrate):  # type: ignore[no-untype
     returned_in_order = [r.input_id for r in rows]
     # Seed order was 0, 1, 2 -> most-recent-first is 2, 1, 0.
     assert returned_in_order == list(reversed(seeded))
+
+
+# --- VT-149 — webhook-replay idempotency (UNIQUE tenant_id, message_sid) --------------------
+def test_replay_same_message_sid_writes_one_row(substrate):  # type: ignore[no-untyped-def]
+    """VT-149: two write_owner_input calls with the SAME (tenant, message_sid) — a DBOS replay —
+    return the SAME id and leave EXACTLY ONE row (the UNIQUE makes the replay a no-op)."""
+    from orchestrator.db import tenant_connection
+    from orchestrator.owner_inputs.writer import OwnerInputClassification, write_owner_input
+
+    tenant = _new_tenant(substrate.dsn)
+    sid = f"SM{uuid4().hex}"
+    cls = OwnerInputClassification(intent="winback", segment="dormant", occasion=None)
+    id1 = write_owner_input(tenant, run_id=None, message_sid=sid, classification=cls)
+    id2 = write_owner_input(tenant, run_id=None, message_sid=sid, classification=cls)  # REPLAY
+    assert id1 == id2, "replay must return the first write's id, not a new row"
+    with tenant_connection(tenant) as conn:
+        r = conn.execute(
+            "SELECT count(*) AS n FROM owner_inputs WHERE tenant_id = %s AND message_sid = %s",
+            (str(tenant), sid),
+        ).fetchone()
+    n = r["n"] if isinstance(r, dict) else r[0]
+    assert n == 1, "exactly one owner_inputs row despite two writes"
+
+
+def test_null_message_sid_not_deduped(substrate):  # type: ignore[no-untyped-def]
+    """A NULL message_sid (owner NL entry / non-Twilio) has no dedup key → two writes = two rows
+    (the partial UNIQUE only covers message_sid IS NOT NULL)."""
+    from orchestrator.db import tenant_connection
+    from orchestrator.owner_inputs.writer import OwnerInputClassification, write_owner_input
+
+    tenant = _new_tenant(substrate.dsn)
+    cls = OwnerInputClassification(intent="winback", segment=None, occasion=None)
+    write_owner_input(tenant, run_id=None, message_sid=None, classification=cls)
+    write_owner_input(tenant, run_id=None, message_sid=None, classification=cls)
+    with tenant_connection(tenant) as conn:
+        r = conn.execute(
+            "SELECT count(*) AS n FROM owner_inputs WHERE tenant_id = %s AND message_sid IS NULL",
+            (str(tenant),),
+        ).fetchone()
+    n = r["n"] if isinstance(r, dict) else r[0]
+    assert n == 2, "NULL message_sid is not deduped"
+
+
+def test_message_sid_index_is_unique(substrate):  # type: ignore[no-untyped-def]
+    """VT-149 mig 111: owner_inputs_tenant_message_sid is now a UNIQUE index."""
+    with psycopg.connect(substrate.dsn, autocommit=True) as conn:
+        r = conn.execute(
+            "SELECT i.indisunique FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid "
+            "WHERE c.relname = 'owner_inputs_tenant_message_sid'"
+        ).fetchone()
+    assert r is not None and r[0] is True, "the provenance index must be UNIQUE after mig 111"
