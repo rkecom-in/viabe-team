@@ -278,3 +278,36 @@ def test_dbos_auto_resumes_mid_transition(tx):
         ).fetchone()[0]
     assert rows == 1, f"signup transition applied {rows}x — must be exactly once"
     assert phase == "trial"
+
+
+# --- VT-333 — founding-slot release on cancellation (audit-only) ----------------------------
+def test_cancelled_transition_releases_founding_slot_audit_only(tx):
+    """VT-333: a cancelled transition stamps founding_tier_claims.released_at (audit-only). The
+    counter's claimed_count is NEVER decremented (no-reopen policy → zero integrity risk)."""
+    from orchestrator.billing.founding_counter import try_claim_founding_slot
+    from orchestrator.graph import get_pool
+
+    tenant_id = _new_tenant(tx.dsn, phase="trial")
+    with get_pool().connection() as c:
+        try_claim_founding_slot(c, tenant_id)  # service-role claim
+    with psycopg.connect(tx.dsn, autocommit=True) as conn:
+        before = conn.execute(
+            "SELECT claimed_count FROM founding_tier_counter WHERE id = 1"
+        ).fetchone()[0]
+        claim = conn.execute(
+            "SELECT released_at FROM founding_tier_claims WHERE tenant_id = %s", (tenant_id,)
+        ).fetchone()
+    assert claim is not None and claim[0] is None  # claimed, not yet released
+
+    new_state = tx.transitions.apply_transition(_state(tx, tenant_id, "trial"), "manual_cancel", {})
+    assert new_state["phase"] == "cancelled"
+
+    with psycopg.connect(tx.dsn, autocommit=True) as conn:
+        released = conn.execute(
+            "SELECT released_at FROM founding_tier_claims WHERE tenant_id = %s", (tenant_id,)
+        ).fetchone()[0]
+        after = conn.execute(
+            "SELECT claimed_count FROM founding_tier_counter WHERE id = 1"
+        ).fetchone()[0]
+    assert released is not None, "cancelled transition must stamp released_at (audit)"
+    assert after == before, "claimed_count must be UNCHANGED (no-reopen; no decrement)"
