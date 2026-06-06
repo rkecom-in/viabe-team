@@ -33,3 +33,27 @@ def portal_access_allowed(
         return False
     now = now or datetime.now(timezone.utc)
     return now <= refunded_at + GRACEFUL_EXIT_WINDOW
+
+
+# VT-328 — terminal phases that forbid OUTBOUND customer dispatch (campaigns).
+_DISPATCH_BLOCKED_PHASES = frozenset({"refunded", "cancelled"})
+
+
+def dispatch_allowed(
+    phase: str, refunded_at: datetime | None = None, now: datetime | None = None
+) -> bool:
+    """Whether a tenant may dispatch OUTBOUND customer campaigns (VT-328).
+
+    Asymmetric with :func:`portal_access_allowed` on purpose:
+    - Portal READS are window-bounded — a refunded tenant keeps read access for
+      GRACEFUL_EXIT_WINDOW, then loses it.
+    - Outbound WRITES (customer campaigns) are off the MOMENT the tenant is
+      ``refunded`` or ``cancelled`` — in-window AND after. A terminated tenant
+      must never push more messages to customers (Pillar 7). ``refunded_at`` /
+      ``now`` are accepted for signature parity but unused — the block is
+      window-independent.
+
+    INBOUND owner replies (DSR / opt-out / refund-decision) are unaffected: they
+    never reach the campaign-execution chokepoint this rule guards.
+    """
+    return phase not in _DISPATCH_BLOCKED_PHASES
