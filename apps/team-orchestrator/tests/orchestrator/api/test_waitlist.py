@@ -139,3 +139,38 @@ def test_purge_fns(client, pool):
     assert _count(pool, email_n) == 0  # post-notify purge
     assert purge_stale_unnotified(months=6) >= 1
     assert _count(pool, email_old) == 0  # retention bound
+
+
+def test_retention_purge_body_enforces_bound(client, pool):
+    """VT-354: the SCHEDULED enforcer purges stale un-notified rows; recent + notified survive."""
+    from orchestrator.api.waitlist import run_waitlist_retention_purge
+
+    recent, old, notified = _email(), _email(), _email()
+    for e in (recent, old, notified):
+        client.post("/api/waitlist", json=_body(e, _wa()), headers=_HDR)
+    with pool.connection() as conn:
+        conn.execute(
+            "UPDATE waitlist_signups SET created_at = now() - interval '7 months' WHERE email = %s",
+            (old,),
+        )
+        conn.execute(
+            "UPDATE waitlist_signups SET notified_at = now() WHERE email = %s", (notified,)
+        )
+    deleted = run_waitlist_retention_purge()
+    assert deleted >= 1
+    assert _count(pool, old) == 0  # stale un-notified → purged (the bound, now enforced)
+    assert _count(pool, recent) == 1  # recent un-notified → kept
+    assert _count(pool, notified) == 1  # notified → kept (its own ops-sweep path)
+
+
+def test_erase_by_whatsapp_e164(client, pool):
+    """VT-354 NIT-3: erasure by phone only (a principal may know only their number) + the
+    no-identifier guard."""
+    email, wa = _email(), _wa()
+    client.post("/api/waitlist", json=_body(email, wa), headers=_HDR)
+    assert _count(pool, email) == 1
+    r = client.request("DELETE", "/api/waitlist", params={"whatsapp_e164": wa}, headers=_HDR)
+    assert r.status_code == 200 and r.json()["deleted"] == 1
+    assert _count(pool, email) == 0  # erased by phone
+    # neither email nor phone → 400 (with the secret, so it's the guard, not auth)
+    assert client.request("DELETE", "/api/waitlist", params={}, headers=_HDR).status_code == 400
