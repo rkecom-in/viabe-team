@@ -194,3 +194,65 @@ def test_cross_tenant_isolation(_dbpool) -> None:
     _post(a, "founding")
     assert len(_rows(_dbpool, a)) == 1
     assert len(_rows(_dbpool, b)) == 0  # tenant_b untouched
+
+
+# --------------------------------------------------------------------------- #
+# VT-332 — trial-end token single-use consumption
+# --------------------------------------------------------------------------- #
+def _post_token(tenant_id, plan_tier, jti, secret=_SECRET):
+    return razorpay_subscribe(
+        RazorpaySubscribeBody(tenant_id=str(tenant_id), plan_tier=plan_tier, jti=jti),
+        x_internal_secret=secret,
+    )
+
+
+def _consumed(pool, jti) -> int:
+    with pool.connection() as conn:
+        return conn.execute(
+            "SELECT count(*) AS n FROM consumed_subscribe_tokens WHERE jti = %s", (jti,)
+        ).fetchone()["n"]
+
+
+def test_trial_end_jti_first_use_then_replay_403(_dbpool) -> None:
+    """VT-332 KEYSTONE: first use of a jti subscribes once + consumes the jti; a replay (the SAME
+    jti) → 403 and NO second subscription (the replay never reaches the vendor)."""
+    from fastapi import HTTPException
+
+    tid = uuid4()
+    _seed(_dbpool, tid, phase="trial")
+    jti = f"jti-{uuid4().hex}"
+
+    out = _post_token(tid, "standard", jti)
+    assert out["status"] == "created"
+    assert _consumed(_dbpool, jti) == 1
+    assert len(_rows(_dbpool, tid)) == 1
+
+    with pytest.raises(HTTPException) as exc:
+        _post_token(tid, "standard", jti)  # REPLAY
+    assert exc.value.status_code == 403
+    assert len(_rows(_dbpool, tid)) == 1  # STILL one — replay created no 2nd subscription
+
+
+def test_subscribe_without_jti_unaffected(_dbpool) -> None:
+    """The in-app path (no token → no jti) still creates — single-use only gates the token path."""
+    tid = uuid4()
+    _seed(_dbpool, tid, phase="trial")
+    out = _post(tid, "standard")
+    assert out["status"] == "created"
+    assert len(_rows(_dbpool, tid)) == 1
+
+
+def test_trial_end_jti_rolled_back_when_subscribe_fails(_dbpool) -> None:
+    """The consume shares the subscribe txn: an UNKNOWN plan (400, after the consume line is
+    reached? no — plan resolves before the txn) — here we assert a failed create does not
+    strand a consumed jti. Use an unconfigured plan (503 BEFORE the txn) to prove the jti is
+    NOT consumed when the subscribe never runs."""
+    from fastapi import HTTPException
+
+    tid = uuid4()
+    _seed(_dbpool, tid, phase="trial")
+    jti = f"jti-{uuid4().hex}"
+    with pytest.raises(HTTPException) as exc:
+        _post_token(tid, "pro", jti)  # PRO_RZP_PLAN_ID unset → 503 before the txn
+    assert exc.value.status_code == 503
+    assert _consumed(_dbpool, jti) == 0  # jti NOT consumed — the token stays usable on a real retry

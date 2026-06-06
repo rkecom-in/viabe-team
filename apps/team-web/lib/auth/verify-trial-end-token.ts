@@ -35,12 +35,15 @@ function _secretBytes(): Uint8Array {
  * missing / malformed / expired / wrong-audience token, or a missing tenant_id claim.
  * The caller derives the tenant from THIS return value — never from a raw client field.
  */
-export async function verifyTrialEndToken(token: string): Promise<{ tenantId: string }> {
+export async function verifyTrialEndToken(
+  token: string,
+): Promise<{ tenantId: string; jti: string | null }> {
   if (!token) throw new TrialEndTokenError('missing token')
   const secret = _secretBytes() // config error (unset secret) propagates here — NOT masked below
   let payload: JWTPayload
   try {
     ;({ payload } = await jwtVerify(token, secret, {
+      algorithms: ['HS256'], // VT-332/VT-350: pin the alg (algorithm-confusion defense)
       audience: TRIAL_END_AUDIENCE, // a wrong / owner-audience token throws here
     }))
   } catch {
@@ -48,5 +51,8 @@ export async function verifyTrialEndToken(token: string): Promise<{ tenantId: st
   }
   const tenantId = typeof payload.tenant_id === 'string' ? payload.tenant_id : ''
   if (!tenantId) throw new TrialEndTokenError('token missing tenant_id')
-  return { tenantId }
+  // VT-332: the jti is the single-use key — forwarded to razorpay-subscribe for the atomic
+  // consume. A minted token always carries one; null only on a (legacy) token without a jti.
+  const jti = typeof payload.jti === 'string' ? payload.jti : null
+  return { tenantId, jti }
 }
