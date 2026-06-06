@@ -168,10 +168,10 @@ def test_concurrent_create_exactly_one_vendor_call(_dbpool, monkeypatch) -> None
     calls: list[str] = []
     real = mod._create_razorpay_subscription
 
-    def _counting(plan, tenant_id):
+    def _counting(plan, tenant_id, idempotency_key):  # VT-352: stub now takes the idem-key
         calls.append(tenant_id)
         time.sleep(0.05)  # widen the race window so both threads contend for the lock
-        return real(plan, tenant_id)
+        return real(plan, tenant_id, idempotency_key)
 
     monkeypatch.setattr(mod, "_create_razorpay_subscription", _counting)
 
@@ -256,3 +256,83 @@ def test_trial_end_jti_rolled_back_when_subscribe_fails(_dbpool) -> None:
         _post_token(tid, "pro", jti)  # PRO_RZP_PLAN_ID unset → 503 before the txn
     assert exc.value.status_code == 503
     assert _consumed(_dbpool, jti) == 0  # jti NOT consumed — the token stays usable on a real retry
+
+
+# --- VT-352 F2 — vendor-orphan protection (idempotency-key + detect-only reconcile) -------------
+def test_idempotency_key_same_key_same_sub() -> None:
+    """VT-352 F2: the SAME Idempotency-Key → the SAME vendor subscription (a retry after a
+    commit-after-vendor failure does NOT create an orphan); a NEW key (new authorized attempt) →
+    a NEW subscription (a re-subscribe after cancel can't collide on the UNIQUE)."""
+    from orchestrator.api.razorpay_subscribe import _create_razorpay_subscription
+    from orchestrator.billing.plans import resolve_plan
+
+    plan = resolve_plan("founding")
+    tid = str(uuid4())
+    key = f"subscribe:{tid}:jti-abc"
+    a = _create_razorpay_subscription(plan, tid, key)
+    b = _create_razorpay_subscription(plan, tid, key)  # retry — same key
+    assert a["subscription_id"] == b["subscription_id"]  # SAME sub → no vendor orphan
+    c = _create_razorpay_subscription(plan, tid, f"subscribe:{tid}:jti-xyz")  # new attempt
+    assert c["subscription_id"] != a["subscription_id"]  # new key → new sub
+
+
+@pytest.mark.integration
+def test_reconcile_detects_orphan_no_autocancel(_dbpool, monkeypatch) -> None:
+    """VT-352 F2 DETECT-ONLY: a vendor subscription with no DB row is flagged to Fazal; the known
+    one is left alone; NO auto-cancel (Cowork: unattended money actions create new incidents)."""
+    alerts: list[str] = []
+    monkeypatch.setattr(
+        "orchestrator.billing.refund_executor._alert_fazal", lambda m: alerts.append(m)
+    )
+    from orchestrator.api.razorpay_subscribe import reconcile_subscription_orphans
+
+    tid = uuid4()
+    _seed(_dbpool, tid, phase="trial")
+    known = _post(tid, "founding")["razorpay_subscription_id"]  # a real bound subscription
+
+    orphans = reconcile_subscription_orphans([known, "sub_orphan_xyz"])
+    assert orphans == ["sub_orphan_xyz"]  # only the vendor sub with no DB row
+    assert alerts and "sub_orphan_xyz" in alerts[0]  # Fazal alerted, names the orphan
+
+
+@pytest.mark.integration
+def test_commit_after_vendor_retry_no_orphan(_dbpool, monkeypatch) -> None:
+    """VT-352 F3 (Cowork bounce): vendor create succeeds but the txn fails ONCE; the retry (same
+    jti → same Idempotency-Key) returns the SAME vendor sub id → EXACTLY ONE subscriptions row, no
+    orphan. Two stub calls, identical key."""
+    import orchestrator.api.razorpay_subscribe as mod
+
+    real = mod._create_razorpay_subscription
+    calls: list[str] = []
+    state = {"fail_next": True}
+
+    def _flaky(plan, tenant_id, idempotency_key):
+        calls.append(idempotency_key)
+        result = real(plan, tenant_id, idempotency_key)  # deterministic id from the key
+        if state["fail_next"]:
+            state["fail_next"] = False
+            raise RuntimeError("simulated commit-after-vendor failure")
+        return result
+
+    monkeypatch.setattr(mod, "_create_razorpay_subscription", _flaky)
+    tid = uuid4()
+    _seed(_dbpool, tid, phase="trial")
+    jti = f"jti-retry-{tid.hex[:8]}"
+
+    def _post_jti():
+        return mod.razorpay_subscribe(
+            RazorpaySubscribeBody(tenant_id=str(tid), plan_tier="founding", jti=jti),
+            x_internal_secret=_SECRET,
+        )
+
+    # attempt 1 — vendor "succeeds" then the txn fails → rollback (no row; the jti consume rolls
+    # back too, so the token is reusable).
+    with pytest.raises(RuntimeError):
+        _post_jti()
+    assert len(_rows(_dbpool, tid)) == 0
+
+    # attempt 2 — same jti → same Idempotency-Key → same vendor sub id → exactly ONE row.
+    out = _post_jti()
+    assert out["status"] == "created"
+    assert len(_rows(_dbpool, tid)) == 1
+    assert len(calls) == 2 and calls[0] == calls[1]  # same key both attempts (no orphan at vendor)
