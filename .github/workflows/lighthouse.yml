@@ -1,0 +1,29 @@
+# VT-345 — Lighthouse-CI on the owner portal. MANUAL (workflow_dispatch) — POST-LAUNCH, NOT a
+# per-PR gate: perf-gating a pre-launch surface on every PR is premature (the row's own reasoning)
+# and the Jun15 milestone does not depend on it. This scaffold gates the PUBLIC /team landing
+# (perf/a11y/best-practices >= 85). The requireOwnerSession-gated dashboard needs a CI-only signed
+# owner session (option a) before lhci can reach it past the login redirect — a post-launch
+# extension of THIS workflow (mint a short-lived OWNER_JWT cookie in the CI step, then add the
+# dashboard URL to lighthouserc.json's collect.url).
+name: lighthouse
+
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  lhci:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @viabe/team-web build
+      - name: Lighthouse CI (public landing)
+        run: pnpm dlx @lhci/cli@0.14.x autorun --config=apps/team-web/lighthouserc.json
