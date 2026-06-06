@@ -223,6 +223,30 @@ def _seed_full_tenant_data(dsn: str, tenant_id: UUID) -> dict[str, UUID]:
             (str(tenant_id),),
         )
 
+        # kg_events + kg_events_processed (VT-327): the KG transactional outbox carries the
+        # TENANT_CREATED business_name (owner PII) in payload AT REST (the drain only stamps
+        # drained_at, never deletes) → MUST hard-delete on DSR. The per-tenant marker lets the
+        # completeness test scan for surviving PII post-purge.
+        # event_type lowercase to match the real emitter (kg_vocab: 'tenant_created').
+        conn.execute(
+            "INSERT INTO kg_events (event_type, tenant_id, payload) "
+            "VALUES ('tenant_created', %s, %s::jsonb)",
+            (str(tenant_id), '{"business_name": "kgpii-' + str(tenant_id) + '"}'),
+        )
+        conn.execute(
+            "INSERT INTO kg_events_processed (event_id, event_type, tenant_id, status) "
+            "VALUES (%s, 'tenant_created', %s, 'processed')",
+            (str(uuid4()), str(tenant_id)),
+        )
+        # The kg_population projection copies business_name into the l1_entities
+        # business_profile (attributes JSONB) — seed the SAME marker there so the
+        # cross-table completeness scan exercises a second PII surface (both purged).
+        conn.execute(
+            "INSERT INTO l1_entities (id, tenant_id, entity_type, attributes) "
+            "VALUES (%s, %s, 'business_profile', %s::jsonb)",
+            (str(uuid4()), str(tenant_id), '{"business_name": "kgpii-' + str(tenant_id) + '"}'),
+        )
+
         # consent_records (VT-82): owner DPDPA consent proof. RETAINED on DSR (NOT in
         # _PURGE_ORDER) like privacy_audit_log — PII-free proof of lawful processing.
         conn.execute(
@@ -308,6 +332,8 @@ _PURGED_TABLES = (
     "l1_entities",
     "episodic_events",  # VT-323: L2 episodic memory must be swept by DSR purge
     "platform_listings",  # VT-325: per-listing source must be swept by DSR purge
+    "kg_events_processed",  # VT-327: KG consumer ledger must be swept by DSR purge
+    "kg_events",  # VT-327: KG outbox (TENANT_CREATED business_name PII) must be swept
     "day39_evaluations",  # VT-92: billing decision-audit must be swept by DSR purge
     "owner_inputs",
     "campaigns",
@@ -363,6 +389,55 @@ def test_purge_clears_subject_data_across_all_inventoried_tables(substrate):  # 
     ticket_row = _ticket_row(substrate.dsn, ticket_a)
     assert ticket_row["status"] == "completed"
     assert isinstance(ticket_row["completed_at"], datetime)
+
+
+# Every purgeable surface the TENANT_CREATED business_name could land in, plus the retained
+# privacy_audit_log + the tombstoned tenants row. The completeness scan iterates ALL of them so
+# a future PII-bearing table can't silently slip the purge-order.
+_PII_SCAN_TABLES = (*_PURGED_TABLES, "privacy_audit_log", "tenants")
+
+
+def _marker_rows_anywhere(dsn: str, table: str, marker: str) -> int:
+    """Rows in `table` whose full text rendering contains the marker — catches the marker in
+    ANY column (JSONB or text), not just a named one. `table` is from a fixed allowlist."""
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        row = conn.execute(
+            f"SELECT count(*) FROM {table} t WHERE t::text LIKE %s",  # noqa: S608 — allowlist
+            (f"%{marker}%",),
+        ).fetchone()
+    assert row is not None
+    return int(row[0])
+
+
+def test_purge_leaves_no_tenant_created_pii_at_payload_level(substrate):  # type: ignore[no-untyped-def]
+    """VT-327 COMPLETENESS (CROSS-TABLE): the TENANT_CREATED business_name marker — seeded in
+    BOTH kg_events.payload AND the l1_entities business_profile (the kg_population projection) —
+    survives in NO purgeable surface after a tenant DSR. A real cross-table scan (not a
+    single-table count), so a future PII-bearing table can't silently slip the purge-order.
+    Cross-tenant: the co-resident's PII is untouched."""
+    from orchestrator.dsr_purge import purge_tenant_data
+
+    tenant_a = _new_tenant(substrate.dsn, name="Tenant A")
+    tenant_b = _new_tenant(substrate.dsn, name="Tenant B")
+    _seed_full_tenant_data(substrate.dsn, tenant_a)
+    _seed_full_tenant_data(substrate.dsn, tenant_b)
+    ticket_a = _open_dsr_ticket(substrate.dsn, tenant_a)
+
+    marker_a, marker_b = f"kgpii-{tenant_a}", f"kgpii-{tenant_b}"
+    # fixture: A's marker is present in >= 2 surfaces (kg_events + l1_entities) pre-purge.
+    pre_a = sum(_marker_rows_anywhere(substrate.dsn, t, marker_a) for t in _PII_SCAN_TABLES)
+    assert pre_a >= 2, f"fixture broken: A's PII marker seeded in only {pre_a} surface(s)"
+
+    purge_tenant_data(ticket_a)
+
+    # A's business_name survives in NO purgeable surface (the real cross-table guard)...
+    for table in _PII_SCAN_TABLES:
+        assert _marker_rows_anywhere(substrate.dsn, table, marker_a) == 0, (
+            f"TENANT_CREATED business_name (owner PII) survived the DSR purge in {table}"
+        )
+    # ...and the co-resident tenant B's PII is untouched (cross-tenant isolation).
+    post_b = sum(_marker_rows_anywhere(substrate.dsn, t, marker_b) for t in _PII_SCAN_TABLES)
+    assert post_b >= 2, "co-resident tenant B's PII was wrongly purged"
 
 
 def test_purge_preserves_other_tenant_data(substrate):  # type: ignore[no-untyped-def]
