@@ -11,7 +11,8 @@
 import { serverSecretClient } from '@/lib/supabase-client'
 
 import { OperatorRole } from '@/lib/auth/roles'
-import { maskForVtr, type MaskedOpsRow, type OpsRow } from '@/lib/ops/de-identify'
+import type { MaskedOpsRow } from '@/lib/ops/de-identify'
+import { fetchVtrEscalations } from '@/lib/orchestrator-client'
 
 type Client = { from: (t: string) => any }
 
@@ -28,8 +29,24 @@ export async function fetchEscalations(
   client: Client = serverSecretClient(),
   limit = 50,
 ): Promise<MaskedOpsRow[]> {
-  const { assignedTenants } = operator
+  const { assignedTenants, role } = operator
   if (assignedTenants !== null && assignedTenants.length === 0) return [] // fail-closed
+  // VT-360: the VTR surface is DB-enforced — read the de-identified vtr_escalations view through
+  // the orchestrator (app_vtr_role; route='vtr' + unresolved filtered server-side). NO raw table,
+  // NO app-side masking. VTAdmin (operator full-access) keeps the service-role read.
+  if (role !== OperatorRole.VTADMIN) {
+    const rows = await fetchVtrEscalations(operator.operatorId)
+    return rows.slice(0, limit).map((r) => ({
+      id: String(r.escalation_id),
+      tenant_id: String(r.tenant_id),
+      tenant_name: (r.tenant_name as string | null) ?? null,
+      reference: String(r.escalation_id), // operational row handle (early-review F2 — raw UUID OK)
+      severity: (r.severity as string | null) ?? null,
+      kind: (r.kind as string | null) ?? null,
+      time: (r.opened_at as string | null) ?? null,
+      status: (r.status as string | null) ?? null,
+    }))
+  }
   let q = client
     .from('escalations')
     .select('id, tenant_id, kind, severity, status, opened_at')
@@ -38,17 +55,16 @@ export async function fetchEscalations(
     .limit(limit)
   if (assignedTenants !== null) q = q.in('tenant_id', assignedTenants)
   const { data } = await q
-  const rows: OpsRow[] = (data ?? []).map((r: any) => ({
+  return ((data ?? []) as any[]).map((r) => ({
     id: String(r.id),
     tenant_id: String(r.tenant_id),
-    kind: r.kind,
-    severity: r.severity,
-    time: r.opened_at,
-    status: r.status,
+    tenant_name: null,
+    reference: String(r.id), // operational row handle (referenceFor deleted — escalations carry no PII)
+    severity: r.severity ?? null,
+    kind: r.kind ?? null,
+    time: r.opened_at ?? null,
+    status: r.status ?? null,
   }))
-  // VTR view masked; VTAdmin sees the same operational fields (escalations carry no PII
-  // columns — masking is uniform to hold the contract as the source grows).
-  return rows.map(maskForVtr)
 }
 
 /** Apply an escalation action: update status (resolve/ack) + append ops_audit. Returns the

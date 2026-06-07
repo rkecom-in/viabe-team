@@ -3,6 +3,13 @@
 import { describe, expect, it, vi } from 'vitest'
 
 import { OperatorRole } from '@/lib/auth/roles'
+
+// VT-360: the VTR read path goes through the orchestrator (app_vtr_role views), not the client.
+vi.mock('@/lib/orchestrator-client', () => ({
+  fetchVtrEscalations: vi.fn(),
+  fetchVtrMonitoring: vi.fn(),
+}))
+import { fetchVtrEscalations } from '@/lib/orchestrator-client'
 import { actOnEscalation, fetchEscalations } from '@/lib/ops/escalations'
 
 function readClient(rows: any[]) {
@@ -26,13 +33,32 @@ describe('VT-292 — fetchEscalations scoping', () => {
     expect(out).toEqual([])
   })
 
-  it('returns de-identified rows (no PII, reference present)', async () => {
+  it('VTAdmin: service-role read, operational fields + row-handle reference (no PII)', async () => {
     const out = await fetchEscalations(
       { operatorId: 'op', role: OperatorRole.VTADMIN, assignedTenants: null },
       readClient([{ id: 'abc123de', tenant_id: 't1', kind: 'hard_limit', severity: 'high', status: 'open', opened_at: 'now' }]) as never,
     )
     expect(out).toHaveLength(1)
-    expect(out[0]!.reference).toBe('REF#abc123')
+    expect(out[0]!.reference).toBe('abc123de') // operational row handle (referenceFor retired)
+    expect(out[0]!.kind).toBe('hard_limit')
+    expect((out[0]! as unknown as Record<string, unknown>).phone).toBeUndefined()
+  })
+
+  it('VTR: reads the orchestrator de-identified view, NOT the service-role client', async () => {
+    vi.mocked(fetchVtrEscalations).mockResolvedValue([
+      { escalation_id: 'esc-9', tenant_id: 't1', tenant_name: 'Asha', kind: 'how_to_gap',
+        severity: 'medium', status: 'open', opened_at: 'now', route: 'vtr' },
+    ])
+    // a client that would THROW if touched — proves the VTR path never reads raw via service-role.
+    const trap = { from: () => { throw new Error('VTR must not touch the service-role client') } }
+    const out = await fetchEscalations(
+      { operatorId: 'op', role: OperatorRole.VTR, assignedTenants: null },
+      trap as never,
+    )
+    expect(fetchVtrEscalations).toHaveBeenCalledWith('op')
+    expect(out).toHaveLength(1)
+    expect(out[0]!.reference).toBe('esc-9')
+    expect(out[0]!.tenant_name).toBe('Asha')
     expect((out[0]! as unknown as Record<string, unknown>).phone).toBeUndefined()
   })
 })

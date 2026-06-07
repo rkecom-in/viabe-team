@@ -60,13 +60,14 @@ describe('VT-297 — dispatchReadCommand', () => {
     expect(out).toContain('No open escalations')
   })
 
-  it('/alerts → masked summary, no PII, reference present', async () => {
+  it('/alerts → operational summary, no PII, id handle in tap-to-copy <code>', async () => {
     const out = await dispatchReadCommand(
       parseCommand('/alerts'),
       ADMIN,
       client([{ id: 'abc123de', tenant_id: 't1', kind: 'hard_limit', severity: 'high', status: 'open', opened_at: 'now' }]) as never,
     )
-    expect(out).toContain('REF#abc123')
+    // VT-360: reference is the escalation id (operational handle, F2), rendered <code> for tap-to-copy.
+    expect(out).toContain('<code>abc123de</code>')
     expect(out).toContain('Escalations')
     expect(out).not.toMatch(/\+?\d{10}/) // no phone-shaped digits
   })
