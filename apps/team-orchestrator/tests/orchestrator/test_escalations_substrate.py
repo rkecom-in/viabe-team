@@ -231,3 +231,29 @@ def test_escalation_decay_trends(substrate):
     # rate-by-category counts the recent (default 7d) window only.
     rate = {r["kind"]: r["count"] for r in escalation_rate_by_category(tenant_id=t)}
     assert rate["declining_kind"] == 1 and rate["flat_kind"] == 3 and rate["rising_kind"] == 3
+
+
+# --- VT-279 — record_escalation stores the deterministic VTR/OWNER route -------------------------
+def test_record_escalation_stores_route(substrate):
+    """VT-279: record_escalation classifies + stores `route` — knowledge-gap → vtr; authority →
+    owner; identity (phone) → owner (VT-281). Real-PG."""
+    from uuid import uuid4
+
+    from orchestrator.escalations import record_escalation
+
+    t = _tenant(substrate.dsn)
+    cases = {
+        "how does the ledger reconciliation work?": ("vtr", uuid4()),
+        "should I approve a refund for this order?": ("owner", uuid4()),
+        "customer +91 98765 43210 wants a callback": ("owner", uuid4()),
+    }
+    for notes, (_expect, rid) in cases.items():
+        record_escalation(t, "support_fallback", notes=notes, run_id=rid)
+
+    with psycopg.connect(substrate.dsn, autocommit=True) as c:
+        rows = c.execute(
+            "SELECT notes, route FROM escalations WHERE tenant_id = %s", (t,)
+        ).fetchall()
+    got = {(r["notes"] if isinstance(r, dict) else r[0]): (r["route"] if isinstance(r, dict) else r[1]) for r in rows}
+    for notes, (expect, _rid) in cases.items():
+        assert got.get(notes) == expect, f"{notes!r} → {got.get(notes)} (expected {expect})"

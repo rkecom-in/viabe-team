@@ -36,19 +36,24 @@ def record_escalation(
     NOT re-fire the Telegram ping (VT-343 nit A)."""
     if severity not in _VALID_SEVERITY:
         raise ValueError(f"invalid severity {severity!r}; valid: {_VALID_SEVERITY}")
+    # VT-279: deterministically route the escalation — knowledge-gap → 'vtr', authority/identity →
+    # 'owner' (Pillar 7). NO LLM (Pillar 1); fail-safe to 'owner'. VT-280's digest reads `route`.
+    from orchestrator.owner_surface.vtr_classifier import classify_escalation_route
+
+    route, _route_reason = classify_escalation_route(notes, kind=kind)
     with get_pool().connection() as conn:
         cur = conn.execute(
             """
-            INSERT INTO escalations (tenant_id, run_id, kind, severity, notes)
-            VALUES (%s, %s, %s, %s, %s)
+            INSERT INTO escalations (tenant_id, run_id, kind, severity, notes, route)
+            VALUES (%s, %s, %s, %s, %s, %s)
             ON CONFLICT (run_id) WHERE run_id IS NOT NULL DO NOTHING
             """,
-            (str(tenant_id), str(run_id) if run_id else None, kind, severity, notes),
+            (str(tenant_id), str(run_id) if run_id else None, kind, severity, notes, route),
         )
         inserted = (cur.rowcount or 0) > 0
     logger.info(
-        "escalation recorded tenant=%s kind=%s severity=%s inserted=%s",
-        tenant_id, kind, severity, inserted,
+        "escalation recorded tenant=%s kind=%s severity=%s route=%s inserted=%s",
+        tenant_id, kind, severity, route, inserted,
     )
     return inserted
 
