@@ -131,3 +131,75 @@ def resolve_phone(
         )
         return {"phone_e164": None}
     return {"phone_e164": phone_e164}
+
+
+class ResolveEscalationBody(BaseModel):
+    escalation_id: str
+    operator_id: str
+    resolution_reason: str = ""
+
+
+@router.post("/api/orchestrator/ops/resolve-escalation")
+def resolve_escalation(
+    body: ResolveEscalationBody,
+    x_internal_secret: str | None = Header(default=None, alias="X-Internal-Secret"),
+    x_operator_jwt: str | None = Header(default=None, alias="X-Operator-Jwt"),
+) -> dict[str, Any]:
+    """VT-359 (VT-357-p3 minimal): an operator resolves an escalation → mark resolved + ops-audit +
+    best-effort `support_resolved` send to the owner. Same internal-secret + operator-JWT gate as
+    resolve-phone. (A Telegram /resolve ingress is a later nicety — this is the ops-invokable
+    entry point.)"""
+    if not _verify_internal_secret(x_internal_secret):
+        raise HTTPException(status_code=403, detail="X-Internal-Secret mismatch")
+    claim = _verify_operator_jwt(x_operator_jwt)
+    if claim.get("operator_id") != body.operator_id:
+        raise HTTPException(status_code=403, detail="operator_id in body != JWT claim")
+
+    pool = get_pool()
+    with pool.connection() as conn, conn.transaction():
+        raw = conn.execute(
+            "UPDATE escalations SET status = 'resolved', resolved_by = %s, resolved_at = now() "
+            "WHERE id = %s AND status <> 'resolved' RETURNING tenant_id",
+            (body.operator_id, body.escalation_id),
+        ).fetchone()
+        if raw is None:
+            # Either no such escalation, or already resolved (idempotent — not an error to re-resolve).
+            exists = conn.execute(
+                "SELECT 1 FROM escalations WHERE id = %s", (body.escalation_id,)
+            ).fetchone()
+            if exists is None:
+                raise HTTPException(status_code=404, detail="escalation not found")
+            return {"status": "already_resolved", "escalation_id": body.escalation_id}
+        row = cast("dict[str, Any]", raw)
+        tenant_id = str(row["tenant_id"])
+        # Ops-audit the resolve (append-only; no PII in detail — CL-390).
+        from orchestrator.escalations import record_ops_audit
+
+        record_ops_audit(
+            body.operator_id,
+            "resolve",
+            "escalation",
+            tenant_id=tenant_id,
+            target_id=body.escalation_id,
+            detail=body.resolution_reason[:200] or None,
+        )
+
+    # Best-effort owner notification (support_resolved). Outside the txn — a send failure must not
+    # roll back the resolve. send_template_message is naturally dormant pre-go-live (WABA not live
+    # → 4xx → success=False). support_reference_id = the escalation id.
+    try:
+        from uuid import UUID
+
+        from orchestrator.utils.twilio_send import send_template_message
+
+        send_template_message(
+            UUID(tenant_id),
+            "support_resolved",
+            {"support_reference_id": body.escalation_id},
+        )
+    except Exception:
+        logger.exception(
+            "support_resolved send failed escalation=%s (resolve still committed)",
+            body.escalation_id,
+        )
+    return {"status": "resolved", "escalation_id": body.escalation_id, "tenant_id": tenant_id}
