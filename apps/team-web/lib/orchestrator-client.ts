@@ -288,3 +288,49 @@ export function fetchVtrEscalations(operatorId: string): Promise<VtrRow[]> {
 export function fetchVtrMonitoring(operatorId: string): Promise<VtrRow[]> {
   return fetchVtrRows('/api/orchestrator/ops/vtr-monitoring', operatorId)
 }
+
+
+// ---------------------------------------------------------------------------
+// VT-361 — business verification (Option F) proxy. team-web NEVER calls Sandbox directly; the
+// orchestrator holds the creds + does the vendor calls (fail-closed). Owner-surface flow:
+// lookup (GSTIN→name) → initiate (reverse penny-drop UPI handle) → bind (payer-name match → tier).
+// ---------------------------------------------------------------------------
+
+export interface BusinessVerificationResult {
+  ok: boolean
+  status?: string // unverified | name_verified | gstin_verified
+  reason?: string
+  upiHandle?: string | null
+  reference?: string | null
+  raw?: Record<string, unknown>
+}
+
+export async function forwardBusinessVerification(
+  tenantId: string,
+  action: 'lookup' | 'initiate' | 'bind',
+  opts: { gstin?: string; reference?: string } = {},
+): Promise<BusinessVerificationResult> {
+  const base = process.env.TEAM_ORCHESTRATOR_URL ?? _ORCHESTRATOR_DEFAULT
+  const secret = process.env.INTERNAL_API_SECRET ?? ''
+  try {
+    const res = await fetch(`${base}/api/business-verification`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'X-Internal-Secret': secret },
+      body: JSON.stringify({ tenant_id: tenantId, action, ...opts }),
+      signal: AbortSignal.timeout(_FORWARD_TIMEOUT_MS),
+    })
+    if (!res.ok) return { ok: false, reason: `http_${res.status}` }
+    const data = (await res.json()) as Record<string, unknown>
+    return {
+      ok: Boolean(data.ok),
+      status: (data.status as string) ?? undefined,
+      reason: (data.reason as string) ?? undefined,
+      upiHandle: (data.upi_handle as string) ?? null,
+      reference: (data.reference as string) ?? null,
+      raw: data,
+    }
+  } catch (err) {
+    const timedOut = err instanceof Error && err.name === 'TimeoutError'
+    return { ok: false, reason: timedOut ? 'timeout' : 'error' }
+  }
+}
