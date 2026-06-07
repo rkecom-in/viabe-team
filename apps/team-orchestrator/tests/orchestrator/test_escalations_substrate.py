@@ -190,3 +190,44 @@ def test_sla_sweep_skips_resolved(substrate, monkeypatch):
     )
     assert resolved not in esc.run_sla_breach_sweep_body()
     assert _sla_alerted_at(substrate.dsn, resolved) is None
+
+
+# --- VT-282 — escalation-rate + decay metric ----------------------------------------------------
+def _seed_at(dsn, tenant, kind, *, days_ago: int, n: int = 1) -> None:
+    """Insert n escalations of `kind` opened `days_ago` days ago (for decay-window seeding)."""
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        for _ in range(n):
+            conn.execute(
+                "INSERT INTO escalations (tenant_id, kind, severity, status, opened_at) "
+                "VALUES (%s, %s, 'medium', 'open', now() - make_interval(days => %s))",
+                (tenant, kind, days_ago),
+            )
+
+
+def test_escalation_decay_trends(substrate):
+    """VT-282: per (tenant, kind) recent-vs-prior decay — declining=healthy; flat/rising flag the
+    CL-426 product-bug signal. Real-PG, windows recent=7d / prior=7d."""
+    from orchestrator.owner_surface.escalation_metrics import (
+        escalation_decay,
+        escalation_rate_by_category,
+    )
+
+    t = _tenant(substrate.dsn)
+    # declining: 1 recent vs 5 prior
+    _seed_at(substrate.dsn, t, "declining_kind", days_ago=1, n=1)
+    _seed_at(substrate.dsn, t, "declining_kind", days_ago=10, n=5)
+    # flat: 3 recent vs 3 prior
+    _seed_at(substrate.dsn, t, "flat_kind", days_ago=1, n=3)
+    _seed_at(substrate.dsn, t, "flat_kind", days_ago=10, n=3)
+    # rising: 3 recent vs 1 prior
+    _seed_at(substrate.dsn, t, "rising_kind", days_ago=1, n=3)
+    _seed_at(substrate.dsn, t, "rising_kind", days_ago=10, n=1)
+
+    decay = {d["kind"]: d for d in escalation_decay(tenant_id=t)}
+    assert decay["declining_kind"]["trend"] == "declining" and decay["declining_kind"]["healthy"]
+    assert decay["flat_kind"]["trend"] == "flat" and not decay["flat_kind"]["healthy"]
+    assert decay["rising_kind"]["trend"] == "rising" and not decay["rising_kind"]["healthy"]
+
+    # rate-by-category counts the recent (default 7d) window only.
+    rate = {r["kind"]: r["count"] for r in escalation_rate_by_category(tenant_id=t)}
+    assert rate["declining_kind"] == 1 and rate["flat_kind"] == 3 and rate["rising_kind"] == 3
