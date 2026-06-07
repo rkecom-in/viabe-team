@@ -2,6 +2,12 @@
 
 **Source of truth** for the launch milestones across the three gates (Reports-Jun15 / Team-Jul15-Soft / Team-Aug15-Full).
 
+> **🎯 BINDING LAUNCH TARGET (Fazal, 2026-06-06): Team go-live = 2026-07-15** (the Team-Jul15-Soft
+> gate). Committed PRE-launch: the counsel package (privacy notice + owner_inputs framing + public
+> legal copy — CL-430 / VT-156) + VT-231 (prod Supabase Mumbai). Vendor cutover legs in flight:
+> VT-109 (Razorpay KYC DONE; Live plans + cutover canaries residual), VT-111 (DLT submitted).
+> **Reports-Jun15 is a SEPARATE Reports-project milestone — do NOT conflate with the Team launch.**
+
 **Owner:** Cowork. Migrated from Notion data source `413be4ab-870d-4895-bf35-dfd579142001` on 2026-05-26 by Cowork (Notion-MCP fetch).
 
 **Coverage:** 35 / 48 milestones extracted in initial pass. Remaining 13 (MS-5/6/7/8/10/12/14/16/17/18/24/46/47) deferred — Cowork backfills opportunistically. The 35 captured include all 3 Launch Gates + the highest-visibility Sprint 1 / Reports-Jun15 milestones.
