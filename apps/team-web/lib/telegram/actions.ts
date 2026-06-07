@@ -1,8 +1,8 @@
 /**
  * VT-297 — Telegram mutating actions (/ack, /resolve) — IDOR-safe by construction.
  *
- * A VTR references an escalation by the REF# shown in /alerts. We do NOT trust any chat-supplied
- * tenant/id: we resolve the reference ONLY within the operator's OWN scoped escalation set
+ * A VTR references an escalation by the id shown (tap-to-copy <code>) in /alerts. We do NOT trust any
+ * chat-supplied tenant/id: we resolve the reference ONLY within the operator's OWN scoped escalation set
  * (fetchEscalations already filters to assigned tenants, fail-closed) and act on the matched row's
  * SERVER-resolved id + tenant_id via actOnEscalation. So a VTR can only ever act on an escalation
  * already visible to them — pairing a foreign id with an assigned tenant is impossible (the
@@ -31,7 +31,7 @@ export async function actByReference(
   client?: Client,
 ): Promise<string> {
   const ref = (reference ?? '').trim()
-  if (!ref) return escapeHtml(`Usage: /${action} REF#xxxxxx`)
+  if (!ref) return escapeHtml(`Usage: /${action} <escalation-id> (tap-to-copy from /alerts)`)
 
   // Candidate set is ALREADY scoped to the operator's assigned tenants (fail-closed []).
   const rows = await fetchEscalations(operator, client as never)
@@ -41,9 +41,8 @@ export async function actByReference(
     // Either not theirs or not open — same generic reply (don't leak existence).
     return escapeHtml(`No open escalation ${ref} in your businesses.`)
   }
-  if (matches.length > 1) {
-    return escapeHtml(`${ref} is ambiguous (matches ${matches.length}). Open it in the web console.`)
-  }
+  // VT-360 (fork A): the old "ambiguous match" guard died with the REF# short-form — `reference` is
+  // now the unique escalation_id, so a match set is always 0 or 1. One fewer error UX, strictly safer.
 
   const row = matches[0]!
   // tenant_id + id are SERVER-resolved from the scoped row — not chat input.

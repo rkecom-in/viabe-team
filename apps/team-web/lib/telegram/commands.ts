@@ -44,8 +44,8 @@ const HELP = [
   '/alerts — open escalations for your businesses',
   '/status — watchdog health (crash/stall/misbehaviour)',
   '/runs — recent agent runs',
-  '/ack REF#xxxxxx — acknowledge an escalation',
-  '/resolve REF#xxxxxx — resolve an escalation',
+  '/ack <id> — acknowledge an escalation (tap-to-copy the id from /alerts)',
+  '/resolve <id> — resolve an escalation (tap-to-copy the id from /alerts)',
   '/help — this message',
 ].join('\n')
 
@@ -76,9 +76,11 @@ export async function dispatchReadCommand(
       const counts = Object.entries(bySev)
         .map(([s, n]) => `${escapeHtml(s)}: ${n}`)
         .join(', ')
+      // VT-360 fork A: render the id (the action handle) in <code> → tap-to-copy on mobile, so
+      // /ack /resolve is copy+paste, never hand-typing a UUID.
       const top = rows
         .slice(0, 10)
-        .map((r) => `• ${escapeHtml(r.reference)} — ${escapeHtml(r.kind ?? '?')} (${escapeHtml(r.severity ?? '?')})`)
+        .map((r) => `• <code>${escapeHtml(r.reference)}</code> — ${escapeHtml(r.kind ?? '?')} (${escapeHtml(r.severity ?? '?')})`)
         .join('\n')
       return `${head}\n${escapeHtml(counts)}\n${top}`
     }

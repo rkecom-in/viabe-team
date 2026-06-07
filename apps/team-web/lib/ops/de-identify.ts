@@ -1,11 +1,13 @@
 /**
- * VT-290 — PII de-identification for the VTR view (CL-426).
+ * VT-290 / VT-360 — VTR view row shapes (CL-426).
  *
- * A VTR sees OPERATIONAL data, not raw customer PII. Escalation/queue rows shown to a
- * VTR are masked at the data-access boundary: customer name / phone / email / account id
- * are dropped and replaced by a stable, non-PII reference derived from the row's own id
- * (e.g. `REF#a4f9d2`). VTAdmin sees full detail. Actual PII is reachable only via the
- * audited [Resolve] path (VT-188), never silently.
+ * The VTR sees OPERATIONAL data, not raw customer PII. As of VT-360 the de-identification is
+ * DB-ENFORCED, not app-side: the VTR ops surface reads the VT-281/360 de-identified views through
+ * the orchestrator as `app_vtr_role` (NO grant on raw tables / decrypt), so PII is unreachable, not
+ * merely masked. The old app-side `maskForVtr` / `referenceFor` / `hasPii` helpers were RETIRED in
+ * VT-360 — these are now just the row-shape types the surface renders. VTAdmin (operator
+ * full-access) keeps the service-role read; actual PII is reachable only via the audited [Resolve]
+ * path (VT-188), never silently.
  */
 
 export interface OpsRow {
@@ -34,28 +36,7 @@ export interface MaskedOpsRow {
   status: string | null
 }
 
-/** Stable non-PII reference from the row id (no customer data). */
-export function referenceFor(id: string): string {
-  return `REF#${(id || '').replace(/-/g, '').slice(0, 6) || 'unknown'}`
-}
-
-/** Mask a row for the VTR view: strip all PII, keep operational fields + a reference. */
-export function maskForVtr(row: OpsRow): MaskedOpsRow {
-  return {
-    id: row.id,
-    tenant_id: row.tenant_id,
-    tenant_name: row.tenant_name ?? null,
-    reference: referenceFor(row.id),
-    severity: row.severity ?? null,
-    kind: row.kind ?? null,
-    time: row.time ?? null,
-    status: row.status ?? null,
-  }
-}
-
-/** Returns true if an object still carries any PII field (guard for tests/assertions). */
-export function hasPii(row: Record<string, unknown>): boolean {
-  return ['customer_name', 'phone', 'email', 'account_id'].some(
-    (k) => row[k] != null && row[k] !== '',
-  )
-}
+// maskForVtr / referenceFor / hasPii were RETIRED in VT-360 — the VTR surface now reads
+// DB-de-identified views through the orchestrator (app_vtr_role), so there is no app-side masking
+// or raw-id REF# left to generate. The types above are the rendered row shapes; `reference` is the
+// operational row handle the orchestrator returns (the escalation/alert id — not a person id).

@@ -203,3 +203,82 @@ def resolve_escalation(
             body.escalation_id,
         )
     return {"status": "resolved", "escalation_id": body.escalation_id, "tenant_id": tenant_id}
+
+
+# ---------------------------------------------------------------------------
+# VT-360 — VTR-facing de-identified reads (route through app_vtr_role + the VT-281/VT-360 views).
+#
+# CL-425 becomes DB-ENFORCED on ALL VTR paths here: team-web's VTR ops surface stops querying raw
+# tables via the service-role (maskForVtr, app-side) and instead calls these endpoints, which read
+# ONLY the de-identified views as app_vtr_role (NO grant on raw / decrypt — VT-281). Read-only,
+# bounded, returns EXACTLY the view columns (no enrichment/joins — a new field is added to the VIEW,
+# never here). Internal-secret + operator-JWT gated (the resolve-phone pattern).
+#
+# MULTI-VTR PRECONDITION (read before adding a 2nd VTR): the views are NOT assignment-scoped —
+# Phase-1 = Fazal-as-VTR#1 sees ALL tenants. BEFORE a second VTR exists, the views MUST gain
+# `WHERE tenant_id IN (SELECT ... FROM vtr_assignments WHERE vtr_id = ...)` (VT-281/VT-360 note);
+# until then these endpoints intentionally return all tenants.
+# ---------------------------------------------------------------------------
+
+_VTR_PAGE_CAP = 200
+
+
+class VtrReadBody(BaseModel):
+    operator_id: str
+    limit: int = 100
+
+
+def _vtr_read_auth(
+    x_internal_secret: str | None, x_operator_jwt: str | None, operator_id: str
+) -> None:
+    if not _verify_internal_secret(x_internal_secret):
+        raise HTTPException(status_code=403, detail="X-Internal-Secret mismatch")
+    claim = _verify_operator_jwt(x_operator_jwt)
+    if claim.get("operator_id") != operator_id:
+        raise HTTPException(status_code=403, detail="operator_id in body != JWT claim")
+
+
+def _vtr_query(sql: str, limit: int) -> list[dict[str, Any]]:
+    """Run a bounded read as app_vtr_role via vtr_connection. The view is the only door."""
+    from orchestrator.privacy.vtr import vtr_connection
+
+    capped = max(1, min(limit, _VTR_PAGE_CAP))
+    with vtr_connection() as conn, conn.cursor() as cur:
+        cur.execute(sql, (capped,))
+        return [dict(r) for r in cur.fetchall()]
+
+
+@router.post("/api/orchestrator/ops/vtr-escalations")
+def vtr_escalations_read(
+    body: VtrReadBody,
+    x_internal_secret: str | None = Header(default=None, alias="X-Internal-Secret"),
+    x_operator_jwt: str | None = Header(default=None, alias="X-Operator-Jwt"),
+) -> dict[str, Any]:
+    """VTR escalations queue — EXACTLY the vtr_escalations view columns, app_vtr_role, bounded.
+    Server-side filtered to the VTR queue: route='vtr' (knowledge-gap) + unresolved (early-review
+    F7 — the filter lives here, not client-side)."""
+    _vtr_read_auth(x_internal_secret, x_operator_jwt, body.operator_id)
+    rows = _vtr_query(
+        "SELECT escalation_id, tenant_id, tenant_name, kind, severity, status, opened_at, "
+        "resolved_at, route FROM vtr_escalations "
+        "WHERE route = 'vtr' AND status <> 'resolved' ORDER BY opened_at DESC LIMIT %s",
+        body.limit,
+    )
+    return {"rows": rows, "count": len(rows)}
+
+
+@router.post("/api/orchestrator/ops/vtr-monitoring")
+def vtr_monitoring_read(
+    body: VtrReadBody,
+    x_internal_secret: str | None = Header(default=None, alias="X-Internal-Secret"),
+    x_operator_jwt: str | None = Header(default=None, alias="X-Operator-Jwt"),
+) -> dict[str, Any]:
+    """VTR monitoring board — EXACTLY the vtr_tenant_alerts view columns (no message_text/payload/
+    run_id — early-review F3), app_vtr_role, bounded."""
+    _vtr_read_auth(x_internal_secret, x_operator_jwt, body.operator_id)
+    rows = _vtr_query(
+        "SELECT alert_id, tenant_id, tenant_name, trigger_kind, severity, fired_at "
+        "FROM vtr_tenant_alerts ORDER BY fired_at DESC LIMIT %s",
+        body.limit,
+    )
+    return {"rows": rows, "count": len(rows)}

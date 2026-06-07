@@ -1,8 +1,15 @@
 /** VT-296 — Monitoring board: scoping (fail-closed), category mapping, CL-426 de-id, sort. */
 
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 
 import { OperatorRole } from '@/lib/auth/roles'
+
+// VT-360: the VTR read path goes through the orchestrator (app_vtr_role views), not the client.
+vi.mock('@/lib/orchestrator-client', () => ({
+  fetchVtrEscalations: vi.fn(),
+  fetchVtrMonitoring: vi.fn(),
+}))
+import { fetchVtrMonitoring } from '@/lib/orchestrator-client'
 import { categoryForKind, fetchMonitoringBoard } from '@/lib/ops/monitoring'
 
 /** Programmable client: tenant_alerts list (thenable) + tenants name lookup (thenable). */
@@ -62,20 +69,23 @@ describe('VT-296 — fetchMonitoringBoard scoping', () => {
   })
 })
 
-describe('VT-296 — CL-426 de-identification', () => {
-  it('VTR view drops message_text, keeps operational fields + reference', async () => {
-    const out = await fetchMonitoringBoard(
-      VTR(['t1']),
-      client(
-        [{ id: 'abc123de', tenant_id: 't1', trigger_kind: 'escalation', severity: 'critical', fired_at: 'now', run_id: 'r1', message_text: 'should be hidden' }],
-        [{ id: 't1', business_name: 'Asha' }],
-      ) as never,
-    )
+describe('VT-296 — CL-426 de-identification (VT-360: DB-enforced via the orchestrator)', () => {
+  it('VTR reads the de-identified view (no message_text, no run_id), NOT the service-role client', async () => {
+    // the view excludes message_text + run_id server-side (mig 118 / early-review F3).
+    vi.mocked(fetchVtrMonitoring).mockResolvedValue([
+      { alert_id: 'a-9', tenant_id: 't1', tenant_name: 'Asha', trigger_kind: 'escalation',
+        severity: 'critical', fired_at: 'now' },
+    ])
+    // a client that THROWS if touched — proves the VTR path never reads raw tenant_alerts.
+    const trap = { from: () => { throw new Error('VTR must not touch the service-role client') } }
+    const out = await fetchMonitoringBoard(VTR(['t1']), trap as never)
+    expect(fetchVtrMonitoring).toHaveBeenCalledWith('vtr')
     expect(out).toHaveLength(1)
-    expect(out[0]!.message_text).toBeNull() // dropped for VTR
-    expect(out[0]!.reference).toBe('REF#abc123')
+    expect(out[0]!.message_text).toBeNull() // not in the view
+    expect(out[0]!.run_id).toBeNull() // F3: no drill-in pivot for the VTR
+    expect(out[0]!.reference).toBe('a-9') // operational row handle
     expect(out[0]!.category).toBe('misbehaviour')
-    expect(out[0]!.severity).toBe('critical')
+    expect(out[0]!.tenant_name).toBe('Asha')
   })
 })
 
