@@ -85,6 +85,10 @@ CREATE OR REPLACE VIEW vtr_escalations AS
 GRANT USAGE ON SCHEMA public TO app_vtr_role;
 GRANT SELECT ON vtr_customers TO app_vtr_role;
 GRANT SELECT ON vtr_escalations TO app_vtr_role;
+-- (Cowork fold-in b): default-priv tidiness. mig 015's ALTER DEFAULT PRIVILEGES auto-grants
+-- app_role on new tables/views; the VTR views don't need app_role access (app_role reads the base
+-- tables directly — the de-identified views are the VTR surface only). REVOKE it.
+REVOKE ALL ON vtr_customers, vtr_escalations FROM app_role;
 
 -- 5. Grant-hygiene (sharpening #3): Postgres grants EXECUTE on every new function to PUBLIC by
 --    default, so app_vtr_role would INHERIT EXECUTE on the audited decrypt fn via PUBLIC. The fn is

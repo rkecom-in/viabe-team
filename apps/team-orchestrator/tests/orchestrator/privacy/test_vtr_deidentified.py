@@ -139,3 +139,18 @@ def test_bootstrap_secret_requires_key(substrate, monkeypatch) -> None:
     monkeypatch.delenv("VT_REF_HMAC_KEY", raising=False)
     with pytest.raises(RuntimeError, match="VT_REF_HMAC_KEY"):
         bootstrap_vtr_ref_secret()
+
+
+def test_vtr_role_grants_are_exactly_the_two_views(substrate) -> None:
+    """Grant hygiene (Cowork fold-in a): app_vtr_role's table privileges are EXACTLY SELECT on the
+    two de-identified views and NOTHING else — covers ALL tables (catches any future grant that
+    would widen the VTR surface), not just the probed PII set."""
+    with psycopg.connect(substrate, autocommit=True) as conn:
+        rows = conn.execute(
+            "SELECT table_name, privilege_type FROM information_schema.role_table_grants "
+            "WHERE grantee = 'app_vtr_role'"
+        ).fetchall()
+    granted = {(r[0], r[1]) for r in rows}
+    assert granted == {("vtr_customers", "SELECT"), ("vtr_escalations", "SELECT")}, (
+        f"app_vtr_role grants drifted beyond the 2 de-identified views: {granted}"
+    )
