@@ -1,6 +1,11 @@
 # Latest State Snapshot
 
-**As of:** 2026-06-06 (regenerated at the Sprint-8 buildable close; reconciled against `gh pr list --state merged` (#366–#393) + the `.viabe/sprint/` board per Rule #14). **Main HEAD:** `3e689d1` (VT-329 i18n, #393). **Reports-Jun15 in 9 days.**
+**As of:** 2026-06-07 (overnight Cowork↔CC delivery). **Main HEAD:** `4ce9013` (VT-282, #411). **BINDING Team go-live: 2026-07-15** (Fazal 2026-06-06; Reports-Jun15 is the SEPARATE Reports milestone — do not conflate). Earlier As-of block (#393) retained below; **Cowork's morning brief does the full Rule-14 reconcile + dashboard regen.**
+
+> **OVERNIGHT DELTA (#394–#411, CC-reconciled).** **Backlog-close queue CLOSED:** 3 stale closures (VT-14/114/308) + VT-358 (customer opt-out i18n) + VT-357 p2 (SLA-breach sweep) + VT-352 (Razorpay dead-letter + replay + vendor-orphan idempotency, money, adversarially bounce-amended) + VT-353 (legal-page DRAFT shells) + VT-322 (reaper) + VT-356 (runner mypy) + VT-107 (edge-case coverage manifest + gate-guard). **PM dashboard retired** (CL-430). **In-flight close:** VT-208→Done (Shopify drift), VT-161→Blocked (no cloud conductor), VT-162→Done, VT-318 reconciled (stays Blocked on live-WABA). **AOL wave:** VT-282 (escalation-rate+decay) Done #411; **VT-281 (#408 VTR de-identified views, pii) + VT-279 (#409 VTR/OWNER classifier) OPEN in Cowork's review**; VT-280 (VTR digest) HELD until #408+#409 land. VT-357 closed (p1→brain-send-wiring acceptance, p3→VT-108 template gate). **Vendor:** VT-109 KYC done (Live-plans+cutover-canaries residual), VT-111 DLT submitted. Launch prereqs unchanged: counsel package (CL-430/VT-156) + VT-231 Mumbai, pre-2026-07-15.
+
+---
+**[stale — superseded by the delta above; Cowork reconciles]** As of 2026-06-06 (#366–#393), HEAD `3e689d1` (VT-329 i18n, #393). Reports-Jun15 block carried-forward.
 
 > Treat as suspect until reconciled (Rule #14). The **Sprint-8 close block is CC-reconciled** (every merged PR cross-checked to its row's `status: Done`). The Reports-Jun15 / VT-267 onboarding block is **carried-forward — Cowork reconciles it** (CC does not hold current PR-B/C/D + VT-283 state).
 
