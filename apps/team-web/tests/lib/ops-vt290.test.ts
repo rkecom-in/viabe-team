@@ -6,7 +6,6 @@ import { describe, expect, it } from 'vitest'
 
 import { OperatorRole, isVtAdmin, resolveRole } from '@/lib/auth/roles'
 import { canAccessTenant, resolveAssignedTenants } from '@/lib/ops/assignments'
-import { hasPii, maskForVtr, referenceFor, type OpsRow } from '@/lib/ops/de-identify'
 
 describe('VT-290 — roles', () => {
   it('Fazal → VTAdmin (break-glass)', () => {
@@ -25,41 +24,10 @@ describe('VT-290 — roles', () => {
   })
 })
 
-describe('VT-290 — de-identification (CL-426)', () => {
-  const row: OpsRow = {
-    id: 'a4f9d2e1-0000-0000-0000-000000000000',
-    tenant_id: 't1',
-    tenant_name: 'Asha Sarees',
-    customer_name: 'John Doe',
-    phone: '+919876500001',
-    email: 'j@x.com',
-    account_id: 'acct-9',
-    severity: 'high',
-    kind: 'aborted_hard_limit',
-    time: '2026-06-02T00:00:00Z',
-    status: 'open',
-  }
-
-  it('masks ALL PII for VTR, keeps operational fields + reference', () => {
-    const masked = maskForVtr(row)
-    expect(hasPii(masked as unknown as Record<string, unknown>)).toBe(false)
-    expect(masked.reference).toBe('REF#a4f9d2')
-    expect(masked.tenant_name).toBe('Asha Sarees')
-    expect(masked.severity).toBe('high')
-    // PII fields are simply absent on the masked shape
-    expect((masked as unknown as Record<string, unknown>).phone).toBeUndefined()
-    expect((masked as unknown as Record<string, unknown>).customer_name).toBeUndefined()
-  })
-
-  it('referenceFor is stable + non-PII', () => {
-    expect(referenceFor('a4f9d2e1-xxxx')).toBe('REF#a4f9d2')
-    expect(referenceFor('')).toBe('REF#unknown')
-  })
-
-  it('hasPii detects raw rows', () => {
-    expect(hasPii(row as unknown as Record<string, unknown>)).toBe(true)
-  })
-})
+// VT-360: the app-side de-identification (maskForVtr/referenceFor/hasPii) was RETIRED — VTR
+// de-identification is now DB-ENFORCED via the orchestrator (app_vtr_role + the VT-281/360 views).
+// Those unit tests are replaced by the orchestrator-side canary (test_vtr_reads.py — denied
+// raw-table reads + view-columns-only) and the role-split tests in ops-escalations / ops-monitoring.
 
 describe('VT-290 — assignment scoping (fail-closed)', () => {
   function fakeClient(rows: { tenant_id: string }[]) {

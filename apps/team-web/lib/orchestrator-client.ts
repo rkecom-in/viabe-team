@@ -1,3 +1,5 @@
+import { issueOperatorJwt } from '@/lib/auth/operator-jwt'
+
 /** Result of forwarding an inbound webhook to the orchestrator. */
 export interface ForwardResult {
   /** True when the orchestrator returned 2xx (regardless of its `reason`). */
@@ -232,4 +234,57 @@ export async function forwardOnboardStep(
       reason: timedOut ? 'timeout' : 'error',
     }
   }
+}
+
+
+// ---------------------------------------------------------------------------
+// VT-360 — VTR de-identified reads via the orchestrator (fork C).
+//
+// CL-425 is DB-ENFORCED on the team-web VTR surface here: instead of reading raw tables with the
+// service-role client + app-side masking, the VTR ops reads call these endpoints, which read ONLY
+// the de-identified views as app_vtr_role (NO grant on raw / decrypt — VT-281). The orchestrator is
+// the ONLY door to VTR data. Fail-CLOSED: any error → [] (the surface degrades to empty, never to
+// raw). MULTI-VTR precondition (VT-281/360): the views aren't assignment-scoped yet — Phase-1 =
+// Fazal-as-VTR#1 sees all tenants; a 2nd VTR needs the views scoped first.
+// ---------------------------------------------------------------------------
+
+const _VTR_READ_TIMEOUT_MS = 5000
+
+export type VtrRow = Record<string, unknown>
+
+async function fetchVtrRows(path: string, operatorId: string): Promise<VtrRow[]> {
+  const base = process.env.TEAM_ORCHESTRATOR_URL ?? _ORCHESTRATOR_DEFAULT
+  const secret = process.env.INTERNAL_API_SECRET ?? ''
+  try {
+    const jwt = await issueOperatorJwt(operatorId)
+    const res = await fetch(`${base}${path}`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'X-Internal-Secret': secret,
+        'X-Operator-Jwt': jwt,
+      },
+      body: JSON.stringify({ operator_id: operatorId }),
+      signal: AbortSignal.timeout(_VTR_READ_TIMEOUT_MS),
+    })
+    if (!res.ok) {
+      console.error(`fetchVtrRows ${path}: http_${res.status}; failing closed`)
+      return []
+    }
+    const data = (await res.json()) as { rows?: VtrRow[] }
+    return data.rows ?? []
+  } catch (err) {
+    console.error(`fetchVtrRows ${path}: failing closed`, err)
+    return []
+  }
+}
+
+/** VT-360: VTR escalations queue (de-identified, app_vtr_role + vtr_escalations). Fail-closed []. */
+export function fetchVtrEscalations(operatorId: string): Promise<VtrRow[]> {
+  return fetchVtrRows('/api/orchestrator/ops/vtr-escalations', operatorId)
+}
+
+/** VT-360: VTR monitoring board (de-identified, app_vtr_role + vtr_tenant_alerts). Fail-closed []. */
+export function fetchVtrMonitoring(operatorId: string): Promise<VtrRow[]> {
+  return fetchVtrRows('/api/orchestrator/ops/vtr-monitoring', operatorId)
 }
