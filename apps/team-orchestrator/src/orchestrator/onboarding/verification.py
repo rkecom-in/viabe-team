@@ -1,63 +1,36 @@
-"""VT-361 — business-verification orchestration (Option F).
+"""VT-361 — business-verification orchestration (two-tier).
 
-Composes the Sandbox-by-Quicko vendor calls into the tenant verification tiers, RLS-scoped, fail-
-closed, attempt-capped, cost-logged. Three operations:
+RLS-scoped, fail-closed, attempt-capped, cost-logged. Two operations:
 
-- ``run_lookup(tenant_id, gstin)`` — GSTIN search → store the authoritative name + the gstin. Status
-  STAYS 'unverified' (a public GSTIN is knowledge, not control — the bind proves control).
-- ``run_initiate(tenant_id)`` — start a reverse penny-drop → return the UPI handle the owner pays ₹1 to.
-- ``run_bind(tenant_id, reference)`` — poll the payer's bank name, match it, set the tier:
-    payer matches the GSTIN-lookup name  → gstin_verified  (top: both sides vendor-authoritative, ungameable)
-    payer matches the claimed business name (no GSTIN) → name_verified
-    no match / vendor down → stays unverified (fail-closed)
+- ``run_lookup(tenant_id, gstin)`` — Sandbox GSTIN search. An ACTIVE GSTIN → ``gstin_verified``
+  ("yellow") + the authoritative name stored. Lookup success alone earns it (no ownership bind —
+  Fazal two-tier ruling 2026-06-08). Distinguishes vendor-down (retryable) from invalid/inactive
+  GSTIN (bad input) in the log so ops can tell an outage from a fraud/typo signal.
+- ``run_vtr_override(tenant_id, operator_id, basis)`` — manual VTR/ops upgrade to ``vtr_verified``
+  ("green"). Audited (who/when/free-text basis). Gates nothing today; value arrives later.
 
-Anti-gaming: the gstin tier matches two vendor-authoritative names (lookup name ∧ bank payer name) —
-neither owner-crafted. The owner cannot type their way to gstin_verified.
+The activation gate (card_captured → paid_active requires gstin_verified) lives in transitions.py —
+it reads verification_status server-side, never a client field.
 """
 
 from __future__ import annotations
 
 import logging
-import re
 from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID
 
 from orchestrator.db import tenant_connection
-from orchestrator.integrations.methods import sandbox_kyc
 
 logger = logging.getLogger(__name__)
 
 _MAX_ATTEMPTS_PER_DAY = 5  # wallet economics — no retry storms
-_MATCH_THRESHOLD = 0.6
-
-# Dropped before token-matching so "RKECOM SERVICE (OPC) PRIVATE LIMITED" ~ "RKECOM Service".
-_NOISE = {
-    "private", "limited", "ltd", "pvt", "llp", "opc", "company", "co", "and", "the",
-    "enterprises", "enterprise", "trading", "services", "service", "industries", "&",
-}
-
-
-def _tokens(name: str | None) -> set[str]:
-    if not name:
-        return set()
-    words = re.sub(r"[^a-z0-9 ]+", " ", name.lower()).split()
-    return {w for w in words if w and w not in _NOISE}
-
-
-def name_match(a: str | None, b: str | None) -> bool:
-    """Token-set overlap (Jaccard) ≥ threshold. Both names are vendor-authoritative at the gstin tier."""
-    ta, tb = _tokens(a), _tokens(b)
-    if not ta or not tb:
-        return False
-    overlap = len(ta & tb) / len(ta | tb)
-    return overlap >= _MATCH_THRESHOLD
 
 
 def _attempts_today(conn: Any, tenant_id: str) -> int:
     row = conn.execute(
         "SELECT count(*) AS n FROM kyc_verification_log "
-        "WHERE tenant_id = %s AND created_at > now() - interval '1 day'",
+        "WHERE tenant_id = %s AND action = 'lookup' AND created_at > now() - interval '1 day'",
         (tenant_id,),
     ).fetchone()
     return int(row["n"] if isinstance(row, dict) else row[0])
@@ -72,72 +45,52 @@ def _log(conn: Any, tenant_id: str, action: str, outcome: str | None, cost_categ
 
 
 def run_lookup(tenant_id: UUID | str, gstin: str, *, search_fn: Any = None) -> dict[str, Any]:
-    """GSTIN search → store gstin + authoritative name. Status stays unverified. Fail-closed."""
+    """GSTIN search → gstin_verified on an ACTIVE result. Fail-closed; per-day capped. The outcome
+    log separates vendor_down (retry next attempt/day) from invalid_gstin (bad input)."""
+    from orchestrator.integrations.methods import sandbox_kyc
+
     tid = str(tenant_id)
     with tenant_connection(tid) as conn:
         if _attempts_today(conn, tid) >= _MAX_ATTEMPTS_PER_DAY:
             return {"ok": False, "reason": "attempt_cap"}
         result = sandbox_kyc.search_gstin(gstin) if search_fn is None else search_fn(gstin)
-        if not result.ok or not (result.legal_name or result.trade_name):
-            _log(conn, tid, "lookup", "vendor_fail", "gstin_search")
-            return {"ok": False, "reason": "lookup_failed"}
-        name = result.trade_name or result.legal_name
+
+        if not result.ok:
+            _log(conn, tid, "lookup", "vendor_down", "gstin_search")  # retryable — outage, not fraud
+            return {"ok": False, "reason": "vendor_down", "status": "unverified"}
+        if not result.is_active() or not result.authoritative_name():
+            _log(conn, tid, "lookup", "invalid_gstin", "gstin_search")  # bad input, not an outage
+            return {"ok": False, "reason": "invalid_gstin", "status": "unverified"}
+
+        name = result.authoritative_name()
         conn.execute(
-            "UPDATE tenants SET gstin = %s, verified_business_name = %s WHERE id = %s",
-            (gstin, name, tid),
+            "UPDATE tenants SET verification_status = 'gstin_verified', verified_business_name = %s, "
+            "verification_method = 'gstin_lookup', gstin = %s, verified_at = %s WHERE id = %s",
+            (name, gstin, datetime.now(timezone.utc), tid),
         )
-        _log(conn, tid, "lookup", "gstin_recorded", "gstin_search")
-        return {"ok": True, "gstin": gstin, "name": name, "status": "unverified"}
+        _log(conn, tid, "lookup", "gstin_verified", "gstin_search")
+        return {"ok": True, "status": "gstin_verified", "gstin": gstin, "name": name}
 
 
-def run_initiate(tenant_id: UUID | str, *, initiate_fn: Any = None) -> dict[str, Any]:
-    """Start a reverse penny-drop. Returns the UPI handle the owner pays ₹1 to. Fail-closed."""
+def run_vtr_override(
+    tenant_id: UUID | str, operator_id: str, basis: str
+) -> dict[str, Any]:
+    """Manual VTR/ops upgrade → vtr_verified ("green"). Audited. tenant_id is the server-resolved
+    target row id (the endpoint must derive it server-side — IDOR rule). Green gates nothing today,
+    but the audit trail is load-bearing for when it gains significance."""
+    from orchestrator.escalations import record_ops_audit
+
     tid = str(tenant_id)
     with tenant_connection(tid) as conn:
-        if _attempts_today(conn, tid) >= _MAX_ATTEMPTS_PER_DAY:
-            return {"ok": False, "reason": "attempt_cap"}
-        rpd = sandbox_kyc.initiate_reverse_penny_drop() if initiate_fn is None else initiate_fn()
-        if not rpd.ok or not rpd.reference:
-            _log(conn, tid, "initiate", "vendor_fail", "reverse_penny_drop")
-            return {"ok": False, "reason": "initiate_failed"}
-        _log(conn, tid, "initiate", "initiated", "reverse_penny_drop")
-        return {"ok": True, "reference": rpd.reference, "upi_handle": rpd.upi_handle}
-
-
-def run_bind(tenant_id: UUID | str, reference: str, *, poll_fn: Any = None) -> dict[str, Any]:
-    """Poll the payer's bank name + match → set the tier. Fail-closed (stays unverified). Result-only:
-    the payer name is matched then DISCARDED — never stored, never logged."""
-    tid = str(tenant_id)
-    with tenant_connection(tid) as conn:
-        if _attempts_today(conn, tid) >= _MAX_ATTEMPTS_PER_DAY:
-            return {"ok": False, "reason": "attempt_cap"}
-        rpd = sandbox_kyc.poll_reverse_penny_drop(reference) if poll_fn is None else poll_fn(reference)
-        if not rpd.ok or not rpd.payer_name:
-            _log(conn, tid, "bind", "pending_or_fail", "reverse_penny_drop")
-            return {"ok": False, "reason": "not_paid_or_failed", "status": "unverified"}
-        row = conn.execute(
-            "SELECT business_name, verified_business_name, gstin FROM tenants WHERE id = %s", (tid,)
-        ).fetchone()
+        row = conn.execute("SELECT 1 FROM tenants WHERE id = %s", (tid,)).fetchone()
         if row is None:
-            return {"ok": False, "reason": "tenant_not_found", "status": "unverified"}
-        r = dict(row) if isinstance(row, dict) else {
-            "business_name": row[0], "verified_business_name": row[1], "gstin": row[2]
-        }
-        lookup_name = r.get("verified_business_name")  # set iff a GSTIN lookup ran
-        claimed = r.get("business_name")
-
-        if r.get("gstin") and lookup_name and name_match(rpd.payer_name, lookup_name):
-            status, method, authoritative = "gstin_verified", "gstin_reverse_penny_drop", lookup_name
-        elif name_match(rpd.payer_name, claimed):
-            status, method, authoritative = "name_verified", "reverse_penny_drop", claimed
-        else:
-            _log(conn, tid, "bind", "no_match", "reverse_penny_drop")
-            return {"ok": False, "reason": "name_mismatch", "status": "unverified"}
-
+            return {"ok": False, "reason": "tenant_not_found"}
         conn.execute(
-            "UPDATE tenants SET verification_status = %s, verification_method = %s, "
-            "verified_business_name = %s, verified_at = %s WHERE id = %s",
-            (status, method, authoritative, datetime.now(timezone.utc), tid),
+            "UPDATE tenants SET verification_status = 'vtr_verified', "
+            "verification_method = 'vtr_override', verified_at = %s WHERE id = %s",
+            (datetime.now(timezone.utc), tid),
         )
-        _log(conn, tid, "bind", status, "reverse_penny_drop")
-        return {"ok": True, "status": status, "method": method}
+        _log(conn, tid, "vtr_override", "vtr_verified", "none")
+    # Append-only ops audit (who / when / free-text basis) — outside the tenant txn (service-role).
+    record_ops_audit(operator_id, "vtr_verify", "tenant", tenant_id=tid, target_id=tid, detail=basis[:200] or None)
+    return {"ok": True, "status": "vtr_verified"}

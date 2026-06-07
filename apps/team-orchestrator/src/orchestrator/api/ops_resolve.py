@@ -282,3 +282,39 @@ def vtr_monitoring_read(
         body.limit,
     )
     return {"rows": rows, "count": len(rows)}
+
+
+# ---------------------------------------------------------------------------
+# VT-361 — VTR "green" override (vtr_verified). Operator-JWT + internal-secret (same gate as
+# resolve-escalation). Audited (who/when/free-text basis). Green gates nothing today, but the audit
+# trail is load-bearing for when it gains significance. The target tenant is server-resolved
+# (run_vtr_override verifies the row exists); operator_id is taken from the verified JWT, not trusted
+# from the body alone (IDOR rule).
+# ---------------------------------------------------------------------------
+
+
+class VtrVerifyBody(BaseModel):
+    tenant_id: str
+    operator_id: str
+    basis: str = ""
+
+
+@router.post("/api/orchestrator/ops/vtr-verify")
+def vtr_verify(
+    body: VtrVerifyBody,
+    x_internal_secret: str | None = Header(default=None, alias="X-Internal-Secret"),
+    x_operator_jwt: str | None = Header(default=None, alias="X-Operator-Jwt"),
+) -> dict[str, Any]:
+    """VT-361: upgrade a tenant to vtr_verified ("green"). Operator-JWT gated + audited."""
+    if not _verify_internal_secret(x_internal_secret):
+        raise HTTPException(status_code=403, detail="X-Internal-Secret mismatch")
+    claim = _verify_operator_jwt(x_operator_jwt)
+    if claim.get("operator_id") != body.operator_id:
+        raise HTTPException(status_code=403, detail="operator_id in body != JWT claim")
+
+    from orchestrator.onboarding.verification import run_vtr_override
+
+    out = run_vtr_override(body.tenant_id, body.operator_id, body.basis)
+    if not out.get("ok"):
+        raise HTTPException(status_code=404, detail={"code": out.get("reason", "failed")})
+    return out

@@ -1,7 +1,8 @@
-"""VT-361 — business-verification endpoint (Option F). Internal-secret only (team-web proxies).
+"""VT-361 — business-verification endpoint (two-tier; lookup). Internal-secret (team-web proxies).
 
-ONE endpoint, dispatched by ``action`` (lookup | initiate | bind). All vendor calls happen here
-(orchestrator-side), fail-closed, RLS-scoped via verification.py. team-web never calls Sandbox.
+GSTIN lookup → gstin_verified. All vendor calls happen here (orchestrator-side), fail-closed,
+RLS-scoped via verification.py. team-web never calls Sandbox. The VTR "green" override lives on the
+ops surface (api/ops_resolve.py — operator-JWT gated).
 """
 
 from __future__ import annotations
@@ -25,9 +26,7 @@ def _verify_internal_secret(provided: str | None) -> bool:
 
 class BusinessVerificationBody(BaseModel):
     tenant_id: str
-    action: str  # 'lookup' | 'initiate' | 'bind'
-    gstin: str | None = None
-    reference: str | None = None
+    gstin: str
 
 
 @router.post("/api/business-verification")
@@ -35,21 +34,13 @@ def business_verification(
     body: BusinessVerificationBody,
     x_internal_secret: str | None = Header(default=None, alias="X-Internal-Secret"),
 ) -> dict[str, Any]:
-    """VT-361 Option F. lookup → GSTIN name; initiate → reverse-penny-drop UPI handle; bind → match
-    payer name + set the tier. Fail-closed throughout (a vendor failure never fakes verified)."""
+    """VT-361 two-tier: GSTIN lookup → gstin_verified on an ACTIVE GSTIN. Fail-closed (a vendor
+    failure never fakes verified; vendor_down is retryable, invalid_gstin is bad input)."""
     if not _verify_internal_secret(x_internal_secret):
         raise HTTPException(status_code=403, detail={"code": "forbidden"})
+    if not body.gstin:
+        raise HTTPException(status_code=422, detail={"code": "gstin_required"})
 
     from orchestrator.onboarding import verification
 
-    if body.action == "lookup":
-        if not body.gstin:
-            raise HTTPException(status_code=422, detail={"code": "gstin_required"})
-        return verification.run_lookup(body.tenant_id, body.gstin)
-    if body.action == "initiate":
-        return verification.run_initiate(body.tenant_id)
-    if body.action == "bind":
-        if not body.reference:
-            raise HTTPException(status_code=422, detail={"code": "reference_required"})
-        return verification.run_bind(body.tenant_id, body.reference)
-    raise HTTPException(status_code=422, detail={"code": "unknown_action"})
+    return verification.run_lookup(body.tenant_id, body.gstin)
