@@ -8,6 +8,7 @@ Postgres and recovers interrupted workflows on launch).
 
 from __future__ import annotations
 
+import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -98,6 +99,18 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
 
     register_webhook_metrics_workflow()
     launch_dbos()
+    # VT-280/VT-281: seed the VTR REF# keying secret from env (VT_REF_HMAC_KEY) so the
+    # de-identified views never emit NULL refs before the first VTR read. Best-effort at the
+    # lifespan level — a missing key (e.g. dev/CI) is logged loudly, not a startup crash (the
+    # orchestrator does far more than the VTR surface); the digest path is ref-independent.
+    try:
+        from orchestrator.privacy.vtr import bootstrap_vtr_ref_secret
+
+        bootstrap_vtr_ref_secret()
+    except Exception:
+        logging.getLogger(__name__).exception(
+            "VT-281 bootstrap_vtr_ref_secret failed at startup (VT_REF_HMAC_KEY set?)"
+        )
     yield
     shutdown_dbos()
 

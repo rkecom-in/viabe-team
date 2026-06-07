@@ -69,6 +69,7 @@ MONTHLY_IMPACT_CRON = "0 8 1 * *"
 L3_CONSTRUCTION_CRON = "0 3 * * *"  # VT-68 — nightly 3 AM IST L3 rebuild
 WAITLIST_RETENTION_PURGE_CRON = "0 4 * * *"  # VT-354 — daily 4 AM IST waitlist 6-month bound
 SLA_BREACH_SWEEP_CRON = "0 * * * *"  # VT-357 — hourly: alert Fazal on SLA-breached open escalations
+VTR_DIGEST_CRON = "30 8 * * *"  # VT-280 — daily 8:30 AM IST VTR digest (de-identified, app_vtr_role)
 
 
 SHELL_STATUS = "skipped_schema_pending"
@@ -282,6 +283,17 @@ def sla_breach_sweep_scheduled(
     from orchestrator.escalations import run_sla_breach_sweep_body
 
     run_sla_breach_sweep_body()
+
+
+def vtr_digest_scheduled(
+    scheduled_time: datetime,
+    actual_time: datetime,
+) -> None:
+    """DBOS scheduled handler — fires daily 8:30 AM IST. VT-280: the VTR digest, read ONLY via
+    app_vtr_role + the VT-281 de-identified views (CL-425 DB-enforced on this path). NO LLM, NO PII."""
+    from orchestrator.owner_surface.vtr_digest import run_vtr_digest_body
+
+    run_vtr_digest_body(now=actual_time)
 
 
 def l3_construction_scheduled(
@@ -992,7 +1004,10 @@ _registered = False
 
 
 def register_scheduled_triggers() -> None:
-    """Apply the ``@DBOS.scheduled`` decoration to the 5 trigger handlers.
+    """Apply the ``@DBOS.scheduled`` decoration to all scheduled trigger handlers.
+
+    (Count grows over sprints — the authoritative tally is the register count test in
+    test_scheduled_triggers.py, not a number here, to avoid doc-drift.)
 
     Call this BEFORE :func:`dbos_config.launch_dbos`. Same ordering rule
     as :func:`orchestrator.dbos_purge.register_purge_scheduler`:
@@ -1041,6 +1056,8 @@ def register_scheduled_triggers() -> None:
     DBOS.scheduled(WAITLIST_RETENTION_PURGE_CRON)(waitlist_retention_purge_scheduled)
     # VT-357: hourly SLA-breach sweep — 2nd Fazal alert on overdue open escalations (marker-gated).
     DBOS.scheduled(SLA_BREACH_SWEEP_CRON)(sla_breach_sweep_scheduled)
+    # VT-280: daily VTR digest — de-identified, app_vtr_role + the VT-281 views only.
+    DBOS.scheduled(VTR_DIGEST_CRON)(vtr_digest_scheduled)
     _registered = True
 
 
