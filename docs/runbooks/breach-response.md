@@ -73,6 +73,22 @@ send_template_message(tenant_id, "breach_notification_customer",
 The bodies/variables are canonical in `docs/meta-templates-batch2.md`. Customer-side mass send +
 the CERT-In authority notice remain Fazal/counsel-authorized manual actions (no auto-fan-out).
 
+### `dsr_deletion_completed` — OPS-INVOKED on a customer-level erasure (VT-359 site-2 ruling)
+The code's DSR purge (`dsr_purge.py`) is TENANT-WIDE — there is no automated customer-level
+DSR-erase in Phase-1, so this **customer-audience** template has NO automated send path (sending a
+customer-voiced "your data deleted" notice to the owner would be a privacy inversion). Treatment
+(Cowork 20260607T142500Z, option a): when a SINGLE-customer erasure is fulfilled manually at
+Phase-1 scale (owner instruction → exclusion + manual row deletion), ops sends it to THAT customer
+as the FINAL step, from the phone captured BEFORE deletion (CL-390 — never retained after):
+
+```python
+send_template_message(tenant_id, "dsr_deletion_completed",
+    {"business_name": ...}, recipient_phone=<the customer's phone, captured pre-deletion>)
+```
+
+The AUTOMATED path (self-serve customer-level erase + this send as the purge's final step) folds
+into **VT-344** (post-launch self-serve delete) — no new row.
+
 ## Post-mortem template (required for P0 + P1)
 - Timeline (detection → containment → notification)
 - Root cause
