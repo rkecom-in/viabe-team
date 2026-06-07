@@ -517,3 +517,36 @@ def test_vt45_send_template_uses_wired_sid(monkeypatch) -> None:
     )
     _, kwargs = create.call_args
     assert kwargs["content_sid"] == "HX188eba65b0de1ee521f7922435e76ae6"
+
+
+# ---------------------------------------------------------------------------
+# Batch 2 (VT-108, Fazal SIDs 2026-06-07) — registry acceptance
+# ---------------------------------------------------------------------------
+
+_SID_RE = re.compile(r"^HX[0-9a-f]{32}$")
+
+_BATCH2 = {
+    "support_resolved": ("owner", ("support_reference_id",)),
+    "trial_subscribe_link": ("owner", ("owner_name", "subscribe_link")),
+    "dsr_deletion_completed": ("customer", ("business_name",)),
+    "breach_notification_owner": ("owner", ("owner_name", "affected_summary", "action_taken")),
+    "breach_notification_customer": ("customer", ("business_name", "data_categories", "advised_step")),
+}
+
+
+def test_batch2_templates_resolve_en_and_hi():
+    """All 10 batch-2 SIDs (5 templates x EN/HI) resolve non-null + ^HX[0-9a-f]{32}$, with the
+    documented audience + variable signature, and NONE agent_selectable (system/compliance-only)."""
+    for name, (audience, variables) in _BATCH2.items():
+        for lang in ("en", "hi"):
+            entry = resolve(name, lang)
+            assert _SID_RE.match(entry.content_sid), f"{name}/{lang} SID {entry.content_sid!r}"
+            assert entry.audience == audience, f"{name} audience"
+            assert tuple(entry.variables) == variables, f"{name} variables"
+            assert entry.agent_selectable is False, f"{name} must NOT be agent_selectable"
+
+
+def test_batch2_distinct_sids():
+    """No copy-paste collision — all 10 batch-2 SIDs are distinct."""
+    sids = [resolve(n, lg).content_sid for n in _BATCH2 for lg in ("en", "hi")]
+    assert len(set(sids)) == 10

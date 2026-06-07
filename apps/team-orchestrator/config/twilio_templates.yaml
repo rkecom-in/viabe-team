@@ -195,3 +195,56 @@ refund_offer:
 # in-window owner replies (a direct reply to a message the owner just sent is inside the 24h
 # window, so no template is required). Their copy + send live in
 # orchestrator/owner_surface/freeform_acks.py. refund_processing moved the same way (above).
+
+# --- Batch 2 (VT-108; Fazal SIDs 2026-06-07). Bodies canonical in docs/meta-templates-batch2.md. ---
+support_resolved:
+  audience: owner
+  agent_selectable: false
+  variables:
+    - support_reference_id
+  languages:
+    en: HX4a14a1dc0e84beeee383094c5d47942a
+    hi: HXd3a19118d25953cc77ee8915b32099a6
+
+trial_subscribe_link:
+  audience: owner
+  agent_selectable: false
+  variables:
+    - owner_name
+    - subscribe_link
+  languages:
+    en: HX3c61f10c65156d381438c265b09474a9
+    hi: HX3d8bb10b75c83d0ebc9310d66504e729
+
+dsr_deletion_completed:
+  audience: customer
+  agent_selectable: false
+  variables:
+    - business_name
+  languages:
+    en: HXa2aada217c00112c386966f8daa1984c
+    hi: HX60e633af93225f5e46c78203e0b99c44
+
+# breach_notification_* — incident-use only — sent via the ops path, never agent_selectable;
+# see the incident runbook note (docs/runbooks/). Registry-only; no send path (Cowork 20260607T093000Z).
+breach_notification_owner:
+  audience: owner
+  agent_selectable: false
+  variables:
+    - owner_name
+    - affected_summary
+    - action_taken
+  languages:
+    en: HX269a7f69da791f24b4cee23bd820383e
+    hi: HX1b4a5c64f7f4c3d07c0ba8798fa120bf
+
+breach_notification_customer:
+  audience: customer
+  agent_selectable: false
+  variables:
+    - business_name
+    - data_categories
+    - advised_step
+  languages:
+    en: HXdbf0129d38d60d57b11851d8acf581e6
+    hi: HX48dcbb5f65877f8592296921b3bad100

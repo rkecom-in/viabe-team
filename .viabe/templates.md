@@ -268,3 +268,8 @@ templates — they become free-form sends in VT-349 and are removed from the reg
 | `refund_offer` | VT-85 day-39 offer | `HX188eba65b0de1ee521f7922435e76ae6` | `HXe78d29b842092b2fa3dd196fc1e652de` |
 | `refund_completed` | VT-93 refund (out-of-window) | `HX38a56278276122a6689edd8f3cb28137` | `HX161b11c468fc4216ff6d27c033b6bd7f` |
 
+| `support_resolved` | VT-108 batch-2 · SupportBot resolve (owner) | `HX4a14a1dc0e84beeee383094c5d47942a` | `HXd3a19118d25953cc77ee8915b32099a6` |
+| `trial_subscribe_link` | VT-108 batch-2 · trial-end pay link (owner; VT-332 send) | `HX3c61f10c65156d381438c265b09474a9` | `HX3d8bb10b75c83d0ebc9310d66504e729` |
+| `dsr_deletion_completed` | VT-108 batch-2 · DSR purge confirmation (customer) | `HXa2aada217c00112c386966f8daa1984c` | `HX60e633af93225f5e46c78203e0b99c44` |
+| `breach_notification_owner` | VT-108 batch-2 · breach notice (owner) — incident-use only, ops path, never agent_selectable | `HX269a7f69da791f24b4cee23bd820383e` | `HX1b4a5c64f7f4c3d07c0ba8798fa120bf` |
+| `breach_notification_customer` | VT-108 batch-2 · breach notice (customer) — incident-use only, ops path, never agent_selectable | `HXdbf0129d38d60d57b11851d8acf581e6` | `HX48dcbb5f65877f8592296921b3bad100` |
