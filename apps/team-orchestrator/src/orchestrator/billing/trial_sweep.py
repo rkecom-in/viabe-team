@@ -39,6 +39,39 @@ def _default_notify(
     )
 
 
+def _compose_trial_subscribe_link(tenant_id: UUID) -> dict[str, Any] | None:
+    """VT-359: compose the trial-end ``trial_subscribe_link`` params — owner_name + the VT-332
+    deep-link carrying a freshly-minted single-use token (7-day TTL). Returns None if minting can't
+    proceed (OWNER_JWT_SECRET unset / dormant) so the caller skips the send; the actual owner-WABA
+    send is gate-live at the notify seam regardless (this only COMPOSES, per the dispatch)."""
+    try:
+        import os
+
+        from orchestrator.billing.trial_end_token import (
+            build_subscribe_deep_link,
+            mint_trial_end_token,
+        )
+        from orchestrator.graph import get_pool
+
+        token, _jti = mint_trial_end_token(str(tenant_id))
+        # OWNER_PORTAL_URL already includes /team; build_subscribe_deep_link appends /team/subscribe,
+        # so strip the trailing /team to avoid a doubled path.
+        base = os.environ.get("OWNER_PORTAL_URL", "https://viabe.ai/team").removesuffix("/team")
+        link = build_subscribe_deep_link(base, "", token)  # plan_tier empty — server-priced (VT-332 F3)
+        with get_pool().connection() as conn:
+            row = conn.execute(
+                "SELECT business_name FROM tenants WHERE id = %s", (str(tenant_id),)
+            ).fetchone()
+        owner_name = (dict(row).get("business_name") if row else None) or "there"
+        return {"owner_name": owner_name, "subscribe_link": link}
+    except Exception:
+        logger.exception(
+            "trial_sweep: trial_subscribe_link compose skipped tenant=%s (dormant/secret unset?)",
+            tenant_id,
+        )
+        return None
+
+
 def _scan_active_trials(now: datetime) -> list[UUID]:
     from orchestrator.graph import get_pool
     from psycopg.rows import dict_row
@@ -106,6 +139,13 @@ def run_trial_evaluation_body(
             _apply_trial_transition(tid, "trial_extension_exhausted")
             if v.extension_count >= int(_max_ext()):
                 notify(tid, "trial_max_reached", "en", params)
+            # VT-359: trial-end conversion nudge — the VT-332 subscribe-link send, fired ONCE at
+            # trial-end (regardless of cap). Composed here (SID + deep-link + single-use token);
+            # the actual owner-WABA send STAYS gated at the notify seam (the stub logs until
+            # go-live — dispatch: "wire the call, don't flip the gate").
+            link_params = _compose_trial_subscribe_link(tid)
+            if link_params is not None:
+                notify(tid, "trial_subscribe_link", "en", link_params)
         elif v.decision == "warn":
             notify(tid, "trial_ending", "en", params)
     return acted

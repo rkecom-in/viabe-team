@@ -53,6 +53,26 @@ PII-scrubbed). Owner notification: `alerts/breach_notification.notify_owner`.
 - **Authority (CERT-In):** manual — Fazal/counsel send; helper to draft the body lands
   with the final text.
 
+### Meta breach templates — REGISTRY-ONLY, ops-invoked (VT-359 / VT-108 batch-2)
+Both `breach_notification_owner` and `breach_notification_customer` are now Meta-approved + in the
+registry (`twilio_templates.yaml`, batch-2). They are **incident-use only — `agent_selectable:
+false`, NO automated send path** (building incident-send tooling speculatively is out of scope).
+At a confirmed P0, an authorized operator (Fazal) sends them MANUALLY via the orchestrator send fn:
+
+```python
+from orchestrator.utils.twilio_send import send_template_message
+# owner: {{1}} owner_name · {{2}} affected_summary (incident + data categories) · {{3}} action_taken
+send_template_message(tenant_id, "breach_notification_owner",
+    {"owner_name": ..., "affected_summary": ..., "action_taken": ...})
+# customer (per affected customer, recipient_phone override): {{1}} business_name · {{2}}
+# data_categories · {{3}} advised_step
+send_template_message(tenant_id, "breach_notification_customer",
+    {"business_name": ..., "data_categories": ..., "advised_step": ...}, recipient_phone=<cust>)
+```
+
+The bodies/variables are canonical in `docs/meta-templates-batch2.md`. Customer-side mass send +
+the CERT-In authority notice remain Fazal/counsel-authorized manual actions (no auto-fan-out).
+
 ## Post-mortem template (required for P0 + P1)
 - Timeline (detection → containment → notification)
 - Root cause
