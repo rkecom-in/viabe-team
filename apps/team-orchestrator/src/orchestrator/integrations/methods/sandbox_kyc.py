@@ -5,8 +5,10 @@ Documented Sandbox contract (verified against developer.sandbox.co.in — #420 s
    data.access_token (a JWT, ~24h). The token is passed in the `authorization` header WITHOUT the
    "Bearer" prefix. We cache it in-process (~23h) and re-auth on expiry or a 401.
 2. LOOKUP: POST /gst/compliance/public/gstin/search with headers x-api-key + authorization=<token> +
-   x-api-version, GSTIN in the BODY (not a query param). An ACTIVE result alone earns gstin_verified
-   (no ownership bind — Fazal two-tier ruling 2026-06-08).
+   x-api-version, GSTIN in the BODY (not a query param). The GST record is nested TWO levels deep:
+   {"data": {"data": {lgnm, tradeNam, sts, gstin, ...}, "status_cd": ...}} — read data.data, not data
+   (the single-level read silently mapped every field to None; VT-361 live canary). An ACTIVE result
+   alone earns gstin_verified (no ownership bind — Fazal two-tier ruling 2026-06-08).
 
 Result-only: parse ONLY name + status, DISCARD the rest. Graceful-degrade: absent creds / network /
 4xx-5xx / parse → ok=False (NEVER raise, NEVER fake-verified). The caller separates vendor-down
@@ -122,13 +124,26 @@ def search_gstin(gstin: str, *, request_fn: RequestFn | None = None) -> GstinLoo
                 raw = _lookup(req, key, token, gstin)
             else:
                 raise
-        data = raw.get("data", raw)
-        return GstinLookup(
+        # Sandbox nests the GST record one level deeper than the envelope: the lookup body is
+        # {"data": {"data": {lgnm, tradeNam, sts, ...}, "status_cd": ...}}. The single-level read
+        # silently produced ok=True with all-None fields — a real 200 that read as unverified
+        # (caught by the VT-361 live canary; the mocked shape test had pinned the wrong shape).
+        env = raw.get("data", raw)
+        record = env.get("data", env) if isinstance(env, dict) else env
+        if not isinstance(record, dict):
+            record = {}
+        result = GstinLookup(
             ok=True,
-            legal_name=_clean(data.get("legal_name") or data.get("lgnm")),
-            trade_name=_clean(data.get("trade_name") or data.get("tradeNam")),
-            status=_clean(data.get("status") or data.get("sts")),
+            legal_name=_clean(record.get("legal_name") or record.get("lgnm")),
+            trade_name=_clean(record.get("trade_name") or record.get("tradeNam")),
+            status=_clean(record.get("status") or record.get("sts")),
         )
+        # Fail-closed on shape drift: a 200 we cannot parse into a name/status MUST NOT read as
+        # verified — the module contract is "parse → ok=False, NEVER fake-verified".
+        if result.legal_name is None and result.trade_name is None and result.status is None:
+            logger.error("sandbox_kyc: lookup 200 but unparseable name/status — shape drift, fail-closed")
+            return GstinLookup(ok=False)
+        return result
     except Exception:
         logger.exception("sandbox_kyc: search_gstin failed (fail-closed → vendor_down)")
         return GstinLookup(ok=False)

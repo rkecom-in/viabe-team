@@ -42,9 +42,11 @@ def _recorder(responses):
 def test_two_step_auth_then_post_search_body_shape():
     from orchestrator.integrations.methods import sandbox_kyc
 
+    # Real Sandbox lookup shape: the GST record is nested under data.data (verified by the VT-361
+    # live canary against Fazal's GSTIN), NOT data — and uses the GST short field names lgnm/tradeNam/sts.
     req, calls = _recorder({
         "/authenticate": {"data": {"access_token": "TOK123"}},
-        "/gst/compliance/public/gstin/search": {"data": {"legal_name": "RKECOM SERVICE (OPC) PRIVATE LIMITED", "status": "Active"}},
+        "/gst/compliance/public/gstin/search": {"data": {"data": {"lgnm": "RKECOM SERVICES (OPC) PRIVATE LIMITED", "tradeNam": "RKECOM SERVICES (OPC) PRIVATE LIMITED", "sts": "Active", "gstin": "27AAKCR3738B1ZE"}, "status_cd": "1"}},
     })
     res = sandbox_kyc.search_gstin("27AAKCR3738B1ZE", request_fn=req)
 
@@ -73,7 +75,7 @@ def test_token_is_cached_across_calls():
 
     req, calls = _recorder({
         "/authenticate": {"data": {"access_token": "TOK"}},
-        "/gst/compliance/public/gstin/search": {"data": {"legal_name": "X", "status": "Active"}},
+        "/gst/compliance/public/gstin/search": {"data": {"data": {"lgnm": "X", "sts": "Active"}}},
     })
     sandbox_kyc.search_gstin("27AAKCR3738B1ZE", request_fn=req)
     sandbox_kyc.search_gstin("27AAKCR3738B1ZE", request_fn=req)
@@ -97,7 +99,7 @@ def test_401_triggers_reauth_once():
         state["lookup_calls"] += 1
         if state["lookup_calls"] == 1:
             raise _401()  # stale token → forces a re-auth + retry
-        return {"data": {"legal_name": "X", "status": "Active"}}
+        return {"data": {"data": {"lgnm": "X", "sts": "Active"}}}
 
     res = sandbox_kyc.search_gstin("27AAKCR3738B1ZE", request_fn=req)
     assert res.ok and res.is_active()
@@ -114,3 +116,17 @@ def test_no_creds_fails_closed(monkeypatch):
         raise AssertionError("no vendor call without creds")
 
     assert sandbox_kyc.search_gstin("27AAKCR3738B1ZE", request_fn=req).ok is False
+
+
+def test_unparseable_200_fails_closed():
+    """A 200 whose body we can't parse into a name/status must read ok=False, NEVER fake-verified.
+    This is the latent bug the VT-361 live canary exposed: the old single-level read mapped the real
+    (data.data-nested) body to all-None yet returned ok=True."""
+    from orchestrator.integrations.methods import sandbox_kyc
+
+    req, _ = _recorder({
+        "/authenticate": {"data": {"access_token": "TOK"}},
+        "/gst/compliance/public/gstin/search": {"data": {"unexpected": "shape"}},
+    })
+    res = sandbox_kyc.search_gstin("27AAKCR3738B1ZE", request_fn=req)
+    assert res.ok is False and res.authoritative_name() is None
