@@ -78,6 +78,12 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     from orchestrator.alerts.scheduler import register_alert_scheduler
 
     register_alert_scheduler()
+    # VT-113: daily 10:00 IST email-deliverability check (Resend bounce/complaint). Same contract.
+    from orchestrator.alerts.email_deliverability import (
+        register_email_deliverability_scheduler,
+    )
+
+    register_email_deliverability_scheduler()
     # VT-222: Drive Push delta workflow + 6h renewal + 10min polling
     # fallback. Same register-before-launch contract.
     from orchestrator.integrations.drive_push import (
