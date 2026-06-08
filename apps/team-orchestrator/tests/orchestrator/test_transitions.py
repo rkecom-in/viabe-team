@@ -60,10 +60,14 @@ def tx():
 
 
 def _new_tenant(dsn: str, phase: str = "onboarding") -> str:
+    # VT-361: transition-mechanics tests assume an activatable tenant, so seed gstin_verified —
+    # the card_captured → paid_active activation gate (transitions.py) is exercised separately in
+    # tests/orchestrator/onboarding/test_business_verification.py (both directions).
     with psycopg.connect(dsn, autocommit=True) as conn:
         row = conn.execute(
-            "INSERT INTO tenants (business_name, plan_tier, phase, phase_entered_at) "
-            "VALUES ('VT-3.2 Test', 'founding', %s, now()) RETURNING id",
+            "INSERT INTO tenants (business_name, plan_tier, phase, phase_entered_at, "
+            "verification_status) "
+            "VALUES ('VT-3.2 Test', 'founding', %s, now(), 'gstin_verified') RETURNING id",
             (phase,),
         ).fetchone()
     assert row is not None

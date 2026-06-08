@@ -121,6 +121,11 @@ _TENANT_ANONYMIZE = {
     "owner_contact": None,  # mig 066
     "locality": None,  # mig 001 — geographic identifier
     "opt_out": True,
+    # VT-361 (mig 120): the verification result carries the authoritative business/owner name + the
+    # GSTIN (a strong re-id anchor) — both MUST be scrubbed on DSR-delete. verification_status /
+    # method / verified_at are non-PII operational flags, left intact.
+    "verified_business_name": None,
+    "gstin": None,
 }
 
 # FK-safe deletion order. Children before parents — pipeline_steps /
@@ -159,6 +164,9 @@ _PURGE_ORDER: tuple[str, ...] = (
     # sets orchestrator.dsr_purge_in_progress so the completed-row immutability
     # trigger (mig 099) permits this delete.
     "refund_executions",
+    "kyc_verification_log",  # VT-361 (mig 120): per-tenant verification attempts — leaf (FK tenants
+    # only; anonymize never CASCADEs). Result-only (no payer names), but it's the subject's
+    # verification history → hard-delete on DSR (the episodic_events/platform_listings lesson).
     "founding_tier_claims",  # VT-94: per-tenant founding claim (audit) — hard-delete on DSR
     "template_error_reports",  # VT-335: owner template-error reports (PII free text) — hard-delete
     "owner_inputs",

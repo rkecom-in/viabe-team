@@ -288,3 +288,76 @@ export function fetchVtrEscalations(operatorId: string): Promise<VtrRow[]> {
 export function fetchVtrMonitoring(operatorId: string): Promise<VtrRow[]> {
   return fetchVtrRows('/api/orchestrator/ops/vtr-monitoring', operatorId)
 }
+
+
+// ---------------------------------------------------------------------------
+// VT-361 — business verification (two-tier) proxy. team-web NEVER calls Sandbox directly; the
+// orchestrator holds the creds + does the GSTIN lookup (fail-closed). Owner enters a GSTIN on the
+// owner surface → lookup → gstin_verified ("yellow"). The "green" upgrade is the ops-only
+// forwardVtrVerify (operator-JWT). No penny-drop (cut — Fazal two-tier ruling 2026-06-08).
+// ---------------------------------------------------------------------------
+
+export interface BusinessVerificationResult {
+  ok: boolean
+  status?: string // unverified | gstin_verified | vtr_verified
+  reason?: string // vendor_down (retry) | invalid_gstin | attempt_cap
+  name?: string | null
+  raw?: Record<string, unknown>
+}
+
+export async function forwardBusinessVerification(
+  tenantId: string,
+  gstin: string,
+): Promise<BusinessVerificationResult> {
+  const base = process.env.TEAM_ORCHESTRATOR_URL ?? _ORCHESTRATOR_DEFAULT
+  const secret = process.env.INTERNAL_API_SECRET ?? ''
+  try {
+    const res = await fetch(`${base}/api/business-verification`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'X-Internal-Secret': secret },
+      body: JSON.stringify({ tenant_id: tenantId, gstin }),
+      signal: AbortSignal.timeout(_FORWARD_TIMEOUT_MS),
+    })
+    if (!res.ok) return { ok: false, reason: `http_${res.status}` }
+    const data = (await res.json()) as Record<string, unknown>
+    return {
+      ok: Boolean(data.ok),
+      status: (data.status as string) ?? undefined,
+      reason: (data.reason as string) ?? undefined,
+      name: (data.name as string) ?? null,
+      raw: data,
+    }
+  } catch (err) {
+    const timedOut = err instanceof Error && err.name === 'TimeoutError'
+    return { ok: false, reason: timedOut ? 'timeout' : 'error' }
+  }
+}
+
+/** VT-361 — VTR "green" override (ops-only; operator-JWT). Audited server-side. */
+export async function forwardVtrVerify(
+  tenantId: string,
+  operatorId: string,
+  operatorJwt: string,
+  basis: string,
+): Promise<{ ok: boolean; status?: string; reason?: string }> {
+  const base = process.env.TEAM_ORCHESTRATOR_URL ?? _ORCHESTRATOR_DEFAULT
+  const secret = process.env.INTERNAL_API_SECRET ?? ''
+  try {
+    const res = await fetch(`${base}/api/orchestrator/ops/vtr-verify`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'X-Internal-Secret': secret,
+        'X-Operator-Jwt': operatorJwt,
+      },
+      body: JSON.stringify({ tenant_id: tenantId, operator_id: operatorId, basis }),
+      signal: AbortSignal.timeout(_FORWARD_TIMEOUT_MS),
+    })
+    if (!res.ok) return { ok: false, reason: `http_${res.status}` }
+    const data = (await res.json()) as Record<string, unknown>
+    return { ok: Boolean(data.ok), status: (data.status as string) ?? undefined }
+  } catch (err) {
+    const timedOut = err instanceof Error && err.name === 'TimeoutError'
+    return { ok: false, reason: timedOut ? 'timeout' : 'error' }
+  }
+}
