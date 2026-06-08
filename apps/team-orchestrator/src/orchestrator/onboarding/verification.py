@@ -75,22 +75,33 @@ def run_lookup(tenant_id: UUID | str, gstin: str, *, search_fn: Any = None) -> d
 def run_vtr_override(
     tenant_id: UUID | str, operator_id: str, basis: str
 ) -> dict[str, Any]:
-    """Manual VTR/ops upgrade → vtr_verified ("green"). Audited. tenant_id is the server-resolved
-    target row id (the endpoint must derive it server-side — IDOR rule). Green gates nothing today,
-    but the audit trail is load-bearing for when it gains significance."""
-    from orchestrator.escalations import record_ops_audit
+    """Manual VTR/ops upgrade → vtr_verified ("green"). tenant_id is the server-resolved target row
+    id (the endpoint derives it server-side — IDOR rule). The upgrade + the ops-audit row + the log
+    are ATOMIC in ONE service-role txn (#420 subagent should-fix: a separate-connection audit could
+    commit the upgrade with no audit row — CL-390 atomic-audit standard). ops_audit is deny-all RLS
+    (app_role can't write it), so this runs under the service role with an explicit WHERE id
+    predicate (the dsr_purge admin-action pattern); the override is operator-JWT gated upstream."""
+    from orchestrator.graph import get_pool
 
     tid = str(tenant_id)
-    with tenant_connection(tid) as conn:
+    now = datetime.now(timezone.utc)
+    with get_pool().connection() as conn, conn.transaction():
         row = conn.execute("SELECT 1 FROM tenants WHERE id = %s", (tid,)).fetchone()
         if row is None:
             return {"ok": False, "reason": "tenant_not_found"}
         conn.execute(
             "UPDATE tenants SET verification_status = 'vtr_verified', "
             "verification_method = 'vtr_override', verified_at = %s WHERE id = %s",
-            (datetime.now(timezone.utc), tid),
+            (now, tid),
         )
-        _log(conn, tid, "vtr_override", "vtr_verified", "none")
-    # Append-only ops audit (who / when / free-text basis) — outside the tenant txn (service-role).
-    record_ops_audit(operator_id, "vtr_verify", "tenant", tenant_id=tid, target_id=tid, detail=basis[:200] or None)
+        conn.execute(
+            "INSERT INTO ops_audit (operator_id, tenant_id, action, target_kind, target_id, detail) "
+            "VALUES (%s, %s, 'vtr_verify', 'tenant', %s, %s)",
+            (str(operator_id), tid, tid, (basis[:200] or None)),
+        )
+        conn.execute(
+            "INSERT INTO kyc_verification_log (tenant_id, action, outcome, cost_category) "
+            "VALUES (%s, 'vtr_override', 'vtr_verified', 'none')",
+            (tid,),
+        )
     return {"ok": True, "status": "vtr_verified"}
