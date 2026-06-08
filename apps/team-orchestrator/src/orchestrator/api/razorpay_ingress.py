@@ -420,7 +420,7 @@ def _apply_phase_transition(tenant_id: str, event: str) -> None:
     denormalised phase mirror stale (reconcilable from phase_transitions; a
     phase-reconcile sweep is a follow-up)."""
     from orchestrator.state import new_subscriber_state
-    from orchestrator.transitions import apply_transition
+    from orchestrator.transitions import VerificationRequiredError, apply_transition
 
     try:
         with get_pool().connection() as conn, conn.cursor(row_factory=dict_row) as cur:
@@ -430,6 +430,23 @@ def _apply_phase_transition(tenant_id: str, event: str) -> None:
             return
         state = new_subscriber_state(tenant_id=UUID(tenant_id), run_id=uuid4(), phase=row["phase"])
         apply_transition(state, event, {"reason": f"razorpay:{event}"})
+    except VerificationRequiredError:
+        # VT-361 gate: payment captured but the tenant is below gstin_verified → activation BLOCKED
+        # (fail-closed, intended). NOT a silent stall — emit a distinct, owner-surfaceable event so
+        # the owner is told to complete GSTIN verification (+ ops can see it). Phase stays trial.
+        logger.warning(
+            "VT-361: card_captured BLOCKED — verification pending tenant=%s (payment captured, "
+            "activation withheld until gstin_verified)", tenant_id,
+        )
+        log_event(
+            event_type="activation_blocked_verification",
+            run_id=uuid4(),
+            tenant_id=UUID(tenant_id),
+            severity="warning",
+            component="billing",
+            payload={"event": event, "reason": "verification_pending",
+                     "owner_action": "complete GSTIN verification to activate"},
+        )
     except Exception:
         logger.exception(
             "razorpay-ingress: phase transition %s failed tenant=%s "

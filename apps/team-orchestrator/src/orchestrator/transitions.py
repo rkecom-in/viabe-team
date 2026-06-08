@@ -89,6 +89,33 @@ class InvalidTransitionError(RuntimeError):
         self.to_phase = to_phase
 
 
+class VerificationRequiredError(InvalidTransitionError):
+    """VT-361 gate: card_captured → paid_active blocked because business verification is below
+    gstin_verified. A DISTINCT type (not a generic InvalidTransition) so the payment-capture caller
+    can surface a clear owner-facing "verification pending" state, not a silent stall."""
+
+
+# VT-361: the activation gate threshold. gstin_verified is the floor; vtr_verified is above it.
+_ACTIVATION_VERIFIED_TIERS = frozenset({"gstin_verified", "vtr_verified"})
+
+
+def _activation_verification_ok(tenant_id: object) -> bool:
+    """Read verification_status SERVER-SIDE from the tenant row (never a client field — the IDOR /
+    forward-raw-body lesson). Fail-closed: a missing row / read error → not verified."""
+    try:
+        with tenant_connection(str(tenant_id)) as conn:
+            row = conn.execute(
+                "SELECT verification_status FROM tenants WHERE id = %s", (str(tenant_id),)
+            ).fetchone()
+    except Exception:  # noqa: BLE001 — fail-closed on any read error (vendor/DB)
+        logger.exception("VT-361 activation gate: verification read failed tenant=%s", tenant_id)
+        return False
+    if row is None:
+        return False
+    status = row["verification_status"] if isinstance(row, dict) else row[0]
+    return status in _ACTIVATION_VERIFIED_TIERS
+
+
 def _resolve(state: SubscriberState, event: str) -> Phase:
     """Return the to_phase for (state.phase, event), or raise."""
     from_phase = state["phase"]
@@ -101,6 +128,12 @@ def _resolve(state: SubscriberState, event: str) -> Phase:
         and state["trial_extension_count"] >= MAX_TRIAL_EXTENSIONS
     ):
         raise InvalidTransitionError(from_phase, event, to_phase)
+    # VT-361 activation gate (Fazal 2026-06-08): a tenant cannot reach paid_active below
+    # gstin_verified. GSTIN-less businesses cannot activate — intended. Server-side DB read.
+    if event == "card_captured" and to_phase == "paid_active" and not _activation_verification_ok(
+        state["tenant_id"]
+    ):
+        raise VerificationRequiredError(from_phase, event, to_phase)
     return to_phase
 
 
