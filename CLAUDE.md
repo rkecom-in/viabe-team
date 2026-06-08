@@ -104,8 +104,10 @@ This is how delivery actually happens between Fazal-issued scope grants. Fresh s
 CC runs under one of two orchestration modes:
 
 - **Interactive `claude -c` watch loop** — Fazal's primary today. Opened in a
-  terminal, left running. Watches `.running/to-claudecode/` and processes
-  signals as they arrive. Live console output is visible to Fazal.
+  terminal, left running. **On startup, FIRST drain the inbox: process every
+  signal already in `.running/to-claudecode/` oldest-first (a signal sitting
+  there at launch is NOT an "arrival" and the watcher won't fire on it), THEN
+  enter watch mode** for new arrivals. Live console output is visible to Fazal.
 - **Python daemon at `.viabe/daemon/`** — installed but paused via
   `.viabe/daemon/STOP` file by default. Background process. Same watch
   semantics; no live console.
@@ -167,7 +169,7 @@ When sandbox `git add` fails with `fatal: Unable to create '.git/index.lock': Fi
 
 **Rule #14 — reconcile against ground truth.** Every status summary, sprint order, or handoff is reconciled against `gh pr list --state merged` + the log files before trusted. Memory is never authoritative. Applies to Clau's summaries too. **The snapshot itself drifts and is subject to this rule** — treat it as a starting hypothesis until git log confirms.
 
-**Rule #15 — canary mandatory.** Every brief touching external API / SDK / persistence MUST include a canary acceptance step. Real API call, verify response, fail-not-skip on error. Cowork bounces plan-ready signals without canary plans.
+**Rule #15 — canary mandatory.** Every brief touching external API / SDK / persistence MUST include a canary acceptance step. Real API call, verify response, fail-not-skip on error. Cowork bounces plan-ready signals without canary plans. **Who runs the canary:** CC runs canary acceptance steps directly — the interactive `claude -c` loop has the Mac's real network egress. Cowork's review sandbox is proxy-blocked from external vendor hosts (e.g. api.sandbox.co.in), so "Cowork couldn't reach the vendor" is NOT a reason to defer a canary to Fazal — dispatch it to CC, which can reach it. Fazal's only input to a canary is the credentials (in `.viabe/secrets/*.env`).
 
 **Rule #16 — pre-dispatch ledger scan.** Before Cowork dispatches any `brief-ready` signal, run `python3 scripts/check_brief_against_ledger.py .viabe/sprint/VT-<N>.md` and add `cl_decisions_checked: [CL-N, ...]` to the signal frontmatter listing every active-context row the script surfaced. CC bounces brief-ready signals missing that field. Triggered by VT-101 LangSmith drift; substrate is `docs/clau/active-context-summary.md`.
 
