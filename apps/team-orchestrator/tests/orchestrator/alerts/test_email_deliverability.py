@@ -8,9 +8,19 @@ imports are deferred into the tests. The Resend request shape is pinned via an i
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+
 import pytest
 
 pytest.importorskip("pydantic")
+
+# Fixed reference time so the rolling-24h window is deterministic in tests.
+_NOW = datetime(2026, 6, 8, 12, 0, 0, tzinfo=timezone.utc)
+
+
+def _ca(hours_ago: float) -> str:
+    """A Resend-style created_at string (space sep, +00 offset) N hours before _NOW."""
+    return (_NOW - timedelta(hours=hours_ago)).strftime("%Y-%m-%d %H:%M:%S.%f+00")
 
 
 # --- sender registry (grep-zero From source) ---------------------------------
@@ -42,16 +52,91 @@ def test_stats_compute_rates_from_injected_rows(monkeypatch):
     def get_fn(path, api_key):
         captured["path"] = path
         captured["key"] = api_key
-        return {"data": [
-            {"last_event": "delivered"}, {"last_event": "delivered"},
-            {"last_event": "bounced"}, {"last_event": "complained"},
+        return {"has_more": False, "data": [  # real shape: newest-first, created_at present
+            {"id": "1", "created_at": _ca(1), "last_event": "delivered"},
+            {"id": "2", "created_at": _ca(2), "last_event": "delivered"},
+            {"id": "3", "created_at": _ca(3), "last_event": "bounced"},
+            {"id": "4", "created_at": _ca(4), "last_event": "complained"},
         ]}
 
-    stats = ed.fetch_resend_stats(get_fn=get_fn)
-    assert captured["path"] == "/emails"  # pinned endpoint shape
+    stats = ed.fetch_resend_stats(get_fn=get_fn, now=_NOW)
+    assert captured["path"].startswith("/emails?limit=100")  # paginated list call
     assert stats.ok and stats.sent == 4 and stats.bounced == 1 and stats.complained == 1
     assert stats.bounce_rate == 0.25 and stats.complaint_rate == 0.25
-    assert stats.breached()  # 25% bounce > 5%
+    assert stats.breached() and stats.capped is False  # 25% bounce > 5%
+
+
+def test_window_excludes_rows_older_than_24h(monkeypatch):
+    from orchestrator.alerts import email_deliverability as ed
+
+    monkeypatch.setenv("RESEND_API_KEY", "re_test")
+
+    def get_fn(path, api_key):  # newest-first; rows 3-4 are outside the 24h window
+        return {"has_more": False, "data": [
+            {"id": "1", "created_at": _ca(2), "last_event": "bounced"},      # in
+            {"id": "2", "created_at": _ca(23), "last_event": "delivered"},   # in (edge)
+            {"id": "3", "created_at": _ca(30), "last_event": "bounced"},     # OLD → excluded
+            {"id": "4", "created_at": _ca(50), "last_event": "complained"},  # OLD → excluded
+        ]}
+
+    stats = ed.fetch_resend_stats(get_fn=get_fn, now=_NOW)
+    assert stats.sent == 2 and stats.bounced == 1 and stats.complained == 0  # only in-window counted
+
+
+def test_pagination_follows_after_cursor_and_short_circuits(monkeypatch):
+    from orchestrator.alerts import email_deliverability as ed
+
+    monkeypatch.setenv("RESEND_API_KEY", "re_test")
+    calls = []
+
+    def get_fn(path, api_key):
+        calls.append(path)
+        if "after=" not in path:  # page 1 — both in window, has_more
+            return {"has_more": True, "data": [
+                {"id": "p1a", "created_at": _ca(1), "last_event": "bounced"},
+                {"id": "p1b", "created_at": _ca(10), "last_event": "delivered"},
+            ]}
+        return {"has_more": True, "data": [  # page 2 — last row is old → short-circuit, no page 3
+            {"id": "p2a", "created_at": _ca(20), "last_event": "complained"},
+            {"id": "p2b", "created_at": _ca(40), "last_event": "bounced"},
+        ]}
+
+    stats = ed.fetch_resend_stats(get_fn=get_fn, now=_NOW)
+    assert len(calls) == 2 and "after=p1b" in calls[1]  # followed the cursor, stopped despite has_more
+    assert stats.sent == 3 and stats.bounced == 1 and stats.complained == 1  # p2b (old) excluded
+
+
+def test_page_cap_sets_capped_and_stops(monkeypatch):
+    from orchestrator.alerts import email_deliverability as ed
+
+    monkeypatch.setenv("RESEND_API_KEY", "re_test")
+    calls = []
+
+    def get_fn(path, api_key):  # every page in-window + has_more → would spin without the cap
+        calls.append(path)
+        return {"has_more": True, "data": [
+            {"id": f"id{len(calls)}", "created_at": _ca(1), "last_event": "delivered"},
+        ]}
+
+    stats = ed.fetch_resend_stats(get_fn=get_fn, now=_NOW)
+    assert stats.capped is True and len(calls) == ed._MAX_PAGES  # stopped at the cap, did not spin
+
+
+def test_pii_fields_never_reach_the_result(monkeypatch):
+    from orchestrator.alerts import email_deliverability as ed
+
+    monkeypatch.setenv("RESEND_API_KEY", "re_test")
+
+    def get_fn(path, api_key):  # full-access key returns recipient PII
+        return {"has_more": False, "data": [
+            {"id": "1", "created_at": _ca(1), "last_event": "bounced",
+             "to": ["victim@example.com"], "from": "ops@viabe.ai", "subject": "Secret Subject"},
+        ]}
+
+    stats = ed.fetch_resend_stats(get_fn=get_fn, now=_NOW)
+    blob = repr(stats)
+    assert "victim@example.com" not in blob and "Secret Subject" not in blob  # counts only
+    assert stats.sent == 1 and stats.bounced == 1
 
 
 def test_no_api_key_fails_soft(monkeypatch):
