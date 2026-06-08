@@ -40,8 +40,10 @@ def _send_sync(
     report: MonthlyReport, pdf: bytes, *, to_addr: str, portal_url: str
 ) -> bool:
     """Sync wrapper over the async Resend send (the trigger body is sync)."""
+    from orchestrator.alerts.email_senders import sender_from
+
     api_key = os.environ.get("RESEND_API_KEY", "")
-    from_addr = os.environ.get("RESEND_FROM_EMAIL", "")  # D6: reuse verified sender
+    from_addr = sender_from("alerts")  # VT-113: canonical registry (D6 ops@ via RESEND_FROM_EMAIL override)
     return asyncio.run(
         send_report_email(
             report, pdf, to_addr=to_addr, portal_url=portal_url,
