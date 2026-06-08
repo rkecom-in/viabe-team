@@ -379,9 +379,11 @@ def _alert_audit_chain_break(result: Any) -> None:
             os.environ.get("TELEGRAM_OPS_CHAT_ID", ""),
             text,
         )
+        from orchestrator.alerts.email_senders import sender_from
+
         await send_resend_email(
             os.environ.get("RESEND_API_KEY", ""),
-            os.environ.get("RESEND_FROM_EMAIL", ""),
+            sender_from("alerts"),  # VT-113: canonical registry (ops@ via RESEND_FROM_EMAIL override)
             os.environ.get("RESEND_TO_EMAIL", ""),
             "Viabe CRITICAL: audit-chain break",
             f"<pre>{text}</pre>",

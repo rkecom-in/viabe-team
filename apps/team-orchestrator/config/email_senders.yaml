@@ -1,0 +1,19 @@
+# VT-113 — canonical From-address registry (Resend, domain send.viabe.ai DKIM-verified 2026-06-08).
+# Pillar-8 analogue of twilio_templates.yaml: ONE registry for sender identities; no hardcoded From
+# strings in code (grep-zero). Roles map to the sending purpose; reply_to documents where replies go.
+#
+# DNS (live + verified 2026-06-08): SPF v=spf1 include:amazonses.com ~all; MX
+# feedback-smtp.ap-northeast-1.amazonses.com; resend._domainkey DKIM; DMARC p=none rua=info@rkecom.in.
+senders:
+  transactional:
+    from: noreply@viabe.ai
+    reply_to: support@viabe.ai          # owner replies land at support → Fazal
+    description: Owner-facing transactional mail (reports, confirmations).
+  support:
+    from: support@viabe.ai
+    reply_to: support@viabe.ai          # replies → Fazal's monitored box
+    description: Support correspondence; replies routed to Fazal.
+  alerts:
+    from: ops@viabe.ai                  # back-compat: the prior RESEND_FROM_EMAIL value
+    reply_to: ops@viabe.ai
+    description: Internal ops/alert mail (deliverability alerts, monthly-impact ops digest).
