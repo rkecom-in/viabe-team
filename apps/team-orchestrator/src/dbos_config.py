@@ -8,17 +8,49 @@ entrypoint / tests — never on import.
 
 from __future__ import annotations
 
+import logging
 import os
 
 from dbos import DBOS, DBOSConfig
 
 from orchestrator.graph import init_substrate, reset_substrate
 
+logger = logging.getLogger(__name__)
+
 # 6 minutes: the 5-minute wall-clock hard limit (concept-team.md §8.3) plus a
 # 1-minute safety margin.
 WORKFLOW_TIMEOUT_SECONDS = 360
 
+# DBOS app name. Fazal registered the Conductor app as "viabe-team" (console.dbos.dev); DBOS binds the
+# Conductor websocket + console by this name (the bind URL is .../websocket/<app_name>/<key>), so it
+# MUST match the registered name. Env-overridable for prod/staging. NOTE (VT-161 due-diligence): the
+# app name is a Conductor/console identifier ONLY — it is NOT written to the workflow/queue tables and
+# is NOT in any recovery WHERE clause. Self-hosted recovery keys on the Postgres DB + executor_id +
+# application_version (the workflow-source hash, which the name does not feed). So renaming
+# team-orchestrator→viabe-team does NOT orphan in-flight workflows and needs no prod drain.
+_DEFAULT_APP_NAME = "viabe-team"
+
 _launched = False
+
+
+def _build_dbos_config(database_url: str) -> DBOSConfig:
+    """Assemble the DBOSConfig.
+
+    App name = ``DBOS_APPLICATION_NAME`` (default ``viabe-team``). Conductor is OPT-IN and
+    NON-CRITICAL (DBOS docs): ``DBOS_CONDUCTOR_KEY`` present → connect to Conductor on a background
+    thread; absent → local-recovery only. The connection runs on a daemon thread started inside
+    ``DBOS.launch()``, so a missing OR unreachable/invalid key never blocks or crashes launch — it
+    degrades to local recovery. We log which mode at startup.
+    """
+    name = os.environ.get("DBOS_APPLICATION_NAME", _DEFAULT_APP_NAME) or _DEFAULT_APP_NAME
+    config: DBOSConfig = {"name": name, "database_url": database_url}
+    conductor_key = (os.environ.get("DBOS_CONDUCTOR_KEY") or "").strip()
+    if conductor_key:
+        config["conductor_key"] = conductor_key
+        logger.info("DBOS launching WITH Conductor (DBOS_CONDUCTOR_KEY present) — app=%s", name)
+    else:
+        logger.info("DBOS launching local-recovery only (no DBOS_CONDUCTOR_KEY) — app=%s", name)
+    return config
 
 
 def get_database_url() -> str:
@@ -96,7 +128,7 @@ def launch_dbos() -> None:
 
     configure_logfire()
 
-    config: DBOSConfig = {"name": "team-orchestrator", "database_url": database_url}
+    config = _build_dbos_config(database_url)
     DBOS(config=config)
     DBOS.launch()
     init_substrate(database_url)
