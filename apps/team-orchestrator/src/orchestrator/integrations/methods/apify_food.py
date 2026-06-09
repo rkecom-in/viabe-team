@@ -52,7 +52,7 @@ _MODELS_YAML = Path(__file__).resolve().parents[4] / "config" / "models.yaml"
 _THEME_PROMPT = (
     Path(__file__).resolve().parents[2] / "agent" / "prompts" / "zomato_themes_v1.md"
 )
-_SWIGGY_ACTOR = "infoweaver~my-actor"
+_SWIGGY_ACTOR = "thirdwatch~swiggy-scraper"  # VT-110: the account's real Swiggy actor (infoweaver~my-actor was a wrong/generic id → fail-soft EMPTY context)
 _ZOMATO_ACTOR = "easyapi~zomato-restaurant-reviews-scraper"
 _TOKEN_ENV = "APIFY_API_TOKEN"
 _MAX_OUTPUT_TOKENS = 1024
@@ -106,14 +106,16 @@ def _query_input(business_name: str | None, locality: str | None, place_url: str
 # --- Swiggy (listing, no PII) -------------------------------------------------
 
 def _swiggy_aggregate(item: dict[str, Any]) -> dict[str, Any]:
-    """Allowlist — listing fields only (no PII present in Swiggy listings)."""
+    """Allowlist — listing fields only (no PII present in Swiggy listings). Reads BOTH the
+    thirdwatch~swiggy-scraper snake_case keys (VT-110, the real account actor) and the legacy
+    camelCase keys, so a parser shape change can't silently drop a field (the fail-soft trap)."""
     return {
-        "rating": item.get("rating") or item.get("avgRating"),
-        "cuisines": item.get("cuisines"),
-        "cost_for_two": item.get("costForTwo") or item.get("price"),
-        "delivery_time": item.get("deliveryTime") or item.get("sla"),
-        "offer": item.get("offer") or item.get("aggregatedDiscountInfo"),
-        "is_advertisement": bool(item.get("isAdvertisement", False)),
+        "rating": item.get("rating") or item.get("avgRating") or item.get("google_rating"),
+        "cuisines": item.get("cuisines") or item.get("cuisine"),
+        "cost_for_two": item.get("costForTwo") or item.get("price") or item.get("cost_for_two") or item.get("cost_for_two_rupees"),
+        "delivery_time": item.get("deliveryTime") or item.get("sla") or item.get("delivery_time") or item.get("delivery_time_minutes"),
+        "offer": item.get("offer") or item.get("aggregatedDiscountInfo") or item.get("offers"),
+        "is_advertisement": bool(item.get("isAdvertisement", item.get("is_promoted", False))),
     }
 
 
