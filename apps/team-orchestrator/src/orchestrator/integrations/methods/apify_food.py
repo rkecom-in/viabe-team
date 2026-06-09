@@ -64,14 +64,11 @@ ThemeFn = Callable[[list[str]], list[dict[str, Any]]]
 
 
 def _default_fetch(actor: str, run_input: dict[str, Any], token: str) -> list[dict[str, Any]]:
-    """Real Apify call (run-sync-get-dataset-items REST endpoint, httpx)."""
-    import httpx
+    """Real Apify call via the shared async start-poll-fetch client (VT-364 — replaces the blocking
+    run-sync 120s call that ReadTimeout'd on slow actors like Zomato)."""
+    from orchestrator.integrations.methods.apify_client import run_actor
 
-    url = f"https://api.apify.com/v2/acts/{actor}/run-sync-get-dataset-items"
-    resp = httpx.post(url, params={"token": token}, json=run_input, timeout=120.0)
-    resp.raise_for_status()
-    data = resp.json()
-    return data if isinstance(data, list) else []
+    return run_actor(actor, run_input, token)
 
 
 def _read_profile(tenant_id: UUID | str) -> dict[str, Any]:
