@@ -23,14 +23,26 @@ Behaviour
 
 from __future__ import annotations
 
+import argparse
 import os
 import sys
+import urllib.parse
 from pathlib import Path
 
 import psycopg
 
 # apply_migrations.py -> scripts -> team-orchestrator -> apps -> repo root
 MIGRATIONS_DIR = Path(__file__).resolve().parents[3] / "migrations"
+
+# VT-362 environment guard. The runner connects to whatever DATABASE_URL is injected (dev=Seoul,
+# prod=Mumbai), so a wrong-env run is the catastrophic failure (dev seed -> prod real-PII DB, or a
+# migration at the wrong target). The guard makes that STRUCTURALLY impossible: a CLI run must state
+# its intended env and the connected DB must prove it matches before ANY migration applies.
+VALID_ENVS = ("dev", "prod")
+
+
+class EnvironmentGuardError(SystemExit):
+    """Raised (as a SystemExit) when the connected DB does not match the expected environment."""
 
 
 def resolve_dsn() -> str:
@@ -42,6 +54,102 @@ def resolve_dsn() -> str:
             "(a direct Postgres DSN, not the Supabase REST URL)"
         )
     return dsn
+
+
+def dsn_host(dsn: str) -> str | None:
+    """Extract ONLY the connection host from a DSN — never the password (CL-431: no secret plaintext).
+    Handles both URL DSNs (postgresql://...) and libpq keyword DSNs."""
+    try:
+        info = psycopg.conninfo.conninfo_to_dict(dsn)
+        host = info.get("host")
+        if host:
+            return str(host)
+    except Exception:  # noqa: BLE001 — fall through to URL parsing
+        pass
+    try:
+        return urllib.parse.urlsplit(dsn).hostname
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _table_exists(conn: psycopg.Connection, table: str) -> bool:
+    row = conn.execute("SELECT to_regclass(%s)", (f"public.{table}",)).fetchone()
+    return bool(row and row[0] is not None)
+
+
+def guard_environment(
+    conn: psycopg.Connection,
+    dsn: str,
+    expected_env: str,
+    expected_host_substr: str | None = None,
+) -> str:
+    """REFUSE to proceed unless the connected DB matches ``expected_env``. Aborts (EnvironmentGuardError)
+    on any mismatch, BEFORE any migration applies. Never prints the DSN/password — only the host +
+    sentinel value (CL-431).
+
+    Steady state: the ``app_environment`` sentinel (one row) must equal ``expected_env``.
+    Bootstrap (fresh DB, no sentinel): requires ``expected_host_substr`` and asserts the connection
+    host contains it (a non-secret project-identity check), then stamps the sentinel so every later
+    run is sentinel-guarded.
+    """
+    if expected_env not in VALID_ENVS:
+        raise EnvironmentGuardError(
+            f"apply_migrations: --expected-env must be one of {VALID_ENVS}, got {expected_env!r}"
+        )
+
+    if _table_exists(conn, "app_environment"):
+        rows = conn.execute("SELECT name FROM app_environment").fetchall()
+        if len(rows) != 1:
+            raise EnvironmentGuardError(
+                f"apply_migrations: app_environment must hold exactly one row, found {len(rows)} "
+                "— refusing (tampered sentinel)."
+            )
+        actual = rows[0][0]
+        if actual != expected_env:
+            raise EnvironmentGuardError(
+                f"apply_migrations: ENV MISMATCH — the connected DB is stamped '{actual}' but "
+                f"--expected-env is '{expected_env}'. Refusing to apply (VT-362 wrong-env guard)."
+            )
+        print(f"  env-guard: sentinel '{actual}' == expected '{expected_env}' ✓")
+        return "steady"
+
+    # Bootstrap: no sentinel yet -> require a non-secret host-identity check before stamping.
+    host = dsn_host(dsn)
+    if not expected_host_substr:
+        raise EnvironmentGuardError(
+            "apply_migrations: the app_environment sentinel is absent (fresh DB) — a bootstrap run "
+            "REQUIRES --expected-host-substr (or EXPECTED_HOST_SUBSTR) to verify the connection "
+            "identity before stamping. Refusing (VT-362 bootstrap guard)."
+        )
+    if not host or expected_host_substr not in host:
+        raise EnvironmentGuardError(
+            f"apply_migrations: bootstrap host-check FAILED — connection host {host!r} does not "
+            f"contain the expected '{expected_host_substr}' for env '{expected_env}'. Refusing "
+            "(VT-362 wrong-project guard)."
+        )
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS app_environment ("
+        " singleton boolean PRIMARY KEY DEFAULT true CHECK (singleton),"
+        " name text NOT NULL CHECK (name IN ('dev','prod')))"
+    )
+    conn.execute(
+        "INSERT INTO app_environment (name) VALUES (%s) ON CONFLICT (singleton) DO NOTHING",
+        (expected_env,),
+    )
+    # ON CONFLICT DO NOTHING means a racing bootstrap could have stamped a DIFFERENT value first and
+    # our INSERT silently no-op'd — re-read and assert before trusting the stamp (don't print success
+    # for a value we did not actually land).
+    stamped = conn.execute("SELECT name FROM app_environment").fetchone()
+    if not stamped or stamped[0] != expected_env:
+        raise EnvironmentGuardError(
+            f"apply_migrations: bootstrap race — intended to stamp '{expected_env}' but the sentinel "
+            f"is now '{stamped[0] if stamped else None}'. Refusing (a concurrent run stamped first)."
+        )
+    print(
+        f"  env-guard: bootstrap — host {host!r} contains '{expected_host_substr}'; "
+        f"stamped sentinel '{expected_env}' ✓"
+    )
+    return "bootstrap"
 
 
 def migration_files(migrations_dir: Path = MIGRATIONS_DIR) -> list[Path]:
@@ -57,14 +165,39 @@ def _has_executable_sql(sql: str) -> bool:
     )
 
 
-def apply(dsn: str | None = None, migrations_dir: Path = MIGRATIONS_DIR) -> dict:
-    """Apply pending migrations. Returns {'applied', 'skipped', 'failed'}."""
+def apply(
+    dsn: str | None = None,
+    migrations_dir: Path = MIGRATIONS_DIR,
+    *,
+    expected_env: str | None = None,
+    expected_host_substr: str | None = None,
+) -> dict:
+    """Apply pending migrations. Returns {'applied', 'skipped', 'failed'}.
+
+    VT-362: when ``expected_env`` is given (the CLI path), the environment guard runs FIRST and aborts
+    on any mismatch before a single migration applies. When ``expected_env`` is None (programmatic
+    callers — test fixtures apply to throwaway LOCAL databases), the guard is skipped: those never
+    touch the dev/prod Supabase projects the guard exists to protect.
+    """
     dsn = dsn or resolve_dsn()
     applied: list[str] = []
     skipped: list[str] = []
     failed: list[tuple[str, str]] = []
 
     with psycopg.connect(dsn, autocommit=True) as conn:
+        if expected_env is not None:
+            guard_environment(conn, dsn, expected_env, expected_host_substr)
+        else:
+            # The unguarded path is for throwaway LOCAL test DBs. Warn loudly if it is ever pointed at
+            # a non-local host — a real dev/prod DSN here would bypass the VT-362 env guard.
+            _host = dsn_host(dsn) or ""
+            if _host and not any(local in _host for local in ("localhost", "127.0.0.1", "::1")):
+                print(
+                    f"  WARNING: apply_migrations.apply() ran UNGUARDED against non-local host "
+                    f"{_host!r} — the VT-362 env guard is bypassed on this path. Pass expected_env "
+                    "(+ expected_host_substr) when the target is a real dev/prod database.",
+                    file=sys.stderr,
+                )
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -75,9 +208,10 @@ def apply(dsn: str | None = None, migrations_dir: Path = MIGRATIONS_DIR) -> dict
             """
         )
         done = {row[0] for row in conn.execute("SELECT name FROM schema_migrations")}
-        next_id = conn.execute(
+        next_id_row = conn.execute(
             "SELECT COALESCE(MAX(id), 0) + 1 FROM schema_migrations"
-        ).fetchone()[0]
+        ).fetchone()
+        next_id = next_id_row[0] if next_id_row else 1
 
         for path in migration_files(migrations_dir):
             name = path.name
@@ -102,8 +236,45 @@ def apply(dsn: str | None = None, migrations_dir: Path = MIGRATIONS_DIR) -> dict
     return {"applied": applied, "skipped": skipped, "failed": failed}
 
 
-def main() -> int:
-    result = apply()
+def _parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="apply_migrations",
+        description="Apply ordered SQL migrations behind the VT-362 environment guard.",
+    )
+    parser.add_argument(
+        "--expected-env",
+        choices=VALID_ENVS,
+        default=os.environ.get("EXPECTED_ENV"),
+        help="REQUIRED: the environment you INTEND to migrate (dev|prod). No default — the caller "
+        "must state intent; the run aborts if the connected DB does not match.",
+    )
+    parser.add_argument(
+        "--expected-host-substr",
+        default=os.environ.get("EXPECTED_HOST_SUBSTR"),
+        help="Required only on a fresh DB (no app_environment sentinel yet): a substring the "
+        "connection host must contain, so a bootstrap run still can't hit the wrong project.",
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = _parse_args(sys.argv[1:] if argv is None else argv)
+    if not args.expected_env:
+        print(
+            "apply_migrations: --expected-env {dev|prod} is REQUIRED (or the EXPECTED_ENV env var). "
+            "Refusing to apply without an explicit target environment (VT-362).",
+            file=sys.stderr,
+        )
+        return 2
+    try:
+        result = apply(
+            expected_env=args.expected_env,
+            expected_host_substr=args.expected_host_substr,
+        )
+    except EnvironmentGuardError as exc:
+        print(str(exc), file=sys.stderr)
+        return 3
+
     for name in result["skipped"]:
         print(f"  skip    {name}")
     for name in result["applied"]:
