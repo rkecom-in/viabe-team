@@ -136,6 +136,15 @@ def guard_environment(
         "INSERT INTO app_environment (name) VALUES (%s) ON CONFLICT (singleton) DO NOTHING",
         (expected_env,),
     )
+    # ON CONFLICT DO NOTHING means a racing bootstrap could have stamped a DIFFERENT value first and
+    # our INSERT silently no-op'd — re-read and assert before trusting the stamp (don't print success
+    # for a value we did not actually land).
+    stamped = conn.execute("SELECT name FROM app_environment").fetchone()
+    if not stamped or stamped[0] != expected_env:
+        raise EnvironmentGuardError(
+            f"apply_migrations: bootstrap race — intended to stamp '{expected_env}' but the sentinel "
+            f"is now '{stamped[0] if stamped else None}'. Refusing (a concurrent run stamped first)."
+        )
     print(
         f"  env-guard: bootstrap — host {host!r} contains '{expected_host_substr}'; "
         f"stamped sentinel '{expected_env}' ✓"
@@ -178,6 +187,17 @@ def apply(
     with psycopg.connect(dsn, autocommit=True) as conn:
         if expected_env is not None:
             guard_environment(conn, dsn, expected_env, expected_host_substr)
+        else:
+            # The unguarded path is for throwaway LOCAL test DBs. Warn loudly if it is ever pointed at
+            # a non-local host — a real dev/prod DSN here would bypass the VT-362 env guard.
+            _host = dsn_host(dsn) or ""
+            if _host and not any(local in _host for local in ("localhost", "127.0.0.1", "::1")):
+                print(
+                    f"  WARNING: apply_migrations.apply() ran UNGUARDED against non-local host "
+                    f"{_host!r} — the VT-362 env guard is bypassed on this path. Pass expected_env "
+                    "(+ expected_host_substr) when the target is a real dev/prod database.",
+                    file=sys.stderr,
+                )
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS schema_migrations (
