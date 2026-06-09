@@ -139,7 +139,14 @@ Fazal grants scope at **batch level** ("ship batch 9," "complete the queued task
 
 **New scope = new explicit grant.** You don't ask mid-batch for every step, but you also don't widen scope without asking.
 
-### Merge workflow (post-VT-245, 2026-05-30)
+### Merge workflow (post-VT-245, 2026-05-30; dev-branch governance VT-363/CL-432, 2026-06-09)
+
+**Branch governance (VT-363, Fazal 2026-06-09 — CL-432):** there are TWO long-lived branches.
+**`dev`** → Railway Dev + Vercel `viabe-team-dev` + Supabase Seoul (the deployed, E2E-tested env).
+**`main`** → Railway Prod + Vercel `viabe-team` + Supabase Mumbai (deliberate, real customer data).
+- **CC's default PR base is `dev`.** CC self-merges [BUILD] rows on green into **`dev`** (CL-429, now → dev); risk rows (money/auth/PII/RLS/classifier) still get the Cowork subagent gate before the dev merge.
+- **`main` is Fazal-authorized ONLY.** CC NEVER merges to `main` without an explicit Fazal `type: task` promotion instruction (the new Pillar-7 gate). A `dev`→`main` promotion PR opens only on Fazal's word; Cowork relays it. A PR targeting `main` is forbidden unless it's that authorized promotion.
+- Flow: feature branch → PR into `dev` → CC self-merge on green → Dev deploy → phase E2E → **Fazal authorizes dev→main promotion** → Prod.
 
 Main protection is an account-level ruleset, but **"Require status checks to pass" is OFF** (Fazal, 2026-05-30) — CI no longer gates merges. The **local pre-push hook is the safety gate**; run `scripts/install-hooks.sh` once after cloning. CI is a non-blocking backstop on PRs.
 
@@ -161,7 +168,7 @@ A `railway up` CLI job was debugged for an hour this session chasing `RAILWAY_TO
 
 The single-env mechanics above describe the **Dev** path. The full topology is now **Dev + Prod**:
 
-- **Railway** — ONE project, TWO environments: **Dev** + **Prod**. Hosts the orchestrator. (Which branch/trigger maps to which Railway env — e.g. `main`→Prod vs a dev branch→Dev — is an OPEN wiring decision deferred to the **VT-231** cutover, NOT decided now; today `main`→the existing service.)
+- **Railway** — ONE project, TWO environments: **Dev** ← `dev` branch + **Prod** ← `main` branch (decided VT-363/CL-432). Hosts the orchestrator (`vt-orchestrator-service`). `EXPECTED_ENV=dev` set on Railway Dev (VT-362 guard); `EXPECTED_ENV=prod` Fazal-set on Prod. The env→branch trigger itself is a Railway-console setting (not CLI-inspectable) — verify/set it in the dashboard.
 - **Vercel** — TWO projects: **`viabe-team-dev`** (exists, dev) + **`viabe-team`** (PROD, **not yet created** — creation + deploy wiring = VT-231 cutover scope). Hosts team-web.
 - **Supabase** — TWO projects: **dev = Seoul (`ap-northeast-2`)**, **prod = Mumbai (`ap-south-1`, being created)**. ADR-0003 dual-project + [[CL-422]] (dev-Seoul accepted; NO real customer data on dev until VT-231). Fazal chose two separate projects over single-project-branching (2026-06-09).
 - **CC console access (2026-06-09):** CC has direct management access to the **Supabase** (both projects), **Railway**, and **Vercel** consoles — Fazal logged CC in. CC can read/set env vars directly, **subject to the authority gate below (CL-431).**
