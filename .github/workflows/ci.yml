@@ -2,7 +2,7 @@ name: CI
 
 on:
   pull_request:
-    branches: [main]
+    branches: [main, dev]  # VT-363: CC's default PR base is `dev`; CI must gate dev PRs too
     # VT-255 Actions-diet: dropped `edited` — a PR title/body edit must NOT
     # re-run the ~17-job suite (CL-423 numeric-title churn fired it constantly).
     # The cheap title gate lives in pr-title.yml, which still runs on `edited`.
