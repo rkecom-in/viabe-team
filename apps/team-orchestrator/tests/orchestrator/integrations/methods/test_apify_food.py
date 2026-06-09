@@ -55,6 +55,24 @@ def test_swiggy_allowlist():
     assert agg["rating"] == 4.2 and "ownerPhone" not in agg
 
 
+def test_swiggy_aggregate_maps_thirdwatch_snake_case():
+    """VT-110: the real account actor thirdwatch~swiggy-scraper emits snake_case keys
+    (cuisine/cost_for_two/delivery_time/offers/is_promoted). The parser must map them —
+    a real run with the old camelCase-only reader silently dropped cuisines + cost."""
+    agg = _swiggy_aggregate({
+        "rating": 4.2, "cuisine": ["Pizzas"], "cost_for_two": "₹300 for two",
+        "delivery_time": "25-30 mins", "offers": "20% OFF", "is_promoted": True,
+        "address": "x", "ownerPhone": "9999999999",  # stray/PII-ish fields ignored
+    })
+    assert agg["rating"] == 4.2
+    assert agg["cuisines"] == ["Pizzas"]
+    assert agg["cost_for_two"] == "₹300 for two"
+    assert agg["delivery_time"] == "25-30 mins"
+    assert agg["offer"] == "20% OFF"
+    assert agg["is_advertisement"] is True
+    assert "ownerPhone" not in agg and "address" not in agg  # allowlist holds
+
+
 def test_deterministic_sentiment():
     assert _sentiment_distribution([5, 2, 4]) == {"positive": 2, "neutral": 0, "negative": 1}
     assert _sentiment_distribution([3, 3]) == {"positive": 0, "neutral": 2, "negative": 0}
