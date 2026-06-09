@@ -73,6 +73,21 @@ def test_swiggy_aggregate_maps_thirdwatch_snake_case():
     assert "ownerPhone" not in agg and "address" not in agg  # allowlist holds
 
 
+def test_zomato_review_rating_reads_ratingV2():
+    """VT-110 live canary: easyapi~zomato emits the star rating in `ratingV2` (a string '5');
+    `rating` is a dict ({'entities':[...]}), NOT a number. The old float(rating) read got 0 →
+    overall_rating None + all-zero sentiment (silent loss)."""
+    from orchestrator.integrations.methods.apify_food import _sentiment_distribution, _zomato_review_rating
+    real = {"rating": {"entities": [{"entity_type": "RATING", "entity_ids": [656243806]}]},
+            "ratingV2": "5", "reviewText": "Great"}
+    assert _zomato_review_rating(real) == 5.0
+    assert _zomato_review_rating({"ratingV2": "1"}) == 1.0
+    assert _zomato_review_rating({"rating": 4.0}) == 4.0           # legacy numeric still works
+    assert _zomato_review_rating({"rating": {"entities": []}}) == 0.0  # dict-only → no crash, 0.0
+    ratings = [_zomato_review_rating(x) for x in ({"ratingV2": "1"}, {"ratingV2": "5"}, {"ratingV2": "5"})]
+    assert _sentiment_distribution([r for r in ratings if r > 0]) == {"positive": 2, "neutral": 0, "negative": 1}
+
+
 def test_deterministic_sentiment():
     assert _sentiment_distribution([5, 2, 4]) == {"positive": 2, "neutral": 0, "negative": 1}
     assert _sentiment_distribution([3, 3]) == {"positive": 0, "neutral": 2, "negative": 0}
