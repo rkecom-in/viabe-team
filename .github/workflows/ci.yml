@@ -832,3 +832,45 @@ jobs:
           path: |
             apps/team-orchestrator/mypy-orchestrator.log
             apps/team-ingestion-worker/mypy-worker.log
+
+  # VT-363: ONE always-run gate to require in branch protection. The conditional jobs above SKIP on
+  # docs-only PRs — requiring them directly would WEDGE (a required *skipped* check = unmergeable,
+  # which is exactly the VT-245 wound). This aggregator is green when every required job passed OR was
+  # legitimately skipped, and red only when a required job actually failed/cancelled. The flaky/heavy
+  # jobs (migrations RLS-service_count, orchestrator chrono-order, e2e-playwright) + advisory mypy are
+  # deliberately NOT in `needs` — they still run + report, they just don't gate the merge. Promote them
+  # into this set once the VT-245 flakes are fixed.
+  ci-success:
+    name: ci-success
+    if: always()
+    needs:
+      - lint
+      - typecheck
+      - test
+      - gitleaks
+      - gate-no-deprecated-langgraph-imports
+      - gate-no-price-literals
+      - gate-no-llm-in-deterministic-triggers
+      - gate-no-langsmith-imports
+      - gate-no-direct-tenant-db-access
+      - gate-sr-agent-prompt-token-cap
+      - gate-vt39-tools-harness-import
+      - gate-connector-registry-schema
+      - gate-vt35-hard-limit-constants
+      - gate-langgraph-nodes-have-observability-hook
+      - gate-mcp-tools-have-observability-decorator
+    runs-on: ubuntu-latest
+    steps:
+      - name: Required CI jobs must not have failed
+        env:
+          # GitHub-computed job results (success/failure/skipped/cancelled) — not user input.
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "required-job results: $RESULTS"
+          for r in $RESULTS; do
+            if [ "$r" = "failure" ] || [ "$r" = "cancelled" ]; then
+              echo "::error::A required CI job failed or was cancelled — blocking merge." >&2
+              exit 1
+            fi
+          done
+          echo "All required CI jobs passed or were acceptably skipped."
