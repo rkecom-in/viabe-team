@@ -121,6 +121,7 @@ row ships on unit/DB coverage; the live walk happens at E2E).
   flag:** if the live walk shows tech-provider ES insufficient for owner-owned WABAs,
   STOP + flag (do NOT switch to Meta Graph silently). Send is fail-CLOSED until WABA
   `live`, so nothing ships to customers pre-walk. Not Reports-Jun15-blocking.
+- **TRADEMARK DEPENDENCY (Fazal, 2026-06-09):** The Viabe trademark filing now gates THREE things: (1) WABA display name "Viabe" (Meta), (2) the SMS DLT header (Fazal postponed the entity-name `RKECOM` interim header in favor of a Viabe-branded header post-TM), and (3) — consequently — the **owner-login OTP path**, since WhatsApp-OTP needs WABA and SMS-OTP needs the DLT header, and BOTH now wait on the TM. **No login channel is independent of the trademark.** Mitigation: both Meta and Airtel typically accept a PENDING trademark APPLICATION NUMBER (not a grant) — so the real gate is FILING the TM (days), not the grant (months). Action: file the Viabe TM ASAP + capture the application number; if Meta/Airtel reject the pending application, reconsider the `RKECOM` interim SMS header so login isn't stranded.
 - **VT-267 PR-C owner onboarding wizard — real OAuth round-trip + WhatsApp-WebView E2E.** The
   wizard (Review-&-Confirm + system-browser OAuth handoff + re-check resume) is built +
   unit/DB-tested (20 vitest incl. a no-`window.open` source assertion + 5 real-PG canary). Two
