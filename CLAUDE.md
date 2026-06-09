@@ -157,6 +157,16 @@ A `railway up` CLI job was debugged for an hour this session chasing `RAILWAY_TO
 - **`deploy-dev.yml`** = `pre-deploy-checks` + the Vercel job only. Because Railway's "Wait for CI" skips the native deploy if ANY Action on the push fails, **keeping `deploy-dev` green is what lets the orchestrator deploy** — a red CI run silently blocks it.
 - **Discipline:** before "fixing" a failing deploy/CI step, check this topology first — don't repair a step that's redundant with platform-native config (Railway/Vercel dashboards own the actual deploy).
 
+#### Two-environment model (2026-06-09 — Fazal granted CC direct console access)
+
+The single-env mechanics above describe the **Dev** path. The full topology is now **Dev + Prod**:
+
+- **Railway** — ONE project, TWO environments: **Dev** + **Prod**. Hosts the orchestrator. (Which branch/trigger maps to which Railway env — e.g. `main`→Prod vs a dev branch→Dev — is an OPEN wiring decision deferred to the **VT-231** cutover, NOT decided now; today `main`→the existing service.)
+- **Vercel** — TWO projects: **`viabe-team-dev`** (exists, dev) + **`viabe-team`** (PROD, **not yet created** — creation + deploy wiring = VT-231 cutover scope). Hosts team-web.
+- **Supabase** — TWO projects: **dev = Seoul (`ap-northeast-2`)**, **prod = Mumbai (`ap-south-1`, being created)**. ADR-0003 dual-project + [[CL-422]] (dev-Seoul accepted; NO real customer data on dev until VT-231). Fazal chose two separate projects over single-project-branching (2026-06-09).
+- **CC console access (2026-06-09):** CC has direct management access to the **Supabase** (both projects), **Railway**, and **Vercel** consoles — Fazal logged CC in. CC can read/set env vars directly, **subject to the authority gate below (CL-431).**
+- **Authority gate (CL-431):** CC manages **DEV** env vars autonomously; **every PROD env-var change (config OR secrets) requires explicit Fazal authorization first** — the Pillar-7 analog for infrastructure. **Secrets hygiene (binding):** CC NEVER writes a live secret VALUE into any repo signal/log/PR/commit (the repo is git — an echoed secret is a committed secret); CC sets/rotates in the console and reports ONLY the variable NAME + action. See `decisions-ledger.md` CL-431.
+
 ### FUSE lock workflow
 
 The sandbox cannot unlink `.git/index.lock` files left by interrupted writes — FUSE mount denies the operation. Only Fazal's native Mac terminal can `rm` the lock.
