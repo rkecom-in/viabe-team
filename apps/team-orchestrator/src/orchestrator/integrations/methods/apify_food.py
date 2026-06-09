@@ -193,6 +193,22 @@ def _sentiment_distribution(ratings: list[float]) -> dict[str, int]:
     return {"positive": pos, "neutral": neu, "negative": neg}
 
 
+def _zomato_review_rating(item: dict[str, Any]) -> float:
+    """Extract a review's numeric star rating. VT-110 live canary: easyapi~zomato puts the number
+    in ``ratingV2`` (a STRING like '5'); ``rating`` is a dict (``{'entities': [...]}``) — NOT a
+    number, so the old ``float(item['rating'])`` read silently yielded 0 → overall_rating None +
+    all-zero sentiment. Try ratingV2 first, then the legacy numeric ``rating``/``reviewRating``.
+    Returns 0.0 if unparseable (drops to no-rating, never crashes)."""
+    for v in (item.get("ratingV2"), item.get("rating"), item.get("reviewRating")):
+        try:
+            f = float(v)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            continue
+        if f > 0:
+            return f
+    return 0.0
+
+
 def _resolve_theme_model() -> str:
     env = os.environ.get("VIABE_ENV", "test").lower()
     slot = "production" if env == "production" else "test"
@@ -271,10 +287,7 @@ def ingest_zomato(
     ratings: list[float] = []
     texts: list[str] = []
     for it in items:
-        try:
-            ratings.append(float(it.get("rating") or it.get("reviewRating") or 0) or 0.0)
-        except (TypeError, ValueError):
-            ratings.append(0.0)
+        ratings.append(_zomato_review_rating(it))
         txt = it.get("reviewText") or it.get("text") or it.get("review")
         if txt:
             texts.append(str(txt))
