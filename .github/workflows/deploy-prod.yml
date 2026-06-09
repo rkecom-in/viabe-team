@@ -1,0 +1,82 @@
+name: Deploy prod (manual)
+
+# VT-363 / CL-432: the prod deploy is DELIBERATE — never auto-on-main. A merge to `main` must
+# NOT auto-ship to the Mumbai prod env; promotion is a manual, confirmed action. This workflow
+# deploys team-web to the PROD Vercel project (`viabe-team`). The orchestrator's prod deploy is
+# Railway-native on `main` (dashboard) — set Railway Prod auto-deploy per the governance
+# (manual / wait-for-promote), a Fazal console action.
+#
+# NEEDS-FAZAL before this can run green:
+#   - the `viabe-team` PROD Vercel project created (VT-363 step 4)
+#   - repo secret VERCEL_PROJECT_ID_PROD = that project's id (VERCEL_ORG_ID / VERCEL_TOKEN reused)
+#
+# Untrusted input handling (GH Actions security): the workflow_dispatch `confirm` input is passed
+# via env, never interpolated into a run: block.
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type "promote-to-prod" to confirm a deliberate prod deploy'
+        required: true
+        default: ''
+
+concurrency:
+  group: deploy-prod
+  cancel-in-progress: false
+
+jobs:
+  confirm-promotion:
+    name: confirm-prod-promotion
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require explicit confirmation
+        env:
+          CONFIRM: ${{ github.event.inputs.confirm }}
+        run: |
+          if [ "$CONFIRM" != "promote-to-prod" ]; then
+            echo "Refusing prod deploy: re-run and type 'promote-to-prod' in the confirm input." >&2
+            exit 1
+          fi
+          echo "Prod promotion confirmed."
+
+  pre-deploy-checks:
+    name: pre-deploy-checks
+    needs: confirm-promotion
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @viabe/team-web typecheck
+      - run: pnpm --filter @viabe/team-web lint
+      - uses: astral-sh/setup-uv@v7
+      - run: uvx ruff check apps/team-orchestrator
+
+  deploy-team-web-prod:
+    name: Deploy team-web PROD (Vercel)
+    needs: pre-deploy-checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: pnpm
+      # Same flow as deploy-dev.yml but against the PROD Vercel project. Token via env (not ${{ }}
+      # in run:) — injection-safe. VERCEL_ORG_ID / VERCEL_PROJECT_ID_PROD read by the CLI from env.
+      - name: Deploy to Vercel (prod project)
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID_PROD }}
+        run: |
+          npm i -g vercel@latest
+          vercel pull --yes --environment=production --token="$VERCEL_TOKEN"
+          vercel build --prod --token="$VERCEL_TOKEN"
+          vercel deploy --prebuilt --prod --token="$VERCEL_TOKEN"

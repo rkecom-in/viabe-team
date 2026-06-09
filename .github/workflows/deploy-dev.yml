@@ -1,12 +1,13 @@
 name: Deploy dev
 
-# Triggered on push to main only. No untrusted event payload values
-# are interpolated into run: blocks — only repo secrets, which are
-# safe per the GitHub Actions security model.
+# Triggered on push to the `dev` branch (VT-363/CL-432: dev → Dev env / viabe-team-dev /
+# Seoul). `main` → Prod is a separate, manual deploy-prod.yml. No untrusted event payload
+# values are interpolated into run: blocks — only repo secrets, which are safe per the
+# GitHub Actions security model.
 
 on:
   push:
-    branches: [main]
+    branches: [dev]
     # VT-245 trigger-diet: don't redeploy dev when a merge touches ONLY
     # docs / sprint substrate / session exports / the ci.yml workflow —
     # none of that changes the deployed apps. paths-ignore skips only
