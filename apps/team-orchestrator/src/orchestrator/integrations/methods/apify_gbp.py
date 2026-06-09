@@ -66,13 +66,11 @@ def _aggregate(place: dict[str, Any]) -> dict[str, Any]:
 
 
 def _default_fetch(run_input: dict[str, Any], token: str) -> list[dict[str, Any]]:
-    """Real Apify call (run-sync-get-dataset-items REST endpoint, httpx)."""
-    import httpx
+    """Real Apify call via the shared async start-poll-fetch client (VT-364 — replaces the blocking
+    run-sync 120s call). GBP runs maxReviews=0 so it's fast, but it shares the one client path."""
+    from orchestrator.integrations.methods.apify_client import run_actor
 
-    resp = httpx.post(_APIFY_URL, params={"token": token}, json=run_input, timeout=120.0)
-    resp.raise_for_status()
-    data = resp.json()
-    return data if isinstance(data, list) else []
+    return run_actor(_ACTOR, run_input, token)
 
 
 def _existing_business_profile(tenant_id: UUID | str) -> dict[str, Any]:
