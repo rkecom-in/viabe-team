@@ -73,6 +73,11 @@ EXPOSE 8001
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
     CMD python -c "import urllib.request,sys; r=urllib.request.urlopen('http://127.0.0.1:'+__import__('os').environ.get('PORT','8001')+'/health',timeout=5); sys.exit(0 if r.status==200 else 1)"
 
-# tini → migrations (idempotent) → uvicorn bound to $PORT.
+# tini → migrations (env-guarded, idempotent) → uvicorn bound to $PORT.
+# VT-362: apply_migrations now REQUIRES --expected-env. Default to dev (fail-closed): on the dev
+# service the Seoul DB is stamped 'dev' so this is a steady-state match and boots normally; a prod
+# deploy MUST set EXPECTED_ENV=prod (+ EXPECTED_HOST_SUBSTR for the first Mumbai run) in the Railway
+# prod env — if it forgets, the guard aborts (the prod-stamped DB ≠ 'dev') and the container refuses
+# to boot rather than migrating the wrong DB. EXPECTED_HOST_SUBSTR is read from the env on bootstrap.
 ENTRYPOINT ["/usr/bin/tini", "--"]
-CMD ["sh", "-c", "python scripts/apply_migrations.py && exec uvicorn main:app --app-dir src --host 0.0.0.0 --port ${PORT}"]
+CMD ["sh", "-c", "python scripts/apply_migrations.py --expected-env \"${EXPECTED_ENV:-dev}\" && exec uvicorn main:app --app-dir src --host 0.0.0.0 --port ${PORT}"]
