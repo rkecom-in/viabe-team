@@ -193,7 +193,10 @@ def _extract_website(text: str) -> dict[str, Any]:
     prompt = (
         "From this business website text, extract a short factual summary as JSON with keys "
         '"about" (1-2 sentences on what the business does) and "services" (a short list of '
-        "offerings, max 6). Use ONLY what the text states; if unknown, use null/[]. No prose, JSON only.\n\n"
+        "offerings, max 6). Use ONLY what the text states; if unknown, use null/[]. "
+        "EXCLUDE all personal names, customer testimonials/reviews, and any personal contact "
+        "details (phone/email/address of individuals) — extract ONLY the business's own "
+        "about/services, never anyone's PII (CL-390). No prose, JSON only.\n\n"
         f"TEXT:\n{text}"
     )
     try:

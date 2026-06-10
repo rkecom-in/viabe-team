@@ -20,8 +20,11 @@ CREATE TABLE business_profile_draft (
 -- One draft per tenant; re-discovery MERGES into the same row (idempotent).
 CREATE UNIQUE INDEX business_profile_draft_one_per_tenant ON business_profile_draft (tenant_id);
 
--- Pillar 3: RLS in the same migration that creates the table (mirrors l1_entities).
+-- Pillar 3: RLS in the same migration that creates the table (mirrors l1_entities). FORCE so table
+-- ownership alone cannot bypass RLS — the table is touched by the privileged owner pool (dsr_purge);
+-- 000b_rls_helpers.sql invariant: "RLS is FORCED on every table".
 ALTER TABLE business_profile_draft ENABLE ROW LEVEL SECURITY;
+ALTER TABLE business_profile_draft FORCE ROW LEVEL SECURITY;
 CREATE POLICY business_profile_draft_select ON business_profile_draft FOR SELECT
     USING (tenant_id = app_current_tenant());
 CREATE POLICY business_profile_draft_insert ON business_profile_draft FOR INSERT
