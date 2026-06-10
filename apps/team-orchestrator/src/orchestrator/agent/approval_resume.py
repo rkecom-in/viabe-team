@@ -129,6 +129,7 @@ def mark_approval_resolved(
     decision: str,
     *,
     owner_message_sid: str | None = None,
+    owner_feedback: str | None = None,
 ) -> bool:
     """Resolve (or, for a defer, EXTEND) the pending_approvals row. Returns True if the row was
     RESOLVED (the caller resumes the run), False if it was EXTENDED on a defer (the run STAYS
@@ -139,7 +140,15 @@ def mark_approval_resolved(
 
     VT-334 defer: a 'defer' decision extends the window (defer_count++, timeout +48h, still
     pending) until ``_MAX_DEFERS``, after which it resolves as decision='defer', status='rejected'
-    (the SAFE downstream behavior; the audit truth is decision='defer')."""
+    (the SAFE downstream behavior; the audit truth is decision='defer').
+
+    VT-369: this is the single resolution choke point (owner-reply path AND the 30-min timeout
+    sweep), so the agent-surface glue lives HERE: when the resolved row is an
+    ``agent_customer_send`` approval, ``approval_glue.apply_agent_decision`` flips the linked
+    ``agent_draft_batches`` row in the SAME transaction/connection (approved → 'approved';
+    needs_changes → 'edit_requested' + owner_feedback + ONE-regeneration cap; rejected →
+    'rejected'; timeout / exhausted-defer → 'cancelled'). ``owner_feedback`` is the raw owner
+    reply body — persisted on the RLS-protected batch row only, NEVER logged (CL-390)."""
     if decision == "defer":
         new_count = PendingApprovalsWrapper().extend_on_defer(
             tenant_id, approval_id, timeout_hours=48, conn=conn
@@ -156,6 +165,7 @@ def mark_approval_resolved(
             decision="defer", status="rejected",
             owner_message_sid=owner_message_sid, conn=conn,
         )
+        _apply_agent_glue(conn, tenant_id, approval_id, "defer", owner_feedback)
         return True
 
     status = _DECISION_TO_STATUS.get(decision, "rejected")
@@ -167,7 +177,30 @@ def mark_approval_resolved(
         owner_message_sid=owner_message_sid,
         conn=conn,
     )
+    _apply_agent_glue(conn, tenant_id, approval_id, decision, owner_feedback)
     return True
+
+
+def _apply_agent_glue(
+    conn: Any,
+    tenant_id: UUID | str,
+    approval_id: UUID | str,
+    decision: str,
+    owner_feedback: str | None,
+) -> None:
+    """VT-369 — apply the agent-batch consequence of a TRUE resolution (no-op for
+    non-agent approval types; ``apply_agent_decision`` reads the row's
+    ``approval_type``/``draft_batch_id`` on the caller's conn and returns None
+    unless it is an open-batch ``agent_customer_send``). Same txn as the resolve."""
+    from orchestrator.agents.approval_glue import apply_agent_decision
+
+    apply_agent_decision(
+        conn,
+        tenant_id,
+        {"id": str(approval_id)},
+        decision,
+        owner_feedback=owner_feedback,
+    )
 
 
 def resume_run(run_id: UUID | str, decision: str) -> dict[str, Any]:

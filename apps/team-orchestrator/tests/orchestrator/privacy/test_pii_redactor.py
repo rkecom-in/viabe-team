@@ -256,3 +256,13 @@ def test_vt101_canary_payload_byte_identical_redaction() -> None:
 
 def test_default_max_depth_is_five() -> None:
     assert DEFAULT_MAX_DEPTH == 5
+
+
+def test_aadhaar_pattern_spares_uuid_segments():
+    """VT-369 CI flake: a uuid4 whose final 12-hex segment is all-numeric must NOT be
+    Aadhaar-redacted (id-bearing payloads were corrupted ~1-in-285 uuids); a real
+    standalone Aadhaar still is."""
+    uuid_like = "710363ea-7d30-4f02-a660-214698525976"
+    assert redact(uuid_like) == uuid_like
+    assert "<aadhaar:redacted>" in redact("my aadhaar is 1234 5678 9012")
+    assert "<aadhaar:redacted>" in redact("aadhaar 123456789012 here")

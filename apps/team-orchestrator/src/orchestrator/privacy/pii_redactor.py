@@ -70,7 +70,12 @@ _CC_CANDIDATE_RE = re.compile(r"\b(?:\d[ \-]?){12,18}\d\b")
 
 # Aadhaar — 12 digits in groups of 4 (with optional separator); word-
 # boundaried so it doesn't bite into longer numeric tokens (hash hex etc.).
-_AADHAAR_RE = re.compile(r"\b\d{4}\s?\d{4}\s?\d{4}\b")
+# UUID guard (VT-369 CI flake): ``\b`` treats '-' as a boundary, so a uuid4 whose final 12-hex
+# segment is all-numeric (~1-in-285, e.g. ...-a660-214698525976) matched as an "Aadhaar" and id-
+# bearing event payloads were corrupted. The hex-hyphen lookbehind/lookahead suppress matches
+# inside a UUID shape; a real Aadhaar embedded in a hex-hyphen context is the accepted (rare)
+# false-negative.
+_AADHAAR_RE = re.compile(r"(?<![0-9a-fA-F]-)\b\d{4}\s?\d{4}\s?\d{4}\b(?!-[0-9a-fA-F])")
 
 # Phone — two narrow forms; intentionally NOT a generic 7-15-digit catch-all
 # (the old VT-101 pattern caught hash hex and CC + Aadhaar digit runs, which

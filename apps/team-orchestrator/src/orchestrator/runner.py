@@ -351,6 +351,19 @@ def try_resume_pending_approval(tenant_id: str, body: str, message_sid: str | No
       4. Resume the paused LangGraph run with Command(resume={decision}).
       5. Drive the ORIGINAL paused run's pipeline_runs.status -> 'completed'.
     """
+    # VT-369 CRITICAL-1 (live compliance bug, DPDP): opt-out / DSR ALWAYS wins over the
+    # approval classifier. 'stop' and 'cancel' are members of approval_reply._REJECT_KW,
+    # so without this guard an owner opt-out ("STOP" / "बंद करो" / "delete my data")
+    # arriving while ANY approval is open would be CONSUMED here as a campaign/batch
+    # rejection instead of reaching the authoritative opt-out / DSR handler. Mirrors the
+    # journey-gate guard (onboarding/journey.py maybe_handle_journey_reply): return None
+    # so the inbound falls through to pre_filter, which routes it to opt_out_handler /
+    # dsr_handler. The open approval row stays open (the 30-min timeout sweep owns it).
+    from orchestrator.pre_filter_gate import matches_opt_out_or_dsr
+
+    if matches_opt_out_or_dsr(body or ""):
+        return None
+
     from orchestrator.agent.approval_resume import (
         find_open_approval_for_tenant,
         mark_approval_resolved,
@@ -373,8 +386,15 @@ def try_resume_pending_approval(tenant_id: str, body: str, message_sid: str | No
     # ruling 20260603T191000Z). approved → campaign_approved, rejected →
     # campaign_rejected; needs_changes has no L2 milestone type → no emit.
     with tenant_connection(tenant_id) as conn, conn.transaction():
+        # VT-369: owner_feedback (the raw reply body) is threaded through so a
+        # needs_changes on an agent_customer_send approval can store it on the
+        # draft batch (RLS-protected agent_draft_batches.owner_feedback; CL-390 —
+        # it is persisted, never logged). The batch-state application happens
+        # INSIDE mark_approval_resolved (the single resolution choke point, shared
+        # with the timeout sweep), atomic with this transaction.
         resolved = mark_approval_resolved(
-            conn, tenant_id, approval["id"], decision, owner_message_sid=message_sid
+            conn, tenant_id, approval["id"], decision,
+            owner_message_sid=message_sid, owner_feedback=body,
         )
         # VT-334: a 'defer' that only EXTENDS the window returns resolved=False — the run stays
         # paused (no L2 emit, no resume). The L2 + resume happen only on a real resolution
@@ -416,6 +436,20 @@ def try_resume_pending_approval(tenant_id: str, body: str, message_sid: str | No
         logger.info(
             "approval-resume: deferred (window extended) tenant=%s approval=%s",
             tenant_id, approval["id"],
+        )
+        return decision
+
+    # VT-369: agent-surface approvals resolve through DURABLE STATE — the draft
+    # batch was flipped (approved / edit_requested / rejected / cancelled) inside
+    # the resolution transaction above. There is NO supervisor-graph checkpoint to
+    # resume under this run_id (the agent dispatch workflow owns its own run
+    # lifecycle and picks the batch status up on its next deterministic step), so
+    # resume_run/close_webhook_run are campaign-path-only.
+    if approval.get("approval_type") == "agent_customer_send":
+        logger.info(
+            "approval-resume: resolved (agent surface, durable-state) tenant=%s "
+            "approval=%s decision=%s",
+            tenant_id, approval["id"], decision,
         )
         return decision
 

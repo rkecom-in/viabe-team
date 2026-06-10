@@ -109,8 +109,16 @@ def _pool(
     return pool, executed
 
 
-def _customer(last_inbound_at: datetime | None, phone: str = "+919990000001") -> dict:
-    return {"phone_e164": phone, "last_inbound_at": last_inbound_at}
+def _customer(
+    last_inbound_at: datetime | None,
+    phone: str = "+919990000001",
+    opt_out_status: str | None = None,
+) -> dict:
+    return {
+        "phone_e164": phone,
+        "last_inbound_at": last_inbound_at,
+        "opt_out_status": opt_out_status,
+    }
 
 
 def _input(**over: Any):
@@ -155,6 +163,42 @@ def test_happy_path_sent() -> None:
 
     # Ledger INSERT must be present.
     assert any("INSERT INTO send_idempotency_keys" in s for s in sql_list)
+
+
+# ---------------------------------------------------------------------------
+# Test 1b (VT-369 Gap-5 PR-1 fix): opted-out customer refused EVEN IN-WINDOW
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("status", ["opted_out", "blocked", "owner_excluded"])
+def test_opted_out_recipient_refused_even_in_window(status: str) -> None:
+    """CL-421/VT-369: an opted-out customer who messages in re-opens a 24h
+    *window*, not consent — the freeform path was missing this gate. The refuse
+    fires BEFORE any window/rate evaluation and the sender is never called."""
+    from orchestrator.agent.tools.send_whatsapp_message import send_whatsapp_message
+
+    last_inbound = _now_utc() - timedelta(hours=2)  # squarely IN-window
+    pool, _ = _pool(customer_row=_customer(last_inbound, opt_out_status=status))
+    send_fn = MagicMock(return_value="SM_should_not_be_called")
+
+    out = send_whatsapp_message(_input(), pool=pool, send_fn=send_fn)
+
+    assert out.status == "unauthorized"
+    assert out.error_envelope is not None
+    assert out.error_envelope.code == "recipient_opted_out"
+    send_fn.assert_not_called()
+
+
+def test_subscribed_recipient_still_sends_in_window() -> None:
+    """The new gate must not over-block: an explicitly 'subscribed' customer
+    in-window still sends."""
+    from orchestrator.agent.tools.send_whatsapp_message import send_whatsapp_message
+
+    last_inbound = _now_utc() - timedelta(hours=2)
+    pool, _ = _pool(customer_row=_customer(last_inbound, opt_out_status="subscribed"))
+
+    out = send_whatsapp_message(_input(), pool=pool, send_fn=_send_fn)
+
+    assert out.status == "sent"
 
 
 # ---------------------------------------------------------------------------

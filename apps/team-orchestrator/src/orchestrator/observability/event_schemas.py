@@ -221,6 +221,34 @@ EVENT_SCHEMAS: dict[str, dict[str, Validator]] = {
         "tenant_id": _required_str,
         "item_id": _required_str,
     },
+    # VT-369 Gap-5 agent-surface lifecycle (specialist agents + master
+    # coordinator). Per-tenant events route on tenant_id; reasons/IDs ride in
+    # the payload verbatim (IDs-in-state — never customer PII, plan §3d).
+    "agent_item_dispatched": {
+        "tenant_id": _required_str,
+        "agent": _required_str,
+    },
+    "agent_drafts_created": {
+        "tenant_id": _required_str,
+        "draft_count": _required_int,
+    },
+    "agent_send_result": {
+        "tenant_id": _required_str,
+        "action": _required_str,
+    },
+    "agent_approval_armed": {
+        "tenant_id": _required_str,
+    },
+    "agent_approval_resolved": {
+        "tenant_id": _required_str,
+        "decision": _required_str,
+    },
+    # Workspace-level: the daily coordinator sweep spans tenants, so this
+    # event intentionally carries no tenant_id (precedent: the tenant-less
+    # webhook_received / scheduled_trigger_fired schemas above).
+    "coordinator_sweep_completed": {
+        "tenants_processed": _required_int,
+    },
 }
 
 
