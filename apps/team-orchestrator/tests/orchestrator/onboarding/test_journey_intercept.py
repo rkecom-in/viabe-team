@@ -298,3 +298,34 @@ def test_complete_journey_returns_none(substrate, send_spy):  # type: ignore[no-
 
     assert result is None, "a complete journey must fall through to the normal brain"
     assert send_spy == [], "nothing should be sent on a complete-journey fall-through"
+
+
+# --- (f) OPT-OUT / DSR / STOP mid-journey ALWAYS wins (VT-329 / DPDP) --------
+
+
+@pytest.mark.parametrize(
+    "optout_body",
+    ["STOP", "unsubscribe", "delete my data", "बंद करो", "मेरा डेटा हटाओ", "band karo"],
+)
+def test_optout_during_active_journey_falls_through_not_consumed(substrate, send_spy, optout_body):  # type: ignore[no-untyped-def]
+    """VT-329/DPDP (compliance-critical): an ACTIVE-journey owner sending opt-out/DSR/STOP (EN +
+    Devanagari + Hinglish) must route to the authoritative opt-out/DSR path — the intercept returns
+    None (fall through to pre_filter), and the journey cursor MUST NOT advance / store it as an answer.
+    Opt-out always wins; it is never swallowed mid-journey."""
+    from orchestrator.onboarding import journey
+
+    tenant = _new_tenant(substrate.dsn, name="optout mid-journey", phase="trial")
+    journey.start_journey(
+        tenant,
+        [{"field": "operating_hours", "kind": "gap", "prompt_en": "What are your hours?",
+          "prompt_hi": "समय?", "draft_value": None}],
+    )
+    before = _journey_row(substrate.dsn, tenant)
+
+    result = journey.maybe_handle_journey_reply(tenant, optout_body, "SM-optout", recipient="+919999000666")
+
+    assert result is None, f"opt-out {optout_body!r} must fall through to the opt-out/DSR handler"
+    after = _journey_row(substrate.dsn, tenant)
+    assert after is not None and after["cursor"] == before["cursor"], "opt-out must NOT advance the cursor"
+    assert after["status"] == "active", "opt-out must not complete/abandon the journey"
+    assert send_spy == [], "no journey question is sent on an opt-out"
