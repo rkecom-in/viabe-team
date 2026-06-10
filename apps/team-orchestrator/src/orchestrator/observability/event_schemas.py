@@ -191,6 +191,36 @@ EVENT_SCHEMAS: dict[str, dict[str, Validator]] = {
         "intent_or_trigger": _required_str,
         "message_type": _required_str,
     },
+    # VT-367 journey-completion seam (was emitted-but-unregistered; registered with VT-368, whose
+    # generator is the execution subscriber). gap4_trigger is a bool but the registry has no bool
+    # validator — presence is what matters; tenant_id is the routing field.
+    "onboarding_journey_completed": {
+        "tenant_id": _required_str,
+    },
+    # VT-368 Gap-4 business-plan lifecycle (the spine). All routed on tenant_id; reasons/versions in
+    # the payload verbatim.
+    "business_plan_generated": {
+        "tenant_id": _required_str,
+        "version": _required_int,
+    },
+    "business_plan_skipped": {
+        "tenant_id": _required_str,
+        "reason": _required_str,
+    },
+    "business_plan_generation_degraded": {
+        "tenant_id": _required_str,
+    },
+    "business_plan_grounding_violation": {
+        "tenant_id": _required_str,
+    },
+    "business_plan_delivered": {
+        "tenant_id": _required_str,
+        "version": _required_int,
+    },
+    "business_plan_item_edited": {
+        "tenant_id": _required_str,
+        "item_id": _required_str,
+    },
 }
 
 
