@@ -129,6 +129,9 @@ _PURGE_ORDER: tuple[str, ...] = (
     # still tenant-scoped). Leaf table (FK to tenants only), no CASCADE, no other hard-delete path,
     # so a tenant DSR-delete MUST sweep it here or the draft survives the purge.
     "business_profile_draft",
+    # VT-367: the onboarding-journey cursor (holds owner-supplied business answers). Leaf (FK tenants
+    # only), no CASCADE — sweep on DSR or the journey answers survive the purge (the 2a lesson).
+    "onboarding_journey",
     # VT-323: L2 episodic memory. Leaf (references tenants — anonymized, NOT
     # deleted — and no child tables point at it), so order-insensitive. payload
     # CAN carry PII at rest, and there is NO ON DELETE CASCADE + no other
