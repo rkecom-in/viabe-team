@@ -122,70 +122,52 @@ def send_spy(monkeypatch):  # type: ignore[no-untyped-def]
     return calls
 
 
-# --- (a) LAZY-START ---------------------------------------------------------
+# --- (a) NO-JOURNEY fall-through + PENDING-fill (journeys start at the signup seam, not lazily) ----
 
 
-def test_lazy_start_fresh_trial_tenant_with_draft(substrate, send_spy, monkeypatch):  # type: ignore[no-untyped-def]
-    """A fresh trial tenant with a seeded draft, no journey → the intercept
-    LAZY-STARTS: composes the queue (from the draft, via a monkeypatched
-    question-brain so NO live LLM), starts the journey, sends the first
-    question, and returns {started: True, done: False}."""
+def test_no_journey_trial_tenant_falls_through(substrate, send_spy):  # type: ignore[no-untyped-def]
+    """A trial tenant with NO journey row → None (fall through). The journey is created at the SIGNUP
+    seam (pending), NOT lazily on an arbitrary inbound — so a tenant without a journey row is NEVER
+    intercepted. THIS is the regression fix: owner-inbound for non-onboarding / direct-seeded tenants
+    (e.g. the twilio-ingress tests) reaches the brain untouched."""
+    from orchestrator.onboarding import journey
+
+    tenant = _new_tenant(substrate.dsn, name="trial no journey", phase="trial")
+    result = journey.maybe_handle_journey_reply(tenant, "hi", "SM-nj-1", recipient="+919999000111")
+    assert result is None, "no journey row → must fall through to the normal pipeline"
+    assert _journey_row(substrate.dsn, tenant) is None, "no journey may be created on an inbound"
+    assert send_spy == [], "nothing sent on a no-journey fall-through"
+
+
+def test_pending_journey_fills_queue_from_draft(substrate, send_spy, monkeypatch):  # type: ignore[no-untyped-def]
+    """A PENDING journey (started at signup with an EMPTY queue) whose draft has since landed → the
+    next inbound composes the queue (2b monkeypatched, NO live LLM), fills it, and sends the first
+    question. Returns {pending: True}. This is the 'start at signup regardless of draft-readiness'
+    path: the owner's first message routes to the journey, never the cold brain."""
     from orchestrator.onboarding import journey, question_brain
     from orchestrator.onboarding.draft_profile import write_draft
 
-    tenant = _new_tenant(substrate.dsn, name="lazy-start trial", phase="trial")
+    tenant = _new_tenant(substrate.dsn, name="pending fill", phase="trial")
+    journey.start_journey(tenant, [])  # signup-style PENDING start (empty queue)
+    write_draft(tenant, {"category": "restaurant"}, source="gbp")  # the async draft landed
 
-    # A draft must exist or _compose_queue returns [] (no attributes → no questions).
-    write_draft(tenant, {"category": "restaurant"}, source="gbp")
-
-    # Monkeypatch the question-brain to a FIXED set of Question objects — NO live
-    # LLM. ``_compose_queue`` imports it as
-    # ``from orchestrator.onboarding.question_brain import compose_onboarding_questions``,
-    # so patch the module attribute.
     fixed = [
-        question_brain.Question(
-            field="category",
-            kind="confirm",
-            prompt_en="We found you're a restaurant — is that right?",
-            prompt_hi="हमें पता चला आप restaurant हैं — क्या यह सही है?",
-            draft_value="restaurant",
-        ),
-        question_brain.Question(
-            field="operating_hours",
-            kind="gap",
-            prompt_en="What are your operating hours?",
-            prompt_hi="आपके काम के घंटे क्या हैं?",
-        ),
+        question_brain.Question(field="category", kind="confirm",
+                                prompt_en="We found you're a restaurant — is that right?",
+                                prompt_hi="हमें पता चला आप restaurant हैं — सही है?", draft_value="restaurant"),
+        question_brain.Question(field="operating_hours", kind="gap",
+                                prompt_en="What are your operating hours?", prompt_hi="समय क्या हैं?"),
     ]
-    monkeypatch.setattr(
-        question_brain,
-        "compose_onboarding_questions",
-        lambda *a, **k: fixed,
-    )
+    monkeypatch.setattr(question_brain, "compose_onboarding_questions", lambda *a, **k: fixed)
 
-    result = journey.maybe_handle_journey_reply(
-        tenant, "hi", "SM-lazy-1", recipient="+919999000111"
-    )
+    result = journey.maybe_handle_journey_reply(tenant, "hi", "SM-pf-1", recipient="+919999000222")
 
-    assert result is not None
-    assert result.get("started") is True
-    assert result.get("done") is False
-
-    # The journey is now active with the composed queue installed.
+    assert result is not None and result.get("pending") is True
     row = _journey_row(substrate.dsn, tenant)
-    assert row is not None, "lazy-start did not create the journey row"
-    assert row["status"] == "active"
-    assert row["cursor"] == 0
-    assert len(row["question_queue"]) == 2, "the composed queue must be installed"
+    assert row is not None and row["status"] == "active"
+    assert len(row["question_queue"]) == 2, "the composed queue must be installed on the pending journey"
     assert row["question_queue"][0]["field"] == "category"
-
-    # The first question was SENT to the owner.
-    assert len(send_spy) == 1, f"expected exactly one send; got {send_spy}"
-    sent_body, sent_to = send_spy[0]
-    assert sent_to == "+919999000111"
-    assert "restaurant" in sent_body, (
-        f"the first composed question must be sent; got {sent_body!r}"
-    )
+    assert len(send_spy) == 1 and "restaurant" in send_spy[0][0], "the first question must be sent"
 
 
 # --- (b) ACTIVE journey -----------------------------------------------------
