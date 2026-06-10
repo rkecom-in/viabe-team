@@ -151,7 +151,7 @@ def test_check_alerts_on_breach(monkeypatch):
 
     monkeypatch.setenv("RESEND_API_KEY", "re_test")
     alerts = []
-    monkeypatch.setattr("orchestrator.billing.refund_executor._alert_fazal", lambda t: alerts.append(t))
+    monkeypatch.setattr("orchestrator.alerts.clients.alert_fazal", lambda t: alerts.append(t))
     monkeypatch.setattr(ed, "fetch_resend_stats", lambda **k: ed.DeliverabilityStats(ok=True, sent=100, bounced=8, complained=0))
     out = ed.run_deliverability_check_body()
     assert out["alerted"] is True and len(alerts) == 1 and "deliverability ALERT" in alerts[0]
@@ -161,7 +161,7 @@ def test_check_no_alert_when_healthy(monkeypatch):
     from orchestrator.alerts import email_deliverability as ed
 
     alerts = []
-    monkeypatch.setattr("orchestrator.billing.refund_executor._alert_fazal", lambda t: alerts.append(t))
+    monkeypatch.setattr("orchestrator.alerts.clients.alert_fazal", lambda t: alerts.append(t))
     monkeypatch.setattr(ed, "fetch_resend_stats", lambda **k: ed.DeliverabilityStats(ok=True, sent=1000, bounced=10, complained=0))  # 1% bounce
     out = ed.run_deliverability_check_body()
     assert out["alerted"] is False and not alerts
@@ -171,7 +171,7 @@ def test_check_fail_soft_when_vendor_down(monkeypatch):
     from orchestrator.alerts import email_deliverability as ed
 
     alerts = []
-    monkeypatch.setattr("orchestrator.billing.refund_executor._alert_fazal", lambda t: alerts.append(t))
+    monkeypatch.setattr("orchestrator.alerts.clients.alert_fazal", lambda t: alerts.append(t))
     monkeypatch.setattr(ed, "fetch_resend_stats", lambda **k: ed.DeliverabilityStats(ok=False))
     out = ed.run_deliverability_check_body()
     assert out["ok"] is False and out["alerted"] is False and not alerts  # vendor down → skip, no crash

@@ -86,7 +86,7 @@ def _alert_fazal_safe(tenant_id: UUID | str, sender_phone: str | None, run_id: s
     appends a FATIGUE line when this tenant has 3+ escalations in 7 days (proactive-outreach
     nudge — a business-stability signal, not just per-incident)."""
     try:
-        from orchestrator.billing.refund_executor import _alert_fazal
+        from orchestrator.alerts.clients import alert_fazal as _alert_fazal
 
         fatigue = ""
         try:

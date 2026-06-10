@@ -126,7 +126,7 @@ def test_gate_blocks_activation_below_gstin_verified(substrate):
     tid = _tenant(substrate)  # unverified
     state = new_subscriber_state(tenant_id=UUID(tid), run_id=uuid4(), phase="trial")
     with pytest.raises(VerificationRequiredError):
-        apply_transition(state, "card_captured", {"reason": "test"})
+        apply_transition(state, "subscribe", {"reason": "test"})  # VT-365: gate on subscribe
     assert _row(substrate, tid)["phase"] == "trial"  # NOT activated
 
 
@@ -138,7 +138,7 @@ def test_gate_allows_activation_when_gstin_verified(substrate):
     tid = _tenant(substrate)
     run_lookup(tid, "27AAKCR3738B1ZE", search_fn=_ACTIVE)  # → gstin_verified
     state = new_subscriber_state(tenant_id=UUID(tid), run_id=uuid4(), phase="trial")
-    apply_transition(state, "card_captured", {"reason": "test"})
+    apply_transition(state, "subscribe", {"reason": "test"})  # VT-365: gate on subscribe
     assert _row(substrate, tid)["phase"] == "paid_active"
 
 
@@ -150,7 +150,7 @@ def test_gate_allows_activation_when_vtr_verified(substrate):
     tid = _tenant(substrate)
     run_vtr_override(tid, str(uuid4()), "green")  # vtr_verified is above the gstin floor
     state = new_subscriber_state(tenant_id=UUID(tid), run_id=uuid4(), phase="trial")
-    apply_transition(state, "card_captured", {"reason": "test"})
+    apply_transition(state, "subscribe", {"reason": "test"})  # VT-365: gate on subscribe
     assert _row(substrate, tid)["phase"] == "paid_active"
 
 

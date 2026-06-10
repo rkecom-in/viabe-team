@@ -177,7 +177,7 @@ def dashboard_settings(
         profile = get_business_profile(GetBusinessProfileInput(tenant_id=tenant_id))
         with tenant_connection(tenant_id) as conn:
             row = conn.execute(
-                "SELECT plan_tier, phase, trial_started_at, trial_extension_count, "
+                "SELECT plan_tier, phase, trial_started_at, "
                 "       preferred_language FROM tenants WHERE id = %s",
                 (tenant_id,),
             ).fetchone()
@@ -186,7 +186,7 @@ def dashboard_settings(
 
     plan = dict(row) if row else {}
     trial_started = plan.get("trial_started_at")
-    trial_ends = (trial_started + timedelta(days=14)) if trial_started else None
+    trial_ends = (trial_started + timedelta(days=30)) if trial_started else None
     return {
         "business": (
             {
@@ -204,7 +204,6 @@ def dashboard_settings(
             "phase": plan.get("phase"),
             "trial_started_at": str(trial_started) if trial_started else None,
             "trial_ends_at": str(trial_ends) if trial_ends else None,
-            "trial_extension_count": plan.get("trial_extension_count"),
             "preferred_language": plan.get("preferred_language"),
         },
     }

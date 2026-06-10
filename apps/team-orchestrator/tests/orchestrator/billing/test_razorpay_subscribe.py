@@ -281,8 +281,10 @@ def test_reconcile_detects_orphan_no_autocancel(_dbpool, monkeypatch) -> None:
     """VT-352 F2 DETECT-ONLY: a vendor subscription with no DB row is flagged to Fazal; the known
     one is left alone; NO auto-cancel (Cowork: unattended money actions create new incidents)."""
     alerts: list[str] = []
+    # VT-365 removed refund_executor; reconcile_subscription_orphans alerts via
+    # orchestrator.alerts.clients.alert_fazal (lazily imported inside the fn).
     monkeypatch.setattr(
-        "orchestrator.billing.refund_executor._alert_fazal", lambda m: alerts.append(m)
+        "orchestrator.alerts.clients.alert_fazal", lambda m: alerts.append(m)
     )
     from orchestrator.api.razorpay_subscribe import reconcile_subscription_orphans
 

@@ -41,7 +41,7 @@ def _recent_template_id(tenant_id: UUID | str) -> str | None:
 def _alert_fazal_safe(tenant_id: UUID | str, recent_tid: str | None, report_id: UUID | None) -> None:
     """Best-effort Telegram alert — NO complaint text (PII stays at rest)."""
     try:
-        from orchestrator.billing.refund_executor import _alert_fazal
+        from orchestrator.alerts.clients import alert_fazal as _alert_fazal
 
         _alert_fazal(
             f"⚠️ Template-error report (VT-335)\n"

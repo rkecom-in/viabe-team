@@ -1,7 +1,13 @@
-"""VT-90 — trial-evaluator decision canary (Rule #15, real PG, zero-LLM).
+"""VT-90 / VT-365 — trial-evaluator decision canary (Rule #15, real PG, zero-LLM).
 
-Deterministic: seed a tenant's trial state + campaigns, drive `now`, assert the
-decision (warn / extend / exhaust / none). No LLM.
+Deterministic: seed a tenant's trial state, drive `now`, assert the decision
+(warn / expire / none). No LLM.
+
+VT-365 (Fazal 2026-06-09): 30-day flat trial, NO card in trial, owner opt-in
+`subscribe` at/after day 30, NO auto-charge, no extensions, no refund. The trial
+WARNs (at trial_end - warn_lead) then EXPIRES to `lapsed`. The old
+engagement-gated extend/exhaust + grace paths are GONE — so are the `engaged` /
+`extension_count` verdict fields and campaign-engagement seeding.
 """
 
 from __future__ import annotations
@@ -18,6 +24,10 @@ pytestmark = pytest.mark.skipif(
 )
 
 _T0 = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+# VT-365 flat trial length (config/trial.yaml trial_days: 30, warn_lead_days: 2).
+_TRIAL_DAYS = 30
+_WARN_LEAD = 2
 
 
 @pytest.fixture(scope="module")
@@ -43,29 +53,16 @@ def pool():
         graph_mod._pool = prev
 
 
-def _tenant(pool, *, phase="trial", trial_start=_T0, count=0, paid=None) -> str:
+def _tenant(pool, *, phase="trial", trial_start=_T0, paid=None) -> str:
     tid = str(uuid.uuid4())
     with pool.connection() as c:
         c.execute(
             "INSERT INTO tenants (id, business_name, plan_tier, phase, "
-            "trial_started_at, trial_extension_count, paid_conversion_at) "
-            "VALUES (%s, 'trial-co', 'founding', %s, %s, %s, %s)",
-            (tid, phase, trial_start, count, paid),
+            "trial_started_at, paid_conversion_at) "
+            "VALUES (%s, 'trial-co', 'founding', %s, %s, %s)",
+            (tid, phase, trial_start, paid),
         )
     return tid
-
-
-def _campaign(pool, tid, *, status="approved", generated_at=_T0) -> None:
-    with pool.connection() as c:
-        run = c.execute(
-            "INSERT INTO pipeline_runs (tenant_id, status) VALUES (%s, 'running') "
-            "RETURNING id", (tid,),
-        ).fetchone()["id"]
-        c.execute(
-            "INSERT INTO campaigns (tenant_id, run_id, plan_json, status, generated_at) "
-            "VALUES (%s, %s, '{}'::jsonb, %s, %s)",
-            (tid, run, status, generated_at),
-        )
 
 
 def test_mid_trial_is_none(pool):
@@ -76,54 +73,58 @@ def test_mid_trial_is_none(pool):
     assert v.decision == "none"
 
 
-def test_day12_is_warn(pool):
+def test_warn_lead_is_warn(pool):
     from orchestrator.billing.trial_evaluator import evaluate_trial
 
-    t = _tenant(pool, trial_start=_T0)  # trial_end = T0+14; warn at T0+12
-    v = evaluate_trial(t, now=_T0 + timedelta(days=12, hours=1))
+    # trial_end = T0+30; warn at T0+(30-2) = T0+28.
+    t = _tenant(pool, trial_start=_T0)
+    v = evaluate_trial(t, now=_T0 + timedelta(days=_TRIAL_DAYS - _WARN_LEAD, hours=1))
     assert v.decision == "warn"
 
 
-def test_trial_end_engaged_extends(pool):
+def test_just_before_warn_is_none(pool):
     from orchestrator.billing.trial_evaluator import evaluate_trial
 
-    t = _tenant(pool, trial_start=_T0, count=0)
-    _campaign(pool, t, status="sent", generated_at=_T0 + timedelta(days=3))
-    v = evaluate_trial(t, now=_T0 + timedelta(days=14, hours=1))
-    assert v.decision == "extend"
-    assert v.engaged is True
-
-
-def test_trial_end_not_engaged_in_grace_is_none(pool):
-    from orchestrator.billing.trial_evaluator import evaluate_trial
-
-    t = _tenant(pool, trial_start=_T0)  # no campaigns → not engaged
-    v = evaluate_trial(t, now=_T0 + timedelta(days=15))  # past end, within grace (7d)
-    assert v.decision == "none"
-    assert v.engaged is False
-
-
-def test_grace_expired_exhausts(pool):
-    from orchestrator.billing.trial_evaluator import evaluate_trial
-
+    # one day before the warn lead → still nothing due.
     t = _tenant(pool, trial_start=_T0)
-    v = evaluate_trial(t, now=_T0 + timedelta(days=22))  # end+8 > grace(7)
-    assert v.decision == "exhaust"
+    v = evaluate_trial(t, now=_T0 + timedelta(days=_TRIAL_DAYS - _WARN_LEAD - 1))
+    assert v.decision == "none"
 
 
-def test_at_extension_cap_exhausts(pool):
+def test_at_trial_end_expires(pool):
     from orchestrator.billing.trial_evaluator import evaluate_trial
 
-    # count=3 (cap); trial_end = T0 + 14*4 = T0+56. Engaged but no room → grace → exhaust.
-    t = _tenant(pool, phase="trial_extended", trial_start=_T0, count=3)
-    _campaign(pool, t, status="sent", generated_at=_T0 + timedelta(days=40))
-    v = evaluate_trial(t, now=_T0 + timedelta(days=56 + 8))  # past end + grace
-    assert v.decision == "exhaust"
+    # VT-365: at/after the flat 30-day end with no subscribe → expire (→ lapsed). No
+    # engagement check, no grace, no extension.
+    t = _tenant(pool, trial_start=_T0)
+    v = evaluate_trial(t, now=_T0 + timedelta(days=_TRIAL_DAYS, hours=1))
+    assert v.decision == "expire"
 
 
-def test_paid_tenant_is_none(pool):
+def test_past_trial_end_expires(pool):
     from orchestrator.billing.trial_evaluator import evaluate_trial
 
-    t = _tenant(pool, phase="paid_active", trial_start=_T0, paid=_T0 + timedelta(days=10))
-    v = evaluate_trial(t, now=_T0 + timedelta(days=20))
+    # Well past the end (where the old model would have exhausted) → still just expire.
+    t = _tenant(pool, trial_start=_T0)
+    v = evaluate_trial(t, now=_T0 + timedelta(days=_TRIAL_DAYS + 30))
+    assert v.decision == "expire"
+
+
+def test_subscribed_tenant_is_none(pool):
+    from orchestrator.billing.trial_evaluator import evaluate_trial
+
+    # paid_conversion_at set → owner has subscribed → out of scope.
+    t = _tenant(
+        pool, phase="paid_active", trial_start=_T0, paid=_T0 + timedelta(days=10)
+    )
+    v = evaluate_trial(t, now=_T0 + timedelta(days=_TRIAL_DAYS + 5))
+    assert v.decision == "none"
+
+
+def test_lapsed_tenant_is_none(pool):
+    from orchestrator.billing.trial_evaluator import evaluate_trial
+
+    # An already-expired (lapsed) tenant is out of scope — the sweep only acts on phase='trial'.
+    t = _tenant(pool, phase="lapsed", trial_start=_T0)
+    v = evaluate_trial(t, now=_T0 + timedelta(days=_TRIAL_DAYS + 5))
     assert v.decision == "none"

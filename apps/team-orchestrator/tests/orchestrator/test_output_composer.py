@@ -1,8 +1,8 @@
 """Tests for the unified output composer (VT-30).
 
 Pure deterministic Python — no DB, no LLM, no network. Honesty rules,
-24h-window logic, template routing, refund acknowledgment, escalation
-framing, hard-limit explanation, mixed-language pass-through.
+24h-window logic, template routing, escalation framing, hard-limit
+explanation, mixed-language pass-through.
 
 Fazal-priority: honesty-rule tests get personal review at pre-merge per
 Pillar 7 (owner-truth).
@@ -248,34 +248,6 @@ def test_explicit_intent_no_softening_applied() -> None:
     )
     out = compose_owner_output(specialist, state, "free_form_chat", now=now)
     assert "customer wants" in out.message_body.lower()
-
-
-# ---------------------------------------------------------------------------
-# Honesty rule #5 — refund-phase acknowledgment
-# ---------------------------------------------------------------------------
-
-def test_refunded_phase_acknowledgment_prepended() -> None:
-    now = datetime(2026, 5, 26, tzinfo=timezone.utc)
-    state = _state(phase="refunded", last_owner_message_at=now - timedelta(hours=1))
-    specialist = SimpleNamespace(
-        status="completed", terminated_by=None, output={"message": "Here's the report."}
-    )
-    out = compose_owner_output(specialist, state, "free_form_chat", now=now)
-    assert "refund" in out.message_body.lower()
-    assert "refund_ack_prepended" in out.honesty_notes
-
-
-def test_refunded_phase_does_not_double_prepend_when_already_mentioned() -> None:
-    now = datetime(2026, 5, 26, tzinfo=timezone.utc)
-    state = _state(phase="refunded", last_owner_message_at=now - timedelta(hours=1))
-    specialist = SimpleNamespace(
-        status="completed",
-        terminated_by=None,
-        output={"message": "Your refund has been processed; here's the receipt."},
-    )
-    out = compose_owner_output(specialist, state, "free_form_chat", now=now)
-    assert "refund_ack_already_present" in out.honesty_notes
-    assert "refund_ack_prepended" not in out.honesty_notes
 
 
 # ---------------------------------------------------------------------------

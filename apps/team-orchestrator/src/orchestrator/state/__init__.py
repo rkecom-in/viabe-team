@@ -25,9 +25,6 @@ Phase = Literal[
 # 'lapsed' is dormant but NOT terminal — a lapsed owner can still subscribe.)
 TERMINAL_PHASES: frozenset[Phase] = frozenset({"cancelled"})
 
-# Max trial extensions (covers a 14 -> 60 day trial). Enforced as an invariant.
-MAX_TRIAL_EXTENSIONS = 3
-
 
 class SubscriberState(TypedDict):
     """Canonical lifecycle state for one subscriber. Fields per VT-3.2 Notion §1."""
@@ -37,7 +34,6 @@ class SubscriberState(TypedDict):
     phase: Phase
     phase_entered_at: datetime
     trial_started_at: datetime | None
-    trial_extension_count: int
     paid_conversion_at: datetime | None
     last_campaign_at: datetime | None
     # Campaign ids awaiting their T+7 attribution close.
@@ -63,7 +59,6 @@ def new_subscriber_state(
         phase=phase,
         phase_entered_at=datetime.now(UTC),
         trial_started_at=None,
-        trial_extension_count=0,
         paid_conversion_at=None,
         last_campaign_at=None,
         attribution_close_pending=[],
