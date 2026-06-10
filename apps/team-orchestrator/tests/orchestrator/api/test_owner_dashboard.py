@@ -72,7 +72,7 @@ def test_endpoint_mapping_campaign_id_and_mask(monkeypatch) -> None:
 
 @pytest.mark.integration
 def test_settings_plan_and_trial(monkeypatch, _dbpool) -> None:
-    """Settings plan/trial: trial_ends_at = trial_started_at + 14d; secret gates."""
+    """Settings plan/trial: trial_ends_at = trial_started_at + 30d (VT-365); secret gates."""
     from fastapi import HTTPException
 
     from orchestrator.api.owner_dashboard import dashboard_settings
@@ -87,7 +87,7 @@ def test_settings_plan_and_trial(monkeypatch, _dbpool) -> None:
         )
     out = dashboard_settings(tenant_id=str(tid), x_internal_secret="s")
     assert out["plan"]["plan_tier"] == "founding"
-    assert out["plan"]["trial_ends_at"].startswith("2026-06-15")  # +14d
+    assert out["plan"]["trial_ends_at"].startswith("2026-07-01")  # +30d (VT-365)
     with pytest.raises(HTTPException):
         dashboard_settings(tenant_id=str(tid), x_internal_secret="wrong")
 

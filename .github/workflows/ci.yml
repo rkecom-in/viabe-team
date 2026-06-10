@@ -212,12 +212,12 @@ jobs:
 
           # 1. scheduled_triggers.py — VT-28 deterministic-body targets.
           src = open("apps/team-orchestrator/src/orchestrator/scheduled_triggers.py").read()
+          # VT-365: the day-39 refund-evaluation trigger was removed (refund subsystem retired).
+          # The deterministic triggers are now attribution-close + monthly-impact.
           targets = (
               "run_attribution_close_body",
-              "run_day39_evaluation_body",
               "run_monthly_impact_body",
               "attribution_close_scheduled",
-              "day39_evaluation_scheduled",
               "monthly_impact_scheduled",
           )
           for fn in targets:
