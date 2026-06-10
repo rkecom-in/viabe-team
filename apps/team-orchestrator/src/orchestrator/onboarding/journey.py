@@ -208,8 +208,6 @@ def _completion_message() -> dict[str, Any]:
 
 # --- Owner-inbound INTERCEPT (the hot-path gate; mirrors runner.try_resume_pending_approval) -------
 
-_LAZY_START_PHASES = {"onboarding", "trial", "lapsed"}
-
 
 def _tenant_phase_and_type(tenant_id: UUID | str) -> tuple[str | None, str | None]:
     with tenant_connection(tenant_id) as conn:
@@ -269,14 +267,10 @@ def maybe_handle_journey_reply(
     try:
         g = get_journey(tenant_id)
         if g is None:
-            phase, btype = _tenant_phase_and_type(tenant_id)
-            if phase not in _LAZY_START_PHASES:
-                return None  # established tenant, no journey → normal flow
-            start_journey(tenant_id, _compose_queue(tenant_id, btype))
-            g2 = get_journey(tenant_id)
-            first = _current(g2) if g2 else None
-            _send(recipient, first or _opener(), lang)
-            return {"done": False, "started": True}
+            # No journey row → NOT in onboarding (the journey is created at the signup seam, pending).
+            # Established/pre-feature tenants have no row → fall through to the normal pipeline. This
+            # is what keeps owner-inbound for non-onboarding tenants untouched (no over-firing).
+            return None
         if g["status"] != "active":
             return None  # complete / abandoned → normal flow
         if not g["question_queue"]:

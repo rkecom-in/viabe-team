@@ -338,6 +338,18 @@ def run_signup(
     except Exception:  # noqa: BLE001 — discovery is best-effort; never fail the signup
         logger.exception("signup: auto-discovery kick failed tenant=%s (non-terminal)", res.tenant_id)
 
+    # VT-367: start the onboarding JOURNEY here (pending — empty queue; the async discovery fills it,
+    # and the owner's first inbound asks the first question). Starting it at signup (NOT lazily on an
+    # arbitrary inbound) is what makes the owner's first message route to the journey, never the cold
+    # brain, WITHOUT intercepting inbound for non-onboarding tenants (they have no journey row).
+    # Best-effort: a start failure must NOT 500 the signup (the owner just falls to the normal flow).
+    try:
+        from orchestrator.onboarding.journey import start_journey
+
+        start_journey(res.tenant_id, [])
+    except Exception:  # noqa: BLE001 — non-terminal; never fail the signup
+        logger.exception("signup: onboarding-journey start failed tenant=%s (non-terminal)", res.tenant_id)
+
     return SignupOutcome(
         tenant_id=res.tenant_id,
         plan_tier=cast(str, res.plan_tier),
