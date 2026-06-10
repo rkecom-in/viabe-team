@@ -89,10 +89,9 @@ def _normalize(body: str) -> str:
 
 def matches_opt_out_or_dsr(body: str) -> bool:
     """True if ``body`` CONTAINS an opt-out or DSR keyword (VT-329: boundary-safe containment, NFC,
-    EN+Devanagari+Hinglish). The VT-85 refund-offer reply gate calls this to YIELD to opt-out / DSR
-    routing — those ALWAYS win over a refund-decision interpretation (DPDP): a refund_offered tenant
-    who says "delete my data and refund me" / "बंद करो" / "band karo" must reach the dsr/opt-out
-    handler, not auto-refund."""
+    EN+Devanagari+Hinglish). Phase-aware reply gates call this so opt-out / DSR routing ALWAYS wins
+    over any other interpretation (DPDP): a tenant who says "delete my data" / "बंद करो" /
+    "band karo" must reach the dsr/opt-out handler regardless of phase."""
     nfc = _nfc(body)
     return any(p.search(nfc) for p in _OPT_OUT_PATTERNS) or any(p.search(nfc) for p in _DSR_PATTERNS)
 

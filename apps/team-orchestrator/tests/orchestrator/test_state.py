@@ -10,7 +10,6 @@ import subprocess
 from uuid import uuid4
 
 from orchestrator.state import (
-    MAX_TRIAL_EXTENSIONS,
     TERMINAL_PHASES,
     new_subscriber_state,
 )
@@ -21,7 +20,6 @@ _NOTION_FIELDS = {
     "phase",
     "phase_entered_at",
     "trial_started_at",
-    "trial_extension_count",
     "paid_conversion_at",
     "last_campaign_at",
     "attribution_close_pending",
@@ -43,7 +41,6 @@ def test_new_subscriber_state_defaults():
     state = new_subscriber_state(tenant_id)
     assert state["tenant_id"] == tenant_id
     assert state["phase"] == "onboarding"
-    assert state["trial_extension_count"] == 0
     assert state["trial_started_at"] is None
     assert state["paid_conversion_at"] is None
     assert state["attribution_close_pending"] == []
@@ -54,9 +51,15 @@ def test_new_subscriber_state_defaults():
     assert state["history"] == []
 
 
-def test_terminal_phases_and_extension_cap():
-    assert TERMINAL_PHASES == frozenset({"cancelled", "refunded"})
-    assert MAX_TRIAL_EXTENSIONS == 3
+def test_terminal_phases():
+    # VT-365: 'refunded' removed; 'cancelled' is the sole terminal phase ('lapsed' is dormant
+    # but re-subscribable, so NOT terminal).
+    assert TERMINAL_PHASES == frozenset({"cancelled"})
+    from orchestrator.state import Phase  # noqa: F401 — the literal carries the new phase set
+    import typing
+    assert "lapsed" in typing.get_args(Phase)
+    for gone in ("refunded", "refund_offered", "trial_extended"):
+        assert gone not in typing.get_args(Phase)
 
 
 def test_agent_code_cannot_import_transitions(tmp_path):

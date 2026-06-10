@@ -40,10 +40,10 @@ def test_month_bounds_december_wraps_year():
     assert end == datetime(2027, 1, 1, tzinfo=timezone.utc)
 
 
-def test_should_skip_cancelled_and_refunded():
+def test_should_skip_cancelled_and_lapsed():
     end = datetime(2026, 5, 1, tzinfo=timezone.utc)
     assert should_skip(phase="cancelled", signed_up_at=None, period_end=end) == "phase=cancelled"
-    assert should_skip(phase="refunded", signed_up_at=None, period_end=end) == "phase=refunded"
+    assert should_skip(phase="lapsed", signed_up_at=None, period_end=end) == "phase=lapsed"
 
 
 def test_should_skip_recent_signup():
@@ -236,9 +236,9 @@ def test_recent_signup_skipped():
     assert report is None
 
 
-def test_refunded_tenant_skipped():
+def test_lapsed_tenant_skipped():
     with _conn() as conn:
-        t = _tenant(conn, phase="refunded")
+        t = _tenant(conn, phase="lapsed")
         report = generate_monthly_report(str(t), "2026-04", conn=conn)
     assert report is None
 

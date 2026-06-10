@@ -148,8 +148,10 @@ def test_sla_sweep_breaches_and_is_idempotent(substrate, monkeypatch):
     from orchestrator import escalations as esc
 
     alerts: list[str] = []
+    # VT-365: _alert_fazal relocated from the deleted billing.refund_executor to
+    # orchestrator.alerts.clients.alert_fazal (imported function-local in the sweep).
     monkeypatch.setattr(
-        "orchestrator.billing.refund_executor._alert_fazal", lambda text: alerts.append(text)
+        "orchestrator.alerts.clients.alert_fazal", lambda text: alerts.append(text)
     )
     t = _tenant(substrate.dsn)
     # opened in business hours (12:30 IST) days ago → past the 4h SLA.
@@ -172,7 +174,7 @@ def test_sla_sweep_offhours_breaches_past_24h(substrate, monkeypatch):
     """VT-357: an OFF-hours escalation (02:00 IST) days ago breaches the 24h window."""
     from orchestrator import escalations as esc
 
-    monkeypatch.setattr("orchestrator.billing.refund_executor._alert_fazal", lambda text: None)
+    monkeypatch.setattr("orchestrator.alerts.clients.alert_fazal", lambda text: None)  # VT-365 relocation
     t = _tenant(substrate.dsn)
     old_off = _seed_escalation(substrate.dsn, t, opened_sql="TIMESTAMPTZ '2026-06-01 02:00:00+05:30'")
     assert old_off in esc.run_sla_breach_sweep_body()
@@ -183,7 +185,7 @@ def test_sla_sweep_skips_resolved(substrate, monkeypatch):
     """VT-357: a RESOLVED escalation past SLA is NOT alerted (status='open' filter)."""
     from orchestrator import escalations as esc
 
-    monkeypatch.setattr("orchestrator.billing.refund_executor._alert_fazal", lambda text: None)
+    monkeypatch.setattr("orchestrator.alerts.clients.alert_fazal", lambda text: None)  # VT-365 relocation
     t = _tenant(substrate.dsn)
     resolved = _seed_escalation(
         substrate.dsn, t, opened_sql="TIMESTAMPTZ '2026-06-01 12:30:00+05:30'", status="resolved"

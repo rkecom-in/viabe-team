@@ -15,65 +15,47 @@ from dbos import DBOS
 
 from orchestrator.db import tenant_connection
 from orchestrator.invariants import check_invariants
-from orchestrator.state import MAX_TRIAL_EXTENSIONS, Phase, SubscriberState
+from orchestrator.state import Phase, SubscriberState
 
 logger = logging.getLogger(__name__)
 
-# The 12 lifecycle events this machine consumes (event sources: VT-3.3 / 3.5 / 3.9).
+# VT-365 (Fazal 2026-06-09): 30-day free trial, NO card in trial, opt-in subscribe at/after day 30,
+# NO auto-charge, NO refund ever. The refund subsystem (day-39 2x-or-refund) + trial extensions are
+# REMOVED. Trial ends in exactly two ways: an explicit owner `subscribe`, or a `trial_expired` to the
+# dormant, re-subscribable `lapsed` phase.
 ALL_EVENTS: tuple[str, ...] = (
     "signup",
-    "card_captured",
-    "trial_extension_granted",
-    "trial_extension_exhausted",
+    "subscribe",  # VT-365: explicit owner subscribe (at/after day 30) — the ONLY path to paid_active
+    "trial_expired",  # VT-365: 30-day trial elapsed without subscribe -> lapsed (dormant)
     "weekly_low_engagement",
     "payment_failed",  # VT-89: 3rd consecutive Razorpay payment.failed -> paid_at_risk
     "engagement_recovered",
     "cancellation_requested",
-    "day39_refund_offered",  # VT-85: day-39 refund OFFER (parks in refund_offered)
-    "day39_refund_triggered",
-    "day39_continue",
     "manual_cancel",
 )
 
-# (from_phase, event) -> to_phase. 'cancelled' and 'refunded' are terminal —
-# they have no outgoing transitions.
+# (from_phase, event) -> to_phase. 'cancelled' is terminal. 'lapsed' is dormant but re-subscribable.
 TRANSITIONS: dict[tuple[Phase, str], Phase] = {
     ("onboarding", "signup"): "trial",
-    # Trial (and extended trial) — convert, extend, or end.
-    ("trial", "card_captured"): "paid_active",
-    ("trial", "trial_extension_granted"): "trial_extended",
-    ("trial", "trial_extension_exhausted"): "cancelled",
+    # Trial — explicit subscribe (no card/auto-charge) or expire to dormant lapsed.
+    ("trial", "subscribe"): "paid_active",
+    ("trial", "trial_expired"): "lapsed",
     ("trial", "cancellation_requested"): "cancelled",
     ("trial", "manual_cancel"): "cancelled",
-    ("trial_extended", "card_captured"): "paid_active",
-    ("trial_extended", "trial_extension_granted"): "trial_extended",
-    ("trial_extended", "trial_extension_exhausted"): "cancelled",
-    ("trial_extended", "cancellation_requested"): "cancelled",
-    ("trial_extended", "manual_cancel"): "cancelled",
-    # Paid — engagement risk, day-39 evaluation, cancellation.
+    # Lapsed — dormant/read-only, re-subscribable any time.
+    ("lapsed", "subscribe"): "paid_active",
+    ("lapsed", "cancellation_requested"): "cancelled",
+    ("lapsed", "manual_cancel"): "cancelled",
+    # Paid — engagement risk + cancellation (NO day-39 refund path).
     ("paid_active", "weekly_low_engagement"): "paid_at_risk",
-    ("paid_active", "day39_continue"): "paid_active",
-    ("paid_active", "day39_refund_triggered"): "refunded",
     ("paid_active", "cancellation_requested"): "cancelled",
     ("paid_active", "manual_cancel"): "cancelled",
     ("paid_at_risk", "engagement_recovered"): "paid_active",
-    ("paid_at_risk", "day39_continue"): "paid_active",
-    ("paid_at_risk", "day39_refund_triggered"): "refunded",
     ("paid_at_risk", "cancellation_requested"): "cancelled",
     ("paid_at_risk", "manual_cancel"): "cancelled",
-    # VT-89: 3rd consecutive Razorpay payment.failed -> paid_at_risk. The
-    # paid_at_risk self-loop keeps a 4th+ failure from raising (idempotent).
+    # VT-89: 3rd consecutive Razorpay payment.failed -> paid_at_risk (self-loop = idempotent).
     ("paid_active", "payment_failed"): "paid_at_risk",
     ("paid_at_risk", "payment_failed"): "paid_at_risk",
-    # VT-85 day-39 refund OFFER (Pillar 7 — no auto-refund). The evaluator parks
-    # the tenant in refund_offered; the owner's REFUND/CONTINUE reply or the 48h
-    # timeout resolves it. The direct (paid_*, day39_refund_triggered) paths above
-    # stay for the manual_request refund (Fazal ops) — refund_offered is reached
-    # only via the offer.
-    ("paid_active", "day39_refund_offered"): "refund_offered",
-    ("paid_at_risk", "day39_refund_offered"): "refund_offered",
-    ("refund_offered", "day39_refund_triggered"): "refunded",  # REFUND reply -> execute_refund
-    ("refund_offered", "day39_continue"): "paid_active",  # CONTINUE reply / 48h timeout
 }
 
 
@@ -90,7 +72,7 @@ class InvalidTransitionError(RuntimeError):
 
 
 class VerificationRequiredError(InvalidTransitionError):
-    """VT-361 gate: card_captured → paid_active blocked because business verification is below
+    """VT-361 gate: subscribe → paid_active blocked because business verification is below
     gstin_verified. A DISTINCT type (not a generic InvalidTransition) so the payment-capture caller
     can surface a clear owner-facing "verification pending" state, not a silent stall."""
 
@@ -122,15 +104,10 @@ def _resolve(state: SubscriberState, event: str) -> Phase:
     to_phase = TRANSITIONS.get((from_phase, event))
     if to_phase is None:
         raise InvalidTransitionError(from_phase, event, None)
-    # Deterministic precondition: trial extensions are capped.
-    if (
-        event == "trial_extension_granted"
-        and state["trial_extension_count"] >= MAX_TRIAL_EXTENSIONS
-    ):
-        raise InvalidTransitionError(from_phase, event, to_phase)
-    # VT-361 activation gate (Fazal 2026-06-08): a tenant cannot reach paid_active below
-    # gstin_verified. GSTIN-less businesses cannot activate — intended. Server-side DB read.
-    if event == "card_captured" and to_phase == "paid_active" and not _activation_verification_ok(
+    # VT-361/VT-365 activation gate: a tenant cannot reach paid_active below gstin_verified. The gate
+    # is on the explicit `subscribe` (the ONLY path to paid_active now), NOT on trial entry — a legit
+    # verified owner subscribes at day 30; a GSTIN-less business is blocked at subscribe, not earlier.
+    if event == "subscribe" and to_phase == "paid_active" and not _activation_verification_ok(
         state["tenant_id"]
     ):
         raise VerificationRequiredError(from_phase, event, to_phase)
@@ -154,9 +131,7 @@ def apply_transition(
     new_state: SubscriberState = {**state, "phase": to_phase, "phase_entered_at": now}
     if event == "signup":
         new_state["trial_started_at"] = now
-    elif event == "trial_extension_granted":
-        new_state["trial_extension_count"] = state["trial_extension_count"] + 1
-    elif event == "card_captured":
+    elif event == "subscribe":
         new_state["paid_conversion_at"] = now
     new_state["history"] = [
         *state["history"],
@@ -183,14 +158,6 @@ def apply_transition(
             "UPDATE tenants SET phase = %s, phase_entered_at = %s WHERE id = %s",
             (to_phase, now, str(state["tenant_id"])),
         )
-        # VT-93: anchor the 30-day graceful-exit window atomically with the phase
-        # flip (graceful_exit.portal_access_allowed reads tenants.refunded_at; the
-        # atomic set avoids a phase=refunded / refunded_at=NULL window).
-        if event == "day39_refund_triggered":
-            conn.execute(
-                "UPDATE tenants SET refunded_at = %s WHERE id = %s",
-                (now, str(state["tenant_id"])),
-            )
         # TODO VT-122: also emit an observability step_record to pipeline_steps
         # via the @observability.step decorator when it ships.
         # Invariants run before commit — a violation rolls back this transaction.
@@ -226,7 +193,7 @@ def apply_transition(
     # pool — founding_tier_claims has no app_role UPDATE policy, so the RLS tenant_connection
     # above cannot touch it. Best-effort + audit-only: a missed release just leaves released_at
     # NULL, NEVER decrements the counter (no-reopen policy → zero integrity risk; Cowork
-    # 20260605T143300Z). Mirrors the VT-94 refund-path release.
+    # 20260605T143300Z).
     if to_phase == "cancelled":
         try:
             from orchestrator.billing.founding_counter import release_founding_slot

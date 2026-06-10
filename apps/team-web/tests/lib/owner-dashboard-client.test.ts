@@ -116,7 +116,7 @@ describe('VT-338 — fetchCampaigns', () => {
 
 describe('VT-338 — fetchSettings', () => {
   it('GET with X-Internal-Secret + session tenantId', async () => {
-    const body = { business: null, plan: { plan_tier: 'founding', phase: 'active', trial_started_at: null, trial_ends_at: null, trial_extension_count: 0, preferred_language: 'en' } }
+    const body = { business: null, plan: { plan_tier: 'founding', phase: 'active', trial_started_at: null, trial_ends_at: null, preferred_language: 'en' } }
     const f = vi.fn(async () => ({ ok: true, status: 200, json: async () => body }))
     vi.stubGlobal('fetch', f)
     const out = await fetchSettings('tenant-abc')

@@ -8,20 +8,23 @@ Q1 — financial durability (Cowork 20260605T121000Z). The dedup INSERT into
 ``razorpay_webhook_events`` is the COMMIT POINT: team-web returns 200 to Razorpay
 ONLY after this endpoint confirms the event is persisted. If this endpoint is
 unreachable, or raises BEFORE the insert commits, team-web returns non-2xx so
-Razorpay RETRIES — a lost ``subscription.charged`` would silently undercount fees
-and under-refund later. A redelivered ``event_id`` CONFLICTs → no re-processing, so
-fees never double-count (the keystone). The fee/counter writes happen in the SAME
-transaction as the dedup row, so a replay that doesn't insert also doesn't re-write.
+Razorpay RETRIES — a lost ``subscription.charged`` would silently undercount fees.
+A redelivered ``event_id`` CONFLICTs → no re-processing, so fees never double-count
+(the keystone). The fee/counter writes happen in the SAME transaction as the dedup
+row, so a replay that doesn't insert also doesn't re-write.
 
 Q3 — ``payment.captured`` fires on EVERY successful charge (recurring too, each a
-distinct event_id), so we map it to the ``card_captured`` phase event ONLY when the
-tenant is still in {trial, trial_extended} (apply_transition RAISES on an undefined
-(phase,event) pair). An already-paid tenant's recurring captured is a phase no-op;
-fees move only via ``subscription.charged`` (captured→phase-only, charged→fees-only).
+distinct event_id), so we map it to the ``subscribe`` phase event ONLY when the
+tenant is still in {trial, lapsed} (apply_transition RAISES on an undefined
+(phase,event) pair). VT-365: a capture can occur ONLY after the owner EXPLICITLY
+subscribed (no card is held during the trial → Razorpay has nothing to auto-charge),
+so capture→subscribe is the completion of that explicit action, never an auto-charge.
+An already-paid tenant's recurring captured is a phase no-op; fees move only via
+``subscription.charged`` (captured→phase-only, charged→fees-only).
 
 Service-role only: ``razorpay_webhook_events`` is deny-all RLS; ``subscriptions``
 predates the app_role grant — so every write here is the privileged pool with an
-explicit ``WHERE tenant_id`` (mirrors dsr_purge / refund_executor).
+explicit ``WHERE tenant_id`` (mirrors dsr_purge).
 
 NO live keys / secrets here. LIVE cutover is hard-gated by VT-93-N1 + VT-329.
 """
@@ -111,7 +114,7 @@ def _alert_fazal_safe(message: str) -> None:
     """Best-effort Fazal alert for a money-path anomaly (parse-drop / amount==0 / missing
     subscription). NEVER raises — the alert must not turn a recorded event into a 500."""
     try:
-        from orchestrator.billing.refund_executor import _alert_fazal
+        from orchestrator.alerts.clients import alert_fazal as _alert_fazal
 
         _alert_fazal(message)
     except Exception:
@@ -327,14 +330,14 @@ def _apply_event_sql(
 ) -> tuple[str, str | None]:
     """Apply the SQL state change for the event (inside the dedup txn) and return
     (action, pending_phase_event). The phase transition is applied by the caller
-    after commit. Fees/phase are kept separate (captured→phase-only via card_captured;
+    after commit. Fees/phase are kept separate (captured→phase-only via subscribe;
     charged→fees-only) so the first payment's money is never double-counted.
 
     VT-330: every subscription UPDATE guards `cur.rowcount` (a deleted subscription row →
     Fazal-alert, never a silent no-op), and a charged amount==0 alerts (a real charge is
-    never 0 → under-count → under-refund)."""
+    never 0 → under-count)."""
     if event_type == "subscription.charged":
-        # The VT-93 refund-amount writer. Reset the failure counter on a success.
+        # The fee-accounting writer (cumulative paid fees). Reset the failure counter on success.
         amount = _amount_paise(payload)  # parseable (the charged_parse_drop guard caught None)
         cur.execute(
             "UPDATE subscriptions "
@@ -351,16 +354,18 @@ def _apply_event_sql(
             return "subscription_missing", None
         if amount == 0:
             # A real Razorpay charge is never 0 paise → a payload/parse problem. Adding 0
-            # silently under-counts cumulative_fees_paid_paise → under-refund (VT-93).
+            # silently under-counts cumulative_fees_paid_paise (revenue accounting).
             _alert_fazal_safe(
                 f"VT-330 razorpay: subscription.charged amount==0 for tenant={tenant_id} "
-                f"(event_id={event_id}) — under-count/under-refund risk."
+                f"(event_id={event_id}) — fee under-count risk."
             )
         return "fees_incremented", None
 
     if event_type == "payment.captured":
-        # Reset failures; convert trial→paid ONLY if still in trial (Q3 — recurring
-        # captured on an already-paid tenant is a phase no-op).
+        # Reset failures; convert trial/lapsed→paid via the explicit `subscribe` event ONLY if the
+        # tenant is pre-paid (Q3 — recurring captured on an already-paid tenant is a phase no-op).
+        # VT-365: a capture only follows an owner-initiated subscribe (no card in trial), so this is
+        # the subscribe completing, not an auto-charge.
         cur.execute(
             "UPDATE subscriptions SET consecutive_payment_failures = 0 WHERE tenant_id = %s",
             (tenant_id,),
@@ -374,8 +379,8 @@ def _apply_event_sql(
         cur.execute("SELECT phase FROM tenants WHERE id = %s", (tenant_id,))
         row = cur.fetchone()
         phase = row["phase"] if row else None
-        if phase in ("trial", "trial_extended"):
-            return "converting_to_paid", "card_captured"
+        if phase in ("trial", "lapsed"):
+            return "converting_to_paid", "subscribe"
         return "captured_noop", None  # already paid — recurring charge, no transition
 
     if event_type == "payment.failed":
@@ -414,9 +419,8 @@ def _apply_phase_transition(tenant_id: str, event: str) -> None:
     The phase is RE-READ here (authoritative): if a concurrent event already moved the
     phase, apply_transition._resolve RAISES on the now-undefined (phase,event) pair and
     we no-op — never a wrong transition (the TOCTOU is safe-by-raise). The payment
-    events (card_captured / payment_failed / cancellation_requested) depend ONLY on
-    phase, not on trial_extension_count / paid_conversion_at, so the fresh
-    new_subscriber_state is correct. A flip that fails after the fees commit leaves the
+    events (subscribe / payment_failed / cancellation_requested) depend ONLY on
+    phase, not on paid_conversion_at, so the fresh new_subscriber_state is correct. A flip that fails after the fees commit leaves the
     denormalised phase mirror stale (reconcilable from phase_transitions; a
     phase-reconcile sweep is a follow-up)."""
     from orchestrator.state import new_subscriber_state
@@ -435,7 +439,7 @@ def _apply_phase_transition(tenant_id: str, event: str) -> None:
         # (fail-closed, intended). NOT a silent stall — emit a distinct, owner-surfaceable event so
         # the owner is told to complete GSTIN verification (+ ops can see it). Phase stays trial.
         logger.warning(
-            "VT-361: card_captured BLOCKED — verification pending tenant=%s (payment captured, "
+            "VT-361: subscribe BLOCKED — verification pending tenant=%s (payment captured, "
             "activation withheld until gstin_verified)", tenant_id,
         )
         log_event(

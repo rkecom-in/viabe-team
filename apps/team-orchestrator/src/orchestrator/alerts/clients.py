@@ -13,6 +13,7 @@ retry".
 from __future__ import annotations
 
 import logging
+import os
 
 import httpx
 
@@ -105,4 +106,41 @@ async def send_resend_email(
     return False
 
 
-__all__ = ["send_telegram", "send_resend_email"]
+def alert_fazal(text: str) -> None:
+    """Best-effort sync Telegram alert to the ops channel. Never raises into the
+    caller's path. Loop-safe: if an event loop is already running (an async caller),
+    ``asyncio.run`` would raise — so the send is off-loaded to a worker thread
+    rather than silently dropped (an ops alert must not vanish in async contexts).
+
+    Relocated to ``alerts.clients`` (VT-365): this is a generic ops-alert
+    helper — not tied to any one billing path. Shared by the support-bot,
+    template-error, email-deliverability, VTR-digest, escalation-SLA, and
+    subscribe/billing-ingress paths.
+    """
+    import asyncio
+    import threading
+
+    def _run() -> None:
+        try:
+            asyncio.run(
+                send_telegram(
+                    os.environ.get("TELEGRAM_OPS_BOT_TOKEN", ""),
+                    os.environ.get("TELEGRAM_OPS_CHAT_ID", ""),
+                    text,
+                )
+            )
+        except Exception:  # noqa: BLE001 — alert is best-effort, never blocks the caller
+            logger.exception("alert_fazal: Telegram alert failed (best-effort)")
+
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        _run()  # no running loop — safe to asyncio.run inline
+        return
+    # A loop is already running; off-thread the send so asyncio.run can't raise.
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    t.join(timeout=10)
+
+
+__all__ = ["send_telegram", "send_resend_email", "alert_fazal"]

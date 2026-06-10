@@ -157,7 +157,7 @@ def run_deliverability_check_body(
         logger.warning("email_deliverability: stats unavailable — skipped (fail-soft)")
         return {"ok": False, "alerted": False}
     if stats.breached():
-        from orchestrator.billing.refund_executor import _alert_fazal
+        from orchestrator.alerts.clients import alert_fazal as _alert_fazal
 
         cap_note = " ⚠️ page-cap hit — counts may UNDERCOUNT." if stats.capped else ""
         _alert_fazal(

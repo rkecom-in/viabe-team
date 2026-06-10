@@ -16,9 +16,9 @@ Surface
 - :class:`ComposedOutput` — frozen dataclass returned by the composer.
 - :func:`compose_owner_output` — single entry point. Reads template
   routing + composes the message body per the deterministic rule
-  precedence documented inline (24h-window → refund acknowledgment →
-  escalation framing → hard-limit explanation → template selection →
-  honesty enforcement → language selection).
+  precedence documented inline (24h-window → escalation framing →
+  hard-limit explanation → template selection → honesty enforcement →
+  language selection).
 - :func:`load_template_routing` — yaml loader exposed for tests + the
   agent-tool wrapper.
 
@@ -32,8 +32,6 @@ Honesty rules (Pillar 7 owner-truth — Fazal-priority)
 4. No certainty claims about customer intent — composer frames
    inferred-intent specialist output as ``"pattern suggests"`` /
    ``"looks like"``.
-5. Refund-phase acknowledgment — ``state.phase == "refunded"`` →
-   message must mention the refund decision.
 
 These rules run as deterministic Python checks; tests cover each.
 """
@@ -319,22 +317,6 @@ def _explain_hard_limit(
     return framed, notes
 
 
-def _maybe_prepend_refund_ack(body: str, state: Any) -> tuple[str, list[str]]:
-    """Honesty rule #5. Refunded phase → message MUST mention refund decision."""
-    notes: list[str] = []
-    phase = getattr(state, "get", lambda *_: None)("phase")
-    if phase != "refunded":
-        return body, notes
-    if re.search(r"\brefund(ed)?\b", body, re.IGNORECASE):
-        notes.append("refund_ack_already_present")
-        return body, notes
-    framed = (
-        "Following your day-39 refund decision: " + body.lstrip()
-    )
-    notes.append("refund_ack_prepended")
-    return framed, notes
-
-
 # ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
@@ -430,8 +412,6 @@ def compose_owner_output(
         message_body, state, urgency
     )
     notes.extend(n3)
-    message_body, n4 = _maybe_prepend_refund_ack(message_body, state)
-    notes.extend(n4)
 
     # Pressure check is enforce-fail style: detected pressure phrases get
     # surfaced in honesty_notes; the composer does NOT silently rewrite.
