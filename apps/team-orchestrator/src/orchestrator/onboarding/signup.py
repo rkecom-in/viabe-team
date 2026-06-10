@@ -316,6 +316,28 @@ def run_signup(
     except Exception:  # noqa: BLE001 — welcome is best-effort; never fail the signup
         logger.exception("signup: welcome send failed tenant=%s (non-terminal)", res.tenant_id)
 
+    # VT-366: kick the Auto-Discovery Engine — post-commit, NON-BLOCKING (DBOS bg workflow), exactly
+    # like the welcome. The tenant is already committed; the engine assembles a DRAFT profile from
+    # public sources (owner-confirmed in onboarding, NEVER asserted as fact). A kick failure must NOT
+    # 500 the signup. Skipped cleanly if DBOS isn't launched (tests / non-workflow contexts).
+    try:
+        from dbos import DBOS
+
+        from orchestrator.onboarding.auto_discovery import auto_discovery_workflow
+
+        DBOS.start_workflow(
+            auto_discovery_workflow,
+            str(res.tenant_id),
+            {
+                "business_name": inp.business_name,
+                "business_type": inp.business_type,
+                "city": inp.city,
+                "whatsapp_number": inp.whatsapp_number,
+            },
+        )
+    except Exception:  # noqa: BLE001 — discovery is best-effort; never fail the signup
+        logger.exception("signup: auto-discovery kick failed tenant=%s (non-terminal)", res.tenant_id)
+
     return SignupOutcome(
         tenant_id=res.tenant_id,
         plan_tier=cast(str, res.plan_tier),
