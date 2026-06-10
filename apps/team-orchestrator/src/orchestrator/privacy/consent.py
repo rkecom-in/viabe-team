@@ -153,10 +153,14 @@ def opt_out(tenant_id: UUID | str, phone_token: str) -> bool:
         if updated:
             # VT-369 PR-2: opt-out ATTRIBUTION on the same connection (plan §3b — never
             # fire-and-forget; a dropped attribution disarms the optout_spike demotion). The
-            # opt-out itself is COMMITTED regardless: an attribution failure logs LOUDLY but
-            # never unwinds a compliance write.
+            # opt-out itself is COMMITTED regardless. SAVEPOINT (Cowork gate, compliance-
+            # critical): a SERVER-SIDE SQL error in the attribution would otherwise abort the
+            # SHARED transaction — the except would swallow it, the commit would downgrade to
+            # rollback, and the opt-out itself would be LOST. The nested transaction scopes any
+            # SQL failure to the attribution alone.
             try:
-                _attribute_optout_to_agents(tenant_id, phone_token, conn)
+                with conn.transaction():  # SAVEPOINT — attribution-only blast radius
+                    _attribute_optout_to_agents(tenant_id, phone_token, conn)
             except Exception:  # noqa: BLE001 — the opt-out stands; the spike trigger is the loss
                 logger.exception(
                     "opt_out: agent attribution FAILED tenant=%s — the optout_spike "
