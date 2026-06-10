@@ -194,7 +194,7 @@ def reconcile_subscription_orphans(vendor_subscription_ids: list[str]) -> list[s
     orphans = [s for s in vendor_subscription_ids if s not in known]
     if orphans:
         try:
-            from orchestrator.billing.refund_executor import _alert_fazal
+            from orchestrator.alerts.clients import alert_fazal as _alert_fazal
 
             _alert_fazal(
                 f"⚠️ VT-352 vendor-orphan(s): {len(orphans)} Razorpay subscription(s) with NO DB "

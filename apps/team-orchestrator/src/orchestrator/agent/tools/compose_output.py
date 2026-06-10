@@ -91,7 +91,7 @@ def compose_owner_output_tool(
             ``"weekly_approval"``, ``"agent_stuck"``).
         tenant_id: UUID string of the tenant the message is addressed to.
         phase: Current subscriber phase (``"onboarding"`` / ``"trial"`` /
-            ``"paid_active"`` / ``"paid_at_risk"`` / ``"refunded"`` etc.).
+            ``"paid_active"`` / ``"paid_at_risk"`` / ``"lapsed"`` etc.).
         last_owner_message_at_iso: ISO-8601 UTC timestamp of the last
             owner-facing message, or ``None`` if no prior message. Drives
             the 24-hour-window template-vs-free-form decision.

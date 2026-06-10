@@ -72,7 +72,7 @@ class InvalidTransitionError(RuntimeError):
 
 
 class VerificationRequiredError(InvalidTransitionError):
-    """VT-361 gate: card_captured → paid_active blocked because business verification is below
+    """VT-361 gate: subscribe → paid_active blocked because business verification is below
     gstin_verified. A DISTINCT type (not a generic InvalidTransition) so the payment-capture caller
     can surface a clear owner-facing "verification pending" state, not a silent stall."""
 
@@ -193,7 +193,7 @@ def apply_transition(
     # pool — founding_tier_claims has no app_role UPDATE policy, so the RLS tenant_connection
     # above cannot touch it. Best-effort + audit-only: a missed release just leaves released_at
     # NULL, NEVER decrements the counter (no-reopen policy → zero integrity risk; Cowork
-    # 20260605T143300Z). Mirrors the VT-94 refund-path release.
+    # 20260605T143300Z).
     if to_phase == "cancelled":
         try:
             from orchestrator.billing.founding_counter import release_founding_slot

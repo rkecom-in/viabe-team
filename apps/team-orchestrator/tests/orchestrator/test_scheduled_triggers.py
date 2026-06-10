@@ -55,11 +55,6 @@ def test_attribution_close_workflow_id_format() -> None:
     )
 
 
-def test_day39_workflow_id_format() -> None:
-    tenant = uuid4()
-    assert st.day39_workflow_id(tenant) == f"day39:{tenant}"
-
-
 def test_monthly_workflow_id_format() -> None:
     tenant = uuid4()
     assert st.monthly_workflow_id(tenant, "2026-05") == f"monthly:{tenant}:2026-05"
@@ -70,11 +65,10 @@ def test_cross_trigger_isolation_different_namespaces() -> None:
     same = UUID("00000000-0000-4000-8000-000000000001")
     ids = {
         st.attribution_close_workflow_id(same),
-        st.day39_workflow_id(same),
         st.monthly_workflow_id(same, "2026-05"),
         st.weekly_workflow_id(same, "2026-W22"),
     }
-    assert len(ids) == 4
+    assert len(ids) == 3
 
 
 # ---------------------------------------------------------------------------
@@ -84,7 +78,9 @@ def test_cross_trigger_isolation_different_namespaces() -> None:
 def test_cron_expressions_match_brief() -> None:
     assert st.WEEKLY_CADENCE_CRON == "0 9 * * MON"
     assert st.ATTRIBUTION_CLOSE_CRON == "0 2 * * *"
-    assert st.DAY39_EVALUATION_CRON == "0 6 * * *"
+    # VT-365: the day-39 refund-evaluation trigger is gone; the kept lifecycle
+    # sweep is the daily VT-90 trial-expiry evaluation (7 AM IST, off-peak).
+    assert st.TRIAL_EVALUATION_CRON == "0 7 * * *"
     assert st.MONTHLY_IMPACT_CRON == "0 8 1 * *"
     # VT-47 — 5th trigger: owner-approval timeout sweep, every 30 min.
     assert st.APPROVAL_TIMEOUT_SWEEP_CRON == "*/30 * * * *"
@@ -122,91 +118,12 @@ def test_attribution_close_body_delegates_to_billing_module(monkeypatch) -> None
     assert out == eligible
 
 
-def test_day39_body_delegates_and_invokes_refund_transition(monkeypatch) -> None:
-    """VT-176: body scans eligibility + calls billing.evaluate_day39.
-
-    Refund-verdict tenant also triggers a transition attempt (best-effort
-    wrapped). Monkeypatch the scanner + the evaluator + the transition
-    helper; assert the call graph.
-    """
-    eligible = [UUID("00000000-0000-4000-8000-000000bbb176")]
-    monkeypatch.setattr(st, "_scan_day39_eligible", lambda now: eligible)
-
-    from types import SimpleNamespace
-
-    refund_verdict = SimpleNamespace(
-        tenant_id=eligible[0],
-        verdict="refund_triggered",
-        already_decided=False,
-    )
-
-    import orchestrator.billing.day39_evaluator as eval_mod
-
-    monkeypatch.setattr(eval_mod, "evaluate_day39", lambda tid: refund_verdict)
-
-    transition_calls: list[UUID] = []
-    monkeypatch.setattr(
-        st, "_send_day39_refund_offer", lambda tid, verdict: transition_calls.append(tid)
-    )
-
-    out = st.run_day39_evaluation_body(
-        now=datetime(2026, 5, 26, 6, 0, tzinfo=timezone.utc)
-    )
-    assert len(out) == 1
-    assert out[0].verdict == "refund_triggered"
-    assert transition_calls == eligible
-
-
-def test_day39_body_continue_branch_skips_refund_transition(monkeypatch) -> None:
-    """VT-176: continue verdict does NOT call apply_transition."""
-    eligible = [UUID("00000000-0000-4000-8000-000000ccc176")]
-    monkeypatch.setattr(st, "_scan_day39_eligible", lambda now: eligible)
-
-    from types import SimpleNamespace
-
-    cont_verdict = SimpleNamespace(
-        tenant_id=eligible[0],
-        verdict="continue",
-        already_decided=False,
-    )
-
-    import orchestrator.billing.day39_evaluator as eval_mod
-
-    monkeypatch.setattr(eval_mod, "evaluate_day39", lambda tid: cont_verdict)
-
-    transition_calls: list[UUID] = []
-    monkeypatch.setattr(
-        st, "_send_day39_refund_offer", lambda tid, verdict: transition_calls.append(tid)
-    )
-
-    st.run_day39_evaluation_body(now=datetime(2026, 5, 26, 6, 0, tzinfo=timezone.utc))
-    assert transition_calls == []
-
-
-def test_day39_body_replays_skip_refund_transition(monkeypatch) -> None:
-    """VT-176: already_decided=True replay skips the transition call."""
-    eligible = [UUID("00000000-0000-4000-8000-000000ddd176")]
-    monkeypatch.setattr(st, "_scan_day39_eligible", lambda now: eligible)
-
-    from types import SimpleNamespace
-
-    replay_verdict = SimpleNamespace(
-        tenant_id=eligible[0],
-        verdict="refund_triggered",
-        already_decided=True,
-    )
-
-    import orchestrator.billing.day39_evaluator as eval_mod
-
-    monkeypatch.setattr(eval_mod, "evaluate_day39", lambda tid: replay_verdict)
-
-    transition_calls: list[UUID] = []
-    monkeypatch.setattr(
-        st, "_send_day39_refund_offer", lambda tid, verdict: transition_calls.append(tid)
-    )
-
-    st.run_day39_evaluation_body(now=datetime(2026, 5, 26, 6, 0, tzinfo=timezone.utc))
-    assert transition_calls == [], "replay should not re-trigger the transition"
+# VT-365: the day-39 refund-evaluation body (run_day39_evaluation_body) and its
+# refund/continue/replay branch tests are DELETED — the day-39 2x-or-refund
+# subsystem (billing.day39_evaluator, _scan_day39_eligible, _send_day39_refund_offer)
+# was removed. The kept lifecycle sweep is the VT-90 trial-expiry evaluation
+# (trial_evaluation_scheduled → trial_sweep.run_trial_evaluation_body), exercised
+# via the scheduled-handler signature smoke + the register idempotency count below.
 
 
 # ---------------------------------------------------------------------------
@@ -427,7 +344,7 @@ def test_deterministic_bodies_do_not_import_orchestrator_agent() -> None:
     [
         st.weekly_cadence_scheduled,
         st.attribution_close_scheduled,
-        st.day39_evaluation_scheduled,
+        st.trial_evaluation_scheduled,  # VT-365: replaced the removed day-39 handler
         st.monthly_impact_scheduled,
     ],
 )
@@ -436,7 +353,8 @@ def test_scheduled_handler_accepts_scheduled_and_actual_time(monkeypatch, fn) ->
     are stubbed to return empty so we exercise the signature without DB."""
     _captured_payloads(monkeypatch)
     monkeypatch.setattr(st, "_scan_attribution_close_eligible", lambda now: [])
-    monkeypatch.setattr(st, "_scan_day39_eligible", lambda now: [])
+    # VT-365: the trial sweep scans active trials via get_pool().connection();
+    # the empty-pool stub below yields zero rows so the body is a clean no-op.
 
     # Monthly impact body queries the pool inline; stub the pool getter.
     class _EmptyCursor:
@@ -489,13 +407,14 @@ def test_register_scheduled_triggers_idempotent(monkeypatch) -> None:
     first = call_count["n"]
     st.register_scheduled_triggers()
     second = call_count["n"]
-    # VT-47 5th (owner-approval timeout sweep); VT-68 6th (nightly L3 construction);
-    # VT-76 7th (reconstitution sweep); VT-304 8th (audit-chain verify); VT-305 9th
-    # (PII-in-log sweep); VT-307 10th (KG-drain straggler sweep); VT-311 11th
-    # (L2 retention soft-delete sweep); VT-85 12th (refund-offer 48h timeout sweep);
-    # VT-354 13th counting from VT-47 (waitlist 6-month retention purge);
-    # VT-357 14th counting from VT-47 (hourly SLA-breach sweep);
-    # VT-280 15th counting from VT-47 (daily VTR digest).
-    assert first == 16, "expected 16 triggers registered on first call"
-    assert second == 16, "second call must short-circuit (idempotent)"
+    # The registered set (14): weekly_cadence, attribution_close, trial_evaluation
+    # (VT-90, the kept lifecycle sweep — NOT the removed VT-365 day-39 refund eval),
+    # monthly_impact, approval_timeout_sweep (VT-47), L3_construction (VT-68),
+    # reconstitution_sweep (VT-76), audit_chain_verify (VT-304), pii_log_sweep
+    # (VT-305), kg_drain_sweep (VT-307), l2_retention_sweep (VT-311),
+    # waitlist_retention_purge (VT-354), sla_breach_sweep (VT-357), vtr_digest (VT-280).
+    # VT-365 removed two triggers (day-39 refund evaluation + the VT-85 refund-offer
+    # 48h timeout sweep): 16 → 14.
+    assert first == 14, "expected 14 triggers registered on first call"
+    assert second == 14, "second call must short-circuit (idempotent)"
     st._registered = False

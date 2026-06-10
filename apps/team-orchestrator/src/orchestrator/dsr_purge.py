@@ -85,7 +85,6 @@ payload-level scrub is its own data-migration row.
 from __future__ import annotations
 
 import logging
-import os
 from dataclasses import dataclass
 from typing import Any, cast
 from uuid import UUID
@@ -94,14 +93,6 @@ from orchestrator.graph import get_pool
 from orchestrator.observability.audit_log import log_privacy_event
 
 logger = logging.getLogger(__name__)
-
-# VT-93 / Cowork-escalation 20260605T100800Z — refund_executions DSR mode. Default
-# HARD-DELETE (DPDP right-to-erasure). Set TEAM_REFUND_RETAIN_ON_DSR=1 to switch to
-# anonymize-retain: keep total_refund_paise + completed_at (Indian tax/accounting
-# retention may require refund amount+date 6-8 yrs even after an erasure request)
-# and scrub the Razorpay vendor detail. A config flip, not a refactor — Fazal's /
-# legal's ruling sets it. NEEDS-FAZAL: confirm the retention requirement.
-_REFUND_HARD_DELETE_ON_DSR = os.environ.get("TEAM_REFUND_RETAIN_ON_DSR", "0") != "1"
 
 
 # Anonymization values for the tenants row tombstone. Kept here (not
@@ -153,17 +144,6 @@ _PURGE_ORDER: tuple[str, ...] = (
     # here or the outbox PII survives the purge (the episodic_events/platform_listings lesson).
     "kg_events_processed",
     "kg_events",
-    # VT-92: day-39 decision audit. Leaf (FK tenants only). Carries the tenant's
-    # ARRR/fees (subject billing data) → hard-deleted on DSR (CASCADE never fires on
-    # a DSR-anonymize). Order-insensitive.
-    "day39_evaluations",
-    # VT-93: refund execution ledger. Leaf (FK tenants only; day39_evaluation_id
-    # is an id-copy, not a FK), order-insensitive. Carries subject billing data
-    # (total_refund_paise + Razorpay refund ids in refund_responses) → hard-
-    # deleted on DSR; the immutable privacy_audit_log copy survives. The purge txn
-    # sets orchestrator.dsr_purge_in_progress so the completed-row immutability
-    # trigger (mig 099) permits this delete.
-    "refund_executions",
     "kyc_verification_log",  # VT-361 (mig 120): per-tenant verification attempts — leaf (FK tenants
     # only; anonymize never CASCADEs). Result-only (no payer names), but it's the subject's
     # verification history → hard-delete on DSR (the episodic_events/platform_listings lesson).
@@ -234,10 +214,6 @@ def purge_tenant_data(ticket_id: UUID) -> PurgeResult:
         tenant_id = _resolve_tenant_id_or_raise(conn, ticket_id)
 
         with conn.transaction():
-            # VT-93: exempt this purge txn from the refund_executions immutability
-            # trigger so a completed refund row can be hard-deleted (DPDP right-to-
-            # erasure). The durable record survives in privacy_audit_log (mig 099).
-            conn.execute("SET LOCAL orchestrator.dsr_purge_in_progress = 'on'")
             if _ticket_already_completed(conn, ticket_id):
                 return PurgeResult(
                     ticket_id=ticket_id,
@@ -250,17 +226,7 @@ def purge_tenant_data(ticket_id: UUID) -> PurgeResult:
             _append_audit_event(conn, tenant_id, ticket_id)
 
             for table in _PURGE_ORDER:
-                if table == "refund_executions" and not _REFUND_HARD_DELETE_ON_DSR:
-                    # Anonymize-retain mode: keep amount+date (tax/accounting),
-                    # scrub vendor detail. Rows are RETAINED (0 deleted). Runs
-                    # under the dsr_purge_in_progress flag set above, so the
-                    # completed-row immutability trigger permits the UPDATE.
-                    from orchestrator.db import refund_executions as _refund_ledger
-
-                    _refund_ledger.anonymize_retain(conn, tenant_id)
-                    rows_deleted = 0
-                else:
-                    rows_deleted = _delete_where_tenant(conn, table, tenant_id)
+                rows_deleted = _delete_where_tenant(conn, table, tenant_id)
                 deleted_counts[table] = rows_deleted
                 # VT-185 Q1 Option A: per-table audit row written AFTER
                 # each successful DELETE. Combined with the intent row

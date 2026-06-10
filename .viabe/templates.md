@@ -263,10 +263,9 @@ templates — they become free-form sends in VT-349 and are removed from the reg
 | template | tier | en SID | hi SID |
 |---|---|---|---|
 | `trial_ending` | VT-90 trial lifecycle | `HX7a7e4a40e500b632b65d4060d62da592` | `HX93ceca39d063ce4eaebefbc6751e01b3` |
-| `trial_extension_offered` | VT-90 trial lifecycle | `HX8324b93b9df5bfa06bf56efe17a917c2` | `HXfe73c83ad79f867f6dfcc3edac45237f` |
-| `trial_max_reached` | VT-90 trial lifecycle | `HX69a298407b209f3dc22141943f768f7a` | `HX025441f9544b9f8ad3a910488c89edb4` |
-| `refund_offer` | VT-85 day-39 offer | `HX188eba65b0de1ee521f7922435e76ae6` | `HXe78d29b842092b2fa3dd196fc1e652de` |
-| `refund_completed` | VT-93 refund (out-of-window) | `HX38a56278276122a6689edd8f3cb28137` | `HX161b11c468fc4216ff6d27c033b6bd7f` |
+<!-- VT-365 (Fazal 2026-06-09): removed `trial_extension_offered`, `trial_max_reached` (no extensions),
+     `refund_offer` (VT-85 day-39), `refund_completed` (VT-93) — the refund subsystem + trial extensions
+     are gone. 30-day flat trial → `trial_ending` warn → subscribe-or-lapse. SIDs retired in Twilio. -->
 
 | `support_resolved` | VT-108 batch-2 · SupportBot resolve (owner) | `HX4a14a1dc0e84beeee383094c5d47942a` | `HXd3a19118d25953cc77ee8915b32099a6` |
 | `trial_subscribe_link` | VT-108 batch-2 · trial-end pay link (owner; VT-332 send) | `HX3c61f10c65156d381438c265b09474a9` | `HX3d8bb10b75c83d0ebc9310d66504e729` |
