@@ -731,3 +731,42 @@ def test_cancel_open_batches_skips_terminal_batches(substrate) -> None:
     assert n == 1
     assert _batch_row(dsn, tenant, open_batch)["status"] == "cancelled"
     assert _batch_row(dsn, tenant, sent_batch)["status"] == "sent"
+
+
+def test_opt_out_survives_attribution_SQL_error(substrate, monkeypatch):  # type: ignore[no-untyped-def]
+    """The Cowork prod-gate fix: a SERVER-SIDE SQL error in the attribution (not just a Python
+    raise) must NOT lose the opt-out. Without the SAVEPOINT the shared txn aborts, the except
+    swallows it, and the commit downgrades to rollback — the opt-out itself is lost. The nested
+    transaction scopes the failure to the attribution; the opt-out COMMITS."""
+    import psycopg as _psycopg
+
+    from orchestrator.db.wrappers import CustomersWrapper
+    from orchestrator.privacy import consent
+
+    tenant = _new_tenant(substrate.dsn)
+    token = "phone_tok_" + "a" * 64
+    with _psycopg.connect(substrate.dsn, autocommit=True) as c:
+        c.execute(
+            "INSERT INTO record_of_consent (tenant_id, phone_token, consent_text_version) "
+            "VALUES (%s, %s, 'v1')",
+            (str(tenant), token),
+        )
+
+    def _sql_error(self, *a, **k):  # a real server-side error INSIDE the shared txn
+        conn = k.get("conn")
+        conn.execute("SELECT no_such_column FROM tenant_agent_autonomy")
+        raise AssertionError("unreachable")
+
+    monkeypatch.setattr(CustomersWrapper, "agent_optout_attribution", _sql_error)
+    monkeypatch.setenv("TEAM_PHONE_HASH_SALT", "test-salt")
+
+    assert consent.opt_out(tenant, token) is True  # must not raise
+
+    with _psycopg.connect(substrate.dsn, autocommit=True) as c:
+        row = c.execute(
+            "SELECT opted_out_at FROM record_of_consent WHERE tenant_id = %s AND phone_token = %s",
+            (str(tenant), token),
+        ).fetchone()
+    assert row is not None and row[0] is not None, (
+        "the opt-out must COMMIT despite the attribution SQL error (the SAVEPOINT)"
+    )
