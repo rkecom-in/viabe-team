@@ -145,7 +145,8 @@ def test_vtr_role_grants_are_exactly_the_de_identified_views(substrate) -> None:
     """Grant hygiene (Cowork fold-in a): app_vtr_role's table privileges are EXACTLY SELECT on the
     de-identified views and NOTHING else — covers ALL tables (catches any future grant that would
     widen the VTR surface), not just the probed PII set. VT-360 added the 3rd view
-    (vtr_tenant_alerts) for the team-web monitoring board."""
+    (vtr_tenant_alerts); VT-370 added the 4 console views (mig 130 — latest-plan w/ diff-values
+    stripped, plan-history metadata, autonomy w/o revoke_reason, batch aggregates w/o params)."""
     with psycopg.connect(substrate, autocommit=True) as conn:
         rows = conn.execute(
             "SELECT table_name, privilege_type FROM information_schema.role_table_grants "
@@ -156,4 +157,26 @@ def test_vtr_role_grants_are_exactly_the_de_identified_views(substrate) -> None:
         ("vtr_customers", "SELECT"),
         ("vtr_escalations", "SELECT"),
         ("vtr_tenant_alerts", "SELECT"),
+        ("vtr_business_plan", "SELECT"),
+        ("vtr_plan_history", "SELECT"),
+        ("vtr_agent_autonomy", "SELECT"),
+        ("vtr_draft_batches", "SELECT"),
     }, f"app_vtr_role grants drifted beyond the de-identified views: {granted}"
+
+
+def test_vtr_admin_role_grants_are_exactly_the_exception_tier(substrate) -> None:
+    """VT-370: app_vtr_admin_role (the Fazal exception tier) is EXACTLY the standard console views
+    plus the param-level vtr_admin_batch_drafts — and never a raw table."""
+    with psycopg.connect(substrate, autocommit=True) as conn:
+        rows = conn.execute(
+            "SELECT table_name, privilege_type FROM information_schema.role_table_grants "
+            "WHERE grantee = 'app_vtr_admin_role'"
+        ).fetchall()
+    granted = {(r[0], r[1]) for r in rows}
+    assert granted == {
+        ("vtr_admin_batch_drafts", "SELECT"),
+        ("vtr_business_plan", "SELECT"),
+        ("vtr_plan_history", "SELECT"),
+        ("vtr_agent_autonomy", "SELECT"),
+        ("vtr_draft_batches", "SELECT"),
+    }, f"app_vtr_admin_role grants drifted: {granted}"
