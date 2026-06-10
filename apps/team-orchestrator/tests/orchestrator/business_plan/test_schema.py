@@ -284,3 +284,21 @@ def test_degrade_template_empty_bundle():
     assert summary["cited_facts"] == []
     assert summary["headline_metrics"] == {}
     assert validate_plan(summary, roadmap, {}) == []
+
+
+def test_strip_removes_ungrounded_headline_metric_not_degrade():
+    """Gate fold-in #3: ONE fabricated headline metric must be STRIPPED (salvageable plan survives),
+    not force a degrade-to-template. Grounded metrics survive the strip."""
+    from orchestrator.business_plan.schema import strip_violations, validate_plan
+
+    bundle = {"F1": {"key": "rating", "value": 4.2, "source": "listing"}}
+    summary = {
+        "text": "Rated 4.2 [F1].",
+        "text_hi": "4.2 रेटिंग [F1]।",
+        "cited_facts": ["F1"],
+        "headline_metrics": {"rating": 4.2, "fabricated_orders": 9000},
+    }
+    assert validate_plan(summary, [], bundle), "the fabricated metric must be a violation"
+    s2, r2, remaining = strip_violations(summary, [], bundle)
+    assert remaining == [], "after the strip the plan must validate clean (no needless degrade)"
+    assert s2["headline_metrics"] == {"rating": 4.2}, "grounded metric kept, fabricated dropped"
