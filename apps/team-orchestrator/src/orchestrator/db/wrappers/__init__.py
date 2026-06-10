@@ -30,6 +30,61 @@ from orchestrator.db.base import TenantScopedTable
 # every wrapper read that validates MUST return tenant_id.
 _CUSTOMER_DEDUP_COLS = "id, tenant_id, display_name, phone_e164, email, acquired_via"
 
+# VT-369 Sales-Recovery detection (CustomersWrapper.lapsed_candidates). phone_token derivation MUST
+# stay byte-identical to privacy.hash_phone ('phone_tok_' + sha256(salt:phone) hex) — if the VT-122
+# tokenisation ever changes this drifts FAIL-CLOSED (no token match → no candidates) and the
+# executor's pin test fails loudly.
+_LAPSED_CANDIDATES_SQL = """
+WITH sales AS (
+    SELECT customer_id,
+           MAX(entry_date)                  AS last_sale_date,
+           (CURRENT_DATE - MAX(entry_date)) AS days_since_last_sale,
+           SUM(amount_paise)                AS lifetime_spend_paise
+    FROM customer_ledger_entries
+    WHERE tenant_id = %(tenant_id)s AND entry_type = 'sale'
+    GROUP BY customer_id
+),
+thresholds AS (
+    SELECT
+        percentile_cont(%(recency_pct)s) WITHIN GROUP
+            (ORDER BY days_since_last_sale::double precision) AS recency_floor_days,
+        percentile_cont(%(spend_pct)s) WITHIN GROUP
+            (ORDER BY lifetime_spend_paise::double precision) AS spend_floor_paise
+    FROM sales
+)
+SELECT c.id AS customer_id,
+       s.last_sale_date,
+       s.days_since_last_sale,
+       s.lifetime_spend_paise
+FROM customers c
+JOIN sales s ON s.customer_id = c.id
+CROSS JOIN thresholds t
+WHERE c.tenant_id = %(tenant_id)s
+  AND c.opt_out_status = 'subscribed'
+  AND c.complaint_status != 'open'
+  AND c.phone_e164 IS NOT NULL
+  AND s.days_since_last_sale >= t.recency_floor_days
+  AND s.lifetime_spend_paise >= t.spend_floor_paise
+  AND EXISTS (
+      SELECT 1
+      FROM record_of_consent roc
+      WHERE roc.tenant_id = c.tenant_id
+        AND roc.phone_token = 'phone_tok_' || encode(
+                sha256(convert_to(%(salt)s || ':' || c.phone_e164, 'UTF8')), 'hex')
+        AND roc.opted_out_at IS NULL
+        AND roc.consent_text_version = ANY(%(versions)s)
+  )
+  AND NOT EXISTS (
+      SELECT 1
+      FROM agent_customer_contacts acc
+      WHERE acc.tenant_id = c.tenant_id
+        AND acc.customer_id = c.id
+        AND acc.sent_at >= now() - make_interval(days => %(suppression_days)s)
+  )
+ORDER BY s.lifetime_spend_paise DESC, c.id
+LIMIT %(limit)s
+"""
+
 
 class CustomersWrapper(TenantScopedTable):
     _table = "customers"
@@ -296,6 +351,77 @@ class CustomersWrapper(TenantScopedTable):
             if dict(r)["display_name"]
         }
 
+    # --- VT-369 agent surface ------------------------------------------------
+
+    def send_eligibility(
+        self, tenant_id: UUID | str, customer_id: UUID | str, *, conn: Any = None
+    ) -> dict[str, Any] | None:
+        """The SEND-TIME re-read for the agent send choke point (VT-369 gate 3):
+        opt_out_status + complaint_status + phone, fetched at the moment of send so
+        draft-time state is never trusted. None = customer gone (never sendable)."""
+        tid = self._uuid(tenant_id)
+        with self._conn(tid, conn) as c:
+            row = c.execute(
+                "SELECT id, tenant_id, opt_out_status, complaint_status, phone_e164, display_name "
+                "FROM customers WHERE tenant_id = %s AND id = %s",
+                (str(tid), str(customer_id)),
+            ).fetchone()
+        if row is None:
+            return None
+        out = dict(row)
+        self._validate([out], tid)
+        return out
+
+    def display_name(
+        self, tenant_id: UUID | str, customer_id: UUID | str, *, conn: Any = None
+    ) -> str | None:
+        """Single customer's display_name (the VT-369 fact-bundle read)."""
+        tid = self._uuid(tenant_id)
+        with self._conn(tid, conn) as c:
+            row = c.execute(
+                "SELECT display_name FROM customers WHERE tenant_id = %s AND id = %s",
+                (str(tid), str(customer_id)),
+            ).fetchone()
+        if row is None:
+            return None
+        return dict(row).get("display_name")
+
+    def lapsed_candidates(
+        self,
+        tenant_id: UUID | str,
+        *,
+        recency_pct: float,
+        spend_pct: float,
+        salt: str,
+        versions: list[str],
+        suppression_days: int,
+        limit: int,
+        conn: Any = None,
+    ) -> list[dict[str, Any]]:
+        """VT-369 Sales-Recovery detection (plan §2.1) — the ONE analytic read over
+        customers: subscribed + complaint-clear + an ACTIVE marketing-cleared consent
+        row (consent_text_version = ANY(versions) — the C2 allowlist, list-param,
+        never literal IN ()) + at/above the tenant's recency/spend percentile floors
+        + no agent contact within suppression_days; richest-first, capped. Empty
+        ``versions`` matches nothing (structurally fail-closed). Lives HERE because
+        per-tenant customers SQL belongs to the wrapper layer (the
+        no-direct-tenant-db-access lint)."""
+        tid = self._uuid(tenant_id)
+        with self._conn(tid, conn) as c:
+            rows = c.execute(
+                _LAPSED_CANDIDATES_SQL,
+                {
+                    "tenant_id": str(tid),
+                    "recency_pct": recency_pct,
+                    "spend_pct": spend_pct,
+                    "salt": salt,
+                    "versions": versions,
+                    "suppression_days": suppression_days,
+                    "limit": limit,
+                },
+            ).fetchall()
+        return [dict(r) for r in rows]
+
 
 class CampaignsWrapper(TenantScopedTable):
     _table = "campaigns"
@@ -538,13 +664,17 @@ class PendingApprovalsWrapper(TenantScopedTable):
     def count_recent_campaign_requests(
         self, tenant_id: UUID | str, *, days: int = 7, conn: Any = None
     ) -> int:
-        """VT-334 per-week messaging budget: how many ``campaign_send`` approval requests this
-        tenant has had in the last ``days`` (the owner-fatigue guard skips a new one at >= 2)."""
+        """VT-334 per-week messaging budget: how many owner-interrupt approval requests this
+        tenant has had in the last ``days`` (the owner-fatigue guard skips a new one at >= 2).
+        VT-369: the budget is SHARED across the campaign and agent surfaces — one 2/week
+        owner-interrupt budget, so ``agent_customer_send`` rows count alongside
+        ``campaign_send`` (plan §4.3; F3 confirms share-vs-raise)."""
         tid = self._uuid(tenant_id)
         with self._conn(tid, conn) as c:
             row = c.execute(
                 "SELECT count(*) AS n FROM pending_approvals "
-                "WHERE tenant_id = %s AND approval_type = 'campaign_send' "
+                "WHERE tenant_id = %s "
+                "AND approval_type IN ('campaign_send', 'agent_customer_send') "
                 "AND created_at >= now() - make_interval(days => %s)",
                 (str(tid), days),
             ).fetchone()

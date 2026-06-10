@@ -208,3 +208,86 @@ breach_notification_customer:
   languages:
     en: HXdbf0129d38d60d57b11851d8acf581e6
     hi: HX48dcbb5f65877f8592296921b3bad100
+
+# --- VT-369 Gap-5 agent-surface templates (plan §3c). 5 entries, en+hi, NO SIDs yet. ---
+# `null` = stub-pending-approval: resolve() returns content_sid None and the agent send
+# path fail-closes with TemplateNotConfigured until the F1 Meta/Twilio SIDs land
+# (PR-1 merge is NOT blocked on F1; any real send is).
+#
+# `category` is the NEW Gap-5 registry field (plan gate #2 / MED-1): the deterministic
+# agent customer-send choke point (`agents/customer_send.py`) requires
+# category: customer_marketing — owner-facing surfaces are owner_notification and can
+# structurally never pass that gate.
+#
+# Both winbacks carry the customer STOP opt-out line in the FIXED Meta body (registry
+# pin `optout_line: true`; CI test asserts it). `team_winback_offer` is
+# `money_bearing: true` — always-confirm floor, never L3 auto-send (plan §5.5).
+# Per-language `body_sha256` pins land WITH the F1 SIDs (fetched once from the Twilio
+# Content API; CI then fails on doc/yaml/Meta drift — plan §3c folded Critic-1 Probe 5).
+#
+# agent_selectable stays FALSE until F1: approved_template_names() includes any entry
+# whose language KEY exists (it does not filter null SIDs), so flipping true now would
+# inject unsendable names into the live VT-45 selectable set and break the D5 pins in
+# tests/orchestrator/test_templates_registry.py. Flip to true alongside the F1 SID
+# drop + the D5 pin update (the gap-5 drafting gate requires agent_selectable: true).
+
+team_winback_simple:
+  audience: customer
+  category: customer_marketing  # Meta MARKETING category (F1 submission)
+  agent_selectable: false       # -> true at F1; see block note above
+  optout_line: true             # STOP line lives in the fixed approved body
+  variables:
+    - customer_name   # {{1}} — display-name-level PII max (no E.164; CI-pinned)
+    - business_name   # {{2}}
+  languages:
+    en: null  # PENDING-F1
+    hi: null  # PENDING-F1
+
+team_winback_offer:
+  audience: customer
+  category: customer_marketing  # Meta MARKETING category (F1 submission)
+  agent_selectable: false       # -> true at F1; see block note above
+  optout_line: true             # STOP line lives in the fixed approved body
+  money_bearing: true           # always-confirm floor — never L3 auto-send (plan §5.5)
+  variables:
+    - customer_name       # {{1}}
+    - business_name       # {{2}}
+    - offer_description   # {{3}} — grounded against the fact bundle, validator-enforced
+  languages:
+    en: null  # PENDING-F1
+    hi: null  # PENDING-F1
+
+team_agent_draft_approval:
+  audience: owner
+  category: owner_notification  # L2 approval ask — system-invoked via arm_pause_request
+  agent_selectable: false
+  variables:
+    - owner_name       # {{1}}
+    - draft_count      # {{2}}
+    - sample_message   # {{3}} — rendered at arm-time from an RLS read of agent_drafts;
+                       #         goes into the send ONLY, never into pending_approvals
+  languages:
+    en: null  # PENDING-F1
+    hi: null  # PENDING-F1
+
+team_l3_presend_notice:
+  audience: owner
+  category: owner_notification  # L3 pre-send notice (delivery-anchored 2h hold, plan §5.6)
+  agent_selectable: false
+  variables:
+    - owner_name   # {{1}}
+    - send_count   # {{2}}
+  languages:
+    en: null  # PENDING-F1
+    hi: null  # PENDING-F1
+
+team_autonomy_offer:
+  audience: owner
+  category: owner_notification  # L3 opt-in offer; body promises "you can always say stop"
+  agent_selectable: false       # (standing kill keyword, plan §5.7 — C3 consent evidence)
+  variables:
+    - owner_name     # {{1}}
+    - streak_count   # {{2}}
+  languages:
+    en: null  # PENDING-F1
+    hi: null  # PENDING-F1

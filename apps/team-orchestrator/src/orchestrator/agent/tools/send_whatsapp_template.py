@@ -249,7 +249,14 @@ def _resolve_customer(
     row = CustomersWrapper().find_by_id(tenant_id, customer_id)
     if row is None:
         return None
-    return {"phone_e164": row["phone_e164"], "opt_out_status": row["opt_out_status"]}
+    return {
+        "phone_e164": row["phone_e164"],
+        "opt_out_status": row["opt_out_status"],
+        # VT-369 (Gap-5 PR-1 adjacent fix): complaint freeze at the tool boundary.
+        # .get() — a stubbed/legacy row without the migration-091 column passes
+        # through as None (only an explicit 'open' refuses).
+        "complaint_status": row.get("complaint_status"),
+    }
 
 
 def _write_idempotency_ledger(
@@ -408,6 +415,29 @@ def send_whatsapp_template(
                             message=(
                                 f"Customer has opt_out_status='{opt_out_status}'. "
                                 "Template sends to opted-out recipients are refused (CL-421)."
+                            ),
+                        ),
+                    )
+
+                # --- Complaint freeze (VT-369 Gap-5 PR-1 adjacent fix, mirrors the
+                # opt-out hard-refuse above): a customer with an OPEN complaint
+                # (migration 091, VT-321) must not receive business-initiated
+                # template sends. The campaign-execute path already freezes on
+                # complaint_status; this closes the direct-tool path so the gate
+                # holds at the choke point too. 'none'/'resolved'/absent pass. ---
+                if customer.get("complaint_status") == "open":
+                    logger.info(
+                        "send_whatsapp_template: complaint_open tenant=%s customer=%s",
+                        payload.tenant_id, payload.customer_id,
+                    )
+                    return SendWhatsappTemplateOutput(
+                        status="unauthorized",
+                        customer_id=payload.customer_id,
+                        error_envelope=ErrorEnvelope(
+                            code="recipient_complaint_open",
+                            message=(
+                                "Customer has complaint_status='open'. Template sends "
+                                "are refused until the complaint is resolved (VT-321/VT-369)."
                             ),
                         ),
                     )

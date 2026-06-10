@@ -127,8 +127,16 @@ def _pool(
     return pool, executed
 
 
-def _customer(phone: str = "+919990000001", opt_out_status: str | None = None) -> dict:
-    return {"phone_e164": phone, "opt_out_status": opt_out_status}
+def _customer(
+    phone: str = "+919990000001",
+    opt_out_status: str | None = None,
+    complaint_status: str | None = None,
+) -> dict:
+    return {
+        "phone_e164": phone,
+        "opt_out_status": opt_out_status,
+        "complaint_status": complaint_status,
+    }
 
 
 def _input(**over: Any):
@@ -407,6 +415,42 @@ def test_blocked_recipient_refused() -> None:
     assert out.error_envelope is not None
     assert out.error_envelope.code == "recipient_opted_out"
     send_fn.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Test 9a (VT-369 Gap-5 PR-1 adjacent fix): open complaint -> refused
+# ---------------------------------------------------------------------------
+
+def test_complaint_open_recipient_refused() -> None:
+    """VT-321/VT-369: a customer with complaint_status='open' is hard-refused at
+    the tool boundary (mirrors the opt-out refuse — the campaign-execute freeze
+    alone left the direct-tool path open)."""
+    from orchestrator.agent.tools.send_whatsapp_template import send_whatsapp_template
+
+    pool, _ = _pool(
+        customer_row=_customer(opt_out_status="subscribed", complaint_status="open")
+    )
+    send_fn = MagicMock()
+
+    out = send_whatsapp_template(_input(), pool=pool, send_fn=send_fn)
+
+    assert out.status == "unauthorized"
+    assert out.error_envelope is not None
+    assert out.error_envelope.code == "recipient_complaint_open"
+    send_fn.assert_not_called()
+
+
+def test_complaint_resolved_recipient_passes_gate() -> None:
+    """A RESOLVED complaint is not a freeze — the send proceeds."""
+    from orchestrator.agent.tools.send_whatsapp_template import send_whatsapp_template
+
+    pool, _ = _pool(
+        customer_row=_customer(opt_out_status="subscribed", complaint_status="resolved")
+    )
+
+    out = send_whatsapp_template(_input(), pool=pool, send_fn=_ok_send_fn)
+
+    assert out.status == "sent"
 
 
 # ---------------------------------------------------------------------------

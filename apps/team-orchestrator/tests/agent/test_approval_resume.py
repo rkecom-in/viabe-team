@@ -65,8 +65,10 @@ class _CaptureConn:
         if "current_user" in sql:
             return SimpleNamespace(fetchone=lambda: None, rowcount=0)
         self.calls.append((" ".join(sql.split()), params))
-        # The wrapper reads cur.rowcount (real psycopg returns a cursor).
-        return SimpleNamespace(rowcount=1)
+        # The wrapper reads cur.rowcount (real psycopg returns a cursor); the
+        # VT-369 agent-glue hook's row re-read (find_by_id SELECT) gets None →
+        # apply_agent_decision no-ops (not an agent approval).
+        return SimpleNamespace(rowcount=1, fetchone=lambda: None)
 
 
 def test_mark_resolved_sets_decision_status_and_guards_unresolved():
@@ -104,7 +106,8 @@ def test_timeout_decision_maps_to_timed_out_status():
 
 class _DeferConn:
     """Mock conn whose RETURNING defer_count yields a configurable value (the post-increment
-    count from extend_on_defer)."""
+    count from extend_on_defer). Plain SELECTs (the VT-369 agent-glue row re-read) get None
+    so apply_agent_decision no-ops."""
 
     def __init__(self, defer_count_after: int):
         self._dc = defer_count_after
@@ -116,7 +119,11 @@ class _DeferConn:
         if "current_user" in sql:
             return SimpleNamespace(fetchone=lambda: None, rowcount=0)
         self.calls.append((" ".join(sql.split()), params))
-        return SimpleNamespace(fetchone=lambda: {"defer_count": self._dc}, rowcount=1)
+        if "defer_count = defer_count + 1" in sql:
+            return SimpleNamespace(
+                fetchone=lambda: {"defer_count": self._dc}, rowcount=1
+            )
+        return SimpleNamespace(fetchone=lambda: None, rowcount=1)
 
 
 def test_defer_first_time_extends_and_does_not_resolve():
@@ -166,6 +173,8 @@ def test_count_recent_campaign_requests_sql_and_value():
     assert n == 3
     sql, params = conn.calls[0]
     assert "count(*)" in sql
-    assert "approval_type = 'campaign_send'" in sql
+    # VT-369: one SHARED 2/week owner-interrupt budget across the campaign +
+    # agent surfaces (plan §4.3).
+    assert "approval_type IN ('campaign_send', 'agent_customer_send')" in sql
     assert "created_at >= now() - make_interval(days => %s)" in sql
     assert params[1] == 7
