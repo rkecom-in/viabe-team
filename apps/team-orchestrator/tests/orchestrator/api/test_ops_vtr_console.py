@@ -837,3 +837,20 @@ def test_edit_roadmap_item_stale_version_raises(substrate) -> None:
             str(tenant), "it-1", {"month": 2}, vtr_id="v1", expected_prev_version=99
         )
     assert _max_plan_version(substrate.dsn, tenant) == 1
+
+
+def test_jwt_without_exp_is_rejected(monkeypatch):
+    """Gate hardening: an exp-LESS operator JWT must be rejected (pyjwt verifies exp only if
+    present by default — require it, so a future exp-less mint can't be honored forever)."""
+    import jwt as pyjwt
+
+    from orchestrator.api import ops_common
+
+    monkeypatch.setenv("OPERATOR_JWT_SECRET", _TEST_JWT_KEY)
+    token = pyjwt.encode(
+        {"operator_claim": True, "operator_id": "op-1", "aud": "authenticated"},  # NO exp
+        _TEST_JWT_KEY, algorithm="HS256",
+    )
+    with pytest.raises(Exception) as exc:
+        ops_common.verify_operator_jwt(token)
+    assert getattr(exc.value, "status_code", None) == 403

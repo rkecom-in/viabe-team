@@ -48,7 +48,12 @@ def verify_operator_jwt(jwt_str: str | None) -> dict[str, Any]:
     if not secret:
         raise HTTPException(status_code=500, detail="OPERATOR_JWT_SECRET not configured")
     try:
-        payload = pyjwt.decode(jwt_str, secret, algorithms=["HS256"], audience=_AUDIENCE)
+        payload = pyjwt.decode(
+            jwt_str, secret, algorithms=["HS256"], audience=_AUDIENCE,
+            # exp is REQUIRED, not merely verified-if-present (Cowork gate hardening): a future
+            # exp-less mint must not be honorable forever on the operator-auth path.
+            options={"require": ["exp"]},
+        )
     except pyjwt.InvalidTokenError as exc:
         raise HTTPException(status_code=403, detail=f"JWT verify failed: {exc}") from exc
     if not payload.get("operator_claim") or not payload.get("operator_id"):
