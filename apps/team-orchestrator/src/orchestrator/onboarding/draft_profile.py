@@ -94,7 +94,7 @@ def confirm_draft(
                 tenant_id,
                 {"tenant_id": str(tenant_id), "confirmed_fields": sorted(confirmed_fields.keys())},
             )
-        drain_kg_events()
+        drain_kg_events(tenant_id)
     except Exception:  # noqa: BLE001 — KG is downstream of the authoritative L1 promotion
         import logging
 
