@@ -60,26 +60,31 @@ export function SocialProof({
 }) {
   const s = socialProofState(data)
   return (
-    <section aria-label="social proof">
-      <h2>{labels.heading}</h2>
+    <section aria-label="social proof" className="px-5 py-16">
+      <div className="mx-auto flex w-full max-w-4xl flex-col gap-8">
+      <h2 className="text-center text-2xl font-bold tracking-tight text-gray-900 sm:text-3xl">
+        {labels.heading}
+      </h2>
 
       {s.testimonials === 'content' ? (
-        <ul aria-label="customer testimonials" className="sp-testimonials">
+        <ul aria-label="customer testimonials" className="sp-testimonials grid gap-6 sm:grid-cols-2">
           {data.testimonials.map((tt, i) => (
-            <li key={i}>
-              <blockquote>{tt.quote}</blockquote>
-              <cite>
+            <li key={i} className="rounded-2xl border border-gray-200 bg-white p-6 shadow-sm">
+              <blockquote className="leading-relaxed text-gray-700">{tt.quote}</blockquote>
+              <cite className="mt-3 block text-sm not-italic text-gray-500">
                 {tt.owner_name} · {tt.business_type} · {tt.locality}
               </cite>
             </li>
           ))}
         </ul>
       ) : (
-        <p className="sp-placeholder">{labels.testimonials_placeholder}</p>
+        <p className="sp-placeholder rounded-xl border border-dashed border-gray-300 px-5 py-6 text-center text-sm italic text-gray-500">
+          {labels.testimonials_placeholder}
+        </p>
       )}
 
       {s.logos === 'content' && (
-        <ul aria-label="customer logos" className="sp-logos">
+        <ul aria-label="customer logos" className="sp-logos flex flex-wrap items-center justify-center gap-8">
           {data.logos.map((logo, i) => (
             <li key={i}>
               <img src={logo.src} alt={logo.name} />
@@ -89,20 +94,22 @@ export function SocialProof({
       )}
 
       {s.metrics === 'content' ? (
-        <ul aria-label="aggregate results" className="sp-metrics">
+        <ul aria-label="aggregate results" className="sp-metrics flex flex-wrap justify-center gap-10 text-center">
           {data.metrics.map((m, i) => (
-            <li key={i}>
-              <span className="sp-metric-value">{m.value}</span>
-              <span className="sp-metric-label">{m.label}</span>
+            <li key={i} className="flex flex-col">
+              <span className="sp-metric-value text-3xl font-extrabold text-emerald-700">{m.value}</span>
+              <span className="sp-metric-label text-sm text-gray-500">{m.label}</span>
             </li>
           ))}
         </ul>
       ) : (
-        <p className="sp-placeholder">{labels.metrics_placeholder}</p>
+        <p className="sp-placeholder rounded-xl border border-dashed border-gray-300 px-5 py-6 text-center text-sm italic text-gray-500">
+          {labels.metrics_placeholder}
+        </p>
       )}
 
       {s.press === 'content' && (
-        <ul aria-label="press coverage" className="sp-press">
+        <ul aria-label="press coverage" className="sp-press flex flex-wrap items-center justify-center gap-8">
           {data.press.map((p, i) => (
             <li key={i}>
               <img src={p.src} alt={p.name} />
@@ -110,6 +117,7 @@ export function SocialProof({
           ))}
         </ul>
       )}
+      </div>
     </section>
   )
 }
