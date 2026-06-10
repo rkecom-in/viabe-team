@@ -1,4 +1,4 @@
-import { issueOperatorJwt } from '@/lib/auth/operator-jwt'
+import { issueOperatorJwt, OPERATOR_RESOLVE_TTL_SEC } from '@/lib/auth/operator-jwt'
 
 /** Result of forwarding an inbound webhook to the orchestrator. */
 export interface ForwardResult {
@@ -360,4 +360,319 @@ export async function forwardVtrVerify(
     const timedOut = err instanceof Error && err.name === 'TimeoutError'
     return { ok: false, reason: timedOut ? 'timeout' : 'error' }
   }
+}
+
+
+// ---------------------------------------------------------------------------
+// VT-370 Gap-6 — VTR console (plan-editing + agent-correction) client.
+//
+// ALL seven fns ride the forwardVtrVerify template: X-Internal-Secret (transport) +
+// X-Operator-Jwt (attribution) — NEVER the forwardRunControl shape (no JWT, body-trusted
+// operator_id = forgeable attribution). Every JWT is minted with
+// `{ ttlSec: OPERATOR_RESOLVE_TTL_SEC }` (5 min) — the bare issueOperatorJwt default is
+// 7 DAYS (operator-jwt.ts) and is forbidden here; these tokens cross the orchestrator
+// audit boundary (CL-390). `operator_id` is always passed through from the caller
+// (server actions derive it from the session claim — never client input); the
+// orchestrator re-verifies body operator_id == JWT claim + assignment, fail-closed.
+//
+// CL-390 logging: these fns log path + status ONLY. Never the patch, params, reason,
+// violations, or any response body (an echoed body in Vercel logs is a CL-390 breach).
+// ---------------------------------------------------------------------------
+
+const _VTR_ACTION_TIMEOUT_MS = 10_000
+
+interface VtrCall {
+  /** HTTP status; 0 on network throw/timeout. */
+  status: number
+  body: Record<string, unknown>
+  /** ok | http_<n> | timeout | error */
+  reason: string
+}
+
+async function vtrCall(path: string, operatorId: string, payload: Record<string, unknown>): Promise<VtrCall> {
+  const base = process.env.TEAM_ORCHESTRATOR_URL ?? _ORCHESTRATOR_DEFAULT
+  const secret = process.env.INTERNAL_API_SECRET ?? ''
+  try {
+    // Short-lived by mandate — never the bare 7-day default.
+    const jwt = await issueOperatorJwt(operatorId, { ttlSec: OPERATOR_RESOLVE_TTL_SEC })
+    const res = await fetch(`${base}/api/orchestrator/ops/${path}`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'X-Internal-Secret': secret,
+        'X-Operator-Jwt': jwt,
+      },
+      body: JSON.stringify({ operator_id: operatorId, ...payload }),
+      signal: AbortSignal.timeout(_VTR_ACTION_TIMEOUT_MS),
+    })
+    let body: Record<string, unknown> = {}
+    try {
+      body = (await res.json()) as Record<string, unknown>
+    } catch {
+      body = {}
+    }
+    if (!res.ok) console.error(`vtr ${path}: http_${res.status}`) // CL-390: path + status only
+    return { status: res.status, body, reason: res.ok ? 'ok' : `http_${res.status}` }
+  } catch (err) {
+    const timedOut = err instanceof Error && err.name === 'TimeoutError'
+    console.error(`vtr ${path}: ${timedOut ? 'timeout' : 'error'}`) // CL-390: no err detail/body
+    return { status: 0, body: {}, reason: timedOut ? 'timeout' : 'error' }
+  }
+}
+
+/** FastAPI HTTPException `detail` → display strings (server scrubs PII before raising). */
+function _detailStrings(body: Record<string, unknown>): string[] {
+  const detail = body.detail
+  if (typeof detail === 'string') return [detail]
+  if (Array.isArray(detail)) return detail.map((d) => (typeof d === 'string' ? d : JSON.stringify(d)))
+  if (detail != null) return [JSON.stringify(detail)]
+  return []
+}
+
+/** One roadmap item as the vtr_business_plan view ships it (diff_from_prev values pre-stripped). */
+export interface VtrRoadmapItem {
+  item_id: string
+  seq: number
+  month: number
+  objective: string
+  why: string
+  owning_agent: string
+  owner_action_needed: boolean
+  owner_action: string | null
+  owner_action_hi: string | null
+  status: string
+  cited_facts?: string[]
+  provenance?: Record<string, unknown>
+}
+
+export interface VtrPlan {
+  tenant_id: string
+  version: number
+  summary_json: Record<string, unknown> | null
+  roadmap_json: VtrRoadmapItem[]
+  generated_by: string
+  model_id: string | null
+  delivered_parts: number
+  delivered_at: string | null
+  created_at: string | null
+}
+
+/** vtr_plan_history view row — metadata ONLY (no roadmap/summary content for prior versions). */
+export interface VtrPlanHistoryEntry {
+  tenant_id: string
+  version: number
+  generated_by: string
+  model_id: string | null
+  created_at: string | null
+}
+
+export interface VtrPlanResult {
+  ok: boolean
+  plan: VtrPlan | null
+  history: VtrPlanHistoryEntry[]
+  reason: string
+}
+
+/** Gap-6: latest plan (latest-version-only, diff-values-stripped view) + metadata history. */
+export async function vtrPlan(operatorId: string, tenantId: string): Promise<VtrPlanResult> {
+  const r = await vtrCall('vtr-plan', operatorId, { tenant_id: tenantId })
+  if (r.status !== 200) return { ok: false, plan: null, history: [], reason: r.reason }
+  return {
+    ok: true,
+    plan: (r.body.plan as VtrPlan | null) ?? null,
+    history: (r.body.history as VtrPlanHistoryEntry[] | undefined) ?? [],
+    reason: 'ok',
+  }
+}
+
+export interface VtrPlanEditResult {
+  ok: boolean
+  newVersion: number | null
+  /** ok | grounding_or_patch | forbidden | not_found | stale_version | http_<n> | timeout | error */
+  reason: string
+  /** Scrubbed grounding-violation strings (400 only). Render-only — never log (CL-390). */
+  violations: string[]
+}
+
+/**
+ * Gap-6: edit one roadmap item (EDITABLE_FIELDS patch). Carries `expected_prev_version`
+ * (optimistic concurrency) — 409 means the plan moved underneath the loaded copy.
+ */
+export async function vtrPlanEdit(
+  operatorId: string,
+  tenantId: string,
+  itemId: string,
+  patch: Record<string, unknown>,
+  expectedPrevVersion: number,
+): Promise<VtrPlanEditResult> {
+  const r = await vtrCall('vtr-plan-edit', operatorId, {
+    tenant_id: tenantId,
+    item_id: itemId,
+    patch,
+    expected_prev_version: expectedPrevVersion,
+  })
+  if (r.status === 200) {
+    return {
+      ok: true,
+      newVersion: typeof r.body.new_version === 'number' ? r.body.new_version : null,
+      reason: 'ok',
+      violations: [],
+    }
+  }
+  if (r.status === 400) {
+    return { ok: false, newVersion: null, reason: 'grounding_or_patch', violations: _detailStrings(r.body) }
+  }
+  if (r.status === 403) return { ok: false, newVersion: null, reason: 'forbidden', violations: [] }
+  if (r.status === 404) return { ok: false, newVersion: null, reason: 'not_found', violations: [] }
+  if (r.status === 409) return { ok: false, newVersion: null, reason: 'stale_version', violations: [] }
+  return { ok: false, newVersion: null, reason: r.reason, violations: [] }
+}
+
+/** vtr_agent_autonomy view row. NO revoke_reason (excluded by construction — free text). */
+export interface VtrAgentAutonomy {
+  tenant_id: string
+  tenant_name: string | null
+  agent: string
+  level: string
+  clean_approval_streak: number
+  lifetime_approvals: number
+  lifetime_rejections: number
+  frozen: boolean
+  last_regression_at: string | null
+  last_regression_kind: string | null
+  l3_granted_at: string | null
+  l3_revoked_at: string | null
+  updated_at: string | null
+}
+
+/** Gap-6: per-agent autonomy state. Fail-closed [] (a missing agent row = L2/0/unfrozen default). */
+export async function vtrAgentState(
+  operatorId: string,
+  tenantId: string,
+): Promise<{ ok: boolean; agents: VtrAgentAutonomy[]; reason: string }> {
+  const r = await vtrCall('vtr-agent-state', operatorId, { tenant_id: tenantId })
+  if (r.status !== 200) return { ok: false, agents: [], reason: r.reason }
+  return { ok: true, agents: (r.body.agents as VtrAgentAutonomy[] | undefined) ?? [], reason: 'ok' }
+}
+
+/** vtr_draft_batches view row — AGGREGATES ONLY (no params/owner_feedback/customer_id by view). */
+export interface VtrDraftBatch {
+  batch_id: string
+  tenant_id: string
+  tenant_name: string | null
+  agent: string
+  status: string
+  edit_cycles: number
+  created_at: string | null
+  updated_at: string | null
+  draft_count: number
+  pending_count: number
+  sent_count: number
+  skipped_count: number
+  halted_count: number
+  template_names: (string | null)[]
+}
+
+/** Gap-6: draft batches (counts + template-name enums only). Fail-closed []. */
+export async function vtrDraftBatches(
+  operatorId: string,
+  tenantId: string,
+  limit = 100,
+): Promise<{ ok: boolean; rows: VtrDraftBatch[]; count: number; reason: string }> {
+  const r = await vtrCall('vtr-draft-batches', operatorId, { tenant_id: tenantId, limit })
+  if (r.status !== 200) return { ok: false, rows: [], count: 0, reason: r.reason }
+  const rows = (r.body.rows as VtrDraftBatch[] | undefined) ?? []
+  return { ok: true, rows, count: typeof r.body.count === 'number' ? r.body.count : rows.length, reason: 'ok' }
+}
+
+export type VtrOverrideAction = 'freeze' | 'unfreeze' | 'demote' | 'revoke_l3'
+
+export interface VtrOverrideResult {
+  ok: boolean
+  state: { level: string; frozen: boolean; streak: number } | null
+  batchesCancelled: number
+  /** ok | forbidden | http_<n> | timeout | error */
+  reason: string
+}
+
+/** Gap-6: freeze/unfreeze/demote/revoke_l3 one agent. Reason is scrubbed + clamped server-side. */
+export async function vtrAutonomyOverride(
+  operatorId: string,
+  tenantId: string,
+  agent: string,
+  action: VtrOverrideAction,
+  reason = '',
+): Promise<VtrOverrideResult> {
+  const r = await vtrCall('vtr-autonomy-override', operatorId, {
+    tenant_id: tenantId,
+    agent,
+    action,
+    reason,
+  })
+  if (r.status !== 200) {
+    return { ok: false, state: null, batchesCancelled: 0, reason: r.status === 403 ? 'forbidden' : r.reason }
+  }
+  const state = (r.body.state as { level: string; frozen: boolean; streak: number } | undefined) ?? null
+  return {
+    ok: true,
+    state,
+    batchesCancelled: typeof r.body.batches_cancelled === 'number' ? r.body.batches_cancelled : 0,
+    reason: 'ok',
+  }
+}
+
+export interface VtrBatchCancelResult {
+  ok: boolean
+  tenantId: string | null
+  draftsHalted: number
+  /** ok | forbidden | not_found | http_<n> | timeout | error */
+  reason: string
+}
+
+/**
+ * Gap-6: cancel ONE batch (the scalpel). NO tenant_id crosses the wire — the orchestrator
+ * derives it from the batch row server-side (VT-293/294 IDOR discipline; missing → 404).
+ */
+export async function vtrBatchCancel(
+  operatorId: string,
+  batchId: string,
+  reason = '',
+): Promise<VtrBatchCancelResult> {
+  const r = await vtrCall('vtr-batch-cancel', operatorId, { batch_id: batchId, reason })
+  if (r.status !== 200) {
+    const mapped = r.status === 403 ? 'forbidden' : r.status === 404 ? 'not_found' : r.reason
+    return { ok: false, tenantId: null, draftsHalted: 0, reason: mapped }
+  }
+  return {
+    ok: true,
+    tenantId: (r.body.tenant_id as string | undefined) ?? null,
+    draftsHalted: typeof r.body.drafts_halted === 'number' ? r.body.drafts_halted : 0,
+    reason: 'ok',
+  }
+}
+
+/** Per-draft row from the EXCEPTION-TIER drill-in (params visible — Fazal-only, audited). */
+export interface VtrBatchDraft {
+  template_name: string
+  params: Record<string, unknown> | null
+  status: string
+  skip_reason: string | null
+}
+
+/**
+ * Gap-6 exception tier (Fazal=VTR#1 only): per-draft template_name + params for one batch.
+ * The orchestrator audits the reveal in-txn BEFORE the read. 403 = not exception tier —
+ * callers render that gracefully (the button shows for everyone; the gate is server-side).
+ * CL-390: NEVER log the returned drafts.
+ */
+export async function vtrBatchDrafts(
+  operatorId: string,
+  batchId: string,
+): Promise<{ ok: boolean; drafts: VtrBatchDraft[]; reason: string }> {
+  const r = await vtrCall('vtr-batch-drafts', operatorId, { batch_id: batchId })
+  if (r.status !== 200) {
+    const mapped = r.status === 403 ? 'forbidden' : r.status === 404 ? 'not_found' : r.reason
+    return { ok: false, drafts: [], reason: mapped }
+  }
+  return { ok: true, drafts: (r.body.drafts as VtrBatchDraft[] | undefined) ?? [], reason: 'ok' }
 }
