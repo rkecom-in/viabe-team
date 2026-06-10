@@ -15,16 +15,15 @@ from uuid import UUID, uuid4
 Phase = Literal[
     "onboarding",
     "trial",
-    "trial_extended",
+    "lapsed",  # VT-365: 30-day trial expired without subscribe — dormant, re-subscribable
     "paid_active",
     "paid_at_risk",
-    "refund_offered",  # VT-85: day-39 refund offer pending owner reply (non-terminal)
     "cancelled",
-    "refunded",
 ]
 
-# Phases with no outgoing transitions — see transitions.TRANSITIONS.
-TERMINAL_PHASES: frozenset[Phase] = frozenset({"cancelled", "refunded"})
+# Phases with no outgoing transitions — see transitions.TRANSITIONS. (VT-365 removed 'refunded';
+# 'lapsed' is dormant but NOT terminal — a lapsed owner can still subscribe.)
+TERMINAL_PHASES: frozenset[Phase] = frozenset({"cancelled"})
 
 # Max trial extensions (covers a 14 -> 60 day trial). Enforced as an invariant.
 MAX_TRIAL_EXTENSIONS = 3
