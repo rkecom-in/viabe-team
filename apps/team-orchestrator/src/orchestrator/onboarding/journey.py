@@ -178,6 +178,22 @@ def _complete(tenant_id) -> None:
             (str(tenant_id),),
         )
     _emit_gap4_seam(tenant_id)
+    _kickoff_business_plan(tenant_id)
+
+
+def _kickoff_business_plan(tenant_id) -> None:
+    """VT-368: kick the business-plan generator (the Gap-4 spine) — non-blocking DBOS bg workflow,
+    best-effort: a generator/kick failure must never block journey completion. Skipped cleanly if
+    DBOS isn't launched (tests / non-workflow contexts). The observability seam emit above stays —
+    this is the execution subscriber."""
+    try:
+        from dbos import DBOS
+
+        from orchestrator.business_plan.generator import generate_business_plan_workflow
+
+        DBOS.start_workflow(generate_business_plan_workflow, str(tenant_id))
+    except Exception:  # noqa: BLE001 — best-effort; journey completion already committed
+        logger.exception("journey: gap4 business-plan kickoff failed tenant=%s", tenant_id)
 
 
 def _emit_gap4_seam(tenant_id) -> None:
