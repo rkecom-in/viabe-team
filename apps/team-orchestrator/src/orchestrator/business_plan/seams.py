@@ -167,8 +167,14 @@ def _validate_patch_values(patch: dict[str, Any]) -> None:
         raise ValueError("invalid patch values: " + "; ".join(problems))
 
 
+class StaleVersion(RuntimeError):
+    """VT-370: the optimistic-concurrency rejection — the caller's expected_prev_version no longer
+    matches the latest plan (a replayed request or a two-VTR lost-update race). Maps to HTTP 409."""
+
+
 def edit_roadmap_item(
-    tenant_id: UUID | str, item_id: str, patch: dict[str, Any], *, vtr_id: str
+    tenant_id: UUID | str, item_id: str, patch: dict[str, Any], *, vtr_id: str,
+    expected_prev_version: int | None = None,
 ) -> int:
     """The Gap-6 VTR edit: patch ONE item in the latest plan and append a new immutable version
     (origin=``vtr_edit``, ``diff_from_prev`` per actually-changed field, ``item_id`` stable, the
@@ -191,6 +197,13 @@ def edit_roadmap_item(
     latest = store.get_active_plan(tenant_id)
     idx, raw = _locate(latest, item_id)
     assert latest is not None  # _locate raised otherwise; narrows the type
+    # VT-370 optimistic concurrency: plan-edit is NOT idempotent (every call appends an immutable
+    # version) — a replayed request or a two-VTR race must lose, not mint a duplicate/lost-update
+    # version. The mint's parent-row lock serializes writers; this compare rejects the stale one.
+    if expected_prev_version is not None and latest.version != expected_prev_version:
+        raise StaleVersion(
+            f"plan moved: latest=v{latest.version}, caller expected v{expected_prev_version}"
+        )
 
     changed = {k: [raw.get(k), v] for k, v in patch.items() if raw.get(k) != v}
     editor = f"vtr:{vtr_id}"

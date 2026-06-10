@@ -409,3 +409,21 @@ def test_clean_plan_through_REAL_schema_not_degraded(substrate, log_spy, write_s
     write = write_spy[0]
     assert write["roadmap"], "the real path must persist the LLM roadmap, not the empty template"
     assert write["summary"]["text"].strip(), "summary text survives the real validator"
+
+
+def test_bundle_builder_has_no_customer_data_path():
+    """VT-370 risk-#1 SHIP-BLOCKING acceptance (the grounded-text laundering audit): the Gap-4
+    fact bundle is the grounding validator's whitelist — if customer PII entered the bundle, the
+    validator would pass it into plan TEXT, which the VTR reads through the vtr_business_plan
+    view (bypassing the column-level PII-gating). Structural guarantee: the generator has NO
+    customer-data code path — it reads confirmed business_profile scalars + tenant business_name
+    + listing platform/rating only. Residual (flagged, accepted): owner-TYPED text in their own
+    profile answers is owner-volunteered, not a system leak."""
+    import pathlib
+
+    src = pathlib.Path(generator.__file__).read_text(encoding="utf-8")
+    for banned in (
+        "CustomersWrapper", "customer_ledger", "agent_customer_contacts",
+        "FROM customers", "phone_e164", "display_name",
+    ):
+        assert banned not in src, f"generator.py must not read customer data ({banned})"
