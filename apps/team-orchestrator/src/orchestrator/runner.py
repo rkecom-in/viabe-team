@@ -504,6 +504,29 @@ def webhook_pipeline_run(tenant_id: str, run_id: str, twilio_fields: dict) -> di
                 "decision": resumed_decision,
             }
 
+    # VT-367 — onboarding-JOURNEY gate. While an onboarding journey is active (or a fresh tenant's
+    # FIRST inbound, which lazy-starts it so the first message never reaches the cold brain), an
+    # inbound owner message routes to the journey handler BEFORE pre_filter/dispatch. FAIL-OPEN:
+    # maybe_handle_journey_reply swallows any error + returns None → the normal pipeline runs (owner
+    # inbound is never blocked by a journey-check failure). Only inbound, non-dupe (idempotency is
+    # double-guarded: the VT-149 message_sid UNIQUE seam above + handle_reply's last_message_sid).
+    # Lazily imported so non-journey paths don't pay the import cost.
+    if event.message_type == "inbound_message" and not event.dupe_status:
+        from orchestrator.onboarding.journey import maybe_handle_journey_reply
+
+        journey_result = maybe_handle_journey_reply(
+            tenant_id, event.body or "", event.twilio_message_sid, event.sender_phone
+        )
+        if journey_result is not None:
+            close_webhook_run(tenant_id, run_id, "completed")
+            return {
+                "run_id": run_id,
+                "tenant_id": tenant_id,
+                "routed": "onboarding_journey",
+                "handler": None,
+                "journey_done": journey_result.get("done"),
+            }
+
     result = pre_filter(event, state)
     handler_name: str | None = None
     # VT-356: `routed` is a local observability label (logged/returned), not the route-decision
