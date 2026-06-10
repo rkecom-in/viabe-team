@@ -125,6 +125,10 @@ _TENANT_ANONYMIZE = {
 _PURGE_ORDER: tuple[str, ...] = (
     "l1_relationships",
     "l1_entities",
+    # VT-366: the Auto-Discovery DRAFT business profile (tenant business data — public-sourced but
+    # still tenant-scoped). Leaf table (FK to tenants only), no CASCADE, no other hard-delete path,
+    # so a tenant DSR-delete MUST sweep it here or the draft survives the purge.
+    "business_profile_draft",
     # VT-323: L2 episodic memory. Leaf (references tenants — anonymized, NOT
     # deleted — and no child tables point at it), so order-insensitive. payload
     # CAN carry PII at rest, and there is NO ON DELETE CASCADE + no other
