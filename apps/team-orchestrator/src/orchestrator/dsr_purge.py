@@ -143,6 +143,9 @@ _PURGE_ORDER: tuple[str, ...] = (
     "agent_draft_batches",
     "agent_work_items",
     "agent_customer_contacts",
+    # VT-369 PR-2: the per-(tenant, agent) autonomy state (trust counters + grant evidence link).
+    # Leaf (FK tenants only; CASCADE never fires — the tenant row is anonymized, not deleted).
+    "tenant_agent_autonomy",
     # VT-323: L2 episodic memory. Leaf (references tenants — anonymized, NOT
     # deleted — and no child tables point at it), so order-insensitive. payload
     # CAN carry PII at rest, and there is NO ON DELETE CASCADE + no other

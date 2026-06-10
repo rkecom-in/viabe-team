@@ -275,6 +275,10 @@ def apply_agent_decision(
     if batch_id is None:
         return None
     tid, bid = str(tenant_id), str(batch_id)
+    agent_row = conn.execute(
+        "SELECT agent FROM agent_draft_batches WHERE tenant_id = %s AND id = %s", (tid, bid)
+    ).fetchone()
+    agent = (agent_row["agent"] if isinstance(agent_row, dict) else agent_row[0]) if agent_row else None
 
     if decision == "approved":
         updated = conn.execute(
@@ -283,6 +287,13 @@ def apply_agent_decision(
             "RETURNING edit_cycles",
             (tid, bid, list(_RESOLVABLE_FROM)),
         ).fetchone()
+        # VT-369 PR-2: the clean-approval streak is counted IN THIS resolution txn, with
+        # edit_cycles read from the UPDATE's RETURNING row — never workflow memory (§5.2).
+        if updated is not None and agent:
+            from orchestrator.agents.autonomy import record_approval_outcome
+
+            cycles = int(updated["edit_cycles"] if isinstance(updated, dict) else updated[0])
+            record_approval_outcome(tid, agent, clean=(cycles == 0), conn=conn)
         return _decided(tid, bid, "approved", updated)
 
     if decision == "needs_changes":
@@ -309,6 +320,10 @@ def apply_agent_decision(
                 "WHERE tenant_id = %s AND id = %s RETURNING edit_cycles",
                 (tid, bid),
             ).fetchone()
+            if updated is not None and agent:
+                from orchestrator.agents.autonomy import record_regression_event
+
+                record_regression_event(tid, agent, "reject", conn=conn)
             return _decided(tid, bid, "rejected", updated)
         updated = conn.execute(
             "UPDATE agent_draft_batches SET status = 'edit_requested', "
@@ -316,6 +331,10 @@ def apply_agent_decision(
             "WHERE tenant_id = %s AND id = %s RETURNING edit_cycles",
             (owner_feedback, tid, bid),
         ).fetchone()
+        if updated is not None and agent:
+            from orchestrator.agents.autonomy import record_regression_event
+
+            record_regression_event(tid, agent, "edit", conn=conn)
         out = _decided(tid, bid, "edit_requested", updated)
         return (
             out.model_copy(update={"regeneration_requested": True})
@@ -330,6 +349,10 @@ def apply_agent_decision(
             "RETURNING edit_cycles",
             (tid, bid, list(_RESOLVABLE_FROM)),
         ).fetchone()
+        if updated is not None and agent:
+            from orchestrator.agents.autonomy import record_regression_event
+
+            record_regression_event(tid, agent, "reject", conn=conn)
         return _decided(tid, bid, "rejected", updated)
 
     if decision in ("timeout", "defer"):
@@ -340,6 +363,10 @@ def apply_agent_decision(
             "RETURNING edit_cycles",
             (tid, bid, list(_RESOLVABLE_FROM)),
         ).fetchone()
+        if updated is not None and agent:
+            from orchestrator.agents.autonomy import record_regression_event
+
+            record_regression_event(tid, agent, "reject", conn=conn)
         return _decided(tid, bid, "cancelled", updated)
 
     return None  # unknown verb — never guess (Pillar 7)
