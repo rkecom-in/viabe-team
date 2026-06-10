@@ -120,6 +120,18 @@ class TemplateEntry:
 
     ``variables`` is an ordered tuple of snake_case param names;
     index i corresponds to positional ``{{i+1}}`` in the WhatsApp template.
+
+    VT-369 Gap-5 fields (additive, optional in yaml — every pre-existing entry
+    parses unchanged with the defaults below; MED-1):
+    - ``category``: ``'customer_marketing'`` (agent → customer; Meta MARKETING)
+      or ``'owner_notification'`` (agent → owner ops surface). ``""`` =
+      uncategorised legacy entry — the agent customer-send gate
+      (``agents/customer_send.py``) refuses anything that is not exactly
+      ``'customer_marketing'``, so legacy entries fail that gate CLOSED.
+    - ``money_bearing``: the body carries a discount/offer — trips the
+      always-confirm floor at L3 (plan §5.5, enforced PR-3).
+    - ``optout_line``: asserts the FIXED Meta body carries the customer STOP
+      opt-out line; ``customer_marketing`` entries MUST pin it (canary_load).
     """
 
     template_name: str
@@ -128,6 +140,13 @@ class TemplateEntry:
     audience: str
     variables: tuple[str, ...] = field(default_factory=tuple)
     agent_selectable: bool = False
+    category: str = ""
+    money_bearing: bool = False
+    optout_line: bool = False
+
+
+# Known values for the Gap-5 ``category`` field (canary_load rejects others).
+TEMPLATE_CATEGORIES = frozenset({"customer_marketing", "owner_notification"})
 
 
 # ---------------------------------------------------------------------------
@@ -219,6 +238,9 @@ def resolve(
         audience=audience,
         variables=variables,
         agent_selectable=agent_selectable,
+        category=str(raw.get("category") or ""),
+        money_bearing=bool(raw.get("money_bearing", False)),
+        optout_line=bool(raw.get("optout_line", False)),
     )
 
 
@@ -324,6 +346,23 @@ def canary_load(path: Path | None = None) -> None:
             if len(unique) != len(variables):
                 errors.append(f"  [{name}] variables contains duplicates: {variables}")
 
+        # Gap-5 field checks (VT-369, MED-1): additive optional fields — absent
+        # is fine (legacy entry); present must be well-formed and a
+        # customer_marketing entry MUST pin the opt-out line (plan §3b).
+        category = raw.get("category")
+        if category is not None and category not in TEMPLATE_CATEGORIES:
+            errors.append(
+                f"  [{name}] category {category!r} not in {sorted(TEMPLATE_CATEGORIES)}"
+            )
+        for flag in ("money_bearing", "optout_line"):
+            if flag in raw and not isinstance(raw[flag], bool):
+                errors.append(f"  [{name}] {flag} must be a bool")
+        if category == "customer_marketing" and raw.get("optout_line") is not True:
+            errors.append(
+                f"  [{name}] customer_marketing templates MUST pin optout_line: true "
+                "(the STOP line lives in the FIXED Meta body — plan §3b)"
+            )
+
         # languages check
         langs = raw.get("languages")
         if langs is None:
@@ -356,6 +395,7 @@ def canary_load(path: Path | None = None) -> None:
 
 
 __all__ = [
+    "TEMPLATE_CATEGORIES",
     "TemplateEntry",
     "TemplateRegistryError",
     "TemplateNotConfigured",

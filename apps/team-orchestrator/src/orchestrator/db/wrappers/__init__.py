@@ -538,13 +538,17 @@ class PendingApprovalsWrapper(TenantScopedTable):
     def count_recent_campaign_requests(
         self, tenant_id: UUID | str, *, days: int = 7, conn: Any = None
     ) -> int:
-        """VT-334 per-week messaging budget: how many ``campaign_send`` approval requests this
-        tenant has had in the last ``days`` (the owner-fatigue guard skips a new one at >= 2)."""
+        """VT-334 per-week messaging budget: how many owner-interrupt approval requests this
+        tenant has had in the last ``days`` (the owner-fatigue guard skips a new one at >= 2).
+        VT-369: the budget is SHARED across the campaign and agent surfaces — one 2/week
+        owner-interrupt budget, so ``agent_customer_send`` rows count alongside
+        ``campaign_send`` (plan §4.3; F3 confirms share-vs-raise)."""
         tid = self._uuid(tenant_id)
         with self._conn(tid, conn) as c:
             row = c.execute(
                 "SELECT count(*) AS n FROM pending_approvals "
-                "WHERE tenant_id = %s AND approval_type = 'campaign_send' "
+                "WHERE tenant_id = %s "
+                "AND approval_type IN ('campaign_send', 'agent_customer_send') "
                 "AND created_at >= now() - make_interval(days => %s)",
                 (str(tid), days),
             ).fetchone()
