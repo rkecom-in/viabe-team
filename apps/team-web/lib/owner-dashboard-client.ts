@@ -134,7 +134,6 @@ export interface OwnerSettings {
     phase: string | null
     trial_started_at: string | null
     trial_ends_at: string | null
-    trial_extension_count: number | null
     preferred_language: string | null
   }
 }

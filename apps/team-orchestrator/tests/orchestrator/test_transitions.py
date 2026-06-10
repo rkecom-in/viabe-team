@@ -60,9 +60,9 @@ def tx():
 
 
 def _new_tenant(dsn: str, phase: str = "onboarding") -> str:
-    # VT-361: transition-mechanics tests assume an activatable tenant, so seed gstin_verified —
-    # the card_captured → paid_active activation gate (transitions.py) is exercised separately in
-    # tests/orchestrator/onboarding/test_business_verification.py (both directions).
+    # VT-361/VT-365: transition-mechanics tests assume an activatable tenant, so seed
+    # gstin_verified — the subscribe → paid_active activation gate (transitions.py) is exercised
+    # separately in tests/orchestrator/onboarding/test_business_verification.py (both directions).
     with psycopg.connect(dsn, autocommit=True) as conn:
         row = conn.execute(
             "INSERT INTO tenants (business_name, plan_tier, phase, phase_entered_at, "
@@ -119,11 +119,16 @@ def test_valid_transition_fires(tx, from_phase, event, to_phase):
 @pytest.mark.parametrize(
     "from_phase,event",
     [
-        ("onboarding", "card_captured"),
-        ("refunded", "signup"),
+        ("onboarding", "subscribe"),
+        ("cancelled", "signup"),  # cancelled is terminal
         ("cancelled", "manual_cancel"),
         ("trial", "engagement_recovered"),
         ("paid_active", "signup"),
+        # VT-365: the removed auto-charge edge — a payment-capture-style card_captured must NOT
+        # be a transition any longer (no card in trial → no auto-charge; subscribe is the only path).
+        ("trial", "card_captured"),
+        ("trial", "trial_extension_granted"),
+        ("trial", "day39_refund_triggered"),
     ],
 )
 def test_invalid_transition_raises(tx, from_phase, event):
@@ -133,11 +138,22 @@ def test_invalid_transition_raises(tx, from_phase, event):
         tx.transitions.apply_transition(state, event, {})
 
 
-def test_trial_extension_cap_blocks_fourth_grant(tx):
-    tenant_id = _new_tenant(tx.dsn, phase="trial_extended")
-    state = _state(tx, tenant_id, "trial_extended", trial_extension_count=3)
-    with pytest.raises(tx.transitions.InvalidTransitionError):
-        tx.transitions.apply_transition(state, "trial_extension_granted", {})
+def test_no_auto_charge_or_refund_edges_exist():
+    """VT-365 guard: the removed money-path edges/phases are GONE from the machine — no
+    card_captured/extension/day39-refund event, no refunded/refund_offered/trial_extended phase."""
+    from orchestrator.transitions import ALL_EVENTS, TRANSITIONS
+
+    for dead_event in (
+        "card_captured", "trial_extension_granted", "trial_extension_exhausted",
+        "day39_refund_offered", "day39_refund_triggered", "day39_continue",
+    ):
+        assert dead_event not in ALL_EVENTS
+    reachable_phases = {f for f, _ in TRANSITIONS} | set(TRANSITIONS.values())
+    for dead_phase in ("refunded", "refund_offered", "trial_extended"):
+        assert dead_phase not in reachable_phases
+    # subscribe is the ONLY path to paid_active
+    paid_sources = {(f, e) for (f, e), t in TRANSITIONS.items() if t == "paid_active"}
+    assert all(e == "subscribe" or e == "engagement_recovered" for _, e in paid_sources)
 
 
 def test_side_effect_fields_updated(tx):
@@ -149,9 +165,19 @@ def test_side_effect_fields_updated(tx):
     after_signup = tx.transitions.apply_transition(state, "signup", {})
     assert after_signup["trial_started_at"] is not None
 
-    after_card = tx.transitions.apply_transition(after_signup, "card_captured", {})
-    assert after_card["paid_conversion_at"] is not None
-    assert after_card["phase"] == "paid_active"
+    after_subscribe = tx.transitions.apply_transition(after_signup, "subscribe", {})
+    assert after_subscribe["paid_conversion_at"] is not None
+    assert after_subscribe["phase"] == "paid_active"
+
+
+def test_trial_expires_to_lapsed_then_resubscribes(tx):
+    """VT-365: trial → trial_expired → lapsed (dormant), and a lapsed owner can still subscribe."""
+    tenant_id = _new_tenant(tx.dsn, phase="trial")
+    state = _state(tx, tenant_id, "trial")
+    lapsed = tx.transitions.apply_transition(state, "trial_expired", {})
+    assert lapsed["phase"] == "lapsed"
+    resubscribed = tx.transitions.apply_transition(lapsed, "subscribe", {})
+    assert resubscribed["phase"] == "paid_active"
 
 
 # --- Invariants (rollback) ---------------------------------------------------
@@ -176,15 +202,6 @@ def test_invariant_paid_without_conversion_rolls_back(tx):
         ).fetchone()[0]
     assert rows == 0
     assert phase == "paid_active"
-
-
-def test_invariant_trial_extension_cap_check(tx):
-    state = tx.make_state(uuid4(), phase="trial_extended")
-    state["trial_extension_count"] = 4
-    with psycopg.connect(tx.dsn) as conn, pytest.raises(
-        tx.invariants.InvariantViolationError
-    ):
-        tx.invariants.check_invariants(state, conn, uuid4())
 
 
 def test_invariant_monotonic_rolls_back(tx):
@@ -219,7 +236,7 @@ def test_tenants_phase_mirror_reflects_latest(tx):
     state["paid_conversion_at"] = None
 
     state = tx.transitions.apply_transition(state, "signup", {})
-    state = tx.transitions.apply_transition(state, "card_captured", {})
+    state = tx.transitions.apply_transition(state, "subscribe", {})
 
     with psycopg.connect(tx.dsn, autocommit=True) as conn:
         phase = conn.execute(

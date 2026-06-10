@@ -143,12 +143,12 @@ EVENT_SCHEMAS: dict[str, dict[str, Validator]] = {
         "ok": lambda v: None if isinstance(v, bool) else f"expected bool, got {type(v).__name__}",
         # Optional fields: result (any, redacted), error (str, redacted).
     },
-    # VT-28 scheduled-trigger event types. Three SHELL events (plumbing-
+    # VT-28 scheduled-trigger event types. Two SHELL events (plumbing-
     # mode per CL-274 + phantom-Done prevention per CL-318/319/380) +
     # one full-implementation weekly_cadence event. The corresponding
-    # completion event names (`attribution_closed`, `day39_evaluated`,
-    # `monthly_impact_started`) are RESERVED for VT-176 and intentionally
-    # NOT registered here.
+    # completion event names (`attribution_closed`, `monthly_impact_started`)
+    # are RESERVED for VT-176 and intentionally NOT registered here.
+    # (VT-365: the deprecated day-N SHELL event was removed with its subsystem.)
     "weekly_cadence_fired": {
         "trigger_reason": _required_str,
     },
@@ -156,67 +156,20 @@ EVENT_SCHEMAS: dict[str, dict[str, Validator]] = {
         "status": _required_str,
         "trigger_reason": _required_str,
     },
-    "day39_shell": {
-        "status": _required_str,
-        "trigger_reason": _required_str,
-    },
     "monthly_impact_shell": {
         "status": _required_str,
         "trigger_reason": _required_str,
     },
-    # VT-175 released event types (formerly reserved by VT-28). The
-    # canonical completion events for attribution-close + day-39 — no
-    # longer SHELL forms now that the schema substrate + deterministic
-    # evaluators ship in this row. Production emission via
-    # `orchestrator.billing.attribution_close.close_attribution` +
-    # `orchestrator.billing.day39_evaluator.evaluate_day39`. The shell
-    # event types above stay registered so VT-176's body-swap rollout
-    # can ship without an intermediate schema break.
+    # VT-175 released event type (formerly reserved by VT-28). The canonical
+    # completion event for attribution-close — no longer a SHELL form now that
+    # the schema substrate + deterministic evaluator ship. Production emission
+    # via `orchestrator.billing.attribution_close.close_attribution`.
+    # (VT-365: the deprecated day-N billing subsystem + its event taxonomy were
+    # REMOVED; no money-return path ever.)
     "attribution_closed": {
         "campaign_id": _required_str,
         "tenant_id": _required_str,
         "total_arrr_paise": _required_int,
-    },
-    "day39_continue": {
-        "tenant_id": _required_str,
-        "verdict": _required_str,
-        "arrr_paise": _required_int,
-        "cumulative_fees_paise": _required_int,
-    },
-    "day39_refund_triggered": {
-        "tenant_id": _required_str,
-        "verdict": _required_str,
-        "arrr_paise": _required_int,
-        "cumulative_fees_paise": _required_int,
-    },
-    # VT-93 refund execution audit (pipeline_log; the immutable copy goes to
-    # privacy_audit_log). Emitted by billing/refund_executor on completion.
-    # TAXONOMY (Cowork PB1, 20260605T095500Z): 'refund_executed' is the CLEAN
-    # terminal audit event for an EXECUTED refund. The phase-machine event
-    # 'day39_refund_triggered' (transitions.py) keeps its ORIGINAL meaning — it
-    # fires the paid_active/paid_at_risk -> refunded transition; it is NOT
-    # overloaded to mean "executed". 'refund_partial_failed' goes only to
-    # privacy_audit_log (its CHECK), not here. VT-85 owns the fuller
-    # day39_refund_offered / day39_refund_decision taxonomy.
-    "refund_executed": {
-        "tenant_id": _required_str,
-        "refund_reason": _required_str,
-        "total_refund_paise": _required_int,
-    },
-    # VT-85 day-39 refund-conversation taxonomy. 'day39_refund_offered' replaces
-    # the old auto-fire 'day39_refund_triggered' EMIT on the refund verdict — the
-    # evaluator now makes an OFFER (no auto-refund). 'day39_refund_decision' records
-    # the owner's reply (or the 48h timeout default).
-    "day39_refund_offered": {
-        "tenant_id": _required_str,
-        "verdict": _required_str,
-        "arrr_paise": _required_int,
-        "cumulative_fees_paise": _required_int,
-    },
-    "day39_refund_decision": {
-        "tenant_id": _required_str,
-        "decision": _required_str,  # refund | continue | discuss
-        "source": _required_str,  # reply | timeout
     },
     # VT-89: Razorpay webhook processing audit (one per deduped event).
     "razorpay_event_processed": {

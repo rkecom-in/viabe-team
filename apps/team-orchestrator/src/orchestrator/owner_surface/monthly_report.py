@@ -36,10 +36,11 @@ from orchestrator.db.wrappers import CampaignsWrapper, CustomersWrapper
 # The 5 real campaign lifecycle states (migration 016 CHECK). No 'cancelled'.
 CAMPAIGN_STATES: tuple[str, ...] = ("proposed", "approved", "rejected", "sent", "failed")
 
-# Tenant phases that SKIP the report entirely (migration 001 CHECK).
-SKIP_PHASES: frozenset[str] = frozenset({"cancelled", "refunded"})
+# Tenant phases that SKIP the report entirely (migration 001 CHECK). `lapsed`
+# (VT-365) is a dormant/read-only account with no active subscription → skip.
+SKIP_PHASES: frozenset[str] = frozenset({"cancelled", "lapsed"})
 # Phases that get the report WITH trial framing rather than a skip.
-TRIAL_PHASES: frozenset[str] = frozenset({"onboarding", "trial", "trial_extended"})
+TRIAL_PHASES: frozenset[str] = frozenset({"onboarding", "trial"})
 
 MIN_DAYS_FOR_REPORT = 30
 
@@ -112,7 +113,7 @@ def should_skip(*, phase: str, signed_up_at: datetime | None,
                 period_end: datetime) -> str | None:
     """Return a skip reason, or None if the report should be produced.
 
-    - cancelled / refunded phase → skip.
+    - cancelled / lapsed phase → skip.
     - signed up < 30 days before the period end → skip (no full month of data;
       matches VT-3.5's skip rule).
     Trial/onboarding do NOT skip — they get trial framing instead.

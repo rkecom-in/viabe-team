@@ -285,7 +285,7 @@ def execute_approved_campaign(
     tenant_id_str = str(tenant_id)
     campaign_id_str = str(campaign_id)
 
-    # VT-328 — refunded/cancelled tenants must NOT dispatch outbound customer campaigns. This is
+    # VT-328 (VT-365) — cancelled tenants must NOT dispatch outbound customer campaigns. This is
     # THE single enforcement point (Pillar 8): every present/future caller funnels through this fn,
     # not just the supervisor node. Phase is derived SERVER-SIDE from the tenant's own row via the
     # RLS-scoped conn — never a client field (IDOR, VT-293/294). Short-circuit BEFORE loading
@@ -293,15 +293,14 @@ def execute_approved_campaign(
     from orchestrator.billing.graceful_exit import dispatch_allowed
 
     _guard_row = conn.execute(
-        "SELECT phase, refunded_at FROM tenants WHERE id = %s", (tenant_id_str,)
+        "SELECT phase FROM tenants WHERE id = %s", (tenant_id_str,)
     ).fetchone()
     if _guard_row is None:
         raise RuntimeError(
             f"execute_approved_campaign: tenant {tenant_id_str} not found (dispatch guard)"
         )
     _phase = _guard_row["phase"] if isinstance(_guard_row, dict) else _guard_row[0]
-    _refunded_at = _guard_row["refunded_at"] if isinstance(_guard_row, dict) else _guard_row[1]
-    if not dispatch_allowed(_phase, _refunded_at):
+    if not dispatch_allowed(_phase):
         logger.info(
             "execute_approved_campaign: dispatch_blocked tenant=%s campaign=%s phase=%s",
             tenant_id_str, campaign_id_str, _phase,

@@ -9,7 +9,7 @@ RLS-scoped, fail-closed, attempt-capped, cost-logged. Two operations:
 - ``run_vtr_override(tenant_id, operator_id, basis)`` — manual VTR/ops upgrade to ``vtr_verified``
   ("green"). Audited (who/when/free-text basis). Gates nothing today; value arrives later.
 
-The activation gate (card_captured → paid_active requires gstin_verified) lives in transitions.py —
+The activation gate (subscribe → paid_active requires gstin_verified) lives in transitions.py —
 it reads verification_status server-side, never a client field.
 """
 

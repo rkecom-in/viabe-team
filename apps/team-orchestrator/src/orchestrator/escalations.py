@@ -119,7 +119,7 @@ def run_sla_breach_sweep_body() -> list[str]:
     (the hourly sweep won't re-ping). Best-effort per row. Returns the breached escalation ids.
 
     NO LLM (Pillar 1). Service-role (escalations is deny-all RLS)."""
-    from orchestrator.billing.refund_executor import _alert_fazal
+    from orchestrator.alerts.clients import alert_fazal as _alert_fazal
 
     breached: list[str] = []
     with get_pool().connection() as conn:

@@ -15,19 +15,15 @@ from uuid import UUID, uuid4
 Phase = Literal[
     "onboarding",
     "trial",
-    "trial_extended",
+    "lapsed",  # VT-365: 30-day trial expired without subscribe — dormant, re-subscribable
     "paid_active",
     "paid_at_risk",
-    "refund_offered",  # VT-85: day-39 refund offer pending owner reply (non-terminal)
     "cancelled",
-    "refunded",
 ]
 
-# Phases with no outgoing transitions — see transitions.TRANSITIONS.
-TERMINAL_PHASES: frozenset[Phase] = frozenset({"cancelled", "refunded"})
-
-# Max trial extensions (covers a 14 -> 60 day trial). Enforced as an invariant.
-MAX_TRIAL_EXTENSIONS = 3
+# Phases with no outgoing transitions — see transitions.TRANSITIONS. (VT-365 removed 'refunded';
+# 'lapsed' is dormant but NOT terminal — a lapsed owner can still subscribe.)
+TERMINAL_PHASES: frozenset[Phase] = frozenset({"cancelled"})
 
 
 class SubscriberState(TypedDict):
@@ -38,7 +34,6 @@ class SubscriberState(TypedDict):
     phase: Phase
     phase_entered_at: datetime
     trial_started_at: datetime | None
-    trial_extension_count: int
     paid_conversion_at: datetime | None
     last_campaign_at: datetime | None
     # Campaign ids awaiting their T+7 attribution close.
@@ -64,7 +59,6 @@ def new_subscriber_state(
         phase=phase,
         phase_entered_at=datetime.now(UTC),
         trial_started_at=None,
-        trial_extension_count=0,
         paid_conversion_at=None,
         last_campaign_at=None,
         attribution_close_pending=[],

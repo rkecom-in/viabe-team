@@ -82,7 +82,7 @@ def run_vtr_digest_body(now: dt.datetime | None = None, *, send: bool = True) ->
     text = build_vtr_digest(now)
     if send:
         try:
-            from orchestrator.billing.refund_executor import _alert_fazal
+            from orchestrator.alerts.clients import alert_fazal as _alert_fazal
 
             _alert_fazal(text)
         except Exception:

@@ -3,15 +3,14 @@
 The owner replies to a `team_weekly_approval` campaign request. Owner approval is
 Pillar-7-AUTHORITATIVE: an LLM misreading a Hindi/Hinglish "no" into an approval would
 send a campaign the owner REJECTED — customers messaged against the owner's will. So we
-classify the UNAMBIGUOUS replies DETERMINISTICALLY here (the same rigor as the VT-85
-refund classifier) and only fall through to the Haiku classifier for genuinely ambiguous
-text. A clear deterministic signal MUST win over the LLM.
+classify the UNAMBIGUOUS replies DETERMINISTICALLY here (deterministic-first rigor) and
+only fall through to the Haiku classifier for genuinely ambiguous text. A clear
+deterministic signal MUST win over the LLM.
 
 Safety asymmetry (Pillar 7): a false REJECT just doesn't send (the owner re-approves);
 a false APPROVE sends a rejected campaign. So ANY negation -> NOT an approval. In
-particular a negated send-verb ("don't send", "मत भेजो", "mat bhejo") is a REJECT — unlike
-the refund classifier (where a negation returns None), because here "don't send" is a
-clear, actionable rejection.
+particular a negated send-verb ("don't send", "मत भेजो", "mat bhejo") is a REJECT: here
+"don't send" is a clear, actionable rejection (a negated decision, not an ambiguous one).
 
 VT-329-safe: NFC-normalize, strip apostrophes (so "don't" -> "dont" matches the negation
 set), and split on whitespace/punctuation ONLY — NEVER an ASCII `\\b` or `[^\\w]`, which
