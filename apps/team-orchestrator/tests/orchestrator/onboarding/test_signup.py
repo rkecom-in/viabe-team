@@ -179,6 +179,27 @@ def test_run_signup_full(pool):
     assert attrs.get("owner_name") == "Asha Devi"
 
 
+def test_run_signup_discovery_kick_failure_non_blocking(pool, monkeypatch):
+    """VT-366: a failing Auto-Discovery kick (post-commit, best-effort) must NEVER 500 the signup —
+    the tenant is already committed; discovery is fire-and-forget."""
+    import dbos
+
+    from orchestrator.onboarding.signup import run_signup
+
+    def _boom(*a, **k):
+        raise RuntimeError("discovery kick exploded")
+
+    monkeypatch.setattr(dbos.DBOS, "start_workflow", staticmethod(_boom), raising=False)
+
+    out = run_signup(
+        _valid_input(whatsapp_number="+919900000366"),
+        welcome_send_fn=lambda *a, **k: True,
+    )
+    # Signup still succeeds despite the kick raising.
+    assert out.tenant_id is not None
+    assert out.welcome_sent is True
+
+
 def test_run_signup_duplicate_409(pool):
     from orchestrator.onboarding.signup import SignupError, run_signup
 
