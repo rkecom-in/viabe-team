@@ -24,6 +24,7 @@ logger = logging.getLogger(__name__)
 
 _GAP_MODEL = "claude-haiku-4-5-20251001"
 _MAX_GAPS = 6  # minimal — never a 20-question dump
+_COMPOSE_TIMEOUT_S = 20.0  # bound the gap-compose LLM call (runs on the owner-inbound hot path)
 
 # Draft fields worth an explicit owner confirm (the discovered identity). Bilingual templates below.
 _CONFIRMABLE = ("category", "city", "about")
@@ -123,6 +124,9 @@ def _llm_compose_gaps(
             model=_GAP_MODEL,
             max_tokens=700,
             messages=[{"role": "user", "content": prompt}],
+            timeout=_COMPOSE_TIMEOUT_S,  # VT-367: bound the call — this runs on the owner-inbound hot
+            # path (the journey pending-fill branch); a hang must degrade to [] (confirms/opener), not
+            # stall the webhook pipeline. try/except catches the timeout exception → [].
         )
         raw = resp.content[0].text if resp.content else "[]"
         start, end = raw.find("["), raw.rfind("]")
