@@ -316,6 +316,24 @@ def strip_violations(
     for key in ("text", "text_hi"):
         if isinstance(summary.get(key), str):
             new_summary[key] = _strip_text(summary[key], grounding)
+    # Strip ungrounded headline_metrics entries too (gate fold-in #3): without this, ONE fabricated
+    # metric needlessly degrades an otherwise-salvageable plan to the template (fail-closed but
+    # over-degrading — the inverse of B2).
+    metrics = summary.get("headline_metrics") or {}
+    if isinstance(metrics, dict):
+        kept_metrics: dict[str, Any] = {}
+        for mkey, mval in metrics.items():
+            if isinstance(mval, bool):
+                kept_metrics[mkey] = mval
+            elif isinstance(mval, (int, float)):
+                if _canon_number(str(mval)) in grounding.numbers:
+                    kept_metrics[mkey] = mval
+            elif isinstance(mval, str):
+                if not mval.strip() or grounding.grounds_word(mval):
+                    kept_metrics[mkey] = mval
+            else:
+                kept_metrics[mkey] = mval
+        new_summary["headline_metrics"] = kept_metrics
 
     kept: list[dict[str, Any]] = []
     seen_ids: set[str] = set()
