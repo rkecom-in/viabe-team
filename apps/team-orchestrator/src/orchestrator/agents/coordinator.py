@@ -185,10 +185,19 @@ def get_registry() -> dict[str, SpecialistAgent]:
 
 
 def is_frozen(tenant_id: UUID | str, agent: str) -> bool:
-    """TODO(VT-369 PR-2): read ``tenant_agent_autonomy.frozen`` for (tenant, agent). PR-1 has no
-    autonomy substrate yet, so nothing can be frozen per-tenant — always False. The live PR-1
-    kill switch is ``AGENT_AUTONOMY_GLOBAL_FREEZE`` (checked at sweep start)."""
-    return False
+    """The per-(tenant, agent) kill switch (VT-369 PR-2): ``tenant_agent_autonomy.frozen``.
+    Fail-CLOSED on a read error — a freeze check that can't be answered must not dispatch
+    (the inverse of the journey intercept's fail-open: skipping a dispatch is safe, blocking
+    owner-inbound isn't; here the safe direction is NOT dispatching)."""
+    try:
+        from orchestrator.agents.autonomy import get_autonomy
+
+        return get_autonomy(tenant_id, agent).frozen
+    except Exception:  # noqa: BLE001 — can't verify ⇒ don't dispatch
+        logger.exception(
+            "is_frozen check failed tenant=%s agent=%s — treating as FROZEN", tenant_id, agent
+        )
+        return True
 
 
 # ---------------------------------------------------------------------------
