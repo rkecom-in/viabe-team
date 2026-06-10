@@ -89,3 +89,13 @@ zomato_theme_extraction:
 method_selector:
   production: claude-haiku-4-5
   test: claude-haiku-4-5
+
+# VT-368 business_plan — Gap-4 spine generator (proactive business summary + 6-month
+# roadmap, grounded on the frozen fact bundle). Production = Sonnet 4.6: grounded
+# bilingual long-form generation with strict per-sentence citation discipline — above
+# Haiku's reliability band, below the Opus bar (the output is citation-validated and
+# degrade-templated, so the false-negative blast radius is bounded). Test = Haiku 4.5
+# (cheap canary/dev runs). Resolver: orchestrator.business_plan.generator._resolve_plan_model.
+business_plan:
+  production: claude-sonnet-4-6
+  test: claude-haiku-4-5
