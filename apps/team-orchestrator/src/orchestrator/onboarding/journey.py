@@ -265,6 +265,15 @@ def maybe_handle_journey_reply(
     error → None (never block owner-inbound). Lazy-starts on a fresh tenant's first inbound so the
     owner's first message NEVER reaches the cold brain."""
     try:
+        # VT-329 / DPDP (compliance-critical): opt-out / DSR / STOP ALWAYS wins over any other
+        # interpretation. The journey gate runs BEFORE pre_filter, so it MUST NOT consume an opt-out /
+        # DSR message as a journey answer — short-circuit to None so the inbound falls through to
+        # pre_filter, which routes it to the authoritative opt-out/DSR handler. Phase-aware reply gates
+        # call this matcher for exactly this reason; the journey gate is one of them.
+        from orchestrator.pre_filter_gate import matches_opt_out_or_dsr
+
+        if matches_opt_out_or_dsr(body or ""):
+            return None
         g = get_journey(tenant_id)
         if g is None:
             # No journey row → NOT in onboarding (the journey is created at the signup seam, pending).
