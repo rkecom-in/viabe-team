@@ -166,56 +166,9 @@ def _col(row: Any, key: str, idx: int) -> Any:
 # DRIFT GUARD: a test pins the SQL expression against the Python hash_phone byte-for-byte; if
 # VT-122 ever changes the tokenisation this drifts FAIL-CLOSED (no token match → no candidates)
 # and the pin test fails loudly.
-_DETECTION_SQL = """
-WITH sales AS (
-    SELECT customer_id,
-           MAX(entry_date)                  AS last_sale_date,
-           (CURRENT_DATE - MAX(entry_date)) AS days_since_last_sale,
-           SUM(amount_paise)                AS lifetime_spend_paise
-    FROM customer_ledger_entries
-    WHERE tenant_id = %(tenant_id)s AND entry_type = 'sale'
-    GROUP BY customer_id
-),
-thresholds AS (
-    SELECT
-        percentile_cont(%(recency_pct)s) WITHIN GROUP
-            (ORDER BY days_since_last_sale::double precision) AS recency_floor_days,
-        percentile_cont(%(spend_pct)s) WITHIN GROUP
-            (ORDER BY lifetime_spend_paise::double precision) AS spend_floor_paise
-    FROM sales
-)
-SELECT c.id AS customer_id,
-       s.last_sale_date,
-       s.days_since_last_sale,
-       s.lifetime_spend_paise
-FROM customers c
-JOIN sales s ON s.customer_id = c.id
-CROSS JOIN thresholds t
-WHERE c.tenant_id = %(tenant_id)s
-  AND c.opt_out_status = 'subscribed'
-  AND c.complaint_status != 'open'
-  AND c.phone_e164 IS NOT NULL
-  AND s.days_since_last_sale >= t.recency_floor_days
-  AND s.lifetime_spend_paise >= t.spend_floor_paise
-  AND EXISTS (
-      SELECT 1
-      FROM record_of_consent roc
-      WHERE roc.tenant_id = c.tenant_id
-        AND roc.phone_token = 'phone_tok_' || encode(
-                sha256(convert_to(%(salt)s || ':' || c.phone_e164, 'UTF8')), 'hex')
-        AND roc.opted_out_at IS NULL
-        AND roc.consent_text_version = ANY(%(versions)s)
-  )
-  AND NOT EXISTS (
-      SELECT 1
-      FROM agent_customer_contacts acc
-      WHERE acc.tenant_id = c.tenant_id
-        AND acc.customer_id = c.id
-        AND acc.sent_at >= now() - make_interval(days => %(suppression_days)s)
-  )
-ORDER BY s.lifetime_spend_paise DESC, c.id
-LIMIT %(limit)s
-"""
+# The detection SQL itself lives in orchestrator.db.wrappers._LAPSED_CANDIDATES_SQL
+# (CustomersWrapper.lapsed_candidates) — per-tenant customers SQL belongs to the wrapper
+# layer (the no-direct-tenant-db-access lint). The drift-guard pin test targets it there.
 
 
 def _phone_hash_salt() -> str:
@@ -246,20 +199,18 @@ def detect_lapsed_customers(
     versions = sorted(MARKETING_CONSENT_VERSIONS)
     if not versions:
         return []
-    with conn.cursor() as cur:
-        cur.execute(
-            _DETECTION_SQL,
-            {
-                "tenant_id": str(tenant_id),
-                "recency_pct": DETECTION_RECENCY_PERCENTILE,
-                "spend_pct": DETECTION_SPEND_PERCENTILE,
-                "salt": _phone_hash_salt(),
-                "versions": versions,
-                "suppression_days": RECONTACT_SUPPRESSION_DAYS,
-                "limit": limit,
-            },
-        )
-        rows = cur.fetchall()
+    from orchestrator.db.wrappers import CustomersWrapper
+
+    rows = CustomersWrapper().lapsed_candidates(
+        tenant_id,
+        recency_pct=DETECTION_RECENCY_PERCENTILE,
+        spend_pct=DETECTION_SPEND_PERCENTILE,
+        salt=_phone_hash_salt(),
+        versions=versions,
+        suppression_days=RECONTACT_SUPPRESSION_DAYS,
+        limit=limit,
+        conn=conn,
+    )
     return [
         LapsedCandidate(
             customer_id=UUID(str(_col(row, "customer_id", 0))),
@@ -285,15 +236,13 @@ def build_customer_fact_bundle(
     LLM arithmetic). NO raw phone, NO email. Raises ``LookupError`` when the customer or their
     sale history is missing (detection guarantees both; a miss is a bug, not a skip)."""
     tid, cid = str(tenant_id), str(customer_id)
+    from orchestrator.db.wrappers import CustomersWrapper
+
+    eligibility = CustomersWrapper().send_eligibility(tid, cid, conn=conn)
+    if eligibility is None:
+        raise LookupError(f"customer {cid} not found for tenant {tid}")
+    raw_name = eligibility.get("display_name")
     with conn.cursor() as cur:
-        cur.execute(
-            "SELECT display_name FROM customers WHERE tenant_id = %s AND id = %s",
-            (tid, cid),
-        )
-        row = cur.fetchone()
-        if row is None:
-            raise LookupError(f"customer {cid} not found for tenant {tid}")
-        raw_name = _col(row, "display_name", 0)
         cur.execute(
             "SELECT entry_date, amount_paise FROM customer_ledger_entries "
             "WHERE tenant_id = %s AND customer_id = %s AND entry_type = 'sale' "

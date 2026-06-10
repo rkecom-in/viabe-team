@@ -419,17 +419,16 @@ def agent_send_draft(
     if not entry.optout_line:
         return _skip(conn, tid, draft, SKIP_NO_OPTOUT_LINE)
 
-    # --- Gate 3: customers row re-read AT SEND TIME ---
-    row = conn.execute(
-        "SELECT opt_out_status, complaint_status, phone_e164 FROM customers "
-        "WHERE tenant_id = %s AND id = %s",
-        (tid, draft["customer_id"]),
-    ).fetchone()
+    # --- Gate 3: customers row re-read AT SEND TIME (via the wrapper layer — the
+    # no-direct-tenant-db-access lint owns per-tenant customers SQL) ---
+    from orchestrator.db.wrappers import CustomersWrapper
+
+    row = CustomersWrapper().send_eligibility(tid, draft["customer_id"], conn=conn)
     if row is None:
         return _skip(conn, tid, draft, SKIP_CUSTOMER_MISSING)  # gone == never sendable
-    opt_out_status = _col(row, "opt_out_status", 0)
-    complaint_status = _col(row, "complaint_status", 1)
-    phone_e164 = _col(row, "phone_e164", 2)
+    opt_out_status = row.get("opt_out_status")
+    complaint_status = row.get("complaint_status")
+    phone_e164 = row.get("phone_e164")
     if opt_out_status != "subscribed":
         return _skip(conn, tid, draft, SKIP_OPT_OUT)
     if complaint_status == "open":
