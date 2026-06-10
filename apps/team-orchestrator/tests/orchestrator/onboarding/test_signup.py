@@ -343,3 +343,42 @@ def test_business_types_endpoint_serves_taxonomy(pool):
     assert "kirana" in keys and "other" in keys
     # every option carries both language labels (no PII).
     assert all(o.get("label_en") and o.get("label_hi") for o in opts)
+
+
+def test_welcome_trial_end_derives_from_trial_yaml(pool):
+    """VT-371: the team_welcome {{2}} trial-end date must come from config/trial.yaml trial_days —
+    the SAME source the evaluator/sweep read. The stale local _TRIAL_DAYS=14 told every new owner
+    their trial ended 16 days early. Asserted against the YAML value (NOT a literal 30 — re-pinning
+    a constant would just recreate the drift this fixes)."""
+    from datetime import timedelta
+    from pathlib import Path
+
+    import yaml
+
+    from orchestrator.onboarding import signup as signup_mod
+    from orchestrator.onboarding.signup import run_signup
+
+    yaml_days = int(
+        yaml.safe_load(
+            (Path(signup_mod.__file__).resolve().parents[3] / "config" / "trial.yaml")
+            .read_text(encoding="utf-8")
+        )["trial_days"]
+    )
+
+    calls: list[tuple] = []
+    out = run_signup(
+        _valid_input(whatsapp_number=f"+9199{uuid.uuid4().int % 10**8:08d}"),  # unique per run
+        welcome_send_fn=lambda *a, **k: calls.append(a) or True,
+    )
+    assert out.welcome_sent is True and len(calls) == 1
+    # _default_welcome signature: (tenant_id, whatsapp_number, preferred_language, owner_name, trial_end)
+    trial_end = calls[0][4]
+    # run_signup's `now` is internal; derive the expectation from the persisted trial_started_at.
+    with pool.connection() as c:
+        started = c.execute(
+            "SELECT trial_started_at FROM tenants WHERE id = %s", (str(out.tenant_id),)
+        ).fetchone()["trial_started_at"]
+    assert trial_end == started + timedelta(days=yaml_days), (
+        f"welcome trial_end must be trial_started_at + trial.yaml trial_days ({yaml_days})"
+    )
+    assert not hasattr(signup_mod, "_TRIAL_DAYS"), "the stale constant must be gone (grep-zero)"

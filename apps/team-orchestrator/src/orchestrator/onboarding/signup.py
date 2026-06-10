@@ -30,13 +30,24 @@ logger = logging.getLogger(__name__)
 # (phonenumbers is not installed; a fuller-validation upgrade is a follow-up).
 _PHONE_RE = re.compile(r"^\+91[6-9]\d{9}$")
 _LANGUAGES = frozenset({"en", "hi"})
-_TRIAL_DAYS = 14
 
 # .../team-orchestrator/src/orchestrator/onboarding/signup.py → parents[3] = team-orchestrator
 # .../team-orchestrator/src/orchestrator/onboarding/signup.py → parents[3] = team-orchestrator
 _CONFIG = Path(__file__).resolve().parents[3] / "config"
 _DISCLOSURES = _CONFIG / "disclosure_versions.yaml"
 _BUSINESS_TYPES = _CONFIG / "business_types.yaml"
+_TRIAL_YAML = _CONFIG / "trial.yaml"
+
+
+def _trial_days() -> int:
+    """The authoritative trial length — config/trial.yaml ``trial_days`` (CL-433: 30), the SAME
+    source the evaluator/sweep read. VT-371: a stale local ``_TRIAL_DAYS = 14`` here fed the
+    ``team_welcome`` {{2}} trial-end date 16 days early; deriving from the shared config means
+    the welcome can never drift from the machine that actually expires the trial."""
+    import yaml
+
+    cfg = yaml.safe_load(_TRIAL_YAML.read_text(encoding="utf-8"))
+    return int(cfg["trial_days"])
 
 
 def valid_business_types() -> frozenset[str]:
@@ -304,11 +315,11 @@ def run_signup(
     if not res.created:
         raise SignupError("duplicate", "this whatsapp_number is already registered")
 
-    # Welcome send: GUARDED + non-terminal. The tenant is already committed; a send
-    # failure must NOT 500 the signup — log + report welcome_sent=False.
-    trial_end = now + timedelta(days=_TRIAL_DAYS)
+    # Welcome send: GUARDED + non-terminal. The tenant is already committed; a send (or the
+    # trial.yaml read) failure must NOT 500 the signup — log + report welcome_sent=False.
     sent = False
     try:
+        trial_end = now + timedelta(days=_trial_days())
         sent = bool((welcome_send_fn or _default_welcome)(
             res.tenant_id, inp.whatsapp_number, inp.preferred_language,
             inp.owner_name, trial_end,
