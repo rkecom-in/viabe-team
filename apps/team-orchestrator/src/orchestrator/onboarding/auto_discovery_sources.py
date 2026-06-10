@@ -25,7 +25,45 @@ _GBP_COST_USD = 0.004
 _WEBSITE_COST_USD = 0.001
 _HTTP_TIMEOUT = 20.0
 _WEBSITE_MAX_CHARS = 12000  # cap the page text fed to the LLM (cost + prompt-injection surface)
+_WEBSITE_MAX_BYTES = 3_000_000  # cap the response body fetched (DoS/cost)
+_WEBSITE_MAX_REDIRECTS = 4
 _EXTRACT_MODEL = "claude-haiku-4-5-20251001"
+
+
+class UnsafeUrlError(ValueError):
+    """The website URL is not a fetchable PUBLIC http(s) target (SSRF guard, VT-366)."""
+
+
+def _assert_public_url(url: str) -> None:
+    """SSRF guard. The website URL comes from a GBP listing (attacker-influenceable) or owner input,
+    and is fetched SERVER-SIDE — so it must be a public http(s) target. Reject non-http(s) schemes,
+    userinfo, and any hostname that resolves to a loopback / link-local (169.254.0.0/16 incl. cloud
+    metadata) / private / reserved / multicast address. Re-checked on every redirect hop by the
+    caller. (Residual: DNS-rebinding between this check and the socket connect — acceptable for a
+    best-effort context fetch; tighten to pinned-IP connect if this ever carries auth/secrets.)"""
+    import ipaddress
+    import socket
+    from urllib.parse import urlsplit
+
+    parts = urlsplit(url)
+    if parts.scheme not in ("http", "https"):
+        raise UnsafeUrlError(f"non-http(s) scheme: {parts.scheme!r}")
+    if parts.username or parts.password:
+        raise UnsafeUrlError("URL userinfo not allowed")
+    host = parts.hostname
+    if not host:
+        raise UnsafeUrlError("no host")
+    try:
+        infos = socket.getaddrinfo(host, parts.port or (443 if parts.scheme == "https" else 80))
+    except OSError as exc:
+        raise UnsafeUrlError(f"host does not resolve: {host}") from exc
+    for info in infos:
+        ip = ipaddress.ip_address(info[4][0])
+        if (
+            ip.is_loopback or ip.is_link_local or ip.is_private or ip.is_reserved
+            or ip.is_multicast or ip.is_unspecified
+        ):
+            raise UnsafeUrlError(f"host {host} resolves to a non-public address {ip}")
 
 
 @dataclass(frozen=True)
@@ -123,14 +161,26 @@ def discover_serper(tenant_id: UUID | str, seed: dict[str, Any]) -> SourceResult
 
 
 def _fetch_website(url: str) -> str:
-    """GET the page; return a crude text strip (tags removed). Best-effort, short timeout."""
+    """GET the page; return a crude text strip (tags removed). SSRF-guarded: every URL (and every
+    redirect hop) is validated public-http(s) BEFORE the request, redirects are followed MANUALLY
+    (httpx auto-redirect disabled) so each Location is re-checked, and the body is size-capped."""
     import re
 
     import httpx
 
-    resp = httpx.get(url, timeout=_HTTP_TIMEOUT, follow_redirects=True, headers={"User-Agent": "ViabeBot/1.0"})
-    resp.raise_for_status()
-    html = resp.text
+    current = url
+    with httpx.Client(timeout=_HTTP_TIMEOUT, follow_redirects=False) as client:
+        for _ in range(_WEBSITE_MAX_REDIRECTS + 1):
+            _assert_public_url(current)  # re-validated on EVERY hop (SSRF)
+            resp = client.get(current, headers={"User-Agent": "ViabeBot/1.0"})
+            if resp.is_redirect and resp.headers.get("location"):
+                current = str(resp.next_request.url) if resp.next_request else resp.headers["location"]
+                continue
+            resp.raise_for_status()
+            html = resp.text[:_WEBSITE_MAX_BYTES]
+            break
+        else:
+            raise UnsafeUrlError("too many redirects")
     html = re.sub(r"(?is)<(script|style|noscript)[^>]*>.*?</\1>", " ", html)
     text = re.sub(r"(?s)<[^>]+>", " ", html)
     return re.sub(r"\s+", " ", text).strip()
