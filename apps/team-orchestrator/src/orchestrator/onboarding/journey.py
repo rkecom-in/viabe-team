@@ -206,7 +206,99 @@ def _completion_message() -> dict[str, Any]:
     }
 
 
-# Re-export json for callers that pass raw queue strings (kept explicit for clarity).
+# --- Owner-inbound INTERCEPT (the hot-path gate; mirrors runner.try_resume_pending_approval) -------
+
+_LAZY_START_PHASES = {"onboarding", "trial", "lapsed"}
+
+
+def _tenant_phase_and_type(tenant_id: UUID | str) -> tuple[str | None, str | None]:
+    with tenant_connection(tenant_id) as conn:
+        row = conn.execute(
+            "SELECT phase, business_type FROM tenants WHERE id = %s", (str(tenant_id),)
+        ).fetchone()
+    if row is None:
+        return None, None
+    return (row["phase"], row["business_type"]) if isinstance(row, dict) else (row[0], row[1])
+
+
+def _compose_queue(tenant_id: UUID | str, business_type: str | None) -> list[dict[str, Any]]:
+    """Compose the ordered question set from the 2a draft via 2b. [] if the draft isn't ready yet."""
+    from orchestrator.onboarding.draft_profile import get_draft
+    from orchestrator.onboarding.question_brain import compose_onboarding_questions
+
+    draft = get_draft(tenant_id)
+    if not draft.get("attributes"):
+        return []
+    questions = compose_onboarding_questions(business_type or "other", draft, answered=[])
+    return [
+        {"field": q.field, "kind": q.kind, "prompt_en": q.prompt_en, "prompt_hi": q.prompt_hi,
+         "draft_value": q.draft_value}
+        for q in questions
+    ]
+
+
+def _opener() -> dict[str, Any]:
+    return {
+        "prompt_en": "Hi! Give us a moment — we're setting up your assistant and will ask a couple of quick questions.",
+        "prompt_hi": "नमस्ते! एक पल दीजिए — हम आपका असिस्टेंट तैयार कर रहे हैं और कुछ छोटे सवाल पूछेंगे।",
+    }
+
+
+def _send(recipient: str | None, q: dict[str, Any], lang: str) -> None:
+    """Best-effort owner send of one question (WABA-gated/stubbed — never crash the pipeline)."""
+    if not recipient:
+        return
+    text = q.get("prompt_hi") if lang == "hi" else q.get("prompt_en")
+    if not text:
+        return
+    try:
+        from orchestrator.utils.twilio_send import send_freeform_message
+
+        send_freeform_message(text, recipient)
+    except Exception:  # noqa: BLE001 — send is WABA-gated; the journey state advances regardless
+        logger.warning("journey: owner send failed (recipient hashed in send util) — state advanced")
+
+
+def maybe_handle_journey_reply(
+    tenant_id: UUID | str, body: str, message_sid: str | None, recipient: str | None, *, lang: str = "en"
+) -> dict[str, Any] | None:
+    """THE owner-inbound gate. Returns a result dict if the journey handled this inbound (caller
+    short-circuits the brain), else None (fall through to the normal pipeline). **FAIL-OPEN**: any
+    error → None (never block owner-inbound). Lazy-starts on a fresh tenant's first inbound so the
+    owner's first message NEVER reaches the cold brain."""
+    try:
+        g = get_journey(tenant_id)
+        if g is None:
+            phase, btype = _tenant_phase_and_type(tenant_id)
+            if phase not in _LAZY_START_PHASES:
+                return None  # established tenant, no journey → normal flow
+            start_journey(tenant_id, _compose_queue(tenant_id, btype))
+            g2 = get_journey(tenant_id)
+            first = _current(g2) if g2 else None
+            _send(recipient, first or _opener(), lang)
+            return {"done": False, "started": True}
+        if g["status"] != "active":
+            return None  # complete / abandoned → normal flow
+        if not g["question_queue"]:
+            # Pending lazy-start: the draft may have landed — try to fill the queue now.
+            _, btype = _tenant_phase_and_type(tenant_id)
+            queue = _compose_queue(tenant_id, btype)
+            if queue:
+                set_queue_if_empty(tenant_id, queue)
+                g = get_journey(tenant_id) or g
+                _send(recipient, _current(g) or _opener(), lang)
+            else:
+                _send(recipient, _opener(), lang)  # still setting up
+            return {"done": False, "pending": True}
+        r = handle_reply(tenant_id, body, message_sid, lang=lang)
+        _send(recipient, {"prompt_en": r["reply_en"], "prompt_hi": r["reply_hi"]}, lang)
+        return r
+    except Exception:  # noqa: BLE001 — owner-inbound HOT PATH: any failure falls through, never blocks
+        logger.exception("maybe_handle_journey_reply failed tenant=%s — fall through", tenant_id)
+        return None
+
+
 __all__ = [
     "start_journey", "set_queue_if_empty", "get_journey", "is_active", "handle_reply",
+    "maybe_handle_journey_reply",
 ]
