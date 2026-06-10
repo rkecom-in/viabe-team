@@ -249,6 +249,29 @@ EVENT_SCHEMAS: dict[str, dict[str, Validator]] = {
     "coordinator_sweep_completed": {
         "tenants_processed": _required_int,
     },
+    # VT-369 PR-2 — autonomy lifecycle (counters/reasons only, no PII).
+    "agent_autonomy_regressed": {
+        "tenant_id": _required_str,
+        "agent": _required_str,
+        "kind": _required_str,
+    },
+    "agent_autonomy_granted": {
+        "tenant_id": _required_str,
+        "agent": _required_str,
+    },
+    "agent_autonomy_revoked": {
+        "tenant_id": _required_str,
+        "agent": _required_str,
+        "reason": _required_str,
+    },
+    "agent_autonomy_frozen": {
+        "tenant_id": _required_str,
+        "agent": _required_str,
+    },
+    "agent_autonomy_unfrozen": {
+        "tenant_id": _required_str,
+        "agent": _required_str,
+    },
 }
 
 

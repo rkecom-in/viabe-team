@@ -386,6 +386,71 @@ class CustomersWrapper(TenantScopedTable):
             return None
         return dict(row).get("display_name")
 
+    def agent_optout_attribution(
+        self,
+        tenant_id: UUID | str,
+        phone_token: str,
+        *,
+        salt: str,
+        attribution_days: int = 30,
+        spike_window_days: int = 7,
+        conn: Any = None,
+    ) -> list[dict[str, Any]]:
+        """VT-369 PR-2 — opt-out attribution (plan §3b/§5.4): which agents contacted THIS
+        opting-out customer within ``attribution_days``, and how many DISTINCT customers who
+        opted out in the last ``spike_window_days`` had a ≤attribution_days contact from that
+        same agent (the spike counter — ≥3 trips the optout_spike regression). Joins customers
+        on the recomputed phone token (same expression as lapsed_candidates — drift fails
+        CLOSED). Returns [] when this opt-out is not attributable to any agent."""
+        tid = self._uuid(tenant_id)
+        with self._conn(tid, conn) as c:
+            rows = c.execute(
+                """
+                WITH tok AS (
+                    SELECT c.id AS customer_id
+                    FROM customers c
+                    WHERE c.tenant_id = %(tenant_id)s
+                      AND c.phone_e164 IS NOT NULL
+                      AND 'phone_tok_' || encode(
+                            sha256(convert_to(%(salt)s || ':' || c.phone_e164, 'UTF8')), 'hex'
+                          ) = %(phone_token)s
+                ),
+                hit AS (
+                    SELECT DISTINCT acc.agent
+                    FROM agent_customer_contacts acc
+                    JOIN tok ON tok.customer_id = acc.customer_id
+                    WHERE acc.tenant_id = %(tenant_id)s
+                      AND acc.sent_at >= now() - make_interval(days => %(attribution_days)s)
+                )
+                SELECT h.agent,
+                       (SELECT count(DISTINCT roc.phone_token)
+                          FROM record_of_consent roc
+                          JOIN customers c2
+                            ON c2.tenant_id = roc.tenant_id
+                           AND c2.phone_e164 IS NOT NULL
+                           AND 'phone_tok_' || encode(
+                                 sha256(convert_to(%(salt)s || ':' || c2.phone_e164, 'UTF8')), 'hex'
+                               ) = roc.phone_token
+                          JOIN agent_customer_contacts acc2
+                            ON acc2.tenant_id = roc.tenant_id
+                           AND acc2.customer_id = c2.id
+                           AND acc2.agent = h.agent
+                           AND acc2.sent_at >= now() - make_interval(days => %(attribution_days)s)
+                         WHERE roc.tenant_id = %(tenant_id)s
+                           AND roc.opted_out_at >= now() - make_interval(days => %(spike_window_days)s)
+                       ) AS spike_count
+                FROM hit h
+                """,
+                {
+                    "tenant_id": str(tid),
+                    "phone_token": phone_token,
+                    "salt": salt,
+                    "attribution_days": attribution_days,
+                    "spike_window_days": spike_window_days,
+                },
+            ).fetchall()
+        return [dict(r) if isinstance(r, dict) else {"agent": r[0], "spike_count": r[1]} for r in rows]
+
     def lapsed_candidates(
         self,
         tenant_id: UUID | str,
