@@ -254,18 +254,50 @@ def set_frozen(tenant_id: UUID | str, agent: str, frozen: bool, *, reason: str, 
 
 def vtr_autonomy_override(
     tenant_id: UUID | str, agent: str,
-    action: Literal["freeze", "demote", "revoke_l3"],
+    action: Literal["freeze", "unfreeze", "demote", "revoke_l3"],
     *, reason: str, vtr_id: str, conn: Any,
 ) -> AutonomyState:
     """The Gap-6 seam: a VTR corrects/halts an agent. Thin provenance wrapper over the primitives
-    (every action carries the vtr id in the reason; Gap-6 wires the VTR surface onto this)."""
+    (every action carries the vtr id in the reason; Gap-6 wires the VTR surface onto this).
+    ``unfreeze`` (VT-370) dispatches to ``set_frozen(False)`` — without it the freeze button is
+    one-way and recovery is psql; unfreezing cancels nothing (work re-enters via the next sweep)."""
     tagged = f"vtr:{vtr_id}:{reason}"
     if action == "freeze":
         return set_frozen(tenant_id, agent, True, reason=tagged, conn=conn)
+    if action == "unfreeze":
+        return set_frozen(tenant_id, agent, False, reason=tagged, conn=conn)
     if action == "revoke_l3":
         return revoke_l3(tenant_id, agent, reason=tagged, conn=conn)
     # demote: revoke without freezing (back to L2, batches cancelled, owner can re-earn)
     return revoke_l3(tenant_id, agent, reason=f"demote:{tagged}", conn=conn)
+
+
+def cancel_batch(
+    tenant_id: UUID | str, batch_id: UUID | str, *, reason: str, vtr_id: str, conn: Any
+) -> int:
+    """VT-370: cancel ONE batch (the scalpel — correcting one bad batch must not nuke a healthy
+    agent the way freeze does). The single-batch narrowing of cancel_open_batches: the batch →
+    'cancelled' (only from a non-terminal state), its drafted rows → 'halted'. Returns the number
+    of drafts halted; 0 also when the batch was already terminal (idempotent)."""
+    tid, bid = str(tenant_id), str(batch_id)
+    row = conn.execute(
+        "UPDATE agent_draft_batches SET status = 'cancelled', updated_at = now() "
+        "WHERE tenant_id = %s AND id = %s AND status = ANY(%s) RETURNING agent",
+        (tid, bid, list(_OPEN_BATCH_STATUSES)),
+    ).fetchone()
+    if row is None:
+        return 0
+    agent = row["agent"] if isinstance(row, dict) else row[0]
+    halted = conn.execute(
+        "UPDATE agent_drafts SET status = 'halted', skip_reason = 'halted_vtr_cancel', "
+        "updated_at = now() WHERE tenant_id = %s AND batch_id = %s AND status = 'drafted' "
+        "RETURNING id",
+        (tid, bid),
+    ).fetchall()
+    _emit(tid, "agent_batch_cancelled", {"agent": str(agent), "batch_id": bid,
+                                         "drafts_halted": len(halted),
+                                         "by": f"vtr:{vtr_id}"})
+    return len(halted)
 
 
 def is_always_confirm(
