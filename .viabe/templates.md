@@ -272,3 +272,52 @@ templates — they become free-form sends in VT-349 and are removed from the reg
 | `dsr_deletion_completed` | VT-108 batch-2 · DSR purge confirmation (customer) | `HXa2aada217c00112c386966f8daa1984c` | `HX60e633af93225f5e46c78203e0b99c44` |
 | `breach_notification_owner` | VT-108 batch-2 · breach notice (owner) — incident-use only, ops path, never agent_selectable | `HX269a7f69da791f24b4cee23bd820383e` | `HX1b4a5c64f7f4c3d07c0ba8798fa120bf` |
 | `breach_notification_customer` | VT-108 batch-2 · breach notice (customer) — incident-use only, ops path, never agent_selectable | `HXdbf0129d38d60d57b11851d8acf581e6` | `HX48dcbb5f65877f8592296921b3bad100` |
+
+## VT-369 agent surface (Gap-5) — 5 templates, SIDs PENDING-F1
+
+The first agent-initiated customer-messaging surface (Sales Recovery win-backs + the
+owner approval/autonomy loop). Registered fail-closed in `twilio_templates.yaml` with
+`null` SIDs — `resolve()` returns `content_sid: None` and the send path refuses with
+`TemplateNotConfigured` until Fazal's F1 Meta/Twilio Content approval lands (en + hi;
+the two `team_winback_*` entries go to Meta as **MARKETING** category, days–weeks lead).
+Body copy is NOT final here: Fazal reviews every word at F1 submission; the Hindi
+opt-out line wording + DPDP grievance-channel linkage is counsel-owned (**F4**) and
+blocks the F1 submission itself.
+
+| template | tier | en SID | hi SID |
+|---|---|---|---|
+| `team_winback_simple` | VT-369 agent surface · customer win-back (category `customer_marketing`, `optout_line: true`) | `PENDING-F1` | `PENDING-F1` |
+| `team_winback_offer` | VT-369 agent surface · customer win-back with offer (category `customer_marketing`, `optout_line: true`, `money_bearing: true` — always-confirm floor, never L3 auto-send) | `PENDING-F1` | `PENDING-F1` |
+| `team_agent_draft_approval` | VT-369 agent surface · owner L2 approval ask (category `owner_notification`) | `PENDING-F1` | `PENDING-F1` |
+| `team_l3_presend_notice` | VT-369 agent surface · owner L3 pre-send notice, delivery-anchored 2h hold (category `owner_notification`) | `PENDING-F1` | `PENDING-F1` |
+| `team_autonomy_offer` | VT-369 agent surface · owner L3 opt-in offer — C3 consent evidence; body must promise the standing "stop" kill keyword (category `owner_notification`) | `PENDING-F1` | `PENDING-F1` |
+
+**Draft variable signatures** (yaml `variables:` is the machine mirror; both files update
+in lockstep when F1 copy is finalized):
+
+- `team_winback_simple` — `{{1}}` customer_name, `{{2}}` business_name. Fixed body MUST
+  contain the customer STOP opt-out line.
+- `team_winback_offer` — `{{1}}` customer_name, `{{2}}` business_name, `{{3}}`
+  offer_description (grounded against the customer fact bundle; validator-enforced).
+  Fixed body MUST contain the customer STOP opt-out line.
+- `team_agent_draft_approval` — `{{1}}` owner_name, `{{2}}` draft_count, `{{3}}`
+  sample_message (rendered at arm-time from an RLS read of `agent_drafts`; goes into the
+  WhatsApp send ONLY — never into the `pending_approvals` row, no-customer-PII rule).
+- `team_l3_presend_notice` — `{{1}}` owner_name, `{{2}}` send_count.
+- `team_autonomy_offer` — `{{1}}` owner_name, `{{2}}` streak_count.
+
+**Body-hash pinning (lands WITH the F1 SIDs, plan §3c):** when the SIDs drop, fetch the
+Meta-APPROVED content once via the Twilio Content API, assert the opt-out line against
+the approved body (not this doc), and pin a per-language `body_sha256` next to each SID
+in `twilio_templates.yaml`. From then on CI fails on any doc/yaml/Meta drift, and the
+PR-1 canary asserts the rendered outbound body contains the opt-out line. Until F1,
+`tests/orchestrator/agents/test_template_registry_gap5.py` pins the fail-closed shape
+(entries present, categories/flags correct, NO SIDs).
+
+**`agent_selectable` note:** both winbacks ship `agent_selectable: false` and flip to
+`true` at F1 together with the SID drop — `approved_template_names()` does not filter
+null-SID variants, so flipping early would inject unsendable names into the live VT-45
+selectable set (D5 pins). The Gap-5 drafting gate requires
+`category: customer_marketing` + `agent_selectable: true` at send time, so no agent
+customer send is possible before that flip. Owner-facing entries stay `false` forever
+(system-invoked).

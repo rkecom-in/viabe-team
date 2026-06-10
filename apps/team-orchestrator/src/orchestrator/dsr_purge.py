@@ -135,6 +135,14 @@ _PURGE_ORDER: tuple[str, ...] = (
     # VT-368: the business-plan spine (summary + roadmap + frozen fact bundle = owner business
     # context, EVERY version). Leaf (FK tenants only), no CASCADE — hard-delete all versions on DSR.
     "business_plan",
+    # VT-369: the agent surface. agent_drafts (customer-facing message params) → batches → work
+    # items, children-first; agent_customer_contacts is the per-customer contact ledger (customer
+    # linkage at rest). All FK tenants with CASCADE, but the tenant row is anonymized NOT deleted on
+    # DSR (the CASCADE never fires) — sweep explicitly or they survive the purge (the VT-366 lesson).
+    "agent_drafts",
+    "agent_draft_batches",
+    "agent_work_items",
+    "agent_customer_contacts",
     # VT-323: L2 episodic memory. Leaf (references tenants — anonymized, NOT
     # deleted — and no child tables point at it), so order-insensitive. payload
     # CAN carry PII at rest, and there is NO ON DELETE CASCADE + no other
