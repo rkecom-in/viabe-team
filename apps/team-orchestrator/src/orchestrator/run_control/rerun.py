@@ -5,6 +5,15 @@ Re-run is honest RE-DISPATCH, not history time-travel: a refused kind refuses
 inherited (I2), and prefix steps re-execute only if the kind's entry point
 requires them.
 
+VT-375 C1 (Cowork ruling 20260611T234500Z, Option A): the F10 open-approval
+409 gate has a TOCTOU window — an owner approval can arm AFTER the gate passed
+but DURING the rerun's execution. Every arm re-checks open approvals once its
+work/dispatch is done; an overlap closes the lineage row ``'escalated'`` +
+emits a ``run_control_rerun_overlap`` pipeline_log alert and surfaces
+``outcome='escalated_overlap'`` (``rerun_from`` returns :class:`RerunResult`).
+The guarantee stack is mig-128 (never two open approvals) + detect-and-escalate
+(never a silent keep) — see ``_finalize_outcome``.
+
 Lineage stamping (the contract's "decide and document" point):
 
 - EVERY arm mints a fresh uuid4 run id (F3) and INSERTS the lineage-stamped
@@ -37,6 +46,7 @@ Top-level imports are stdlib + the dep-less registry only; everything heavy
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID, uuid4
@@ -79,14 +89,44 @@ class RerunRefused(RuntimeError):
         self.code = code
 
 
+@dataclass(frozen=True)
+class RerunResult:
+    """``rerun_from``'s outcome-bearing return (VT-375 C1, Cowork ruling
+    20260611T234500Z — Option A).
+
+    ``outcome``:
+
+    - ``'completed'`` — the arm finished (or dispatched) with NO open approval at
+      the post-arm re-check; the lineage row closed on the normal house pattern
+      (agent_dispatch's row stays 'running' for its child workflow to close).
+    - ``'escalated_overlap'`` — an owner approval armed DURING the rerun's
+      execution window (the gate-window TOCTOU the 409 gate cannot close). The
+      arm's effects STAND (the ruling: no rollback — e.g. a minted plan version
+      stays), the lineage row closed ``status='escalated'`` with
+      ``final_outcome='rerun_overlapped_open_approval'``, and a structured
+      ``run_control_rerun_overlap`` alert was emitted — escalated and disclosed,
+      never silently kept.
+
+    The ops API is the sole production consumer; it surfaces ``outcome`` in the
+    /rerun response verbatim.
+    """
+
+    run_id: UUID
+    outcome: str  # 'completed' | 'escalated_overlap'
+
+
 def rerun_from(
     source_run_id: UUID | str,
     from_step: str,
     overrides: list[dict[str, Any]] | None = None,
     *,
     requested_by: UUID | str,
-) -> UUID:
-    """Re-dispatch the source run's workflow_kind from ``from_step``; return the run id.
+) -> RerunResult:
+    """Re-dispatch the source run's workflow_kind from ``from_step``.
+
+    Returns :class:`RerunResult` — the fresh run id PLUS an ``outcome``
+    ('completed' | 'escalated_overlap'). The ops API /rerun handler is the sole
+    production consumer and surfaces the outcome verbatim.
 
     Refuses (RerunRefused): unknown source run; kind not in RERUNNABLE (I8 policy);
     unknown step for the kind; ANY open pending approval for the tenant (409, F10 —
@@ -95,7 +135,20 @@ def rerun_from(
     / non-controllable step); kind-specific preflight failures (terminal work item,
     no grounded profile, no plan version, no connector identity).
 
-    Order: validate → 409 gate → pre-register overrides → dispatch → lineage.
+    Order: validate → 409 gate → pre-register overrides → dispatch → lineage →
+    post-arm overlap re-check (VT-375 C1, Cowork ruling 20260611T234500Z / Option A).
+    The 409 gate has a TOCTOU window: an owner approval can arm AFTER the gate
+    passed but DURING the arm's execution. Every arm therefore re-checks the
+    tenant's open approvals (the same ``find_open_approval_for_tenant`` helper the
+    gate uses) once its work/dispatch is done — synchronous arms (plan_generate /
+    plan_deliver) after their work, async arms (agent_dispatch / auto_discovery /
+    ingestion) after dispatch, BEFORE their lineage close so an overlap closes the
+    row 'escalated' instead of 'completed'/'dispatched_async'. On overlap the
+    arm's effects STAND (no rollback — the ruling), the row closes 'escalated'
+    with ``final_outcome='rerun_overlapped_open_approval'``, and a
+    ``run_control_rerun_overlap`` alert lands in pipeline_log — never a silent
+    keep. See :func:`_finalize_outcome`.
+
     Source-run rows are never mutated, with the one documented exception of the
     agent_dispatch lineage stamp (see module docstring).
     """
@@ -234,7 +287,7 @@ def _rerun_agent_dispatch(
     from_step: str,
     validated: list[dict[str, Any]],
     requested_by: UUID | str,
-) -> UUID:
+) -> RerunResult:
     """Re-dispatch the SAME work item — non-terminal only (CAS guard owns regression).
 
     F3 fresh identity (A4): a NEW uuid4 run id is minted here, inserted with the
@@ -243,6 +296,15 @@ def _rerun_agent_dispatch(
     never continues (or mutates) the source run row. Overrides bind to the new
     id — the id the seam passes to ``consume_override``. The workflow closes the
     row on completion.
+
+    C1 overlap re-check (post-dispatch): the dispatch is KEPT on overlap — it
+    already happened, and the child workflow re-enters its own owner-approval
+    gates (I2: approvals are never inherited), so an overlapped dispatch cannot
+    silently send. The overlap close targets the row state this arm leaves it in
+    ('running' — the child owns the completion close): it stamps 'escalated' now;
+    the child's unconditional completion close may later overwrite that stamp, so
+    the durable overlap record is the ``run_control_rerun_overlap`` pipeline_log
+    alert + the surfaced 'escalated_overlap' outcome, not the row status alone.
     """
     from orchestrator.db import tenant_connection
 
@@ -297,7 +359,10 @@ def _rerun_agent_dispatch(
         from_step,
         new_run_id,
     )
-    return new_run_id
+    # completed_meta=None: the child workflow owns this row's completion close.
+    return _finalize_outcome(
+        tenant_id, new_run_id, "agent_dispatch", source_run_id, completed_meta=None
+    )
 
 
 def _rerun_auto_discovery(
@@ -306,16 +371,19 @@ def _rerun_auto_discovery(
     from_step: str,
     validated: list[dict[str, Any]],
     requested_by: UUID | str,
-) -> UUID:
+) -> RerunResult:
     """Re-dispatch the discovery engine. Seed is rebuilt from the tenants row; raw
     city is unrecoverable BY DESIGN (VT-317 coarsens it at signup), and the sources
     tolerate a missing city. Re-emit cost ≤ the engine's own $0.018 ceiling (I8 reuse).
 
-    The lineage row is minted and closed IMMEDIATELY (A3: 'completed' +
-    ``final_outcome='dispatched_async'``) — the async child workflow has its own
-    (non-pipeline_runs) observability today; a perpetual-'running' row would lie.
-    The seed itself (business_name / whatsapp_number) is name-bearing, so the
-    metadata records only the child workflow name (CL-390: IDs/enums only)."""
+    The lineage row is minted and closed IMMEDIATELY after dispatch (A3:
+    'completed' + ``final_outcome='dispatched_async'``) — the async child workflow
+    has its own (non-pipeline_runs) observability today; a perpetual-'running' row
+    would lie. The C1 overlap re-check runs post-dispatch BEFORE that close, so an
+    overlap closes the row 'escalated' instead (the dispatch itself is kept — it
+    already happened). The seed itself (business_name / whatsapp_number) is
+    name-bearing, so the metadata records only the child workflow name (CL-390:
+    IDs/enums only)."""
     seed = _seed_from_tenant(tenant_id)
     if seed is None:
         raise RerunRefused("tenant row not found for discovery seed", code=422)
@@ -338,15 +406,19 @@ def _rerun_auto_discovery(
     except Exception as exc:
         _close_lineage_row_failed(tenant_id, new_run_id, exc)
         raise
-    _close_lineage_row(
-        tenant_id,
-        new_run_id,
-        meta={"final_outcome": "dispatched_async", "child_workflow": "auto_discovery_workflow"},
-    )
     logger.info(
         "run_control rerun: auto_discovery dispatched tenant=%s new_run=%s", tenant_id, new_run_id
     )
-    return new_run_id
+    return _finalize_outcome(
+        tenant_id,
+        new_run_id,
+        "auto_discovery",
+        source_run_id,
+        completed_meta={
+            "final_outcome": "dispatched_async",
+            "child_workflow": "auto_discovery_workflow",
+        },
+    )
 
 
 def _rerun_plan_generate(
@@ -355,13 +427,15 @@ def _rerun_plan_generate(
     from_step: str,
     validated: list[dict[str, Any]],
     requested_by: UUID | str,
-) -> UUID:
+) -> RerunResult:
     """Force-regenerate: the explicit force path the contract names — plan_exists is
     deliberately NOT consulted (this wrapper calls the generator/store functions
     directly instead of the workflow), so a rerun mints a NEW version, audit-visible
     in plan history. Refuses rather than minting an ungrounded plan. Synchronous —
-    rerun_from owns the run row open/close. Because the internals bypass the seam's
-    own pause hold, an active pause refuses at entry (A6)."""
+    rerun_from owns the run row open/close; the C1 overlap re-check runs after the
+    work (the minted version STANDS on overlap — no rollback, per the ruling;
+    the escalated close + alert disclose it). Because the internals bypass the
+    seam's own pause hold, an active pause refuses at entry (A6)."""
     from orchestrator.business_plan import generator, store
 
     _refuse_if_paused(tenant_id, "plan_generate")
@@ -402,16 +476,19 @@ def _rerun_plan_generate(
             tenant_id,
             version,
         )
-    _close_lineage_row(
-        tenant_id, new_run_id, meta={"final_outcome": "completed", "version": version}
-    )
     logger.info(
         "run_control rerun: plan_generate minted v%s tenant=%s new_run=%s",
         version,
         tenant_id,
         new_run_id,
     )
-    return new_run_id
+    return _finalize_outcome(
+        tenant_id,
+        new_run_id,
+        "plan_generate",
+        source_run_id,
+        completed_meta={"final_outcome": "completed", "version": version},
+    )
 
 
 def _rerun_plan_deliver(
@@ -420,9 +497,10 @@ def _rerun_plan_deliver(
     from_step: str,
     validated: list[dict[str, Any]],
     requested_by: UUID | str,
-) -> UUID:
+) -> RerunResult:
     """Re-deliver the LATEST plan version — the delivered_parts bitmap makes this
-    resumable by design (only unset parts send; reuse-safe per I8). Synchronous.
+    resumable by design (only unset parts send; reuse-safe per I8). Synchronous —
+    the C1 overlap re-check runs after the delivery work, before the close.
     Calls the delivery internals directly, bypassing the seam's own pause hold —
     so an active pause refuses at entry (A6)."""
     from orchestrator.business_plan import delivery, store
@@ -438,16 +516,19 @@ def _rerun_plan_deliver(
     )
     _insert_lineage_row(tenant_id, new_run_id, "plan_deliver", source_run_id, from_step)
     delivery.deliver_plan(tenant_id, plan.version)  # never raises (per-part best-effort)
-    _close_lineage_row(
-        tenant_id, new_run_id, meta={"final_outcome": "completed", "version": plan.version}
-    )
     logger.info(
         "run_control rerun: plan_deliver v%s tenant=%s new_run=%s",
         plan.version,
         tenant_id,
         new_run_id,
     )
-    return new_run_id
+    return _finalize_outcome(
+        tenant_id,
+        new_run_id,
+        "plan_deliver",
+        source_run_id,
+        completed_meta={"final_outcome": "completed", "version": plan.version},
+    )
 
 
 def _rerun_ingestion(
@@ -457,15 +538,17 @@ def _rerun_ingestion(
     validated: list[dict[str, Any]],
     requested_by: UUID | str,
     trigger_payload: dict[str, Any] | None,
-) -> UUID:
+) -> RerunResult:
     """Re-dispatch one connector pull. The connector identity must ride on the source
     run's trigger_payload (rerun-minted rows and seam-opened ingestion rows write it);
     a cursor-based pull is reuse-safe (I8).
 
-    The lineage row is minted and closed IMMEDIATELY (A3: 'completed' +
-    ``final_outcome='dispatched_async'`` + the child dispatch params) — the async
-    child workflow has its own (non-pipeline_runs) observability today; a
-    perpetual-'running' row would lie."""
+    The lineage row is minted and closed IMMEDIATELY after dispatch (A3:
+    'completed' + ``final_outcome='dispatched_async'`` + the child dispatch
+    params) — the async child workflow has its own (non-pipeline_runs)
+    observability today; a perpetual-'running' row would lie. The C1 overlap
+    re-check runs post-dispatch BEFORE that close, so an overlap closes the row
+    'escalated' instead (the dispatch itself is kept — it already happened)."""
     connector_id = (trigger_payload or {}).get("connector_id")
     if not connector_id:
         raise RerunRefused(
@@ -498,22 +581,23 @@ def _rerun_ingestion(
     except Exception as exc:
         _close_lineage_row_failed(tenant_id, new_run_id, exc)
         raise
-    _close_lineage_row(
-        tenant_id,
-        new_run_id,
-        meta={
-            "final_outcome": "dispatched_async",
-            "child_workflow": "ingest_one_connector",
-            "connector_id": str(connector_id),
-        },
-    )
     logger.info(
         "run_control rerun: ingestion dispatched tenant=%s connector=%s new_run=%s",
         tenant_id,
         connector_id,
         new_run_id,
     )
-    return new_run_id
+    return _finalize_outcome(
+        tenant_id,
+        new_run_id,
+        "ingestion",
+        source_run_id,
+        completed_meta={
+            "final_outcome": "dispatched_async",
+            "child_workflow": "ingest_one_connector",
+            "connector_id": str(connector_id),
+        },
+    )
 
 
 # --- DB helpers ---------------------------------------------------------------------
@@ -688,23 +772,121 @@ def _insert_lineage_row(
         )
 
 
-def _close_lineage_row(tenant_id: UUID, run_id: UUID, *, meta: dict[str, Any]) -> None:
-    """Close a rerun-minted run row — ALWAYS ``status='completed'``.
+def _open_approval_now(tenant_id: UUID) -> dict[str, Any] | None:
+    """The C1 re-check read — the SAME helper the 409 gate uses
+    (``find_open_approval_for_tenant``), so gate and re-check can never disagree
+    about what 'open approval' means."""
+    from orchestrator.agent.approval_resume import find_open_approval_for_tenant
+    from orchestrator.db import tenant_connection
+
+    with tenant_connection(tenant_id) as conn:
+        return find_open_approval_for_tenant(conn, tenant_id)
+
+
+def _finalize_outcome(
+    tenant_id: UUID,
+    new_run_id: UUID,
+    kind: str,
+    source_run_id: UUID,
+    *,
+    completed_meta: dict[str, Any] | None,
+) -> RerunResult:
+    """Post-arm C1 convergence re-check (Cowork ruling 20260611T234500Z — Option A).
+
+    The arm's work/dispatch is DONE and KEPT (the ruling: no rollback; a minted
+    plan version stands). The 409 gate passed with ZERO open approvals, so ANY
+    approval open at this re-check armed DURING the rerun's execution window —
+    the gate-window TOCTOU overlap. Overlap → close the lineage row
+    ``status='escalated'`` (a mig-052 CHECK member; house close pattern with
+    ``final_outcome='rerun_overlapped_open_approval'``), emit the structured
+    ``run_control_rerun_overlap`` alert (severity error, component run_control —
+    the nightly alert pipeline scans pipeline_log), and surface
+    ``outcome='escalated_overlap'``. No overlap → the normal close (when
+    ``completed_meta`` is provided; agent_dispatch passes None because its child
+    workflow owns the completion close) and ``outcome='completed'``.
+
+    A re-check READ failure follows the A2 posture: failed-close + re-raise —
+    an unverifiable convergence must never be laundered into 'completed'.
+    """
+    try:
+        approval = _open_approval_now(tenant_id)
+    except Exception as exc:
+        _close_lineage_row_failed(tenant_id, new_run_id, exc)
+        raise
+    if approval is not None:
+        overlap_meta = dict(completed_meta or {})
+        overlap_meta["final_outcome"] = "rerun_overlapped_open_approval"
+        _close_lineage_row(tenant_id, new_run_id, meta=overlap_meta, status="escalated")
+        _emit_overlap_alert(tenant_id, new_run_id, kind, source_run_id, approval.get("id"))
+        logger.error(
+            "run_control rerun: OVERLAP — approval armed during rerun execution; run "
+            "escalated tenant=%s kind=%s new_run=%s approval=%s",
+            tenant_id,
+            kind,
+            new_run_id,
+            approval.get("id"),
+        )
+        return RerunResult(run_id=new_run_id, outcome="escalated_overlap")
+    if completed_meta is not None:
+        _close_lineage_row(tenant_id, new_run_id, meta=completed_meta)
+    return RerunResult(run_id=new_run_id, outcome="completed")
+
+
+def _emit_overlap_alert(
+    tenant_id: UUID,
+    new_run_id: UUID,
+    kind: str,
+    source_run_id: UUID,
+    approval_id: Any,
+) -> None:
+    """Best-effort structured ``run_control_rerun_overlap`` alert — the nightly
+    alert pipeline scans pipeline_log. Mirrors the ``_emit_degraded`` posture
+    (run_control/__init__.py): log_event imports lazily (heavy chain) and the
+    whole emission is guarded — an alert failure must never alter the escalation
+    close. Payload is IDs/enums only (CL-390)."""
+    try:
+        from orchestrator.observability.log import log_event  # lazy — heavy import chain
+
+        log_event(
+            event_type="run_control_rerun_overlap",
+            run_id=new_run_id,
+            tenant_id=str(tenant_id),
+            severity="error",
+            component="run_control",
+            payload={
+                "workflow_kind": kind,
+                "source_run_id": str(source_run_id),
+                "approval_id": str(approval_id) if approval_id else None,
+                "final_outcome": "rerun_overlapped_open_approval",
+            },
+        )
+    except Exception:  # noqa: BLE001 — observability must not break the escalation path
+        logger.warning("run_control rerun: overlap-alert emission failed", exc_info=True)
+
+
+def _close_lineage_row(
+    tenant_id: UUID, run_id: UUID, *, meta: dict[str, Any], status: str = "completed"
+) -> None:
+    """Close a rerun-minted run row — ``status='completed'`` by default.
 
     ``pipeline_runs_status_check`` has no 'failed' member (migration 052 set);
     the house pattern (coordinator._close_agent_run) is 'completed' + the real
     outcome in ``terminal_state_metadata`` (``final_outcome``: 'completed' /
-    'rerun_failed' / 'dispatched_async'). Metadata is IDs/enums only (CL-390)."""
+    'rerun_failed' / 'dispatched_async'). The ONE exception is the C1 overlap
+    escalation, which passes ``status='escalated'`` (also a mig-052 CHECK
+    member) with ``final_outcome='rerun_overlapped_open_approval'`` — an
+    overlapped rerun is a real escalation, not a completion. Metadata is
+    IDs/enums only (CL-390)."""
     from psycopg.types.json import Jsonb
 
     from orchestrator.db import tenant_connection
 
     with tenant_connection(tenant_id) as conn:
         conn.execute(
-            "UPDATE pipeline_runs SET status = 'completed', ended_at = now(), "
+            "UPDATE pipeline_runs SET status = %s, ended_at = now(), "
             "terminal_state_metadata = %s "
             "WHERE id = %s AND tenant_id = %s",
-            (Jsonb(meta), str(run_id), str(tenant_id)),
+            (status, Jsonb(meta), str(run_id), str(tenant_id)),
         )
 
 
@@ -728,4 +910,4 @@ def _as_uuid(value: Any) -> UUID:
     return value if isinstance(value, UUID) else UUID(str(value))
 
 
-__all__ = ["RUN_TYPE_TO_KIND", "RerunRefused", "rerun_from"]
+__all__ = ["RUN_TYPE_TO_KIND", "RerunRefused", "RerunResult", "rerun_from"]

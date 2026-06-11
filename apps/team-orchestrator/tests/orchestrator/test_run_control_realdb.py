@@ -861,9 +861,12 @@ def test_rerun_409_while_tenant_has_open_approval(substrate):
 
 
 # ---------------------------------------------------------------------------
-# C1 fold-in (VT-375) — F10 RACE: rerun_from vs request_owner_approval's arm
-# converge to refusal, NEVER two open pending_approvals (mig-128 partial unique
-# is the structural backstop; the /rerun 409 is the UX on top — plan §12 F10).
+# C1 fold-in (VT-375, Option A per the Cowork ruling 20260611T234500Z) — F10
+# RACE: rerun_from vs request_owner_approval's arm. Guarantee stack: mig-128
+# partial unique (never two open pending_approvals) + detect-and-escalate (an
+# approval that arms DURING the rerun ⇒ the rerun closes 'escalated' + a
+# run_control_rerun_overlap alert — never silently kept). The /rerun 409 is
+# the UX gate on top — plan §12 F10.
 # ---------------------------------------------------------------------------
 
 
@@ -881,37 +884,91 @@ def _seed_grounded_profile(dsn: str, tenant: str) -> None:
     )
 
 
+def _poll_overlap_alert(
+    dsn: str, run_id: Any, *, timeout_s: float = 12.0
+) -> dict[str, Any] | None:
+    """Poll pipeline_log for the ``run_control_rerun_overlap`` alert row. ``log_event``
+    is fire-and-forget (the INSERT lands on a daemon thread), so the assertion must
+    wait for it rather than read-once."""
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        with psycopg.connect(dsn, autocommit=True) as conn:
+            row = conn.execute(
+                "SELECT severity, component, payload FROM pipeline_log "
+                "WHERE event_type = 'run_control_rerun_overlap' AND run_id = %s",
+                (str(run_id),),
+            ).fetchone()
+        if row is not None:
+            return {"severity": row[0], "component": row[1], "payload": row[2]}
+        time.sleep(0.25)
+    return None
+
+
+def _rerun_row_state(dsn: str, run_id: Any) -> tuple[str, dict[str, Any] | None]:
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        row = conn.execute(
+            "SELECT status, terminal_state_metadata FROM pipeline_runs WHERE id = %s",
+            (str(run_id),),
+        ).fetchone()
+    assert row is not None, "the rerun's lineage row must exist"
+    return row[0], row[1]
+
+
 def test_f10_rerun_races_approval_arm_never_two_open_approvals(substrate, monkeypatch):
-    """C1 (plan §12 F10) — FALSIFIABLE: a ``rerun_from`` racing ``arm_pause_request`` for the SAME
-    tenant converges to ONE of two clean outcomes, NEVER the forbidden third.
+    """C1 (plan §12 F10, re-pointed to Option A's guarantee — Cowork ruling
+    20260611T234500Z): a ``rerun_from`` racing ``arm_pause_request`` for the SAME tenant
+    converges to one of the ALLOWED outcomes, never the forbidden third.
 
-    The crux the strengthening fixes: the rerun is set up so it CAN genuinely SUCCEED when it
-    wins the race (a grounded profile is seeded + ``generator._generate_and_validate`` is stubbed
-    so no LLM is hit). With success reachable, the test actually exercises the race — the prior
-    version's blanket 422-on-grounding made every interleaving a trivial refusal, proving nothing.
+    Allowed, per interleaving:
+      (a) the rerun REFUSED-409 (the F10 open-approval gate; the arm won), or
+      (b) the rerun RAN, and EITHER no approval was open at its completion re-check
+          (outcome='completed', row closed 'completed') OR the overlap was detected:
+          the run row closed 'escalated' with final_outcome='rerun_overlapped_open_approval'
+          (the minted version STANDS — no rollback) + the ``run_control_rerun_overlap``
+          pipeline_log alert row present, outcome='escalated_overlap'.
+    FORBIDDEN: the rerun's run row 'completed' while an approval the rerun overlapped is
+    open and no escalation/alert — a silently-kept overlap. Always: open approvals ≤ 1
+    (the mig-128 ``pending_approvals_one_open_per_tenant`` partial unique, untouched).
 
-    The invariant, asserted on EVERY interleaving:
-      1. open pending_approvals for the tenant ∈ {0, 1} — the mig-128
-         ``pending_approvals_one_open_per_tenant`` partial unique (the structural backstop).
-      2. The rerun outcome is EXACTLY ONE of {SUCCEEDED (a new run UUID), REFUSED-409 (the F10
-         open-approval gate)} — XOR, never both, never the old 422, never a crash.
-      3. THE forbidden third: the rerun SUCCEEDED while an approval is OPEN. That combination —
-         a second control surface armed behind an in-flight rerun — is a hard failure. So:
-         rerun-success ⟺ zero open approvals; an open approval ⟺ the rerun refused 409.
-    Keeps the 6 interleavings.
+    Why Option A and not the B advisory lock (the C1 ruling's B-analysis, recorded here):
+    an advisory lock spanning only rerun's GATE window vs the arm's insert txn would NOT
+    deliver "converges to refusal" — an approval created after the gate window but during
+    rerun execution still lands, exactly the overlap A detects. Delivering full mutual
+    exclusion would mean holding the lock for the rerun's ENTIRE execution, which blocks
+    the LIVE owner-approval arm path behind an ops re-run — an unacceptable inversion
+    (ops convenience outranking the owner's money-adjacent control surface). The honest,
+    complete guarantee stack is therefore: mig-128 (never two open approvals) +
+    detect-and-escalate (an overlap is escalated + alerted, never silently kept). C
+    (xfail) was rejected — no xfail masks on money-adjacent paths.
+
+    Falsifiability is kept two ways: (1) the rerun CAN genuinely succeed (grounded
+    profile seeded + ``generator._generate_and_validate`` stubbed — no LLM), so the 6
+    barrier interleavings exercise the real race, and (2) a DETERMINISTIC forced-overlap
+    leg holds the rerun inside the (stubbed) generator until the arm has committed its
+    approval — the re-check MUST then see it, so an implementation that skips the
+    post-completion re-check fails that leg hard (row 'completed' + open approval +
+    no alert = the forbidden third, asserted directly).
     """
     from orchestrator.agent.tools.request_owner_approval import (
         RequestOwnerApprovalInput,
         arm_pause_request,
     )
     from orchestrator.business_plan import delivery, generator
-    from orchestrator.run_control.rerun import RerunRefused, rerun_from
+    from orchestrator.run_control.rerun import RerunRefused, RerunResult, rerun_from
 
-    # Stub the LLM transmit + the owner-facing delivery burst so a WINNING rerun completes fast
-    # and offline. The stub returns a schema-shaped, citation-free degraded plan (the generator's
-    # own floor shape) — write_new_version persists it against the real DB, so the rerun returns a
-    # real new-run UUID = genuine success, not a mocked-away one.
+    # Stub the LLM transmit + the owner-facing delivery burst so a WINNING rerun completes
+    # fast and offline. The stub returns a schema-shaped, citation-free degraded plan (the
+    # generator's own floor shape) — write_new_version persists it against the real DB, so
+    # the rerun returns a real new-run id = genuine success, not a mocked-away one. The
+    # ``hold`` events are armed ONLY by the forced-overlap leg below; the 6 racing
+    # interleavings leave them None (stub returns immediately).
+    hold: dict[str, threading.Event | None] = {"entered": None, "release": None}
+
     def _stub_generate(_tenant_id: Any, grounding: Any, _llm: Any = None) -> dict[str, Any]:
+        entered, release = hold["entered"], hold["release"]
+        if entered is not None and release is not None:
+            entered.set()  # the rerun is past the 409 gate, mid-execution
+            assert release.wait(timeout=20), "forced-overlap release never came"
         return {
             "summary": {"text": "Race-test plan.", "headline": "Race", "citations": []},
             "roadmap": [],
@@ -921,9 +978,29 @@ def test_f10_rerun_races_approval_arm_never_two_open_approvals(substrate, monkey
     monkeypatch.setattr(generator, "_generate_and_validate", _stub_generate)
     monkeypatch.setattr(delivery, "deliver_plan", lambda *a, **k: None)
 
-    for _ in range(6):  # several interleavings — the invariant must hold on every one
+    def _arm_call(tenant: str, approval_run: str) -> Any:
+        return arm_pause_request(
+            RequestOwnerApprovalInput(
+                tenant_id=UUID(tenant),
+                run_id=UUID(approval_run),
+                approval_type="other",
+                summary="VT-375 C1 race",
+            ),
+            dry_run=True,  # no Twilio — the INSERT is the only effect we race
+        )
+
+    def _open_count(tenant: str) -> int:
+        with psycopg.connect(substrate, autocommit=True) as conn:
+            return conn.execute(
+                "SELECT count(*) FROM pending_approvals "
+                "WHERE tenant_id = %s AND resolved_at IS NULL",
+                (tenant,),
+            ).fetchone()[0]
+
+    # --- leg 1: the 6 barrier interleavings (the live race) --------------------------
+    for _ in range(6):
         tenant = _tenant_brain_ready(substrate, whatsapp=f"+1{uuid4().int % 10**10:010d}")
-        _seed_grounded_profile(substrate, tenant)  # grounding present → the rerun CAN win+succeed
+        _seed_grounded_profile(substrate, tenant)  # grounding present → the rerun CAN win
         rerun_source = _run_typed(substrate, tenant, "plan_generate")
         approval_run = _run_typed(substrate, tenant, "plan_generate")  # the arm's target run
 
@@ -933,15 +1010,7 @@ def test_f10_rerun_races_approval_arm_never_two_open_approvals(substrate, monkey
         def _arm() -> None:
             try:
                 barrier.wait(timeout=10)
-                results["arm"] = arm_pause_request(
-                    RequestOwnerApprovalInput(
-                        tenant_id=UUID(tenant),
-                        run_id=UUID(approval_run),
-                        approval_type="other",
-                        summary="VT-375 C1 race",
-                    ),
-                    dry_run=True,  # no Twilio — the INSERT is the only effect we race
-                )
+                results["arm"] = _arm_call(tenant, approval_run)
             except Exception as exc:  # noqa: BLE001 — surface in the assert
                 results["arm"] = exc
 
@@ -963,41 +1032,95 @@ def test_f10_rerun_races_approval_arm_never_two_open_approvals(substrate, monkey
             t.join(timeout=30)
 
         assert set(results) == {"arm", "rerun"}, f"a racer never returned: {results}"
-        # The arm itself must not have raised (it either armed, or refused 'queue busy' — both
-        # are clean PauseRequestResults, never an exception).
+        # The arm itself must not have raised (it either armed, or refused 'queue busy' —
+        # both are clean PauseRequestResults, never an exception).
         assert not isinstance(results["arm"], Exception), f"arm raised: {results['arm']!r}"
 
         rr = results["rerun"]
         # invariant 1 — the structural backstop: never more than one OPEN approval.
-        with psycopg.connect(substrate, autocommit=True) as conn:
-            open_count = conn.execute(
-                "SELECT count(*) FROM pending_approvals "
-                "WHERE tenant_id = %s AND resolved_at IS NULL",
-                (tenant,),
-            ).fetchone()[0]
+        open_count = _open_count(tenant)
         assert open_count <= 1, (
             f"F10 structural backstop violated: {open_count} open approvals for the tenant "
             "(the mig-128 one-open-per-tenant partial unique must converge the race)"
         )
 
-        # invariant 2 — outcome is SUCCESS xor REFUSED-409, nothing else.
-        rerun_succeeded = isinstance(rr, UUID)
+        # invariant 2 — the rerun outcome is RAN (RerunResult) xor REFUSED-409, nothing
+        # else (grounded now, so never the old blanket 422; never a crash).
+        rerun_ran = isinstance(rr, RerunResult)
         rerun_refused_409 = isinstance(rr, RerunRefused) and rr.code == 409
-        assert rerun_succeeded ^ rerun_refused_409, (
-            f"rerun outcome must be SUCCESS xor 409-refusal (grounded now, so no 422); got {rr!r}"
+        assert rerun_ran ^ rerun_refused_409, (
+            f"rerun outcome must be RAN xor 409-refusal; got {rr!r}"
         )
 
-        # invariant 3 — the forbidden third: success WHILE an approval is open. rerun-success ⟺
-        # zero open approvals; an open approval ⟺ the rerun refused 409.
-        if rerun_succeeded:
-            assert open_count == 0, (
-                "FORBIDDEN: the rerun SUCCEEDED while an approval is OPEN — a second control "
-                f"surface armed behind an in-flight rerun (open_count={open_count})"
-            )
-        else:  # refused-409
+        # invariant 3 — A's guarantee, per outcome.
+        if rerun_refused_409:
             assert open_count == 1, (
-                "a 409 refusal must be backed by an actually-open approval (the arm won the race)"
+                "a 409 refusal must be backed by an actually-open approval (the arm won)"
             )
+        elif rr.outcome == "escalated_overlap":
+            # overlap detected mid-flight: escalated + alerted, never silently kept.
+            status, meta = _rerun_row_state(substrate, rr.run_id)
+            assert status == "escalated", f"overlap must close the run 'escalated', got {status!r}"
+            assert meta and meta.get("final_outcome") == "rerun_overlapped_open_approval"
+            assert "version" in (meta or {}), "the version mint STANDS on overlap (no rollback)"
+            assert open_count == 1, "an escalated overlap implies the arm's approval is open"
+            alert = _poll_overlap_alert(substrate, rr.run_id)
+            assert alert is not None, "the run_control_rerun_overlap alert row must land"
+            assert alert["severity"] == "error" and alert["component"] == "run_control"
+        else:
+            # outcome='completed': the completion re-check saw no open approval. An
+            # approval may STILL be open now (the arm landed after the re-check) — that
+            # is sequential, not an overlap; the next arm/rerun hits the 409/refused gate.
+            assert rr.outcome == "completed", f"unknown outcome {rr.outcome!r}"
+            status, meta = _rerun_row_state(substrate, rr.run_id)
+            assert status == "completed" and meta and meta.get("final_outcome") == "completed"
+
+    # --- leg 2: DETERMINISTIC forced overlap (the falsifiability anchor) -------------
+    # Hold the rerun inside the stubbed generator (past the 409 gate), commit the arm's
+    # approval, release. The completion re-check is now GUARANTEED to face an open
+    # approval — the forbidden third (row 'completed', approval open, no escalation/alert)
+    # is asserted impossible directly, not probabilistically.
+    tenant = _tenant_brain_ready(substrate, whatsapp=f"+1{uuid4().int % 10**10:010d}")
+    _seed_grounded_profile(substrate, tenant)
+    rerun_source = _run_typed(substrate, tenant, "plan_generate")
+    approval_run = _run_typed(substrate, tenant, "plan_generate")
+    hold["entered"], hold["release"] = threading.Event(), threading.Event()
+    forced: dict[str, Any] = {}
+
+    def _forced_rerun() -> None:
+        try:
+            forced["rerun"] = rerun_from(
+                rerun_source, "generate_validate", requested_by=str(uuid4())
+            )
+        except Exception as exc:  # noqa: BLE001 — surface in the assert
+            forced["rerun"] = exc
+
+    t = threading.Thread(target=_forced_rerun)
+    t.start()
+    try:
+        assert hold["entered"].wait(timeout=20), "rerun never reached the generator"
+        armed = _arm_call(tenant, approval_run)  # gate already passed → arm lands mid-flight
+        assert armed.status == "armed", f"the forced arm must arm, got {armed.status!r}"
+    finally:
+        hold["release"].set()
+        t.join(timeout=30)
+        hold["entered"] = hold["release"] = None  # disarm for any later stub call
+
+    rr = forced.get("rerun")
+    assert isinstance(rr, RerunResult), f"forced-overlap rerun must RUN (gate passed): {rr!r}"
+    assert rr.outcome == "escalated_overlap", (
+        "FORBIDDEN THIRD: an approval armed mid-flight and the rerun did not escalate "
+        f"(outcome={rr.outcome!r}) — the overlap would be silently kept"
+    )
+    status, meta = _rerun_row_state(substrate, rr.run_id)
+    assert status == "escalated" and meta is not None
+    assert meta.get("final_outcome") == "rerun_overlapped_open_approval"
+    assert "version" in meta, "the version mint STANDS on overlap (no rollback — the ruling)"
+    assert _open_count(tenant) == 1, "exactly the arm's approval is open (mig-128 holds)"
+    alert = _poll_overlap_alert(substrate, rr.run_id)
+    assert alert is not None, "the run_control_rerun_overlap alert row must land in pipeline_log"
+    assert alert["severity"] == "error" and alert["component"] == "run_control"
+    assert alert["payload"].get("workflow_kind") == "plan_generate"
 
 
 # ===========================================================================
@@ -1436,8 +1559,10 @@ def test_rerun_plan_deliver_fresh_run_lineage_source_untouched_no_dup_parts(
             (tenant, Jsonb({"text": "your plan headline"})),
         )
 
-    new_run = rerun_from(source, "deliver_parts", requested_by=str(uuid4()))
+    result = rerun_from(source, "deliver_parts", requested_by=str(uuid4()))
+    new_run = result.run_id
 
+    assert result.outcome == "completed", "no approval armed → the C1 outcome is 'completed'"
     assert str(new_run) != source, "rerun must mint a FRESH run id, not reuse the source"
     with psycopg.connect(substrate, autocommit=True) as conn:
         new_row = conn.execute(
@@ -1488,8 +1613,10 @@ def test_rerun_agent_dispatch_fresh_run_id_not_uuid5(substrate, monkeypatch):
             ).fetchone()[0]
         )
 
-    new_run = rerun_from(source, "execute_item", requested_by=str(uuid4()))
+    result = rerun_from(source, "execute_item", requested_by=str(uuid4()))
+    new_run = result.run_id
 
+    assert result.outcome == "completed", "no approval armed → the C1 outcome is 'completed'"
     assert captured["fn"] == "agent_dispatch_workflow"
     # signature: (tenant_id, item_id, agent, work_item_id, rerun_run_id)
     rerun_run_id_arg = captured["args"][-1]

@@ -587,7 +587,15 @@ def rerun(
     from the source run row. :class:`RerunRefused` (non-rerunnable kind / open approval F10 /
     unknown step) maps to its carried status (default 409). The attempt-audit commits BEFORE the
     dispatch — ``rerun_from`` owns its own txns, so atomic audit-with-mutation is not expressible
-    here; an audited-but-refused attempt is the intended trace (the VT-300 posture)."""
+    here; an audited-but-refused attempt is the intended trace (the VT-300 posture).
+
+    Response carries ``outcome`` ('completed' | 'escalated_overlap') — VT-375 C1 (Cowork ruling
+    20260611T234500Z, Option A). HTTP stays **200 for 'escalated_overlap'** deliberately: the
+    rerun DID run (the dispatch happened / the version mint stands — no rollback, per the
+    ruling); what overlapped is an owner approval that armed mid-flight, and that is disclosed —
+    the run row closes 'escalated', a ``run_control_rerun_overlap`` alert lands in pipeline_log,
+    and the panel's disclosure copy explains it. A non-2xx here would falsely tell the operator
+    nothing happened."""
     _require_uuid(body.source_run_id, "source_run_id")
     verify_internal_secret(x_internal_secret)
     verify_operator_jwt(x_operator_jwt)
@@ -643,7 +651,7 @@ def rerun(
         )
 
     try:
-        new_run_id = rerun_from(
+        result = rerun_from(
             body.source_run_id, body.from_step, overrides, requested_by=operator
         )
     except RerunRefused as exc:
@@ -654,12 +662,14 @@ def rerun(
         # Refusal text echoes kinds/steps/counts; scrub anyway before it leaves (CL-390).
         raise HTTPException(status_code=status, detail=scrub_pii(str(exc))) from exc
     logger.info(
-        "rerun OK operator=%s tenant=%s source=%s from_step=%s new_run=%s",
-        operator, tenant_id, body.source_run_id, body.from_step, new_run_id,
+        "rerun OK operator=%s tenant=%s source=%s from_step=%s new_run=%s outcome=%s",
+        operator, tenant_id, body.source_run_id, body.from_step, result.run_id, result.outcome,
     )
     return {
         "ok": True,
-        "new_run_id": str(new_run_id),
+        "new_run_id": str(result.run_id),
+        # C1/Option A: 'completed' | 'escalated_overlap' — 200 either way (see docstring).
+        "outcome": result.outcome,
         "source_run_id": body.source_run_id,
         "tenant_id": tenant_id,
     }

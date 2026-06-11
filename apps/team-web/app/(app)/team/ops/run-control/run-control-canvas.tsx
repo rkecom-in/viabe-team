@@ -12,6 +12,10 @@
  *   - observed-tier steps → badge "Observed — not controllable"
  *   - rerun lineage → "Re-dispatched as a NEW run (no time-travel) — prior steps re-execute
  *     only if the entry point requires them."
+ *   - rerun lineage (VT-375 C1, Option A) → "A re-run that overlapped an owner decision is
+ *     escalated, not silently kept." Run rows carry status 'escalated' (the overlap close);
+ *     the overlap METADATA does not ride the read projections, so the disclosure is the
+ *     static line + an "escalated re-run" marker on escalated lineage rows.
  *   - envelope cells → "Keys only — values are de-identified by construction."
  *   - degraded → banner "Pause state unverifiable right now — control reads are degraded."
  *   - holds footer → "Concurrently-held runs release in no guaranteed order."
@@ -40,6 +44,8 @@ export interface TenantCanvasData {
 const ENVELOPE_KEYS_COPY = 'Keys only — values are de-identified by construction.'
 const RERUN_LINEAGE_COPY =
   'Re-dispatched as a NEW run (no time-travel) — prior steps re-execute only if the entry point requires them.'
+const RERUN_OVERLAP_COPY =
+  'A re-run that overlapped an owner decision is escalated, not silently kept.'
 const OBSERVED_BADGE_COPY = 'Observed — not controllable'
 const DEGRADED_COPY = 'Pause state unverifiable right now — control reads are degraded.'
 const HOLDS_FOOTER_COPY = 'Concurrently-held runs release in no guaranteed order.'
@@ -103,6 +109,10 @@ function StepTimeline({ timeline }: { timeline: VtrRunTimelineResult | undefined
           <span className="font-mono text-gray-400">
             (from {reruns.rerun_of_run_id}
             {reruns.rerun_from_step ? ` @ ${reruns.rerun_from_step}` : ''})
+          </span>
+          {/* VT-375 C1 (Option A) binding disclosure — ships statically wherever lineage renders. */}
+          <span data-rc-rerun-overlap-note className="mt-1 block italic text-gray-500">
+            {RERUN_OVERLAP_COPY}
           </span>
         </p>
       )}
@@ -199,6 +209,17 @@ function ProgramRunTile({
           {run.rerun_of_run_id && (
             <span className="rounded border border-indigo-200 bg-indigo-50 px-1.5 py-0.5 text-[10px] font-medium text-indigo-600">
               re-dispatched
+            </span>
+          )}
+          {/* C1 outcome rendering — run rows carry status 'escalated' on the overlap close
+              (metadata stays server-side); the marker + title disclose the why. */}
+          {run.rerun_of_run_id && run.status === 'escalated' && (
+            <span
+              data-rc-rerun-escalated
+              className="rounded border border-red-200 bg-red-50 px-1.5 py-0.5 text-[10px] font-medium text-red-600"
+              title={RERUN_OVERLAP_COPY}
+            >
+              escalated re-run
             </span>
           )}
         </span>
