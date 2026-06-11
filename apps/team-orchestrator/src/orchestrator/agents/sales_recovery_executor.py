@@ -448,6 +448,84 @@ def _owner_inputs_ok(tenant_id: UUID) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# VT-374 run-control seam (kind 'agent_dispatch'; sub-steps candidate_build /
+# compose_drafts / persist_batch)
+# ---------------------------------------------------------------------------
+
+
+def _run_control_seam(
+    tenant_id: UUID,
+    run_id: str,
+    step_name: str,
+    base: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Hold while (tenant, 'agent_dispatch') is paused, then consume-first claim the
+    sub-step's one-shot override (F8/N2). Returns ``base`` deep-merged with the
+    override's allow-listed pins (registry-validated — a non-allow-listed key raises,
+    fail-loud per the executor contract).
+
+    Failure posture: pause reads never raise (check_pause two-tier, F9); a consume-DB
+    failure proceeds WITHOUT the override, logged loudly — a control outage must never
+    kill a live dispatch. Durable hold inside a DBOS workflow (the dispatch workflow's
+    call stack), plain poll on direct calls (tests). Call BEFORE opening any
+    tenant_connection — a hold must never pin a pooled connection."""
+    from dbos import DBOS
+
+    from orchestrator import run_control
+
+    if DBOS.workflow_id is not None:
+        paused_ms = run_control.hold_while_paused_durable(tenant_id, "agent_dispatch")
+    else:
+        paused_ms = run_control.hold_while_paused(tenant_id, "agent_dispatch")
+    override = None
+    try:
+        from orchestrator.graph import get_pool
+
+        with get_pool().connection() as conn:
+            override = run_control.consume_override(
+                conn,
+                tenant_id=tenant_id,
+                workflow_kind="agent_dispatch",
+                step_name=step_name,
+                run_id=run_id,
+            )
+    except Exception:  # noqa: BLE001 — control outage must not fail the work item (F9 spirit)
+        logger.warning(
+            "sales_recovery: override consume failed (step=%s run=%s) — proceeding without",
+            step_name,
+            run_id,
+            exc_info=True,
+        )
+    merged = dict(base or {})
+    if override is not None and override.pinned_input:
+        entry = run_control.REGISTRY[("agent_dispatch", step_name)]
+        merged = run_control.apply_pinned_input(entry, merged, override.pinned_input)
+    if paused_ms or override is not None:
+        _log_run_control(tenant_id, run_id, step_name, paused_ms, override)
+    return merged
+
+
+def _log_run_control(
+    tenant_id: UUID, run_id: str, step_name: str, paused_ms: int, override: Any
+) -> None:
+    """Timeline substrate for the seam (IDs + counters only, CL-390) — one
+    ``run_control_intervention`` pipeline_steps row with the mig-131 override_id /
+    paused_ms COLUMNS set (B1 dead-columns fix). ``record_intervention`` itself
+    never raises: a timeline miss must never alter control semantics."""
+    from orchestrator.observability.pipeline_observability import record_intervention
+
+    record_intervention(
+        tenant_id,
+        run_id,
+        workflow_kind="agent_dispatch",
+        step_name=step_name,
+        override_id=override.id if override is not None else None,
+        paused_ms=paused_ms or None,
+        action="override_consumed" if override is not None else "released",
+    )
+
+
+# ---------------------------------------------------------------------------
 # The specialist agent (coordinator SpecialistAgent protocol, plan §1.2)
 # ---------------------------------------------------------------------------
 
@@ -483,8 +561,13 @@ class SalesRecoveryAgent:
                 work_item_status="cancelled", counters={"skipped_owner_inputs": 1}
             )
 
+        # VT-374 candidate_build seam — hold/consume BEFORE the tenant_connection opens
+        # (a pause must never pin a pooled connection); 'limit' is the sole allow-listed pin.
+        pins = _run_control_seam(
+            tenant_id, ctx.run_id, "candidate_build", {"limit": DEFAULT_DETECTION_LIMIT}
+        )
         with tenant_connection(tenant_id) as conn:
-            candidates = detect_lapsed_customers(tenant_id, conn=conn)
+            candidates = detect_lapsed_customers(tenant_id, conn=conn, limit=int(pins["limit"]))
             bundles = [
                 build_customer_fact_bundle(tenant_id, cand.customer_id, conn=conn)
                 for cand in candidates
@@ -495,7 +578,12 @@ class SalesRecoveryAgent:
             )
 
         # LLM phase — no DB connection held; each bundle is used for ONE call, then discarded.
-        model = _resolve_drafting_model()
+        # VT-374 compose_drafts seam — whole-phase hold before any transmit; 'model' is the
+        # sole allow-listed pin (an ops override can drop the drafting band for one run).
+        compose_pins = _run_control_seam(
+            tenant_id, ctx.run_id, "compose_drafts", {"model": _resolve_drafting_model()}
+        )
+        model = str(compose_pins["model"])
         call = self._llm or _call_llm
         grounded: list[tuple[UUID, dict[str, str]]] = []
         dropped = 0
@@ -526,6 +614,9 @@ class SalesRecoveryAgent:
                 counters={"dropped_ungrounded": dropped, "skipped_no_grounded_drafts": 1},
             )
 
+        # VT-374 persist_batch seam — hold BEFORE persist, never between persist and arm
+        # (an unarmed awaiting_approval batch violates the _cancel_batch invariant, STEP-0).
+        _run_control_seam(tenant_id, ctx.run_id, "persist_batch")
         with tenant_connection(tenant_id) as conn:
             batch_id = _persist_draft_batch(
                 tenant_id, work_item_id=UUID(str(ctx.work_item_id)), drafts=grounded, conn=conn

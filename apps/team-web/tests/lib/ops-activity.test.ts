@@ -146,4 +146,14 @@ describe('VT-300 — flagRunControl forwards to the authoritative orchestrator e
     expect(res.ok).toBe(false)
     expect(res.reason).toBe('http_403')
   })
+
+  it('VT-374 C6: steer 410 (retired from legacy leg) → friendly Phase-B message, not http_410', async () => {
+    const fwd = vi.fn(async () => ({ ok: false, reason: 'http_410' }))
+    const res = await flagRunControl(
+      { operatorId: 'op', role: OperatorRole.VTR, assignedTenants: ['ta'] }, 'r1', 'steer',
+      runClient('ta') as never, fwd as never,
+    )
+    expect(res.ok).toBe(false)
+    expect(res.reason).toBe('Steer moved to the Run-Control panel (Phase B)')
+  })
 })

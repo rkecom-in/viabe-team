@@ -1,17 +1,26 @@
-"""VT-300 — VTR live run-control endpoint (the enforcement leg).
+"""VT-300 — VTR live run-control endpoint, RE-POINTED at the VT-374 substrate (N1 RETIRE arm).
 
 POST /api/orchestrator/ops/run-control   (INTERNAL_API_SECRET; team-web calls server-side)
 
-Records a VTR's pause/steer/override on a LIVE run into run_controls (mig 078), which the graph
-consumes at node boundaries. The adversarial review's key finding: team-web's auth alone is
-fail-OPEN at this leg (ops_resolve.py does AuthN, not tenant AuthZ). So this endpoint RE-DERIVES
-the run's tenant from pipeline_runs server-side (NO tenant param crosses the wire → unspoofable)
-and RE-CHECKS operator_assignments server-side, fail-CLOSED. Every attempt audits to ops_audit
-(executed OR denied). directive is PII-scrubbed (CL-390/CL-426). Override is VTR-issuable (Fazal).
+History: this endpoint wrote ``run_controls`` (mig 078), consumed at the supervisor campaign-send
+fan-out. VT-374 retired that table (mig 131; the STEP-0 inventory confirmed it single-purpose),
+so 'pause' now inserts a ``workflow_controls`` hold (tenant derived from the run row,
+``workflow_kind='campaign_send'``) which the supervisor seam reads via the run_control executor.
+'steer'/'override' are GONE from this leg: 410 pointing at
+``POST /api/orchestrator/ops/run-control/override`` (the Gap-6-authed VT-374 API).
 
-The EFFECTING (graph reads run_controls at the next node boundary → re-arm interrupt for pause /
-consume directive for steer/override) is the orchestrator graph handler; this endpoint is the
-authorized, audited write.
+Auth + audit posture UNCHANGED (the adversarial-review finding stands): team-web's auth alone is
+fail-OPEN at this leg, so the endpoint RE-DERIVES the run's tenant from pipeline_runs server-side
+(NO tenant param crosses the wire → unspoofable) and RE-CHECKS operator_assignments server-side,
+fail-CLOSED. Every attempt audits to ops_audit (executed OR denied). The directive free text is
+redacted at WRITE through the pii_redactor WITH the tenant's name registry (plan §5); a
+registry-build failure DROPS the text rather than storing it unredacted — the pause itself still
+lands (a safety hold must not be blocked by a redaction dependency; the live UI never populates
+directive anyway, per the N1 inventory).
+
+The team-web relay is unchanged in shape: same body, same ``{ok, control_id, tenant_id,
+control_type}`` response. A repeat pause is idempotent — the active hold's id is returned (the
+partial-unique index allows one active hold per (tenant, kind)).
 """
 
 from __future__ import annotations
@@ -26,11 +35,14 @@ from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel
 
 from orchestrator.graph import get_pool
+from orchestrator.privacy.customer_registry import make_name_registry
+from orchestrator.privacy.pii_redactor import redact
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
 _VALID_CONTROLS = ("pause", "steer", "override")
+_GONE_CONTROLS = ("steer", "override")  # VT-374: moved to the run-control substrate API
 
 
 def _verify_internal_secret(provided: str | None) -> bool:
@@ -78,6 +90,23 @@ def _audit(cur: Any, *, operator_id: str, tenant_id: str | None, action: str, ru
     )
 
 
+def _redacted_reason(tenant_id: str, directive: str | None) -> str | None:
+    """Write-time redaction (VT-374 plan §5): pattern + name-registry. Registry failure DROPS the
+    text — never store unredacted, never block the safety hold on a redaction dependency."""
+    if not directive:
+        return None
+    try:
+        registry = make_name_registry(tenant_id)
+        return str(redact(directive, name_registry=registry))[:500]
+    except Exception as exc:  # noqa: BLE001 — drop the text, keep the pause
+        logger.warning(
+            "run_control: name-registry build failed tenant=%s — directive text dropped "
+            "(never stored unredacted) exc=%r",
+            tenant_id, exc,
+        )
+        return None
+
+
 @router.post("/api/orchestrator/ops/run-control")
 def run_control(
     body: RunControlBody,
@@ -87,18 +116,19 @@ def run_control(
         raise HTTPException(status_code=401, detail="invalid internal secret")
     if body.control_type not in _VALID_CONTROLS:
         raise HTTPException(status_code=400, detail=f"invalid control_type; one of {_VALID_CONTROLS}")
+    if body.control_type in _GONE_CONTROLS:
+        raise HTTPException(
+            status_code=410,
+            detail=(
+                "steer/override moved to the VT-374 run-control substrate; "
+                "use POST /api/orchestrator/ops/run-control/override"
+            ),
+        )
     try:
         UUID(body.run_id)
         UUID(body.operator_id)
     except ValueError:
         raise HTTPException(status_code=400, detail="invalid run_id / operator_id") from None
-
-    # Scrub PII from the human-typed directive BEFORE it touches the DB (CL-390/CL-426).
-    directive: str | None = None
-    if body.directive:
-        from orchestrator.alerts.pii_scrub import scrub_pii
-
-        directive = scrub_pii(body.directive)[:500]
 
     pool = get_pool()
     with pool.connection() as conn, conn.cursor() as cur:
@@ -119,13 +149,33 @@ def run_control(
             )
             raise HTTPException(status_code=403, detail="operator not assigned to this run's tenant")
 
-        # 3. Authorized — record the control + audit control_executed (server-resolved tenant).
+    # Registry-backed redaction opens its own tenant connection — run it BETWEEN pool checkouts,
+    # never while a service-pool connection is held (nested-checkout exhaustion hazard).
+    reason = _redacted_reason(tenant_id, body.directive)
+
+    with pool.connection() as conn, conn.cursor() as cur:
+        # 3. Authorized — set the tenant-wide campaign_send hold on the VT-374 substrate (the
+        # supervisor seam holds before fan-out). Idempotent under the one-active partial-unique
+        # index: a concurrent/prior active hold's id is returned instead of a second row.
         cur.execute(
-            "INSERT INTO run_controls (run_id, tenant_id, control_type, directive, requested_by) "
-            "VALUES (%s, %s, %s, %s, %s) RETURNING id",
-            (body.run_id, tenant_id, body.control_type, directive, body.operator_id),
+            "INSERT INTO workflow_controls (tenant_id, workflow_kind, set_by, reason) "
+            "VALUES (%s, 'campaign_send', %s, %s) "
+            "ON CONFLICT (tenant_id, workflow_kind) WHERE released_at IS NULL DO NOTHING "
+            "RETURNING id",
+            (tenant_id, body.operator_id, reason),
         )
         ctrl_row = cur.fetchone()
+        if ctrl_row is None:
+            cur.execute(
+                "SELECT id FROM workflow_controls "
+                "WHERE tenant_id = %s AND workflow_kind = 'campaign_send' "
+                "AND released_at IS NULL LIMIT 1",
+                (tenant_id,),
+            )
+            ctrl_row = cur.fetchone()
+            if ctrl_row is None:
+                # Insert lost to a hold that was released in between — contended; client retries.
+                raise HTTPException(status_code=409, detail="pause state contended; retry")
         ctrl_id = str(ctrl_row["id"] if isinstance(ctrl_row, dict) else ctrl_row[0])
         _audit(
             cur, operator_id=body.operator_id, tenant_id=tenant_id,
@@ -137,7 +187,20 @@ def run_control(
         "run_control OK operator=%s run=%s tenant=%s control=%s id=%s",
         body.operator_id, body.run_id, tenant_id, body.control_type, ctrl_id,
     )
+    # C5: state the NEW semantics in the response. Legacy 'pause' is no longer a per-run steer —
+    # it now sets a tenant-wide campaign_send hold on the VT-374 substrate that stays until it is
+    # explicitly released (the old run_controls auto-expiry is gone). Callers/operators must know
+    # the hold is sticky and tenant-scoped, and how to lift it.
     return cast(
         "dict[str, Any]",
-        {"ok": True, "control_id": ctrl_id, "tenant_id": tenant_id, "control_type": body.control_type},
+        {
+            "ok": True,
+            "control_id": ctrl_id,
+            "tenant_id": tenant_id,
+            "control_type": body.control_type,
+            "detail": (
+                "tenant-wide campaign_send hold until released via "
+                "POST /api/orchestrator/ops/run-control/release"
+            ),
+        },
     )

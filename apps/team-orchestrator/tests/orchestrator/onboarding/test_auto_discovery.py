@@ -235,10 +235,12 @@ def test_summary_shape_and_rounding(cost_spy):
     assert out["spent_usd"] == round(0.0011115, 4)  # rounded to 4dp
     assert out["aborted"] is False
     assert out["sources"] == {"gbp": "ok", "website": "empty"}
-    # the engine recorded cost to observability (best-effort) exactly once
-    assert len(cost_spy) == 1
-    assert cost_spy[0]["event_type"] == "auto_discovery_cost"
-    assert cost_spy[0]["payload"]["cost_usd"] == round(0.0011115, 4)
+    # the engine recorded cost to observability (best-effort) exactly once. Filter by
+    # event_type: the VT-374 per-source pause checks legitimately emit
+    # run_control_degraded alerts in this DB-less environment (fail-OPEN posture, F9).
+    cost_events = [c for c in cost_spy if c["event_type"] == "auto_discovery_cost"]
+    assert len(cost_events) == 1
+    assert cost_events[0]["payload"]["cost_usd"] == round(0.0011115, 4)
 
 
 def test_status_defaults_to_error_when_result_lacks_status(cost_spy):

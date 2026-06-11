@@ -73,6 +73,16 @@ def _compose_trial_subscribe_link(tenant_id: UUID) -> dict[str, Any] | None:
         return None
 
 
+def _paused(tenant_id: UUID) -> bool:
+    """VT-374 per-tenant pause check (kind 'trial_sweep'). SKIP semantics, not a blocking
+    hold — a hold would stall every tenant behind one paused row in a daily sweep; the
+    next sweep re-evaluates after release (expire/warn verdicts are recomputed from state,
+    so nothing is lost). check_pause never raises (F9 two-tier)."""
+    from orchestrator.run_control import check_pause
+
+    return check_pause(tenant_id, "trial_sweep")
+
+
 def _scan_active_trials(now: datetime) -> list[UUID]:
     from orchestrator.graph import get_pool
     from psycopg.rows import dict_row
@@ -123,6 +133,12 @@ def run_trial_evaluation_body(
     notify = notify_fn or _default_notify
     acted: list[Any] = []
     for tid in _scan_active_trials(now):
+        # VT-374 (trial_sweep, evaluate_tenant) seam — per-tenant pause check at loop top.
+        if _paused(tid):
+            logger.info(
+                "trial_sweep: tenant=%s paused by run-control — skipped this sweep", tid
+            )
+            continue
         try:
             v = evaluate_trial(tid, now)
         except Exception:  # noqa: BLE001

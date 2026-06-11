@@ -239,6 +239,48 @@ def close_webhook_run(tenant_id: str, run_id: str, status: str) -> None:
         )
 
 
+# --- VT-374 N3/B2: the pre-dispatch_brain run-control hold ---------------------
+#
+# Poll/bound for the webhook_inbound pause seam. 15s per poll keeps a long pause
+# from flooding the DBOS system tables (one checkpointed step per read) while
+# staying responsive to an ops /release; 1800s (30 min) is the max park — no
+# worker holds a durable run forever (B2). On exceeding the bound the run closes
+# as status='paused' (mig-052 CHECK member) and the brain is NOT dispatched.
+_RUN_CONTROL_POLL_S = 15.0
+_RUN_CONTROL_MAX_HOLD_S = 1800.0
+
+
+@DBOS.step()
+def read_webhook_pause(tenant_id: str) -> bool:
+    """Checkpointed control read for the pre-dispatch_brain hold (N3).
+
+    Module-level ``@DBOS.step`` so the qualname is stable for DBOS recovery — a
+    paused run survives a worker restart and resumes the hold (plan §10.2).
+    ``check_pause`` inside never raises (F9 two-tier): a control-read outage
+    cannot fail this step and kill a live inbound run.
+    """
+    from orchestrator.run_control import check_pause
+
+    return check_pause(tenant_id, "webhook_inbound")
+
+
+@DBOS.step()
+def close_webhook_run_paused(tenant_id: str, run_id: str) -> None:
+    """Close a max-hold-exceeded inbound run as status='paused' (B2). Idempotent.
+
+    'paused' is a legal pipeline_runs_status_check member (mig 052);
+    ``terminal_state_metadata.paused_by_run_control`` marks it for the panel
+    (Phase B copy obligation: this run is parked, not failed). tenant GUC per
+    CL-71 (RLS scopes the UPDATE).
+    """
+    with tenant_connection(tenant_id) as conn:
+        conn.execute(
+            "UPDATE pipeline_runs SET status = 'paused', ended_at = now(), "
+            "terminal_state_metadata = %s WHERE id = %s",
+            (Jsonb({"paused_by_run_control": True}), run_id),
+        )
+
+
 # Dispatch final_status values that mean the agent dispatch TERMINATED (failure/
 # limit), vs 'completed' (success) and 'paused' (not terminal — resumes later).
 _DISPATCH_TERMINATED_STATUSES = frozenset({"aborted_hard_limit", "escalated", "failed"})
@@ -583,6 +625,62 @@ def webhook_pipeline_run(tenant_id: str, run_id: str, twilio_fields: dict) -> di
             routed = "consent_required"
             HANDLERS[handler_name](event, state)
         else:
+            # VT-374 N3/B2 — the webhook-path run-control boundary: PAUSE-ONLY (no
+            # override ever matches dispatch_brain — registry allowed_keys=∅). Durable
+            # BOUNDED hold: each control read is its own @DBOS.step and the wait between
+            # polls is DBOS.sleep, both checkpointed, so a paused run survives a worker
+            # restart and resumes the hold (plan §10.2); paused_ms counts poll intervals
+            # (deterministic under DBOS replay), not wall-clock. The direct-handler
+            # branch above (opt-out / DSR) is pause-EXEMPT by construction (I6).
+            # Concurrently-held runs release with NO ordering guarantee (N3).
+            #
+            # B2 max-hold: past _RUN_CONTROL_MAX_HOLD_S the run closes status='paused'
+            # (terminal_state_metadata.paused_by_run_control) and returns WITHOUT
+            # dispatching the brain — no worker parks forever. The message IS recorded
+            # (sid ledger + run row + webhook_received step above); releasing the pause
+            # means FUTURE messages flow — this run does not auto-resume. Panel copy
+            # obligation (Phase B): surface parked runs with exactly that wording.
+            paused_ms = 0
+            max_hold_exceeded = False
+            while read_webhook_pause(tenant_id):
+                if paused_ms >= int(_RUN_CONTROL_MAX_HOLD_S * 1000):
+                    max_hold_exceeded = True
+                    break
+                DBOS.sleep(_RUN_CONTROL_POLL_S)
+                paused_ms += int(_RUN_CONTROL_POLL_S * 1000)
+            from orchestrator.observability.pipeline_observability import (
+                record_intervention,
+            )
+
+            if max_hold_exceeded:
+                # B1: 'held' timeline row BEFORE the close (write_step needs the
+                # run row; record_intervention never raises).
+                record_intervention(
+                    tenant_id,
+                    run_id,
+                    workflow_kind="webhook_inbound",
+                    step_name="dispatch_brain",
+                    paused_ms=paused_ms,
+                    action="held",
+                )
+                close_webhook_run_paused(tenant_id, run_id)
+                return {
+                    "run_id": run_id,
+                    "tenant_id": tenant_id,
+                    "routed": "run_control_max_hold",
+                    "handler": None,
+                }
+            if paused_ms:
+                # B1: a released hold lands on the run's timeline with the mig-131
+                # paused_ms column set (the dead-columns fix).
+                record_intervention(
+                    tenant_id,
+                    run_id,
+                    workflow_kind="webhook_inbound",
+                    step_name="dispatch_brain",
+                    paused_ms=paused_ms,
+                    action="released",
+                )
             # VT-193: brain wired into supervisor graph via dispatch_brain.
             # Replaces the VT-3.4 placeholder (record_brain_pending + 'escalated'
             # final status) that the 2026-05-27 E2E surfaced. Imported lazily
