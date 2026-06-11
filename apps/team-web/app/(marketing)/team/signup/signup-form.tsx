@@ -9,6 +9,10 @@
  * page structures a phone field that the later OTP step hooks before submit.
  *
  * CL-390: NO PII (name / phone / city) in any analytics/telemetry event.
+ *
+ * VT-378: the form shipped markup-only like the landing did (VT-372 twin — no stylesheet ever
+ * existed). Styled with Tailwind utilities (the repo's system): light theme, emerald accent,
+ * mobile-first; copy/flow/validation untouched. Semantic classes kept alongside.
  */
 'use client'
 
@@ -178,44 +182,78 @@ export function SignupForm() {
 
   if (done) {
     return (
-      <main className="signup-success">
-        <p>{t.success}</p>
+      <main className="signup-success flex min-h-screen flex-col items-center justify-center bg-gray-50 px-5 text-center text-gray-900 antialiased">
+        <div className="w-full max-w-md rounded-2xl border border-gray-200 bg-white p-8 shadow-sm">
+          <span
+            aria-hidden
+            className="mx-auto flex h-12 w-12 items-center justify-center rounded-full bg-emerald-100 text-2xl font-bold text-emerald-700"
+          >
+            ✓
+          </span>
+          <p className="mt-4 font-medium leading-relaxed text-gray-900">{t.success}</p>
+        </div>
       </main>
     )
   }
 
+  const langBtn = (active: boolean) =>
+    active
+      ? 'rounded-full bg-emerald-600 px-4 py-1.5 font-semibold text-white'
+      : 'rounded-full border border-gray-300 px-4 py-1.5 text-gray-600 transition hover:bg-gray-100'
+  const fieldLabel = 'flex flex-col gap-1.5 text-sm font-medium text-gray-700'
+  const fieldInput =
+    'rounded-lg border border-gray-300 bg-white px-3 py-2.5 text-base font-normal text-gray-900 outline-none transition focus:border-emerald-600 focus:ring-2 focus:ring-emerald-600/20'
+
   return (
-    <main className="signup">
-      <div className="signup-lang">
-        <button type="button" onClick={() => setLang('en')} aria-pressed={lang === 'en'}>
-          English
-        </button>
-        <button type="button" onClick={() => setLang('hi')} aria-pressed={lang === 'hi'}>
-          हिंदी
-        </button>
-      </div>
-      <h1>{t.title}</h1>
-      {step === 'details' ? (
-      <form onSubmit={onSendCode}>
-        <label>
+    <main className="signup min-h-screen bg-gray-50 px-5 py-10 text-gray-900 antialiased sm:py-16">
+      <div className="mx-auto w-full max-w-md">
+        <div className="signup-lang flex justify-center gap-2 text-sm">
+          <button
+            type="button"
+            onClick={() => setLang('en')}
+            aria-pressed={lang === 'en'}
+            className={langBtn(lang === 'en')}
+          >
+            English
+          </button>
+          <button
+            type="button"
+            onClick={() => setLang('hi')}
+            aria-pressed={lang === 'hi'}
+            className={langBtn(lang === 'hi')}
+          >
+            हिंदी
+          </button>
+        </div>
+        <h1 className="mt-6 text-center text-2xl font-bold tracking-tight text-gray-900 sm:text-3xl">
+          {t.title}
+        </h1>
+        {step === 'details' ? (
+        <form
+          onSubmit={onSendCode}
+          className="mt-8 flex flex-col gap-5 rounded-2xl border border-gray-200 bg-white p-6 shadow-sm sm:p-8"
+        >
+        <label className={fieldLabel}>
           {t.business_name}
           <input
             value={form.business_name}
             onChange={(e) => update('business_name', e.target.value)}
             maxLength={200}
             required
+            className={fieldInput}
           />
         </label>
-        <label>
+        <label className={fieldLabel}>
           {t.owner_name}
           <input
             value={form.owner_name}
             onChange={(e) => update('owner_name', e.target.value)}
             maxLength={120}
             required
+            className={fieldInput}
           />
         </label>
-        <label>
+        <label className={fieldLabel}>
           {t.whatsapp_number}
           <input
             value={form.whatsapp_number}
@@ -223,23 +261,26 @@ export function SignupForm() {
             placeholder="+919876543210"
             inputMode="tel"
             required
+            className={fieldInput}
           />
         </label>
-        <label>
+        <label className={fieldLabel}>
           {t.city}
           <input
             value={form.city}
             onChange={(e) => update('city', e.target.value)}
             maxLength={120}
             required
+            className={fieldInput}
           />
         </label>
-        <label>
+        <label className={fieldLabel}>
           {t.business_type}
           <select
             value={form.business_type}
             onChange={(e) => update('business_type', e.target.value)}
             required
+            className={fieldInput}
           >
             <option value="" disabled>
               —
@@ -251,36 +292,46 @@ export function SignupForm() {
             ))}
           </select>
         </label>
-        <label className="signup-consent">
+        <label className="signup-consent flex items-start gap-2.5 text-sm font-normal leading-relaxed text-gray-600">
           <input
             type="checkbox"
             checked={form.consent_dpdpa}
             onChange={(e) => update('consent_dpdpa', e.target.checked)}
+            className="mt-0.5 h-4 w-4 shrink-0 accent-emerald-600"
           />
           {t.consent_dpdpa}
           {/* NEEDS-FAZAL: link to the DPDP disclosure copy (dpdpa_v1_2026-06). */}
         </label>
-        <label className="signup-consent">
+        <label className="signup-consent flex items-start gap-2.5 text-sm font-normal leading-relaxed text-gray-600">
           <input
             type="checkbox"
             checked={form.consent_residency}
             onChange={(e) => update('consent_residency', e.target.checked)}
+            className="mt-0.5 h-4 w-4 shrink-0 accent-emerald-600"
           />
           {t.consent_residency}
           {/* NEEDS-FAZAL: link to the residency disclosure copy (residency_v1_2026-06). */}
         </label>
-        {error && <p className="signup-error" role="alert">{error}</p>}
+        {error && (
+          <p className="signup-error rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700" role="alert">
+            {error}
+          </p>
+        )}
         <button
           type="submit"
           disabled={submitting || !form.consent_dpdpa || !form.consent_residency}
+          className="rounded-xl bg-emerald-600 px-5 py-3 font-semibold text-white shadow-sm transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50"
         >
           {t.send_code}
         </button>
       </form>
       ) : (
-      <form onSubmit={onVerifyAndCreate}>
-        <p>{t.code_sent}</p>
-        <label>
+      <form
+        onSubmit={onVerifyAndCreate}
+        className="mt-8 flex flex-col gap-5 rounded-2xl border border-gray-200 bg-white p-6 shadow-sm sm:p-8"
+      >
+        <p className="text-sm leading-relaxed text-gray-600">{t.code_sent}</p>
+        <label className={fieldLabel}>
           {t.enter_code}
           <input
             value={otpCode}
@@ -288,10 +339,19 @@ export function SignupForm() {
             inputMode="numeric"
             autoComplete="one-time-code"
             required
+            className={`${fieldInput} text-center text-lg tracking-[0.3em]`}
           />
         </label>
-        {error && <p className="signup-error" role="alert">{error}</p>}
-        <button type="submit" disabled={submitting}>
+        {error && (
+          <p className="signup-error rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700" role="alert">
+            {error}
+          </p>
+        )}
+        <button
+          type="submit"
+          disabled={submitting}
+          className="rounded-xl bg-emerald-600 px-5 py-3 font-semibold text-white shadow-sm transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50"
+        >
           {t.verify_create}
         </button>
         <button
@@ -301,11 +361,13 @@ export function SignupForm() {
             setOtpCode('')
             setError(null)
           }}
+          className="rounded-xl border border-gray-300 px-5 py-2.5 font-medium text-gray-700 transition hover:bg-gray-50"
         >
           {t.change_number}
         </button>
       </form>
       )}
+      </div>
     </main>
   )
 }
