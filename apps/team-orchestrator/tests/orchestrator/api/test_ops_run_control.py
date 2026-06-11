@@ -630,6 +630,62 @@ def test_timeline_cross_tenant_403(substrate) -> None:
     assert exc.value.status_code == 403
 
 
+def _seed_step(
+    dsn: str, run: UUID, tenant: UUID, seq: int, step_kind: str, step_name: str
+) -> None:
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute(
+            "INSERT INTO pipeline_steps (run_id, tenant_id, step_seq, step_kind, step_name, "
+            "status) VALUES (%s, %s, %s, %s, %s, 'completed')",
+            (str(run), str(tenant), seq, step_kind, step_name),
+        )
+
+
+def test_timeline_step_tier_annotation(substrate) -> None:
+    """VT-375 Task 3: every timeline row carries a 'tier' field — pure response annotation,
+    no view/RLS change. A REGISTERED controllable seam (agent_dispatch:candidate_build) reads
+    'controllable'; an unregistered kind (a brain micro-step) and a run_control_intervention
+    companion row read 'observed' (the honest 'not controllable' label, plan §1)."""
+    dsn = substrate.dsn
+    op, tenant = _assigned(dsn)
+    # agent_dispatch run_type → workflow_kind agent_dispatch; candidate_build IS a controllable
+    # registry seam.
+    run = _seed_run(dsn, tenant, run_type="agent_dispatch", status="completed")
+    _seed_step(dsn, run, tenant, 0, "tool_call", "candidate_build")  # controllable seam
+    _seed_step(dsn, run, tenant, 1, "state_transition", "some_brain_micro_step")  # unregistered
+    # the colon-namespaced companion row — its post-colon part matches a controllable step but
+    # the row is observability ABOUT the seam, never the seam → must stay observed.
+    _seed_step(
+        dsn, run, tenant, 2, "run_control_intervention", "agent_dispatch:candidate_build"
+    )
+
+    out = rc.timeline(str(run), **_hdr(op=op))
+    by_name = {s["step_name"]: s["tier"] for s in out["steps"]}
+    assert all("tier" in s for s in out["steps"]), "every timeline row must carry a tier field"
+    assert by_name["candidate_build"] == "controllable"
+    assert by_name["some_brain_micro_step"] == "observed"
+    assert by_name["agent_dispatch:candidate_build"] == "observed", (
+        "a run_control_intervention companion row is observed, never controllable"
+    )
+
+
+def test_timeline_step_tier_unregistered_kind_observed(substrate) -> None:
+    """A run whose run_type has NO registry mapping (only legacy/known run_types map) yields
+    'observed' for every step — the registry lookup misses, so nothing is controllable."""
+    dsn = substrate.dsn
+    op, tenant = _assigned(dsn)
+    # 'duplicate_rejected' is a valid pipeline_runs status but a run_type with no RUN_TYPE_TO_KIND
+    # entry; use an unmapped run_type so the kind lookup returns None.
+    run = _seed_run(dsn, tenant, run_type="some_unmapped_run_type", status="completed")
+    _seed_step(dsn, run, tenant, 0, "tool_call", "candidate_build")
+
+    out = rc.timeline(str(run), **_hdr(op=op))
+    tiers = {s["tier"] for s in out["steps"]}
+    assert tiers == {"observed"}, (
+        f"an unregistered run_type must annotate every step observed, got {tiers}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # 7. THE BINDING registry-populates acceptance (VT-361 lesson)
 # ---------------------------------------------------------------------------
@@ -677,3 +733,212 @@ def test_override_reason_redacts_customer_name_AND_registry_populates(substrate)
     )
     assert display_name not in raw_reason  # the plaintext name is gone
     assert "9876543210" not in raw_reason  # the phone is pattern-redacted (registry-independent)
+
+
+# ---------------------------------------------------------------------------
+# 8. /programs/{tenant_id} — read-only projection (VT-375 Phase B, B1)
+# ---------------------------------------------------------------------------
+
+
+def _programs(op: str, tenant: UUID, **hdr: Any) -> dict[str, Any]:
+    return rc.programs(str(tenant), **hdr)
+
+
+def _set_trial_start(dsn: str, tenant: UUID, started_at: datetime) -> None:
+    """Set trial_started_at so the forecast leg projects a warn/expiry inside the window."""
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute(
+            "UPDATE tenants SET trial_started_at = %s, paid_conversion_at = NULL "
+            "WHERE id = %s",
+            (started_at, str(tenant)),
+        )
+
+
+def _seed_work_item(dsn: str, tenant: UUID, status: str = "dispatched") -> None:
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute(
+            "INSERT INTO agent_work_items (tenant_id, item_id, agent, status) "
+            "VALUES (%s, %s, 'sales_recovery', %s)",
+            (str(tenant), f"cust-{uuid4().hex[:8]}", status),
+        )
+
+
+def _seed_plan(
+    dsn: str,
+    tenant: UUID,
+    roadmap: list[dict[str, Any]],
+    *,
+    created_at: datetime | None = None,
+) -> None:
+    from psycopg.types.json import Jsonb
+
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute(
+            "INSERT INTO business_plan (tenant_id, version, summary_json, roadmap_json, "
+            "fact_bundle_json, generated_by, created_at) "
+            "VALUES (%s, 1, '{}', %s, '{}', 'test', %s)",
+            (str(tenant), Jsonb(roadmap), created_at or datetime.now(timezone.utc)),
+        )
+
+
+def test_programs_auth_unassigned_tenant_403(substrate) -> None:
+    """The GET inherits the Gap-6 assignment gate (tenant from the PATH): an unassigned
+    operator is 403, never a read."""
+    op = str(uuid4())
+    tenant = _new_tenant(substrate.dsn)  # no assignment
+    with pytest.raises(HTTPException) as exc:
+        _programs(op, tenant, **_hdr(op=op))
+    assert exc.value.status_code == 403
+
+
+def test_programs_auth_missing_jwt_403(substrate) -> None:
+    op, tenant = _assigned(substrate.dsn)
+    with pytest.raises(HTTPException) as exc:
+        _programs(op, tenant, **_hdr(jwt=None))
+    assert exc.value.status_code == 403
+
+
+def test_programs_auth_bad_secret_403(substrate) -> None:
+    op, tenant = _assigned(substrate.dsn)
+    with pytest.raises(HTTPException) as exc:
+        _programs(op, tenant, **_hdr(secret="wrong", jwt=_op_jwt(op)))
+    assert exc.value.status_code == 403
+
+
+def test_programs_response_shape_and_past_running(substrate) -> None:
+    """Shape pin + past/running split: a terminal run lands in ``past`` with lineage fields;
+    a 'running' run lands in ``running`` with the ``active_hold`` flag. ``degraded`` is False
+    on a healthy control read; ``holds`` is a list."""
+    dsn = substrate.dsn
+    op, tenant = _assigned(dsn)
+    terminal = _seed_run(dsn, tenant, run_type="agent_dispatch", status="completed")
+    running = _seed_run(dsn, tenant, run_type="agent_dispatch", status="running")
+
+    out = _programs(op, tenant, **_hdr(op=op))
+    assert set(out) == {"tenant_id", "past", "running", "upcoming_7d", "holds", "degraded"}
+    assert out["tenant_id"] == str(tenant)
+    assert out["degraded"] is False
+    assert isinstance(out["holds"], list)
+
+    past_ids = {r["run_id"] for r in out["past"]}
+    running_ids = {r["run_id"] for r in out["running"]}
+    assert str(terminal) in past_ids and str(terminal) not in running_ids
+    assert str(running) in running_ids and str(running) not in past_ids
+    # past row carries the pinned structural fields.
+    past_row = next(r for r in out["past"] if r["run_id"] == str(terminal))
+    assert set(past_row) == {
+        "run_id", "run_type", "status", "started_at", "ended_at",
+        "rerun_of_run_id", "rerun_from_step", "step_count",
+    }
+    # running row additionally carries active_hold; no hold seeded → False.
+    run_row = next(r for r in out["running"] if r["run_id"] == str(running))
+    assert run_row["active_hold"] is False
+
+
+def test_programs_running_active_hold_true_when_kind_paused(substrate) -> None:
+    """active_hold reflects a live hold: pausing the run's workflow_kind flips active_hold,
+    and the hold appears in ``holds`` (workflow_kind + set_at, NEVER reason)."""
+    dsn = substrate.dsn
+    op, tenant = _assigned(dsn)
+    running = _seed_run(dsn, tenant, run_type="agent_dispatch", status="running")
+    _pause(op, tenant, **_hdr(op=op))  # pauses agent_dispatch for this tenant
+
+    out = _programs(op, tenant, **_hdr(op=op))
+    run_row = next(r for r in out["running"] if r["run_id"] == str(running))
+    assert run_row["active_hold"] is True
+    assert len(out["holds"]) == 1
+    hold = out["holds"][0]
+    assert set(hold) == {"workflow_kind", "set_at"}  # NO reason, no operator id
+    assert hold["workflow_kind"] == "agent_dispatch"
+
+
+def test_programs_upcoming_trial_sweep_computed(substrate) -> None:
+    """COMPUTED trial forecast: a trial started 28 days ago projects BOTH a warn (day 28,
+    now-ish) and an expiry (day 30, +2d) inside the 7d window — kind='trial_sweep',
+    source='trial.yaml forecast'. No new state written (the dates are derived)."""
+    dsn = substrate.dsn
+    op, tenant = _assigned(dsn)
+    _set_trial_start(dsn, tenant, datetime.now(timezone.utc) - timedelta(days=28))
+
+    out = _programs(op, tenant, **_hdr(op=op))
+    trial = [u for u in out["upcoming_7d"] if u["kind"] == "trial_sweep"]
+    assert trial, f"expected a trial_sweep forecast, got {out['upcoming_7d']}"
+    assert all(u["source"] == "trial.yaml forecast" for u in trial)
+    # day-30 expiry must be in-window (+2d); the day-28 warn is ~now.
+    assert any("expiry" in u["label"] for u in trial)
+
+
+def test_programs_upcoming_agent_dispatch_and_roadmap_computed(substrate) -> None:
+    """COMPUTED legs: a queued 'dispatched' work item projects kind='agent_dispatch'
+    (source='agent_work_items', label names the next sweep); a roadmap month-2 item on a
+    plan created ~26 days ago projects kind='roadmap' (window = created_at + 30d ≈ +4d, in
+    the 7d horizon; source='business_plan v1'). A month-12 item on the same plan is far out
+    of window and must NOT appear."""
+    dsn = substrate.dsn
+    op, tenant = _assigned(dsn)
+    _seed_work_item(dsn, tenant, status="dispatched")
+    # The objective is LLM free text and must NEVER reach the VTR label (PII boundary). The
+    # owning_agent is the closed enum the structural label surfaces instead.
+    secret_objective = "Launch the loyalty push for Rajesh Kumar"
+    _seed_plan(
+        dsn, tenant,
+        roadmap=[
+            {"month": 2, "objective": secret_objective, "owning_agent": "sales_recovery"},
+            {"month": 12, "objective": "Out-of-window milestone", "owning_agent": "reputation"},
+        ],
+        created_at=datetime.now(timezone.utc) - timedelta(days=26),
+    )
+
+    out = _programs(op, tenant, **_hdr(op=op))
+    kinds = {u["kind"] for u in out["upcoming_7d"]}
+    assert "agent_dispatch" in kinds, f"queued work item not forecast: {out['upcoming_7d']}"
+    assert "roadmap" in kinds, f"month-2 roadmap window not forecast: {out['upcoming_7d']}"
+    agent = next(u for u in out["upcoming_7d"] if u["kind"] == "agent_dispatch")
+    assert agent["source"] == "agent_work_items" and "sweep" in agent["label"]
+    roadmaps = [u for u in out["upcoming_7d"] if u["kind"] == "roadmap"]
+    assert len(roadmaps) == 1, f"only the in-window month-2 item should forecast: {roadmaps}"
+    assert roadmaps[0]["source"] == "business_plan v1"
+    # STRUCTURAL label: month number + owning_agent enum, and ZERO objective free text.
+    label = roadmaps[0]["label"]
+    assert "month 2" in label
+    assert "sales_recovery" in label, f"owning_agent enum must be on the label: {label!r}"
+    assert secret_objective not in label  # the LLM free text never crosses onto the label
+    assert "Rajesh" not in label and "Kumar" not in label  # nor any token of it
+    assert "loyalty" not in label and "Launch" not in label
+
+
+def test_programs_terminal_work_item_not_forecast(substrate) -> None:
+    """A TERMINAL ('sent') work item is NOT a queued dispatch — it must not appear in the
+    forecast (only non-terminal pre-run 'dispatched' rows do)."""
+    dsn = substrate.dsn
+    op, tenant = _assigned(dsn)
+    _seed_work_item(dsn, tenant, status="sent")  # terminal
+
+    out = _programs(op, tenant, **_hdr(op=op))
+    assert not [u for u in out["upcoming_7d"] if u["kind"] == "agent_dispatch"], (
+        "a terminal work item must not be forecast as a queued dispatch"
+    )
+
+
+def test_programs_degraded_true_when_control_read_raises(substrate, monkeypatch) -> None:
+    """degraded=true (fail-OPEN): when the workflow_controls (holds) read raises, the
+    projection still returns past/running/upcoming, ``holds`` is empty, and ``degraded`` is
+    True — the panel then shows the pause-state-unverifiable copy. The pipeline_runs read is
+    unaffected (it is on the service pool, not the vtr view)."""
+    dsn = substrate.dsn
+    op, tenant = _assigned(dsn)
+    _seed_run(dsn, tenant, run_type="agent_dispatch", status="completed")
+
+    from contextlib import contextmanager
+
+    @contextmanager
+    def _boom_vtr(*_a: Any, **_k: Any):  # type: ignore[no-untyped-def]
+        raise RuntimeError("synthetic vtr-view outage")
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(rc, "vtr_connection", _boom_vtr)
+
+    out = _programs(op, tenant, **_hdr(op=op))
+    assert out["degraded"] is True
+    assert out["holds"] == []
+    assert len(out["past"]) >= 1, "the run projection must still return when controls degrade"
