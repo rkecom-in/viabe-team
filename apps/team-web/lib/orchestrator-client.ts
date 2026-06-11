@@ -811,6 +811,13 @@ export interface VtrTimelineStep {
    * imply a step is controllable when the server didn't say so).
    */
   tier: 'controllable' | 'observed' | null
+  /**
+   * VT-376 (B1 /timeline annotation): the KEY NAMES the override form may pin for this step —
+   * the registry StepEntry.allowed_keys (config/ID-class only, I7-safe to show). Empty array for
+   * observed/uncontrollable steps. NEVER the VALUES (those are de-identified by construction); the
+   * override dialog renders one field per name and warns the operator is editing blind.
+   */
+  allowed_keys?: string[]
   started_at: string | null
   ended_at: string | null
   duration_ms: number | null
@@ -828,6 +835,25 @@ export interface VtrRunTimelineResult {
   steps: VtrTimelineStep[]
   /** active vtr_workflow_controls holds riding along so the panel never shows a false "not paused". */
   activeControls: VtrHold[]
+  /**
+   * VT-376 (B1 run-level annotation): true iff this run's workflow_kind is in RERUNNABLE — drives
+   * whether the rerun button shows at all. Absent ⇒ false (fail-safe: never offer rerun the server
+   * didn't bless).
+   */
+  rerunnable: boolean
+  /**
+   * VT-376: per-kind WHY-copy when the run is NOT rerunnable
+   * ('message-dedup semantics' | 'duplicate-nudge risk' | 'kg-duplication'). null when rerunnable.
+   * Rendered verbatim next to the (absent) button so the operator sees the reason, not silence.
+   */
+  forbiddenReason: string | null
+  /**
+   * VT-376 PRE-FLIGHT (a3): true iff the tenant has an OPEN owner approval right now — a rerun
+   * would refuse (server 409/422 is the authority). The confirm dialog re-fetches this immediately
+   * pre-POST and, when true, warns + disables submit. Absent ⇒ false (the server gate still
+   * decides; this is UI sugar). NEVER the approval's contents — a boolean only.
+   */
+  openApproval: boolean
   reason: string
 }
 
@@ -842,14 +868,254 @@ export async function vtrRunTimeline(
 ): Promise<VtrRunTimelineResult> {
   const r = await vtrRcGet(`timeline/${runId}`, operatorId)
   if (r.status !== 200) {
-    return { ok: false, runId: null, tenantId: null, steps: [], activeControls: [], reason: r.reason }
+    return {
+      ok: false,
+      runId: null,
+      tenantId: null,
+      steps: [],
+      activeControls: [],
+      rerunnable: false,
+      forbiddenReason: null,
+      openApproval: false,
+      reason: r.reason,
+    }
   }
+  // VT-376 run-level annotations (B1) — all fail-safe-defaulted: a server that omits them is
+  // treated as "not rerunnable / no open-approval signal", never as "rerun is fine".
   return {
     ok: true,
     runId: (r.body.run_id as string | undefined) ?? null,
     tenantId: (r.body.tenant_id as string | undefined) ?? null,
     steps: (r.body.steps as VtrTimelineStep[] | undefined) ?? [],
     activeControls: (r.body.active_controls as VtrHold[] | undefined) ?? [],
+    rerunnable: Boolean(r.body.rerunnable),
+    forbiddenReason:
+      typeof r.body.forbidden_reason === 'string' ? r.body.forbidden_reason : null,
+    openApproval: Boolean(r.body.open_approval),
     reason: 'ok',
+  }
+}
+
+
+// ---------------------------------------------------------------------------
+// VT-376 (Phase C) — VTR run-control MUTATION surface (pause/release/override/
+// cancel-override/rerun). POST on the Gap-6 vtrCall idiom (X-Internal-Secret +
+// SHORT-LIVED X-Operator-Jwt) — the SAME endpoints the orchestrator built in
+// Phase A; the panel invents NO new mutation paths. Every fn maps the pinned
+// status codes (401/403/404/409/422/503) to a TYPED reason; the orchestrator
+// re-derives tenant + re-checks the assignment gate + audits BEFORE the mutation
+// (team-web auth is fail-open at the enforcement leg, server is authoritative).
+//
+// CL-390: vtrCall already logs path + status ONLY — these fns NEVER log the
+// reason text, pins, override ids, or any response body. NO tenant_id crosses the
+// wire for the ROW-targeted actions (cancel-override / rerun) — the orchestrator
+// derives it from the row (VT-293/294 IDOR discipline).
+// ---------------------------------------------------------------------------
+
+/** Map a vtrCall result to the run-control typed reason vocabulary (shared across the 5 fns). */
+function _rcReason(status: number, fallback: string): string {
+  switch (status) {
+    case 401:
+      return 'unauthorized'
+    case 403:
+      return 'forbidden'
+    case 404:
+      return 'not_found'
+    case 409:
+      return 'conflict'
+    case 422:
+      return 'unprocessable'
+    case 503:
+      return 'registry_unavailable'
+    default:
+      return fallback
+  }
+}
+
+export interface RcPauseResult {
+  ok: boolean
+  controlId: string | null
+  /** ok | unauthorized | forbidden | conflict (already paused) | http_<n> | timeout | error */
+  reason: string
+}
+
+/**
+ * VT-376: set the (tenant, workflow_kind) hold. 409 = already paused. The server F9 read-back
+ * means a 200 here is a hold the executor can actually see (a pause it can't see is a 500, not
+ * a false success). ``reason`` free text is redacted at write — the UI notes that.
+ */
+export async function vtrRcPause(
+  operatorId: string,
+  tenantId: string,
+  workflowKind: string,
+  reason = '',
+): Promise<RcPauseResult> {
+  const r = await vtrCall('run-control/pause', operatorId, {
+    tenant_id: tenantId,
+    workflow_kind: workflowKind,
+    reason,
+  })
+  if (r.status !== 200) {
+    return { ok: false, controlId: null, reason: _rcReason(r.status, r.reason) }
+  }
+  return { ok: true, controlId: (r.body.control_id as string | undefined) ?? null, reason: 'ok' }
+}
+
+export interface RcReleaseResult {
+  ok: boolean
+  controlId: string | null
+  /** ok | unauthorized | forbidden | not_found (no active pause) | http_<n> | timeout | error */
+  reason: string
+}
+
+/** VT-376: release the active (tenant, workflow_kind) hold. 404 = no active pause. */
+export async function vtrRcRelease(
+  operatorId: string,
+  tenantId: string,
+  workflowKind: string,
+): Promise<RcReleaseResult> {
+  const r = await vtrCall('run-control/release', operatorId, {
+    tenant_id: tenantId,
+    workflow_kind: workflowKind,
+  })
+  if (r.status !== 200) {
+    return { ok: false, controlId: null, reason: _rcReason(r.status, r.reason) }
+  }
+  return { ok: true, controlId: (r.body.control_id as string | undefined) ?? null, reason: 'ok' }
+}
+
+export interface RcOverrideResult {
+  ok: boolean
+  overrideId: string | null
+  expiresAt: string | null
+  /**
+   * ok | unauthorized | forbidden | not_found | unprocessable (422 — bad keys / non-controllable
+   * step / pause-only boundary / gate module / next-run-needs-expiry) | registry_unavailable (503)
+   * | http_<n> | timeout | error
+   */
+  reason: string
+  /** Scrubbed 422/4xx detail strings — render-only, NEVER log (CL-390). */
+  detail: string[]
+}
+
+/**
+ * VT-376: pre-register a one-shot step pin. ``workflowId`` set = row-targeted (tenant derived
+ * from the run); NULL = next-run, tenant-scoped, ``expiresAt`` REQUIRED (UI defaults 7d).
+ * The server 422 is the authority on allowed-keys / pure_return / pause-only / gate-module /
+ * next-run-expiry — the form only renders the step's allowed_keys (key NAMES; values blind).
+ */
+export async function vtrRcOverride(
+  operatorId: string,
+  args: {
+    tenantId: string
+    workflowKind: string
+    stepName: string
+    workflowId?: string | null
+    pinnedInput?: Record<string, unknown> | null
+    pinnedOutput?: Record<string, unknown> | null
+    reason?: string
+    expiresAt?: string | null
+  },
+): Promise<RcOverrideResult> {
+  const r = await vtrCall('run-control/override', operatorId, {
+    tenant_id: args.tenantId,
+    workflow_kind: args.workflowKind,
+    step_name: args.stepName,
+    workflow_id: args.workflowId ?? null,
+    pinned_input: args.pinnedInput ?? null,
+    pinned_output: args.pinnedOutput ?? null,
+    reason: args.reason ?? '',
+    expires_at: args.expiresAt ?? null,
+  })
+  if (r.status !== 200) {
+    return {
+      ok: false,
+      overrideId: null,
+      expiresAt: null,
+      reason: _rcReason(r.status, r.reason),
+      detail: _detailStrings(r.body),
+    }
+  }
+  return {
+    ok: true,
+    overrideId: (r.body.override_id as string | undefined) ?? null,
+    expiresAt: (r.body.expires_at as string | undefined) ?? null,
+    reason: 'ok',
+    detail: [],
+  }
+}
+
+export interface RcCancelOverrideResult {
+  ok: boolean
+  /** ok | unauthorized | forbidden | not_found | conflict (consumed/cancelled) | http_<n> | … */
+  reason: string
+}
+
+/**
+ * VT-376: cancel ONE unconsumed override. NO tenant_id crosses the wire — the orchestrator
+ * derives it from the override row (VT-293/294). 409 = already consumed/cancelled (or lost the
+ * race with a consuming run).
+ */
+export async function vtrRcCancelOverride(
+  operatorId: string,
+  overrideId: string,
+): Promise<RcCancelOverrideResult> {
+  const r = await vtrCall('run-control/cancel-override', operatorId, { override_id: overrideId })
+  if (r.status !== 200) return { ok: false, reason: _rcReason(r.status, r.reason) }
+  return { ok: true, reason: 'ok' }
+}
+
+export interface RcRerunResult {
+  ok: boolean
+  newRunId: string | null
+  /**
+   * The C1/Option-A close outcome — 'completed' | 'escalated_overlap'. The server returns 200
+   * for BOTH (the rerun DID run; an overlap is disclosed, never rolled back). null on any non-200.
+   */
+  outcome: 'completed' | 'escalated_overlap' | null
+  /**
+   * ok | unauthorized | forbidden | not_found | conflict (paused) | unprocessable (422 — kind not
+   * rerunnable / open approval / unknown step / non-object pin) | http_<n> | timeout | error
+   */
+  reason: string
+  /** Scrubbed refusal detail — render-only, NEVER log (CL-390). */
+  detail: string[]
+}
+
+/**
+ * VT-376: app-level re-dispatch from a step (re-dispatch, NOT time-travel). NO tenant_id crosses
+ * the wire — derived from the source run (VT-293/294). Outputs RE-ENTER owner approval (I2). An
+ * owner approval that armed mid-flight closes the run 'escalated' with outcome
+ * 'escalated_overlap' (still HTTP 200 — the panel surfaces the C1-A disclosure). The double-click
+ * hazard is serialized server-side by the rerun-slot advisory lock (B1); the second concurrent
+ * POST refuses cleanly (no two lineage rows for one source).
+ */
+export async function vtrRcRerun(
+  operatorId: string,
+  sourceRunId: string,
+  fromStep: string,
+  overrides: Record<string, unknown>[] = [],
+): Promise<RcRerunResult> {
+  const r = await vtrCall('run-control/rerun', operatorId, {
+    source_run_id: sourceRunId,
+    from_step: fromStep,
+    overrides,
+  })
+  if (r.status !== 200) {
+    return {
+      ok: false,
+      newRunId: null,
+      outcome: null,
+      reason: _rcReason(r.status, r.reason),
+      detail: _detailStrings(r.body),
+    }
+  }
+  const outcome = r.body.outcome === 'escalated_overlap' ? 'escalated_overlap' : 'completed'
+  return {
+    ok: true,
+    newRunId: (r.body.new_run_id as string | undefined) ?? null,
+    outcome,
+    reason: 'ok',
+    detail: [],
   }
 }

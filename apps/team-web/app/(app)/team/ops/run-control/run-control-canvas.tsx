@@ -34,6 +34,38 @@ import type {
   VtrUpcomingItem,
 } from '@/lib/orchestrator-client'
 
+import {
+  OverrideControl,
+  PauseReleaseControls,
+  RerunControl,
+} from './run-control-controls'
+
+// The workflow kinds an operator can pause/release from the tenant tile (the migration-131
+// workflow_controls CHECK list — registry.WORKFLOW_KINDS). Pinned here so the pause tiles render
+// even when no hold is active for a kind (you can pause a kind that isn't currently held).
+const PAUSEABLE_KINDS = [
+  'webhook_inbound',
+  'agent_dispatch',
+  'auto_discovery',
+  'plan_generate',
+  'plan_deliver',
+  'trial_sweep',
+  'ingestion',
+  'campaign_send',
+] as const
+
+/** run_type → workflow_kind, mirroring the orchestrator's RUN_TYPE_TO_KIND for override scoping. */
+const RUN_TYPE_TO_KIND: Record<string, string> = {
+  webhook_inbound: 'webhook_inbound',
+  agent_dispatch: 'agent_dispatch',
+  auto_discovery: 'auto_discovery',
+  plan_generate: 'plan_generate',
+  plan_deliver: 'plan_deliver',
+  trial_sweep: 'trial_sweep',
+  ingestion: 'ingestion',
+  campaign_send: 'campaign_send',
+}
+
 export interface TenantCanvasData {
   tenantId: string
   tenantName: string | null
@@ -88,7 +120,13 @@ function StatusPill({ status }: { status: string | null | undefined }) {
 }
 
 /** One run's step-timeline table — keys-only envelopes, observed-tier badge, lineage note. */
-function StepTimeline({ timeline }: { timeline: VtrRunTimelineResult | undefined }) {
+function StepTimeline({
+  timeline,
+  run,
+}: {
+  timeline: VtrRunTimelineResult | undefined
+  run: VtrProgramRun
+}) {
   if (!timeline) {
     return <p className="text-xs text-gray-400 px-3 py-2">Timeline not loaded.</p>
   }
@@ -101,6 +139,11 @@ function StepTimeline({ timeline }: { timeline: VtrRunTimelineResult | undefined
   }
   const steps = timeline.steps.filter((s) => s.step_seq != null)
   const reruns = timeline.steps.find((s) => s.rerun_of_run_id)
+  const workflowKind = RUN_TYPE_TO_KIND[run.run_type ?? ''] ?? ''
+  // The re-dispatch entry point = the first CONTROLLABLE step's name (the rerun arm re-enters at a
+  // registered seam). Fall back to the first step's name if none is tagged controllable.
+  const firstControllable = steps.find((s) => s.tier === 'controllable' && s.step_name)
+  const fromStep = firstControllable?.step_name ?? steps[0]?.step_name ?? null
   return (
     <div className="space-y-2">
       {reruns?.rerun_of_run_id && (
@@ -116,22 +159,45 @@ function StepTimeline({ timeline }: { timeline: VtrRunTimelineResult | undefined
           </span>
         </p>
       )}
+
+      {/* VT-376 rerun control — only on rerunnable runs; non-rerunnable show the why-copy. The
+          fromStep is resolved to the first controllable seam; with none, no entry point exists. */}
+      {fromStep && (
+        <div data-rc-run-rerun className="flex items-center gap-2">
+          <span className="text-[11px] uppercase tracking-wide text-gray-400">Re-dispatch:</span>
+          <RerunControl
+            runId={run.run_id}
+            fromStep={fromStep}
+            rerunnable={timeline.rerunnable}
+            forbiddenReason={timeline.forbiddenReason}
+          />
+        </div>
+      )}
+
       {steps.length === 0 ? (
         <p className="text-xs text-gray-400 px-1 py-1">No steps recorded for this run.</p>
       ) : (
         <table className="min-w-full divide-y divide-gray-200 text-xs">
           <thead className="bg-gray-50">
             <tr>
-              {['Seq', 'Step', 'Status', 'Duration', 'Override', 'Paused', 'Envelope keys'].map((h) => (
-                <th key={h} className="px-2 py-1 text-left font-medium uppercase text-gray-500">
-                  {h}
-                </th>
-              ))}
+              {['Seq', 'Step', 'Status', 'Duration', 'Override', 'Paused', 'Envelope keys', 'Control'].map(
+                (h) => (
+                  <th key={h} className="px-2 py-1 text-left font-medium uppercase text-gray-500">
+                    {h}
+                  </th>
+                ),
+              )}
             </tr>
           </thead>
           <tbody className="divide-y divide-gray-100">
             {steps.map((s) => (
-              <TimelineRow key={s.step_id ?? `${s.step_seq}`} step={s} />
+              <TimelineRow
+                key={s.step_id ?? `${s.step_seq}`}
+                step={s}
+                tenantId={timeline.tenantId}
+                workflowKind={workflowKind}
+                runId={run.run_id}
+              />
             ))}
           </tbody>
         </table>
@@ -140,7 +206,17 @@ function StepTimeline({ timeline }: { timeline: VtrRunTimelineResult | undefined
   )
 }
 
-function TimelineRow({ step }: { step: VtrTimelineStep }) {
+function TimelineRow({
+  step,
+  tenantId,
+  workflowKind,
+  runId,
+}: {
+  step: VtrTimelineStep
+  tenantId: string | null
+  workflowKind: string
+  runId: string
+}) {
   // Control axis is orchestrator-authoritative: badge when the step is NOT controllable.
   // Absent/unknown tier ⇒ treat as observed (fail-safe — never imply controllable on silence).
   const observed = step.tier !== 'controllable'
@@ -173,6 +249,20 @@ function TimelineRow({ step }: { step: VtrTimelineStep }) {
         <span className="ml-1 block text-[10px] text-gray-400" title={ENVELOPE_KEYS_COPY}>
           {ENVELOPE_KEYS_COPY}
         </span>
+      </td>
+      {/* VT-376: override control ONLY on controllable steps. Observed steps render NO control
+          (the OverrideControl returns null), keeping the honesty contract — observed = no buttons. */}
+      <td className="px-2 py-1">
+        {observed || !tenantId ? (
+          <span className="text-[10px] text-gray-300">—</span>
+        ) : (
+          <OverrideControl
+            step={step}
+            workflowKind={workflowKind}
+            tenantId={tenantId}
+            workflowId={runId}
+          />
+        )}
       </td>
     </tr>
   )
@@ -229,9 +319,38 @@ function ProgramRunTile({
       </button>
       {open && (
         <div className="border-t border-gray-100 px-3 py-2">
-          <StepTimeline timeline={timeline} />
+          <StepTimeline timeline={timeline} run={run} />
         </div>
       )}
+    </div>
+  )
+}
+
+/** Pause/release tiles for every pauseable kind for one tenant. A kind currently held shows
+ *  Release; otherwise Pause. Held state is read from the programs holds projection. */
+function PauseTiles({ tenantId, holds }: { tenantId: string; holds: VtrHold[] }) {
+  const heldKinds = new Set(holds.map((h) => h.workflow_kind))
+  return (
+    <div data-rc-pause-tiles className="space-y-1.5">
+      <h4 className="text-xs font-semibold uppercase tracking-wide text-gray-500">
+        Pause / release (per workflow kind)
+      </h4>
+      <div className="flex flex-wrap gap-2">
+        {PAUSEABLE_KINDS.map((kind) => (
+          <span
+            key={kind}
+            data-rc-pause-tile={kind}
+            className="inline-flex items-center gap-2 rounded border border-gray-200 bg-white px-2 py-1 text-xs"
+          >
+            <span className="font-mono text-gray-600">{kind}</span>
+            <PauseReleaseControls
+              tenantId={tenantId}
+              workflowKind={kind}
+              paused={heldKinds.has(kind)}
+            />
+          </span>
+        ))}
+      </div>
     </div>
   )
 }
@@ -334,6 +453,9 @@ function TenantTile({ data }: { data: TenantCanvasData }) {
           )}
 
           <HoldsList holds={programs.holds} />
+
+          {/* VT-376 pause/release controls — tenant × kind tiles. */}
+          <PauseTiles tenantId={data.tenantId} holds={programs.holds} />
 
           <ProgramGroup title="Running">
             {programs.running.length === 0 ? (

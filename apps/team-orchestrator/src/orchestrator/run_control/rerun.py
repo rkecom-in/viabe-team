@@ -46,6 +46,8 @@ Top-level imports are stdlib + the dep-less registry only; everything heavy
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -54,6 +56,20 @@ from uuid import UUID, uuid4
 from orchestrator.run_control.registry import KIND_RERUN_POLICY, REGISTRY, RERUNNABLE
 
 logger = logging.getLogger(__name__)
+
+# VT-376 rerun-slot advisory-lock NAMESPACE (Cowork plan ruling 20260612T015000Z:
+# hashtext collisions across features are silent, so every pg_advisory user documents a
+# distinct keyspace). The EXISTING advisory-lock users in this codebase:
+#   * observability/audit_log._CHAIN_LOCK_KEY — the fixed INT literal 8080_8080 (one
+#     global audit chain ⇒ one key; no hashtext involved).
+#   * api/razorpay_subscribe — pg_advisory_xact_lock(hashtext('subscribe:{tenant_id}'))
+#     serializing per-tenant subscription creates.
+# This lock hashes 'rerun-slot:{tenant_id}' — the prefix guarantees the INPUT string can
+# never equal a 'subscribe:' string, so collision with razorpay (or the audit chain's
+# fixed key) is only the generic 1-in-2^32 hashtext collision all three users already
+# share. A cross-feature collision degrades to brief false serialization (this lock is
+# xact-scoped and held for milliseconds), never deadlock or corruption.
+_RERUN_SLOT_NS = "rerun-slot:"
 
 # pipeline_runs.run_type → registry workflow_kind. Legacy run_types map onto
 # webhook_inbound; rerun-minted rows (and seam-opened rows) write run_type =
@@ -135,8 +151,16 @@ def rerun_from(
     / non-controllable step); kind-specific preflight failures (terminal work item,
     no grounded profile, no plan version, no connector identity).
 
-    Order: validate → 409 gate → pre-register overrides → dispatch → lineage →
+    Order: validate → [rerun-slot lock: 409 gates (open approval + in-flight rerun) →
+    arm preflight → pre-register overrides → lineage insert] → lock released → dispatch →
     post-arm overlap re-check (VT-375 C1, Cowork ruling 20260611T234500Z / Option A).
+    The VT-376 rerun-slot lock (``pg_advisory_xact_lock(hashtext('rerun-slot:{tenant}'))``)
+    serializes rerun-vs-RERUN for one tenant — the double-click hazard the panel button
+    introduces — across EXACTLY the gate-check → lineage-row-insert window. The arm's
+    dispatch/LLM work runs via the closure each arm returns, AFTER the lock context
+    exited; the live owner-approval arm path takes no lock, so a priority inversion is
+    impossible by construction (arm-vs-rerun overlap stays detect-and-escalate, the C1
+    ruling).
     The 409 gate has a TOCTOU window: an owner approval can arm AFTER the gate
     passed but DURING the arm's execution. Every arm therefore re-checks the
     tenant's open approvals (the same ``find_open_approval_for_tenant`` helper the
@@ -169,38 +193,103 @@ def rerun_from(
         raise RerunRefused(f"unknown step {from_step!r} for kind {kind!r}", code=422)
 
     tenant_id = _as_uuid(source["tenant_id"])
-    _refuse_on_open_approval(tenant_id)
     validated = _validate_overrides(kind, from_step, overrides or [])
 
-    if kind == "agent_dispatch":
-        return _rerun_agent_dispatch(
-            tenant_id, _as_uuid(source_run_id), from_step, validated, requested_by
-        )
-    if kind == "auto_discovery":
-        return _rerun_auto_discovery(
-            tenant_id, _as_uuid(source_run_id), from_step, validated, requested_by
-        )
-    if kind == "plan_generate":
-        return _rerun_plan_generate(
-            tenant_id, _as_uuid(source_run_id), from_step, validated, requested_by
-        )
-    if kind == "plan_deliver":
-        return _rerun_plan_deliver(
-            tenant_id, _as_uuid(source_run_id), from_step, validated, requested_by
-        )
-    if kind == "ingestion":
-        return _rerun_ingestion(
-            tenant_id,
-            _as_uuid(source_run_id),
-            from_step,
-            validated,
-            requested_by,
-            source.get("trigger_payload"),
-        )
-    raise RerunRefused(f"no re-dispatch arm for kind {kind!r}", code=422)  # unreachable
+    # VT-376: gate-check → lineage insert under the per-tenant rerun-slot lock; the
+    # returned dispatch closure runs AFTER the lock released (never held across
+    # dispatch/LLM work — see the docstring + _rerun_slot_lock).
+    with _rerun_slot_lock(tenant_id):
+        _refuse_on_open_approval(tenant_id)
+        _refuse_on_inflight_rerun(tenant_id, _as_uuid(source_run_id))
+        if kind == "agent_dispatch":
+            dispatch = _rerun_agent_dispatch(
+                tenant_id, _as_uuid(source_run_id), from_step, validated, requested_by
+            )
+        elif kind == "auto_discovery":
+            dispatch = _rerun_auto_discovery(
+                tenant_id, _as_uuid(source_run_id), from_step, validated, requested_by
+            )
+        elif kind == "plan_generate":
+            dispatch = _rerun_plan_generate(
+                tenant_id, _as_uuid(source_run_id), from_step, validated, requested_by
+            )
+        elif kind == "plan_deliver":
+            dispatch = _rerun_plan_deliver(
+                tenant_id, _as_uuid(source_run_id), from_step, validated, requested_by
+            )
+        elif kind == "ingestion":
+            dispatch = _rerun_ingestion(
+                tenant_id,
+                _as_uuid(source_run_id),
+                from_step,
+                validated,
+                requested_by,
+                source.get("trigger_payload"),
+            )
+        else:  # unreachable — RERUNNABLE pinned the kinds above
+            raise RerunRefused(f"no re-dispatch arm for kind {kind!r}", code=422)
+    return dispatch()
 
 
 # --- refusal gates ------------------------------------------------------------------
+
+
+@contextmanager
+def _rerun_slot_lock(tenant_id: UUID) -> Iterator[None]:
+    """VT-376 rerun-slot lock — serializes rerun-vs-RERUN for ONE tenant (the panel
+    button's double-click hazard; Cowork plan ruling 20260612T015000Z, arm a).
+
+    Held across EXACTLY the gate-check → lineage-row-insert window (milliseconds of DB
+    reads + at most a handful of inserts): the helpers inside the block run on their own
+    connections, and every one of their writes commits before this context exits, so the
+    next lock holder reads the winner's committed state. ``rerun_from`` invokes the arm's
+    dispatch closure AFTER this context exits — the lock is never held across DBOS
+    dispatch / LLM / delivery work, and the live ``request_owner_approval`` arm path takes
+    no lock at all (inversion impossible by construction; arm-vs-rerun stays
+    detect-and-escalate per the C1 ruling).
+
+    ``pg_advisory_xact_lock`` is transaction-scoped: released when the wrapping
+    transaction ends (commit, error, or session death) — no unlock path to forget.
+    Keyspace: ``hashtext(_RERUN_SLOT_NS + tenant_id)`` — see the constant's comment for
+    the collision analysis against the existing advisory users (audit_log chain key,
+    razorpay 'subscribe:').
+    """
+    from orchestrator.graph import get_pool  # lazy — dep-less module import
+
+    with get_pool().connection() as conn, conn.transaction():
+        conn.execute(
+            "SELECT pg_advisory_xact_lock(hashtext(%s))",
+            (f"{_RERUN_SLOT_NS}{tenant_id}",),
+        )
+        yield
+
+
+def _refuse_on_inflight_rerun(tenant_id: UUID, source_run_id: UUID) -> None:
+    """VT-376 double-click gate — runs UNDER the rerun-slot lock. 409 while an UNFINISHED
+    rerun of the SAME source run exists (a lineage row with ``rerun_of_run_id = source``
+    still 'running'). The winner inserts its lineage row before releasing the lock, so two
+    racing clicks serialize: the loser acquires the lock, observes the winner's committed
+    'running' row, and refuses here — never two live lineage rows for one source. A
+    FINISHED prior rerun (row closed: completed / escalated / paused…) does NOT refuse —
+    deliberately re-running the same source later is legitimate.
+
+    Known edge (accepted): a rerun that died hard between its lineage insert and the
+    best-effort failed-close leaves a stuck 'running' row holding this gate for its
+    source — the same stuck-'running' shape agent_dispatch rows already have; closing the
+    row clears it."""
+    from orchestrator.db import tenant_connection
+
+    with tenant_connection(tenant_id) as conn:
+        row = conn.execute(
+            "SELECT 1 FROM pipeline_runs "
+            "WHERE tenant_id = %s AND rerun_of_run_id = %s AND status = 'running' LIMIT 1",
+            (str(tenant_id), str(source_run_id)),
+        ).fetchone()
+    if row is not None:
+        raise RerunRefused(
+            "a rerun of this source run is already in flight — wait for it to finish",
+            code=409,
+        )
 
 
 def _refuse_if_paused(tenant_id: UUID, workflow_kind: str) -> None:
@@ -287,8 +376,13 @@ def _rerun_agent_dispatch(
     from_step: str,
     validated: list[dict[str, Any]],
     requested_by: UUID | str,
-) -> RerunResult:
+) -> Callable[[], RerunResult]:
     """Re-dispatch the SAME work item — non-terminal only (CAS guard owns regression).
+
+    VT-376 two-phase shape (all arms): the function BODY is the pre-dispatch phase and
+    runs UNDER the rerun-slot lock (preflight reads + override registration + lineage
+    insert — milliseconds); it returns the dispatch closure ``rerun_from`` invokes AFTER
+    the lock released (DBOS dispatch + the C1 finalize never hold the lock).
 
     F3 fresh identity (A4): a NEW uuid4 run id is minted here, inserted with the
     lineage stamp, and passed into the dispatch workflow as ``rerun_run_id`` —
@@ -335,34 +429,37 @@ def _rerun_agent_dispatch(
     )
     _insert_lineage_row(tenant_id, new_run_id, "agent_dispatch", source_run_id, from_step)
 
-    from dbos import DBOS  # lazy — dep-less module import
+    def _dispatch() -> RerunResult:
+        from dbos import DBOS  # lazy — dep-less module import
 
-    from orchestrator.agents.coordinator import agent_dispatch_workflow
+        from orchestrator.agents.coordinator import agent_dispatch_workflow
 
-    try:
-        DBOS.start_workflow(
-            agent_dispatch_workflow,
-            str(tenant_id),
-            row["item_id"],
-            row["agent"],
+        try:
+            DBOS.start_workflow(
+                agent_dispatch_workflow,
+                str(tenant_id),
+                row["item_id"],
+                row["agent"],
+                row["id"],
+                str(new_run_id),
+            )
+        except Exception as exc:
+            _close_lineage_row_failed(tenant_id, new_run_id, exc)
+            raise
+        logger.info(
+            "run_control rerun: agent_dispatch re-dispatched tenant=%s work_item=%s from=%s "
+            "new_run=%s",
+            tenant_id,
             row["id"],
-            str(new_run_id),
+            from_step,
+            new_run_id,
         )
-    except Exception as exc:
-        _close_lineage_row_failed(tenant_id, new_run_id, exc)
-        raise
-    logger.info(
-        "run_control rerun: agent_dispatch re-dispatched tenant=%s work_item=%s from=%s "
-        "new_run=%s",
-        tenant_id,
-        row["id"],
-        from_step,
-        new_run_id,
-    )
-    # completed_meta=None: the child workflow owns this row's completion close.
-    return _finalize_outcome(
-        tenant_id, new_run_id, "agent_dispatch", source_run_id, completed_meta=None
-    )
+        # completed_meta=None: the child workflow owns this row's completion close.
+        return _finalize_outcome(
+            tenant_id, new_run_id, "agent_dispatch", source_run_id, completed_meta=None
+        )
+
+    return _dispatch
 
 
 def _rerun_auto_discovery(
@@ -371,7 +468,7 @@ def _rerun_auto_discovery(
     from_step: str,
     validated: list[dict[str, Any]],
     requested_by: UUID | str,
-) -> RerunResult:
+) -> Callable[[], RerunResult]:
     """Re-dispatch the discovery engine. Seed is rebuilt from the tenants row; raw
     city is unrecoverable BY DESIGN (VT-317 coarsens it at signup), and the sources
     tolerate a missing city. Re-emit cost ≤ the engine's own $0.018 ceiling (I8 reuse).
@@ -397,28 +494,33 @@ def _rerun_auto_discovery(
     )
     _insert_lineage_row(tenant_id, new_run_id, "auto_discovery", source_run_id, from_step)
 
-    from dbos import DBOS
+    def _dispatch() -> RerunResult:
+        from dbos import DBOS
 
-    from orchestrator.onboarding.auto_discovery import auto_discovery_workflow
+        from orchestrator.onboarding.auto_discovery import auto_discovery_workflow
 
-    try:
-        DBOS.start_workflow(auto_discovery_workflow, str(tenant_id), seed)
-    except Exception as exc:
-        _close_lineage_row_failed(tenant_id, new_run_id, exc)
-        raise
-    logger.info(
-        "run_control rerun: auto_discovery dispatched tenant=%s new_run=%s", tenant_id, new_run_id
-    )
-    return _finalize_outcome(
-        tenant_id,
-        new_run_id,
-        "auto_discovery",
-        source_run_id,
-        completed_meta={
-            "final_outcome": "dispatched_async",
-            "child_workflow": "auto_discovery_workflow",
-        },
-    )
+        try:
+            DBOS.start_workflow(auto_discovery_workflow, str(tenant_id), seed)
+        except Exception as exc:
+            _close_lineage_row_failed(tenant_id, new_run_id, exc)
+            raise
+        logger.info(
+            "run_control rerun: auto_discovery dispatched tenant=%s new_run=%s",
+            tenant_id,
+            new_run_id,
+        )
+        return _finalize_outcome(
+            tenant_id,
+            new_run_id,
+            "auto_discovery",
+            source_run_id,
+            completed_meta={
+                "final_outcome": "dispatched_async",
+                "child_workflow": "auto_discovery_workflow",
+            },
+        )
+
+    return _dispatch
 
 
 def _rerun_plan_generate(
@@ -427,7 +529,7 @@ def _rerun_plan_generate(
     from_step: str,
     validated: list[dict[str, Any]],
     requested_by: UUID | str,
-) -> RerunResult:
+) -> Callable[[], RerunResult]:
     """Force-regenerate: the explicit force path the contract names — plan_exists is
     deliberately NOT consulted (this wrapper calls the generator/store functions
     directly instead of the workflow), so a rerun mints a NEW version, audit-visible
@@ -435,7 +537,9 @@ def _rerun_plan_generate(
     rerun_from owns the run row open/close; the C1 overlap re-check runs after the
     work (the minted version STANDS on overlap — no rollback, per the ruling;
     the escalated close + alert disclose it). Because the internals bypass the
-    seam's own pause hold, an active pause refuses at entry (A6)."""
+    seam's own pause hold, an active pause refuses at entry (A6). VT-376: the
+    pause/grounding gates + lineage insert run under the rerun-slot lock; the LLM
+    generate + delivery run in the returned closure, lock-free."""
     from orchestrator.business_plan import generator, store
 
     _refuse_if_paused(tenant_id, "plan_generate")
@@ -451,44 +555,49 @@ def _rerun_plan_generate(
         tenant_id, "plan_generate", validated, workflow_id=new_run_id, requested_by=requested_by
     )
     _insert_lineage_row(tenant_id, new_run_id, "plan_generate", source_run_id, from_step)
-    try:
-        result = generator._generate_and_validate(tenant_id, grounding)
-        version = store.write_new_version(
-            tenant_id,
-            summary=result["summary"],
-            roadmap=result["roadmap"],
-            fact_bundle=grounding.bundle,
-            generated_by=generator.GENERATED_BY,
-            model_id=result["model_id"],
-        )
-    except Exception as exc:
-        # A2: best-effort close that can NEVER mask the original exception.
-        _close_lineage_row_failed(tenant_id, new_run_id, exc)
-        raise
-    try:
-        # Mirrors the workflow: delivery is best-effort; the version is already persisted.
-        from orchestrator.business_plan import delivery
 
-        delivery.deliver_plan(tenant_id, version)
-    except Exception:  # noqa: BLE001 — best-effort, same posture as the spine workflow
-        logger.exception(
-            "run_control rerun: plan delivery failed (best-effort) tenant=%s v=%s",
-            tenant_id,
+    def _dispatch() -> RerunResult:
+        try:
+            result = generator._generate_and_validate(tenant_id, grounding)
+            version = store.write_new_version(
+                tenant_id,
+                summary=result["summary"],
+                roadmap=result["roadmap"],
+                fact_bundle=grounding.bundle,
+                generated_by=generator.GENERATED_BY,
+                model_id=result["model_id"],
+            )
+        except Exception as exc:
+            # A2: best-effort close that can NEVER mask the original exception.
+            _close_lineage_row_failed(tenant_id, new_run_id, exc)
+            raise
+        try:
+            # Mirrors the workflow: delivery is best-effort; the version is already
+            # persisted.
+            from orchestrator.business_plan import delivery
+
+            delivery.deliver_plan(tenant_id, version)
+        except Exception:  # noqa: BLE001 — best-effort, same posture as the spine workflow
+            logger.exception(
+                "run_control rerun: plan delivery failed (best-effort) tenant=%s v=%s",
+                tenant_id,
+                version,
+            )
+        logger.info(
+            "run_control rerun: plan_generate minted v%s tenant=%s new_run=%s",
             version,
+            tenant_id,
+            new_run_id,
         )
-    logger.info(
-        "run_control rerun: plan_generate minted v%s tenant=%s new_run=%s",
-        version,
-        tenant_id,
-        new_run_id,
-    )
-    return _finalize_outcome(
-        tenant_id,
-        new_run_id,
-        "plan_generate",
-        source_run_id,
-        completed_meta={"final_outcome": "completed", "version": version},
-    )
+        return _finalize_outcome(
+            tenant_id,
+            new_run_id,
+            "plan_generate",
+            source_run_id,
+            completed_meta={"final_outcome": "completed", "version": version},
+        )
+
+    return _dispatch
 
 
 def _rerun_plan_deliver(
@@ -497,12 +606,13 @@ def _rerun_plan_deliver(
     from_step: str,
     validated: list[dict[str, Any]],
     requested_by: UUID | str,
-) -> RerunResult:
+) -> Callable[[], RerunResult]:
     """Re-deliver the LATEST plan version — the delivered_parts bitmap makes this
     resumable by design (only unset parts send; reuse-safe per I8). Synchronous —
     the C1 overlap re-check runs after the delivery work, before the close.
     Calls the delivery internals directly, bypassing the seam's own pause hold —
-    so an active pause refuses at entry (A6)."""
+    so an active pause refuses at entry (A6). VT-376: gates + lineage insert run
+    under the rerun-slot lock; the delivery burst runs in the closure, lock-free."""
     from orchestrator.business_plan import delivery, store
 
     _refuse_if_paused(tenant_id, "plan_deliver")
@@ -515,20 +625,24 @@ def _rerun_plan_deliver(
         tenant_id, "plan_deliver", validated, workflow_id=new_run_id, requested_by=requested_by
     )
     _insert_lineage_row(tenant_id, new_run_id, "plan_deliver", source_run_id, from_step)
-    delivery.deliver_plan(tenant_id, plan.version)  # never raises (per-part best-effort)
-    logger.info(
-        "run_control rerun: plan_deliver v%s tenant=%s new_run=%s",
-        plan.version,
-        tenant_id,
-        new_run_id,
-    )
-    return _finalize_outcome(
-        tenant_id,
-        new_run_id,
-        "plan_deliver",
-        source_run_id,
-        completed_meta={"final_outcome": "completed", "version": plan.version},
-    )
+
+    def _dispatch() -> RerunResult:
+        delivery.deliver_plan(tenant_id, plan.version)  # never raises (per-part best-effort)
+        logger.info(
+            "run_control rerun: plan_deliver v%s tenant=%s new_run=%s",
+            plan.version,
+            tenant_id,
+            new_run_id,
+        )
+        return _finalize_outcome(
+            tenant_id,
+            new_run_id,
+            "plan_deliver",
+            source_run_id,
+            completed_meta={"final_outcome": "completed", "version": plan.version},
+        )
+
+    return _dispatch
 
 
 def _rerun_ingestion(
@@ -538,7 +652,7 @@ def _rerun_ingestion(
     validated: list[dict[str, Any]],
     requested_by: UUID | str,
     trigger_payload: dict[str, Any] | None,
-) -> RerunResult:
+) -> Callable[[], RerunResult]:
     """Re-dispatch one connector pull. The connector identity must ride on the source
     run's trigger_payload (rerun-minted rows and seam-opened ingestion rows write it);
     a cursor-based pull is reuse-safe (I8).
@@ -572,32 +686,35 @@ def _rerun_ingestion(
         payload={"connector_id": str(connector_id)},
     )
 
-    from dbos import DBOS
+    def _dispatch() -> RerunResult:
+        from dbos import DBOS
 
-    from orchestrator.integrations.scheduler import ingest_one_connector
+        from orchestrator.integrations.scheduler import ingest_one_connector
 
-    try:
-        DBOS.start_workflow(ingest_one_connector, tenant_id, str(connector_id))
-    except Exception as exc:
-        _close_lineage_row_failed(tenant_id, new_run_id, exc)
-        raise
-    logger.info(
-        "run_control rerun: ingestion dispatched tenant=%s connector=%s new_run=%s",
-        tenant_id,
-        connector_id,
-        new_run_id,
-    )
-    return _finalize_outcome(
-        tenant_id,
-        new_run_id,
-        "ingestion",
-        source_run_id,
-        completed_meta={
-            "final_outcome": "dispatched_async",
-            "child_workflow": "ingest_one_connector",
-            "connector_id": str(connector_id),
-        },
-    )
+        try:
+            DBOS.start_workflow(ingest_one_connector, tenant_id, str(connector_id))
+        except Exception as exc:
+            _close_lineage_row_failed(tenant_id, new_run_id, exc)
+            raise
+        logger.info(
+            "run_control rerun: ingestion dispatched tenant=%s connector=%s new_run=%s",
+            tenant_id,
+            connector_id,
+            new_run_id,
+        )
+        return _finalize_outcome(
+            tenant_id,
+            new_run_id,
+            "ingestion",
+            source_run_id,
+            completed_meta={
+                "final_outcome": "dispatched_async",
+                "child_workflow": "ingest_one_connector",
+                "connector_id": str(connector_id),
+            },
+        )
+
+    return _dispatch
 
 
 # --- DB helpers ---------------------------------------------------------------------
