@@ -676,3 +676,180 @@ export async function vtrBatchDrafts(
   }
   return { ok: true, drafts: (r.body.drafts as VtrBatchDraft[] | undefined) ?? [], reason: 'ok' }
 }
+
+
+// ---------------------------------------------------------------------------
+// VT-375 (Phase B) — VTR run-control READ surface (programs projection + step
+// timeline). READ-ONLY: GET endpoints on the Gap-6 stack — X-Internal-Secret
+// (transport) + a SHORT-LIVED X-Operator-Jwt (attribution). GET carries NO body:
+// the orchestrator feeds the JWT claim id itself to the assignment-gate equality
+// leg (it never reads an operator_id from a GET body), so these fns mint the
+// short-lived token and send NOTHING in a body. Fail-CLOSED (empty projection /
+// empty timeline) on any non-2xx or throw — the canvas degrades to empty, never
+// to raw. CL-390: log path + status ONLY — never the projection/timeline body.
+//
+// The write leg (pause / override / rerun) is VT-376; this file ships zero
+// mutating fns for run-control in Phase B by design.
+// ---------------------------------------------------------------------------
+
+const _VTR_RC_READ_TIMEOUT_MS = 10_000
+
+/** GET on the run-control read stack — short-lived JWT, no body. status 0 on throw/timeout. */
+async function vtrRcGet(path: string, operatorId: string): Promise<VtrCall> {
+  const base = process.env.TEAM_ORCHESTRATOR_URL ?? _ORCHESTRATOR_DEFAULT
+  const secret = process.env.INTERNAL_API_SECRET ?? ''
+  try {
+    const jwt = await issueOperatorJwt(operatorId, { ttlSec: OPERATOR_RESOLVE_TTL_SEC })
+    const res = await fetch(`${base}/api/orchestrator/ops/run-control/${path}`, {
+      method: 'GET',
+      headers: {
+        'X-Internal-Secret': secret,
+        'X-Operator-Jwt': jwt,
+      },
+      signal: AbortSignal.timeout(_VTR_RC_READ_TIMEOUT_MS),
+    })
+    let body: Record<string, unknown> = {}
+    try {
+      body = (await res.json()) as Record<string, unknown>
+    } catch {
+      body = {}
+    }
+    if (!res.ok) console.error(`vtr-rc ${path}: http_${res.status}`) // CL-390: path + status only
+    return { status: res.status, body, reason: res.ok ? 'ok' : `http_${res.status}` }
+  } catch (err) {
+    const timedOut = err instanceof Error && err.name === 'TimeoutError'
+    console.error(`vtr-rc ${path}: ${timedOut ? 'timeout' : 'error'}`) // CL-390: no err detail/body
+    return { status: 0, body: {}, reason: timedOut ? 'timeout' : 'error' }
+  }
+}
+
+/** One terminal/running run as the programs projection ships it (past + running share fields). */
+export interface VtrProgramRun {
+  run_id: string
+  run_type: string | null
+  status: string
+  started_at: string | null
+  ended_at: string | null
+  rerun_of_run_id: string | null
+  rerun_from_step: string | null
+  step_count: number | null
+  /** running rows only — an active workflow_controls hold covers this run's kind. */
+  active_hold?: boolean
+}
+
+/** One COMPUTED upcoming-7d forecast item (no new state — trial sweep / agent dispatch / roadmap). */
+export interface VtrUpcomingItem {
+  kind: string
+  due_at: string | null
+  label: string
+  source: string
+}
+
+/** One active pause hold (vtr_workflow_controls — structural fields only; NEVER reason). */
+export interface VtrHold {
+  // /programs sends exactly {workflow_kind, set_at} (deliberately minimal — no reason text);
+  // /timeline's active_controls additionally carry tenant_id/released_at from the view.
+  tenant_id?: string
+  workflow_kind: string
+  set_at: string | null
+  released_at?: string | null
+}
+
+export interface VtrProgramsResult {
+  ok: boolean
+  past: VtrProgramRun[]
+  running: VtrProgramRun[]
+  upcoming7d: VtrUpcomingItem[]
+  holds: VtrHold[]
+  /** true when the workflow_controls read degraded (fail-open) — drives the unverifiable banner. */
+  degraded: boolean
+  reason: string
+}
+
+/**
+ * VT-375: per-tenant programs projection (past / running / upcoming-7d + active holds).
+ * Read-only. Fail-CLOSED on any non-2xx / throw → empty groups, degraded=true so the
+ * canvas surfaces the pause-state-unverifiable copy rather than implying "not paused".
+ */
+export async function vtrPrograms(
+  operatorId: string,
+  tenantId: string,
+): Promise<VtrProgramsResult> {
+  const r = await vtrRcGet(`programs/${tenantId}`, operatorId)
+  if (r.status !== 200) {
+    return { ok: false, past: [], running: [], upcoming7d: [], holds: [], degraded: true, reason: r.reason }
+  }
+  return {
+    ok: true,
+    past: (r.body.past as VtrProgramRun[] | undefined) ?? [],
+    running: (r.body.running as VtrProgramRun[] | undefined) ?? [],
+    upcoming7d: (r.body.upcoming_7d as VtrUpcomingItem[] | undefined) ?? [],
+    holds: (r.body.holds as VtrHold[] | undefined) ?? [],
+    degraded: Boolean(r.body.degraded),
+    reason: 'ok',
+  }
+}
+
+/** One step row as vtr_step_timeline ships it — keys-only envelopes by construction (plan §6). */
+export interface VtrTimelineStep {
+  run_id: string
+  run_type: string | null
+  run_status: string | null
+  run_started_at: string | null
+  run_ended_at: string | null
+  rerun_of_run_id: string | null
+  rerun_from_step: string | null
+  step_id: string | null
+  step_seq: number | null
+  step_kind: string | null
+  step_name: string | null
+  step_status: string | null
+  /**
+   * Control axis (orchestrator-authoritative): 'controllable' = pause/override/rerun can act on
+   * this step; 'observed' = timeline display only, not controllable in this panel. Drives the
+   * "Observed — not controllable" badge. Absent/unknown ⇒ treat as observed (fail-safe: never
+   * imply a step is controllable when the server didn't say so).
+   */
+  tier: 'controllable' | 'observed' | null
+  started_at: string | null
+  ended_at: string | null
+  duration_ms: number | null
+  override_id: string | null
+  paused_ms: number | null
+  /** keys-only (array of key names) for non-audited kinds; an object for the audited name-free set. */
+  input_envelope: unknown
+  output_envelope: unknown
+}
+
+export interface VtrRunTimelineResult {
+  ok: boolean
+  runId: string | null
+  tenantId: string | null
+  steps: VtrTimelineStep[]
+  /** active vtr_workflow_controls holds riding along so the panel never shows a false "not paused". */
+  activeControls: VtrHold[]
+  reason: string
+}
+
+/**
+ * VT-375: the step timeline for ONE run (the Phase-A GET surface). Read-only.
+ * Tenant is DERIVED server-side from the run row (VT-293/294) — no tenant crosses the wire.
+ * Fail-CLOSED on non-2xx / throw → empty steps.
+ */
+export async function vtrRunTimeline(
+  operatorId: string,
+  runId: string,
+): Promise<VtrRunTimelineResult> {
+  const r = await vtrRcGet(`timeline/${runId}`, operatorId)
+  if (r.status !== 200) {
+    return { ok: false, runId: null, tenantId: null, steps: [], activeControls: [], reason: r.reason }
+  }
+  return {
+    ok: true,
+    runId: (r.body.run_id as string | undefined) ?? null,
+    tenantId: (r.body.tenant_id as string | undefined) ?? null,
+    steps: (r.body.steps as VtrTimelineStep[] | undefined) ?? [],
+    activeControls: (r.body.active_controls as VtrHold[] | undefined) ?? [],
+    reason: 'ok',
+  }
+}
