@@ -90,6 +90,10 @@ from .opt_out_processed import (
     OptOutProcessedInput,
     OptOutProcessedOutput,
 )
+from .run_control_intervention import (
+    RunControlInterventionEnvelope,
+    RunControlInterventionInput,
+)
 from .self_evaluate_gate import (
     SelfEvaluateGateEnvelope,
     SelfEvaluateGateInput,
@@ -135,6 +139,7 @@ STEP_KIND_REGISTRY: dict[str, type[StepEnvelope]] = {
     "l0_query": L0QueryEnvelope,
     "compose_output": ComposeOutputEnvelope,
     "aborted_hard_limit": AbortedHardLimitEnvelope,
+    "run_control_intervention": RunControlInterventionEnvelope,
 }
 
 
@@ -226,6 +231,7 @@ __all__ = [
     "L0QueryEnvelope",
     "ComposeOutputEnvelope",
     "AbortedHardLimitEnvelope",
+    "RunControlInterventionEnvelope",
     # Input/Output sub-models
     "WebhookReceivedInput",
     "WebhookClassifiedInput",
@@ -265,4 +271,5 @@ __all__ = [
     "AbortedHardLimitInput",
     "AbortedHardLimitOutput",
     "HardLimitAxis",
+    "RunControlInterventionInput",
 ]

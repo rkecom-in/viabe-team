@@ -135,11 +135,15 @@ export async function escalateRun(
   return { ok: true }
 }
 
-/** VT-300 — issue a run-control (pause/steer/override) on a live run. Fast team-web pre-check
- *  (resolve tenant server-side + assignment) for UX, then forward to the orchestrator's
- *  AUTHORITATIVE endpoint which re-derives the tenant + re-checks operator_assignments server-side
- *  (the enforcement leg — team-web auth alone is fail-open) + writes run_controls + audits. The
- *  graph holds the send at the next node boundary if a control is pending. */
+/** VT-300 — issue a run-control on a live run. Fast team-web pre-check (resolve tenant
+ *  server-side + assignment) for UX, then forward to the orchestrator's AUTHORITATIVE endpoint
+ *  which re-derives the tenant + re-checks operator_assignments server-side (the enforcement
+ *  leg — team-web auth alone is fail-open) + writes the hold + audits.
+ *
+ *  VT-374 (N1 retire): 'pause' now sets a tenant-wide campaign_send hold on the run-control
+ *  substrate (released via the run-control API, not auto-expired). 'steer'/'override' were
+ *  REMOVED from this legacy leg — the orchestrator returns 410; we surface that as a clear
+ *  "moved to the Run-Control panel (Phase B)" reason rather than a generic failure (C6). */
 export async function flagRunControl(
   op: ActingOperator, runId: string, control: string,
   client: Client = serverSecretClient(),
@@ -150,5 +154,11 @@ export async function flagRunControl(
   if (!_authorized(op, tenantId)) return { ok: false, reason: 'not assigned to this tenant' }
   // Authoritative enforcement + audit happen in the orchestrator (re-derive + re-check).
   const res = await forward(op.operatorId, runId, control)
-  return res.ok ? { ok: true } : { ok: false, reason: res.reason }
+  if (res.ok) return { ok: true }
+  // 410 = steer/override retired from this leg (VT-374). Give the operator the destination,
+  // not a raw status code.
+  if (res.reason === 'http_410') {
+    return { ok: false, reason: 'Steer moved to the Run-Control panel (Phase B)' }
+  }
+  return { ok: false, reason: res.reason }
 }

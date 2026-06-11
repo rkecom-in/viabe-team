@@ -41,6 +41,16 @@ _SCHEDULER_CRON = "*/5 * * * *"
 _FAILURE_ESCALATION_THRESHOLD = 3
 
 
+def _paused(tenant_id: UUID) -> bool:
+    """VT-374 pause check (kind 'ingestion'). SKIP semantics: a paused tenant's due row
+    stays due (``next_scheduled_run`` untouched, no fail-count bump), so the 5-minute
+    scheduler naturally resumes the pull after /release — no blocking hold needed.
+    check_pause never raises (F9 two-tier)."""
+    from orchestrator.run_control import check_pause
+
+    return check_pause(tenant_id, "ingestion")
+
+
 def _parse_daily_cron(expr: str) -> tuple[int, int]:
     """Parse a Phase-1 ``"M H * * *"`` daily-at-time cron expression.
 
@@ -129,6 +139,17 @@ def ingest_one_connector(tenant_id: UUID, connector_id: str) -> dict[str, object
         cols = ["pull_cadence", "last_sync_at", "consecutive_fails",
                 "rows_ingested_today", "last_ingested_date"]
         row = dict(zip(cols, raw, strict=True))
+
+    # VT-374 (ingestion, connector_pull) seam — defense-in-depth with the fan-out check
+    # (the rerun arm enters here directly): a paused tenant's pull is skipped with the
+    # status row untouched, so release resumes it on the next due tick.
+    if _paused(tenant_id):
+        logger.info(
+            "ingest_one_connector: tenant=%s connector=%s paused by run-control — skipped",
+            tenant_id,
+            connector_id,
+        )
+        return {"status": "paused"}
 
     spec = get_connector(connector_id)
     connector_cls = _connector_class_for(connector_id)
@@ -261,6 +282,15 @@ def run_due_ingestions() -> int:
         else:
             tenant_id_s, connector_id = raw[0], raw[1]
         tenant_id = UUID(str(tenant_id_s))
+        # VT-374 — pause check before fan-out: a paused tenant is not dispatched at all
+        # (cheaper than dispatching a workflow that would skip itself).
+        if _paused(tenant_id):
+            logger.info(
+                "scheduler: tenant=%s connector=%s paused by run-control — dispatch skipped",
+                tenant_id,
+                connector_id,
+            )
+            continue
         try:
             DBOS.start_workflow(ingest_one_connector, tenant_id, connector_id)
             dispatched += 1

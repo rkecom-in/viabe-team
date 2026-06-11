@@ -172,6 +172,15 @@ _PURGE_ORDER: tuple[str, ...] = (
     "template_error_reports",  # VT-335: owner template-error reports (PII free text) — hard-delete
     "owner_inputs",
     "campaigns",
+    # VT-374 (mig 131): the run-control substrate. step_overrides carries redacted-at-write
+    # pinned_input/pinned_output/reason (still the tenant's control history — a PII-at-rest
+    # surface, F7); workflow_controls carries pause records + redacted reasons. Both leaf
+    # (FK tenants only, no CASCADE — the tenant row is anonymized, never deleted, so a sweep
+    # here is the ONLY hard-delete path). workflow_id/consumed_run_id point at pipeline_runs
+    # ids WITHOUT an FK, but they're swept BEFORE the pipeline tables anyway so control rows
+    # never outlive the runs they controlled.
+    "step_overrides",
+    "workflow_controls",
     "pipeline_steps",
     "pipeline_runs",
     "subscriber_states",
