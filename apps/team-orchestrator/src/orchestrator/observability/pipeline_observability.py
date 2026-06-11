@@ -81,10 +81,18 @@ def _ensure_buffer_schema(path: Path) -> None:
               cost_paise         INTEGER NOT NULL DEFAULT 0,
               model_used         TEXT,
               tokens_input       INTEGER,
-              tokens_output      INTEGER
+              tokens_output      INTEGER,
+              override_id        TEXT,
+              paused_ms          INTEGER
             )
             """
         )
+        # VT-374 additive columns — a buffer file created pre-mig-131 lacks them
+        # (CREATE IF NOT EXISTS skips); patch in place so the INSERT never breaks.
+        existing = {row[1] for row in conn.execute("PRAGMA table_info(buffered_steps)")}
+        for col, decl in (("override_id", "TEXT"), ("paused_ms", "INTEGER")):
+            if col not in existing:
+                conn.execute(f"ALTER TABLE buffered_steps ADD COLUMN {col} {decl}")
         conn.execute(
             "CREATE INDEX IF NOT EXISTS buffered_steps_order_idx "
             "ON buffered_steps (buffered_at_utc, rowid)"
@@ -108,8 +116,14 @@ def write_step(
     model_used: str | None = None,
     tokens_input: int | None = None,
     tokens_output: int | None = None,
+    override_id: UUID | None = None,
+    paused_ms: int | None = None,
 ) -> None:
     """Write one pipeline_steps row + atomically update pipeline_runs cumulatives.
+
+    VT-374: ``override_id`` / ``paused_ms`` are structural run-control columns
+    (mig 131) — populated where a controllable-seam wrapper executed; NOT part
+    of the typed envelope (no envelope schema change), so they skip step 2.
 
     Per CL-417: canonical per-field columns populated directly; envelopes
     carry payload-specific extras only.
@@ -189,6 +203,8 @@ def write_step(
             model_used=model_used,
             tokens_input=tokens_input,
             tokens_output=tokens_output,
+            override_id=override_id,
+            paused_ms=paused_ms,
         )
     except (psycopg.OperationalError, psycopg.errors.ConnectionFailure) as exc:
         _append_to_buffer(
@@ -207,6 +223,8 @@ def write_step(
             model_used=model_used,
             tokens_input=tokens_input,
             tokens_output=tokens_output,
+            override_id=override_id,
+            paused_ms=paused_ms,
         )
         logger.warning(
             "write_step prod DB unavailable; buffered locally",
@@ -215,6 +233,60 @@ def write_step(
                 "run_id": str(run_id),
                 "exc": repr(exc),
             },
+        )
+
+
+def record_intervention(
+    tenant_id: UUID | str,
+    run_id: UUID | str,
+    *,
+    workflow_kind: str,
+    step_name: str,
+    override_id: UUID | None = None,
+    paused_ms: int | None = None,
+    action: str,
+) -> None:
+    """VT-374 B1 — record one run-control intervention on the run's timeline.
+
+    One pipeline_steps row: ``step_kind='run_control_intervention'``,
+    ``step_name='<workflow_kind>:<step_name>'``, with the mig-131 structural
+    ``override_id`` / ``paused_ms`` COLUMNS populated (this helper is their
+    writer — the columns are dead without it). The envelope carries IDs/enums
+    ONLY (action + workflow_kind + step_name; CL-390 — never free text); the
+    vtr_step_timeline view shows this kind keys-only by default and the
+    columns carry the data.
+
+    ``action``: 'released' (a hold ended, the step proceeded), 'held' (the
+    seam parked the run instead of proceeding), 'override_consumed' (a
+    step_overrides row was claimed; pass ``override_id``).
+
+    NEVER raises — callers sit at live controllable seams (durable workflow
+    bodies, graph nodes); a timeline-write failure must not alter control
+    semantics (F9 spirit). Failures log loudly instead.
+    """
+    try:
+        write_step(
+            step_kind="run_control_intervention",
+            run_id=run_id if isinstance(run_id, UUID) else UUID(str(run_id)),
+            tenant_id=tenant_id if isinstance(tenant_id, UUID) else UUID(str(tenant_id)),
+            step_name=f"{workflow_kind}:{step_name}",
+            input_envelope={
+                "action": action,
+                "workflow_kind": workflow_kind,
+                "step_name": step_name,
+            },
+            override_id=override_id,
+            paused_ms=paused_ms,
+        )
+    except Exception:  # noqa: BLE001 — observability must not break a control seam
+        logger.warning(
+            "record_intervention failed (kind=%s step=%s run=%s action=%s) — "
+            "control semantics unchanged",
+            workflow_kind,
+            step_name,
+            run_id,
+            action,
+            exc_info=True,
         )
 
 
@@ -235,6 +307,8 @@ def _do_db_write(
     model_used: str | None,
     tokens_input: int | None,
     tokens_output: int | None,
+    override_id: UUID | None = None,
+    paused_ms: int | None = None,
 ) -> None:
     """Single-transaction INSERT pipeline_steps + UPDATE pipeline_runs.
 
@@ -263,10 +337,11 @@ def _do_db_write(
               run_id, tenant_id, step_seq, step_kind, step_name,
               parent_step_id, input_envelope, output_envelope, status,
               decision_rationale, tool_calls, error, cost_paise,
-              model_used, tokens_input, tokens_output, started_at
+              model_used, tokens_input, tokens_output, override_id,
+              paused_ms, started_at
             ) VALUES (
               %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-              %s, %s, %s, now()
+              %s, %s, %s, %s, %s, now()
             )
             """,
             (
@@ -286,6 +361,8 @@ def _do_db_write(
                 model_used,
                 tokens_input,
                 tokens_output,
+                str(override_id) if override_id else None,
+                paused_ms,
             ),
         )
 
@@ -317,6 +394,8 @@ def _append_to_buffer(
     model_used: str | None,
     tokens_input: int | None,
     tokens_output: int | None,
+    override_id: UUID | None = None,
+    paused_ms: int | None = None,
 ) -> None:
     """Append one row to local SQLite buffer. Idempotent schema-create."""
     path = _buffer_path()
@@ -328,8 +407,8 @@ def _append_to_buffer(
               buffered_at_utc, run_id, tenant_id, step_kind, step_name,
               parent_step_id, input_envelope, output_envelope, status,
               decision_rationale, tool_calls, error, cost_paise,
-              model_used, tokens_input, tokens_output
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              model_used, tokens_input, tokens_output, override_id, paused_ms
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 datetime.now(timezone.utc).isoformat(),
@@ -348,6 +427,8 @@ def _append_to_buffer(
                 model_used,
                 tokens_input,
                 tokens_output,
+                str(override_id) if override_id else None,
+                paused_ms,
             ),
         )
 
@@ -366,6 +447,9 @@ def _flush_buffer() -> int:
     path = _buffer_path()
     if not path.exists():
         return 0
+    # Patch a pre-mig-131 buffer in place (adds override_id/paused_ms) so the
+    # SELECT below never breaks on an old file. Idempotent.
+    _ensure_buffer_schema(path)
     flushed = 0
     with sqlite3.connect(path) as sqlite_conn:
         sqlite_conn.row_factory = sqlite3.Row
@@ -375,7 +459,7 @@ def _flush_buffer() -> int:
                    step_name, parent_step_id, input_envelope,
                    output_envelope, status, decision_rationale,
                    tool_calls, error, cost_paise, model_used,
-                   tokens_input, tokens_output
+                   tokens_input, tokens_output, override_id, paused_ms
               FROM buffered_steps
              ORDER BY buffered_at_utc, rowid
             """
@@ -408,6 +492,8 @@ def _flush_buffer() -> int:
                 model_used=row["model_used"],
                 tokens_input=row["tokens_input"],
                 tokens_output=row["tokens_output"],
+                override_id=UUID(row["override_id"]) if row["override_id"] else None,
+                paused_ms=row["paused_ms"],
             )
             sqlite_conn.execute(
                 "DELETE FROM buffered_steps WHERE rowid = ?", (row["rowid"],)
@@ -418,6 +504,7 @@ def _flush_buffer() -> int:
 
 
 __all__ = [
+    "record_intervention",
     "write_step",
     "_flush_buffer",
     "_buffer_path",

@@ -117,6 +117,19 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         logging.getLogger(__name__).exception(
             "VT-281 bootstrap_vtr_ref_secret failed at startup (VT_REF_HMAC_KEY set?)"
         )
+    # VT-374 N4: warm the run-control pause cache from workflow_controls so a
+    # post-restart control-read error still fails CLOSED for scopes that were paused
+    # before the restart (the F9 guarantee is best-effort-after-restart by design).
+    # warm_pause_cache itself never raises; the try/except guards the import path —
+    # a warm failure must never block worker boot.
+    try:
+        from orchestrator.run_control import warm_pause_cache
+
+        warm_pause_cache()
+    except Exception:
+        logging.getLogger(__name__).exception(
+            "VT-374 warm_pause_cache failed at startup (best-effort)"
+        )
     yield
     shutdown_dbos()
 

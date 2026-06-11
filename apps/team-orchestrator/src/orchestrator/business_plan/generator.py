@@ -336,6 +336,20 @@ def _generate_and_validate(
 # --- the workflow ------------------------------------------------------------------
 
 
+def _hold_if_paused(tenant_id: str, workflow_kind: str) -> int:
+    """VT-374 pause hold at the spine's controllable boundaries ('plan_generate' before
+    the LLM transmit, 'plan_deliver' before the owner-facing burst); returns paused_ms.
+
+    Durable variant (checkpointed @DBOS.step reads + DBOS.sleep) inside the DBOS workflow
+    body; plain poll for direct calls (tests / the rerun arm, which holds nothing today).
+    check_pause inside never raises (F9 two-tier) — a control outage cannot kill a run."""
+    from orchestrator import run_control
+
+    if DBOS.workflow_id is not None:
+        return run_control.hold_while_paused_durable(tenant_id, workflow_kind)
+    return run_control.hold_while_paused(tenant_id, workflow_kind)
+
+
 @DBOS.workflow()
 def generate_business_plan_workflow(tenant_id: str) -> dict[str, Any]:
     """Gap-4 spine: triggered on onboarding-journey completion. Idempotent (a tenant with ANY plan
@@ -359,6 +373,11 @@ def generate_business_plan_workflow(tenant_id: str) -> dict[str, Any]:
         )
         return {"skipped": "no_profile"}
 
+    # VT-374 (plan_generate, generate_validate) seam — hold AFTER the skip gates (a paused
+    # tenant must not burn the pause window on a run that would have skipped anyway),
+    # immediately before the LLM transmit. No overrides: the v1 registry allow-lists no
+    # keys for this step.
+    _hold_if_paused(tenant_id, "plan_generate")
     result = _generate_and_validate(tenant_id, grounding)
     version = store.write_new_version(
         tenant_id,
@@ -372,6 +391,10 @@ def generate_business_plan_workflow(tenant_id: str) -> dict[str, Any]:
     try:
         from orchestrator.business_plan import delivery  # lazy — delivery lands separately
 
+        # VT-374 (plan_deliver, deliver_parts) seam — hold before the owner-facing burst.
+        # The version is ALREADY persisted: a pause here delays delivery only, and the
+        # delivered_parts bitmap keeps a mid-burst release resumable by design.
+        _hold_if_paused(tenant_id, "plan_deliver")
         delivery.deliver_plan(tenant_id, version)
     except Exception:  # noqa: BLE001 — delivery is best-effort; the version is already persisted
         logger.exception(

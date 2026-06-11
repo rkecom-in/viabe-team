@@ -474,6 +474,30 @@ def l2_retention_sweep_scheduled(
         logger.exception("VT-311 L2 retention sweep scheduled run failed")
 
 
+# VT-374: daily expired-override cancel sweep. 22:00 UTC = 03:30 IST (off-peak,
+# between the 03:00 PII-log sweep and the 04:00 reconstitution sweep). UTC-correct
+# cron (matches audit-chain/PII-log/KG-drain).
+OVERRIDE_EXPIRY_SWEEP_CRON = "0 22 * * *"
+
+
+def override_expiry_sweep_scheduled(
+    scheduled_time: datetime,
+    actual_time: datetime,
+) -> None:
+    """DBOS scheduled handler — daily 03:30 IST (VT-374). Cancels expired, unconsumed
+    ``step_overrides`` rows via ``run_control.expire_overrides_sweep`` (F8: next-run
+    pins REQUIRE ``expires_at``, and the bound is only real because this sweep
+    enforces it — an expired pin must never fire on a much-later run). NO LLM;
+    idempotent. Best-effort: a sweep failure must not crash the scheduler (the
+    consume predicate also expiry-gates fresh claims, so the next run re-catches)."""
+    from orchestrator.run_control import expire_overrides_sweep
+
+    try:
+        expire_overrides_sweep()
+    except Exception:  # noqa: BLE001 — daily sweep is best-effort; next run retries
+        logger.exception("VT-374 override-expiry sweep scheduled run failed")
+
+
 # ---------------------------------------------------------------------------
 # 4. Monthly impact — REAL body (VT-176, partial — PDF generation downstream)
 # ---------------------------------------------------------------------------
@@ -756,6 +780,9 @@ def register_scheduled_triggers() -> None:
     DBOS.scheduled(SLA_BREACH_SWEEP_CRON)(sla_breach_sweep_scheduled)
     # VT-280: daily VTR digest — de-identified, app_vtr_role + the VT-281 views only.
     DBOS.scheduled(VTR_DIGEST_CRON)(vtr_digest_scheduled)
+    # VT-374: daily expired-override cancel sweep (F8 next-run pin expiry bound).
+    # EXTENDS this surface (same register-before-launch posture), NOT a parallel poller.
+    DBOS.scheduled(OVERRIDE_EXPIRY_SWEEP_CRON)(override_expiry_sweep_scheduled)
     _registered = True
 
 
@@ -769,6 +796,7 @@ __all__ = [
     "MONTHLY_IMPACT_CRON",
     "MONTHLY_IMPACT_SHELL_EVENT",
     "MONTHLY_IMPACT_STARTED_EVENT",
+    "OVERRIDE_EXPIRY_SWEEP_CRON",
     "SHELL_STATUS",
     "WEEKLY_CADENCE_CRON",
     "WEEKLY_CADENCE_EVENT",
@@ -785,6 +813,7 @@ __all__ = [
     "pii_log_sweep_scheduled",
     "monthly_impact_scheduled",
     "monthly_workflow_id",
+    "override_expiry_sweep_scheduled",
     "reconstitution_sweep_scheduled",
     "register_scheduled_triggers",
     "run_approval_timeout_sweep_body",

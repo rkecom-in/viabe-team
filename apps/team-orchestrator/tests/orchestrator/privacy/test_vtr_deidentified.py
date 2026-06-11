@@ -146,7 +146,9 @@ def test_vtr_role_grants_are_exactly_the_de_identified_views(substrate) -> None:
     de-identified views and NOTHING else — covers ALL tables (catches any future grant that would
     widen the VTR surface), not just the probed PII set. VT-360 added the 3rd view
     (vtr_tenant_alerts); VT-370 added the 4 console views (mig 130 — latest-plan w/ diff-values
-    stripped, plan-history metadata, autonomy w/o revoke_reason, batch aggregates w/o params)."""
+    stripped, plan-history metadata, autonomy w/o revoke_reason, batch aggregates w/o params);
+    VT-374 added the 2 run-control views (mig 131 — keys-only step timeline w/ envelope values
+    ONLY for the 4 audited name-free kinds, pause state w/o reason/operator ids)."""
     with psycopg.connect(substrate, autocommit=True) as conn:
         rows = conn.execute(
             "SELECT table_name, privilege_type FROM information_schema.role_table_grants "
@@ -161,6 +163,8 @@ def test_vtr_role_grants_are_exactly_the_de_identified_views(substrate) -> None:
         ("vtr_plan_history", "SELECT"),
         ("vtr_agent_autonomy", "SELECT"),
         ("vtr_draft_batches", "SELECT"),
+        ("vtr_step_timeline", "SELECT"),
+        ("vtr_workflow_controls", "SELECT"),
     }, f"app_vtr_role grants drifted beyond the de-identified views: {granted}"
 
 

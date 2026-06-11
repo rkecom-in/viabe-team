@@ -193,25 +193,44 @@ def _campaign_execute_node(state: AgentGraphState) -> dict[str, Any]:
     tenant_id_str = str(tenant_id)
     campaign_id_str = str(campaign_id)
 
-    # VT-300 — run-control gate at the send boundary (the meaningful coarse control point):
-    # a VTR's pause/steer/override on this run HOLDS the fan-out before any customer send.
-    run_id = state.get("run_id")
-    if run_id is not None:
-        from orchestrator.run_control_handler import consume_pending_control, should_hold_send
+    # VT-374 — run-control pause at the send boundary (supersedes the VT-300 run_controls
+    # consume; N1 RETIRE arm, mig 131 drops the table). An active workflow_controls hold
+    # for (tenant, 'campaign_send') HOLDS the fan-out before any customer send — same
+    # held-status return shape as VT-300 so downstream readers are unchanged. Tenant-scoped
+    # (no run_id needed): ops 'pause' rows land per (tenant, kind), released via /release.
+    # check_pause is the F9 two-tier read (fail-CLOSED on an acknowledged pause, fail-OPEN
+    # + degraded alert otherwise) — it never raises into a live graph run.
+    from orchestrator.run_control import check_pause
 
-        _control = consume_pending_control(run_id)
-        if should_hold_send(_control):
-            import logging
-            logging.getLogger(__name__).info(
-                "_campaign_execute_node: HELD by run-control tenant=%s campaign=%s control=%s",
-                tenant_id_str, campaign_id_str, (_control or {}).get("control_type"),
+    if check_pause(tenant_id_str, "campaign_send"):
+        import logging
+        logging.getLogger(__name__).info(
+            "_campaign_execute_node: HELD by run-control pause tenant=%s campaign=%s",
+            tenant_id_str, campaign_id_str,
+        )
+        # VT-374 B1 — the hold lands on this run's timeline as a
+        # run_control_intervention step row (action='held'; this node returns held
+        # rather than waiting, so there is no paused_ms duration to record).
+        # record_intervention never raises — a timeline miss must not alter the hold.
+        run_id = state.get("run_id")
+        if run_id is not None:
+            from orchestrator.observability.pipeline_observability import (
+                record_intervention,
             )
-            return {
-                "campaign_execution_summary": {
-                    "status": "held_by_run_control",
-                    "control_type": (_control or {}).get("control_type"),
-                }
+
+            record_intervention(
+                tenant_id_str,
+                str(run_id),
+                workflow_kind="campaign_send",
+                step_name="execute_fanout",
+                action="held",
+            )
+        return {
+            "campaign_execution_summary": {
+                "status": "held_by_run_control",
+                "control_type": "pause",
             }
+        }
 
     try:
         with tenant_connection(tenant_id_str) as conn:

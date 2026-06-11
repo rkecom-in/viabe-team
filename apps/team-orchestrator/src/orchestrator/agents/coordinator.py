@@ -79,6 +79,10 @@ WORK_ITEM_STATUSES = frozenset(
 WORK_ITEM_TERMINAL_STATUSES = frozenset({"sent", "rejected", "failed", "cancelled"})
 # Statuses an executor may legally report back ('dispatched' is coordinator-minted only).
 _RESULT_STATUSES = WORK_ITEM_STATUSES - {"dispatched"}
+# VT-374 CAS substrate: every in-workflow status write passes expected_from=<this tuple> so a
+# stale writer (DBOS recovery replay, a rerun re-dispatch) can never regress a terminal state
+# ('sent' must never become 'drafting' again — STEP-0 §3.3 fix).
+_NON_TERMINAL_STATUSES = tuple(sorted(WORK_ITEM_STATUSES - WORK_ITEM_TERMINAL_STATUSES))
 
 # Fixed namespace for the deterministic per-work-item pipeline_runs id (DBOS recovery re-runs the
 # workflow body; uuid5 + ON CONFLICT keeps the run row exactly-once).
@@ -420,12 +424,66 @@ def _claim_work_item(conn: Any, tenant_id: UUID, item_id: str, agent: str) -> st
 
 
 # ---------------------------------------------------------------------------
+# VT-374 run-control seam (kind 'agent_dispatch', step 'execute_item')
+# ---------------------------------------------------------------------------
+
+
+def _hold_for_run_control(tenant_id: str) -> int:
+    """Block while (tenant, 'agent_dispatch') is paused; return paused_ms.
+
+    Durable variant (each read its own @DBOS.step + DBOS.sleep) when executing inside a
+    DBOS workflow — a paused dispatch survives a worker restart and resumes the hold.
+    Plain poll for direct calls (tests / admin kick). check_pause inside never raises
+    (F9 two-tier): a control-read outage cannot kill a live dispatch."""
+    from orchestrator import run_control
+
+    if DBOS.workflow_id is not None:
+        return run_control.hold_while_paused_durable(tenant_id, "agent_dispatch")
+    return run_control.hold_while_paused(tenant_id, "agent_dispatch")
+
+
+def _consume_execute_override(tenant_id: str, run_id: str) -> Any | None:
+    """Consume-first claim of the (agent_dispatch, execute_item) one-shot override (F8/N2).
+
+    The v1 registry allow-lists no keys for this step, so a consumed row records the
+    operator's intervention (override_id on the timeline) but pins nothing — the
+    key-bearing pins live at the executor sub-steps (candidate_build/compose_drafts).
+    A control-DB failure proceeds WITHOUT the override, logged loudly — never a new
+    exception path that kills the dispatch (F9 spirit)."""
+    try:
+        from orchestrator.graph import get_pool
+        from orchestrator.run_control import consume_override
+
+        with get_pool().connection() as conn:
+            return consume_override(
+                conn,
+                tenant_id=tenant_id,
+                workflow_kind="agent_dispatch",
+                step_name="execute_item",
+                run_id=run_id,
+            )
+    except Exception:  # noqa: BLE001 — control outage must not fail the work item
+        logger.warning(
+            "agent_coordinator: execute_item override consume failed (tenant=%s run=%s) — "
+            "proceeding without",
+            tenant_id,
+            run_id,
+            exc_info=True,
+        )
+        return None
+
+
+# ---------------------------------------------------------------------------
 # Per-item dispatch workflow — the LLM lives downstream of HERE (in the executor)
 # ---------------------------------------------------------------------------
 
 
 def agent_dispatch_workflow(
-    tenant_id: str, item_id: str, agent: str, work_item_id: str
+    tenant_id: str,
+    item_id: str,
+    agent: str,
+    work_item_id: str,
+    rerun_run_id: str | None = None,
 ) -> dict[str, Any]:
     """Execute ONE dispatched work item via the registry agent. DBOS-decorated at registration.
 
@@ -435,13 +493,22 @@ def agent_dispatch_workflow(
     recovery re-entering the body stays exactly-once via ON CONFLICT), invoke
     ``execute_item(ctx)``, persist the resulting work-item status.
 
+    VT-374 A4/F3: ``rerun_run_id`` (set ONLY by ``run_control.rerun.rerun_from``) is the
+    rerun's FRESH uuid4 run identity — ``_open_agent_run`` adopts it instead of
+    uuid5(work_item_id), so a rerun gets its own lineage-stamped run row (pre-inserted by
+    rerun.py) and never continues the source run's. As a workflow ARG it is checkpointed,
+    so DBOS recovery re-enters with the same identity. ``None`` (every coordinator-sweep
+    dispatch) keeps the deterministic uuid5 path.
+
     IDs-in-state (plan §3d): inputs/outputs carry ONLY UUIDs + statuses + counters (DBOS
     checkpoints them in its system tables). Fail-soft: ANY failure marks the work item 'failed'
     and returns a status dict — this workflow never raises (one item's failure must not poison
     the queue; the next sweep may re-dispatch)."""
     try:
         if not _owner_inputs_ok(tenant_id):
-            _set_work_item_status(tenant_id, work_item_id, "cancelled")
+            _set_work_item_status(
+                tenant_id, work_item_id, "cancelled", expected_from=_NON_TERMINAL_STATUSES
+            )
             log_event(
                 event_type="agent_dispatch_skipped_no_owner_inputs",
                 run_id=uuid4(),
@@ -455,8 +522,14 @@ def agent_dispatch_workflow(
                 "work_item_id": work_item_id,
                 "item_id": item_id,
             }
-        run_id = _open_agent_run(tenant_id, work_item_id)
-        _set_work_item_status(tenant_id, work_item_id, "drafting", run_id=run_id)
+        run_id = _open_agent_run(tenant_id, work_item_id, rerun_run_id=rerun_run_id)
+        _set_work_item_status(
+            tenant_id,
+            work_item_id,
+            "drafting",
+            run_id=run_id,
+            expected_from=_NON_TERMINAL_STATUSES,
+        )
         impl = get_registry().get(agent)
         if impl is None:
             raise KeyError(f"agent {agent!r} is not registered")  # → fail-soft 'failed' below
@@ -467,6 +540,29 @@ def agent_dispatch_workflow(
             work_item_id=work_item_id,
             run_id=run_id,
         )
+        # VT-374 — the (agent_dispatch, execute_item) controllable boundary: hold while
+        # the tenant's agent_dispatch kind is paused, then consume-first claim any
+        # pre-registered override for this run (the CL-425 gate above stays FIRST —
+        # a pause hold never defers a consent check).
+        paused_ms = _hold_for_run_control(tenant_id)
+        override = _consume_execute_override(tenant_id, run_id)
+        if paused_ms or override is not None:
+            # B1 dead-columns fix: one run_control_intervention timeline row with the
+            # mig-131 override_id / paused_ms COLUMNS populated. record_intervention
+            # never raises — a timeline miss must not alter control semantics (F9).
+            from orchestrator.observability.pipeline_observability import (
+                record_intervention,
+            )
+
+            record_intervention(
+                tenant_id,
+                run_id,
+                workflow_kind="agent_dispatch",
+                step_name="execute_item",
+                override_id=override.id if override is not None else None,
+                paused_ms=paused_ms or None,
+                action="override_consumed" if override is not None else "released",
+            )
         result = impl.execute_item(ctx)
         status = result.work_item_status
         if status not in _RESULT_STATUSES:
@@ -478,7 +574,9 @@ def agent_dispatch_workflow(
                 work_item_id,
             )
             status = "failed"
-        _set_work_item_status(tenant_id, work_item_id, status)
+        _set_work_item_status(
+            tenant_id, work_item_id, status, expected_from=_NON_TERMINAL_STATUSES
+        )
         _close_agent_run(tenant_id, run_id, status, work_item_id)
         return {
             "status": status,
@@ -497,8 +595,15 @@ def agent_dispatch_workflow(
             work_item_id,
         )
         try:
-            _set_work_item_status(tenant_id, work_item_id, "failed")
-            _close_agent_run(tenant_id, _agent_run_id(work_item_id), "failed", work_item_id)
+            _set_work_item_status(
+                tenant_id, work_item_id, "failed", expected_from=_NON_TERMINAL_STATUSES
+            )
+            _close_agent_run(
+                tenant_id,
+                rerun_run_id or _agent_run_id(work_item_id),
+                "failed",
+                work_item_id,
+            )
         except Exception:  # noqa: BLE001 — best-effort terminal write
             logger.exception(
                 "agent_dispatch_workflow: failed-state write also failed (work_item=%s)",
@@ -512,12 +617,18 @@ def _agent_run_id(work_item_id: str) -> str:
     return str(uuid5(_AGENT_RUN_NAMESPACE, f"agent_dispatch:{work_item_id}"))
 
 
-def _open_agent_run(tenant_id: str, work_item_id: str) -> str:
+def _open_agent_run(
+    tenant_id: str, work_item_id: str, *, rerun_run_id: str | None = None
+) -> str:
     """Open the run row this dispatch hangs off (``pending_approvals.run_id`` FKs it).
-    Idempotent — deterministic id + ON CONFLICT DO NOTHING (mirrors runner.open_run)."""
+    Idempotent — deterministic id + ON CONFLICT DO NOTHING (mirrors runner.open_run).
+
+    VT-374 A4: ``rerun_run_id`` (a rerun's fresh uuid4) is adopted verbatim — the
+    lineage-stamped row was pre-inserted by rerun.py, so the INSERT here no-ops on
+    conflict and the rerun never touches the uuid5 source-run row."""
     from orchestrator.db import tenant_connection
 
-    run_id = _agent_run_id(work_item_id)
+    run_id = rerun_run_id or _agent_run_id(work_item_id)
     with tenant_connection(tenant_id) as conn:
         conn.execute(
             "INSERT INTO pipeline_runs (id, tenant_id, run_type, status) "
@@ -550,20 +661,50 @@ def _close_agent_run(
 
 
 def _set_work_item_status(
-    tenant_id: str, work_item_id: str, status: str, *, run_id: str | None = None
+    tenant_id: str,
+    work_item_id: str,
+    status: str,
+    *,
+    run_id: str | None = None,
+    expected_from: tuple[str, ...] | None = None,
 ) -> None:
-    """Advance the work-item ledger row (RLS via tenant_connection)."""
+    """Advance the work-item ledger row (RLS via tenant_connection).
+
+    VT-374 CAS guard: with ``expected_from`` the UPDATE applies only while the current
+    status is in that set (``AND status = ANY(...)``) — a stale writer (DBOS recovery
+    replaying the workflow body, a rerun re-dispatch) can never regress a terminal state.
+    A CAS no-op is logged, never raised: the newer state wins by design. ``None`` keeps
+    the legacy unconditional write for callers outside the dispatch workflow."""
     if status not in WORK_ITEM_STATUSES:
         raise ValueError(f"unknown work-item status {status!r}")
+    if expected_from is not None:
+        unknown = set(expected_from) - WORK_ITEM_STATUSES
+        if unknown:
+            raise ValueError(f"unknown expected_from statuses {sorted(unknown)!r}")
     from orchestrator.db import tenant_connection
 
     with tenant_connection(tenant_id) as conn:
-        conn.execute(
+        if expected_from is None:
+            conn.execute(
+                "UPDATE agent_work_items SET status = %s, run_id = COALESCE(%s, run_id), "
+                "updated_at = now() "
+                "WHERE tenant_id = %s AND id = %s",
+                (status, run_id, tenant_id, work_item_id),
+            )
+            return
+        cur = conn.execute(
             "UPDATE agent_work_items SET status = %s, run_id = COALESCE(%s, run_id), "
             "updated_at = now() "
-            "WHERE tenant_id = %s AND id = %s",
-            (status, run_id, tenant_id, work_item_id),
+            "WHERE tenant_id = %s AND id = %s AND status = ANY(%s)",
+            (status, run_id, tenant_id, work_item_id, list(expected_from)),
         )
+        if cur.rowcount == 0:
+            logger.warning(
+                "agent_coordinator: status CAS no-op (work_item=%s -> %r; current state "
+                "not in expected_from) — stale write suppressed",
+                work_item_id,
+                status,
+            )
 
 
 # ---------------------------------------------------------------------------

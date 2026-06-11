@@ -79,10 +79,12 @@ export function ActivityStream({ runs }: { runs: ActivityRun[] }) {
                 Stream
               </button>
               <button type="button" disabled={pending} onClick={() => escalate(r)}>Escalate</button>
-              {/* VT-293 honesty (Cowork): these RECORD a control intent (ops_audit); live
-                  enforcement on the running agent is VT-300. Labels say "Request …". */}
-              <button type="button" disabled={pending} onClick={() => control(r, 'pause')} title="Records a pause request (enforcement: VT-300)">Request pause</button>
-              <button type="button" disabled={pending} onClick={() => control(r, 'steer')} title="Records a steer request (enforcement: VT-300)">Request steer</button>
+              {/* VT-374 (N1 retire): 'pause' sets a tenant-wide campaign_send hold on the
+                  run-control substrate — it stays until released via the run-control API
+                  (no auto-expiry). 'steer' moved to the Run-Control panel (Phase B): this
+                  legacy button now returns a "moved to the Run-Control panel" message. */}
+              <button type="button" disabled={pending} onClick={() => control(r, 'pause')} title="Sets a tenant-wide campaign_send hold; released via the run-control API (POST …/run-control/release)">Pause campaign sends</button>
+              <button type="button" disabled={pending} onClick={() => control(r, 'steer')} title="Steer moved to the Run-Control panel (Phase B)">Steer (moved →)</button>
             </td>
           </tr>
         ))}
