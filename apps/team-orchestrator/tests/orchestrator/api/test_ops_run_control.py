@@ -603,6 +603,80 @@ def test_rerun_open_approval_409(substrate) -> None:
     assert exc.value.status_code == 409
 
 
+def test_rerun_overlap_escalates_response_carries_outcome_200(substrate, monkeypatch) -> None:
+    """VT-375 C1 (Cowork ruling 20260611T234500Z, Option A) — the FORCED overlap: an owner
+    approval arms AFTER the 409 gate passed but DURING the rerun's execution (injected by
+    stubbing ``delivery.deliver_plan`` to commit a real pending_approvals row mid-flight).
+    The /rerun response must stay HTTP **200** (the rerun DID run — no rollback) and carry
+    ``outcome='escalated_overlap'``; the lineage row closes 'escalated' with
+    ``final_outcome='rerun_overlapped_open_approval'`` — escalated and disclosed, never a
+    silent keep."""
+    dsn = substrate.dsn
+    op, tenant = _assigned(dsn)
+    run = _seed_run(dsn, tenant, run_type="plan_deliver")
+    # An active plan with every part already delivered (bitmap 3) — the deliver arm is the
+    # cheapest synchronous arm to drive through the API.
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute(
+            "INSERT INTO business_plan (tenant_id, version, summary_json, roadmap_json, "
+            "fact_bundle_json, generated_by, delivered_parts) "
+            "VALUES (%s, 1, %s, '[]', '{}', 'test', 3)",
+            (str(tenant), '{"text": "plan"}'),
+        )
+
+    from orchestrator.business_plan import delivery
+
+    def _arm_mid_flight(*_a: Any, **_k: Any) -> None:
+        _seed_open_approval(dsn, tenant, run)  # the overlap: commits between gate and re-check
+
+    monkeypatch.setattr(delivery, "deliver_plan", _arm_mid_flight)
+
+    out = _rerun(op, run, "deliver_parts", **_hdr(op=op))
+
+    assert out["ok"] is True
+    assert out["outcome"] == "escalated_overlap"
+    assert out["new_run_id"] and out["new_run_id"] != str(run)
+    with psycopg.connect(dsn, autocommit=True, row_factory=dict_row) as conn:
+        row = conn.execute(
+            "SELECT status, terminal_state_metadata FROM pipeline_runs WHERE id = %s",
+            (out["new_run_id"],),
+        ).fetchone()
+    assert row is not None and row["status"] == "escalated"
+    assert row["terminal_state_metadata"]["final_outcome"] == "rerun_overlapped_open_approval"
+    assert row["terminal_state_metadata"]["version"] == 1, "the arm's effects stand (no rollback)"
+
+
+def test_rerun_no_overlap_response_outcome_completed_200(substrate, monkeypatch) -> None:
+    """The C1 counter-leg: no approval arms mid-flight → 200 with ``outcome='completed'`` and
+    the lineage row closed 'completed' (the response shape the canvas-era operators read)."""
+    dsn = substrate.dsn
+    op, tenant = _assigned(dsn)
+    run = _seed_run(dsn, tenant, run_type="plan_deliver")
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute(
+            "INSERT INTO business_plan (tenant_id, version, summary_json, roadmap_json, "
+            "fact_bundle_json, generated_by, delivered_parts) "
+            "VALUES (%s, 1, %s, '[]', '{}', 'test', 3)",
+            (str(tenant), '{"text": "plan"}'),
+        )
+
+    from orchestrator.business_plan import delivery
+
+    monkeypatch.setattr(delivery, "deliver_plan", lambda *a, **k: None)
+
+    out = _rerun(op, run, "deliver_parts", **_hdr(op=op))
+
+    assert out["ok"] is True
+    assert out["outcome"] == "completed"
+    with psycopg.connect(dsn, autocommit=True, row_factory=dict_row) as conn:
+        row = conn.execute(
+            "SELECT status, terminal_state_metadata FROM pipeline_runs WHERE id = %s",
+            (out["new_run_id"],),
+        ).fetchone()
+    assert row is not None and row["status"] == "completed"
+    assert row["terminal_state_metadata"]["final_outcome"] == "completed"
+
+
 # ---------------------------------------------------------------------------
 # 6. /timeline — read through the mig-131 views, tenant derived from the run
 # ---------------------------------------------------------------------------
