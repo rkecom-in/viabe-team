@@ -643,6 +643,74 @@ def test_expire_overrides_sweep_cancels_only_expired_unconsumed(substrate):
     assert states[consumed] is None, "consumed pin is history, never cancelled"
 
 
+def _run_status(dsn: str, tenant: str, status: str) -> str:
+    """Seed a pipeline_runs row in an explicit status (the orphaned-pin sweep keys on it)."""
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        return str(
+            conn.execute(
+                "INSERT INTO pipeline_runs (tenant_id, run_type, status) "
+                "VALUES (%s, 'agent_dispatch', %s) RETURNING id",
+                (tenant, status),
+            ).fetchone()[0]
+        )
+
+
+def test_expire_overrides_sweep_cancels_orphaned_run_bound_pins(substrate):
+    """VT-375 hygiene: the sweep cancels an unconsumed run-BOUND pin (workflow_id NOT NULL,
+    no expiry) whose pipeline_runs row reached a genuinely-FINISHED status — the run will
+    never re-execute, so the pin can never fire.
+
+    FINISHED here = NOT IN ('running', 'paused'). 'paused' is RESUMABLE, not terminal
+    (runner.py:285 parks the SAME run on 'paused'; approval_resume drives it onward to
+    'completed') — so a pin bound to a paused run must SURVIVE (it may still fire on resume),
+    exactly like a pin on a still-running run. Only the finished statuses orphan a pin. A pin
+    bound to a finished run AND already consumed is history (untouched); a next-run (NULL
+    workflow_id) pin is governed by expiry only, not by this leg.
+    """
+    from orchestrator.run_control import expire_overrides_sweep
+
+    tenant = _tenant(substrate)
+    running_run = _run_status(substrate, tenant, "running")
+    finished_run = _run_status(substrate, tenant, "completed")
+    paused_run = _run_status(substrate, tenant, "paused")  # RESUMABLE — NOT terminal-for-sweep
+
+    # orphaned: bound to a finished run, unconsumed, NO expiry → cancelled.
+    orphaned = _override(
+        substrate, tenant, "agent_dispatch", "candidate_build", workflow_id=finished_run
+    )
+    # bound to a 'paused' (RESUMABLE) run, unconsumed → must SURVIVE: the run may yet resume
+    # and consume it (the sweep must never cancel a pin a resuming run still needs).
+    live_paused = _override(
+        substrate, tenant, "agent_dispatch", "candidate_build", workflow_id=paused_run
+    )
+    # bound to a still-running run → must SURVIVE (the run may yet consume it).
+    live_bound = _override(
+        substrate, tenant, "agent_dispatch", "candidate_build", workflow_id=running_run
+    )
+    # bound to a finished run but ALREADY consumed → history, never re-cancelled.
+    consumed_bound = _override(
+        substrate, tenant, "agent_dispatch", "candidate_build",
+        workflow_id=finished_run, consumed_at=_future() - timedelta(hours=2),
+        consumed_run_id=finished_run,
+    )
+
+    cancelled = expire_overrides_sweep(pool=_DsnPool(substrate))
+    assert cancelled >= 1  # >= — the sweep is global; other suites' rows may ride along
+    with psycopg.connect(substrate, autocommit=True) as conn:
+        states = dict(
+            conn.execute(
+                "SELECT id::text, cancelled_at FROM step_overrides WHERE tenant_id = %s",
+                (tenant,),
+            ).fetchall()
+        )
+    assert states[orphaned] is not None, "orphaned run-bound pin (finished run) must be cancelled"
+    assert states[live_paused] is None, (
+        "pin on a 'paused' (RESUMABLE) run must SURVIVE — paused is not terminal"
+    )
+    assert states[live_bound] is None, "pin on a still-running run must survive the sweep"
+    assert states[consumed_bound] is None, "a consumed run-bound pin is history, never cancelled"
+
+
 # ---------------------------------------------------------------------------
 # F6/I7 — allowed-keys merge enforcement (apply_pinned_input)
 # ---------------------------------------------------------------------------
@@ -790,6 +858,146 @@ def test_rerun_409_while_tenant_has_open_approval(substrate):
         rerun_from(run, "generate_validate", requested_by=str(uuid4()))
     assert exc2.value.code == 422
     assert "approval" not in str(exc2.value)
+
+
+# ---------------------------------------------------------------------------
+# C1 fold-in (VT-375) — F10 RACE: rerun_from vs request_owner_approval's arm
+# converge to refusal, NEVER two open pending_approvals (mig-128 partial unique
+# is the structural backstop; the /rerun 409 is the UX on top — plan §12 F10).
+# ---------------------------------------------------------------------------
+
+
+def _seed_grounded_profile(dsn: str, tenant: str) -> None:
+    """Seed a CONFIRMED L1 business_profile so generator._gather_grounding returns a non-empty
+    bundle — this is what lets the rerun WIN the race and actually SUCCEED (without it the rerun
+    always 422s on grounding, and the race never exercises the success arm). RLS-scoped write
+    through the real upsert path."""
+    os.environ["TEAM_SUPABASE_DB_URL"] = dsn  # tenant_connection reads this
+    from orchestrator.knowledge import upsert_business_profile
+
+    upsert_business_profile(
+        tenant,
+        {"business_name": "VT375 Race Diner", "business_type": "restaurant", "city": "Pune"},
+    )
+
+
+def test_f10_rerun_races_approval_arm_never_two_open_approvals(substrate, monkeypatch):
+    """C1 (plan §12 F10) — FALSIFIABLE: a ``rerun_from`` racing ``arm_pause_request`` for the SAME
+    tenant converges to ONE of two clean outcomes, NEVER the forbidden third.
+
+    The crux the strengthening fixes: the rerun is set up so it CAN genuinely SUCCEED when it
+    wins the race (a grounded profile is seeded + ``generator._generate_and_validate`` is stubbed
+    so no LLM is hit). With success reachable, the test actually exercises the race — the prior
+    version's blanket 422-on-grounding made every interleaving a trivial refusal, proving nothing.
+
+    The invariant, asserted on EVERY interleaving:
+      1. open pending_approvals for the tenant ∈ {0, 1} — the mig-128
+         ``pending_approvals_one_open_per_tenant`` partial unique (the structural backstop).
+      2. The rerun outcome is EXACTLY ONE of {SUCCEEDED (a new run UUID), REFUSED-409 (the F10
+         open-approval gate)} — XOR, never both, never the old 422, never a crash.
+      3. THE forbidden third: the rerun SUCCEEDED while an approval is OPEN. That combination —
+         a second control surface armed behind an in-flight rerun — is a hard failure. So:
+         rerun-success ⟺ zero open approvals; an open approval ⟺ the rerun refused 409.
+    Keeps the 6 interleavings.
+    """
+    from orchestrator.agent.tools.request_owner_approval import (
+        RequestOwnerApprovalInput,
+        arm_pause_request,
+    )
+    from orchestrator.business_plan import delivery, generator
+    from orchestrator.run_control.rerun import RerunRefused, rerun_from
+
+    # Stub the LLM transmit + the owner-facing delivery burst so a WINNING rerun completes fast
+    # and offline. The stub returns a schema-shaped, citation-free degraded plan (the generator's
+    # own floor shape) — write_new_version persists it against the real DB, so the rerun returns a
+    # real new-run UUID = genuine success, not a mocked-away one.
+    def _stub_generate(_tenant_id: Any, grounding: Any, _llm: Any = None) -> dict[str, Any]:
+        return {
+            "summary": {"text": "Race-test plan.", "headline": "Race", "citations": []},
+            "roadmap": [],
+            "model_id": "stub-no-llm",
+        }
+
+    monkeypatch.setattr(generator, "_generate_and_validate", _stub_generate)
+    monkeypatch.setattr(delivery, "deliver_plan", lambda *a, **k: None)
+
+    for _ in range(6):  # several interleavings — the invariant must hold on every one
+        tenant = _tenant_brain_ready(substrate, whatsapp=f"+1{uuid4().int % 10**10:010d}")
+        _seed_grounded_profile(substrate, tenant)  # grounding present → the rerun CAN win+succeed
+        rerun_source = _run_typed(substrate, tenant, "plan_generate")
+        approval_run = _run_typed(substrate, tenant, "plan_generate")  # the arm's target run
+
+        barrier = threading.Barrier(2)
+        results: dict[str, Any] = {}
+
+        def _arm() -> None:
+            try:
+                barrier.wait(timeout=10)
+                results["arm"] = arm_pause_request(
+                    RequestOwnerApprovalInput(
+                        tenant_id=UUID(tenant),
+                        run_id=UUID(approval_run),
+                        approval_type="other",
+                        summary="VT-375 C1 race",
+                    ),
+                    dry_run=True,  # no Twilio — the INSERT is the only effect we race
+                )
+            except Exception as exc:  # noqa: BLE001 — surface in the assert
+                results["arm"] = exc
+
+        def _rerun() -> None:
+            try:
+                barrier.wait(timeout=10)
+                results["rerun"] = rerun_from(
+                    rerun_source, "generate_validate", requested_by=str(uuid4())
+                )
+            except RerunRefused as exc:
+                results["rerun"] = exc
+            except Exception as exc:  # noqa: BLE001 — any other failure must surface, not pass
+                results["rerun"] = exc
+
+        threads = [threading.Thread(target=_arm), threading.Thread(target=_rerun)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=30)
+
+        assert set(results) == {"arm", "rerun"}, f"a racer never returned: {results}"
+        # The arm itself must not have raised (it either armed, or refused 'queue busy' — both
+        # are clean PauseRequestResults, never an exception).
+        assert not isinstance(results["arm"], Exception), f"arm raised: {results['arm']!r}"
+
+        rr = results["rerun"]
+        # invariant 1 — the structural backstop: never more than one OPEN approval.
+        with psycopg.connect(substrate, autocommit=True) as conn:
+            open_count = conn.execute(
+                "SELECT count(*) FROM pending_approvals "
+                "WHERE tenant_id = %s AND resolved_at IS NULL",
+                (tenant,),
+            ).fetchone()[0]
+        assert open_count <= 1, (
+            f"F10 structural backstop violated: {open_count} open approvals for the tenant "
+            "(the mig-128 one-open-per-tenant partial unique must converge the race)"
+        )
+
+        # invariant 2 — outcome is SUCCESS xor REFUSED-409, nothing else.
+        rerun_succeeded = isinstance(rr, UUID)
+        rerun_refused_409 = isinstance(rr, RerunRefused) and rr.code == 409
+        assert rerun_succeeded ^ rerun_refused_409, (
+            f"rerun outcome must be SUCCESS xor 409-refusal (grounded now, so no 422); got {rr!r}"
+        )
+
+        # invariant 3 — the forbidden third: success WHILE an approval is open. rerun-success ⟺
+        # zero open approvals; an open approval ⟺ the rerun refused 409.
+        if rerun_succeeded:
+            assert open_count == 0, (
+                "FORBIDDEN: the rerun SUCCEEDED while an approval is OPEN — a second control "
+                f"surface armed behind an in-flight rerun (open_count={open_count})"
+            )
+        else:  # refused-409
+            assert open_count == 1, (
+                "a 409 refusal must be backed by an actually-open approval (the arm won the race)"
+            )
 
 
 # ===========================================================================

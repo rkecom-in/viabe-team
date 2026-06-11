@@ -379,21 +379,55 @@ def _deep_merge(base: dict[str, Any], pinned: dict[str, Any]) -> dict[str, Any]:
 
 
 def expire_overrides_sweep(*, pool: Any = None) -> int:
-    """Cancel expired, unconsumed override rows; return how many were cancelled.
+    """Cancel stale unconsumed override rows; return how many were cancelled.
 
-    F8: NULL-workflow (next-run) pins REQUIRE ``expires_at`` — this sweep is what
-    makes that bound real (an expired pin must never fire on a much-later run).
-    Run-targeted pins that carry an expiry are swept on the same predicate.
+    Two hygiene legs, both restricted to unconsumed + uncancelled pins:
+
+    1. EXPIRED pins (F8): ``expires_at <= now()``. NULL-workflow (next-run) pins
+       REQUIRE ``expires_at`` — this is what makes that bound real (an expired pin
+       must never fire on a much-later run). Run-targeted pins carrying an expiry
+       are swept on the same predicate.
+    2. ORPHANED run-BOUND pins (VT-375 hygiene): ``workflow_id`` points at a
+       ``pipeline_runs`` row that reached a TERMINAL status WITHOUT the pin being
+       consumed. The run will never re-execute, so the pin can never fire; cancel
+       it so it does not linger un-cancelled forever (an expiry-less run-bound pin
+       would otherwise survive every expiry sweep). Same count semantics — both
+       legs contribute to the single returned cancelled count.
+
+       TERMINAL here = NOT IN ('running', 'paused'). 'paused' is NOT terminal —
+       it is RESUMABLE: runner.py:285 stamps 'paused' when run-control parks a run,
+       and approval_resume / close_webhook_run later drives the SAME run onward to
+       'completed' (the migration-052 CHECK lists 'paused' as a distinct value
+       precisely because the run is not finished). A pin bound to a paused run may
+       still fire when that run resumes, so the orphan leg must SPARE it; only the
+       genuinely-finished statuses (completed / escalated / aborted_hard_limit /
+       duplicate_rejected) leave a run-bound pin un-fireable.
+
+    Run in ONE UPDATE so the rowcount is the true total (a pin matching both legs
+    is counted once). Service pool only (step_overrides is deny-all RLS).
     """
     with _service_pool(pool).connection() as conn:
         cur = conn.execute(
-            "UPDATE step_overrides SET cancelled_at = now() "
-            "WHERE cancelled_at IS NULL AND consumed_at IS NULL "
-            "AND expires_at IS NOT NULL AND expires_at <= now()"
+            "UPDATE step_overrides o SET cancelled_at = now() "
+            "WHERE o.cancelled_at IS NULL AND o.consumed_at IS NULL "
+            "AND ("
+            "  (o.expires_at IS NOT NULL AND o.expires_at <= now())"
+            "  OR ("
+            "    o.workflow_id IS NOT NULL"
+            "    AND EXISTS ("
+            "      SELECT 1 FROM pipeline_runs r"
+            "       WHERE r.id = o.workflow_id "
+            "         AND r.status NOT IN ('running', 'paused')"
+            "    )"
+            "  )"
+            ")"
         )
         cancelled = cur.rowcount or 0
     if cancelled:
-        logger.info("run_control: expired-override sweep cancelled %d row(s)", cancelled)
+        logger.info(
+            "run_control: override sweep cancelled %d row(s) (expired + orphaned run-bound)",
+            cancelled,
+        )
     return cancelled
 
 
