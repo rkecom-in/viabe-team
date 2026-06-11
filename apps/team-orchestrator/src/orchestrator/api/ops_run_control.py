@@ -50,7 +50,7 @@ from orchestrator.privacy.vtr import vtr_connection
 from orchestrator.run_control import is_paused
 from orchestrator.run_control.gate_manifest import GATE_MODULES
 from orchestrator.run_control.registry import REGISTRY
-from orchestrator.run_control.rerun import RerunRefused, rerun_from
+from orchestrator.run_control.rerun import RUN_TYPE_TO_KIND, RerunRefused, rerun_from
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/orchestrator/ops/run-control")
@@ -587,7 +587,15 @@ def rerun(
     from the source run row. :class:`RerunRefused` (non-rerunnable kind / open approval F10 /
     unknown step) maps to its carried status (default 409). The attempt-audit commits BEFORE the
     dispatch — ``rerun_from`` owns its own txns, so atomic audit-with-mutation is not expressible
-    here; an audited-but-refused attempt is the intended trace (the VT-300 posture)."""
+    here; an audited-but-refused attempt is the intended trace (the VT-300 posture).
+
+    Response carries ``outcome`` ('completed' | 'escalated_overlap') — VT-375 C1 (Cowork ruling
+    20260611T234500Z, Option A). HTTP stays **200 for 'escalated_overlap'** deliberately: the
+    rerun DID run (the dispatch happened / the version mint stands — no rollback, per the
+    ruling); what overlapped is an owner approval that armed mid-flight, and that is disclosed —
+    the run row closes 'escalated', a ``run_control_rerun_overlap`` alert lands in pipeline_log,
+    and the panel's disclosure copy explains it. A non-2xx here would falsely tell the operator
+    nothing happened."""
     _require_uuid(body.source_run_id, "source_run_id")
     verify_internal_secret(x_internal_secret)
     verify_operator_jwt(x_operator_jwt)
@@ -643,7 +651,7 @@ def rerun(
         )
 
     try:
-        new_run_id = rerun_from(
+        result = rerun_from(
             body.source_run_id, body.from_step, overrides, requested_by=operator
         )
     except RerunRefused as exc:
@@ -654,12 +662,14 @@ def rerun(
         # Refusal text echoes kinds/steps/counts; scrub anyway before it leaves (CL-390).
         raise HTTPException(status_code=status, detail=scrub_pii(str(exc))) from exc
     logger.info(
-        "rerun OK operator=%s tenant=%s source=%s from_step=%s new_run=%s",
-        operator, tenant_id, body.source_run_id, body.from_step, new_run_id,
+        "rerun OK operator=%s tenant=%s source=%s from_step=%s new_run=%s outcome=%s",
+        operator, tenant_id, body.source_run_id, body.from_step, result.run_id, result.outcome,
     )
     return {
         "ok": True,
-        "new_run_id": str(new_run_id),
+        "new_run_id": str(result.run_id),
+        # C1/Option A: 'completed' | 'escalated_overlap' — 200 either way (see docstring).
+        "outcome": result.outcome,
         "source_run_id": body.source_run_id,
         "tenant_id": tenant_id,
     }
@@ -668,6 +678,33 @@ def rerun(
 # ---------------------------------------------------------------------------
 # /timeline/{run_id} — read-only (no audit; mirrors the Gap-6 read endpoints)
 # ---------------------------------------------------------------------------
+
+# run_control_intervention rows are the companion observability records ABOUT a seam —
+# never the controllable seam itself — and they carry a colon-namespaced step_name
+# ('<workflow_kind>:<step_name>'). They are ALWAYS observed, even though the part after
+# the colon matches a controllable registry step. Exclude them explicitly.
+_INTERVENTION_STEP_KIND = "run_control_intervention"
+
+
+def _step_tier(run_type: Any, step_kind: Any, step_name: Any) -> str:
+    """Pure response annotation: 'controllable' iff the step is a REGISTERED controllable
+    seam, else 'observed'. NO view/RLS change — derived from the registry at read time.
+
+    'controllable' requires: (a) the step is NOT a run_control_intervention companion row,
+    (b) the run_type maps to a known workflow_kind (RUN_TYPE_TO_KIND), and (c) the step_name's
+    registry part resolves to a REGISTRY entry whose tier is 'controllable'. Everything else —
+    unregistered kinds, brain micro-steps (langgraph node names), observed-tier registry
+    entries, intervention rows — is 'observed' (the honest 'not controllable' label, plan §1)."""
+    if step_kind == _INTERVENTION_STEP_KIND:
+        return "observed"
+    kind = RUN_TYPE_TO_KIND.get(run_type or "")
+    if not kind or not step_name:
+        return "observed"
+    # The registry step part — bare step_name for real rows; the post-colon part defensively
+    # (a non-intervention row should not be namespaced, but never index past a stray colon).
+    registry_step = str(step_name).rsplit(":", 1)[-1]
+    entry = REGISTRY.get((kind, registry_step))
+    return "controllable" if entry is not None and entry.tier == "controllable" else "observed"
 
 
 @router.get("/timeline/{run_id}")
@@ -708,6 +745,10 @@ def timeline(
             (tenant_id,),
         )
         controls = [dict(r) for r in cur.fetchall()]
+    # Pure response annotation (no view/RLS change): tag each step controllable | observed so
+    # the panel can badge observed steps "not controllable" without a second round-trip.
+    for s in steps:
+        s["tier"] = _step_tier(s.get("run_type"), s.get("step_kind"), s.get("step_name"))
     logger.info(
         "timeline OK operator=%s tenant=%s run=%s steps=%d active_controls=%d",
         operator, tenant_id, run_id, len(steps), len(controls),
@@ -717,4 +758,284 @@ def timeline(
         "tenant_id": tenant_id,
         "steps": steps,
         "active_controls": controls,
+    }
+
+
+# ---------------------------------------------------------------------------
+# /programs/{tenant_id} — read-only programs projection (VT-375 Phase B, B1)
+# ---------------------------------------------------------------------------
+#
+# The panel's tenant-tile → program-tile read surface. Past = terminal pipeline_runs
+# (+ rerun lineage); running = non-terminal runs (active_hold flagged from the live
+# workflow_controls read); upcoming_7d = COMPUTED forecast, NO new state (trial sweep
+# dates, queued agent work, roadmap month windows). Same Gap-6 read posture as
+# /timeline: internal secret + operator JWT (exp required) + the assignment gate
+# (tenant from the PATH, like /pause's tenant-scoped gate). pipeline_runs reads on the
+# service pool (matching /timeline); the holds read goes through the app_vtr_role view
+# (vtr_workflow_controls) so the panel never shows raw control rows.
+#
+# ``degraded``: true when the workflow_controls (holds) read raises — a fail-OPEN read
+# path (the projection still returns past/running/upcoming; the panel surfaces the
+# pause-state-unverifiable copy). Hold rows NEVER carry reason text (the view excludes
+# it by construction; we re-pin the column allowlist here defensively).
+
+_PROGRAMS_PAST_LIMIT = 50  # newest terminal runs per tenant (contract pin)
+_UPCOMING_WINDOW = timedelta(days=7)
+# Terminal = NOT 'running' (the pipeline_runs status CHECK list; migration 052).
+_RUNNING_STATUS = "running"
+# vtr_workflow_controls is exactly these 4 structural columns (mig-131) — re-pinned so a
+# view edit that widened the projection never leaks reason/operator ids through here.
+_HOLD_COLUMNS = ("tenant_id", "workflow_kind", "set_at", "released_at")
+
+
+def _row_to_dict(row: Any, columns: tuple[str, ...]) -> dict[str, Any]:
+    if isinstance(row, dict):
+        return dict(row)
+    return dict(zip(columns, row, strict=True))
+
+
+def _iso(value: Any) -> str | None:
+    return value.isoformat() if isinstance(value, datetime) else None
+
+
+_RUN_COLUMNS = (
+    "id",
+    "run_type",
+    "status",
+    "started_at",
+    "ended_at",
+    "rerun_of_run_id",
+    "rerun_from_step",
+    "step_count",
+)
+
+
+def _run_projection(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "run_id": str(row["id"]),
+        "run_type": row["run_type"],
+        "status": row["status"],
+        "started_at": _iso(row["started_at"]),
+        "ended_at": _iso(row["ended_at"]),
+        "rerun_of_run_id": str(row["rerun_of_run_id"]) if row["rerun_of_run_id"] else None,
+        "rerun_from_step": row["rerun_from_step"],
+        "step_count": row["step_count"],
+    }
+
+
+def _roadmap_agent(item: dict[str, Any]) -> str:
+    """The roadmap item's owning_agent CLOSED enum (schema.py OWNING_AGENTS), or 'unassigned'.
+
+    Defense-in-depth against an unexpected/free-text value sneaking onto this VTR label: only a
+    value already in the closed enum is surfaced; anything else degrades to 'unassigned'. The
+    import is lazy so this dep-light API module never pulls the business_plan store at import."""
+    from orchestrator.business_plan.store import OWNING_AGENTS
+
+    agent = item.get("owning_agent")
+    return agent if isinstance(agent, str) and agent in OWNING_AGENTS else "unassigned"
+
+
+def _compute_upcoming_7d(conn: Any, tenant_id: str, now: datetime) -> list[dict[str, Any]]:
+    """COMPUTED forecast — NO new state. Three sources, each derived from rows that
+    already exist (trial start + config, queued work items, the latest plan roadmap)."""
+    horizon = now + _UPCOMING_WINDOW
+    upcoming: list[dict[str, Any]] = []
+
+    # --- trial sweep dates: tenants.trial_started_at + config/trial.yaml -------------
+    # Only an active, un-subscribed trial forecasts a sweep (mirrors trial_evaluator's
+    # in-scope predicate). warn = trial_end - warn_lead; expiry = trial_end.
+    trow = conn.execute(
+        "SELECT phase, trial_started_at, paid_conversion_at FROM tenants WHERE id = %s",
+        (tenant_id,),
+    ).fetchone()
+    t = _row_to_dict(trow, ("phase", "trial_started_at", "paid_conversion_at")) if trow else None
+    if (
+        t is not None
+        and t["phase"] == "trial"
+        and t["paid_conversion_at"] is None
+        and t["trial_started_at"] is not None
+    ):
+        from orchestrator.billing import trial_evaluator
+
+        cfg = trial_evaluator._config()
+        trial_end = t["trial_started_at"] + timedelta(days=int(cfg["trial_days"]))
+        warn_at = trial_end - timedelta(days=int(cfg["warn_lead_days"]))
+        for label, due in (("trial warning", warn_at), ("trial expiry", trial_end)):
+            if now <= due < horizon:
+                upcoming.append(
+                    {
+                        "kind": "trial_sweep",
+                        "due_at": due.isoformat(),
+                        "label": label,
+                        "source": "trial.yaml forecast",
+                    }
+                )
+
+    # --- queued agent work: non-terminal pre-run agent_work_items -------------------
+    # 'dispatched' is the queued-not-yet-executed status the coordinator mints; the next
+    # coordinator sweep (AGENT_COORDINATOR_CRON, daily 10:00 UTC) is the forecast due_at.
+    from orchestrator.agents.coordinator import AGENT_COORDINATOR_CRON
+
+    qrow = conn.execute(
+        "SELECT count(*) FROM agent_work_items "
+        "WHERE tenant_id = %s AND status = 'dispatched'",
+        (tenant_id,),
+    ).fetchone()
+    queued = int(qrow[0] if not isinstance(qrow, dict) else qrow["count"])
+    if queued:
+        upcoming.append(
+            {
+                "kind": "agent_dispatch",
+                "due_at": _next_cron_after(AGENT_COORDINATOR_CRON, now).isoformat(),
+                "label": f"next sweep ({queued} queued)",
+                "source": "agent_work_items",
+            }
+        )
+
+    # --- roadmap: latest plan's month windows starting within 7d --------------------
+    # month N window starts at plan.created_at + (N-1) months; the plan is the latest
+    # business_plan version. Read service-pool style via the same conn (service role).
+    prow = conn.execute(
+        "SELECT version, roadmap_json, created_at FROM business_plan "
+        "WHERE tenant_id = %s ORDER BY version DESC LIMIT 1",
+        (tenant_id,),
+    ).fetchone()
+    if prow is not None:
+        plan = _row_to_dict(prow, ("version", "roadmap_json", "created_at"))
+        created_at = plan["created_at"]
+        for item in plan["roadmap_json"] or []:
+            month = item.get("month")
+            if not isinstance(month, int) or month < 1:
+                continue
+            window_start = created_at + timedelta(days=(month - 1) * 30)
+            if now <= window_start < horizon:
+                upcoming.append(
+                    {
+                        "kind": "roadmap",
+                        "due_at": window_start.isoformat(),
+                        # STRUCTURAL ONLY — the month number + the owning_agent CLOSED enum.
+                        # item['objective'] is LLM-authored free text from the service-pool plan
+                        # read; surfacing it on this VTR projection is a PII-boundary violation
+                        # (a roadmap objective can name the owner's business / a customer). The
+                        # owning_agent is validated against OWNING_AGENTS at plan-write (schema.py);
+                        # an out-of-enum value degrades to a neutral token, never raw free text.
+                        "label": f"month {month} window opens ({_roadmap_agent(item)})",
+                        "source": f"business_plan v{plan['version']}",
+                    }
+                )
+
+    upcoming.sort(key=lambda u: u["due_at"])
+    return upcoming
+
+
+def _next_cron_after(cron: str, now: datetime) -> datetime:
+    """Next fire of a ``M H * * *`` daily cron strictly after ``now`` (the only cron shape
+    the coordinator uses). Falls back to now+1d on any non-daily shape — the forecast is a
+    best-effort due_at label, never a scheduler."""
+    try:
+        minute, hour = cron.split()[0], cron.split()[1]
+        m, h = int(minute), int(hour)
+    except (ValueError, IndexError):
+        return now + timedelta(days=1)
+    candidate = now.replace(hour=h, minute=m, second=0, microsecond=0)
+    if candidate <= now:
+        candidate += timedelta(days=1)
+    return candidate
+
+
+@router.get("/programs/{tenant_id}")
+def programs(
+    tenant_id: str,
+    x_internal_secret: str | None = Header(default=None, alias="X-Internal-Secret"),
+    x_operator_jwt: str | None = Header(default=None, alias="X-Operator-Jwt"),
+) -> dict[str, Any]:
+    """Programs projection for one tenant (VT-375 Phase B read surface). Past / running /
+    upcoming_7d / holds + a ``degraded`` flag. Read-only — no audit, no mutation (mirrors
+    the Gap-6 read endpoints). Tenant comes from the PATH; the assignment gate runs on it
+    (tenant-scoped, like /pause). GET carries no body — the JWT claim id feeds the gate's
+    equality leg, same as /timeline."""
+    _require_uuid(tenant_id, "tenant_id")
+    verify_internal_secret(x_internal_secret)
+    claim = verify_operator_jwt(x_operator_jwt)
+    claim_operator = str(claim["operator_id"])
+    operator = _gate(
+        x_internal_secret=x_internal_secret,
+        x_operator_jwt=x_operator_jwt,
+        body_operator_id=claim_operator,
+        tenant_id=tenant_id,
+        deny_action="programs_read_denied",
+    )
+
+    now = datetime.now(timezone.utc)
+    pool = get_pool()
+    # pipeline_runs + the computed forecast read on the service pool (matches /timeline's
+    # pipeline_runs posture; these are run-row/forecast reads, not view reads).
+    with pool.connection() as conn:
+        past_rows = conn.execute(
+            "SELECT id, run_type, status, started_at, ended_at, rerun_of_run_id, "
+            "rerun_from_step, step_count FROM pipeline_runs "
+            "WHERE tenant_id = %s AND status <> %s "
+            "ORDER BY started_at DESC LIMIT %s",
+            (tenant_id, _RUNNING_STATUS, _PROGRAMS_PAST_LIMIT),
+        ).fetchall()
+        running_rows = conn.execute(
+            "SELECT id, run_type, status, started_at, ended_at, rerun_of_run_id, "
+            "rerun_from_step, step_count FROM pipeline_runs "
+            "WHERE tenant_id = %s AND status = %s ORDER BY started_at DESC",
+            (tenant_id, _RUNNING_STATUS),
+        ).fetchall()
+        upcoming_7d = _compute_upcoming_7d(conn, tenant_id, now)
+
+    past = [_run_projection(_row_to_dict(r, _RUN_COLUMNS)) for r in past_rows]
+
+    # Holds read through the app_vtr_role view (the PII boundary). A read error is the ONLY
+    # degraded trigger (fail-open): the projection still returns; the panel shows the
+    # pause-state-unverifiable copy. active_hold on running runs is derived from the held kinds.
+    holds: list[dict[str, Any]] = []
+    degraded = False
+    try:
+        with vtr_connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT tenant_id, workflow_kind, set_at, released_at FROM vtr_workflow_controls "
+                "WHERE tenant_id = %s AND released_at IS NULL",
+                (tenant_id,),
+            )
+            for r in cur.fetchall():
+                hold = _row_to_dict(r, _HOLD_COLUMNS)
+                holds.append(
+                    {
+                        "workflow_kind": hold["workflow_kind"],
+                        "set_at": _iso(hold["set_at"]),
+                    }
+                )
+    except Exception as exc:  # noqa: BLE001 — control-read outage fails OPEN (degraded)
+        logger.warning(
+            "programs: workflow_controls read FAILED tenant=%s — degraded=true exc=%r",
+            tenant_id, exc,
+        )
+        degraded = True
+
+    # active_hold: a run is held when its workflow_kind is paused. Map the run_type onto the
+    # registry workflow_kind first (legacy 'orchestrator'/'twilio_inbound' → webhook_inbound),
+    # so a legacy run_type still matches a webhook_inbound hold.
+    from orchestrator.run_control.rerun import RUN_TYPE_TO_KIND
+
+    held_kinds = {h["workflow_kind"] for h in holds}
+    running = []
+    for r in running_rows:
+        proj = _run_projection(_row_to_dict(r, _RUN_COLUMNS))
+        kind = RUN_TYPE_TO_KIND.get(proj["run_type"] or "", proj["run_type"])
+        running.append({**proj, "active_hold": kind in held_kinds})
+
+    logger.info(
+        "programs OK operator=%s tenant=%s past=%d running=%d upcoming=%d holds=%d degraded=%s",
+        operator, tenant_id, len(past), len(running), len(upcoming_7d), len(holds), degraded,
+    )
+    return {
+        "tenant_id": tenant_id,
+        "past": past,
+        "running": running,
+        "upcoming_7d": upcoming_7d,
+        "holds": holds,
+        "degraded": degraded,
     }
