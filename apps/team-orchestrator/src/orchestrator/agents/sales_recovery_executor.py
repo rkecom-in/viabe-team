@@ -409,6 +409,11 @@ def _cancel_batch(tenant_id: UUID, batch_id: UUID, *, conn: Any, reason: str) ->
             "WHERE tenant_id = %s AND batch_id = %s",
             (reason, str(tenant_id), str(batch_id)),
         )
+        # VT-382 (CL-437.3): terminal unwind — redact owner_feedback + halted draft
+        # params in the SAME txn (nothing was sent; no audit capture).
+        from orchestrator.agents.outbox_redaction import redact_batch_close
+
+        redact_batch_close(conn, str(tenant_id), [str(batch_id)])
 
 
 def _resolve_arm_fn() -> Any:

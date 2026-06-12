@@ -498,6 +498,34 @@ def override_expiry_sweep_scheduled(
         logger.exception("VT-374 override-expiry sweep scheduled run failed")
 
 
+# VT-382: daily outbox-redaction sweep. 22:30 UTC = 04:00 IST (off-peak, after the
+# 03:30 override-expiry sweep). UTC-correct cron (matches the other nightly sweeps).
+# The reliability BACKSTOP for the inline redact-on-terminal hooks (customer_send /
+# approval_glue / autonomy): redacts params/owner_feedback on rows ALREADY terminal that
+# the inline hook never ran for — the CL-437 ruling-3.3 backfill clause — and captures the
+# exact owner-facing text for historical 'sent' rows still holding raw params BEFORE
+# redacting them (one-shot policy-honesty leg). NEVER touches non-terminal rows
+# (drafted/sending/edit_requested) — retain-while-needed is the policy.
+OUTBOX_REDACTION_SWEEP_CRON = "30 22 * * *"
+
+
+def outbox_redaction_sweep_scheduled(
+    scheduled_time: datetime,
+    actual_time: datetime,
+) -> None:
+    """DBOS scheduled handler — daily 04:00 IST (VT-382). Redacts outbox bodies on rows
+    already in a terminal status (CL-437 ruling 3 backfill + the inline-hook backstop) and
+    captures historical sent-row text into owner_message_audit before redacting. NO LLM;
+    batched; idempotent (already-redacted values pass through unchanged). Best-effort: a
+    sweep failure must not crash the scheduler (the next run + the inline hooks re-catch)."""
+    from orchestrator.agents.outbox_redaction import sweep_terminal_rows
+
+    try:
+        sweep_terminal_rows()
+    except Exception:  # noqa: BLE001 — daily sweep is best-effort; next run retries
+        logger.exception("VT-382 outbox-redaction sweep scheduled run failed")
+
+
 # ---------------------------------------------------------------------------
 # 4. Monthly impact — REAL body (VT-176, partial — PDF generation downstream)
 # ---------------------------------------------------------------------------
@@ -783,6 +811,9 @@ def register_scheduled_triggers() -> None:
     # VT-374: daily expired-override cancel sweep (F8 next-run pin expiry bound).
     # EXTENDS this surface (same register-before-launch posture), NOT a parallel poller.
     DBOS.scheduled(OVERRIDE_EXPIRY_SWEEP_CRON)(override_expiry_sweep_scheduled)
+    # VT-382: daily outbox-redaction backfill/backstop sweep (CL-437 ruling 3.3).
+    # EXTENDS this surface (same register-before-launch posture), NOT a parallel poller.
+    DBOS.scheduled(OUTBOX_REDACTION_SWEEP_CRON)(outbox_redaction_sweep_scheduled)
     _registered = True
 
 
@@ -796,6 +827,7 @@ __all__ = [
     "MONTHLY_IMPACT_CRON",
     "MONTHLY_IMPACT_SHELL_EVENT",
     "MONTHLY_IMPACT_STARTED_EVENT",
+    "OUTBOX_REDACTION_SWEEP_CRON",
     "OVERRIDE_EXPIRY_SWEEP_CRON",
     "SHELL_STATUS",
     "WEEKLY_CADENCE_CRON",
@@ -813,6 +845,7 @@ __all__ = [
     "pii_log_sweep_scheduled",
     "monthly_impact_scheduled",
     "monthly_workflow_id",
+    "outbox_redaction_sweep_scheduled",
     "override_expiry_sweep_scheduled",
     "reconstitution_sweep_scheduled",
     "register_scheduled_triggers",

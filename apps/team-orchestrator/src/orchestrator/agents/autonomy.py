@@ -151,6 +151,12 @@ def cancel_open_batches(tenant_id: UUID | str, agent: str, *, reason: str, conn:
             "WHERE tenant_id = %s AND batch_id = ANY(%s::uuid[]) AND status = 'drafted'",
             (f"halted_{reason}", tid, batch_ids),
         )
+        # VT-382 (CL-437.3): cancelled batches + halted drafts are terminal — redact
+        # owner_feedback + halted params in the SAME revoke/freeze txn (no audit rows:
+        # nothing was sent).
+        from orchestrator.agents.outbox_redaction import redact_batch_close
+
+        redact_batch_close(conn, tid, batch_ids)
     return len(batch_ids)
 
 
@@ -294,6 +300,11 @@ def cancel_batch(
         "RETURNING id",
         (tid, bid),
     ).fetchall()
+    # VT-382 (CL-437.3): single-batch terminal cancel — redact owner_feedback + halted
+    # draft params in the SAME txn.
+    from orchestrator.agents.outbox_redaction import redact_batch_close
+
+    redact_batch_close(conn, tid, [bid])
     _emit(tid, "agent_batch_cancelled", {"agent": str(agent), "batch_id": bid,
                                          "drafts_halted": len(halted),
                                          "by": f"vtr:{vtr_id}"})
