@@ -94,7 +94,12 @@ RECONTACT_SUPPRESSION_DAYS = 30
 # category='customer_marketing' check happen at SEND time (fail-closed TemplateNotConfigured
 # until the F1 Meta SIDs land).
 WINBACK_TEMPLATE_NAME = "team_winback_simple"
-WINBACK_TEMPLATE_PARAMS: tuple[str, ...] = ("customer_name", "days_since_last_visit")
+# VT-384 (Cowork ruling #1 — registry-as-canon): the Meta-APPROVED body pins {{2}} = business_name,
+# so the executor signature conforms to the ARMED registry's team_winback_simple variables
+# (customer_name, business_name). The OLD (customer_name, days_since_last_visit) was the carried-
+# forward F1 mismatch — it is closed here. customer_send.assert_winback_signature() pins this at
+# import; agent_send_draft Gate-2b hard-refuses any drift at send time.
+WINBACK_TEMPLATE_PARAMS: tuple[str, ...] = ("customer_name", "business_name")
 
 _MODELS_YAML = Path(__file__).resolve().parents[3] / "config" / "models.yaml"
 # Drafting model slots: a dedicated ``agent_drafting`` models.yaml key wins when present (a
@@ -150,6 +155,10 @@ class CustomerFactBundle:
     days_since_last_sale: int
     last_sale_amount_paise: int
     lifetime_spend_paise: int
+    # VT-384: the tenant's business name — the registry's team_winback_simple {{2}}. Read once from
+    # tenants (not per-customer; the same value for the whole batch) and frozen into each bundle so
+    # the param menu + validator share one source.
+    business_name: str | None = None
 
 
 def _col(row: Any, key: str, idx: int) -> Any:
@@ -252,6 +261,12 @@ def build_customer_fact_bundle(
         sales = cur.fetchall()
     if not sales:
         raise LookupError(f"customer {cid} has no sale ledger rows — not a lapsed candidate")
+    # VT-384: the tenant business name → team_winback_simple {{2}}. Same value for the whole batch;
+    # read per-bundle for simplicity (the detection batch is small) on the RLS'd tenant_connection.
+    biz_row = conn.execute(
+        "SELECT business_name FROM tenants WHERE id = %s", (tid,)
+    ).fetchone()
+    raw_biz = _col(biz_row, "business_name", 0) if biz_row else None
     last_sale_date = _col(sales[0], "entry_date", 0)
     return CustomerFactBundle(
         customer_id=UUID(cid),
@@ -259,6 +274,7 @@ def build_customer_fact_bundle(
         days_since_last_sale=(date.today() - last_sale_date).days,
         last_sale_amount_paise=int(_col(sales[0], "amount_paise", 1)),
         lifetime_spend_paise=sum(int(_col(r, "amount_paise", 1)) for r in sales),
+        business_name=str(raw_biz) if raw_biz else None,
     )
 
 
@@ -298,9 +314,12 @@ def _call_llm(prompt: str, model: str) -> str:
 def _allowed_param_values(bundle: CustomerFactBundle) -> dict[str, str | None]:
     """The EXACT literal each template param may carry, derived from the frozen bundle. This is
     both the LLM's menu and the validator's ground truth — one source, zero drift."""
+    # VT-384 (registry-as-canon): the menu keys ARE WINBACK_TEMPLATE_PARAMS = (customer_name,
+    # business_name) — the Meta-APPROVED {{1}}/{{2}}. days_since_last_visit is no longer a template
+    # variable (the approved body greets by name + business, it does not interpolate a day count).
     return {
         "customer_name": bundle.display_name,
-        "days_since_last_visit": str(bundle.days_since_last_sale),
+        "business_name": bundle.business_name,
     }
 
 
@@ -545,6 +564,52 @@ class SalesRecoveryAgent:
         self._llm = llm
         self._arm_fn = arm_fn
 
+    def _try_l3_arm(self, tenant_id: UUID, batch_id: UUID) -> bool:
+        """VT-384 — attempt the L3 arm for a freshly-persisted batch. Returns True iff the batch
+        was moved into the delivery-anchored hold (auto_send_pending), in which case the durable
+        hold workflow is started and the caller MUST NOT run the L2 approval arm. Returns False on
+        ANY refusal (non-L3 / frozen / always-confirm floor / CAS lost / notice-send failure) — the
+        caller then falls back to the unchanged L2 arm. Never raises: an unexpected error logs and
+        returns False (fail-closed to L2 — an owner-gated send is always the safe fallback).
+
+        enter_l3_hold re-derives eligibility AT ARM TIME (autonomy L3 + not frozen + is_always_confirm
+        FALSE), so a money-bearing / bulk / first-contact / novel batch can never flip to
+        auto_send_pending here (CL-438 non-bypassable). It also sends the owner presend notice + sets
+        presend_notice_sid; this then starts the hold (register_l3_hold ran at lifespan)."""
+        from orchestrator.agents.l3_hold import (
+            enter_l3_hold,
+            start_l3_hold,
+        )
+
+        try:
+            with tenant_connection(tenant_id) as conn:
+                result = enter_l3_hold(tenant_id, batch_id, conn=conn)
+        except Exception:  # noqa: BLE001 — a pre-flip arm error fails closed to the L2 owner-gated arm
+            logger.exception(
+                "sales_recovery: L3 arm errored batch=%s — falling back to L2 arm", batch_id
+            )
+            return False
+        if not result.armed:
+            logger.info(
+                "sales_recovery: L3 arm declined batch=%s reason=%s — L2 fallback",
+                batch_id, result.reason,
+            )
+            return False
+        # The batch is now auto_send_pending (the flip + the presend notice both succeeded). The L2
+        # fallback is NO LONGER safe (it would double-handle a batch already in the hold), so from
+        # here we ALWAYS return True. start_l3_hold is idempotent on the batch-keyed workflow_id; a
+        # start failure leaves the batch armed but the hold un-started — the owner-inbound demote /
+        # kill paths still protect it, the C2 stop still blocks any send, and the next coordinator
+        # sweep is the recovery seam. That residual is strictly safer than re-arming an L2 approval.
+        try:
+            start_l3_hold(str(tenant_id), str(batch_id))
+        except Exception:  # noqa: BLE001 — armed-but-hold-unstarted: log; do NOT fall back to L2
+            logger.exception(
+                "sales_recovery: L3 hold start failed batch=%s (batch is armed auto_send_pending; "
+                "hold un-started — recovered by the next sweep / protected by demote+C2)", batch_id
+            )
+        return True
+
     def execute_item(self, ctx: AgentItemContext) -> ItemExecutionResult:
         """Detect → bundle → draft (CL-425-gated LLM) → validate grounding → persist →
         arm Pillar-7. Returns IDs + counters ONLY (IDs-in-state). Outcomes:
@@ -628,6 +693,32 @@ class SalesRecoveryAgent:
             )
 
         counters = {"drafted": len(grounded), "dropped_ungrounded": dropped}
+
+        # VT-384 — the L3 ARM (the orphaned wire, now connected). An L3-granted, non-frozen agent
+        # routes the drafted batch into the delivery-anchored hold (enter_l3_hold) INSTEAD of the L2
+        # approval arm. enter_l3_hold re-derives eligibility at arm time — autonomy L3 + not frozen
+        # AND is_always_confirm FALSE (the money/bulk/first-contact/novel floor, CL-438
+        # non-bypassable) — so a money-bearing batch can NEVER flip to auto_send_pending. ANY floor
+        # trip (or a non-L3/frozen tenant) returns armed=False and we fall through to the unchanged
+        # L2 arm. On a successful arm the durable hold workflow is started (register_l3_hold ran at
+        # lifespan); the batch sits in auto_send_pending behind the presend notice + the C2 stop.
+        l3_armed = self._try_l3_arm(tenant_id, batch_id)
+        if l3_armed:
+            logger.info(
+                "sales_recovery: item=%s batch=%s L3-armed (auto_send_pending) drafted=%d",
+                ctx.item_id, batch_id, len(grounded),
+            )
+            # The BATCH is now in 'auto_send_pending' (the delivery-anchored hold owns its
+            # lifecycle). The WORK ITEM reports 'awaiting_approval' — the same valid terminal-ish
+            # dispatch status the L2 arm reports (agent_work_items.status has no auto_send_pending
+            # member, mig-125; the L3-vs-L2 distinction lives on the batch + the l3_armed counter,
+            # not the work-item status). The hold workflow drives the batch to sent/demoted from here.
+            return ItemExecutionResult(
+                work_item_status="awaiting_approval",
+                batch_id=str(batch_id),
+                counters={**counters, "l3_armed": 1},
+            )
+
         try:
             arm = self._arm_fn or _resolve_arm_fn()
             arm(str(tenant_id), str(ctx.run_id), str(batch_id), dict(counters))

@@ -404,24 +404,27 @@ def test_bundle_numbers_computed_in_python(substrate):  # type: ignore[no-untype
 
 
 def test_validate_draft_params_grounding() -> None:
+    # VT-384 (registry-as-canon): WINBACK_TEMPLATE_PARAMS = (customer_name, business_name); the old
+    # days_since_last_visit param is gone. The grounded literals are display_name + business_name.
     bundle = sre.CustomerFactBundle(
         customer_id=uuid4(),
         display_name="Asha",
         days_since_last_sale=41,
         last_sale_amount_paise=30000,
         lifetime_spend_paise=80000,
+        business_name="Test Cafe",
     )
-    good = {"customer_name": "Asha", "days_since_last_visit": "41"}
+    good = {"customer_name": "Asha", "business_name": "Test Cafe"}
     assert sre.validate_draft_params(good, bundle)
-    # Ungrounded name / number — exact-literal rule.
+    # Ungrounded name / business — exact-literal rule.
     assert not sre.validate_draft_params({**good, "customer_name": "Priya"}, bundle)
-    assert not sre.validate_draft_params({**good, "days_since_last_visit": "100"}, bundle)
+    assert not sre.validate_draft_params({**good, "business_name": "Other Cafe"}, bundle)
     # Key-shape violations.
     assert not sre.validate_draft_params({"customer_name": "Asha"}, bundle)
     assert not sre.validate_draft_params({**good, "extra": "x"}, bundle)
     assert not sre.validate_draft_params("not-a-dict", bundle)
     assert not sre.validate_draft_params({**good, "customer_name": ""}, bundle)
-    assert not sre.validate_draft_params({**good, "days_since_last_visit": 41}, bundle)
+    assert not sre.validate_draft_params({**good, "business_name": 41}, bundle)
 
     # PII guard outranks grounding: even a LITERALLY-grounded phone-shaped value is rejected.
     phone_bundle = sre.CustomerFactBundle(
@@ -430,9 +433,10 @@ def test_validate_draft_params_grounding() -> None:
         days_since_last_sale=41,
         last_sale_amount_paise=30000,
         lifetime_spend_paise=80000,
+        business_name="Test Cafe",
     )
     assert not sre.validate_draft_params(
-        {"customer_name": "+91 98765 43210", "days_since_last_visit": "41"}, phone_bundle
+        {"customer_name": "+91 98765 43210", "business_name": "Test Cafe"}, phone_bundle
     )
 
 
@@ -480,7 +484,9 @@ def test_execute_item_persists_drafts_and_arms(substrate, monkeypatch):  # type:
     assert draft["customer_id"] == scenario.a2
     assert draft["template_name"] == sre.WINBACK_TEMPLATE_NAME
     assert draft["status"] == "drafted"
-    assert draft["params"] == {"customer_name": "Asha", "days_since_last_visit": "150"}
+    # VT-384 (registry-as-canon): params now (customer_name, business_name) — business_name is the
+    # tenant's business_name (_seed_lapsed_scenario seeds name="VT-369 sre detection").
+    assert draft["params"] == {"customer_name": "Asha", "business_name": "VT-369 sre detection"}
 
     assert arm.calls == [
         (
