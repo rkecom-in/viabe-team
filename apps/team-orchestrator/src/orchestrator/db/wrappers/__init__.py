@@ -660,6 +660,89 @@ class PendingApprovalsWrapper(TenantScopedTable):
             ).fetchone()
         return dict(row) if row is not None else None
 
+    def has_open_for_tenant(self, tenant_id: UUID | str, *, conn: Any = None) -> bool:
+        """True iff ANY unresolved approval exists for the tenant — the one-open-per-tenant
+        collision probe (VT-384 demote C-c; mig-128 is the structural backstop)."""
+        tid = self._uuid(tenant_id)
+        with self._conn(tid, conn) as c:
+            row = c.execute(
+                "SELECT 1 FROM pending_approvals "
+                "WHERE tenant_id = %s AND resolved_at IS NULL LIMIT 1",
+                (str(tid),),
+            ).fetchone()
+        return row is not None
+
+    def has_recent_of_type(
+        self,
+        tenant_id: UUID | str,
+        approval_type: str,
+        *,
+        within_days: int,
+        conn: Any = None,
+    ) -> bool:
+        """True iff an approval of ``approval_type`` was requested within ``within_days``
+        — the VT-384 autonomy-offer cooldown probe."""
+        tid = self._uuid(tenant_id)
+        with self._conn(tid, conn) as c:
+            row = c.execute(
+                "SELECT 1 FROM pending_approvals "
+                "WHERE tenant_id = %s AND approval_type = %s "
+                "AND requested_at >= now() - make_interval(days => %s) LIMIT 1",
+                (str(tid), approval_type, int(within_days)),
+            ).fetchone()
+        return row is not None
+
+    def find_unarmed_awaiting_batch(
+        self, tenant_id: UUID | str, agent: str, *, conn: Any = None
+    ) -> str | None:
+        """Oldest ``awaiting_approval`` agent_draft_batches row for (tenant, agent) with NO
+        unresolved approval referencing it — the VT-384 stranded/queued-demote re-arm probe
+        (composite read lives HERE because the pending_approvals fragment is wrapper-scoped)."""
+        tid = self._uuid(tenant_id)
+        with self._conn(tid, conn) as c:
+            row = c.execute(
+                "SELECT b.id::text AS bid FROM agent_draft_batches b "
+                "WHERE b.tenant_id = %s AND b.agent = %s AND b.status = 'awaiting_approval' "
+                "  AND NOT EXISTS ("
+                "    SELECT 1 FROM pending_approvals p "
+                "    WHERE p.tenant_id = b.tenant_id AND p.draft_batch_id = b.id "
+                "      AND p.resolved_at IS NULL) "
+                "ORDER BY b.updated_at ASC, b.id ASC LIMIT 1",
+                (str(tid), agent),
+            ).fetchone()
+        if row is None:
+            return None
+        return str(row["bid"] if isinstance(row, dict) else row[0])
+
+    def get_open_by_id(
+        self, tenant_id: UUID | str, approval_id: UUID | str, *, conn: Any = None
+    ) -> dict[str, Any] | None:
+        """The unresolved approval by id (type + details) — the VT-384 ENABLE-grant
+        resolution lookup."""
+        tid = self._uuid(tenant_id)
+        with self._conn(tid, conn) as c:
+            row = c.execute(
+                "SELECT id::text AS id, approval_type, details FROM pending_approvals "
+                "WHERE tenant_id = %s AND id = %s AND resolved_at IS NULL",
+                (str(tid), str(approval_id)),
+            ).fetchone()
+        return dict(row) if row is not None else None
+
+    def latest_open_of_type(
+        self, tenant_id: UUID | str, approval_type: str, *, conn: Any = None
+    ) -> dict[str, Any] | None:
+        """Most-recent unresolved approval of ``approval_type`` — the VT-384 ENABLE
+        reply's autonomy_upgrade lookup."""
+        tid = self._uuid(tenant_id)
+        with self._conn(tid, conn) as c:
+            row = c.execute(
+                "SELECT id::text AS id, details FROM pending_approvals "
+                "WHERE tenant_id = %s AND approval_type = %s AND resolved_at IS NULL "
+                "ORDER BY requested_at DESC LIMIT 1",
+                (str(tid), approval_type),
+            ).fetchone()
+        return dict(row) if row is not None else None
+
     def find_open_for_run(
         self, tenant_id: UUID | str, run_id: UUID | str, *, conn: Any = None
     ) -> dict[str, Any] | None:

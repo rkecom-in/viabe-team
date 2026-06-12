@@ -449,15 +449,39 @@ def test_unapproved_batch_skips_without_poisoning_the_draft(substrate, fake_regi
 
 
 @requires_db
-def test_l3_branch_is_a_loud_stub(substrate, fake_registry):  # type: ignore[no-untyped-def]
+def test_l3_arm_is_wired_not_a_stub(substrate, fake_registry):  # type: ignore[no-untyped-def]
+    """VT-384: the two PR-1 NotImplementedError stub arms are now the real L3 wire. The L3 arm no
+    longer raises — it runs the full gate stack. With C2 empty (MARKETING_CONSENT_VERSIONS), the
+    consent gate makes an L3 send on a fully-armed auto_send_pending batch ZERO sends end-to-end
+    (skipped_consent), NOT a NotImplementedError. The unknown-level ValueError stays loud."""
+    # (1) L3 on a non-auto_send_pending (approved) batch: Gate 1 rejects (L3 expects the hold
+    # state) — skipped batch_not_approved, fail-closed, no send.
     s = _stack(substrate.dsn)
-    with pytest.raises(NotImplementedError, match="PR-3"):
-        _send(s.tenant, s.draft, _FakeSendFn(), autonomy_level="L3")
+    send_fn = _FakeSendFn()
+    r1 = _send(s.tenant, s.draft, send_fn, autonomy_level="L3")
+    assert r1.status == "skipped"
+    assert r1.skip_reason == customer_send.SKIP_BATCH_NOT_APPROVED
+    assert send_fn.calls == []
 
+    # (2) L3 on an auto_send_pending batch (the hold-wake path): runs the gate stack; the C2 empty
+    # frozenset trips the consent gate → ZERO sends end-to-end (the centerpiece proof), NOT a raise.
     s2 = _stack(substrate.dsn, batch_status="auto_send_pending")
-    with pytest.raises(NotImplementedError, match="PR-3"):
-        _send(s2.tenant, s2.draft, _FakeSendFn())
+    send_fn2 = _FakeSendFn()
+    r2 = _send(s2.tenant, s2.draft, send_fn2, autonomy_level="L3")
+    assert r2.status == "skipped"
+    assert r2.skip_reason == customer_send.SKIP_CONSENT  # C2 empty ⇒ no version resolves ⇒ no send
+    assert send_fn2.calls == []
 
+    # (3) L2 on an auto_send_pending batch: the explicit fail-LOUD guard — an L2 caller must never
+    # send over an in-flight L3 hold. Skipped batch_not_approved, not persisted, no send.
+    s3 = _stack(substrate.dsn, batch_status="auto_send_pending")
+    send_fn3 = _FakeSendFn()
+    r3 = _send(s3.tenant, s3.draft, send_fn3)  # default autonomy_level='L2'
+    assert r3.status == "skipped"
+    assert r3.skip_reason == customer_send.SKIP_BATCH_NOT_APPROVED
+    assert send_fn3.calls == []
+
+    # (4) The unknown-autonomy-level guard stays a loud ValueError.
     with pytest.raises(ValueError, match="autonomy_level"):
         _send(s.tenant, s.draft, _FakeSendFn(), autonomy_level="L9")
 

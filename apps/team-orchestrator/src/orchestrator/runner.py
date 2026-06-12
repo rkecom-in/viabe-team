@@ -512,6 +512,37 @@ def try_resume_pending_approval(tenant_id: str, body: str, message_sid: str | No
     return decision
 
 
+@DBOS.step()
+def stamp_l3_delivery_anchor(tenant_id: str, message_sid: str) -> str | None:
+    """VT-384 — the L3 delivery-anchor leg. A ``delivered`` status callback for an L3
+    ``team_l3_presend_notice`` stamps the F6 anchor on the matching auto_send_pending batch and
+    derives send_not_before = delivered_at + hold_hours (config). Idempotent + no-op for a
+    callback that matches no auto_send_pending batch (C-d: a late callback after a demote does
+    NOTHING — the stamp CAS only fires while the batch is still auto_send_pending). Returns the
+    stamped batch_id or None. Checkpointed @DBOS.step so a redelivered callback re-runs safely."""
+    from orchestrator.agents.l3_hold import stamp_delivery_anchor
+
+    with tenant_connection(tenant_id) as conn:
+        return stamp_delivery_anchor(tenant_id, message_sid, conn=conn)
+
+
+@DBOS.step()
+def demote_l3_on_owner_inbound(tenant_id: str) -> int:
+    """VT-384 — the demote CAS leg (plan-ack §2). A substantive owner inbound (NOT opt-out/DSR —
+    those route to their own handlers; NOT a kill keyword — B2's freeze path cancels) while the
+    tenant has an auto_send_pending L3 batch means "I want eyes on this": demote each such batch
+    auto_send_pending → awaiting_approval + a regression record, atomically. The two-sided race
+    guard: whichever side wins the row CAS, a hold-expiry send can NEVER fire over this in-flight
+    objection (the wake-side re-check in agent_send_draft Gate 1 sees the demoted state). The C-c
+    collision rule (an open approval already exists ⇒ QUEUE, never two open) lives in
+    demote_auto_send_pending. Returns the number of batches demoted. Checkpointed for recovery."""
+    from orchestrator.agents.l3_hold import demote_auto_send_pending
+
+    with tenant_connection(tenant_id) as conn:
+        results = demote_auto_send_pending(tenant_id, conn=conn, reason="owner_engaged")
+    return sum(1 for r in results if r.demoted)
+
+
 @DBOS.workflow()
 def webhook_pipeline_run(tenant_id: str, run_id: str, twilio_fields: dict) -> dict[str, Any]:
     """Durable inbound-webhook pipeline: dedup -> ingress -> Pre-Filter -> handler.
@@ -539,6 +570,29 @@ def webhook_pipeline_run(tenant_id: str, run_id: str, twilio_fields: dict) -> di
 
     open_webhook_run(tenant_id, run_id, tokenised)
     record_webhook_received(tenant_id, run_id, tokenised)
+
+    # VT-384 — the L3 delivery-anchor leg. A 'delivered' status callback for the owner's
+    # team_l3_presend_notice stamps the F6 anchor on its auto_send_pending batch and starts the
+    # hold clock (send_not_before = delivered_at + hold_hours). Runs BEFORE pre_filter (which
+    # Rejects delivered callbacks as observability-only) so the anchor is never lost. The stamp is
+    # a no-op for any non-L3 delivered callback (no matching auto_send_pending batch). The status
+    # callback's 'From' is the owner phone, so the ingress already resolved this run to the right
+    # tenant. After stamping THIS run ends clean — a delivered callback is not a routed message.
+    if (
+        event.message_type == "status_callback"
+        and event.status_callback_state == "delivered"
+        and event.twilio_message_sid
+    ):
+        stamped_batch = stamp_l3_delivery_anchor(tenant_id, event.twilio_message_sid)
+        if stamped_batch is not None:
+            close_webhook_run(tenant_id, run_id, "completed")
+            return {
+                "run_id": run_id,
+                "tenant_id": tenant_id,
+                "routed": "l3_delivery_anchor",
+                "handler": None,
+                "batch_id": stamped_batch,
+            }
 
     # VT-146 — owner-input extraction seam. Reads body from the
     # request-scoped ``event`` (NOT from any persisted column; VT-144
@@ -603,6 +657,27 @@ def webhook_pipeline_run(tenant_id: str, run_id: str, twilio_fields: dict) -> di
                 "journey_done": journey_result.get("done"),
             }
 
+    # VT-384 — the demote CAS leg (plan-ack §2). A substantive owner inbound during an L3 hold
+    # demotes the auto_send_pending batch to awaiting_approval (the owner wants eyes on it; the
+    # batch re-enters the normal approval path — nothing is lost). EXCLUSIONS: opt-out / DSR keep
+    # their own authoritative routing (matches_opt_out_or_dsr); a kill keyword (matches_kill_keyword)
+    # is excluded so it FREEZES via autonomy_kill_handler (cancel holds/batches outright — the
+    # stronger signal) rather than merely demoting+regressing here. The demote runs BEFORE pre_filter
+    # so a window-expiry send can never fire over the objection (two-sided race). FAIL-OPEN: a
+    # demote-check failure must never block owner inbound — wrapped best-effort.
+    if event.message_type == "inbound_message" and not event.dupe_status:
+        from orchestrator.pre_filter_gate import matches_kill_keyword, matches_opt_out_or_dsr
+
+        body = event.body or ""
+        if not matches_opt_out_or_dsr(body) and not matches_kill_keyword(body):
+            try:
+                demote_l3_on_owner_inbound(tenant_id)
+            except Exception:  # noqa: BLE001 — a demote-check failure must never block owner inbound
+                logger.exception(
+                    "VT-384: L3 demote-on-owner-inbound failed (tenant=%s run=%s)",
+                    tenant_id, run_id,
+                )
+
     result = pre_filter(event, state)
     handler_name: str | None = None
     # VT-356: `routed` is a local observability label (logged/returned), not the route-decision
@@ -610,6 +685,10 @@ def webhook_pipeline_run(tenant_id: str, run_id: str, twilio_fields: dict) -> di
     routed: str = result.kind
     final_status = "completed"
     if result.kind == "direct_handler":
+        # VT-384 — the autonomy_kill_handler / autonomy_enable_handler that pre_filter rules b2/b3
+        # route to are registered in orchestrator.direct_handlers.HANDLERS (alongside the original
+        # 7). This dispatch line routes any registered name; an unregistered route would KeyError
+        # here, which the test_vt384_handler_dispatch_realdb registration-pin guards against.
         handler_name = result.handler_name
         HANDLERS[handler_name](event, state)
     elif result.kind == "brain":

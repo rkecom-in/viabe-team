@@ -224,6 +224,8 @@ class CoordinatorSweepSummary:
     skipped_open_approval: int = 0
     skipped_no_agent: int = 0
     skipped_frozen: int = 0  # always 0 in PR-1 (is_frozen seam)
+    autonomy_offers_dispatched: int = 0  # VT-384 §B2.1 — L3 opt-in offers armed this sweep
+    stranded_batches_rearmed: int = 0  # VT-384 — queued demoted batches re-armed this sweep
     tenant_failures: int = 0
 
 
@@ -359,10 +361,35 @@ def _sweep_one_tenant(
     if not _owner_inputs_ok(str(tenant_id)):
         summary.skipped_no_owner_inputs += 1
         return
+
+    # VT-384 re-arm leg — close the demoted-batch stranding loop BEFORE gate 3.7. A C-c collision
+    # demote queues a batch awaiting_approval WITHOUT arming an approval (mig-128 one-open-per-tenant);
+    # when that open approval resolves, nothing re-arms the queued batch — it would strand forever with
+    # no approval row. This leg arms the OLDEST stranded batch per tenant per sweep via the real-run-id
+    # path. It is one-open-per-tenant safe (a NO-OP when any approval is already open) and never raises
+    # (best-effort). Placed before gate 3.7 so the just-armed approval is then seen by 3.7, which
+    # correctly defers this tenant's item dispatch until the owner replies.
+    _maybe_rearm_stranded_batches(tenant_id, summary)
+
     # Gate 3.7 (plan §4.1 queue serialization): any open approval defers the whole tenant.
     if PendingApprovalsWrapper().find_open_for_tenant(tenant_id) is not None:
         summary.skipped_open_approval += 1
         return
+
+    # VT-384 §B2.1 — L3 autonomy OFFER dispatch. Best-effort, runs BEFORE item dispatch: an
+    # eligible (tenant, agent) (20-clean streak, L2, not frozen — l3_proposal_eligible) that is not
+    # on the proposal cooldown gets ONE team_autonomy_offer + an armed autonomy_upgrade approval. The
+    # arm goes through the per-tenant one-open-approval serialization (mig-128), so at most one offer
+    # arms per tenant; once armed, gate 3.7's open-approval check defers item dispatch next sweep
+    # until the owner replies (ENABLE -> grant, anything else -> the queue clears). Failure here
+    # never halts the tenant's item dispatch (best-effort).
+    try:
+        _maybe_dispatch_autonomy_offer(tenant_id, summary)
+    except Exception:  # noqa: BLE001 — offer dispatch is best-effort; item dispatch must still run
+        logger.exception(
+            "agent_coordinator: autonomy offer dispatch failed for tenant %s; sweep continues",
+            tenant_id,
+        )
 
     dispatched_for_tenant = 0
     for agent in sorted(OWNING_AGENTS - {"unassigned"}):
@@ -403,6 +430,78 @@ def _sweep_one_tenant(
                 item.item_id,
                 work_item_id,
             )
+
+
+def _maybe_dispatch_autonomy_offer(
+    tenant_id: UUID, summary: CoordinatorSweepSummary
+) -> None:
+    """VT-384 §B2.1 — dispatch ONE L3 autonomy offer for the first eligible, off-cooldown agent.
+
+    Eligibility is the substrate predicate ``autonomy.l3_proposal_eligible`` (20-clean streak, L2,
+    not frozen); the proposal cooldown is ``autonomy.offer_on_cooldown`` (no autonomy_upgrade
+    approval armed within 30 days — the approval row IS the offer record, no new column). The arm
+    (``dispatch_autonomy_offer``) is itself one-open-approval-serialized (mig-128), so calling it for
+    a tenant that already has any open approval REFUSES and sends nothing. At most one offer per
+    sweep per tenant (we break on the first armed)."""
+    from orchestrator.agents.autonomy import (
+        dispatch_autonomy_offer,
+        get_autonomy,
+        l3_proposal_eligible,
+        offer_on_cooldown,
+    )
+    from orchestrator.db import tenant_connection
+
+    with tenant_connection(tenant_id) as conn:
+        if offer_on_cooldown(tenant_id, conn=conn):
+            return
+    for agent in sorted(OWNING_AGENTS - {"unassigned"}):
+        state = get_autonomy(tenant_id, agent)
+        if not l3_proposal_eligible(state):
+            continue
+        approval_id = dispatch_autonomy_offer(
+            tenant_id, agent, streak_count=state.clean_approval_streak
+        )
+        if approval_id is not None:
+            summary.autonomy_offers_dispatched += 1
+            logger.info(
+                "agent_coordinator: autonomy offer armed tenant=%s agent=%s approval=%s",
+                tenant_id, agent, approval_id,
+            )
+            break  # one offer per tenant per sweep (mig-128 serializes anyway)
+
+
+def _maybe_rearm_stranded_batches(
+    tenant_id: UUID, summary: CoordinatorSweepSummary
+) -> None:
+    """VT-384 — re-arm ONE stranded (queued) demoted batch for this tenant (the demoted-batch
+    stranding fix). Delegates to ``l3_hold.rearm_stranded_batch``, which arms the OLDEST
+    awaiting_approval batch with no open approval via the real-run-id path, respects
+    one-open-per-tenant (NO-OP when any approval is already open), and never raises. Best-effort:
+    a re-arm failure must never halt the tenant's item dispatch. Runs once per registered agent
+    (the L3 hold wire targets ``sales_recovery`` today; iterating the registry keeps it general)."""
+    from orchestrator.agents.l3_hold import rearm_stranded_batch
+    from orchestrator.db import tenant_connection
+
+    for agent in sorted(OWNING_AGENTS - {"unassigned"}):
+        try:
+            with tenant_connection(tenant_id) as conn:
+                rearmed = rearm_stranded_batch(tenant_id, conn=conn, agent=agent)
+        except Exception:  # noqa: BLE001 — best-effort; item dispatch must still run
+            logger.exception(
+                "agent_coordinator: stranded-batch re-arm failed for tenant %s agent %s; "
+                "sweep continues",
+                tenant_id,
+                agent,
+            )
+            continue
+        if rearmed is not None:
+            summary.stranded_batches_rearmed += 1
+            logger.info(
+                "agent_coordinator: re-armed stranded batch tenant=%s agent=%s batch=%s",
+                tenant_id, agent, rearmed,
+            )
+            # One armed approval fills the tenant's single open slot — stop (one-open-per-tenant).
+            break
 
 
 def _claim_work_item(conn: Any, tenant_id: UUID, item_id: str, agent: str) -> str | None:

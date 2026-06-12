@@ -1,0 +1,17 @@
+# VT-384 Gap-5 PR-3 — L3 auto-send hold tunables (config, not code; tunable without a deploy).
+#
+# The trial.yaml pattern (Cowork ruling C-a, VT-381 TTL lesson): these durations are CONFIG-DRIVEN,
+# never module constants. The loader in agents/l3_hold.py caches them and FAILS CLOSED to the safe
+# defaults below if the file is missing/malformed — a config read error must never widen the hold
+# window or skip the demote.
+#
+# The wire is proven against the C2 stop (MARKETING_CONSENT_VERSIONS empty): no real send fires
+# regardless of these values until counsel clears C2.
+
+# The delivery-anchored hold: send_not_before = presend_notice_delivered_at + hold_hours.
+# The owner gets this long after the notice is DELIVERED (not sent) to object before the auto-send.
+hold_hours: 2
+
+# No delivery callback within this window after auto_send_pending ⇒ demote to L2 (awaiting_approval).
+# An undelivered notice = no informed silence, so the hold can never proceed on it.
+no_delivery_demote_minutes: 30
