@@ -1,10 +1,10 @@
 -- 135_vt382_owner_message_audit.sql — VT-382 (CL-437 ruling 3): the tenant-scoped audit
--- surface for the EXACT owner-facing sent message text.
+-- surface that makes the EXACT owner-facing sent message RECONSTRUCTIBLE.
 --
--- STEP-0 proved NO surface persists the exact outbound text today: owner_inputs is
--- derived-only BY DESIGN (mig 020 / VT-144), wa_conversations is phone-token markers
+-- STEP-0 proved NO surface persists the send-resolved variable values today: owner_inputs
+-- is derived-only BY DESIGN (mig 020 / VT-144), wa_conversations is phone-token markers
 -- only (mig 070), send_idempotency_keys / campaign_messages carry SID + status only
--- (mig 049). CL-437.3 retains the exact owner-facing text ONLY here — under normal
+-- (mig 049). CL-437.3 retains the reconstruction substrate ONLY here — under normal
 -- tenant retention + DSR (dsr_purge._PURGE_ORDER) — while the outbox copy
 -- (agent_drafts.params / agent_draft_batches.owner_feedback, mig 126) is redacted on
 -- terminal completion (metadata + hashes kept).
@@ -12,9 +12,18 @@
 -- One row per SENT agent draft, captured at the agent_drafts -> 'sent' flip in the SAME
 -- transaction as the status flip + params redaction (orchestrator/agents/
 -- outbox_redaction.py — atomic: no window where the outbox copy is gone but the audit
--- row absent). rendered_text holds the message resolved EXACTLY as the send path
--- resolved it (str()-coerced params in the registry's positional variable order —
+-- row absent).
+--
+-- What rendered_text captures (CL-437 + Fazal 'accept' 2026-06-12 — the RULED
+-- interpretation): the template REF + the ordered send-resolved variable VALUES
+-- (str()-coerced params in the registry's positional variable order —
 -- customer_send.agent_send_draft / send_whatsapp_template._build_content_variables).
+-- It is NOT a literal Meta-rendered body snapshot: the fixed approved body lives at
+-- Meta/Twilio, not in our store. The EXACT owner-facing text is RECONSTRUCTIBLE by
+-- folding these ordered values into the registry's pinned approved body for that
+-- template+language (body_sha256-pinned in config/twilio_templates.yaml, landing with
+-- the F1 SIDs) — that pin is what makes the reconstruction exact + drift-detectable.
+-- message_sid (the resolved Twilio SID) pins which approved body was sent.
 -- skipped/halted drafts capture NOTHING (no send happened).
 --
 -- RLS posture MATCHES the sibling agent tables (mig 126 agent_drafts): ENABLE + FORCE +
@@ -35,7 +44,9 @@ CREATE TABLE owner_message_audit (
     batch_id      UUID NOT NULL,   -- agent_draft_batches.id (same — linkage by value, not constraint)
     customer_id   UUID NULL,       -- recipient at send time (nullable: audit outlives customer hard-deletes)
     template_name TEXT NULL,
-    rendered_text TEXT NOT NULL,   -- the EXACT owner-facing message (send-path params resolution)
+    rendered_text TEXT NOT NULL,   -- template ref + ordered send-resolved variable values
+                                   -- (exact text RECONSTRUCTIBLE via the registry's pinned
+                                   -- approved body; NOT a literal Meta-rendered snapshot)
     message_sid   TEXT NULL,
     sent_at       TIMESTAMPTZ NOT NULL DEFAULT now()
 );

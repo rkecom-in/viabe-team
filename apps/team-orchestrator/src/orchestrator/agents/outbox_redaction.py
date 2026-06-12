@@ -3,13 +3,23 @@
 The policy (near-verbatim): outbox message bodies are retained ONLY while needed for
 delivery / retry / replay / drain. On terminal completion — drafts: 'sent' / 'skipped' /
 'halted'; batches: 'sent' / 'rejected' / 'cancelled' — the body fields are redacted IN
-PLACE, keeping metadata + hashes. The exact owner-facing text of a SENT draft is captured
-FIRST into the tenant-scoped ``owner_message_audit`` surface (migration 135; STEP-0
-proved no surface held it before), in the SAME transaction as the status flip + the
-redaction — atomic by construction: no window where the outbox copy is gone but the
-audit row absent. Non-terminal rows ('drafted' / 'sending'; batch 'edit_requested' —
-``owner_feedback`` is the regeneration input) are NEVER touched: retain-while-needed is
-itself the policy, not just the redaction.
+PLACE, keeping metadata + hashes. For a SENT draft the RECONSTRUCTION SUBSTRATE is
+captured FIRST into the tenant-scoped ``owner_message_audit`` surface (migration 135;
+STEP-0 proved no surface held it before), in the SAME transaction as the status flip +
+the redaction — atomic by construction: no window where the outbox copy is gone but the
+audit row absent.
+
+What the capture stores (CL-437 + Fazal 'accept' 2026-06-12 — the RULED interpretation):
+the template REF, the resolved Twilio SID, and the ORDERED send-resolved variable values
+— NOT a literal Meta-rendered body snapshot (the fixed approved body lives at Meta/Twilio,
+not in our store). The EXACT owner-facing text is RECONSTRUCTIBLE by folding the ordered
+values into the registry's pinned approved body for that template+language
+(``body_sha256``-pinned in ``config/twilio_templates.yaml``; the pin is what makes the
+reconstruction exact and drift-detectable); the SID pins which approved body was sent.
+
+Non-terminal rows ('drafted' / 'sending'; batch 'edit_requested' — ``owner_feedback`` is
+the regeneration input) are NEVER touched: retain-while-needed is itself the policy, not
+just the redaction.
 
 Body fields (mig 126):
 
@@ -55,6 +65,11 @@ BATCH_TERMINAL_STATUSES: tuple[str, ...] = ("sent", "rejected", "cancelled")
 
 # Sweep batch width — small enough to keep each backfill transaction short.
 _SWEEP_BATCH_SIZE = 200
+
+# The sweep's marker for a 'drafted' child stranded under an already-terminal batch
+# (the crash-window backstop — the inline close hook never flipped it). Mirrors the
+# halt_drafted_reason markers redact_batch_close writes at the live close.
+_SWEEP_HALT_REASON = "halted_sweep_terminal_batch"
 
 
 def _col(row: Any, key: str, idx: int) -> Any:
@@ -275,9 +290,13 @@ def capture_then_redact_draft(
 ) -> None:
     """The drafts -> 'sent' terminal hook (CL-437.3 capture clause).
 
-    1. INSERT the ``owner_message_audit`` row holding the EXACT owner-facing text,
-       resolved the same way the send path resolved it (``render_owner_facing_text``).
-       Idempotent per draft (WHERE NOT EXISTS + the mig-135 unique index).
+    1. INSERT the ``owner_message_audit`` row holding the RECONSTRUCTION SUBSTRATE — the
+       template ref + the ordered send-resolved variable values (``render_owner_facing_text``,
+       resolved the same way the send path resolved them) + the resolved Twilio SID. NOT
+       a literal Meta-rendered body: the exact owner-facing text is RECONSTRUCTIBLE by
+       folding these values into the registry's pinned approved body (``body_sha256``-pinned;
+       CL-437 + Fazal 'accept' 2026-06-12). Idempotent per draft (WHERE NOT EXISTS + the
+       mig-135 unique index).
     2. THEN redact the draft's params — on the SAME connection, i.e. the SAME
        transaction as the caller's status flip. Atomic: a failure anywhere rolls back
        capture, redaction AND the flip together (no window where the outbox copy is
@@ -319,20 +338,43 @@ def sweep_terminal_rows(*, pool: Any | None = None) -> dict[str, int]:
     privileged service pool (the dsr_purge precedent), batched, idempotent, counts-only
     logging.
 
-    Historical-capture leg (one-shot policy honesty): a 'sent' draft still holding RAW
-    params (pre-VT-382 history, or an inline hook that never ran) has its exact
-    owner-facing text reconstructed — possible precisely BECAUSE the params are still
-    raw — and captured into ``owner_message_audit`` BEFORE the redaction, inside the
-    same per-batch transaction. 'skipped'/'halted' rows capture nothing (no send
-    happened). Non-terminal rows ('drafted'/'sending'/batch 'edit_requested') are
-    structurally untouched — the terminal-status predicates are in the SQL.
+    Three legs:
+
+    - Leg 1 — terminal drafts ('sent'/'skipped'/'halted') still holding RAW params:
+      redacted; a 'sent' row's exact owner-facing text is reconstructed (possible
+      precisely BECAUSE the params are still raw) and captured into
+      ``owner_message_audit`` BEFORE the redaction, in the same per-batch transaction
+      (one-shot policy honesty). 'skipped'/'halted' rows capture nothing — no send
+      happened.
+    - Leg 2 — terminal batches still holding RAW ``owner_feedback``: redacted to the
+      sha256 marker.
+    - Leg 3 — 'drafted' children STRANDED under an already-terminal batch (the
+      crash-window backstop): the live close (``redact_batch_close`` /
+      ``apply_agent_decision`` / the autonomy/VTR cancel paths) flips the parent
+      terminal and halt-flips the children atomically, but if it died between those
+      two writes the child sits 'drafted' with raw params OUTSIDE every other leg
+      (Legs 1-2 + the inline hooks all require a terminal status). This leg halts those
+      children ('drafted' -> 'halted', ``skip_reason`` = ``halted_sweep_terminal_batch``,
+      parent-terminal SQL guard) AND redacts their params in the same UPDATE. NO audit
+      capture — nothing was ever sent (the recorded policy reading: capturing
+      never-sent text would itself violate retention). So the backstop now genuinely
+      covers children, not just the parent batch.
+
+    Non-terminal rows whose PARENT is also non-terminal ('drafted'/'sending' under a
+    live batch, batch 'edit_requested' — ``owner_feedback`` is the regeneration input)
+    are structurally untouched: the terminal-status predicates are in the SQL.
     """
     if pool is None:
         from orchestrator.graph import get_pool
 
         pool = get_pool()
 
-    counts = {"drafts_redacted": 0, "drafts_captured": 0, "batches_redacted": 0}
+    counts = {
+        "drafts_redacted": 0,
+        "drafts_captured": 0,
+        "batches_redacted": 0,
+        "children_halted": 0,
+    }
 
     # The "still raw" jsonb predicate: at least one params value NOT in the redacted
     # shape (empty params have nothing to redact and are excluded via COALESCE).
@@ -420,10 +462,53 @@ def sweep_terminal_rows(*, pool: Any | None = None) -> dict[str, int]:
                     )
                     counts["batches_redacted"] += 1
 
+        # --- Leg 3: 'drafted' children stranded under an ALREADY-terminal batch ---
+        # The crash-window backstop: if a terminal batch close (apply_agent_decision /
+        # the autonomy/VTR cancel paths) flipped the parent but died before
+        # redact_batch_close's halt-flip ran, the child sits 'drafted' with RAW params
+        # outside every other redaction leg (Legs 1-2 + the inline hooks all require a
+        # terminal status). Here the sweep halts those children (parent-terminal SQL
+        # guard, same convention as redact_batch_close.halt_drafted_reason) — they are
+        # then terminal 'halted' and Leg 1 (next sweep) / the inline legs cover their
+        # params; we redact them in the SAME batch transaction for promptness. NO audit
+        # capture: nothing was ever sent (the recorded policy reading — capturing
+        # never-sent text would itself violate retention).
+        while True:
+            with conn.transaction():
+                rows = conn.execute(
+                    "SELECT d.tenant_id::text AS tenant_id, d.id::text AS id, d.params "
+                    "FROM agent_drafts d "
+                    "JOIN agent_draft_batches b "
+                    "  ON b.tenant_id = d.tenant_id AND b.id = d.batch_id "
+                    "WHERE d.status = 'drafted' AND b.status = ANY(%s) "
+                    "LIMIT %s FOR UPDATE OF d SKIP LOCKED",
+                    (list(BATCH_TERMINAL_STATUSES), _SWEEP_BATCH_SIZE),
+                ).fetchall()
+                if not rows:
+                    break
+                from psycopg.types.json import Jsonb  # lazy: dep-less module import
+
+                for row in rows:
+                    tid = str(_col(row, "tenant_id", 0))
+                    did = str(_col(row, "id", 1))
+                    params = _col(row, "params", 2) or {}
+                    # Flip 'drafted' -> terminal 'halted' (parent-terminal guard already
+                    # satisfied by the JOIN) AND redact params in the same UPDATE — no
+                    # window where the child is terminal but still raw. The status guard
+                    # repeats in the WHERE so a concurrent flip never double-applies.
+                    conn.execute(
+                        "UPDATE agent_drafts SET status = 'halted', skip_reason = %s, "
+                        "params = %s, updated_at = now() "
+                        "WHERE tenant_id = %s AND id = %s AND status = 'drafted'",
+                        (_SWEEP_HALT_REASON, Jsonb(redact_params(params)), tid, did),
+                    )
+                    counts["children_halted"] += 1
+
     logger.info(
         "outbox_redaction: sweep done drafts_redacted=%d drafts_captured=%d "
-        "batches_redacted=%d",
-        counts["drafts_redacted"], counts["drafts_captured"], counts["batches_redacted"],
+        "batches_redacted=%d children_halted=%d",
+        counts["drafts_redacted"], counts["drafts_captured"],
+        counts["batches_redacted"], counts["children_halted"],
     )
     return counts
 

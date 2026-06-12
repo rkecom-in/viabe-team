@@ -636,6 +636,80 @@ def test_sweep_does_not_touch_nonterminal_rows(substrate):  # type: ignore[no-un
 
 
 # ===========================================================================
+# (N1) Sweep crash-window backstop: 'drafted' children STRANDED under an
+#      already-terminal batch are halted + redacted — the children, not just
+#      the parent (the privacy capstone). Idempotent; no audit; isolation held.
+# ===========================================================================
+
+
+@pytest.mark.parametrize("batch_status", ["cancelled", "rejected"])
+def test_sweep_halts_drafted_children_under_terminal_batch(substrate, batch_status):  # type: ignore[no-untyped-def]
+    """The crash window: a terminal batch close flipped the PARENT terminal but died
+    before the child halt-flip (redact_batch_close / apply_agent_decision). The child
+    sits 'drafted' with RAW params OUTSIDE every other redaction leg — the inline hooks
+    and Legs 1-2 all require a terminal status, and nothing else ever flips it. We seed
+    that exact crash state with a raw INSERT (status='drafted' under a terminal batch,
+    bypassing every hook), run the sweep, and assert Leg 3 halts + redacts the child:
+    status 'halted' (skip_reason halted_sweep_terminal_batch), params redacted, ZERO
+    audit rows (never sent — capturing never-sent text would itself violate retention),
+    and a second sweep is a no-op (idempotent).
+
+    Isolation guard in the SAME pass: a 'drafted' child under a NON-terminal ('approved')
+    batch stays raw + 'drafted' — Leg 3's parent-terminal SQL guard never touches it."""
+    tenant = _new_tenant(substrate.dsn)
+    customer, _ = _seed_customer(substrate.dsn, tenant)
+    work_item = _seed_work_item(substrate.dsn, tenant)
+
+    # Crash state: terminal batch, two 'drafted' children still holding raw params.
+    term_batch = _seed_batch(substrate.dsn, tenant, work_item, status=batch_status)
+    stranded = [
+        _seed_draft(substrate.dsn, tenant, term_batch, customer, status="drafted")
+        for _ in range(2)
+    ]
+    # Isolation control: a 'drafted' child under a still-LIVE (non-terminal) batch.
+    live_batch = _seed_batch(substrate.dsn, tenant, work_item, status="approved")
+    live_child = _seed_draft(substrate.dsn, tenant, live_batch, customer, status="drafted")
+
+    counts = outbox_redaction.sweep_terminal_rows()
+    assert isinstance(counts, dict)
+    assert counts.get("children_halted", 0) >= 2
+
+    # Stranded children: halted + params redacted + NO audit row.
+    for draft in stranded:
+        status, params = _draft_params(substrate.dsn, tenant, draft)
+        assert status == "halted", f"stranded child not halted: {status!r}"
+        _assert_params_redacted(params)
+        assert _audit_rows(substrate.dsn, tenant, draft) == [], (
+            "halted child was never sent — capture must write nothing"
+        )
+    with psycopg.connect(substrate.dsn, autocommit=True) as conn:
+        reasons = conn.execute(
+            "SELECT DISTINCT skip_reason FROM agent_drafts "
+            "WHERE tenant_id = %s AND batch_id = %s",
+            (str(tenant), str(term_batch)),
+        ).fetchall()
+    assert [r[0] for r in reasons] == ["halted_sweep_terminal_batch"]
+
+    # Isolation: the child under the live batch is untouched (still drafted + raw).
+    live_status, live_params = _draft_params(substrate.dsn, tenant, live_child)
+    assert live_status == "drafted", "child under a non-terminal batch must stay drafted"
+    assert live_params.get("customer_name") == "Ravi"
+    assert not any(_is_redacted_value(v) for v in live_params.values())
+
+    # Idempotent: a second sweep flips/redacts nothing new for these children.
+    after_1 = {d: _draft_params(substrate.dsn, tenant, d) for d in stranded}
+    counts2 = outbox_redaction.sweep_terminal_rows()
+    for draft in stranded:
+        assert _draft_params(substrate.dsn, tenant, draft) == after_1[draft], (
+            "second sweep must not re-touch an already-halted+redacted child"
+        )
+        assert _audit_rows(substrate.dsn, tenant, draft) == []
+    # The live child is STILL untouched after the second pass.
+    assert _draft_params(substrate.dsn, tenant, live_child)[0] == "drafted"
+    assert isinstance(counts2, dict)
+
+
+# ===========================================================================
 # (f) Sweep: backfills EXISTING terminal rows + historical-capture leg + idempotent
 # ===========================================================================
 
