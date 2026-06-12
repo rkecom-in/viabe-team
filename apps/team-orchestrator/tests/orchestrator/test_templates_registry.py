@@ -216,23 +216,36 @@ def test_validate_params_correct_keys_no_raise():
 # ---------------------------------------------------------------------------
 
 
+# VT-383 (CL-438, 2026-06-12): F1 armed the two Gap-5 winbacks — Meta-approved
+# SIDs wired + agent_selectable flipped true. The live VT-45 selectable set grew
+# from {team_weekly_approval} to {team_weekly_approval, team_winback_simple,
+# team_winback_offer}. The 3 owner_notification surfaces stay non-selectable.
+_SELECTABLE_SET = frozenset(
+    {"team_weekly_approval", "team_winback_simple", "team_winback_offer"}
+)
+
+
 def test_approved_template_names_en_returns_only_selectable():
     names = approved_template_names("en", _path=_REAL_YAML_PATH)
     assert isinstance(names, tuple)
-    assert "team_weekly_approval" in names
+    # VT-383: the live selectable set is exactly these three (D5 pin, armed shape).
+    assert set(names) == _SELECTABLE_SET, f"selectable set drifted: {sorted(names)}"
     # Verify non-selectable templates are excluded.
     for name in ("team_opt_out_confirmation", "team_dsr_acknowledgment",
                  "team_error_handler", "team_status_ping",
                  "team_unable_to_complete_request", "team_agent_stuck_escalation",
-                 "team_welcome"):
+                 "team_welcome",
+                 # Gap-5 owner surfaces — system-invoked, never agent-selectable.
+                 "team_agent_draft_approval", "team_l3_presend_notice",
+                 "team_autonomy_offer"):
         assert name not in names, f"{name} should not be agent_selectable"
 
 
 def test_approved_template_names_hi_populated():
-    """VT-163-fix-1: hi SIDs populated — the agent-selectable template
-    (team_weekly_approval) now has a hi variant, so hi names are non-empty."""
+    """VT-163-fix-1: hi SIDs populated. VT-383: F1 armed the two winbacks in hi
+    too (Meta-approved hi SIDs), so the hi selectable set matches en."""
     names = approved_template_names("hi", _path=_REAL_YAML_PATH)
-    assert names == ("team_weekly_approval",)
+    assert set(names) == _SELECTABLE_SET, f"hi selectable set drifted: {sorted(names)}"
 
 
 # ---------------------------------------------------------------------------

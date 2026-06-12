@@ -132,6 +132,10 @@ class TemplateEntry:
       always-confirm floor at L3 (plan §5.5, enforced PR-3).
     - ``optout_line``: asserts the FIXED Meta body carries the customer STOP
       opt-out line; ``customer_marketing`` entries MUST pin it (canary_load).
+    - ``body_sha256``: the sha256 of the Meta-APPROVED template body for this
+      language, fetched once via the Twilio Content API at SID-wiring time
+      (VT-383). ``None`` for pending-approval (null-SID) stubs. When pinned it
+      is the doc/yaml/Meta drift detector — CI fails if the approved body moves.
     """
 
     template_name: str
@@ -143,10 +147,14 @@ class TemplateEntry:
     category: str = ""
     money_bearing: bool = False
     optout_line: bool = False
+    body_sha256: str | None = None  # per-language APPROVED-body hash pin (VT-383)
 
 
 # Known values for the Gap-5 ``category`` field (canary_load rejects others).
 TEMPLATE_CATEGORIES = frozenset({"customer_marketing", "owner_notification"})
+
+# A pinned body_sha256 is a lowercase 64-char hex digest.
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 # ---------------------------------------------------------------------------
@@ -231,6 +239,9 @@ def resolve(
     audience = str(raw.get("audience") or "")
     agent_selectable = bool(raw.get("agent_selectable", False))
 
+    sha_map = raw.get("body_sha256") or {}
+    body_sha256 = sha_map.get(language) if isinstance(sha_map, dict) else None
+
     return TemplateEntry(
         template_name=template_name,
         language=language,
@@ -241,6 +252,7 @@ def resolve(
         category=str(raw.get("category") or ""),
         money_bearing=bool(raw.get("money_bearing", False)),
         optout_line=bool(raw.get("optout_line", False)),
+        body_sha256=body_sha256,
     )
 
 
@@ -383,6 +395,32 @@ def canary_load(path: Path | None = None) -> None:
                 errors.append(
                     f"  [{name}][{lang}] content_sid does not match ^HX[0-9a-f]{{32}}$"
                 )
+
+        # body_sha256 pin check (VT-383): optional. When present it must be a
+        # mapping of language -> 64-hex digest, every pinned language must be a
+        # declared variant, and a hash is forbidden on a null-SID stub (it would
+        # pin the doc draft, not the Meta-APPROVED body — plan §3c).
+        sha_map = raw.get("body_sha256")
+        if sha_map is not None:
+            if not isinstance(sha_map, dict) or len(sha_map) == 0:
+                errors.append(f"  [{name}] body_sha256 must be a non-empty mapping")
+            else:
+                for lang, digest in sha_map.items():
+                    if lang not in langs:
+                        errors.append(
+                            f"  [{name}][{lang}] body_sha256 pins an undeclared language"
+                        )
+                        continue
+                    if not isinstance(digest, str) or not _SHA256_RE.match(digest):
+                        errors.append(
+                            f"  [{name}][{lang}] body_sha256 must be a 64-char lowercase hex digest"
+                        )
+                    if langs.get(lang) is None:
+                        errors.append(
+                            f"  [{name}][{lang}] body_sha256 pinned with no SID — "
+                            "a hash on a null-SID stub pins the doc draft, not the "
+                            "Meta-APPROVED body (plan §3c)"
+                        )
 
     if errors:
         msg = "templates_registry canary_load FAILED:\n" + "\n".join(errors)

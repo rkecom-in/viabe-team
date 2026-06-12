@@ -273,24 +273,115 @@ templates — they become free-form sends in VT-349 and are removed from the reg
 | `breach_notification_owner` | VT-108 batch-2 · breach notice (owner) — incident-use only, ops path, never agent_selectable | `HX269a7f69da791f24b4cee23bd820383e` | `HX1b4a5c64f7f4c3d07c0ba8798fa120bf` |
 | `breach_notification_customer` | VT-108 batch-2 · breach notice (customer) — incident-use only, ops path, never agent_selectable | `HXdbf0129d38d60d57b11851d8acf581e6` | `HX48dcbb5f65877f8592296921b3bad100` |
 
-## VT-369 agent surface (Gap-5) — 5 templates, SIDs PENDING-F1
+## VT-369 agent surface (Gap-5) — 5 templates, F1 ARMED (VT-383 / CL-438, 2026-06-12)
 
 The first agent-initiated customer-messaging surface (Sales Recovery win-backs + the
-owner approval/autonomy loop). Registered fail-closed in `twilio_templates.yaml` with
-`null` SIDs — `resolve()` returns `content_sid: None` and the send path refuses with
-`TemplateNotConfigured` until Fazal's F1 Meta/Twilio Content approval lands (en + hi;
-the two `team_winback_*` entries go to Meta as **MARKETING** category, days–weeks lead).
-Body copy is NOT final here: Fazal reviews every word at F1 submission; the Hindi
-opt-out line wording + DPDP grievance-channel linkage is counsel-owned (**F4**) and
-blocks the F1 submission itself.
+owner approval/autonomy loop). **F1 landed 2026-06-12 (CL-438):** Fazal delivered the 10
+Meta-approved Twilio Content SIDs (5 templates × en/hi). The VT-383 Content-API canary
+(`apps/team-orchestrator/canaries/vt383_f1_content_api.py`) fetched each SID — **every
+`meta_status` is `approved`** — and the APPROVED body + per-language `body_sha256` were
+recorded as canon in `.viabe/queue/VT-383-canary-results.json`. The bodies below are
+**verbatim from that approved canary output** (Fazal edited copy at submission; the
+approved body is canon, not earlier drafts). The two `team_winback_*` carry the customer
+STOP opt-out line in the FIXED Meta body (canary asserted STOP present, both langs) and
+are now `agent_selectable: true`; the three `owner_notification` surfaces are
+system-invoked and stay `agent_selectable: false`.
 
 | template | tier | en SID | hi SID |
 |---|---|---|---|
-| `team_winback_simple` | VT-369 agent surface · customer win-back (category `customer_marketing`, `optout_line: true`) | `PENDING-F1` | `PENDING-F1` |
-| `team_winback_offer` | VT-369 agent surface · customer win-back with offer (category `customer_marketing`, `optout_line: true`, `money_bearing: true` — always-confirm floor, never L3 auto-send) | `PENDING-F1` | `PENDING-F1` |
-| `team_agent_draft_approval` | VT-369 agent surface · owner L2 approval ask (category `owner_notification`) | `PENDING-F1` | `PENDING-F1` |
-| `team_l3_presend_notice` | VT-369 agent surface · owner L3 pre-send notice, delivery-anchored 2h hold (category `owner_notification`) | `PENDING-F1` | `PENDING-F1` |
-| `team_autonomy_offer` | VT-369 agent surface · owner L3 opt-in offer — C3 consent evidence; body must promise the standing "stop" kill keyword (category `owner_notification`) | `PENDING-F1` | `PENDING-F1` |
+| `team_winback_simple` | VT-369 agent surface · customer win-back (category `customer_marketing`, `optout_line: true`, `agent_selectable: true`) | `HX601925a292da89e9d00d3fdf8742f765` | `HX5da4406f8a6691f52555cd179f40be73` |
+| `team_winback_offer` | VT-369 agent surface · customer win-back with offer (category `customer_marketing`, `optout_line: true`, `money_bearing: true` — always-confirm floor, never L3 auto-send; `agent_selectable: true`) | `HX637d3dc2969a722f627e0dfd2c166b1e` | `HX9370d1b1a1c917a88ef512b7d545ac46` |
+| `team_agent_draft_approval` | VT-369 agent surface · owner L2 approval ask (category `owner_notification`, system-invoked, `agent_selectable: false`) | `HX1fa31e0339d5739d7936e6edf39e08a3` | `HX81929b92dd3a159e920b5eb338700cf8` |
+| `team_l3_presend_notice` | VT-369 agent surface · owner L3 pre-send notice, delivery-anchored 2h hold (category `owner_notification`, system-invoked, `agent_selectable: false`) | `HXb114769da63f0c72d4a9f01c2fd0ed80` | `HX8184dfe127d1f5bc124384192a4793be` |
+| `team_autonomy_offer` | VT-369 agent surface · owner L3 opt-in offer — C3 consent evidence; body promises the standing "stop" kill keyword (category `owner_notification`, system-invoked, `agent_selectable: false`) | `HX150525f3963603ad00d234bd01b37224` | `HXae12acceccc259235478a7a60c53d628` |
+
+### Approved bodies (verbatim from the VT-383 canary — Meta status `approved`)
+
+All `body_sha256` values below are `sha256(approved_body_utf8)` and are pinned per-language
+in `apps/team-orchestrator/config/twilio_templates.yaml` (`body_sha256: {en, hi}`).
+
+#### `team_winback_simple`  *(customer · `customer_marketing` · `optout_line: true` · `agent_selectable: true`)*
+
+- **Variables:** `{{1}}` = customer_name, `{{2}}` = business_name
+- **en SID:** `HX601925a292da89e9d00d3fdf8742f765` · **body_sha256:** `15edf62d44cfc28b478a9b589529a9fa6cf0b7367622fbfeb23ab1ad63a4d740`
+
+```
+Hi {{1}}, this is a message from {{2}}. We haven't seen you in a while and we'd love to welcome you back — your favourites are waiting for you. Visit us or reply here and we'll help you right away.
+Reply STOP to stop receiving these messages.
+```
+
+- **hi SID:** `HX5da4406f8a6691f52555cd179f40be73` · **body_sha256:** `d32d3a974cb63b78cb505430cd465f62bed597f02056646c270ba92a47163dc4`
+
+```
+नमस्ते {{1}}, यह संदेश {{2}} की ओर से है। आपको काफ़ी समय से नहीं देखा — हमें आपकी कमी महसूस हो रही है। दोबारा पधारें या यहीं जवाब दें, हम तुरंत आपकी मदद करेंगे।
+इन संदेशों को रोकने के लिए STOP लिखें।
+```
+
+#### `team_winback_offer`  *(customer · `customer_marketing` · `optout_line: true` · `money_bearing: true` · `agent_selectable: true`)*
+
+- **Variables:** `{{1}}` = customer_name, `{{2}}` = business_name, `{{3}}` = offer_description (grounded against the customer fact bundle; validator-enforced)
+- **en SID:** `HX637d3dc2969a722f627e0dfd2c166b1e` · **body_sha256:** `b8ecced1091c1ecfdb7ac302ce8ca16fc5ffdaae284841bd08913aab2ec4810e`
+
+```
+Hi {{1}}, a special offer from {{2}}: {{3}}. Show this message when you visit, or reply here to know more. We'd love to see you again!
+Reply STOP to stop receiving these messages.
+```
+
+- **hi SID:** `HX9370d1b1a1c917a88ef512b7d545ac46` · **body_sha256:** `5a31e9acb6e57fd2652a9c94fed76864c00a3b3b9acdb891360b4390ae3c6db9`
+
+```
+नमस्ते {{1}}, {{2}} की ओर से आपके लिए एक खास पेशकश: {{3}}। आने पर यह संदेश दिखाएँ या अधिक जानकारी के लिए यहीं जवाब दें। आपके फिर से आने का इंतज़ार रहेगा!
+इन संदेशों को रोकने के लिए STOP लिखें।
+```
+
+#### `team_agent_draft_approval`  *(owner · `owner_notification` · system-invoked · `agent_selectable: false`)*
+
+- **Variables:** `{{1}}` = owner_name, `{{2}}` = draft_count, `{{3}}` = sample_message (rendered at arm-time from an RLS read of `agent_drafts`; goes into the WhatsApp send ONLY — never into the `pending_approvals` row, no-customer-PII rule)
+- **en SID:** `HX1fa31e0339d5739d7936e6edf39e08a3` · **body_sha256:** `5fba29d4eec7937a8510fab43f3ac1a4a07fd3854efcac869d7f935a50c21501`
+
+```
+Hi {{1}}, your Viabe assistant has prepared {{2}} customer message(s) for your approval. Sample: "{{3}}"
+Reply YES to approve and send, EDIT to change, or NO to reject. Nothing is sent without your approval.
+```
+
+- **hi SID:** `HX81929b92dd3a159e920b5eb338700cf8` · **body_sha256:** `94e40feada67567d350e0951901d470df6f272f4bfe3eace89660f9fb5547477`
+
+```
+नमस्ते {{1}}, आपके Viabe असिस्टेंट ने आपकी मंज़ूरी के लिए {{2}} ग्राहक संदेश तैयार किए हैं। नमूना: "{{3}}"
+भेजने की मंज़ूरी के लिए YES, बदलाव के लिए EDIT, या अस्वीकार करने के लिए NO लिखें। आपकी मंज़ूरी के बिना कुछ भी नहीं भेजा जाएगा।
+```
+
+#### `team_l3_presend_notice`  *(owner · `owner_notification` · system-invoked · `agent_selectable: false`)*
+
+- **Variables:** `{{1}}` = owner_name, `{{2}}` = send_count
+- **en SID:** `HXb114769da63f0c72d4a9f01c2fd0ed80` · **body_sha256:** `fcafd820af259593814a79eb6f46d40ec09d59157889ede657c97a08abebaca1`
+
+```
+Hi {{1}}, under the autonomy you enabled, your Viabe assistant will automatically send {{2}} customer message(s) in 2 hours. No action is needed if you're okay with this. Reply with anything to pause and review them first — replying STOP turns off automatic sending.
+```
+
+- **hi SID:** `HX8184dfe127d1f5bc124384192a4793be` · **body_sha256:** `92759384a731b7b7d14d5fcf4943835327769c82bba99d61deddb4f6ee6cdbfc`
+
+```
+नमस्ते {{1}}, आपकी दी गई अनुमति के तहत आपका Viabe असिस्टेंट 2 घंटे में {{2}} ग्राहक संदेश अपने आप भेज देगा। सहमत हैं तो कुछ करने की ज़रूरत नहीं। पहले देखना चाहें तो कोई भी जवाब भेजें — भेजना रुक जाएगा। STOP लिखने से ऑटोमैटिक भेजना बंद हो जाएगा।
+```
+
+#### `team_autonomy_offer`  *(owner · `owner_notification` · system-invoked · `agent_selectable: false`)*
+
+- **Variables:** `{{1}}` = owner_name, `{{2}}` = streak_count
+- **en SID:** `HX150525f3963603ad00d234bd01b37224` · **body_sha256:** `c39414a0c6f0901a785cc7d6d3305076e861cd171005e6412d12e9a9c9491680`
+
+```
+Hi {{1}}, you've approved {{2}} messages from your Viabe assistant in a row without changes. Would you like it to send similar routine messages automatically from now on? You'll get a notice 2 hours before every automatic send, and you can always say STOP to turn this off instantly.
+Reply ENABLE to turn on automatic sending, or ignore this message to keep approving each one.
+```
+
+- **hi SID:** `HXae12acceccc259235478a7a60c53d628` · **body_sha256:** `c036772fdf65196b978bdc6cc4a4bbe8eab907cc75363dcbdf8aa73f7688a66c`
+
+```
+नमस्ते {{1}}, आपने अपने Viabe असिस्टेंट के लगातार {{2}} संदेश बिना बदलाव के मंज़ूर किए हैं। क्या आप चाहेंगे कि ऐसे रोज़मर्रा के संदेश अब अपने आप भेजे जाएँ? हर ऑटोमैटिक भेजने से 2 घंटे पहले आपको सूचना मिलेगी, और आप कभी भी STOP कहकर इसे तुरंत बंद कर सकते हैं।
+ऑटोमैटिक भेजना चालू करने के लिए ENABLE लिखें, या हर संदेश खुद मंज़ूर करते रहने के लिए इस संदेश को अनदेखा करें।
+```
 
 **Draft variable signatures** (yaml `variables:` is the machine mirror; both files update
 in lockstep when F1 copy is finalized):
@@ -306,18 +397,17 @@ in lockstep when F1 copy is finalized):
 - `team_l3_presend_notice` — `{{1}}` owner_name, `{{2}}` send_count.
 - `team_autonomy_offer` — `{{1}}` owner_name, `{{2}}` streak_count.
 
-**Body-hash pinning (lands WITH the F1 SIDs, plan §3c):** when the SIDs drop, fetch the
-Meta-APPROVED content once via the Twilio Content API, assert the opt-out line against
-the approved body (not this doc), and pin a per-language `body_sha256` next to each SID
-in `twilio_templates.yaml`. From then on CI fails on any doc/yaml/Meta drift, and the
-PR-1 canary asserts the rendered outbound body contains the opt-out line. Until F1,
-`tests/orchestrator/agents/test_template_registry_gap5.py` pins the fail-closed shape
-(entries present, categories/flags correct, NO SIDs).
+**Body-hash pinning (DONE at F1 — VT-383, plan §3c):** the Meta-APPROVED content was
+fetched once via the Twilio Content API (canary), the opt-out line asserted against the
+APPROVED body (not this doc), and a per-language `body_sha256` pinned next to each SID in
+`twilio_templates.yaml`. CI now fails on any doc/yaml/Meta drift (the
+`templates_registry.canary_load` body_sha256 check + `test_template_registry_gap5.py`
+armed-shape pins). The approved-body hashes are recorded above and in
+`.viabe/queue/VT-383-canary-results.json` (canon).
 
-**`agent_selectable` note:** both winbacks ship `agent_selectable: false` and flip to
-`true` at F1 together with the SID drop — `approved_template_names()` does not filter
-null-SID variants, so flipping early would inject unsendable names into the live VT-45
-selectable set (D5 pins). The Gap-5 drafting gate requires
-`category: customer_marketing` + `agent_selectable: true` at send time, so no agent
-customer send is possible before that flip. Owner-facing entries stay `false` forever
-(system-invoked).
+**`agent_selectable` note (resolved at F1):** the two `team_winback_*` are now
+`agent_selectable: true` — Meta-approved with real SIDs wired, so they correctly enter
+`approved_template_names()` / the live VT-45 selectable set. The Gap-5 drafting gate
+requires `category: customer_marketing` + `agent_selectable: true` at send time, which
+both winbacks now satisfy. The three `owner_notification` entries stay `false` forever
+(system-invoked, never agent-chosen).
