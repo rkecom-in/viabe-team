@@ -688,8 +688,8 @@ export async function vtrBatchDrafts(
 // empty timeline) on any non-2xx or throw — the canvas degrades to empty, never
 // to raw. CL-390: log path + status ONLY — never the projection/timeline body.
 //
-// The write leg (pause / override / rerun) is VT-376; this file ships zero
-// mutating fns for run-control in Phase B by design.
+// The write leg (pause / override / rerun) ships below this read surface (the
+// VT-376 mutation fns — see the VT-376 section further down this file).
 // ---------------------------------------------------------------------------
 
 const _VTR_RC_READ_TIMEOUT_MS = 10_000

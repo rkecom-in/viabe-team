@@ -82,6 +82,16 @@ def _env(monkeypatch):
     monkeypatch.setenv("OPERATOR_JWT_SECRET", _OP_SECRET)
 
 
+def _assign(dsn: str, operator_id: str, tenant_id: str) -> None:
+    """VT-377 (mig-134): the views are assignment-scoped — an operator with no ACTIVE
+    operator_assignments row reads zero rows (fail-closed), so row-asserting tests assign."""
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute(
+            "INSERT INTO operator_assignments (operator_id, tenant_id) VALUES (%s, %s)",
+            (operator_id, tenant_id),
+        )
+
+
 def test_vtr_escalations_returns_view_columns_only(substrate, monkeypatch):
     _env(monkeypatch)
     from orchestrator.api.ops_resolve import VtrReadBody, vtr_escalations_read
@@ -95,6 +105,7 @@ def test_vtr_escalations_returns_view_columns_only(substrate, monkeypatch):
         conn.execute("INSERT INTO escalations (tenant_id, kind, severity, status, route) "
                      "VALUES (%s, 'how_to_gap', 'medium', 'resolved', 'vtr')", (tid,))
     op = str(uuid4())
+    _assign(substrate, op, tid)  # mig-134 scoping: row-asserting read needs the assignment
     out = vtr_escalations_read(
         VtrReadBody(operator_id=op), x_internal_secret=_SECRET, x_operator_jwt=_op_jwt(op)
     )
@@ -111,8 +122,9 @@ def test_vtr_monitoring_excludes_message_text(substrate, monkeypatch):
     _env(monkeypatch)
     from orchestrator.api.ops_resolve import VtrReadBody, vtr_monitoring_read
 
-    _seed(substrate)
+    tid = _seed(substrate)
     op = str(uuid4())
+    _assign(substrate, op, tid)  # mig-134 scoping: row-asserting read needs the assignment
     out = vtr_monitoring_read(
         VtrReadBody(operator_id=op), x_internal_secret=_SECRET, x_operator_jwt=_op_jwt(op)
     )
@@ -169,6 +181,7 @@ def test_vtr_read_caps_limit(substrate, monkeypatch):
                 [(tid,)] * 201,
             )
     op = str(uuid4())
+    _assign(substrate, op, tid)  # mig-134 scoping: row-asserting read needs the assignment
     out = vtr_escalations_read(
         VtrReadBody(operator_id=op, limit=9999), x_internal_secret=_SECRET, x_operator_jwt=_op_jwt(op)
     )

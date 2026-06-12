@@ -141,9 +141,11 @@ function StepTimeline({
   const reruns = timeline.steps.find((s) => s.rerun_of_run_id)
   const workflowKind = RUN_TYPE_TO_KIND[run.run_type ?? ''] ?? ''
   // The re-dispatch entry point = the first CONTROLLABLE step's name (the rerun arm re-enters at a
-  // registered seam). Fall back to the first step's name if none is tagged controllable.
+  // registered seam). NO fallback to the first OBSERVED step: that name is not a controllable seam,
+  // so the server's registry check would 422 the POST every time — a guaranteed-422 button is a
+  // worse UX than no button. With no controllable step we render the empty/why state instead.
   const firstControllable = steps.find((s) => s.tier === 'controllable' && s.step_name)
-  const fromStep = firstControllable?.step_name ?? steps[0]?.step_name ?? null
+  const fromStep = firstControllable?.step_name ?? null
   return (
     <div className="space-y-2">
       {reruns?.rerun_of_run_id && (
@@ -161,8 +163,10 @@ function StepTimeline({
       )}
 
       {/* VT-376 rerun control — only on rerunnable runs; non-rerunnable show the why-copy. The
-          fromStep is resolved to the first controllable seam; with none, no entry point exists. */}
-      {fromStep && (
+          fromStep is the first CONTROLLABLE seam. With none, there is no entry point the server
+          would accept (a rerun from an observed step is a guaranteed 422), so we render the
+          empty/why state instead of a button that would always fail (VT-381 nit). */}
+      {fromStep ? (
         <div data-rc-run-rerun className="flex items-center gap-2">
           <span className="text-[11px] uppercase tracking-wide text-gray-400">Re-dispatch:</span>
           <RerunControl
@@ -172,7 +176,14 @@ function StepTimeline({
             forbiddenReason={timeline.forbiddenReason}
           />
         </div>
-      )}
+      ) : timeline.rerunnable ? (
+        <div data-rc-run-rerun className="flex items-center gap-2">
+          <span className="text-[11px] uppercase tracking-wide text-gray-400">Re-dispatch:</span>
+          <span data-rc-rerun-no-entry className="text-[11px] italic text-gray-500">
+            No controllable step to re-dispatch from — this run exposes no re-entry seam.
+          </span>
+        </div>
+      ) : null}
 
       {steps.length === 0 ? (
         <p className="text-xs text-gray-400 px-1 py-1">No steps recorded for this run.</p>

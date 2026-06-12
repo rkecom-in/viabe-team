@@ -734,7 +734,11 @@ def test_vtr_business_plan_latest_only_and_diff_values_stripped(substrate) -> No
         tenant, summary=_SUMMARY, roadmap=v2_items, fact_bundle=_FACTS, generated_by="vtr:x",
     )
 
-    with vtr_connection() as conn, conn.cursor() as cur:
+    # VT-377 (mig-134): the view is assignment-scoped — an operator-less read is zero rows
+    # (fail-closed), so this pin reads as an ASSIGNED operator via the GUC.
+    op = str(uuid4())
+    _assign(dsn, op, tenant)
+    with vtr_connection(operator_id=op) as conn, conn.cursor() as cur:
         cur.execute("SELECT * FROM vtr_business_plan WHERE tenant_id = %s", (str(tenant),))
         rows = cur.fetchall()
     assert len(rows) == 1  # latest only — v1 is unreachable through the view

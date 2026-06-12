@@ -221,6 +221,26 @@ def _future() -> datetime:
     return datetime.now(UTC) + timedelta(hours=1)
 
 
+def _assigned_operator(dsn: str, tenant: str) -> str:
+    """Seed an ACTIVE operator_assignments row (service-role write — the table is deny-all
+    RLS) and return the operator id. mig-134: an app_vtr_role view read sees this tenant ONLY
+    with the matching ``app.vtr_operator_id`` GUC set (unset/empty ⇒ zero rows, fail-closed)."""
+    op = str(uuid4())
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute(
+            "INSERT INTO operator_assignments (operator_id, tenant_id) VALUES (%s, %s)",
+            (op, tenant),
+        )
+    return op
+
+
+def _set_vtr_guc(cur, operator_id: str) -> None:  # type: ignore[no-untyped-def]
+    """Session-level set on a throwaway autocommit test connection — B1's note: a txn-local
+    set_config does NOT survive the per-statement autocommit, so set it session-level (the
+    third arg False); the connection closes right after the read, so nothing leaks."""
+    cur.execute("SELECT set_config('app.vtr_operator_id', %s, false)", (operator_id,))
+
+
 # ---------------------------------------------------------------------------
 # §10.1 — RLS + FORCE deny-all on both new tables
 # ---------------------------------------------------------------------------
@@ -316,8 +336,10 @@ def test_timeline_keys_only_for_name_bearing_kind(substrate):
         output_env={"draft_id": "d-1", "summary": "Message to Ramesh about the order"},
     )
     _step(substrate, run, tenant, 1, "compose_output")  # NULL envelopes stay NULL
+    op = _assigned_operator(substrate, tenant)  # mig-134: scoped — assignment + GUC required
     with psycopg.connect(substrate, autocommit=True) as conn, conn.cursor() as cur:
         cur.execute("SET ROLE app_vtr_role")
+        _set_vtr_guc(cur, op)
         cur.execute(
             "SELECT step_seq, input_envelope, output_envelope FROM vtr_step_timeline "
             "WHERE run_id = %s ORDER BY step_seq",
@@ -398,8 +420,10 @@ def test_timeline_value_projection_is_exactly_the_audited_allowlists(substrate):
         },
     )
     _step(substrate, run, tenant, 99, "state_transition", input_env={"state": "Ramesh dict"})
+    op = _assigned_operator(substrate, tenant)  # mig-134: scoped — assignment + GUC required
     with psycopg.connect(substrate, autocommit=True) as conn, conn.cursor() as cur:
         cur.execute("SET ROLE app_vtr_role")
+        _set_vtr_guc(cur, op)
         cur.execute(
             "SELECT step_seq, input_envelope, output_envelope FROM vtr_step_timeline "
             "WHERE run_id = %s ORDER BY step_seq",
@@ -469,8 +493,10 @@ def test_timeline_injected_extra_key_never_passes_the_projection(substrate):
         input_env={"smuggled_in": "Ramesh-breach-leak"},
         output_env={"layer": "pre_flight", "smuggled_out": "Ramesh-counts-leak"},
     )
+    op = _assigned_operator(substrate, tenant)  # mig-134: scoped — assignment + GUC required
     with psycopg.connect(substrate, autocommit=True) as conn, conn.cursor() as cur:
         cur.execute("SET ROLE app_vtr_role")
+        _set_vtr_guc(cur, op)
         cur.execute(
             "SELECT step_seq, input_envelope, output_envelope FROM vtr_step_timeline "
             "WHERE run_id = %s ORDER BY step_seq",
@@ -527,8 +553,10 @@ def test_vtr_can_read_active_hold_via_companion_view(substrate):
     app_vtr_role through vtr_workflow_controls."""
     tenant = _tenant(substrate)
     _pause(substrate, tenant, "campaign_send")
+    op = _assigned_operator(substrate, tenant)  # mig-134: scoped — assignment + GUC required
     with psycopg.connect(substrate, autocommit=True) as conn, conn.cursor() as cur:
         cur.execute("SET ROLE app_vtr_role")
+        _set_vtr_guc(cur, op)
         cur.execute(
             "SELECT workflow_kind, released_at FROM vtr_workflow_controls "
             "WHERE tenant_id = %s",
@@ -1426,6 +1454,163 @@ def test_run_control_event_schemas_registered():
         "run_control_degraded", {"workflow_kind": "agent_dispatch", "posture": "fail_open"}
     )
     assert ok, errors
+
+
+# ===========================================================================
+# VT-381 F1 — stale-'running' rerun lineage TTL (build contract §B3.2). A
+# hard-killed SYNCHRONOUS rerun leaves a 'running' lineage row that
+# _refuse_on_inflight_rerun would 409 on forever; the stale-TTL leg closes it
+# 'aborted_stale' + PROCEEDS. A FRESH 'running' row still 409s.
+# ===========================================================================
+
+
+def _seed_rerun_lineage_running(
+    dsn: str, tenant: str, source_run: str, *, age_seconds: float
+) -> str:
+    """A 'running' rerun lineage row (rerun_of_run_id = source) with started_at back-dated
+    by ``age_seconds`` — the orphaned shape a hard-killed synchronous rerun leaves."""
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        return str(
+            conn.execute(
+                "INSERT INTO pipeline_runs (tenant_id, run_type, status, rerun_of_run_id, "
+                "rerun_from_step, started_at) "
+                "VALUES (%s, 'plan_deliver', 'running', %s, 'deliver_parts', "
+                "now() - make_interval(secs => %s)) RETURNING id",
+                (tenant, source_run, age_seconds),
+            ).fetchone()[0]
+        )
+
+
+def test_rerun_stale_running_row_closed_aborted_stale_and_proceeds(substrate, monkeypatch):
+    """F1: a STALE 'running' rerun lineage row (older than _RERUN_STALE_TTL_S) for the
+    source is closed 'completed' + final_outcome='aborted_stale' (the mig-052 house
+    pattern), and the new rerun PROCEEDS to success — the forever-409 is gone."""
+    from orchestrator.business_plan import delivery
+    from orchestrator.run_control import rerun as rerun_mod
+    from orchestrator.run_control.rerun import RerunResult, rerun_from
+
+    monkeypatch.setattr(delivery, "deliver_plan", lambda *a, **k: None)
+    # Make the staleness window tiny so a "few-seconds-old" seeded row already counts stale
+    # (keeps the test fast + deterministic; the real default is 3600 s).
+    monkeypatch.setattr(rerun_mod, "_RERUN_STALE_TTL_S", 1)
+
+    tenant = _tenant_brain_ready(substrate, whatsapp=f"+1{uuid4().int % 10**10:010d}")
+    _seed_delivered_plan(substrate, tenant)
+    source = _run_typed(substrate, tenant, "plan_deliver")
+    stale = _seed_rerun_lineage_running(substrate, tenant, source, age_seconds=120)
+
+    result = rerun_from(source, "deliver_parts", requested_by=str(uuid4()))
+    assert isinstance(result, RerunResult) and result.outcome == "completed", (
+        "the rerun must SUCCEED after closing the stale row (no forever-409)"
+    )
+
+    # the stale row was closed on the house pattern.
+    with psycopg.connect(substrate, autocommit=True) as conn:
+        row = conn.execute(
+            "SELECT status, terminal_state_metadata FROM pipeline_runs WHERE id = %s",
+            (stale,),
+        ).fetchone()
+    assert row[0] == "completed", f"stale row must close 'completed', got {row[0]!r}"
+    assert row[1] and row[1].get("final_outcome") == "aborted_stale", (
+        "the stale close must stamp final_outcome='aborted_stale'"
+    )
+    # a fresh lineage row exists for the proceeded rerun (distinct from the stale one).
+    assert str(result.run_id) != stale, "the proceeded rerun mints a fresh lineage row"
+    with psycopg.connect(substrate, autocommit=True) as conn:
+        new_status = conn.execute(
+            "SELECT status FROM pipeline_runs WHERE id = %s", (str(result.run_id),)
+        ).fetchone()[0]
+    assert new_status == "completed", "the proceeded rerun's own row closed completed"
+
+
+def test_rerun_fresh_running_row_still_409s(substrate):
+    """F1 boundary: a FRESH 'running' rerun lineage row (younger than the TTL) STILL 409s —
+    a genuinely-in-flight rerun (the double-click serialization) must never be aborted out
+    from under itself by the stale-TTL leg."""
+    from orchestrator.run_control.rerun import RerunRefused, rerun_from
+
+    tenant = _tenant_brain_ready(substrate, whatsapp=f"+1{uuid4().int % 10**10:010d}")
+    _seed_delivered_plan(substrate, tenant)
+    source = _run_typed(substrate, tenant, "plan_deliver")
+    # age 0 → far younger than the 3600 s default → must be treated as live in-flight.
+    _seed_rerun_lineage_running(substrate, tenant, source, age_seconds=0)
+
+    with pytest.raises(RerunRefused) as exc:
+        rerun_from(source, "deliver_parts", requested_by=str(uuid4()))
+    assert exc.value.code == 409
+    assert "already in flight" in str(exc.value)
+
+
+# ===========================================================================
+# VT-381 F3 — ops_top_tenants_today function-level real-DB coverage (build
+# contract §B3.3): zero-run tenant listed (LEFT JOIN), runs-count ranking,
+# EXECUTE denied for app_vtr_role (+anon where the role exists on Supabase).
+# ===========================================================================
+
+
+def test_ops_top_tenants_today_lists_zero_run_tenant_and_ranks_by_runs(substrate):
+    """The LEFT JOIN claim: a tenant with ZERO runs since p_since IS listed (runs_count 0),
+    and a tenant with MORE runs ranks ABOVE one with fewer. p_since = epoch so every seeded
+    run counts; the limit is generous so both seeded tenants appear."""
+    since = datetime(1970, 1, 1, tzinfo=UTC)
+    zero_tenant = _tenant(substrate)  # no runs
+    busy_tenant = _tenant(substrate)
+    quiet_tenant = _tenant(substrate)
+    for _ in range(3):
+        _run(substrate, busy_tenant)
+    _run(substrate, quiet_tenant)  # exactly one
+
+    with psycopg.connect(substrate, autocommit=True) as conn:
+        rows = conn.execute(
+            "SELECT tenant_id::text, runs_count FROM ops_top_tenants_today(%s, %s)",
+            (1000, since),
+        ).fetchall()
+    counts = {r[0]: r[1] for r in rows}
+    assert zero_tenant in counts, "a zero-run tenant must still list (the LEFT JOIN claim)"
+    assert counts[zero_tenant] == 0
+    assert counts[busy_tenant] == 3 and counts[quiet_tenant] == 1
+    # ranking: busy (3) appears before quiet (1) in the ORDER BY runs_count DESC result.
+    order = [r[0] for r in rows]
+    assert order.index(busy_tenant) < order.index(quiet_tenant), (
+        "ops_top_tenants_today must rank higher-run tenants first"
+    )
+
+
+def test_ops_top_tenants_today_execute_denied_for_app_vtr_role(substrate):
+    """EXECUTE is deny-by-default: app_vtr_role (a VTR's role) has NO EXECUTE on
+    ops_top_tenants_today — the function is the SECRET-client (service_role) caller's only.
+    A direct call as the role is refused. (anon/authenticated REVOKE is mig-134/F2; this leg
+    asserts the role that EXISTS on local + CI today.)"""
+    with psycopg.connect(substrate, autocommit=True) as conn:
+        has = conn.execute(
+            "SELECT has_function_privilege('app_vtr_role', "
+            "'ops_top_tenants_today(integer, timestamptz)', 'EXECUTE')"
+        ).fetchone()[0]
+        assert has is False, "app_vtr_role must NOT hold EXECUTE on ops_top_tenants_today"
+        # the role-entered direct call is refused (defense in depth on the has_privilege check).
+        with conn.cursor() as cur:
+            cur.execute("SET ROLE app_vtr_role")
+            with pytest.raises(pg_errors.InsufficientPrivilege):
+                cur.execute(
+                    "SELECT 1 FROM ops_top_tenants_today(%s, %s)",
+                    (1, datetime(1970, 1, 1, tzinfo=UTC)),
+                )
+            cur.execute("ROLLBACK")
+            cur.execute("RESET ROLE")
+    # anon/authenticated — only assert where the Supabase roles exist (mig-134/F2 REVOKE).
+    with psycopg.connect(substrate, autocommit=True) as conn:
+        for role in ("anon", "authenticated"):
+            exists = conn.execute(
+                "SELECT 1 FROM pg_roles WHERE rolname = %s", (role,)
+            ).fetchone()
+            if exists is None:
+                continue  # local/CI Postgres — role absent; F2 REVOKE is a no-op there
+            has = conn.execute(
+                "SELECT has_function_privilege(%s, "
+                "'ops_top_tenants_today(integer, timestamptz)', 'EXECUTE')",
+                (role,),
+            ).fetchone()[0]
+            assert has is False, f"{role} must NOT hold EXECUTE (mig-134/F2 REVOKE)"
 
 
 # ===========================================================================

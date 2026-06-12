@@ -773,7 +773,9 @@ def timeline(
         deny_target_kind="run",
         deny_target_id=run_id,
     )
-    with vtr_connection() as conn, conn.cursor() as cur:
+    # VT-377 (mig-134): the VERIFIED operator scopes the views themselves (defense in depth
+    # behind the gate above; FAZAL break-glass rides the admin role inside vtr_connection).
+    with vtr_connection(operator_id=operator) as conn, conn.cursor() as cur:
         cur.execute(
             "SELECT * FROM vtr_step_timeline WHERE run_id = %s ORDER BY step_seq",
             (run_id,),
@@ -1055,7 +1057,8 @@ def programs(
     holds: list[dict[str, Any]] = []
     degraded = False
     try:
-        with vtr_connection() as conn, conn.cursor() as cur:
+        # VT-377 (mig-134): operator-scoped view read (same posture as /timeline).
+        with vtr_connection(operator_id=operator) as conn, conn.cursor() as cur:
             cur.execute(
                 "SELECT tenant_id, workflow_kind, set_at, released_at FROM vtr_workflow_controls "
                 "WHERE tenant_id = %s AND released_at IS NULL",
