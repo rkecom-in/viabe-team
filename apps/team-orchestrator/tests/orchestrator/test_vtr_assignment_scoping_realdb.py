@@ -93,10 +93,9 @@ def substrate():  # type: ignore[no-untyped-def]
 
 
 def _mig134_present(dsn: str) -> bool:
-    """True once B1's mig-134 has defined the ``app_vtr_operator()`` helper — the
-    assignment-scoping legs are substrate-gated on this. Until B1 lands this is False and
-    the gated legs xfail (run-but-not-block per the prompt), so the integrator re-run is
-    unambiguous."""
+    """True once mig-134 has defined the ``app_vtr_operator()`` helper. The scoping legs
+    HARD-ASSERT on this (gate C2) — a database without the migration fails the isolation
+    battery loudly instead of xfail-neutering it."""
     with psycopg.connect(dsn, autocommit=True) as conn:
         return (
             conn.execute(
@@ -226,17 +225,17 @@ def _tenants_seen(cur: Any, view: str) -> set[str]:
 
 
 # ---------------------------------------------------------------------------
-# View-scoping legs — substrate-gated on mig-134 (B1). xfail-until-B1 so they
-# RUN (and report) without blocking; they flip to PASS the moment B1 lands.
+# View-scoping legs. The build-window xfail gate is RETIRED (Cowork gate C2):
+# post-merge, a missing mig-134 must HARD-FAIL the isolation battery — an xfail
+# here is a silent-neutering vector on the multi-VTR security proof.
 # ---------------------------------------------------------------------------
 
 
 def _gate(dsn: str) -> None:
-    if not _mig134_present(dsn):
-        pytest.xfail(
-            "mig-134 (app_vtr_operator + assignment-scoped views) not applied yet — "
-            "B1 lands concurrently; this leg flips to PASS on that merge"
-        )
+    assert _mig134_present(dsn), (
+        "mig-134 (app_vtr_operator + assignment-scoped views) is MISSING from the "
+        "test database — the multi-VTR isolation battery cannot be skipped (gate C2)"
+    )
 
 
 def test_guc_operator_a_sees_only_its_tenant_across_all_nine_views(substrate):
@@ -562,3 +561,70 @@ def test_api_rerun_operator_a_denied_b_run_403(substrate):
         substrate, action="run_rerun_denied", tenant=t_b, operator=op_a,
         target_id=str(run_b),
     )
+
+
+# ---------------------------------------------------------------------------
+# Gate C3 — the vtr_connection() FAZAL break-glass delegation legs (the helper's
+# admin dispatch + its fail-closed branch were previously untested).
+# ---------------------------------------------------------------------------
+
+
+class _DsnPool:
+    """Minimal ``.connection()`` shim over a plain superuser connect (the
+    test_run_control_realdb idiom) — exercises vtr_connection's pool seam without
+    depending on the launched DBOS pool's state."""
+
+    def __init__(self, dsn: str) -> None:
+        self._dsn = dsn
+
+    @contextmanager
+    def connection(self):  # type: ignore[no-untyped-def]
+        with psycopg.connect(self._dsn, autocommit=True) as conn:
+            yield conn
+
+
+def test_vtr_connection_fazal_delegates_to_admin_tier(substrate, monkeypatch):
+    """operator_id == FAZAL_OWNER_UUID ⇒ vtr_connection delegates to vtr_admin_connection:
+    the session runs as app_vtr_admin_role and the mig-134 role leg opens ALL tenants."""
+    _gate(substrate)
+    from orchestrator.privacy import vtr as vtr_mod
+
+    fazal = _operator()
+    monkeypatch.setenv("FAZAL_OWNER_UUID", fazal)
+    t_a, t_b = _tenant(substrate), _tenant(substrate)
+    _seed_all_views(substrate, t_a)
+    _seed_all_views(substrate, t_b)
+
+    pool = _DsnPool(substrate)
+    with vtr_mod.vtr_connection(operator_id=fazal, pool=pool) as conn, conn.cursor() as cur:
+        cur.execute("SELECT current_user")
+        assert cur.fetchone()[0] == "app_vtr_admin_role", (
+            "FAZAL delegation must run the session as the admin role (role IS the mechanism)"
+        )
+        for view in _SCOPED_VIEWS:
+            seen = _tenants_seen(cur, view)
+            assert {t_a, t_b} <= seen, f"{view}: admin delegation must see ALL tenants"
+
+
+def test_vtr_connection_fazal_env_unset_fails_closed(substrate, monkeypatch):
+    """The fail-closed branch: FAZAL_OWNER_UUID UNSET ⇒ the would-be admin uuid gets NO
+    delegation — it is a plain VTR with zero assignments, and every scoped view returns
+    nothing. An unset env must never open the all-tenants gate."""
+    _gate(substrate)
+    from orchestrator.privacy import vtr as vtr_mod
+
+    would_be_fazal = _operator()
+    monkeypatch.delenv("FAZAL_OWNER_UUID", raising=False)
+    t_a = _tenant(substrate)
+    _seed_all_views(substrate, t_a)
+
+    pool = _DsnPool(substrate)
+    with vtr_mod.vtr_connection(operator_id=would_be_fazal, pool=pool) as conn, conn.cursor() as cur:
+        cur.execute("SELECT current_user")
+        assert cur.fetchone()[0] == "app_vtr_role", (
+            "without the env the identity must NOT reach the admin role"
+        )
+        for view in _SCOPED_VIEWS:
+            assert _tenants_seen(cur, view) == set(), (
+                f"{view}: unassigned identity leaked rows with FAZAL_OWNER_UUID unset"
+            )

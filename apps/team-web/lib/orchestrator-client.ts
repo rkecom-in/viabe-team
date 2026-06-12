@@ -244,8 +244,8 @@ export async function forwardOnboardStep(
 // service-role client + app-side masking, the VTR ops reads call these endpoints, which read ONLY
 // the de-identified views as app_vtr_role (NO grant on raw / decrypt — VT-281). The orchestrator is
 // the ONLY door to VTR data. Fail-CLOSED: any error → [] (the surface degrades to empty, never to
-// raw). MULTI-VTR precondition (VT-281/360): the views aren't assignment-scoped yet — Phase-1 =
-// Fazal-as-VTR#1 sees all tenants; a 2nd VTR needs the views scoped first.
+// raw). Multi-VTR (VT-377/mig-134): the views ARE assignment-scoped per-operator (admin tier sees
+// all via the audited break-glass role) — the old "needs scoping first" precondition is closed.
 // ---------------------------------------------------------------------------
 
 const _VTR_READ_TIMEOUT_MS = 5000

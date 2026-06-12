@@ -781,18 +781,19 @@ def test_programs_read_survives_with_operator_guc_no_500(substrate) -> None:
     """mig-134 empty-GUC predicate fix, end-to-end at the read layer: once the operator GUC
     is plumbed through vtr_connection, a VALID assigned operator's /programs read must return
     cleanly (NOT 500) — the NULLIF(...)-guarded app_vtr_operator() never throws on an
-    unset/empty GUC. Substrate-gated: until B1 plumbs the operator, this xfails (the read
-    runs with no operator GUC, the pre-fix behaviour). It flips to PASS on B1's merge.
+    unset/empty GUC.
+
+    The build-window xfail gate is RETIRED (Cowork gate C2): a missing mig-134 now
+    HARD-FAILS — this leg is part of the isolation battery and must not silently neuter.
 
     Falsifiability: if the predicate fix regressed to current_setting(...)::uuid on an empty
     GUC, the vtr_workflow_controls read inside /programs would raise — but /programs catches
     that into degraded=true (fail-open), so the falsifiable signal here is that the read
     RETURNS and is NOT degraded for a real operator with a real GUC."""
-    if not _mig134_present(substrate.dsn):
-        pytest.xfail(
-            "mig-134 operator-GUC plumbing not applied yet — B1 lands concurrently; "
-            "this leg flips to PASS on that merge"
-        )
+    assert _mig134_present(substrate.dsn), (
+        "mig-134 operator-GUC plumbing is MISSING from the test database — the multi-VTR "
+        "isolation battery cannot be skipped (gate C2)"
+    )
     dsn = substrate.dsn
     op, tenant = _assigned(dsn)
     _seed_run(dsn, tenant, run_type="agent_dispatch", status="completed")
