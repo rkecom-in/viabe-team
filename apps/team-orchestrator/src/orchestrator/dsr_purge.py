@@ -139,6 +139,11 @@ _PURGE_ORDER: tuple[str, ...] = (
     # items, children-first; agent_customer_contacts is the per-customer contact ledger (customer
     # linkage at rest). All FK tenants with CASCADE, but the tenant row is anonymized NOT deleted on
     # DSR (the CASCADE never fires) — sweep explicitly or they survive the purge (the VT-366 lesson).
+    # VT-382 (CL-437.3, mig 135): owner_message_audit holds the EXACT owner-facing sent text — the
+    # ONE surface that retains it after the outbox redaction. Leaf (FK tenants only; CASCADE never
+    # fires), but it carries draft/batch linkage by value, so it sweeps FIRST among the agent
+    # tables (children-first hygiene). MUST be swept here or the exact text survives the purge.
+    "owner_message_audit",
     "agent_drafts",
     "agent_draft_batches",
     "agent_work_items",

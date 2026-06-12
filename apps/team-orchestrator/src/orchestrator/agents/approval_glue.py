@@ -320,6 +320,12 @@ def apply_agent_decision(
                 "WHERE tenant_id = %s AND id = %s RETURNING edit_cycles",
                 (tid, bid),
             ).fetchone()
+            if updated is not None:
+                # VT-382 (CL-437.3): terminal 'rejected' close — owner_feedback
+                # redacts in the SAME resolution txn (sha256 marker kept).
+                from orchestrator.agents.outbox_redaction import redact_batch_owner_feedback
+
+                redact_batch_owner_feedback(conn, tid, [bid])
             if updated is not None and agent:
                 from orchestrator.agents.autonomy import record_regression_event
 
@@ -349,6 +355,12 @@ def apply_agent_decision(
             "RETURNING edit_cycles",
             (tid, bid, list(_RESOLVABLE_FROM)),
         ).fetchone()
+        if updated is not None:
+            # VT-382 (CL-437.3): terminal 'rejected' close — owner_feedback redacts
+            # in the SAME resolution txn (sha256 marker kept).
+            from orchestrator.agents.outbox_redaction import redact_batch_owner_feedback
+
+            redact_batch_owner_feedback(conn, tid, [bid])
         if updated is not None and agent:
             from orchestrator.agents.autonomy import record_regression_event
 
@@ -363,6 +375,12 @@ def apply_agent_decision(
             "RETURNING edit_cycles",
             (tid, bid, list(_RESOLVABLE_FROM)),
         ).fetchone()
+        if updated is not None:
+            # VT-382 (CL-437.3): terminal 'cancelled' close — owner_feedback redacts
+            # in the SAME resolution txn (sha256 marker kept).
+            from orchestrator.agents.outbox_redaction import redact_batch_owner_feedback
+
+            redact_batch_owner_feedback(conn, tid, [bid])
         if updated is not None and agent:
             from orchestrator.agents.autonomy import record_regression_event
 
