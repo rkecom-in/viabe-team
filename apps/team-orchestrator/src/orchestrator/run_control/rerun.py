@@ -93,6 +93,15 @@ _TERMINAL_WORK_ITEM_STATUSES = frozenset({"sent", "rejected", "failed", "cancell
 # run of that kind expected inside the window (F8: NULL-workflow pins REQUIRE expiry).
 _NEXT_RUN_OVERRIDE_TTL_S = 3600
 
+# VT-381 F1 — stale-'running' rerun lineage TTL. A hard-killed SYNCHRONOUS rerun
+# (plan_generate / plan_deliver — NOT the DBOS-recovered agent_dispatch arm) can die
+# between its lineage insert and the best-effort failed-close, leaving a 'running'
+# lineage row that ``_refuse_on_inflight_rerun`` would 409 on FOREVER. A 'running'
+# lineage row OLDER than this TTL is treated as orphaned: the stale-close path closes it
+# ('completed' + ``final_outcome='aborted_stale'`` — the mig-052 house pattern) and the
+# new rerun PROCEEDS. A FRESH 'running' row still 409s (a genuinely-in-flight rerun).
+_RERUN_STALE_TTL_S = 3600
+
 _REASON_MAX_LEN = 500  # matches the migration-131 reason cap (F7)
 
 
@@ -273,23 +282,50 @@ def _refuse_on_inflight_rerun(tenant_id: UUID, source_run_id: UUID) -> None:
     FINISHED prior rerun (row closed: completed / escalated / paused…) does NOT refuse —
     deliberately re-running the same source later is legitimate.
 
-    Known edge (accepted): a rerun that died hard between its lineage insert and the
-    best-effort failed-close leaves a stuck 'running' row holding this gate for its
-    source — the same stuck-'running' shape agent_dispatch rows already have; closing the
-    row clears it."""
+    VT-381 F1 — stale-TTL leg: a hard-killed SYNCHRONOUS rerun (plan_generate /
+    plan_deliver — NOT the DBOS-recovered agent_dispatch arm) can die between its lineage
+    insert and the best-effort failed-close, leaving a 'running' lineage row that would
+    hold THIS gate forever. A 'running' lineage row OLDER than ``_RERUN_STALE_TTL_S`` is
+    therefore treated as orphaned: the stale-close path closes it ('completed' +
+    ``final_outcome='aborted_stale'`` — the mig-052 house pattern, same as
+    ``_close_lineage_row``) and the new rerun PROCEEDS (no refusal). A FRESH 'running' row
+    (younger than the TTL) still 409s — a genuinely-in-flight rerun (the double-click
+    serialization above) must never be aborted out from under itself. Stale rows are aged
+    on ``started_at`` (the lineage insert stamps it at row open)."""
     from orchestrator.db import tenant_connection
 
     with tenant_connection(tenant_id) as conn:
         row = conn.execute(
-            "SELECT 1 FROM pipeline_runs "
-            "WHERE tenant_id = %s AND rerun_of_run_id = %s AND status = 'running' LIMIT 1",
-            (str(tenant_id), str(source_run_id)),
+            "SELECT id::text, "
+            "started_at < now() - make_interval(secs => %s) AS is_stale "
+            "FROM pipeline_runs "
+            "WHERE tenant_id = %s AND rerun_of_run_id = %s AND status = 'running' "
+            "ORDER BY started_at LIMIT 1",
+            (_RERUN_STALE_TTL_S, str(tenant_id), str(source_run_id)),
         ).fetchone()
-    if row is not None:
-        raise RerunRefused(
-            "a rerun of this source run is already in flight — wait for it to finish",
-            code=409,
+    if row is None:
+        return  # no in-flight rerun — proceed
+    if not isinstance(row, dict):
+        row = dict(zip(("id", "is_stale"), row, strict=True))
+    if row["is_stale"]:
+        # Orphaned stale 'running' row — close it on the house pattern and PROCEED.
+        _close_lineage_row(
+            tenant_id,
+            _as_uuid(row["id"]),
+            meta={"final_outcome": "aborted_stale"},
         )
+        logger.info(
+            "run_control rerun: closed stale 'running' lineage row tenant=%s source=%s "
+            "stale_run=%s (aborted_stale) — proceeding",
+            tenant_id,
+            source_run_id,
+            row["id"],
+        )
+        return
+    raise RerunRefused(
+        "a rerun of this source run is already in flight — wait for it to finish",
+        code=409,
+    )
 
 
 def _refuse_if_paused(tenant_id: UUID, workflow_kind: str) -> None:

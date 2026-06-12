@@ -214,10 +214,13 @@ def resolve_escalation(
 # bounded, returns EXACTLY the view columns (no enrichment/joins — a new field is added to the VIEW,
 # never here). Internal-secret + operator-JWT gated (the resolve-phone pattern).
 #
-# MULTI-VTR PRECONDITION (read before adding a 2nd VTR): the views are NOT assignment-scoped —
-# Phase-1 = Fazal-as-VTR#1 sees ALL tenants. BEFORE a second VTR exists, the views MUST gain
-# `WHERE tenant_id IN (SELECT ... FROM vtr_assignments WHERE vtr_id = ...)` (VT-281/VT-360 note);
-# until then these endpoints intentionally return all tenants.
+# MULTI-VTR PRECONDITION — CLOSED by VT-377 (mig-134): the views ARE assignment-scoped now.
+# Every vtr_* view carries `WHERE current_user = 'app_vtr_admin_role' OR tenant_id IN (SELECT
+# tenant_id FROM operator_assignments WHERE operator_id = app_vtr_operator() AND unassigned_at IS
+# NULL)` — the substrate is the EXISTING operator_assignments table (mig-072), NOT a new
+# `vtr_assignments` table (plan-ack amendment; the old docstring references are retired). These
+# endpoints thread the VERIFIED operator id into vtr_connection, so a VTR sees ONLY assigned
+# tenants; FAZAL break-glass (FAZAL_OWNER_UUID) rides the admin role and keeps all-tenants.
 # ---------------------------------------------------------------------------
 
 _VTR_PAGE_CAP = 200
@@ -238,12 +241,15 @@ def _vtr_read_auth(
         raise HTTPException(status_code=403, detail="operator_id in body != JWT claim")
 
 
-def _vtr_query(sql: str, limit: int) -> list[dict[str, Any]]:
-    """Run a bounded read as app_vtr_role via vtr_connection. The view is the only door."""
+def _vtr_query(sql: str, limit: int, operator_id: str) -> list[dict[str, Any]]:
+    """Run a bounded read as app_vtr_role via vtr_connection. The view is the only door.
+
+    VT-377: ``operator_id`` is the VERIFIED id (post ``_vtr_read_auth`` body==claim check) —
+    it scopes the mig-134 views to the operator's active assignments via the GUC."""
     from orchestrator.privacy.vtr import vtr_connection
 
     capped = max(1, min(limit, _VTR_PAGE_CAP))
-    with vtr_connection() as conn, conn.cursor() as cur:
+    with vtr_connection(operator_id=operator_id) as conn, conn.cursor() as cur:
         cur.execute(sql, (capped,))
         return [dict(r) for r in cur.fetchall()]
 
@@ -263,6 +269,7 @@ def vtr_escalations_read(
         "resolved_at, route FROM vtr_escalations "
         "WHERE route = 'vtr' AND status <> 'resolved' ORDER BY opened_at DESC LIMIT %s",
         body.limit,
+        body.operator_id,  # VERIFIED == JWT claim by _vtr_read_auth above (VT-377 scoping)
     )
     return {"rows": rows, "count": len(rows)}
 
@@ -280,6 +287,7 @@ def vtr_monitoring_read(
         "SELECT alert_id, tenant_id, tenant_name, trigger_kind, severity, fired_at "
         "FROM vtr_tenant_alerts ORDER BY fired_at DESC LIMIT %s",
         body.limit,
+        body.operator_id,  # VERIFIED == JWT claim by _vtr_read_auth above (VT-377 scoping)
     )
     return {"rows": rows, "count": len(rows)}
 

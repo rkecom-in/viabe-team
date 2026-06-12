@@ -742,6 +742,69 @@ def test_timeline_cross_tenant_403(substrate) -> None:
     assert exc.value.status_code == 403
 
 
+# ---------------------------------------------------------------------------
+# VT-377 — two-operator cross-scope + the mig-134 empty-GUC predicate-fix legs
+# (build contract §B3.1: "empty-GUC + cross-operator API legs"). The assignment
+# gate is operator_assignments (mig-072), live today; the GUC plumbing
+# (vtr_connection(operator_id=...) + app_vtr_operator()) lands as B1/mig-134, so
+# the empty-GUC read leg is substrate-gated and flips to PASS on that merge.
+# ---------------------------------------------------------------------------
+
+
+def _mig134_present(dsn: str) -> bool:
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        return (
+            conn.execute(
+                "SELECT to_regprocedure('app_vtr_operator()') IS NOT NULL"
+            ).fetchone()[0]
+            is True
+        )
+
+
+def test_timeline_both_operators_assigned_a_still_denied_b_run_403(substrate) -> None:
+    """The gate is PER-OPERATOR, not "any assignment": opA and opB are BOTH validly assigned
+    (each to their own tenant), yet opA reading opB's run is still 403 — the derived-tenant
+    gate keys on opA's OWN assignment set, never "is the caller assigned to anything"."""
+    dsn = substrate.dsn
+    op_a, _tenant_a = _assigned(dsn)
+    op_b, tenant_b = _assigned(dsn)  # opB is independently, validly assigned
+    run_b = _seed_run(dsn, tenant_b, run_type="agent_dispatch")
+    with pytest.raises(HTTPException) as exc:
+        rc.timeline(str(run_b), **_hdr(op=op_a))  # opA, assigned elsewhere, still denied
+    assert exc.value.status_code == 403
+    # control: opB CAN read its own run (the gate admits the rightful operator).
+    out = rc.timeline(str(run_b), **_hdr(op=op_b))
+    assert out["tenant_id"] == str(tenant_b)
+
+
+def test_programs_read_survives_with_operator_guc_no_500(substrate) -> None:
+    """mig-134 empty-GUC predicate fix, end-to-end at the read layer: once the operator GUC
+    is plumbed through vtr_connection, a VALID assigned operator's /programs read must return
+    cleanly (NOT 500) — the NULLIF(...)-guarded app_vtr_operator() never throws on an
+    unset/empty GUC.
+
+    The build-window xfail gate is RETIRED (Cowork gate C2): a missing mig-134 now
+    HARD-FAILS — this leg is part of the isolation battery and must not silently neuter.
+
+    Falsifiability: if the predicate fix regressed to current_setting(...)::uuid on an empty
+    GUC, the vtr_workflow_controls read inside /programs would raise — but /programs catches
+    that into degraded=true (fail-open), so the falsifiable signal here is that the read
+    RETURNS and is NOT degraded for a real operator with a real GUC."""
+    assert _mig134_present(substrate.dsn), (
+        "mig-134 operator-GUC plumbing is MISSING from the test database — the multi-VTR "
+        "isolation battery cannot be skipped (gate C2)"
+    )
+    dsn = substrate.dsn
+    op, tenant = _assigned(dsn)
+    _seed_run(dsn, tenant, run_type="agent_dispatch", status="completed")
+    out = rc.programs(str(tenant), **_hdr(op=op))
+    assert out["tenant_id"] == str(tenant)
+    assert out["degraded"] is False, (
+        "a real operator with a real GUC must read holds cleanly — not fail-open degraded"
+    )
+    assert isinstance(out["holds"], list)
+
+
 def _seed_step(
     dsn: str,
     run: UUID,

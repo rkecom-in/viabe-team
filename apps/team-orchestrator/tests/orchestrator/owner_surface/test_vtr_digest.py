@@ -72,8 +72,11 @@ def test_digest_counts_only_vtr_routed(substrate):
 
 
 def test_digest_role_cannot_read_raw_escalations(substrate):
-    """The GUARANTEE (Cowork): the digest's role (app_vtr_role, via vtr_connection) is DENIED on the
-    raw escalations table — the de-identified view is the only door, so PII is unreachable."""
+    """The GUARANTEE (Cowork): the digest tier is DENIED on the raw escalations table — the
+    de-identified view is the only door, so PII is unreachable. (Post-VT-377 the digest
+    itself reads via vtr_admin_connection / app_vtr_admin_role — the fleet-wide Fazal=VTR#1
+    surface; this probe pins the same raw-table denial for the base app_vtr_role tier the
+    docstring previously misattributed to the digest.)"""
     from orchestrator.privacy.vtr import vtr_connection
 
     with vtr_connection() as conn, conn.cursor() as cur:
