@@ -72,7 +72,7 @@ ApprovalType = Literal[
     "campaign_send", "cohort_size_exceeded", "sensitive_data_access", "other",
     # VT-369 Gap-5 — the agent customer-messaging surface. CL-428: this Literal is the
     # source of truth — migration 128 keeps the DB CHECK in exact sync (all three added
-    # in both, same PR; autonomy_upgrade + l3_presend_notice are reserved for PR-3).
+    # in both, same PR; VT-384 PR-3 activates autonomy_upgrade — the offer/ENABLE consent row).
     "agent_customer_send", "autonomy_upgrade", "l3_presend_notice",
 ]
 # The raw owner decision verb recorded on pending_approvals.decision. CL-428: this Literal is

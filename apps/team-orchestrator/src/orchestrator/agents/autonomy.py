@@ -34,6 +34,12 @@ logger = logging.getLogger(__name__)
 L3_CLEAN_STREAK_THRESHOLD = 20  # plan §5.3 (F3 confirms)
 L3_AUTO_MAX_BATCH = 20          # the bulk floor (§5.5)
 L3_PROPOSAL_COOLDOWN_DAYS = 30
+# VT-384 gate-bounce F4: the consecutive_silent_l3_notices counter is KEPT (mig-129 column +
+# the wake-leg bump in l3_hold) as pure OBSERVABILITY + a VT-385 design input. The auto-demote
+# THRESHOLD path was DROPPED — auto-demoting an opted-in owner for using Act mode exactly as
+# designed fights CL-438 (the owner explicitly opted in; silence is not a regression). No
+# threshold constant, no owner_disengaged-on-silence regression. VT-385 owns any disengagement
+# design that uses this counter.
 
 RegressionKind = Literal[
     "edit", "reject", "optout_spike", "complaint", "owner_cancel",
@@ -59,6 +65,9 @@ class AutonomyState:
     l3_granted_at: Any = None
     l3_grant_approval_id: str | None = None
     last_regression_kind: str | None = None
+    # VT-384: the owner-disengagement counter (mig-129) — surfaced so callers can read it back
+    # through get_autonomy (the silent-notice acceptance leg) without a second raw query.
+    consecutive_silent_l3_notices: int = 0
 
 
 def _row_to_state(tenant_id: UUID, agent: str, row: Any) -> AutonomyState:
@@ -67,7 +76,8 @@ def _row_to_state(tenant_id: UUID, agent: str, row: Any) -> AutonomyState:
     g = dict(row) if isinstance(row, dict) else None
     if g is None:
         cols = ("level", "clean_approval_streak", "lifetime_approvals", "lifetime_rejections",
-                "frozen", "l3_granted_at", "l3_grant_approval_id", "last_regression_kind")
+                "frozen", "l3_granted_at", "l3_grant_approval_id", "last_regression_kind",
+                "consecutive_silent_l3_notices")
         g = dict(zip(cols, row, strict=False))
     return AutonomyState(
         tenant_id=tenant_id, agent=agent, level=g["level"],
@@ -78,12 +88,13 @@ def _row_to_state(tenant_id: UUID, agent: str, row: Any) -> AutonomyState:
         l3_granted_at=g.get("l3_granted_at"),
         l3_grant_approval_id=str(g["l3_grant_approval_id"]) if g.get("l3_grant_approval_id") else None,
         last_regression_kind=g.get("last_regression_kind"),
+        consecutive_silent_l3_notices=int(g.get("consecutive_silent_l3_notices") or 0),
     )
 
 
 _SELECT = (
     "SELECT level, clean_approval_streak, lifetime_approvals, lifetime_rejections, frozen, "
-    "l3_granted_at, l3_grant_approval_id, last_regression_kind "
+    "l3_granted_at, l3_grant_approval_id, last_regression_kind, consecutive_silent_l3_notices "
     "FROM tenant_agent_autonomy WHERE tenant_id = %s AND agent = %s"
 )
 
@@ -161,12 +172,18 @@ def cancel_open_batches(tenant_id: UUID | str, agent: str, *, reason: str, conn:
 
 
 def record_regression_event(
-    tenant_id: UUID | str, agent: str, kind: RegressionKind, *, conn: Any
+    tenant_id: UUID | str, agent: str, kind: RegressionKind, *, conn: Any, detail: str | None = None
 ) -> AutonomyState:
     """Apply the §5.4 regression table on the caller's conn (same-txn discipline):
     streak → 0 always; lifetime_rejections +1 on 'reject'; FREEZE on the kill-switch kinds;
     at L3 → REVOKE to L2 (one-way per incident). Every revoke/freeze cancels open batches
-    atomically. Emits an observability event (best-effort)."""
+    atomically. Emits an observability event (best-effort).
+
+    VT-384 gate-bounce F5: ``detail`` carries the PRECISE regression reason (e.g.
+    'owner_engaged' vs 'no_delivery' for a demote — both record the SAME ``owner_disengaged``
+    kind, so the kind alone loses the distinction). It rides the ``agent_autonomy_regressed``
+    observability event's ``detail`` field so the two demote causes are separable downstream
+    without a kind-taxonomy change (that cleanup is VT-385's design input, per the ruling)."""
     tid = str(tenant_id)
     _ensure_row(conn, tid, agent)
     state = get_autonomy(tenant_id, agent, conn=conn)
@@ -188,7 +205,7 @@ def record_regression_event(
         cancelled = cancel_open_batches(tenant_id, agent, reason=kind, conn=conn)
     else:
         cancelled = 0
-    _emit(tid, "agent_autonomy_regressed", {"agent": agent, "kind": kind,
+    _emit(tid, "agent_autonomy_regressed", {"agent": agent, "kind": kind, "detail": detail,
                                             "revoked": revokes, "frozen": freezes,
                                             "batches_cancelled": cancelled})
     return get_autonomy(tenant_id, agent, conn=conn)
@@ -223,6 +240,178 @@ def grant_l3(
     else:
         _emit(tid, "agent_autonomy_granted", {"agent": agent, "approval_id": str(approval_id)})
     return get_autonomy(tenant_id, agent, conn=conn)
+
+
+def kill_autonomy_by_keyword(tenant_id: UUID | str, *, conn: Any) -> dict[str, int]:
+    """VT-384 §B2.3 — the owner KILL keyword (an autonomy-specific "stop automatic sending", NOT a
+    full DPDP opt-out). For EVERY owning agent of the tenant, record the ``owner_keyword``
+    regression on the caller's conn (same-txn): that FREEZES the agent and ATOMICALLY cancels its
+    in-flight holds + batches — ``_OPEN_BATCH_STATUSES`` includes ``auto_send_pending`` and
+    ``sending``, so an L3 hold parked on its delivery anchor is cancelled the instant the keyword
+    lands (the original race requirement; a window-expiry send can never fire over the objection).
+
+    Owner-level by design: the offer/kill is owner-facing, so the keyword freezes the whole
+    workspace's agent autonomy — not just one agent. Returns {agent: batches_cancelled_or_0}.
+    Idempotent: a kill on an already-L2/frozen agent still records the regression (streak reset)
+    and cancels any residual open batch."""
+    from orchestrator.business_plan.store import OWNING_AGENTS
+
+    out: dict[str, int] = {}
+    for agent in sorted(OWNING_AGENTS - {"unassigned"}):
+        before = get_autonomy(tenant_id, agent, conn=conn)
+        record_regression_event(tenant_id, agent, "owner_keyword", conn=conn)
+        # record_regression_event cancels open batches internally; surface a per-agent marker so the
+        # handler can report a non-PII summary (count of agents touched).
+        out[agent] = 1 if before.level == "L3" or before.frozen is False else 0
+    return out
+
+
+def offer_on_cooldown(
+    tenant_id: UUID | str, *, cooldown_days: int = L3_PROPOSAL_COOLDOWN_DAYS, conn: Any
+) -> bool:
+    """VT-384 §B2.1 cooldown — True if an ``autonomy_upgrade`` offer was already armed for this
+    tenant within ``cooldown_days`` (open OR resolved). The approval row IS the offer record, so no
+    new column is needed: an ignored/rejected offer must not be re-pestered for the cooldown window
+    (plan §5.3). Tenant-predicated."""
+    tid = str(tenant_id)
+    from orchestrator.db.wrappers import PendingApprovalsWrapper
+
+    return PendingApprovalsWrapper().has_recent_of_type(
+        tid, "autonomy_upgrade", within_days=int(cooldown_days), conn=conn
+    )
+
+
+def dispatch_autonomy_offer(
+    tenant_id: UUID | str,
+    agent: str,
+    *,
+    streak_count: int,
+    send_fn: Any = None,
+    dry_run: bool = False,
+) -> str | None:
+    """VT-384 §B2.1 — arm the L3 opt-in OFFER for an eligible (tenant, agent): send
+    ``team_autonomy_offer`` to the owner AND open the ``autonomy_upgrade`` approval row (that row IS
+    the C3 consent evidence; ``details.agent`` records which agent the grant will target). Goes
+    through ``arm_pause_request`` so the per-tenant one-open-approval serialization (mig-128) holds:
+    if ANOTHER approval is already open the arm is REFUSED and no offer is sent (returns None — the
+    coordinator retries next sweep). Returns the approval_id on success, else None.
+
+    Template params use the NAMED registry keys (owner_name {{1}}, streak_count {{2}}) — the
+    same convention as ``arm_agent_send_approval``; the owner display name is an arm-time RLS read
+    (reuses ``approval_glue._owner_display_name``, never logged). The offer is NOT a LangGraph
+    interrupt — it is a fire-and-forget owner notice + a durable approval row the deterministic
+    ENABLE handler later resolves (no run is paused on it). CL-390: IDs only in logs."""
+    from uuid import uuid4 as _uuid4
+
+    from orchestrator.agent.tools.request_owner_approval import (
+        RequestOwnerApprovalInput,
+        arm_pause_request,
+    )
+    from orchestrator.agents.approval_glue import _owner_display_name
+
+    tid = str(tenant_id)
+    # The offer has no agent run of its own, but pending_approvals.run_id FKs pipeline_runs — so
+    # open a minimal provenance run row (run_type='autonomy_offer') the approval hangs off. Done in
+    # the same arm-time RLS conn as the owner-name read.
+    offer_run_id = _uuid4()
+    with tenant_connection(tid) as c:
+        owner_name = _owner_display_name(c, tid)
+        c.execute(
+            "INSERT INTO pipeline_runs (id, tenant_id, run_type, status) "
+            "VALUES (%s, %s, 'autonomy_offer', 'running') ON CONFLICT (id) DO NOTHING",
+            (str(offer_run_id), tid),
+        )
+
+    payload = RequestOwnerApprovalInput(
+        tenant_id=tenant_id if isinstance(tenant_id, UUID) else UUID(str(tid)),
+        run_id=offer_run_id,
+        approval_type="autonomy_upgrade",
+        summary=f"L3 autonomy offer for agent {agent} ({streak_count}-clean streak)",
+        details={"agent": agent, "streak_count": int(streak_count)},
+        template_name="team_autonomy_offer",
+        template_params={"owner_name": owner_name, "streak_count": str(streak_count)},
+    )
+    result = arm_pause_request(payload, send_fn=send_fn, dry_run=dry_run)
+    if result.status != "armed" or result.approval_id is None:
+        logger.info(
+            "dispatch_autonomy_offer: not armed tenant=%s agent=%s status=%s",
+            tid, agent, result.status,
+        )
+        return None
+    _emit(tid, "agent_autonomy_offer_sent",
+          {"agent": agent, "approval_id": str(result.approval_id), "streak_count": int(streak_count)})
+    return str(result.approval_id)
+
+
+def resolve_and_grant_l3(
+    tenant_id: UUID | str, approval_id: UUID | str, *, conn: Any
+) -> tuple[str | None, AutonomyState | None]:
+    """VT-384 ENABLE path — the owner's deterministic ENABLE reply to a ``team_autonomy_offer``.
+
+    Resolve the open ``autonomy_upgrade`` approval (the C3 consent-evidence row) and grant L3 for
+    the agent the offer was armed for, ATOMICALLY on the caller's ``conn``:
+      1. read the approval row (must be OPEN + approval_type='autonomy_upgrade'); the offer stored
+         the agent in ``details->>'agent'``;
+      2. mark it resolved decision='approved' (tenant-predicated wrapper write);
+      3. ``grant_l3(approval_id)`` — which RE-VALIDATES the streak/frozen/level IN-TXN (a stale
+         grant no-ops; the row id is the durable consent evidence).
+
+    Returns ``(agent, new_state)`` on success, ``(None, None)`` when there is no open
+    autonomy_upgrade approval to act on (idempotent: a duplicate ENABLE after the grant finds
+    nothing open → no-op). CL-390: IDs only — never the owner phone/body."""
+    from orchestrator.db.wrappers import PendingApprovalsWrapper
+
+    tid = str(tenant_id)
+
+    row = PendingApprovalsWrapper().get_open_by_id(tid, approval_id, conn=conn)
+    if row is None:
+        return None, None
+    g = dict(row) if not isinstance(row, dict) else row
+    if g.get("approval_type") != "autonomy_upgrade":
+        return None, None
+    details = g.get("details") or {}
+    if not isinstance(details, dict):
+        import json as _json
+
+        try:
+            details = _json.loads(details)
+        except (TypeError, ValueError):
+            details = {}
+    agent = details.get("agent")
+    if not agent:
+        logger.warning(
+            "resolve_and_grant_l3: autonomy_upgrade approval %s has no agent in details — no grant",
+            approval_id,
+        )
+        return None, None
+    PendingApprovalsWrapper().mark_resolved(
+        tenant_id, approval_id, decision="approved", status="approved", conn=conn
+    )
+    state = grant_l3(tenant_id, agent, approval_id, conn=conn)
+    return str(agent), state
+
+
+def find_open_autonomy_upgrade(tenant_id: UUID | str, *, conn: Any) -> dict[str, Any] | None:
+    """Return the most-recent OPEN ``autonomy_upgrade`` approval for the tenant (id + agent), else
+    None — the ENABLE handler's lookup. Tenant-predicated (RLS via the caller's conn). The per-tenant
+    one-open-approval index (mig-128) means at most one open approval exists at a time; this filters
+    to the autonomy_upgrade type so a co-open agent_customer_send approval is not mistaken for it."""
+    tid = str(tenant_id)
+    from orchestrator.db.wrappers import PendingApprovalsWrapper
+
+    row = PendingApprovalsWrapper().latest_open_of_type(tid, "autonomy_upgrade", conn=conn)
+    if row is None:
+        return None
+    g = dict(row) if not isinstance(row, dict) else row
+    details = g.get("details") or {}
+    if not isinstance(details, dict):
+        import json as _json
+
+        try:
+            details = _json.loads(details)
+        except (TypeError, ValueError):
+            details = {}
+    return {"id": g["id"], "agent": details.get("agent")}
 
 
 def revoke_l3(tenant_id: UUID | str, agent: str, *, reason: str, conn: Any) -> AutonomyState:

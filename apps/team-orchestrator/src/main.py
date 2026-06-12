@@ -104,6 +104,13 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     )
 
     register_webhook_metrics_workflow()
+    # VT-384: the L3 auto-send HOLD workflow (l3_hold_workflow). Same
+    # register-before-launch contract — the workflow must be in the DBOS
+    # registry when launch_dbos() computes the app_version hash so the
+    # executor's start_l3_hold + DBOS recovery of a parked hold resolve.
+    from orchestrator.agents.l3_hold import register_l3_hold
+
+    register_l3_hold()
     launch_dbos()
     # VT-280/VT-281: seed the VTR REF# keying secret from env (VT_REF_HMAC_KEY) so the
     # de-identified views never emit NULL refs before the first VTR read. Best-effort at the

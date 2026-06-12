@@ -55,6 +55,41 @@ _ENABLE_KEYWORDS = {_nfc(kw.casefold()) for kw in _load_keywords("data_inputs_en
 # DSR: boundary-safe containment (see _boundary_patterns).
 _DSR_PATTERNS = _boundary_patterns("dsr_keywords.yaml")
 
+# VT-384 (Gap-5 PR-3) — L3 autonomy keyword sets (config/l3_keywords.yaml), LOCKSTEP with the
+# CL-438 Meta-approved team_autonomy_offer body. BOTH rules are ordered strictly AFTER the
+# authoritative opt-out + DSR rules (the CL-438 floor — see RULE_ORDER below). The `kill` set is
+# boundary-safe CONTAINMENT (the opt-out style) of AUTONOMY-SPECIFIC kill phrases; the `enable` set
+# is EXACT whole-body match (the data-inputs ENABLE style). Bare STOP stays the authoritative
+# opt-out path (opt_out_keywords.yaml) and wins first — it is NOT duplicated in the kill set.
+def _load_l3_keyword_section(section: str) -> list[str]:
+    data = yaml.safe_load((_CONFIG_DIR / "l3_keywords.yaml").read_text())
+    return [str(keyword) for keyword in (data.get(section) or [])]
+
+
+_L3_KILL_PATTERNS = boundary_patterns(_load_l3_keyword_section("kill"))
+_L3_ENABLE_KEYWORDS = {_nfc(kw.casefold()) for kw in _load_l3_keyword_section("enable")}
+
+# VT-384 condition C-b — the RULE-ORDER PIN (structural, not just behavioral). This is the
+# AUTHORITATIVE source-of-truth ordering of the inbound-body rules in :func:`pre_filter`, kept in
+# the SAME order they execute. The acceptance suite asserts ``opt_out`` and ``dsr`` both precede
+# ``l3_kill`` and ``l3_enable`` here (CL-438 floor: the authoritative DPDP matchers run first), so a
+# future rule insertion that silently reorders the gate fails the pin test instead of shipping a
+# compliance regression. Any change to the rule sequence in pre_filter MUST update this list in
+# lockstep (the pin test reads THIS list, then the rules read in the same sequence).
+INBOUND_BODY_RULE_ORDER: tuple[str, ...] = (
+    "opt_out",     # Rule a  — authoritative DPDP opt-out (FIRST; CL-438 floor)
+    "data_inputs_enable",  # Rule a2 — VT-303 owner_inputs consent grant
+    "dsr",         # Rule b  — authoritative DPDP data-subject request
+    "l3_kill",     # Rule b2 — VT-384 autonomy kill (AFTER opt-out + DSR)
+    "l3_enable",   # Rule b3 — VT-384 autonomy ENABLE (AFTER opt-out + DSR)
+    "status_ping", # Rule f
+    "integration_intent",  # Rule g
+    "brain",       # Rule h — fallthrough
+)
+# Alias the C-b acceptance suite's declarative-list pin reads by index (test_vt384_pre_filter_
+# rule_order.test_declarative_rule_list_order_if_present) — the strongest form of the order pin.
+_RULE_ORDER = INBOUND_BODY_RULE_ORDER
+
 # Status ping: narrow regex — matches ONLY a whole-message trivial query.
 _STATUS_PING = re.compile(
     r"^\s*(hi|hello|hey|any update|any updates|कैसा चल रहा है)\s*[?!.]*\s*$",
@@ -94,6 +129,17 @@ def matches_opt_out_or_dsr(body: str) -> bool:
     "band karo" must reach the dsr/opt-out handler regardless of phase."""
     nfc = _nfc(body)
     return any(p.search(nfc) for p in _OPT_OUT_PATTERNS) or any(p.search(nfc) for p in _DSR_PATTERNS)
+
+
+def matches_kill_keyword(body: str) -> bool:
+    """True if ``body`` CONTAINS an L3 autonomy-kill phrase (config/l3_keywords.yaml `kill` set;
+    NFC, boundary-safe containment — the same matcher pre_filter rule b2 runs). The runner
+    owner-inbound demote leg calls this to EXCLUDE a kill keyword: a kill must FREEZE via
+    autonomy_kill_handler (cancel holds/batches outright), not merely DEMOTE-and-regress. Bare
+    opt-out keywords are deliberately absent from the kill set (they route to opt_out_handler
+    first), so this never overlaps matches_opt_out_or_dsr."""
+    nfc = _nfc(body)
+    return any(p.search(nfc) for p in _L3_KILL_PATTERNS)
 
 
 @DBOS.step()
@@ -151,6 +197,28 @@ def pre_filter(event: WebhookEvent, state: SubscriberState) -> PreFilterResult:
             return RouteToDirectHandler(
                 handler_name="dsr_handler", payload={"matched": pattern.pattern}
             )
+
+    # Rule b2 — VT-384 L3 autonomy KILL keyword (boundary-safe containment, NFC, EN + Devanagari
+    # + Hinglish). Ordered AFTER opt-out + DSR (the CL-438 floor + RULE_ORDER pin): a phrase that
+    # is ALSO an opt-out ("STOP") never reaches here — it was already routed to opt_out_handler.
+    # An autonomy-specific kill ("stop automatic sending") freezes L3 via the substrate kill path
+    # (autonomy_kill_handler -> record_regression_event('owner_keyword'), which cancels in-flight
+    # holds/batches same-txn) WITHOUT a full DPDP opt-out.
+    for pattern in _L3_KILL_PATTERNS:
+        if pattern.search(nfc_body):
+            return RouteToDirectHandler(
+                handler_name="autonomy_kill_handler", payload={"matched": pattern.pattern}
+            )
+
+    # Rule b3 — VT-384 L3 autonomy ENABLE keyword (exact whole-body match, case-insensitive, NFC).
+    # The deliberate opt-in verb the team_autonomy_offer promises ("Reply ENABLE"). Ordered AFTER
+    # opt-out + DSR (CL-438 floor): an owner who somehow sends both an opt-out and ENABLE yields to
+    # the opt-out. Routes to autonomy_enable_handler, which resolves the open autonomy_upgrade
+    # approval + grants L3 (grant_l3 re-validates the streak in-txn — a stale grant no-ops).
+    if normalized in _L3_ENABLE_KEYWORDS:
+        return RouteToDirectHandler(
+            handler_name="autonomy_enable_handler", payload={"matched": normalized}
+        )
 
     # Rule f — status ping (narrow whole-message regex).
     if _STATUS_PING.match(event.body):

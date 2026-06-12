@@ -7,9 +7,13 @@ from every send capability — they emit ``template_name + params`` into
 
 The gate stack runs IN ORDER; every gate fails CLOSED with a distinct marker:
 
-  1. batch state — ``approved`` (or mid-batch ``sending``) under L2. The L3
-     ``auto_send_pending``-past-``send_not_before`` path is PR-3 scope and the
-     branch raises ``NotImplementedError`` here (stub, never a silent send).
+  1. batch state — ``approved`` (or mid-batch ``sending``) under L2; for L3 the
+     batch must be ``auto_send_pending`` (the delivery-anchored hold window). The
+     L3 path takes a ``SELECT ... FOR UPDATE`` row lock on the batch and re-checks
+     ``auto_send_pending`` UNDER the lock immediately before the irreversible send
+     (gate 6), serialized against ``l3_hold.demote_auto_send_pending`` which takes
+     the SAME lock — so a window-expiry send can never fire over an in-flight
+     owner demote (the two-sided CAS, in either acquisition order).
   2. template registry — resolves, has an approved SID, ``category ==
      'customer_marketing'``, and pins ``optout_line: true``. SID-less stubs
      (pre-F1) skip as ``skipped_template_not_configured``.
@@ -29,7 +33,10 @@ The gate stack runs IN ORDER; every gate fails CLOSED with a distinct marker:
      cannot double-send; a crash in the window between Twilio success and the
      ledger INSERT re-sends on replay (pre-existing bounded residual, shared
      with VT-45). VT-45 independently re-runs opt-out/opt-in + the 5000/24h
-     tenant cap underneath — defense-in-depth, not a fork.
+     tenant cap underneath — defense-in-depth, not a fork. For L3 the send +
+     the draft flip + the contact ledger row run inside the gate-1 FOR UPDATE
+     transaction (the CAS), so the send is conditioned on the batch still being
+     ``auto_send_pending`` under the lock.
 
 On success: ``agent_drafts.status='sent'`` + ``message_sid``, an
 ``agent_customer_contacts`` ledger row (suppression/first-contact/audit
@@ -84,6 +91,8 @@ SKIP_CAP_TENANT_DAILY = "skipped_cap_tenant_daily"
 SKIP_CAP_CUSTOMER_WEEKLY = "skipped_cap_customer_weekly"
 SKIP_SUPPRESSION_30D = "skipped_suppression_30d"
 SKIP_CAP_90D = "skipped_cap_90d"
+SKIP_CAP_L3_DAILY = "skipped_cap_l3_daily"             # VT-384: 50/agent/24h L3 auto-send cap
+SKIP_SIGNATURE_MISMATCH = "skipped_signature_mismatch" # VT-384: registry vs executor variable drift
 
 _DRAFT_TERMINAL_STATUSES = ("sent", "skipped", "halted")
 
@@ -134,6 +143,63 @@ def _marketing_consent_versions() -> frozenset[str]:
     return frozenset(sales_recovery_executor.MARKETING_CONSENT_VERSIONS)
 
 
+# --- VT-384 signature cross-check (contract item 5) ---------------------------
+#
+# The executor drafts params under WINBACK_TEMPLATE_PARAMS; the registry pins the Meta-APPROVED
+# variable signature. They MUST agree or the {{n}} positions are wrong (a customer would get
+# garbage). registry-as-canon (Cowork ruling #1): the Meta body is immutable, the executor conforms.
+# Two layers: (1) the import-time assert below pins the winback case at module load (a drifted
+# executor constant fails the import — fail LOUD); (2) the per-send Gate-2b _registry_signature_ok
+# catches ANY drift at send time (a mutated registry, a future template) — fail CLOSED.
+
+# template_name -> the executor constant that drafts its params. Extend as Gap-5 grows; a template
+# with no entry here has no executor signature to cross-check (the registry IS its only signature).
+def _executor_signature_for(template_name: str) -> tuple[str, ...] | None:
+    try:
+        from orchestrator.agents import sales_recovery_executor
+    except ImportError:
+        return None
+    if template_name == sales_recovery_executor.WINBACK_TEMPLATE_NAME:
+        return tuple(sales_recovery_executor.WINBACK_TEMPLATE_PARAMS)
+    return None
+
+
+def _registry_signature_ok(template_name: str, entry: Any) -> bool:
+    """True iff the registry's variable signature matches the executor constant for this template
+    (order-independent — {{n}} positions are bound by the registry's ordered tuple, which the
+    drafting prompt already conforms to; the cross-check guards the SET of names). A template with
+    no executor signature has nothing to cross-check → True (the registry is its canon)."""
+    expected = _executor_signature_for(template_name)
+    if expected is None:
+        return True
+    return frozenset(entry.variables) == frozenset(expected)
+
+
+def assert_winback_signature() -> None:
+    """Import-time hard assert (contract item 5): the ARMED registry's team_winback_simple variable
+    signature matches the executor WINBACK_TEMPLATE_PARAMS. A drift fails the IMPORT (fail LOUD) so
+    a mismatched constant can never ship. Best-effort on a missing registry/executor (the dep-less
+    smoke imports this module without the yaml on the path)."""
+    try:
+        from orchestrator.agents import sales_recovery_executor
+        from orchestrator.templates_registry import resolve as registry_resolve
+
+        name = sales_recovery_executor.WINBACK_TEMPLATE_NAME
+        entry = registry_resolve(name, _SEND_LANGUAGE)
+        expected = frozenset(sales_recovery_executor.WINBACK_TEMPLATE_PARAMS)
+        got = frozenset(entry.variables)
+        if got != expected:
+            raise AssertionError(
+                f"VT-384 signature drift: registry '{name}' variables {sorted(got)} != "
+                f"executor WINBACK_TEMPLATE_PARAMS {sorted(expected)} (registry-as-canon: "
+                "conform the executor constant + its draft prompt to the Meta-APPROVED body)"
+            )
+    except AssertionError:
+        raise
+    except Exception:  # noqa: BLE001 — a missing registry/executor (dep-less smoke) is not a drift
+        logger.debug("assert_winback_signature: registry/executor unavailable — skipped")
+
+
 def has_marketing_consent_for_phone(
     tenant_id: UUID | str,
     phone_e164: str,
@@ -174,20 +240,40 @@ def has_marketing_consent_for_phone(
 
 
 def check_agent_send_caps(
-    tenant_id: UUID | str, customer_id: UUID | str, *, conn: Any
+    tenant_id: UUID | str,
+    customer_id: UUID | str,
+    *,
+    conn: Any,
+    autonomy_level: str = "L2",
+    agent: str | None = None,
 ) -> CapCheckResult:
     """The agent-cap gate (plan §3e), counted over ``agent_customer_contacts``.
 
-    Checked in order — tenant daily (200/24h), customer weekly (1/7d), 30d
-    recontact suppression, 2-per-90d ceiling. Each failure returns its own
-    marker. ``L3_DAILY_AUTO_SEND_CAP`` is defined above but enforced in PR-3
-    (no L3 auto-send exists in PR-1). VT-45's 5000/24h tenant cap still
-    applies underneath in the delegated send path.
+    Checked in order — L3 daily auto-send (50/agent/24h, L3 only), tenant daily
+    (200/24h), customer weekly (1/7d), 30d recontact suppression, 2-per-90d
+    ceiling. Each failure returns its own marker. VT-45's 5000/24h tenant cap
+    still applies underneath in the delegated send path.
+
+    VT-384: ``L3_DAILY_AUTO_SEND_CAP`` (defined above, commented "ENFORCED in
+    PR-3") is now enforced HERE — a per-agent 24h count of L3 auto-sends, gated
+    ONLY when ``autonomy_level == 'L3'`` (L2 approved sends are owner-gated, not
+    rate-limited by this cap). Requires ``agent`` to scope the count.
 
     Known residual (accepted, plan §3e): COUNT-then-send TOCTOU overshoot is
     bounded by concurrency width (~2 messages) — not redesigned here.
     """
     tid, cid = str(tenant_id), str(customer_id)
+
+    # --- VT-384 L3 daily auto-send cap (50/agent/24h) — L3 path only ---
+    if autonomy_level == "L3" and agent is not None:
+        row = conn.execute(
+            "SELECT count(*) AS c FROM agent_customer_contacts "
+            "WHERE tenant_id = %s AND agent = %s AND autonomy_level = 'L3' "
+            "  AND sent_at > now() - interval '24 hours'",
+            (tid, agent),
+        ).fetchone()
+        if int(_col(row, "c", 0)) >= L3_DAILY_AUTO_SEND_CAP:
+            return CapCheckResult(allowed=False, reason=SKIP_CAP_L3_DAILY)
 
     row = conn.execute(
         "SELECT count(*) AS c FROM agent_customer_contacts "
@@ -277,8 +363,11 @@ def _finalize_batch_if_terminal(
         return str(_col(row, "status", 0))
 
     updated = conn.execute(
+        # VT-384: 'auto_send_pending' joins the closeable set — an L3 batch stays anchored in
+        # auto_send_pending while its drafts send (it never flips to 'sending'), so it closes to
+        # 'sent' directly from auto_send_pending once every draft is terminal.
         "UPDATE agent_draft_batches SET status = 'sent', updated_at = now() "
-        "WHERE tenant_id = %s AND id = %s AND status IN ('approved', 'sending') "
+        "WHERE tenant_id = %s AND id = %s AND status IN ('approved', 'sending', 'auto_send_pending') "
         "RETURNING id",
         (tenant_id, batch_id),
     ).fetchone()
@@ -370,14 +459,14 @@ def agent_send_draft(
 
     if autonomy_level not in ("L2", "L3"):
         raise ValueError(f"unknown autonomy_level {autonomy_level!r}; allowed: L2, L3")
-    if autonomy_level == "L3":
-        # PR-3 scope: auto_send_pending past send_not_before + the 1b/1c
-        # structural autonomy re-verification + floor re-derivation. Stubbed
-        # LOUD — never a silent partial L3 send (plan §3 gate 1).
-        raise NotImplementedError(
-            "L3 auto-send is PR-3 scope (VT-369) — agent_send_draft only "
-            "implements the L2 approved-batch path in PR-1"
-        )
+    # VT-384 (PR-3 stub arm 1, was customer_send.py:377): the L3 auto-send path. The hold-wake
+    # leg (agents/l3_hold.l3_hold_workflow) calls this with autonomy_level='L3' on a batch that is
+    # 'auto_send_pending'. The wire (eligibility re-derivation + delivery-anchored hold + demote
+    # CAS) lives in l3_hold.py; THIS function stays the deterministic per-draft gate stack. The L3
+    # arm runs the SAME gates as L2 plus the L3_DAILY cap (gate 5b) and the signature cross-check
+    # (gate 2b); the only structural difference is the batch-state gate accepts 'auto_send_pending'
+    # for L3 (gate 1). C2 (MARKETING_CONSENT_VERSIONS empty) makes gate 4 fail-closed: ZERO L3
+    # sends end-to-end even on a fully-armed batch — the wire is proven against the stop.
 
     tid = str(tenant_id)
     did = str(draft_id)
@@ -387,10 +476,13 @@ def agent_send_draft(
         logger.info("agent_send: draft not found tenant=%s draft=%s", tid, did)
         return AgentSendResult(draft_id=did, status="failed", skip_reason="draft_not_found")
 
-    if draft["batch_status"] == "auto_send_pending":
-        raise NotImplementedError(
-            "auto_send_pending (L3 hold window) is PR-3 scope (VT-369)"
-        )
+    # VT-384 (PR-3 stub arm 2, was customer_send.py:391): an 'auto_send_pending' batch is the L3
+    # hold window. It is sendable ONLY through the L3 arm (the hold-wake leg). A stray L2 call on
+    # such a batch still fails closed (gate 1 below rejects it — auto_send_pending is not in the L2
+    # ('approved','sending') set), so this is the explicit fail-LOUD guard for an L2 caller racing
+    # the hold: never a silent send over an in-flight hold.
+    if draft["batch_status"] == "auto_send_pending" and autonomy_level != "L3":
+        return _skip(conn, tid, draft, SKIP_BATCH_NOT_APPROVED, persist=False)
 
     # In-module idempotency: a terminal draft never re-sends. The ledger check
     # inside the delegated send transaction (gate #6) is the authoritative
@@ -410,19 +502,45 @@ def agent_send_draft(
             batch_status=draft["batch_status"],
         )
 
-    # --- Gate 1: batch state (L2 = Pillar-7 approved; 'sending' = mid-batch) ---
-    if draft["batch_status"] not in ("approved", "sending"):
+    # --- Gate 1: batch state (L2 = Pillar-7 approved; 'sending' = mid-batch;
+    # VT-384 L3 = 'auto_send_pending', the delivery-anchored hold window) ---
+    _ok_batch_states = ("auto_send_pending",) if autonomy_level == "L3" else ("approved", "sending")
+    if draft["batch_status"] not in _ok_batch_states:
         # NOT persisted on the draft: an awaiting_approval batch may still be
         # legitimately approved later — poisoning the draft would be wrong.
+        # VT-384: a demoted (auto_send_pending → awaiting_approval) batch reaching an L3 call
+        # lands here too — the two-sided race guard. An expiry send can NEVER fire over an
+        # in-flight objection: the owner-inbound demote flipped the batch out of
+        # auto_send_pending, so this gate skips it.
         return _skip(conn, tid, draft, SKIP_BATCH_NOT_APPROVED, persist=False)
 
-    # The batch is being processed: approved -> sending (idempotent CAS).
-    conn.execute(
-        "UPDATE agent_draft_batches SET status = 'sending', updated_at = now() "
-        "WHERE tenant_id = %s AND id = %s AND status = 'approved'",
-        (tid, draft["batch_id"]),
-    )
-    draft["batch_status"] = "sending"
+    if autonomy_level == "L3":
+        # WAKE-side cheap pre-check (the fast skip): the batch must still be auto_send_pending.
+        # This is NOT the race guard — it is an unlocked early-out so an already-demoted batch skips
+        # without running gates 2-5. The AUTHORITATIVE serialization is the FOR UPDATE row lock taken
+        # in the irreversible region below (gate 6): the still-pending re-check + the Twilio send +
+        # the draft flip all run inside ONE transaction holding that lock, and demote_auto_send_pending
+        # takes the SAME FOR UPDATE lock — so whichever side acquires the row first runs to commit
+        # while the other blocks, then re-reads status. A window-expiry send can NEVER fire over an
+        # in-flight demote (and a demote can never land between this send's status-check and its
+        # flip). Unlike L2, the L3 batch does NOT flip to 'sending' — it stays anchored in
+        # auto_send_pending so a late owner-inbound demote still wins; the batch closes to 'sent'
+        # only when every draft is terminal (_finalize_batch_if_terminal).
+        still = conn.execute(
+            "SELECT 1 FROM agent_draft_batches WHERE tenant_id = %s AND id = %s "
+            "AND status = 'auto_send_pending'",
+            (tid, draft["batch_id"]),
+        ).fetchone()
+        if still is None:
+            return _skip(conn, tid, draft, SKIP_BATCH_NOT_APPROVED, persist=False)
+    else:
+        # The batch is being processed: approved -> sending (idempotent CAS).
+        conn.execute(
+            "UPDATE agent_draft_batches SET status = 'sending', updated_at = now() "
+            "WHERE tenant_id = %s AND id = %s AND status = 'approved'",
+            (tid, draft["batch_id"]),
+        )
+        draft["batch_status"] = "sending"
 
     # --- Gate 2: template registry — SID + category + opt-out line ---
     try:
@@ -436,6 +554,14 @@ def agent_send_draft(
         return _skip(conn, tid, draft, SKIP_WRONG_CATEGORY)
     if not entry.optout_line:
         return _skip(conn, tid, draft, SKIP_NO_OPTOUT_LINE)
+
+    # --- Gate 2b: signature cross-check (VT-384 contract item 5) — the registry's approved
+    # variable signature for this template MUST match the executor constant that drafted its
+    # params. The import-time assert (assert_winback_signature, below) locks the winback case at
+    # module load; this is the per-send Gate-2 hard-refuse for ANY registry/executor drift (a
+    # mutated registry, a future template). Fail-closed: a mismatch SKIPS, never sends.
+    if not _registry_signature_ok(draft["template_name"], entry):
+        return _skip(conn, tid, draft, SKIP_SIGNATURE_MISMATCH)
 
     # --- Gate 3: customers row re-read AT SEND TIME (via the wrapper layer — the
     # no-direct-tenant-db-access lint owns per-tenant customers SQL) ---
@@ -458,8 +584,12 @@ def agent_send_draft(
     if not has_marketing_consent_for_phone(tid, phone_e164, conn=conn):
         return _skip(conn, tid, draft, SKIP_CONSENT)
 
-    # --- Gate 5: agent caps + suppression ---
-    caps = check_agent_send_caps(tid, draft["customer_id"], conn=conn)
+    # --- Gate 5: agent caps + suppression (VT-384: L3 path passes agent + level so the
+    # 50/agent/24h L3 auto-send cap is enforced; L2 keeps the existing cap set) ---
+    caps = check_agent_send_caps(
+        tid, draft["customer_id"], conn=conn,
+        autonomy_level=autonomy_level, agent=draft["agent"],
+    )
     if not caps.allowed:
         assert caps.reason is not None
         return _skip(conn, tid, draft, caps.reason)
@@ -472,6 +602,7 @@ def agent_send_draft(
         SendWhatsappTemplateInput,
         send_whatsapp_template,
     )
+    from orchestrator.agents.outbox_redaction import capture_then_redact_draft
 
     raw_params = draft["params"] or {}
     payload = SendWhatsappTemplateInput(
@@ -482,6 +613,80 @@ def agent_send_draft(
         template_params={k: str(v) for k, v in raw_params.items()},
         idempotency_key=f"agent:{did}",
     )
+
+    # VT-384 — the wake-side CAS. For L3 the irreversible send + the draft flip run inside ONE
+    # transaction that FIRST takes a FOR UPDATE row lock on the batch and re-confirms it is STILL
+    # auto_send_pending UNDER the lock. demote_auto_send_pending takes the SAME FOR UPDATE lock, so
+    # the two serialize: if the demote committed first, this SELECT ... FOR UPDATE blocks until it
+    # releases, then sees status != 'auto_send_pending' and ABORTS before the send (no send over an
+    # objection); if this side acquires first, the demote blocks until the send+flip commit. The
+    # Twilio call is held inside the lock deliberately — on this low-volume single-draft L3 path the
+    # no-send-over-objection invariant outranks lock duration. L2 keeps its original (unlocked)
+    # path: an L2 batch is owner-approved and never demoted out from under a send.
+    if autonomy_level == "L3":
+        with conn.transaction():
+            locked = conn.execute(
+                "SELECT status FROM agent_draft_batches WHERE tenant_id = %s AND id = %s "
+                "FOR UPDATE",
+                (tid, draft["batch_id"]),
+            ).fetchone()
+            if locked is None or str(_col(locked, "status", 0)) != "auto_send_pending":
+                # A concurrent demote (or cancel) won the row — abort BEFORE the irreversible send.
+                # NOT persisted on the draft (the batch may be re-approved later via the L2 path).
+                return _skip(conn, tid, draft, SKIP_BATCH_NOT_APPROVED, persist=False)
+            out = send_whatsapp_template(payload, send_fn=send_fn)
+            if out.status == "unauthorized":
+                code = out.error_envelope.code if out.error_envelope else ""
+                reason = SKIP_CONSENT if code == "recipient_not_opted_in" else SKIP_OPT_OUT
+                # _skip opens its own nested transaction (savepoint) — safe inside this txn.
+                return _skip(conn, tid, draft, reason)
+            if out.status != "sent":
+                code = out.error_envelope.code if out.error_envelope else out.status
+                logger.info(
+                    "agent_send: send failed tenant=%s draft=%s template=%s code=%s",
+                    tid, did, draft["template_name"], code,
+                )
+                # The draft stays 'drafted' (NOT terminal); the txn commits with no flip.
+                return AgentSendResult(
+                    draft_id=did, status="failed",
+                    skip_reason=f"send_failed:{code}", batch_status=draft["batch_status"],
+                )
+            # Send succeeded — flip + capture + contact + sweep, all under the still-held lock.
+            conn.execute(
+                "UPDATE agent_drafts SET status = 'sent', message_sid = %s, skip_reason = NULL, "
+                "updated_at = now() WHERE tenant_id = %s AND id = %s",
+                (out.message_sid, tid, did),
+            )
+            capture_then_redact_draft(
+                conn, draft, tenant_id=tid, message_sid=out.message_sid, language=_SEND_LANGUAGE
+            )
+            contact = conn.execute(
+                "INSERT INTO agent_customer_contacts "
+                "  (tenant_id, customer_id, agent, draft_id, batch_id, template_name, "
+                "   autonomy_level, message_sid) "
+                "SELECT %s, %s, %s, %s, %s, %s, %s, %s "
+                "WHERE NOT EXISTS (SELECT 1 FROM agent_customer_contacts "
+                "                  WHERE tenant_id = %s AND draft_id = %s) "
+                "RETURNING id",
+                (
+                    tid, draft["customer_id"], draft["agent"], did, draft["batch_id"],
+                    draft["template_name"], autonomy_level, out.message_sid,
+                    tid, did,
+                ),
+            ).fetchone()
+            batch_status = _finalize_batch_if_terminal(
+                conn, tid, draft["batch_id"], draft["work_item_id"]
+            )
+        status = "sent" if contact is not None else "already_sent"
+        logger.info(
+            "agent_send: %s tenant=%s draft=%s batch=%s template=%s sid=%s batch_status=%s",
+            status, tid, did, draft["batch_id"], draft["template_name"],
+            out.message_sid, batch_status,
+        )
+        return AgentSendResult(
+            draft_id=did, status=status, message_sid=out.message_sid, batch_status=batch_status,
+        )
+
     out = send_whatsapp_template(payload, send_fn=send_fn)
 
     if out.status == "unauthorized":
@@ -511,9 +716,7 @@ def agent_send_draft(
     # every statement commits alone): capture the EXACT owner-facing text into
     # owner_message_audit, THEN redact the outbox params — atomic both-or-neither, no
     # window where the outbox copy is gone but the audit row absent (or a flip without
-    # its capture). Lazy from-import resolves the module attribute at call time (test seam).
-    from orchestrator.agents.outbox_redaction import capture_then_redact_draft
-
+    # its capture).
     with conn.transaction():
         conn.execute(
             "UPDATE agent_drafts SET status = 'sent', message_sid = %s, skip_reason = NULL, "
@@ -554,6 +757,12 @@ def agent_send_draft(
     )
 
 
+# VT-384 import-time signature pin (contract item 5): the ARMED registry's team_winback_simple
+# signature MUST match the executor WINBACK_TEMPLATE_PARAMS — a drift fails THIS import (fail
+# LOUD). Best-effort on a missing registry/executor (dep-less smoke), so the module stays importable.
+assert_winback_signature()
+
+
 __all__ = [
     "AGENT_SEND_CATEGORY",
     "AGENT_SEND_CUSTOMER_WEEKLY_CAP",
@@ -563,7 +772,10 @@ __all__ = [
     "L3_DAILY_AUTO_SEND_CAP",
     "MAX_AGENT_CONTACTS_PER_90D",
     "RECONTACT_SUPPRESSION_DAYS",
+    "SKIP_CAP_L3_DAILY",
+    "SKIP_SIGNATURE_MISMATCH",
     "agent_send_draft",
+    "assert_winback_signature",
     "check_agent_send_caps",
     "has_marketing_consent_for_phone",
 ]
