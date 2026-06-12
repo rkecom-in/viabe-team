@@ -403,13 +403,13 @@ def test_backfill_redacts_existing_rows_and_is_idempotent(substrate) -> None:
     step_id = _latest_step_id(dsn, rid)
 
     # Dry-run (default) writes nothing.
-    dry = backfill.run(dsn=dsn, expected_env="dev", execute=False)
+    dry = backfill.run(dsn=dsn, expected_env="dev", expected_host_substr="localhost", execute=False)
     assert dry["rows_changed"] >= 1
     pre = _raw_step(dsn, step_id)
     assert _PHONE in json.dumps(pre["error"]), "dry-run must not have written"
 
     # Execute — the row is redacted at rest.
-    res = backfill.run(dsn=dsn, expected_env="dev", execute=True)
+    res = backfill.run(dsn=dsn, expected_env="dev", expected_host_substr="localhost", execute=True)
     assert res["rows_changed"] >= 1
     assert res["error_changed"] >= 1
 
@@ -425,7 +425,7 @@ def test_backfill_redacts_existing_rows_and_is_idempotent(substrate) -> None:
     assert _NAME not in full, f"backfill left the customer name behind: {full!r}"
 
     # Idempotent: a second execute touches nothing.
-    again = backfill.run(dsn=dsn, expected_env="dev", execute=True)
+    again = backfill.run(dsn=dsn, expected_env="dev", expected_host_substr="localhost", execute=True)
     assert again["rows_changed"] == 0, (
         f"backfill is NOT idempotent — second run changed {again['rows_changed']} rows"
     )
