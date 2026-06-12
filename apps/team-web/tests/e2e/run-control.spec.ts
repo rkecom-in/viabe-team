@@ -66,6 +66,18 @@ const COPY = {
     'Re-dispatched as a NEW run (no time-travel) — prior steps re-execute only if the entry point requires them.',
 } as const
 
+// ── VT-376 interactive-control copy (must match run-control-controls.tsx verbatim) ──
+const RC_COPY = {
+  blindWrite: 'Keys only — you are editing values you cannot see.',
+  consumeFail:
+    'If control reads degrade, a pin may silently not apply — check the timeline after the run.',
+  rerunI2: 'Re-running re-enters owner approval — outputs are not auto-kept.',
+  preflightWarn: 'Owner approval pending — rerun will refuse. Resolve the approval first.',
+  escalatedOverlap:
+    'An owner approval armed during this re-run — the run was ESCALATED, not silently kept. ' +
+    'Check the escalation queue.',
+} as const
+
 // data-testid tokens the canvas emits (each appears verbatim in the client bundle).
 const TESTID_TOKENS = [
   'rc-tenant-tile',
@@ -88,23 +100,9 @@ function isAllowedConsoleError(text: string): boolean {
   return CONSOLE_ERROR_ALLOWLIST.some((re) => re.test(text))
 }
 
-// pageerror allowlist: a PRE-EXISTING, OUT-OF-VT-375-SCOPE hydration mismatch in the
-// SHARED ops sticky banner (components/ops/sticky-banner.tsx:69 renders
-// `new Date(counts.refreshed_at).toLocaleTimeString()` — locale/second drift between the
-// SSR HTML and client hydration). It surfaces as React minified error #418 ("Text content
-// does not match server-rendered HTML") on EVERY /team/ops/* page, not just run-control, so
-// it is the run-control surface's environment, not its defect. Allowlisted with intent; any
-// OTHER uncaught page exception still hard-fails. (Fix belongs to the banner, not VT-375.)
-const PAGE_ERROR_ALLOWLIST = [
-  /Minified React error #41[8-9]/, // #418/#419 hydration text mismatch (shared banner clock)
-  /Minified React error #42[0-5]/, // #423/#425 hydration siblings
-  /hydrat/i,
-  /did not match.*server/i,
-]
-
-function isAllowedPageError(text: string): boolean {
-  return PAGE_ERROR_ALLOWLIST.some((re) => re.test(text))
-}
+// [B3 VT-380] PAGE_ERROR_ALLOWLIST removed — sticky-banner.tsx now renders a deterministic
+// UTC HH:MM:SS timestamp (utcTimeString()) instead of toLocaleTimeString(), eliminating
+// React minified error #418 at root. No hydration allowlist needed.
 
 /**
  * Collect ALL the JS the page pulls in: every <script src> chunk plus any inline
@@ -176,16 +174,12 @@ test.describe('VT-375 Run-Control canvas (read-only)', () => {
     await page.waitForTimeout(200)
     await page.screenshot({ path: '/tmp/vt375-rc-mobile.png', fullPage: true })
 
-    // Zero uncaught page exceptions (bar the pre-existing shared-banner hydration
-    // mismatch), and zero non-allowlisted console errors.
-    const disallowedPageErrors = pageErrors.filter((t) => !isAllowedPageError(t))
+    // Zero uncaught page exceptions — no allowlist; banner #418 is fixed at root (VT-380/B3).
     expect(
-      disallowedPageErrors,
-      `unexpected pageerrors: ${disallowedPageErrors.join(' | ')}`,
+      pageErrors,
+      `unexpected pageerrors: ${pageErrors.join(' | ')}`,
     ).toHaveLength(0)
-    const disallowed = consoleErrors.filter(
-      (t) => !isAllowedConsoleError(t) && !isAllowedPageError(t),
-    )
+    const disallowed = consoleErrors.filter((t) => !isAllowedConsoleError(t))
     expect(
       disallowed,
       `unexpected console errors: ${disallowed.join(' | ')}`,
@@ -392,5 +386,231 @@ test.describe('VT-375 Run-Control canvas (read-only)', () => {
       ).toContainText(COPY.observedBadge)
       await expect(page.getByText(COPY.keysOnly).first()).toBeVisible()
     })
+  })
+
+  // ── T5: VT-376 interactive controls (stub-backed) ────────────────────────────
+  // BINDING gate acceptance (build-contract §B2.4): the pre-flight warn state and the
+  // escalated_overlap outcome rendering — NOT just the happy path. Same SKIP gate + inline
+  // orchestrator stub as T4; this stub additionally serves the VT-376 run-level annotations
+  // (rerunnable / forbidden_reason / open_approval), a CONTROLLABLE step (so the override +
+  // rerun controls render), and a POST /run-control/rerun response.
+  //
+  // Two runs in the stub disambiguate the two legs:
+  //   run-overlap-0001 → open_approval:true  → pre-flight WARN + disabled submit (leg a)
+  //   run-clear-0001   → open_approval:false → submit enabled; the rerun POST returns
+  //                        outcome:'escalated_overlap' → the C1-A disclosure renders (leg b)
+  test.describe('5. VT-376 interactive controls (stub-backed)', () => {
+    let stub: Server | null = null
+
+    function programsBody() {
+      return JSON.stringify({
+        past: [],
+        running: [
+          {
+            run_id: 'run-overlap-0001',
+            run_type: 'agent_dispatch',
+            status: 'running',
+            started_at: new Date(Date.now() - 60_000).toISOString(),
+            ended_at: null,
+            rerun_of_run_id: null,
+            rerun_from_step: null,
+            step_count: 1,
+            active_hold: false,
+          },
+          {
+            run_id: 'run-clear-0001',
+            run_type: 'agent_dispatch',
+            status: 'running',
+            started_at: new Date(Date.now() - 50_000).toISOString(),
+            ended_at: null,
+            rerun_of_run_id: null,
+            rerun_from_step: null,
+            step_count: 1,
+            active_hold: false,
+          },
+        ],
+        upcoming_7d: [],
+        holds: [],
+        degraded: false,
+      })
+    }
+
+    // A controllable agent_dispatch step (candidate_build) so the override control renders, plus
+    // the run-level VT-376 annotations. open_approval varies by run id (drives the pre-flight).
+    function timelineBody(runId: string) {
+      const openApproval = runId === 'run-overlap-0001'
+      return JSON.stringify({
+        run_id: runId,
+        tenant_id: 'tenant-stub-0001',
+        rerunnable: true,
+        forbidden_reason: null,
+        open_approval: openApproval,
+        steps: [
+          {
+            run_id: runId,
+            run_type: 'agent_dispatch',
+            step_id: `${runId}-step-1`,
+            step_seq: 1,
+            step_kind: 'agent_dispatch',
+            step_name: 'candidate_build',
+            step_status: 'completed',
+            tier: 'controllable',
+            allowed_keys: ['limit'],
+            duration_ms: 300,
+            override_id: null,
+            paused_ms: null,
+            input_envelope: ['lead_id'],
+            output_envelope: { count: null },
+          },
+        ],
+        active_controls: [],
+      })
+    }
+
+    test.beforeAll(async () => {
+      if (process.env.RC_E2E_STUB_BACKED !== '1') return
+      const port = Number(process.env.RC_STUB_PORT ?? 8001)
+      stub = createServer((req, res) => {
+        const url = req.url ?? ''
+        res.setHeader('content-type', 'application/json')
+        if (url.includes('/run-control/programs/')) {
+          res.statusCode = 200
+          res.end(programsBody())
+          return
+        }
+        if (url.includes('/run-control/timeline/')) {
+          const tail = url.split('/run-control/timeline/')[1] ?? ''
+          const runId = decodeURIComponent(tail.split('?')[0] ?? '')
+          res.statusCode = 200
+          res.end(timelineBody(runId))
+          return
+        }
+        // POST /run-control/rerun → the C1-A escalated-overlap close (still HTTP 200).
+        if (url.includes('/run-control/rerun')) {
+          res.statusCode = 200
+          res.end(
+            JSON.stringify({
+              ok: true,
+              new_run_id: 'run-new-0009',
+              outcome: 'escalated_overlap',
+              source_run_id: 'run-clear-0001',
+              tenant_id: 'tenant-stub-0001',
+            }),
+          )
+          return
+        }
+        res.statusCode = 404
+        res.end(JSON.stringify({ error: 'not_found' }))
+      })
+      await new Promise<void>((resolve) => stub!.listen(port, resolve))
+    })
+
+    test.afterAll(async () => {
+      if (stub) await new Promise<void>((resolve) => stub!.close(() => resolve()))
+    })
+
+    async function openTenantAndRun(page: import('@playwright/test').Page, runId: string) {
+      await page.goto(RUN_CONTROL_PATH)
+      const tenantTile = page.locator('[data-testid="rc-tenant-tile"]').first()
+      await expect(tenantTile).toBeVisible({ timeout: 10_000 })
+      await tenantTile.locator('button').first().click()
+      // Both runs auto-expand (group="running"); scope to the target run's program tile.
+      const runTile = page.locator(`[data-testid="rc-program-tile"]:has-text("${runId}")`).first()
+      await expect(runTile).toBeVisible({ timeout: 10_000 })
+      return runTile
+    }
+
+    test('leg a — rerun pre-flight: open owner approval ⇒ warn + disabled submit', async ({
+      page,
+      fazalJwt,
+    }) => {
+      test.skip(
+        process.env.RC_E2E_STUB_BACKED !== '1',
+        'RC_E2E_STUB_BACKED!=1 — needs real Supabase tenants + the stub. See file header.',
+      )
+      expect(fazalJwt).toBeTruthy()
+      const runTile = await openTenantAndRun(page, 'run-overlap-0001')
+
+      // Open the rerun confirm dialog for the open-approval run.
+      await runTile.locator('[data-rc-rerun-btn]').first().click()
+
+      // I2 banner is always present in the dialog.
+      await expect(page.locator('[data-rc-rerun-i2]')).toContainText(RC_COPY.rerunI2)
+      // PRE-FLIGHT re-fetch resolves to open_approval=true → the warn renders + submit disabled.
+      await expect(page.locator('[data-rc-rerun-preflight-warn]')).toContainText(
+        RC_COPY.preflightWarn,
+        { timeout: 10_000 },
+      )
+      await expect(page.locator('[data-rc-rerun-submit]')).toBeDisabled()
+    })
+
+    test('leg b — rerun returns escalated_overlap ⇒ the C1-A disclosure renders', async ({
+      page,
+      fazalJwt,
+    }) => {
+      test.skip(
+        process.env.RC_E2E_STUB_BACKED !== '1',
+        'RC_E2E_STUB_BACKED!=1 — needs real Supabase tenants + the stub. See file header.',
+      )
+      expect(fazalJwt).toBeTruthy()
+      const runTile = await openTenantAndRun(page, 'run-clear-0001')
+
+      await runTile.locator('[data-rc-rerun-btn]').first().click()
+      // open_approval=false for this run → submit enables once the pre-flight clears.
+      const submit = page.locator('[data-rc-rerun-submit]')
+      await expect(submit).toBeEnabled({ timeout: 10_000 })
+      await submit.click()
+
+      // The stub returns outcome:'escalated_overlap' → the prominent C1-A disclosure renders.
+      await expect(page.locator('[data-rc-rerun-escalated-overlap]')).toContainText(
+        RC_COPY.escalatedOverlap,
+        { timeout: 10_000 },
+      )
+    })
+
+    test('override dialog on a controllable step renders the blind-write + consume-fail copy', async ({
+      page,
+      fazalJwt,
+    }) => {
+      test.skip(
+        process.env.RC_E2E_STUB_BACKED !== '1',
+        'RC_E2E_STUB_BACKED!=1 — needs real Supabase tenants + the stub. See file header.',
+      )
+      expect(fazalJwt).toBeTruthy()
+      const runTile = await openTenantAndRun(page, 'run-clear-0001')
+
+      // The controllable step exposes an override button; observed steps would not.
+      await runTile.locator('[data-rc-override-btn]').first().click()
+      await expect(page.locator('[data-rc-blind-write]')).toContainText(RC_COPY.blindWrite)
+      await expect(page.locator('[data-rc-consume-fail]')).toContainText(RC_COPY.consumeFail)
+      // The allowed_keys field (limit) renders — a key NAME only, value blank/blind.
+      await expect(page.locator('[data-rc-override-key="limit"]')).toBeVisible()
+    })
+  })
+})
+
+// ── T6: VT-376 control copy is in the served JS bundle (stubless — bundle-level) ──
+// Mirrors T3: the interactive-control strings are verbatim literals in run-control-controls.tsx
+// ('use client'), so they ship in a client chunk even when the controls don't mount in a
+// stubless render. This is the bundle-level guarantee for the VT-376 disclosures whose RENDERED
+// path needs the stub-backed stack (exercised in T5).
+test.describe('VT-376 interactive-control copy in the served JS bundle', () => {
+  test('blind-write / consume-fail / I2 / pre-flight / escalated-overlap copy ships in the bundle', async ({
+    page,
+    request,
+    baseURL,
+    fazalJwt,
+  }) => {
+    expect(fazalJwt).toBeTruthy()
+    test.skip(!baseURL, 'baseURL required to fetch JS chunks')
+    await page.goto(RUN_CONTROL_PATH)
+    const html = await page.content()
+    const bundle = await collectServedJs(request, baseURL!, html)
+
+    const missing = Object.entries(RC_COPY).filter(([, s]) => !bundle.includes(s))
+    expect(
+      missing.map(([k]) => k),
+      `VT-376 control copy missing from served JS: ${missing.map(([k]) => k).join(', ')}`,
+    ).toHaveLength(0)
   })
 })

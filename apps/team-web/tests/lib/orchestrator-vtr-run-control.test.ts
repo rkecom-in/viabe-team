@@ -288,6 +288,10 @@ describe('VT-375 — vtrRunTimeline fail-closed', () => {
     expect(out.activeControls).toEqual([])
     expect(out.runId).toBeNull()
     expect(out.tenantId).toBeNull()
+    // VT-376 run-level annotations also fail-safe-default on the error path.
+    expect(out.rerunnable).toBe(false)
+    expect(out.forbiddenReason).toBeNull()
+    expect(out.openApproval).toBe(false)
   })
 
   it('403 → ok=false, reason contains 403', async () => {
@@ -313,6 +317,196 @@ describe('VT-375 — vtrRunTimeline fail-closed', () => {
     expect(out.ok).toBe(false)
     expect(out.reason).toBe('error')
     expect(out.steps).toEqual([])
+  })
+})
+
+// ---------------------------------------------------------------------------
+// VT-376 — run-level + per-step annotations on the /timeline read (B1 adds them;
+// the client must surface them fail-safe-defaulted).
+// ---------------------------------------------------------------------------
+
+describe('VT-376 — vtrRunTimeline surfaces the run-control annotations', () => {
+  it('parses rerunnable + forbiddenReason + openApproval + per-step allowed_keys', async () => {
+    const c = await client()
+    const steps = [
+      { run_id: 'r1', step_seq: 1, step_kind: 'candidate_build', step_name: 'candidate_build', tier: 'controllable', allowed_keys: ['limit'] },
+      { run_id: 'r1', step_seq: 2, step_kind: 'classify', step_name: 'intent', tier: 'observed', allowed_keys: [] },
+    ]
+    stub200({
+      run_id: 'r1', tenant_id: 't1', steps, active_controls: [],
+      rerunnable: true, forbidden_reason: null, open_approval: false,
+    })
+    const out = await c.vtrRunTimeline(OP, 'r1')
+    expect(out.rerunnable).toBe(true)
+    expect(out.forbiddenReason).toBeNull()
+    expect(out.openApproval).toBe(false)
+    expect(out.steps[0]!.allowed_keys).toEqual(['limit'])
+    expect(out.steps[1]!.allowed_keys).toEqual([])
+  })
+
+  it('surfaces forbidden_reason + open_approval=true (non-rerunnable kind with a pending approval)', async () => {
+    const c = await client()
+    stub200({
+      run_id: 'r1', tenant_id: 't1', steps: [], active_controls: [],
+      rerunnable: false, forbidden_reason: 'message-dedup semantics', open_approval: true,
+    })
+    const out = await c.vtrRunTimeline(OP, 'r1')
+    expect(out.rerunnable).toBe(false)
+    expect(out.forbiddenReason).toBe('message-dedup semantics')
+    expect(out.openApproval).toBe(true)
+  })
+
+  it('absent annotations fail-safe: rerunnable=false, forbiddenReason=null, openApproval=false', async () => {
+    const c = await client()
+    stub200({ run_id: 'r1', tenant_id: 't1', steps: [], active_controls: [] })
+    const out = await c.vtrRunTimeline(OP, 'r1')
+    expect(out.rerunnable).toBe(false)
+    expect(out.forbiddenReason).toBeNull()
+    expect(out.openApproval).toBe(false)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// VT-376 — MUTATION fns: pause / release / override / cancel-override / rerun.
+// Same vtrCall idiom as Gap-6 (POST, X-Internal-Secret + short-lived JWT). Verify
+// the URL path, that the operator_id rides in the body (NOT a client-trusted
+// tenant on the row-targeted fns), and the typed status→reason mapping.
+// ---------------------------------------------------------------------------
+
+describe('VT-376 — mutation fns ride the run-control POST endpoints', () => {
+  it('vtrRcPause POSTs to run-control/pause with operator_id + redactable reason', async () => {
+    const c = await client()
+    const f = stub200({ control_id: 'ctl-1' })
+    const out = await c.vtrRcPause(OP, 'tenant-abc', 'agent_dispatch', 'noisy')
+    const { url, opts } = callArgs(f)
+    expect(url).toBe('http://orch:8001/api/orchestrator/ops/run-control/pause')
+    expect((opts as { method?: string }).method).toBe('POST')
+    const body = JSON.parse(String(opts.body))
+    expect(body.operator_id).toBe(OP)
+    expect(body.tenant_id).toBe('tenant-abc')
+    expect(body.workflow_kind).toBe('agent_dispatch')
+    expect(body.reason).toBe('noisy')
+    const headers = opts.headers as Record<string, string>
+    expect(headers['X-Internal-Secret']).toBe('sek')
+    expect(headers['X-Operator-Jwt']).toBeTruthy()
+    expect(out.ok).toBe(true)
+    expect(out.controlId).toBe('ctl-1')
+  })
+
+  it('vtrRcPause 409 → conflict (already paused)', async () => {
+    const c = await client()
+    stubStatus(409, { detail: 'already paused' })
+    const out = await c.vtrRcPause(OP, 'tenant-abc', 'agent_dispatch')
+    expect(out.ok).toBe(false)
+    expect(out.reason).toBe('conflict')
+  })
+
+  it('vtrRcRelease 404 → not_found (no active pause)', async () => {
+    const c = await client()
+    stubStatus(404)
+    const out = await c.vtrRcRelease(OP, 'tenant-abc', 'agent_dispatch')
+    expect(out.ok).toBe(false)
+    expect(out.reason).toBe('not_found')
+  })
+
+  it('vtrRcOverride sends only the form keys + maps 422 to unprocessable with scrubbed detail', async () => {
+    const c = await client()
+    const f = stub200({ override_id: 'ovr-1', expires_at: '2026-07-01T00:00:00Z' })
+    const out = await c.vtrRcOverride(OP, {
+      tenantId: 't1', workflowKind: 'agent_dispatch', stepName: 'candidate_build',
+      workflowId: 'run-1', pinnedInput: { limit: '5' },
+    })
+    const { url, opts } = callArgs(f)
+    expect(url).toBe('http://orch:8001/api/orchestrator/ops/run-control/override')
+    const body = JSON.parse(String(opts.body))
+    expect(body.workflow_id).toBe('run-1')
+    expect(body.pinned_input).toEqual({ limit: '5' })
+    expect(out.ok).toBe(true)
+    expect(out.overrideId).toBe('ovr-1')
+    expect(out.expiresAt).toBe('2026-07-01T00:00:00Z')
+
+    stubStatus(422, { detail: 'pinned_input keys not allow-listed' })
+    const bad = await c.vtrRcOverride(OP, {
+      tenantId: 't1', workflowKind: 'agent_dispatch', stepName: 'candidate_build',
+      workflowId: 'run-1', pinnedInput: { secret: 'x' },
+    })
+    expect(bad.ok).toBe(false)
+    expect(bad.reason).toBe('unprocessable')
+    expect(bad.detail).toContain('pinned_input keys not allow-listed')
+  })
+
+  it('vtrRcOverride 503 → registry_unavailable (fail-closed redaction)', async () => {
+    const c = await client()
+    stubStatus(503)
+    const out = await c.vtrRcOverride(OP, {
+      tenantId: 't1', workflowKind: 'agent_dispatch', stepName: 'candidate_build',
+      pinnedInput: { limit: '5' }, expiresAt: '2026-07-01T00:00:00Z',
+    })
+    expect(out.ok).toBe(false)
+    expect(out.reason).toBe('registry_unavailable')
+  })
+
+  it('vtrRcCancelOverride sends ONLY override_id (NO tenant — IDOR discipline)', async () => {
+    const c = await client()
+    const f = stub200({ ok: true, override_id: 'ovr-9' })
+    const out = await c.vtrRcCancelOverride(OP, 'ovr-9')
+    const { url, opts } = callArgs(f)
+    expect(url).toBe('http://orch:8001/api/orchestrator/ops/run-control/cancel-override')
+    const body = JSON.parse(String(opts.body))
+    expect(body.override_id).toBe('ovr-9')
+    expect(body.operator_id).toBe(OP)
+    expect(body.tenant_id).toBeUndefined() // never a client tenant on a row-targeted action
+    expect(out.ok).toBe(true)
+  })
+
+  it('vtrRcCancelOverride 409 → conflict (already consumed/cancelled)', async () => {
+    const c = await client()
+    stubStatus(409)
+    const out = await c.vtrRcCancelOverride(OP, 'ovr-9')
+    expect(out.ok).toBe(false)
+    expect(out.reason).toBe('conflict')
+  })
+
+  it('vtrRcRerun sends source_run_id + from_step (NO tenant) and surfaces outcome=completed', async () => {
+    const c = await client()
+    const f = stub200({ new_run_id: 'run-new', outcome: 'completed', source_run_id: 'run-src' })
+    const out = await c.vtrRcRerun(OP, 'run-src', 'candidate_build', [])
+    const { url, opts } = callArgs(f)
+    expect(url).toBe('http://orch:8001/api/orchestrator/ops/run-control/rerun')
+    const body = JSON.parse(String(opts.body))
+    expect(body.source_run_id).toBe('run-src')
+    expect(body.from_step).toBe('candidate_build')
+    expect(body.tenant_id).toBeUndefined() // derived from the source run server-side
+    expect(out.ok).toBe(true)
+    expect(out.outcome).toBe('completed')
+    expect(out.newRunId).toBe('run-new')
+  })
+
+  it('vtrRcRerun surfaces outcome=escalated_overlap on the C1-A close (still 200/ok)', async () => {
+    const c = await client()
+    stub200({ new_run_id: 'run-new', outcome: 'escalated_overlap', source_run_id: 'run-src' })
+    const out = await c.vtrRcRerun(OP, 'run-src', 'candidate_build', [])
+    expect(out.ok).toBe(true)
+    expect(out.outcome).toBe('escalated_overlap')
+  })
+
+  it('vtrRcRerun 422 → unprocessable (kind not rerunnable / open approval) with scrubbed detail', async () => {
+    const c = await client()
+    stubStatus(422, { detail: 'tenant has an open pending approval' })
+    const out = await c.vtrRcRerun(OP, 'run-src', 'evaluate_tenant', [])
+    expect(out.ok).toBe(false)
+    expect(out.reason).toBe('unprocessable')
+    expect(out.detail).toContain('tenant has an open pending approval')
+  })
+
+  it('all five mutation fns map a network throw to reason="error"', async () => {
+    const c = await client()
+    vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('net') }))
+    expect((await c.vtrRcPause(OP, 't', 'agent_dispatch')).reason).toBe('error')
+    expect((await c.vtrRcRelease(OP, 't', 'agent_dispatch')).reason).toBe('error')
+    expect((await c.vtrRcOverride(OP, { tenantId: 't', workflowKind: 'agent_dispatch', stepName: 's', workflowId: 'r' })).reason).toBe('error')
+    expect((await c.vtrRcCancelOverride(OP, 'o')).reason).toBe('error')
+    expect((await c.vtrRcRerun(OP, 'r', 's', [])).reason).toBe('error')
   })
 })
 

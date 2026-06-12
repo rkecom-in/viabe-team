@@ -272,6 +272,24 @@ EVENT_SCHEMAS: dict[str, dict[str, Validator]] = {
         "tenant_id": _required_str,
         "agent": _required_str,
     },
+    # VT-376 run-control alert events (CC's rostered flag: the alerts the panel
+    # surfaces must be REGISTERED schemas, not ad-hoc). Both writers predate this
+    # registration and emit through observability.log.log_event:
+    #   * run_control_rerun_overlap — rerun._emit_overlap_alert (VT-375 C1 Option A):
+    #     an owner approval armed DURING a rerun's execution window; the lineage row
+    #     closed 'escalated'. Optional field: approval_id (str | None).
+    #   * run_control_degraded — run_control._emit_degraded (F9 two-tier): a control
+    #     read failed with no known pause → fail OPEN; posture is the enum ('fail_open').
+    # Payloads are IDs/enums only (CL-390).
+    "run_control_rerun_overlap": {
+        "workflow_kind": _required_str,
+        "source_run_id": _required_uuid_str,
+        "final_outcome": _required_str,
+    },
+    "run_control_degraded": {
+        "workflow_kind": _required_str,
+        "posture": _required_str,
+    },
 }
 
 
