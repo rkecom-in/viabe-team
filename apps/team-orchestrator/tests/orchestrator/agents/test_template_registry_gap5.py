@@ -3,6 +3,10 @@
 Pure Python: no DB, no LLM, no network. Reads the REAL on-disk
 ``config/twilio_templates.yaml``.
 
+ARMED at F1 (VT-383 / CL-438, 2026-06-12): Fazal delivered the 10 Meta-APPROVED
+Content SIDs and the VT-383 canary confirmed every ``meta_status == approved``.
+These pins moved from the fail-closed pre-F1 shape to the armed shape.
+
 Pins, in order:
   1. All 5 Gap-5 entries exist with a ``category`` field; both winbacks are
      ``customer_marketing``; the 3 owner surfaces are ``owner_notification``
@@ -10,21 +14,24 @@ Pins, in order:
   2. Compliance flags: both winbacks ``optout_line: true`` (STOP line lives in
      the FIXED Meta body); ``team_winback_offer`` is ``money_bearing: true``
      (always-confirm floor, never L3 auto-send); ``team_winback_simple`` is NOT
-     money-bearing.
-  3. Fail-closed pre-F1: every Gap-5 entry declares en+hi variants with NO SID
-     (``null`` stub) — ``resolve()`` returns ``content_sid is None`` and the
-     send path refuses with ``TemplateNotConfigured`` until the F1 SIDs land.
-     Body-hash (``body_sha256``) pins land WITH the F1 SIDs, not before.
-  4. MED-1 regression pin: the new ``category`` field is a shared-resolver
-     schema change touching the live campaign path — every PRE-EXISTING
-     template entry must still parse and resolve for every declared language
-     variant, and ``canary_load()`` must still pass on the real yaml.
-  5. The live VT-45 agent-selectable set is unchanged pre-F1: no null-SID
-     Gap-5 winback leaks into ``approved_template_names()`` (the D5 surface).
+     money-bearing. Both winbacks are now ``agent_selectable: true``; the 3
+     owner surfaces stay ``agent_selectable: false`` (system-invoked).
+  3. Armed at F1: every Gap-5 entry declares en+hi variants, each with a real
+     ``^HX[0-9a-f]{32}$`` SID and a per-language ``body_sha256`` 64-hex pin
+     (fetched from the Twilio Content API against the Meta-APPROVED body).
+     ``resolve()`` returns the real SID + the body hash.
+  4. MED-1 regression pin: the ``category`` + ``body_sha256`` fields are
+     shared-resolver schema changes touching the live campaign path — every
+     PRE-EXISTING template entry must still parse and resolve for every declared
+     language variant, and ``canary_load()`` must still pass on the real yaml.
+  5. The live VT-45 agent-selectable set now includes the two winbacks (D5
+     surface): they are sendable (real SID) and Meta-approved. The 3 owner
+     surfaces must NOT appear in ``approved_template_names()``.
 """
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
 
@@ -46,6 +53,9 @@ from orchestrator.templates_registry import (  # noqa: E402
 _REAL_YAML_PATH = (
     Path(__file__).resolve().parents[3] / "config" / "twilio_templates.yaml"
 )
+
+_SID_RE = re.compile(r"^HX[0-9a-f]{32}$")
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 _WINBACK_NAMES = ("team_winback_simple", "team_winback_offer")
 
@@ -107,6 +117,11 @@ def test_winbacks_are_customer_marketing_with_optout_line(
             f"{name} must pin optout_line: true — the STOP line lives in the "
             "FIXED Meta body (plan §3b)"
         )
+        # VT-383: armed at F1 — Meta-approved + SIDs wired → agent-selectable.
+        assert entry.get("agent_selectable") is True, (
+            f"{name} must be agent_selectable: true at F1 (VT-383/CL-438) — "
+            "Meta-approved with real SIDs, belongs in the live selectable set"
+        )
 
 
 def test_winback_offer_is_money_bearing_simple_is_not(
@@ -135,47 +150,60 @@ def test_owner_surfaces_are_owner_notification_never_marketing(
 
 
 # ---------------------------------------------------------------------------
-# 3. Fail-closed pre-F1: en+hi declared, NO SIDs
+# 3. Armed at F1: en+hi declared, real HX SIDs, per-language body_sha256 pins
 # ---------------------------------------------------------------------------
 
 
-def test_gap5_entries_declare_en_and_hi_with_no_sid(
+def test_gap5_entries_declare_en_and_hi_with_real_sid(
     raw_yaml: dict[str, Any],
 ) -> None:
+    """VT-383: every Gap-5 entry declares en+hi, each with a real
+    ^HX[0-9a-f]{32}$ SID (the fail-closed null stub is gone — F1 landed)."""
     for name in _GAP5_NAMES:
         langs = raw_yaml[name].get("languages")
         assert isinstance(langs, dict), f"{name} languages block missing"
         for lang in ("en", "hi"):
             assert lang in langs, f"{name} must declare the {lang} variant (F1 is en+hi)"
-            assert langs[lang] is None, (
-                f"{name}.{lang} must have NO SID until F1 lands (fail-closed "
-                "stub). If an F1 SID just landed, this pin moves to body-hash "
-                "assertions (plan §3c) — update deliberately, never delete."
+            sid = langs[lang]
+            assert isinstance(sid, str) and _SID_RE.match(sid), (
+                f"{name}.{lang} must carry a real ^HX[0-9a-f]{{32}}$ SID at F1 "
+                f"(VT-383/CL-438); got {sid!r}"
             )
 
 
-def test_gap5_entries_resolve_with_content_sid_none() -> None:
-    """resolve() must succeed (the entry is registered) while returning
-    content_sid=None — the shape the send path fail-closes on
-    (TemplateNotConfigured at the Twilio boundary)."""
+def test_gap5_entries_resolve_with_real_content_sid() -> None:
+    """resolve() returns the real Meta-approved SID at F1 — the send path is
+    live for these names (no longer fail-closed on null)."""
     for name in _GAP5_NAMES:
         for lang in ("en", "hi"):
             entry = resolve(name, lang, _path=_REAL_YAML_PATH)
             assert isinstance(entry, TemplateEntry)
-            assert entry.content_sid is None, (
-                f"{name}.{lang} resolved a SID pre-F1 — fail-closed pin broken"
+            assert entry.content_sid is not None and _SID_RE.match(entry.content_sid), (
+                f"{name}.{lang} did not resolve a real SID post-F1: {entry.content_sid!r}"
             )
             assert entry.variables, f"{name} must declare a variable signature"
 
 
-def test_no_body_hash_pinned_before_f1(raw_yaml: dict[str, Any]) -> None:
-    """body_sha256 pins land WITH the F1 SIDs (fetched from the Twilio Content
-    API against the Meta-APPROVED body). A hash with no SID would pin the doc
-    draft, not the approved copy — forbidden by plan §3c."""
+def test_gap5_body_hash_pinned_per_language(raw_yaml: dict[str, Any]) -> None:
+    """VT-383: each Gap-5 entry pins a per-language body_sha256 (64-char lowercase
+    hex) fetched from the Twilio Content API against the Meta-APPROVED body. This
+    is the doc/yaml/Meta drift detector (plan §3c). resolve() surfaces the hash."""
     for name in _GAP5_NAMES:
-        assert "body_sha256" not in raw_yaml[name], (
-            f"{name} pins a body hash before its F1 SID landed"
+        sha_map = raw_yaml[name].get("body_sha256")
+        assert isinstance(sha_map, dict), (
+            f"{name} must pin body_sha256 per language at F1 (VT-383)"
         )
+        for lang in ("en", "hi"):
+            assert lang in sha_map, f"{name}.body_sha256 missing the {lang} pin"
+            digest = sha_map[lang]
+            assert isinstance(digest, str) and _SHA256_RE.match(digest), (
+                f"{name}.body_sha256.{lang} must be 64-char lowercase hex; got {digest!r}"
+            )
+            # resolve() must surface the same per-language hash.
+            entry = resolve(name, lang, _path=_REAL_YAML_PATH)
+            assert entry.body_sha256 == digest, (
+                f"{name}.{lang} resolve().body_sha256 != yaml pin"
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -210,17 +238,22 @@ def test_canary_load_passes_on_real_yaml() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 5. Live D5 selectable set unchanged pre-F1
+# 5. Live D5 selectable set — armed at F1
 # ---------------------------------------------------------------------------
 
 
-def test_null_sid_winbacks_not_in_live_selectable_set() -> None:
-    """Pre-F1 the winbacks must NOT enter approved_template_names() — they are
-    unsendable (no SID) and would pollute the live VT-45 prompt set. They flip
-    agent_selectable: true together with the F1 SID drop."""
+def test_winbacks_in_live_selectable_set_owner_surfaces_not() -> None:
+    """VT-383: at F1 the two winbacks ARE sendable (real SID) + Meta-approved, so
+    they enter approved_template_names() (the live VT-45 prompt set), in both en
+    and hi. The 3 owner_notification surfaces are system-invoked and must NEVER
+    appear there."""
     for lang in ("en", "hi"):
         names = approved_template_names(lang, _path=_REAL_YAML_PATH)
-        for name in _GAP5_NAMES:
+        for name in _WINBACK_NAMES:
+            assert name in names, (
+                f"{name} must be in the live agent-selectable set at F1 ({lang})"
+            )
+        for name in _OWNER_SURFACE_NAMES:
             assert name not in names, (
-                f"{name} leaked into the live agent-selectable set pre-F1"
+                f"{name} (owner_notification) must NOT be agent-selectable ({lang})"
             )

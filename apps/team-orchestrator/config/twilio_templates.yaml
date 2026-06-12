@@ -209,44 +209,46 @@ breach_notification_customer:
     en: HXdbf0129d38d60d57b11851d8acf581e6
     hi: HX48dcbb5f65877f8592296921b3bad100
 
-# --- VT-369 Gap-5 agent-surface templates (plan §3c). 5 entries, en+hi, NO SIDs yet. ---
-# `null` = stub-pending-approval: resolve() returns content_sid None and the agent send
-# path fail-closes with TemplateNotConfigured until the F1 Meta/Twilio SIDs land
-# (PR-1 merge is NOT blocked on F1; any real send is).
+# --- VT-369 Gap-5 agent-surface templates (plan §3c). 5 entries, en+hi. ---
+# F1 ARMED (VT-383 / CL-438, 2026-06-12): all 10 SIDs (5 templates x en/hi) wired and
+# Meta-APPROVED (Content-API canary: every meta_status == 'approved'). resolve() now
+# returns the real content_sid; the send path is live for these names.
 #
-# `category` is the NEW Gap-5 registry field (plan gate #2 / MED-1): the deterministic
-# agent customer-send choke point (`agents/customer_send.py`) requires
-# category: customer_marketing — owner-facing surfaces are owner_notification and can
-# structurally never pass that gate.
+# `category` is the Gap-5 registry field (plan gate #2 / MED-1): the deterministic agent
+# customer-send choke point (`agents/customer_send.py`) requires category:
+# customer_marketing — owner-facing surfaces are owner_notification and can structurally
+# never pass that gate.
 #
-# Both winbacks carry the customer STOP opt-out line in the FIXED Meta body (registry
-# pin `optout_line: true`; CI test asserts it). `team_winback_offer` is
-# `money_bearing: true` — always-confirm floor, never L3 auto-send (plan §5.5).
-# Per-language `body_sha256` pins land WITH the F1 SIDs (fetched once from the Twilio
-# Content API; CI then fails on doc/yaml/Meta drift — plan §3c folded Critic-1 Probe 5).
+# Both winbacks carry the customer STOP opt-out line in the FIXED Meta body (registry pin
+# `optout_line: true`; the canary asserted STOP against the APPROVED body in both langs).
+# `team_winback_offer` is `money_bearing: true` — always-confirm floor, never L3 auto-send
+# (plan §5.5). Per-language `body_sha256` pins are the APPROVED-body hash fetched once via
+# the Twilio Content API (VT-383 canary; .viabe/queue/VT-383-canary-results.json is canon);
+# CI fails on any doc/yaml/Meta drift (plan §3c folded Critic-1 Probe 5).
 #
-# agent_selectable stays FALSE until F1: approved_template_names() includes any entry
-# whose language KEY exists (it does not filter null SIDs), so flipping true now would
-# inject unsendable names into the live VT-45 selectable set and break the D5 pins in
-# tests/orchestrator/test_templates_registry.py. Flip to true alongside the F1 SID
-# drop + the D5 pin update (the gap-5 drafting gate requires agent_selectable: true).
+# agent_selectable: the two `team_winback_*` are now TRUE (Meta-approved + SIDs wired →
+# they belong in approved_template_names() / the live VT-45 selectable set). The three
+# owner_notification surfaces stay FALSE forever — system-invoked, never agent-chosen.
 
 team_winback_simple:
   audience: customer
   category: customer_marketing  # Meta MARKETING category (F1 submission)
-  agent_selectable: false       # -> true at F1; see block note above
+  agent_selectable: true        # F1 armed (VT-383/CL-438): Meta-APPROVED, SIDs wired
   optout_line: true             # STOP line lives in the fixed approved body
   variables:
     - customer_name   # {{1}} — display-name-level PII max (no E.164; CI-pinned)
     - business_name   # {{2}}
   languages:
-    en: null  # PENDING-F1
-    hi: null  # PENDING-F1
+    en: HX601925a292da89e9d00d3fdf8742f765  # VT-383 F1 (CL-438); Meta approved
+    hi: HX5da4406f8a6691f52555cd179f40be73  # VT-383 F1 (CL-438); Meta approved
+  body_sha256:  # pinned from the Twilio Content API APPROVED body (VT-383 canary)
+    en: 15edf62d44cfc28b478a9b589529a9fa6cf0b7367622fbfeb23ab1ad63a4d740
+    hi: d32d3a974cb63b78cb505430cd465f62bed597f02056646c270ba92a47163dc4
 
 team_winback_offer:
   audience: customer
   category: customer_marketing  # Meta MARKETING category (F1 submission)
-  agent_selectable: false       # -> true at F1; see block note above
+  agent_selectable: true        # F1 armed (VT-383/CL-438): Meta-APPROVED, SIDs wired
   optout_line: true             # STOP line lives in the fixed approved body
   money_bearing: true           # always-confirm floor — never L3 auto-send (plan §5.5)
   variables:
@@ -254,40 +256,52 @@ team_winback_offer:
     - business_name       # {{2}}
     - offer_description   # {{3}} — grounded against the fact bundle, validator-enforced
   languages:
-    en: null  # PENDING-F1
-    hi: null  # PENDING-F1
+    en: HX637d3dc2969a722f627e0dfd2c166b1e  # VT-383 F1 (CL-438); Meta approved
+    hi: HX9370d1b1a1c917a88ef512b7d545ac46  # VT-383 F1 (CL-438); Meta approved
+  body_sha256:  # pinned from the Twilio Content API APPROVED body (VT-383 canary)
+    en: b8ecced1091c1ecfdb7ac302ce8ca16fc5ffdaae284841bd08913aab2ec4810e
+    hi: 5a31e9acb6e57fd2652a9c94fed76864c00a3b3b9acdb891360b4390ae3c6db9
 
 team_agent_draft_approval:
   audience: owner
   category: owner_notification  # L2 approval ask — system-invoked via arm_pause_request
-  agent_selectable: false
+  agent_selectable: false       # owner-facing: system-invoked, NOT agent-chosen (stays false)
   variables:
     - owner_name       # {{1}}
     - draft_count      # {{2}}
     - sample_message   # {{3}} — rendered at arm-time from an RLS read of agent_drafts;
                        #         goes into the send ONLY, never into pending_approvals
   languages:
-    en: null  # PENDING-F1
-    hi: null  # PENDING-F1
+    en: HX1fa31e0339d5739d7936e6edf39e08a3  # VT-383 F1 (CL-438); Meta approved
+    hi: HX81929b92dd3a159e920b5eb338700cf8  # VT-383 F1 (CL-438); Meta approved
+  body_sha256:  # pinned from the Twilio Content API APPROVED body (VT-383 canary)
+    en: 5fba29d4eec7937a8510fab43f3ac1a4a07fd3854efcac869d7f935a50c21501
+    hi: 94e40feada67567d350e0951901d470df6f272f4bfe3eace89660f9fb5547477
 
 team_l3_presend_notice:
   audience: owner
   category: owner_notification  # L3 pre-send notice (delivery-anchored 2h hold, plan §5.6)
-  agent_selectable: false
+  agent_selectable: false       # owner-facing: system-invoked, NOT agent-chosen (stays false)
   variables:
     - owner_name   # {{1}}
     - send_count   # {{2}}
   languages:
-    en: null  # PENDING-F1
-    hi: null  # PENDING-F1
+    en: HXb114769da63f0c72d4a9f01c2fd0ed80  # VT-383 F1 (CL-438); Meta approved
+    hi: HX8184dfe127d1f5bc124384192a4793be  # VT-383 F1 (CL-438); Meta approved
+  body_sha256:  # pinned from the Twilio Content API APPROVED body (VT-383 canary)
+    en: fcafd820af259593814a79eb6f46d40ec09d59157889ede657c97a08abebaca1
+    hi: 92759384a731b7b7d14d5fcf4943835327769c82bba99d61deddb4f6ee6cdbfc
 
 team_autonomy_offer:
   audience: owner
   category: owner_notification  # L3 opt-in offer; body promises "you can always say stop"
-  agent_selectable: false       # (standing kill keyword, plan §5.7 — C3 consent evidence)
+  agent_selectable: false       # owner-facing: system-invoked, NOT agent-chosen (stays false)
   variables:
     - owner_name     # {{1}}
     - streak_count   # {{2}}
   languages:
-    en: null  # PENDING-F1
-    hi: null  # PENDING-F1
+    en: HX150525f3963603ad00d234bd01b37224  # VT-383 F1 (CL-438); Meta approved
+    hi: HXae12acceccc259235478a7a60c53d628  # VT-383 F1 (CL-438); Meta approved
+  body_sha256:  # pinned from the Twilio Content API APPROVED body (VT-383 canary)
+    en: c39414a0c6f0901a785cc7d6d3305076e861cd171005e6412d12e9a9c9491680
+    hi: c036772fdf65196b978bdc6cc4a4bbe8eab907cc75363dcbdf8aa73f7688a66c

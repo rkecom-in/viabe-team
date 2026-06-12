@@ -100,9 +100,17 @@ def test_every_existing_template_still_resolves_with_new_field_defaults() -> Non
 
 
 def test_gap5_entries_parse_into_template_entry_fields() -> None:
+    import re
+
     for name in _GAP5_NAMES:
         entry = resolve(name, "en", _path=_REAL_YAML_PATH)
-        assert entry.content_sid is None, f"{name} must be SID-less pre-F1"
+        # VT-383 (F1 armed): the five entries carry real Content SIDs + sha pins now.
+        assert entry.content_sid and re.fullmatch(r"HX[0-9a-f]{32}", entry.content_sid), (
+            f"{name} must carry a real Content SID post-F1"
+        )
+        assert entry.body_sha256 and re.fullmatch(r"[0-9a-f]{64}", entry.body_sha256), (
+            f"{name} must pin body_sha256 post-F1"
+        )
         assert entry.category in reg.TEMPLATE_CATEGORIES
     for name in ("team_winback_simple", "team_winback_offer"):
         entry = resolve(name, "en", _path=_REAL_YAML_PATH)
@@ -455,11 +463,20 @@ def test_l3_branch_is_a_loud_stub(substrate, fake_registry):  # type: ignore[no-
 
 
 @requires_db
-def test_missing_sid_fails_closed_template_not_configured(substrate):  # type: ignore[no-untyped-def]
-    """The real Gap-5 yaml entry (SID-less pre-F1 stub) must skip fail-closed."""
-    # The default _TEST_PARAMS match team_winback_simple's variable signature,
-    # so the skip below is the missing SID, nothing else.
-    s = _stack(substrate.dsn, template_name="team_winback_simple")
+def test_missing_sid_fails_closed_template_not_configured(substrate, monkeypatch):  # type: ignore[no-untyped-def]
+    """A SID-less registry entry must skip fail-closed. Pre-VT-383 the real yaml's
+    Gap-5 stubs exercised this; post-F1 they are armed, so inject a synthetic
+    SID-less entry (same variable signature as _TEST_PARAMS)."""
+    data = dict(reg._load_raw(_REAL_YAML_PATH))
+    data["team_sidless_itest"] = {
+        "audience": "customer",
+        "category": "customer_marketing",
+        "optout_line": True,
+        "variables": ["customer_name", "business_name"],
+        "languages": {"en": None},  # the pre-F1 shape: declared language, no SID
+    }
+    monkeypatch.setattr(reg, "_get_cached", lambda path=None: data)
+    s = _stack(substrate.dsn, template_name="team_sidless_itest")
     send_fn = _FakeSendFn()
 
     result = _send(s.tenant, s.draft, send_fn)
