@@ -283,9 +283,13 @@ def _finalize_batch_if_terminal(
         (tenant_id, batch_id),
     ).fetchone()
     if updated is not None:
-        # VT-382 (CL-437.3): batch terminal 'sent' close — owner_feedback redacts in
-        # the SAME txn (the per-draft bodies were redacted at their own
-        # sent/skipped/halted flips).
+        # VT-382 (CL-437.3): batch terminal 'sent' close — owner_feedback redacts on
+        # the SAME connection (the per-draft bodies were redacted at their own
+        # sent/skipped/halted flips). Txn accuracy (gate F3): this close runs OUTSIDE
+        # agent_send_draft's explicit transaction (which wraps only the draft flip +
+        # capture) on the autocommit pool — the batch flip and this redaction each
+        # commit alone; a crash between them is healed by the daily outbox_redaction
+        # sweep (the crash backstop).
         from orchestrator.agents.outbox_redaction import redact_batch_owner_feedback
 
         redact_batch_owner_feedback(conn, tenant_id, [batch_id])

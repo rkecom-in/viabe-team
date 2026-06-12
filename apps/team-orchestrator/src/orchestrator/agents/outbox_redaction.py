@@ -212,10 +212,27 @@ def redact_batch_owner_feedback(
     return changed
 
 
-def redact_batch_close(conn: Any, tenant_id: UUID | str, batch_ids: list[str]) -> None:
+def redact_batch_close(
+    conn: Any,
+    tenant_id: UUID | str,
+    batch_ids: list[str],
+    *,
+    halt_drafted_reason: str | None = None,
+) -> None:
     """The batch cancel/halt close hook (autonomy revoke/freeze, VTR cancel, executor
-    unwind): redact ``owner_feedback`` on the now-terminal batches AND ``params`` on
-    their 'skipped'/'halted' drafts, in the caller's transaction.
+    unwind, approval-resolution terminal closes): redact ``owner_feedback`` on the
+    now-terminal batches AND ``params`` on their 'skipped'/'halted' drafts, on the
+    caller's connection.
+
+    ``halt_drafted_reason`` (VT-382 gate F1): when set, child rows still 'drafted' are
+    FIRST flipped to terminal 'halted' (``skip_reason`` = the given marker) — the
+    ``apply_agent_decision`` terminal closes (rejected / edit-exhausted /
+    timeout-cancelled) end the batch without the prior halt sweep the autonomy/VTR
+    cancel paths run, and without this flip those children would sit 'drafted' forever:
+    outside every redaction leg (the daily sweep correctly excludes non-terminal rows)
+    with raw params at rest. The flip is guarded on the PARENT batch being terminal
+    (status guard in the SQL, never caller discipline) and writes NO audit rows —
+    nothing was sent. Idempotent: an already-halted child has no 'drafted' row to flip.
 
     'sent' drafts are deliberately NOT swept here: post-VT-382 each was captured +
     redacted at its own sent flip (idempotent no-op anyway), and a PRE-VT-382 sent row
@@ -226,6 +243,16 @@ def redact_batch_close(conn: Any, tenant_id: UUID | str, batch_ids: list[str]) -
     bids = [str(b) for b in batch_ids]
     if not bids:
         return
+    if halt_drafted_reason is not None:
+        conn.execute(
+            "UPDATE agent_drafts d SET status = 'halted', skip_reason = %s, "
+            "updated_at = now() "
+            "FROM agent_draft_batches b "
+            "WHERE b.tenant_id = d.tenant_id AND b.id = d.batch_id "
+            "  AND d.tenant_id = %s AND d.batch_id = ANY(%s::uuid[]) "
+            "  AND d.status = 'drafted' AND b.status = ANY(%s)",
+            (halt_drafted_reason, tid, bids, list(BATCH_TERMINAL_STATUSES)),
+        )
     redact_batch_owner_feedback(conn, tid, bids)
     rows = conn.execute(
         "SELECT id::text AS id FROM agent_drafts "
