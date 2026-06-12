@@ -311,6 +311,16 @@ def detect_pii_in_logs(tenant_id: UUID, *, lookback_hours: int = 24) -> list[Tri
     boundary (VT-144). Any payload that STILL matches a PII pattern is a leak →
     critical. Reuses the alert pii_scrub patterns (one PII-pattern source).
 
+    VT-379: the scan was envelope-only — ``pipeline_steps.error`` (jsonb, the
+    three direct-INSERT writers: error_router / self_evaluate_gate / collapse)
+    plus ``decision_rationale`` (text) and ``tool_calls`` (jsonb) were never
+    swept, so an exception string carrying a phone or a customer name landed
+    in an UNswept column. All four free-text-bearing columns are now scanned
+    in the same pass (find_pii operates on the stringified blob, so jsonb /
+    text are uniformly co-scannable). ``input_envelope`` / ``output_envelope``
+    remain in the blob — the redacting writer covers them, but Detector-5 is
+    the backstop, not the gate.
+
     The detection logic ships now (+ canary); the nightly DBOS.scheduled
     registration is a fast-follow (VT-305) — same app_version posture as VT-304.
     """
@@ -321,7 +331,8 @@ def detect_pii_in_logs(tenant_id: UUID, *, lookback_hours: int = 24) -> list[Tri
     with pool.connection() as conn, conn.cursor() as cur:
         cur.execute(
             """
-            SELECT id, run_id, input_envelope, output_envelope
+            SELECT id, run_id, input_envelope, output_envelope,
+                   error, decision_rationale, tool_calls
             FROM pipeline_steps
             WHERE tenant_id = %s
               AND started_at > now() - make_interval(hours => %s)
@@ -332,7 +343,19 @@ def detect_pii_in_logs(tenant_id: UUID, *, lookback_hours: int = 24) -> list[Tri
         rows = cur.fetchall()
     for r in rows:
         rd = dict(r) if not isinstance(r, dict) else r
-        blob = f"{rd.get('input_envelope')!s} {rd.get('output_envelope')!s}"
+        # VT-379: scan envelopes AND the three previously-unswept free-text
+        # columns (error / decision_rationale / tool_calls). NULLs stringify
+        # to "None" which find_pii treats as clean, so unset columns no-op.
+        blob = " ".join(
+            str(rd.get(col))
+            for col in (
+                "input_envelope",
+                "output_envelope",
+                "error",
+                "decision_rationale",
+                "tool_calls",
+            )
+        )
         matches = find_pii(blob)
         if matches:
             triggers.append(_make_trigger(
