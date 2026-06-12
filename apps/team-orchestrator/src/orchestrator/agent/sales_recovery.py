@@ -779,11 +779,15 @@ def _emit_self_evaluate_gate(
     step_kind = 'self_evaluate_gate' (canonical per VT-179 Option A;
     renamed from legacy 'self_evaluate_attempt'). output_envelope carries the
     attempt number + verdict + reasons (list-per-category preserved
-    when present). RLS-scoped via tenant_connection. Best-effort —
+    when present). VT-379: written via the shared redacting writer
+    (``write_redacted_step_row``) — gate reasons / feedback messages are
+    free text and were previously INSERTed raw; redaction (patterns +
+    tenant name registry) now runs at write. RLS-scoped via
+    tenant_connection inside the helper. Best-effort —
     observability MUST NOT break the run."""
-    from psycopg.types.json import Jsonb
-
-    from orchestrator.db import tenant_connection
+    from orchestrator.observability.pipeline_observability import (
+        write_redacted_step_row,
+    )
 
     envelope: dict[str, Any] = {
         "attempt_number": attempt_number,
@@ -803,30 +807,12 @@ def _emit_self_evaluate_gate(
         envelope["feedback_messages"] = feedback_messages
 
     try:
-        with tenant_connection(context.tenant_id) as conn, conn.transaction():
-            # dict_row factory configured on the pool (graph.py); mypy
-            # can't see it through psycopg's generic Row type, cast at
-            # the seam (same pattern as error_router._log_decision).
-            raw_next = conn.execute(
-                "SELECT COALESCE(MAX(step_seq), 0) + 1 AS next "
-                "FROM pipeline_steps WHERE run_id = %s",
-                (context.run_id,),
-            ).fetchone()
-            next_index_row = cast("dict[str, Any]", raw_next)
-            next_index = int(next_index_row["next"])
-            conn.execute(
-                """
-                INSERT INTO pipeline_steps
-                    (run_id, tenant_id, step_seq, step_kind, output_envelope, status)
-                VALUES (%s, %s, %s, 'self_evaluate_gate', %s, 'completed')
-                """,
-                (
-                    context.run_id,
-                    context.tenant_id,
-                    next_index,
-                    Jsonb(envelope),
-                ),
-            )
+        write_redacted_step_row(
+            run_id=context.run_id,
+            tenant_id=context.tenant_id,
+            step_kind="self_evaluate_gate",
+            output_envelope=envelope,
+        )
     except Exception:
         # Observability never breaks recovery (CL-242 — same precedent
         # as orchestrator.error_router._log_decision).

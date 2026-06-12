@@ -217,7 +217,11 @@ def record_terminal_verdict(
     Best-effort: routing failure logs but does NOT re-raise.
     Observability must not break the graph. Matches the existing
     ``error_router._log_decision`` + ``_emit_self_evaluate_gate``
-    persistence patterns.
+    persistence patterns. VT-379: written via the shared redacting
+    writer (``write_redacted_step_row``) — ``out_of_scope_reason`` /
+    ``missing_data`` are model-authored free text and were previously
+    INSERTed raw; redaction (patterns + tenant name registry) now runs
+    at write.
 
     Raises ``TenantIsolationError`` if ``tenant_id`` disagrees with
     ``campaign_plan.tenant_id`` (CL-202 — kept for all three variants).
@@ -257,29 +261,17 @@ def record_terminal_verdict(
                 envelope[key] = value
 
     try:
-        with tenant_connection(tenant_id) as conn, conn.transaction():
-            raw = conn.execute(
-                "SELECT COALESCE(MAX(step_seq), 0) + 1 AS next "
-                "FROM pipeline_steps WHERE run_id = %s",
-                (str(run_id),),
-            ).fetchone()
-            row = cast("dict[str, Any]", raw)
-            next_index = int(row["next"])
-            conn.execute(
-                """
-                INSERT INTO pipeline_steps
-                    (run_id, tenant_id, step_seq, step_kind,
-                     output_envelope, decision_rationale, status)
-                VALUES (%s, %s, %s, 'campaign_plan_emitted', %s, %s, 'completed')
-                """,
-                (
-                    str(run_id),
-                    str(tenant_id),
-                    next_index,
-                    Jsonb(envelope),
-                    f"agent terminal verdict: {variant}",
-                ),
-            )
+        from orchestrator.observability.pipeline_observability import (
+            write_redacted_step_row,
+        )
+
+        write_redacted_step_row(
+            run_id=run_id,
+            tenant_id=tenant_id,
+            step_kind="campaign_plan_emitted",
+            output_envelope=envelope,
+            decision_rationale=f"agent terminal verdict: {variant}",
+        )
     except Exception:
         # Observability must not break the graph. Log + continue.
         logger.exception(
