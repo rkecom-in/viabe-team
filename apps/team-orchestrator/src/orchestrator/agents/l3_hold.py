@@ -430,7 +430,11 @@ def demote_auto_send_pending(
             # eyes on this" (Cowork ruling #2), NOT "kill it" — the batch must SURVIVE as
             # awaiting_approval, so any revoke/freeze kind would wrongly cancel the very batch we
             # just demoted. Same txn as the flip (the regression is atomic with the demote).
-            record_regression_event(tid, agent, "owner_disengaged", conn=conn)
+            # VT-384 gate-bounce F5: thread the PRECISE reason ('owner_engaged' vs 'no_delivery')
+            # into the regression record's detail — the kind is the same 'owner_disengaged' for
+            # both demote causes, so detail is what separates an owner-engagement demote from a
+            # no-delivery demote downstream (rides the agent_autonomy_regressed event).
+            record_regression_event(tid, agent, "owner_disengaged", conn=conn, detail=reason)
         # The arm is OUTSIDE the flip txn: when no approval is open, arm one now; when one is open,
         # the batch is QUEUED (never a second open — C-c). The arm itself owns mig-128 serialization.
         if an_approval_is_open:

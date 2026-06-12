@@ -34,10 +34,12 @@ logger = logging.getLogger(__name__)
 L3_CLEAN_STREAK_THRESHOLD = 20  # plan §5.3 (F3 confirms)
 L3_AUTO_MAX_BATCH = 20          # the bulk floor (§5.5)
 L3_PROPOSAL_COOLDOWN_DAYS = 30
-# VT-384 §B2.4 — after this many CONSECUTIVE silent L3 pre-send notices (owner never engaged), the
-# substrate records an ``owner_disengaged`` regression (soft: streak reset, NO freeze/revoke). The
-# threshold lives here (a named constant) because no F-decision set a value; surfaced for tuning.
-L3_SILENT_NOTICE_DISENGAGE_THRESHOLD = 5
+# VT-384 gate-bounce F4: the consecutive_silent_l3_notices counter is KEPT (mig-129 column +
+# the wake-leg bump in l3_hold) as pure OBSERVABILITY + a VT-385 design input. The auto-demote
+# THRESHOLD path was DROPPED — auto-demoting an opted-in owner for using Act mode exactly as
+# designed fights CL-438 (the owner explicitly opted in; silence is not a regression). No
+# threshold constant, no owner_disengaged-on-silence regression. VT-385 owns any disengagement
+# design that uses this counter.
 
 RegressionKind = Literal[
     "edit", "reject", "optout_spike", "complaint", "owner_cancel",
@@ -170,12 +172,18 @@ def cancel_open_batches(tenant_id: UUID | str, agent: str, *, reason: str, conn:
 
 
 def record_regression_event(
-    tenant_id: UUID | str, agent: str, kind: RegressionKind, *, conn: Any
+    tenant_id: UUID | str, agent: str, kind: RegressionKind, *, conn: Any, detail: str | None = None
 ) -> AutonomyState:
     """Apply the §5.4 regression table on the caller's conn (same-txn discipline):
     streak → 0 always; lifetime_rejections +1 on 'reject'; FREEZE on the kill-switch kinds;
     at L3 → REVOKE to L2 (one-way per incident). Every revoke/freeze cancels open batches
-    atomically. Emits an observability event (best-effort)."""
+    atomically. Emits an observability event (best-effort).
+
+    VT-384 gate-bounce F5: ``detail`` carries the PRECISE regression reason (e.g.
+    'owner_engaged' vs 'no_delivery' for a demote — both record the SAME ``owner_disengaged``
+    kind, so the kind alone loses the distinction). It rides the ``agent_autonomy_regressed``
+    observability event's ``detail`` field so the two demote causes are separable downstream
+    without a kind-taxonomy change (that cleanup is VT-385's design input, per the ruling)."""
     tid = str(tenant_id)
     _ensure_row(conn, tid, agent)
     state = get_autonomy(tenant_id, agent, conn=conn)
@@ -197,7 +205,7 @@ def record_regression_event(
         cancelled = cancel_open_batches(tenant_id, agent, reason=kind, conn=conn)
     else:
         cancelled = 0
-    _emit(tid, "agent_autonomy_regressed", {"agent": agent, "kind": kind,
+    _emit(tid, "agent_autonomy_regressed", {"agent": agent, "kind": kind, "detail": detail,
                                             "revoked": revokes, "frozen": freezes,
                                             "batches_cancelled": cancelled})
     return get_autonomy(tenant_id, agent, conn=conn)
@@ -404,35 +412,6 @@ def find_open_autonomy_upgrade(tenant_id: UUID | str, *, conn: Any) -> dict[str,
         except (TypeError, ValueError):
             details = {}
     return {"id": g["id"], "agent": details.get("agent")}
-
-
-def record_silent_l3_notice(tenant_id: UUID | str, agent: str, *, conn: Any) -> int:
-    """VT-384 §B2.4 — a ``team_l3_presend_notice`` window EXPIRED in silence (the owner never
-    replied; the send proceeded). Bump ``consecutive_silent_l3_notices`` for the (tenant, agent) on
-    the caller's conn (same-txn with the send-proceed leg). A GRANT and any owner reply that
-    demotes/freezes both RESET it to 0 (grant_l3 zeroes it; a regression resets the streak — the
-    disengagement signal is *consecutive* silence). Returns the new counter.
-
-    At/above ``L3_SILENT_NOTICE_DISENGAGE_THRESHOLD`` the caller records the ``owner_disengaged``
-    regression (streak reset, NO freeze/revoke — disengagement is a soft signal, not a kill)."""
-    tid = str(tenant_id)
-    _ensure_row(conn, tid, agent)
-    row = conn.execute(
-        "UPDATE tenant_agent_autonomy "
-        "SET consecutive_silent_l3_notices = consecutive_silent_l3_notices + 1, updated_at = now() "
-        "WHERE tenant_id = %s AND agent = %s "
-        "RETURNING consecutive_silent_l3_notices",
-        (tid, agent),
-    ).fetchone()
-    count = int((row["consecutive_silent_l3_notices"] if isinstance(row, dict) else row[0]))
-    if count >= L3_SILENT_NOTICE_DISENGAGE_THRESHOLD:
-        record_regression_event(tenant_id, agent, "owner_disengaged", conn=conn)
-        conn.execute(
-            "UPDATE tenant_agent_autonomy SET consecutive_silent_l3_notices = 0, updated_at = now() "
-            "WHERE tenant_id = %s AND agent = %s",
-            (tid, agent),
-        )
-    return count
 
 
 def revoke_l3(tenant_id: UUID | str, agent: str, *, reason: str, conn: Any) -> AutonomyState:

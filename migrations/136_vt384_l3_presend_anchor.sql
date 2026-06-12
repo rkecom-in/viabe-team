@@ -22,9 +22,12 @@ ALTER TABLE agent_draft_batches
     ADD COLUMN presend_notice_delivered_at TIMESTAMPTZ NULL, -- F6 delivery anchor (callback-stamped)
     ADD COLUMN auto_send_pending_at        TIMESTAMPTZ NULL; -- hold-entry anchor (enter_l3_hold flip)
 
--- The SID-match lookup runs under the SERVICE pool (the status-callback path resolves the tenant
--- from the SID before any tenant GUC is set) — index it for that anchor write. Partial: only
--- batches that actually carry a notice SID participate.
+-- The anchor-stamp lookup (stamp_delivery_anchor) matches a batch by its presend_notice_sid under
+-- a TENANT connection (the status-callback ingress already resolved the run to its tenant, so the
+-- query is tenant-predicated + RLS-scoped: WHERE tenant_id = … AND presend_notice_sid = … AND
+-- status = 'auto_send_pending' AND presend_notice_delivered_at IS NULL) — index presend_notice_sid
+-- for that match. Partial on presend_notice_sid IS NOT NULL: only batches that actually carry a
+-- notice SID participate (the vast majority of batches never arm an L3 notice).
 CREATE INDEX agent_draft_batches_presend_notice_sid
     ON agent_draft_batches (presend_notice_sid)
     WHERE presend_notice_sid IS NOT NULL;

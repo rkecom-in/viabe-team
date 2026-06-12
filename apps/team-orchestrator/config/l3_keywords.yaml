@@ -43,7 +43,11 @@ enable:
 # DELIBERATELY EXCLUDED (verified against opt_out_keywords.yaml + the pre_filter RULE_ORDER): any
 # phrase CONTAINING a bare opt-out keyword (STOP / बंद करो / band karo / roko) is caught by the
 # authoritative opt-out rule FIRST and never reaches here — "stop automatic sending",
-# "auto band karo" route to opt_out_handler by design (the CL-438 floor; opt-out also stops sends).
+# "auto band karo" route to opt_out_handler by design (the CL-438 floor). This is SAFE — and the
+# offer's "say STOP to turn this off instantly" promise is HONEST — because opt_out_handler/dsr_handler
+# now invoke the autonomy FREEZE path (kill_autonomy_by_keyword: freeze + cancel every open batch incl.
+# auto_send_pending, same-txn — VT-384 gate-bounce F1), so a bare opt-out is STRICTLY STRONGER than the
+# kill keyword: it stops in-flight automatic sending AND sets the DPDP opt-out flag.
 # This list is ONLY phrases that disable automatic sending WITHOUT tripping a full DPDP opt-out, so
 # every entry is reachable (no dead keywords). "बंद" alone is not an opt-out keyword (that is the
 # multi-word "बंद करो"), so the Devanagari "ऑटोमैटिक ... बंद" phrasings ARE reachable.

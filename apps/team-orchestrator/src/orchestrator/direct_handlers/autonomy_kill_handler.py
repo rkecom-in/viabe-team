@@ -8,6 +8,12 @@ RULE_ORDER pin), so any phrase carrying a bare opt-out keyword ("stop automatic 
 karo") is caught by opt-out and never reaches here — those are DELIBERATELY absent from the kill set.
 This handler covers "turn off only the automatic sending" without a full opt-out.
 
+VT-384 gate-bounce F1: opt-out is STRICTLY STRONGER than this kill — opt_out_handler/dsr_handler now
+run the SAME freeze path (``kill_autonomy_by_keyword``) BEFORE setting the DPDP opt-out flag, so a bare
+STOP both stops in-flight automatic sending AND opts the owner out. That is why excluding opt-out
+phrasings from this set is safe AND why the offer's "say STOP to turn this off instantly" promise is
+honest: STOP reaches a handler that freezes the holds, not a dead end.
+
 The kill records the ``owner_keyword`` regression for EVERY owning agent of the tenant — the
 substrate FREEZE path, which ATOMICALLY cancels in-flight L3 holds + batches in the SAME
 transaction (``_OPEN_BATCH_STATUSES`` includes ``auto_send_pending``/``sending``). So a hold parked

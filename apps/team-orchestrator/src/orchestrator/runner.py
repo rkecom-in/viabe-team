@@ -528,9 +528,10 @@ def stamp_l3_delivery_anchor(tenant_id: str, message_sid: str) -> str | None:
 
 @DBOS.step()
 def demote_l3_on_owner_inbound(tenant_id: str) -> int:
-    """VT-384 — the demote CAS leg (plan-ack §2). A substantive owner inbound (NOT opt-out/DSR —
-    those route to their own handlers; NOT a kill keyword — B2's freeze path cancels) while the
-    tenant has an auto_send_pending L3 batch means "I want eyes on this": demote each such batch
+    """VT-384 — the demote CAS leg (plan-ack §2). A substantive owner inbound (NOT a kill keyword —
+    B2's freeze path cancels outright; opt-out/DSR ALSO freeze via their handlers but are no longer
+    excluded from this non-cancelling demote — F1 belt-and-braces) while the tenant has an
+    auto_send_pending L3 batch means "I want eyes on this": demote each such batch
     auto_send_pending → awaiting_approval + a regression record, atomically. The two-sided race
     guard: whichever side wins the row CAS, a hold-expiry send can NEVER fire over this in-flight
     objection (the wake-side re-check in agent_send_draft Gate 1 sees the demoted state). The C-c
@@ -659,17 +660,22 @@ def webhook_pipeline_run(tenant_id: str, run_id: str, twilio_fields: dict) -> di
 
     # VT-384 — the demote CAS leg (plan-ack §2). A substantive owner inbound during an L3 hold
     # demotes the auto_send_pending batch to awaiting_approval (the owner wants eyes on it; the
-    # batch re-enters the normal approval path — nothing is lost). EXCLUSIONS: opt-out / DSR keep
-    # their own authoritative routing (matches_opt_out_or_dsr); a kill keyword (matches_kill_keyword)
-    # is excluded so it FREEZES via autonomy_kill_handler (cancel holds/batches outright — the
-    # stronger signal) rather than merely demoting+regressing here. The demote runs BEFORE pre_filter
+    # batch re-enters the normal approval path — nothing is lost). The demote runs BEFORE pre_filter
     # so a window-expiry send can never fire over the objection (two-sided race). FAIL-OPEN: a
     # demote-check failure must never block owner inbound — wrapped best-effort.
+    #
+    # VT-384 gate-bounce F1 (BELT-AND-BRACES): opt-out / DSR are NO LONGER excluded here. Those
+    # phrasings ("stop automatic sending" / "auto band karo") now route to opt_out_handler/dsr_handler,
+    # which invoke the FREEZE path (cancel holds outright — strictly stronger than this demote). The
+    # demote is NON-CANCELLING (flip → awaiting_approval, no kill), so stacking it under that freeze is
+    # safe: whichever lands first, no send fires over the owner's objection. Only the kill keyword stays
+    # excluded — it FREEZES via autonomy_kill_handler (cancel outright), so a demote+regress here would
+    # be redundant with the cancel and could fight the freeze's batch-cancel.
     if event.message_type == "inbound_message" and not event.dupe_status:
-        from orchestrator.pre_filter_gate import matches_kill_keyword, matches_opt_out_or_dsr
+        from orchestrator.pre_filter_gate import matches_kill_keyword
 
         body = event.body or ""
-        if not matches_opt_out_or_dsr(body) and not matches_kill_keyword(body):
+        if not matches_kill_keyword(body):
             try:
                 demote_l3_on_owner_inbound(tenant_id)
             except Exception:  # noqa: BLE001 — a demote-check failure must never block owner inbound

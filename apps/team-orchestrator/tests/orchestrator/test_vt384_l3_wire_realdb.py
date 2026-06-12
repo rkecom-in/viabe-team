@@ -937,6 +937,187 @@ def test_open_batch_statuses_includes_auto_send_pending():  # type: ignore[no-un
 
 
 # ===========================================================================
+# F2 — DETERMINISTIC send-HOLDS-lock-FIRST ordering. The barrier race above
+# covers demote-first nondeterministically; this leg pins the OTHER interleave
+# deterministically: the wake-side send holds the batch FOR UPDATE lock, and a
+# concurrent demote must SERIALIZE behind it (block until the lock releases).
+# ===========================================================================
+
+
+def test_demote_serializes_behind_send_held_batch_lock(substrate):  # type: ignore[no-untyped-def]
+    """F2 (gate-bounce): the deterministic 'send acquires the row lock FIRST' interleave. We hold
+    the SAME ``SELECT ... FOR UPDATE`` batch-row lock the wake-side send takes (customer_send L3
+    gate-6) in a control transaction, then fire ``demote_auto_send_pending`` from another thread.
+    The demote MUST block on that lock (it cannot flip the row out from under an in-flight send) —
+    we assert it does NOT complete while the lock is held, then RELEASE the lock and assert the
+    demote then completes. This proves both lock-acquisition orderings serialize on the row (the
+    barrier race proves demote-first; this proves send-first), so a window-expiry send can never
+    race a demote into a double-decision. No transport is ever touched (no send is performed here —
+    we only hold the lock the send WOULD hold)."""
+    s = _sendable_l3_stack(substrate.dsn)
+
+    lock_acquired = threading.Event()
+    release_lock = threading.Event()
+    demote_done = threading.Event()
+    demote_result: dict[str, Any] = {}
+
+    def _hold_send_lock() -> None:
+        # Mimic the wake-side send's gate-6 lock: take FOR UPDATE on the batch and HOLD it open
+        # until released — the exact lock customer_send.agent_send_draft(L3) holds across its send.
+        with tenant_connection(s.tenant) as conn, conn.transaction():
+            conn.execute(
+                "SELECT status FROM agent_draft_batches WHERE tenant_id = %s AND id = %s "
+                "FOR UPDATE",
+                (str(s.tenant), str(s.batch)),
+            ).fetchone()
+            lock_acquired.set()
+            # Hold the lock until the main thread tells us to release (after proving the demote
+            # blocked). Bounded so a bug can't hang the suite.
+            release_lock.wait(timeout=15)
+
+    def _attempt_demote() -> None:
+        try:
+            with tenant_connection(s.tenant) as conn:
+                demote_result["out"] = l3_hold.demote_auto_send_pending(
+                    s.tenant, conn=conn, agent=_AGENT
+                )
+        except Exception as exc:  # noqa: BLE001 — surface in the assert
+            demote_result["out"] = exc
+        finally:
+            demote_done.set()
+
+    holder = threading.Thread(target=_hold_send_lock)
+    holder.start()
+    assert lock_acquired.wait(timeout=10), "the send-side lock was never acquired"
+
+    demoter = threading.Thread(target=_attempt_demote)
+    demoter.start()
+
+    # While the send holds the row lock the demote MUST block — it cannot complete. Give it a
+    # generous window to (wrongly) finish; it must NOT.
+    assert not demote_done.wait(timeout=2.0), (
+        "F2 VIOLATION: the demote completed while the send held the batch FOR UPDATE lock — "
+        "the two are NOT serializing on the row"
+    )
+    assert _batch_status(substrate.dsn, s.tenant, s.batch) == "auto_send_pending", (
+        "the batch must stay auto_send_pending while the send holds the lock (no demote slipped in)"
+    )
+
+    # Release the send's lock — the demote now serializes through and completes.
+    release_lock.set()
+    holder.join(timeout=10)
+    assert demote_done.wait(timeout=10), "the demote never completed after the lock released"
+    demoter.join(timeout=10)
+
+    out = demote_result["out"]
+    assert not isinstance(out, Exception), f"the serialized demote errored: {out!r}"
+    assert any(r.demoted for r in out), f"the demote should land once the lock frees: {out}"
+    assert _batch_status(substrate.dsn, s.tenant, s.batch) == "awaiting_approval", (
+        "after the lock releases the serialized demote must flip the batch to awaiting_approval"
+    )
+
+
+# ===========================================================================
+# F1 — THE STRONG ARM: owner STOP/DSR during an armed hold FREEZES + cancels it
+# (strictly stronger than the kill keyword) ⇒ ZERO send at expiry. The Hinglish
+# "auto band karo" phrasing routes to opt_out AND still kills the hold.
+# ===========================================================================
+
+
+@pytest.mark.usefixtures("armed_registry")
+def test_owner_stop_during_armed_hold_freezes_and_zero_send_at_expiry(substrate):  # type: ignore[no-untyped-def]
+    """F1 PINNING TEST (gate-bounce blocker): an owner STOP while an L3 auto_send_pending hold is
+    armed must FREEZE + cancel the hold (opt-out is strictly stronger than the kill keyword), so
+    when the hold is driven to expiry NO customer send fires and the regression is recorded.
+
+    Flow: armed L3 hold (delivered anchor, past send_not_before — the wake leg is reachable) →
+    owner sends STOP → opt_out_handler runs the freeze leg → assert the batch is cancelled + the
+    agent is frozen + the tenant opt_out flag set. THEN drive the hold's wake-side send leg to
+    'expiry' and assert it sends ZERO (the batch is gone from auto_send_pending — no transport
+    call), and that the autonomy regression (owner_keyword freeze) landed."""
+    from orchestrator.direct_handlers import HANDLERS
+    from orchestrator.state import new_subscriber_state
+    from orchestrator.types import WebhookEvent
+
+    s = _sendable_l3_stack(substrate.dsn)  # empty frozenset (C2) + armed, anchored, past-due hold
+    # Pre-condition: the hold is armed and reachable (auto_send_pending, the wake leg would fire).
+    assert _batch_status(substrate.dsn, s.tenant, s.batch) == "auto_send_pending"
+
+    # The owner sends STOP — opt_out_handler now runs the FREEZE leg (F1).
+    state = new_subscriber_state(s.tenant)
+    event = WebhookEvent(body="STOP", sender_phone=s.phone, message_type="inbound_message")
+    outcome = HANDLERS["opt_out_handler"](event, state)
+    assert outcome["opt_out_set"] is True
+    assert outcome["autonomy_frozen"] is True, "the opt-out must run the freeze leg (F1 strong arm)"
+
+    # The armed hold is CANCELLED (the freeze cancels open batches incl. auto_send_pending) and the
+    # agent is FROZEN + revoked to L2 — strictly stronger than a demote.
+    assert _batch_status(substrate.dsn, s.tenant, s.batch) == "cancelled", (
+        "the owner STOP must CANCEL the in-flight auto_send_pending hold (F1)"
+    )
+    assert _draft_row(substrate.dsn, s.tenant, s.draft)[0] == "halted"
+    st = autonomy_mod.get_autonomy(s.tenant, _AGENT)
+    assert st.frozen is True, "the owner STOP must FREEZE the agent (strictly stronger than kill)"
+    assert st.level == "L2", "the freeze revokes an L3 agent to L2"
+    # The opt_out flag is set on the tenant (the DPDP compliance leg — committed first).
+    with psycopg.connect(substrate.dsn, autocommit=True) as conn:
+        opt_out = conn.execute(
+            "SELECT opt_out FROM tenants WHERE id = %s", (str(s.tenant),)
+        ).fetchone()[0]
+    assert opt_out is True, "the opt-out flag must be set (compliance priority lands)"
+
+    # NOW drive the hold's wake-side send leg to 'expiry' AFTER the STOP — it must send ZERO: the
+    # batch left auto_send_pending (cancelled), so the wake leg's CAS re-check finds nothing.
+    send_fn = _RecordingCustomerSend()
+    # The wake leg re-confirms auto_send_pending; the cancelled batch raced out → no send attempted.
+    out = l3_hold._hold_send_step_body(str(s.tenant), str(s.batch))
+    assert out.get("sent", 0) == 0, f"a send fired at expiry AFTER the owner STOP (F1 breach): {out}"
+    # Belt-and-braces: a direct wake-side per-draft send also sends ZERO (the draft is halted /
+    # batch cancelled → gate-1 fail-closed), proving no transport over the objection.
+    direct = _send_l3_draft(s.tenant, s.draft, send_fn)
+    assert send_fn.calls == [], (
+        f"the transport was called at expiry after the owner STOP (F1 breach): {send_fn.calls}"
+    )
+    assert direct.status in ("skipped", "already_sent") or direct.status != "sent", (
+        f"a draft sent after the owner STOP froze the hold (F1 breach): {direct.status}"
+    )
+    assert _customer_contacts(substrate.dsn, s.tenant) == 0, "ZERO customer contacts after STOP"
+
+
+def test_hinglish_auto_band_karo_routes_to_opt_out_and_kills_hold(substrate):  # type: ignore[no-untyped-def]
+    """F1 phrasing leg: the NATURAL Hinglish "auto band karo" (the body the Meta-approved offer
+    invites — "say STOP to turn this off") contains the opt-out keyword "band karo", so the
+    pre_filter gate routes it to opt_out_handler (NOT the autonomy_kill branch), and that handler
+    STILL kills the armed hold (the F1 freeze). This pins both halves: the routing (opt-out wins
+    the tie, the RULE-ORDER discipline) AND the kill (the freeze cancels the auto_send_pending
+    batch). Without F1 this body hit opt_out_handler — which did nothing to the hold."""
+    from orchestrator.pre_filter_gate import matches_opt_out_or_dsr
+    from orchestrator.state import new_subscriber_state
+    from orchestrator.types import WebhookEvent
+    from orchestrator.direct_handlers import HANDLERS
+    from orchestrator import pre_filter_gate
+
+    body = "auto band karo"
+    # Routing: the Hinglish kill-intent body carries an opt-out keyword → opt-out path (authoritative).
+    assert matches_opt_out_or_dsr(body), "'auto band karo' must match the opt-out keyword set"
+    s = _sendable_l3_stack(substrate.dsn)
+    state = new_subscriber_state(s.tenant)
+    event = WebhookEvent(body=body, sender_phone=s.phone, message_type="inbound_message")
+    route = pre_filter_gate.pre_filter(event, state)
+    assert getattr(route, "handler_name", None) == "opt_out_handler", (
+        f"'auto band karo' must route to opt_out_handler (authoritative-first), got {route!r}"
+    )
+
+    # The kill: opt_out_handler freezes + cancels the armed hold (F1).
+    outcome = HANDLERS["opt_out_handler"](event, state)
+    assert outcome["autonomy_frozen"] is True
+    assert _batch_status(substrate.dsn, s.tenant, s.batch) == "cancelled", (
+        "the Hinglish opt-out 'auto band karo' must STILL kill the auto_send_pending hold (F1)"
+    )
+    assert autonomy_mod.get_autonomy(s.tenant, _AGENT).frozen is True
+
+
+# ===========================================================================
 # 50/DAY CAP — L3_DAILY_AUTO_SEND_CAP enforcement (per-agent 24h L3 count +
 # SKIP_CAP_L3_DAILY marker) in check_agent_send_caps, L3 path only.
 # ===========================================================================
@@ -1125,16 +1306,16 @@ def test_enable_grant_writes_l3_grant_approval_id(substrate):  # type: ignore[no
 def test_silent_notice_counter_increments_on_silent_proceed(substrate):  # type: ignore[no-untyped-def]
     """Contract item 4 (counter): a presend notice that elapses with NO owner reply (silent
     proceed to the wake-side send) increments consecutive_silent_l3_notices on the autonomy
-    row — the owner-disengagement substrate. The hold-wake send leg bumps it. The C2 empty
-    frozenset → still zero customer sends, but the silence is informed by the DELIVERED notice
-    (independent of the consent gate), so the counter still bumps.
+    row — the owner-disengagement OBSERVABILITY substrate (VT-384 gate-bounce F4: the counter is
+    KEPT as observability + a VT-385 design input; the auto-demote THRESHOLD path was dropped).
+    The hold-wake send leg (``_hold_send_step_body``) bumps it. The C2 empty frozenset → still
+    zero customer sends, but the silence is informed by the DELIVERED notice (independent of the
+    consent gate), so the counter still bumps.
 
-    SKIPs if B1 wired the counter bump into the workflow leg rather than a directly-callable
-    function (the integrator confirms via the live hold workflow leg) — this asserts the
-    column-level behavior where a public proceed entry exists."""
-    proceed = getattr(l3_hold, "_hold_send_step_body", None)
-    if proceed is None:
-        pytest.skip("no directly-callable wake-side send leg — covered by the live workflow test")
+    F4 HARD ASSERT — the prior regression-masking pytest.skip legs are removed: the counter bump
+    is wired into ``_hold_send_step_body`` (kept by F4), so this test pins the column behavior
+    directly. A future edit that drops the bump fails HERE, not silently in production."""
+    proceed = l3_hold._hold_send_step_body  # F4: directly-callable wake-side send leg (no skip)
 
     s = _sendable_l3_stack(substrate.dsn)
     with psycopg.connect(substrate.dsn, autocommit=True) as conn:
@@ -1152,13 +1333,8 @@ def test_silent_notice_counter_increments_on_silent_proceed(substrate):  # type:
             "WHERE tenant_id = %s AND agent = %s",
             (str(s.tenant), _AGENT),
         ).fetchone()[0]
-    # The counter bumps on a silent proceed (>= c0+1); flagged-soft if B1 bumps elsewhere.
-    if c1 == c0:
-        pytest.skip(
-            "consecutive_silent_l3_notices not bumped by _hold_send_step_body — "
-            "verify B1 bumps it in the workflow leg (integrator note)"
-        )
-    assert c1 >= c0 + 1, "a silent proceed must increment consecutive_silent_l3_notices"
+    # F4 hard assert: a silent proceed MUST increment the counter (no skip escape hatch).
+    assert c1 == c0 + 1, "a silent proceed must increment consecutive_silent_l3_notices by exactly 1"
 
 
 # ===========================================================================
