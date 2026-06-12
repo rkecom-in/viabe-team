@@ -241,11 +241,19 @@ def _load_draft(conn: Any, tenant_id: str, draft_id: str) -> dict[str, Any] | No
 
 def _mark_draft_skipped(conn: Any, tenant_id: str, draft_id: str, reason: str) -> None:
     """Terminal per-draft skip with its marker. Only ever from 'drafted'."""
-    conn.execute(
-        "UPDATE agent_drafts SET status = 'skipped', skip_reason = %s, updated_at = now() "
-        "WHERE tenant_id = %s AND id = %s AND status = 'drafted'",
-        (reason, tenant_id, draft_id),
-    )
+    # VT-382 (CL-437.3): 'skipped' is terminal — params are no longer needed; the flip
+    # and the redaction share ONE explicit transaction (the pool is autocommit). NO
+    # audit row: nothing was sent (capture is for owner-facing SENT text only).
+    from orchestrator.agents.outbox_redaction import redact_draft_params
+
+    with conn.transaction():
+        row = conn.execute(
+            "UPDATE agent_drafts SET status = 'skipped', skip_reason = %s, updated_at = now() "
+            "WHERE tenant_id = %s AND id = %s AND status = 'drafted' RETURNING id",
+            (reason, tenant_id, draft_id),
+        ).fetchone()
+        if row is not None:
+            redact_draft_params(conn, tenant_id, [draft_id])
 
 
 def _finalize_batch_if_terminal(
@@ -275,6 +283,16 @@ def _finalize_batch_if_terminal(
         (tenant_id, batch_id),
     ).fetchone()
     if updated is not None:
+        # VT-382 (CL-437.3): batch terminal 'sent' close — owner_feedback redacts on
+        # the SAME connection (the per-draft bodies were redacted at their own
+        # sent/skipped/halted flips). Txn accuracy (gate F3): this close runs OUTSIDE
+        # agent_send_draft's explicit transaction (which wraps only the draft flip +
+        # capture) on the autocommit pool — the batch flip and this redaction each
+        # commit alone; a crash between them is healed by the daily outbox_redaction
+        # sweep (the crash backstop).
+        from orchestrator.agents.outbox_redaction import redact_batch_owner_feedback
+
+        redact_batch_owner_feedback(conn, tenant_id, [batch_id])
         # Completion is reported via the agent_work_items status (the roadmap
         # seam write — report_item_status 'done' — is the dispatch workflow's
         # responsibility, not the send choke point's).
@@ -488,11 +506,23 @@ def agent_send_draft(
         )
 
     # --- Success: draft -> sent, contacts ledger row, batch/work-item sweep ---
-    conn.execute(
-        "UPDATE agent_drafts SET status = 'sent', message_sid = %s, skip_reason = NULL, "
-        "updated_at = now() WHERE tenant_id = %s AND id = %s",
-        (out.message_sid, tid, did),
-    )
+    # VT-382 (CL-437.3): the status flip + the audit capture + the params redaction run
+    # in ONE explicit transaction (the pool is autocommit — without this BEGIN/COMMIT
+    # every statement commits alone): capture the EXACT owner-facing text into
+    # owner_message_audit, THEN redact the outbox params — atomic both-or-neither, no
+    # window where the outbox copy is gone but the audit row absent (or a flip without
+    # its capture). Lazy from-import resolves the module attribute at call time (test seam).
+    from orchestrator.agents.outbox_redaction import capture_then_redact_draft
+
+    with conn.transaction():
+        conn.execute(
+            "UPDATE agent_drafts SET status = 'sent', message_sid = %s, skip_reason = NULL, "
+            "updated_at = now() WHERE tenant_id = %s AND id = %s",
+            (out.message_sid, tid, did),
+        )
+        capture_then_redact_draft(
+            conn, draft, tenant_id=tid, message_sid=out.message_sid, language=_SEND_LANGUAGE
+        )
     contact = conn.execute(
         "INSERT INTO agent_customer_contacts "
         "  (tenant_id, customer_id, agent, draft_id, batch_id, template_name, "

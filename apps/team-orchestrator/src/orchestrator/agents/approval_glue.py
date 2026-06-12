@@ -320,6 +320,18 @@ def apply_agent_decision(
                 "WHERE tenant_id = %s AND id = %s RETURNING edit_cycles",
                 (tid, bid),
             ).fetchone()
+            if updated is not None:
+                # VT-382 (CL-437.3) + gate F1: terminal 'rejected' close — halt the
+                # batch's still-'drafted' children, THEN redact owner_feedback +
+                # halted params (the helper owns the halt+redact logic; no audit
+                # rows — nothing was sent) in the SAME resolution txn (sha256
+                # markers kept; this branch only arrives via the owner-reply
+                # runner, which wraps the resolution in one transaction).
+                from orchestrator.agents.outbox_redaction import redact_batch_close
+
+                redact_batch_close(
+                    conn, tid, [bid], halt_drafted_reason="halted_batch_rejected"
+                )
             if updated is not None and agent:
                 from orchestrator.agents.autonomy import record_regression_event
 
@@ -349,6 +361,18 @@ def apply_agent_decision(
             "RETURNING edit_cycles",
             (tid, bid, list(_RESOLVABLE_FROM)),
         ).fetchone()
+        if updated is not None:
+            # VT-382 (CL-437.3) + gate F1: terminal 'rejected' close — halt the
+            # batch's still-'drafted' children, THEN redact owner_feedback + halted
+            # params (the helper owns the halt+redact logic; no audit rows — nothing
+            # was sent) in the SAME resolution txn (sha256 markers kept; this branch
+            # only arrives via the owner-reply runner, which wraps the resolution in
+            # one transaction).
+            from orchestrator.agents.outbox_redaction import redact_batch_close
+
+            redact_batch_close(
+                conn, tid, [bid], halt_drafted_reason="halted_batch_rejected"
+            )
         if updated is not None and agent:
             from orchestrator.agents.autonomy import record_regression_event
 
@@ -363,6 +387,20 @@ def apply_agent_decision(
             "RETURNING edit_cycles",
             (tid, bid, list(_RESOLVABLE_FROM)),
         ).fetchone()
+        if updated is not None:
+            # VT-382 (CL-437.3) + gate F1: terminal 'cancelled' close — halt the
+            # batch's still-'drafted' children, THEN redact owner_feedback + halted
+            # params (the helper owns the halt+redact logic; no audit rows — nothing
+            # was sent), on the SAME connection as the resolve. Txn accuracy (gate
+            # F3): the owner-reply runner (exhausted defer) wraps the resolution in
+            # ONE transaction, but the 30-min timeout sweep runs autocommit-per-
+            # statement (no wrapping txn) — a crash between the batch flip and this
+            # close is healed by the daily outbox_redaction sweep (crash backstop).
+            from orchestrator.agents.outbox_redaction import redact_batch_close
+
+            redact_batch_close(
+                conn, tid, [bid], halt_drafted_reason="halted_batch_cancelled"
+            )
         if updated is not None and agent:
             from orchestrator.agents.autonomy import record_regression_event
 
