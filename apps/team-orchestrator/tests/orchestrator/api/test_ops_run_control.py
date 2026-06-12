@@ -26,6 +26,11 @@ Coverage (fix-contract Test-B):
   * /rerun 422-vs-409 mapping (C3): RerunRefused.code 422 (forbidden kind / unknown step /
     non-object pin) maps to 422; .code 409 (open pending approval, F10) maps to 409 — the
     distinction the pre-C3 ``.status_code`` lookup collapsed to 409.
+  * VT-376 /timeline annotations (build contract §B1.3/§B1.6): per-step ``allowed_keys``
+    (registry key NAMES on controllable steps, [] otherwise), run-level ``rerunnable`` +
+    the pinned ``forbidden_reason`` why-copy for rerun-forbidden kinds; and the mig-132
+    explicit envelope projections read END-TO-END through the endpoint (injected
+    foreign keys/values never reach the response).
 
 DB substrate mirrors ``test_ops_vtr_console.py``: importorskip psycopg+dbos(+langgraph)+fastapi+jwt,
 skipif no DATABASE_URL, module fixture apply_migrations + launch_dbos; seeds via direct autocommit
@@ -85,6 +90,18 @@ def substrate():  # type: ignore[no-untyped-def]
         yield SimpleNamespace(dsn=dsn)
     finally:
         shutdown_dbos()
+
+
+@pytest.fixture(autouse=True)
+def _purge_synthetic_breach_rows(substrate):  # type: ignore[no-untyped-def]
+    """The mig-132 projection tests seed synthetic ``tenant_isolation_breach`` step rows,
+    but the VT-79 Detector-1 suite (privacy/test_k_anonymity.py) asserts a GLOBAL zero
+    count of that kind — purge on teardown so the detector invariant holds suite-wide."""
+    yield
+    with psycopg.connect(substrate.dsn, autocommit=True) as conn:
+        conn.execute(
+            "DELETE FROM pipeline_steps WHERE step_kind = 'tenant_isolation_breach'"
+        )
 
 
 @pytest.fixture(autouse=True)
@@ -693,6 +710,27 @@ def test_timeline_reads_views_and_derives_tenant(substrate) -> None:
     assert isinstance(out["active_controls"], list)
 
 
+def test_timeline_open_approval_preflight_flag(substrate) -> None:
+    """VT-376 pre-flight: /timeline carries the tenant's open-approval STATE as a boolean
+    only (the rerun dialog's warn+disable input; server 409 stays the authority). The
+    response must never carry approval row contents."""
+    dsn = substrate.dsn
+    op, tenant = _assigned(dsn)
+    run = _seed_run(dsn, tenant, run_type="agent_dispatch")
+    out = rc.timeline(str(run), **_hdr(op=op))
+    assert out["open_approval"] is False
+    _seed_open_approval(dsn, tenant, run)
+    out2 = rc.timeline(str(run), **_hdr(op=op))
+    assert out2["open_approval"] is True
+    # Boolean only — no approval payload anywhere in the response.
+    assert "approval" not in {k for k in out2 if k != "open_approval"}
+    assert not any(
+        isinstance(v, dict) and "approval_type" in v
+        for v in out2.values()
+        if isinstance(v, dict)
+    )
+
+
 def test_timeline_cross_tenant_403(substrate) -> None:
     """Timeline derives tenant from the run row, then gates — opA cannot read B's run."""
     dsn = substrate.dsn
@@ -705,13 +743,28 @@ def test_timeline_cross_tenant_403(substrate) -> None:
 
 
 def _seed_step(
-    dsn: str, run: UUID, tenant: UUID, seq: int, step_kind: str, step_name: str
+    dsn: str,
+    run: UUID,
+    tenant: UUID,
+    seq: int,
+    step_kind: str,
+    step_name: str,
+    *,
+    input_env: dict[str, Any] | None = None,
+    output_env: dict[str, Any] | None = None,
 ) -> None:
+    from psycopg.types.json import Jsonb
+
     with psycopg.connect(dsn, autocommit=True) as conn:
         conn.execute(
             "INSERT INTO pipeline_steps (run_id, tenant_id, step_seq, step_kind, step_name, "
-            "status) VALUES (%s, %s, %s, %s, %s, 'completed')",
-            (str(run), str(tenant), seq, step_kind, step_name),
+            "status, input_envelope, output_envelope) VALUES (%s, %s, %s, %s, %s, "
+            "'completed', %s, %s)",
+            (
+                str(run), str(tenant), seq, step_kind, step_name,
+                Jsonb(input_env) if input_env is not None else None,
+                Jsonb(output_env) if output_env is not None else None,
+            ),
         )
 
 
@@ -757,6 +810,128 @@ def test_timeline_step_tier_unregistered_kind_observed(substrate) -> None:
     tiers = {s["tier"] for s in out["steps"]}
     assert tiers == {"observed"}, (
         f"an unregistered run_type must annotate every step observed, got {tiers}"
+    )
+    # VT-376 run-level legs for the unmapped kind: not rerunnable, and no why-copy (the
+    # pinned copy exists only for the three forbidden registry kinds).
+    assert out["rerunnable"] is False
+    assert out["forbidden_reason"] is None
+
+
+# ---------------------------------------------------------------------------
+# 6b. /timeline — VT-376 annotations (allowed_keys / rerunnable / forbidden_reason)
+#     + the mig-132 projections through the API read path
+# ---------------------------------------------------------------------------
+
+
+def test_timeline_allowed_keys_annotation(substrate) -> None:
+    """VT-376 (build contract §B1.3): every timeline step carries ``allowed_keys`` — the
+    registry key NAMES for CONTROLLABLE steps (the override form's field list), [] for
+    everything else (a controllable step with an empty registry allowlist, an observed
+    micro-step, an intervention companion row) — so the dialog can never render a field
+    for a step the registry does not allow-list."""
+    dsn = substrate.dsn
+    op, tenant = _assigned(dsn)
+    run = _seed_run(dsn, tenant, run_type="agent_dispatch", status="completed")
+    _seed_step(dsn, run, tenant, 0, "tool_call", "candidate_build")  # allowed {'limit'}
+    _seed_step(dsn, run, tenant, 1, "tool_call", "compose_drafts")  # allowed {'model'}
+    _seed_step(dsn, run, tenant, 2, "tool_call", "persist_batch")  # controllable, ∅ keys
+    _seed_step(dsn, run, tenant, 3, "state_transition", "some_brain_micro_step")  # observed
+    _seed_step(dsn, run, tenant, 4, "run_control_intervention", "agent_dispatch:candidate_build")
+
+    out = rc.timeline(str(run), **_hdr(op=op))
+    by_name = {s["step_name"]: s for s in out["steps"]}
+    assert all("allowed_keys" in s for s in out["steps"]), "every step row carries allowed_keys"
+    assert by_name["candidate_build"]["allowed_keys"] == ["limit"]
+    assert by_name["compose_drafts"]["allowed_keys"] == ["model"]
+    assert by_name["persist_batch"]["allowed_keys"] == []  # controllable but pins nothing
+    assert by_name["persist_batch"]["tier"] == "controllable"
+    assert by_name["some_brain_micro_step"]["allowed_keys"] == []
+    assert by_name["agent_dispatch:candidate_build"]["allowed_keys"] == [], (
+        "an intervention companion row is observed — it must never advertise keys"
+    )
+
+
+@pytest.mark.parametrize(
+    ("run_type", "rerunnable", "why"),
+    [
+        ("agent_dispatch", True, None),
+        ("plan_generate", True, None),
+        ("twilio_inbound", False, "message-dedup semantics"),  # → webhook_inbound
+        ("trial_sweep", False, "duplicate-nudge risk"),
+        ("campaign_send", False, "kg-duplication"),
+    ],
+)
+def test_timeline_run_level_rerunnable_and_forbidden_reason(
+    substrate, run_type: str, rerunnable: bool, why: str | None
+) -> None:
+    """VT-376 (build contract §B1.3): the run-level payload carries ``rerunnable`` (kind
+    in RERUNNABLE) and the pinned per-kind why-copy for the rerun-forbidden kinds — the
+    substrate for B2's 'no button + why' rendering. Rerunnable kinds carry None."""
+    dsn = substrate.dsn
+    op, tenant = _assigned(dsn)
+    run = _seed_run(dsn, tenant, run_type=run_type, status="completed")
+    out = rc.timeline(str(run), **_hdr(op=op))
+    assert out["rerunnable"] is rerunnable
+    assert out["forbidden_reason"] == why
+
+
+def test_timeline_mig132_projection_through_api(substrate) -> None:
+    """mig-132 through the API read path (build contract §B1.6): the three formerly
+    whole-envelope kinds project EXACTLY their writer-pinned keys, and an injected
+    foreign key/value never reaches the /timeline response — the endpoint reads the
+    hardened view, so the projection holds end-to-end, not just at the SQL layer."""
+    import json as _json
+
+    dsn = substrate.dsn
+    op, tenant = _assigned(dsn)
+    run = _seed_run(dsn, tenant, run_type="agent_dispatch", status="completed")
+    _seed_step(
+        dsn, run, tenant, 0, "agent_invocation", "brain_dispatch_entry",
+        input_env={
+            "inbound_body_len": 42,
+            "trigger": "owner_substantive_message",
+            "dispatched_at": "2026-06-12T00:00:00+00:00",
+            "smuggled": "Ramesh-leak",
+        },
+        output_env={"reason": "ok", "smuggled": "Ramesh-leak"},
+    )
+    _seed_step(
+        dsn, run, tenant, 1, "aborted_hard_limit", "brain_dispatch_aborted",
+        input_env={"reason": "hard_limit_exceeded:tokens", "inbound_body_len": 9,
+                   "smuggled": "Ramesh-leak"},
+        output_env={"axis": "tokens", "observed": 11.0, "limit": 10.0, "smuggled": "Ramesh-leak"},
+    )
+    _seed_step(
+        dsn, run, tenant, 2, "tenant_isolation_breach", "context_isolation_preflight",
+        output_env={
+            "layer": "pre_flight",
+            "offending_ids": {"campaigns": ["c-1"]},
+            "counts": {"campaigns": 1},
+            "smuggled": "Ramesh-leak",
+        },
+    )
+
+    out = rc.timeline(str(run), **_hdr(op=op))
+    by_seq = {s["step_seq"]: s for s in out["steps"]}
+    assert by_seq[0]["input_envelope"] == {
+        "inbound_body_len": 42,
+        "trigger": "owner_substantive_message",
+        "dispatched_at": "2026-06-12T00:00:00+00:00",
+    }
+    assert by_seq[0]["output_envelope"] == {"reason": "ok"}
+    assert by_seq[1]["input_envelope"] == {
+        "reason": "hard_limit_exceeded:tokens",
+        "inbound_body_len": 9,
+    }
+    assert by_seq[1]["output_envelope"] == {"axis": "tokens", "observed": 11.0, "limit": 10.0}
+    assert by_seq[2]["output_envelope"] == {
+        "layer": "pre_flight",
+        "offending_ids": {"campaigns": ["c-1"]},
+        "counts": {"campaigns": 1},
+    }
+    surface = _json.dumps(out["steps"], default=str)
+    assert "smuggled" not in surface and "Ramesh" not in surface, (
+        "an injected key/value crossed the mig-132 projection into the API response"
     )
 
 

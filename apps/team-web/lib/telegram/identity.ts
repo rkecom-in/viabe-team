@@ -80,7 +80,8 @@ export async function resolveOperatorFromTelegram(
     const role = resolveRole(undefined, { isFazal: !!FAZAL_UUID && row.operator_id === FAZAL_UUID })
 
     // 4. Tenant scope (VTAdmin → null/all; VTR → assigned set, fail-closed []).
-    const assignedTenants = await resolveAssignedTenants(row.operator_id, role, client as never)
+    // Pass a factory (() => client) — resolveAssignedTenants now resolves lazily.
+    const assignedTenants = await resolveAssignedTenants(row.operator_id, role, () => client)
 
     return { operatorId: row.operator_id, role, assignedTenants }
   } catch {

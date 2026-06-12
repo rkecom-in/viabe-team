@@ -106,7 +106,17 @@ export default async function RunControlPage() {
           console.error('RunControlPage: vtrRunTimeline failed', runId, err)
           return [
             runId,
-            { ok: false, runId: null, tenantId: null, steps: [], activeControls: [], reason: 'error' },
+            {
+              ok: false,
+              runId: null,
+              tenantId: null,
+              steps: [],
+              activeControls: [],
+              rerunnable: false,
+              forbiddenReason: null,
+              openApproval: false,
+              reason: 'error',
+            },
           ]
         }
       }),
@@ -134,8 +144,9 @@ export default async function RunControlPage() {
       <header className="space-y-1">
         <h1 className="text-2xl font-semibold text-gray-900">Run Control — Canvas</h1>
         <p className="text-sm text-gray-500">
-          Read-only view of each tenant&apos;s programs and step timelines. Controls
-          (pause, override, re-dispatch) arrive in a later phase — nothing here mutates state.
+          Each tenant&apos;s programs and step timelines, with pause/release, step override, and
+          re-dispatch controls. Only controllable steps expose controls; observed steps are
+          display-only. Every action is audited and re-checked server-side.
         </p>
       </header>
 

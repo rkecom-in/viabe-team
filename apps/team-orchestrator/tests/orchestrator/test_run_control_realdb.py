@@ -1,13 +1,16 @@
 """VT-374 — run-control substrate (real Postgres). Plan §10 DB-touching acceptance.
 
 REPLACES the VT-300 suite: ``run_controls`` is retired (mig 131, N1 RETIRE arm) and the
-substrate is now ``workflow_controls`` + ``step_overrides`` + the mig-131 VTR views.
+substrate is now ``workflow_controls`` + ``step_overrides`` + the mig-131/132 VTR views.
 Covers: RLS+FORCE deny-all on both new tables (§10.1); ``app_vtr_role`` zero raw reads +
-keys-only timeline with value passthrough ONLY for the 4 audited name-free kinds (§10.7);
-DSR purge hard-delete canary (§10.1); consume-first race + N2 recovery-idempotent
-re-consume + expiry sweep + the next-run-requires-expiry DB CHECK (§10.4); allowed-keys
-merge enforcement (F6/I7); the F9/N4 two-tier pause posture (§10.5); and ``rerun_from``
-refusals — forbidden kind + open-approval 409 (§10.6/F10/F11).
+keys-only timeline with EXPLICIT per-direction key projections for the 4 audited
+name-free kinds (§10.7; mig-132 / VT-376 C2 — whole-envelope passthrough is gone) + the
+injected-extra-key probe; DSR purge hard-delete canary (§10.1); consume-first race + N2
+recovery-idempotent re-consume + expiry sweep + the next-run-requires-expiry DB CHECK
+(§10.4); allowed-keys merge enforcement (F6/I7); the F9/N4 two-tier pause posture
+(§10.5); ``rerun_from`` refusals — forbidden kind + open-approval 409 (§10.6/F10/F11);
+and the VT-376 rerun-slot lock — double-click serialization (BINDING acceptance) + the
+direct held-window lock probe.
 
 Gated on DATABASE_URL + dbos (CL-422 — synthetic data only). Unique tenants per test
 (uuid-suffixed names, no fixed phones) so a recycled DB never collides.
@@ -41,8 +44,11 @@ pytestmark = pytest.mark.skipif(
     reason="DATABASE_URL not set — VT-374 run-control substrate tests skipped",
 )
 
-# The mig-131 audited value-passthrough list (STEP-0 §3.2 name-free kinds) — pinned here
-# so a view edit that widens the passthrough fails this suite, not just review.
+# The audited VALUE-BEARING kind list (STEP-0 §3.2 name-free kinds) — pinned here so a
+# view edit that widens the list fails this suite, not just review. Post-mig-132 (VT-376
+# C2) NONE of these passes a whole envelope: each projects an EXPLICIT per-direction key
+# allowlist pinned from its actual writer; the list is a CEILING that never widens
+# without a fresh PII audit.
 _AUDITED_PASSTHROUGH_KINDS = (
     "webhook_received",
     "agent_invocation",
@@ -66,6 +72,18 @@ def substrate():  # type: ignore[no-untyped-def]
         yield dsn
     finally:
         shutdown_dbos()
+
+
+@pytest.fixture(autouse=True)
+def _purge_synthetic_breach_rows(substrate):  # type: ignore[no-untyped-def]
+    """The C2 projection tests seed synthetic ``tenant_isolation_breach`` step rows, but
+    the VT-79 Detector-1 suite (privacy/test_k_anonymity.py) asserts a GLOBAL zero count
+    of that kind — purge on teardown so the detector invariant holds suite-wide."""
+    yield
+    with psycopg.connect(substrate, autocommit=True) as conn:
+        conn.execute(
+            "DELETE FROM pipeline_steps WHERE step_kind = 'tenant_isolation_breach'"
+        )
 
 
 # --- pool shims (run_control's injectable pool seam) ---------------------------------
@@ -315,23 +333,52 @@ def test_timeline_keys_only_for_name_bearing_kind(substrate):
     assert rows[1][1] is None and rows[1][2] is None
 
 
-def test_timeline_value_passthrough_is_exactly_the_audited_list(substrate):
-    """The audited passthrough kinds, post-C2 (Fixer-C mig-131 narrowing):
+def test_timeline_value_projection_is_exactly_the_audited_allowlists(substrate):
+    """Post-mig-132 (VT-376 C2): NO step_kind passes a whole envelope any more. Each
+    value-bearing kind projects an EXPLICIT per-direction key allowlist pinned from its
+    ACTUAL writer:
 
-    - the THREE fully-name-free kinds (agent_invocation / aborted_hard_limit /
-      tenant_isolation_breach) pass envelope VALUES through verbatim;
-    - ``webhook_received`` is NOT full passthrough — it projects an EXPLICIT 4-KEY
-      ALLOWLIST (message_type / num_media / dupe_status / status_callback_state);
-      the unsafe keys it also carries (body_token / sender_phone_token /
-      twilio_message_sid / media_url_0) are NEVER exposed (C2: the frozen name-free
-      list is a CEILING, not a floor);
-    - a 5th kind (state_transition: raw langgraph state, name-bearing) stays keys-only.
+    - ``agent_invocation`` (agent/dispatch.py ``_write_dispatch_entry``): input
+      {inbound_body_len, trigger, dispatched_at}; output {reason};
+    - ``aborted_hard_limit`` (agent/dispatch.py ``_write_aborted_hard_limit``): input
+      {reason, inbound_body_len}; output {axis, observed, limit};
+    - ``tenant_isolation_breach`` (context_validator ``_record_breach`` — output only;
+      BOTH call shapes): pre-flight {layer, offending_ids, counts} and post-flight
+      {layer, expected_tenant, stray_tenants} project through the union allowlist;
+    - ``webhook_received`` keeps the mig-131 4-key allowlist (unchanged);
+    - everything else (state_transition control leg) stays keys-only.
+
+    Absent allowlisted keys strip away (jsonb_strip_nulls) — present-if-present.
     """
-    full_passthrough = ("agent_invocation", "aborted_hard_limit", "tenant_isolation_breach")
     tenant = _tenant(substrate)
     run = _run(substrate, tenant)
-    for seq, kind in enumerate(full_passthrough):
-        _step(substrate, run, tenant, seq, kind, input_env={"k": f"value-{kind}", "n": seq})
+    _step(
+        substrate, run, tenant, 0, "agent_invocation",
+        input_env={
+            "inbound_body_len": 42,
+            "trigger": "owner_substantive_message",
+            "dispatched_at": "2026-06-12T00:00:00+00:00",
+        },
+        output_env={"reason": "substantive owner message — needs reasoning"},
+    )
+    _step(
+        substrate, run, tenant, 1, "aborted_hard_limit",
+        input_env={"reason": "hard_limit_exceeded:tokens", "inbound_body_len": 9},
+        output_env={"axis": "tokens", "observed": 11.0, "limit": 10.0},
+    )
+    stray = str(uuid4())
+    _step(
+        substrate, run, tenant, 2, "tenant_isolation_breach",
+        output_env={
+            "layer": "pre_flight",
+            "offending_ids": {"campaigns": ["c-1"]},
+            "counts": {"campaigns": 1},
+        },
+    )
+    _step(
+        substrate, run, tenant, 3, "tenant_isolation_breach",
+        output_env={"layer": "post_flight", "expected_tenant": tenant, "stray_tenants": [stray]},
+    )
     # webhook_received carries BOTH allow-listed keys AND the unsafe identifiers — only
     # the 4-key allowlist must survive the projection.
     _step(
@@ -354,25 +401,94 @@ def test_timeline_value_passthrough_is_exactly_the_audited_list(substrate):
     with psycopg.connect(substrate, autocommit=True) as conn, conn.cursor() as cur:
         cur.execute("SET ROLE app_vtr_role")
         cur.execute(
-            "SELECT step_kind, step_seq, input_envelope FROM vtr_step_timeline "
+            "SELECT step_seq, input_envelope, output_envelope FROM vtr_step_timeline "
             "WHERE run_id = %s ORDER BY step_seq",
             (run,),
         )
         rows = cur.fetchall()
         cur.execute("RESET ROLE")
-    by_kind = {r[0]: r[2] for r in rows}
-    for seq, kind in enumerate(full_passthrough):
-        assert by_kind[kind] == {"k": f"value-{kind}", "n": seq}, f"{kind}: values must pass"
-    # C2: exactly the 4-key allowlist (status_callback_state absent → stripped as NULL).
-    assert by_kind["webhook_received"] == {
+    by_seq = {r[0]: (r[1], r[2]) for r in rows}
+    assert by_seq[0] == (
+        {
+            "inbound_body_len": 42,
+            "trigger": "owner_substantive_message",
+            "dispatched_at": "2026-06-12T00:00:00+00:00",
+        },
+        {"reason": "substantive owner message — needs reasoning"},
+    ), "agent_invocation: exactly the writer's keys, values intact"
+    assert by_seq[1] == (
+        {"reason": "hard_limit_exceeded:tokens", "inbound_body_len": 9},
+        {"axis": "tokens", "observed": 11.0, "limit": 10.0},
+    ), "aborted_hard_limit: exactly the writer's keys, values intact"
+    assert by_seq[2] == (
+        None,  # the breach writer never sets input_envelope
+        {
+            "layer": "pre_flight",
+            "offending_ids": {"campaigns": ["c-1"]},
+            "counts": {"campaigns": 1},
+        },
+    ), "tenant_isolation_breach pre-flight shape projects exactly"
+    assert by_seq[3] == (
+        None,
+        {"layer": "post_flight", "expected_tenant": tenant, "stray_tenants": [stray]},
+    ), "tenant_isolation_breach post-flight shape projects exactly (the verified-writer keys)"
+    # webhook_received: exactly the mig-131 4-key allowlist (absent key stripped as NULL).
+    assert by_seq[50][0] == {
         "message_type": "inbound_message",
         "num_media": 0,
         "dupe_status": False,
     }
-    leaked = json.dumps(by_kind["webhook_received"])
+    leaked = json.dumps(by_seq[50][0])
     for unsafe in ("tok-body", "tok-phone", "SM-leak", "leak/media"):
         assert unsafe not in leaked, f"webhook_received leaked {unsafe!r} past the C2 allowlist"
-    assert by_kind["state_transition"] == ["state"]  # keys-only for everything else
+    assert by_seq[99][0] == ["state"]  # keys-only for everything else
+
+
+def test_timeline_injected_extra_key_never_passes_the_projection(substrate):
+    """THE mig-132 probe (plan ruling arm b: 'the assertion that matters'): a row carrying
+    a FOREIGN key in its envelope — alongside or instead of the allowlisted keys — never
+    surfaces that key (or its value) through the view, for ALL THREE newly-projected
+    kinds, in BOTH directions. A row whose envelope is ONLY foreign keys projects to the
+    empty object. This is what makes a writer-side leak structurally impossible rather
+    than merely untested."""
+    tenant = _tenant(substrate)
+    run = _run(substrate, tenant)
+    _step(
+        substrate, run, tenant, 0, "agent_invocation",
+        input_env={"inbound_body_len": 7, "smuggled_in": "Ramesh-input-leak"},
+        output_env={"reason": "ok", "smuggled_out": "Ramesh-output-leak"},
+    )
+    _step(
+        substrate, run, tenant, 1, "aborted_hard_limit",
+        input_env={"reason": "hard_limit_exceeded:tools", "smuggled_in": "Ramesh-axis-leak"},
+        output_env={"axis": "tools", "smuggled_out": "Ramesh-limit-leak"},
+    )
+    _step(
+        substrate, run, tenant, 2, "tenant_isolation_breach",
+        # the writer never sets input — an injected input of ONLY foreign keys → {}
+        input_env={"smuggled_in": "Ramesh-breach-leak"},
+        output_env={"layer": "pre_flight", "smuggled_out": "Ramesh-counts-leak"},
+    )
+    with psycopg.connect(substrate, autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute("SET ROLE app_vtr_role")
+        cur.execute(
+            "SELECT step_seq, input_envelope, output_envelope FROM vtr_step_timeline "
+            "WHERE run_id = %s ORDER BY step_seq",
+            (run,),
+        )
+        rows = cur.fetchall()
+        cur.execute("RESET ROLE")
+    by_seq = {r[0]: (r[1], r[2]) for r in rows}
+    assert by_seq[0] == ({"inbound_body_len": 7}, {"reason": "ok"})
+    assert by_seq[1] == ({"reason": "hard_limit_exceeded:tools"}, {"axis": "tools"})
+    assert by_seq[2] == ({}, {"layer": "pre_flight"}), (
+        "an injected envelope of ONLY foreign keys must project to the EMPTY object"
+    )
+    surface = json.dumps(rows, default=str)
+    assert "smuggled" not in surface, "an injected KEY name crossed the projection"
+    assert "Ramesh" not in surface and "leak" not in surface, (
+        "an injected VALUE crossed the projection"
+    )
 
 
 def test_timeline_view_shape_and_companion_view(substrate):
@@ -1121,6 +1237,195 @@ def test_f10_rerun_races_approval_arm_never_two_open_approvals(substrate, monkey
     assert alert is not None, "the run_control_rerun_overlap alert row must land in pipeline_log"
     assert alert["severity"] == "error" and alert["component"] == "run_control"
     assert alert["payload"].get("workflow_kind") == "plan_generate"
+
+
+# ---------------------------------------------------------------------------
+# VT-376 — rerun-slot lock (Cowork plan ruling 20260612T015000Z arm a; build
+# contract §B1.2 + §B1.5). The lock serializes rerun-vs-RERUN per tenant across
+# the gate-check → lineage-insert window ONLY; arm-vs-rerun stays the C1
+# detect-and-escalate guarantee above.
+# ---------------------------------------------------------------------------
+
+
+def _seed_delivered_plan(dsn: str, tenant: str) -> None:
+    """An active plan with every part delivered (bitmap 3) — the cheapest synchronous
+    rerun-arm substrate (mirrors the C1 API-test seeding)."""
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute(
+            "INSERT INTO business_plan (tenant_id, version, summary_json, roadmap_json, "
+            "fact_bundle_json, generated_by, delivered_parts) "
+            "VALUES (%s, 1, %s, '[]', '{}', 'test', 3)",
+            (tenant, Jsonb({"text": "plan"})),
+        )
+
+
+def test_rerun_double_click_serializes_exactly_one_proceeds(substrate, monkeypatch):
+    """BINDING acceptance addition #1 (build contract §B1.5 / plan ruling): two concurrent
+    rerun calls (threads + barrier) for the SAME tenant + SAME source run → EXACTLY ONE
+    proceeds; the second serializes behind the rerun-slot advisory lock and refuses 409 on
+    the in-flight gate re-check; NEVER two lineage rows for the one double-clicked source.
+
+    Determinism: the winner is parked inside its (lock-free) dispatch phase by a blocking
+    ``deliver_plan`` stub, so its lineage row is still 'running' when the loser's gate
+    re-check runs — the loser MUST observe it and refuse. Falsifiability: WITHOUT the lock
+    the barrier puts both threads through the gate-check together (neither lineage insert
+    has committed yet), both insert, both park in the stub — ZERO refusals and TWO lineage
+    rows, failing the exactly-one assertions below. The refusal itself is the
+    serialization evidence (the loser's gate read observed the winner's committed insert
+    despite the simultaneous start); the held-window lock probe is the next test."""
+    from orchestrator.business_plan import delivery
+    from orchestrator.run_control.rerun import RerunRefused, RerunResult, rerun_from
+
+    tenant = _tenant_brain_ready(substrate, whatsapp=f"+1{uuid4().int % 10**10:010d}")
+    _seed_delivered_plan(substrate, tenant)
+    source = _run_typed(substrate, tenant, "plan_deliver")
+
+    entered, release = threading.Event(), threading.Event()
+
+    def _blocking_deliver(*_a: Any, **_k: Any) -> None:
+        entered.set()  # the winner is past its locked window, parked mid-dispatch
+        assert release.wait(timeout=30), "double-click release never came"
+
+    monkeypatch.setattr(delivery, "deliver_plan", _blocking_deliver)
+
+    barrier = threading.Barrier(2)
+    results: dict[str, Any] = {}
+
+    def _click(label: str) -> None:
+        try:
+            barrier.wait(timeout=10)
+            results[label] = rerun_from(source, "deliver_parts", requested_by=str(uuid4()))
+        except RerunRefused as exc:
+            results[label] = exc
+        except Exception as exc:  # noqa: BLE001 — surface thread failures in the asserts
+            results[label] = exc
+
+    threads = [threading.Thread(target=_click, args=(label,)) for label in ("a", "b")]
+    for t in threads:
+        t.start()
+    try:
+        # The loser returns FIRST (the winner is parked in the deliver stub): wait for a
+        # refusal to land, then inspect the in-flight state BEFORE releasing the winner.
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline and not any(
+            isinstance(v, RerunRefused) for v in results.values()
+        ):
+            time.sleep(0.1)
+        assert entered.wait(timeout=20), "no rerun ever reached the dispatch phase"
+        refusals = {k: v for k, v in results.items() if isinstance(v, RerunRefused)}
+        assert len(refusals) == 1, (
+            f"exactly ONE click must refuse (the lock serialized the pair); got {results!r}"
+        )
+        loser = next(iter(refusals.values()))
+        assert loser.code == 409, f"the loser refuses 409, got {loser.code}"
+        assert "already in flight" in str(loser)
+        with psycopg.connect(substrate, autocommit=True) as conn:
+            inflight = conn.execute(
+                "SELECT count(*) FROM pipeline_runs WHERE rerun_of_run_id = %s", (source,)
+            ).fetchone()[0]
+        assert inflight == 1, f"NEVER two lineage rows for one double-click (got {inflight})"
+    finally:
+        release.set()
+        for t in threads:
+            t.join(timeout=30)
+
+    winners = [v for v in results.values() if isinstance(v, RerunResult)]
+    assert len(winners) == 1, f"exactly one click proceeds; results={results!r}"
+    assert winners[0].outcome == "completed"
+    status, meta = _rerun_row_state(substrate, winners[0].run_id)
+    assert status == "completed" and meta and meta.get("final_outcome") == "completed"
+    with psycopg.connect(substrate, autocommit=True) as conn:
+        total = conn.execute(
+            "SELECT count(*) FROM pipeline_runs WHERE rerun_of_run_id = %s", (source,)
+        ).fetchone()[0]
+    assert total == 1, "the double-click landed exactly one lineage row, start to finish"
+
+
+def test_rerun_slot_lock_held_across_gate_to_lineage_window_only(substrate, monkeypatch):
+    """Direct lock evidence (plan ruling: 'assert the lock actually serialized'): while a
+    rerun is parked INSIDE its gate→lineage window (the lineage insert is wrapped to
+    block after the real insert), a second session CANNOT acquire
+    ``pg_advisory_xact_lock(hashtext('rerun-slot:<tenant>'))`` — the try-probe returns
+    false. Once the rerun finishes (dispatch + close run OUTSIDE the lock), the same
+    probe acquires immediately — proving the lock spans exactly the pinned window and is
+    never held across dispatch work. The probe string is built from the production
+    ``_RERUN_SLOT_NS`` constant, pinning the documented namespace."""
+    from orchestrator.business_plan import delivery
+    from orchestrator.run_control import rerun as rerun_mod
+
+    tenant = _tenant_brain_ready(substrate, whatsapp=f"+1{uuid4().int % 10**10:010d}")
+    _seed_delivered_plan(substrate, tenant)
+    source = _run_typed(substrate, tenant, "plan_deliver")
+
+    monkeypatch.setattr(delivery, "deliver_plan", lambda *a, **k: None)
+
+    entered, release = threading.Event(), threading.Event()
+    real_insert = rerun_mod._insert_lineage_row
+
+    def _parked_insert(*args: Any, **kwargs: Any) -> None:
+        real_insert(*args, **kwargs)
+        entered.set()  # inside the locked window, lineage row committed
+        assert release.wait(timeout=30), "lock-probe release never came"
+
+    monkeypatch.setattr(rerun_mod, "_insert_lineage_row", _parked_insert)
+
+    def _probe() -> bool:
+        # Autocommit: the try-lock's implicit txn ends with the statement, so a SUCCESSFUL
+        # probe self-releases — probing never wedges the production lock.
+        with psycopg.connect(substrate, autocommit=True) as conn:
+            return conn.execute(
+                "SELECT pg_try_advisory_xact_lock(hashtext(%s))",
+                (f"{rerun_mod._RERUN_SLOT_NS}{tenant}",),
+            ).fetchone()[0]
+
+    result: dict[str, Any] = {}
+
+    def _run_rerun() -> None:
+        try:
+            result["rr"] = rerun_mod.rerun_from(
+                source, "deliver_parts", requested_by=str(uuid4())
+            )
+        except Exception as exc:  # noqa: BLE001 — surface in the asserts
+            result["rr"] = exc
+
+    t = threading.Thread(target=_run_rerun)
+    t.start()
+    try:
+        assert entered.wait(timeout=20), "rerun never reached the lineage insert"
+        assert _probe() is False, (
+            "the rerun-slot lock must be HELD while the rerun sits in its gate→lineage window"
+        )
+    finally:
+        release.set()
+        t.join(timeout=30)
+    rr = result.get("rr")
+    assert isinstance(rr, rerun_mod.RerunResult) and rr.outcome == "completed", f"{rr!r}"
+    assert _probe() is True, "the lock must be RELEASED once the locked window exits"
+
+
+def test_run_control_event_schemas_registered():
+    """VT-376 item 4: the run-control alerts the panel surfaces are REGISTERED
+    pipeline_log schemas. validate() passes the EXACT payload shapes the two production
+    emitters write (rerun._emit_overlap_alert / run_control._emit_degraded), so the
+    writer never annotates them ``payload_validation_failed``."""
+    from orchestrator.observability.event_schemas import EVENT_SCHEMAS, validate
+
+    assert "run_control_rerun_overlap" in EVENT_SCHEMAS
+    assert "run_control_degraded" in EVENT_SCHEMAS
+    ok, errors = validate(
+        "run_control_rerun_overlap",
+        {
+            "workflow_kind": "plan_generate",
+            "source_run_id": str(uuid4()),
+            "approval_id": None,  # optional — the emitter's no-approval-id shape
+            "final_outcome": "rerun_overlapped_open_approval",
+        },
+    )
+    assert ok, errors
+    ok, errors = validate(
+        "run_control_degraded", {"workflow_kind": "agent_dispatch", "posture": "fail_open"}
+    )
+    assert ok, errors
 
 
 # ===========================================================================

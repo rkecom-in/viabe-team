@@ -49,7 +49,12 @@ from orchestrator.privacy.pii_redactor import redact
 from orchestrator.privacy.vtr import vtr_connection
 from orchestrator.run_control import is_paused
 from orchestrator.run_control.gate_manifest import GATE_MODULES
-from orchestrator.run_control.registry import REGISTRY
+from orchestrator.run_control.registry import (
+    KIND_RERUN_POLICY,
+    REGISTRY,
+    RERUNNABLE,
+    StepEntry,
+)
 from orchestrator.run_control.rerun import RUN_TYPE_TO_KIND, RerunRefused, rerun_from
 
 logger = logging.getLogger(__name__)
@@ -685,26 +690,41 @@ def rerun(
 # the colon matches a controllable registry step. Exclude them explicitly.
 _INTERVENTION_STEP_KIND = "run_control_intervention"
 
+# VT-376: the per-kind why-copy the panel renders on NON-rerunnable kinds (B2 shows it
+# verbatim next to the absent rerun button). Pinned to the KIND_RERUN_POLICY 'forbidden'
+# set; the import-time check below keeps the two from drifting apart.
+_FORBIDDEN_RERUN_WHY = {
+    "webhook_inbound": "message-dedup semantics",
+    "trial_sweep": "duplicate-nudge risk",
+    "campaign_send": "kg-duplication",
+}
+if set(_FORBIDDEN_RERUN_WHY) != {k for k, v in KIND_RERUN_POLICY.items() if v == "forbidden"}:
+    raise RuntimeError(
+        "run_control API: _FORBIDDEN_RERUN_WHY must cover exactly the rerun-forbidden kinds"
+    )
 
-def _step_tier(run_type: Any, step_kind: Any, step_name: Any) -> str:
-    """Pure response annotation: 'controllable' iff the step is a REGISTERED controllable
-    seam, else 'observed'. NO view/RLS change — derived from the registry at read time.
 
-    'controllable' requires: (a) the step is NOT a run_control_intervention companion row,
+def _controllable_entry(run_type: Any, step_kind: Any, step_name: Any) -> StepEntry | None:
+    """The REGISTRY entry iff the step is a REGISTERED controllable seam, else None —
+    the substrate of the per-step 'tier' + 'allowed_keys' response annotations (pure
+    annotation; NO view/RLS change — derived from the registry at read time).
+
+    Controllable requires: (a) the step is NOT a run_control_intervention companion row,
     (b) the run_type maps to a known workflow_kind (RUN_TYPE_TO_KIND), and (c) the step_name's
     registry part resolves to a REGISTRY entry whose tier is 'controllable'. Everything else —
     unregistered kinds, brain micro-steps (langgraph node names), observed-tier registry
-    entries, intervention rows — is 'observed' (the honest 'not controllable' label, plan §1)."""
+    entries, intervention rows — is None ⇒ 'observed' (the honest 'not controllable' label,
+    plan §1) with allowed_keys=[]."""
     if step_kind == _INTERVENTION_STEP_KIND:
-        return "observed"
+        return None
     kind = RUN_TYPE_TO_KIND.get(run_type or "")
     if not kind or not step_name:
-        return "observed"
+        return None
     # The registry step part — bare step_name for real rows; the post-colon part defensively
     # (a non-intervention row should not be namespaced, but never index past a stray colon).
     registry_step = str(step_name).rsplit(":", 1)[-1]
     entry = REGISTRY.get((kind, registry_step))
-    return "controllable" if entry is not None and entry.tier == "controllable" else "observed"
+    return entry if entry is not None and entry.tier == "controllable" else None
 
 
 @router.get("/timeline/{run_id}")
@@ -713,17 +733,37 @@ def timeline(
     x_internal_secret: str | None = Header(default=None, alias="X-Internal-Secret"),
     x_operator_jwt: str | None = Header(default=None, alias="X-Operator-Jwt"),
 ) -> dict[str, Any]:
-    """Step timeline for one run, read as ``app_vtr_role`` through the mig-131 views ONLY
-    (keys-only envelopes by construction — the view is the PII boundary, plan §6). Active
-    workflow_controls holds ride along so the panel never shows "not paused" during a hold.
-    GET carries no body: the JWT claim id itself feeds the gate's equality leg."""
+    """Step timeline for one run, read as ``app_vtr_role`` through the mig-131/132 views
+    ONLY (keys-only / explicit-projection envelopes by construction — the view is the PII
+    boundary, plan §6). Active workflow_controls holds ride along so the panel never shows
+    "not paused" during a hold. GET carries no body: the JWT claim id itself feeds the
+    gate's equality leg.
+
+    VT-376 panel annotations (all derived at read time, no view change):
+      * per-step ``tier`` ('controllable' | 'observed') + ``allowed_keys`` — registry key
+        NAMES for controllable steps (I7: config/ID-class names, safe to show; the values
+        the VTR pins are blind-written), [] otherwise so the override dialog can never
+        render a field for a non-controllable row;
+      * run-level ``rerunnable`` (workflow_kind in RERUNNABLE) + ``forbidden_reason`` —
+        the pinned why-copy for the rerun-forbidden kinds, None when rerunnable (or when
+        the run_type maps to no known kind)."""
     _require_uuid(run_id, "run_id")
     verify_internal_secret(x_internal_secret)
     claim = verify_operator_jwt(x_operator_jwt)
     claim_operator = str(claim["operator_id"])
     pool = get_pool()
+    # Tenant derived from the run row (VT-293/294); run_type rides along for the
+    # run-level rerunnable annotation. Transport auth ran BEFORE this derive.
     with pool.connection() as conn:
-        tenant_id = _resolve_run_tenant(conn, run_id)
+        run_row = conn.execute(
+            "SELECT tenant_id, run_type FROM pipeline_runs WHERE id = %s LIMIT 1", (run_id,)
+        ).fetchone()
+    if run_row is None:
+        raise HTTPException(status_code=404, detail="run not found")
+    if not isinstance(run_row, dict):
+        run_row = dict(zip(("tenant_id", "run_type"), run_row))
+    tenant_id = str(run_row["tenant_id"])
+    workflow_kind = RUN_TYPE_TO_KIND.get(run_row["run_type"] or "")
     operator = _gate(
         x_internal_secret=x_internal_secret,
         x_operator_jwt=x_operator_jwt,
@@ -745,17 +785,38 @@ def timeline(
             (tenant_id,),
         )
         controls = [dict(r) for r in cur.fetchall()]
-    # Pure response annotation (no view/RLS change): tag each step controllable | observed so
-    # the panel can badge observed steps "not controllable" without a second round-trip.
+    # Pure response annotation (no view/RLS change): tag each step controllable | observed
+    # + its registry allowed-key NAMES so the panel can badge observed steps and build the
+    # override form without a second round-trip (VT-376).
     for s in steps:
-        s["tier"] = _step_tier(s.get("run_type"), s.get("step_kind"), s.get("step_name"))
+        entry = _controllable_entry(s.get("run_type"), s.get("step_kind"), s.get("step_name"))
+        s["tier"] = "controllable" if entry is not None else "observed"
+        s["allowed_keys"] = sorted(entry.allowed_keys) if entry is not None else []
+    rerunnable = workflow_kind in RERUNNABLE
+    # VT-376 pre-flight: the rerun dialog needs the tenant's open-approval STATE — a
+    # boolean ONLY, never the approval row (CL-390/content-leak constraint). Same helper
+    # the /rerun 409 gate uses; server 409 remains the authority, this is dialog sugar.
+    # Fail-safe TRUE on read error: the dialog warns rather than green-lighting blind.
+    try:
+        from orchestrator.agent.approval_resume import find_open_approval_for_tenant
+        from orchestrator.db import tenant_connection
+
+        with tenant_connection(uuid.UUID(str(tenant_id))) as approval_conn:
+            open_approval = find_open_approval_for_tenant(approval_conn, tenant_id) is not None
+    except Exception:  # noqa: BLE001 — pre-flight read failure must not break the timeline
+        open_approval = True
     logger.info(
-        "timeline OK operator=%s tenant=%s run=%s steps=%d active_controls=%d",
-        operator, tenant_id, run_id, len(steps), len(controls),
+        "timeline OK operator=%s tenant=%s run=%s steps=%d active_controls=%d rerunnable=%s",
+        operator, tenant_id, run_id, len(steps), len(controls), rerunnable,
     )
     return {
         "run_id": run_id,
         "tenant_id": tenant_id,
+        # VT-376 run-level rerun annotation: the button renders ONLY where rerunnable;
+        # forbidden kinds carry the why-copy (None for rerunnable / unmapped run types).
+        "rerunnable": rerunnable,
+        "forbidden_reason": None if rerunnable else _FORBIDDEN_RERUN_WHY.get(workflow_kind),
+        "open_approval": open_approval,
         "steps": steps,
         "active_controls": controls,
     }
