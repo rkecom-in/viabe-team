@@ -30,6 +30,7 @@ import {
   type VtrRunTimelineResult,
 } from '@/lib/orchestrator-client'
 import { RunControlCanvas, type TenantCanvasData } from './run-control-canvas'
+import { scopeTenantsForOperator } from './scope-tenants'
 
 export const dynamic = 'force-dynamic'
 
@@ -56,12 +57,11 @@ export default async function RunControlPage() {
   let tenants: { tenant_id: string; business_name: string | null }[] = []
   try {
     const top = await fetchTopTenants(MAX_TENANTS)
-    tenants = top.map((t) => ({ tenant_id: t.tenant_id, business_name: t.business_name }))
     // A VTR is scoped to its assigned tenants (fail-closed); VTAdmin (null) sees all.
-    if (operator.assignedTenants !== null) {
-      const allowed = new Set(operator.assignedTenants)
-      tenants = tenants.filter((t) => allowed.has(t.tenant_id))
-    }
+    tenants = scopeTenantsForOperator(
+      top.map((t) => ({ tenant_id: t.tenant_id, business_name: t.business_name })),
+      operator.assignedTenants,
+    )
   } catch (err) {
     loadError = err instanceof Error ? err.message : 'unknown error'
     console.error('RunControlPage: tenant list load failed', err)

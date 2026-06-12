@@ -17,9 +17,22 @@ toward stripping rather than fabricating):
 - Proper-noun candidates are capitalized Latin-script tokens. The LEADING run of
   capitalized words in a sentence is exempt (indistinguishable from sentence
   case — "Sharma Snacks Corner — ..." / "Reply to reviews"), so a fabricated
-  platform name is only caught mid-sentence. Devanagari has no case; ``text_hi``
-  is not scanned by ``validate_plan`` (the EN text is the canonical gate) but IS
-  cleaned by ``strip_violations``.
+  platform name is only caught mid-sentence.
+- Devanagari proper-noun bridge (VT-377 Gap-6): Devanagari has no case, so the
+  Latin leading-run/mid-sentence heuristic cannot apply. Instead, ``text_hi`` /
+  ``owner_action_hi`` Devanagari token-runs are checked against a CLOSED, versioned
+  brand lexicon (``config/devanagari_brand_lexicon.yaml``): a token that IS a known
+  brand (स्विगी, ज़ोमैटो, …) must have its Latin form grounded in the bundle, else
+  it's an ungrounded-proper-noun violation (the realistic attack: a fabricated
+  brand smuggled in Devanagari). A token NOT in the lexicon is treated as ordinary
+  Hindi prose and left untouched.
+  RESIDUAL (stated explicitly — this is a BRIDGE, not a wall): an *arbitrary*
+  Devanagari proper noun that is NOT in the lexicon (a fabricated place/brand the
+  lexicon doesn't enumerate) cannot be deterministically distinguished from
+  legitimate prose against an EN-only fact bundle — there is no transliteration
+  oracle here and no case signal. The pre-promotion Devanagari-blindness item
+  CLOSES WITH THIS BOUNDARY: the lexicon set is covered deterministically; the
+  open-world residual is accepted and documented, not silently swept under.
 - Sentence split is on ``. ! ? | ।`` with a decimal guard: a ``.`` followed by a
   digit (``4.2``) does not terminate a sentence.
 - Numbers ``1``–``6`` immediately preceded by the word "month"/"months" (or
@@ -33,18 +46,30 @@ toward stripping rather than fabricating):
 
 from __future__ import annotations
 
+import logging
 import re
 from decimal import Decimal, InvalidOperation
+from functools import lru_cache
+from pathlib import Path
 from typing import Any
 
 from orchestrator.business_plan.store import ITEM_STATUSES, OWNING_AGENTS
+
+logger = logging.getLogger(__name__)
 
 OBJECTIVE_MAX_CHARS = 120
 MONTH_MIN, MONTH_MAX = 1, 6
 
 # A numeric token: not preceded by a word char or '.', digits with optional
-# thousands-commas and a decimal tail. ₹/% are stripped by position (₹ is not \w).
+# thousands-commas and a decimal tail. ``\d`` is Unicode, so Devanagari numerals
+# (०-९, e.g. "४.९") match here too — they are folded to ASCII in ``_canon_number``
+# so "४.९" and "4.9" canonicalize identically and ground against the EN-only bundle.
+# ₹/% are stripped by position (₹ is not \w).
 _NUM_RE = re.compile(r"(?<![\w.])\d[\d,]*(?:\.\d+)?")
+# Devanagari digit -> ASCII digit fold (VT-377): bundle literals are ASCII; a plan
+# may state a grounded number in Devanagari script. Map before Decimal parsing so
+# the canonical form is script-independent.
+_DEVANAGARI_DIGITS = str.maketrans("०१२३४५६७८९", "0123456789")
 
 # Inline citation markers ([F1], [F12]) are the GROUNDING RECEIPTS the prompt requires — strip them
 # before token extraction or the extractor flags the digits/Fid of every compliant citation and every
@@ -65,15 +90,59 @@ _CAP_STOPWORDS = frozenset(
     {"i", "month", "months", "week", "weeks", "day", "days", "quarter", "quarters"}
 )
 
+# A run of one or more Devanagari letters/signs (no script case to lean on). The
+# class is the Devanagari block (U+0900..U+097F) MINUS the danda punctuation
+# (। ॥ U+0964..U+0965, already sentence terminators) and MINUS the digit block
+# (०-९ U+0966..U+096F, handled by the number path, not the proper-noun path).
+_DEVANAGARI_RUN_RE = re.compile(r"[ऀ-ॣ॰-ॿ]+")
+# config/devanagari_brand_lexicon.yaml lives at the orchestrator root /config.
+_LEXICON_YAML = Path(__file__).resolve().parents[3] / "config" / "devanagari_brand_lexicon.yaml"
+
+
+@lru_cache(maxsize=1)
+def _brand_lexicon() -> dict[str, str]:
+    """Devanagari-spelling -> canonical-Latin-form map from the versioned lexicon
+    yaml. FAIL-SOFT: a missing/malformed/unparseable lexicon yields an EMPTY map
+    (Devanagari proper-noun checking simply no-ops — validation must never break on
+    a config-load failure) but the failure is LOGGED at WARNING so it can't rot
+    silently. Cached for the process; the file is closed config (change-tracked)."""
+    try:
+        import yaml  # local import: the dep-less smoke job never reaches this path
+
+        data = yaml.safe_load(_LEXICON_YAML.read_text()) or {}
+        out: dict[str, str] = {}
+        for entry in data.get("brands") or []:
+            deva = (entry.get("deva") or "").strip()
+            grounds = (entry.get("grounds") or "").strip()
+            if deva and grounds:
+                out[deva] = grounds
+        if not out:
+            logger.warning(
+                "devanagari brand lexicon at %s loaded but empty — "
+                "Devanagari proper-noun grounding is a no-op",
+                _LEXICON_YAML,
+            )
+        return out
+    except (OSError, ValueError) as exc:  # FileNotFound, YAML errors, bad shape
+        logger.warning(
+            "devanagari brand lexicon unavailable at %s (%s) — "
+            "Devanagari proper-noun grounding disabled (fail-soft)",
+            _LEXICON_YAML,
+            exc,
+        )
+        return {}
+
 
 # --------------------------------------------------------------------------- grounding
 
 
 def _canon_number(token: str) -> str | None:
     """Normalize a numeric token to a canonical decimal string ('4.20' -> '4.2',
-    '1,200' -> '1200'); None if unparseable."""
+    '1,200' -> '1200', Devanagari '४.९' -> '4.9'); None if unparseable. Devanagari
+    numerals are folded to ASCII so script never affects grounding."""
     try:
-        return format(Decimal(token.replace(",", "")).normalize(), "f")
+        cleaned = token.translate(_DEVANAGARI_DIGITS).replace(",", "")
+        return format(Decimal(cleaned).normalize(), "f")
     except InvalidOperation:
         return None
 
@@ -167,6 +236,14 @@ def _sentence_ungrounded(sentence: str, grounding: _Grounding) -> list[tuple[str
     for word in _proper_noun_candidates(sentence):
         if not grounding.grounds_word(word):
             bad.append((word, "proper noun"))
+    # Devanagari brand bridge (VT-377): a Devanagari run that IS a known brand must
+    # have its Latin form grounded; an unknown run is ordinary prose, left alone.
+    lexicon = _brand_lexicon()
+    if lexicon:
+        for run in _DEVANAGARI_RUN_RE.findall(sentence):
+            latin = lexicon.get(run)
+            if latin is not None and not grounding.grounds_word(latin):
+                bad.append((run, "proper noun"))
     return bad
 
 

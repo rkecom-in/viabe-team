@@ -244,8 +244,8 @@ export async function forwardOnboardStep(
 // service-role client + app-side masking, the VTR ops reads call these endpoints, which read ONLY
 // the de-identified views as app_vtr_role (NO grant on raw / decrypt — VT-281). The orchestrator is
 // the ONLY door to VTR data. Fail-CLOSED: any error → [] (the surface degrades to empty, never to
-// raw). MULTI-VTR precondition (VT-281/360): the views aren't assignment-scoped yet — Phase-1 =
-// Fazal-as-VTR#1 sees all tenants; a 2nd VTR needs the views scoped first.
+// raw). Multi-VTR (VT-377/mig-134): the views ARE assignment-scoped per-operator (admin tier sees
+// all via the audited break-glass role) — the old "needs scoping first" precondition is closed.
 // ---------------------------------------------------------------------------
 
 const _VTR_READ_TIMEOUT_MS = 5000
@@ -688,8 +688,8 @@ export async function vtrBatchDrafts(
 // empty timeline) on any non-2xx or throw — the canvas degrades to empty, never
 // to raw. CL-390: log path + status ONLY — never the projection/timeline body.
 //
-// The write leg (pause / override / rerun) is VT-376; this file ships zero
-// mutating fns for run-control in Phase B by design.
+// The write leg (pause / override / rerun) ships below this read surface (the
+// VT-376 mutation fns — see the VT-376 section further down this file).
 // ---------------------------------------------------------------------------
 
 const _VTR_RC_READ_TIMEOUT_MS = 10_000

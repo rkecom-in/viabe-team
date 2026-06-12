@@ -1,11 +1,18 @@
 """VT-280 — Orchestrator → VTR daily digest ("what the agent did / needs the VTR").
 
 CL-426 closes here: the digest is the VTR's window into agent activity. CL-425 goes DB-ENFORCED on
-this path — it reads ONLY through `vtr_connection()` (SET ROLE app_vtr_role) + the VT-281
-de-identified views, so a raw-PII read is permission-denied, not merely masked. The VTR (Fazal =
-VTR#1) sees route='vtr' (knowledge-gap) escalations by kind/severity + the escalation-rate decay
-trend (VT-282 logic over the view) — never customer names/phones (those rows are owner-routed and,
-even if surfaced, the view exposes no PII column).
+this path — it reads ONLY through `vtr_admin_connection()` (SET ROLE app_vtr_admin_role) + the
+VT-281 de-identified views, so a raw-PII read is permission-denied, not merely masked (the admin
+role too has ZERO raw-table grants). The VTR (Fazal = VTR#1) sees route='vtr' (knowledge-gap)
+escalations by kind/severity + the escalation-rate decay trend (VT-282 logic over the view) —
+never customer names/phones (those rows are owner-routed and, even if surfaced, the view exposes
+no PII column).
+
+VT-377 (mig-134): the vtr_* views are now assignment-scoped per operator. This digest is the
+FLEET-WIDE Fazal=VTR#1 surface with no operator JWT in scope (scheduled DBOS trigger), so it reads
+as the ADMIN tier — the mig-134 predicate's `current_user = 'app_vtr_admin_role'` leg keeps
+all-tenants (role IS the mechanism, Cowork ruling 20260612T011000Z). A plain `vtr_connection()`
+read here would fail closed to zero rows.
 
 NO LLM (Pillar 1). Sent via the established sync `_alert_fazal` Telegram path (VTR#1 = the ops
 chat). Daily DBOS trigger; the event-path (immediate digest on a high-severity vtr escalation) is a
@@ -20,7 +27,7 @@ import logging
 from psycopg.rows import dict_row
 
 from orchestrator.owner_surface.escalation_metrics import _trend
-from orchestrator.privacy.vtr import vtr_connection
+from orchestrator.privacy.vtr import vtr_admin_connection
 
 logger = logging.getLogger(__name__)
 
@@ -29,14 +36,15 @@ _PRIOR_DAYS = 7
 
 
 def build_vtr_digest(now: dt.datetime | None = None) -> str:
-    """Compose the PII-free VTR digest text from the de-identified view ONLY (via app_vtr_role).
+    """Compose the PII-free VTR digest text from the de-identified view ONLY (via
+    app_vtr_admin_role — the fleet-wide VTR#1 tier; see module docstring, VT-377).
 
-    Reads `vtr_escalations` through `vtr_connection` — open route='vtr' counts by kind/severity +
-    the recent-vs-prior decay trend. No raw table, no PII. now=None → SQL now()."""
+    Reads `vtr_escalations` through `vtr_admin_connection` — open route='vtr' counts by
+    kind/severity + the recent-vs-prior decay trend. No raw table, no PII. now=None → SQL now()."""
     by_kind: dict[str, int] = {}
     by_severity: dict[str, int] = {}
     trend = "flat"
-    with vtr_connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+    with vtr_admin_connection() as conn, conn.cursor(row_factory=dict_row) as cur:
         # Open knowledge-gap (route='vtr') escalations, grouped — the VTR's actionable queue.
         cur.execute(
             "SELECT kind, severity, count(*) AS n FROM vtr_escalations "

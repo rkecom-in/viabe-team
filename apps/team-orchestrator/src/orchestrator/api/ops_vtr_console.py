@@ -7,7 +7,12 @@ fail-closed, denial audited); the returned VERIFIED id is the only value ever us
 audit attribution.
 
 Read surface (CL-390 PII boundary, DB-enforced): reads go through ``vtr_connection()``
-(``SET ROLE app_vtr_role``) against the mig-130 views ONLY — never raw tables. The exception-tier
+(``SET ROLE app_vtr_role``) against the mig-130 views ONLY — never raw tables. VT-377 (mig-134):
+every view read threads the VERIFIED operator id (``vtr_connection(operator_id=...)`` → the
+``app.vtr_operator_id`` GUC), so the views themselves scope to the operator's active
+operator_assignments — DB-enforced defense in depth BEHIND ``require_vtr_action``'s per-tenant
+gate (which stays, as do the single-tenant WHERE clauses). FAZAL break-glass routes to the admin
+role (all tenants via the mig-134 role leg). The exception-tier
 drill-in (``vtr-batch-drafts``, Fazal=VTR#1) additionally passes ``require_exception_tier`` and
 reads via ``SET LOCAL ROLE app_vtr_admin_role`` with the ``draft_params_reveal`` audit row INSERTed
 BEFORE the read in the SAME txn (no silent break-glass).
@@ -185,7 +190,7 @@ def vtr_plan(
         tenant_id=body.tenant_id,
         deny_action="plan_read_denied",
     )
-    with vtr_connection() as conn, conn.cursor() as cur:
+    with vtr_connection(operator_id=operator) as conn, conn.cursor() as cur:
         cur.execute(
             "SELECT tenant_id, version, summary_json, roadmap_json, generated_by, model_id, "
             "delivered_parts, delivered_at, created_at "
@@ -298,7 +303,7 @@ def vtr_agent_state(
         tenant_id=body.tenant_id,
         deny_action="agent_state_denied",
     )
-    with vtr_connection() as conn, conn.cursor() as cur:
+    with vtr_connection(operator_id=operator) as conn, conn.cursor() as cur:
         cur.execute(
             "SELECT tenant_id, tenant_name, agent, level, clean_approval_streak, "
             "lifetime_approvals, lifetime_rejections, frozen, last_regression_at, "
@@ -331,7 +336,7 @@ def vtr_draft_batches(
         deny_action="draft_batches_denied",
     )
     capped = max(1, min(body.limit, _DRAFT_BATCH_PAGE_CAP))
-    with vtr_connection() as conn, conn.cursor() as cur:
+    with vtr_connection(operator_id=operator) as conn, conn.cursor() as cur:
         cur.execute(
             "SELECT batch_id, tenant_id, tenant_name, agent, status, edit_cycles, created_at, "
             "updated_at, draft_count, pending_count, sent_count, skipped_count, halted_count, "
