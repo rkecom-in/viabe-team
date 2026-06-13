@@ -1,12 +1,14 @@
 'use client'
 
 /**
- * VT-375 (Phase B) — Run-Control canvas client components (READ-ONLY).
+ * Run-Control canvas client components (VT-375 Phase B read surface + VT-376 Phase C controls).
  *
  * Renders the tenant-tile → program-tile → step-timeline hierarchy from data fetched
  * server-side (the page owns the orchestrator secret/JWT; this component receives plain
- * de-identified projections). The ONLY interactivity is local expand/collapse — zero
- * mutating calls, zero buttons that change server state.
+ * de-identified projections). VT-376 (Phase C): the tiles/timeline render the control
+ * components (PauseReleaseControls, OverrideControl, RerunControl from ./run-control-controls)
+ * which invoke the server actions in ./actions.ts (pause/release/override/rerun) — each gated
+ * server-side. Read projections stay de-identified; mutations go through the gated actions only.
  *
  * Binding honesty copy (verbatim-or-equivalent, all visible):
  *   - observed-tier steps → badge "Observed — not controllable"
