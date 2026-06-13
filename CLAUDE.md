@@ -30,6 +30,8 @@ If the snapshot's HEAD / IN FLIGHT / NEXT ACTION doesn't match what `git log` sh
 - `apps/team-ingestion-worker/` (Python 3.13, Apify + Sarvam) — **Phase-1 `SystemExit` scaffold (VT-17), NOT deployed.** Platform ingestion actually runs IN the orchestrator via the apify method path (`integrations/methods/apify_gbp.py`, `apify_food.py` → `business_profile` aggregate + VT-325 `platform_listings` per-listing rows), not in this worker.
 - `packages/team-shared/` (cross-app types)
 
+**Positioning (Fazal 2026-06-13 — CL-440, carry this every session):** **Viabe Team is the core product** — the autonomous AI business platform that runs business tasks for owners. **Viabe Reports is an awareness feature**, not a co-equal product (top-of-funnel: build the Viabe brand, attract founders). In all external/positioning contexts, Reports is referred to as **"Viabe's Location Feasibility Report"**; Viabe Team stays **Viabe Team**. Reports remains a technically separate codebase/DB/KG — "feature" is the market framing, not a repo merge.
+
 **Binding launch milestone:** Reports-Jun15 (2026-06-15). Sprints 1+2 ship for that gate; everything else is ship-thin.
 
 **Repo:** `github.com/rkecom-in/viabe-team` (**private** — auth required for fetch/clone). Local clone at `/Users/fazalkhan/development/viabe-team`. **Main protection = an account-level ruleset; "Require status checks to pass" was turned OFF 2026-05-30 (VT-245)** — CI checks no longer block merges. The **local pre-push hook** (`scripts/git-hooks/pre-push`, install via `scripts/install-hooks.sh`) is the safety gate; CI is a non-blocking backstop on PRs. Route-via-PR remains a convention, not an enforced gate.
