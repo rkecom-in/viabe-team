@@ -66,39 +66,20 @@ def get_draft(tenant_id: UUID | str) -> dict[str, Any]:
 def confirm_draft(
     tenant_id: UUID | str,
     confirmed_fields: dict[str, Any],
-    *,
-    emit_kg: bool = True,
 ) -> None:
     """THE promotion gate. Promote ONLY the owner-confirmed (possibly owner-EDITED) fields → the
-    canonical ``business_profile`` (the fact store the agent reads), and emit a best-effort KG fact.
-    Unconfirmed / un-edited draft fields are NEVER asserted. ``confirmed_fields`` is the owner's
-    final dict (a subset of the draft, with any corrections applied)."""
+    canonical ``business_profile`` (the fact store the agent reads). Unconfirmed / un-edited draft
+    fields are NEVER asserted. ``confirmed_fields`` is the owner's final dict (a subset of the
+    draft, with any corrections applied).
+
+    VT-389: the ``business_profile_confirmed`` KG emit was REMOVED — it had no handler in
+    ``kg_population._HANDLERS`` and no consumer anywhere, so every confirm wrote a ``failed`` row
+    to ``kg_events_processed`` that the VT-307 drain re-ran forever (drained_at never set). The L1
+    ``upsert_business_profile`` above is the authoritative and only sink for confirmed fields; a
+    genuine KG projection of them would be a new handler + ``KgEventType`` constant, not this
+    consumer-less emit."""
     if not confirmed_fields:
         return
     from orchestrator.knowledge.l1 import upsert_business_profile
 
     upsert_business_profile(tenant_id, confirmed_fields)
-
-    if not emit_kg:
-        return
-    # Best-effort KG fact (service-role outbox + drain), mirroring the signup emit pattern. A KG
-    # failure must never undo a confirmed promotion (the L1 write above is the authoritative fact).
-    try:
-        from orchestrator.graph import get_pool
-        from orchestrator.knowledge.kg_emit import drain_kg_events, emit_kg_event
-
-        with get_pool().connection() as conn:
-            emit_kg_event(
-                conn,
-                "business_profile_confirmed",
-                tenant_id,
-                {"tenant_id": str(tenant_id), "confirmed_fields": sorted(confirmed_fields.keys())},
-            )
-        drain_kg_events(tenant_id)
-    except Exception:  # noqa: BLE001 — KG is downstream of the authoritative L1 promotion
-        import logging
-
-        logging.getLogger(__name__).exception(
-            "confirm_draft: KG emit failed tenant=%s (profile promotion already committed)",
-            tenant_id,
-        )

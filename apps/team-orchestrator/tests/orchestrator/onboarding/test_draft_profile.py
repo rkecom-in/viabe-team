@@ -166,16 +166,12 @@ def test_confirm_promotes_only_confirmed_fields(substrate):  # type: ignore[no-u
     )
 
     # The owner confirms a SUBSET, with an EDIT to business_name + a NEW field
-    # (city) they typed in the confirm UI. emit_kg=False to decouple from the
-    # KG outbox/drain (downstream of the authoritative L1 promotion under test).
+    # (city) they typed in the confirm UI. (VT-389: the consumer-less KG emit was
+    # removed; confirm_draft now has only the L1 sink, so there is nothing to decouple.)
     from orchestrator.onboarding.draft_profile import confirm_draft
 
     edited_name = "Owner's Real Cafe"
-    confirm_draft(
-        tenant,
-        {"business_name": edited_name, "city": "Bengaluru"},
-        emit_kg=False,
-    )
+    confirm_draft(tenant, {"business_name": edited_name, "city": "Bengaluru"})
 
     promoted = _canonical_profile_attributes(substrate.dsn, tenant)
     assert promoted is not None, "confirm_draft did not create the canonical profile"
@@ -193,6 +189,23 @@ def test_confirm_promotes_only_confirmed_fields(substrate):  # type: ignore[no-u
             f"un-confirmed draft field {unconfirmed!r} leaked into the canonical "
             f"business_profile — confirm gate breached. profile={promoted!r}"
         )
+
+    # VT-389: confirm no longer emits the consumer-less 'business_profile_confirmed' KG
+    # event — no outbox row, so the VT-307 drain can never accrue a 'failed' kg_events_processed
+    # row for it on every confirm.
+    with psycopg.connect(substrate.dsn, autocommit=True) as conn:
+        kg = conn.execute(
+            "SELECT count(*) FROM kg_events WHERE tenant_id = %s "
+            "AND event_type = 'business_profile_confirmed'",
+            (str(tenant),),
+        ).fetchone()[0]
+        failed = conn.execute(
+            "SELECT count(*) FROM kg_events_processed WHERE tenant_id = %s "
+            "AND event_type = 'business_profile_confirmed' AND status = 'failed'",
+            (str(tenant),),
+        ).fetchone()[0]
+    assert kg == 0, "VT-389: a 'business_profile_confirmed' KG event was still emitted"
+    assert failed == 0, "VT-389: a 'failed' kg_events_processed row was still written"
 
 
 # --- Test 2: the DSR hard-delete canary ------------------------------------
