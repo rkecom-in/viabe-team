@@ -1,13 +1,17 @@
 /**
- * VT-375 (Phase B) — VTR Run-Control canvas (READ-ONLY).
+ * VTR Run-Control canvas (VT-375 Phase B read surface + VT-376 Phase C controls).
  *
  * tenant tiles → per-tenant program tiles (Past / Running / Upcoming 7d) → per-run step
- * timeline. Reads ONLY the Phase-A GET surfaces via the orchestrator (vtrPrograms +
- * vtrRunTimeline) — the orchestrator is the sole door to VTR data (CL-425; fail-closed).
- * NO mutations in Phase B (pause/override/rerun = VT-376): this page ships zero POST calls
- * and zero buttons that mutate. The binding honesty copy (observed-tier non-controllable,
- * re-dispatch-not-time-travel, keys-only envelopes, pause-state-unverifiable on degrade,
- * no-ordering on concurrent holds) is rendered in the client tile/timeline components.
+ * timeline. This SERVER component reads ONLY the Phase-A GET surfaces via the orchestrator
+ * (vtrPrograms + vtrRunTimeline) — the orchestrator is the sole door to VTR data (CL-425;
+ * fail-closed) — and never holds a mutation secret itself.
+ *
+ * Mutations (VT-376 Phase C — pause/release/override/rerun) ARE wired: the client tile/
+ * timeline components (run-control-canvas → run-control-controls) call the server actions in
+ * ./actions.ts, each gated server-side (requireOpsOperator + the orchestrator auth chain).
+ * The binding honesty copy (observed-tier non-controllable, re-dispatch-not-time-travel,
+ * keys-only envelopes, pause-state-unverifiable on degrade, no-ordering on concurrent holds,
+ * overlap-escalation) is rendered in those client components.
  *
  * EN-primary (VTR operator surface, not owner-facing) — noted per the row contract §6.
  *
