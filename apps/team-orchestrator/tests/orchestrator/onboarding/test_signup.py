@@ -200,6 +200,21 @@ def test_run_signup_discovery_kick_failure_non_blocking(pool, monkeypatch):
     assert out.welcome_sent is True
 
 
+def test_run_signup_stubbed_welcome_reports_not_sent(pool):
+    """VT-390 honesty: with NO welcome_send_fn injected, the default stub sends nothing
+    (owner-WABA is gate-live), so welcome_sent must be False — not the prior True that
+    claimed a delivery never made. Signup still succeeds (the welcome is best-effort)."""
+    import uuid
+
+    from orchestrator.onboarding.signup import run_signup
+
+    out = run_signup(_valid_input(whatsapp_number=f"+9199{uuid.uuid4().int % 10**8:08d}"))
+    assert out.tenant_id is not None, "signup must still succeed with the stubbed welcome"
+    assert out.welcome_sent is False, (
+        "the stub sends nothing — welcome_sent must report False, not claim a delivery"
+    )
+
+
 def test_run_signup_duplicate_409(pool):
     from orchestrator.onboarding.signup import SignupError, run_signup
 
