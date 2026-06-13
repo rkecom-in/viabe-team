@@ -23,7 +23,8 @@
 # Supported; no entry uses it today.
 
 team_welcome:
-  audience: customer
+  audience: owner            # VT-390: OWNER-facing (signup welcome to the business owner);
+                             # was mislabeled 'customer' — variables are owner_name/trial_end_date
   agent_selectable: false
   variables:
     - owner_name

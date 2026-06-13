@@ -277,14 +277,20 @@ def _default_welcome(
     """STUB owner welcome-send seam (WABA stubbed/injectable, Cowork). The real
     owner-WABA send is gate-live (same posture as customer-comms); until then this
     logs intent. Tests inject a real recorder. NON-terminal: a failure here never
-    rolls back the signup."""
+    rolls back the signup.
+
+    VT-390: returns ``False`` — the stub sends NOTHING, so ``welcome_sent`` must report
+    that honestly (it previously returned ``True``, making the API claim a welcome was
+    delivered when none was). When the real owner-WABA send lands it returns ``True`` only
+    on a confirmed dispatch."""
     # TODO(owner-WABA): send `team_welcome` (lang SID) to the owner's number with
-    # {owner_name, trial_end_date} once the owner-WABA delivery path is live.
+    # {owner_name, trial_end_date} once the owner-WABA delivery path is live; return True
+    # only on a confirmed send.
     logger.info(
-        "signup: welcome queued tenant=%s lang=%s (owner-WABA send is gate-live)",
+        "signup: welcome NOT sent — owner-WABA send is gate-live (stub) tenant=%s lang=%s",
         tenant_id, language,
     )
-    return True
+    return False
 
 
 def run_signup(
