@@ -42,14 +42,25 @@ export async function startOwnerVerification(
   phoneE164: string,
   channel: string,
   tenantId: string | null,
+  clientIp: string | null = null,
 ): Promise<VerifyStartResult> {
   try {
+    const headers: Record<string, string> = {
+      'content-type': 'application/json',
+      'X-Internal-Secret': _secret(),
+    }
+    // VT-394: forward the request's client IP so the orchestrator-side
+    // (authoritative, global-by-construction) per-IP OTP cap can enforce on
+    // the real caller IP. The orchestrator trusts this header ONLY because the
+    // request is X-Internal-Secret-authenticated (team-web is the only caller);
+    // an unauthenticated request never reaches the limiter. team-web keeps its
+    // own thin first-layer cap (defense in depth).
+    if (clientIp) {
+      headers['X-Forwarded-For'] = clientIp
+    }
     const res = await fetch(`${_base()}/api/orchestrator/owner/verify-start`, {
       method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        'X-Internal-Secret': _secret(),
-      },
+      headers,
       body: JSON.stringify({ phone: phoneE164, channel, tenant_id: tenantId }),
       signal: AbortSignal.timeout(_TIMEOUT_MS),
     })
