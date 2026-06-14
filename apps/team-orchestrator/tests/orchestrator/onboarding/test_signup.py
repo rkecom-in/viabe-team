@@ -200,19 +200,100 @@ def test_run_signup_discovery_kick_failure_non_blocking(pool, monkeypatch):
     assert out.welcome_sent is True
 
 
-def test_run_signup_stubbed_welcome_reports_not_sent(pool):
-    """VT-390 honesty: with NO welcome_send_fn injected, the default stub sends nothing
-    (owner-WABA is gate-live), so welcome_sent must be False — not the prior True that
-    claimed a delivery never made. Signup still succeeds (the welcome is best-effort)."""
-    import uuid
+def _send_result(*, success: bool, error_code: str | None = None):
+    """Build a PII-safe SendResult for injecting into _default_welcome's send seam."""
+    from datetime import datetime, timezone
+
+    from orchestrator.utils.twilio_send import SendResult
+
+    return SendResult(
+        success=success,
+        message_sid=("SM" + "0" * 32) if success else None,
+        error_code=error_code,
+        error_message=None if success else "injected",
+        attempted_at=datetime.now(timezone.utc),
+        template_name="team_welcome",
+        recipient_phone_token="phone_tok_test",
+    )
+
+
+def test_default_welcome_calls_send_owner_template_correctly(pool, monkeypatch):
+    """VT-393: the un-injected default _default_welcome sends the real team_welcome
+    template via the owner_send seam with the owner's language + {owner_name,
+    trial_end_date}, and welcome_sent MIRRORS SendResult.success (here: True)."""
+    from datetime import datetime, timezone
+
+    from orchestrator.onboarding import signup as signup_mod
+
+    captured: dict = {}
+
+    def _spy(tenant_id, template_name, language, params, *, recipient_phone):
+        captured.update(
+            tenant_id=tenant_id, template_name=template_name, language=language,
+            params=params, recipient_phone=recipient_phone,
+        )
+        return _send_result(success=True)
+
+    # Patch the seam where _default_welcome imports it (module-local import).
+    monkeypatch.setattr(
+        "orchestrator.owner_surface.owner_send.send_owner_template", _spy
+    )
+
+    tid = uuid.uuid4()
+    trial_end = datetime(2026, 7, 14, 9, 0, tzinfo=timezone.utc)
+    sent = signup_mod._default_welcome(
+        tid, "+919812300013", "hi", "Asha Devi", trial_end,
+    )
+    assert sent is True  # mirrors SendResult.success
+    assert captured["template_name"] == "team_welcome"
+    assert captured["language"] == "hi"  # honors the owner's preferred_language
+    assert captured["recipient_phone"] == "+919812300013"  # signup number, NOT owner_phone
+    assert captured["tenant_id"] == tid
+    assert captured["params"] == {
+        "owner_name": "Asha Devi",
+        # trial_end formatted as the template expects: a human date string.
+        "trial_end_date": "2026-07-14",
+    }
+    # Sanity: the formatted date is trial_end's calendar date.
+    assert captured["params"]["trial_end_date"] == (trial_end.date()).isoformat()
+
+
+def test_run_signup_unapproved_sid_reports_not_sent_but_signup_succeeds(pool, monkeypatch):
+    """VT-390/VT-393 honesty: an unapproved SID → SendResult(success=False,
+    error_code='template_not_yet_approved') → welcome_sent=False, and the committed
+    signup STILL succeeds (the welcome is best-effort, non-terminal)."""
+    def _unapproved(*a, **k):
+        return _send_result(success=False, error_code="template_not_yet_approved")
+
+    monkeypatch.setattr(
+        "orchestrator.owner_surface.owner_send.send_owner_template", _unapproved
+    )
 
     from orchestrator.onboarding.signup import run_signup
 
     out = run_signup(_valid_input(whatsapp_number=f"+9199{uuid.uuid4().int % 10**8:08d}"))
-    assert out.tenant_id is not None, "signup must still succeed with the stubbed welcome"
+    assert out.tenant_id is not None, "signup must still succeed when the send is unapproved"
     assert out.welcome_sent is False, (
-        "the stub sends nothing — welcome_sent must report False, not claim a delivery"
+        "an unapproved SID sends nothing — welcome_sent must report False (no faked delivery)"
     )
+
+
+def test_run_signup_raising_welcome_send_is_non_terminal(pool, monkeypatch):
+    """A welcome send that RAISES (e.g. a 5xx re-raise for DBOS retry) must NEVER 500
+    the signup — the tenant is already committed; the run_signup try/except swallows it
+    and welcome_sent reports False."""
+    def _boom(*a, **k):
+        raise RuntimeError("twilio 5xx re-raised")
+
+    monkeypatch.setattr(
+        "orchestrator.owner_surface.owner_send.send_owner_template", _boom
+    )
+
+    from orchestrator.onboarding.signup import run_signup
+
+    out = run_signup(_valid_input(whatsapp_number=f"+9199{uuid.uuid4().int % 10**8:08d}"))
+    assert out.tenant_id is not None, "a raising welcome send must not fail a committed signup"
+    assert out.welcome_sent is False
 
 
 def test_run_signup_duplicate_409(pool):
