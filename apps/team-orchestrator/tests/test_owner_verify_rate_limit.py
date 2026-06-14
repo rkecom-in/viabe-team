@@ -24,6 +24,10 @@ from pathlib import Path
 
 import pytest
 
+# This file drives the owner_verify FastAPI router via TestClient — skip it on
+# the dep-less CI `test` job (no fastapi); the full orchestrator job runs it.
+pytest.importorskip("fastapi")
+
 SRC = Path(__file__).resolve().parent.parent / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
