@@ -74,6 +74,49 @@ describe('POST /api/team/auth/request-otp', () => {
     }
     expect(res.status).toBe(429)
   })
+
+  it('VT-394: maps the orchestrator authoritative http_429 → 429 (not the generic 502)', async () => {
+    // The orchestrator-side global cap trips and returns 429. team-web must
+    // surface it as 429/rate_limited ("wait"), NOT the 502 "try again" that
+    // would invite the retry the limit exists to stop.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        new Response(JSON.stringify({ detail: 'rate_limited' }), { status: 429 }),
+      ),
+    )
+    const { POST } = await import('@/app/api/team/auth/request-otp/route')
+    const res = await POST(jsonReq({ phone: '9876543210' }))
+    expect(res.status).toBe(429)
+  })
+
+  it('VT-394: per-IP key uses the trusted platform IP — a rotating spoofed XFF cannot mint fresh buckets', async () => {
+    // Fresh Response per call (a single Response body can only be read once).
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation(
+        async () =>
+          new Response(JSON.stringify({ status: 'pending' }), { status: 200 }),
+      ),
+    )
+    const { POST } = await import('@/app/api/team/auth/request-otp/route')
+    // Same trusted platform IP every request; attacker rotates the leftmost
+    // x-forwarded-for each time. The cap must STILL trip — proving the key is
+    // sourced from x-vercel-forwarded-for, not the spoofable leftmost XFF.
+    const spoofReq = (i: number): Request =>
+      new Request('http://test/api/team/auth/request-otp', {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-vercel-forwarded-for': '203.0.113.7',
+          'x-forwarded-for': `66.66.${i}.${i}, 203.0.113.7`,
+        },
+        body: JSON.stringify({ phone: `+91980000${2000 + i}` }),
+      })
+    let res!: Response
+    for (let i = 0; i < 6; i++) res = await POST(spoofReq(i))
+    expect(res.status).toBe(429)
+  })
 })
 
 describe('POST /api/team/auth/verify-otp', () => {

@@ -20,6 +20,7 @@
 
 import { NextResponse } from 'next/server'
 
+import { trustedClientIp } from '@/lib/auth/client-ip'
 import { checkOtpRateLimit } from '@/lib/auth/otp-rate-limit'
 import { normalizeOwnerPhone } from '@/lib/auth/owner-phone'
 import { startOwnerVerification } from '@/lib/owner-verify-client'
@@ -32,14 +33,6 @@ const LIVE_CHANNEL = 'whatsapp'
 interface RequestOtpBody {
   phone?: unknown
   channel?: unknown
-}
-
-function clientIp(req: Request): string {
-  return (
-    req.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ??
-    req.headers.get('x-real-ip')?.trim() ??
-    'unknown'
-  )
 }
 
 export async function POST(req: Request): Promise<NextResponse> {
@@ -63,7 +56,10 @@ export async function POST(req: Request): Promise<NextResponse> {
   }
 
   // Cowork D4: per-IP AND per-phone cap. Both must pass.
-  const rl = checkOtpRateLimit(clientIp(req), phoneE164)
+  // VT-394: key on the platform-trusted client IP, not the spoofable leftmost
+  // XFF — see lib/auth/client-ip.
+  const ip = trustedClientIp(req)
+  const rl = checkOtpRateLimit(ip, phoneE164)
   if (!rl.allowed) {
     // PII-safe: log only the dimension that tripped.
     console.warn(`[request-otp] rate limited (blockedBy=${rl.blockedBy})`)
@@ -73,7 +69,9 @@ export async function POST(req: Request): Promise<NextResponse> {
     )
   }
 
-  const result = await startOwnerVerification(phoneE164, channel, null)
+  // VT-394: forward the same client IP to the orchestrator so its authoritative
+  // (global-by-construction) per-IP cap enforces on the real caller IP.
+  const result = await startOwnerVerification(phoneE164, channel, null, ip)
   if (!result.ok) {
     // Channel gated / orchestrator error — surface a generic failure, no PII.
     console.warn(`[request-otp] verify-start failed (reason=${result.reason})`)
@@ -82,6 +80,18 @@ export async function POST(req: Request): Promise<NextResponse> {
       return NextResponse.json(
         { error: 'this channel is unavailable' },
         { status: 400 },
+      )
+    }
+    if (result.reason === 'http_429') {
+      // VT-394: the orchestrator-side authoritative (global-by-construction)
+      // per-IP/per-phone cap tripped — this is the exact multi-instance-bypass
+      // case the orchestrator limiter exists to catch. Surface it as the SAME
+      // 429 the team-web first-layer cap returns so the client maps it to
+      // "wait", not the 502 "try again" that would invite the retry the limit
+      // is meant to stop.
+      return NextResponse.json(
+        { error: 'too many requests — try again later' },
+        { status: 429 },
       )
     }
     return NextResponse.json(
