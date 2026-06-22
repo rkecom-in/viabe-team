@@ -274,23 +274,40 @@ def _default_welcome(
     tenant_id: UUID, whatsapp_number: str, language: str,
     owner_name: str, trial_end: datetime,
 ) -> bool:
-    """STUB owner welcome-send seam (WABA stubbed/injectable, Cowork). The real
-    owner-WABA send is gate-live (same posture as customer-comms); until then this
-    logs intent. Tests inject a real recorder. NON-terminal: a failure here never
-    rolls back the signup.
+    """The real owner welcome-send seam (VT-393). Sends the Meta-approved
+    ``team_welcome`` template (lang SID — EN/HI) to the owner's signup number via
+    the owner-utility send seam, with {owner_name, trial_end_date}. Tests inject a
+    recorder via ``welcome_send_fn``. NON-terminal: a failure here never rolls back
+    the signup (the caller's try/except keeps a committed signup from 500-ing).
 
-    VT-390: returns ``False`` — the stub sends NOTHING, so ``welcome_sent`` must report
-    that honestly (it previously returned ``True``, making the API claim a welcome was
-    delivered when none was). When the real owner-WABA send lands it returns ``True`` only
-    on a confirmed dispatch."""
-    # TODO(owner-WABA): send `team_welcome` (lang SID) to the owner's number with
-    # {owner_name, trial_end_date} once the owner-WABA delivery path is live; return True
-    # only on a confirmed send.
-    logger.info(
-        "signup: welcome NOT sent — owner-WABA send is gate-live (stub) tenant=%s lang=%s",
-        tenant_id, language,
+    VT-390 honesty invariant: ``welcome_sent`` (this return) is True ONLY on a
+    confirmed send (``SendResult.success``). An unapproved SID → success=False /
+    ``template_not_yet_approved`` → returns False + logged; never claims a delivery
+    that did not happen. The recipient is the signup ``whatsapp_number`` (NOT
+    tenants.owner_phone), so this is independent of the owner_phone-NULL blocker."""
+    from orchestrator.owner_surface.owner_send import send_owner_template
+
+    # The team_welcome {{2}} trial-end date — formatted as the template expects (a
+    # human date string). Matches trial_sweep's owner-notify formatting for the same
+    # variable family (trial_end.date().isoformat(), e.g. "2026-07-14").
+    trial_end_date = trial_end.date().isoformat()
+    result = send_owner_template(
+        tenant_id,
+        "team_welcome",
+        language,
+        {"owner_name": owner_name, "trial_end_date": trial_end_date},
+        recipient_phone=whatsapp_number,
     )
-    return False
+    if not result.success:
+        logger.warning(
+            "signup: welcome NOT sent tenant=%s lang=%s (error_code=%s)",
+            tenant_id, language, result.error_code,
+        )
+    else:
+        logger.info(
+            "signup: welcome sent tenant=%s lang=%s", tenant_id, language,
+        )
+    return result.success
 
 
 def run_signup(

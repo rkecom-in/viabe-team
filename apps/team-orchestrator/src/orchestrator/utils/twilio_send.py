@@ -167,6 +167,7 @@ def send_template_message(
     params: dict[str, Any],
     *,
     recipient_phone: str | None = None,
+    language: str = "en",
 ) -> SendResult:
     """Send a Meta-approved WhatsApp template via Twilio. See the module docstring.
 
@@ -175,12 +176,14 @@ def send_template_message(
     is re-raised so the DBOS step retries.
 
     SID resolution is delegated to templates_registry.resolve() (D1, VT-163).
-    Language defaults to "en" — the pre-VT-163 implicit behaviour.
+    ``language`` selects the template's language variant SID; it defaults to "en"
+    (the pre-VT-163 implicit behaviour — every existing caller keeps "en"). VT-393:
+    the owner welcome honors the owner's preferred_language (team_welcome has EN+HI).
     """
     # Resolve via registry (D1 migration). Raises UnknownTemplateError (== TemplateNotConfigured)
     # for unknown names, UnknownLanguageVariantError for missing language variants.
     try:
-        entry = _registry_resolve(template_name, "en")
+        entry = _registry_resolve(template_name, language)
     except UnknownTemplateError:
         raise  # propagates as TemplateNotConfigured (alias)
 
