@@ -10,6 +10,19 @@
 
 **Source authority:** Meta-approval status owned by Fazal (vendor relationship). Twilio Content SIDs are the canonical runtime identifier — assigned when the template is uploaded to Twilio Content API after Meta approval. The `template_name` is the human-readable handle used in code.
 
+## WhatsApp Senders (the sending numbers)
+
+The number the runtime sends FROM (`TEAM_TWILIO_FROM_NUMBER`) — a Twilio WhatsApp Sender resource, per env. Recorded here so the sender identity isn't lost in the consoles.
+
+| Env | Display name | Number | Twilio sender SID | Meta phone_number_id | Status |
+|---|---|---|---|---|---|
+| **dev** | **Viabe** | `+918108084223` | `XE5dca19b08f04ba5e11d69735c6969a9d` | `1166430683220266` | ONLINE — wired 2026-06-16 |
+| dev (prev) | — | `+18704122234` | `XE47d50f0ba019ad3ad3cc252e511a2e9f` | — | ONLINE — superseded as the dev FROM |
+
+Notes (dev wiring, 2026-06-16, CL-431-autonomous):
+- Dev `TEAM_TWILIO_FROM_NUMBER` = `+918108084223` — **plain E.164, NO `whatsapp:` prefix**. The send path (`utils/twilio_send.py`) passes both `from_` and `to=` raw (no prefix added anywhere in code), matching the prior ONLINE sender's plain form. A `whatsapp:`-prefixed `from_` against a raw `to=` would Twilio-21910 channel-mismatch. (Open: the real send/receive is canary-gated — flip to the `whatsapp:` prefix only if the canary proves it's required, in which case `to=` must be prefixed too.)
+- Dev **inbound** callback (Twilio sender webhook) → team-web `…/api/team/twilio/webhook` on `viabe-team-web-dev`, behind a Vercel **Protection-Bypass-for-Automation** token. The bypass secret is kept OUT of the repo — it lives only in the Twilio sender callback URL and in `TEAM_TWILIO_WEBHOOK_URL` (Vercel `viabe-team-web-dev`, Production). Twilio signs the full callback URL incl. the bypass query param, so those two must stay byte-identical.
+
 ## Why this file exists in this place
 
 WhatsApp templates have a registration lifecycle outside the codebase: author → Meta review → approve → upload to Twilio → get a SID. The SID is the only thing the runtime cares about. Without a durable repo-side record of the `template_name` → `SID` mapping:
