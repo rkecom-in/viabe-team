@@ -159,3 +159,52 @@ def test_recipient_phone_is_tokenised_in_result(send_ctx, twilio_create):
     )
     assert result.recipient_phone_token.startswith("phone_tok_")
     assert phone not in result.recipient_phone_token
+
+
+# --------------------------------------------------------------------------- #
+# VT-393: the optional ``language`` param. Backward-compat (every existing
+# caller keeps "en") + a ``hi`` call resolves the Hindi variant SID.
+# --------------------------------------------------------------------------- #
+
+
+def test_language_param_defaults_to_en_when_omitted(send_ctx, twilio_create, monkeypatch):
+    """Backward-compat: a caller that omits ``language`` resolves the "en" variant —
+    the pre-VT-393 implicit behaviour. The resolver is spied to assert the language
+    threaded into _registry_resolve is exactly "en"."""
+    from orchestrator.utils import twilio_send
+
+    seen: list[str] = []
+    real_resolve = twilio_send._registry_resolve
+
+    def _spy(name, lang):
+        seen.append(lang)
+        return real_resolve(name, lang)
+
+    monkeypatch.setattr(twilio_send, "_registry_resolve", _spy)
+    twilio_send.send_template_message(
+        uuid4(), "team_status_ping", {}, recipient_phone="+919812300011"
+    )
+    assert seen == ["en"], "an omitted language must resolve the 'en' variant"
+
+
+def test_language_param_resolves_hi_variant_sid(send_ctx, twilio_create):
+    """A ``language="hi"`` call resolves the Hindi variant SID (team_welcome has both
+    EN+HI). The resolved hi content_sid (NOT the en one) is what Twilio is asked to send."""
+    from orchestrator.templates_registry import resolve
+    from orchestrator.utils.twilio_send import send_template_message
+
+    en_sid = resolve("team_welcome", "en").content_sid
+    hi_sid = resolve("team_welcome", "hi").content_sid
+    assert en_sid and hi_sid and en_sid != hi_sid  # the yaml has two distinct SIDs
+
+    result = send_template_message(
+        uuid4(),
+        "team_welcome",
+        {"owner_name": "Asha", "trial_end_date": "2026-07-14"},
+        recipient_phone="+919812300012",
+        language="hi",
+    )
+    assert result.success is True
+    # The hi (not en) SID is the content_sid Twilio was asked to send.
+    assert twilio_create.call_args.kwargs["content_sid"] == hi_sid
+    assert twilio_create.call_args.kwargs["content_sid"] != en_sid
