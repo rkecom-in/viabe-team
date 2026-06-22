@@ -27,6 +27,7 @@ from typing import Any
 from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel
 
+from orchestrator.auth.otp_rate_limit import check_otp_rate_limit
 from orchestrator.auth.twilio_verify import (
     ChannelGatedError,
     InvalidChannelError,
@@ -62,9 +63,25 @@ def _verify_internal_secret(provided: str | None) -> bool:
 def verify_start(
     body: VerifyStartBody,
     x_internal_secret: str | None = Header(default=None, alias="X-Internal-Secret"),
+    x_forwarded_for: str | None = Header(default=None, alias="X-Forwarded-For"),
 ) -> dict[str, Any]:
     if not _verify_internal_secret(x_internal_secret):
         raise HTTPException(status_code=403, detail="X-Internal-Secret mismatch")
+    # VT-394 — authoritative per-IP + per-phone request-OTP cap (Direction B),
+    # checked BEFORE the Twilio Verify call. The client IP is forwarded by the
+    # internal-secret-authenticated team-web caller (X-Forwarded-For); we trust
+    # it ONLY here, past the secret check above. team-web keeps its own thin
+    # first-layer cap (defense in depth). Fail-OPEN lives inside the limiter.
+    # PII-safe: the limiter hashes the IP + phone (CL-390); we never log them.
+    client_ip = (x_forwarded_for or "").split(",")[0].strip() or "unknown"
+    rl = check_otp_rate_limit(client_ip, body.phone)
+    if not rl.allowed:
+        logger.warning(
+            "[verify-start] rate limited (blocked_by=%s)", rl.blocked_by
+        )
+        raise HTTPException(
+            status_code=429, detail="too many requests — try again later"
+        )
     try:
         result = start_verification(
             body.phone, body.channel, tenant_id=body.tenant_id

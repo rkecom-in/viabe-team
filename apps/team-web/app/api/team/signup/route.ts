@@ -7,20 +7,13 @@
  */
 import { NextResponse } from 'next/server'
 
+import { trustedClientIp } from '@/lib/auth/client-ip'
 import { checkSignupRateLimit } from '@/lib/auth/otp-rate-limit'
 import { normalizeOwnerPhone } from '@/lib/auth/owner-phone'
 import { verifyVerifiedNumberToken } from '@/lib/auth/verified-number-token'
 
 const BASE = process.env.TEAM_ORCHESTRATOR_URL ?? 'http://localhost:8001'
 const _secret = (): string => process.env.INTERNAL_API_SECRET ?? ''
-
-function clientIp(req: Request): string {
-  return (
-    req.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ??
-    req.headers.get('x-real-ip')?.trim() ??
-    'unknown'
-  )
-}
 
 export async function POST(request: Request): Promise<Response> {
   // VT-96/VT-326: inert-by-construction. The deployed proxy 404s everywhere until
@@ -57,7 +50,7 @@ export async function POST(request: Request): Promise<Response> {
 
   // VT-326 per-IP throttle — a backstop behind the OTP gate (Cowork A3: keep 5/15, the
   // OTP proof-of-control is the primary anti-flood; CGNAT makes a tighter cap harmful).
-  if (!checkSignupRateLimit(clientIp(request)).allowed) {
+  if (!checkSignupRateLimit(trustedClientIp(request)).allowed) {
     return NextResponse.json({ detail: { code: 'rate_limited' } }, { status: 429 })
   }
 
