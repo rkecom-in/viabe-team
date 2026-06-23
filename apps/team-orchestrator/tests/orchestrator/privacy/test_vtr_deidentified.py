@@ -194,6 +194,7 @@ def test_vtr_role_grants_are_exactly_the_de_identified_views(substrate) -> None:
         ("vtr_draft_batches", "SELECT"),
         ("vtr_step_timeline", "SELECT"),
         ("vtr_workflow_controls", "SELECT"),
+        ("vtr_tenant_profile", "SELECT"),  # VT-405 (mig 137): signup + discovered draft, keys-only confirm
     }, f"app_vtr_role grants drifted beyond the de-identified views: {granted}"
 
 
@@ -218,4 +219,5 @@ def test_vtr_admin_role_grants_are_exactly_the_exception_tier(substrate) -> None
         ("vtr_draft_batches", "SELECT"),
         ("vtr_step_timeline", "SELECT"),
         ("vtr_workflow_controls", "SELECT"),
+        ("vtr_tenant_profile", "SELECT"),  # VT-405 (mig 137)
     }, f"app_vtr_admin_role grants drifted: {granted}"

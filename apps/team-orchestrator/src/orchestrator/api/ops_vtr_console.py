@@ -109,6 +109,11 @@ class VtrBatchDraftsBody(BaseModel):
     # Exception tier (Fazal=VTR#1) only; tenant derived from batch_id (VT-293/294).
 
 
+class VtrTenantProfileBody(BaseModel):
+    operator_id: str
+    tenant_id: str
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -317,6 +322,46 @@ def vtr_agent_state(
         operator, body.tenant_id, len(agents),
     )
     return {"agents": agents}
+
+
+@router.post("/api/orchestrator/ops/vtr-tenant-profile")
+def vtr_tenant_profile(
+    body: VtrTenantProfileBody,
+    x_internal_secret: str | None = Header(default=None, alias="X-Internal-Secret"),
+    x_operator_jwt: str | None = Header(default=None, alias="X-Operator-Jwt"),
+) -> dict[str, Any]:
+    """VT-405 Part A — one tenant's signup fields + auto-discovered draft + keys-only confirmation
+    status: EXACTLY the vtr_tenant_profile view columns (non-PII; WhatsApp masked to last-4 AT the
+    view, confirmed profile is keys-only). Read-only; the view self-scopes to the operator's active
+    assignments via app_vtr_operator() (DB floor under the _gate per-tenant check). A null profile =
+    not visible to this operator / no such tenant — the UI renders the empty/denied state."""
+    _require_uuid(body.tenant_id, "tenant_id")
+    operator = _gate(
+        x_internal_secret=x_internal_secret,
+        x_operator_jwt=x_operator_jwt,
+        body_operator_id=body.operator_id,
+        tenant_id=body.tenant_id,
+        deny_action="tenant_profile_read_denied",
+    )
+    with vtr_connection(operator_id=operator) as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT tenant_id, business_name, phase, plan_tier, business_type, locality, "
+            "city_tier, language_preference, preferred_language, signed_up_at, trial_started_at, "
+            "phase_entered_at, owner_name, whatsapp_last4, draft_attributes, draft_provenance, "
+            "draft_created_at, draft_updated_at, onboarding_status, onboarding_queue_len, "
+            "confirmed_fields "
+            "FROM vtr_tenant_profile WHERE tenant_id = %s",
+            (body.tenant_id,),
+        )
+        rows = [dict(r) for r in cur.fetchall()]
+    profile = rows[0] if rows else None
+    logger.info(
+        "vtr_tenant_profile OK operator=%s tenant=%s found=%s",
+        operator,
+        body.tenant_id,
+        profile is not None,
+    )
+    return {"profile": profile}
 
 
 @router.post("/api/orchestrator/ops/vtr-draft-batches")

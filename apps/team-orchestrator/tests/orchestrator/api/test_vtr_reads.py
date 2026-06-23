@@ -218,3 +218,80 @@ def test_vtr_read_invalid_jwt_403(substrate, monkeypatch):
             x_operator_jwt="not-a-jwt",
         )
     assert exc.value.status_code == 403
+
+
+# --- VT-405 Part A: vtr_tenant_profile -----------------------------------------------------------
+
+
+def _seed_profile_tenant(dsn: str) -> str:
+    from psycopg.rows import dict_row
+
+    # Unique number (tenants.whatsapp_number is UNIQUE) but a fixed last-4 (3598) for the mask assert.
+    phone = f"+919{uuid4().int % 10**5:05d}3598"
+    with psycopg.connect(dsn, autocommit=True, row_factory=dict_row) as conn:
+        tid = str(
+            conn.execute(
+                "INSERT INTO tenants (business_name, plan_tier, phase, business_type, "
+                "whatsapp_number, locality, city_tier, owner_contact, signed_up_at) "
+                "VALUES ('VT-405 Biz','founding','trial','retail',%s,'Mumbai',"
+                "'tier_1','Asha Owner', now()) RETURNING id",
+                (phone,),
+            ).fetchone()["id"]
+        )
+        conn.execute(
+            "INSERT INTO business_profile_draft (tenant_id, attributes, provenance) VALUES "
+            "(%s, '{\"about\":\"a shop\",\"rating\":4.7}'::jsonb, "
+            "'{\"about\":{\"source\":\"website\"},\"rating\":{\"source\":\"gbp\"}}'::jsonb)",
+            (tid,),
+        )
+    return tid
+
+
+def test_vtr_tenant_profile_scoped_masked_non_pii(substrate, monkeypatch):
+    """The profile read returns EXACTLY the view columns: WhatsApp masked to last-4 (raw number
+    absent), owner name + discovered draft present, confirmation keys-only. Assignment-scoped."""
+    _env(monkeypatch)
+    from orchestrator.api.ops_vtr_console import VtrTenantProfileBody, vtr_tenant_profile
+
+    tid = _seed_profile_tenant(substrate)
+    op = str(uuid4())
+    _assign(substrate, op, tid)
+    out = vtr_tenant_profile(
+        VtrTenantProfileBody(operator_id=op, tenant_id=tid),
+        x_internal_secret=_SECRET,
+        x_operator_jwt=_op_jwt(op),
+    )
+    p = out["profile"]
+    assert p is not None
+    assert p["business_name"] == "VT-405 Biz"
+    assert p["whatsapp_last4"] == "3598"  # masked at the view
+    assert "whatsapp_number" not in p  # the raw PII column never surfaces
+    assert p["owner_name"] == "Asha Owner"
+    assert p["draft_attributes"]["rating"] == 4.7
+    assert p["draft_provenance"]["about"]["source"] == "website"
+    assert set(p) == {
+        "tenant_id", "business_name", "phase", "plan_tier", "business_type", "locality",
+        "city_tier", "language_preference", "preferred_language", "signed_up_at", "trial_started_at",
+        "phase_entered_at", "owner_name", "whatsapp_last4", "draft_attributes", "draft_provenance",
+        "draft_created_at", "draft_updated_at", "onboarding_status", "onboarding_queue_len",
+        "confirmed_fields",
+    }
+
+
+def test_vtr_tenant_profile_unassigned_403(substrate, monkeypatch):
+    """An operator with no active assignment to the tenant is denied at the gate (require_vtr_action
+    operator_assigned, fail-closed + audited) — defense-in-depth ABOVE the view's own scope predicate."""
+    _env(monkeypatch)
+    from fastapi import HTTPException
+
+    from orchestrator.api.ops_vtr_console import VtrTenantProfileBody, vtr_tenant_profile
+
+    tid = _seed_profile_tenant(substrate)
+    op = str(uuid4())  # deliberately NOT assigned
+    with pytest.raises(HTTPException) as exc:
+        vtr_tenant_profile(
+            VtrTenantProfileBody(operator_id=op, tenant_id=tid),
+            x_internal_secret=_SECRET,
+            x_operator_jwt=_op_jwt(op),
+        )
+    assert exc.value.status_code == 403

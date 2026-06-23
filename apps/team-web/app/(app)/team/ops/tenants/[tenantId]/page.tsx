@@ -1,14 +1,19 @@
-/** Ops Console — per-tenant dashboard (VT-123 view 2 of 3). */
+/**
+ * Ops Console — per-tenant view (VT-405 Part A: the discovery panel the operator LANDS on).
+ *
+ * Replaces the VT-123 dashboard that gated with requireFazal() ONLY (no assignment scoping — a
+ * cross-tenant exposure) and rendered unscoped, unstyled tables. Now: requireOpsOperator +
+ * canAccessTenant (app leg) → vtrTenantProfile (endpoint gate + vtr_connection view, the PII-wall)
+ * → TenantDiscoveryPanel (signup + auto-discovered draft + confirmation status, non-PII).
+ */
 
-import { notFound, redirect } from 'next/navigation'
+import { redirect } from 'next/navigation'
 
-import { requireFazal, UnauthorizedError } from '@/lib/auth/require-fazal'
-import {
-  fetchPrivacyAudit,
-  fetchRecentCampaigns,
-  fetchTenantProfile,
-  fetchTenantTimeline,
-} from '@/lib/ops/data-access'
+import { UnauthorizedError } from '@/lib/auth/require-fazal'
+import { requireOpsOperator } from '@/lib/auth/require-ops-operator'
+import { canAccessTenant } from '@/lib/ops/assignments'
+import { TenantDiscoveryPanel } from '@/components/ops/tenant-discovery-panel'
+import { vtrTenantProfile } from '@/lib/orchestrator-client'
 
 export const dynamic = 'force-dynamic'
 
@@ -17,118 +22,49 @@ interface PageProps {
 }
 
 export default async function TenantDashboardPage({ params }: PageProps) {
+  const { tenantId } = await params
+  let operator: Awaited<ReturnType<typeof requireOpsOperator>>
   try {
-    await requireFazal()
+    operator = await requireOpsOperator()
   } catch (err) {
-    if (err instanceof UnauthorizedError) redirect('/team/ops/login?next=/team/ops')
+    if (err instanceof UnauthorizedError) redirect(`/team/ops/login?next=/team/ops/tenants/${tenantId}`)
     throw err
   }
-  const { tenantId } = await params
 
-  const [profile, timeline, campaigns, audit] = await Promise.all([
-    fetchTenantProfile(tenantId),
-    fetchTenantTimeline(tenantId, 30),
-    fetchRecentCampaigns(tenantId, 10),
-    fetchPrivacyAudit(tenantId, 20),
-  ])
+  // App-leg scoping (VT-405 §1.4): a VTR may only view assigned tenants; VTAdmin (assignedTenants
+  // null) passes. Defense-in-depth ABOVE the endpoint's require_vtr_action gate + the view's
+  // app_vtr_operator() assignment predicate. Never trust a client scoping field (VT-293/294).
+  if (!canAccessTenant(operator.assignedTenants, tenantId)) {
+    return (
+      <main
+        className="ops-tenant min-h-screen bg-gray-50 p-6"
+        data-area="team-ops-tenant"
+        data-tenant-id={tenantId}
+      >
+        <section className="rounded-lg border border-gray-200 bg-white p-6 shadow-sm">
+          <p className="text-sm text-gray-600">You are not assigned to this tenant.</p>
+        </section>
+      </main>
+    )
+  }
 
-  if (!profile) notFound()
+  const { ok, profile, reason } = await vtrTenantProfile(operator.operatorId, tenantId)
 
   return (
     <main
-      className="ops-tenant bg-gray-50 min-h-screen p-6 space-y-6"
+      className="ops-tenant min-h-screen space-y-6 bg-gray-50 p-6"
       data-area="team-ops-tenant"
       data-tenant-id={tenantId}
     >
-      <header className="bg-white rounded-lg shadow-sm border border-gray-200 p-6 space-y-2">
-        <h1 className="text-2xl font-semibold text-gray-900">
-          Tenant — {profile.business_name ?? profile.tenant_id}
-        </h1>
-        <p className="text-sm text-gray-600">
-          phase: {profile.phase} | plan: {profile.plan_tier} | tenant_id:{' '}
-          <code className="font-mono text-xs text-gray-700">{profile.tenant_id}</code>
-        </p>
-      </header>
-
-      <section data-section="timeline">
-        <h2>30-day pipeline runs ({timeline.length})</h2>
-        <table>
-          <thead>
-            <tr>
-              <th>Run</th>
-              <th>Status</th>
-              <th>Trigger</th>
-              <th>Started</th>
-              <th>Ended</th>
-              <th>Cost (paise)</th>
-              <th>Steps</th>
-            </tr>
-          </thead>
-          <tbody>
-            {timeline.map((r) => (
-              <tr key={r.run_id}>
-                <td>
-                  <a href={`/team/ops/runs/${r.run_id}`}>{r.run_id}</a>
-                </td>
-                <td>{r.status}</td>
-                <td>{r.trigger_kind ?? '—'}</td>
-                <td>{new Date(r.started_at).toLocaleString()}</td>
-                <td>{r.ended_at ? new Date(r.ended_at).toLocaleString() : '—'}</td>
-                <td>{r.total_cost_paise ?? '—'}</td>
-                <td>{r.step_count ?? '—'}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </section>
-
-      <section data-section="campaigns">
-        <h2>Recent campaigns</h2>
-        <table>
-          <thead>
-            <tr>
-              <th>Campaign</th>
-              <th>Status</th>
-              <th>Generated</th>
-            </tr>
-          </thead>
-          <tbody>
-            {campaigns.map((c) => (
-              <tr key={c.campaign_id}>
-                <td>{c.campaign_id}</td>
-                <td>{c.status}</td>
-                <td>{new Date(c.generated_at).toLocaleString()}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </section>
-
-      <section data-section="privacy-audit">
-        <h2>Privacy audit log</h2>
-        <table>
-          <thead>
-            <tr>
-              <th>Event</th>
-              <th>Actor</th>
-              <th>When</th>
-              <th>Payload</th>
-            </tr>
-          </thead>
-          <tbody>
-            {audit.map((a) => (
-              <tr key={a.id}>
-                <td>{a.event_type}</td>
-                <td>{a.actor ?? '—'}</td>
-                <td>{new Date(a.created_at).toLocaleString()}</td>
-                <td>
-                  <code>{JSON.stringify(a.payload)}</code>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </section>
+      {!ok || !profile ? (
+        <section className="rounded-lg border border-gray-200 bg-white p-6 shadow-sm">
+          <p data-section-error className="text-sm text-red-700">
+            {!ok ? `couldn't load this tenant: ${reason}` : 'tenant not found, or not visible to you'}
+          </p>
+        </section>
+      ) : (
+        <TenantDiscoveryPanel profile={profile} />
+      )}
     </main>
   )
 }
