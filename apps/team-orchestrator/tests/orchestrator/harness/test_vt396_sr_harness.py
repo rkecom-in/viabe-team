@@ -143,7 +143,7 @@ def test_optout_removes_from_detection(substrate, monkeypatch):  # type: ignore[
     harness.seed_synthetic_customer(tenant, phone, consent_version=_DEV_VERSION)
     assert len(harness.detect_for_tenant(tenant)) == 1
 
-    assert harness.opt_out_synthetic(tenant, phone) is True
+    assert harness.simulate_customer_stop(tenant, phone) is True
     assert harness.detect_for_tenant(tenant) == []
 
 

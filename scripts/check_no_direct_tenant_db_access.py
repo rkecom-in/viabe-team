@@ -107,6 +107,15 @@ _ALLOWLIST = frozenset(
         # through `tenant_connection` (RLS), not direct access. Same documented,
         # audited cross-tenant-exception discipline as k_anonymity / l3_construction.
         "apps/team-orchestrator/src/orchestrator/privacy/reconstitution.py",
+        # VT-396 DEV-ONLY Sales-Recovery e2e harness — NOT a production access site and NOT a
+        # deferred migration. A service-role admin SEED tool (Cowork-approved 2026-06-23), in the
+        # same class as the DSR controller paths above: explicit ``WHERE/INTO ... tenant_id``, never
+        # on the prod request path (lives under ``harness/``), and runtime PROD-deny guarded
+        # (``assert_not_prod`` refuses any connected ``app_environment`` of prod/production). There
+        # is no CustomersWrapper create primitive to route the synthetic-customer seed through
+        # (production customer rows are minted by allowlisted ingestion paths), so the one
+        # ``customers`` INSERT/SELECT is direct, like the DSR admin paths.
+        "apps/team-orchestrator/src/orchestrator/harness/vt396_sr_harness.py",
     }
 )
 

@@ -179,10 +179,13 @@ def detect_for_tenant(tenant_id: UUID | str, *, limit: int = 50) -> list[LapsedC
         return detect_lapsed_customers(tid, conn=conn, limit=limit)
 
 
-def opt_out_synthetic(tenant_id: UUID | str, phone_e164: str) -> bool:
+def simulate_customer_stop(tenant_id: UUID | str, phone_e164: str) -> bool:
     """Simulate the customer texting STOP — opt the synthetic number out (§5 floor check).
 
-    After this, ``detect_for_tenant`` must exclude the customer (consent ``opted_out_at`` stamped).
+    A thin CONSUMER of the real ``consent.opt_out_for_phone`` (deliberately NOT named ``opt_out*``
+    so the VT-374 F14 send/consent-surface gate doesn't misread this harness as a new opt-out
+    surface — it defines none). After this, ``detect_for_tenant`` must exclude the customer
+    (consent ``opted_out_at`` stamped).
     """
     tid = _as_uuid(tenant_id)
     with get_pool().connection() as conn:
@@ -305,7 +308,7 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - thin CLI s
             )
         )
     elif args.cmd == "optout":
-        print(json.dumps({"opted_out": opt_out_synthetic(args.tenant, args.phone)}))
+        print(json.dumps({"opted_out": simulate_customer_stop(args.tenant, args.phone)}))
     elif args.cmd == "dispatch":
         result = cast("Any", dispatch_once(args.tenant))
         print(
@@ -327,8 +330,8 @@ __all__ = [
     "assert_not_prod",
     "detect_for_tenant",
     "dispatch_once",
-    "opt_out_synthetic",
     "seed_synthetic_customer",
+    "simulate_customer_stop",
 ]
 
 
