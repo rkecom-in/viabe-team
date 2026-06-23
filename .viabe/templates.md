@@ -40,11 +40,26 @@ This file becomes the contract. Code in `apps/team-orchestrator/` (when wired) r
 
 ## Approved templates
 
-### `team_welcome`
+### `team_welcome2`
 
-- **Twilio Content SID:** `HX1b66c0daaa52dc0b8575e50eebadfdd1`
+- **Twilio Content SID (en):** `HX65602e94b48bb2d6e82c70630d01da20`
+- **Twilio Content SID (hi):** `HXa2e1bcb65189ed25ec1f6b92d9458108`
 - **Tier:** Tier-A (launch-blocking, onboarding flow)
+- **Variables:** `{{1}}` = owner name, `{{2}}` = trial end date (positional — VT-400)
+- **VT-404:** replaces `team_welcome`. The Meta-approved copy invites the owner's reply, opening the
+  24h window so onboarding's lazy question-queue fills on the first inbound. The live signup send
+  (`_default_welcome`) and the `welcome` routing both point here.
+
+---
+
+### `team_welcome` — **DEPRECATED (VT-404)**, superseded by `team_welcome2`. Not sent by any live path.
+
+- **Twilio Content SID:** `HX1b66c0daaa52dc0b8575e50eebadfdd1` (en) · `HXf154fc0f582955f65c75b6306662388a` (hi)
+- **Tier:** Tier-A (retained for history/back-compat resolution only)
 - **Variables:** `{{1}}` = owner name, `{{2}}` = trial end date
+- **Why retired:** the copy told a passive owner to WAIT for a message ("You'll receive a WhatsApp
+  message here when the proposal is ready") — it never invited a reply, so the 24h window never
+  opened and onboarding stalled (Sundaram e2e).
 
 ```
 Hi {{1}}, your Viabe Team account is now active. Your trial period ends on {{2}}.
@@ -210,7 +225,8 @@ Hi {{1}}, your Viabe Team report for {{2}} is ready — I've attached the full P
 
 ### Hindi bodies for the 8 existing templates
 
-**`team_welcome` [hi]** — `HXf154fc0f582955f65c75b6306662388a`
+**`team_welcome` [hi]** — `HXf154fc0f582955f65c75b6306662388a` — **DEPRECATED (VT-404)**, replaced by
+`team_welcome2` [hi] `HXa2e1bcb65189ed25ec1f6b92d9458108` (reply-inviting copy).
 
 ```
 नमस्ते {{1}}, आपका Viabe Team अकाउंट अब सक्रिय हो गया है। आपकी ट्रायल अवधि {{2}} को समाप्त होगी। इस दौरान, आपका एजेंट आपके व्यवसाय के डेटा की समीक्षा करेगा और आपकी समीक्षा के लिए अपना पहला कैंपेन प्रस्ताव तैयार करेगा। प्रस्ताव तैयार होने पर आपको यहीं WhatsApp पर संदेश मिलेगा।

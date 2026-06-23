@@ -23,6 +23,10 @@
 # Supported; no entry uses it today.
 
 team_welcome:
+  # DEPRECATED (VT-404): superseded by team_welcome2. The old copy said "you'll receive a message
+  # when the proposal is ready" — it told a passive owner to WAIT, never opening the 24h window, so
+  # onboarding stalled (Sundaram e2e). RETAINED for history/back-compat resolution only — NOT sent
+  # by any live path (signup _default_welcome + the `welcome` routing both point at team_welcome2).
   audience: owner            # VT-390: OWNER-facing (signup welcome to the business owner);
                              # was mislabeled 'customer' — variables are owner_name/trial_end_date
   agent_selectable: false
@@ -32,6 +36,19 @@ team_welcome:
   languages:
     en: HX1b66c0daaa52dc0b8575e50eebadfdd1
     hi: HXf154fc0f582955f65c75b6306662388a
+
+team_welcome2:
+  # VT-404: replaces team_welcome. Meta-approved copy invites the owner's reply → opens the 24h
+  # window → onboarding's lazy question-queue fills on that first inbound. Variables UNCHANGED:
+  # positional [owner_name, trial_end_date] = {{1}},{{2}} (VT-400 positional mapping keys off order).
+  audience: owner
+  agent_selectable: false
+  variables:
+    - owner_name
+    - trial_end_date
+  languages:
+    en: HX65602e94b48bb2d6e82c70630d01da20
+    hi: HXa2e1bcb65189ed25ec1f6b92d9458108
 
 team_weekly_approval:
   audience: customer

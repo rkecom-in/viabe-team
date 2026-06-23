@@ -16,8 +16,8 @@
 # `any` if the specific phase isn't listed.
 
 welcome:
-  onboarding: team_welcome
-  trial: team_welcome
+  onboarding: team_welcome2   # VT-404: reply-inviting copy (team_welcome retired — told owner to wait)
+  trial: team_welcome2
 
 weekly_approval:
   paid_active: team_weekly_approval
