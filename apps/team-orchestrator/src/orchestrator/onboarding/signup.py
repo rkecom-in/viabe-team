@@ -406,6 +406,19 @@ def run_signup(
     if not res.created:
         raise SignupError("duplicate", "this whatsapp_number is already registered")
 
+    # VT-406 reconciliation (verify-then-create completion): persist the verified entity as the
+    # discovery anchor on the NEW tenant. Part A's confirm_and_verify was tenant-scoped/pre-create (it
+    # no-ops on the empty pre-create tenant_id); the anchor truly lands HERE, post-create, with the real
+    # tenant_id and the GATE's SERVER-verified gstin/name — NEVER a client-supplied value (IDOR rule).
+    # Best-effort + non-terminal, like the kicks below.
+    if verify.gstin:
+        try:
+            from orchestrator.onboarding.entity_match import persist_entity_anchor
+
+            persist_entity_anchor(res.tenant_id, gstin=verify.gstin, verified_name=verify.verified_name)
+        except Exception:  # noqa: BLE001 — anchor is best-effort; never fail a committed signup
+            logger.exception("signup: entity anchor persist failed tenant=%s (non-terminal)", res.tenant_id)
+
     # Welcome send: GUARDED + non-terminal. The tenant is already committed; a send (or the
     # trial.yaml read) failure must NOT 500 the signup — log + report welcome_sent=False.
     sent = False
@@ -431,7 +444,11 @@ def run_signup(
             auto_discovery_workflow,
             str(res.tenant_id),
             {
-                "business_name": inp.business_name,
+                # VT-406 reconciliation: anchor discovery on the SERVER-VERIFIED entity, not the raw
+                # typed name — so the draft anchors on the confirmed entity (the Sundaram wrong-anchor
+                # fix) and VT-407's discover_gst keys off the verified GSTIN.
+                "business_name": verify.verified_name or inp.business_name,
+                "gstin": verify.gstin,
                 "business_type": inp.business_type,
                 "city": inp.city,
                 "whatsapp_number": inp.whatsapp_number,
