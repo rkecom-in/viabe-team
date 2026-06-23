@@ -293,7 +293,7 @@ def _default_welcome(
     trial_end_date = trial_end.date().isoformat()
     result = send_owner_template(
         tenant_id,
-        "team_welcome",
+        "team_welcome2",  # VT-404: reply-inviting copy (old team_welcome told the owner to wait → stall)
         language,
         {"owner_name": owner_name, "trial_end_date": trial_end_date},
         recipient_phone=whatsapp_number,
