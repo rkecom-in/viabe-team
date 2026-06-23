@@ -18,7 +18,10 @@
 
 import { useEffect, useState } from 'react'
 
+import type { VerifiedEntity } from '@/lib/entity-match'
 import { requestSignupOtp, verifyOtpAndCreate } from '@/lib/signup-otp'
+
+import { EntityMatchStep } from './entity-match-step'
 
 type Lang = 'en' | 'hi'
 type BizType = { key: string; label_en: string; label_hi: string }
@@ -97,10 +100,15 @@ export function SignupForm() {
   const [error, setError] = useState<string | null>(null)
   const [done, setDone] = useState(false)
   const [submitting, setSubmitting] = useState(false)
-  // VT-96: a 2-step flow — details, then OTP-verify the WhatsApp number before create (the
-  // VT-326 gate requires a verified-number proof token, so a direct POST would 401).
-  const [step, setStep] = useState<'details' | 'verify'>('details')
+  // VT-96 + VT-406: a 3-step flow — details, then entity-match (confirm the GST-registered
+  // business BEFORE creating an account — VT-406/VT-408 verify-then-create gate), then OTP-verify
+  // the WhatsApp number (the VT-326 proof token; a direct POST would 401). Account-creation is
+  // unreachable without a server-confirmed verified entity (the create-account gate).
+  const [step, setStep] = useState<'details' | 'entity' | 'verify'>('details')
   const [otpCode, setOtpCode] = useState('')
+  // VT-406: the Sandbox-verified entity (gstin + authoritative name). null until a gstin_verified
+  // confirm lands; it gates the transition to the OTP/create steps and rides into the create payload.
+  const [verifiedEntity, setVerifiedEntity] = useState<VerifiedEntity | null>(null)
   const t = MESSAGES[lang]
 
   useEffect(() => {
@@ -114,9 +122,10 @@ export function SignupForm() {
     setForm((f) => ({ ...f, [k]: v }))
   }
 
-  // Step 1 — validate the details, then request an OTP to the WhatsApp number. The owner must
-  // OTP-prove control of the number before any tenant is created (the VT-326 gate).
-  async function onSendCode(e: React.FormEvent) {
+  // Step 1 — validate the details, then advance to the VT-406 entity-match step. The OTP is NOT
+  // requested here: we confirm a GST-registered business FIRST (verify-then-create) and only send a
+  // WhatsApp code to an owner who passes — never to a reject-bound one.
+  function onSubmitDetails(e: React.FormEvent) {
     e.preventDefault()
     setError(null)
     if (
@@ -134,6 +143,16 @@ export function SignupForm() {
       setError(t.invalid_phone)
       return
     }
+    setStep('entity')
+  }
+
+  // VT-406 → VT-326 bridge — fired ONLY after the entity-match step server-confirms a verified
+  // entity. Record the verified entity (it gates create + rides into the create payload), then
+  // request the OTP and advance to the verify step. Account-creation stays unreachable until here.
+  async function onEntityVerified(entity: VerifiedEntity) {
+    setVerifiedEntity(entity)
+    if (step === 'verify' || submitting) return // double-click guard on the Continue button
+    setError(null)
     setSubmitting(true)
     try {
       const r = await requestSignupOtp(form.whatsapp_number)
@@ -159,9 +178,26 @@ export function SignupForm() {
       setError(t.invalid_code)
       return
     }
+    // VT-406 create-account gate: NEVER create without a server-confirmed verified entity. The UI
+    // can't reach this step un-verified (the entity step gates the transition), but assert it here
+    // too — defence-in-depth (the server hard-block is VT-408; this is the UI invariant).
+    if (!verifiedEntity?.gstin) {
+      setError(t.generic)
+      return
+    }
     setSubmitting(true)
     try {
-      const r = await verifyOtpAndCreate({ ...form, preferred_language: lang }, otpCode.trim())
+      // Carry the verified entity into the create payload so the orchestrator anchors discovery to
+      // the CONFIRMED entity (gstin + authoritative name), not the owner-typed name (VT-406 fix).
+      const r = await verifyOtpAndCreate(
+        {
+          ...form,
+          preferred_language: lang,
+          verified_gstin: verifiedEntity.gstin,
+          verified_name: verifiedEntity.name,
+        },
+        otpCode.trim(),
+      )
       if (r.ok) {
         setDone(true)
         return
@@ -230,7 +266,7 @@ export function SignupForm() {
         </h1>
         {step === 'details' ? (
         <form
-          onSubmit={onSendCode}
+          onSubmit={onSubmitDetails}
           className="mt-8 flex flex-col gap-5 rounded-2xl border border-gray-200 bg-white p-6 shadow-sm sm:p-8"
         >
         <label className={fieldLabel}>
@@ -325,6 +361,17 @@ export function SignupForm() {
           {t.send_code}
         </button>
       </form>
+      ) : step === 'entity' ? (
+      // VT-406 entity-match sub-step — confirm a GST-registered business before account-creation.
+      // onVerified bridges to the OTP step + records the verified entity (the create-account gate);
+      // onReject is the graceful "GST-registered only" terminus (no account offered).
+      <EntityMatchStep
+        businessName={form.business_name}
+        city={form.city}
+        lang={lang}
+        onVerified={onEntityVerified}
+        onReject={() => { /* terminal — the reject screen renders in-place; no create path */ }}
+      />
       ) : (
       <form
         onSubmit={onVerifyAndCreate}
