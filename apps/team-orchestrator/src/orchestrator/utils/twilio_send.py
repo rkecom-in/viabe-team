@@ -160,6 +160,20 @@ def get_tenant_whatsapp_number(tenant_id: UUID) -> str | None:
     return row["whatsapp_number"] if row else None
 
 
+_WHATSAPP_PREFIX = "whatsapp:"
+
+
+def _wa(number: str) -> str:
+    """Idempotently apply the WhatsApp channel scheme to an E.164 number.
+
+    ``TEAM_TWILIO_FROM_NUMBER`` and recipient numbers are stored/passed as PLAIN E.164 (CL-435).
+    Twilio requires ``whatsapp:+…`` on BOTH ``from_`` and ``to`` to route on the WhatsApp channel;
+    a raw number misroutes to SMS and fails (VT-399: the welcome to a real signup failed Twilio
+    error 21659 because both ends were unprefixed). Idempotent — never double-prefixes.
+    """
+    return number if number.startswith(_WHATSAPP_PREFIX) else f"{_WHATSAPP_PREFIX}{number}"
+
+
 @DBOS.step()
 def send_template_message(
     tenant_id: UUID,
@@ -218,8 +232,8 @@ def send_template_message(
         message = _client().messages.create(
             content_sid=content_sid,
             content_variables=json.dumps(params),
-            from_=os.environ["TEAM_TWILIO_FROM_NUMBER"],
-            to=recipient,
+            from_=_wa(os.environ["TEAM_TWILIO_FROM_NUMBER"]),
+            to=_wa(recipient),
         )
     except TwilioRestException as exc:
         if exc.status is not None and 400 <= exc.status < 500:
@@ -279,8 +293,8 @@ def send_freeform_message(body: str, recipient_phone: str) -> str:
     )
     message = _client().messages.create(
         body=body,
-        from_=os.environ["TEAM_TWILIO_FROM_NUMBER"],
-        to=recipient_phone,
+        from_=_wa(os.environ["TEAM_TWILIO_FROM_NUMBER"]),
+        to=_wa(recipient_phone),
     )
     logger.info(
         "twilio-send: freeform sent -> %s (sid=%s)",
