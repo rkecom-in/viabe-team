@@ -190,6 +190,44 @@ def test_run_signup_full(pool):
     assert attrs.get("owner_name") == "Asha Devi"
 
 
+def test_run_signup_reconciliation_anchors_verified_entity(pool, monkeypatch):
+    """VT-406 reconciliation (verify-then-create completion): a verified signup persists the entity
+    anchor on the NEW tenant from the GATE's SERVER-verified gstin/name (never a client value) AND
+    seeds auto-discovery with the VERIFIED entity (name + gstin) — NOT the raw typed business_name."""
+    import dbos
+
+    from orchestrator.onboarding.signup import run_signup
+
+    seeds: list = []
+    monkeypatch.setattr(
+        dbos.DBOS, "start_workflow",
+        staticmethod(lambda _wf, _tid, seed: seeds.append(seed)), raising=False,
+    )
+    # Typed name = "Sundaram Book Store"; the verifier returns the AUTHORITATIVE "Asha Kirana".
+    out = run_signup(
+        _valid_input(business_name="Sundaram Book Store"),
+        welcome_send_fn=lambda *a, **k: True,
+        verify_search_fn=_active_search,
+    )
+    # Discovery anchored on the VERIFIED entity (name + gstin), not the typed name (the Sundaram fix).
+    assert len(seeds) == 1
+    assert seeds[0]["business_name"] == "Asha Kirana"
+    assert seeds[0]["gstin"] == "27AAKCR3738B1ZE"
+
+    # The entity anchor is persisted on the business_profile entity from the server-verified result.
+    from orchestrator.db import tenant_connection
+    with tenant_connection(out.tenant_id) as conn:
+        bp = conn.execute(
+            "SELECT attributes FROM l1_entities WHERE entity_type = 'business_profile'"
+        ).fetchone()
+    attrs = bp["attributes"] if isinstance(bp, dict) else bp[0]
+    anchor = attrs.get("business_entity_anchor")
+    assert anchor is not None
+    assert anchor["gstin"] == "27AAKCR3738B1ZE"
+    assert anchor["trade_name"] == "Asha Kirana"
+    assert anchor["source"] == "sandbox" and anchor["verified"] is True
+
+
 def test_run_signup_discovery_kick_failure_non_blocking(pool, monkeypatch):
     """VT-366: a failing Auto-Discovery kick (post-commit, best-effort) must NEVER 500 the signup —
     the tenant is already committed; discovery is fire-and-forget."""

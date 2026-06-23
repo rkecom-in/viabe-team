@@ -222,6 +222,18 @@ def _persist_anchor(
         logger.exception("entity_match: anchor persist failed tenant=%s (non-terminal)", tenant_id)
 
 
+def persist_entity_anchor(
+    tenant_id: UUID | str, *, gstin: str, verified_name: str | None,
+    upsert_fn: Callable[[UUID | str, dict[str, Any]], Any] | None = None,
+) -> None:
+    """Public seam — persist the SERVER-VERIFIED entity anchor on a tenant that already exists.
+
+    The verify-then-create completion (VT-406 reconciliation): run_signup verifies the GSTIN
+    server-side (VT-408 gate) and creates the tenant, THEN calls this with the gate's authoritative
+    gstin + name (NEVER a client-supplied value — IDOR). Best-effort, non-terminal."""
+    _persist_anchor(tenant_id, gstin=gstin, verified_name=verified_name, upsert_fn=upsert_fn)
+
+
 def _seed_discovery(
     tenant_id: UUID | str, *, verified_name: str | None, gstin: str, seed: dict[str, Any]
 ) -> None:
