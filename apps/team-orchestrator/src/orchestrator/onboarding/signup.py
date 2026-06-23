@@ -101,6 +101,8 @@ def create_signup_tenant(
     business_type: str,
     consent_dpdpa: bool,
     consent_residency: bool,
+    verified_gstin: str | None = None,
+    verified_business_name: str | None = None,
     now_fn: Callable[[], datetime] | None = None,
 ) -> SignupResult:
     """Atomically create the signup tenant + consent proof + trial + city_tier +
@@ -132,6 +134,16 @@ def create_signup_tenant(
     dpdpa_version, residency_version = _disclosure_versions()
     city_tier = str(coarsen_city(city))  # VT-317: raw city is discarded here.
 
+    # VT-408: a signup tenant is verified BY CONSTRUCTION — run_signup's verify-then-create
+    # gate is the ONLY door to this INSERT, so stamp gstin_verified (+ the authoritative
+    # name / gstin / method / verified_at) in the SAME atomic txn. This is what the
+    # transitions.py defense-in-depth activation gate reads; without it a legitimately
+    # verified owner would be blocked at subscribe. Default stays 'unverified' for any
+    # non-signup create path (mig 120) — only the gated signup stamps verified.
+    verification_status = "gstin_verified" if verified_gstin else "unverified"
+    verification_method = "gstin_lookup" if verified_gstin else None
+    verified_at = now if verified_gstin else None
+
     pool = get_pool()
     with pool.connection() as conn, conn.transaction():
         row = conn.execute(
@@ -139,14 +151,18 @@ def create_signup_tenant(
             INSERT INTO tenants
                 (business_name, plan_tier, phase, whatsapp_number, preferred_language,
                  business_type, city_tier, signed_up_at, trial_started_at,
-                 phase_entered_at, created_via)
-            VALUES (%s, %s, 'onboarding', %s, %s, %s, %s, %s, %s, %s, 'web')
+                 phase_entered_at, created_via, verification_status,
+                 verified_business_name, verification_method, gstin, verified_at)
+            VALUES (%s, %s, 'onboarding', %s, %s, %s, %s, %s, %s, %s, 'web',
+                    %s, %s, %s, %s, %s)
             ON CONFLICT (whatsapp_number) WHERE whatsapp_number IS NOT NULL
             DO NOTHING
             RETURNING id
             """,
             (business_name, plan_tier, whatsapp_number, preferred_language,
-             business_type, city_tier, now, now, now),
+             business_type, city_tier, now, now, now,
+             verification_status, verified_business_name, verification_method,
+             verified_gstin, verified_at),
         ).fetchone()
 
         if row is None:
@@ -221,6 +237,24 @@ class SignupError(Exception):
         self.code = code
 
 
+class SignupGateError(SignupError):
+    """VT-408 — the GSTIN hard-gate refused to create a tenant (verify-then-create).
+
+    Distinct from a field/consent SignupError so the route can render the right owner-facing
+    copy: a terminal REJECT (invalid/no GSTIN — generic "GST-registered businesses" screen,
+    NO enumeration oracle) vs a retryable HOLD (vendor_down — "on our side, try again"). NO
+    tenant is created on either. ``retryable`` drives reject-vs-hold UX; ``language`` selects
+    the bilingual copy.
+    """
+
+    def __init__(self, *, outcome: str, retryable: bool, language: str) -> None:
+        # code is the outcome tag (invalid_gstin | vendor_down); the route maps it to a status.
+        super().__init__(outcome, f"signup gate: {outcome} (no tenant created)")
+        self.outcome = outcome
+        self.retryable = retryable
+        self.language = language
+
+
 @dataclass(frozen=True)
 class SignupInput:
     business_name: str
@@ -231,6 +265,12 @@ class SignupInput:
     business_type: str
     consent_dpdpa: bool
     consent_residency: bool
+    # VT-408: the GSTIN to verify BEFORE the tenant is created (verify-then-create). The
+    # web signup form collects it as a gating sub-step (VT-406). The orchestrator gate is
+    # the server-side enforcement seam — a missing/empty GSTIN is a hard reject (no GST =>
+    # nothing). Defaults to '' so the field stays optional at the dataclass boundary, but
+    # run_signup rejects an empty/unverified value (fail-closed).
+    gstin: str = ""
 
 
 @dataclass(frozen=True)
@@ -315,12 +355,38 @@ def run_signup(
     *,
     welcome_send_fn: Callable[..., bool] | None = None,
     now_fn: Callable[[], datetime] | None = None,
+    verify_search_fn: Callable[..., Any] | None = None,
 ) -> SignupOutcome:
     """The signup orchestration. Validate (→ SignupError on any field/consent) →
-    ATOMIC create (tenant + consent + city_tier + owner_name in one txn; → SignupError
-    'duplicate' on a repeat whatsapp_number) → welcome send (injectable, GUARDED +
-    non-terminal — a raising send never fails a committed signup)."""
+    **VT-408 GSTIN HARD-GATE (verify-then-create)** → ATOMIC create (tenant + consent +
+    city_tier + owner_name in one txn; → SignupError 'duplicate' on a repeat whatsapp_number)
+    → welcome send → auto-discovery kick → onboarding-journey start (all injectable / GUARDED +
+    non-terminal — a raising kick never fails a committed signup).
+
+    VT-408 (CL-442, Fazal 2026-06-24 — "a no-GST business doesn't get anything, neither paid
+    nor trial"): the GSTIN is verified SERVER-SIDE *before* ``create_signup_tenant`` runs. No
+    green verify ⇒ ``SignupGateError`` and NO tenant is created — no row, no consent, no
+    founding slot, no burned whatsapp_number, and (critically) NONE of the welcome / discovery
+    / journey product kicks fire (they all sit BELOW create, which never runs on a reject).
+    ``vendor_down`` is a retryable HOLD (an outage must not turn a legit GST business away);
+    ``invalid_gstin`` / missing GSTIN is a terminal REJECT. The verify is the ONLY door to a
+    tenant — every kick below is therefore reachable ONLY on the verified path (the gate is
+    upstream of all of them). ``verify_search_fn`` is the injectable GSTIN search seam for tests
+    (no live creds)."""
     _validate(inp)
+
+    # VT-408 PRIMARY GATE — verify-then-create. Fail-closed: anything but a confirmed ACTIVE
+    # GSTIN raises SignupGateError and creates NOTHING (so no product kick can fire below).
+    from orchestrator.onboarding.signup_gate import verify_gstin_for_signup
+
+    verify = verify_gstin_for_signup(inp.gstin, search_fn=verify_search_fn)
+    if not verify.ok:
+        raise SignupGateError(
+            outcome=verify.outcome,
+            retryable=verify.retryable,
+            language=inp.preferred_language,
+        )
+
     now = (now_fn or _utcnow)()
     _now = now_fn or (lambda: now)  # single instant for both create + trial_end
 
@@ -333,6 +399,8 @@ def run_signup(
         business_type=inp.business_type,
         consent_dpdpa=inp.consent_dpdpa,
         consent_residency=inp.consent_residency,
+        verified_gstin=verify.gstin,
+        verified_business_name=verify.verified_name,
         now_fn=_now,
     )
     if not res.created:
@@ -394,6 +462,7 @@ def run_signup(
 
 __all__ = [
     "SignupError",
+    "SignupGateError",
     "SignupInput",
     "SignupOutcome",
     "SignupResult",

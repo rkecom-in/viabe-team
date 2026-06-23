@@ -1,6 +1,7 @@
 # Business-verification decision — Option F, two-tier (VT-112 → VT-361)
 
 **Status:** DECIDED + IMPLEMENTED (Fazal 2026-06-07/08). Closes **VT-112**; the build is **VT-361**.
+GATE RELOCATED to signup by **VT-408** (Fazal 2026-06-24) — see "Signup gate" below.
 
 ## Decision (two-tier, Fazal ruling 2026-06-08)
 **Instant programmatic business verification** at the owner surface, via **Sandbox by Quicko**
@@ -13,14 +14,21 @@ GSTIN lookup. Two tiers + a hard activation gate.
 - `vtr_verified` ("green") — manual VTR/ops upgrade (audited). **No product significance yet**
   (gates nothing); value arrives in a later phase.
 
-### Activation gate
-`card_captured → paid_active` requires `gstin_verified` (or above). GSTIN-less businesses **cannot
-activate — intended.** The gate reads `verification_status` **server-side** from the tenant row at
-transition time (never a client field — IDOR lesson). Fail-closed on vendor outage (lookup fails →
-unverified → activation waits; per-day retry; `vendor_down` logged distinctly from `invalid_gstin` so
-ops can tell an outage from bad input). A blocked capture emits a distinct
-`activation_blocked_verification` event (owner-surfaceable: "complete GSTIN verification to
-activate") — not a silent stall.
+### Signup gate (VT-408 — Fazal 2026-06-24; relocated from the activation gate)
+`gstin_verified` (or `vtr_verified`) is required at **signup / account-creation**. A business without
+an active GST registration **gets nothing — neither trial nor paid** (Fazal 2026-06-24, verbatim:
+*"We will be gating it hard — a no-GST business doesn't get anything, neither paid nor trial."*).
+
+**Invariant:** no tenant reaches trial OR active without `verification_status ∈
+{gstin_verified, vtr_verified}`. Enforcement is **verify-then-create** — the GSTIN is verified
+server-side BEFORE the `tenants` row is created, so no unverified tenant is ever persisted (cleanest
+DPDP posture: nothing is held for a rejected business). The gate reads a fresh server-recorded verified
+result (never a client field — IDOR lesson). Fail-closed: `vendor_down` HOLDS with a retry path (it is
+NOT a reject — an outage must never turn away a legit GST business), `invalid_gstin` REJECTS to a
+graceful "Viabe Team is for GST-registered businesses" terminus (no unverified-proceed).
+
+The prior `subscribe → paid_active` activation gate (transitions.py) is **RETAINED as
+defense-in-depth** — a second wall, not the primary gate.
 
 ## ACCEPTED RISK (Fazal, 2026-06-08): lookup without ownership bind
 `gstin_verified` proves the GSTIN **exists + is active**, not that the signing owner **controls** it
@@ -58,8 +66,8 @@ Sandbox" for the RPD path.**
   `forwardBusinessVerification`). Endpoint `POST /api/business-verification` (lookup). Vendor client
   `integrations/methods/sandbox_kyc.py` (search_gstin only). VTR override on the ops surface
   (`/api/orchestrator/ops/vtr-verify`, operator-JWT + internal-secret, audited, tenant server-resolved).
-- **Owner-surface flow** (GSTIN entry post-signup, pre-activation), NOT a synchronous signup step —
-  signup collects no GSTIN. A signup-form GSTIN field is a possible later UX pass (noted in VT-361).
+- **Owner-surface flow** — GSTIN entry is a gating sub-step OF signup (VT-408): verified before the
+  tenant is created. (Was: post-signup, pre-activation; relocated by VT-408.)
 - **Result-only storage** (mig 120): tenants.{verification_status, verified_business_name,
   verification_method, gstin, verified_at}. No documents. DSR scrubs gstin + verified_business_name;
   the per-tenant `kyc_verification_log` (attempt-cap + wallet-cost, no PII) is purged on DSR-delete.
