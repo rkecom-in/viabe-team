@@ -28,7 +28,8 @@ logger = logging.getLogger(__name__)
 _BASE_URL = os.environ.get("SANDBOX_BASE_URL", "https://api.sandbox.co.in")
 _KEY_ENV = "SANDBOX_API_KEY"
 _SECRET_ENV = "SANDBOX_API_SECRET"
-_API_VERSION = "1.0"
+_API_VERSION = "1.0"  # /authenticate (200s as-is — do not change)
+_SEARCH_API_VERSION = "1.0.0"  # VT-409: the GSTIN search wants 1.0.0 (Fazal's proven-good curl); "1.0" mismatched
 _AUTH_PATH = "/authenticate"
 _SEARCH_PATH = "/gst/compliance/public/gstin/search"
 _TIMEOUT_S = 20.0
@@ -89,8 +90,13 @@ def _authenticate(key: str, secret: str, request_fn: RequestFn) -> str | None:
         {"x-api-key": key, "x-api-secret": secret, "x-api-version": _API_VERSION},
         None,
     )
-    data = raw.get("data", raw)
-    return _clean(data.get("access_token"))
+    # VT-409: Sandbox returns the token at BOTH top-level `access_token` (the one that WORKS) AND nested
+    # `data.access_token` (which 500s on the subsequent /search) — a contract quirk found 2026-06-24 via
+    # Fazal's direct curl. The old `raw.get("data", raw).get("access_token")` grabbed the NESTED (dud)
+    # token, so every auth 200'd but every search Internal-Server-Error'd. Prefer top-level; fall back
+    # to nested only for back-compat with a response that omits the top-level key.
+    token = raw.get("access_token") or (raw.get("data") or {}).get("access_token")
+    return _clean(token)
 
 
 def _get_token(key: str, secret: str, request_fn: RequestFn, *, force: bool = False) -> str | None:
@@ -152,7 +158,7 @@ def search_gstin(gstin: str, *, request_fn: RequestFn | None = None) -> GstinLoo
 def _lookup(req: RequestFn, key: str, token: str, gstin: str) -> dict[str, Any]:
     return req(
         "POST", _SEARCH_PATH,
-        {"x-api-key": key, "authorization": token, "x-api-version": _API_VERSION},
+        {"x-api-key": key, "authorization": token, "x-api-version": _SEARCH_API_VERSION},
         {"gstin": gstin},
     )
 
