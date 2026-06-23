@@ -1,4 +1,4 @@
-"""VT-366 Gap-2a — Auto-Discovery source adapters (GBP + website + Serper-stub).
+"""VT-366 Gap-2a — Auto-Discovery source adapters (GBP + GST + website + Serper-stub).
 
 Each ``discover_*`` fetches one public source, writes the fields it found to the tenant's DRAFT
 (``draft_profile.write_draft`` — owner-confirmed later, NEVER asserted as fact here), and returns a
@@ -23,6 +23,11 @@ logger = logging.getLogger(__name__)
 # website = one Haiku extract (~$0.001). Serper deferred (key-gated). Used for the engine's ceiling.
 _GBP_COST_USD = 0.004
 _WEBSITE_COST_USD = 0.001
+# GST (VT-407): the Sandbox GSTIN lookup is ALREADY paid for + run during verification (VT-361),
+# whose verified gstin we reuse here as the seed anchor — discover_gst re-reads that same record,
+# adding NO incremental discovery cost. 0.0 keeps the engine's cost ceiling honest (we don't
+# double-bill a call the verification step already accounts for).
+_GST_COST_USD = 0.0
 _HTTP_TIMEOUT = 20.0
 _WEBSITE_MAX_CHARS = 12000  # cap the page text fed to the LLM (cost + prompt-injection surface)
 _WEBSITE_MAX_BYTES = 3_000_000  # cap the response body fetched (DoS/cost)
@@ -121,6 +126,40 @@ def discover_gbp(
     if fields:
         write_draft(tenant_id, fields, source="gbp")
     return SourceResult("gbp", "ok" if fields else "empty", cost_usd=_GBP_COST_USD, fields=fields, website=website)
+
+
+def discover_gst(
+    tenant_id: UUID | str,
+    seed: dict[str, Any],
+    *,
+    search_fn: Callable[[str], Any] | None = None,
+) -> SourceResult:
+    """VT-407 — derive business context from the tenant's VERIFIED GSTIN (the VT-406 anchor in the
+    seed). Re-reads the Sandbox GST record via ``sandbox_kyc.search_gstin`` and writes ONLY the
+    business-level extras to the DRAFT (owner-confirmed later). Skipped (not an error) when there's
+    no gstin — this source only runs once the gstin anchor is set.
+
+    PII BOUNDARY (CL-390/425, DPDP): ``business_fields()`` already excludes ``legal_name`` and every
+    person-level field. We additionally add ``legal_name`` to the draft ONLY when the constitution is
+    NOT a proprietorship — for a proprietorship ``lgnm`` is a natural person's name (personal PII);
+    for a company/LLP it's the business's own legal name (business-level, OK). Never write a
+    director/proprietor personal name, DIN, or PAN."""
+    gstin = (seed.get("gstin") or "").strip()
+    if not gstin:
+        return SourceResult("gst", "skipped")
+    from orchestrator.integrations.methods.sandbox_kyc import search_gstin
+
+    lookup = (search_fn or search_gstin)(gstin)
+    # Vendor-down / fail-closed → ok=False; an inactive GSTIN is not useful context either.
+    if not getattr(lookup, "ok", False) or not lookup.is_active():
+        return SourceResult("gst", "error", cost_usd=_GST_COST_USD)
+    fields = dict(lookup.business_fields())  # business-level extras (legal_name NOT included)
+    # legal_name is business-level ONLY for a company/LLP; for a proprietorship it is a person (PII).
+    if lookup.legal_name and not lookup.is_proprietorship():
+        fields["legal_name"] = lookup.legal_name
+    if fields:
+        write_draft(tenant_id, fields, source="gst")
+    return SourceResult("gst", "ok" if fields else "empty", cost_usd=_GST_COST_USD, fields=fields)
 
 
 def discover_website(

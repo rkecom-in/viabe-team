@@ -162,3 +162,117 @@ def test_unparseable_200_fails_closed():
     })
     res = sandbox_kyc.search_gstin("27AAKCR3738B1ZE", request_fn=req)
     assert res.ok is False and res.authoritative_name() is None
+
+
+# ----------------------------------------------------------------- VT-407 widen
+
+
+def test_widen_parses_all_rich_fields():
+    """A full data.data record (pradr/ctb/nba/rgdt/adadr) → every VT-407 field parses; name+status
+    still drive ok/active (the verified signal is unchanged, the rest is extra context)."""
+    from orchestrator.integrations.methods import sandbox_kyc
+
+    record = {
+        "lgnm": "RKECOM SERVICES (OPC) PRIVATE LIMITED",
+        "tradeNam": "RKECOM",
+        "sts": "Active",
+        "ctb": "Private Limited Company",
+        "rgdt": "01/07/2017",
+        "nba": ["Retail Business", "Supplier of Services"],
+        "pradr": {
+            "addr": {
+                "bno": "12", "bnm": "Galaxy Tower", "st": "MG Road", "loc": "Andheri",
+                "dst": "Mumbai", "stcd": "Maharashtra", "pncd": "400001",
+                "lt": "19.0760", "lg": "72.8777",
+            },
+            "ntr": "Office",
+        },
+        "adadr": [
+            {"addr": {"bno": "7", "st": "Link Road", "dst": "Pune", "stcd": "Maharashtra", "pncd": "411001"}},
+            {"addr": {"bnm": "Warehouse 3", "loc": "MIDC", "dst": "Thane", "stcd": "Maharashtra"}},
+        ],
+    }
+    req, _ = _recorder({
+        "/authenticate": {"data": {"access_token": "TOK"}},
+        "/gst/compliance/public/gstin/search": {"data": {"data": record, "status_cd": "1"}},
+    })
+    res = sandbox_kyc.search_gstin("27AAKCR3738B1ZE", request_fn=req)
+
+    assert res.ok and res.is_active()
+    assert res.legal_name == "RKECOM SERVICES (OPC) PRIVATE LIMITED"
+    assert res.trade_name == "RKECOM"
+    assert res.constitution == "Private Limited Company"
+    assert res.is_proprietorship() is False
+    assert res.registration_date == "01/07/2017"
+    assert res.nature_of_business == ["Retail Business", "Supplier of Services"]
+    assert res.geo_lat == "19.0760" and res.geo_lng == "72.8777"
+    # principal address composed in postal order, empties dropped
+    assert res.principal_address == "12, Galaxy Tower, MG Road, Andheri, Mumbai, Maharashtra, 400001"
+    assert res.additional_addresses == (
+        "7, Link Road, Pune, Maharashtra, 411001",
+        "Warehouse 3, MIDC, Thane, Maharashtra",
+    )
+    # business_fields packages the extras; legal_name is NOT in it (caller gates that)
+    bf = res.business_fields()
+    assert "legal_name" not in bf
+    assert bf["trade_name"] == "RKECOM"
+    assert bf["constitution"] == "Private Limited Company"
+    assert bf["principal_address"].startswith("12, Galaxy Tower")
+    assert bf["nature_of_business"] == ["Retail Business", "Supplier of Services"]
+    assert bf["additional_addresses"] == list(res.additional_addresses)
+    assert bf["registration_date"] == "01/07/2017"
+    assert bf["geo_lat"] == "19.0760" and bf["geo_lng"] == "72.8777"
+
+
+def test_widen_minimal_record_leaves_rich_fields_empty_but_ok_true():
+    """A minimal record (only lgnm/sts) still verifies (ok=True); every rich field → None/[] and
+    business_fields() carries no rich extras. The widen NEVER weakens the fail-closed contract."""
+    from orchestrator.integrations.methods import sandbox_kyc
+
+    req, _ = _recorder({
+        "/authenticate": {"data": {"access_token": "TOK"}},
+        "/gst/compliance/public/gstin/search": {"data": {"data": {"lgnm": "Solo Co", "sts": "Active"}}},
+    })
+    res = sandbox_kyc.search_gstin("27AAKCR3738B1ZE", request_fn=req)
+
+    assert res.ok and res.is_active()
+    assert res.principal_address is None
+    assert res.geo_lat is None and res.geo_lng is None
+    assert res.constitution is None
+    assert res.registration_date is None
+    assert res.nature_of_business == []
+    assert res.additional_addresses == ()
+    assert res.is_proprietorship() is False  # no constitution → not flagged proprietorship
+    # business_fields has no rich extras (trade_name absent here too)
+    assert res.business_fields() == {}
+
+
+def test_nature_of_business_accepts_single_string():
+    """``nba`` is normally a list but a single string is tolerated → wrapped to a one-item list."""
+    from orchestrator.integrations.methods import sandbox_kyc
+
+    req, _ = _recorder({
+        "/authenticate": {"data": {"access_token": "TOK"}},
+        "/gst/compliance/public/gstin/search": {
+            "data": {"data": {"lgnm": "X", "sts": "Active", "nba": "Retail Business"}}
+        },
+    })
+    res = sandbox_kyc.search_gstin("27AAKCR3738B1ZE", request_fn=req)
+    assert res.nature_of_business == ["Retail Business"]
+
+
+def test_proprietorship_constitution_flags_pii():
+    """ctb='Proprietorship' → is_proprietorship() True; lgnm is then a person and the caller must
+    NOT promote it (business_fields still excludes legal_name regardless)."""
+    from orchestrator.integrations.methods import sandbox_kyc
+
+    req, _ = _recorder({
+        "/authenticate": {"data": {"access_token": "TOK"}},
+        "/gst/compliance/public/gstin/search": {
+            "data": {"data": {"lgnm": "Ramesh Kumar", "sts": "Active", "ctb": "Proprietorship"}}
+        },
+    })
+    res = sandbox_kyc.search_gstin("27AAKCR3738B1ZE", request_fn=req)
+    assert res.is_proprietorship() is True
+    assert res.legal_name == "Ramesh Kumar"
+    assert "legal_name" not in res.business_fields()
