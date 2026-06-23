@@ -122,9 +122,14 @@ def _gbp_candidates(
     if fetch_fn is None and not token:
         return []
     try:
-        from orchestrator.integrations.methods.apify_gbp import _default_fetch
+        fetch = fetch_fn
+        if fetch is None:
+            # Import the default fetcher ONLY when actually needed — apify_gbp pulls the heavy
+            # l1/ingestion import chain, which is absent in the dep-less smoke env; importing it
+            # unconditionally (even with an injected fetch_fn) made the unit tests fail in CI.
+            from orchestrator.integrations.methods.apify_gbp import _default_fetch
 
-        fetch = fetch_fn or _default_fetch
+            fetch = _default_fetch
         items = fetch(
             {"maxReviews": 0, "maxImages": 0, "language": "en", "searchStringsArray": [f"{name} {city}".strip()]},
             token or "",
