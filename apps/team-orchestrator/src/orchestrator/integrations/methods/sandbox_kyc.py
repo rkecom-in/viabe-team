@@ -10,9 +10,13 @@ Documented Sandbox contract (verified against developer.sandbox.co.in — #420 s
    (the single-level read silently mapped every field to None; VT-361 live canary). An ACTIVE result
    alone earns gstin_verified (no ownership bind — Fazal two-tier ruling 2026-06-08).
 
-Result-only: parse ONLY name + status, DISCARD the rest. Graceful-degrade: absent creds / network /
-4xx-5xx / parse → ok=False (NEVER raise, NEVER fake-verified). The caller separates vendor-down
-(ok=False) from GSTIN-not-active (ok=True, status != active) so ops can tell an outage from bad input.
+The VERIFIED signal is name + status only (those alone earn ok/active). VT-407 widens the parse to
+also capture rich business context from the SAME data.data record — principal/additional addresses,
+constitution, nature-of-business, registration date, geo — as EXTRA context for the auto-discovery
+draft (owner-confirmed later, never asserted here); their absence NEVER flips ok. Graceful-degrade:
+absent creds / network / 4xx-5xx / parse → ok=False (NEVER raise, NEVER fake-verified). The caller
+separates vendor-down (ok=False) from GSTIN-not-active (ok=True, status != active) so ops can tell an
+outage from bad input.
 """
 
 from __future__ import annotations
@@ -20,7 +24,7 @@ from __future__ import annotations
 import logging
 import os
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable
 
 logger = logging.getLogger(__name__)
@@ -48,18 +52,60 @@ RequestFn = Callable[[str, str, dict[str, str], dict[str, Any] | None], dict[str
 
 @dataclass(frozen=True)
 class GstinLookup:
-    """Result-only GSTIN lookup. ok=False on any vendor failure (fail-closed → vendor_down)."""
+    """Result-only GSTIN lookup. ok=False on any vendor failure (fail-closed → vendor_down).
+
+    VT-407 widen: the verified signal is STILL name + status — those alone earn ``ok``/active.
+    The richer GST fields below (principal address, constitution, nature-of-business, reg-date,
+    additional addresses, geo) are EXTRA CONTEXT pulled from the same ``data.data`` record; their
+    absence NEVER flips ``ok`` (every one is optional → None/[]). They feed the auto-discovery
+    DRAFT (owner-confirmed later), never asserted as fact here. ``business_fields()`` packages the
+    business-level extras for the draft. ``legal_name`` is deliberately NOT in that dict: for a
+    proprietorship ``lgnm`` is a natural person's name (PII) — the caller gates it on constitution
+    (CL-390/425, DPDP)."""
 
     ok: bool
     legal_name: str | None = None
     trade_name: str | None = None
     status: str | None = None  # 'Active' etc. — only Active earns gstin_verified
+    # VT-407 — rich GST context (extra only; absence never flips ok)
+    principal_address: str | None = None  # composed from pradr.addr subfields
+    geo_lat: str | None = None  # pradr.addr.lt
+    geo_lng: str | None = None  # pradr.addr.lg
+    constitution: str | None = None  # ctb — e.g. 'Proprietorship', 'Private Limited Company'
+    nature_of_business: list[str] = field(default_factory=list)  # nba — list of activities
+    registration_date: str | None = None  # rgdt
+    additional_addresses: tuple[str, ...] = ()  # adadr[].addr composed (frozen-safe → tuple)
 
     def is_active(self) -> bool:
         return self.ok and (self.status or "").strip().lower() == "active"
 
     def authoritative_name(self) -> str | None:
         return self.trade_name or self.legal_name
+
+    def is_proprietorship(self) -> bool:
+        """True when the constitution is a sole proprietorship — for which ``lgnm`` is a natural
+        person's name (personal PII), NOT a business name. discover_gst gates whether legal_name
+        may be written to the draft on this (CL-390/425)."""
+        return "propriet" in (self.constitution or "").strip().lower()
+
+    def business_fields(self) -> dict[str, Any]:
+        """Business-level extras suitable for the auto-discovery DRAFT. DELIBERATELY EXCLUDES
+        legal_name (PII for a proprietorship; the caller decides, gated on constitution) and every
+        person-level field (director/proprietor name, DIN, PAN). Only non-empty values included."""
+        out: dict[str, Any] = {
+            "trade_name": self.trade_name,
+            "principal_address": self.principal_address,
+            "constitution": self.constitution,
+            "registration_date": self.registration_date,
+            "geo_lat": self.geo_lat,
+            "geo_lng": self.geo_lng,
+        }
+        fields = {k: v for k, v in out.items() if v}
+        if self.nature_of_business:
+            fields["nature_of_business"] = list(self.nature_of_business)
+        if self.additional_addresses:
+            fields["additional_addresses"] = list(self.additional_addresses)
+        return fields
 
 
 def _creds() -> tuple[str, str] | None:
@@ -138,18 +184,33 @@ def search_gstin(gstin: str, *, request_fn: RequestFn | None = None) -> GstinLoo
         record = env.get("data", env) if isinstance(env, dict) else env
         if not isinstance(record, dict):
             record = {}
-        result = GstinLookup(
-            ok=True,
-            legal_name=_clean(record.get("legal_name") or record.get("lgnm")),
-            trade_name=_clean(record.get("trade_name") or record.get("tradeNam")),
-            status=_clean(record.get("status") or record.get("sts")),
-        )
+        legal_name = _clean(record.get("legal_name") or record.get("lgnm"))
+        trade_name = _clean(record.get("trade_name") or record.get("tradeNam"))
+        status = _clean(record.get("status") or record.get("sts"))
         # Fail-closed on shape drift: a 200 we cannot parse into a name/status MUST NOT read as
-        # verified — the module contract is "parse → ok=False, NEVER fake-verified".
-        if result.legal_name is None and result.trade_name is None and result.status is None:
+        # verified — the module contract is "parse → ok=False, NEVER fake-verified". The richer
+        # fields below are EXTRA context only; their absence does NOT participate in this gate
+        # (a record carrying only name+status is still a fully valid verified result).
+        if legal_name is None and trade_name is None and status is None:
             logger.error("sandbox_kyc: lookup 200 but unparseable name/status — shape drift, fail-closed")
             return GstinLookup(ok=False)
-        return result
+        # VT-407 — widen: pull the rich business context from the SAME record. Every field is
+        # defensively optional (missing → None/[]); a parse miss here NEVER flips ok.
+        pradr = record.get("pradr") if isinstance(record.get("pradr"), dict) else {}
+        paddr = pradr.get("addr") if isinstance(pradr.get("addr"), dict) else {}
+        return GstinLookup(
+            ok=True,
+            legal_name=legal_name,
+            trade_name=trade_name,
+            status=status,
+            principal_address=_compose_address(paddr),
+            geo_lat=_clean(paddr.get("lt")),
+            geo_lng=_clean(paddr.get("lg")),
+            constitution=_clean(record.get("constitution") or record.get("ctb")),
+            nature_of_business=_nature_of_business(record.get("nba")),
+            registration_date=_clean(record.get("registration_date") or record.get("rgdt")),
+            additional_addresses=_additional_addresses(record.get("adadr")),
+        )
     except Exception:
         logger.exception("sandbox_kyc: search_gstin failed (fail-closed → vendor_down)")
         return GstinLookup(ok=False)
@@ -173,3 +234,44 @@ def _clean(v: Any) -> str | None:
         return None
     s = str(v).strip()
     return s or None
+
+
+# VT-407 — GSTN address subfield order for a readable single-line compose. The GST `addr` object
+# uses these short keys; we join the present, non-empty ones in postal order. (Door/floor, building
+# name, street, locality, district, state, PIN.) `lt`/`lg` are geo, handled separately; `landMark`
+# is included for completeness.
+_ADDR_SUBFIELDS = ("flno", "bno", "bnm", "st", "loc", "landMark", "dst", "stcd", "pncd")
+
+
+def _compose_address(addr: Any) -> str | None:
+    """Compose a readable single-line address from a GSTN ``addr`` dict (pradr.addr / adadr[].addr).
+    Defensive: non-dict or no usable subfields → None. Order = postal; empties dropped."""
+    if not isinstance(addr, dict):
+        return None
+    parts = [s for k in _ADDR_SUBFIELDS if (s := _clean(addr.get(k)))]
+    return ", ".join(parts) or None
+
+
+def _additional_addresses(adadr: Any) -> tuple[str, ...]:
+    """Compose each additional place-of-business address (``adadr[].addr``) to a string. Defensive:
+    non-list / malformed entries skipped; empties dropped. Returns a tuple (frozen-dataclass-safe)."""
+    if not isinstance(adadr, list):
+        return ()
+    out = []
+    for entry in adadr:
+        addr = entry.get("addr") if isinstance(entry, dict) else None
+        composed = _compose_address(addr)
+        if composed:
+            out.append(composed)
+    return tuple(out)
+
+
+def _nature_of_business(nba: Any) -> list[str]:
+    """Normalise the nature-of-business field (``nba``) to a list of clean strings. The GST shape is
+    typically a list of activity strings, but a single string is tolerated. Defensive → []."""
+    if isinstance(nba, str):
+        cleaned = _clean(nba)
+        return [cleaned] if cleaned else []
+    if isinstance(nba, list):
+        return [c for v in nba if (c := _clean(v))]
+    return []

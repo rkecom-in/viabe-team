@@ -21,6 +21,7 @@ from orchestrator.onboarding import auto_discovery_sources as src
 from orchestrator.onboarding.auto_discovery_sources import (
     SourceResult,
     discover_gbp,
+    discover_gst,
     discover_serper,
     discover_website,
 )
@@ -249,4 +250,119 @@ def test_discover_serper_no_key_skips_never_errors(draft_spy, monkeypatch):
     assert result.status == "skipped"
     assert result.source == "serper"
     assert result.cost_usd == 0.0
+    assert draft_spy == []
+
+
+# --------------------------------------------------------------------------- GST (VT-407)
+#
+# Driven through the REAL GstinLookup dataclass via the injected ``search_fn`` — so the PII guard
+# exercises the production business_fields()/is_proprietorship() logic, not a stub.
+
+from orchestrator.integrations.methods.sandbox_kyc import GstinLookup  # noqa: E402
+
+
+def test_discover_gst_no_gstin_skips(draft_spy):
+    """No gstin anchor in the seed → skipped (this source only runs once VT-406 sets the gstin)."""
+    def _boom(gstin):  # must never be called when there's no gstin
+        raise AssertionError("search_fn must not run without a gstin")
+
+    result = discover_gst(TENANT, {"business_name": "X"}, search_fn=_boom)
+    assert result.status == "skipped"
+    assert result.source == "gst"
+    assert result.cost_usd == 0.0
+    assert result.fields == {}
+    assert draft_spy == []
+
+
+def test_discover_gst_active_company_writes_business_fields(draft_spy):
+    """An ACTIVE company GSTIN → business-level fields written under source='gst'. For a company
+    legal_name IS business-level (not a person) so it is included."""
+    seen: dict = {}
+
+    def fake_search(gstin):
+        seen["gstin"] = gstin
+        return GstinLookup(
+            ok=True,
+            legal_name="RKECOM SERVICES (OPC) PRIVATE LIMITED",
+            trade_name="RKECOM",
+            status="Active",
+            constitution="Private Limited Company",
+            registration_date="01/07/2017",
+            nature_of_business=["Retail Business"],
+            principal_address="12, MG Road, Mumbai, Maharashtra, 400001",
+            additional_addresses=("7, Link Road, Pune, Maharashtra, 411001",),
+            geo_lat="19.0760",
+            geo_lng="72.8777",
+        )
+
+    result = discover_gst(TENANT, {"gstin": "27AAKCR3738B1ZE"}, search_fn=fake_search)
+
+    assert seen["gstin"] == "27AAKCR3738B1ZE"
+    assert result.status == "ok"
+    assert result.source == "gst"
+    assert result.cost_usd == src._GST_COST_USD == 0.0
+    # company legal_name is business-level → present
+    assert result.fields["legal_name"] == "RKECOM SERVICES (OPC) PRIVATE LIMITED"
+    assert result.fields["trade_name"] == "RKECOM"
+    assert result.fields["constitution"] == "Private Limited Company"
+    assert result.fields["principal_address"].startswith("12, MG Road")
+    assert result.fields["nature_of_business"] == ["Retail Business"]
+    assert result.fields["additional_addresses"] == ["7, Link Road, Pune, Maharashtra, 411001"]
+    assert result.fields["registration_date"] == "01/07/2017"
+
+    assert len(draft_spy) == 1
+    assert draft_spy[0]["source"] == "gst"
+    assert draft_spy[0]["tenant_id"] == TENANT
+    assert draft_spy[0]["fields"] == result.fields
+
+
+def test_discover_gst_proprietorship_does_not_write_person_name(draft_spy):
+    """PII NEGATIVE TEST (CL-390/425): for a Proprietorship, lgnm='Ramesh Kumar' is a natural
+    person — it MUST NOT be written to the draft. Business-level fields still flow."""
+    def fake_search(gstin):
+        return GstinLookup(
+            ok=True,
+            legal_name="Ramesh Kumar",  # a PERSON for a proprietorship
+            trade_name="Ramesh General Store",
+            status="Active",
+            constitution="Proprietorship",
+            principal_address="5, Bazaar Road, Jaipur, Rajasthan, 302001",
+        )
+
+    result = discover_gst(TENANT, {"gstin": "08AAAAA0000A1Z5"}, search_fn=fake_search)
+
+    assert result.status == "ok"
+    # the person-name legal_name is NOT in the written fields
+    assert "legal_name" not in result.fields
+    assert "Ramesh Kumar" not in result.fields.values()
+    # business-level context still written
+    assert result.fields["trade_name"] == "Ramesh General Store"
+    assert result.fields["constitution"] == "Proprietorship"
+    assert result.fields["principal_address"].startswith("5, Bazaar Road")
+
+    assert len(draft_spy) == 1
+    assert "legal_name" not in draft_spy[0]["fields"]
+    assert "Ramesh Kumar" not in draft_spy[0]["fields"].values()
+
+
+def test_discover_gst_vendor_down_errors_no_write(draft_spy):
+    """search_gstin fail-closed (ok=False) → status 'error', nothing written."""
+    result = discover_gst(
+        TENANT, {"gstin": "27AAKCR3738B1ZE"}, search_fn=lambda g: GstinLookup(ok=False)
+    )
+    assert result.status == "error"
+    assert result.source == "gst"
+    assert result.cost_usd == 0.0
+    assert draft_spy == []
+
+
+def test_discover_gst_inactive_gstin_errors_no_write(draft_spy):
+    """A parsed-but-inactive GSTIN (ok=True, status='Cancelled') is not useful context → error,
+    no write (matches the verification semantics — only an active record earns trust)."""
+    result = discover_gst(
+        TENANT,
+        {"gstin": "27AAKCR3738B1ZE"},
+        search_fn=lambda g: GstinLookup(ok=True, legal_name="Dead Co", status="Cancelled"),
+    )
+    assert result.status == "error"
     assert draft_spy == []

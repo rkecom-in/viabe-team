@@ -96,11 +96,14 @@ def auto_discovery_run(
     if sources is None:
         from orchestrator.onboarding.auto_discovery_sources import (
             discover_gbp,
+            discover_gst,
             discover_serper,
             discover_website,
         )
 
-        sources = [discover_gbp, discover_website, discover_serper]  # GBP → website → serper
+        # GBP → GST → website → serper. GST is placed after GBP and self-skips cleanly when the
+        # seed carries no verified gstin (VT-407), so it adds nothing for non-GSTIN tenants.
+        sources = [discover_gbp, discover_gst, discover_website, discover_serper]
 
     seed = dict(seed)  # local copy; the GBP→website chain mutates it
     # VT-374 (auto_discovery, source_fetch) seam: one consume-first override claim per run
