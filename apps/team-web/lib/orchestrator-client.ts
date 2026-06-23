@@ -171,6 +171,130 @@ export async function forwardRunControl(
   }
 }
 
+// ---------------------------------------------------------------------------
+// VT-406 (Part B) — entity-match at signup. team-web PROXIES the orchestrator's
+// internal-secret-gated endpoints (Part A); the browser NEVER sees INTERNAL_API_SECRET
+// and team-web NEVER calls the Sandbox/Apify vendors directly. Both fns fail CLOSED:
+// candidates → {candidates: []} (never stalls signup — a no-candidate owner proceeds via
+// the not-listed path); confirm → {ok: false, reason} (a vendor failure never fakes
+// "verified" — the verify status is the only thing that gates account-creation, VT-408).
+//
+// CL-390: log path + status ONLY — never the business_name/city/gstin/name or any body
+// (those are business identity, and an echoed body in Vercel logs is a CL-390 breach).
+// ---------------------------------------------------------------------------
+
+const _ENTITY_CANDIDATES_TIMEOUT_MS = 10_000
+const _ENTITY_CONFIRM_TIMEOUT_MS = 15_000
+
+/** One UNVERIFIED entity candidate as Part A ships it (asdict of EntityCandidate). Never a fact —
+ *  the owner picks one to verify. `source` drives the "found via web/GBP" chip (NEVER "verified");
+ *  `candidate_gstin` is null for GBP candidates (no registry id); `detail` disambiguates same-name
+ *  candidates (address/category). */
+export interface EntityCandidate {
+  trade_name: string | null
+  source: 'web' | 'gbp'
+  candidate_gstin: string | null
+  legal_name: string | null
+  detail: string | null
+}
+
+export interface EntityCandidatesResult {
+  /** True iff the orchestrator returned 2xx (even with an empty list). */
+  ok: boolean
+  candidates: EntityCandidate[]
+  /** ok | http_<n> | timeout | error — render-only; NEVER implies a candidate is verified. */
+  reason: string
+}
+
+/**
+ * Fetch UNVERIFIED entity candidates for {businessName, city} (Part A web-search + GBP). Fail-CLOSED
+ * to an empty list on any non-2xx / throw — candidate lookup must never stall or block signup (the
+ * not-listed path always exists). The returned candidates are SHOWN AS "found", never "verified".
+ */
+export async function fetchEntityCandidates(
+  businessName: string,
+  city: string,
+): Promise<EntityCandidatesResult> {
+  const base = process.env.TEAM_ORCHESTRATOR_URL ?? _ORCHESTRATOR_DEFAULT
+  const secret = process.env.INTERNAL_API_SECRET ?? ''
+  try {
+    const res = await fetch(`${base}/api/orchestrator/onboard/entity-candidates`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'X-Internal-Secret': secret },
+      body: JSON.stringify({ business_name: businessName, city }),
+      signal: AbortSignal.timeout(_ENTITY_CANDIDATES_TIMEOUT_MS),
+    })
+    if (!res.ok) {
+      console.error(`entity-candidates: http_${res.status}; failing closed`) // CL-390: path + status only
+      return { ok: false, candidates: [], reason: `http_${res.status}` }
+    }
+    const data = (await res.json()) as { candidates?: EntityCandidate[] }
+    return { ok: true, candidates: data.candidates ?? [], reason: 'ok' }
+  } catch (err) {
+    const timedOut = err instanceof Error && err.name === 'TimeoutError'
+    console.error(`entity-candidates: ${timedOut ? 'timeout' : 'error'}; failing closed`) // CL-390: no detail/body
+    return { ok: false, candidates: [], reason: timedOut ? 'timeout' : 'error' }
+  }
+}
+
+export interface EntityConfirmResult {
+  /** True iff the chosen GSTIN verified ACTIVE at Sandbox (status === 'gstin_verified'). */
+  ok: boolean
+  /** unverified | gstin_verified — the ONLY thing that may render a "verified" chip. */
+  status?: string
+  /** vendor_down (retryable, NOT a reject) | invalid_gstin | invalid_gstin_format. */
+  reason?: string
+  /** The AUTHORITATIVE registry name on success — render this, never the candidate's web/LLM name. */
+  name?: string | null
+}
+
+/**
+ * Confirm the owner-picked candidate GSTIN (Part A Sandbox round-trip). Returns the verify status
+ * verbatim. Fail-CLOSED: any non-2xx / throw → {ok:false, reason} — a vendor failure NEVER fakes a
+ * verified result. `gstin_verified` is the sole signal that may unlock account-creation (VT-408).
+ *
+ * tenantId is '' pre-create (the wizard runs BEFORE the tenant exists — see VT-408 verify-then-create
+ * ordering): the Sandbox verify still returns a status, and Part A's anchor-persist/discovery-seed are
+ * best-effort no-ops without a real tenant. The verified entity is carried into the create payload so
+ * the orchestrator anchors it at tenant-create time.
+ */
+export async function confirmEntity(
+  tenantId: string,
+  gstin: string,
+): Promise<EntityConfirmResult> {
+  const base = process.env.TEAM_ORCHESTRATOR_URL ?? _ORCHESTRATOR_DEFAULT
+  const secret = process.env.INTERNAL_API_SECRET ?? ''
+  try {
+    const res = await fetch(`${base}/api/orchestrator/onboard/entity-confirm`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'X-Internal-Secret': secret },
+      body: JSON.stringify({ tenant_id: tenantId, gstin }),
+      signal: AbortSignal.timeout(_ENTITY_CONFIRM_TIMEOUT_MS),
+    })
+    if (!res.ok) {
+      console.error(`entity-confirm: http_${res.status}; failing closed`) // CL-390: path + status only
+      return { ok: false, reason: `http_${res.status}` }
+    }
+    const data = (await res.json()) as {
+      ok?: boolean
+      status?: string
+      reason?: string
+      name?: string | null
+    }
+    return {
+      ok: Boolean(data.ok),
+      status: data.status ?? undefined,
+      reason: data.reason ?? undefined,
+      name: data.name ?? null,
+    }
+  } catch (err) {
+    const timedOut = err instanceof Error && err.name === 'TimeoutError'
+    console.error(`entity-confirm: ${timedOut ? 'timeout' : 'error'}; failing closed`) // CL-390: no detail/body
+    return { ok: false, reason: timedOut ? 'timeout' : 'error' }
+  }
+}
+
+
 /** VT-211 onboard-step result envelope. */
 export interface OnboardStepResult {
   ok: boolean
