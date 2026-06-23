@@ -31,10 +31,12 @@ BEFORE the HTTPException.
 from __future__ import annotations
 
 import logging
+from datetime import UTC, datetime
 from typing import Any, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Header, HTTPException
+from psycopg.types.json import Jsonb
 from pydantic import BaseModel
 
 from orchestrator.agents.autonomy import _OPEN_BATCH_STATUSES, cancel_batch, vtr_autonomy_override
@@ -112,6 +114,13 @@ class VtrBatchDraftsBody(BaseModel):
 class VtrTenantProfileBody(BaseModel):
     operator_id: str
     tenant_id: str
+
+
+class VtrConfirmFieldBody(BaseModel):
+    operator_id: str
+    tenant_id: str
+    field: str
+    basis: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -349,7 +358,7 @@ def vtr_tenant_profile(
             "city_tier, language_preference, preferred_language, signed_up_at, trial_started_at, "
             "phase_entered_at, owner_name, whatsapp_last4, draft_attributes, draft_provenance, "
             "draft_created_at, draft_updated_at, onboarding_status, onboarding_queue_len, "
-            "confirmed_fields "
+            "confirmed_fields, field_provenance "
             "FROM vtr_tenant_profile WHERE tenant_id = %s",
             (body.tenant_id,),
         )
@@ -362,6 +371,80 @@ def vtr_tenant_profile(
         profile is not None,
     )
     return {"profile": profile}
+
+
+@router.post("/api/orchestrator/ops/vtr-confirm-field")
+def vtr_confirm_field(
+    body: VtrConfirmFieldBody,
+    x_internal_secret: str | None = Header(default=None, alias="X-Internal-Secret"),
+    x_operator_jwt: str | None = Header(default=None, alias="X-Operator-Jwt"),
+) -> dict[str, Any]:
+    """VT-405 Part B (CL-441) — a VTR promotes ONE discovered field into the canonical business
+    profile, marked VTR-asserted. ALL discovered fields are confirmable (incl. identity) per Fazal's
+    ruling — no owner-only lane. Guardrails: the draft VALUE is server-read (never client-trusted,
+    the VT-293/294 IDOR rule); the promote + provenance + audit commit in ONE transaction; provenance
+    records source='vtr'; an `ops_audit` row is written (metadata only — field NAME, never the value);
+    NO KG emit (VT-389). The owner's WhatsApp confirm still overwrites the VALUE via the same merge;
+    the badge-supersede (flip status→owner_confirmed) is a forward-compatible follow-up.
+    """
+    _require_uuid(body.tenant_id, "tenant_id")
+    field = body.field.strip()
+    if not field or field == "_field_provenance":
+        raise HTTPException(status_code=400, detail="invalid field")
+    operator = _gate(
+        x_internal_secret=x_internal_secret,
+        x_operator_jwt=x_operator_jwt,
+        body_operator_id=body.operator_id,
+        tenant_id=body.tenant_id,
+        deny_action="profile_confirm_denied",
+        deny_target_kind="business_profile",
+    )
+    # ops_audit + l1_entities writes need the privileged role (app_vtr_role has neither grant); the
+    # promote + provenance + audit are ONE atomic transaction (CL-390 — a guaranteed audit row).
+    with get_pool().connection() as conn, conn.transaction():
+        cur = conn.cursor()
+        # Server-read the discovered value — the client NEVER supplies it (IDOR/PII).
+        drow = cur.execute(
+            "SELECT attributes -> %s AS value, (attributes ? %s) AS present "
+            "FROM business_profile_draft WHERE tenant_id = %s",
+            (field, field, body.tenant_id),
+        ).fetchone()
+        present = drow["present"] if isinstance(drow, dict) else (drow[1] if drow else False)
+        if not drow or not present:
+            raise HTTPException(status_code=404, detail="field not in the discovered draft")
+        value = drow["value"] if isinstance(drow, dict) else drow[0]
+        # Read-merge-write the nested _field_provenance map (top-level `||` would clobber it).
+        erow = cur.execute(
+            "SELECT attributes -> '_field_provenance' AS prov FROM l1_entities "
+            "WHERE tenant_id = %s AND entity_type = 'business_profile' AND valid_to IS NULL",
+            (body.tenant_id,),
+        ).fetchone()
+        prov_raw = (erow["prov"] if isinstance(erow, dict) else (erow[0] if erow else None)) if erow else None
+        prov: dict[str, Any] = dict(prov_raw) if prov_raw else {}
+        prov[field] = {
+            "source": "vtr",
+            "status": "vtr_confirmed",
+            "confirmed_by": operator,
+            "at": datetime.now(UTC).isoformat(),
+        }
+        cur.execute(
+            "INSERT INTO l1_entities (tenant_id, entity_type, attributes) "
+            "VALUES (%s, 'business_profile', %s) "
+            "ON CONFLICT (tenant_id) WHERE entity_type = 'business_profile' "
+            "DO UPDATE SET attributes = l1_entities.attributes || EXCLUDED.attributes",
+            (body.tenant_id, Jsonb({field: value, "_field_provenance": prov})),
+        )
+        audit(
+            cur,
+            operator_id=operator,
+            tenant_id=body.tenant_id,
+            action="vtr_profile_confirm",
+            target_kind="business_profile",
+            target_id=body.tenant_id,
+            detail=field,  # field NAME only — never the value (CL-390 metadata-only)
+        )
+    logger.info("vtr_confirm_field OK operator=%s tenant=%s field=%s", operator, body.tenant_id, field)
+    return {"ok": True, "field": field, "status": "vtr_confirmed"}
 
 
 @router.post("/api/orchestrator/ops/vtr-draft-batches")

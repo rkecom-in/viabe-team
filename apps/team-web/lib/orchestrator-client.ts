@@ -706,6 +706,12 @@ export interface VtrTenantProfile {
   onboarding_status: string | null
   onboarding_queue_len: number
   confirmed_fields: string[] | null
+  /** VT-405 Part B — per-field confirm provenance ({field: {source, status, confirmed_by, at}}).
+   *  METADATA ONLY (no field values); source='vtr' → VTR-asserted, absent/owner → owner-confirmed. */
+  field_provenance: Record<
+    string,
+    { source?: string; status?: string; confirmed_by?: string; at?: string }
+  > | null
 }
 
 export async function vtrTenantProfile(
@@ -715,6 +721,39 @@ export async function vtrTenantProfile(
   const r = await vtrCall('vtr-tenant-profile', operatorId, { tenant_id: tenantId })
   if (r.status !== 200) return { ok: false, profile: null, reason: r.reason }
   return { ok: true, profile: (r.body.profile as VtrTenantProfile | null) ?? null, reason: 'ok' }
+}
+
+export interface VtrConfirmFieldResult {
+  ok: boolean
+  field: string | null
+  status: string | null
+  reason: string
+}
+
+/**
+ * VT-405 Part B — promote ONE auto-discovered draft field to VTR-asserted confirmed (CL-441: a VTR
+ * may confirm ANY discovered field incl. identity). The value is read server-side from the draft
+ * (never sent by the client — IDOR/PII); we send only the field NAME. Fail-closed on any non-200.
+ */
+export async function vtrConfirmField(
+  operatorId: string,
+  tenantId: string,
+  field: string,
+  basis = '',
+): Promise<VtrConfirmFieldResult> {
+  const r = await vtrCall('vtr-confirm-field', operatorId, { tenant_id: tenantId, field, basis })
+  if (r.status === 200) {
+    return {
+      ok: true,
+      field: typeof r.body.field === 'string' ? r.body.field : field,
+      status: typeof r.body.status === 'string' ? r.body.status : 'vtr_confirmed',
+      reason: 'ok',
+    }
+  }
+  if (r.status === 400) return { ok: false, field: null, status: null, reason: 'invalid_field' }
+  if (r.status === 403) return { ok: false, field: null, status: null, reason: 'forbidden' }
+  if (r.status === 404) return { ok: false, field: null, status: null, reason: 'not_found' }
+  return { ok: false, field: null, status: null, reason: r.reason }
 }
 
 /** vtr_draft_batches view row — AGGREGATES ONLY (no params/owner_feedback/customer_id by view). */

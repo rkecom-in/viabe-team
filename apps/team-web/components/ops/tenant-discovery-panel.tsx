@@ -1,13 +1,15 @@
 /**
- * VT-405 Part A — the VTR tenant discovery panel (read-only).
+ * VT-405 — the VTR tenant discovery panel.
  *
  * Renders one tenant's signup fields + auto-discovered profile draft + confirmation status from the
  * vtr_tenant_profile view (non-PII; WhatsApp last-4 only; confirmed profile keys-only). Server
- * component — Part A is read-only; Part B (drag-drop confirm) will add client interactivity + the
- * per-row confirm action (the buttons are rendered disabled here as the placeholders Cowork specced).
+ * component; Part B adds the per-row Confirm action via a small client island (ConfirmFieldButton)
+ * — a VTR may confirm ANY discovered field incl. identity (CL-441), promoting it to VTR-asserted
+ * (badged distinctly from owner-confirmed; owner-confirm supersedes).
  */
 
 import type { VtrTenantProfile } from '@/lib/orchestrator-client'
+import { ConfirmFieldButton } from '@/components/ops/confirm-field-button'
 
 function fmtDate(iso: string | null): string {
   if (!iso) return '—'
@@ -154,6 +156,7 @@ export function TenantDiscoveryPanel({ profile: p }: { profile: VtrTenantProfile
             {draftKeys.map((k) => {
               const source = p.draft_provenance?.[k]?.source ?? null
               const isConfirmed = confirmed.has(k)
+              const prov = p.field_provenance?.[k]
               return (
                 <div key={k} className="flex items-start gap-3 py-2.5">
                   <div className="w-36 shrink-0 text-xs font-medium uppercase tracking-wide text-gray-500">
@@ -165,18 +168,17 @@ export function TenantDiscoveryPanel({ profile: p }: { profile: VtrTenantProfile
                   <div className="flex shrink-0 items-center gap-1.5">
                     {source && <Chip tone="gray">{source}</Chip>}
                     {isConfirmed ? (
-                      <Chip tone="green">confirmed</Chip>
+                      prov?.source === 'vtr' ? (
+                        <Chip tone="blue">VTR-asserted</Chip>
+                      ) : (
+                        <Chip tone="green">owner-confirmed</Chip>
+                      )
                     ) : (
-                      <Chip tone="amber">discovered</Chip>
+                      <>
+                        <Chip tone="amber">discovered</Chip>
+                        <ConfirmFieldButton tenantId={p.tenant_id} field={k} />
+                      </>
                     )}
-                    {/* Part B drag-drop confirm lands here — disabled placeholder for Part A. */}
-                    <button
-                      disabled
-                      title="confirm (Part B — pending Fazal's field allow-list ruling)"
-                      className="cursor-not-allowed rounded border border-dashed border-gray-300 px-2 py-0.5 text-xs text-gray-400"
-                    >
-                      Confirm
-                    </button>
                   </div>
                 </div>
               )
