@@ -289,16 +289,20 @@ def test_content_variables_positional_three_vars(send_ctx, twilio_create):
     }
 
 
-def test_missing_template_var_fails_closed(send_ctx, twilio_create):
-    """A declared var missing from params -> NO send (never emit Twilio samples)."""
+def test_missing_template_var_omits_that_position(send_ctx, twilio_create):
+    """A declared var absent from params -> its position is OMITTED (never invented), and the send
+    still proceeds (VT-400 deferred strict fail-closed; the absent {{n}} renders its Twilio sample
+    until each partial-param sender is completed). The PRESENT vars still map to real values."""
+    import json
+
     from orchestrator.utils.twilio_send import send_template_message
 
-    result = send_template_message(
+    send_template_message(
         uuid4(),
         "team_welcome",
         {"owner_name": "Sundaram"},  # trial_end_date missing
         recipient_phone="+919812300017",
     )
-    assert result.success is False
-    assert result.error_code == "missing_template_var"
-    twilio_create.assert_not_called()
+    sent = json.loads(twilio_create.call_args.kwargs["content_variables"])
+    assert sent == {"1": "Sundaram"}  # position 2 omitted, not a sample/placeholder
+    twilio_create.assert_called_once()

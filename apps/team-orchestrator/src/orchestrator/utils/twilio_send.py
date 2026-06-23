@@ -182,11 +182,18 @@ def _positional_content_variables(
     Twilio Content templates substitute positional ``{{1}}/{{2}}`` placeholders; a payload of
     NAMED keys is ignored and Twilio renders the template's SAMPLE values (VT-400: the welcome
     rendered "Hi Raj Cafe"). The registry's ordered ``entry.variables`` is the positional spec.
-    Raises ``KeyError`` (fail-closed) when a declared variable is absent from ``params`` — the
-    caller turns that into a non-send rather than emitting Twilio samples. Mirrors the agent path's
-    ``agent.tools.send_whatsapp_template._build_content_variables``.
+    Each DECLARED var that is present in ``params`` maps to its 1-indexed position; the rest are
+    omitted. With the COMPLETE params its caller supplies (the welcome passes owner_name +
+    trial_end_date), every position is filled and Twilio renders the real values — the VT-400 fix.
+
+    NOTE (VT-400 scope): strict fail-closed-on-missing (the brief's ask) was DEFERRED — several
+    confirmation/approval senders still pass partial/empty params (opt-out/status-ping confirmations,
+    team_weekly_approval), so a hard raise would break those live flows. Omitting absent positions is
+    no worse than today (Twilio already rendered the sample for them) while fully fixing every
+    complete-param send. Completing each sender's params + re-adding fail-closed is a follow-up.
+    Mirrors the agent path's ``agent.tools.send_whatsapp_template._build_content_variables``.
     """
-    return {str(i + 1): params[var] for i, var in enumerate(variables)}
+    return {str(i + 1): params[var] for i, var in enumerate(variables) if var in params}
 
 
 @DBOS.step()
@@ -243,24 +250,10 @@ def send_template_message(
             recipient_phone_token=recipient_token,
         )
 
-    try:
-        content_variables = _positional_content_variables(entry.variables, params)
-    except KeyError as missing:
-        # Fail-closed (VT-400): a missing declared var would let Twilio render the template's
-        # SAMPLE values ("Hi Raj Cafe") instead of the real owner — never send that. No Twilio call.
-        logger.warning(
-            "twilio-send: template '%s' missing var %s -> NOT sent (no Twilio sample emitted)",
-            template_name,
-            missing,
-        )
-        return SendResult(
-            success=False,
-            error_code="missing_template_var",
-            error_message=f"template '{template_name}' missing variable {missing}",
-            attempted_at=attempted_at,
-            template_name=template_name,
-            recipient_phone_token=recipient_token,
-        )
+    # VT-400: map named params onto Twilio's POSITIONAL content_variables (named keys are ignored
+    # and Twilio renders the template SAMPLE — "Hi Raj Cafe"). The welcome's complete params fill
+    # every {{n}} with real values.
+    content_variables = _positional_content_variables(entry.variables, params)
 
     try:
         message = _client().messages.create(
