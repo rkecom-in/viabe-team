@@ -66,8 +66,40 @@ def test_two_step_auth_then_post_search_body_shape():
     assert search["headers"]["authorization"] == "TOK123"  # token, NO 'Bearer' prefix
     assert "Bearer" not in search["headers"]["authorization"]
     assert search["headers"]["x-api-key"] == "key-abc"
-    assert search["headers"]["x-api-version"] == "1.0"
+    assert search["headers"]["x-api-version"] == "1.0.0"  # VT-409: search uses 1.0.0 (auth stays 1.0)
     assert "x-api-secret" not in search["headers"]  # secret only on /authenticate
+
+
+def test_vt409_auth_prefers_top_level_token_not_nested():
+    """VT-409 regression: /authenticate returns the token at BOTH top-level access_token (WORKS) AND
+    nested data.access_token (500s on search). We MUST send the TOP-LEVEL one. The structural guard so
+    this exact drift can't silently return the dud token again (mirrors the data.data depth guard)."""
+    from orchestrator.integrations.methods import sandbox_kyc
+
+    req, calls = _recorder({
+        # BOTH tokens present, DIFFERENT values — only the top-level one is the working token.
+        "/authenticate": {"code": 200, "access_token": "TOP_WORKS", "data": {"access_token": "NESTED_500s"}},
+        "/gst/compliance/public/gstin/search": {"data": {"data": {"lgnm": "RKECOM", "sts": "Active"}, "status_cd": "1"}},
+    })
+    res = sandbox_kyc.search_gstin("27AAKCR3738B1ZE", request_fn=req)
+
+    assert res.ok and res.is_active()
+    search = calls[1]
+    assert search["headers"]["authorization"] == "TOP_WORKS"  # NOT "NESTED_500s"
+    assert search["headers"]["x-api-version"] == "1.0.0"  # VT-409: search uses 1.0.0
+
+
+def test_vt409_auth_falls_back_to_nested_when_no_top_level():
+    """Back-compat: a response that omits the top-level token still resolves via data.access_token."""
+    from orchestrator.integrations.methods import sandbox_kyc
+
+    req, calls = _recorder({
+        "/authenticate": {"data": {"access_token": "ONLY_NESTED"}},
+        "/gst/compliance/public/gstin/search": {"data": {"data": {"lgnm": "RKECOM", "sts": "Active"}, "status_cd": "1"}},
+    })
+    res = sandbox_kyc.search_gstin("27AAKCR3738B1ZE", request_fn=req)
+    assert res.ok
+    assert calls[1]["headers"]["authorization"] == "ONLY_NESTED"
 
 
 def test_token_is_cached_across_calls():
