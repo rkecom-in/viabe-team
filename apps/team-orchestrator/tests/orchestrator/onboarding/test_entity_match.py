@@ -64,11 +64,11 @@ def test_confirm_rejects_malformed_gstin_without_calling_sandbox() -> None:
 
 
 def test_confirm_verified_persists_anchor_and_seeds_discovery(monkeypatch) -> None:
+    # Patch the two seams (NOT l1/verification — importing those pulls psycopg, absent in dep-less smoke).
     anchor: dict[str, Any] = {}
     seeded: dict[str, Any] = {}
     monkeypatch.setattr(
-        "orchestrator.knowledge.l1.upsert_business_profile",
-        lambda tid, attrs: anchor.update(tid=tid, attrs=attrs) or __import__("uuid").uuid4(),
+        entity_match, "_persist_anchor", lambda tid, **k: anchor.update(tid=tid, **k)
     )
     monkeypatch.setattr(entity_match, "_seed_discovery", lambda *a, **k: seeded.update(called=True))
 
@@ -77,11 +77,25 @@ def test_confirm_verified_persists_anchor_and_seeds_discovery(monkeypatch) -> No
 
     out = entity_match.confirm_and_verify("t1", _VALID_GSTIN, lookup_fn=lookup)
     assert out["status"] == "gstin_verified"
-    a = anchor["attrs"]["business_entity_anchor"]
-    assert a["gstin"] == _VALID_GSTIN
-    assert a["source"] == "sandbox" and a["verified"] is True
-    assert a["trade_name"] == "Sundaram Multi Pap Limited"
+    # The verified path persists the anchor with the verified gstin + name, and seeds discovery.
+    assert anchor["tid"] == "t1"
+    assert anchor["gstin"] == _VALID_GSTIN
+    assert anchor["verified_name"] == "Sundaram Multi Pap Limited"
     assert seeded.get("called") is True
+
+
+def test_persist_anchor_builds_business_level_anchor() -> None:
+    """_persist_anchor (injected upsert_fn — no l1 import) writes a business-level, sandbox-verified
+    anchor onto the business_profile entity."""
+    captured: dict[str, Any] = {}
+    entity_match._persist_anchor(
+        "t1", gstin=_VALID_GSTIN, verified_name="Sundaram Multi Pap Limited",
+        upsert_fn=lambda tid, attrs: captured.update(tid=tid, attrs=attrs),
+    )
+    a = captured["attrs"]["business_entity_anchor"]
+    assert a["gstin"] == _VALID_GSTIN
+    assert a["source"] == "sandbox" and a["verified"] is True and a["registry_kind"] == "gst"
+    assert a["trade_name"] == "Sundaram Multi Pap Limited"
 
 
 def test_confirm_vendor_down_returns_unverified_no_anchor(monkeypatch) -> None:

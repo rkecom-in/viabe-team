@@ -170,9 +170,13 @@ def confirm_and_verify(
     if not _GSTIN_RE.fullmatch(gstin):
         return {"ok": False, "reason": "invalid_gstin_format", "status": "unverified"}
 
-    from orchestrator.onboarding import verification
+    run = lookup_fn
+    if run is None:
+        # Import the real verifier ONLY when not injected — verification pulls the psycopg/db chain,
+        # absent in the dep-less smoke env (an unconditional import broke the injected-fn unit tests).
+        from orchestrator.onboarding import verification
 
-    run = lookup_fn or verification.run_lookup
+        run = verification.run_lookup
     result = run(tenant_id, gstin)
     if not result.get("ok"):
         return result  # vendor_down (retryable) or invalid_gstin (bad input) — caller/VT-408 decides
@@ -183,14 +187,25 @@ def confirm_and_verify(
     return result
 
 
-def _persist_anchor(tenant_id: UUID | str, *, gstin: str, verified_name: str | None) -> None:
+def _persist_anchor(
+    tenant_id: UUID | str,
+    *,
+    gstin: str,
+    verified_name: str | None,
+    upsert_fn: Callable[[UUID | str, dict[str, Any]], Any] | None = None,
+) -> None:
     """Persist the confirmed entity as the discovery anchor on the business_profile L1 entity. Provenance
     is inline (source='sandbox', verified=True) — VT-407 enriches; the VTR panel badges it 'verified'.
-    Best-effort: a persist failure must not undo the verification (already committed by run_lookup)."""
+    Best-effort: a persist failure must not undo the verification (already committed by run_lookup).
+    ``upsert_fn`` is injectable for tests (the default lazily imports l1 — psycopg-bound, absent in the
+    dep-less smoke env, so it must not import at module load)."""
     try:
-        from orchestrator.knowledge.l1 import upsert_business_profile
+        upsert = upsert_fn
+        if upsert is None:
+            from orchestrator.knowledge.l1 import upsert_business_profile
 
-        upsert_business_profile(
+            upsert = upsert_business_profile
+        upsert(
             tenant_id,
             {
                 "business_entity_anchor": {
