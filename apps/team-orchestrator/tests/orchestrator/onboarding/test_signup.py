@@ -133,9 +133,19 @@ def _valid_input(**over):
         business_name="Asha Kirana", owner_name="Asha Devi", whatsapp_number=_wa_91(),
         preferred_language="hi", city="Bengaluru", business_type="kirana",
         consent_dpdpa=True, consent_residency=True,
+        gstin="27AAKCR3738B1ZE",  # VT-408: a GSTIN is now mandatory at signup (verify-then-create)
     )
     base.update(over)
     return SignupInput(**base)
+
+
+def _active_search(_gstin):
+    """Injectable verify_search_fn → an ACTIVE GSTIN (VT-408 gate green path, no live creds).
+    Returns the REAL production GstinLookup type so the gate exercises the real is_active() /
+    authoritative_name() contract — only an ACTIVE status with a name earns gstin_verified."""
+    from orchestrator.integrations.methods.sandbox_kyc import GstinLookup
+
+    return GstinLookup(ok=True, legal_name="Asha Kirana", status="Active")
 
 
 def _wa_91() -> str:
@@ -151,6 +161,7 @@ def test_run_signup_full(pool):
     out = run_signup(
         _valid_input(),
         welcome_send_fn=lambda *a, **k: calls.append(a) or True,
+        verify_search_fn=_active_search,  # VT-408: green GSTIN verify (no live Sandbox)
     )
     assert out.plan_tier == "founding"
     assert out.city_tier in {"tier_1", "tier_2", "tier_3"}
@@ -194,6 +205,7 @@ def test_run_signup_discovery_kick_failure_non_blocking(pool, monkeypatch):
     out = run_signup(
         _valid_input(whatsapp_number="+919900000366"),
         welcome_send_fn=lambda *a, **k: True,
+        verify_search_fn=_active_search,  # VT-408: green GSTIN verify (no live Sandbox)
     )
     # Signup still succeeds despite the kick raising.
     assert out.tenant_id is not None
@@ -271,7 +283,10 @@ def test_run_signup_unapproved_sid_reports_not_sent_but_signup_succeeds(pool, mo
 
     from orchestrator.onboarding.signup import run_signup
 
-    out = run_signup(_valid_input(whatsapp_number=f"+9199{uuid.uuid4().int % 10**8:08d}"))
+    out = run_signup(
+        _valid_input(whatsapp_number=f"+9199{uuid.uuid4().int % 10**8:08d}"),
+        verify_search_fn=_active_search,  # VT-408: green GSTIN verify (no live Sandbox)
+    )
     assert out.tenant_id is not None, "signup must still succeed when the send is unapproved"
     assert out.welcome_sent is False, (
         "an unapproved SID sends nothing — welcome_sent must report False (no faked delivery)"
@@ -291,7 +306,10 @@ def test_run_signup_raising_welcome_send_is_non_terminal(pool, monkeypatch):
 
     from orchestrator.onboarding.signup import run_signup
 
-    out = run_signup(_valid_input(whatsapp_number=f"+9199{uuid.uuid4().int % 10**8:08d}"))
+    out = run_signup(
+        _valid_input(whatsapp_number=f"+9199{uuid.uuid4().int % 10**8:08d}"),
+        verify_search_fn=_active_search,  # VT-408: green GSTIN verify (no live Sandbox)
+    )
     assert out.tenant_id is not None, "a raising welcome send must not fail a committed signup"
     assert out.welcome_sent is False
 
@@ -300,9 +318,15 @@ def test_run_signup_duplicate_409(pool):
     from orchestrator.onboarding.signup import SignupError, run_signup
 
     wa = _wa_91()
-    run_signup(_valid_input(whatsapp_number=wa), welcome_send_fn=lambda *a, **k: True)
+    run_signup(
+        _valid_input(whatsapp_number=wa),
+        welcome_send_fn=lambda *a, **k: True, verify_search_fn=_active_search,
+    )
     with pytest.raises(SignupError) as e:
-        run_signup(_valid_input(whatsapp_number=wa), welcome_send_fn=lambda *a, **k: True)
+        run_signup(
+            _valid_input(whatsapp_number=wa),
+            welcome_send_fn=lambda *a, **k: True, verify_search_fn=_active_search,
+        )
     assert e.value.code == "duplicate"
 
 
@@ -345,6 +369,15 @@ def test_signup_route_status_mapping(pool, monkeypatch):
     monkeypatch.setenv("INTERNAL_API_SECRET", "vt326-test-secret")
     hdr = {"X-Internal-Secret": "vt326-test-secret"}
 
+    # VT-408: the route verifies the GSTIN before create — monkeypatch the Sandbox search to
+    # ACTIVE so the happy path reaches create (the HTTP path can't inject a search fn).
+    from orchestrator.integrations.methods import sandbox_kyc
+
+    monkeypatch.setattr(
+        sandbox_kyc, "search_gstin",
+        lambda g, **k: sandbox_kyc.GstinLookup(ok=True, legal_name="Asha Kirana", status="Active"),
+    )
+
     app = FastAPI()
     app.include_router(router)
     client = TestClient(app)
@@ -354,6 +387,7 @@ def test_signup_route_status_mapping(pool, monkeypatch):
         "whatsapp_number": _wa_91(), "preferred_language": "en",
         "city": "Mumbai", "business_type": "kirana",
         "consent_dpdpa": True, "consent_residency": True,
+        "gstin": "27AAKCR3738B1ZE",
     }
     r = client.post("/api/signup", json=body, headers=hdr)
     assert r.status_code == 201, r.text
@@ -383,6 +417,30 @@ def test_signup_route_status_mapping(pool, monkeypatch):
     r_phone = client.post("/api/signup", json={**body, "whatsapp_number": "+1202555"}, headers=hdr)
     assert r_phone.status_code == 400
     assert r_phone.json()["detail"]["code"] == "invalid_phone"
+
+    # VT-408: an INACTIVE GSTIN → 422 reject (no tenant), generic "GST-registered" copy. Patch
+    # the search to inactive for this one request.
+    monkeypatch.setattr(
+        sandbox_kyc, "search_gstin",
+        lambda g, **k: sandbox_kyc.GstinLookup(ok=True, legal_name="X", status="Cancelled"),
+    )
+    r_reject = client.post(
+        "/api/signup", json={**body, "whatsapp_number": _wa_91()}, headers=hdr
+    )
+    assert r_reject.status_code == 422
+    assert r_reject.json()["detail"]["code"] == "invalid_gstin"
+    assert "GST-registered" in r_reject.json()["detail"]["message"]
+
+    # VT-408: a vendor_down → 503 HOLD (retryable), distinct copy.
+    monkeypatch.setattr(
+        sandbox_kyc, "search_gstin", lambda g, **k: sandbox_kyc.GstinLookup(ok=False)
+    )
+    r_hold = client.post(
+        "/api/signup", json={**body, "whatsapp_number": _wa_91()}, headers=hdr
+    )
+    assert r_hold.status_code == 503
+    assert r_hold.json()["detail"]["code"] == "vendor_down"
+    assert r_hold.json()["detail"]["retryable"] is True
 
 
 def test_signup_kg_event_has_no_business_name_pii(pool):
@@ -465,6 +523,7 @@ def test_welcome_trial_end_derives_from_trial_yaml(pool):
     out = run_signup(
         _valid_input(whatsapp_number=f"+9199{uuid.uuid4().int % 10**8:08d}"),  # unique per run
         welcome_send_fn=lambda *a, **k: calls.append(a) or True,
+        verify_search_fn=_active_search,  # VT-408: green GSTIN verify (no live Sandbox)
     )
     assert out.welcome_sent is True and len(calls) == 1
     # _default_welcome signature: (tenant_id, whatsapp_number, preferred_language, owner_name, trial_end)
