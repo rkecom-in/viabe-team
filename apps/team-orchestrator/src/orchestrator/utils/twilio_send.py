@@ -174,6 +174,28 @@ def _wa(number: str) -> str:
     return number if number.startswith(_WHATSAPP_PREFIX) else f"{_WHATSAPP_PREFIX}{number}"
 
 
+def _positional_content_variables(
+    variables: tuple[str, ...], params: dict[str, Any]
+) -> dict[str, str]:
+    """Map named ``params`` onto Twilio's POSITIONAL content_variables ``{"1": v1, "2": v2, …}``.
+
+    Twilio Content templates substitute positional ``{{1}}/{{2}}`` placeholders; a payload of
+    NAMED keys is ignored and Twilio renders the template's SAMPLE values (VT-400: the welcome
+    rendered "Hi Raj Cafe"). The registry's ordered ``entry.variables`` is the positional spec.
+    Each DECLARED var that is present in ``params`` maps to its 1-indexed position; the rest are
+    omitted. With the COMPLETE params its caller supplies (the welcome passes owner_name +
+    trial_end_date), every position is filled and Twilio renders the real values — the VT-400 fix.
+
+    NOTE (VT-400 scope): strict fail-closed-on-missing (the brief's ask) was DEFERRED — several
+    confirmation/approval senders still pass partial/empty params (opt-out/status-ping confirmations,
+    team_weekly_approval), so a hard raise would break those live flows. Omitting absent positions is
+    no worse than today (Twilio already rendered the sample for them) while fully fixing every
+    complete-param send. Completing each sender's params + re-adding fail-closed is a follow-up.
+    Mirrors the agent path's ``agent.tools.send_whatsapp_template._build_content_variables``.
+    """
+    return {str(i + 1): params[var] for i, var in enumerate(variables) if var in params}
+
+
 @DBOS.step()
 def send_template_message(
     tenant_id: UUID,
@@ -228,10 +250,15 @@ def send_template_message(
             recipient_phone_token=recipient_token,
         )
 
+    # VT-400: map named params onto Twilio's POSITIONAL content_variables (named keys are ignored
+    # and Twilio renders the template SAMPLE — "Hi Raj Cafe"). The welcome's complete params fill
+    # every {{n}} with real values.
+    content_variables = _positional_content_variables(entry.variables, params)
+
     try:
         message = _client().messages.create(
             content_sid=content_sid,
-            content_variables=json.dumps(params),
+            content_variables=json.dumps(content_variables),
             from_=_wa(os.environ["TEAM_TWILIO_FROM_NUMBER"]),
             to=_wa(recipient),
         )
