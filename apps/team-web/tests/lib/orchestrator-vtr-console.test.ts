@@ -69,12 +69,13 @@ function jwtPayload(token: string): Record<string, number | string | boolean> {
 }
 
 describe('VT-370 — every fn rides the JWT-bearing template with the 5-min TTL', () => {
-  it('sends X-Internal-Secret + a SHORT-LIVED X-Operator-Jwt naming the operator, on all 7', async () => {
+  it('sends X-Internal-Secret + a SHORT-LIVED X-Operator-Jwt naming the operator, on all 8', async () => {
     const c = await client()
     const invocations: [string, () => Promise<unknown>][] = [
       ['vtr-plan', () => c.vtrPlan(OP, 't1')],
       ['vtr-plan-edit', () => c.vtrPlanEdit(OP, 't1', 'i1', { why: 'x' }, 3)],
       ['vtr-agent-state', () => c.vtrAgentState(OP, 't1')],
+      ['vtr-tenant-profile', () => c.vtrTenantProfile(OP, 't1')],
       ['vtr-draft-batches', () => c.vtrDraftBatches(OP, 't1')],
       ['vtr-autonomy-override', () => c.vtrAutonomyOverride(OP, 't1', 'reputation', 'freeze', 'r')],
       ['vtr-batch-cancel', () => c.vtrBatchCancel(OP, 'b1', 'r')],
@@ -177,6 +178,19 @@ describe('VT-370 — vtrAgentState / vtrDraftBatches reads fail closed', () => {
     expect(call(f).body.limit).toBe(50)
     stubStatus(502)
     expect((await c.vtrDraftBatches(OP, 't1')).rows).toEqual([])
+  })
+})
+
+describe('VT-405 — vtrTenantProfile read fails closed', () => {
+  it('returns the profile on 200, null otherwise', async () => {
+    const c = await client()
+    stub200({ profile: { tenant_id: 't1', business_name: 'Sundaram', whatsapp_last4: '3598' } })
+    const ok = await c.vtrTenantProfile(OP, 't1')
+    expect(ok.ok).toBe(true)
+    expect(ok.profile?.business_name).toBe('Sundaram')
+    expect(ok.profile?.whatsapp_last4).toBe('3598')
+    stubStatus(403)
+    expect(await c.vtrTenantProfile(OP, 't1')).toEqual({ ok: false, profile: null, reason: 'http_403' })
   })
 })
 

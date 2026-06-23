@@ -555,6 +555,44 @@ export async function vtrAgentState(
   return { ok: true, agents: (r.body.agents as VtrAgentAutonomy[] | undefined) ?? [], reason: 'ok' }
 }
 
+/**
+ * vtr_tenant_profile view row (VT-405 Part A) — signup fields + auto-discovered draft + keys-only
+ * confirmation status. Non-PII: WhatsApp is masked to last-4 AT the view; the confirmed canonical
+ * profile is keys-only (`confirmed_fields`); draft attributes/provenance carry public discovery values.
+ */
+export interface VtrTenantProfile {
+  tenant_id: string
+  business_name: string | null
+  phase: string | null
+  plan_tier: string | null
+  business_type: string | null
+  locality: string | null
+  city_tier: string | null
+  language_preference: string | null
+  preferred_language: string | null
+  signed_up_at: string | null
+  trial_started_at: string | null
+  phase_entered_at: string | null
+  owner_name: string | null
+  whatsapp_last4: string | null
+  draft_attributes: Record<string, unknown> | null
+  draft_provenance: Record<string, { source?: string; fetched_at?: string }> | null
+  draft_created_at: string | null
+  draft_updated_at: string | null
+  onboarding_status: string | null
+  onboarding_queue_len: number
+  confirmed_fields: string[] | null
+}
+
+export async function vtrTenantProfile(
+  operatorId: string,
+  tenantId: string,
+): Promise<{ ok: boolean; profile: VtrTenantProfile | null; reason: string }> {
+  const r = await vtrCall('vtr-tenant-profile', operatorId, { tenant_id: tenantId })
+  if (r.status !== 200) return { ok: false, profile: null, reason: r.reason }
+  return { ok: true, profile: (r.body.profile as VtrTenantProfile | null) ?? null, reason: 'ok' }
+}
+
 /** vtr_draft_batches view row — AGGREGATES ONLY (no params/owner_feedback/customer_id by view). */
 export interface VtrDraftBatch {
   batch_id: string
