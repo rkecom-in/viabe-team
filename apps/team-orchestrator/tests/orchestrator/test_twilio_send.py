@@ -137,7 +137,8 @@ def test_send_uses_tenant_whatsapp_number_by_default(send_ctx, twilio_create):
     number = "+919876543210"
     tenant_id = _new_tenant(send_ctx.dsn, number)
     send_template_message(UUID(tenant_id), "team_status_ping", {})
-    assert twilio_create.call_args.kwargs["to"] == number
+    # VT-399: from_/to ride the WhatsApp channel (whatsapp:-prefixed).
+    assert twilio_create.call_args.kwargs["to"] == f"whatsapp:{number}"
 
 
 def test_send_uses_recipient_phone_override(send_ctx, twilio_create):
@@ -147,7 +148,7 @@ def test_send_uses_recipient_phone_override(send_ctx, twilio_create):
     send_template_message(
         uuid4(), "team_status_ping", {}, recipient_phone=override
     )
-    assert twilio_create.call_args.kwargs["to"] == override
+    assert twilio_create.call_args.kwargs["to"] == f"whatsapp:{override}"
 
 
 def test_recipient_phone_is_tokenised_in_result(send_ctx, twilio_create):
@@ -208,3 +209,34 @@ def test_language_param_resolves_hi_variant_sid(send_ctx, twilio_create):
     # The hi (not en) SID is the content_sid Twilio was asked to send.
     assert twilio_create.call_args.kwargs["content_sid"] == hi_sid
     assert twilio_create.call_args.kwargs["content_sid"] != en_sid
+
+
+# --------------------------------------------------------------------------- #
+# VT-399: WhatsApp channel prefix on BOTH from_ and to. A raw E.164 misroutes to
+# SMS and fails (the live welcome failed Twilio error 21659). FROM env stays plain.
+# --------------------------------------------------------------------------- #
+
+
+def test_template_send_prefixes_whatsapp_on_both_ends(send_ctx, twilio_create):
+    from orchestrator.utils.twilio_send import send_template_message
+
+    send_template_message(uuid4(), "team_status_ping", {}, recipient_phone="+919812300013")
+    kwargs = twilio_create.call_args.kwargs
+    assert kwargs["from_"] == "whatsapp:+910000000000"  # FROM env is plain; prefixed at call site
+    assert kwargs["to"] == "whatsapp:+919812300013"
+
+
+def test_freeform_send_prefixes_whatsapp_on_both_ends(send_ctx, twilio_create):
+    from orchestrator.utils.twilio_send import send_freeform_message
+
+    send_freeform_message("onboarding question 1?", "+919812300014")
+    kwargs = twilio_create.call_args.kwargs
+    assert kwargs["from_"] == "whatsapp:+910000000000"
+    assert kwargs["to"] == "whatsapp:+919812300014"
+
+
+def test_wa_prefix_is_idempotent():
+    from orchestrator.utils.twilio_send import _wa
+
+    assert _wa("+918108084223") == "whatsapp:+918108084223"
+    assert _wa("whatsapp:+918108084223") == "whatsapp:+918108084223"  # never double-prefixes
