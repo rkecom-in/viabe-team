@@ -77,7 +77,26 @@ assert_agent_tools_safe(AGENT_TOOLS, surface="agents.sales_recovery_executor")
 # (short-circuit) AND as ``= ANY(%(versions)s)`` with a LIST parameter in SQL — NEVER a literal
 # ``IN ()`` (MED-2: an empty literal IN () is a SQL syntax error, which would break the
 # fail-closed property).
-MARKETING_CONSENT_VERSIONS: frozenset[str] = frozenset()
+#
+# VT-396 (dev-only e2e harness, Cowork-gated 2026-06-23): the value is now sourced from the
+# ``MARKETING_CONSENT_VERSIONS`` env var, **default EMPTY**. This is a DEV TEST HARNESS HOOK,
+# NOT counsel clearance — counsel C1–C3 remains the real production gate (CL-438). BINDING:
+#   • prod/main leave the env UNSET → ``frozenset()`` → detection stays structurally fail-closed.
+#   • ONLY the Railway *dev* env may set a clearly-non-prod test version (e.g. ``dev-test-v0``).
+#   • This default MUST NEVER be promoted to main as non-empty. The literal below is ``""`` and
+#     the loader's default is empty — a grep on main must always show an empty default.
+def _load_marketing_consent_versions() -> frozenset[str]:
+    """Read the C2 allowlist from the env, fail-closed empty by default (VT-396).
+
+    Unset / blank env → ``frozenset()`` (production-locked). A comma-separated env value yields
+    the trimmed, non-empty version strings. Read once at import; ``detect_lapsed_customers``
+    re-reads the module global at CALL time, so a monkeypatch in tests still overrides it.
+    """
+    raw = os.environ.get("MARKETING_CONSENT_VERSIONS", "")
+    return frozenset(v.strip() for v in raw.split(",") if v.strip())
+
+
+MARKETING_CONSENT_VERSIONS: frozenset[str] = _load_marketing_consent_versions()
 
 # Detection thresholds (plan §2.1): recency at-or-above the tenant's p75 days-since-last-sale,
 # lifetime spend at-or-above the tenant's p50 — computed over the tenant's customers WITH sales.
@@ -763,4 +782,5 @@ __all__ = [
     "build_customer_fact_bundle",
     "detect_lapsed_customers",
     "validate_draft_params",
+    "_load_marketing_consent_versions",
 ]

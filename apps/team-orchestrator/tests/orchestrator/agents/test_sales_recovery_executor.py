@@ -311,6 +311,37 @@ def test_shipped_consent_allowlist_is_empty_and_short_circuits() -> None:
     assert sre.detect_lapsed_customers(uuid4(), conn=None) == []
 
 
+# --- VT-396: the C2 allowlist is env-driven, DEFAULT EMPTY (dev-only test harness) -------------
+
+
+def test_consent_versions_env_loader_default_is_empty(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """Unset env → frozenset() → production-locked, fail-closed. The BINDING default for prod/main:
+    no env var ⇒ empty allowlist ⇒ zero candidates. Guards the 'never non-empty default' rule."""
+    monkeypatch.delenv("MARKETING_CONSENT_VERSIONS", raising=False)
+    assert sre._load_marketing_consent_versions() == frozenset()
+
+
+def test_consent_versions_env_loader_blank_is_empty(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """Blank / whitespace-only env → still empty (no accidental '' version slips through)."""
+    monkeypatch.setenv("MARKETING_CONSENT_VERSIONS", "")
+    assert sre._load_marketing_consent_versions() == frozenset()
+    monkeypatch.setenv("MARKETING_CONSENT_VERSIONS", "   ")
+    assert sre._load_marketing_consent_versions() == frozenset()
+
+
+def test_consent_versions_env_loader_single_dev_version(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """A dev env value (e.g. dev-test-v0) flows through to the allowlist — the only path that
+    enables detection on dev. Production never sets this."""
+    monkeypatch.setenv("MARKETING_CONSENT_VERSIONS", "dev-test-v0")
+    assert sre._load_marketing_consent_versions() == frozenset({"dev-test-v0"})
+
+
+def test_consent_versions_env_loader_csv_trimmed(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """Comma-separated value is split + trimmed; empty fragments dropped."""
+    monkeypatch.setenv("MARKETING_CONSENT_VERSIONS", " a , b ,, c ")
+    assert sre._load_marketing_consent_versions() == frozenset({"a", "b", "c"})
+
+
 @requires_db
 def test_empty_allowlist_zero_candidates_over_eligible_base(substrate):  # type: ignore[no-untyped-def]
     """A fully eligible seeded base STILL yields zero candidates while the allowlist is empty
