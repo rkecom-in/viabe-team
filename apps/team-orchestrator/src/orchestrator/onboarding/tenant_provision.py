@@ -21,8 +21,13 @@ from uuid import UUID
 
 @dataclass(frozen=True)
 class TenantProvisionResult:
-    tenant_id: UUID
-    created: bool  # True = a new tenant; False = merged into an existing one
+    # VT-408: tenant_id is None when provisioning was REFUSED — an unknown/new inbound number
+    # without a verified GSTIN gets NO tenant (verify-first signup is the only door). created
+    # is True only for a real new row; a refused provision is created=False, tenant_id=None,
+    # provisioned=False, so the caller replies with the "verify at signup" directive.
+    tenant_id: UUID | None
+    created: bool  # True = a new tenant; False = merged into an existing one OR refused
+    provisioned: bool = True  # False ⇒ VT-408 refused an unknown unverified inbound number
 
 
 def create_tenant_if_unknown(
@@ -31,10 +36,22 @@ def create_tenant_if_unknown(
     business_name: str | None = None,
     owner_contact: str | None = None,
     created_via: str | None = None,
+    verified: bool = False,
 ) -> TenantProvisionResult:
     """Idempotent provision keyed on ``business_contact`` (the unique WhatsApp
     identity, mig 066). Same number → the existing tenant (merge); a newly-supplied
-    ``owner_contact`` backfills if the row had none. Returns (tenant_id, created).
+    ``owner_contact`` backfills if the row had none. Returns (tenant_id, created,
+    provisioned).
+
+    **VT-408 (CL-442) — the inbound backdoor is CLOSED for NEW/UNKNOWN numbers.** A no-GST
+    business gets nothing, neither paid nor trial. So an UNKNOWN ``business_contact`` is
+    provisioned ONLY when ``verified=True`` (a gated web/QR entry that has already passed the
+    OTP + GSTIN verify). The inbound WhatsApp ingress passes ``verified=False`` (the default)
+    → the unknown number is REFUSED (no row, no PII, no trial) and the caller replies with the
+    "verify at signup" directive (signup_gate.gate_copy('inbound_directive', lang)). A KNOWN
+    number is UNAFFECTED — it already passed the gate at signup, so the merge/backfill path
+    proceeds unconditionally (this is the legitimate already-known-tenant flow the ruling
+    preserves; an inbound message from an existing tenant must still resolve to its tenant).
 
     ``business_name`` defaults to the number until onboarding captures the real name
     (tenants.business_name is NOT NULL). New tenants land phase='onboarding'. Raises
@@ -45,8 +62,22 @@ def create_tenant_if_unknown(
 
     from orchestrator.graph import get_pool
 
-    name = business_name or business_contact  # placeholder until onboarding fills it
     pool = get_pool()
+    # VT-408: refuse to CREATE a new tenant for an unknown number unless it came through the
+    # verified (OTP + GSTIN) gate. A known number is exempt — it is already a verified tenant
+    # (merge path preserved). The pre-check is a cheap existence read; the actual create stays
+    # the atomic ON CONFLICT below (so a concurrent create still merges, never double-inserts).
+    if not verified:
+        with pool.connection() as _conn:
+            known = _conn.execute(
+                "SELECT id FROM tenants WHERE whatsapp_number = %s LIMIT 1",
+                (business_contact,),
+            ).fetchone()
+        if known is None:
+            # Unknown + unverified → REFUSE. No tenant, no PII persisted (DPDP posture).
+            return TenantProvisionResult(tenant_id=None, created=False, provisioned=False)
+
+    name = business_name or business_contact  # placeholder until onboarding fills it
     # VT-65 PR-2: INSERT + KG emit in one txn (atomic — the kg_events outbox row
     # only lands if the tenant INSERT commits). Single-statement site → benign wrap.
     with pool.connection() as conn, conn.transaction():

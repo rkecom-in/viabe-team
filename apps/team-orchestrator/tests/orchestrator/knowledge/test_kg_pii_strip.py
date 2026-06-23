@@ -116,7 +116,8 @@ def test_tenant_created_payload_has_no_phone_business_name(pool):
     from orchestrator.onboarding.tenant_provision import create_tenant_if_unknown
 
     contact = f"+9198{uuid4().hex[:8]}"
-    res = create_tenant_if_unknown(business_contact=contact, business_name=None)
+    # VT-408: provisioning a new number now requires verified=True (the gated entry).
+    res = create_tenant_if_unknown(business_contact=contact, business_name=None, verified=True)
     tid = str(res.tenant_id)
 
     payloads = _kg_payloads(pool, tid, "tenant_created")
