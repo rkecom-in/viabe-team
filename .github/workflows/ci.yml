@@ -307,6 +307,22 @@ jobs:
       - name: no-direct-tenant-db-access (enforced — hard-fail)
         run: python3 scripts/check_no_direct_tenant_db_access.py
 
+  gate-no-raw-railway-variables:
+    name: gate-no-raw-railway-variables
+    needs: changes
+    if: needs.changes.outputs.orchestrator == 'true' || needs.changes.outputs.ci == 'true'
+    runs-on: ubuntu-latest
+    # VT-403: raw railway-variables output carries secret VALUES; printing it leaked secrets twice
+    # (RESEND_API_KEY, PROD ANTHROPIC_API_KEY) — CL-431. Env inspection must route through
+    # scripts/env_presence.py (names -> booleans only). This gate hard-fails any raw usage.
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: no-raw-railway-variables (enforced — hard-fail)
+        run: python3 scripts/check_no_raw_railway_variables.py
+
   gate-sr-agent-prompt-token-cap:
     name: gate-sr-agent-prompt-token-cap
     needs: changes
@@ -853,6 +869,7 @@ jobs:
       - gate-no-llm-in-deterministic-triggers
       - gate-no-langsmith-imports
       - gate-no-direct-tenant-db-access
+      - gate-no-raw-railway-variables
       - gate-sr-agent-prompt-token-cap
       - gate-vt39-tools-harness-import
       - gate-connector-registry-schema
