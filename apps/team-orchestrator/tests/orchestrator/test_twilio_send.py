@@ -55,11 +55,19 @@ def _new_tenant(dsn: str, whatsapp_number: str) -> str:
     return str(row[0])
 
 
+# team_status_ping declares 3 positional vars; VT-400 fail-closed needs them all present.
+_PING_PARAMS = {
+    "owner_name": "Asha",
+    "last_activity_description": "reviewed your sales",
+    "next_up_description": "draft a campaign",
+}
+
+
 def test_send_returns_success_when_content_sid_present(send_ctx, twilio_create):
     from orchestrator.utils.twilio_send import send_template_message
 
     result = send_template_message(
-        uuid4(), "team_opt_out_confirmation", {}, recipient_phone="+919812300001"
+        uuid4(), "team_opt_out_confirmation", {"owner_name": "Asha"}, recipient_phone="+919812300001"
     )
     assert result.success is True
     assert result.message_sid == "SM" + "0" * 32
@@ -110,7 +118,7 @@ def test_send_handles_permanent_twilio_error_4xx(send_ctx, twilio_create):
         status=400, uri="/Messages", msg="invalid 'To' number", code=21211
     )
     result = send_template_message(
-        uuid4(), "team_status_ping", {}, recipient_phone="+919812300004"
+        uuid4(), "team_status_ping", _PING_PARAMS, recipient_phone="+919812300004"
     )
     assert result.success is False
     assert result.error_code == "21211"
@@ -127,7 +135,7 @@ def test_send_propagates_transient_twilio_error_5xx(send_ctx, twilio_create):
     )
     with pytest.raises(TwilioRestException):
         send_template_message(
-            uuid4(), "team_status_ping", {}, recipient_phone="+919812300005"
+            uuid4(), "team_status_ping", _PING_PARAMS, recipient_phone="+919812300005"
         )
 
 
@@ -136,7 +144,7 @@ def test_send_uses_tenant_whatsapp_number_by_default(send_ctx, twilio_create):
 
     number = "+919876543210"
     tenant_id = _new_tenant(send_ctx.dsn, number)
-    send_template_message(UUID(tenant_id), "team_status_ping", {})
+    send_template_message(UUID(tenant_id), "team_status_ping", _PING_PARAMS)
     # VT-399: from_/to ride the WhatsApp channel (whatsapp:-prefixed).
     assert twilio_create.call_args.kwargs["to"] == f"whatsapp:{number}"
 
@@ -146,7 +154,7 @@ def test_send_uses_recipient_phone_override(send_ctx, twilio_create):
 
     override = "+919800000099"
     send_template_message(
-        uuid4(), "team_status_ping", {}, recipient_phone=override
+        uuid4(), "team_status_ping", _PING_PARAMS, recipient_phone=override
     )
     assert twilio_create.call_args.kwargs["to"] == f"whatsapp:{override}"
 
@@ -156,7 +164,7 @@ def test_recipient_phone_is_tokenised_in_result(send_ctx, twilio_create):
 
     phone = "+919811112222"
     result = send_template_message(
-        uuid4(), "team_status_ping", {}, recipient_phone=phone
+        uuid4(), "team_status_ping", _PING_PARAMS, recipient_phone=phone
     )
     assert result.recipient_phone_token.startswith("phone_tok_")
     assert phone not in result.recipient_phone_token
@@ -183,7 +191,7 @@ def test_language_param_defaults_to_en_when_omitted(send_ctx, twilio_create, mon
 
     monkeypatch.setattr(twilio_send, "_registry_resolve", _spy)
     twilio_send.send_template_message(
-        uuid4(), "team_status_ping", {}, recipient_phone="+919812300011"
+        uuid4(), "team_status_ping", _PING_PARAMS, recipient_phone="+919812300011"
     )
     assert seen == ["en"], "an omitted language must resolve the 'en' variant"
 
@@ -220,7 +228,7 @@ def test_language_param_resolves_hi_variant_sid(send_ctx, twilio_create):
 def test_template_send_prefixes_whatsapp_on_both_ends(send_ctx, twilio_create):
     from orchestrator.utils.twilio_send import send_template_message
 
-    send_template_message(uuid4(), "team_status_ping", {}, recipient_phone="+919812300013")
+    send_template_message(uuid4(), "team_status_ping", _PING_PARAMS, recipient_phone="+919812300013")
     kwargs = twilio_create.call_args.kwargs
     assert kwargs["from_"] == "whatsapp:+910000000000"  # FROM env is plain; prefixed at call site
     assert kwargs["to"] == "whatsapp:+919812300013"
@@ -240,3 +248,57 @@ def test_wa_prefix_is_idempotent():
 
     assert _wa("+918108084223") == "whatsapp:+918108084223"
     assert _wa("whatsapp:+918108084223") == "whatsapp:+918108084223"  # never double-prefixes
+
+
+# --------------------------------------------------------------------------- #
+# VT-400: named params -> POSITIONAL content_variables. Named keys are ignored by
+# Twilio (it renders the template SAMPLE, "Hi Raj Cafe"); we map onto {{1}}/{{2}}.
+# --------------------------------------------------------------------------- #
+
+
+def test_content_variables_are_positional(send_ctx, twilio_create):
+    import json
+
+    from orchestrator.utils.twilio_send import send_template_message
+
+    send_template_message(
+        uuid4(),
+        "team_welcome",
+        {"owner_name": "Sundaram", "trial_end_date": "2026-07-14"},
+        recipient_phone="+919812300015",
+    )
+    sent = json.loads(twilio_create.call_args.kwargs["content_variables"])
+    # team_welcome variables order = (owner_name, trial_end_date) -> positions 1, 2.
+    assert sent == {"1": "Sundaram", "2": "2026-07-14"}
+    assert "owner_name" not in sent  # never the named keys Twilio would ignore
+
+
+def test_content_variables_positional_three_vars(send_ctx, twilio_create):
+    import json
+
+    from orchestrator.utils.twilio_send import send_template_message
+
+    send_template_message(
+        uuid4(), "team_status_ping", _PING_PARAMS, recipient_phone="+919812300016"
+    )
+    sent = json.loads(twilio_create.call_args.kwargs["content_variables"])
+    assert sent == {
+        "1": "Asha",
+        "2": "reviewed your sales",
+        "3": "draft a campaign",
+    }
+
+
+def test_missing_template_var_fails_closed(send_ctx, twilio_create):
+    """A declared var missing from params -> NO send (never emit Twilio samples)."""
+    from orchestrator.utils.twilio_send import send_template_message
+
+    result = send_template_message(
+        uuid4(),
+        "team_welcome",
+        {"owner_name": "Sundaram"},  # trial_end_date missing
+        recipient_phone="+919812300017",
+    )
+    assert result.success is False
+    assert result.error_code == "missing_template_var"
+    twilio_create.assert_not_called()

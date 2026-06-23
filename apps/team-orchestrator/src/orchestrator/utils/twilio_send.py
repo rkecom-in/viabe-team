@@ -174,6 +174,21 @@ def _wa(number: str) -> str:
     return number if number.startswith(_WHATSAPP_PREFIX) else f"{_WHATSAPP_PREFIX}{number}"
 
 
+def _positional_content_variables(
+    variables: tuple[str, ...], params: dict[str, Any]
+) -> dict[str, str]:
+    """Map named ``params`` onto Twilio's POSITIONAL content_variables ``{"1": v1, "2": v2, …}``.
+
+    Twilio Content templates substitute positional ``{{1}}/{{2}}`` placeholders; a payload of
+    NAMED keys is ignored and Twilio renders the template's SAMPLE values (VT-400: the welcome
+    rendered "Hi Raj Cafe"). The registry's ordered ``entry.variables`` is the positional spec.
+    Raises ``KeyError`` (fail-closed) when a declared variable is absent from ``params`` — the
+    caller turns that into a non-send rather than emitting Twilio samples. Mirrors the agent path's
+    ``agent.tools.send_whatsapp_template._build_content_variables``.
+    """
+    return {str(i + 1): params[var] for i, var in enumerate(variables)}
+
+
 @DBOS.step()
 def send_template_message(
     tenant_id: UUID,
@@ -229,9 +244,28 @@ def send_template_message(
         )
 
     try:
+        content_variables = _positional_content_variables(entry.variables, params)
+    except KeyError as missing:
+        # Fail-closed (VT-400): a missing declared var would let Twilio render the template's
+        # SAMPLE values ("Hi Raj Cafe") instead of the real owner — never send that. No Twilio call.
+        logger.warning(
+            "twilio-send: template '%s' missing var %s -> NOT sent (no Twilio sample emitted)",
+            template_name,
+            missing,
+        )
+        return SendResult(
+            success=False,
+            error_code="missing_template_var",
+            error_message=f"template '{template_name}' missing variable {missing}",
+            attempted_at=attempted_at,
+            template_name=template_name,
+            recipient_phone_token=recipient_token,
+        )
+
+    try:
         message = _client().messages.create(
             content_sid=content_sid,
-            content_variables=json.dumps(params),
+            content_variables=json.dumps(content_variables),
             from_=_wa(os.environ["TEAM_TWILIO_FROM_NUMBER"]),
             to=_wa(recipient),
         )
