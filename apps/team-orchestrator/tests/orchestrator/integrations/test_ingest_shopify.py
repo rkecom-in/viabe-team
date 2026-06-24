@@ -266,7 +266,7 @@ def test_webhook_sim_canary_full_write(db_ctx, monkeypatch):
     from orchestrator.db import tenant_connection
 
     tenant = _tenant(db_ctx.dsn)
-    push_secret = "whsec_vt417_canary"
+    push_secret = "whsec_vt417_canary"  # gitleaks:allow — fake test secret for the HMAC canary, not a real credential
     with psycopg.connect(db_ctx.dsn, autocommit=True) as conn:
         conn.execute(
             "INSERT INTO tenant_oauth_tokens "
