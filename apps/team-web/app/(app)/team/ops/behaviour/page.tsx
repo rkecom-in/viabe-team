@@ -1,4 +1,4 @@
-/** VT-294 — Ops Console V2 Behaviour & Training. Inherits the VT-290 contract. */
+/** VT-294 — Ops Console V2 Decision Audit (operator decision-audit/metrics panel). Inherits the VT-290 contract. */
 
 import { redirect } from 'next/navigation'
 
@@ -39,11 +39,26 @@ export default async function OpsBehaviourPage() {
   }
 
   return (
-    <main data-area="team-ops-behaviour" className="p-6 space-y-4">
+    <main
+      data-area="team-ops-behaviour"
+      className="ops-behaviour min-h-screen space-y-6 bg-gray-50 p-6"
+    >
       <header>
-        <h1 className="text-2xl font-semibold">Behaviour &amp; Training</h1>
+        <h1 className="text-2xl font-semibold text-gray-900">Decision Audit</h1>
+        <p className="mt-1 text-sm text-gray-600">
+          Operator decision metrics and recent decisions. Log feedback on a decision to record an
+          audit note.
+        </p>
       </header>
-      {error ? <p data-section-error>couldn&apos;t load: {error}</p> : <BehaviourPanel metrics={metrics} decisions={decisions} />}
+      {error ? (
+        <section className="rounded-lg border border-gray-200 bg-white p-6 shadow-sm">
+          <p data-section-error className="text-sm text-red-700">
+            couldn&apos;t load: {error}
+          </p>
+        </section>
+      ) : (
+        <BehaviourPanel metrics={metrics} decisions={decisions} />
+      )}
     </main>
   )
 }
