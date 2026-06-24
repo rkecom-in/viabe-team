@@ -1,10 +1,19 @@
-/** VT-201 PR-2 — historical Ops stream view (/team/ops/stream/history). */
+/** VT-201 PR-2 — historical Ops stream view (/team/ops/stream/history).
+ *
+ * VT-412 (PR-D): opened to scoped VTR operators. requireFazal() → requireOpsOperator().
+ * The tenant tiles in the filter sidebar are scoped to the operator's assigned set
+ * (scopeTenantsForOperator); the actual data read (/api/ops/history) enforces the same
+ * scope server-side AND de-identifies rows for a VTR — the page-level scoping here is
+ * display narrowing, not the security boundary (that lives in the route).
+ */
 
 import { redirect } from 'next/navigation'
 
 import { StreamHistoryView } from '@/components/ops/stream-history-view'
-import { requireFazal, UnauthorizedError } from '@/lib/auth/require-fazal'
+import { UnauthorizedError } from '@/lib/auth/require-fazal'
+import { requireOpsOperator } from '@/lib/auth/require-ops-operator'
 import { fetchTopTenants } from '@/lib/ops/data-access'
+import { scopeTenantsForOperator } from '@/app/(app)/team/ops/run-control/scope-tenants'
 
 export const dynamic = 'force-dynamic'
 
@@ -19,8 +28,9 @@ function todayIst(): string {
 }
 
 export default async function OpsStreamHistoryPage(props: OpsStreamHistoryPageProps) {
+  let operator: Awaited<ReturnType<typeof requireOpsOperator>>
   try {
-    await requireFazal()
+    operator = await requireOpsOperator()
   } catch (err) {
     if (err instanceof UnauthorizedError) redirect('/team/ops/login?next=/team/ops/stream/history')
     throw err
@@ -28,7 +38,12 @@ export default async function OpsStreamHistoryPage(props: OpsStreamHistoryPagePr
 
   const sp = await props.searchParams
   const date = sp.date && /^\d{4}-\d{2}-\d{2}$/.test(sp.date) ? sp.date : todayIst()
-  const tenants = await fetchTopTenants(20)
+  const top = await fetchTopTenants(20)
+  // A VTR's filter sidebar shows ONLY its assigned tenants; VTAdmin (null) sees all.
+  const tenants = scopeTenantsForOperator(
+    top.map((t) => ({ tenant_id: t.tenant_id, business_name: t.business_name })),
+    operator.assignedTenants,
+  )
 
   return (
     <main
