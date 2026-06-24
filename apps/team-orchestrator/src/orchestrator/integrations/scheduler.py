@@ -93,6 +93,74 @@ def _compute_next_run(pull_cadence: str, after: datetime) -> datetime:
     return target_today_ist - ist_offset
 
 
+def _ingest_pulled_rows(
+    tenant_id: UUID, connector_id: str, pulled: list
+) -> int:
+    """Map a connector's ``pull_full`` rows → ``CanonicalRow`` and land them via
+    ``ingest_customer_rows``. Returns the committed-customer count.
+
+    Connector-aware mapping (the pull shapes differ):
+      * ``google_sheet`` — rows are ``{column -> cell}`` dicts → ``sheet_row_to_canonical``.
+      * ``shopify`` — ``pull_full`` returns CUSTOMER dicts (identity only; NO orders/
+        sales — the order-of-record substrate arrives via the webhook + ``backfill_orders``).
+        We land identity (phone/email/name); no sale is fabricated from a customer row.
+
+    tenant_id is the scheduler's server-derived argument (P3), never a row field.
+    A connector with no recognized pull shape lands nothing (returns 0) — never a
+    silent wrong-shape write.
+    """
+    from orchestrator.integrations.ingest import (
+        CanonicalRow,
+        ingest_customer_rows,
+        sheet_row_to_canonical,
+    )
+
+    rows: list[CanonicalRow] = []
+    if connector_id == "google_sheet":
+        rows = [
+            c
+            for r in pulled
+            if isinstance(r, dict) and (c := sheet_row_to_canonical(r)) is not None
+        ]
+        acquired_via = "google_sheet"
+    elif connector_id == "shopify":
+        from orchestrator.integrations.connectors.shopify import _normalize_e164
+
+        for r in pulled:
+            if not isinstance(r, dict):
+                continue
+            phone = _normalize_e164(r.get("phone"))
+            email_raw = r.get("email")
+            email = (
+                str(email_raw).strip().lower()
+                if email_raw and str(email_raw).strip() else None
+            )
+            name = (
+                f"{r.get('first_name', '') or ''} {r.get('last_name', '') or ''}".strip()
+                or None
+            )
+            if phone or email or name:
+                rows.append(
+                    CanonicalRow(
+                        phone_e164=phone, email=email, display_name=name,
+                        sales=(), consent=None,  # identity-only; no sale from a customer row
+                    )
+                )
+        acquired_via = "shopify"
+    else:
+        # Unknown pull shape — do NOT guess a mapping (would risk wrong-shape writes).
+        logger.info(
+            "_ingest_pulled_rows: connector=%s has no pull mapper — rows not landed",
+            connector_id,
+        )
+        return 0
+
+    if not rows:
+        return 0
+    summary = ingest_customer_rows(tenant_id, rows, acquired_via=acquired_via)
+    return summary.committed
+
+
 def ingest_one_connector(tenant_id: UUID, connector_id: str) -> dict[str, object]:
     """Run one pull for (tenant, connector); update status.
 
@@ -155,6 +223,7 @@ def ingest_one_connector(tenant_id: UUID, connector_id: str) -> dict[str, object
     connector_cls = _connector_class_for(connector_id)
 
     rows_pulled = 0
+    rows_committed = 0
     error_message: str | None = None
     try:
         connector = connector_cls()
@@ -163,6 +232,11 @@ def ingest_one_connector(tenant_id: UUID, connector_id: str) -> dict[str, object
         # from datetime since; their adapters reconcile internally.
         pulled = connector.pull_full(tenant_id, since=row["last_sync_at"])
         rows_pulled = len(pulled) if pulled is not None else 0
+        # VT-417 PR-2: LAND the pulled rows instead of counting+discarding them.
+        # Map each connector-pull row → CanonicalRow (connector-aware) → real
+        # customers + sale ledger via ingest_customer_rows. tenant_id is the
+        # scheduler's server-derived argument (P3), never from a row.
+        rows_committed = _ingest_pulled_rows(tenant_id, connector_id, pulled or [])
     except Exception as exc:  # noqa: BLE001 — scheduler must not crash
         error_message = repr(exc)[:200]
         logger.exception(
@@ -234,6 +308,7 @@ def ingest_one_connector(tenant_id: UUID, connector_id: str) -> dict[str, object
     return {
         "status": new_status,
         "rows_pulled": rows_pulled,
+        "rows_committed": rows_committed,
         "consecutive_fails": new_fails,
     }
 
