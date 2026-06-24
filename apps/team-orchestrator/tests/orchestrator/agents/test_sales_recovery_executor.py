@@ -88,11 +88,12 @@ def substrate():  # type: ignore[no-untyped-def]
 
 
 def _new_tenant(dsn: str, *, name: str, owner_inputs: bool = True) -> UUID:
-    # VT-421: execute_item now has a DETECT-side ONBOARDED gate (tenant_is_sr_eligible) right after
-    # the owner_inputs check. For these end-to-end SR tests to reach detection/drafting, the tenant
-    # must be fully onboarded: paid_active + gstin_verified + ≥1 enabled+ok connector (the per-test
-    # _seed_customer satisfies the ≥1-customer leg). owner_inputs=False tests still trip the
-    # owner_inputs gate first (it runs above the onboarded gate).
+    # VT-421: execute_item now has a DETECT-side ACTIVATION gate (tenant_is_sr_eligible →
+    # is_agent_eligible) right after the owner_inputs check. For these end-to-end SR tests to reach
+    # detection/drafting, the tenant must be fully activated: journey-complete + gstin_verified + ≥1
+    # enabled+ok connector (the per-test _seed_customer satisfies the ≥1-customer leg). owner_inputs=
+    # False tests still trip the owner_inputs gate first (it runs above the activation gate). The bar
+    # is now journey-complete (onboarding_journey.status='complete'), NOT paid-active — so seed it.
     with psycopg.connect(dsn, autocommit=True) as conn:
         row = conn.execute(
             "INSERT INTO tenants (business_name, plan_tier, phase, phase_entered_at, "
@@ -107,6 +108,11 @@ def _new_tenant(dsn: str, *, name: str, owner_inputs: bool = True) -> UUID:
             "INSERT INTO tenant_connector_status (tenant_id, connector_id, enabled, last_status, "
             "last_ingested_date) VALUES (%s, %s, TRUE, 'ok', CURRENT_DATE)",
             (str(tenant), f"conn-{uuid4().hex[:8]}"),
+        )
+        conn.execute(
+            "INSERT INTO onboarding_journey (tenant_id, status, completed_at) "
+            "VALUES (%s, 'complete', now())",
+            (str(tenant),),
         )
     return tenant
 

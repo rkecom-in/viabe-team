@@ -175,9 +175,10 @@ class _RaisingCustomerSend:
 
 
 def _new_tenant(dsn: str) -> UUID:
-    # VT-421: agent_send_draft now has a Gate-0 ONBOARDED gate. This driver's batches must reach the
-    # send, so the tenant is fully onboarded: paid_active + gstin_verified + ≥1 enabled+ok connector
-    # (the per-test _seed_customer satisfies the ≥1-customer leg).
+    # VT-421: agent_send_draft now has a Gate-0 ACTIVATION gate. This driver's batches must reach the
+    # send, so the tenant is fully activated: journey-complete + gstin_verified + ≥1 enabled+ok
+    # connector (the per-test _seed_customer satisfies the ≥1-customer leg). The bar is now
+    # journey-complete (onboarding_journey.status='complete'), NOT paid-active — so seed that row.
     with psycopg.connect(dsn, autocommit=True) as conn:
         row = conn.execute(
             "INSERT INTO tenants (business_name, plan_tier, phase, phase_entered_at, "
@@ -192,6 +193,11 @@ def _new_tenant(dsn: str) -> UUID:
             "INSERT INTO tenant_connector_status (tenant_id, connector_id, enabled, last_status, "
             "last_ingested_date) VALUES (%s, %s, TRUE, 'ok', CURRENT_DATE)",
             (str(tenant), f"conn-{uuid4().hex[:8]}"),
+        )
+        conn.execute(
+            "INSERT INTO onboarding_journey (tenant_id, status, completed_at) "
+            "VALUES (%s, 'complete', now())",
+            (str(tenant),),
         )
     return tenant
 
