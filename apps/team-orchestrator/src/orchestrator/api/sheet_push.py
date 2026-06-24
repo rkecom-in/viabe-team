@@ -10,8 +10,10 @@ POSTs row-edit events with HMAC-SHA256-signed body. The handler:
    (tenant_id, 'google_sheet')
 3. Verifies HMAC over raw body via
    ``verify_push_signature``
-4. Hands canonical row to dedupe/mapping seam (VT-209)
-5. Returns 204 on success; 403 on bad signature
+4. Maps the sheet row → ``CanonicalRow`` and lands it via
+   ``ingest_customer_rows`` (VT-417 PR-2 — the REAL writer; used to terminate
+   at the ``dedupe_customer_row`` stub that wrote only a phone-token).
+5. Returns 200 on success; 403 on bad signature
 
 Per CL-72: Pillar 7 — handlers MUST return 2xx so Apps Script's
 ``muteHttpExceptions: true`` upstream doesn't surface noise on
@@ -31,10 +33,15 @@ from orchestrator.graph import get_pool
 from orchestrator.integrations.connectors.apps_script_template import (
     verify_push_signature,
 )
-from orchestrator.integrations.dedupe import dedupe_customer_row
+from orchestrator.integrations.ingest import (
+    ingest_customer_rows,
+    sheet_row_to_canonical,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+_ACQUIRED_VIA = "google_sheet"
 
 
 @router.post("/api/orchestrator/integrations/sheet/push")
@@ -75,27 +82,28 @@ async def sheet_push(
 
     payload = await request.json()
     row_data = payload.get("row_data", {})
-    phone = (
-        row_data.get("phone")
-        or row_data.get("Phone")
-        or row_data.get("Mobile")
-        or ""
-    )
-    if not phone:
+
+    # Map the arbitrary owner-labelled sheet row → CanonicalRow (identity +
+    # optional amount/date sale). PII boundary: only phone/email/name + the one
+    # sale magnitude/date are read; every other column is dropped at the mapper.
+    canonical = sheet_row_to_canonical(row_data) if isinstance(row_data, dict) else None
+    if canonical is None:
+        # No identity anchor (no phone / email / name) — nothing to land.
         logger.info(
-            "VT-207 sheet push: no phone in row_data; skipping dedupe",
+            "VT-207 sheet push: no identity anchor in row_data; skipped",
             extra={"tenant_id": str(tenant_uuid)},
         )
-        return {"status": "ok", "reason": "no_phone_field"}
+        return {"status": "ok", "reason": "no_anchor"}
 
-    decision = dedupe_customer_row(
-        tenant_id=tenant_uuid,
-        phone_e164=phone,
-        connector_id="google_sheet",
-        canonical_row=row_data,
+    # tenant_id is server-derived from the verified X-Viabe-Tenant header — NEVER
+    # from the payload (P3).
+    summary = ingest_customer_rows(
+        tenant_uuid, [canonical], acquired_via=_ACQUIRED_VIA
     )
     return {
         "status": "ok",
-        "decision": decision.kind,
-        "phone_token": decision.phone_token,
+        "rows_committed": summary.committed,
+        "sales_written": summary.sales_written,
+        "sales_skipped_duplicate": summary.sales_skipped_duplicate,
+        "ambiguous": summary.ambiguous,
     }

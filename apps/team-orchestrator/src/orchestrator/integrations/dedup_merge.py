@@ -44,12 +44,20 @@ logger = logging.getLogger(__name__)
 
 # Single-source ingestion-method enum (VT-6). Validated app-side; a CI gate test
 # asserts an invalid tag is REJECTED. Adding a method = a Python change here
-# (Pillar 8), not a migration.
+# (Pillar 8), not a migration — the customers/ledger acquired_via columns are
+# free-text TEXT, validated here, never an enum at the DB.
+#
+# VT-417: the inbound connector lineage (Shopify, Sheets, Drive) now reaches the
+# real writers (it used to terminate at the dedupe stub, which never reached this
+# gate — so these tags were missing and would have RAISED AcquiredViaError the
+# first time a webhook landed). Adding them unblocks connect→ingest.
 ACQUIRED_VIA: frozenset[str] = frozenset(
     {
         "paper_book", "contacts", "upi_phonepe", "upi_gpay", "upi_paytm",
         "kot_pos", "cash_book", "qr_opt_in", "apify_zomato", "apify_swiggy",
         "apify_magicpin", "apify_gbp", "owner_typed",
+        # VT-417 — inbound connector lineage (network-triggered ingestion).
+        "shopify", "google_sheet", "drive_sheet",
     }
 )
 

@@ -19,6 +19,13 @@ Per CL-72: 2xx always when at all possible; 403 on signature failure
 is the one allowed non-2xx so vendors stop sending bad payloads.
 
 Per VT-210 brief AC-2: synthetic POST round-trips within 30s.
+
+VT-417 PR-2: each parsed push row → ``CanonicalRow`` → ``ingest_customer_rows``
+(the REAL writer: real ``customers`` + ``sale`` ledger rows). It used to
+terminate at the ``dedupe_customer_row`` stub, which wrote only a phone-token and
+discarded everything else. ``acquired_via`` is the verified ``connector_id`` (the
+writers validate it against the VT-6 enum and RAISE on an unknown tag — fail-loud,
+not silent-drop).
 """
 
 from __future__ import annotations
@@ -31,7 +38,10 @@ from uuid import UUID
 from fastapi import APIRouter, Header, HTTPException, Request
 
 from orchestrator.graph import get_pool
-from orchestrator.integrations.dedupe import dedupe_customer_row
+from orchestrator.integrations.ingest import (
+    ingest_customer_rows,
+    sheet_row_to_canonical,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -85,18 +95,18 @@ async def integration_push(
         raise HTTPException(status_code=403, detail="invalid signature")
 
     rows = connector.parse_push_payload(body)
-    persisted = 0
-    for canonical_row in rows:
-        phone = canonical_row.get("phone") or canonical_row.get("Phone")
-        if not phone:
-            continue
-        dedupe_customer_row(
-            tenant_id=tenant_uuid,
-            phone_e164=str(phone),
-            connector_id=connector_id,
-            canonical_row=canonical_row,
-        )
-        persisted += 1
+    # Map each parsed push row → CanonicalRow (identity + optional amount/date
+    # sale). tenant_id is server-derived from the verified X-Viabe-Tenant header,
+    # NEVER from the payload (P3). acquired_via = the verified connector_id.
+    canonical_rows = [
+        c
+        for row in rows
+        if isinstance(row, dict) and (c := sheet_row_to_canonical(row)) is not None
+    ]
+    summary = ingest_customer_rows(
+        tenant_uuid, canonical_rows, acquired_via=connector_id
+    )
+    persisted = summary.committed
 
     now = datetime.now(UTC)
     with pool.connection() as conn:
@@ -120,4 +130,10 @@ async def integration_push(
             ),
         )
 
-    return {"status": "ok", "rows_ingested": persisted}
+    return {
+        "status": "ok",
+        "rows_ingested": persisted,
+        "sales_written": summary.sales_written,
+        "sales_skipped_duplicate": summary.sales_skipped_duplicate,
+        "ambiguous": summary.ambiguous,
+    }
