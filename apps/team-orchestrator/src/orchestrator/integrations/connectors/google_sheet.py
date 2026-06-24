@@ -288,16 +288,43 @@ class GoogleSheetConnector(ConnectorBase):
         tenant_id: UUID,
         spreadsheet_id: str = "",
         since_row_index: int = 0,
-    ) -> list[CanonicalRow]:
+        *,
+        since: datetime | None = None,  # base-contract alias; ignored (row-index cursor)
+    ) -> list[dict[str, Any]]:
         """Incremental pull from ``since_row_index`` to end.
 
         Row-index cursor strategy per Q5 Option A. Assumes append-only;
         mid-sheet deletes shift indices and may re-ingest rows
         (dedupe via phone_hash handles duplicate inserts).
+
+        VT-417 PR-2: returns the actual ``{column -> cell}`` row dicts (header row
+        zipped with each data row) so the Drive-pull / scheduler paths can map them
+        to ``CanonicalRow`` via ``ingest.sheet_row_to_canonical``. Previously this
+        returned data-LESS ``CanonicalRow(source_row_index=...)`` envelopes — the
+        cell values were discarded, so the pull lineage could never ingest a
+        customer. ``since`` (the ``ConnectorBase`` datetime cursor) is accepted for
+        signature uniformity but ignored — this connector cursors by ROW INDEX, not
+        time (the scheduler's google_sheet path is a known gap: it has no
+        spreadsheet_id / row-index cursor — the Drive poll path carries the
+        resource_id and is the real sheet-pull driver).
         """
         if not spreadsheet_id:
             raise ValueError("pull_full: spreadsheet_id required")
         access_token = self.get_access_token(tenant_id)
+        # Header (row 1) is needed to label cells — pull_full's old range
+        # (A{start}:Z) skipped it, leaving rows un-labellable.
+        header_resp = httpx.get(
+            f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}/values/A1:Z1",
+            headers={"Authorization": f"Bearer {access_token}"},
+            timeout=30.0,
+        )
+        if header_resp.status_code != 200:
+            raise RuntimeError(
+                f"Sheets pull_full header fetch failed: HTTP {header_resp.status_code}"
+            )
+        header_values = header_resp.json().get("values", [])
+        headers = [str(h) for h in header_values[0]] if header_values else []
+
         start_row = max(2, since_row_index + 1)
         range_a1 = f"A{start_row}:Z"
         url = (
@@ -314,10 +341,13 @@ class GoogleSheetConnector(ConnectorBase):
                 f"Sheets pull_full failed: HTTP {resp.status_code}"
             )
         values = resp.json().get("values", [])
-        return [
-            CanonicalRow(source_row_index=since_row_index + i + 1)
-            for i, _ in enumerate(values)
-        ]
+        rows: list[dict[str, Any]] = []
+        for row_data in values:
+            row: dict[str, Any] = {}
+            for i, h in enumerate(headers):
+                row[h] = row_data[i] if i < len(row_data) else None
+            rows.append(row)
+        return rows
 
     def verify_push_signature(
         self, body: bytes, headers: dict[str, str], push_secret: str

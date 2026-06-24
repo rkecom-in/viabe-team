@@ -29,8 +29,11 @@ Logging is counts-only — NEVER phone / email / name / amount-as-rupees (the
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
+from decimal import Decimal, InvalidOperation
+from typing import Any
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -208,10 +211,164 @@ def ingest_customer_rows(
     return summary
 
 
+# ---------- VT-417 PR-2: Sheet/CSV row → CanonicalRow mapping ----------
+# The shared mapper for the SHEET lineage (api/sheet_push, api/integration_push
+# google_sheet pushes, and the Drive/scheduler sheet pulls). A sheet row is an
+# arbitrary {column -> cell} dict — owners label columns freely. We map ONLY the
+# fields the writers' schemas persist (§3): phone / email / name + an optional
+# amount+date sale. Address / GST / notes columns are dropped here (never read
+# into the CanonicalRow). A contacts-only sheet (no amount column) lands
+# identity-only (empty ``sales``) — that is by design, not a bug.
+
+# Case/space-insensitive column aliases. First non-empty match wins.
+_PHONE_KEYS = ("phone", "mobile", "phone_number", "phoneno", "contact", "whatsapp")
+_EMAIL_KEYS = ("email", "e-mail", "email_address", "mail")
+_NAME_KEYS = ("name", "customer_name", "customer", "full_name", "fullname", "display_name")
+_AMOUNT_KEYS = ("amount", "order_amount", "total", "total_amount", "sale_amount", "value", "price")
+_DATE_KEYS = ("date", "order_date", "sale_date", "txn_date", "transaction_date", "created_at")
+
+
+def _normalize_e164(raw: Any) -> str | None:
+    """Best-effort E.164 for an Indian-first sheet; ``None`` if un-normalizable.
+
+    Mirrors the Shopify connector's normalizer (an IN store-owner's sheet carries
+    bare 10-digit or +91 numbers). We never invent a country code for ambiguous
+    bare digits — email / name still anchor the customer.
+    """
+    if raw is None:
+        return None
+    s = str(raw).strip()
+    has_plus = s.startswith("+")
+    digits = re.sub(r"\D", "", s)
+    if not digits:
+        return None
+    if has_plus and digits.startswith("91") and len(digits) == 12:
+        return "+" + digits
+    if has_plus:
+        return "+" + digits  # already international — trust it
+    if len(digits) == 10:
+        return "+91" + digits
+    if len(digits) == 12 and digits.startswith("91"):
+        return "+" + digits
+    if len(digits) == 11 and digits.startswith("0"):
+        return "+91" + digits[1:]
+    return None  # ambiguous → don't guess
+
+
+def _amount_to_paise(raw: Any) -> int | None:
+    """A sheet amount cell (e.g. "₹499", "499.00", "1,250") → paise (INR minor).
+
+    Strips currency symbols / thousands separators. Returns ``None`` on a missing
+    / unparseable / negative value (the sale is then skipped, never written as 0).
+    The sheet lineage is INR-only (an owner's sheet is in their local currency);
+    no FX, mirroring the Shopify INR guard.
+    """
+    if raw is None:
+        return None
+    s = str(raw).strip()
+    if not s:
+        return None
+    # Keep digits, decimal point, leading minus; drop ₹/Rs/commas/spaces.
+    cleaned = re.sub(r"[^\d.\-]", "", s)
+    if not cleaned or cleaned in ("-", ".", "-."):
+        return None
+    try:
+        paise = int((Decimal(cleaned) * 100).to_integral_value())
+    except (InvalidOperation, ValueError, TypeError):
+        return None
+    return paise if paise >= 0 else None
+
+
+def _sheet_date(raw: Any) -> date | None:
+    """A sheet date cell → ``date``. Accepts ISO 8601 / ISO date / dd/mm/yyyy."""
+    if raw is None:
+        return None
+    s = str(raw).strip()
+    if not s:
+        return None
+    # ISO 8601 datetime or date.
+    try:
+        return datetime.fromisoformat(s.replace("Z", "+00:00")).date()
+    except (ValueError, TypeError):
+        pass
+    try:
+        return date.fromisoformat(s[:10])
+    except (ValueError, TypeError):
+        pass
+    # dd/mm/yyyy or dd-mm-yyyy (the common Indian sheet shape).
+    m = re.match(r"^(\d{1,2})[/-](\d{1,2})[/-](\d{4})$", s)
+    if m:
+        d, mo, y = (int(g) for g in m.groups())
+        try:
+            return date(y, mo, d)
+        except ValueError:
+            return None
+    return None
+
+
+def _first_by_alias(row: dict[str, Any], aliases: tuple[str, ...]) -> Any:
+    """Return the first non-empty cell whose column name (case/space/underscore-
+    insensitive) matches one of ``aliases``. None if no match."""
+    norm = {
+        re.sub(r"[\s_\-]", "", str(k).strip().lower()): v
+        for k, v in row.items()
+    }
+    for alias in aliases:
+        key = re.sub(r"[\s_\-]", "", alias)
+        val = norm.get(key)
+        if val is not None and str(val).strip() != "":
+            return val
+    return None
+
+
+def sheet_row_to_canonical(row: dict[str, Any]) -> CanonicalRow | None:
+    """Map an arbitrary owner-sheet row → ``CanonicalRow`` (or None if no anchor).
+
+    Identity = phone(E.164) / email / name. Sale = amount + date columns when BOTH
+    are present & parseable → ONE ``SaleLine`` (confidence 1.0 — an owner-typed
+    sheet cell is structured, not OCR). A contacts-only sheet (no amount column, or
+    an unparseable amount) lands identity-only (empty ``sales``). Consent is NEVER
+    written from a sheet (a column header is not lawful WhatsApp consent — option-A
+    analog; consent arrives via the WhatsApp/QR ``record_consent`` path).
+
+    PII boundary (§3): only phone / email / name + the one sale magnitude/date are
+    read; every other column (address, GST, notes, line items) is dropped here.
+    """
+    phone_e164 = _normalize_e164(_first_by_alias(row, _PHONE_KEYS))
+    email_raw = _first_by_alias(row, _EMAIL_KEYS)
+    email = (
+        str(email_raw).strip().lower()
+        if email_raw is not None and str(email_raw).strip()
+        else None
+    )
+    name_raw = _first_by_alias(row, _NAME_KEYS)
+    display_name = (
+        str(name_raw).strip() if name_raw is not None and str(name_raw).strip() else None
+    )
+
+    if not (phone_e164 or email or display_name):
+        return None
+
+    sales: tuple[SaleLine, ...] = ()
+    paise = _amount_to_paise(_first_by_alias(row, _AMOUNT_KEYS))
+    entry_date = _sheet_date(_first_by_alias(row, _DATE_KEYS))
+    if paise is not None and entry_date is not None:
+        sales = (SaleLine(amount_paise=paise, entry_date=entry_date, confidence=1.0),)
+
+    return CanonicalRow(
+        phone_e164=phone_e164,
+        email=email,
+        display_name=display_name,
+        sales=sales,
+        consent=None,  # sheets carry no lawful WhatsApp consent (option-A analog)
+    )
+
+
 __all__ = [
     "CanonicalRow",
     "ConsentSignal",
     "IngestSummary",
     "SaleLine",
     "ingest_customer_rows",
+    "sheet_row_to_canonical",
 ]
