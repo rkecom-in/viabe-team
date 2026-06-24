@@ -1,26 +1,36 @@
-"""VT-421 — the fail-closed Sales-Recovery ONBOARDED gate (real Postgres).
+"""VT-421 — the registry-driven agent ACTIVATION gate (real Postgres).
 
-Fazal HALT (2026-06-25): SR execution (detect → approve → win-back SEND) runs ONLY for a
-FULLY-ONBOARDED tenant. No out-of-track communication. The held send to +919321553267 stays HELD
-until this lands AND a real onboarded Sundaram tenant exists.
+Fazal HALT + PIN + EXPAND (2026-06-25): agent execution (for SR: detect → approve → win-back SEND)
+runs ONLY for a tenant that has crossed that agent's activation bar. No out-of-track communication.
+The held send to +919321553267 stays HELD until this lands AND a real activated Sundaram tenant
+exists.
 
-THE GATE (orchestrator.agents.onboarding_gate.tenant_is_sr_eligible) is enforced at TWO sites:
-  - Call site A (DETECT, optimization): ``SalesRecoveryAgent.execute_item`` entry → a non-onboarded
+Fazal-pinned model:
+  - The bar is **journey-complete, NOT paid-active.** Gate on ``onboarding_journey.status='complete'``
+    (admits BOTH trial AND paid — the 1-month free trial is DELIBERATELY UNRESTRICTED).
+  - The bar is DECLARATIVE per-agent in ``activation_registry.REGISTRY``; the gate READS it.
+
+THE GATE (orchestrator.agents.onboarding_gate.is_agent_eligible) is enforced at TWO sites:
+  - Call site A (DETECT, optimization): ``SalesRecoveryAgent.execute_item`` entry → a non-activated
     tenant returns ``cancelled`` + ``skipped_not_onboarded`` BEFORE detection runs.
   - Call site B (SEND, THE load-bearing boundary — Gate 0): ``customer_send.agent_send_draft`` →
-    a non-onboarded tenant's draft is SKIPPED (``SKIP_NOT_ONBOARDED``) before any Twilio call. ONE
+    a non-activated tenant's draft is SKIPPED (``SKIP_NOT_ONBOARDED``) before any Twilio call. ONE
     edit covers BOTH L2 (l2_send) and L3 (l3_hold) — they converge on this single choke point.
 
 CANARY (Rule #15), BOTH directions:
-  1. Onboarding-phase tenant NO-OPs on DETECT (0 candidates) AND on SEND (SKIP_NOT_ONBOARDED,
+  1. Journey-incomplete tenant NO-OPs on DETECT (0 candidates) AND on SEND (SKIP_NOT_ONBOARDED,
      0 Twilio calls).
-  2. Fully-eligible tenant (paid_active + gstin_verified + enabled+ok connector + ≥1 customer)
+  2. Fully-activated tenant (journey-complete + gstin_verified + enabled+ok connector + ≥1 customer)
      PASSES Gate 0 — execute_item proceeds past the gate (reaches detection), and agent_send_draft
      passes Gate 0 (then meets the normal downstream gates).
-  3. The +919321553267-style non-eligible tenant is BLOCKED on the SEND regardless of trigger
+  3. A TRIAL tenant with the full activation set (journey-complete + verified + connector + customers)
+     is ADMITTED — proving the free trial is unrestricted (journey-complete, not paid).
+  4. The +919321553267-style non-eligible tenant is BLOCKED on the SEND regardless of trigger
      (L2 approved batch / L3 auto_send_pending) — Gate 0 short-circuits both.
-  4. Fail-closed unit pins: unknown phase / NULL / missing connector / 0 customers / verified-below
-     / forced read error → False.
+  5. The REGISTRY: SR's prereqs evaluated correctly; ``unmet_prerequisites`` returns the right
+     reasons; a SECOND (stub) agent with different prereqs evaluates INDEPENDENTLY (extensibility).
+  6. Fail-closed unit pins: unknown agent / missing journey / NULL / missing connector / 0 customers
+     / verified-below / forced read error → ineligible.
 
 HARNESS — house realdb conventions (mirrors test_vt418_l2_send_driver_realdb.py): importorskip
 psycopg+dbos, skipif no DATABASE_URL, migrations applied through the UNGUARDED ``apply(dsn=...)``
@@ -48,7 +58,7 @@ from psycopg.types.json import Jsonb  # noqa: E402
 
 pytestmark = pytest.mark.skipif(
     not os.environ.get("DATABASE_URL"),
-    reason="DATABASE_URL not set — VT-421 onboarded-gate realdb suite skipped",
+    reason="DATABASE_URL not set — VT-421 activation-gate realdb suite skipped",
 )
 
 # Modules under test. importorskip keeps collection fresh-DB-safe before they land.
@@ -56,9 +66,14 @@ onboarding_gate = pytest.importorskip(
     "orchestrator.agents.onboarding_gate",
     reason="VT-421 onboarding_gate module not yet in tree — integrator re-runs",
 )
+activation_registry = pytest.importorskip(
+    "orchestrator.agents.activation_registry",
+    reason="VT-421 activation_registry module not yet in tree — integrator re-runs",
+)
 
 from orchestrator.agents import customer_send  # noqa: E402
 from orchestrator.agents import sales_recovery_executor as sr  # noqa: E402
+from orchestrator.agents.activation_registry import AgentPrerequisites  # noqa: E402
 from orchestrator.agents.coordinator import AgentItemContext  # noqa: E402
 from orchestrator.db import tenant_connection  # noqa: E402
 import orchestrator.templates_registry as reg  # noqa: E402
@@ -155,10 +170,12 @@ class _RecordingCustomerSend:
 def _new_tenant(
     dsn: str,
     *,
-    phase: str = "paid_active",
+    phase: str = "trial",
     verification_status: str = "gstin_verified",
     owner_inputs: bool = True,
 ) -> UUID:
+    """A tenants row. ``phase`` is now IRRELEVANT to eligibility (the gate keys on the journey row,
+    not phase) — defaulted to 'trial' precisely to prove journey-complete, not paid, is the bar."""
     with psycopg.connect(dsn, autocommit=True) as conn:
         row = conn.execute(
             "INSERT INTO tenants (business_name, plan_tier, phase, phase_entered_at, "
@@ -173,14 +190,26 @@ def _new_tenant(
     return UUID(str(row[0]))
 
 
+def _seed_journey(dsn: str, tenant: UUID, *, status: str = "complete") -> None:
+    """The VT-367 onboarding_journey row at a given status. 'complete' = the activation signal."""
+    completed = "now()" if status == "complete" else "NULL"
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute(
+            "INSERT INTO onboarding_journey (tenant_id, status, completed_at) "
+            f"VALUES (%s, %s, {completed})",
+            (str(tenant), status),
+        )
+
+
 def _seed_connector(
     dsn: str, tenant: UUID, *, enabled: bool = True, last_status: str = "ok",
+    connector_id: str | None = None,
 ) -> None:
     with psycopg.connect(dsn, autocommit=True) as conn:
         conn.execute(
             "INSERT INTO tenant_connector_status (tenant_id, connector_id, enabled, last_status, "
             "last_ingested_date) VALUES (%s, %s, %s, %s, CURRENT_DATE)",
-            (str(tenant), f"conn-{uuid4().hex[:8]}", enabled, last_status),
+            (str(tenant), connector_id or f"conn-{uuid4().hex[:8]}", enabled, last_status),
         )
 
 
@@ -286,108 +315,214 @@ def _ctx(tenant: UUID, work_item: UUID) -> AgentItemContext:
     )
 
 
-def _eligible_tenant(dsn: str) -> SimpleNamespace:
-    """A FULLY-ONBOARDED tenant: paid_active + gstin_verified + enabled+ok connector + ≥1 customer
-    + owner_inputs enabled."""
-    tenant = _new_tenant(dsn, phase="paid_active", verification_status="gstin_verified")
+def _activated_tenant(dsn: str, *, phase: str = "trial") -> SimpleNamespace:
+    """A fully-ACTIVATED tenant: journey-complete + gstin_verified + enabled+ok connector +
+    ≥1 customer + owner_inputs. Defaults to phase='trial' to prove journey-complete (not paid) is
+    the bar."""
+    tenant = _new_tenant(dsn, phase=phase, verification_status="gstin_verified")
+    _seed_journey(dsn, tenant, status="complete")
     _seed_connector(dsn, tenant)
     customer, phone = _seed_customer(dsn, tenant)
     return SimpleNamespace(tenant=tenant, customer=customer, phone=phone)
 
 
 # ===========================================================================
-# 0. The eligibility helper directly (fail-closed unit pins).
+# 0. The eligibility helper directly (fail-closed unit pins, journey-complete model).
 # ===========================================================================
 
 
-def test_eligible_tenant_returns_true(substrate):  # type: ignore[no-untyped-def]
-    s = _eligible_tenant(substrate.dsn)
+def test_activated_tenant_returns_true(substrate):  # type: ignore[no-untyped-def]
+    s = _activated_tenant(substrate.dsn)
     with tenant_connection(s.tenant) as conn:
+        assert onboarding_gate.is_agent_eligible(s.tenant, _AGENT, conn=conn) is True
+        # backward-compat alias agrees.
         assert onboarding_gate.tenant_is_sr_eligible(s.tenant, conn=conn) is True
 
 
-def test_onboarding_phase_returns_false(substrate):  # type: ignore[no-untyped-def]
-    """phase='onboarding' — the canonical non-onboarded tenant — is ineligible even with a
-    connector + customers (phase gate trips first)."""
-    tenant = _new_tenant(substrate.dsn, phase="onboarding", verification_status="gstin_verified")
-    _seed_connector(substrate.dsn, tenant)
-    _seed_customer(substrate.dsn, tenant)
-    with tenant_connection(tenant) as conn:
-        assert onboarding_gate.tenant_is_sr_eligible(tenant, conn=conn) is False
+def test_trial_tenant_with_full_set_is_admitted(substrate):  # type: ignore[no-untyped-def]
+    """Fazal-pinned: the 1-month free trial is UNRESTRICTED. A phase='trial' tenant that is
+    journey-complete + verified + connector + customers is ELIGIBLE — the bar is journey-complete,
+    NOT paid-active. (The old model EXCLUDED trial; this is the deliberate flip.)"""
+    s = _activated_tenant(substrate.dsn, phase="trial")
+    with tenant_connection(s.tenant) as conn:
+        assert onboarding_gate.is_agent_eligible(s.tenant, _AGENT, conn=conn) is True
+        assert onboarding_gate.unmet_prerequisites(s.tenant, _AGENT, conn=conn) == []
 
 
-def test_trial_phase_excluded(substrate):  # type: ignore[no-untyped-def]
-    """trial is EXCLUDED from the conservative ELIGIBLE_PHASES (journey-complete ≠ paid)."""
+def test_journey_incomplete_returns_false(substrate):  # type: ignore[no-untyped-def]
+    """An onboarding (journey status='active') tenant — connector + customers + verified present —
+    is ineligible: the journey-complete bar trips."""
     tenant = _new_tenant(substrate.dsn, phase="trial", verification_status="gstin_verified")
+    _seed_journey(substrate.dsn, tenant, status="active")
     _seed_connector(substrate.dsn, tenant)
     _seed_customer(substrate.dsn, tenant)
     with tenant_connection(tenant) as conn:
-        assert onboarding_gate.tenant_is_sr_eligible(tenant, conn=conn) is False
-    assert "trial" not in onboarding_gate.ELIGIBLE_PHASES
+        assert onboarding_gate.is_agent_eligible(tenant, _AGENT, conn=conn) is False
+        assert "onboarding not complete" in onboarding_gate.unmet_prerequisites(
+            tenant, _AGENT, conn=conn
+        )
 
 
-def test_paid_active_but_unverified_returns_false(substrate):  # type: ignore[no-untyped-def]
-    """The hand-mutated-phase bypass guard: phase=paid_active but verification_status='unverified'
-    → False. Verification is re-asserted DIRECTLY, not inferred from phase."""
+def test_no_journey_row_returns_false(substrate):  # type: ignore[no-untyped-def]
+    """A tenant with NO onboarding_journey row at all → journey-complete unmet → ineligible."""
+    tenant = _new_tenant(substrate.dsn, phase="paid_active", verification_status="gstin_verified")
+    _seed_connector(substrate.dsn, tenant)
+    _seed_customer(substrate.dsn, tenant)  # no journey row
+    with tenant_connection(tenant) as conn:
+        assert onboarding_gate.is_agent_eligible(tenant, _AGENT, conn=conn) is False
+
+
+def test_journey_complete_but_unverified_returns_false(substrate):  # type: ignore[no-untyped-def]
+    """journey-complete but verification_status='unverified' → False. Verification is asserted
+    DIRECTLY, not inferred from phase or journey."""
     tenant = _new_tenant(substrate.dsn, phase="paid_active", verification_status="unverified")
+    _seed_journey(substrate.dsn, tenant, status="complete")
     _seed_connector(substrate.dsn, tenant)
     _seed_customer(substrate.dsn, tenant)
     with tenant_connection(tenant) as conn:
-        assert onboarding_gate.tenant_is_sr_eligible(tenant, conn=conn) is False
+        assert onboarding_gate.is_agent_eligible(tenant, _AGENT, conn=conn) is False
+        assert "GSTIN not verified" in onboarding_gate.unmet_prerequisites(tenant, _AGENT, conn=conn)
 
 
 def test_no_connector_returns_false(substrate):  # type: ignore[no-untyped-def]
-    """Eligible phase + verified + customers, but NO connector row → False."""
-    tenant = _new_tenant(substrate.dsn, phase="paid_active", verification_status="gstin_verified")
+    """journey-complete + verified + customers, but NO connector row → False with the right reason."""
+    tenant = _new_tenant(substrate.dsn, verification_status="gstin_verified")
+    _seed_journey(substrate.dsn, tenant, status="complete")
     _seed_customer(substrate.dsn, tenant)  # no connector
     with tenant_connection(tenant) as conn:
-        assert onboarding_gate.tenant_is_sr_eligible(tenant, conn=conn) is False
+        assert onboarding_gate.is_agent_eligible(tenant, _AGENT, conn=conn) is False
+        assert onboarding_gate.unmet_prerequisites(tenant, _AGENT, conn=conn) == [
+            "no connected customer-data source"
+        ]
 
 
 def test_disabled_connector_returns_false(substrate):  # type: ignore[no-untyped-def]
     """A connector that exists but is enabled=FALSE does NOT count as connected → False."""
-    tenant = _new_tenant(substrate.dsn, phase="paid_active", verification_status="gstin_verified")
+    tenant = _new_tenant(substrate.dsn, verification_status="gstin_verified")
+    _seed_journey(substrate.dsn, tenant, status="complete")
     _seed_connector(substrate.dsn, tenant, enabled=False, last_status="ok")
     _seed_customer(substrate.dsn, tenant)
     with tenant_connection(tenant) as conn:
-        assert onboarding_gate.tenant_is_sr_eligible(tenant, conn=conn) is False
+        assert onboarding_gate.is_agent_eligible(tenant, _AGENT, conn=conn) is False
+
+
+def test_generalized_data_source_google_sheet(substrate):  # type: ignore[no-untyped-def]
+    """The data-source prereq is GENERALIZED beyond shopify: a 'google_sheet' connector (enabled+ok)
+    satisfies it just like any ingest connector."""
+    tenant = _new_tenant(substrate.dsn, verification_status="gstin_verified")
+    _seed_journey(substrate.dsn, tenant, status="complete")
+    _seed_connector(substrate.dsn, tenant, connector_id="google_sheet")
+    _seed_customer(substrate.dsn, tenant)
+    with tenant_connection(tenant) as conn:
+        assert onboarding_gate.is_agent_eligible(tenant, _AGENT, conn=conn) is True
 
 
 def test_zero_customers_returns_false(substrate):  # type: ignore[no-untyped-def]
-    """Eligible phase + verified + connector, but 0 ingested customers → False."""
-    tenant = _new_tenant(substrate.dsn, phase="paid_active", verification_status="gstin_verified")
+    """journey-complete + verified + connector, but 0 ingested customers → False."""
+    tenant = _new_tenant(substrate.dsn, verification_status="gstin_verified")
+    _seed_journey(substrate.dsn, tenant, status="complete")
     _seed_connector(substrate.dsn, tenant)  # no customers
     with tenant_connection(tenant) as conn:
-        assert onboarding_gate.tenant_is_sr_eligible(tenant, conn=conn) is False
+        assert onboarding_gate.is_agent_eligible(tenant, _AGENT, conn=conn) is False
+        assert onboarding_gate.unmet_prerequisites(tenant, _AGENT, conn=conn) == [
+            "no customers ingested"
+        ]
+
+
+def test_unmet_lists_all_reasons_for_bare_tenant(substrate):  # type: ignore[no-untyped-def]
+    """A tenant with NOTHING (no journey, unverified, no connector, no customers) reports ALL four
+    unmet reasons — the portal sees the full picture, not just the first failure."""
+    tenant = _new_tenant(substrate.dsn, verification_status="unverified")
+    with tenant_connection(tenant) as conn:
+        reasons = onboarding_gate.unmet_prerequisites(tenant, _AGENT, conn=conn)
+    assert set(reasons) == {
+        "onboarding not complete",
+        "GSTIN not verified",
+        "no connected customer-data source",
+        "no customers ingested",
+    }
 
 
 def test_missing_tenant_row_returns_false(substrate):  # type: ignore[no-untyped-def]
     """A tenant_id with no tenants row → False (the RLS conn sees nothing)."""
     ghost = uuid4()
     with tenant_connection(ghost) as conn:
-        assert onboarding_gate.tenant_is_sr_eligible(ghost, conn=conn) is False
+        assert onboarding_gate.is_agent_eligible(ghost, _AGENT, conn=conn) is False
+
+
+def test_unknown_agent_fails_closed(substrate):  # type: ignore[no-untyped-def]
+    """An agent NOT in the registry → ineligible (KeyError caught → fail-closed). The gate never
+    silently admits an agent we never declared a bar for. unmet returns a sentinel reason."""
+    s = _activated_tenant(substrate.dsn)
+    with tenant_connection(s.tenant) as conn:
+        assert onboarding_gate.is_agent_eligible(s.tenant, "no_such_agent", conn=conn) is False
+        assert onboarding_gate.unmet_prerequisites(s.tenant, "no_such_agent", conn=conn) != []
 
 
 def test_read_error_fails_closed(substrate):  # type: ignore[no-untyped-def]
     """A forced conn.execute exception → False (the except-returns-False path)."""
-    s = _eligible_tenant(substrate.dsn)
+    s = _activated_tenant(substrate.dsn)
 
     class _Boom:
         def execute(self, *_a, **_k):  # noqa: ANN002, ANN003, ANN201
             raise RuntimeError("simulated DB read failure")
 
-    assert onboarding_gate.tenant_is_sr_eligible(s.tenant, conn=_Boom()) is False
+    assert onboarding_gate.is_agent_eligible(s.tenant, _AGENT, conn=_Boom()) is False
+    # unmet is fail-closed too (sentinel reason, not an empty/"eligible" list).
+    assert onboarding_gate.unmet_prerequisites(s.tenant, _AGENT, conn=_Boom()) != []
 
 
 # ===========================================================================
-# 1. DETECT side (call site A) — non-onboarded tenant NO-OPs; eligible passes the gate.
+# 1. The REGISTRY itself — structure, SR's entry, and EXTENSIBILITY (a stub agent).
 # ===========================================================================
 
 
-def test_detect_noop_for_onboarding_phase(substrate):  # type: ignore[no-untyped-def]
-    """An onboarding-phase tenant (connector + customers present) → execute_item returns
+def test_sr_registry_entry_shape():  # type: ignore[no-untyped-def]
+    """SR's declared bar is journey-complete + verified + data-source + ≥1 customer."""
+    sr_prereqs = activation_registry.get_prerequisites("sales_recovery")
+    assert sr_prereqs.requires_journey_complete is True
+    assert sr_prereqs.requires_verification is True
+    assert sr_prereqs.requires_enabled_data_source is True
+    assert sr_prereqs.min_customers == 1
+
+
+def test_unknown_agent_raises_keyerror():  # type: ignore[no-untyped-def]
+    with pytest.raises(KeyError):
+        activation_registry.get_prerequisites("not_a_registered_agent")
+
+
+def test_second_agent_evaluates_independently(substrate, monkeypatch):  # type: ignore[no-untyped-def]
+    """EXTENSIBILITY proof: register a SECOND agent whose bar is journey-complete + verified ONLY
+    (no data-source, no customers). For a journey-complete + verified tenant with NO connector and
+    NO customers, SR is INELIGIBLE (its bar requires those) but the stub agent is ELIGIBLE — the
+    two evaluate independently off the SAME registry, with ZERO gate-logic change."""
+    stub = AgentPrerequisites(
+        agent="stub_agent",
+        requires_journey_complete=True,
+        requires_verification=True,
+        requires_enabled_data_source=False,
+        min_customers=0,
+    )
+    monkeypatch.setitem(activation_registry.REGISTRY, "stub_agent", stub)
+
+    tenant = _new_tenant(substrate.dsn, verification_status="gstin_verified")
+    _seed_journey(substrate.dsn, tenant, status="complete")  # no connector, no customers
+    with tenant_connection(tenant) as conn:
+        assert onboarding_gate.is_agent_eligible(tenant, "sales_recovery", conn=conn) is False
+        assert onboarding_gate.is_agent_eligible(tenant, "stub_agent", conn=conn) is True
+        assert onboarding_gate.unmet_prerequisites(tenant, "stub_agent", conn=conn) == []
+
+
+# ===========================================================================
+# 2. DETECT side (call site A) — non-activated tenant NO-OPs; activated passes the gate.
+# ===========================================================================
+
+
+def test_detect_noop_for_journey_incomplete(substrate):  # type: ignore[no-untyped-def]
+    """A journey-incomplete tenant (connector + customers present) → execute_item returns
     cancelled + skipped_not_onboarded, and detection NEVER runs (0 drafts persisted)."""
-    tenant = _new_tenant(substrate.dsn, phase="onboarding", verification_status="gstin_verified")
+    tenant = _new_tenant(substrate.dsn, verification_status="gstin_verified")
+    _seed_journey(substrate.dsn, tenant, status="active")
     _seed_connector(substrate.dsn, tenant)
     _seed_customer(substrate.dsn, tenant)
     work_item = _seed_work_item(substrate.dsn, tenant)
@@ -399,14 +534,14 @@ def test_detect_noop_for_onboarding_phase(substrate):  # type: ignore[no-untyped
     assert _count_drafts(substrate.dsn, tenant) == 0  # detection / drafting never reached
 
 
-def test_detect_passes_gate_for_eligible_tenant(substrate):  # type: ignore[no-untyped-def]
-    """A fully-eligible tenant PASSES Gate 0 — execute_item does NOT short-circuit on
+def test_detect_passes_gate_for_activated_tenant(substrate):  # type: ignore[no-untyped-def]
+    """A fully-activated tenant PASSES Gate 0 — execute_item does NOT short-circuit on
     skipped_not_onboarded; it proceeds INTO detection (which with the empty C2 allowlist returns
     skipped_no_candidates — proving the gate let it through to the detect phase)."""
-    s = _eligible_tenant(substrate.dsn)
+    s = _activated_tenant(substrate.dsn)
     work_item = _seed_work_item(substrate.dsn, s.tenant)
 
-    # C2 stays EMPTY at rest — detection returns [] structurally, so the eligible tenant reaches
+    # C2 stays EMPTY at rest — detection returns [] structurally, so the activated tenant reaches
     # the detect phase and reports skipped_no_candidates (NOT skipped_not_onboarded). That is the
     # proof Gate 0 passed.
     assert sr.MARKETING_CONSENT_VERSIONS == frozenset()
@@ -418,16 +553,17 @@ def test_detect_passes_gate_for_eligible_tenant(substrate):  # type: ignore[no-u
 
 
 # ===========================================================================
-# 2. SEND side (call site B = Gate 0) — the LOAD-BEARING safety boundary, BOTH L2 and L3.
+# 3. SEND side (call site B = Gate 0) — the LOAD-BEARING safety boundary, BOTH L2 and L3.
 # ===========================================================================
 
 
 @pytest.mark.usefixtures("armed_registry")
-def test_send_blocked_for_onboarding_phase_l2(substrate):  # type: ignore[no-untyped-def]
-    """The +919321553267-style block, L2 trigger: a NON-onboarded tenant with an APPROVED L2 batch
-    + a drafted draft → agent_send_draft returns skipped (SKIP_NOT_ONBOARDED), ZERO Twilio calls.
-    Gate 0 short-circuits even with an otherwise fully-sendable approved batch."""
-    tenant = _new_tenant(substrate.dsn, phase="onboarding", verification_status="gstin_verified")
+def test_send_blocked_for_journey_incomplete_l2(substrate):  # type: ignore[no-untyped-def]
+    """The +919321553267-style block, L2 trigger: a journey-INCOMPLETE tenant with an APPROVED L2
+    batch + a drafted draft → agent_send_draft returns skipped (SKIP_NOT_ONBOARDED), ZERO Twilio
+    calls. Gate 0 short-circuits even with an otherwise fully-sendable approved batch."""
+    tenant = _new_tenant(substrate.dsn, verification_status="gstin_verified")
+    _seed_journey(substrate.dsn, tenant, status="active")
     _seed_connector(substrate.dsn, tenant)
     customer, phone = _seed_customer(substrate.dsn, tenant, phone="+919321553267")
     work_item = _seed_work_item(substrate.dsn, tenant)
@@ -447,11 +583,12 @@ def test_send_blocked_for_onboarding_phase_l2(substrate):  # type: ignore[no-unt
 
 
 @pytest.mark.usefixtures("armed_registry")
-def test_send_blocked_for_onboarding_phase_l3(substrate):  # type: ignore[no-untyped-def]
+def test_send_blocked_for_journey_incomplete_l3(substrate):  # type: ignore[no-untyped-def]
     """Same block, L3 trigger (the L3-wake / auto_send_pending path): Gate 0 sits ABOVE the L3
-    batch-state gate, so a non-onboarded tenant's auto_send_pending batch is blocked too — ONE
+    batch-state gate, so a journey-incomplete tenant's auto_send_pending batch is blocked too — ONE
     Gate 0 covers BOTH send paths. ZERO Twilio calls."""
-    tenant = _new_tenant(substrate.dsn, phase="onboarding", verification_status="gstin_verified")
+    tenant = _new_tenant(substrate.dsn, verification_status="gstin_verified")
+    _seed_journey(substrate.dsn, tenant, status="active")
     _seed_connector(substrate.dsn, tenant)
     customer, phone = _seed_customer(substrate.dsn, tenant, phone="+919321553267")
     work_item = _seed_work_item(substrate.dsn, tenant)
@@ -470,12 +607,12 @@ def test_send_blocked_for_onboarding_phase_l3(substrate):  # type: ignore[no-unt
 
 
 @pytest.mark.usefixtures("armed_registry")
-def test_send_passes_gate0_for_eligible_tenant(substrate, monkeypatch):  # type: ignore[no-untyped-def]
-    """A fully-eligible tenant PASSES Gate 0 on the SEND side: with the C2 gate opened (matching
-    consent + patched allowlist — the L2-test pattern), agent_send_draft proceeds THROUGH Gate 0
-    and the downstream gates to a real (injected) send. This proves Gate 0 lets an onboarded
-    tenant through — it is NOT a blanket block."""
-    s = _eligible_tenant(substrate.dsn)
+def test_send_passes_gate0_for_activated_trial_tenant(substrate, monkeypatch):  # type: ignore[no-untyped-def]
+    """A fully-activated TRIAL tenant PASSES Gate 0 on the SEND side: with the C2 gate opened
+    (matching consent + patched allowlist — the L2-test pattern), agent_send_draft proceeds THROUGH
+    Gate 0 and the downstream gates to a real (injected) send. This proves the journey-complete bar
+    ADMITS a trial tenant on the load-bearing send path — it is NOT a paid-only block."""
+    s = _activated_tenant(substrate.dsn, phase="trial")
     work_item = _seed_work_item(substrate.dsn, s.tenant)
     batch = _seed_batch(substrate.dsn, s.tenant, work_item, status="approved")
     draft = _seed_draft(substrate.dsn, s.tenant, batch, s.customer)

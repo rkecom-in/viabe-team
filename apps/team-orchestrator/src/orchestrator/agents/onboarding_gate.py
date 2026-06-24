@@ -1,32 +1,44 @@
-"""VT-421 — the fail-closed Sales-Recovery ONBOARDED gate.
+"""VT-421 — the fail-closed agent ACTIVATION gate (registry-driven).
 
-Fazal HALT (2026-06-25): SR execution (detect → approve → win-back SEND) runs ONLY for a
-FULLY-ONBOARDED tenant. No out-of-track communication. Today NOTHING in the SR stack reads
-``tenants.phase`` / ``verification_status`` / connector / customer-count — RLS scopes the
-tenant but does not gate onboarding. THIS module is that gate.
+Fazal HALT (2026-06-25): agent execution (for SR: detect → approve → win-back SEND) runs ONLY for a
+tenant that has crossed that agent's activation bar. No out-of-track communication. Today NOTHING in
+the SR stack reads onboarding-completion / verification / connector / customer-count — RLS scopes the
+tenant but does not gate activation. THIS module is that gate.
 
-``tenant_is_sr_eligible(tenant_id, conn)`` is the single eligibility predicate, called from
+Fazal PIN + EXPAND (2026-06-25):
+  - The activation bar is **journey-complete, NOT paid-active.** The 1-month free trial is
+    DELIBERATELY UNRESTRICTED — gate on ``onboarding_journey.status='complete'`` (admits BOTH trial
+    AND paid). The old ``tenants.phase ∈ {paid_active, paid_at_risk}`` conjunct is REMOVED.
+  - The bar is no longer a hardcoded SR condition — it is a DECLARATIVE per-agent prerequisite set in
+    ``activation_registry.REGISTRY`` that THIS gate READS. A future agent declares its own prereqs
+    there with ZERO change to gate logic.
+
+``is_agent_eligible(tenant_id, agent, *, conn)`` is the single eligibility predicate, called from
 TWO fail-closed sites (defense-in-depth, neither alone is trusted):
 
   - Call site A (DETECT side, an optimization + clean no-op):
     ``sales_recovery_executor.execute_item`` entry — a non-eligible tenant returns a
     ``skipped_not_onboarded`` ItemExecutionResult before detection runs.
   - Call site B (SEND side, THE load-bearing safety boundary, Gate 0):
-    ``customer_send.agent_send_draft`` — Gate 0 sits at the TOP of the gate stack and covers
-    BOTH L2 (l2_send) and L3 (l3_hold), which converge on this single choke point. A
-    non-eligible tenant's draft is SKIPPED (``SKIP_NOT_ONBOARDED``) before any Twilio call.
+    ``customer_send.agent_send_draft`` — Gate 0 sits at the TOP of the gate stack and covers BOTH L2
+    (l2_send) and L3 (l3_hold), which converge on this single choke point. A non-eligible tenant's
+    draft is SKIPPED (``SKIP_NOT_ONBOARDED``) before any Twilio call.
 
-FAIL-CLOSED EVERYWHERE: missing tenant row / NULL / unknown phase / read error → False. One
-try/except wraps the whole body and returns False on ANY exception — the precedent is
+INTROSPECTABLE (Fazal: don't bury it in a boolean — the portal must render WHY an agent is inactive):
+``unmet_prerequisites(tenant_id, agent, *, conn)`` returns the UNMET prereqs as human-readable
+reasons, queryable per-tenant for the owner-facing surface.
+
+FAIL-CLOSED EVERYWHERE: missing tenant row / NULL / unknown agent / read error → ineligible. One
+try/except wraps the eligibility body and returns False on ANY exception — the precedent is
 ``transitions._activation_verification_ok`` and ``sales_recovery_executor._owner_inputs_ok``.
 
 Reuses existing signals only — NO new migration:
-  - ``tenants.phase``                  (mig 001 / 121 — the lifecycle phase)
+  - ``onboarding_journey.status``      (mig 123 — the VT-367 guided-journey completion signal)
   - ``tenants.verification_status``    (mig 120 — the VT-361 activation tier)
-  - ``tenant_connector_status``        (mig 034 — connected + has-pulled-data signal)
+  - ``tenant_connector_status``        (mig 034 — connected + has-pulled-data signal; ANY connector)
   - ``customers`` count                (the ingested-customer signal)
 
-CL-390: this module logs IDs + a boolean reason ONLY — never a display name, phone, or fact.
+CL-390: this module logs IDs + a boolean reason code ONLY — never a display name, phone, or fact.
 """
 
 from __future__ import annotations
@@ -35,29 +47,21 @@ import logging
 from typing import Any
 from uuid import UUID
 
+from orchestrator.agents.activation_registry import (
+    PREREQ_CUSTOMERS,
+    PREREQ_DATA_SOURCE,
+    PREREQ_JOURNEY_COMPLETE,
+    PREREQ_VERIFICATION,
+    AgentPrerequisites,
+    get_prerequisites,
+    prereq_reason,
+)
+
 logger = logging.getLogger(__name__)
 
-# --- ELIGIBLE_PHASES — the single load-bearing knob ---------------------------------------
-#
-# The whole gate keys on this ONE named constant: flipping the "fully onboarded" definition is a
-# one-line change here, with the helper + both call sites unaffected (mirrors
-# transitions._ACTIVATION_VERIFIED_TIERS).
-#
-# Fazal decision pending (Cowork relaying): paid-active-only {paid_active,paid_at_risk} vs
-# journey-complete (admits trial)
-#
-# Default = the CONSERVATIVE paid-only set. Rationale: paid_active is "fully onboarded + verified
-# + actively paid"; paid_at_risk is a still-active paid tenant in an engagement dip — SR is exactly
-# the win-back tool for it, so excluding it would be wrong. trial is EXCLUDED: a trial tenant can
-# have completed the guided journey + hold a business_plan + customers WITHOUT being a paying,
-# fully-activated customer (journey-complete ≠ paid), and the fail-closed launch posture is to
-# admit only the unambiguous "active paying" set.
-ELIGIBLE_PHASES: frozenset[str] = frozenset({"paid_active", "paid_at_risk"})
-
 # The verification tiers that count as "≥ gstin_verified" (mirrors transitions._ACTIVATION_VERIFIED_TIERS).
-# Re-asserted DIRECTLY (not folded into phase): reaching paid_active already requires this, but a
-# hand-mutated tenants.phase must NOT bypass the verification floor — phase does not PROVE current
-# verification.
+# Asserted DIRECTLY (not inferred from phase): a hand-mutated tenant must NOT bypass the verification
+# floor — phase does not PROVE current verification.
 _VERIFIED_TIERS: frozenset[str] = frozenset({"gstin_verified", "vtr_verified"})
 
 
@@ -66,50 +70,40 @@ def _col(row: Any, key: str, idx: int) -> Any:
     return row[key] if isinstance(row, dict) else row[idx]
 
 
-def tenant_is_sr_eligible(tenant_id: UUID | str, *, conn: Any) -> bool:
-    """True IFF the tenant is FULLY ONBOARDED for Sales-Recovery execution. Fail-closed.
+def _unmet_codes(tenant_id: UUID | str, prereqs: AgentPrerequisites, *, conn: Any) -> list[str]:
+    """Resolve the agent's DECLARED prerequisites against this tenant's live state → the list of
+    UNMET prerequisite CODES (empty list = fully eligible). Reads on the caller's RLS-scoped conn.
 
-    ``conn`` is the caller's RLS-scoped ``tenant_connection`` (already bound to this tenant). The
-    read runs on that connection, so RLS independently confirms the row belongs to the tenant.
+    The gate owns the SQL + thresholds; the registry owns WHICH facts each agent requires. A prereq
+    flag set False in the registry is simply not evaluated for that agent.
 
-    Returns True only when ALL of:
-      1. ``tenants.phase ∈ ELIGIBLE_PHASES``.
-      2. ``tenants.verification_status ∈ {gstin_verified, vtr_verified}`` — re-asserted DIRECTLY,
-         NOT collapsed into phase (a hand-mutated phase cannot bypass the verification floor).
-      3. ≥1 ``tenant_connector_status`` row that is ``enabled = TRUE`` AND has actually pulled data
-         (``last_status = 'ok'`` OR ``last_ingested_date IS NOT NULL``).
-      4. ≥1 ingested customer (``count(customers) >= 1``).
-
-    Returns False on ANY unknown / NULL / missing row / read error (single try/except → False).
+    NOT fail-closed on its own — it RAISES on a read error so the boolean ``is_agent_eligible``
+    wrapper converts that into ineligible. (A bare ``unmet_prerequisites`` caller gets the same
+    fail-closed contract via that public function's own try/except.)
     """
     tid = str(tenant_id)
-    try:
-        # tenants row — phase + verification on ONE read.
+    unmet: list[str] = []
+
+    # tenants row — verification on one read (phase no longer gates: journey-complete replaced it).
+    if prereqs.requires_verification:
         trow = conn.execute(
-            "SELECT phase, verification_status FROM tenants WHERE id = %s",
+            "SELECT verification_status FROM tenants WHERE id = %s",
             (tid,),
         ).fetchone()
-        if trow is None:
-            logger.info("sr_onboarded_gate: no tenant row tenant=%s -> ineligible", tid)
-            return False
-        phase = _col(trow, "phase", 0)
-        verification_status = _col(trow, "verification_status", 1)
+        if trow is None or _col(trow, "verification_status", 0) not in _VERIFIED_TIERS:
+            unmet.append(PREREQ_VERIFICATION)
 
-        if phase not in ELIGIBLE_PHASES:
-            logger.info(
-                "sr_onboarded_gate: tenant=%s phase=%s not in ELIGIBLE_PHASES -> ineligible",
-                tid, phase,
-            )
-            return False
-        # DIRECT re-assertion (NOT folded into phase): a hand-mutated phase must not bypass this.
-        if verification_status not in _VERIFIED_TIERS:
-            logger.info(
-                "sr_onboarded_gate: tenant=%s verification_status=%s below gstin_verified -> ineligible",
-                tid, verification_status,
-            )
-            return False
+    # onboarding_journey.status='complete' — the journey-complete bar (admits trial AND paid).
+    if prereqs.requires_journey_complete:
+        jrow = conn.execute(
+            "SELECT 1 FROM onboarding_journey WHERE tenant_id = %s AND status = 'complete' LIMIT 1",
+            (tid,),
+        ).fetchone()
+        if jrow is None:
+            unmet.append(PREREQ_JOURNEY_COMPLETE)
 
-        # Connected data source that actually pulled data at least once.
+    # ≥1 ENABLED customer-data source that actually pulled data (ANY ingest connector — generalized).
+    if prereqs.requires_enabled_data_source:
         crow = conn.execute(
             "SELECT 1 FROM tenant_connector_status "
             "WHERE tenant_id = %s AND enabled = TRUE "
@@ -118,26 +112,90 @@ def tenant_is_sr_eligible(tenant_id: UUID | str, *, conn: Any) -> bool:
             (tid,),
         ).fetchone()
         if crow is None:
-            logger.info(
-                "sr_onboarded_gate: tenant=%s no enabled+pulled connector -> ineligible", tid
-            )
-            return False
+            unmet.append(PREREQ_DATA_SOURCE)
 
-        # ≥1 ingested customer — via the wrapper (the no-direct-tenant-db-access lint owns
-        # per-tenant customers SQL); pass the held RLS conn so it reads on the same connection.
+    # ≥ min_customers ingested customers — via the wrapper (the no-direct-tenant-db-access lint owns
+    # per-tenant customers SQL); pass the held RLS conn so it reads on the same connection.
+    if prereqs.min_customers > 0:
         from orchestrator.db.wrappers import CustomersWrapper
 
-        if CustomersWrapper().count_all(tid, conn=conn) < 1:
-            logger.info("sr_onboarded_gate: tenant=%s 0 customers -> ineligible", tid)
-            return False
+        if CustomersWrapper().count_all(tid, conn=conn) < prereqs.min_customers:
+            unmet.append(PREREQ_CUSTOMERS)
 
+    return unmet
+
+
+def is_agent_eligible(tenant_id: UUID | str, agent: str, *, conn: Any) -> bool:
+    """True IFF the tenant has crossed ``agent``'s activation bar. Fail-closed.
+
+    ``conn`` is the caller's RLS-scoped ``tenant_connection`` (already bound to this tenant). The read
+    runs on that connection, so RLS independently confirms the row belongs to the tenant.
+
+    Eligible IFF every prerequisite the agent DECLARES in ``activation_registry.REGISTRY`` is
+    satisfied for this tenant. For ``sales_recovery`` that is:
+      1. ``onboarding_journey.status='complete'`` (admits BOTH trial AND paid — journey-complete,
+         NOT paid-active; the free trial is deliberately unrestricted).
+      2. ``tenants.verification_status ∈ {gstin_verified, vtr_verified}`` — asserted DIRECTLY.
+      3. ≥1 ``tenant_connector_status`` row that is ``enabled = TRUE`` AND has pulled data
+         (``last_status = 'ok'`` OR ``last_ingested_date IS NOT NULL``) — ANY ingest connector.
+      4. ≥1 ingested customer (``count(customers) >= min_customers``).
+
+    Returns False on an UNKNOWN agent / NULL / missing row / read error (single try/except → False).
+    """
+    tid = str(tenant_id)
+    try:
+        prereqs = get_prerequisites(agent)  # KeyError on unknown agent → caught → fail-closed.
+        unmet = _unmet_codes(tid, prereqs, conn=conn)
+        if unmet:
+            logger.info(
+                "agent_activation_gate: tenant=%s agent=%s ineligible unmet=%s",
+                tid, agent, unmet,
+            )
+            return False
         return True
-    except Exception:  # noqa: BLE001 — fail-closed on ANY read/DB error (the precedent: transitions)
+    except Exception:  # noqa: BLE001 — fail-closed on ANY read/DB/unknown-agent error (precedent: transitions)
         logger.warning(
-            "sr_onboarded_gate: eligibility read failed tenant=%s -> ineligible (fail-closed)",
-            tid,
+            "agent_activation_gate: eligibility read failed tenant=%s agent=%s -> ineligible (fail-closed)",
+            tid, agent,
         )
         return False
 
 
-__all__ = ["ELIGIBLE_PHASES", "tenant_is_sr_eligible"]
+def unmet_prerequisites(tenant_id: UUID | str, agent: str, *, conn: Any) -> list[str]:
+    """The UNMET activation prerequisites for ``agent`` on this tenant, as human-readable reasons —
+    the owner-facing portal introspection surface (Fazal: render WHY an agent is inactive, not a
+    bare boolean).
+
+    Returns ``[]`` when the agent is fully eligible. Fail-closed: an unknown agent / read error
+    returns a single sentinel reason so the portal renders "inactive" rather than (wrongly) "active".
+    The codes behind these reasons are stable (``activation_registry.PREREQ_*``); the strings are the
+    display layer.
+    """
+    tid = str(tenant_id)
+    try:
+        prereqs = get_prerequisites(agent)
+        codes = _unmet_codes(tid, prereqs, conn=conn)
+        return [prereq_reason(c) for c in codes]
+    except Exception:  # noqa: BLE001 — fail-closed: surface inactive-with-reason rather than active.
+        logger.warning(
+            "agent_activation_gate: unmet_prerequisites read failed tenant=%s agent=%s (fail-closed)",
+            tid, agent,
+        )
+        return [prereq_reason("activation_check_failed")]
+
+
+def tenant_is_sr_eligible(tenant_id: UUID | str, *, conn: Any) -> bool:
+    """Backward-compat alias for the Sales-Recovery activation predicate.
+
+    Thin wrapper over ``is_agent_eligible(tenant_id, 'sales_recovery', conn=conn)``. Retained so the
+    DETECT-side call (``sales_recovery_executor``) and any other ``sales_recovery`` caller keep a
+    stable name; the load-bearing SEND-side Gate 0 calls ``is_agent_eligible`` directly.
+    """
+    return is_agent_eligible(tenant_id, "sales_recovery", conn=conn)
+
+
+__all__ = [
+    "is_agent_eligible",
+    "tenant_is_sr_eligible",
+    "unmet_prerequisites",
+]

@@ -7,11 +7,13 @@ from every send capability — they emit ``template_name + params`` into
 
 The gate stack runs IN ORDER; every gate fails CLOSED with a distinct marker:
 
-  0. tenant ONBOARDED gate (VT-421) — ``tenant_is_sr_eligible``: the tenant must
-     be fully onboarded (phase ∈ ELIGIBLE_PHASES AND verification ≥ gstin_verified
-     AND ≥1 enabled+ok connector AND ≥1 customer). Fail-closed (unknown/NULL/error →
-     skip ``skipped_not_onboarded``). This ONE gate covers BOTH L2 and L3 (both
-     converge here) — SR may only SEND for a fully-onboarded tenant (Fazal HALT).
+  0. agent ACTIVATION gate (VT-421) — ``is_agent_eligible(tid, 'sales_recovery')``:
+     the tenant must have crossed SR's REGISTERED activation bar (journey-complete —
+     ``onboarding_journey.status='complete'``, admits trial AND paid — AND verification
+     ≥ gstin_verified AND ≥1 enabled+pulled data source AND ≥1 customer). The bar is
+     DECLARED in ``activation_registry.REGISTRY``, not hardcoded here. Fail-closed
+     (unknown agent/NULL/error → skip ``skipped_not_onboarded``). This ONE gate covers
+     BOTH L2 and L3 (both converge here) — SR may only SEND for an activated tenant.
   1. batch state — ``approved`` (or mid-batch ``sending``) under L2; for L3 the
      batch must be ``auto_send_pending`` (the delivery-anchored hold window). The
      L3 path takes a ``SELECT ... FOR UPDATE`` row lock on the batch and re-checks
@@ -516,9 +518,9 @@ def agent_send_draft(
     # idempotency early-outs so a terminal/already-sent draft still short-circuits first. The
     # helper is fail-closed (unknown/NULL/error → False → SKIP). persist=True: non-onboarded is a
     # stable condition for THIS draft (poison it); a later-onboarded tenant gets a NEW batch.
-    from orchestrator.agents.onboarding_gate import tenant_is_sr_eligible
+    from orchestrator.agents.onboarding_gate import is_agent_eligible
 
-    if not tenant_is_sr_eligible(tid, conn=conn):
+    if not is_agent_eligible(tid, "sales_recovery", conn=conn):
         return _skip(conn, tid, draft, SKIP_NOT_ONBOARDED, persist=True)
 
     # --- Gate 1: batch state (L2 = Pillar-7 approved; 'sending' = mid-batch;

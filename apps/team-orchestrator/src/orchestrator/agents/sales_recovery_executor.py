@@ -689,8 +689,9 @@ class SalesRecoveryAgent:
                 work_item_status="cancelled", counters={"skipped_owner_inputs": 1}
             )
 
-        # VT-421 ONBOARDED gate (DETECT-side short-circuit) — SR runs ONLY for a fully-onboarded
-        # tenant (Fazal HALT 2026-06-25). This saves the detect/draft work for a non-onboarded
+        # VT-421 ACTIVATION gate (DETECT-side short-circuit) — SR runs ONLY for a tenant that has
+        # crossed SR's registered activation bar (journey-complete + verified + data source +
+        # customers; Fazal HALT 2026-06-25). This saves the detect/draft work for a non-activated
         # tenant; it is NOT the safety boundary (that is Gate 0 in customer_send.agent_send_draft,
         # which every L2/L3 send funnels through). Fail-closed (unknown/NULL/error → ineligible).
         # A cheap own RLS connection just for the read — NOT held across the candidate_build seam

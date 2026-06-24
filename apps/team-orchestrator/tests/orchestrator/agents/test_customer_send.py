@@ -199,11 +199,12 @@ def substrate():  # type: ignore[no-untyped-def]
 
 
 def _new_tenant(dsn: str, *, name: str = "VT-369 customer_send test") -> UUID:
-    # VT-421: the send choke point now has a Gate-0 ONBOARDED gate at the TOP of the stack
-    # (tenant_is_sr_eligible). For these gate-1..6 tests to reach the gate they actually assert,
-    # the tenant must be fully onboarded: paid_active + gstin_verified + ≥1 enabled+ok connector
-    # (the per-test _seed_customer satisfies the ≥1-customer leg). A non-onboarded tenant would
-    # short-circuit on SKIP_NOT_ONBOARDED before any of these gates.
+    # VT-421: the send choke point now has a Gate-0 ACTIVATION gate at the TOP of the stack
+    # (is_agent_eligible). For these gate-1..6 tests to reach the gate they actually assert, the
+    # tenant must be fully activated: journey-complete + gstin_verified + ≥1 enabled+ok connector
+    # (the per-test _seed_customer satisfies the ≥1-customer leg). A non-activated tenant would
+    # short-circuit on SKIP_NOT_ONBOARDED before any of these gates. The bar is now journey-complete
+    # (onboarding_journey.status='complete'), NOT paid-active — so seed that row.
     with psycopg.connect(dsn, autocommit=True) as conn:
         row = conn.execute(
             "INSERT INTO tenants (business_name, plan_tier, phase, phase_entered_at, "
@@ -218,6 +219,11 @@ def _new_tenant(dsn: str, *, name: str = "VT-369 customer_send test") -> UUID:
             "INSERT INTO tenant_connector_status (tenant_id, connector_id, enabled, last_status, "
             "last_ingested_date) VALUES (%s, %s, TRUE, 'ok', CURRENT_DATE)",
             (str(tenant), f"conn-{uuid4().hex[:8]}"),
+        )
+        conn.execute(
+            "INSERT INTO onboarding_journey (tenant_id, status, completed_at) "
+            "VALUES (%s, 'complete', now())",
+            (str(tenant),),
         )
     return tenant
 
