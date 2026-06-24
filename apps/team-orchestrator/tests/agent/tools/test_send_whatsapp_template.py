@@ -600,9 +600,20 @@ def test_twilio_error_returns_envelope() -> None:
     assert out.error_envelope is not None
     assert out.error_envelope.code == "twilio_error"
 
+    # VT-420: TWO send_idempotency_keys writes now — the pre-send 'sending' in-flight
+    # marker (committed BEFORE the Twilio call) + the error flip that upserts it to
+    # 'error' afterward (a raise means Twilio did NOT accept → retryable, not 'sent').
     sql_list = [sql for sql, _ in executed]
     insert_calls = [s for s in sql_list if "INSERT INTO send_idempotency_keys" in s]
-    assert len(insert_calls) == 1
+    assert len(insert_calls) == 2
+    # First write is the in-flight 'sending' marker; the second is the 'error' upsert.
+    assert "'sending'" in insert_calls[0]
+    assert "ON CONFLICT (tenant_id, idempotency_key) DO UPDATE" in insert_calls[1]
+    error_params = next(
+        params for sql, params in executed
+        if "INSERT INTO send_idempotency_keys" in sql and "DO UPDATE" in sql
+    )
+    assert "error" in error_params
 
 
 def test_twilio_failure_result_envelope() -> None:
@@ -706,3 +717,284 @@ def test_invalid_language_raises() -> None:
             template_params={},
             idempotency_key="k1",
         )
+
+
+# ===========================================================================
+# VT-420 — crash-window canary (Rule #15, money-send LOAD-BEARING)
+#
+# The bug: send_whatsapp_template's Twilio messages.create call and the autocommit
+# 'sent' ledger INSERT are NOT one transaction. A crash AFTER Twilio dispatch but
+# BEFORE the 'sent' commit left the key absent → on recovery the send re-fired
+# (double-charge / double-message). Twilio's Messages/Content API has no native
+# idempotency key (twilio 9.10.9 messages.create exposes none — proven directly
+# below), so the fix is a pre-send 'sending' (in-flight) marker, committed BEFORE
+# the Twilio call: on recovery a still-'sending' key blocks the re-send fail-SAFE.
+#
+# The canary simulates the crash window over a DURABLE ledger (modelling the
+# autocommit table that survives the process death) and asserts: a recovery attempt
+# makes NO second Twilio call. Shared by L2 + L3 (both funnel through this tool).
+# ===========================================================================
+
+
+class _DurableLedgerPool:
+    """A MagicMock-free fake pool whose send_idempotency_keys rows PERSIST across
+    send_whatsapp_template calls — modelling the autocommit table that survives a
+    process crash. Honours the in-flight marker INSERT (ON CONFLICT DO NOTHING), the
+    terminal upsert (ON CONFLICT DO UPDATE WHERE send_status <> 'sent'), the
+    idempotency SELECT, and the rate-limit COUNT. Everything else (set_config,
+    campaign_messages) is accepted as a no-op.
+
+    ``crash_after_send`` — if set, the cursor raises CrashSimulated the FIRST time a
+    terminal upsert (DO UPDATE) is attempted, i.e. AFTER the Twilio call succeeded but
+    BEFORE the 'sent' row commits: the exact crash window. The in-flight 'sending' row
+    written before the Twilio call has ALREADY been committed (it persists in
+    ``self.rows``), so the second attempt sees it.
+    """
+
+    class CrashSimulated(BaseException):
+        # BaseException (not Exception) so send_whatsapp_template's broad
+        # `except Exception` does NOT catch it — this models an ABRUPT process death
+        # (SIGKILL / OOM / deploy restart) in the crash window, the real-world failure
+        # mode, not a catchable in-flow error. The 'sent' upsert never commits; the
+        # already-committed 'sending' marker is all that survives.
+        pass
+
+    def __init__(self, *, crash_after_send: bool = False) -> None:
+        # key: (tenant_id, idempotency_key) -> row dict
+        self.rows: dict[tuple[str, str], dict[str, Any]] = {}
+        self._crash_armed = crash_after_send
+        self.sql_log: list[tuple[str, Any]] = []
+
+    # --- the cursor protocol send_whatsapp_template uses -----------------
+    def _execute(self, sql: str, params: tuple | None = None) -> None:
+        self.sql_log.append((sql, params))
+        s = " ".join(sql.split())  # normalise whitespace for matching
+        if "INSERT INTO send_idempotency_keys" in s and "VALUES (%s, %s, %s, NULL, 'sending')" in s:
+            # In-flight marker: ON CONFLICT DO NOTHING. Commits instantly (autocommit).
+            tid, key, cid = params  # type: ignore[misc]
+            self.rows.setdefault(
+                (tid, key),
+                {"id": f"row-{key}", "message_sid": None,
+                 "send_status": "sending", "created_at": _now_utc()},
+            )
+            self._last_select = None
+            return
+        if "INSERT INTO send_idempotency_keys" in s and "DO UPDATE" in s:
+            # Terminal upsert ('sent' or 'error'). THIS is the post-Twilio commit.
+            if self._crash_armed:
+                self._crash_armed = False
+                raise _DurableLedgerPool.CrashSimulated("process died before 'sent' commit")
+            tid, key, cid, sid, status = params  # type: ignore[misc]
+            row = self.rows.get((tid, key))
+            if row is None:
+                self.rows[(tid, key)] = {
+                    "id": f"row-{key}", "message_sid": sid,
+                    "send_status": status, "created_at": _now_utc(),
+                }
+            elif row["send_status"] != "sent":  # WHERE send_status <> 'sent'
+                row["send_status"] = status
+                row["message_sid"] = sid
+            self._last_select = None
+            return
+        if "send_idempotency_keys" in s and "SELECT" in s and "COUNT" not in s.upper():
+            # Idempotency check SELECT.
+            tid, key = params  # type: ignore[misc]
+            self._last_select = self.rows.get((tid, key))
+            return
+        if "COUNT(*)" in s.upper() and "send_idempotency_keys" in s:
+            self._last_select = {"count": 0}  # never rate-limited in the canary
+            return
+        # set_config, campaign_messages INSERT, anything else: no-op.
+        self._last_select = None
+
+    def _fetchone(self) -> Any:
+        return getattr(self, "_last_select", None)
+
+    # --- context-manager plumbing matching pool.connection()/conn.cursor() ---
+    # NOTE: `with` looks up __enter__/__exit__ on the TYPE, not the instance, so
+    # these must be real classes (not SimpleNamespace with instance dunders).
+    def cursor(self) -> Any:
+        pool = self
+
+        class _Cur:
+            execute = staticmethod(pool._execute)
+            fetchone = staticmethod(pool._fetchone)
+
+            def __enter__(self) -> Any:
+                return self
+
+            def __exit__(self, *_a: Any) -> bool:
+                return False
+
+        return _Cur()
+
+    def connection(self) -> Any:
+        pool = self
+
+        class _Conn:
+            cursor = staticmethod(pool.cursor)
+
+            def __enter__(self) -> Any:
+                return self
+
+            def __exit__(self, *_a: Any) -> bool:
+                return False
+
+        return _Conn()
+
+
+def _spy_send_fn() -> Any:
+    """A transport spy: counts Twilio calls, returns a successful SendResult. No
+    network. Each call is a distinct message_sid so a double-send is detectable."""
+    calls = {"n": 0}
+
+    def _send(*_args: Any, **_kwargs: Any) -> _FakeSendResult:
+        calls["n"] += 1
+        return _FakeSendResult(success=True, message_sid=f"MK{'s' * 28}{calls['n']:02d}")
+
+    _send.calls = calls  # type: ignore[attr-defined]
+    return _send
+
+
+def test_vt420_twilio_sdk_has_no_idempotency_key() -> None:
+    """The premise of the fix: twilio 9.x messages.create exposes NO idempotency-key
+    parameter (so we cannot delegate dedup to Twilio — the pre-send marker is required).
+    Skips cleanly if the SDK is absent (dep-less smoke)."""
+    twilio_rest = pytest.importorskip("twilio.rest.api.v2010.account.message")
+    import inspect
+
+    params = list(inspect.signature(twilio_rest.MessageList.create).parameters)
+    idempotency_params = [p for p in params if "idempot" in p.lower()]
+    assert idempotency_params == [], (
+        f"twilio messages.create unexpectedly exposes idempotency params {idempotency_params}; "
+        "re-evaluate VT-420 — the native-key path may now be available"
+    )
+
+
+def test_vt420_crash_window_no_double_send() -> None:
+    """THE canary. Attempt 1: Twilio succeeds, then the process 'crashes' BEFORE the
+    'sent' commit (the in-flight 'sending' marker is already durable). Attempt 2
+    (recovery): MUST NOT call Twilio again — the 'sending' marker blocks the re-send."""
+    from orchestrator.agent.tools.send_whatsapp_template import send_whatsapp_template
+
+    _RESOLVED_CUSTOMER[0] = _customer()
+    pool = _DurableLedgerPool(crash_after_send=True)
+    send_fn = _spy_send_fn()
+
+    # --- Attempt 1: crashes in the window (Twilio sent, 'sent' commit raises) ---
+    with pytest.raises(_DurableLedgerPool.CrashSimulated):
+        send_whatsapp_template(_input(), pool=pool, send_fn=send_fn)
+    assert send_fn.calls["n"] == 1, "attempt 1 must have dispatched to Twilio exactly once"
+    # The durable in-flight marker survived the crash.
+    key = ("a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11", "idem-key-vt45-test")
+    assert pool.rows[key]["send_status"] == "sending"
+
+    # --- Attempt 2: recovery. A fresh pool.connection() but the SAME durable rows. ---
+    out = send_whatsapp_template(_input(), pool=pool, send_fn=send_fn)
+
+    # THE money-safety assertion: NO second Twilio call.
+    assert send_fn.calls["n"] == 1, (
+        f"DOUBLE-SEND: recovery re-dispatched to Twilio "
+        f"(call_count={send_fn.calls['n']}, expected 1)"
+    )
+    # Recovery reports a terminal 'sent' (probably-already-delivered) with no SID —
+    # the caller marks the draft terminal and stops retrying (no double-charge).
+    assert out.status == "sent"
+    assert out.message_sid is None
+
+
+def test_vt420_inflight_marker_written_before_twilio_call() -> None:
+    """Ordering proof: the 'sending' marker INSERT is committed BEFORE messages.create.
+    If it were written after, the crash window would not be closed."""
+    from orchestrator.agent.tools.send_whatsapp_template import send_whatsapp_template
+
+    _RESOLVED_CUSTOMER[0] = _customer()
+    pool = _DurableLedgerPool()
+    order: list[str] = []
+
+    def _send(*_a: Any, **_k: Any) -> _FakeSendResult:
+        order.append("twilio_send")
+        return _FakeSendResult(success=True, message_sid="MK" + "z" * 30)
+
+    # Tag the in-flight marker write in the SQL log via a wrapper.
+    orig_execute = pool._execute
+
+    def _tap(sql: str, params: tuple | None = None) -> None:
+        if "VALUES (%s, %s, %s, NULL, 'sending')" in " ".join(sql.split()):
+            order.append("inflight_marker")
+        orig_execute(sql, params)
+
+    pool._execute = _tap  # type: ignore[method-assign]
+
+    out = send_whatsapp_template(_input(), pool=pool, send_fn=_send)
+    assert out.status == "sent"
+    assert order == ["inflight_marker", "twilio_send"], (
+        f"in-flight marker must precede the Twilio call; got {order}"
+    )
+
+
+def test_vt420_happy_path_sends_once_marker_flips_to_sent() -> None:
+    """Happy path unbroken: exactly ONE Twilio call, and the 'sending' marker is
+    upserted to terminal 'sent' (+ the real SID)."""
+    from orchestrator.agent.tools.send_whatsapp_template import send_whatsapp_template
+
+    _RESOLVED_CUSTOMER[0] = _customer()
+    pool = _DurableLedgerPool()
+    send_fn = _spy_send_fn()
+
+    out = send_whatsapp_template(_input(), pool=pool, send_fn=send_fn)
+
+    assert out.status == "sent"
+    assert send_fn.calls["n"] == 1
+    key = ("a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11", "idem-key-vt45-test")
+    assert pool.rows[key]["send_status"] == "sent"
+    assert pool.rows[key]["message_sid"] is not None
+
+    # A clean re-run (no crash) is also an idempotent hit — never re-sends.
+    out2 = send_whatsapp_template(_input(), pool=pool, send_fn=send_fn)
+    assert out2.status == "sent"
+    assert send_fn.calls["n"] == 1, "a completed 'sent' send must never re-fire"
+
+
+def test_vt420_twilio_reject_flips_marker_to_error_retryable() -> None:
+    """A Twilio 4xx reject (success=False) means NO message was dispatched → the
+    'sending' marker must flip to 'error' (retryable per VT-387), NOT stay 'sending'
+    (which would wrongly block a legitimate retry) and NOT become 'sent'."""
+    from orchestrator.agent.tools.send_whatsapp_template import send_whatsapp_template
+
+    _RESOLVED_CUSTOMER[0] = _customer()
+    pool = _DurableLedgerPool()
+
+    out = send_whatsapp_template(_input(), pool=pool, send_fn=_fail_send_fn)
+    assert out.status == "error"
+    key = ("a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11", "idem-key-vt45-test")
+    assert pool.rows[key]["send_status"] == "error", (
+        "a Twilio reject must leave the key retryable ('error'), not block it ('sending')"
+    )
+
+    # Recovery after a reject DOES re-send (the message never went out) — 'error' is
+    # not an idempotent hit (VT-387), and the marker no longer says 'sending'.
+    send_fn = _spy_send_fn()
+    out2 = send_whatsapp_template(_input(), pool=pool, send_fn=send_fn)
+    assert out2.status == "sent"
+    assert send_fn.calls["n"] == 1
+
+
+def test_vt420_stop_still_kills_sends() -> None:
+    """The STOP gate (opt-out hard-refuse) is unaffected by the marker change: an
+    opted-out recipient is refused with NO Twilio call AND no 'sending' marker written
+    (the gate runs before the in-flight marker)."""
+    from orchestrator.agent.tools.send_whatsapp_template import send_whatsapp_template
+
+    _RESOLVED_CUSTOMER[0] = _customer(opt_out_status="opted_out")
+    pool = _DurableLedgerPool()
+    send_fn = _spy_send_fn()
+
+    out = send_whatsapp_template(_input(), pool=pool, send_fn=send_fn)
+    assert out.status == "unauthorized"
+    assert out.error_envelope is not None
+    assert out.error_envelope.code == "recipient_opted_out"
+    assert send_fn.calls["n"] == 0, "STOP must kill the send — no Twilio call"
+    # No in-flight marker was written (the gate short-circuits before it).
+    key = ("a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11", "idem-key-vt45-test")
+    assert key not in pool.rows
