@@ -146,10 +146,31 @@ def shopify_oauth_callback(
             extra={"tenant_id": str(tenant_uuid), "code_prefix": code[:8]},
         )
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    # VT-422 (setup_push flow gap): register the webhooks on install. ``setup_push``
+    # is defined on the connector but was NEVER called by this callback — so on a real
+    # OAuth install the webhooks were never registered and ``orders/create`` never
+    # delivered. Fire it AFTER complete_auth (the OAuth branch), once the offline token
+    # + push_secret row exists. Registration failure does NOT fail the install (the token
+    # is already stored, the merchant is connected); it is logged and surfaced as
+    # ``webhooks_registered=false`` so the canary (GET webhooks.json) can flag it. A
+    # subsequent re-run / scheduled re-register can recover.
+    webhooks_registered = False
+    try:
+        push = connector.setup_push(tenant_uuid)
+        webhooks_registered = bool(push.get("topics"))
+    except Exception:
+        logger.exception(
+            "VT-422 Shopify webhook registration failed post-install (token stored, "
+            "merchant connected; webhooks NOT registered)",
+            extra={"tenant_id": str(tenant_uuid)},
+        )
+
     return {
         "status": "ok",
         "connector_id": connector.connector_id,
         "mode": str(result.get("mode", "oauth_install")),
         "shop_url": str(result.get("shop_url", "")),
         "scopes": ",".join(result.get("scopes", [])),
+        "webhooks_registered": str(webhooks_registered).lower(),
     }
