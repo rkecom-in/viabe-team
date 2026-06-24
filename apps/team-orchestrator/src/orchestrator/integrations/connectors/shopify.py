@@ -64,12 +64,16 @@ import re
 import secrets
 from base64 import b64decode, b64encode
 from collections.abc import Callable
-from datetime import UTC, datetime, timedelta
+from dataclasses import dataclass
+from datetime import UTC, date, datetime, timedelta
+from decimal import Decimal, InvalidOperation
 from typing import Any, cast
 from urllib.parse import urlencode
 from uuid import UUID
 
 import httpx
+
+from orchestrator.integrations.ingest import CanonicalRow, SaleLine
 
 from orchestrator.graph import get_pool
 from orchestrator.integrations.connectors.base import ConnectorBase
@@ -249,6 +253,136 @@ def _default_grant(store_domain: str, client_id: str, client_secret: str) -> dic
             f"body={resp.text[:300]}"
         )
     return cast("dict[str, Any]", resp.json())
+
+
+# ---------- VT-417: Shopify order → CanonicalRow mapping ----------
+# The single Shopify-specific mapper. PII boundary (§3): persists ONLY
+# phone / email / name + the order TOTAL as ONE sale magnitude. Address and
+# line-items are NEVER read into the CanonicalRow — they are dropped here.
+
+_SHOPIFY_ACQUIRED_VIA = "shopify"
+_INR = "INR"
+
+
+def _normalize_e164(raw: str | None) -> str | None:
+    """Best-effort E.164 for an Indian-first store; ``None`` if un-normalizable.
+
+    Shopify usually stores E.164 already for IN. If we cannot confidently
+    normalize, return ``None`` and let email / name anchor the customer (never
+    invent a number). Mirrors the methods' ``contacts._normalize_phone`` shape but
+    drops the confidence channel (connector data is structured, not OCR).
+    """
+    if not raw:
+        return None
+    s = raw.strip()
+    has_plus = s.startswith("+")
+    digits = re.sub(r"\D", "", s)
+    if not digits:
+        return None
+    if has_plus and digits.startswith("91") and len(digits) == 12:
+        return "+" + digits
+    if has_plus:
+        return "+" + digits  # already international (non-IN) — trust it
+    if len(digits) == 10:
+        return "+91" + digits
+    if len(digits) == 12 and digits.startswith("91"):
+        return "+" + digits
+    if len(digits) == 11 and digits.startswith("0"):
+        return "+91" + digits[1:]
+    return None  # ambiguous bare digits — don't guess a country code
+
+
+def _total_price_to_paise(total_price: Any) -> int | None:
+    """Shopify ``total_price`` (major-unit decimal STRING, e.g. "499.00") → paise.
+
+    ``round(Decimal(total_price) * 100)``. Returns ``None`` on a missing /
+    unparseable / negative value (the sale is then skipped, not written as 0).
+    """
+    if total_price is None:
+        return None
+    try:
+        paise = int((Decimal(str(total_price)) * 100).to_integral_value())
+    except (InvalidOperation, ValueError, TypeError):
+        return None
+    return paise if paise >= 0 else None
+
+
+def _order_date(created_at: Any) -> date | None:
+    """Shopify ``created_at`` (ISO 8601) → date-only (the ledger stores DATE)."""
+    if not created_at:
+        return None
+    try:
+        return datetime.fromisoformat(str(created_at).replace("Z", "+00:00")).date()
+    except (ValueError, TypeError):
+        # Fallback: a bare ISO date prefix.
+        try:
+            return date.fromisoformat(str(created_at).strip()[:10])
+        except (ValueError, TypeError):
+            return None
+
+
+@dataclass(frozen=True)
+class _OrderMapResult:
+    """The mapper outcome — the row plus WHY a sale was/wasn't attached, so the
+    caller can count ``skipped_non_inr`` without re-deriving currency."""
+
+    row: CanonicalRow | None         # None when the order has no identity anchor
+    skipped_non_inr: bool = False
+
+
+def shopify_order_to_canonical(payload: dict[str, Any]) -> _OrderMapResult:
+    """Map a Shopify ``orders/create`` (or backfill ``orders.json``) order into a
+    ``CanonicalRow``. Identity = phone(E.164) / email / name. Sale = the order
+    TOTAL → ONE ``SaleLine`` (confidence 1.0 — structured API data is certain).
+
+    Currency guard (§2.3): ``amount_paise`` is INR-minor. A non-INR order keeps
+    the customer (identity) but SKIPS the sale (no FX in scope) and is flagged
+    ``skipped_non_inr`` so the caller can count it — NEVER silently converted.
+
+    Address and order line-items are NOT read (PII boundary, §3).
+    """
+    customer = payload.get("customer") or {}
+    phone_raw = (
+        customer.get("phone")
+        or (payload.get("shipping_address") or {}).get("phone")
+        or payload.get("phone")
+    )
+    phone_e164 = _normalize_e164(phone_raw)
+    email_raw = customer.get("email") or payload.get("email")
+    email = email_raw.strip().lower() if isinstance(email_raw, str) and email_raw.strip() else None
+    display_name = (
+        f"{customer.get('first_name', '')} {customer.get('last_name', '')}".strip()
+        or None
+    )
+
+    if not (phone_e164 or email or display_name):
+        return _OrderMapResult(row=None)
+
+    sales: tuple[SaleLine, ...] = ()
+    skipped_non_inr = False
+    currency = (payload.get("currency") or "").upper()
+    paise = _total_price_to_paise(payload.get("total_price"))
+    entry_date = _order_date(payload.get("created_at"))
+
+    if paise is not None and entry_date is not None:
+        if currency and currency != _INR:
+            # Non-INR: keep identity, skip the sale (no FX). Log the CURRENCY only,
+            # never the amount-as-rupees (CL-390).
+            skipped_non_inr = True
+            logger.info("shopify_order_to_canonical: non-INR order skipped sale currency=%s", currency)
+        else:
+            sales = (SaleLine(amount_paise=paise, entry_date=entry_date, confidence=1.0),)
+
+    return _OrderMapResult(
+        row=CanonicalRow(
+            phone_e164=phone_e164,
+            email=email,
+            display_name=display_name,
+            sales=sales,
+            consent=None,  # option A (§2.4): Shopify writes NO consent
+        ),
+        skipped_non_inr=skipped_non_inr,
+    )
 
 
 class ShopifyConnector(ConnectorBase):
@@ -537,6 +671,55 @@ class ShopifyConnector(ConnectorBase):
             for row in customers
         ]
 
+    def pull_orders(
+        self, tenant_id: UUID, since: datetime | None = None
+    ) -> list[dict[str, Any]]:
+        """VT-417 — initial-backfill ORDERS pull (the sale-of-record substrate).
+
+        ``pull_full`` only pulls ``/customers.json`` (identity, no sales). For
+        backfill of the Sales-Recovery substrate we need orders. Phase-1 cap = 250
+        (Shopify's default page_size); Link-header pagination beyond one page is a
+        VT-N follow-up (a known backfill ceiling for high-volume stores) — mirrors
+        the documented ``pull_full`` cap.
+        """
+        params: dict[str, str] = {"status": "any", "limit": "250"}
+        if since is not None:
+            params["updated_at_min"] = since.replace(microsecond=0).isoformat()
+        return self._request(
+            tenant_id, "/orders.json", params=params
+        ).get("orders", [])
+
+    def backfill_orders(
+        self, tenant_id: UUID, since: datetime | None = None
+    ) -> dict[str, int]:
+        """Pull orders (capped 250) → map each via ``shopify_order_to_canonical``
+        → land via ``ingest_customer_rows(acquired_via='shopify')`` (the SAME seam
+        the live webhook uses). Returns counts only (no PII).
+        """
+        from orchestrator.integrations.ingest import ingest_customer_rows
+
+        orders = self.pull_orders(tenant_id, since)
+        rows: list[CanonicalRow] = []
+        skipped_non_inr = 0
+        for order in orders:
+            mapped = shopify_order_to_canonical(order)
+            if mapped.skipped_non_inr:
+                skipped_non_inr += 1
+            if mapped.row is not None:
+                rows.append(mapped.row)
+        summary = ingest_customer_rows(
+            tenant_id, rows, acquired_via=_SHOPIFY_ACQUIRED_VIA
+        )
+        return {
+            "orders_pulled": len(orders),
+            "committed": summary.committed,
+            "sales_written": summary.sales_written,
+            "sales_skipped_duplicate": summary.sales_skipped_duplicate,
+            "ambiguous": summary.ambiguous,
+            "dropped": summary.dropped,
+            "skipped_non_inr": skipped_non_inr,
+        }
+
     # ---------- PUSH ----------
 
     def setup_push(self, tenant_id: UUID) -> dict[str, str]:
@@ -650,6 +833,7 @@ class ShopifyConnector(ConnectorBase):
             ).strip() or None,
             "order_amount": payload.get("total_price"),
             "order_date": payload.get("created_at"),
+            "currency": payload.get("currency"),  # VT-417 — money-row currency guard
             "acquired_via": "shopify",
             "__source": "shopify_webhook",
         }
@@ -668,6 +852,7 @@ __all__ = [
     "ShopifyConfigError",
     "ShopDomainError",
     "ShopifyConnector",
+    "shopify_order_to_canonical",
     "validate_shop_domain",
     "verify_oauth_hmac",
 ]
