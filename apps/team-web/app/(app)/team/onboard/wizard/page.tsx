@@ -39,11 +39,13 @@ export default async function OnboardWizardPage() {
   let draft: ProfileDraft
   let sheets: ConnectionStatus
   let whatsapp: ConnectionStatus
+  let shopify: ConnectionStatus
   try {
-    ;[draft, sheets, whatsapp] = await Promise.all([
+    ;[draft, sheets, whatsapp, shopify] = await Promise.all([
       fetchProfileDraft(tenantId),
       checkConnection(tenantId, 'google_sheet'),
       checkConnection(tenantId, 'whatsapp'),
+      checkConnection(tenantId, 'shopify'),  // VT-422 GAP-3
     ])
   } catch (err) {
     return (
@@ -63,6 +65,7 @@ export default async function OnboardWizardPage() {
         draft={draft}
         initialSheets={sheets.connected}
         initialWhatsapp={whatsapp.connected}
+        initialShopify={shopify.connected}
       />
     </main>
   )
