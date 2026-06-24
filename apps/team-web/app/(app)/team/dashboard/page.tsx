@@ -1,12 +1,13 @@
+import { Card, CardTitle, LoadError, MetricTile, PageHeader, StatusChip } from '@/components/dashboard/ui'
 import { requireOwnerSession } from '@/lib/auth/require-owner-session'
 import { getDictionary, resolveLocale, t } from '@/lib/i18n'
 import { fetchDashboardSummary } from '@/lib/owner-dashboard-client'
 
 /**
- * Owner dashboard — Overview (index). VT-87 PR-1 + VT-338 i18n. Read-only: month/30d hero
- * metrics, top-5 customers (phones MASKED at source — last-4 only), recent-5 campaigns. The
- * layout gated the session; we re-derive tenantId server-side (never a client field). Locale
- * from ?lang (override) > tenant default > en.
+ * Owner dashboard — Overview (index). VT-87 PR-1 + VT-338 i18n + VT-372 styling. Read-only:
+ * customer-count metric tile, top-5 customers (phones MASKED at source — last-4 only), recent-5
+ * campaigns. The layout gated the session; we re-derive tenantId server-side (never a client
+ * field). Locale from ?lang (override) > tenant default > en.
  */
 export default async function DashboardOverviewPage({
   searchParams,
@@ -20,51 +21,68 @@ export default async function DashboardOverviewPage({
 
   if (!summary) {
     return (
-      <main data-testid="dashboard-overview">
-        <h1>{t(dict, 'dashboard.title')}</h1>
-        <p>{t(dict, 'common.loadError')}</p>
-      </main>
+      <div data-testid="dashboard-overview">
+        <LoadError title={t(dict, 'dashboard.title')} message={t(dict, 'common.loadError')} />
+      </div>
     )
   }
 
   return (
-    <main data-testid="dashboard-overview">
-      <h1>{t(dict, 'dashboard.title')}</h1>
+    <div data-testid="dashboard-overview">
+      <PageHeader title={t(dict, 'dashboard.title')} subtitle={t(dict, 'overview.subtitle')} />
 
-      <section aria-label="metrics">
-        <p>
-          <strong data-testid="customer-count">{summary.customer_count}</strong>{' '}
-          {t(dict, 'overview.customers')}
-        </p>
+      <section aria-label="metrics" className="grid gap-4 sm:grid-cols-3">
+        <MetricTile
+          testid="customer-count"
+          value={summary.customer_count.toLocaleString('en-IN')}
+          label={t(dict, 'overview.customers')}
+        />
       </section>
 
-      <section aria-label="top-customers">
-        <h2>{t(dict, 'overview.topCustomers')}</h2>
-        <ul>
-          {summary.top_customers.map((c, i) => (
-            <li key={i}>
-              <span>{c.display_name ?? t(dict, 'common.unknown')}</span>
-              {c.phone_last4 ? <span> · {c.phone_last4}</span> : null}
-              <span> · ₹{c.spend_rupees.toLocaleString('en-IN')}</span>
-            </li>
-          ))}
-        </ul>
-      </section>
+      <div className="mt-6 grid gap-6 lg:grid-cols-2">
+        <Card label="top-customers">
+          <CardTitle>{t(dict, 'overview.topCustomers')}</CardTitle>
+          {summary.top_customers.length === 0 ? (
+            <p className="mt-4 text-sm text-gray-500">{t(dict, 'campaigns.none')}</p>
+          ) : (
+            <ul className="mt-4 divide-y divide-gray-100">
+              {summary.top_customers.map((c, i) => (
+                <li key={i} className="flex items-center justify-between gap-3 py-3">
+                  <div className="min-w-0">
+                    <p className="truncate font-medium text-gray-900">
+                      {c.display_name ?? t(dict, 'common.unknown')}
+                    </p>
+                    {c.phone_last4 ? (
+                      <p className="text-xs text-gray-400">···· {c.phone_last4}</p>
+                    ) : null}
+                  </div>
+                  <span className="shrink-0 font-semibold tabular-nums text-gray-900">
+                    ₹{c.spend_rupees.toLocaleString('en-IN')}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </Card>
 
-      <section aria-label="recent-campaigns">
-        <h2>{t(dict, 'overview.recentCampaigns')}</h2>
-        <ul>
-          {summary.recent_campaigns.map((c) => (
-            <li key={c.campaign_id}>
-              <span>{c.status ?? t(dict, 'common.unknown')}</span>
-              <span>
-                {' '}
-                · {c.responses} {t(dict, 'overview.responses')}
-              </span>
-            </li>
-          ))}
-        </ul>
-      </section>
-    </main>
+        <Card label="recent-campaigns">
+          <CardTitle>{t(dict, 'overview.recentCampaigns')}</CardTitle>
+          {summary.recent_campaigns.length === 0 ? (
+            <p className="mt-4 text-sm text-gray-500">{t(dict, 'campaigns.none')}</p>
+          ) : (
+            <ul className="mt-4 divide-y divide-gray-100">
+              {summary.recent_campaigns.map((c) => (
+                <li key={c.campaign_id} className="flex items-center justify-between gap-3 py-3">
+                  <StatusChip status={c.status} unknownLabel={t(dict, 'common.unknown')} />
+                  <span className="text-sm text-gray-600">
+                    {c.responses} {t(dict, 'overview.responses')}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </Card>
+      </div>
+    </div>
   )
 }

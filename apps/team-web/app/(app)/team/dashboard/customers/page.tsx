@@ -1,11 +1,15 @@
+import Link from 'next/link'
+
+import { DataTable, EmptyState, LoadError, PageHeader, StatusChip } from '@/components/dashboard/ui'
 import { requireOwnerSession } from '@/lib/auth/require-owner-session'
 import { getDictionary, resolveLocale, t } from '@/lib/i18n'
 import { fetchCustomers } from '@/lib/owner-dashboard-client'
 
 /**
- * Owner dashboard — Customers (VT-338). Read-only, paginated. Phones MASKED at source
- * (last-4 only — the orchestrator never sends a raw phone). tenantId is session-derived
- * server-side (never a client field — IDOR); page/excluded/lang are pagination/filter/locale.
+ * Owner dashboard — Customers (VT-338 + VT-372 styling). Read-only, paginated. Phones MASKED
+ * at source (last-4 only — the orchestrator never sends a raw phone; this is the OWNER's own
+ * data, not the VTR PII gate). tenantId is session-derived server-side (never a client field —
+ * IDOR); page/excluded/lang are pagination/filter/locale.
  */
 export default async function CustomersPage({
   searchParams,
@@ -21,10 +25,9 @@ export default async function CustomersPage({
 
   if (!data) {
     return (
-      <main data-testid="dashboard-customers">
-        <h1>{t(dict, 'customers.title')}</h1>
-        <p>{t(dict, 'common.loadError')}</p>
-      </main>
+      <div data-testid="dashboard-customers">
+        <LoadError title={t(dict, 'customers.title')} message={t(dict, 'common.loadError')} />
+      </div>
     )
   }
 
@@ -32,42 +35,74 @@ export default async function CustomersPage({
   const qs = (p: number) =>
     `?page=${p}${excludedOnly ? '&excluded=1' : ''}${sp.lang ? `&lang=${sp.lang}` : ''}`
 
+  const pageLinkClass =
+    'rounded-lg border border-gray-300 px-3 py-1.5 text-sm font-medium text-gray-700 transition hover:bg-gray-50'
+
   return (
-    <main data-testid="dashboard-customers">
-      <h1>{t(dict, 'customers.title')}</h1>
-      <p>
-        {data.total} {t(dict, 'customers.total')}
-      </p>
+    <div data-testid="dashboard-customers">
+      <PageHeader
+        title={t(dict, 'customers.title')}
+        subtitle={`${data.total.toLocaleString('en-IN')} ${t(dict, 'customers.total')}`}
+      />
 
-      <table>
-        <thead>
-          <tr>
-            <th>{t(dict, 'customers.name')}</th>
-            <th>{t(dict, 'customers.phone')}</th>
-            <th>{t(dict, 'customers.status')}</th>
-            <th>{t(dict, 'customers.spend')}</th>
-          </tr>
-        </thead>
-        <tbody>
-          {data.customers.map((c, i) => (
-            <tr key={i}>
-              <td>{c.display_name ?? t(dict, 'common.unknown')}</td>
-              <td>{c.phone_last4 ?? ''}</td>
-              <td>{c.opt_out_status ?? ''}</td>
-              <td>₹{c.spend_rupees.toLocaleString('en-IN')}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
+      {data.customers.length === 0 ? (
+        <EmptyState>{t(dict, 'campaigns.none')}</EmptyState>
+      ) : (
+        <>
+          <DataTable
+            headers={[
+              { label: t(dict, 'customers.name') },
+              { label: t(dict, 'customers.phone') },
+              { label: t(dict, 'customers.status') },
+              { label: t(dict, 'customers.spend'), align: 'right' },
+            ]}
+          >
+            {data.customers.map((c, i) => (
+              <tr key={i} className="hover:bg-gray-50/60">
+                <td className="px-4 py-3 font-medium text-gray-900">
+                  {c.display_name ?? t(dict, 'common.unknown')}
+                </td>
+                <td className="px-4 py-3 text-gray-500">
+                  {c.phone_last4 ? `···· ${c.phone_last4}` : '—'}
+                </td>
+                <td className="px-4 py-3">
+                  {c.opt_out_status ? (
+                    <StatusChip status={c.opt_out_status} unknownLabel={t(dict, 'common.unknown')} />
+                  ) : (
+                    <span className="text-gray-400">—</span>
+                  )}
+                </td>
+                <td className="px-4 py-3 text-right font-medium tabular-nums text-gray-900">
+                  ₹{c.spend_rupees.toLocaleString('en-IN')}
+                </td>
+              </tr>
+            ))}
+          </DataTable>
 
-      <nav aria-label="pagination">
-        {page > 1 ? <a href={qs(page - 1)}>{t(dict, 'customers.prev')}</a> : null}
-        <span>
-          {' '}
-          {page} / {totalPages}{' '}
-        </span>
-        {page < totalPages ? <a href={qs(page + 1)}>{t(dict, 'customers.next')}</a> : null}
-      </nav>
-    </main>
+          <nav
+            aria-label="pagination"
+            className="mt-5 flex items-center justify-between gap-3 text-sm text-gray-500"
+          >
+            {page > 1 ? (
+              <Link href={qs(page - 1)} className={pageLinkClass}>
+                ← {t(dict, 'customers.prev')}
+              </Link>
+            ) : (
+              <span />
+            )}
+            <span className="tabular-nums">
+              {page} / {totalPages}
+            </span>
+            {page < totalPages ? (
+              <Link href={qs(page + 1)} className={pageLinkClass}>
+                {t(dict, 'customers.next')} →
+              </Link>
+            ) : (
+              <span />
+            )}
+          </nav>
+        </>
+      )}
+    </div>
   )
 }
