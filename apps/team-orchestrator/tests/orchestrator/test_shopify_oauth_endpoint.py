@@ -143,6 +143,13 @@ def test_callback_success_exchanges_and_persists(app_ctx, monkeypatch):
         return {"access_token": "shpat_endpoint_ok", "scope": "read_customers,read_orders"}
 
     monkeypatch.setattr(shopify_mod, "_default_oauth_exchange", _fake_exchange)
+    # VT-422: the callback now fires setup_push (webhook registration) on success.
+    # Stub it so this persistence test stays network-free; a dedicated test below
+    # asserts it IS called.
+    monkeypatch.setattr(
+        shopify_mod.ShopifyConnector, "setup_push",
+        lambda self, tid: {"address": "x", "topics": "orders/create"},
+    )
 
     t = _tenant(app_ctx.dsn)
     state = _mint_via_setup(app_ctx, t)
@@ -174,3 +181,71 @@ def test_callback_success_exchanges_and_persists(app_ctx, monkeypatch):
     from orchestrator.integrations.connectors.shopify import ShopifyConnector
     token, shop = ShopifyConnector().get_access_token(UUID(t))
     assert token == "shpat_endpoint_ok"
+
+
+def test_callback_registers_webhooks_via_setup_push(app_ctx, monkeypatch):
+    """VT-422 (setup_push flow gap): the OAuth callback MUST call setup_push after
+    complete_auth so webhooks register on install (the old callback returned without
+    ever registering → orders/create never delivered). Assert setup_push is invoked
+    with the resolved tenant, and that registration success surfaces as
+    webhooks_registered=true."""
+    import orchestrator.integrations.connectors.shopify as shopify_mod
+
+    def _fake_exchange(shop, client_id, client_secret, code):
+        return {"access_token": "shpat_webhook_wire", "scope": "read_orders,write_orders"}
+
+    monkeypatch.setattr(shopify_mod, "_default_oauth_exchange", _fake_exchange)
+
+    called: dict[str, str] = {}
+
+    def _fake_setup_push(self, tenant_id):
+        called["tenant_id"] = str(tenant_id)
+        return {"address": "https://orch/webhook", "topics": "orders/create,orders/paid"}
+
+    monkeypatch.setattr(shopify_mod.ShopifyConnector, "setup_push", _fake_setup_push)
+
+    t = _tenant(app_ctx.dsn)
+    state = _mint_via_setup(app_ctx, t)
+    params = {"code": "authcode123", "shop": _SHOP, "state": state, "timestamp": "1700000000"}
+    params["hmac"] = _sign(params)
+    resp = app_ctx.client.get(
+        "/api/orchestrator/integrations/shopify/oauth/callback", params=params
+    )
+    assert resp.status_code == 200, resp.text
+    # setup_push was called on the install, with the nonce-resolved tenant.
+    assert called.get("tenant_id") == t, "callback did not fire setup_push on install"
+    assert resp.json()["webhooks_registered"] == "true"
+
+
+def test_callback_install_survives_webhook_registration_failure(app_ctx, monkeypatch):
+    """VT-422: webhook registration is best-effort — a setup_push failure must NOT fail
+    the install (the token is already stored, the merchant is connected). The callback
+    returns 200 with webhooks_registered=false so the canary can flag it."""
+    import orchestrator.integrations.connectors.shopify as shopify_mod
+
+    def _fake_exchange(shop, client_id, client_secret, code):
+        return {"access_token": "shpat_wh_fail", "scope": "read_orders"}
+
+    monkeypatch.setattr(shopify_mod, "_default_oauth_exchange", _fake_exchange)
+
+    def _boom(self, tenant_id):
+        raise RuntimeError("webhook register failed (e.g. transient 5xx)")
+
+    monkeypatch.setattr(shopify_mod.ShopifyConnector, "setup_push", _boom)
+
+    t = _tenant(app_ctx.dsn)
+    state = _mint_via_setup(app_ctx, t)
+    params = {"code": "authcode123", "shop": _SHOP, "state": state, "timestamp": "1700000000"}
+    params["hmac"] = _sign(params)
+    resp = app_ctx.client.get(
+        "/api/orchestrator/integrations/shopify/oauth/callback", params=params
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["webhooks_registered"] == "false"
+    # the token still persisted despite the webhook-registration failure.
+    with psycopg.connect(app_ctx.dsn, autocommit=True) as c:
+        row = c.execute(
+            "SELECT 1 FROM tenant_oauth_tokens WHERE tenant_id=%s AND connector_id='shopify'",
+            (t,),
+        ).fetchone()
+    assert row is not None, "install must persist the token even if webhooks fail to register"
