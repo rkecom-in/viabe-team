@@ -1,13 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { NextRequest } from 'next/server'
 
-// Mock the 3 auth gates (keep their real error classes for the route's instanceof
+// Mock the 2 auth gates (keep their real error classes for the route's instanceof
 // checks) + the orchestrator forward. The route's OWN behaviour (path order, tenant
-// always server-derived, IDOR-safe, status mapping) is under test.
-vi.mock('@/lib/auth/require-fazal', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('@/lib/auth/require-fazal')>()
-  return { ...actual, requireFazal: vi.fn() }
-})
+// always server-derived, IDOR-safe, status mapping) is under test. VT-416 PR-1 dropped
+// the path-3 FAZAL_TENANT_ID fallback, so requireFazal is no longer wired here.
 vi.mock('@/lib/auth/require-owner-session', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/lib/auth/require-owner-session')>()
   return { ...actual, requireOwnerSession: vi.fn() }
@@ -18,19 +15,21 @@ vi.mock('@/lib/auth/verify-trial-end-token', async (importOriginal) => {
 })
 vi.mock('@/lib/orchestrator-client', () => ({ forwardSubscribe: vi.fn() }))
 
-import { requireFazal, UnauthorizedError } from '@/lib/auth/require-fazal'
 import { OwnerUnauthorizedError, requireOwnerSession } from '@/lib/auth/require-owner-session'
 import { TrialEndTokenError, verifyTrialEndToken } from '@/lib/auth/verify-trial-end-token'
 import { forwardSubscribe } from '@/lib/orchestrator-client'
 import { POST } from '@/app/api/team/razorpay/subscribe/route'
 
-const fazalMock = vi.mocked(requireFazal)
 const sessionMock = vi.mocked(requireOwnerSession)
 const tokenMock = vi.mocked(verifyTrialEndToken)
 const fwdMock = vi.mocked(forwardSubscribe)
 
 const OWNER_TENANT = 'owner-tenant-1'
 const TOKEN_TENANT = 'token-tenant-2'
+// Synthetic two-owner canary tenants (VT-416 PR-1): two distinct portal owners that must
+// each bill THEIR OWN tenant and never cross-attribute (and never Fazal's).
+const OWNER_A_TENANT = 'owner-a-tenant'
+const OWNER_B_TENANT = 'owner-b-tenant'
 const FAZAL_TENANT = 'fazal-tenant-3'
 
 function req(body: unknown = { plan_tier: 'founding' }): NextRequest {
@@ -42,16 +41,17 @@ function req(body: unknown = { plan_tier: 'founding' }): NextRequest {
 }
 
 beforeEach(() => {
-  fazalMock.mockReset()
   sessionMock.mockReset()
   tokenMock.mockReset()
   fwdMock.mockReset()
+  // FAZAL_TENANT_ID is set in the env to PROVE the route no longer reads it (no fallback):
+  // an unauth/no-token call must 503, never silently bill this tenant.
   process.env.FAZAL_TENANT_ID = FAZAL_TENANT
   sessionMock.mockRejectedValue(new OwnerUnauthorizedError('no session')) // default: no portal session
   fwdMock.mockResolvedValue({ ok: true, status: 'created', razorpaySubscriptionId: 'sub_x' })
 })
 
-describe('Razorpay subscribe — 3-path auth resolver (VT-91)', () => {
+describe('Razorpay subscribe — 2-path auth resolver (VT-91; VT-416 PR-1 dropped path-3)', () => {
   it('portal session -> tenant from the session claim', async () => {
     sessionMock.mockResolvedValue({ tenantId: OWNER_TENANT })
     const res = await POST(req({ plan_tier: 'founding' }))
@@ -68,17 +68,36 @@ describe('Razorpay subscribe — 3-path auth resolver (VT-91)', () => {
     expect(fwdMock).toHaveBeenCalledWith(TOKEN_TENANT, 'standard', 'jti-tok')
   })
 
-  it('fazal fallback -> FAZAL_TENANT_ID (no session, no token)', async () => {
-    fazalMock.mockResolvedValue(undefined as never)
-    const res = await POST(req({ plan_tier: 'pro' }))
-    expect(res.status).toBe(200)
-    expect(fwdMock).toHaveBeenCalledWith(FAZAL_TENANT, 'pro', null)
+  // ── VT-416 PR-1: 2-owner cross-attribution canary ──────────────────────────────────
+  it('2-owner canary: two distinct owner sessions each bill THEIR OWN tenant, never crossed', async () => {
+    // Owner A's session resolves to A's tenant.
+    sessionMock.mockResolvedValueOnce({ tenantId: OWNER_A_TENANT })
+    const resA = await POST(req({ plan_tier: 'founding' }))
+    expect(resA.status).toBe(200)
+    expect(fwdMock).toHaveBeenNthCalledWith(1, OWNER_A_TENANT, 'founding', null)
+
+    // Owner B's session resolves to B's tenant — a DIFFERENT tenant.
+    sessionMock.mockResolvedValueOnce({ tenantId: OWNER_B_TENANT })
+    const resB = await POST(req({ plan_tier: 'standard' }))
+    expect(resB.status).toBe(200)
+    expect(fwdMock).toHaveBeenNthCalledWith(2, OWNER_B_TENANT, 'standard', null)
+
+    // Neither subscription was ever attributed to the other owner, and NEITHER touched
+    // Fazal's tenant — the deleted path-3 fallback can no longer cross-bill.
+    expect(OWNER_A_TENANT).not.toBe(OWNER_B_TENANT)
+    const forwardedTenants = fwdMock.mock.calls.map((c) => c[0])
+    expect(forwardedTenants).toEqual([OWNER_A_TENANT, OWNER_B_TENANT])
+    expect(forwardedTenants).not.toContain(FAZAL_TENANT)
   })
 
-  it('no auth on any path -> 401, no forward', async () => {
-    fazalMock.mockRejectedValue(new UnauthorizedError('not fazal'))
-    const res = await POST(req({ plan_tier: 'founding' }))
-    expect(res.status).toBe(401)
+  it('VT-416: unauth/no-token call 503s — the path-3 FAZAL_TENANT_ID fallback is GONE (no silent Fazal bill)', async () => {
+    // No portal session (default) and no deep-link token. Pre-VT-416 this fell through to
+    // requireFazal()+FAZAL_TENANT_ID and could bill Fazal's tenant. Now it must fail closed.
+    const res = await POST(req({ plan_tier: 'pro' }))
+    expect(res.status).toBe(503)
+    const body = (await res.json()) as { ok: boolean; reason: string }
+    expect(body).toEqual({ ok: false, reason: 'tenant_not_configured' })
+    // The critical assertion: NOTHING was forwarded — Fazal's tenant is never billed.
     expect(fwdMock).not.toHaveBeenCalled()
   })
 
