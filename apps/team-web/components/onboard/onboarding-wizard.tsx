@@ -30,14 +30,22 @@ const FIELD_LABEL: Record<EditableField, string> = {
   owner_curated_context: 'Anything else we should know',
 }
 
+const CONNECTOR_LABEL: Record<WizardConnector, string> = {
+  whatsapp: 'WhatsApp',
+  google_sheet: 'Google Sheets',
+  shopify: 'Shopify',
+}
+
 export function OnboardingWizard({
   draft,
   initialSheets,
   initialWhatsapp,
+  initialShopify,
 }: {
   draft: ProfileDraft
   initialSheets: boolean
   initialWhatsapp: boolean
+  initialShopify: boolean
 }) {
   const [pending, startTransition] = useTransition()
   const [fields, setFields] = useState<Record<EditableField, string>>({
@@ -52,9 +60,14 @@ export function OnboardingWizard({
   const [connected, setConnected] = useState<Record<WizardConnector, boolean>>({
     google_sheet: initialSheets,
     whatsapp: initialWhatsapp,
+    shopify: initialShopify,
   })
   const [authUrls, setAuthUrls] = useState<Partial<Record<WizardConnector, string>>>({})
   const [connectMsg, setConnectMsg] = useState<Partial<Record<WizardConnector, string>>>({})
+  // VT-422 GAP-3: the owner's *.myshopify.com domain — the one UI addition Shopify needs
+  // (sheets/whatsapp don't). Passed to startConnect → /setup; the tenant is session-resolved
+  // server-side, never client-trusted.
+  const [shopDomain, setShopDomain] = useState<string>('')
 
   function saveField(field: EditableField) {
     startTransition(async () => {
@@ -66,7 +79,11 @@ export function OnboardingWizard({
 
   function beginConnect(connector: WizardConnector) {
     startTransition(async () => {
-      const res = await startConnectAction(connector)
+      // VT-422 GAP-3: shopify needs the owner-typed shop domain; others ignore it.
+      const res = await startConnectAction(
+        connector,
+        connector === 'shopify' ? shopDomain.trim() : undefined,
+      )
       if (res.ok && res.authUrl) {
         setAuthUrls((u) => ({ ...u, [connector]: res.authUrl! }))
         setConnectMsg((m) => ({ ...m, [connector]: 'Open the link in your browser, then tap “I’ve connected”.' }))
@@ -132,17 +149,34 @@ export function OnboardingWizard({
       {/* Step 2: Connect data sources (system-browser handoff) */}
       <section data-wizard-step="connect" className="space-y-3">
         <h2 className="text-lg font-medium">2. Connect your tools</h2>
-        {(['whatsapp', 'google_sheet'] as WizardConnector[]).map((connector) => (
+        {(['whatsapp', 'google_sheet', 'shopify'] as WizardConnector[]).map((connector) => (
           <div key={connector} data-connect={connector} className="py-1">
             <span className="font-medium">
-              {connector === 'whatsapp' ? 'WhatsApp' : 'Google Sheets'}:{' '}
+              {CONNECTOR_LABEL[connector]}:{' '}
             </span>
             {connected[connector] ? (
               <span data-connected="true">Connected ✓</span>
             ) : (
               <>
+                {/* VT-422 GAP-3: Shopify needs the owner's *.myshopify.com domain. The
+                    one UI addition; sheets/whatsapp have no such input. */}
+                {connector === 'shopify' && !authUrls[connector] && (
+                  <input
+                    type="text"
+                    aria-label="Your Shopify store domain"
+                    placeholder="your-store.myshopify.com"
+                    value={shopDomain}
+                    disabled={pending}
+                    data-shop-domain-input
+                    onChange={(e) => setShopDomain(e.target.value)}
+                  />
+                )}{' '}
                 {!authUrls[connector] ? (
-                  <button type="button" disabled={pending} onClick={() => beginConnect(connector)}>
+                  <button
+                    type="button"
+                    disabled={pending || (connector === 'shopify' && !shopDomain.trim())}
+                    onClick={() => beginConnect(connector)}
+                  >
                     Connect
                   </button>
                 ) : (

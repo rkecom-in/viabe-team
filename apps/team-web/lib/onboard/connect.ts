@@ -20,7 +20,9 @@
 
 import { serverSecretClient } from '@/lib/supabase-client'
 
-export type WizardConnector = 'google_sheet' | 'whatsapp'
+// VT-422 GAP-3: shopify added to the wizard. Unlike sheets/whatsapp it needs a
+// shop-domain (the owner's *.myshopify.com) collected in the wizard + passed to /setup.
+export type WizardConnector = 'google_sheet' | 'whatsapp' | 'shopify'
 
 const _ORCHESTRATOR_DEFAULT = 'http://localhost:8001'
 const _SETUP_TIMEOUT_MS = 10_000
@@ -28,11 +30,16 @@ const _SETUP_TIMEOUT_MS = 10_000
 const _SETUP_PATH: Record<WizardConnector, string> = {
   google_sheet: '/api/orchestrator/integrations/google_sheet/setup',
   whatsapp: '/api/orchestrator/integrations/whatsapp/setup',
+  shopify: '/api/orchestrator/integrations/shopify/setup',
 }
 // The provider authorize URL is returned under different keys per connector.
+// VT-422 GAP-3: shopify's /setup returns `authorize_url` (see shopify_oauth.py:103) —
+// NOT `auth_url`. Using the wrong key would silently null the URL (the install never
+// opens). This MUST match the endpoint's response key exactly.
 const _URL_KEY: Record<WizardConnector, string> = {
   google_sheet: 'auth_url',
   whatsapp: 'embedded_signup_url',
+  shopify: 'authorize_url',
 }
 
 export interface StartConnectResult {
@@ -44,19 +51,29 @@ export interface StartConnectResult {
 }
 
 /** Start an OAuth connect: orchestrator mints the VT-289 nonce + returns the authorize URL.
- *  The wizard opens the URL in the system browser (handoff). Never throws. */
+ *  The wizard opens the URL in the system browser (handoff). Never throws.
+ *
+ *  VT-422 GAP-3: `shop` is the owner-typed *.myshopify.com domain, REQUIRED for shopify
+ *  (shopify's /setup needs it; the tenant_id still comes from the owner session server-side,
+ *  never client-trusted). It is ignored for sheets/whatsapp. The orchestrator validates the
+ *  shop domain before minting, so a malformed value is rejected there (returns http_400). */
 export async function startConnect(
   tenantId: string,
   connector: WizardConnector,
+  shop?: string,
 ): Promise<StartConnectResult> {
   const base = process.env.TEAM_ORCHESTRATOR_URL ?? _ORCHESTRATOR_DEFAULT
   const secret = process.env.INTERNAL_API_SECRET ?? ''
   if (!tenantId) return { ok: false, authUrl: null, reason: 'misconfig' }
+  // Shopify requires the shop domain; without it the install cannot be minted.
+  if (connector === 'shopify' && !shop) return { ok: false, authUrl: null, reason: 'missing_shop' }
   try {
+    const body: Record<string, string> = { tenant_id: tenantId }
+    if (connector === 'shopify' && shop) body.shop = shop
     const res = await fetch(`${base}${_SETUP_PATH[connector]}`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', 'X-Internal-Secret': secret },
-      body: JSON.stringify({ tenant_id: tenantId }),
+      body: JSON.stringify(body),
       signal: AbortSignal.timeout(_SETUP_TIMEOUT_MS),
     })
     if (!res.ok) return { ok: false, authUrl: null, reason: `http_${res.status}` }
@@ -102,6 +119,20 @@ export async function checkConnection(
         connected: Boolean(row.enabled),
         detail: row.last_status ?? (row.enabled ? 'connected' : 'disabled'),
       }
+    }
+    if (connector === 'shopify') {
+      // VT-422 GAP-3: connected once the OAuth-install persisted a token row for the
+      // tenant (the callback writes tenant_oauth_tokens on success). Service-role read,
+      // tenant-scoped server-side (never client-trusted). Fail-closed: no row → not connected.
+      const { data, error } = await client
+        .from('tenant_oauth_tokens')
+        .select('shop_url')
+        .eq('tenant_id', tenantId)
+        .eq('connector_id', 'shopify')
+        .maybeSingle()
+      if (error || !data) return { connector, connected: false, detail: 'not connected' }
+      const row = data as { shop_url: string | null }
+      return { connector, connected: true, detail: row.shop_url ?? 'connected' }
     }
     // whatsapp: tenant_whatsapp_accounts.status (pending→verifying→name_approved→live).
     const { data, error } = await client
