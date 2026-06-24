@@ -60,3 +60,8 @@ migrations/.lock
 # + Supabase magic-link auth tokens (token=... URLs) in metadata.json — must NEVER be
 # committed. Curated *.md exports (token-scrubbed) may still be tracked deliberately.
 cowork_sessions/session-export-*/
+
+# Transient/stray (Cowork 2026-06-24 housekeeping)
+.playwright-mcp/
+apps/team-web/test-results/
+pm_dashboard.html
