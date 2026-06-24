@@ -190,6 +190,17 @@ _IDEMPOTENT_HIT_STATUSES = frozenset(
     {"sent", "dry_run", "rate_limited", "unauthorized"}
 )
 
+# VT-420 — the pre-send in-flight marker. Written + committed BEFORE the Twilio
+# messages.create call and flipped to 'sent' after success. A 'sending' row that
+# is STILL 'sending' on a later attempt means the process crashed in the window
+# between Twilio dispatch and the 'sent' commit: the message was PROBABLY already
+# sent, so the recovery attempt must NOT re-send (a re-send would double-charge /
+# double-message). It is a HIT (block the re-send) but is handled distinctly from
+# the deliverable statuses above because its message_sid is unknown (NULL) and it
+# wants its own fail-SAFE log line (flag for review). NOT in _IDEMPOTENT_HIT_STATUSES
+# so the plain echo path doesn't fire — _check_idempotency surfaces it explicitly.
+_INFLIGHT_STATUS = "sending"
+
 
 def _check_idempotency(
     cur: Any, tenant_id: str, idempotency_key: str,
@@ -199,6 +210,11 @@ def _check_idempotency(
     Returns None for a row whose send_status the output cannot represent (VT-262)
     — the caller re-evaluates (consent gate / send) rather than echoing an
     invalid status.
+
+    VT-420: a 'sending' (in-flight) row IS returned (it is a recovery hit that must
+    block the re-send) even though 'sending' is not in _IDEMPOTENT_HIT_STATUSES —
+    the caller detects it via send_status == _INFLIGHT_STATUS and reports a fail-SAFE
+    'probably already sent' terminal outcome rather than re-dispatching.
     """
     cur.execute(
         """
@@ -228,6 +244,11 @@ def _check_idempotency(
             "send_status": row[2],
             "created_at": row[3],
         }
+    # VT-420: a 'sending' in-flight marker is a recovery HIT — surface it so the
+    # caller blocks the re-send (the message was probably already dispatched). It is
+    # NOT in _IDEMPOTENT_HIT_STATUSES, so allow it through explicitly here.
+    if result["send_status"] == _INFLIGHT_STATUS:
+        return result
     if result["send_status"] not in _IDEMPOTENT_HIT_STATUSES:
         logger.info(
             "send_whatsapp_template: ignoring non-deliverable idempotency marker "
@@ -280,6 +301,34 @@ def _resolve_customer(
     }
 
 
+def _write_inflight_marker(
+    cur: Any,
+    tenant_id: str,
+    idempotency_key: str,
+    customer_id: str,
+) -> None:
+    """VT-420: write the pre-send 'sending' (in-flight) marker, committed BEFORE the
+    Twilio messages.create call (the pool is autocommit, so this standalone INSERT
+    commits the instant it executes — that durable commit is the whole point).
+
+    ON CONFLICT DO NOTHING: if a prior attempt already left a row under this key
+    (a retried 'error', or a stale 'sending' from a crash), the marker is a no-op and
+    the existing row stands — the _check_idempotency gate ahead of this already decided
+    the attempt may proceed (it returns the 'error' row as None → retryable, and it
+    surfaces a 'sending' row as a hit → we never reach here). Writing this BEFORE the
+    send is what converts the crash window from a double-send (a missing key re-fires)
+    into a recoverable possible-missed-send (a 'sending' key blocks the re-fire)."""
+    cur.execute(
+        """
+        INSERT INTO send_idempotency_keys
+            (tenant_id, idempotency_key, customer_id, message_sid, send_status)
+        VALUES (%s, %s, %s, NULL, 'sending')
+        ON CONFLICT (tenant_id, idempotency_key) DO NOTHING
+        """,
+        (tenant_id, idempotency_key, customer_id),
+    )
+
+
 def _write_idempotency_ledger(
     cur: Any,
     tenant_id: str,
@@ -288,13 +337,29 @@ def _write_idempotency_ledger(
     message_sid: str | None,
     send_status: str,
 ) -> None:
-    """Insert idempotency ledger row (ON CONFLICT DO NOTHING)."""
+    """Upsert the idempotency ledger row to its terminal status.
+
+    VT-420: a 'sending' in-flight marker (written by _write_inflight_marker BEFORE the
+    Twilio call) already occupies this (tenant_id, idempotency_key), so a plain INSERT
+    ... ON CONFLICT DO NOTHING would be a no-op and leave the row stuck at 'sending'.
+    Upsert instead — flip the existing marker to its terminal status ('sent' on a
+    delivered send, 'error' on a Twilio reject/raise) and stamp the message_sid. The
+    'sent' flip is the OTHER side of the crash window: once it commits, recovery sees
+    'sent' (an idempotent hit) and never re-sends; if the process dies before it
+    commits, the row stays 'sending' and recovery blocks the re-send fail-SAFE.
+
+    NEVER downgrade a terminal 'sent' back to 'error': the WHERE clause guards the flip
+    so a late/duplicate error-path write cannot clobber a delivered send (defense in
+    depth — the linear flow never does this, but the guard makes it structurally safe)."""
     cur.execute(
         """
         INSERT INTO send_idempotency_keys
             (tenant_id, idempotency_key, customer_id, message_sid, send_status)
         VALUES (%s, %s, %s, %s, %s)
-        ON CONFLICT (tenant_id, idempotency_key) DO NOTHING
+        ON CONFLICT (tenant_id, idempotency_key) DO UPDATE
+            SET send_status = EXCLUDED.send_status,
+                message_sid = EXCLUDED.message_sid
+            WHERE send_idempotency_keys.send_status <> 'sent'
         """,
         (tenant_id, idempotency_key, customer_id, message_sid, send_status),
     )
@@ -388,6 +453,26 @@ def send_whatsapp_template(
                     cur, payload.tenant_id, payload.idempotency_key,
                 )
                 if existing is not None:
+                    # VT-420 crash recovery: a STILL-'sending' marker means a prior
+                    # attempt dispatched to Twilio but died before the 'sent' commit —
+                    # the message was PROBABLY already delivered. Fail SAFE: do NOT
+                    # re-send (a re-send double-charges). Report a terminal 'sent'
+                    # outcome with NO message_sid (we never recorded it — honest) so the
+                    # caller marks the draft terminal and stops retrying. A loud
+                    # flag-for-review line distinguishes it from a clean send.
+                    if existing["send_status"] == _INFLIGHT_STATUS:
+                        logger.warning(
+                            "send_whatsapp_template: inflight_recovery tenant=%s customer=%s "
+                            "key=%s — a 'sending' marker survived a crash; NOT re-sending "
+                            "(message probably already delivered). Flag for review: SID unknown.",
+                            payload.tenant_id, payload.customer_id, payload.idempotency_key,
+                        )
+                        return SendWhatsappTemplateOutput(
+                            status="sent",
+                            message_sid=None,
+                            customer_id=payload.customer_id,
+                            sent_at=existing["created_at"],
+                        )
                     logger.info(
                         "send_whatsapp_template: idempotent_hit tenant=%s customer=%s sid=%s",
                         payload.tenant_id, payload.customer_id, existing["message_sid"],
@@ -516,6 +601,21 @@ def send_whatsapp_template(
                             retry_after_ms=int(_TENANT_WINDOW.total_seconds() * 1000),
                         ),
                     )
+
+                # --- VT-420: pre-send in-flight marker (the crash-window close) ---
+                # Write + commit the 'sending' marker BEFORE the irreversible Twilio
+                # call (the autocommit pool commits this standalone INSERT instantly).
+                # Twilio's Messages/Content API has NO native idempotency key (twilio
+                # 9.10.9 messages.create exposes none; the official Messages REST docs
+                # document none — I-Twilio-Idempotency-Token is a webhook header, the
+                # reverse direction), so this marker is the money-SAFE alternative: if
+                # the process crashes AFTER Twilio dispatch but BEFORE the 'sent' flip,
+                # the durable 'sending' row makes recovery block the re-send (no
+                # double-charge) instead of re-firing on a missing key.
+                _write_inflight_marker(
+                    cur, payload.tenant_id, payload.idempotency_key,
+                    payload.customer_id,
+                )
 
                 # --- Twilio Content API send ---
                 try:
