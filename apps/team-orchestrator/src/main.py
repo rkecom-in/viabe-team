@@ -111,6 +111,15 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     from orchestrator.agents.l3_hold import register_l3_hold
 
     register_l3_hold()
+    # VT-418: the L2 owner-approve→send driver (l2_send_workflow). Same
+    # register-before-launch contract — the workflow must be in the DBOS
+    # registry when launch_dbos() computes the app_version hash so the runner's
+    # start_l2_send + DBOS recovery of a parked/crashed send run resolve. The
+    # reconciler sweep (l2_approved_send_sweep_scheduled) registers with the
+    # other scheduled triggers in register_scheduled_triggers (above).
+    from orchestrator.agents.l2_send import register_l2_send
+
+    register_l2_send()
     launch_dbos()
     # VT-280/VT-281: seed the VTR REF# keying secret from env (VT_REF_HMAC_KEY) so the
     # de-identified views never emit NULL refs before the first VTR read. Best-effort at the
