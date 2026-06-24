@@ -48,6 +48,11 @@ TriggerKind = Literal[
     "reconstitution_sla_breach",  # P0 — opted-out customer un-reconstituted past 8d
     # VT-307 KG-events outbox-drain straggler (nightly drain sweep, warning).
     "kg_drain_straggler",  # an outbox event the immediate + nightly drain failed to project
+    # VT-386 redaction name-registry outage (fail-soft split: known name-keys
+    # stripped + this CRITICAL alert; the free-text-name residual is now ALERTED,
+    # not a silent leak). Fired from the write-hook on a build failure (deduped)
+    # and from the nightly sweep over the §A degraded-write counter.
+    "redaction_registry_unavailable",  # P1 — name registry could not build; redaction degraded
 ]
 
 Severity = Literal["critical", "warning"]
@@ -70,6 +75,10 @@ _SEVERITY_BY_KIND: dict[TriggerKind, Severity] = {
     "reconstitution_sla_breach": "critical",
     # VT-307 KG-drain straggler — reliability backstop signal (batched digest).
     "kg_drain_straggler": "warning",
+    # VT-386 redaction-registry outage — CRITICAL: a name-registry outage means
+    # the free-text-name redaction path is degraded; a permanent outage is a
+    # standing PII-exposure risk, so it pages.
+    "redaction_registry_unavailable": "critical",
 }
 
 # VT-79 Detector-3: DSR request-rate threshold (Phase-1 fixed value; cohort
@@ -111,6 +120,63 @@ def _make_trigger(
         run_id=run_id,
         payload=payload or {},
     )
+
+
+# VT-386 Detector — redaction-registry outage. Threshold over the §A
+# process-local degraded-write counter (build_error + undefined_table) before
+# the nightly sweep escalates. Conservative Phase-1 fixed value (mirrors the
+# _DSR_RATE_THRESHOLD posture); revisited on real traffic.
+_REDACTION_DEGRADED_THRESHOLD = 1  # >=1 degraded write in-process → outage signal
+
+
+def build_registry_unavailable_trigger(tenant_id: UUID) -> Trigger:
+    """VT-386 §B — the CRITICAL ``redaction_registry_unavailable`` trigger.
+
+    Fired from the observability write-hook on a name-registry BUILD failure
+    (``pipeline_observability._fire_registry_unavailable_alert``) and from the
+    nightly sweep. The message carries the PII-free degraded-write COUNT +
+    tenant_id + a fixed-window note ONLY — never a name/phone/value (it is also
+    re-scrubbed by ``scrub_pii`` on dispatch). Deduped by the existing
+    ``(tenant_id, trigger_kind)`` 5-min window so a burst fires once.
+    """
+    try:
+        from orchestrator.privacy.redaction_health import degraded_write_count
+
+        degraded = degraded_write_count(str(tenant_id))
+    except Exception:  # noqa: BLE001 — count is best-effort; alert still fires
+        degraded = 0
+    return _make_trigger(
+        tenant_id,
+        "redaction_registry_unavailable",
+        (
+            f"Customer-name redaction registry unavailable for tenant {tenant_id}; "
+            f"{degraded} step write(s) degraded to known-key-strip + pattern-only "
+            "redaction in-process. Free-text-name redaction is degraded until the "
+            "registry recovers."
+        ),
+        payload={"degraded_write_count": degraded},
+    )
+
+
+def detect_redaction_registry_outage(tenant_id: UUID) -> list[Trigger]:
+    """VT-386 §B sweep — escalate if a tenant crossed the degraded-write threshold.
+
+    Reads the §A process-local counter (``degraded_write_count`` = build_error +
+    undefined_table). When it meets ``_REDACTION_DEGRADED_THRESHOLD`` the nightly
+    sweep emits one CRITICAL ``redaction_registry_unavailable`` (deduped on
+    dispatch). Complements the immediate write-hook fire: the hook catches the
+    outage live; this batched sweep is the backstop for a still-degraded tenant.
+    Counts only — no PII.
+    """
+    try:
+        from orchestrator.privacy.redaction_health import degraded_write_count
+
+        degraded = degraded_write_count(str(tenant_id))
+    except Exception:  # noqa: BLE001 — never break the sweep
+        return []
+    if degraded >= _REDACTION_DEGRADED_THRESHOLD:
+        return [build_registry_unavailable_trigger(tenant_id)]
+    return []
 
 
 def detect_critical_for_run(run_id: UUID) -> list[Trigger]:
@@ -326,6 +392,18 @@ def detect_pii_in_logs(tenant_id: UUID, *, lookback_hours: int = 24) -> list[Tri
     """
     from orchestrator.alerts.pii_scrub import find_pii
 
+    # VT-386 Part C — registry-aware name detector. Build the tenant's
+    # customer-name registry ONCE and scan each swept blob for an exact
+    # registry-name hit; a hit ⇒ ``pii_kinds: ["customer_name"]`` on the same
+    # CRITICAL ``pii_in_log``. This is the backstop for a name that leaked into
+    # free text while the registry was DOWN (then recovered) — the §B
+    # ``redaction_registry_unavailable`` alert covers the still-down case; the
+    # two are complementary. If the registry is itself unbuildable at sweep
+    # time, this name scan is inert (None) — find_pii's phone/digit detection
+    # still runs, and §B alerts the outage. NO PII in the alert: only the
+    # ``customer_name`` LABEL + step_id cross the boundary, never the name.
+    name_registry = _name_registry_for_sweep(tenant_id)
+
     pool = get_pool()
     triggers: list[Trigger] = []
     with pool.connection() as conn, conn.cursor() as cur:
@@ -356,16 +434,64 @@ def detect_pii_in_logs(tenant_id: UUID, *, lookback_hours: int = 24) -> list[Tri
                 "tool_calls",
             )
         )
-        matches = find_pii(blob)
+        matches = list(find_pii(blob))
+        # VT-386 Part C: a leaked KNOWN customer name (registry exact-match
+        # inside the blob) fires pii_in_log even though it carries no
+        # digits/structure that find_pii could catch.
+        if name_registry is not None and _blob_has_registry_name(blob, name_registry):
+            matches.append("customer_name")
         if matches:
+            kinds = sorted(set(matches))
             triggers.append(_make_trigger(
                 tenant_id, "pii_in_log",
                 f"Unredacted PII in pipeline_step {rd.get('id')} "
-                f"(kinds: {sorted(set(matches))})",
+                f"(kinds: {kinds})",
                 run_id=UUID(str(rd["run_id"])) if rd.get("run_id") else None,
-                payload={"step_id": str(rd.get("id")), "pii_kinds": sorted(set(matches))},
+                payload={"step_id": str(rd.get("id")), "pii_kinds": kinds},
             ))
     return triggers
+
+
+def _name_registry_for_sweep(tenant_id: UUID):
+    """Build the tenant name-registry predicate for the Detector-5 name scan.
+
+    Fail-soft: a build failure (the registry is itself down at sweep time)
+    returns None — the name scan goes inert and find_pii's pattern detection
+    still runs; §B's ``redaction_registry_unavailable`` covers the still-down
+    case. Never raises into the sweep.
+    """
+    try:
+        from orchestrator.privacy.customer_registry import make_name_registry
+
+        return make_name_registry(str(tenant_id))
+    except Exception:  # noqa: BLE001 — name scan is a best-effort backstop
+        logger.warning(
+            "detect_pii_in_logs: name registry unbuildable for tenant %s; "
+            "name scan inert (pattern scan unaffected)",
+            tenant_id,
+        )
+        return None
+
+
+def _blob_has_registry_name(blob: str, name_registry) -> bool:
+    """True iff a registered customer name appears as a whitespace bigram in ``blob``.
+
+    Mirrors the redactor's ``_scan_for_registry_names`` 2-gram matching (English/
+    Hindi names are typically 2 tokens here) so the DETECTOR and the REDACTOR
+    agree on what a "name" is — a name the redactor would have masked but didn't
+    (because the registry was down at write time) is exactly what this catches.
+    Returns a BOOLEAN only — the matched name never leaves this function.
+    """
+    import re
+
+    tokens = blob.split()
+    punct = re.compile(r"^[^\w]+|[^\w]+$")
+    for i in range(len(tokens) - 1):
+        left = punct.sub("", tokens[i])
+        right = punct.sub("", tokens[i + 1])
+        if left and right and name_registry(f"{left} {right}"):
+            return True
+    return False
 
 
 def all_active_tenant_ids() -> list[UUID]:
@@ -389,8 +515,10 @@ __all__ = [
     "Trigger",
     "TriggerKind",
     "all_active_tenant_ids",
+    "build_registry_unavailable_trigger",
     "detect_critical_for_run",
     "detect_pii_in_logs",
+    "detect_redaction_registry_outage",
     "detect_slow_triggers",
     "severity_for",
 ]

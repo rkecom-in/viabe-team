@@ -29,6 +29,7 @@ def redact_for_otel_span(
     _depth: int = 0,
     *,
     name_registry: Callable[[str], bool] | None = None,
+    registry_down: bool = False,
 ) -> Any:
     """Return a PII-safe copy of ``value`` for an OTel-style span sink.
 
@@ -41,8 +42,17 @@ def redact_for_otel_span(
     tenant-scoped caller inject the customer-name registry callable from
     :func:`orchestrator.privacy.customer_registry.make_name_registry` so
     known customer names get redacted by exact match.
+
+    VT-386: ``registry_down=True`` (the fail-soft-split outage signal) makes the
+    redactor strip the known name-keys to ``<name:registry_down>`` without a
+    registry. Default ``False`` — no behaviour change for existing callers.
     """
-    return redact(value, depth=_depth, name_registry=name_registry)
+    return redact(
+        value,
+        depth=_depth,
+        name_registry=name_registry,
+        registry_down=registry_down,
+    )
 
 
 # pipeline_log writer — same redactor; call-site clarity at non-Logfire

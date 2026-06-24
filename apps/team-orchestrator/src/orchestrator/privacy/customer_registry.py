@@ -20,11 +20,23 @@ import logging
 from typing import Callable
 
 from orchestrator.db.wrappers import CustomersWrapper
+from orchestrator.privacy.redaction_health import (
+    RegistryOutcome,
+    record_registry_outcome,
+)
 
 logger = logging.getLogger(__name__)
 
 # tenant_id -> frozenset of case-folded display names.
 _CACHE: dict[str, frozenset[str]] = {}
+
+
+def _record_outcome(tenant_id: str, outcome: RegistryOutcome) -> None:
+    """Bump the §A health counter; never let health-counting break the build."""
+    try:
+        record_registry_outcome(str(tenant_id), outcome)
+    except Exception:  # noqa: BLE001 — health telemetry is best-effort
+        logger.debug("redaction_health outcome record failed", exc_info=True)
 
 
 def invalidate(tenant_id: str) -> None:
@@ -58,11 +70,19 @@ def get_customer_names_for_tenant(
         names = set(CustomersWrapper().list_display_names(tenant_id))
     except Exception as exc:  # noqa: BLE001
         if type(exc).__name__ != "UndefinedTable":
+            # VT-386 Part A: a real outage (not the forward-compat absent-table
+            # case) — count it as build_error before re-raising so the caller's
+            # fail-soft path (and the §B alert) sees the outage.
+            _record_outcome(tenant_id, RegistryOutcome.BUILD_ERROR)
             raise
+        # Forward-compat: customers table absent → empty set, no leak yet.
+        _record_outcome(tenant_id, RegistryOutcome.UNDEFINED_TABLE)
         logger.info(
             "customer_registry: customers table absent (tenant=%s); empty",
             tenant_id,
         )
+    else:
+        _record_outcome(tenant_id, RegistryOutcome.OK)
 
     frozen = frozenset(names)
     if use_cache:

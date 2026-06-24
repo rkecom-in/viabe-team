@@ -392,13 +392,25 @@ def pii_log_sweep_scheduled(
     per-tenant CRITICAL ``pii_in_log`` alert for each finding (unredacted PII left
     in pipeline_steps payloads — a CL-390 regression catcher). Per-tenant, so it
     uses the standard ``tenant_alerts`` path (unlike VT-304's workspace alert).
+    VT-386: the same sweep also escalates a redaction-registry OUTAGE — if a
+    tenant crossed the §A degraded-write threshold this process, dispatch the
+    CRITICAL ``redaction_registry_unavailable`` (deduped). This is the batched
+    backstop to the immediate write-hook fire.
+
     Best-effort per tenant: one tenant's failure must not halt the sweep."""
     from orchestrator.alerts.dispatch import dispatch_alert
-    from orchestrator.alerts.triggers import all_active_tenant_ids, detect_pii_in_logs
+    from orchestrator.alerts.triggers import (
+        all_active_tenant_ids,
+        detect_pii_in_logs,
+        detect_redaction_registry_outage,
+    )
 
     for tenant_id in all_active_tenant_ids():
         try:
             for trigger in detect_pii_in_logs(tenant_id):
+                dispatch_alert(trigger)
+            # VT-386 §B — outage escalation backstop (counts only; PII-free).
+            for trigger in detect_redaction_registry_outage(tenant_id):
                 dispatch_alert(trigger)
         except Exception:  # noqa: BLE001 — per-tenant isolation; the sweep continues
             logger.exception(
