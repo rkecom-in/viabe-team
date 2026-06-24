@@ -103,6 +103,8 @@ This is how delivery actually happens between Fazal-issued scope grants. Fresh s
 
 ### Orchestrator modes
 
+**On every (re)start, FIRST read [`.viabe/cc-startup-protocol.md`](.viabe/cc-startup-protocol.md) and run its startup sequence in order** — return the tree to clean `dev` → drain the FULL inbox oldest-first → reconcile vs `git log origin/dev` (Rule #14) → announce liveness — before any new work. In-session watchers/crons DIE on a process restart and do not self-recover; that protocol is the recovery discipline (archive signals only AFTER execution; re-arm-first on every wake; heartbeat >10min tasks). Cowork-mandated 2026-06-24 after two restart-stalls.
+
 CC runs under one of two orchestration modes:
 
 - **Interactive `claude -c` watch loop** — Fazal's primary today. Opened in a
