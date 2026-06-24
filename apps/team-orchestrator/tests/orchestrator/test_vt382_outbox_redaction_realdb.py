@@ -578,11 +578,12 @@ def test_transient_failure_keeps_raw_params_then_send_succeeds(substrate):  # ty
     assert not any(_is_redacted_value(v) for v in params.values())
     assert _audit_rows(substrate.dsn, s.tenant, s.draft) == []
 
-    # PRE-EXISTING VT-262 semantics (out of VT-382 scope, flagged to Cowork): the failed
-    # attempt cached send_status='error' under the fixed key agent:{draft_id}, and 'error'
-    # is in _IDEMPOTENT_HIT_STATUSES — an immediate retry would echo the cached error for
-    # 24h. Backdate the cache row past the TTL so this test exercises VT-382's
-    # retain-while-needed policy, not the VT-262 retry window.
+    # VT-387 FIXED the VT-262 retry-window bug: 'error' is no longer in
+    # _IDEMPOTENT_HIT_STATUSES, so a within-window retry of a transiently-errored
+    # draft re-evaluates + re-sends (no longer echoes the cached error for 24h).
+    # This backdate is now redundant (the cached 'error' row already isn't a hit)
+    # but kept as a defensive no-op so this test stays focused on VT-382's
+    # retain-while-needed policy regardless of the idempotency TTL.
     with psycopg.connect(substrate.dsn, autocommit=True) as conn:
         conn.execute(
             "UPDATE send_idempotency_keys SET created_at = now() - interval '25 hours' "

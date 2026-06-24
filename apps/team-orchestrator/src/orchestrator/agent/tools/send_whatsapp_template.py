@@ -165,8 +165,29 @@ def _build_content_variables(
 # status written by another tool sharing send_idempotency_keys) is NOT a prior
 # deliverable send — echoing it would raise a pydantic ValidationError that the
 # broad except turns into a phantom db_error AND wrongly suppress the send.
+#
+# VT-387: 'error' is DELIBERATELY excluded (it WAS in the VT-262 set). A draft whose
+# send TRANSIENTLY failed (Twilio 5xx, network blip, 4xx reject, db error) caches
+# send_status='error' under the FIXED key agent:{draft_id} — treating that as an
+# idempotent hit made the draft unretryable for the key's full 24h TTL, so a retry
+# within the window silently no-opped (money-adjacent: a recovery/approval send that
+# should re-fire just didn't). Excluding 'error' makes _check_idempotency return None
+# for an errored row → the caller re-runs every gate (consent/opt-out/caps/rate) and
+# re-sends.
+#
+# Double-send safety (the load-bearing invariant): 'error' is NEVER written to the
+# ledger AFTER a successful side-effect. Every path here that writes 'error' does so
+# BEFORE/WITHOUT a delivered message —
+#   (1) send_fn raises: twilio_send.send_template_message re-raises ONLY on 5xx/unknown
+#       (Twilio did NOT accept), ValueError (no recipient), or UnknownTemplateError —
+#       messages.create either never ran or raised before returning;
+#   (2) send_result.success is False: a 4xx reject or template_not_yet_approved — no
+#       message dispatched;
+#   (3) the outer db_error except writes NOTHING to the ledger (no false 'error' row).
+# A genuinely delivered send is the ONLY thing that writes 'sent', and 'sent' STAYS in
+# the set — so a completed/sent draft remains an idempotent hit and never re-sends.
 _IDEMPOTENT_HIT_STATUSES = frozenset(
-    {"sent", "dry_run", "rate_limited", "unauthorized", "error"}
+    {"sent", "dry_run", "rate_limited", "unauthorized"}
 )
 
 
