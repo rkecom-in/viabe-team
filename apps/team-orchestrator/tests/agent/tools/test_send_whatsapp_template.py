@@ -106,6 +106,12 @@ def _pool(
             raise raise_on_set_local
         if raise_on_campaign_messages_insert and "INSERT INTO campaign_messages" in sql:
             raise raise_on_campaign_messages_insert
+        # VT-423: the in-flight marker INSERT now self-serializes via rowcount. In this
+        # single-shot mock pool the first attempt always wins the key → rowcount = 1
+        # (an int the self-serialize check trusts without falling back to fetchone(),
+        # which would otherwise drain the staged response queue).
+        if "INSERT INTO send_idempotency_keys" in sql and "'sending'" in sql:
+            cur.rowcount = 1
 
     def _fetchone() -> Any:
         idx = response_idx[0]
@@ -600,18 +606,26 @@ def test_twilio_error_returns_envelope() -> None:
     assert out.error_envelope is not None
     assert out.error_envelope.code == "twilio_error"
 
-    # VT-420: TWO send_idempotency_keys writes now — the pre-send 'sending' in-flight
+    # VT-420/423: TWO send_idempotency_keys writes now — the pre-send 'sending' in-flight
     # marker (committed BEFORE the Twilio call) + the error flip that upserts it to
     # 'error' afterward (a raise means Twilio did NOT accept → retryable, not 'sent').
+    # VT-423: the marker INSERT is now ALSO an `ON CONFLICT DO UPDATE` (the conditional
+    # claim), so disambiguate the two by their distinct shapes, not just "DO UPDATE".
     sql_list = [sql for sql, _ in executed]
     insert_calls = [s for s in sql_list if "INSERT INTO send_idempotency_keys" in s]
     assert len(insert_calls) == 2
-    # First write is the in-flight 'sending' marker; the second is the 'error' upsert.
-    assert "'sending'" in insert_calls[0]
+    # First write is the in-flight 'sending' claim marker (VALUES literal 'sending' +
+    # the WHERE-guarded conditional claim); the second is the terminal 'error' upsert.
+    assert "VALUES (%s, %s, %s, NULL, 'sending')" in " ".join(insert_calls[0].split())
+    assert "send_status NOT IN ('sent', 'sending')" in " ".join(insert_calls[0].split())
     assert "ON CONFLICT (tenant_id, idempotency_key) DO UPDATE" in insert_calls[1]
+    # The terminal ledger write carries the status in its PARAMS ('error') — that's how
+    # we pick it out from the marker (whose status is the literal 'sending').
     error_params = next(
         params for sql, params in executed
-        if "INSERT INTO send_idempotency_keys" in sql and "DO UPDATE" in sql
+        if "INSERT INTO send_idempotency_keys" in sql
+        and "DO UPDATE" in sql
+        and params is not None and "error" in params
     )
     assert "error" in error_params
 
@@ -764,20 +778,40 @@ class _DurableLedgerPool:
         self.rows: dict[tuple[str, str], dict[str, Any]] = {}
         self._crash_armed = crash_after_send
         self.sql_log: list[tuple[str, Any]] = []
+        # VT-423: psycopg3-style rowcount; the self-serialize check reads it.
+        self.rowcount = -1
 
     # --- the cursor protocol send_whatsapp_template uses -----------------
     def _execute(self, sql: str, params: tuple | None = None) -> None:
         self.sql_log.append((sql, params))
         s = " ".join(sql.split())  # normalise whitespace for matching
         if "INSERT INTO send_idempotency_keys" in s and "VALUES (%s, %s, %s, NULL, 'sending')" in s:
-            # In-flight marker: ON CONFLICT DO NOTHING. Commits instantly (autocommit).
+            # In-flight marker: a CONDITIONAL upsert that CLAIMS the row (VT-423).
+            #   INSERT ... 'sending' ON CONFLICT DO UPDATE SET ...='sending'
+            #     WHERE existing send_status NOT IN ('sent','sending') RETURNING id
+            # Commits instantly (autocommit). rowcount = 1 iff THIS attempt claimed the
+            # row (no prior row, OR a retryable 'error'/'rate_limited'/'window_closed'
+            # row it flips to 'sending'); 0 iff a sibling already holds 'sending' or the
+            # row is terminal 'sent'. send_whatsapp_template reads rowcount to self-serialize.
             tid, key, cid = params  # type: ignore[misc]
-            self.rows.setdefault(
-                (tid, key),
-                {"id": f"row-{key}", "message_sid": None,
-                 "send_status": "sending", "created_at": _now_utc()},
-            )
-            self._last_select = None
+            existing = self.rows.get((tid, key))
+            if existing is None:
+                self.rows[(tid, key)] = {
+                    "id": f"row-{key}", "message_sid": None,
+                    "send_status": "sending", "created_at": _now_utc(),
+                }
+                self.rowcount = 1
+                self._last_select = {"id": f"row-{key}"}
+            elif existing["send_status"] not in ("sent", "sending"):
+                # Retryable row → claim it: flip to a fresh 'sending'.
+                existing["send_status"] = "sending"
+                existing["message_sid"] = None
+                self.rowcount = 1
+                self._last_select = {"id": existing["id"]}
+            else:
+                # 'sending' (sibling owns it) or 'sent' (terminal): claim refused.
+                self.rowcount = 0
+                self._last_select = None
             return
         if "INSERT INTO send_idempotency_keys" in s and "DO UPDATE" in s:
             # Terminal upsert ('sent' or 'error'). THIS is the post-Twilio commit.
@@ -797,9 +831,18 @@ class _DurableLedgerPool:
             self._last_select = None
             return
         if "send_idempotency_keys" in s and "SELECT" in s and "COUNT" not in s.upper():
-            # Idempotency check SELECT.
+            # Idempotency check SELECT (VT-423 semantics): a 'sending' marker matches
+            # at ANY age (never expires); a TERMINAL row matches only within 24h.
             tid, key = params  # type: ignore[misc]
-            self._last_select = self.rows.get((tid, key))
+            row = self.rows.get((tid, key))
+            if row is None:
+                self._last_select = None
+            elif row["send_status"] == "sending":
+                self._last_select = row  # in-flight: not time-bounded.
+            elif _now_utc() - row["created_at"] <= timedelta(hours=24):
+                self._last_select = row  # terminal: within 24h idem TTL.
+            else:
+                self._last_select = None  # terminal + stale → re-evaluate.
             return
         if "COUNT(*)" in s.upper() and "send_idempotency_keys" in s:
             self._last_select = {"count": 0}  # never rate-limited in the canary
@@ -819,6 +862,10 @@ class _DurableLedgerPool:
         class _Cur:
             execute = staticmethod(pool._execute)
             fetchone = staticmethod(pool._fetchone)
+
+            @property
+            def rowcount(self) -> int:  # VT-423: mirror psycopg3's post-execute rowcount.
+                return pool.rowcount
 
             def __enter__(self) -> Any:
                 return self
@@ -998,3 +1045,165 @@ def test_vt420_stop_still_kills_sends() -> None:
     # No in-flight marker was written (the gate short-circuits before it).
     key = ("a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11", "idem-key-vt45-test")
     assert key not in pool.rows
+
+
+# ===========================================================================
+# VT-423 — send-marker HARDENING canaries (Rule #15, money-send LOAD-BEARING)
+#
+# Two NON-BLOCKING residuals the VT-420 adversarial verify surfaced:
+#  (1) self-serializing marker — two TRUE-parallel first-attempts on one key both
+#      pass _check_idempotency (both see None), so the marker INSERT itself (now
+#      ON CONFLICT DO NOTHING ... RETURNING id) must let exactly ONE attempt reach
+#      Twilio; the loser of the race treats the existing 'sending' row as a HIT.
+#  (2) the 24h stale-marker window — a 'sending' marker older than 24h used to fall
+#      out of _check_idempotency's time bound → re-send. It must now block at ANY age.
+# Both assert ZERO double-sends. Shared by L2 + L3 (both funnel through this tool).
+# ===========================================================================
+
+
+class _RacingLedgerPool(_DurableLedgerPool):
+    """Models the TRUE-parallel first-attempt window: BOTH concurrent callers ran
+    their _check_idempotency SELECT before EITHER wrote the 'sending' marker, so both
+    must see None there. We force that by making the idempotency SELECT return None
+    until ``unfreeze_after`` marker-INSERTs have been attempted — after which the
+    SELECT reverts to the real (VT-423) row lookup. The INSERT path is the REAL
+    self-serialize: Postgres' UNIQUE lets one INSERT win (rowcount=1) and the other
+    hit ON CONFLICT (rowcount=0), exactly as _write_inflight_marker reads it."""
+
+    def __init__(self, *, unfreeze_after: int = 2) -> None:
+        super().__init__()
+        self._select_frozen_for = unfreeze_after
+        self._marker_inserts = 0
+
+    def _execute(self, sql: str, params: tuple | None = None) -> None:
+        s = " ".join(sql.split())
+        is_idem_select = (
+            "send_idempotency_keys" in s and "SELECT" in s and "COUNT" not in s.upper()
+        )
+        if is_idem_select and self._select_frozen_for > 0:
+            # Both racing attempts: the row isn't visible yet → None. (Logged so the
+            # ordering proof in sql_log still holds.)
+            self.sql_log.append((sql, params))
+            self._last_select = None
+            return
+        super()._execute(sql, params)
+        if "INSERT INTO send_idempotency_keys" in s and "VALUES (%s, %s, %s, NULL, 'sending')" in s:
+            self._marker_inserts += 1
+            if self._marker_inserts >= self._select_frozen_for:
+                self._select_frozen_for = 0  # race over; real lookups resume.
+
+
+def test_vt423_parallel_first_attempts_self_serialize_one_twilio_call() -> None:
+    """RESIDUAL #1 canary. Two TRUE-parallel first-attempts on ONE draft_id: both pass
+    _check_idempotency seeing None (the race window). The marker INSERT
+    (ON CONFLICT DO NOTHING ... RETURNING id) self-serializes — exactly ONE attempt
+    inserts the 'sending' row (rowcount=1, proceeds to Twilio); the other loses the
+    ON-CONFLICT race (rowcount=0) and MUST NOT send. Asserts exactly ONE Twilio call."""
+    from orchestrator.agent.tools.send_whatsapp_template import send_whatsapp_template
+
+    _RESOLVED_CUSTOMER[0] = _customer()
+    pool = _RacingLedgerPool(unfreeze_after=2)
+    send_fn = _spy_send_fn()
+
+    # Attempt A wins the INSERT race → sends. (Both saw None at _check_idempotency.)
+    out_a = send_whatsapp_template(_input(), pool=pool, send_fn=send_fn)
+    # Attempt B lost the ON-CONFLICT race → must NOT call Twilio (self-serialized).
+    out_b = send_whatsapp_template(_input(), pool=pool, send_fn=send_fn)
+
+    # THE money-safety assertion: exactly ONE Twilio dispatch across both attempts.
+    assert send_fn.calls["n"] == 1, (
+        f"DOUBLE-SEND: parallel first-attempts both dispatched to Twilio "
+        f"(call_count={send_fn.calls['n']}, expected 1) — the marker did not self-serialize"
+    )
+    # The winner is a clean 'sent' with a real SID; the loser fails SAFE to a
+    # probably-already-sent terminal 'sent' with NO SID (never an error, never a re-send).
+    statuses = sorted([out_a.status, out_b.status])
+    assert statuses == ["sent", "sent"], statuses
+    sids = {out_a.message_sid, out_b.message_sid}
+    assert None in sids, "the race loser must report SID=None (it never sent)"
+    assert any(s is not None for s in sids), "the race winner must report a real SID"
+    key = ("a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11", "idem-key-vt45-test")
+    assert pool.rows[key]["send_status"] == "sent", "the winner's marker flips to 'sent'"
+
+
+def test_vt423_stale_sending_marker_does_not_resend_after_24h() -> None:
+    """RESIDUAL #2 canary. A 'sending' marker that is OLDER than 24h (a draft re-driven
+    long after a crash) must STILL block the re-send. Pre-VT-423 the 24h created_at
+    window in _check_idempotency dropped it → re-send (money-UNSAFE). Now a 'sending'
+    row is not time-bounded: ZERO Twilio calls, the attempt fails SAFE."""
+    from orchestrator.agent.tools.send_whatsapp_template import send_whatsapp_template
+
+    _RESOLVED_CUSTOMER[0] = _customer()
+    pool = _DurableLedgerPool()
+    send_fn = _spy_send_fn()
+
+    key = ("a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11", "idem-key-vt45-test")
+    # Plant a stale 'sending' marker: 25h old (a crash-orphaned in-flight row).
+    pool.rows[key] = {
+        "id": "row-stale", "message_sid": None, "send_status": "sending",
+        "created_at": _now_utc() - timedelta(hours=25),
+    }
+
+    out = send_whatsapp_template(_input(), pool=pool, send_fn=send_fn)
+
+    # THE money-safety assertion: the stale marker still blocks → NO Twilio call.
+    assert send_fn.calls["n"] == 0, (
+        f"DOUBLE-SEND: a >24h-stale 'sending' marker re-sent "
+        f"(call_count={send_fn.calls['n']}, expected 0) — the stale-window tail is open"
+    )
+    # Fail SAFE: terminal 'sent', no SID (probably-already-delivered), marker untouched.
+    assert out.status == "sent"
+    assert out.message_sid is None
+    assert pool.rows[key]["send_status"] == "sending", (
+        "the tool must NOT auto-resolve/re-send a stale marker — a reconciler does that"
+    )
+
+
+def test_vt423_stale_marker_emits_loud_review_log(caplog: pytest.LogCaptureFixture) -> None:
+    """A stale 'sending' marker (>24h) blocks AND emits a loud stale_inflight_marker
+    warning so a reconciler / Ops can resolve the stuck row. CL-390: no PII in the log."""
+    from orchestrator.agent.tools.send_whatsapp_template import send_whatsapp_template
+
+    _RESOLVED_CUSTOMER[0] = _customer()
+    pool = _DurableLedgerPool()
+    key = ("a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11", "idem-key-vt45-test")
+    pool.rows[key] = {
+        "id": "row-stale", "message_sid": None, "send_status": "sending",
+        "created_at": _now_utc() - timedelta(hours=30),
+    }
+
+    with caplog.at_level(logging.WARNING):
+        send_whatsapp_template(_input(), pool=pool, send_fn=_spy_send_fn())
+
+    assert any("stale_inflight_marker" in r.message for r in caplog.records), (
+        "a >24h 'sending' marker must emit the loud reconciler hand-off log"
+    )
+    # CL-390: phone never in the log line.
+    assert not any("+9199" in r.message for r in caplog.records)
+
+
+def test_vt423_fresh_sending_marker_blocks_without_stale_log(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A NORMAL (fresh) crash-orphaned 'sending' marker (well under 24h) blocks the
+    re-send WITHOUT the stale-review log — the loud flag is reserved for genuinely
+    stuck markers, so a clean crash-recovery within the window stays quiet."""
+    from orchestrator.agent.tools.send_whatsapp_template import send_whatsapp_template
+
+    _RESOLVED_CUSTOMER[0] = _customer()
+    pool = _DurableLedgerPool()
+    send_fn = _spy_send_fn()
+    key = ("a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11", "idem-key-vt45-test")
+    pool.rows[key] = {
+        "id": "row-fresh", "message_sid": None, "send_status": "sending",
+        "created_at": _now_utc() - timedelta(minutes=5),
+    }
+
+    with caplog.at_level(logging.WARNING):
+        out = send_whatsapp_template(_input(), pool=pool, send_fn=send_fn)
+
+    assert send_fn.calls["n"] == 0, "a fresh 'sending' marker still blocks the re-send"
+    assert out.status == "sent" and out.message_sid is None
+    assert not any("stale_inflight_marker" in r.message for r in caplog.records), (
+        "a fresh in-flight marker must NOT trigger the stale-review flag"
+    )
