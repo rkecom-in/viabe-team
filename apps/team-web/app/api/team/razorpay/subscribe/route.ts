@@ -1,22 +1,23 @@
 import { NextResponse } from 'next/server'
 import type { NextRequest } from 'next/server'
 
-import { requireFazal, UnauthorizedError } from '@/lib/auth/require-fazal'
 import { OwnerUnauthorizedError, requireOwnerSession } from '@/lib/auth/require-owner-session'
 import { TrialEndTokenError, verifyTrialEndToken } from '@/lib/auth/verify-trial-end-token'
 import { forwardSubscribe } from '@/lib/orchestrator-client'
 
 /**
- * Resolve the subscribing tenant SERVER-SIDE from one of 3 auth paths, in order
- * (VT-91, Cowork Q1):
+ * Resolve the subscribing tenant SERVER-SIDE from one of 2 auth paths, in order
+ * (VT-91, Cowork Q1; VT-416 PR-1 dropped the path-3 FAZAL_TENANT_ID fallback):
  *   1. portal owner session (`viabe_team_session` cookie) -> claim.tenant_id
  *   2. trial-end deep-link token (body.token) -> verified claim.tenant_id
- *   3. Fazal / Ops fallback (requireFazal) -> FAZAL_TENANT_ID
  *
- * The tenant ALWAYS comes from a verified claim (cookie JWT, token JWT, or the Fazal
- * env) — a raw client-supplied tenant_id is NEVER trusted (IDOR-safe on every path).
- * Throws an auth error if none authenticate. Returns '' only if Fazal authenticates but
- * FAZAL_TENANT_ID is unset (the caller maps that to 503).
+ * The tenant ALWAYS comes from a verified claim (cookie JWT or token JWT) — a raw
+ * client-supplied tenant_id is NEVER trusted (IDOR-safe on every path). There is NO
+ * env-tenant fallback: a real owner ALWAYS resolves at path 1 or 2, so a fallback could
+ * only ever cross-attribute a subscription to the wrong (Fazal's) tenant under a future
+ * auth-order regression — a billing P0 we close by removing it (VT-416). A caller that
+ * authenticates on no path returns '' (the caller maps that to 401 unauthorized —
+ * fail-closed: it NEVER silently bills another tenant).
  */
 async function resolveSubscribeTenant(
   token: string,
@@ -33,17 +34,22 @@ async function resolveSubscribeTenant(
   if (token) {
     return await verifyTrialEndToken(token)
   }
-  // 3. Fazal / Ops fallback. Throws UnauthorizedError if not Fazal.
-  await requireFazal()
-  return { tenantId: process.env.FAZAL_TENANT_ID ?? '', jti: null }
+  // No auth path matched (no session, no token). This caller is genuinely
+  // unauthenticated — the case that used to hit the deleted path-3 FAZAL_TENANT_ID
+  // fallback. Fail closed with an empty tenant; the caller maps '' to 401 unauthorized
+  // (NOT 503 — the caller is unauthenticated, the service is not down). There is
+  // deliberately NO Fazal/env fallback here (VT-416 PR-1): a real owner always resolves
+  // above, so any fallback is pure cross-attribution risk.
+  return { tenantId: '', jti: null }
 }
 
 /**
  * Razorpay subscription creation at trial→paid conversion (VT-331 backend, VT-91
  * frontend auth). Body = `{plan_tier, token?}`. Auth via resolveSubscribeTenant (above).
  * Forwards to the orchestrator (money-authoritative — resolves plan, vendor call, writes
- * subscriptions). Does NOT flip phase — conversion stays webhook-only (VT-89). 401 unauth;
- * 400 bad body; 503 tenant not configured; 502 orchestrator failure.
+ * subscriptions). Does NOT flip phase — conversion stays webhook-only (VT-89). 401 unauth
+ * (no session AND no valid token — incl. the no-auth-path fall-through, Cowork gate ruling
+ * VT-416 PR-1); 400 bad body; 502 orchestrator failure.
  */
 export async function POST(request: NextRequest): Promise<Response> {
   let planTier = ''
@@ -64,17 +70,17 @@ export async function POST(request: NextRequest): Promise<Response> {
   try {
     ;({ tenantId, jti } = await resolveSubscribeTenant(token))
   } catch (err) {
-    if (
-      err instanceof OwnerUnauthorizedError ||
-      err instanceof TrialEndTokenError ||
-      err instanceof UnauthorizedError
-    ) {
+    if (err instanceof OwnerUnauthorizedError || err instanceof TrialEndTokenError) {
       return NextResponse.json({ ok: false, reason: 'unauthorized' }, { status: 401 })
     }
     throw err
   }
   if (!tenantId) {
-    return NextResponse.json({ ok: false, reason: 'tenant_not_configured' }, { status: 503 })
+    // The only path that yields an empty tenant is the no-session-AND-no-token
+    // fall-through in resolveSubscribeTenant — a genuinely unauthenticated caller. 401 is
+    // the accurate semantic (Cowork gate ruling, VT-416 PR-1); 503 would false-signal
+    // "service DOWN" to monitoring when nothing is down.
+    return NextResponse.json({ ok: false, reason: 'unauthorized' }, { status: 401 })
   }
 
   // tenantId is server-derived from a verified claim — a client tenant_id is never used. jti
