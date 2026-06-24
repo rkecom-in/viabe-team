@@ -1,4 +1,4 @@
--- 139_vt420_sending_inflight_marker.sql — VT-420: close the Twilio-success→ledger-'sent'
+-- 140_vt420_sending_inflight_marker.sql — VT-420: close the Twilio-success→ledger-'sent'
 -- double-send crash window with a pre-send 'sending' (in-flight) ledger marker.
 --
 -- The win-back send path (send_whatsapp_template, shared by L2 + L3 via
@@ -21,7 +21,7 @@
 --
 -- Idempotent re-assert (DROP CONSTRAINT IF EXISTS) per the migration-057 pattern.
 -- CL-422: dev holds synthetic data only until prod-in-Mumbai (VT-231); no backfill.
--- Migration number 139 allocated via scripts/migration_id_allocate.py (CL-424).
+-- Migration number 140 allocated via scripts/migration_id_allocate.py (CL-424).
 
 ALTER TABLE public.send_idempotency_keys
     DROP CONSTRAINT IF EXISTS send_idempotency_keys_send_status_check;
