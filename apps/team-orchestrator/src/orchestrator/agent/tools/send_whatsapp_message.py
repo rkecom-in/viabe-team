@@ -76,8 +76,30 @@ def _now() -> datetime:
 # campaign-execute seam, which shares send_idempotency_keys) is NOT a prior
 # deliverable send — echoing it would raise a pydantic ValidationError that the
 # broad except turns into a phantom db_error AND wrongly suppress the send.
+#
+# VT-410 (sibling of VT-387, which fixed the same bug in send_whatsapp_template):
+# 'error' is DELIBERATELY excluded (it WAS in the VT-262 set). A freeform send that
+# TRANSIENTLY failed (Twilio 5xx, network blip, 4xx reject) caches send_status='error'
+# under the caller-supplied idempotency_key — treating that as an idempotent hit made
+# the freeform send unretryable for the key's full 24h TTL, so a retry within the
+# window silently no-opped. Excluding 'error' makes _check_idempotency return None for
+# an errored row → the caller re-runs every gate (opt-out/window/caps/rate) and re-sends.
+#
+# Double-send safety (the load-bearing invariant) — note how the FREEFORM path differs
+# from the template path: send_freeform_message() (twilio_send) does NOT catch
+# TwilioRestException — it lets ALL provider errors (4xx, 5xx, network, ValueError)
+# PROPAGATE and returns a SID ONLY on a delivered message. So unlike the template tool
+# (which has TWO 'error' producers: send_fn raising AND a 4xx success=False result),
+# the freeform tool writes 'error' to the ledger in exactly ONE place: the `except
+# Exception` around `send_fn(...)`. That except fires ONLY when messages.create() raised
+# — the provider did NOT accept the message, no side-effect occurred. The two other
+# 'error' RETURNS (the no_phone guard and the outer db_error except) write NOTHING to the
+# ledger. 'sent' is written ONLY after send_fn returns a real SID (a delivered message),
+# and 'sent' STAYS in the set — so a completed/sent freeform message remains an idempotent
+# hit and never re-sends. 'error' is therefore never written post-side-effect → dropping
+# it cannot cause a double-send.
 _IDEMPOTENT_HIT_STATUSES = frozenset(
-    {"sent", "window_closed", "rate_limited", "unauthorized", "error"}
+    {"sent", "window_closed", "rate_limited", "unauthorized"}
 )
 
 
