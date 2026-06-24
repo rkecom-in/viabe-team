@@ -115,6 +115,12 @@ _BANK_KEYS: frozenset[str] = frozenset(
     {"bank_account", "account_number", "acct_no"}
 )
 
+# VT-386: the conservative placeholder emitted at a KNOWN name-key when the
+# customer-name registry is UNAVAILABLE (outage), so a known name field is
+# never written raw even without a registry. Distinct from the registry-miss
+# token (``<redacted:customer_name:len=N>``) so the outage is legible at rest.
+_REGISTRY_DOWN_SENTINEL: str = "<name:registry_down>"
+
 # Long-body threshold for raw-string detection (brief §1).
 _LONG_BODY_THRESHOLD: int = 200
 
@@ -273,6 +279,7 @@ def _is_already_redacted(value: str) -> bool:
             "<bank:redacted",
             "<customer_name>",
             "<owner_name>",
+            "<name:registry_down>",
             "<redacted:",
             "<redaction_truncated>",
         )
@@ -287,11 +294,20 @@ def _redact_pii_value(
     key_lower: str,
     value: Any,
     name_registry: Callable[[str], bool] | None,
+    registry_down: bool = False,
 ) -> str:
     """Tokenize a value at a known-PII key. VT-101 format preserved.
 
     Idempotent: if ``value`` is already in a known token form, return it
     unchanged so ``redact(redact(x)) == redact(x)`` holds at named keys.
+
+    VT-386 fail-soft split: ``registry_down=True`` signals the customer-name
+    registry is UNAVAILABLE (outage) — the known name-keys ``customer_name`` /
+    ``owner_name`` are then stripped to ``<name:registry_down>`` WITHOUT needing
+    the registry (zero false-positive: we already know the key is a name). This
+    is the high-confidence half of the key-aware split; the free-text-name
+    residual stays a now-ALERTED pattern-only gap (see §B / Detector-5), never a
+    silent leak.
     """
     if value is None:
         return "<redacted:none>"
@@ -308,11 +324,20 @@ def _redact_pii_value(
         return _hash_body(text)
     if key_lower == "email":
         return "<redacted:email>"
-    if key_lower in {"customer_name", "owner_name"} and name_registry is not None:
-        if name_registry(text):
-            return "<customer_name>" if key_lower == "customer_name" else "<owner_name>"
-        return f"<redacted:{key_lower}:len={len(text)}>"
-    # name / address / etc — VT-101 token format with length hint.
+    if key_lower in {"customer_name", "owner_name"}:
+        # VT-386: registry-down → conservative sentinel without the registry.
+        if registry_down:
+            return _REGISTRY_DOWN_SENTINEL
+        if name_registry is not None:
+            if name_registry(text):
+                return (
+                    "<customer_name>"
+                    if key_lower == "customer_name"
+                    else "<owner_name>"
+                )
+            return f"<redacted:{key_lower}:len={len(text)}>"
+    # name / address / etc — VT-101 token format with length hint. (Also the
+    # no-registry, not-down customer_name/owner_name path — VT-101 byte-identical.)
     return f"<redacted:{key_lower}:len={len(text)}>"
 
 
@@ -332,6 +357,7 @@ def redact(
     depth: int = 0,
     max_depth: int = DEFAULT_MAX_DEPTH,
     name_registry: Callable[[str], bool] | None = None,
+    registry_down: bool = False,
 ) -> Any:
     """Return a PII-safe copy of ``value``.
 
@@ -355,6 +381,14 @@ def redact(
     migrations 000-022). The canary wires a synthetic in-memory set; the
     future VT row that adds the table replaces this with a SQL lookup
     without API change.
+
+    ``registry_down`` (VT-386 fail-soft split): when ``True`` the caller is
+    signalling that the customer-name registry could not be built (an OUTAGE,
+    not just an absent tenant context). Known name-keys (``customer_name`` /
+    ``owner_name``) are then stripped to ``<name:registry_down>`` deterministically
+    without a registry. Default ``False`` so the many no-tenant-context callers
+    (``name_registry=None``) keep VT-101 byte-identical behaviour — ``registry_down``
+    is only set on the outage seams.
     """
     if depth > max_depth:
         return "<redaction_truncated>"
@@ -363,7 +397,8 @@ def redact(
         out = _redact_str(value)
         # Customer-name registry exact-match scan inside the raw string —
         # only when caller provided a registry and the value isn't already
-        # a token. Keeps cost low for the no-registry case.
+        # a token. Keeps cost low for the no-registry case. (registry_down has
+        # no free-text effect — that residual is the accepted, now-ALERTED gap.)
         if name_registry is not None and not _is_already_redacted(out):
             out = _scan_for_registry_names(out, name_registry)
         return out
@@ -373,19 +408,25 @@ def redact(
         for k, v in value.items():
             key_str = str(k).lower()
             if key_str in _PII_KEYS:
-                result[k] = _redact_pii_value(key_str, v, name_registry)
+                result[k] = _redact_pii_value(key_str, v, name_registry, registry_down)
             elif key_str in _BANK_KEYS:
                 result[k] = _redact_bank_value(v)
             else:
-                result[k] = redact(v, depth + 1, max_depth, name_registry)
+                result[k] = redact(
+                    v, depth + 1, max_depth, name_registry, registry_down
+                )
         return result
 
     if isinstance(value, list):
-        return [redact(item, depth + 1, max_depth, name_registry) for item in value]
+        return [
+            redact(item, depth + 1, max_depth, name_registry, registry_down)
+            for item in value
+        ]
 
     if isinstance(value, tuple):
         return tuple(
-            redact(item, depth + 1, max_depth, name_registry) for item in value
+            redact(item, depth + 1, max_depth, name_registry, registry_down)
+            for item in value
         )
 
     return value

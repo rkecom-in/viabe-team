@@ -146,6 +146,44 @@ def _redact_for_persistence(payload: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in payload.items() if k not in _REDACTED_KEYS_AT_REST}
 
 
+def _redact_envelope_for_persistence(
+    tenant_id: str, payload: dict[str, Any]
+) -> dict[str, Any]:
+    """VT-386 Part D — close the inbound ``webhook_received`` name-redaction gap.
+
+    ``record_webhook_received`` / ``open_webhook_run`` previously persisted the
+    inbound envelope via ``_redact_for_persistence`` ONLY (which POPS the four
+    body keys but runs NO name registry + NO redactor walker). So a customer
+    name arriving in a NON-popped field (a Twilio ``ProfileName`` / sender
+    display name / structured field) was written to
+    ``pipeline_runs.trigger_payload`` / ``pipeline_steps.input_envelope`` with
+    zero name redaction — the same gap class as the write_step path.
+
+    This closes it:
+      1. Body-pop first (the CL-390 belt — unchanged; ``redact`` is the
+         suspenders, never a replacement for the body-pop).
+      2. Then the full ``redact()`` walker threading the tenant name registry.
+         Known name-keys (``customer_name`` / ``owner_name`` / etc.) are
+         tokenised; phones hashed; PAN/Aadhaar/email/etc pattern-redacted.
+      3. VT-386 fail-soft split: on a registry OUTAGE the known name-keys are
+         stripped to ``<name:registry_down>`` (``registry_down=True``) and the
+         §B CRITICAL alert fires — the inbound pipeline NEVER breaks
+         (availability preserved). ``redact`` is idempotent, so a re-pass over
+         the already-phone-hashed envelope is a no-op on hashed fields.
+    """
+    body_popped = _redact_for_persistence(payload)
+    # Lazy import: the redactor's registry chain stays off the module import path.
+    from orchestrator.observability.pii import redact_for_log
+    from orchestrator.observability.pipeline_observability import (
+        _registry_for_tenant_with_status,
+    )
+
+    registry, registry_down = _registry_for_tenant_with_status(tenant_id)
+    return redact_for_log(
+        body_popped, name_registry=registry, registry_down=registry_down
+    )
+
+
 @DBOS.step()
 def open_webhook_run(tenant_id: str, run_id: str, trigger_payload: dict) -> None:
     """Record the inbound run in pipeline_runs. Idempotent — a redelivered
@@ -156,7 +194,11 @@ def open_webhook_run(tenant_id: str, run_id: str, trigger_payload: dict) -> None
     ``trigger_payload``. The redacted dict is wrapped in ``Jsonb`` for
     the INSERT; the input dict is not mutated.
     """
-    safe_payload = _redact_for_persistence(trigger_payload)
+    # VT-386 Part D: body-pop + full redactor walker with the tenant name
+    # registry (fail-soft split on outage). The original ``trigger_payload`` is
+    # untouched — the L2/derived reads below still see the raw body for LENGTH
+    # ONLY (never persisted).
+    safe_payload = _redact_envelope_for_persistence(tenant_id, trigger_payload)
     # VT-309: record the run AND the L2 owner_message_received episodic event in
     # ONE txn (atomic per Cowork ruling 20260603T191000Z). LIVE dispatch path —
     # highest care: the payload carries ONLY derived/structural fields
@@ -213,7 +255,10 @@ def record_webhook_received(tenant_id: str, run_id: str, envelope: dict) -> None
     DO NOTHING clause. Migration 014's UNIQUE (run_id, step_seq) constraint
     makes ON CONFLICT well-defined.
     """
-    safe_envelope = _redact_for_persistence(envelope)
+    # VT-386 Part D: body-pop + full redactor walker with the tenant name
+    # registry (fail-soft split on outage) — closes the inbound name-redaction
+    # gap. A name in a non-body field is now redacted before it persists.
+    safe_envelope = _redact_envelope_for_persistence(tenant_id, envelope)
     with tenant_connection(tenant_id) as conn:
         conn.execute(
             "INSERT INTO pipeline_steps "

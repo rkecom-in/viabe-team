@@ -109,39 +109,133 @@ def _ensure_buffer_schema(path: Path) -> None:
         )
 
 
-def _registry_for_tenant(tenant_id: UUID | str) -> Callable[[str], bool] | None:
-    """Build the tenant's customer-name registry for write-time redaction.
+def _record_redaction_mode(tenant_id: UUID | str, registry_present: bool) -> None:
+    """VT-386 §A — bump the per-write redaction-mode counter (PII-free).
+
+    ``full`` when a registry predicate was available; ``pattern_only`` when the
+    registry was None (an outage OR a no-tenant-context write). Best-effort:
+    health-counting must never break a live observability write.
+    """
+    try:
+        from orchestrator.privacy.redaction_health import (
+            RedactionMode,
+            record_redaction_mode,
+        )
+
+        record_redaction_mode(
+            str(tenant_id),
+            RedactionMode.FULL if registry_present else RedactionMode.PATTERN_ONLY,
+        )
+    except Exception:  # noqa: BLE001 — health telemetry is best-effort
+        logger.debug("redaction_health mode record failed", exc_info=True)
+
+
+def _registry_for_tenant_with_status(
+    tenant_id: UUID | str,
+) -> tuple[Callable[[str], bool] | None, bool]:
+    """Build the tenant's customer-name registry, reporting outage status.
+
+    Returns ``(registry, registry_down)``:
+      - ``(predicate, False)`` on a successful build, OR
+      - ``(None, True)`` when the build raised — the VT-386 OUTAGE signal.
 
     VT-379 posture decision — FAIL-SOFT, documented: when the registry
     build fails (customers read error, pool unavailable, ...) this
-    degrades to PATTERN-ONLY redaction with a structured warning log.
-    Rationale: observability writers sit on live pipeline hot paths
-    (``record_intervention``'s never-raise contract, the error_router /
-    gate / collapse best-effort writers) — a registry outage must not
-    kill a live pipeline, and pattern redaction (phones, email, PAN,
-    Aadhaar, IFSC, GST, CC, long bodies) still runs unconditionally.
+    degrades redaction but never kills the live pipeline. Observability
+    writers sit on live pipeline hot paths (``record_intervention``'s
+    never-raise contract, the error_router / gate / collapse best-effort
+    writers) — a registry outage must not break a live pipeline, and
+    pattern redaction (phones, email, PAN, Aadhaar, IFSC, GST, CC, long
+    bodies) still runs unconditionally.
+
+    VT-386 FAIL-SOFT SPLIT (Fazal-ruled — NOT fail-open, NOT fail-closed):
+    on an outage the writer (a) still writes the row (availability), (b)
+    deterministically strips the KNOWN name-key fields (``customer_name`` /
+    ``owner_name``) to ``<name:registry_down>`` via ``registry_down=True``
+    (no registry needed, zero false-positive), and (c) fires the CRITICAL
+    ``redaction_registry_unavailable`` alert (the §B escalation). The
+    free-text-name residual is now an ALERTED pattern gap, not a silent
+    leak. This replaces the pure fail-OPEN (pattern-only, silent) posture
+    the row was filed against.
 
     CONTRAST — the VT-374 ops API (``api/ops_run_control.py``) is
     fail-CLOSED on the same build: there a human is submitting free text
-    whose persistence is the request itself, so a silent registry no-op
-    would deliberately store under-redacted PII and refusing the request
-    is cheap. Here the row is collateral telemetry; dropping the write or
-    raising into the pipeline is the worse privacy/availability trade.
+    whose persistence is the request itself, so refusing is cheap.
+
+    PII boundary: this emits counts/labels/tenant_id ONLY — the structured
+    log + the §A counter + the §B alert never carry a name/phone/value.
     """
     try:
         # Lazy import: keeps the registry (and its DB wrapper chain) off
         # this module's import path; cached per tenant after first build.
         from orchestrator.privacy.customer_registry import make_name_registry
 
-        return make_name_registry(str(tenant_id))
+        registry = make_name_registry(str(tenant_id))
     except Exception:  # noqa: BLE001 — fail-soft by contract (see docstring)
         logger.warning(
             "pipeline_observability: name-registry build failed; "
-            "falling back to pattern-only redaction",
-            extra={"tenant_id": str(tenant_id), "redaction_mode": "pattern_only"},
+            "fail-soft-split (strip known name-keys + alert) — "
+            "redaction_registry_unavailable",
+            extra={
+                "tenant_id": str(tenant_id),
+                "redaction_mode": "pattern_only_plus_known_key_strip",
+                "event": "redaction_registry_unavailable",
+            },
             exc_info=True,
         )
-        return None
+        # §A: count the per-write build_error (idempotent best-effort).
+        try:
+            from orchestrator.privacy.redaction_health import (
+                RegistryOutcome,
+                record_registry_outcome,
+            )
+
+            record_registry_outcome(str(tenant_id), RegistryOutcome.BUILD_ERROR)
+        except Exception:  # noqa: BLE001 — health telemetry is best-effort
+            logger.debug("redaction_health build_error record failed", exc_info=True)
+        # §B: escalate — fire the CRITICAL alert (best-effort; never break write).
+        _fire_registry_unavailable_alert(tenant_id)
+        return None, True
+
+    return registry, False
+
+
+def _registry_for_tenant(tenant_id: UUID | str) -> Callable[[str], bool] | None:
+    """Back-compat shim — registry-or-None (drops the outage flag).
+
+    Preserved for any caller that only wants the predicate. New write paths
+    use :func:`_registry_for_tenant_with_status` so they can honour the
+    VT-386 fail-soft split.
+    """
+    registry, _down = _registry_for_tenant_with_status(tenant_id)
+    return registry
+
+
+def _fire_registry_unavailable_alert(tenant_id: UUID | str) -> None:
+    """VT-386 §B — dispatch the CRITICAL ``redaction_registry_unavailable`` alert.
+
+    Best-effort + lazy-imported: the alert dispatch path pulls in the DB pool /
+    dispatch chain, which must stay off this module's hot import path AND must
+    never break a live observability write (F9 spirit). Deduped by the existing
+    ``(tenant_id, trigger_kind)`` 5-min window in ``dispatch.py``, so a burst of
+    degraded writes fires at most one alert per window. The message carries
+    COUNTS + tenant_id + window ONLY (PII-free; also re-scrubbed on dispatch).
+    """
+    try:
+        from orchestrator.alerts.dispatch import dispatch_alert
+        from orchestrator.alerts.triggers import build_registry_unavailable_trigger
+
+        trigger = build_registry_unavailable_trigger(
+            tenant_id if isinstance(tenant_id, UUID) else UUID(str(tenant_id))
+        )
+        dispatch_alert(trigger)
+    except Exception:  # noqa: BLE001 — escalation must not break the write
+        logger.warning(
+            "redaction_registry_unavailable alert dispatch failed; "
+            "registry outage still handled fail-soft (known-key strip applied)",
+            extra={"tenant_id": str(tenant_id)},
+            exc_info=True,
+        )
 
 
 def write_step(
@@ -231,29 +325,48 @@ def write_step(
         )
 
     # 3. PII redaction (CL-104; VT-379 — error column + tenant name registry).
-    #    Registry built lazily when the caller did not inject one; fail-soft
-    #    to pattern-only (see _registry_for_tenant for the posture decision).
-    registry = (
-        name_registry if name_registry is not None else _registry_for_tenant(tenant_id)
-    )
+    #    Registry built lazily when the caller did not inject one. VT-386
+    #    fail-soft split: an outage degrades to pattern + KNOWN-NAME-KEY strip
+    #    (registry_down=True → <name:registry_down>) and fires the §B CRITICAL
+    #    alert — never a silent name leak (see _registry_for_tenant_with_status).
+    if name_registry is not None:
+        registry: Callable[[str], bool] | None = name_registry
+        registry_down = False
+    else:
+        registry, registry_down = _registry_for_tenant_with_status(tenant_id)
+    # §A: count the redaction mode actually applied for this write (PII-free).
+    _record_redaction_mode(tenant_id, registry is not None)
     input_envelope_safe = (
-        redact_for_log(input_envelope, name_registry=registry)
+        redact_for_log(
+            input_envelope, name_registry=registry, registry_down=registry_down
+        )
         if input_envelope
         else {}
     )
     output_envelope_safe = (
-        redact_for_log(output_envelope, name_registry=registry)
+        redact_for_log(
+            output_envelope, name_registry=registry, registry_down=registry_down
+        )
         if output_envelope
         else None
     )
     error_safe: dict[str, Any] | None = (
-        redact_for_log(error_dict, name_registry=registry) if error_dict else None
+        redact_for_log(error_dict, name_registry=registry, registry_down=registry_down)
+        if error_dict
+        else None
     )
     # decision_rationale carries agent think_text the callbacks pre-redact PATTERN-ONLY
     # (no registry in their context) — re-redact here with the tenant registry so a bare
     # customer name in short reasoning snippets cannot persist (the VT-379 review catch).
     rationale_safe: str | None = (
-        cast(str, redact_for_log(decision_rationale, name_registry=registry))
+        cast(
+            str,
+            redact_for_log(
+                decision_rationale,
+                name_registry=registry,
+                registry_down=registry_down,
+            ),
+        )
         if decision_rationale is not None
         else None
     )
@@ -401,19 +514,35 @@ def write_redacted_step_row(
     catch-and-log contract (observability must not break recovery).
     RLS enforced via ``tenant_connection`` (CL-122 / Pillar 3).
     """
-    registry = (
-        name_registry if name_registry is not None else _registry_for_tenant(tenant_id)
-    )
+    # VT-386 fail-soft split here too (legacy direct writers): an outage strips
+    # known name-keys + fires the §B alert via _registry_for_tenant_with_status.
+    if name_registry is not None:
+        registry: Callable[[str], bool] | None = name_registry
+        registry_down = False
+    else:
+        registry, registry_down = _registry_for_tenant_with_status(tenant_id)
+    _record_redaction_mode(tenant_id, registry is not None)
     output_safe: dict[str, Any] | None = (
-        redact_for_log(output_envelope, name_registry=registry)
+        redact_for_log(
+            output_envelope, name_registry=registry, registry_down=registry_down
+        )
         if output_envelope
         else None
     )
     error_safe: dict[str, Any] | None = (
-        redact_for_log(error, name_registry=registry) if error else None
+        redact_for_log(error, name_registry=registry, registry_down=registry_down)
+        if error
+        else None
     )
     rationale_safe: str | None = (
-        cast(str, redact_for_log(decision_rationale, name_registry=registry))
+        cast(
+            str,
+            redact_for_log(
+                decision_rationale,
+                name_registry=registry,
+                registry_down=registry_down,
+            ),
+        )
         if decision_rationale is not None
         else None
     )
