@@ -7,6 +7,11 @@ from every send capability — they emit ``template_name + params`` into
 
 The gate stack runs IN ORDER; every gate fails CLOSED with a distinct marker:
 
+  0. tenant ONBOARDED gate (VT-421) — ``tenant_is_sr_eligible``: the tenant must
+     be fully onboarded (phase ∈ ELIGIBLE_PHASES AND verification ≥ gstin_verified
+     AND ≥1 enabled+ok connector AND ≥1 customer). Fail-closed (unknown/NULL/error →
+     skip ``skipped_not_onboarded``). This ONE gate covers BOTH L2 and L3 (both
+     converge here) — SR may only SEND for a fully-onboarded tenant (Fazal HALT).
   1. batch state — ``approved`` (or mid-batch ``sending``) under L2; for L3 the
      batch must be ``auto_send_pending`` (the delivery-anchored hold window). The
      L3 path takes a ``SELECT ... FOR UPDATE`` row lock on the batch and re-checks
@@ -93,6 +98,7 @@ SKIP_SUPPRESSION_30D = "skipped_suppression_30d"
 SKIP_CAP_90D = "skipped_cap_90d"
 SKIP_CAP_L3_DAILY = "skipped_cap_l3_daily"             # VT-384: 50/agent/24h L3 auto-send cap
 SKIP_SIGNATURE_MISMATCH = "skipped_signature_mismatch" # VT-384: registry vs executor variable drift
+SKIP_NOT_ONBOARDED = "skipped_not_onboarded"           # VT-421: Gate 0 — tenant not fully onboarded
 
 _DRAFT_TERMINAL_STATUSES = ("sent", "skipped", "halted")
 
@@ -501,6 +507,19 @@ def agent_send_draft(
             skip_reason=draft["skip_reason"] or "already_terminal",
             batch_status=draft["batch_status"],
         )
+
+    # --- Gate 0: tenant ONBOARDED gate (VT-421) — fail-closed, the SINGLE load-bearing send gate ---
+    # Both L2 (l2_send) and L3 (l3_hold) converge on agent_send_draft, so this ONE check covers BOTH
+    # send paths. SR (detect → approve → win-back SEND) may run ONLY for a fully-onboarded tenant
+    # (Fazal HALT 2026-06-25): a non-onboarded tenant's draft is SKIPPED here, before any Twilio
+    # call (no Gate-6 delegate). Placed ABOVE the gate stack but AFTER the draft-load + terminal +
+    # idempotency early-outs so a terminal/already-sent draft still short-circuits first. The
+    # helper is fail-closed (unknown/NULL/error → False → SKIP). persist=True: non-onboarded is a
+    # stable condition for THIS draft (poison it); a later-onboarded tenant gets a NEW batch.
+    from orchestrator.agents.onboarding_gate import tenant_is_sr_eligible
+
+    if not tenant_is_sr_eligible(tid, conn=conn):
+        return _skip(conn, tid, draft, SKIP_NOT_ONBOARDED, persist=True)
 
     # --- Gate 1: batch state (L2 = Pillar-7 approved; 'sending' = mid-batch;
     # VT-384 L3 = 'auto_send_pending', the delivery-anchored hold window) ---
