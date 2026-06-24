@@ -386,6 +386,80 @@ def test_idempotency_dedup() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Test 8a (VT-387): a cached 'error' row is NOT an idempotent hit — RETRYABLE.
+#
+# The money-adjacent fix: a draft whose send TRANSIENTLY failed cached
+# send_status='error' under the fixed key agent:{draft_id}. With 'error' OUT of
+# _IDEMPOTENT_HIT_STATUSES, a retry within the 24h window re-evaluates the gates
+# and SENDS, instead of echoing the cached error and silently no-opping.
+# ---------------------------------------------------------------------------
+
+def test_errored_row_is_retryable_not_idempotent_hit() -> None:
+    from orchestrator.agent.tools.send_whatsapp_template import send_whatsapp_template
+
+    # A prior attempt cached 'error' under this key, 5 min ago (well inside 24h).
+    errored_idem = {
+        "id": "idem-row-vt387",
+        "message_sid": None,
+        "send_status": "error",
+        "created_at": _now_utc() - timedelta(minutes=5),
+    }
+    send_fn = MagicMock(side_effect=_ok_send_fn)
+    pool, executed = _pool(customer_row=_customer(), idem_row=errored_idem)
+
+    out = send_whatsapp_template(_input(), pool=pool, send_fn=send_fn)
+
+    # The retry SENDS — the cached 'error' did NOT short-circuit it.
+    assert out.status == "sent"
+    assert out.message_sid is not None
+    send_fn.assert_called_once()
+
+    # And the retry wrote a 'sent' ledger row (ON CONFLICT DO NOTHING is harmless
+    # — the key already exists with 'error', but the re-send happened).
+    sql_list = [sql for sql, _ in executed]
+    assert any("INSERT INTO send_idempotency_keys" in s for s in sql_list)
+
+
+def test_errored_row_status_not_in_hit_set() -> None:
+    """Direct guard on the set itself: 'error' is excluded; the deliverable/terminal
+    statuses stay IN so completed sends never re-fire (VT-387)."""
+    from orchestrator.agent.tools.send_whatsapp_template import (
+        _IDEMPOTENT_HIT_STATUSES,
+    )
+
+    assert "error" not in _IDEMPOTENT_HIT_STATUSES
+    # The dedup contract: a genuinely-delivered send ('sent') and the other
+    # non-retryable terminal states STAY hits → never re-processed.
+    assert {"sent", "dry_run", "rate_limited", "unauthorized"} <= _IDEMPOTENT_HIT_STATUSES
+
+
+# ---------------------------------------------------------------------------
+# Test 8b (VT-387 regression guard — LOAD-BEARING): a 'sent' row STAYS an
+# idempotent hit. The no-double-send invariant: a draft that already delivered
+# must NEVER re-send on a retry within the window.
+# ---------------------------------------------------------------------------
+
+def test_sent_row_still_dedups_no_resend() -> None:
+    from orchestrator.agent.tools.send_whatsapp_template import send_whatsapp_template
+
+    sent_idem = {
+        "id": "idem-row-vt387-sent",
+        "message_sid": "MK" + "c" * 30,
+        "send_status": "sent",
+        "created_at": _now_utc() - timedelta(minutes=5),
+    }
+    send_fn = MagicMock(side_effect=_ok_send_fn)
+    pool, _ = _pool(idem_row=sent_idem)
+
+    out = send_whatsapp_template(_input(), pool=pool, send_fn=send_fn)
+
+    # Idempotent hit: returns the cached 'sent' WITHOUT calling send_fn again.
+    assert out.status == "sent"
+    assert out.message_sid == "MK" + "c" * 30
+    send_fn.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
 # Test 9: Opted-out/blocked recipient
 # ---------------------------------------------------------------------------
 
