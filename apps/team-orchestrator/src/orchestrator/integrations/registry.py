@@ -61,8 +61,21 @@ REGISTRY: dict[str, ConnectorSpec] = {
         connector_id="shopify",
         display_name="Shopify",
         category="digital",
-        auth_flow="api_key",
-        auth_scopes=["read_orders", "read_customers", "read_products"],
+        # VT-422 GAP-4: OAuth-install is the CANONICAL public-app path; client_credentials
+        # is the dev/own-store test fallback only. auth_flow declares the canonical path.
+        # (The schema Literal exposes "oauth2" — Shopify's install IS an OAuth2
+        # authorization-code flow — not a bare "oauth"; "oauth2" is the correct value.)
+        auth_flow="oauth2",
+        # VT-422 GAP-0: read + WRITE scopes (single source mirrors connectors/shopify.py
+        # _REQUIRED_SCOPES). write_orders = e2e backdated-seed unblock; write_customers =
+        # future write-agent (Fazal decision pending: both vs write_orders-only).
+        auth_scopes=[
+            "read_orders",
+            "read_customers",
+            "read_products",
+            "write_orders",
+            "write_customers",
+        ],
         auth_walkthrough_url="https://help.shopify.com/en/manual/apps/app-types/custom-apps",
         sample_pull=SamplePullSpec(
             method="rest_paginated",
