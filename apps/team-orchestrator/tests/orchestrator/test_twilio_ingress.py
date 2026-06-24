@@ -183,6 +183,98 @@ def test_unknown_sender_does_not_start_workflow(ingress):
     assert resp.json() == {"workflow_id": None, "reason": "unknown_sender"}
 
 
+# --- VT-416 PR-3: whatsapp_number ambiguity guard (fail-closed) --------------
+#
+# The canonical guarantee is the DB constraint: migration 066's
+# tenants_whatsapp_number_key (partial UNIQUE on whatsapp_number, VT-267 / Fazal
+# D1) makes a duplicate number un-insertable, so the two-match case is
+# schema-impossible via normal inserts (an INSERT of a second tenant on the same
+# number raises UniqueViolation). The _lookup_tenant guard is DEFENCE-IN-DEPTH
+# for a hypothetical future regression that drops the index. We therefore prove
+# the guard's branch by stubbing the pool to return two rows (the only way to
+# reach the ambiguity path without violating the live constraint), and keep a
+# real single-match baseline against the DB.
+
+
+class _FakeCursorResult:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def fetchall(self):
+        return self._rows
+
+
+class _FakeConn:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def execute(self, *_args, **_kwargs):
+        return _FakeCursorResult(self._rows)
+
+
+class _FakePool:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def connection(self):
+        return _FakeConn(self._rows)
+
+
+def test_single_tenant_match_routes_correctly(ingress):
+    """Sanity baseline for the ambiguity guard: exactly one tenant for the
+    number → the happy path is unchanged (workflow starts, reason 'started').
+    Runs against the real DB (single insert is allowed by the unique index)."""
+    phone = _phone()
+    _new_tenant(ingress.dsn, phone)
+    resp = _post(ingress, _fields(phone, Body="hello"))
+    assert resp.status_code == 200
+    assert resp.json()["reason"] == "started"
+    _await_workflow(resp.json()["workflow_id"])
+
+
+def test_lookup_tenant_single_match_returns_id(monkeypatch):
+    """Defence-in-depth unit test: exactly one row → that tenant id (happy path
+    unchanged). Pool stubbed so this needs no DB."""
+    import orchestrator.api.twilio_ingress as ti
+
+    monkeypatch.setattr(ti, "get_pool", lambda: _FakePool([{"id": "tenant-xyz"}]))
+    assert ti._lookup_tenant("+919999900001") == "tenant-xyz"
+
+
+def test_lookup_tenant_returns_none_on_ambiguity(monkeypatch, caplog):
+    """Defence-in-depth unit test: if the lookup ever returns >1 row (a future
+    schema regression dropping tenants_whatsapp_number_key), _lookup_tenant
+    fails CLOSED — returns None and logs an error, NOT a silent newest-wins
+    pick. Pool stubbed to force the (otherwise schema-impossible) two-match."""
+    import logging
+
+    import orchestrator.api.twilio_ingress as ti
+
+    monkeypatch.setattr(
+        ti,
+        "get_pool",
+        lambda: _FakePool([{"id": "tenant-a"}, {"id": "tenant-b"}]),
+    )
+    with caplog.at_level(logging.ERROR, logger="orchestrator.api.twilio_ingress"):
+        result = ti._lookup_tenant("+919999900002")
+    assert result is None, "ambiguous match must NOT resolve to a tenant"
+    assert any("ambiguous whatsapp_number" in r.message for r in caplog.records)
+
+
+def test_lookup_tenant_no_match_returns_none(monkeypatch):
+    """No row → None (unmatched path), unchanged. Pool stubbed; no DB."""
+    import orchestrator.api.twilio_ingress as ti
+
+    monkeypatch.setattr(ti, "get_pool", lambda: _FakePool([]))
+    assert ti._lookup_tenant("+919999900003") is None
+
+
 def test_duplicate_message_sid_short_circuits(ingress):
     phone = _phone()
     _new_tenant(ingress.dsn, phone)
@@ -668,6 +760,121 @@ def test_owner_inputs_extraction_writes_structured_row(ingress, monkeypatch):
     assert composer_row.intent == "winback"
     assert composer_row.segment == "dormant_60d"
     assert composer_row.occasion == "diwali"
+
+
+# --- VT-416 PR-3: per-tenant preferred_language WIRED into state (end-to-end) -
+#
+# PR-3 made the composer READ state['preferred_language'], but nothing populated
+# that key at runtime, so the fix was latent — every tenant hit the global
+# default and a Hindi-preference owner still got English. These tests prove the
+# wiring is LIVE: the runner's _load_preferred_language reads the real tenant
+# row, the runner threads it into SubscriberState exactly as webhook_pipeline_run
+# does, and the real compose_owner_output then renders the Hindi variant. The
+# proof is END-TO-END through the live node — NOT a hand-set state key.
+
+
+def _new_tenant_with_language(
+    dsn: str, whatsapp_number: str, *, preferred_language: str
+) -> str:
+    """Seed a tenant carrying an explicit tenants.preferred_language value."""
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        row = conn.execute(
+            "INSERT INTO tenants (business_name, plan_tier, phase, phase_entered_at, "
+            "whatsapp_number, owner_inputs, preferred_language) "
+            "VALUES ('VT-416 Lang Test', 'founding', 'trial', now(), %s, true, %s) "
+            "RETURNING id",
+            (whatsapp_number, preferred_language),
+        ).fetchone()
+    assert row is not None
+    return str(row[0])
+
+
+def test_load_preferred_language_reads_explicit_hindi_choice(ingress):
+    """The live runner node reads tenants.preferred_language='hi' for a real
+    tenant — the column that the composer's per-tenant resolver consumes."""
+    from orchestrator.runner import _load_preferred_language
+
+    tenant_id = _new_tenant_with_language(
+        ingress.dsn, _phone(), preferred_language="hi"
+    )
+    assert _load_preferred_language(tenant_id) == "hi"
+
+
+def test_load_preferred_language_falls_back_to_language_preference(ingress):
+    """When preferred_language is NULL, the read falls back to the NOT-NULL
+    language_preference column (mirrors get_business_profile's locale rule)."""
+    from orchestrator.runner import _load_preferred_language
+
+    # _new_tenant inserts no preferred_language → column is NULL → fallback to
+    # language_preference (DEFAULT 'en').
+    tenant_id = _new_tenant(ingress.dsn, _phone())
+    assert _load_preferred_language(tenant_id) == "en"
+
+
+def test_load_preferred_language_none_for_missing_tenant(ingress):
+    """A tenant id with no row returns None (best-effort) — the composer then
+    uses its global default. Never raises (dispatch must not break)."""
+    from orchestrator.runner import _load_preferred_language
+
+    assert _load_preferred_language(str(uuid4())) is None
+
+
+def test_hindi_tenant_state_renders_hindi_variant_end_to_end(ingress):
+    """END-TO-END proof of the PR-3 wiring: a Hindi-preference tenant →
+    _load_preferred_language populates SubscriberState exactly as the runner
+    does → the real compose_owner_output returns the Hindi variant.
+
+    This is the load-bearing test: it does NOT hand-set the state key. It runs
+    the LIVE runner read against the real tenant row, threads it into state via
+    new_subscriber_state + the same assignment webhook_pipeline_run performs,
+    then exercises the real composer. Before the wiring this returned 'en'.
+    """
+    from datetime import datetime, timezone
+    from uuid import UUID, uuid4
+
+    from orchestrator.output_composer import compose_owner_output
+    from orchestrator.runner import _load_preferred_language
+    from orchestrator.state import new_subscriber_state
+
+    tenant_id = _new_tenant_with_language(
+        ingress.dsn, _phone(), preferred_language="hi"
+    )
+
+    # Build state the way webhook_pipeline_run does (live node populates the key).
+    state = new_subscriber_state(UUID(tenant_id), uuid4())
+    state["preferred_language"] = _load_preferred_language(tenant_id)
+    assert state["preferred_language"] == "hi", (
+        "live node did not populate the per-tenant language into state"
+    )
+
+    # Real composer (welcome flow, template path) renders the Hindi variant.
+    now = datetime(2026, 6, 24, 12, 0, tzinfo=timezone.utc)
+    out = compose_owner_output(None, state, "welcome", now=now)
+    assert out.preferred_language == "hi", (
+        "Hindi-owner bug NOT closed: composer rendered English for a hi tenant"
+    )
+
+
+def test_english_tenant_state_renders_english_variant_end_to_end(ingress):
+    """Sibling of the Hindi proof — an 'en' tenant resolves to the English
+    variant through the same live path (no accidental Hindi spillover)."""
+    from datetime import datetime, timezone
+    from uuid import UUID, uuid4
+
+    from orchestrator.output_composer import compose_owner_output
+    from orchestrator.runner import _load_preferred_language
+    from orchestrator.state import new_subscriber_state
+
+    tenant_id = _new_tenant_with_language(
+        ingress.dsn, _phone(), preferred_language="en"
+    )
+    state = new_subscriber_state(UUID(tenant_id), uuid4())
+    state["preferred_language"] = _load_preferred_language(tenant_id)
+    assert state["preferred_language"] == "en"
+
+    now = datetime(2026, 6, 24, 12, 0, tzinfo=timezone.utc)
+    out = compose_owner_output(None, state, "welcome", now=now)
+    assert out.preferred_language == "en"
 
 
 def test_ingress_resilient_on_classifier_failure(ingress, monkeypatch):

@@ -57,6 +57,53 @@ def _brain_owner_inputs_ok(tenant_id: str) -> bool:
         return False
 
 
+def _load_preferred_language(tenant_id: str) -> str | None:
+    """VT-416 PR-3 wiring — read the tenant's WhatsApp language preference.
+
+    Resolves ``tenants.preferred_language ?? language_preference`` under the
+    tenant_connection (RLS-scoped), so the per-tenant value reaches
+    ``SubscriberState['preferred_language']`` and the output_composer renders
+    the right-language template variant (a Hindi-preference owner gets the
+    Hindi variant — the bug PR-3 made latent, now LIVE). Column semantics
+    mirror ``get_business_profile``'s locale resolution (mig 001):
+    ``preferred_language`` (nullable, the explicit per-tenant choice) wins,
+    else ``language_preference`` (NOT NULL DEFAULT 'en').
+
+    Best-effort: returns ``None`` on ANY read failure (missing row, DB error)
+    — the composer then falls back to its global ``TENANT_DEFAULT_LANGUAGE``
+    default, so a language-read hiccup NEVER breaks dispatch. Returning the
+    raw column value (not normalised here) keeps this read dumb; the composer
+    owns 'en'/'hi' validation + the fallback.
+    """
+    try:
+        with tenant_connection(tenant_id) as conn:
+            row = conn.execute(
+                "SELECT preferred_language, language_preference "
+                "FROM tenants WHERE id = %s LIMIT 1",
+                (tenant_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        # The shared pool uses ``row_factory=dict_row`` (graph.get_pool), so the
+        # row is keyed by column name; tolerate a tuple row too (raw connections).
+        if isinstance(row, dict):
+            preferred, language_pref = (
+                row.get("preferred_language"),
+                row.get("language_preference"),
+            )
+        else:
+            preferred, language_pref = row[0], row[1]
+        return preferred or language_pref or None
+    except Exception as exc:  # noqa: BLE001 — language read is best-effort
+        logger.warning(
+            "VT-416: preferred_language read failed (tenant=%s); "
+            "composer will use the global default",
+            tenant_id,
+            extra={"exc": repr(exc)},
+        )
+        return None
+
+
 @DBOS.step()
 def open_run(tenant_id: str, run_id: str) -> None:
     """Record the run as started. Idempotent (ON CONFLICT) so recovery is safe."""
@@ -556,6 +603,13 @@ def webhook_pipeline_run(tenant_id: str, run_id: str, twilio_fields: dict) -> di
     newly_inserted = record_inbound_message_sid(tenant_id, message_sid)
     event = build_webhook_event(twilio_fields, dupe_status=not newly_inserted)
     state = new_subscriber_state(UUID(tenant_id), UUID(run_id))
+    # VT-416 PR-3 wiring — thread the tenant's language preference INTO state so
+    # the output_composer's per-tenant resolver activates live (without this the
+    # key is always absent → composer hits the global TENANT_DEFAULT_LANGUAGE
+    # fallback for EVERY tenant, so a Hindi-preference owner silently got English).
+    # Additive + best-effort: a read failure leaves the key absent and the
+    # composer falls back to the global default — dispatch is never blocked.
+    state["preferred_language"] = _load_preferred_language(tenant_id)
 
     # Phone-tokenise before anything is persisted (Pillar 3 / Pillar 7).
     # Body-key redaction lives at the persistence boundary inside
