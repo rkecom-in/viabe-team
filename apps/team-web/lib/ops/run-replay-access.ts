@@ -50,6 +50,23 @@ export function hasFullReadAccess(assignedTenants: string[] | null): boolean {
   return assignedTenants === null
 }
 
+/**
+ * True iff this operator may use the `q` free-text history search. ONLY VTAdmin /
+ * Fazal (assignedTenants === null) — the SAME role boundary as hasFullReadAccess.
+ *
+ * Why a VTR is denied `q` (VT-412 PR-D adversarial-review, Finding 1): the search
+ * runs `.textSearch('envelope_search_tsv', q)` against a tsvector built from RAW
+ * input_envelope || output_envelope text (migrations/038), BEFORE de-identification
+ * — de-id is applied to result ROWS after the query. So even though every returned
+ * row is de-identified, a VTR could use result-set MEMBERSHIP as an oracle
+ * (q=<customer-name> / q=<phone> ⇒ rows ⇒ "that token is present in my assigned
+ * tenants' raw data"). Dropping `q` for a VTR closes that oracle; tenant-scoping +
+ * row de-id are unaffected. Role resolved server-side from the same operator object
+ * the route already gates on — never a client flag. */
+export function canUseFreeTextSearch(assignedTenants: string[] | null): boolean {
+  return assignedTenants === null
+}
+
 /** Reduce an arbitrary envelope to its top-level KEY NAMES only — what a step
  *  carried, never to-what. Mirrors the vtr_step_timeline default branch
  *  (keys-only for non-audited kinds); applied to ALL kinds here so this TS

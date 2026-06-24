@@ -246,6 +246,76 @@ def test_unregistered_single_token_survives() -> None:
 
 
 # ---------------------------------------------------------------------------
+# 6c. VT-412 PR-D (adversarial-review Finding 2) — glued-name tokenization.
+# The pre-fix scan did `text.split(" ")` (literal space only) and stripped
+# punctuation only at token boundaries, so a registered name GLUED to adjacent
+# text by a tab/newline, an interior comma/period/slash, an em/en-dash, or a
+# non-breaking space (U+00A0) survived into agent think-text and reached a VTR's
+# run replay. The tokenizer now splits on ALL whitespace (NBSP included) AND
+# interior punctuation flanked by word chars, so the glued name is caught.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("text", "glue_desc"),
+    [
+        ("escalation: Lakshmi\tDevi waiting", "tab between name parts"),
+        ("note Lakshmi\nDevi pending", "newline between name parts"),
+        ("order for Lakshmi\xa0Devi today", "non-breaking space (U+00A0) between parts"),
+        ("ticket Lakshmi,Devi opened", "interior comma between parts"),
+    ],
+)
+def test_two_token_name_glued_by_non_space_whitespace_or_comma_redacted(
+    text: str, glue_desc: str
+) -> None:
+    """A 2-token registered name glued by a tab / newline / NBSP / interior comma
+    is still matched as the whole name (split on all whitespace + interior glue)."""
+    registry = _casefold_registry("Lakshmi Devi")
+    out = redact(text, name_registry=registry)
+    assert "Lakshmi" not in out, f"{glue_desc}: first name leaked"
+    assert "Devi" not in out, f"{glue_desc}: surname leaked"
+    assert "<customer_name>" in out
+
+
+@pytest.mark.parametrize(
+    ("text", "glue_desc"),
+    [
+        ("status Lakshmi.called back", "interior period (name glued to next word)"),
+        ("status Lakshmi\ncalled back", "newline (name glued to next word)"),
+        ("status Lakshmi—urgent now", "em-dash (name glued to next word)"),
+        ("status Lakshmi/queue now", "slash (name glued to next word)"),
+        ("status Lakshmi\xa0now please", "NBSP (name glued to next word)"),
+    ],
+)
+def test_mononym_glued_to_adjacent_word_redacted(text: str, glue_desc: str) -> None:
+    """A registered MONONYM glued to a NON-name word by interior punctuation /
+    non-space whitespace / NBSP is split out and redacted; the adjacent word
+    survives verbatim."""
+    registry = _casefold_registry("Lakshmi")
+    out = redact(text, name_registry=registry)
+    assert "Lakshmi" not in out, f"{glue_desc}: name leaked"
+    assert "<customer_name>" in out
+
+
+def test_glued_name_no_false_positive_on_legitimate_text() -> None:
+    """The new interior-punctuation split must NOT redact ordinary punctuated text
+    that contains no registered name — exact-match registry, so a non-name token
+    glued by a comma/period/dash/slash/NBSP is reconstructed byte-for-byte."""
+    registry = _casefold_registry("Lakshmi")
+    text = "invoice#1234, total/amount due—paid;\xa0see notes.next-step"
+    out = redact(text, name_registry=registry)
+    assert out == text  # no registered name present ⇒ unchanged, separators intact
+
+
+def test_glued_name_surrounding_words_byte_exact_after_redaction() -> None:
+    """When a glued mononym IS redacted, the adjacent NON-name text (including the
+    glue punctuation between it and the next word) is preserved verbatim."""
+    registry = _casefold_registry("Lakshmi")
+    out = redact("re: Lakshmi.called the owner back", name_registry=registry)
+    assert out == "re: <customer_name>.called the owner back"
+
+
+# ---------------------------------------------------------------------------
 # 7. Recursive structures + max depth
 # ---------------------------------------------------------------------------
 

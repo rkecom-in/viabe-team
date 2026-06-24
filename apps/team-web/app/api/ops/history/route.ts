@@ -23,6 +23,7 @@ import { UnauthorizedError } from '@/lib/auth/require-fazal'
 import { requireOpsOperator } from '@/lib/auth/require-ops-operator'
 import { fetchHistoricalSteps } from '@/lib/ops/data-access'
 import {
+  canUseFreeTextSearch,
   deIdentifyStepForVtr,
   hasFullReadAccess,
   scopeHistoryTenantFilter,
@@ -71,6 +72,15 @@ export async function GET(req: NextRequest): Promise<Response> {
     return NextResponse.json({ rows: [], next_cursor: null })
   }
 
+  // VT-412 PR-D (Finding 1) — the `q` free-text search runs against the RAW
+  // envelope tsvector (envelope_search_tsv, migrations/038) BEFORE de-id, so for a
+  // VTR it would be a result-set membership ORACLE over un-de-identified text even
+  // though returned rows are de-identified. DROP `q` for a VTR; VTAdmin/Fazal keep
+  // it. Role resolved server-side from the gated operator — never a client flag.
+  const q = canUseFreeTextSearch(operator.assignedTenants)
+    ? (sp.get('q') ?? undefined)
+    : undefined
+
   const result = await fetchHistoricalSteps({
     date,
     hour,
@@ -78,7 +88,7 @@ export async function GET(req: NextRequest): Promise<Response> {
     tenantIds,
     stepKinds: sp.get('step_kinds')?.split(',').filter(Boolean),
     statuses: sp.get('statuses')?.split(',').filter(Boolean),
-    q: sp.get('q') ?? undefined,
+    q,
     limit,
   })
 

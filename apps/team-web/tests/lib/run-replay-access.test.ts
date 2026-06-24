@@ -19,6 +19,7 @@ import { describe, expect, it } from 'vitest'
 import type { PipelineStepRow } from '@/lib/ops/data-access'
 import {
   canReplayRun,
+  canUseFreeTextSearch,
   deIdentifyStepForVtr,
   envelopeKeysOnly,
   hasFullReadAccess,
@@ -68,6 +69,24 @@ describe('VT-412 (b) — a VTR NOT assigned to tenant B is DENIED (the IDOR boun
     const out = scopeHistoryTenantFilter(VTR_ASSIGNED_A, [TENANT_A, TENANT_B])
     expect(out.tenantIds).toEqual([TENANT_A])
     expect(out.denied).toBe(false)
+  })
+})
+
+describe('VT-412 PR-D (Finding 1) — the `q` free-text search oracle is VTAdmin-only', () => {
+  // The `q` search runs against the RAW envelope tsvector (envelope_search_tsv,
+  // migrations/038) BEFORE de-id, so for a VTR it would be a result-set MEMBERSHIP
+  // oracle even though returned rows are de-identified. Only VTAdmin/Fazal keep `q`.
+  it('a VTR (assigned set) may NOT use the q oracle', () => {
+    expect(canUseFreeTextSearch(VTR_ASSIGNED_A)).toBe(false)
+  })
+  it('a VTR with an EMPTY assigned set still may NOT use q (fail-closed, non-null)', () => {
+    expect(canUseFreeTextSearch([])).toBe(false)
+  })
+  it('VTAdmin / Fazal (null) KEEP q — same boundary as the full read path', () => {
+    expect(canUseFreeTextSearch(VTADMIN)).toBe(true)
+    // The q gate tracks the full-read gate exactly (both = "assignedTenants === null").
+    expect(canUseFreeTextSearch(VTADMIN)).toBe(hasFullReadAccess(VTADMIN))
+    expect(canUseFreeTextSearch(VTR_ASSIGNED_A)).toBe(hasFullReadAccess(VTR_ASSIGNED_A))
   })
 })
 
