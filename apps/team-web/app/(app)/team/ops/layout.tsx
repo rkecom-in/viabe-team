@@ -41,12 +41,14 @@ export default async function OpsLayout({ children }: { children: ReactNode }) {
   }
 
   return (
-    <section data-area="team-ops">
+    <section data-area="team-ops" className="min-h-screen bg-gray-50 text-gray-900">
       <StickyBannerLive initialCounts={counts} />
       <OverlayProvider>
-        <div data-ops-shell style={{ display: 'flex', gap: '1rem' }}>
+        <div data-ops-shell className="flex gap-0">
           {role && <OpsSideNav role={role} />}
-          <div data-ops-main style={{ flex: 1 }}>{children}</div>
+          <div data-ops-main className="min-w-0 flex-1">
+            {children}
+          </div>
         </div>
       </OverlayProvider>
     </section>
