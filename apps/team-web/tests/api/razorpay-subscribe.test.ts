@@ -45,7 +45,7 @@ beforeEach(() => {
   tokenMock.mockReset()
   fwdMock.mockReset()
   // FAZAL_TENANT_ID is set in the env to PROVE the route no longer reads it (no fallback):
-  // an unauth/no-token call must 503, never silently bill this tenant.
+  // an unauth/no-token call must 401, never silently bill this tenant.
   process.env.FAZAL_TENANT_ID = FAZAL_TENANT
   sessionMock.mockRejectedValue(new OwnerUnauthorizedError('no session')) // default: no portal session
   fwdMock.mockResolvedValue({ ok: true, status: 'created', razorpaySubscriptionId: 'sub_x' })
@@ -90,13 +90,15 @@ describe('Razorpay subscribe — 2-path auth resolver (VT-91; VT-416 PR-1 droppe
     expect(forwardedTenants).not.toContain(FAZAL_TENANT)
   })
 
-  it('VT-416: unauth/no-token call 503s — the path-3 FAZAL_TENANT_ID fallback is GONE (no silent Fazal bill)', async () => {
+  it('VT-416: unauth/no-token call 401s — the path-3 FAZAL_TENANT_ID fallback is GONE (no silent Fazal bill)', async () => {
     // No portal session (default) and no deep-link token. Pre-VT-416 this fell through to
-    // requireFazal()+FAZAL_TENANT_ID and could bill Fazal's tenant. Now it must fail closed.
+    // requireFazal()+FAZAL_TENANT_ID and could bill Fazal's tenant. Now it fails closed as
+    // an unauthenticated caller — 401 (Cowork gate ruling: 401 is the accurate semantic;
+    // 503 would false-signal "service DOWN" to monitoring).
     const res = await POST(req({ plan_tier: 'pro' }))
-    expect(res.status).toBe(503)
+    expect(res.status).toBe(401)
     const body = (await res.json()) as { ok: boolean; reason: string }
-    expect(body).toEqual({ ok: false, reason: 'tenant_not_configured' })
+    expect(body).toEqual({ ok: false, reason: 'unauthorized' })
     // The critical assertion: NOTHING was forwarded — Fazal's tenant is never billed.
     expect(fwdMock).not.toHaveBeenCalled()
   })
