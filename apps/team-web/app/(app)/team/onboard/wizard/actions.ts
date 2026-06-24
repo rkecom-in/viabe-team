@@ -3,14 +3,19 @@
 /**
  * VT-267 PR-C — owner wizard server actions.
  *
- * Each action authenticates the owner session (requireFazal) before doing anything, and
- * resolves the tenant SERVER-SIDE from FAZAL_TENANT_ID (Phase-1; no client tenant field).
+ * VT-415 (owner-auth cutover): each action authenticates the OWNER session
+ * (requireOwnerSession) AND resolves the tenant from that same session in one
+ * call — the returned `tenantId` is the only tenant the action ever scopes to.
+ * It is NEVER read from FAZAL_TENANT_ID and NEVER taken from a client argument
+ * (the client `OnboardingWizard` passes only the connector / edits — no tenant
+ * field; IDOR caught twice VT-293/294). A signed-in owner therefore reaches
+ * ONLY their own tenant's onboarding draft/state.
  * - saveProfileAction: persist Review-&-Confirm edits (MERGE via the orchestrator).
  * - startConnectAction: get the provider authorize URL to open in the SYSTEM browser (handoff).
  * - checkConnectionAction: the resume signal after the owner returns from the system browser.
  */
 
-import { requireFazal } from '@/lib/auth/require-fazal'
+import { requireOwnerSession } from '@/lib/auth/require-owner-session'
 import {
   checkConnection,
   startConnect,
@@ -24,27 +29,23 @@ import {
   type SaveProfileResult,
 } from '@/lib/onboard/profile'
 
-function _tenantId(): string {
-  return process.env.FAZAL_TENANT_ID ?? ''
-}
-
 export async function saveProfileAction(
   edits: Partial<Record<EditableField, string>>,
 ): Promise<SaveProfileResult> {
-  await requireFazal()
-  return saveProfileEdits(_tenantId(), edits)
+  const { tenantId } = await requireOwnerSession()
+  return saveProfileEdits(tenantId, edits)
 }
 
 export async function startConnectAction(
   connector: WizardConnector,
 ): Promise<StartConnectResult> {
-  await requireFazal()
-  return startConnect(_tenantId(), connector)
+  const { tenantId } = await requireOwnerSession()
+  return startConnect(tenantId, connector)
 }
 
 export async function checkConnectionAction(
   connector: WizardConnector,
 ): Promise<ConnectionStatus> {
-  await requireFazal()
-  return checkConnection(_tenantId(), connector)
+  const { tenantId } = await requireOwnerSession()
+  return checkConnection(tenantId, connector)
 }

@@ -9,20 +9,27 @@
 import { redirect } from 'next/navigation'
 import { NextResponse } from 'next/server'
 
-import { requireFazal, UnauthorizedError } from '@/lib/auth/require-fazal'
+import { OwnerUnauthorizedError, requireOwnerSession } from '@/lib/auth/require-owner-session'
 import { forwardOnboardStep } from '@/lib/orchestrator-client'
 
 export async function POST(request: Request): Promise<Response> {
+  // VT-415: gated on the OWNER session; the tenant is derived SERVER-SIDE from
+  // that session (never FAZAL_TENANT_ID, never a client field). An unauthed
+  // POST bounces to the OWNER login (this is a same-origin form submit that
+  // redirects back to the onboard page on success).
+  let tenantId: string
   try {
-    await requireFazal()
+    ;({ tenantId } = await requireOwnerSession())
   } catch (err) {
-    if (err instanceof UnauthorizedError) {
-      return NextResponse.redirect(new URL('/login', request.url), { status: 303 })
+    if (err instanceof OwnerUnauthorizedError) {
+      return NextResponse.redirect(
+        new URL('/team/login?next=/team/onboard', request.url),
+        { status: 303 },
+      )
     }
     throw err
   }
 
-  const tenantId = process.env.FAZAL_TENANT_ID ?? ''
   if (!tenantId) {
     return NextResponse.json(
       { ok: false, reason: 'tenant_not_configured' },

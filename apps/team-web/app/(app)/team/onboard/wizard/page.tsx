@@ -3,14 +3,15 @@
  *
  * Renders inside the WhatsApp in-app browser (full-page, no popups). Steps: review the
  * draft business_profile (edit states) → connect Google Sheets + WhatsApp (OAuth hands off to
- * the SYSTEM browser, then re-check to resume). Auth: owner session (requireFazal); tenant
- * resolved server-side (FAZAL_TENANT_ID, Phase-1).
+ * the SYSTEM browser, then re-check to resume).
+ *
+ * VT-415 (owner-auth cutover): gated on the OWNER session (requireOwnerSession); the tenant is
+ * resolved SERVER-SIDE from that session — never FAZAL_TENANT_ID, never a client field.
  */
 
 import { redirect } from 'next/navigation'
 
-import { UnauthorizedError } from '@/lib/auth/require-fazal'
-import { requireFazal } from '@/lib/auth/require-fazal'
+import { OwnerUnauthorizedError, requireOwnerSession } from '@/lib/auth/require-owner-session'
 import { OnboardingWizard } from '@/components/onboard/onboarding-wizard'
 import { checkConnection, type ConnectionStatus } from '@/lib/onboard/connect'
 import { fetchProfileDraft, type ProfileDraft } from '@/lib/onboard/profile'
@@ -18,21 +19,19 @@ import { fetchProfileDraft, type ProfileDraft } from '@/lib/onboard/profile'
 export const dynamic = 'force-dynamic'
 
 export default async function OnboardWizardPage() {
+  let tenantId: string
   try {
-    await requireFazal()
+    ;({ tenantId } = await requireOwnerSession())
   } catch (err) {
-    if (err instanceof UnauthorizedError) redirect('/team/ops/login?next=/team/onboard/wizard')
+    if (err instanceof OwnerUnauthorizedError) redirect('/team/login?next=/team/onboard/wizard')
     throw err
   }
 
-  const tenantId = process.env.FAZAL_TENANT_ID ?? ''
   if (!tenantId) {
     return (
       <main data-area="onboard-wizard-degraded" className="p-6">
         <h1 className="text-2xl font-semibold">Onboarding unavailable</h1>
-        <p>
-          <code>FAZAL_TENANT_ID</code> is not configured.
-        </p>
+        <p>We couldn&apos;t resolve your business from your session. Sign in again.</p>
       </main>
     )
   }
