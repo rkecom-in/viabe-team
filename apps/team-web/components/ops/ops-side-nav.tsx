@@ -20,6 +20,7 @@ interface NavItem {
 
 const NAV: NavItem[] = [
   { href: '/team/ops', label: 'Home / Triage', vt: 'VT-290' },
+  { href: '/team/ops/tenants', label: 'Tenants', vt: 'VT-412' },
   { href: '/team/ops/fleet', label: 'Fleet', vt: 'VT-291' },
   { href: '/team/ops/escalations', label: 'Escalations', vt: 'VT-292' },
   { href: '/team/ops/activity', label: 'Activity', vt: 'VT-293' },
