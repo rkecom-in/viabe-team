@@ -535,6 +535,22 @@ def try_resume_pending_approval(tenant_id: str, body: str, message_sid: str | No
     # lifecycle and picks the batch status up on its next deterministic step), so
     # resume_run/close_webhook_run are campaign-path-only.
     if approval.get("approval_type") == "agent_customer_send":
+        # VT-418 — the L2 owner-approve→send DRIVER arm seam. The approval-resolution
+        # transaction ABOVE has committed the batch flip to 'approved' (approval_glue
+        # apply_agent_decision). On an APPROVED resolution, start the durable send workflow
+        # NOW that the flip is durable (start-after-commit — starting inside the resolve txn
+        # would orphan a workflow on a rollback; mirrors the L3 arm's start-after-flip). Only
+        # 'approved' drives a send; needs_changes/rejected/cancelled flip the batch to a
+        # non-sendable state and the helper's 'status=approved' guard makes them safe no-ops.
+        # The start is idempotent on the l2_send_{batch_id} workflow-id (a redelivered
+        # owner-reply cannot spawn two drivers) and errors are swallowed (the reconciler sweep
+        # is the recovery seam) — the owner-reply path must never fail on the arm.
+        if decision == "approved":
+            from orchestrator.agents.l2_send import (
+                start_l2_send_for_resolved_approval,
+            )
+
+            start_l2_send_for_resolved_approval(str(tenant_id), str(approval["id"]))
         logger.info(
             "approval-resume: resolved (agent surface, durable-state) tenant=%s "
             "approval=%s decision=%s",

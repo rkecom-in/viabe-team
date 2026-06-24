@@ -814,6 +814,17 @@ def register_scheduled_triggers() -> None:
     # VT-382: daily outbox-redaction backfill/backstop sweep (CL-437 ruling 3.3).
     # EXTENDS this surface (same register-before-launch posture), NOT a parallel poller.
     DBOS.scheduled(OUTBOX_REDACTION_SWEEP_CRON)(outbox_redaction_sweep_scheduled)
+    # VT-418: the L2 owner-approve→send reconciler sweep — recovery-only (heals the
+    # crash-between-commit-and-start residual where the runner's post-commit start_l2_send
+    # never ran). Idempotent on the l2_send_{batch_id} workflow-id; the per-draft ledger
+    # dedup makes a genuine re-drive no-double-send. EXTENDS this surface (same
+    # register-before-launch posture), NOT a parallel poller.
+    from orchestrator.agents.l2_send import (
+        L2_APPROVED_SEND_SWEEP_CRON,
+        l2_approved_send_sweep_scheduled,
+    )
+
+    DBOS.scheduled(L2_APPROVED_SEND_SWEEP_CRON)(l2_approved_send_sweep_scheduled)
     _registered = True
 
 
