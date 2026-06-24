@@ -244,6 +244,13 @@ def _seed_profile_tenant(dsn: str) -> str:
             "'{\"about\":{\"source\":\"website\"},\"rating\":{\"source\":\"gbp\"}}'::jsonb)",
             (tid,),
         )
+        # owner_name lives in the canonical business_profile entity (signup-merged), NOT
+        # tenants.owner_contact (VT-405 Part B owner_name fix, mig 138).
+        conn.execute(
+            "INSERT INTO l1_entities (tenant_id, entity_type, attributes) VALUES "
+            "(%s, 'business_profile', '{\"owner_name\":\"Prakash\"}'::jsonb)",
+            (tid,),
+        )
     return tid
 
 
@@ -266,7 +273,7 @@ def test_vtr_tenant_profile_scoped_masked_non_pii(substrate, monkeypatch):
     assert p["business_name"] == "VT-405 Biz"
     assert p["whatsapp_last4"] == "3598"  # masked at the view
     assert "whatsapp_number" not in p  # the raw PII column never surfaces
-    assert p["owner_name"] == "Asha Owner"
+    assert p["owner_name"] == "Prakash"  # from the business_profile entity (mig 138), not owner_contact
     assert p["draft_attributes"]["rating"] == 4.7
     assert p["draft_provenance"]["about"]["source"] == "website"
     assert set(p) == {
@@ -274,8 +281,10 @@ def test_vtr_tenant_profile_scoped_masked_non_pii(substrate, monkeypatch):
         "city_tier", "language_preference", "preferred_language", "signed_up_at", "trial_started_at",
         "phase_entered_at", "owner_name", "whatsapp_last4", "draft_attributes", "draft_provenance",
         "draft_created_at", "draft_updated_at", "onboarding_status", "onboarding_queue_len",
-        "confirmed_fields",
+        "confirmed_fields", "field_provenance",
     }
+    # confirmed_fields = the entity's keys (owner_name from signup), excluding _field_provenance.
+    assert "owner_name" in (p["confirmed_fields"] or [])
 
 
 def test_vtr_tenant_profile_unassigned_403(substrate, monkeypatch):
@@ -295,3 +304,86 @@ def test_vtr_tenant_profile_unassigned_403(substrate, monkeypatch):
             x_operator_jwt=_op_jwt(op),
         )
     assert exc.value.status_code == 403
+
+
+# --- VT-405 Part B: vtr_confirm_field (CL-441 — all fields VTR-confirmable) -----------------------
+
+
+def test_vtr_confirm_field_promotes_with_provenance_and_audit(substrate, monkeypatch):
+    """A VTR confirm promotes the SERVER-READ draft value into the canonical entity, stamps
+    _field_provenance[field].source='vtr', and writes ONE ops_audit row (field name only).
+    The client never supplies the value (IDOR-safe)."""
+    _env(monkeypatch)
+    from psycopg.rows import dict_row
+
+    from orchestrator.api.ops_vtr_console import VtrConfirmFieldBody, vtr_confirm_field
+
+    tid = _seed_profile_tenant(substrate)  # draft has about='a shop', rating=4.7
+    op = str(uuid4())
+    _assign(substrate, op, tid)
+    out = vtr_confirm_field(
+        VtrConfirmFieldBody(operator_id=op, tenant_id=tid, field="about", basis="looks right"),
+        x_internal_secret=_SECRET,
+        x_operator_jwt=_op_jwt(op),
+    )
+    assert out == {"ok": True, "field": "about", "status": "vtr_confirmed"}
+
+    with psycopg.connect(substrate, autocommit=True, row_factory=dict_row) as conn:
+        attrs = conn.execute(
+            "SELECT attributes FROM l1_entities WHERE tenant_id=%s AND entity_type='business_profile' "
+            "AND valid_to IS NULL",
+            (tid,),
+        ).fetchone()["attributes"]
+        assert attrs["about"] == "a shop"  # the server-read draft value, promoted
+        assert attrs["_field_provenance"]["about"]["source"] == "vtr"
+        assert attrs["_field_provenance"]["about"]["confirmed_by"] == op
+        assert "owner_name" in attrs  # the pre-existing signup field survives the merge
+        n = conn.execute(
+            "SELECT count(*) AS c FROM ops_audit WHERE tenant_id=%s AND action='vtr_profile_confirm' "
+            "AND target_kind='business_profile'",
+            (tid,),
+        ).fetchone()["c"]
+        assert n == 1
+
+
+def test_vtr_confirm_field_identity_allowed_and_unknown_404(substrate, monkeypatch):
+    """CL-441: identity fields (e.g. business_name) ARE confirmable — no owner-only 403. A field not
+    in the discovered draft is a 404."""
+    _env(monkeypatch)
+    from fastapi import HTTPException
+    from psycopg.rows import dict_row
+
+    from orchestrator.api.ops_vtr_console import VtrConfirmFieldBody, vtr_confirm_field
+
+    tid = _seed_profile_tenant(substrate)
+    op = str(uuid4())
+    _assign(substrate, op, tid)
+    # add an identity field to the draft
+    with psycopg.connect(substrate, autocommit=True) as conn:
+        conn.execute(
+            "UPDATE business_profile_draft SET attributes = attributes || "
+            "'{\"business_name\":\"Sundaram\"}'::jsonb WHERE tenant_id=%s",
+            (tid,),
+        )
+    out = vtr_confirm_field(
+        VtrConfirmFieldBody(operator_id=op, tenant_id=tid, field="business_name"),
+        x_internal_secret=_SECRET,
+        x_operator_jwt=_op_jwt(op),
+    )
+    assert out["status"] == "vtr_confirmed"  # identity confirmable (CL-441)
+    with psycopg.connect(substrate, autocommit=True, row_factory=dict_row) as conn:
+        attrs = conn.execute(
+            "SELECT attributes FROM l1_entities WHERE tenant_id=%s AND entity_type='business_profile' "
+            "AND valid_to IS NULL",
+            (tid,),
+        ).fetchone()["attributes"]
+        assert attrs["business_name"] == "Sundaram"
+        assert attrs["_field_provenance"]["business_name"]["source"] == "vtr"
+
+    with pytest.raises(HTTPException) as exc:
+        vtr_confirm_field(
+            VtrConfirmFieldBody(operator_id=op, tenant_id=tid, field="not_a_discovered_field"),
+            x_internal_secret=_SECRET,
+            x_operator_jwt=_op_jwt(op),
+        )
+    assert exc.value.status_code == 404

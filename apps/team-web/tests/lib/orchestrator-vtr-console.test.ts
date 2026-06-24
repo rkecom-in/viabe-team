@@ -69,13 +69,14 @@ function jwtPayload(token: string): Record<string, number | string | boolean> {
 }
 
 describe('VT-370 — every fn rides the JWT-bearing template with the 5-min TTL', () => {
-  it('sends X-Internal-Secret + a SHORT-LIVED X-Operator-Jwt naming the operator, on all 8', async () => {
+  it('sends X-Internal-Secret + a SHORT-LIVED X-Operator-Jwt naming the operator, on all 9', async () => {
     const c = await client()
     const invocations: [string, () => Promise<unknown>][] = [
       ['vtr-plan', () => c.vtrPlan(OP, 't1')],
       ['vtr-plan-edit', () => c.vtrPlanEdit(OP, 't1', 'i1', { why: 'x' }, 3)],
       ['vtr-agent-state', () => c.vtrAgentState(OP, 't1')],
       ['vtr-tenant-profile', () => c.vtrTenantProfile(OP, 't1')],
+      ['vtr-confirm-field', () => c.vtrConfirmField(OP, 't1', 'about')],
       ['vtr-draft-batches', () => c.vtrDraftBatches(OP, 't1')],
       ['vtr-autonomy-override', () => c.vtrAutonomyOverride(OP, 't1', 'reputation', 'freeze', 'r')],
       ['vtr-batch-cancel', () => c.vtrBatchCancel(OP, 'b1', 'r')],
@@ -191,6 +192,32 @@ describe('VT-405 — vtrTenantProfile read fails closed', () => {
     expect(ok.profile?.whatsapp_last4).toBe('3598')
     stubStatus(403)
     expect(await c.vtrTenantProfile(OP, 't1')).toEqual({ ok: false, profile: null, reason: 'http_403' })
+  })
+})
+
+describe('VT-405 Part B — vtrConfirmField promotes one field (value server-read)', () => {
+  it('200 → ok + field + status; body carries field + basis, NOT a value', async () => {
+    const c = await client()
+    const f = stub200({ ok: true, field: 'about', status: 'vtr_confirmed' })
+    const out = await c.vtrConfirmField(OP, 't1', 'about', 'looked legit')
+    expect(out).toEqual({ ok: true, field: 'about', status: 'vtr_confirmed', reason: 'ok' })
+    const { body } = call(f)
+    expect(body.tenant_id).toBe('t1')
+    expect(body.field).toBe('about')
+    expect(body.basis).toBe('looked legit')
+    // The client never sends a value — only the field NAME (PII/IDOR boundary).
+    expect(body).not.toHaveProperty('value')
+  })
+
+  it('400 → invalid_field; 403 → forbidden; 404 → not_found; fails closed', async () => {
+    const c = await client()
+    stubStatus(400)
+    expect((await c.vtrConfirmField(OP, 't1', '_field_provenance')).reason).toBe('invalid_field')
+    stubStatus(403)
+    expect((await c.vtrConfirmField(OP, 't1', 'about')).reason).toBe('forbidden')
+    stubStatus(404)
+    expect((await c.vtrConfirmField(OP, 't1', 'about')).reason).toBe('not_found')
+    expect((await c.vtrConfirmField(OP, 't1', 'about')).ok).toBe(false)
   })
 })
 
