@@ -54,16 +54,46 @@ def _verify_internal_secret(provided: str | None) -> bool:
 
 
 def _lookup_tenant(from_phone: str) -> str | None:
-    """Resolve a tenant by WhatsApp number. Most recent wins; None if unknown."""
+    """Resolve a tenant by WhatsApp number. FAIL-CLOSED on ambiguity (VT-416 PR-3).
+
+    Returns the single matching tenant id, or ``None`` when the number matches
+    no tenant. If MORE THAN ONE tenant ever shares the number, this does NOT
+    silently pick the newest (the old ``ORDER BY created_at DESC LIMIT 1``
+    behaviour, which could cross-route a customer's inbound to the wrong owner) —
+    it logs a clear error and returns ``None``, routing the message to the
+    existing unmatched path rather than to a guessed owner.
+
+    The canonical guarantee is the DB constraint: migration 066
+    (``tenants_whatsapp_number_key``, a partial UNIQUE index on
+    ``whatsapp_number WHERE whatsapp_number IS NOT NULL``, VT-267 / Fazal D1
+    2026-06-02) makes the business WhatsApp number a globally-unique tenant
+    identity, so a duplicate cannot be inserted in the first place. This code
+    guard is DEFENCE-IN-DEPTH: it converts the (now schema-impossible) two-match
+    case from a silent newest-wins mis-route into a fail-closed, logged
+    non-match — surviving a hypothetical future regression that drops the
+    constraint, without ever cross-routing a customer to the wrong owner.
+    """
     if not from_phone:
         return None
     with get_pool().connection() as conn:
-        row = conn.execute(
-            "SELECT id FROM tenants WHERE whatsapp_number = %s "
-            "ORDER BY created_at DESC LIMIT 1",
+        # Fetch up to two rows: one is the happy path, two proves ambiguity.
+        rows = conn.execute(
+            "SELECT id FROM tenants WHERE whatsapp_number = %s LIMIT 2",
             (from_phone,),
-        ).fetchone()
-    return str(row["id"]) if row else None
+        ).fetchall()
+    if not rows:
+        return None
+    if len(rows) > 1:
+        logger.error(
+            "twilio-ingress: ambiguous whatsapp_number — %d tenants share number=%s; "
+            "fail-closed (routing to unmatched path, NOT guessing an owner). "
+            "This should be impossible under the tenants_whatsapp_number_key "
+            "UNIQUE index (mig 066) — investigate the schema if it fires.",
+            len(rows),
+            hash_phone(from_phone),
+        )
+        return None
+    return str(rows[0]["id"])
 
 
 def _lookup_customer_inbound_tenant(to_phone: str) -> str | None:

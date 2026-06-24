@@ -270,6 +270,66 @@ def test_invalid_preferred_language_env_falls_back_to_en(monkeypatch) -> None:
     assert out.preferred_language == "en"
 
 
+# VT-416 PR-3 — per-tenant preferred_language (state wins over global default)
+
+def test_per_tenant_hindi_preference_yields_hindi_variant(monkeypatch) -> None:
+    """A Hindi-preference tenant in state gets 'hi', even when the global default is 'en'."""
+    monkeypatch.setenv("TENANT_DEFAULT_LANGUAGE", "en")
+    now = datetime(2026, 5, 26, tzinfo=timezone.utc)
+    state = _state(
+        last_owner_message_at=now - timedelta(hours=1),
+        preferred_language="hi",
+    )
+    out = compose_owner_output(None, state, "welcome", now=now)
+    assert out.preferred_language == "hi"
+
+
+def test_per_tenant_state_overrides_global_default(monkeypatch) -> None:
+    """State preference wins even when the global default points the other way."""
+    monkeypatch.setenv("TENANT_DEFAULT_LANGUAGE", "hi")
+    now = datetime(2026, 5, 26, tzinfo=timezone.utc)
+    state = _state(
+        last_owner_message_at=now - timedelta(hours=1),
+        preferred_language="en",
+    )
+    out = compose_owner_output(None, state, "welcome", now=now)
+    assert out.preferred_language == "en"
+
+
+def test_absent_preferred_language_falls_back_to_global_default(monkeypatch) -> None:
+    """No per-tenant value → the global default (env) is used (fallback intact)."""
+    monkeypatch.setenv("TENANT_DEFAULT_LANGUAGE", "hi")
+    now = datetime(2026, 5, 26, tzinfo=timezone.utc)
+    state = _state(last_owner_message_at=now - timedelta(hours=1))  # no preferred_language key
+    out = compose_owner_output(None, state, "welcome", now=now)
+    assert out.preferred_language == "hi"
+
+
+@pytest.mark.parametrize("bad", ["", None, "fr", "EN-US"])
+def test_invalid_or_empty_state_value_falls_back_to_default(monkeypatch, bad) -> None:
+    """Empty / unrecognised state value → fall back to the global default."""
+    monkeypatch.setenv("TENANT_DEFAULT_LANGUAGE", "en")
+    now = datetime(2026, 5, 26, tzinfo=timezone.utc)
+    state = _state(
+        last_owner_message_at=now - timedelta(hours=1),
+        preferred_language=bad,
+    )
+    out = compose_owner_output(None, state, "welcome", now=now)
+    assert out.preferred_language == "en"
+
+
+def test_state_hindi_value_is_case_insensitive(monkeypatch) -> None:
+    """An uppercase 'HI' on state still resolves to the 'hi' variant."""
+    monkeypatch.setenv("TENANT_DEFAULT_LANGUAGE", "en")
+    now = datetime(2026, 5, 26, tzinfo=timezone.utc)
+    state = _state(
+        last_owner_message_at=now - timedelta(hours=1),
+        preferred_language="HI",
+    )
+    out = compose_owner_output(None, state, "welcome", now=now)
+    assert out.preferred_language == "hi"
+
+
 # ---------------------------------------------------------------------------
 # Signature determinism
 # ---------------------------------------------------------------------------
