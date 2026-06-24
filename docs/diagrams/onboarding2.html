@@ -1,0 +1,130 @@
+<h2 class="sr-only">Complete VT-267 onboarding journey including the connect sub-flow: entry and opt-in, OAuth consent with no key pasting, source discovery, column field-mapping, then the already-approved tail of profile draft, always-never capture, web review, and save, plus branch and edge cases.</h2>
+
+<div style="font-family:var(--font-sans); padding:1rem 0;">
+
+  <div style="font-size:13px; font-weight:500; color:var(--color-text-secondary); text-transform:uppercase; letter-spacing:0.04em; margin-bottom:1rem;">The missing middle — connect sub-journey</div>
+
+  <div style="display:flex; flex-direction:column; gap:1.5rem;">
+
+    <div style="display:flex; gap:14px;">
+      <div style="display:flex; flex-direction:column; align-items:center; flex-shrink:0;">
+        <div style="width:30px; height:30px; border-radius:50%; background:var(--color-background-success); color:var(--color-text-success); display:flex; align-items:center; justify-content:center; font-weight:500; font-size:13px;">0</div>
+        <div style="flex:1; width:2px; background:var(--color-border-tertiary); margin-top:6px;"></div>
+      </div>
+      <div style="flex:1; min-width:0;">
+        <div style="display:flex; align-items:center; gap:8px; margin-bottom:8px;">
+          <span style="font-size:16px; font-weight:500; color:var(--color-text-primary);">Entry &amp; opt-in</span>
+          <span style="font-size:12px; background:var(--color-background-success); color:var(--color-text-success); padding:2px 8px; border-radius:var(--border-radius-md);">WhatsApp</span>
+        </div>
+        <div style="background:var(--color-background-primary); border:0.5px solid var(--color-border-tertiary); border-radius:var(--border-radius-lg); padding:14px;">
+          <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap; font-size:13px; color:var(--color-text-primary);">
+            <span style="background:var(--color-background-secondary); padding:5px 10px; border-radius:var(--border-radius-md);"><i class="ti ti-qrcode" style="font-size:14px; vertical-align:-2px; margin-right:4px;" aria-hidden="true"></i>QR on viabe.ai</span>
+            <span style="background:var(--color-background-secondary); padding:5px 10px; border-radius:var(--border-radius-md);"><i class="ti ti-ad" style="font-size:14px; vertical-align:-2px; margin-right:4px;" aria-hidden="true"></i>Ad / referral link</span>
+            <i class="ti ti-arrow-right" style="color:var(--color-text-tertiary);" aria-hidden="true"></i>
+            <span style="background:var(--color-background-success); color:var(--color-text-success); padding:5px 10px; border-radius:var(--border-radius-md);">wa.me opens, owner sends "Hi"</span>
+          </div>
+          <div style="font-size:12px; color:var(--color-text-tertiary); margin-top:10px;">Owner-initiated message = WhatsApp opt-in. Agent greets, offers Connect Sheets / Connect Shopify.</div>
+        </div>
+      </div>
+    </div>
+
+    <div style="display:flex; gap:14px;">
+      <div style="display:flex; flex-direction:column; align-items:center; flex-shrink:0;">
+        <div style="width:30px; height:30px; border-radius:50%; background:var(--color-background-info); color:var(--color-text-info); display:flex; align-items:center; justify-content:center; font-weight:500; font-size:13px;">1</div>
+        <div style="flex:1; width:2px; background:var(--color-border-tertiary); margin-top:6px;"></div>
+      </div>
+      <div style="flex:1; min-width:0;">
+        <div style="display:flex; align-items:center; gap:8px; margin-bottom:8px;">
+          <span style="font-size:16px; font-weight:500; color:var(--color-text-primary);">Tap Connect &rarr; OAuth consent</span>
+          <span style="font-size:12px; background:var(--color-background-info); color:var(--color-text-info); padding:2px 8px; border-radius:var(--border-radius-md);">Browser</span>
+        </div>
+        <div style="background:var(--color-background-primary); border:0.5px solid var(--color-border-tertiary); border-radius:var(--border-radius-lg); overflow:hidden; max-width:360px;">
+          <div style="display:flex; align-items:center; gap:6px; background:var(--color-background-secondary); padding:7px 12px; border-bottom:0.5px solid var(--color-border-tertiary);">
+            <i class="ti ti-lock" style="font-size:12px; color:var(--color-text-tertiary);" aria-hidden="true"></i>
+            <span style="font-size:12px; color:var(--color-text-secondary);">accounts.google.com</span>
+          </div>
+          <div style="padding:16px;">
+            <div style="font-size:14px; font-weight:500; color:var(--color-text-primary); margin-bottom:4px;">Viabe wants access to</div>
+            <div style="font-size:13px; color:var(--color-text-secondary); margin-bottom:14px;"><i class="ti ti-eye" style="font-size:14px; vertical-align:-2px; margin-right:4px;" aria-hidden="true"></i>View your Google Sheets — read only</div>
+            <div style="display:flex; gap:8px; justify-content:flex-end;">
+              <span style="font-size:13px; color:var(--color-text-secondary); padding:8px 14px;">Cancel</span>
+              <span style="font-size:13px; font-weight:500; background:var(--color-background-info); color:var(--color-text-info); padding:8px 18px; border-radius:var(--border-radius-md);">Allow</span>
+            </div>
+          </div>
+        </div>
+        <div style="font-size:12px; color:var(--color-text-tertiary); margin-top:10px; line-height:1.55;"><i class="ti ti-shield-check" style="font-size:13px; vertical-align:-1px; margin-right:4px;" aria-hidden="true"></i>No keys or scripts pasted — token captured by redirect (CL-421). <strong style="font-weight:500;">Shopify variant:</strong> owner types store handle once (yourstore.myshopify.com) &rarr; approves app install (read customers + orders).</div>
+      </div>
+    </div>
+
+    <div style="display:flex; gap:14px;">
+      <div style="display:flex; flex-direction:column; align-items:center; flex-shrink:0;">
+        <div style="width:30px; height:30px; border-radius:50%; background:var(--color-background-success); color:var(--color-text-success); display:flex; align-items:center; justify-content:center; font-weight:500; font-size:13px;">2</div>
+        <div style="flex:1; width:2px; background:var(--color-border-tertiary); margin-top:6px;"></div>
+      </div>
+      <div style="flex:1; min-width:0;">
+        <div style="display:flex; align-items:center; gap:8px; margin-bottom:8px;">
+          <span style="font-size:16px; font-weight:500; color:var(--color-text-primary);">Discovery — which source</span>
+          <span style="font-size:12px; background:var(--color-background-success); color:var(--color-text-success); padding:2px 8px; border-radius:var(--border-radius-md);">WhatsApp</span>
+        </div>
+        <div style="background:var(--color-background-secondary); border-radius:var(--border-radius-lg); padding:14px; max-width:340px;">
+          <div style="background:var(--color-background-primary); border:0.5px solid var(--color-border-tertiary); border-radius:var(--border-radius-md); padding:9px 11px; font-size:13px; color:var(--color-text-primary); line-height:1.5; margin-bottom:8px;">Connected. I found a few sheets — which one has your customers?</div>
+          <div style="display:flex; flex-direction:column; gap:6px;">
+            <div style="background:var(--color-background-success); color:var(--color-text-success); border-radius:var(--border-radius-md); padding:8px 11px; font-size:13px; font-weight:500;">Customer list 2026 <span style="font-weight:400; font-size:11px;">· looks right</span></div>
+            <div style="background:var(--color-background-primary); border:0.5px solid var(--color-border-secondary); color:var(--color-text-primary); border-radius:var(--border-radius-md); padding:8px 11px; font-size:13px;">Inventory</div>
+            <div style="background:var(--color-background-primary); border:0.5px solid var(--color-border-secondary); color:var(--color-text-primary); border-radius:var(--border-radius-md); padding:8px 11px; font-size:13px;">Sheet3</div>
+          </div>
+          <div style="font-size:12px; color:var(--color-text-tertiary); margin-top:9px;">Agent pre-picks the likely one; owner taps to confirm or change.</div>
+        </div>
+      </div>
+    </div>
+
+    <div style="display:flex; gap:14px;">
+      <div style="display:flex; flex-direction:column; align-items:center; flex-shrink:0;">
+        <div style="width:30px; height:30px; border-radius:50%; background:var(--color-background-success); color:var(--color-text-success); display:flex; align-items:center; justify-content:center; font-weight:500; font-size:13px;">3</div>
+        <div style="flex:1; width:2px; background:var(--color-border-tertiary); margin-top:6px;"></div>
+      </div>
+      <div style="flex:1; min-width:0;">
+        <div style="display:flex; align-items:center; gap:8px; margin-bottom:8px;">
+          <span style="font-size:16px; font-weight:500; color:var(--color-text-primary);">Field mapping</span>
+          <span style="font-size:12px; background:var(--color-background-success); color:var(--color-text-success); padding:2px 8px; border-radius:var(--border-radius-md);">WhatsApp</span>
+        </div>
+        <div style="background:var(--color-background-primary); border:0.5px solid var(--color-border-tertiary); border-radius:var(--border-radius-lg); padding:14px; max-width:340px;">
+          <div style="font-size:13px; color:var(--color-text-primary); margin-bottom:10px;">I matched your columns automatically:</div>
+          <div style="display:flex; flex-direction:column; gap:7px; font-size:13px;">
+            <div style="display:flex; align-items:center; gap:8px;"><i class="ti ti-circle-check" style="font-size:15px; color:var(--color-text-success);" aria-hidden="true"></i><span style="color:var(--color-text-primary);">Name <span style="color:var(--color-text-tertiary);">&larr; Col A</span></span></div>
+            <div style="display:flex; align-items:center; gap:8px;"><i class="ti ti-circle-check" style="font-size:15px; color:var(--color-text-success);" aria-hidden="true"></i><span style="color:var(--color-text-primary);">Last order <span style="color:var(--color-text-tertiary);">&larr; Col E</span></span></div>
+            <div style="display:flex; align-items:center; gap:8px;"><i class="ti ti-help-circle" style="font-size:15px; color:var(--color-text-warning);" aria-hidden="true"></i><span style="color:var(--color-text-primary);">Phone? <span style="color:var(--color-text-tertiary);">&larr; Col B or Col C</span></span></div>
+          </div>
+          <div style="background:var(--color-background-secondary); border-radius:var(--border-radius-md); padding:8px 11px; font-size:13px; color:var(--color-text-primary); margin-top:10px;">Only the one it's unsure about gets a question. Everything else is auto + reversible.</div>
+        </div>
+      </div>
+    </div>
+
+    <div style="display:flex; gap:14px;">
+      <div style="display:flex; flex-direction:column; align-items:center; flex-shrink:0;">
+        <div style="width:30px; height:30px; border-radius:50%; background:var(--color-background-secondary); color:var(--color-text-secondary); display:flex; align-items:center; justify-content:center;"><i class="ti ti-arrow-down" style="font-size:15px;" aria-hidden="true"></i></div>
+      </div>
+      <div style="flex:1; min-width:0; align-self:center;">
+        <div style="font-size:13px; color:var(--color-text-secondary);">&hellip; then the tail you already approved &darr;</div>
+      </div>
+    </div>
+
+  </div>
+
+  <div style="font-size:13px; font-weight:500; color:var(--color-text-secondary); text-transform:uppercase; letter-spacing:0.04em; margin:1.75rem 0 0.9rem;">Already-approved tail (recap)</div>
+  <div style="display:flex; flex-direction:column; gap:8px;">
+    <div style="display:flex; align-items:center; gap:10px; background:var(--color-background-secondary); border-radius:var(--border-radius-md); padding:10px 13px;"><span style="font-size:12px; background:var(--color-background-primary); color:var(--color-text-secondary); padding:2px 8px; border-radius:var(--border-radius-md); border:0.5px solid var(--color-border-tertiary);">4</span><span style="font-size:13px; color:var(--color-text-primary);">Agent drafts profile from the pulled data — behind the scenes</span></div>
+    <div style="display:flex; align-items:center; gap:10px; background:var(--color-background-secondary); border-radius:var(--border-radius-md); padding:10px 13px;"><span style="font-size:12px; background:var(--color-background-primary); color:var(--color-text-secondary); padding:2px 8px; border-radius:var(--border-radius-md); border:0.5px solid var(--color-border-tertiary);">5</span><span style="font-size:13px; color:var(--color-text-primary);">Always / never capture — WhatsApp</span></div>
+    <div style="display:flex; align-items:center; gap:10px; background:var(--color-background-secondary); border-radius:var(--border-radius-md); padding:10px 13px;"><span style="font-size:12px; background:var(--color-background-primary); color:var(--color-text-secondary); padding:2px 8px; border-radius:var(--border-radius-md); border:0.5px solid var(--color-border-tertiary);">6</span><span style="font-size:13px; color:var(--color-text-primary);">Review &amp; confirm — web link opens <strong style="font-weight:500;">already signed-in via one-time magic token</strong> (no password)</span></div>
+    <div style="display:flex; align-items:center; gap:10px; background:var(--color-background-secondary); border-radius:var(--border-radius-md); padding:10px 13px;"><span style="font-size:12px; background:var(--color-background-primary); color:var(--color-text-secondary); padding:2px 8px; border-radius:var(--border-radius-md); border:0.5px solid var(--color-border-tertiary);">7</span><span style="font-size:13px; color:var(--color-text-primary);">Saved to L1 &rarr; confirmation back in WhatsApp</span></div>
+  </div>
+
+  <div style="font-size:13px; font-weight:500; color:var(--color-text-secondary); text-transform:uppercase; letter-spacing:0.04em; margin:1.75rem 0 0.9rem;">Branches &amp; edge cases</div>
+  <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(220px, 1fr)); gap:10px;">
+    <div style="background:var(--color-background-primary); border:0.5px solid var(--color-border-tertiary); border-radius:var(--border-radius-md); padding:11px 13px;"><div style="font-size:13px; font-weight:500; color:var(--color-text-warning); margin-bottom:3px;"><i class="ti ti-x" style="font-size:14px; vertical-align:-2px;" aria-hidden="true"></i> OAuth cancelled / abandoned</div><div style="font-size:12px; color:var(--color-text-secondary); line-height:1.5;">"Looks like that didn't finish — try again, or connect a different source?"</div></div>
+    <div style="background:var(--color-background-primary); border:0.5px solid var(--color-border-tertiary); border-radius:var(--border-radius-md); padding:11px 13px;"><div style="font-size:13px; font-weight:500; color:var(--color-text-warning); margin-bottom:3px;"><i class="ti ti-database-off" style="font-size:14px; vertical-align:-2px;" aria-hidden="true"></i> Empty / too little data</div><div style="font-size:12px; color:var(--color-text-secondary); line-height:1.5;">Offer another sheet, or skip — agent proceeds with a thinner draft + nudges later.</div></div>
+    <div style="background:var(--color-background-primary); border:0.5px solid var(--color-border-tertiary); border-radius:var(--border-radius-md); padding:11px 13px;"><div style="font-size:13px; font-weight:500; color:var(--color-text-warning); margin-bottom:3px;"><i class="ti ti-help-circle" style="font-size:14px; vertical-align:-2px;" aria-hidden="true"></i> Ambiguous columns</div><div style="font-size:12px; color:var(--color-text-secondary); line-height:1.5;">Ask only the column it can't resolve — never re-ask the ones it's sure of.</div></div>
+    <div style="background:var(--color-background-primary); border:0.5px solid var(--color-border-tertiary); border-radius:var(--border-radius-md); padding:11px 13px;"><div style="font-size:13px; font-weight:500; color:var(--color-text-warning); margin-bottom:3px;"><i class="ti ti-plug-connected-x" style="font-size:14px; vertical-align:-2px;" aria-hidden="true"></i> No Sheets / Shopify at all</div><div style="font-size:12px; color:var(--color-text-secondary); line-height:1.5;">Offline-only owner: skip connect, build profile from the always/never + a few questions.</div></div>
+  </div>
+
+</div>
