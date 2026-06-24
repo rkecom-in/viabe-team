@@ -407,16 +407,18 @@ def test_register_scheduled_triggers_idempotent(monkeypatch) -> None:
     first = call_count["n"]
     st.register_scheduled_triggers()
     second = call_count["n"]
-    # The registered set (16): weekly_cadence, attribution_close, trial_evaluation
+    # The registered set (17): weekly_cadence, attribution_close, trial_evaluation
     # (VT-90, the kept lifecycle sweep — NOT the removed VT-365 day-39 refund eval),
     # monthly_impact, approval_timeout_sweep (VT-47), L3_construction (VT-68),
     # reconstitution_sweep (VT-76), audit_chain_verify (VT-304), pii_log_sweep
     # (VT-305), kg_drain_sweep (VT-307), l2_retention_sweep (VT-311),
     # waitlist_retention_purge (VT-354), sla_breach_sweep (VT-357), vtr_digest (VT-280),
     # override_expiry_sweep (VT-374 — the F8 next-run pin expiry bound),
-    # outbox_redaction_sweep (VT-382 — the CL-437 ruling-3.3 redaction backfill/backstop).
+    # outbox_redaction_sweep (VT-382 — the CL-437 ruling-3.3 redaction backfill/backstop),
+    # l2_approved_send_sweep (VT-418 — the L2 owner-approve→send reconciler, recovery-only).
     # VT-365 removed two triggers (day-39 refund evaluation + the VT-85 refund-offer
-    # 48h timeout sweep): 16 → 14; VT-374 added one: 14 → 15; VT-382 added one: 15 → 16.
-    assert first == 16, "expected 16 triggers registered on first call"
-    assert second == 16, "second call must short-circuit (idempotent)"
+    # 48h timeout sweep): 16 → 14; VT-374 added one: 14 → 15; VT-382 added one: 15 → 16;
+    # VT-418 added one: 16 → 17.
+    assert first == 17, "expected 17 triggers registered on first call"
+    assert second == 17, "second call must short-circuit (idempotent)"
     st._registered = False
