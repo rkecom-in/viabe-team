@@ -9,7 +9,7 @@ the orchestrator-agent and specialists read phase but never mutate it.
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import Literal, TypedDict
+from typing import Literal, NotRequired, TypedDict
 from uuid import UUID, uuid4
 
 Phase = Literal[
@@ -44,6 +44,11 @@ class SubscriberState(TypedDict):
     last_owner_message_at: datetime | None
     # Append-only event log within the run; complements pipeline_steps (VT-122).
     history: list[dict]
+    # VT-416 PR-3: the tenant's WhatsApp language preference ('en' | 'hi'), threaded
+    # from tenants.preferred_language. Optional so existing state construction
+    # (new_subscriber_state) and every caller stay valid; the output_composer reads
+    # it per-tenant and falls back to TENANT_DEFAULT_LANGUAGE when absent.
+    preferred_language: NotRequired[str | None]
 
 
 def new_subscriber_state(

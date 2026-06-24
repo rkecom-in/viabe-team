@@ -151,13 +151,28 @@ def load_twilio_templates(path: Path | None = None) -> dict[str, Any]:
     return templates_registry._load_raw(path or _TEMPLATES_PATH)
 
 
-def _tenant_preferred_language(_state: Any) -> PreferredLanguage:
-    """Resolve the tenant's preferred language. Phase-1 fallback constant.
+def _tenant_preferred_language(state: Any) -> PreferredLanguage:
+    """Resolve the tenant's preferred language — PER-TENANT, not global (VT-416 PR-3).
 
-    The ``tenants.preferred_language`` column doesn't exist on main yet
-    (ships under VT-9.2 sign-up). Until then, default to ``"en"`` via
-    the ``TENANT_DEFAULT_LANGUAGE`` env override.
+    Reads ``state['preferred_language']`` when present and valid (a Hindi-preference
+    owner therefore gets the Hindi template variant). Falls back to the global
+    ``TENANT_DEFAULT_LANGUAGE`` env default (``"en"``) ONLY when the state key is
+    absent, empty, or an unrecognised value — so the path stays safe even on prod,
+    where the ``tenants.preferred_language`` column may not yet be threaded into
+    every state (the needs-triage item).
+
+    Prior to this fix the function ignored ``state`` entirely and returned ONE
+    global language for EVERY tenant, so a Hindi-preference owner silently got
+    English template variants.
     """
+    # Per-tenant: prefer the value carried on state.
+    raw_state = state.get("preferred_language") if hasattr(state, "get") else None
+    if raw_state:
+        candidate = str(raw_state).lower()
+        if candidate in ("en", "hi"):
+            return candidate  # type: ignore[return-value]
+
+    # Fallback: global default (column not yet populated / no state value).
     raw = os.environ.get("TENANT_DEFAULT_LANGUAGE", "en").lower()
     if raw not in ("en", "hi"):
         return "en"

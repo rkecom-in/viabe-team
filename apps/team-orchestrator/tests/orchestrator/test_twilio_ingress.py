@@ -183,6 +183,98 @@ def test_unknown_sender_does_not_start_workflow(ingress):
     assert resp.json() == {"workflow_id": None, "reason": "unknown_sender"}
 
 
+# --- VT-416 PR-3: whatsapp_number ambiguity guard (fail-closed) --------------
+#
+# The canonical guarantee is the DB constraint: migration 066's
+# tenants_whatsapp_number_key (partial UNIQUE on whatsapp_number, VT-267 / Fazal
+# D1) makes a duplicate number un-insertable, so the two-match case is
+# schema-impossible via normal inserts (an INSERT of a second tenant on the same
+# number raises UniqueViolation). The _lookup_tenant guard is DEFENCE-IN-DEPTH
+# for a hypothetical future regression that drops the index. We therefore prove
+# the guard's branch by stubbing the pool to return two rows (the only way to
+# reach the ambiguity path without violating the live constraint), and keep a
+# real single-match baseline against the DB.
+
+
+class _FakeCursorResult:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def fetchall(self):
+        return self._rows
+
+
+class _FakeConn:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def execute(self, *_args, **_kwargs):
+        return _FakeCursorResult(self._rows)
+
+
+class _FakePool:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def connection(self):
+        return _FakeConn(self._rows)
+
+
+def test_single_tenant_match_routes_correctly(ingress):
+    """Sanity baseline for the ambiguity guard: exactly one tenant for the
+    number → the happy path is unchanged (workflow starts, reason 'started').
+    Runs against the real DB (single insert is allowed by the unique index)."""
+    phone = _phone()
+    _new_tenant(ingress.dsn, phone)
+    resp = _post(ingress, _fields(phone, Body="hello"))
+    assert resp.status_code == 200
+    assert resp.json()["reason"] == "started"
+    _await_workflow(resp.json()["workflow_id"])
+
+
+def test_lookup_tenant_single_match_returns_id(monkeypatch):
+    """Defence-in-depth unit test: exactly one row → that tenant id (happy path
+    unchanged). Pool stubbed so this needs no DB."""
+    import orchestrator.api.twilio_ingress as ti
+
+    monkeypatch.setattr(ti, "get_pool", lambda: _FakePool([{"id": "tenant-xyz"}]))
+    assert ti._lookup_tenant("+919999900001") == "tenant-xyz"
+
+
+def test_lookup_tenant_returns_none_on_ambiguity(monkeypatch, caplog):
+    """Defence-in-depth unit test: if the lookup ever returns >1 row (a future
+    schema regression dropping tenants_whatsapp_number_key), _lookup_tenant
+    fails CLOSED — returns None and logs an error, NOT a silent newest-wins
+    pick. Pool stubbed to force the (otherwise schema-impossible) two-match."""
+    import logging
+
+    import orchestrator.api.twilio_ingress as ti
+
+    monkeypatch.setattr(
+        ti,
+        "get_pool",
+        lambda: _FakePool([{"id": "tenant-a"}, {"id": "tenant-b"}]),
+    )
+    with caplog.at_level(logging.ERROR, logger="orchestrator.api.twilio_ingress"):
+        result = ti._lookup_tenant("+919999900002")
+    assert result is None, "ambiguous match must NOT resolve to a tenant"
+    assert any("ambiguous whatsapp_number" in r.message for r in caplog.records)
+
+
+def test_lookup_tenant_no_match_returns_none(monkeypatch):
+    """No row → None (unmatched path), unchanged. Pool stubbed; no DB."""
+    import orchestrator.api.twilio_ingress as ti
+
+    monkeypatch.setattr(ti, "get_pool", lambda: _FakePool([]))
+    assert ti._lookup_tenant("+919999900003") is None
+
+
 def test_duplicate_message_sid_short_circuits(ingress):
     phone = _phone()
     _new_tenant(ingress.dsn, phone)
