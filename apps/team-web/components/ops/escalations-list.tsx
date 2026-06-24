@@ -9,6 +9,16 @@
 import { useState, useTransition } from 'react'
 
 import { useOverlay } from '@/components/ops/overlay-context'
+import {
+  OpsTable,
+  OpsEmpty,
+  OpsChip,
+  OpsMono,
+  opsCellClass,
+  opsButtonClass,
+  severityTone,
+  statusTone,
+} from '@/components/ops/ops-ui'
 import { escalationAction } from '@/app/(app)/team/ops/escalations/actions'
 import type { MaskedOpsRow } from '@/lib/ops/de-identify'
 
@@ -17,7 +27,7 @@ export function EscalationsList({ rows }: { rows: MaskedOpsRow[] }) {
   const [pending, startTransition] = useTransition()
   const [done, setDone] = useState<Record<string, string>>({})
 
-  if (rows.length === 0) return <p data-ops-empty>No open escalations.</p>
+  if (rows.length === 0) return <OpsEmpty data-ops-empty>No open escalations.</OpsEmpty>
 
   function act(row: MaskedOpsRow, action: 'resolve' | 'ack') {
     startTransition(async () => {
@@ -27,57 +37,78 @@ export function EscalationsList({ rows }: { rows: MaskedOpsRow[] }) {
   }
 
   return (
-    <table data-ops-escalations>
-      <thead>
-        <tr>
-          <th>Reference</th>
-          <th>Kind</th>
-          <th>Severity</th>
-          <th>Opened</th>
-          <th>Status</th>
-          <th>Actions</th>
-        </tr>
-      </thead>
-      <tbody>
-        {rows.map((row) => (
-          <tr key={row.id} data-severity={row.severity}>
-            <td>{row.reference}</td>
-            <td>{row.kind}</td>
-            <td>{row.severity}</td>
-            <td>{row.time}</td>
-            <td>{done[row.id] ?? row.status}</td>
-            <td>
-              <button type="button" disabled={pending || !!done[row.id]} onClick={() => act(row, 'ack')}>
-                Ack
-              </button>
-              <button type="button" disabled={pending || !!done[row.id]} onClick={() => act(row, 'resolve')}>
-                Resolve
-              </button>
-              <button
-                type="button"
-                onClick={() =>
-                  overlay.open({
-                    key: `esc-${row.id}`,
-                    title: `Escalation ${row.reference}`,
-                    content: (
-                      <div data-ops-escalation-detail>
-                        <ul>
-                          <li>Kind: {row.kind}</li>
-                          <li>Severity: {row.severity}</li>
-                          <li>Opened: {row.time}</li>
-                          <li>Status: {done[row.id] ?? row.status}</li>
-                        </ul>
-                      </div>
-                    ),
-                  })
-                }
-              >
-                Open
-              </button>
+    <OpsTable
+      tableProps={{ 'data-ops-escalations': '' }}
+      headers={['Reference', 'Kind', 'Severity', 'Opened', 'Status', 'Actions']}
+    >
+      {rows.map((row) => {
+        const statusText = done[row.id] ?? row.status
+        return (
+          <tr key={row.id} data-severity={row.severity} className="hover:bg-gray-50">
+            <td className={opsCellClass}>
+              <OpsMono>{row.reference}</OpsMono>
+            </td>
+            <td className={`${opsCellClass} text-gray-700`}>{row.kind}</td>
+            <td className={opsCellClass}>
+              <OpsChip tone={severityTone(row.severity)}>{row.severity}</OpsChip>
+            </td>
+            <td className={`${opsCellClass} whitespace-nowrap text-gray-500`}>{row.time}</td>
+            <td className={opsCellClass}>
+              <OpsChip tone={statusTone(statusText)}>{statusText}</OpsChip>
+            </td>
+            <td className={opsCellClass}>
+              <div className="flex flex-wrap items-center gap-1.5">
+                <button
+                  type="button"
+                  className={opsButtonClass()}
+                  disabled={pending || !!done[row.id]}
+                  onClick={() => act(row, 'ack')}
+                >
+                  Ack
+                </button>
+                <button
+                  type="button"
+                  className={opsButtonClass('primary')}
+                  disabled={pending || !!done[row.id]}
+                  onClick={() => act(row, 'resolve')}
+                >
+                  Resolve
+                </button>
+                <button
+                  type="button"
+                  className={opsButtonClass('ghost')}
+                  onClick={() =>
+                    overlay.open({
+                      key: `esc-${row.id}`,
+                      title: `Escalation ${row.reference}`,
+                      content: (
+                        <div data-ops-escalation-detail className="text-sm text-gray-700">
+                          <dl className="grid grid-cols-[7rem_1fr] gap-x-3 gap-y-2">
+                            <dt className="text-gray-500">Kind</dt>
+                            <dd className="text-gray-900">{row.kind}</dd>
+                            <dt className="text-gray-500">Severity</dt>
+                            <dd>
+                              <OpsChip tone={severityTone(row.severity)}>{row.severity}</OpsChip>
+                            </dd>
+                            <dt className="text-gray-500">Opened</dt>
+                            <dd className="text-gray-900">{row.time}</dd>
+                            <dt className="text-gray-500">Status</dt>
+                            <dd>
+                              <OpsChip tone={statusTone(statusText)}>{statusText}</OpsChip>
+                            </dd>
+                          </dl>
+                        </div>
+                      ),
+                    })
+                  }
+                >
+                  Open
+                </button>
+              </div>
             </td>
           </tr>
-        ))}
-      </tbody>
-    </table>
+        )
+      })}
+    </OpsTable>
   )
 }

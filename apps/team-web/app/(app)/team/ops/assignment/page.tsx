@@ -6,6 +6,7 @@ import { UnauthorizedError } from '@/lib/auth/require-fazal'
 import { requireOpsOperator } from '@/lib/auth/require-ops-operator'
 import { isVtAdmin } from '@/lib/auth/roles'
 import { AssignmentAdmin } from '@/components/ops/assignment-admin'
+import { OpsPageHeader, OpsError, OpsCard } from '@/components/ops/ops-ui'
 import {
   fetchAllBusinesses,
   fetchAssignableOperators,
@@ -28,13 +29,13 @@ export default async function OpsAssignmentPage() {
   // sees an explicit message + nav, not a 404.
   if (!isVtAdmin(operator.role)) {
     return (
-      <main data-area="team-ops-assignment" className="p-6 space-y-4">
-        <header>
-          <h1 className="text-2xl font-semibold">Assignment</h1>
-        </header>
-        <p data-ops-forbidden>
-          Assignment management is VTAdmin-only. Ask a VTAdmin to change business assignments.
-        </p>
+      <main data-area="team-ops-assignment" className="space-y-5 p-6">
+        <OpsPageHeader title="Assignment" />
+        <OpsCard className="p-6">
+          <p data-ops-forbidden className="text-sm text-gray-600">
+            Assignment management is VTAdmin-only. Ask a VTAdmin to change business assignments.
+          </p>
+        </OpsCard>
       </main>
     )
   }
@@ -53,12 +54,10 @@ export default async function OpsAssignmentPage() {
   }
 
   return (
-    <main data-area="team-ops-assignment" className="p-6 space-y-4">
-      <header>
-        <h1 className="text-2xl font-semibold">Assignment (all businesses)</h1>
-      </header>
+    <main data-area="team-ops-assignment" className="space-y-5 p-6">
+      <OpsPageHeader title="Assignment" subtitle="VTR ↔ business assignments across all businesses." />
       {error ? (
-        <p data-section-error>couldn&apos;t load: {error}</p>
+        <OpsError data-section-error>couldn&apos;t load: {error}</OpsError>
       ) : (
         <AssignmentAdmin businesses={businesses} operators={operators} />
       )}

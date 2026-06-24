@@ -35,12 +35,33 @@ export function OpsSideNav({ role }: { role: OperatorRole }) {
   const admin = isVtAdmin(role)
   const items = NAV.filter((n) => !n.vtAdminOnly || admin)
   return (
-    <nav data-ops-nav aria-label="Ops Console">
-      <div data-ops-role-badge>{admin ? 'VTAdmin' : 'VTR'}</div>
-      <ul>
+    <nav
+      data-ops-nav
+      aria-label="Ops Console"
+      className="sticky top-0 hidden h-screen w-56 shrink-0 self-start overflow-y-auto border-r border-gray-200 bg-white px-3 py-5 sm:block"
+    >
+      <div className="px-2 pb-3">
+        <div className="text-xs font-semibold uppercase tracking-wide text-gray-400">Ops Console</div>
+        <div
+          data-ops-role-badge
+          className={`mt-1.5 inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-semibold ring-1 ring-inset ${
+            admin
+              ? 'bg-emerald-50 text-emerald-700 ring-emerald-600/20'
+              : 'bg-gray-100 text-gray-600 ring-gray-500/20'
+          }`}
+        >
+          {admin ? 'VTAdmin' : 'VTR'}
+        </div>
+      </div>
+      <ul className="flex flex-col gap-0.5">
         {items.map((n) => (
           <li key={n.href}>
-            <Link href={n.href}>{n.label}</Link>
+            <Link
+              href={n.href}
+              className="block rounded-md px-3 py-2 text-sm font-medium text-gray-700 transition-colors hover:bg-gray-100 hover:text-gray-900"
+            >
+              {n.label}
+            </Link>
           </li>
         ))}
       </ul>
