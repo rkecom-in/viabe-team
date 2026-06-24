@@ -243,12 +243,26 @@ def _clean(v: Any) -> str | None:
 _ADDR_SUBFIELDS = ("flno", "bno", "bnm", "st", "loc", "landMark", "dst", "stcd", "pncd")
 
 
+def _clean_addr_subfield(v: Any) -> str | None:
+    """Clean a single GST address subfield for joining. Strips surrounding whitespace AND
+    separator punctuation (commas) so a subfield that is only a comma — GSTN routinely returns
+    ``flno: ','`` for businesses with no floor number — collapses to None instead of injecting a
+    leading/doubled comma into the joined address (live RKECOM canary: ``flno=','`` produced the
+    cosmetic ``',, A/403, ...'``). A meaningful internal comma is preserved (only the edges are
+    trimmed)."""
+    if v is None:
+        return None
+    s = str(v).strip().strip(",").strip()
+    return s or None
+
+
 def _compose_address(addr: Any) -> str | None:
     """Compose a readable single-line address from a GSTN ``addr`` dict (pradr.addr / adadr[].addr).
-    Defensive: non-dict or no usable subfields → None. Order = postal; empties dropped."""
+    Defensive: non-dict or no usable subfields → None. Order = postal; empty / comma-only subfields
+    dropped (so there are no leading or doubled commas in the result)."""
     if not isinstance(addr, dict):
         return None
-    parts = [s for k in _ADDR_SUBFIELDS if (s := _clean(addr.get(k)))]
+    parts = [s for k in _ADDR_SUBFIELDS if (s := _clean_addr_subfield(addr.get(k)))]
     return ", ".join(parts) or None
 
 

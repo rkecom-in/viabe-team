@@ -224,6 +224,63 @@ def test_widen_parses_all_rich_fields():
     assert bf["geo_lat"] == "19.0760" and bf["geo_lng"] == "72.8777"
 
 
+def test_principal_address_drops_empty_and_comma_only_subfields():
+    """VT-407 minor — the live RKECOM canary returned ``flno: ','`` (a floor-number subfield that is
+    ONLY a comma) plus an empty ``landMark`` / empty geo. The naive join surfaced a cosmetic leading
+    ``',, A/403, ...'``. Comma-only and empty subfields must drop out so there are NO leading or
+    doubled commas; real internal commas inside a building name are preserved."""
+    from orchestrator.integrations.methods import sandbox_kyc
+
+    record = {
+        "lgnm": "RKECOM SERVICES (OPC) PRIVATE LIMITED",
+        "tradeNam": "RKECOM",
+        "sts": "Active",
+        "ctb": "Private Limited Company",
+        "pradr": {
+            "addr": {
+                "flno": ",",  # comma-only → must drop (the canary's actual leading-comma source)
+                "bno": "A/403",
+                "bnm": "DHEERAJ HERITAGE RESI,PLOT-E2 DAULAT NGR CHS",  # real internal comma — kept
+                "st": "SANTACRUZ WEST NEAR JUHU",
+                "loc": "MUMBAI",
+                "landMark": "",  # empty → drop
+                "dst": "Mumbai",
+                "stcd": "Maharashtra",
+                "pncd": "400054",
+                "lt": "",  # geocodelvl: NA on RKECOM → geo genuinely absent
+                "lg": "",
+            },
+        },
+    }
+    req, _ = _recorder({
+        "/authenticate": {"data": {"access_token": "TOK"}},
+        "/gst/compliance/public/gstin/search": {"data": {"data": record, "status_cd": "1"}},
+    })
+    res = sandbox_kyc.search_gstin("27AAKCR3738B1ZE", request_fn=req)
+
+    assert res.ok and res.is_active()
+    assert res.principal_address == (
+        "A/403, DHEERAJ HERITAGE RESI,PLOT-E2 DAULAT NGR CHS, "
+        "SANTACRUZ WEST NEAR JUHU, MUMBAI, Mumbai, Maharashtra, 400054"
+    )
+    # no leading / doubled commas anywhere
+    assert not res.principal_address.startswith(",")
+    assert ", ," not in res.principal_address and ",," not in res.principal_address
+    # empty lt/lg → geo degrades to None (correct; not a key miss)
+    assert res.geo_lat is None and res.geo_lng is None
+
+
+def test_compose_address_helper_unit():
+    """Direct ``_compose_address`` units: comma-only / whitespace-only subfields drop; an addr with
+    no usable subfields → None; non-dict → None."""
+    from orchestrator.integrations.methods import sandbox_kyc
+
+    assert sandbox_kyc._compose_address({"flno": ",", "bno": "A/403", "st": "MG Road"}) == "A/403, MG Road"
+    assert sandbox_kyc._compose_address({"flno": ",", "bno": "  ", "bnm": ", ,"}) is None
+    assert sandbox_kyc._compose_address({}) is None
+    assert sandbox_kyc._compose_address(None) is None
+
+
 def test_widen_minimal_record_leaves_rich_fields_empty_but_ok_true():
     """A minimal record (only lgnm/sts) still verifies (ok=True); every rich field → None/[] and
     business_fields() carries no rich extras. The widen NEVER weakens the fail-closed contract."""
