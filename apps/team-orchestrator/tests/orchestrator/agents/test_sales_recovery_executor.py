@@ -88,15 +88,27 @@ def substrate():  # type: ignore[no-untyped-def]
 
 
 def _new_tenant(dsn: str, *, name: str, owner_inputs: bool = True) -> UUID:
+    # VT-421: execute_item now has a DETECT-side ONBOARDED gate (tenant_is_sr_eligible) right after
+    # the owner_inputs check. For these end-to-end SR tests to reach detection/drafting, the tenant
+    # must be fully onboarded: paid_active + gstin_verified + ≥1 enabled+ok connector (the per-test
+    # _seed_customer satisfies the ≥1-customer leg). owner_inputs=False tests still trip the
+    # owner_inputs gate first (it runs above the onboarded gate).
     with psycopg.connect(dsn, autocommit=True) as conn:
         row = conn.execute(
             "INSERT INTO tenants (business_name, plan_tier, phase, phase_entered_at, "
-            "business_type, whatsapp_number, owner_inputs) "
-            "VALUES (%s, 'founding', 'trial', now(), 'restaurant', %s, %s) RETURNING id",
+            "business_type, whatsapp_number, owner_inputs, verification_status) "
+            "VALUES (%s, 'founding', 'paid_active', now(), 'restaurant', %s, %s, 'gstin_verified') "
+            "RETURNING id",
             (name, f"+9198{uuid4().int % 10**8:08d}", owner_inputs),
         ).fetchone()
-    assert row is not None
-    return UUID(str(row[0]))
+        assert row is not None
+        tenant = UUID(str(row[0]))
+        conn.execute(
+            "INSERT INTO tenant_connector_status (tenant_id, connector_id, enabled, last_status, "
+            "last_ingested_date) VALUES (%s, %s, TRUE, 'ok', CURRENT_DATE)",
+            (str(tenant), f"conn-{uuid4().hex[:8]}"),
+        )
+    return tenant
 
 
 def _seed_customer(
@@ -500,10 +512,17 @@ def test_execute_item_persists_drafts_and_arms(substrate, monkeypatch):  # type:
 
 @requires_db
 def test_execute_item_no_candidates(substrate, monkeypatch):  # type: ignore[no-untyped-def]
-    """Zero candidates (here: an empty customer base) → cancelled + counted; no LLM call,
-    no arm, no batch row."""
+    """Zero DETECTION candidates → cancelled + counted; no LLM call, no arm, no batch row.
+
+    VT-421: the tenant is onboarded-eligible (so it passes the detect-side onboarded gate and
+    REACHES detection — the gate-A leg needs ≥1 customer), but its one customer has NO sale ledger
+    and no marketing consent, so detection returns [] → skipped_no_candidates (NOT
+    skipped_not_onboarded). This proves the path past the gate, into an empty detect."""
     monkeypatch.setattr(sre, "MARKETING_CONSENT_VERSIONS", frozenset({_TEST_CONSENT_VERSION}))
     t = _new_tenant(substrate.dsn, name="VT-369 sre no candidates")
+    # One non-qualifying customer (no sales, no consent) — satisfies the onboarded gate's
+    # ≥1-customer leg without producing a detection candidate.
+    _seed_customer(substrate.dsn, t, display_name="Inactive", phone=f"+9197{uuid4().int % 10**8:08d}")
     agent = sre.SalesRecoveryAgent(llm=_forbidden_llm, arm_fn=_forbidden_arm)
     ctx = AgentItemContext(
         tenant_id=str(t),

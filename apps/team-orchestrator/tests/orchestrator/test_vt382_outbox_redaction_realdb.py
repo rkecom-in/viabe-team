@@ -108,15 +108,25 @@ _REAL_YAML_PATH = None  # resolved lazily in the registry fixture
 
 
 def _new_tenant(dsn: str, *, name: str = "VT-382 outbox-redaction") -> UUID:
+    # VT-421: agent_send_draft now has a Gate-0 ONBOARDED gate. These send/redaction tests must
+    # reach the send, so the tenant is fully onboarded: paid_active + gstin_verified + ≥1 enabled+ok
+    # connector (the per-test _seed_customer satisfies the ≥1-customer leg).
     with psycopg.connect(dsn, autocommit=True) as conn:
         row = conn.execute(
             "INSERT INTO tenants (business_name, plan_tier, phase, phase_entered_at, "
-            "business_type, whatsapp_number) "
-            "VALUES (%s, 'founding', 'trial', now(), 'restaurant', %s) RETURNING id",
+            "business_type, verification_status, whatsapp_number) "
+            "VALUES (%s, 'founding', 'paid_active', now(), 'restaurant', 'gstin_verified', %s) "
+            "RETURNING id",
             (f"{name} {uuid4().hex[:8]}", f"+9198{uuid4().int % 10**8:08d}"),
         ).fetchone()
-    assert row is not None
-    return UUID(str(row[0]))
+        assert row is not None
+        tenant = UUID(str(row[0]))
+        conn.execute(
+            "INSERT INTO tenant_connector_status (tenant_id, connector_id, enabled, last_status, "
+            "last_ingested_date) VALUES (%s, %s, TRUE, 'ok', CURRENT_DATE)",
+            (str(tenant), f"conn-{uuid4().hex[:8]}"),
+        )
+    return tenant
 
 
 def _seed_customer(

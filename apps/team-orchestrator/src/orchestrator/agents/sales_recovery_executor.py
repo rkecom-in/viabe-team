@@ -670,6 +670,9 @@ class SalesRecoveryAgent:
         arm Pillar-7. Returns IDs + counters ONLY (IDs-in-state). Outcomes:
 
         - ``cancelled`` + ``skipped_owner_inputs`` — consent gate tripped; no LLM transmit.
+        - ``cancelled`` + ``skipped_not_onboarded`` — VT-421 onboarded gate tripped (tenant not
+          fully onboarded): a clean NO-OP — 0 detect, 0 draft, 0 send. The DETECT-side
+          short-circuit; the binding SEND boundary is Gate 0 in ``customer_send.agent_send_draft``.
         - ``cancelled`` + ``skipped_no_candidates`` — detection empty (ALWAYS, until the C2
           allowlist is populated); the work-item slot frees for the next sweep.
         - ``cancelled`` + ``skipped_no_grounded_drafts`` — every draft dropped ungrounded.
@@ -685,6 +688,20 @@ class SalesRecoveryAgent:
             return ItemExecutionResult(
                 work_item_status="cancelled", counters={"skipped_owner_inputs": 1}
             )
+
+        # VT-421 ONBOARDED gate (DETECT-side short-circuit) — SR runs ONLY for a fully-onboarded
+        # tenant (Fazal HALT 2026-06-25). This saves the detect/draft work for a non-onboarded
+        # tenant; it is NOT the safety boundary (that is Gate 0 in customer_send.agent_send_draft,
+        # which every L2/L3 send funnels through). Fail-closed (unknown/NULL/error → ineligible).
+        # A cheap own RLS connection just for the read — NOT held across the candidate_build seam
+        # pause below (a pause must never pin a pooled connection; the seam opens its own conn).
+        from orchestrator.agents.onboarding_gate import tenant_is_sr_eligible
+
+        with tenant_connection(tenant_id) as gate_conn:
+            if not tenant_is_sr_eligible(tenant_id, conn=gate_conn):
+                return ItemExecutionResult(
+                    work_item_status="cancelled", counters={"skipped_not_onboarded": 1}
+                )
 
         # VT-374 candidate_build seam — hold/consume BEFORE the tenant_connection opens
         # (a pause must never pin a pooled connection); 'limit' is the sole allow-listed pin.
