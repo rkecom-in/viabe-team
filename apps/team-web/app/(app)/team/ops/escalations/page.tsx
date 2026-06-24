@@ -5,6 +5,7 @@ import { redirect } from 'next/navigation'
 import { UnauthorizedError } from '@/lib/auth/require-fazal'
 import { requireOpsOperator } from '@/lib/auth/require-ops-operator'
 import { EscalationsList } from '@/components/ops/escalations-list'
+import { OpsPageHeader, OpsError } from '@/components/ops/ops-ui'
 import { fetchEscalations } from '@/lib/ops/escalations'
 import type { MaskedOpsRow } from '@/lib/ops/de-identify'
 
@@ -29,13 +30,20 @@ export default async function OpsEscalationsPage() {
   }
 
   return (
-    <main data-area="team-ops-escalations" className="p-6 space-y-4">
-      <header>
-        <h1 className="text-2xl font-semibold">
-          Escalations{operator.assignedTenants === null ? ' (all)' : ' (your businesses)'}
-        </h1>
-      </header>
-      {error ? <p data-section-error>couldn&apos;t load: {error}</p> : <EscalationsList rows={rows} />}
+    <main data-area="team-ops-escalations" className="space-y-5 p-6">
+      <OpsPageHeader
+        title="Escalations"
+        subtitle={
+          operator.assignedTenants === null
+            ? 'Open escalations across all businesses.'
+            : 'Open escalations across your assigned businesses.'
+        }
+      />
+      {error ? (
+        <OpsError data-section-error>couldn&apos;t load: {error}</OpsError>
+      ) : (
+        <EscalationsList rows={rows} />
+      )}
     </main>
   )
 }

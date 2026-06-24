@@ -5,6 +5,7 @@ import { redirect } from 'next/navigation'
 import { UnauthorizedError } from '@/lib/auth/require-fazal'
 import { requireOpsOperator } from '@/lib/auth/require-ops-operator'
 import { MonitoringBoard } from '@/components/ops/monitoring-board'
+import { OpsPageHeader, OpsError } from '@/components/ops/ops-ui'
 import { fetchMonitoringBoard, type MonitoringItem } from '@/lib/ops/monitoring'
 
 export const dynamic = 'force-dynamic'
@@ -28,13 +29,20 @@ export default async function OpsMonitoringPage() {
   }
 
   return (
-    <main data-area="team-ops-monitoring" className="p-6 space-y-4">
-      <header>
-        <h1 className="text-2xl font-semibold">
-          Monitoring{operator.assignedTenants === null ? ' (all)' : ' (your businesses)'}
-        </h1>
-      </header>
-      {error ? <p data-section-error>couldn&apos;t load: {error}</p> : <MonitoringBoard items={items} />}
+    <main data-area="team-ops-monitoring" className="space-y-5 p-6">
+      <OpsPageHeader
+        title="Monitoring"
+        subtitle={
+          operator.assignedTenants === null
+            ? 'Watchdog signals (last 24h) across all businesses.'
+            : 'Watchdog signals (last 24h) across your assigned businesses.'
+        }
+      />
+      {error ? (
+        <OpsError data-section-error>couldn&apos;t load: {error}</OpsError>
+      ) : (
+        <MonitoringBoard items={items} />
+      )}
     </main>
   )
 }

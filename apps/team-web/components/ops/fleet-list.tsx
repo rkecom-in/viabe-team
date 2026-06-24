@@ -9,60 +9,85 @@
 import Link from 'next/link'
 
 import { useOverlay } from '@/components/ops/overlay-context'
+import { OpsTable, OpsEmpty, OpsChip, opsCellClass, opsButtonClass, type ChipTone } from '@/components/ops/ops-ui'
 import type { FleetRow } from '@/lib/ops/fleet'
 
 const HEALTH_DOT: Record<string, string> = { green: '🟢', yellow: '🟡', red: '🔴' }
+const HEALTH_TONE: Record<string, ChipTone> = { green: 'green', yellow: 'amber', red: 'red' }
+
+function HealthCell({ health }: { health: string }) {
+  return (
+    <OpsChip tone={HEALTH_TONE[health] ?? 'gray'}>
+      <span aria-hidden className="mr-1">
+        {HEALTH_DOT[health] ?? ''}
+      </span>
+      {health}
+    </OpsChip>
+  )
+}
 
 export function FleetList({ rows }: { rows: FleetRow[] }) {
   const overlay = useOverlay()
-  if (rows.length === 0) return <p data-ops-empty>No agents in your fleet right now.</p>
+  if (rows.length === 0) return <OpsEmpty data-ops-empty>No agents in your fleet right now.</OpsEmpty>
   return (
-    <table data-ops-fleet>
-      <thead>
-        <tr>
-          <th>Health</th>
-          <th>Business</th>
-          <th>In-flight</th>
-          <th>Escalated</th>
-          <th>Hard limits</th>
-          <th />
-        </tr>
-      </thead>
-      <tbody>
-        {rows.map((r) => (
-          <tr key={r.tenant_id} data-health={r.health}>
-            <td>{HEALTH_DOT[r.health] ?? r.health}</td>
-            <td>{r.tenant_name ?? r.tenant_id}</td>
-            <td>{r.running}</td>
-            <td>{r.escalated}</td>
-            <td>{r.hard_limits}</td>
-            <td>
-              <button
-                type="button"
-                onClick={() =>
-                  overlay.open({
-                    key: `fleet-${r.tenant_id}`,
-                    title: r.tenant_name ?? r.tenant_id,
-                    content: (
-                      <div data-ops-fleet-detail>
-                        <p>Health: {HEALTH_DOT[r.health] ?? r.health} {r.health}</p>
-                        <ul>
-                          <li>In-flight: {r.running}</li>
-                          <li>Escalated (24h): {r.escalated}</li>
-                          <li>Hard limits (24h): {r.hard_limits}</li>
-                        </ul>
-                        <Link href={`/team/ops/tenants/${r.tenant_id}`}>Open full tenant view →</Link>
+    <OpsTable
+      tableProps={{ 'data-ops-fleet': '' }}
+      headers={[
+        'Health',
+        'Business',
+        { label: 'In-flight', align: 'right' },
+        { label: 'Escalated', align: 'right' },
+        { label: 'Hard limits', align: 'right' },
+        '',
+      ]}
+    >
+      {rows.map((r) => (
+        <tr key={r.tenant_id} data-health={r.health} className="hover:bg-gray-50">
+          <td className={opsCellClass}>
+            <HealthCell health={r.health} />
+          </td>
+          <td className={`${opsCellClass} font-medium text-gray-900`}>{r.tenant_name ?? r.tenant_id}</td>
+          <td className={`${opsCellClass} text-right tabular-nums`}>{r.running}</td>
+          <td className={`${opsCellClass} text-right tabular-nums`}>{r.escalated}</td>
+          <td className={`${opsCellClass} text-right tabular-nums`}>{r.hard_limits}</td>
+          <td className={`${opsCellClass} text-right`}>
+            <button
+              type="button"
+              className={opsButtonClass()}
+              onClick={() =>
+                overlay.open({
+                  key: `fleet-${r.tenant_id}`,
+                  title: r.tenant_name ?? r.tenant_id,
+                  content: (
+                    <div data-ops-fleet-detail className="space-y-4 text-sm text-gray-700">
+                      <div className="flex items-center gap-2">
+                        <span className="text-gray-500">Health</span>
+                        <HealthCell health={r.health} />
                       </div>
-                    ),
-                  })
-                }
-              >
-                Open
-              </button>
-            </td>
-          </tr>
-        ))}
-      </tbody>
-    </table>
+                      <dl className="grid grid-cols-2 gap-x-4 gap-y-2">
+                        <dt className="text-gray-500">In-flight</dt>
+                        <dd className="text-right tabular-nums text-gray-900">{r.running}</dd>
+                        <dt className="text-gray-500">Escalated (24h)</dt>
+                        <dd className="text-right tabular-nums text-gray-900">{r.escalated}</dd>
+                        <dt className="text-gray-500">Hard limits (24h)</dt>
+                        <dd className="text-right tabular-nums text-gray-900">{r.hard_limits}</dd>
+                      </dl>
+                      <Link
+                        href={`/team/ops/tenants/${r.tenant_id}`}
+                        className="inline-flex text-sm font-medium text-blue-600 hover:text-blue-800"
+                      >
+                        Open full tenant view →
+                      </Link>
+                    </div>
+                  ),
+                })
+              }
+            >
+              Open
+            </button>
+          </td>
+        </tr>
+      ))}
+    </OpsTable>
   )
 }
