@@ -762,6 +762,121 @@ def test_owner_inputs_extraction_writes_structured_row(ingress, monkeypatch):
     assert composer_row.occasion == "diwali"
 
 
+# --- VT-416 PR-3: per-tenant preferred_language WIRED into state (end-to-end) -
+#
+# PR-3 made the composer READ state['preferred_language'], but nothing populated
+# that key at runtime, so the fix was latent — every tenant hit the global
+# default and a Hindi-preference owner still got English. These tests prove the
+# wiring is LIVE: the runner's _load_preferred_language reads the real tenant
+# row, the runner threads it into SubscriberState exactly as webhook_pipeline_run
+# does, and the real compose_owner_output then renders the Hindi variant. The
+# proof is END-TO-END through the live node — NOT a hand-set state key.
+
+
+def _new_tenant_with_language(
+    dsn: str, whatsapp_number: str, *, preferred_language: str
+) -> str:
+    """Seed a tenant carrying an explicit tenants.preferred_language value."""
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        row = conn.execute(
+            "INSERT INTO tenants (business_name, plan_tier, phase, phase_entered_at, "
+            "whatsapp_number, owner_inputs, preferred_language) "
+            "VALUES ('VT-416 Lang Test', 'founding', 'trial', now(), %s, true, %s) "
+            "RETURNING id",
+            (whatsapp_number, preferred_language),
+        ).fetchone()
+    assert row is not None
+    return str(row[0])
+
+
+def test_load_preferred_language_reads_explicit_hindi_choice(ingress):
+    """The live runner node reads tenants.preferred_language='hi' for a real
+    tenant — the column that the composer's per-tenant resolver consumes."""
+    from orchestrator.runner import _load_preferred_language
+
+    tenant_id = _new_tenant_with_language(
+        ingress.dsn, _phone(), preferred_language="hi"
+    )
+    assert _load_preferred_language(tenant_id) == "hi"
+
+
+def test_load_preferred_language_falls_back_to_language_preference(ingress):
+    """When preferred_language is NULL, the read falls back to the NOT-NULL
+    language_preference column (mirrors get_business_profile's locale rule)."""
+    from orchestrator.runner import _load_preferred_language
+
+    # _new_tenant inserts no preferred_language → column is NULL → fallback to
+    # language_preference (DEFAULT 'en').
+    tenant_id = _new_tenant(ingress.dsn, _phone())
+    assert _load_preferred_language(tenant_id) == "en"
+
+
+def test_load_preferred_language_none_for_missing_tenant(ingress):
+    """A tenant id with no row returns None (best-effort) — the composer then
+    uses its global default. Never raises (dispatch must not break)."""
+    from orchestrator.runner import _load_preferred_language
+
+    assert _load_preferred_language(str(uuid4())) is None
+
+
+def test_hindi_tenant_state_renders_hindi_variant_end_to_end(ingress):
+    """END-TO-END proof of the PR-3 wiring: a Hindi-preference tenant →
+    _load_preferred_language populates SubscriberState exactly as the runner
+    does → the real compose_owner_output returns the Hindi variant.
+
+    This is the load-bearing test: it does NOT hand-set the state key. It runs
+    the LIVE runner read against the real tenant row, threads it into state via
+    new_subscriber_state + the same assignment webhook_pipeline_run performs,
+    then exercises the real composer. Before the wiring this returned 'en'.
+    """
+    from datetime import datetime, timezone
+    from uuid import UUID, uuid4
+
+    from orchestrator.output_composer import compose_owner_output
+    from orchestrator.runner import _load_preferred_language
+    from orchestrator.state import new_subscriber_state
+
+    tenant_id = _new_tenant_with_language(
+        ingress.dsn, _phone(), preferred_language="hi"
+    )
+
+    # Build state the way webhook_pipeline_run does (live node populates the key).
+    state = new_subscriber_state(UUID(tenant_id), uuid4())
+    state["preferred_language"] = _load_preferred_language(tenant_id)
+    assert state["preferred_language"] == "hi", (
+        "live node did not populate the per-tenant language into state"
+    )
+
+    # Real composer (welcome flow, template path) renders the Hindi variant.
+    now = datetime(2026, 6, 24, 12, 0, tzinfo=timezone.utc)
+    out = compose_owner_output(None, state, "welcome", now=now)
+    assert out.preferred_language == "hi", (
+        "Hindi-owner bug NOT closed: composer rendered English for a hi tenant"
+    )
+
+
+def test_english_tenant_state_renders_english_variant_end_to_end(ingress):
+    """Sibling of the Hindi proof — an 'en' tenant resolves to the English
+    variant through the same live path (no accidental Hindi spillover)."""
+    from datetime import datetime, timezone
+    from uuid import UUID, uuid4
+
+    from orchestrator.output_composer import compose_owner_output
+    from orchestrator.runner import _load_preferred_language
+    from orchestrator.state import new_subscriber_state
+
+    tenant_id = _new_tenant_with_language(
+        ingress.dsn, _phone(), preferred_language="en"
+    )
+    state = new_subscriber_state(UUID(tenant_id), uuid4())
+    state["preferred_language"] = _load_preferred_language(tenant_id)
+    assert state["preferred_language"] == "en"
+
+    now = datetime(2026, 6, 24, 12, 0, tzinfo=timezone.utc)
+    out = compose_owner_output(None, state, "welcome", now=now)
+    assert out.preferred_language == "en"
+
+
 def test_ingress_resilient_on_classifier_failure(ingress, monkeypatch):
     """Brief goal-item 6: classify_message raises → webhook still ACKs
     200, the rest of the pipeline runs, and NO owner_inputs row is
