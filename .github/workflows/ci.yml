@@ -155,6 +155,25 @@ jobs:
         # regression-protects the gate's own regex against an edit that silently breaks it.
         run: bash scripts/test-gate-no-price-literals.sh
 
+  gate-marketing-consent-default-empty:
+    name: gate-marketing-consent-default-empty
+    needs: changes
+    if: needs.changes.outputs.orchestrator == 'true' || needs.changes.outputs.ci == 'true'
+    runs-on: ubuntu-latest
+    # VT-396 step-3 C2 prod-safety (money/PII): MARKETING_CONSENT_VERSIONS MUST default to EMPTY
+    # in committed code — its non-empty value lives ONLY in the Railway *dev* env var, guarded at
+    # runtime by _assert_consent_versions_prod_safe under VIABE_ENV=production. This gate closes
+    # the CODE path: no committed orchestrator file may seed a non-empty default, so a non-empty
+    # marketing allowlist can never be merged into a branch and reach prod by code.
+    steps:
+      - uses: actions/checkout@v6
+      - name: Marketing-consent allowlist default stays empty (VT-396 C2)
+        run: bash scripts/gate-marketing-consent-default-empty.sh
+      - name: Self-test the marketing-consent default-empty gate (VT-396)
+        # Plants synthetic non-empty defaults + asserts the gate FIRES (and passes on the clean
+        # empty/env-driven forms) — regression-protects the gate's own regex.
+        run: bash scripts/test-gate-marketing-consent-default-empty.sh
+
   gate-no-llm-in-deterministic-triggers:
     name: gate-no-llm-in-deterministic-triggers
     needs: changes
@@ -866,6 +885,7 @@ jobs:
       - gitleaks
       - gate-no-deprecated-langgraph-imports
       - gate-no-price-literals
+      - gate-marketing-consent-default-empty
       - gate-no-llm-in-deterministic-triggers
       - gate-no-langsmith-imports
       - gate-no-direct-tenant-db-access

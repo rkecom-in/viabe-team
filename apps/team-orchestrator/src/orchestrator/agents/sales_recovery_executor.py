@@ -63,21 +63,76 @@ assert_agent_tools_safe(AGENT_TOOLS, surface="agents.sales_recovery_executor")
 # Marketing-consent purpose limitation — MECHANICAL, not prose (plan §2.1 / §3a, Critic-1 fix #2)
 # ---------------------------------------------------------------------------
 #
-# ███ LOUD AND DELIBERATE: THIS ALLOWLIST IS EMPTY AND THAT IS NOT A BUG. ███
+# ███ LOUD AND DELIBERATE: THIS ALLOWLIST IS EMPTY BY DEFAULT AND THAT IS NOT A BUG. ███
 #
 # ``MARKETING_CONSENT_VERSIONS`` is the set of ``record_of_consent.consent_text_version`` values
-# counsel has cleared for AUTOMATED MARKETING (win-back) use. Until counsel dependency C2
-# (plan §3f) resolves, NO existing consent version is cleared, so this is ``frozenset()`` and
-# detection is STRUCTURALLY fail-closed: zero candidates, always, even on a fully eligible
-# customer base. Pre-existing/transactional consents are thereby excluded from marketing sends
-# by construction (DPDP purpose limitation).
+# cleared for AUTOMATED MARKETING (win-back) use. The PROD/main default is EMPTY: the env var is
+# UNSET in prod, so detection is STRUCTURALLY fail-closed — zero candidates, always, even on a
+# fully eligible customer base. Pre-existing/transactional consents are thereby excluded from
+# marketing sends by construction (DPDP purpose limitation).
 #
-# Flipping it post-counsel = ONE constant change + a decisions-ledger entry (CL ref required).
-# Do NOT "fix" the empty set; do NOT widen it from a test. Membership is checked in Python
-# (short-circuit) AND as ``= ANY(%(versions)s)`` with a LIST parameter in SQL — NEVER a literal
-# ``IN ()`` (MED-2: an empty literal IN () is a SQL syntax error, which would break the
+# VT-396 step-3 (dev-test harness — NOT counsel C2 clearance, CL-438): the allowlist is now read
+# from the ``MARKETING_CONSENT_VERSIONS`` env var (comma-separated), parsed ONCE at import by
+# ``_parse_marketing_consent_versions()``. UNSET → ``frozenset()`` (fail-closed preserved). A
+# non-empty value can ONLY exist on dev: two independent guards keep it off prod —
+#   (a) a CI grep-gate (``scripts/gate-marketing-consent-default-empty.sh``) forbids any committed
+#       NON-EMPTY default in orchestrator code, so the value lives ONLY in the Railway dev env; and
+#   (b) the import-time runtime assertion ``_assert_consent_versions_prod_safe`` below, which makes
+#       the orchestrator process FAIL TO BOOT if a non-empty allowlist is ever resolved under
+#       ``VIABE_ENV=production`` (a fat-fingered prod env var → loud, early, total failure).
+#
+# The env hook is a DEV-TEST harness only. Counsel C1–C3 (CL-438) remains the sole real C2
+# clearance; the prod allowlist is counsel's call, NEVER an env var. Do NOT "fix" the empty
+# default; do NOT seed a string into code; do NOT widen it from a test. Membership is checked in
+# Python (short-circuit) AND as ``= ANY(%(versions)s)`` with a LIST parameter in SQL — NEVER a
+# literal ``IN ()`` (MED-2: an empty literal IN () is a SQL syntax error, which would break the
 # fail-closed property).
-MARKETING_CONSENT_VERSIONS: frozenset[str] = frozenset()
+
+_MARKETING_CONSENT_VERSIONS_ENV = "MARKETING_CONSENT_VERSIONS"
+
+
+class MarketingConsentProdSafetyError(RuntimeError):
+    """A non-empty ``MARKETING_CONSENT_VERSIONS`` under ``VIABE_ENV=production`` is a C2 breach
+    (DPDP purpose limitation). The env hook is dev-test ONLY (VT-396 / CL-438); prod's marketing
+    allowlist is counsel's call, never an env var. Raised at import → the process fails to boot."""
+
+
+def _assert_consent_versions_prod_safe(versions: frozenset[str]) -> None:
+    """Guard layer (b) — VT-396 step-3. Refuse a NON-EMPTY allowlist under ``VIABE_ENV=production``.
+
+    Keyed on the in-process ``VIABE_ENV`` signal (prod == ``"production"``, the same signal the
+    drafting-model resolver reads) so the check can run at import with no DB handle. Mirrors the
+    VT-362 structural-refusal spirit (``apply_migrations.guard_environment``): fail-closed, loud,
+    BEFORE any effect. Because the parser runs at import, a fat-fingered prod env var makes the
+    orchestrator process FAIL TO BOOT rather than silently send marketing.
+    """
+    if versions and os.environ.get("VIABE_ENV", "test").lower() == "production":
+        raise MarketingConsentProdSafetyError(
+            "MARKETING_CONSENT_VERSIONS is non-empty under VIABE_ENV=production — the env hook is "
+            "a dev-test harness only (VT-396/CL-438); the prod C2 marketing allowlist is "
+            "counsel-gated, never env-driven. Refusing to boot."
+        )
+
+
+def _parse_marketing_consent_versions() -> frozenset[str]:
+    """DEV-TEST harness hook (VT-396 step-3) — NOT counsel C2 clearance (CL-438).
+
+    Parse the comma-separated ``MARKETING_CONSENT_VERSIONS`` env var into the allowlist.
+    UNSET / empty / all-whitespace → ``frozenset()`` (the fail-closed default is preserved). The
+    hard prod-safety guard (``_assert_consent_versions_prod_safe``) refuses a non-empty value under
+    ``VIABE_ENV=production``, so a non-empty allowlist can ONLY exist on dev.
+    """
+    raw = os.environ.get(_MARKETING_CONSENT_VERSIONS_ENV, "")
+    versions = frozenset(v.strip() for v in raw.split(",") if v.strip())
+    _assert_consent_versions_prod_safe(versions)
+    return versions
+
+
+# Bound ONCE at import (plan §1b): a kill-switch flip is a deploy/restart boundary, never a
+# mid-process change, and import-bind keeps both read sites (the detector's direct global read +
+# the send-gate helper) single-sourced from this one global — they can never drift. The prod-
+# safety assertion above therefore runs at import: a bad prod value = the process fails to boot.
+MARKETING_CONSENT_VERSIONS: frozenset[str] = _parse_marketing_consent_versions()
 
 # Detection thresholds (plan §2.1): recency at-or-above the tenant's p75 days-since-last-sale,
 # lifetime spend at-or-above the tenant's p50 — computed over the tenant's customers WITH sales.
@@ -754,6 +809,7 @@ __all__ = [
     "DETECTION_RECENCY_PERCENTILE",
     "DETECTION_SPEND_PERCENTILE",
     "MARKETING_CONSENT_VERSIONS",
+    "MarketingConsentProdSafetyError",
     "RECONTACT_SUPPRESSION_DAYS",
     "WINBACK_TEMPLATE_NAME",
     "WINBACK_TEMPLATE_PARAMS",
