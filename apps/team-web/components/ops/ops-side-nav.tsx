@@ -23,7 +23,7 @@ const NAV: NavItem[] = [
   { href: '/team/ops/fleet', label: 'Fleet', vt: 'VT-291' },
   { href: '/team/ops/escalations', label: 'Escalations', vt: 'VT-292' },
   { href: '/team/ops/activity', label: 'Activity', vt: 'VT-293' },
-  { href: '/team/ops/behaviour', label: 'Behaviour & Training', vt: 'VT-294' },
+  { href: '/team/ops/behaviour', label: 'Decision Audit', vt: 'VT-294' },
   { href: '/team/ops/assignment', label: 'Assignment', vtAdminOnly: true, vt: 'VT-295' },
   { href: '/team/ops/monitoring', label: 'Monitoring', vt: 'VT-296' },
   { href: '/team/ops/run-control', label: 'Run Control', vt: 'VT-375' },
