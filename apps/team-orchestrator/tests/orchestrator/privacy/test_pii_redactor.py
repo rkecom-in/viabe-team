@@ -160,6 +160,92 @@ def test_customer_name_in_raw_text_scan_keeps_unregistered_match() -> None:
 
 
 # ---------------------------------------------------------------------------
+# 6b. VT-412 — registry scan now catches single-token + 3+-token names.
+# decision_rationale agent think-text is a raw string; before VT-412 the scan
+# only formed consecutive 2-grams, so a mononym customer name and any 3+-token
+# registered name survived into a VTR's run replay. These prove the close.
+# The real registry predicate is case-folded exact-match (customer_registry.
+# make_name_registry); model it with a casefold-aware membership test.
+# ---------------------------------------------------------------------------
+
+def _casefold_registry(*names: str):
+    folded = {n.casefold() for n in names}
+    return lambda text: text.casefold() in folded
+
+
+def test_single_token_registered_name_redacted_in_raw_text() -> None:
+    """VT-412 core: a MONONYM customer name in agent think-text is redacted.
+
+    'Ramesh' is a single token — the pre-VT-412 2-gram-only scan never tested
+    it, so it reached the VTR run-replay surface. It must now be caught.
+    """
+    registry = _casefold_registry("Ramesh")
+    out = redact(
+        "Owner asked to reschedule the delivery for Ramesh on Friday",
+        name_registry=registry,
+    )
+    assert "Ramesh" not in out
+    assert "<customer_name>" in out
+
+
+def test_three_token_registered_name_redacted_in_raw_text() -> None:
+    """VT-412: a 3-token registered name is matched WHOLE (longest-window-first),
+    not as a stray sub-token. The old consecutive-bigram scan matched neither
+    of its 2-grams against the 3-token registry entry."""
+    registry = _casefold_registry("Mohammed Abdul Rahman")
+    out = redact(
+        "Routing the order for Mohammed Abdul Rahman to the kitchen now",
+        name_registry=registry,
+    )
+    assert "Mohammed Abdul Rahman" not in out
+    assert "Mohammed" not in out and "Rahman" not in out
+    assert "<customer_name>" in out
+
+
+def test_registry_scan_case_insensitive_single_token() -> None:
+    """The predicate is case-folded; a lowercased mononym still matches."""
+    registry = _casefold_registry("Priya")
+    out = redact("note: priya wants the green one", name_registry=registry)
+    assert "priya" not in out
+    assert "<customer_name>" in out
+
+
+def test_registry_scan_preserves_bracketing_punctuation_single_token() -> None:
+    """A single-token name in parentheses keeps the brackets so the sentence
+    still reads (the punctuation-preservation contract, extended to 1-grams)."""
+    registry = _casefold_registry("Suresh")
+    out = redact("escalation (Suresh) pending", name_registry=registry)
+    assert "Suresh" not in out
+    assert "(<customer_name>)" in out
+
+
+def test_possessive_single_token_name_redacted() -> None:
+    """VT-412: 'Ramesh's' (possessive) leaks the bare name 'Ramesh' — strip the
+    clitic before the registry test, re-attach it so the sentence reads."""
+    registry = _casefold_registry("Ramesh")
+    out = redact(
+        "Owner asked to reschedule Ramesh's delivery to Friday", name_registry=registry
+    )
+    assert "Ramesh" not in out
+    assert "<customer_name>'s" in out
+
+
+def test_registry_scan_no_registry_no_change() -> None:
+    """No registry → no name scan at all (the cheap no-tenant-context path is
+    unchanged; only pattern redaction runs)."""
+    out = redact("Ramesh ordered two coffees", name_registry=None)
+    assert out == "Ramesh ordered two coffees"
+
+
+def test_unregistered_single_token_survives() -> None:
+    """A single token that is NOT a registered customer name is never inferred
+    away (no false-positive widening from the new 1-gram window)."""
+    registry = _casefold_registry("Ramesh")
+    out = redact("the manager approved it", name_registry=registry)
+    assert out == "the manager approved it"
+
+
+# ---------------------------------------------------------------------------
 # 7. Recursive structures + max depth
 # ---------------------------------------------------------------------------
 

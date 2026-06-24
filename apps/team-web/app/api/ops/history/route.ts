@@ -3,23 +3,37 @@
  *
  * GET /api/ops/history?date=YYYY-MM-DD&hour=H&cursor=...&tenant_ids=a,b&step_kinds=...&statuses=...&q=...
  *
- * Auth: requireFazal() (Phase-1 single-operator). Multi-operator
- * Phase-2 will route via per-operator JWTs (CL-88 substrate).
+ * VT-412 (PR-D): opened to scoped VTR operators. requireFazal() → requireOpsOperator().
+ * The read path splits by role:
+ *   - VTAdmin / Fazal (assignedTenants null) → full service-role read, unchanged.
+ *   - VTR → the requested tenant filter is NARROWED server-side to the operator's assigned
+ *     set (scopeHistoryTenantFilter — never trust the client tenant_ids, VT-293/294 IDOR);
+ *     an absent filter defaults to the WHOLE assigned set (never "all"); a VTR with no
+ *     tenant in scope gets [] rows (fail-closed). Every returned row is de-identified
+ *     (deIdentifyStepForVtr: no decision_rationale / error / tool_calls; envelopes
+ *     keys-only) — a conservative superset of the vtr_step_timeline view's redaction.
  *
- * Keyset paginated; returns `{ rows, next_cursor }` per call. Client
- * pages through until next_cursor is null.
+ * Keyset paginated; returns `{ rows, next_cursor }` per call. Client pages through until
+ * next_cursor is null.
  */
 
 import { NextResponse, type NextRequest } from 'next/server'
 
-import { requireFazal, UnauthorizedError } from '@/lib/auth/require-fazal'
+import { UnauthorizedError } from '@/lib/auth/require-fazal'
+import { requireOpsOperator } from '@/lib/auth/require-ops-operator'
 import { fetchHistoricalSteps } from '@/lib/ops/data-access'
+import {
+  deIdentifyStepForVtr,
+  hasFullReadAccess,
+  scopeHistoryTenantFilter,
+} from '@/lib/ops/run-replay-access'
 
 export const dynamic = 'force-dynamic'
 
 export async function GET(req: NextRequest): Promise<Response> {
+  let operator: Awaited<ReturnType<typeof requireOpsOperator>>
   try {
-    await requireFazal()
+    operator = await requireOpsOperator()
   } catch (err) {
     if (err instanceof UnauthorizedError) {
       return NextResponse.json({ error: 'unauthenticated' }, { status: 401 })
@@ -48,18 +62,33 @@ export async function GET(req: NextRequest): Promise<Response> {
   const limitParam = sp.get('limit')
   const limit = limitParam ? Math.min(Math.max(Number(limitParam) || 100, 1), 500) : 100
 
+  // VT-412 — narrow the requested tenant filter to the operator's scope server-side.
+  // A VTR can NEVER widen past its assigned set by passing tenant_ids it isn't assigned to.
+  const requested = sp.get('tenant_ids')?.split(',').filter(Boolean)
+  const { tenantIds, denied } = scopeHistoryTenantFilter(operator.assignedTenants, requested)
+  if (denied) {
+    // VTR with no tenant in scope — fail-closed, no rows (and no query issued).
+    return NextResponse.json({ rows: [], next_cursor: null })
+  }
+
   const result = await fetchHistoricalSteps({
     date,
     hour,
     cursor,
-    tenantIds: sp.get('tenant_ids')?.split(',').filter(Boolean),
+    tenantIds,
     stepKinds: sp.get('step_kinds')?.split(',').filter(Boolean),
     statuses: sp.get('statuses')?.split(',').filter(Boolean),
     q: sp.get('q') ?? undefined,
     limit,
   })
+
+  // VT-412 — de-identify every row for a VTR (VTAdmin/Fazal keep the full rows).
+  const rows = hasFullReadAccess(operator.assignedTenants)
+    ? result.rows
+    : result.rows.map(deIdentifyStepForVtr)
+
   return NextResponse.json({
-    rows: result.rows,
+    rows,
     next_cursor: result.nextCursor,
   })
 }

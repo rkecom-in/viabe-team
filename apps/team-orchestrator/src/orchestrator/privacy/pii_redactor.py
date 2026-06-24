@@ -392,42 +392,87 @@ def redact(
 
 
 _PUNCT_STRIP_RE = re.compile(r"^[^\w]+|[^\w]+$")
+_PREFIX_PUNCT_RE = re.compile(r"^[^\w]+")
+_SUFFIX_PUNCT_RE = re.compile(r"[^\w]+$")
+# Possessive clitic on a NAME token ("Ramesh's", "Ramesh’s", "Suresh'"). The
+# bare name still leaks through the possessive, so strip the clitic before the
+# registry test and re-attach it on the output side. Straight + curly apostrophe.
+_POSSESSIVE_RE = re.compile(r"(['’]s|['’])$")
+
+# Window sizes the registry scan tries, LONGEST first so a 3-token registered
+# name ("Mohammed Abdul Rahman") matches the 3-gram before any of its 2-gram or
+# 1-gram subspans. 3 covers the multi-part Indian/Hindi/Muslim names in tenant
+# data; 1 covers mononyms (the VT-412 gap — a single-token customer name in
+# agent think-text was never tested before, so it survived to the VTR replay).
+_REGISTRY_SCAN_WINDOWS = (3, 2, 1)
 
 
 def _scan_for_registry_names(text: str, name_registry: Callable[[str], bool]) -> str:
-    """Replace registered names found inside ``text`` with ``<customer_name>``.
+    """Replace registered customer names found inside ``text`` with ``<customer_name>``.
 
-    Heuristic: split on whitespace into 2-gram candidates (English/Hindi
-    names are typically 2 tokens in this codebase's tenant data). Each
-    token has leading/trailing punctuation stripped before forming the
-    bigram so ``(Rajesh Kumar)`` still matches the registry entry
-    ``Rajesh Kumar``. Exact-match against the registry. False negatives
-    accepted per brief §Phase-1 limitation.
+    Whitespace-tokenize, then slide windows of size 3 → 2 → 1 (longest-first)
+    over the punctuation-stripped tokens and exact-match each candidate span
+    against the registry. Longest-first so a multi-token registered name is
+    matched whole, not as a stray sub-token.
+
+    VT-412 — the scan now also tests SINGLE tokens (window size 1) and strips a
+    trailing possessive clitic ("Ramesh's" → tests "Ramesh"). The prior
+    implementation only formed consecutive 2-grams, so a mononym customer name
+    ("Rajesh"), any 3+-token registered name, and a possessive form all slipped
+    through into ``decision_rationale`` agent think-text and survived to a VTR's
+    run replay. The registry predicate is exact-match (case-folded), so a
+    single-token scan only ever redacts a token that IS a registered customer
+    name — no false-positive widening of the no-name path. Bracketing
+    punctuation + the possessive clitic are preserved so the surrounding
+    sentence still reads (``<customer_name>'s``).
+
+    False negatives remain accepted for names whose tokenization differs from
+    the registered form (Phase-1 limitation); a name the registry does not hold
+    is never inferred.
     """
     tokens = text.split(" ")
-    if len(tokens) < 2:
+    if not tokens:
         return text
     out_tokens: list[str] = []
     i = 0
-    while i < len(tokens):
-        if i + 1 < len(tokens):
-            left_word = _PUNCT_STRIP_RE.sub("", tokens[i])
-            right_word = _PUNCT_STRIP_RE.sub("", tokens[i + 1])
-            if left_word and right_word and name_registry(f"{left_word} {right_word}"):
-                # Preserve the punctuation that bracketed the name so the
-                # surrounding sentence still reads correctly.
-                left_lead = tokens[i][: len(tokens[i]) - len(tokens[i].lstrip(" \t"))]
-                left_prefix_punct_len = len(tokens[i]) - len(
-                    re.sub(r"^[^\w]+", "", tokens[i])
-                )
-                right_suffix_punct_len = len(tokens[i + 1]) - len(
-                    re.sub(r"[^\w]+$", "", tokens[i + 1])
-                )
-                prefix = tokens[i][:left_prefix_punct_len]
-                suffix = tokens[i + 1][len(tokens[i + 1]) - right_suffix_punct_len:]
-                out_tokens.append(f"{left_lead}{prefix}<customer_name>{suffix}")
-                i += 2
+    n = len(tokens)
+    while i < n:
+        matched = False
+        for window in _REGISTRY_SCAN_WINDOWS:
+            if window > n - i:
                 continue
+            span = tokens[i : i + window]
+            words = [_PUNCT_STRIP_RE.sub("", tok) for tok in span]
+            # Strip a possessive clitic from the LAST word only (the bare name is
+            # what the registry holds; "Ramesh's" → "Ramesh"). The matched clitic
+            # is re-attached on the output side so the sentence still reads.
+            poss_match = _POSSESSIVE_RE.search(words[-1]) if words else None
+            possessive = ""
+            if poss_match:
+                possessive = poss_match.group(0)
+                words[-1] = words[-1][: poss_match.start()]
+            # Skip a window whose tokens are pure whitespace/empty (consecutive
+            # spaces in the source) — the registered form has no empty parts.
+            if any(not w for w in words):
+                continue
+            candidate = " ".join(words)
+            if name_registry(candidate):
+                # Preserve leading whitespace + bracketing punctuation + the
+                # possessive clitic so the surrounding sentence still reads.
+                first, last = span[0], span[-1]
+                left_lead = first[: len(first) - len(first.lstrip(" \t"))]
+                prefix_match = _PREFIX_PUNCT_RE.search(first)
+                suffix_match = _SUFFIX_PUNCT_RE.search(last)
+                prefix = first[: prefix_match.end()] if prefix_match else ""
+                trailing_punct = last[suffix_match.start():] if suffix_match else ""
+                out_tokens.append(
+                    f"{left_lead}{prefix}<customer_name>{possessive}{trailing_punct}"
+                )
+                i += window
+                matched = True
+                break
+        if matched:
+            continue
         out_tokens.append(tokens[i])
         i += 1
     return " ".join(out_tokens)

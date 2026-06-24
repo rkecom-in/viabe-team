@@ -1,20 +1,68 @@
 /** VT-234 — Ops Console phase-1A: read-only debug view.
  *
  * Step-by-step envelope inspection. NO state-changing affordances
- * (override/replay = phase-1B, separate row). Auth-gated via the
- * existing requireFazal() pattern (CL-88 operator JWT).
+ * (override/replay = phase-1B, separate row).
+ *
+ * VT-412 (PR-D): opened to scoped VTR operators. requireFazal() → requireOpsOperator()
+ * + a per-tenant canReplayRun gate (run tenant resolved SERVER-SIDE from the run row —
+ * never a client field, VT-293/294 IDOR rule; this page previously read any runId with
+ * NO tenant resolution at all — that gap is closed here). Role-split read:
+ *   - VTAdmin / Fazal → full service-role read (fetchRunReplay), unchanged.
+ *   - VTR → de-identified, assignment-scoped read via vtrRunTimeline → vtr_step_timeline
+ *     (decision_rationale — the raw think-text this page rendered at line 77 — is absent by
+ *     construction for a VTR; envelopes keys-only; error/tool_calls dropped).
  */
 
 import { notFound, redirect } from 'next/navigation'
 
 import { JsonPretty } from '@/components/ops/json-pretty'
-import { requireFazal, UnauthorizedError } from '@/lib/auth/require-fazal'
+import { UnauthorizedError } from '@/lib/auth/require-fazal'
+import { requireOpsOperator } from '@/lib/auth/require-ops-operator'
 import { fetchRunReplay, type PipelineStepRow } from '@/lib/ops/data-access'
+import { canReplayRun, deIdentifyStepForVtr, hasFullReadAccess } from '@/lib/ops/run-replay-access'
+import { vtrRunTimeline, type VtrTimelineStep } from '@/lib/orchestrator-client'
+import { serverSecretClient } from '@/lib/supabase-client'
 
 export const dynamic = 'force-dynamic'
 
 interface PageProps {
   params: Promise<{ runId: string }>
+}
+
+/** Resolve the run's tenant SERVER-SIDE from the run row (VT-293/294). */
+async function fetchRunTenant(runId: string): Promise<string | null> {
+  const client = serverSecretClient()
+  const { data } = await client
+    .from('pipeline_runs')
+    .select('tenant_id')
+    .eq('id', runId)
+    .maybeSingle()
+  return (data as { tenant_id: string } | null)?.tenant_id ?? null
+}
+
+/** Map a de-identified vtr_step_timeline row to the debug view's PipelineStepRow shape. */
+function vtrStepToRow(s: VtrTimelineStep): PipelineStepRow {
+  return deIdentifyStepForVtr({
+    id: s.step_id ?? '',
+    run_id: s.run_id,
+    step_seq: s.step_seq ?? 0,
+    step_kind: s.step_kind ?? '',
+    step_name: s.step_name,
+    parent_step_id: null,
+    status: s.step_status ?? '',
+    decision_rationale: null,
+    model_used: null,
+    tokens_input: null,
+    tokens_output: null,
+    cost_paise: null,
+    duration_ms: s.duration_ms,
+    tool_calls: null,
+    input_envelope: s.input_envelope,
+    output_envelope: s.output_envelope,
+    error: null,
+    started_at: s.started_at ?? '',
+    ended_at: s.ended_at,
+  })
 }
 
 function statusPillClass(status: string): string {
@@ -89,21 +137,37 @@ function StepCard({ step }: { step: PipelineStepRow }) {
 }
 
 export default async function RunDebugPage({ params }: PageProps) {
+  const { runId } = await params
+  let operator: Awaited<ReturnType<typeof requireOpsOperator>>
   try {
-    await requireFazal()
+    operator = await requireOpsOperator()
   } catch (err) {
     if (err instanceof UnauthorizedError) {
-      const { runId } = await params
       redirect(`/team/ops/login?next=/team/ops/runs/${runId}/debug`)
     }
     throw err
   }
 
-  const { runId } = await params
+  // Resolve the run's tenant server-side, then gate on assignment BEFORE the read.
+  let tenantId: string | null = null
+  try {
+    tenantId = await fetchRunTenant(runId)
+  } catch (err) {
+    console.error('RunDebugPage: tenant resolve failed', err)
+    notFound()
+  }
+  if (!canReplayRun(operator.assignedTenants, tenantId)) {
+    notFound()
+  }
 
   let steps: PipelineStepRow[] = []
   try {
-    steps = await fetchRunReplay(runId)
+    if (hasFullReadAccess(operator.assignedTenants)) {
+      steps = await fetchRunReplay(runId)
+    } else {
+      const timeline = await vtrRunTimeline(operator.operatorId, runId)
+      steps = timeline.steps.map(vtrStepToRow)
+    }
   } catch (err) {
     console.error('RunDebugPage: fetch failed', err)
     notFound()
