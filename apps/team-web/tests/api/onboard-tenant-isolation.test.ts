@@ -124,13 +124,23 @@ describe('VT-415 — 2-tenant isolation: each owner reaches ONLY their own tenan
   })
 
   it('startConnectAction scopes to the SESSION tenant (A→A, B→B)', async () => {
+    // VT-422 GAP-3: startConnect now takes an optional `shop` 3rd arg (undefined for
+    // non-shopify). The isolation guarantee is unchanged: tenant comes from the session.
     sessionMock.mockResolvedValueOnce({ tenantId: TENANT_A })
     await startConnectAction('google_sheet')
-    expect(startMock).toHaveBeenLastCalledWith(TENANT_A, 'google_sheet')
+    expect(startMock).toHaveBeenLastCalledWith(TENANT_A, 'google_sheet', undefined)
 
     sessionMock.mockResolvedValueOnce({ tenantId: TENANT_B })
     await startConnectAction('whatsapp')
-    expect(startMock).toHaveBeenLastCalledWith(TENANT_B, 'whatsapp')
+    expect(startMock).toHaveBeenLastCalledWith(TENANT_B, 'whatsapp', undefined)
+  })
+
+  it('startConnectAction (shopify) scopes tenant to SESSION, passes shop through', async () => {
+    // VT-422 GAP-3: the shop domain is a client-passed value, but the tenant is STILL
+    // session-resolved — a malicious client cannot bind another tenant's install via shop.
+    sessionMock.mockResolvedValueOnce({ tenantId: TENANT_A })
+    await startConnectAction('shopify', 'attacker-store.myshopify.com')
+    expect(startMock).toHaveBeenLastCalledWith(TENANT_A, 'shopify', 'attacker-store.myshopify.com')
   })
 
   it('checkConnectionAction scopes to the SESSION tenant (A→A, B→B)', async () => {

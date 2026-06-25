@@ -252,10 +252,12 @@ def test_ingest_lands_customer_and_sale(db_ctx):
 
 @_DB
 def test_webhook_sim_canary_full_write(db_ctx, monkeypatch):
-    """CANARY — construct a realistic orders/create payload, compute the VALID
-    HMAC with the tenant's push_secret, invoke the webhook handler, and ASSERT a
-    real customers row + a real `sale` ledger row land. The end-to-end inbound
-    proof (Rule #15)."""
+    """CANARY — VT-422 GAP-2 real-delivery shape. Construct a realistic orders/create
+    payload, compute the VALID HMAC with the APP client_secret (SHOPIFY_API_SECRET) —
+    NOT a per-tenant push_secret — deliver with the X-Shopify-Shop-Domain header (the
+    only tenant linkage on an app-delivered webhook), invoke the handler, and ASSERT a
+    real customers row + a real `sale` ledger row land. The end-to-end inbound proof
+    (Rule #15) on the real public-app model."""
     import asyncio
     import base64
     import hashlib
@@ -266,15 +268,22 @@ def test_webhook_sim_canary_full_write(db_ctx, monkeypatch):
     from orchestrator.db import tenant_connection
 
     tenant = _tenant(db_ctx.dsn)
-    push_secret = "whsec_vt417_canary"  # gitleaks:allow — fake test secret for the HMAC canary, not a real credential
+    # Unique shop per test — the GAP-2 resolver rejects a shop_url shared by >1 tenant
+    # (the ambiguity guard), and the module-scoped DB accumulates rows across tests.
+    shop_domain = f"canary-{uuid4().hex[:10]}.myshopify.com"
+    # VT-422: the webhook is verified against the APP secret, not push_secret.
+    app_secret = "shpss_vt422_app_secret_canary"  # gitleaks:allow — fake test app secret for the HMAC canary, not a real credential
+    monkeypatch.setenv("SHOPIFY_API_SECRET", app_secret)
     with psycopg.connect(db_ctx.dsn, autocommit=True) as conn:
+        # push_secret is now vestigial for the webhook path — the row exists with a
+        # shop_url (the GAP-2 tenant-resolution key) and the app secret verifies.
         conn.execute(
             "INSERT INTO tenant_oauth_tokens "
             "(tenant_id, connector_id, refresh_token_encrypted, scopes, "
             " push_secret, shop_url) "
-            "VALUES (%s, 'shopify', 'enc', ARRAY['read_orders'], %s, "
-            "'kk4xva-di.myshopify.com')",
-            (tenant, push_secret),
+            "VALUES (%s, 'shopify', 'enc', "
+            "ARRAY['read_orders','write_orders'], 'whsec_vestigial', %s)",
+            (tenant, shop_domain),
         )
 
     phone = _uniq_phone()
@@ -289,8 +298,9 @@ def test_webhook_sim_canary_full_write(db_ctx, monkeypatch):
         "created_at": "2026-06-10T08:15:00Z",
     }
     body = json.dumps(order).encode()
+    # VT-422: sign with the APP secret (base64 over the raw body) — the real model.
     sig = base64.b64encode(
-        hmac.new(push_secret.encode(), body, hashlib.sha256).digest()
+        hmac.new(app_secret.encode(), body, hashlib.sha256).digest()
     ).decode()
 
     class _Req:
@@ -302,7 +312,7 @@ def test_webhook_sim_canary_full_write(db_ctx, monkeypatch):
     out = asyncio.run(
         shopify_webhook(
             _Req(),  # type: ignore[arg-type]
-            x_viabe_tenant=tenant,
+            x_shopify_shop_domain=shop_domain,
             x_shopify_topic="orders/create",
             x_shopify_hmac_sha256=sig,
         )
@@ -386,3 +396,157 @@ def test_consent_and_gate_option_a(db_ctx):
             (tenant,)
         ).fetchone()["n"]
     assert nconsent == 0, "Shopify ingestion must NOT write consent (option A)"
+
+
+# --- VT-422 GAP-2: real app-delivery auth (app-secret HMAC + shop→tenant) ----
+
+
+def _make_req(body: bytes, sig: str):
+    """A minimal stand-in for the FastAPI Request the handler consumes."""
+
+    class _Req:
+        headers = {"x-shopify-hmac-sha256": sig}
+
+        async def body(self):
+            return body
+
+    return _Req()
+
+
+def test_vt422_webhook_rejects_bad_app_secret_signature(monkeypatch):
+    """GAP-2: a delivery whose HMAC does NOT verify against the APP client_secret is
+    rejected (403) BEFORE any tenant lookup — pure, no DB. Proves the verify is keyed
+    on SHOPIFY_API_SECRET (the app secret), and a forged/tampered body never drives a
+    DB resolution."""
+    import asyncio
+
+    from fastapi import HTTPException
+
+    from orchestrator.api.shopify_webhook import shopify_webhook
+
+    monkeypatch.setenv("SHOPIFY_API_SECRET", "shpss_app_secret_test")  # gitleaks:allow — fake test app secret
+    body = b'{"id":1}'
+    with pytest.raises(HTTPException) as ei:
+        asyncio.run(
+            shopify_webhook(
+                _make_req(body, "not-a-valid-base64-hmac"),  # type: ignore[arg-type]
+                x_shopify_shop_domain="kk4xva-di.myshopify.com",
+                x_shopify_topic="orders/create",
+                x_shopify_hmac_sha256="not-a-valid-base64-hmac",
+            )
+        )
+    assert ei.value.status_code == 403
+
+
+def test_vt422_webhook_requires_shop_domain_header(monkeypatch):
+    """GAP-2: the X-Shopify-Shop-Domain header is the only tenant linkage on an
+    app-delivered webhook; absent → 400 (pure, no DB)."""
+    import asyncio
+
+    from fastapi import HTTPException
+
+    from orchestrator.api.shopify_webhook import shopify_webhook
+
+    monkeypatch.setenv("SHOPIFY_API_SECRET", "shpss_app_secret_test")  # gitleaks:allow — fake test app secret
+    with pytest.raises(HTTPException) as ei:
+        asyncio.run(
+            shopify_webhook(
+                _make_req(b"{}", "sig"),  # type: ignore[arg-type]
+                x_shopify_shop_domain="",
+                x_shopify_topic="orders/create",
+                x_shopify_hmac_sha256="sig",
+            )
+        )
+    assert ei.value.status_code == 400
+
+
+@_DB
+def test_vt422_webhook_resolves_tenant_from_shop_domain(db_ctx, monkeypatch):
+    """GAP-2: with a VALID app-secret HMAC, the handler resolves the tenant SOLELY
+    from X-Shopify-Shop-Domain → tenant_oauth_tokens.shop_url (no X-Viabe-Tenant
+    header at all) and drives the ingest. Real PG (the resolution is a DB lookup)."""
+    import asyncio
+    import base64
+    import hashlib
+    import hmac
+    import json
+
+    from orchestrator.api.shopify_webhook import shopify_webhook
+    from orchestrator.db import tenant_connection
+
+    tenant = _tenant(db_ctx.dsn)
+    # Unique shop per test (the GAP-2 ambiguity guard rejects a shop shared by >1 tenant;
+    # the module-scoped DB accumulates rows across tests).
+    shop_domain = f"resolve-{uuid4().hex[:10]}.myshopify.com"
+    app_secret = "shpss_resolve_test"  # gitleaks:allow — fake test app secret
+    monkeypatch.setenv("SHOPIFY_API_SECRET", app_secret)
+    with psycopg.connect(db_ctx.dsn, autocommit=True) as conn:
+        conn.execute(
+            "INSERT INTO tenant_oauth_tokens "
+            "(tenant_id, connector_id, refresh_token_encrypted, scopes, "
+            " push_secret, shop_url) "
+            "VALUES (%s, 'shopify', 'enc', ARRAY['read_orders'], 'vestigial', %s)",
+            (tenant, shop_domain),
+        )
+
+    phone = _uniq_phone()
+    order = {
+        "customer": {"phone": phone, "first_name": "Resolve", "last_name": "Me"},
+        "total_price": "250.00",
+        "currency": "INR",
+        "created_at": "2026-06-12T10:00:00Z",
+    }
+    body = json.dumps(order).encode()
+    sig = base64.b64encode(
+        hmac.new(app_secret.encode(), body, hashlib.sha256).digest()
+    ).decode()
+
+    out = asyncio.run(
+        shopify_webhook(
+            _make_req(body, sig),  # type: ignore[arg-type]
+            x_shopify_shop_domain=shop_domain,
+            x_shopify_topic="orders/create",
+            x_shopify_hmac_sha256=sig,
+        )
+    )
+    assert out["status"] == "ok"
+    assert out["rows_committed"] == 1
+
+    # The customer landed under the SHOP-RESOLVED tenant (proves the resolution path).
+    with tenant_connection(tenant) as conn:
+        cust = conn.execute(
+            "SELECT id FROM customers WHERE tenant_id = %s AND phone_e164 = %s",
+            (tenant, phone),
+        ).fetchone()
+    assert cust is not None, "GAP-2: shop-domain→tenant resolution did not land the row"
+
+
+@_DB
+def test_vt422_webhook_unknown_shop_rejected(db_ctx, monkeypatch):
+    """GAP-2: a valid-HMAC delivery for a shop with NO installed tenant is rejected
+    (404) — the handler never invents a tenant. Real PG (the zero-row resolution)."""
+    import asyncio
+    import base64
+    import hashlib
+    import hmac
+
+    from fastapi import HTTPException
+
+    from orchestrator.api.shopify_webhook import shopify_webhook
+
+    app_secret = "shpss_unknown_shop_test"  # gitleaks:allow — fake test app secret
+    monkeypatch.setenv("SHOPIFY_API_SECRET", app_secret)
+    body = b'{"customer":{"phone":"+919812345678"},"total_price":"1.00","currency":"INR","created_at":"2026-06-12T10:00:00Z"}'
+    sig = base64.b64encode(
+        hmac.new(app_secret.encode(), body, hashlib.sha256).digest()
+    ).decode()
+    with pytest.raises(HTTPException) as ei:
+        asyncio.run(
+            shopify_webhook(
+                _make_req(body, sig),  # type: ignore[arg-type]
+                x_shopify_shop_domain="never-installed.myshopify.com",
+                x_shopify_topic="orders/create",
+                x_shopify_hmac_sha256=sig,
+            )
+        )
+    assert ei.value.status_code == 404

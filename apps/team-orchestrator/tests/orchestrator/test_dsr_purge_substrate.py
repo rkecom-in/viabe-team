@@ -168,6 +168,20 @@ def _seed_full_tenant_data(dsn: str, tenant_id: UUID) -> dict[str, UUID]:
             (str(tenant_id),),
         )
 
+        # tenant_oauth_tokens (VT-422 GAP-1): the per-(tenant, connector) ENCRYPTED OAuth
+        # credential. FK tenants but the tenant row is anonymized (not deleted) on DSR, so
+        # the FK never CASCADEs → the purge MUST sweep it explicitly or the encrypted token
+        # survives erasure (the DPDP-erasure bug VT-422 closes). PK is (tenant_id, connector_id).
+        conn.execute(
+            "INSERT INTO tenant_oauth_tokens "
+            "(tenant_id, connector_id, refresh_token_encrypted, scopes, "
+            " push_secret, shop_url) "
+            "VALUES (%s, 'shopify', 'enc-blob-placeholder', "
+            "ARRAY['read_orders','write_orders'], 'whsec_dsr_seed', "
+            "'dsr-seed.myshopify.com')",
+            (str(tenant_id),),
+        )
+
         # campaigns (post-018 reshape: plan_json JSONB)
         conn.execute(
             "INSERT INTO campaigns (tenant_id, run_id, status, "
@@ -333,6 +347,7 @@ _PURGED_TABLES = (
     "phase_transitions",
     "subscriptions",
     "phone_token_resolutions",
+    "tenant_oauth_tokens",  # VT-422 GAP-1: encrypted OAuth credential must be erased on DSR
     "twilio_inbound_events",
     "rate_limit_buckets",
 )
@@ -836,4 +851,37 @@ def test_purge_hard_deletes_episodic_events_l2(substrate):  # type: ignore[no-un
     )
     assert _count_tenant_rows(substrate.dsn, "episodic_events", tenant_b) >= 1, (
         "VT-323: cross-tenant leak — purging A wiped B's L2 rows"
+    )
+
+
+def test_purge_hard_deletes_tenant_oauth_tokens(substrate):  # type: ignore[no-untyped-def]
+    """VT-422 GAP-1 — the DPDP erasure bug. The per-tenant ENCRYPTED OAuth credential
+    (Shopify offline token) was EXPORTED on DSR but never ERASED: it FKs tenants, but the
+    tenant row is anonymized (not deleted) so the CASCADE never fires, and the table was
+    missing from _PURGE_ORDER → the credential survived erasure. A tenant DSR-delete must
+    HARD-DELETE the token row (assert 0 rows after purge); a co-resident tenant is untouched.
+    Real PG (mock cursors hide the FK/scoping)."""
+    from orchestrator.dsr_purge import purge_tenant_data
+
+    tenant_a = _new_tenant(substrate.dsn, name="Tenant A (oauth purgee)")
+    tenant_b = _new_tenant(substrate.dsn, name="Tenant B (oauth untouched)")
+    _seed_full_tenant_data(substrate.dsn, tenant_a)
+    _seed_full_tenant_data(substrate.dsn, tenant_b)
+
+    # Pre: both have a stored encrypted OAuth credential.
+    assert _count_tenant_rows(substrate.dsn, "tenant_oauth_tokens", tenant_a) >= 1
+    assert _count_tenant_rows(substrate.dsn, "tenant_oauth_tokens", tenant_b) >= 1
+
+    result = purge_tenant_data(_open_dsr_ticket(substrate.dsn, tenant_a))
+    assert result.deleted_counts.get("tenant_oauth_tokens", 0) >= 1, (
+        "VT-422 GAP-1: purge must report tenant_oauth_tokens deletions"
+    )
+
+    # Post: A's encrypted credential is GONE; B's survives (scoping). This is THE
+    # privacy-at-rest assertion — the credential must not outlive erasure.
+    assert _count_tenant_rows(substrate.dsn, "tenant_oauth_tokens", tenant_a) == 0, (
+        "VT-422 GAP-1: DSR-delete left the encrypted OAuth token behind (credential survives erasure)"
+    )
+    assert _count_tenant_rows(substrate.dsn, "tenant_oauth_tokens", tenant_b) >= 1, (
+        "VT-422 GAP-1: cross-tenant leak — purging A wiped B's OAuth token"
     )
