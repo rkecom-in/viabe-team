@@ -203,15 +203,21 @@ def test_run_signup_reconciliation_anchors_verified_entity(pool, monkeypatch):
         dbos.DBOS, "start_workflow",
         staticmethod(lambda _wf, _tid, seed: seeds.append(seed)), raising=False,
     )
-    # Typed name = "Sundaram Book Store"; the verifier returns the AUTHORITATIVE "Asha Kirana".
+    # Typed "Sundaram Book Store"; the verifier returns the AUTHORITATIVE "Sundaram Multi Pap Limited"
+    # — differs from the typed name but shares the distinctive 'sundaram' token, so it passes the VT-448
+    # name-match while still proving discovery anchors the VERIFIED name, not the typed one.
+    def _active_sundaram(_gstin):
+        from orchestrator.integrations.methods.sandbox_kyc import GstinLookup
+        return GstinLookup(ok=True, legal_name="Sundaram Multi Pap Limited", status="Active")
+
     out = run_signup(
         _valid_input(business_name="Sundaram Book Store"),
         welcome_send_fn=lambda *a, **k: True,
-        verify_search_fn=_active_search,
+        verify_search_fn=_active_sundaram,
     )
     # Discovery anchored on the VERIFIED entity (name + gstin), not the typed name (the Sundaram fix).
     assert len(seeds) == 1
-    assert seeds[0]["business_name"] == "Asha Kirana"
+    assert seeds[0]["business_name"] == "Sundaram Multi Pap Limited"
     assert seeds[0]["gstin"] == "27AAKCR3738B1ZE"
 
     # The entity anchor is persisted on the business_profile entity from the server-verified result.
@@ -224,8 +230,27 @@ def test_run_signup_reconciliation_anchors_verified_entity(pool, monkeypatch):
     anchor = attrs.get("business_entity_anchor")
     assert anchor is not None
     assert anchor["gstin"] == "27AAKCR3738B1ZE"
-    assert anchor["trade_name"] == "Asha Kirana"
+    assert anchor["trade_name"] == "Sundaram Multi Pap Limited"
     assert anchor["source"] == "sandbox" and anchor["verified"] is True
+
+
+def test_run_signup_rejects_name_mismatch_unrelated_gstin(pool):
+    """VT-448 name-match security: a valid+ACTIVE GSTIN whose authoritative registry name is a DIFFERENT
+    business is REJECTED (a valid GSTIN alone is not enough) — SignupGateError, the generic invalid_gstin
+    outcome (no enumeration oracle), and NO tenant is created."""
+    from orchestrator.onboarding.signup import SignupGateError, run_signup
+
+    def _active_unrelated(_gstin):
+        from orchestrator.integrations.methods.sandbox_kyc import GstinLookup
+        return GstinLookup(ok=True, legal_name="Shubham Telecom Services", status="Active")
+
+    with pytest.raises(SignupGateError) as ei:
+        run_signup(
+            _valid_input(business_name="RKeCom Services Pvt Ltd"),
+            welcome_send_fn=lambda *a, **k: True,
+            verify_search_fn=_active_unrelated,
+        )
+    assert ei.value.outcome == "invalid_gstin"  # generic reject — no enumeration oracle
 
 
 def test_run_signup_discovery_kick_failure_non_blocking(pool, monkeypatch):

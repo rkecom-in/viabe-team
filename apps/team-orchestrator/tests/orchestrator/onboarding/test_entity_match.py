@@ -64,6 +64,29 @@ def test_fetch_candidates_web_all_generic_name_not_overfiltered() -> None:
     assert len(cands) == 1  # sig_tokens empty → relevance gate passes everything
 
 
+def test_business_name_matches_lenient_on_suffix_variation() -> None:
+    # VT-448: the e2e case — typed "Pvt Ltd" vs registry "(OPC) PRIVATE LIMITED" still share 'rkecom'.
+    assert entity_match.business_name_matches("RKeCom Services Pvt Ltd", "RKECOM SERVICES (OPC) PRIVATE LIMITED")
+    assert entity_match.business_name_matches("Sundaram Book Store", "SUNDARAM BOOKS")
+
+
+def test_business_name_matches_rejects_unrelated_valid_gstin() -> None:
+    # The SECURITY case — a DIFFERENT business's (valid) GSTIN: no distinctive overlap → REJECT.
+    assert not entity_match.business_name_matches("RKeCom Services Pvt Ltd", "SHUBHAM TELECOM SERVICES")
+    assert not entity_match.business_name_matches("RKeCom Services Pvt Ltd", "AECOM INDIA PRIVATE LIMITED")
+
+
+def test_business_name_matches_empty_registry_is_no_match() -> None:
+    assert not entity_match.business_name_matches("RKeCom Services Pvt Ltd", None)
+    assert not entity_match.business_name_matches("RKeCom Services Pvt Ltd", "")
+
+
+def test_business_name_matches_all_generic_falls_back_to_substring() -> None:
+    # An all-generic typed name (no distinctive token) → normalized substring/equality fallback.
+    assert entity_match.business_name_matches("Services", "SERVICES INDIA PVT LTD")
+    assert not entity_match.business_name_matches("Services", "TELECOM CORP")
+
+
 def _gbp_one(*_: Any) -> list[dict[str, Any]]:
     return [{"title": "Sundaram Multi Pap Limited", "categoryName": "Stationery", "city": "Chennai"}]
 

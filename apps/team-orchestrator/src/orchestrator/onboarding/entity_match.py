@@ -113,6 +113,23 @@ def _result_is_relevant(blob: str, sig_tokens: set[str]) -> bool:
     return any(t in low for t in sig_tokens)
 
 
+def business_name_matches(typed: str | None, registry: str | None) -> bool:
+    """VT-448 NAME-MATCH SECURITY: the Sandbox-authoritative registry name must plausibly be the owner's
+    CLAIMED business — they must share a distinctive (non-generic) token. An unrelated-but-valid GSTIN
+    (a DIFFERENT business's registration) therefore FAILS, so a valid GSTIN alone is not enough to earn a
+    tenant. Lenient on suffix/word-order variation ("RKeCom Services Pvt Ltd" vs "RKECOM SERVICES (OPC)
+    PRIVATE LIMITED" share 'rkecom'); strict on zero distinctive overlap. The caller collapses a mismatch
+    into the SAME generic reject as invalid_gstin (no enumeration oracle — never "valid but not yours")."""
+    t = _significant_tokens(typed or "")
+    r = _significant_tokens(registry or "")
+    if t and r:
+        return bool(t & r)  # share ≥1 distinctive token
+    # One side has no distinctive token (all-generic name) → normalized substring/equality fallback.
+    tn = re.sub(r"[^a-z0-9]", "", (typed or "").lower())
+    rn = re.sub(r"[^a-z0-9]", "", (registry or "").lower())
+    return bool(tn) and bool(rn) and (tn in rn or rn in tn)
+
+
 def _web_candidates(name: str, city: str, search_fn: SearchFn | None) -> list[EntityCandidate]:
     token = os.environ.get(_TOKEN_ENV)
     fn = search_fn
