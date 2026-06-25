@@ -19,11 +19,14 @@ import { describe, expect, it, vi } from 'vitest'
 
 import {
   canCreateAccount,
+  cityToStateCode,
   classifyConfirm,
   confirmCandidate,
   fetchCandidates,
+  fetchGstinsByPan,
   isConfirmable,
   isValidGstinFormat,
+  isValidPanFormat,
   type EntityCandidate,
   type EntityConfirmResult,
 } from '@/lib/entity-match'
@@ -202,5 +205,89 @@ describe('VT-448 isValidGstinFormat (manual-entry format gate)', () => {
     // A format-valid string never unlocks create on its own; canCreateAccount needs a verified entity.
     expect(canCreateAccount({ gstin: '27AAACR5055K1Z7', name: 'X' })).toBe(true)
     expect(canCreateAccount(null)).toBe(false)
+  })
+})
+
+describe('VT-448 fetchGstinsByPan (PRIMARY identify path)', () => {
+  it('200 → gstins, posts to the proxy route with {pan, state_code}', async () => {
+    const f = vi.fn().mockResolvedValue(resp(200, { ok: true, gstins: ['27AAACR5055K1Z7'] }))
+    const r = await fetchGstinsByPan('AAACR5055K', '27', f)
+    expect(r.ok).toBe(true)
+    expect(r.gstins).toEqual(['27AAACR5055K1Z7'])
+    const [url, init] = f.mock.calls[0] as [string, RequestInit]
+    expect(url).toBe('/api/team/onboard/gstins-by-pan')
+    expect(JSON.parse(init.body as string)).toEqual({ pan: 'AAACR5055K', state_code: '27' })
+  })
+
+  it('parses {ok, gstins} and defaults a missing list to empty', async () => {
+    const f = vi.fn().mockResolvedValue(resp(200, { ok: true }))
+    expect(await fetchGstinsByPan('AAACR5055K', '27', f)).toEqual({
+      ok: true,
+      gstins: [],
+      reason: 'ok',
+    })
+  })
+
+  it('fails CLOSED to an empty list on non-2xx (manual fallback always exists)', async () => {
+    const f = vi.fn().mockResolvedValue(resp(502))
+    expect(await fetchGstinsByPan('AAACR5055K', '27', f)).toEqual({
+      ok: false,
+      gstins: [],
+      reason: 'http_502',
+    })
+  })
+
+  it('fails CLOSED to an empty list on throw', async () => {
+    const f = vi.fn().mockRejectedValue(new Error('network'))
+    expect(await fetchGstinsByPan('AAACR5055K', '27', f)).toEqual({
+      ok: false,
+      gstins: [],
+      reason: 'error',
+    })
+  })
+})
+
+describe('VT-448 isValidPanFormat (PAN format gate)', () => {
+  it('accepts a well-formed 10-char PAN (any case / surrounding space)', () => {
+    expect(isValidPanFormat('AAACR5055K')).toBe(true)
+    expect(isValidPanFormat(' aaacr5055k ')).toBe(true) // trimmed + upper-cased before test
+  })
+
+  it('rejects wrong length / shape', () => {
+    expect(isValidPanFormat('')).toBe(false)
+    expect(isValidPanFormat('AAACR5055')).toBe(false) // 9 chars (missing trailing letter)
+    expect(isValidPanFormat('AAACR5055KK')).toBe(false) // 11 chars
+    expect(isValidPanFormat('AAAC15055K')).toBe(false) // digit in the 5-letter block
+    expect(isValidPanFormat('AAACR505K5')).toBe(false) // letter in the 4-digit block
+    expect(isValidPanFormat('AAACR50555')).toBe(false) // digit in the trailing-letter slot
+    expect(isValidPanFormat('27AAACR505')).toBe(false) // GSTIN-shaped, not a PAN
+  })
+
+  it('is a FORMAT gate only — a valid PAN is NOT verification', () => {
+    // A format-valid PAN never unlocks create; canCreateAccount still needs a verified entity.
+    expect(canCreateAccount(null)).toBe(false)
+  })
+})
+
+describe('VT-448 cityToStateCode', () => {
+  it('maps known cities to their GST state code (case / space insensitive)', () => {
+    expect(cityToStateCode('Mumbai')).toBe('27')
+    expect(cityToStateCode(' mumbai ')).toBe('27')
+    expect(cityToStateCode('Pune')).toBe('27')
+    expect(cityToStateCode('Maharashtra')).toBe('27')
+    expect(cityToStateCode('Delhi')).toBe('07')
+    expect(cityToStateCode('Bengaluru')).toBe('29')
+    expect(cityToStateCode('Karnataka')).toBe('29')
+    expect(cityToStateCode('Chennai')).toBe('33')
+    expect(cityToStateCode('Tamil Nadu')).toBe('33')
+    expect(cityToStateCode('Kolkata')).toBe('19')
+    expect(cityToStateCode('West Bengal')).toBe('19')
+    expect(cityToStateCode('Hyderabad')).toBe('36')
+    expect(cityToStateCode('Telangana')).toBe('36')
+  })
+
+  it('returns null for an unknown city (component asks for a state hint, never guesses)', () => {
+    expect(cityToStateCode('Atlantis')).toBeNull()
+    expect(cityToStateCode('')).toBeNull()
   })
 })
