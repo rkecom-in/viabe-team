@@ -31,7 +31,9 @@ from pydantic import BaseModel
 from orchestrator.billing.plans import (
     PlanIdNotConfiguredError,
     ResolvedPlan,
+    TierNotOfferedError,
     UnknownPlanError,
+    assert_tier_offered,
     resolve_plan,
 )
 from orchestrator.graph import get_pool
@@ -143,11 +145,20 @@ def razorpay_subscribe(
     x_internal_secret: str | None = Header(default=None),
 ) -> dict[str, Any]:
     """Create (or return the existing) Razorpay subscription for a tenant. 403 bad
-    secret; 400 unknown plan_tier; 503 plan-id OR live keys not configured (NEEDS-FAZAL,
-    fail-closed — never a stub). Returns ``{status: created|exists, razorpay_subscription_id}``.
-    Never flips phase."""
+    secret OR tier-not-offered (VT-429 launch gate); 400 unknown plan_tier; 503 plan-id OR
+    live keys not configured (NEEDS-FAZAL, fail-closed — never a stub). Returns
+    ``{status: created|exists, razorpay_subscription_id}``. Never flips phase."""
     if not _verify_internal_secret(x_internal_secret):
         raise HTTPException(status_code=403, detail="invalid internal secret")
+
+    # VT-429 — single-plan launch gate (fail-closed). BEFORE resolve_plan + BEFORE any vendor
+    # call: a plan_tier not in the server-side offered_tiers allowlist → 403, NO subscription, NO
+    # vendor call. Never trust the client to send only an offered tier; an empty/absent
+    # offered_tiers config is default-deny (offer-nothing), never offer-all.
+    try:
+        assert_tier_offered(body.plan_tier)
+    except TierNotOfferedError:
+        raise HTTPException(status_code=403, detail="tier not offered at launch") from None
 
     try:
         plan = resolve_plan(body.plan_tier)
