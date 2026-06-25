@@ -120,6 +120,20 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     from orchestrator.agents.l2_send import register_l2_send
 
     register_l2_send()
+    # VT-431: the autonomous agent-coordinator dispatch loop. Same
+    # register-before-launch contract — applies @DBOS.workflow to
+    # agent_dispatch_workflow + agent_coordinator_scheduled and @DBOS.scheduled
+    # (AGENT_COORDINATOR_CRON) to the sweep, so all three are in the DBOS
+    # registry when launch_dbos() computes the app_version hash and the daily
+    # sweep + DBOS recovery of an in-flight dispatch resolve. This is the
+    # activation of the previously-dark loop (the coordinator was built but
+    # never registered). Downstream customer sends STAY gated — the executor's
+    # detection is structurally fail-closed (empty MARKETING_CONSENT_VERSIONS on
+    # prod) and the CL-425 owner_inputs basis is re-checked fail-closed in the
+    # dispatch workflow; this only wires the dispatch loop, not any send gate.
+    from orchestrator.agents.coordinator import register_agent_coordinator
+
+    register_agent_coordinator()
     launch_dbos()
     # VT-280/VT-281: seed the VTR REF# keying secret from env (VT_REF_HMAC_KEY) so the
     # de-identified views never emit NULL refs before the first VTR read. Best-effort at the

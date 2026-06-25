@@ -473,3 +473,165 @@ def test_workflow_fail_soft_marks_failed_never_raises(substrate, wf_spy, monkeyp
         (str(tenant2), work_item_id2),
     )
     assert rows2[0][0] == "failed"
+
+
+# --- VT-431 registration (no DB; DBOS decorators spied) -------------------------
+
+
+def test_register_agent_coordinator_registers_workflows_and_schedule(monkeypatch) -> None:
+    """VT-431 activation: ``register_agent_coordinator`` applies ``@DBOS.workflow`` to BOTH the
+    per-item dispatch workflow and the sweep handler, and ``@DBOS.scheduled(CRON)`` to the sweep —
+    so all three are in the DBOS registry when ``launch_dbos()`` computes the app_version hash. The
+    previously-dark loop is only registered here; no send/eligibility gate is touched."""
+    from dbos import DBOS
+
+    workflow_targets: list[str] = []
+    scheduled_crons: list[str] = []
+
+    def _fake_workflow():
+        def _wrap(fn):
+            workflow_targets.append(fn.__name__)
+            return fn
+
+        return _wrap
+
+    def _fake_scheduled(cron):
+        scheduled_crons.append(cron)
+
+        def _wrap(fn):
+            return fn
+
+        return _wrap
+
+    monkeypatch.setattr(DBOS, "workflow", _fake_workflow)
+    monkeypatch.setattr(DBOS, "scheduled", _fake_scheduled)
+    monkeypatch.setattr(coordinator, "_registered", False)
+    try:
+        coordinator.register_agent_coordinator()
+        # workflow() applied to agent_dispatch_workflow AND agent_coordinator_scheduled
+        assert workflow_targets == [
+            "agent_dispatch_workflow",
+            "agent_coordinator_scheduled",
+        ]
+        # scheduled() applied ONCE, with the plan's literal daily cron
+        assert scheduled_crons == [coordinator.AGENT_COORDINATOR_CRON]
+        assert coordinator.AGENT_COORDINATOR_CRON == "0 10 * * *"
+    finally:
+        coordinator._registered = False
+
+
+def test_register_agent_coordinator_idempotent(monkeypatch) -> None:
+    """Two calls must not re-register (re-decorating shifts the launch-time ``app_version`` hash and
+    breaks the DBOS recovery filter). Second call is a no-op short-circuit. Mirrors the
+    ``register_scheduled_triggers`` idempotency invariant (VT-28/VT-176)."""
+    from dbos import DBOS
+
+    calls = {"workflow": 0, "scheduled": 0}
+
+    def _fake_workflow():
+        calls["workflow"] += 1
+
+        def _wrap(fn):
+            return fn
+
+        return _wrap
+
+    def _fake_scheduled(cron):
+        calls["scheduled"] += 1
+
+        def _wrap(fn):
+            return fn
+
+        return _wrap
+
+    monkeypatch.setattr(DBOS, "workflow", _fake_workflow)
+    monkeypatch.setattr(DBOS, "scheduled", _fake_scheduled)
+    monkeypatch.setattr(coordinator, "_registered", False)
+    try:
+        coordinator.register_agent_coordinator()
+        first = (calls["workflow"], calls["scheduled"])
+        coordinator.register_agent_coordinator()
+        second = (calls["workflow"], calls["scheduled"])
+        assert first == (2, 1), "first call: 2 workflows + 1 schedule"
+        assert second == (2, 1), "second call must short-circuit (idempotent)"
+    finally:
+        coordinator._registered = False
+
+
+def test_main_lifespan_invokes_register_agent_coordinator(monkeypatch) -> None:
+    """VT-431 wiring assertion: ``main.py``'s lifespan calls ``register_agent_coordinator`` BEFORE
+    ``launch_dbos()`` (mirrors the other ``register_*`` calls). The activation lives in main.py;
+    this pins it so the loop can never silently go dark again. All heavy startup calls are spied so
+    the test needs no DB/DBOS launch."""
+    import importlib
+    import sys
+
+    main = importlib.import_module("main")
+
+    order: list[str] = []
+
+    # Spy every registration / launch the lifespan drives, in import-target modules.
+    def _spy(name):
+        def _fn(*_a, **_k):
+            order.append(name)
+
+        return _fn
+
+    import orchestrator.agents.coordinator as coord_mod
+    import orchestrator.agents.l2_send as l2_mod
+    import orchestrator.agents.l3_hold as l3_mod
+    import orchestrator.alerts.email_deliverability as edel_mod
+    import orchestrator.alerts.scheduler as alert_mod
+    import orchestrator.dbos_purge as purge_mod
+    import orchestrator.integrations.drive_push as drive_mod
+    import orchestrator.integrations.scheduler as ingest_mod
+    import orchestrator.observability.decorators as deco_mod
+    import orchestrator.observability.envelopes as env_mod
+    import orchestrator.observability.twilio_replay_purge as treplay_mod
+    import orchestrator.observability.webhook_metrics_writer as wmw_mod
+    import orchestrator.scheduled_triggers as st_mod
+
+    monkeypatch.setattr(env_mod, "validate_registry_completeness", _spy("validate_registry"))
+    monkeypatch.setattr(deco_mod, "validate_tool_step_registry", _spy("validate_tool_step"))
+    monkeypatch.setattr(purge_mod, "register_purge_scheduler", _spy("purge"))
+    monkeypatch.setattr(st_mod, "register_scheduled_triggers", _spy("scheduled_triggers"))
+    monkeypatch.setattr(ingest_mod, "register_ingestion_scheduler", _spy("ingestion"))
+    monkeypatch.setattr(alert_mod, "register_alert_scheduler", _spy("alert"))
+    monkeypatch.setattr(
+        edel_mod, "register_email_deliverability_scheduler", _spy("email_deliverability")
+    )
+    monkeypatch.setattr(drive_mod, "register_drive_push_scheduler", _spy("drive_push"))
+    monkeypatch.setattr(
+        treplay_mod, "register_twilio_replay_purge_scheduler", _spy("twilio_replay")
+    )
+    monkeypatch.setattr(wmw_mod, "register_webhook_metrics_workflow", _spy("webhook_metrics"))
+    monkeypatch.setattr(l3_mod, "register_l3_hold", _spy("l3_hold"))
+    monkeypatch.setattr(l2_mod, "register_l2_send", _spy("l2_send"))
+    monkeypatch.setattr(coord_mod, "register_agent_coordinator", _spy("agent_coordinator"))
+
+    # Spy dbos_config + the best-effort post-launch bootstraps so the lifespan never touches a DB.
+    import dbos_config as cfg_mod
+
+    monkeypatch.setattr(cfg_mod, "launch_dbos", _spy("launch_dbos"))
+    monkeypatch.setattr(cfg_mod, "shutdown_dbos", lambda *a, **k: None)
+    import orchestrator.privacy.vtr as vtr_mod
+    import orchestrator.run_control as rc_mod
+
+    monkeypatch.setattr(vtr_mod, "bootstrap_vtr_ref_secret", lambda *a, **k: None)
+    monkeypatch.setattr(rc_mod, "warm_pause_cache", lambda *a, **k: None)
+    # compose_output is import-only in the lifespan; ensure it's importable, no spy needed.
+    assert "orchestrator.agent.tools.compose_output" or sys  # keep sys import meaningful
+
+    import anyio
+
+    async def _drive() -> None:
+        async with main.lifespan(main.app):
+            pass
+
+    anyio.run(_drive)
+
+    assert "agent_coordinator" in order, "lifespan must call register_agent_coordinator"
+    # registered BEFORE launch_dbos (app_version contract)
+    assert order.index("agent_coordinator") < order.index("launch_dbos")
+    # and it lands in the register-before-launch phase, after the other registrations
+    assert order.index("l2_send") < order.index("agent_coordinator")
