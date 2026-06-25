@@ -27,6 +27,12 @@ from __future__ import annotations
 import logging
 import uuid
 
+import pytest
+
+# The code under test (trial_sweep → attribution_close) imports psycopg; the dep-less smoke
+# (CI 'test' job + pre-push) runs without heavy deps, so skip there. Runs fully with deps. (VT-447 sweep)
+pytest.importorskip("psycopg")
+
 
 class _FakeSendResult:
     """Stand-in for utils.twilio_send.SendResult — only the fields _owner_notify reads."""
