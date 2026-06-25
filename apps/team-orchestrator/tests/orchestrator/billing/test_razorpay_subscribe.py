@@ -72,6 +72,12 @@ def _env(monkeypatch):
     import orchestrator.api.razorpay_subscribe as mod
 
     monkeypatch.setattr(mod, "_get_razorpay_client", _FakeRazorpayClient)
+    # VT-429: these pre-existing tests exercise the VENDOR/idempotency/concurrency path with
+    # founding+standard, which are NOT in the launch offered_tiers allowlist (standard-only). Make
+    # the launch gate permissive HERE so the gate doesn't short-circuit the path under test — the
+    # gate's own fail-closed / non-offered behaviour is proven by the dedicated VT-429 tests below
+    # (which use the real assert_tier_offered).
+    monkeypatch.setattr(mod, "assert_tier_offered", lambda _tier: None)
 
 
 @pytest.fixture
@@ -416,6 +422,97 @@ def test_vendor_empty_id_surfaced_as_clean_error() -> None:
     plan = resolve_plan("founding")
     with pytest.raises(RuntimeError, match="no subscription id"):
         _create_razorpay_subscription(plan, str(uuid4()), "k", client=_EmptyClient())
+
+
+# --- VT-429 — single-plan launch gate (server-side offered_tiers allowlist, fail-closed) --------
+# These use the REAL assert_tier_offered (the autouse _env stub is overridden per-test below) to
+# prove the gate rejects non-offered tiers BEFORE resolve_plan + BEFORE any vendor call.
+def test_gate_standard_passes_gate_to_create() -> None:
+    """STANDARD is the launch-offered tier → it PASSES the gate and proceeds to the create path
+    (no DB here, so it reaches _do_subscribe and fails on the pool — NOT a 403/400 gate reject).
+    The point: the offered tier is NOT blocked at the gate."""
+    import orchestrator.api.razorpay_subscribe as mod
+    from fastapi import HTTPException
+
+    # Real gate with the launch config (standard-only) — DO NOT stub it.
+    monkeypatch_real = pytest.MonkeyPatch()
+    import orchestrator.billing.plans as plans_mod
+
+    monkeypatch_real.setattr(mod, "assert_tier_offered", plans_mod.assert_tier_offered)
+    try:
+        with pytest.raises(Exception) as exc:  # noqa: PT011 — asserting it's NOT a 403/400 gate reject
+            _post(uuid4(), "standard")
+        # standard passed the gate + plan resolve; it died LATER (no DB pool). The failure is NOT a
+        # 403 "tier not offered" nor a 400 "unknown plan_tier" — i.e. the gate let it through.
+        if isinstance(exc.value, HTTPException):
+            assert exc.value.status_code not in (400, 403)
+    finally:
+        monkeypatch_real.undo()
+
+
+def test_gate_founding_rejected_403_no_vendor_call() -> None:
+    """FOUNDING is DEFINED but NOT offered at launch → 403 'tier not offered', BEFORE resolve_plan
+    and BEFORE any vendor call (the stub records zero calls)."""
+    from fastapi import HTTPException
+
+    import orchestrator.api.razorpay_subscribe as mod
+    import orchestrator.billing.plans as plans_mod
+
+    fake = _FakeRazorpayClient()
+    mp = pytest.MonkeyPatch()
+    mp.setattr(mod, "assert_tier_offered", plans_mod.assert_tier_offered)  # REAL gate
+    mp.setattr(mod, "_get_razorpay_client", lambda: fake)
+    try:
+        with pytest.raises(HTTPException) as exc:
+            _post(uuid4(), "founding")
+        assert exc.value.status_code == 403
+        assert exc.value.detail == "tier not offered at launch"
+        assert fake.subscription.calls == []  # NO vendor call — rejected before the money path
+    finally:
+        mp.undo()
+
+
+def test_gate_pro_rejected_403_no_vendor_call() -> None:
+    """PRO is DEFINED but NOT offered at launch → 403 'tier not offered', no vendor call. (The gate
+    fires BEFORE the 503 unconfigured-plan-id path that PRO would otherwise hit.)"""
+    from fastapi import HTTPException
+
+    import orchestrator.api.razorpay_subscribe as mod
+    import orchestrator.billing.plans as plans_mod
+
+    fake = _FakeRazorpayClient()
+    mp = pytest.MonkeyPatch()
+    mp.setattr(mod, "assert_tier_offered", plans_mod.assert_tier_offered)  # REAL gate
+    mp.setattr(mod, "_get_razorpay_client", lambda: fake)
+    try:
+        with pytest.raises(HTTPException) as exc:
+            _post(uuid4(), "pro")
+        assert exc.value.status_code == 403  # gate (403) wins over the unconfigured-id (503)
+        assert exc.value.detail == "tier not offered at launch"
+        assert fake.subscription.calls == []
+    finally:
+        mp.undo()
+
+
+def test_gate_empty_offered_config_default_deny_no_vendor_call(monkeypatch) -> None:
+    """FAIL-CLOSED PROOF (the keystone): with the offered set EMPTY (a missing/blank
+    offered_tiers config), EVEN STANDARD → 403 'tier not offered', no vendor call. An empty config
+    must default-deny (offer NOTHING), NEVER offer-all."""
+    from fastapi import HTTPException
+
+    import orchestrator.api.razorpay_subscribe as mod
+    import orchestrator.billing.plans as plans_mod
+
+    fake = _FakeRazorpayClient()
+    # Simulate an absent/blank offered_tiers config → offered set is EMPTY.
+    monkeypatch.setattr(plans_mod, "offered_tiers", lambda: frozenset())
+    monkeypatch.setattr(mod, "assert_tier_offered", plans_mod.assert_tier_offered)  # REAL gate
+    monkeypatch.setattr(mod, "_get_razorpay_client", lambda: fake)
+    with pytest.raises(HTTPException) as exc:
+        _post(uuid4(), "standard")  # even the launch tier is denied when the config is empty
+    assert exc.value.status_code == 403
+    assert exc.value.detail == "tier not offered at launch"
+    assert fake.subscription.calls == []  # NO vendor call — default-deny, not offer-all
 
 
 @pytest.mark.integration
