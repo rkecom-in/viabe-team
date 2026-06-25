@@ -6,13 +6,21 @@
 # subscriptions (service-role). team-web NEVER sees a resolved plan_id/amount; it sends
 # only plan_tier (Cowork Q1 — the money-authoritative mapping stays at the service-role
 # layer so a team-web bug can't create a subscription at the wrong plan/price).
+# total_count = the number of billing cycles Razorpay charges before the subscription
+# auto-completes (mandatory on subscription.create). Config, not code (VT-424) — kept here
+# alongside the price so a billing-term change is a config edit, not a code change. 120 monthly
+# cycles = a 10-year horizon (effectively "until cancelled"); cancellation is the real lifecycle
+# end, this is just the vendor-required upper bound.
 plans:
   founding:
     amount_paise: 249900
+    total_count: 120
     plan_id_env: FOUNDING_RZP_PLAN_ID
   standard:
     amount_paise: 499900
+    total_count: 120
     plan_id_env: STANDARD_RZP_PLAN_ID
   pro:
     amount_paise: 1499900
+    total_count: 120
     plan_id_env: PRO_RZP_PLAN_ID

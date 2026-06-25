@@ -22,6 +22,9 @@ class ResolvedPlan(NamedTuple):
     plan_tier: str
     razorpay_plan_id: str
     amount_paise: int
+    # VT-424 — billing cycles for razorpay.subscription.create (mandatory). Config-sourced
+    # (plans.yaml), defaults to 120 if omitted so a missing field can't 500 the create.
+    total_count: int = 120
 
 
 class UnknownPlanError(ValueError):
@@ -56,4 +59,5 @@ def resolve_plan(plan_tier: str) -> ResolvedPlan:
         raise PlanIdNotConfiguredError(
             f"{env_name} unset — the Razorpay plan ID for {plan_tier!r} is NEEDS-FAZAL (LIVE)"
         )
-    return ResolvedPlan(plan_tier, plan_id, int(amount))
+    total_count = int(spec.get("total_count", 120))  # VT-424 — billing cycles for create
+    return ResolvedPlan(plan_tier, plan_id, int(amount), total_count)
