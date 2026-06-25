@@ -11,7 +11,7 @@ VT-422 Partner app):
   * RESUME canary: an inbound "done" after the link-out RE-CHECKS connector status (DB truth) and
     continues — it does NOT re-enter the brain fresh.
   * not-connected guard: "done" with no token row → stays phase_2_auth, NO fabricated progress.
-  * connected → pull_sample (MOCK) → fixed-schema auto-map → ingest_customer_rows writes real
+  * connected → pull_orders (MOCK) → fixed-schema auto-map → ingest_customer_rows writes real
     customers + ledger rows; phase_5_confirmed.
   * PII canary: counts-only owner prompt + counts-only logging; NO raw phone/email persisted from a
     fabricated number (the mock fixture is clearly-marked; never a DB-persisted fake number that
@@ -205,13 +205,16 @@ def _seed_token(dsn: str, tenant_id: UUID) -> None:
 # explicit fixture rows. These are obviously-synthetic test phones/emails (CL-422: dev = internal
 # data only; the live pull against real customer data is post-VT-231 / Fazal's VT-422 Partner app).
 class _MockShopifyConnector:
-    def pull_sample(self, tenant_id: UUID):  # noqa: ARG002 — signature parity with the real connector
+    def pull_orders(self, tenant_id: UUID):  # noqa: ARG002 — signature parity with the real connector
+        # VT-447: onboarding ingests real ORDERS (/orders.json), NOT abandoned checkouts. Each order
+        # carries a sale. ``processed_at`` is the real transaction date the mapper reads (the field that
+        # also sticks on a backdated/API order — Shopify forces ``created_at``=now on creation).
         return [
-            {"__source": "customers", "phone": "+919800000001",
-             "first_name": "MockA", "last_name": "Test", "email": "mocka@example.test"},
-            {"__source": "abandoned_checkouts",
-             "customer": {"phone": "+919800000002", "first_name": "MockB"},
-             "total_price": "750.00", "currency": "INR", "created_at": "2026-06-10T08:15:00Z"},
+            {"customer": {"phone": "+919800000001", "first_name": "MockA",
+                          "last_name": "Test", "email": "mocka@example.test"},
+             "total_price": "500.00", "currency": "INR", "processed_at": "2026-06-09T08:15:00Z"},
+            {"customer": {"phone": "+919800000002", "first_name": "MockB"},
+             "total_price": "750.00", "currency": "INR", "processed_at": "2026-06-10T08:15:00Z"},
         ]
 
 
@@ -321,7 +324,7 @@ def test_resume_canary_not_connected_does_not_fabricate(substrate):
 @_DB
 def test_resume_canary_connected_pulls_maps_ingests(substrate):
     """THE PROOF + RESUME canary: connected → 'done' inbound RESUMES (re-checks status), pulls the
-    MOCK sample, fixed-schema auto-maps, ingests real customers+ledger, advances phase_5_confirmed."""
+    MOCK orders, fixed-schema auto-maps, ingests real customers+ledger, advances phase_5_confirmed."""
     from orchestrator.db import tenant_connection
     from orchestrator.onboarding.shopify_onboarding import (
         maybe_resume_shopify_onboarding,
@@ -355,9 +358,10 @@ def test_resume_canary_connected_pulls_maps_ingests(substrate):
             "SELECT amount_paise, entry_type FROM customer_ledger_entries WHERE tenant_id = %s",
             (str(tenant),),
         ).fetchall()
-    assert len(sales) == 1  # only the abandoned checkout carried a sale
-    assert sales[0]["amount_paise"] == 75000
-    assert sales[0]["entry_type"] == "sale"
+    # VT-447: each real ORDER carries a sale (both mock orders are INR).
+    assert len(sales) == 2
+    assert {s["amount_paise"] for s in sales} == {50000, 75000}
+    assert all(s["entry_type"] == "sale" for s in sales)
 
     # A recurring-ingestion schedule was set.
     with psycopg.connect(substrate.dsn, autocommit=True) as conn:

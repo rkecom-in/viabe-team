@@ -98,6 +98,23 @@ def test_mapper_inr_order_full_row():
     assert row.sales[0].confidence == 1.0
 
 
+def test_mapper_prefers_processed_at_over_created_at():
+    # VT-447: processed_at = the real transaction date AND the field that sticks on a backdated/API
+    # order (Shopify forces created_at=now on creation). The mapper must read processed_at when present.
+    payload = _order(created="2026-06-25T00:00:00Z")        # API-stamped "today"
+    payload["processed_at"] = "2026-03-27T00:00:00Z"        # the real (backdated) transaction date
+    row = shopify_order_to_canonical(payload).row
+    assert row is not None
+    assert row.sales[0].entry_date == date(2026, 3, 27)     # processed_at wins, NOT created_at
+
+
+def test_mapper_falls_back_to_created_at_when_no_processed_at():
+    # Back-compat: payloads without processed_at use created_at.
+    row = shopify_order_to_canonical(_order(created="2026-06-01T10:30:00Z")).row
+    assert row is not None
+    assert row.sales[0].entry_date == date(2026, 6, 1)
+
+
 def test_mapper_drops_address_and_lineitems():
     # PII boundary (§3): address + line_items must NOT survive into CanonicalRow.
     payload = _order(address={"address1": "12 MG Road", "phone": "+919000000009"})
