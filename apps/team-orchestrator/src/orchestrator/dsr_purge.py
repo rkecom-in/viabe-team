@@ -192,6 +192,15 @@ _PURGE_ORDER: tuple[str, ...] = (
     "phase_transitions",
     "subscriptions",
     "phone_token_resolutions",
+    # VT-422 (GAP-1, DPDP erasure bug): the per-(tenant, connector) ENCRYPTED OAuth
+    # credential (the Shopify offline access token et al — the tenant's credential =
+    # tenant PII per CL-390/425). Leaf (FK tenants only; the tenant row is anonymized,
+    # NOT deleted on DSR, so the FK CASCADE never fires) → order-insensitive. It was
+    # EXPORTED on DSR (dsr_export.py) but never ERASED — a real privacy-at-rest bug: a
+    # DSR-deleted tenant's encrypted token survived the purge. MUST be swept here or
+    # the credential outlives erasure (the episodic_events/platform_listings lesson,
+    # on the credential store). Hard-delete.
+    "tenant_oauth_tokens",
     # VT-8.5: customer consent proof (migration 067). Leaf table (no FK in or
     # out — phone_token-keyed, no customers FK), so order-insensitive; grouped
     # with the privacy surfaces. Tenant-wide DSR must sweep it.

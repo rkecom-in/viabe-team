@@ -34,6 +34,34 @@ describe('VT-267 PR-C — startConnect (system-browser handoff URL)', () => {
     expect(r.authUrl).toContain('facebook.com')
   })
 
+  it('shopify → returns the authorize_url (VT-422: NOT auth_url — endpoint key)', async () => {
+    // The shopify /setup endpoint returns `authorize_url`; using `auth_url` would
+    // silently null the URL. This locks the correct key.
+    const f = _fetchOnce(200, { authorize_url: 'https://shop.myshopify.com/admin/oauth/authorize?x=1' })
+    const r = await startConnect('t1', 'shopify', 'shop.myshopify.com')
+    expect(r.ok).toBe(true)
+    expect(r.authUrl).toContain('myshopify.com/admin/oauth/authorize')
+    // the shop domain is threaded into the /setup body.
+    const calls = f.mock.calls as unknown as Array<[string, { body: string }]>
+    const body = JSON.parse(calls[0]![1].body)
+    expect(body).toEqual({ tenant_id: 't1', shop: 'shop.myshopify.com' })
+  })
+
+  it('shopify → wrong key (auth_url) yields no url (proves the authorize_url requirement)', async () => {
+    _fetchOnce(200, { auth_url: 'https://shop.myshopify.com/admin/oauth/authorize?x=1' })
+    const r = await startConnect('t1', 'shopify', 'shop.myshopify.com')
+    expect(r.ok).toBe(false)
+    expect(r.authUrl).toBeNull()
+  })
+
+  it('shopify → missing shop domain → missing_shop, no fetch', async () => {
+    const f = _fetchOnce(200, { authorize_url: 'x' })
+    const r = await startConnect('t1', 'shopify')
+    expect(r.ok).toBe(false)
+    expect(r.reason).toBe('missing_shop')
+    expect(f).not.toHaveBeenCalled()
+  })
+
   it('non-2xx → fail with http_<n>, no url', async () => {
     _fetchOnce(500, {})
     const r = await startConnect('t1', 'google_sheet')
@@ -86,6 +114,19 @@ describe('VT-267 PR-C — checkConnection (resume signal, fail-closed)', () => {
     const s = await checkConnection('t1', 'whatsapp', c as never)
     expect(s.connected).toBe(true)
     expect(s.detail).toBe('verifying')
+  })
+
+  it('shopify connected once a tenant_oauth_tokens row exists (VT-422 GAP-3)', async () => {
+    const c = client('tenant_oauth_tokens', { data: { shop_url: 'shop.myshopify.com' }, error: null })
+    const s = await checkConnection('t1', 'shopify', c as never)
+    expect(s.connected).toBe(true)
+    expect(s.detail).toBe('shop.myshopify.com')
+  })
+
+  it('shopify NOT connected when no token row (fail-closed)', async () => {
+    const c = client('tenant_oauth_tokens', { data: null, error: null })
+    const s = await checkConnection('t1', 'shopify', c as never)
+    expect(s.connected).toBe(false)
   })
 
   it('whatsapp NOT connected while pending', async () => {

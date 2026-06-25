@@ -52,6 +52,49 @@ def test_start_auth_zero_paste():
     assert "token" not in str(env.get("walkthrough", "")).lower()
 
 
+def test_vt422_registry_declares_oauth_and_write_scopes():
+    """VT-422 GAP-0 + GAP-4: the registry declares OAuth-install as the canonical
+    auth_flow (the schema Literal exposes "oauth2") and read+WRITE scopes. The spec
+    scopes mirror the connector's _REQUIRED_SCOPES single source."""
+    from orchestrator.integrations.connectors.shopify import _REQUIRED_SCOPES
+    from orchestrator.integrations.registry import get_connector
+
+    spec = get_connector("shopify")
+    # GAP-4: api_key (client_credentials) is no longer the canonical declared flow.
+    assert spec.auth_flow == "oauth2", (
+        f"VT-422 GAP-4: shopify auth_flow must be the OAuth-install path, got {spec.auth_flow!r}"
+    )
+    # GAP-0: read + write scopes present.
+    scopes = set(spec.auth_scopes)
+    assert {"read_orders", "read_customers", "read_products"} <= scopes
+    assert "write_orders" in scopes, "VT-422 GAP-0: write_orders (e2e seed unblock) missing"
+    assert "write_customers" in scopes, "VT-422 GAP-0: write_customers (write-agent) missing"
+    # Single-source: the registry spec scopes == the connector's _REQUIRED_SCOPES pin.
+    assert scopes == set(_REQUIRED_SCOPES), (
+        "VT-422: registry auth_scopes drifted from connectors/shopify._REQUIRED_SCOPES"
+    )
+
+
+def test_vt422_install_url_requests_write_scopes(monkeypatch):
+    """GAP-0: the authorize URL (the single source) carries the write scopes — so the
+    merchant consent screen actually requests write at install time."""
+    from urllib.parse import parse_qs, urlsplit
+
+    monkeypatch.setenv("SHOPIFY_API_KEY", "cid_test")
+    monkeypatch.setenv("SHOPIFY_API_SECRET", "secret_test")  # gitleaks:allow — fake test secret
+    monkeypatch.setenv(
+        "SHOPIFY_OAUTH_REDIRECT_URI",
+        "https://viabe-team-dev.vercel.app/api/integrations/shopify/oauth/callback",
+    )
+    url = ShopifyConnector().build_oauth_install_url(
+        uuid4(), "merchant-store.myshopify.com", state="nonce_xyz"
+    )
+    scope = parse_qs(urlsplit(url).query)["scope"][0]
+    assert "write_orders" in scope and "write_customers" in scope, (
+        f"VT-422 GAP-0: install URL must request write scopes; got {scope!r}"
+    )
+
+
 def test_config_error_when_env_absent(monkeypatch):
     for k in _ENV:
         monkeypatch.delenv(k, raising=False)

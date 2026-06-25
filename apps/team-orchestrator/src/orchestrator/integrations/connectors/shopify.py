@@ -1,11 +1,26 @@
 """VT-208 — Shopify connector.
 
-Shopify Admin REST API 2024-04. CLIENT-CREDENTIALS grant (VT-208 rework
-2026-06-01): Shopify removed in-UI Admin API access-token paste, so auth is now
-the OAuth2 client_credentials grant — app Client ID + Client Secret → POST the
-store token endpoint → short-lived access_token. ZERO manual paste (CL-421).
-Works because the app + dev store are in the SAME ORG (dev: the eComVibe Dev
-Dashboard app + the kk4xva-di dev store; CL-422 synthetic only).
+Shopify Admin REST API 2026-04 (VT-422: bumped from 2024-04 — outside Shopify's ~1yr supported window by 2026-06).
+
+CANONICAL AUTH = OAuth authorization-code install (VT-283 / VT-422)
+------------------------------------------------------------------
+VT-422 promoted Shopify to the PUBLIC OAuth app. The canonical, production auth
+path is the standard Shopify OAuth authorization-code install (``build_oauth_install_url``
+→ owner consent → callback → ``_oauth_exchange_and_store`` → OFFLINE token). This is
+the only path that works for a REAL merchant on a DIFFERENT org, and it is what the
+registry now declares (``auth_flow="oauth2"``). ZERO manual paste (CL-421).
+
+client_credentials = DEV / own-store TEST FALLBACK ONLY
+-------------------------------------------------------
+The OAuth2 client_credentials grant (``_grant_and_store``, ``_shopify_env``,
+``SHOPIFY_STORE_DOMAIN``, ``shopify-dev.env``) is RETAINED as the dev/own-store
+test fallback — it is same-org-only (app + store in ONE org; dev: the eComVibe Dev
+Dashboard app + the kk4xva-di dev store; CL-422 synthetic only) and is the only way
+to exercise pulls against our own dev store without a different-org merchant. It is
+NOT the canonical path and is never used for a real merchant install. Do NOT delete
+it (VT-422 GAP-4).
+
+client_credentials grant mechanics (test fallback):
 
 Grant (confirmed vs shopify.dev get-api-access-tokens, Cowork 2026-06-01):
     POST https://{SHOPIFY_STORE_DOMAIN}/admin/oauth/access_token
@@ -87,11 +102,29 @@ from orchestrator.observability.encrypt_value import (
 logger = logging.getLogger(__name__)
 
 
-_SHOPIFY_API_VERSION = "2024-04"
-# Scopes the app is granted in the Dev Dashboard (Cowork VT-208). read_orders
-# covers abandoned checkouts; if the live walk 403s the /checkouts.json pull,
-# read_checkouts must be added in the Dashboard (flag for the live canary).
-_REQUIRED_SCOPES = {"read_customers", "read_orders", "read_products"}
+_SHOPIFY_API_VERSION = "2026-04"
+# VT-422 GAP-0 — read + WRITE scopes for the PUBLIC OAuth app. This constant is the
+# SINGLE SOURCE: the authorize URL, the offline token, and Shopify's consent screen
+# all derive from it, so widening it here is all the install needs to request write.
+# It is the PIN consumed at the canary (which needs Fazal's Partner app). read_orders
+# covers abandoned checkouts; if the live walk 403s /checkouts.json, read_checkouts
+# is added in the Dashboard (flag for the live canary).
+#   read_orders    — sale-of-record substrate (backfill + orders/create)
+#   read_customers — identity anchor (phone/email/name)
+#   read_products  — product context for sales-recovery messaging
+# Write block — Fazal decision pending (Cowork relaying): write_orders only vs
+# write_orders + write_customers. Default to BOTH for the build; if an unused write
+# scope spooks Shopify review, drop write_customers to a fast-follow and keep
+# write_orders (the e2e backdated-seed unblock).
+#   write_orders    — e2e backdated-seed via the app token + future order-action agent
+#   write_customers — future write-agent (tag/note/update customer for recovery campaigns)
+_REQUIRED_SCOPES = {
+    "read_customers",
+    "read_orders",
+    "read_products",
+    "write_orders",
+    "write_customers",
+}
 _TOKEN_PATH = "/admin/oauth/access_token"
 _AUTHORIZE_PATH = "/admin/oauth/authorize"
 _EXPIRY_SKEW = timedelta(minutes=5)  # proactive re-grant before the 24h TTL lapses
@@ -501,7 +534,15 @@ class ShopifyConnector(ConnectorBase):
         }
 
     def _grant_and_store(self, tenant_id: UUID) -> dict[str, Any]:
-        """Run the client_credentials grant + persist the token (encrypted, 24h TTL)."""
+        """TEST / OWN-STORE FALLBACK ONLY (VT-422 GAP-4) — run the client_credentials
+        grant + persist the token (encrypted, 24h TTL).
+
+        Same-org-only (app + store in ONE org), so it CANNOT serve a real merchant on
+        a different org — that is the canonical OAuth-install path
+        (``_oauth_exchange_and_store``). Retained because it is the only way to
+        exercise pulls against our own dev store without a different-org merchant.
+        Do NOT delete; do NOT treat as the canonical auth path.
+        """
         client_id, client_secret, store_domain = _shopify_env()
         grant = self._grant_fn(store_domain, client_id, client_secret)
         access_token = grant.get("access_token")
@@ -725,10 +766,15 @@ class ShopifyConnector(ConnectorBase):
     def setup_push(self, tenant_id: UUID) -> dict[str, str]:
         """Register Shopify webhooks for checkouts + orders.
 
-        Hits POST /admin/api/.../webhooks.json for the 4 topics this
-        connector cares about. Each webhook signs with the same shop-
-        wide secret Shopify generates; we read it from
-        ``tenant_oauth_tokens.push_secret`` and document it back.
+        Hits POST /admin/api/.../webhooks.json for the 4 topics this connector cares
+        about. VT-422: an APP-registered webhook is signed by Shopify with the APP's
+        ``client_secret`` (``SHOPIFY_API_SECRET``) — NOT a per-tenant secret — so the
+        webhook handler verifies against the app secret (see api/shopify_webhook.py).
+        ``push_secret`` is vestigial for this OAuth path (retained for the sheet path);
+        it is read here only as an install precondition + echoed as a hint.
+
+        Wired to fire on OAuth-install success (api/shopify_oauth.py callback, VT-422)
+        so the webhooks actually register on install.
         """
         pool = get_pool()
         with pool.connection() as conn, conn.cursor() as cur:

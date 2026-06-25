@@ -38,9 +38,13 @@ export async function saveProfileAction(
 
 export async function startConnectAction(
   connector: WizardConnector,
+  shop?: string,
 ): Promise<StartConnectResult> {
+  // VT-415: tenant from the OWNER session only — never a client argument. VT-422
+  // GAP-3: `shop` is the owner-typed *.myshopify.com domain for shopify (validated
+  // orchestrator-side); the tenant is still session-resolved, not client-trusted.
   const { tenantId } = await requireOwnerSession()
-  return startConnect(tenantId, connector)
+  return startConnect(tenantId, connector, shop)
 }
 
 export async function checkConnectionAction(
