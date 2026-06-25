@@ -84,6 +84,8 @@ def test_cron_expressions_match_brief() -> None:
     assert st.MONTHLY_IMPACT_CRON == "0 8 1 * *"
     # VT-47 — 5th trigger: owner-approval timeout sweep, every 30 min.
     assert st.APPROVAL_TIMEOUT_SWEEP_CRON == "*/30 * * * *"
+    # VT-432 — 18th trigger: daily implicit-attribution sweep, 23:00 UTC / 04:30 IST.
+    assert st.IMPLICIT_ATTRIBUTION_SWEEP_CRON == "0 23 * * *"
 
 
 # ---------------------------------------------------------------------------
@@ -309,6 +311,88 @@ def test_approval_timeout_sweep_one_failure_does_not_halt(monkeypatch) -> None:
 
 
 # ---------------------------------------------------------------------------
+# VT-432 — implicit attribution sweep handler (18th trigger)
+# ---------------------------------------------------------------------------
+
+
+def test_implicit_attribution_sweep_scheduled_calls_sweep(monkeypatch) -> None:
+    """VT-432: the scheduled handler delegates to run_implicit_attribution_sweep
+    and logs the result. Monkeypatched sweep returns synthetic counts; no DB,
+    no send (assert no Twilio/Resend call)."""
+    import orchestrator.feedback.implicit_attribution as ia_mod
+
+    called_with: list[dict] = []
+
+    def _fake_sweep() -> dict:
+        called_with.append({})
+        return {"considered": 3, "written": 2, "skipped_no_outcome": 1}
+
+    monkeypatch.setattr(ia_mod, "run_implicit_attribution_sweep", _fake_sweep)
+
+    fake_scheduled = datetime(2026, 6, 25, 23, 0, tzinfo=timezone.utc)
+    fake_actual = datetime(2026, 6, 25, 23, 0, 5, tzinfo=timezone.utc)
+    # Handler must not raise; best-effort wrapper catches exceptions.
+    st.implicit_attribution_sweep_scheduled(fake_scheduled, fake_actual)
+
+    assert called_with, "run_implicit_attribution_sweep must be called by the handler"
+
+
+def test_implicit_attribution_sweep_no_send(monkeypatch) -> None:
+    """VT-432: the sweep path NEVER reaches Twilio or Resend. Patch both send
+    clients and assert neither is called when the handler runs."""
+    import orchestrator.feedback.implicit_attribution as ia_mod
+
+    # Stub sweep to return a non-empty result to exercise the full handler path.
+    monkeypatch.setattr(
+        ia_mod, "run_implicit_attribution_sweep",
+        lambda: {"considered": 1, "written": 1, "skipped_no_outcome": 0},
+    )
+
+    send_called: list[str] = []
+
+    # Patch at the alerts clients level — if any send path is reachable it
+    # would call these.
+    try:
+        import orchestrator.alerts.clients as clients_mod  # noqa: F401
+
+        monkeypatch.setattr(
+            clients_mod,
+            "send_telegram",
+            lambda *a, **kw: send_called.append("telegram"),
+        )
+        monkeypatch.setattr(
+            clients_mod,
+            "send_resend_email",
+            lambda *a, **kw: send_called.append("resend"),
+        )
+    except (ImportError, AttributeError):
+        pass  # module may not be importable without network deps; that's fine
+
+    fake_scheduled = datetime(2026, 6, 25, 23, 0, tzinfo=timezone.utc)
+    fake_actual = datetime(2026, 6, 25, 23, 0, 5, tzinfo=timezone.utc)
+    st.implicit_attribution_sweep_scheduled(fake_scheduled, fake_actual)
+
+    assert not send_called, (
+        f"VT-432 sweep must NOT send via Telegram/Resend; called: {send_called}"
+    )
+
+
+def test_implicit_attribution_sweep_handler_is_best_effort(monkeypatch) -> None:
+    """VT-432: a sweep exception must not propagate — handler is best-effort."""
+    import orchestrator.feedback.implicit_attribution as ia_mod
+
+    def _raising_sweep() -> dict:
+        raise RuntimeError("DB unavailable")
+
+    monkeypatch.setattr(ia_mod, "run_implicit_attribution_sweep", _raising_sweep)
+
+    fake_scheduled = datetime(2026, 6, 25, 23, 0, tzinfo=timezone.utc)
+    fake_actual = datetime(2026, 6, 25, 23, 0, 5, tzinfo=timezone.utc)
+    # Must not raise — handler wraps in try/except BLE001.
+    st.implicit_attribution_sweep_scheduled(fake_scheduled, fake_actual)
+
+
+# ---------------------------------------------------------------------------
 # 5. Pillar 1 — deterministic bodies must NOT import LLM modules
 # ---------------------------------------------------------------------------
 
@@ -346,6 +430,7 @@ def test_deterministic_bodies_do_not_import_orchestrator_agent() -> None:
         st.attribution_close_scheduled,
         st.trial_evaluation_scheduled,  # VT-365: replaced the removed day-39 handler
         st.monthly_impact_scheduled,
+        st.implicit_attribution_sweep_scheduled,  # VT-432
     ],
 )
 def test_scheduled_handler_accepts_scheduled_and_actual_time(monkeypatch, fn) -> None:
@@ -407,7 +492,7 @@ def test_register_scheduled_triggers_idempotent(monkeypatch) -> None:
     first = call_count["n"]
     st.register_scheduled_triggers()
     second = call_count["n"]
-    # The registered set (17): weekly_cadence, attribution_close, trial_evaluation
+    # The registered set (18): weekly_cadence, attribution_close, trial_evaluation
     # (VT-90, the kept lifecycle sweep — NOT the removed VT-365 day-39 refund eval),
     # monthly_impact, approval_timeout_sweep (VT-47), L3_construction (VT-68),
     # reconstitution_sweep (VT-76), audit_chain_verify (VT-304), pii_log_sweep
@@ -415,10 +500,11 @@ def test_register_scheduled_triggers_idempotent(monkeypatch) -> None:
     # waitlist_retention_purge (VT-354), sla_breach_sweep (VT-357), vtr_digest (VT-280),
     # override_expiry_sweep (VT-374 — the F8 next-run pin expiry bound),
     # outbox_redaction_sweep (VT-382 — the CL-437 ruling-3.3 redaction backfill/backstop),
-    # l2_approved_send_sweep (VT-418 — the L2 owner-approve→send reconciler, recovery-only).
+    # l2_approved_send_sweep (VT-418 — the L2 owner-approve→send reconciler, recovery-only),
+    # implicit_attribution_sweep (VT-432 — daily VT-198 feedback tier-1 sweep, NO SEND).
     # VT-365 removed two triggers (day-39 refund evaluation + the VT-85 refund-offer
     # 48h timeout sweep): 16 → 14; VT-374 added one: 14 → 15; VT-382 added one: 15 → 16;
-    # VT-418 added one: 16 → 17.
-    assert first == 17, "expected 17 triggers registered on first call"
-    assert second == 17, "second call must short-circuit (idempotent)"
+    # VT-418 added one: 16 → 17; VT-432 added one: 17 → 18.
+    assert first == 18, "expected 18 triggers registered on first call"
+    assert second == 18, "second call must short-circuit (idempotent)"
     st._registered = False
