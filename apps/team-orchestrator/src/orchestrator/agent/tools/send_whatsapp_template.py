@@ -201,11 +201,43 @@ _IDEMPOTENT_HIT_STATUSES = frozenset(
 # so the plain echo path doesn't fire — _check_idempotency surfaces it explicitly.
 _INFLIGHT_STATUS = "sending"
 
+# VT-423 — a 'sending' marker older than this is "stuck" (a normal send resolves to a
+# terminal status in seconds). It STILL blocks the re-send (never auto-re-send), but
+# emits a loud log so a reconciler / Ops can resolve the genuinely-orphaned marker to a
+# terminal flagged state. Threshold is generous — well past any plausible Twilio-call +
+# commit latency — so a legitimately in-flight send is never mislabelled stuck.
+_STALE_MARKER_AGE = timedelta(hours=24)
+
+
+def _warn_if_stale_marker(
+    tenant_id: str, idempotency_key: str, created_at: Any,
+) -> None:
+    """VT-423: loudly flag a 'sending' marker that is older than _STALE_MARKER_AGE.
+
+    The marker still blocks the re-send (the caller treats it as an in-flight hit) — we
+    NEVER auto-re-send a stale marker, because we cannot prove the original message was
+    NOT delivered. This log is the hand-off to a reconciler / Ops to resolve the stuck
+    row to a terminal flagged-for-review state. Best-effort: a non-datetime created_at
+    (e.g. a stub) is silently ignored — it must never break the send path."""
+    try:
+        age = _now() - created_at
+    except TypeError:
+        return
+    if age > _STALE_MARKER_AGE:
+        logger.warning(
+            "send_whatsapp_template: stale_inflight_marker tenant=%s key=%s age_hours=%.1f "
+            "— a 'sending' marker has been unresolved past %dh; STILL blocking the re-send "
+            "(NOT auto-re-sending — message may have been delivered). Flag for review: a "
+            "reconciler should resolve this stuck marker to a terminal state.",
+            tenant_id, idempotency_key, age.total_seconds() / 3600.0,
+            int(_STALE_MARKER_AGE.total_seconds() // 3600),
+        )
+
 
 def _check_idempotency(
     cur: Any, tenant_id: str, idempotency_key: str,
 ) -> dict[str, Any] | None:
-    """Return existing ledger row if the key was used within 24h, else None.
+    """Return existing ledger row if the key is still an idempotent hit, else None.
 
     Returns None for a row whose send_status the output cannot represent (VT-262)
     — the caller re-evaluates (consent gate / send) rather than echoing an
@@ -215,6 +247,20 @@ def _check_idempotency(
     block the re-send) even though 'sending' is not in _IDEMPOTENT_HIT_STATUSES —
     the caller detects it via send_status == _INFLIGHT_STATUS and reports a fail-SAFE
     'probably already sent' terminal outcome rather than re-dispatching.
+
+    VT-423 (stale-marker window, residual #2): a 'sending' marker must block the
+    re-send REGARDLESS OF AGE. The original query bounded EVERY row to a 24h
+    created_at window, so a draft re-driven >24h after a crash found the stale
+    'sending' marker had fallen out of the window → SELECT returned None → re-send
+    (money-UNSAFE: a possible-already-delivered message re-fires after a day). Fix:
+    the time bound now applies ONLY to the TERMINAL deliverable statuses (whose 24h
+    idempotency TTL is the legitimate dedup window). The fail-SAFE 'sending' marker
+    is NOT time-bounded — it blocks re-dispatch until it resolves to a terminal state
+    ('sent'/'error') or a separate reconciler sweeps a genuinely-stuck marker to a
+    terminal flagged state. The tool NEVER auto-re-sends a stale 'sending' row; an
+    old one gets a loud log so the reconciler/Ops can resolve it. This GUARANTEES no
+    double-send across the window: a 'sending' marker only ever stops blocking when
+    something DELIBERATELY resolves it, never by silent expiry.
     """
     cur.execute(
         """
@@ -222,7 +268,11 @@ def _check_idempotency(
         FROM send_idempotency_keys
         WHERE tenant_id = %s
           AND idempotency_key = %s
-          AND created_at > now() - interval '24 hours'
+          AND (
+                send_status = 'sending'                       -- in-flight: never expires
+                OR created_at > now() - interval '24 hours'   -- terminal: 24h idem TTL
+          )
+        ORDER BY (send_status = 'sending') DESC, created_at DESC
         LIMIT 1
         """,
         (tenant_id, idempotency_key),
@@ -244,10 +294,11 @@ def _check_idempotency(
             "send_status": row[2],
             "created_at": row[3],
         }
-    # VT-420: a 'sending' in-flight marker is a recovery HIT — surface it so the
-    # caller blocks the re-send (the message was probably already dispatched). It is
-    # NOT in _IDEMPOTENT_HIT_STATUSES, so allow it through explicitly here.
+    # VT-420/VT-423: a 'sending' in-flight marker is a recovery HIT — surface it so the
+    # caller blocks the re-send (the message was probably already dispatched), at ANY
+    # age. It is NOT in _IDEMPOTENT_HIT_STATUSES, so allow it through explicitly here.
     if result["send_status"] == _INFLIGHT_STATUS:
+        _warn_if_stale_marker(tenant_id, idempotency_key, result["created_at"])
         return result
     if result["send_status"] not in _IDEMPOTENT_HIT_STATUSES:
         logger.info(
@@ -306,27 +357,69 @@ def _write_inflight_marker(
     tenant_id: str,
     idempotency_key: str,
     customer_id: str,
-) -> None:
+) -> bool:
     """VT-420: write the pre-send 'sending' (in-flight) marker, committed BEFORE the
     Twilio messages.create call (the pool is autocommit, so this standalone INSERT
     commits the instant it executes — that durable commit is the whole point).
 
-    ON CONFLICT DO NOTHING: if a prior attempt already left a row under this key
-    (a retried 'error', or a stale 'sending' from a crash), the marker is a no-op and
-    the existing row stands — the _check_idempotency gate ahead of this already decided
-    the attempt may proceed (it returns the 'error' row as None → retryable, and it
-    surfaces a 'sending' row as a hit → we never reach here). Writing this BEFORE the
-    send is what converts the crash window from a double-send (a missing key re-fires)
-    into a recoverable possible-missed-send (a 'sending' key blocks the re-fire)."""
+    VT-423 (self-serializing — residual #1): the statement is a CONDITIONAL upsert that
+    CLAIMS the (tenant_id, idempotency_key) row for THIS attempt and reports, via RETURNING
+    id / rowcount, whether the claim succeeded:
+
+        INSERT ... 'sending'
+        ON CONFLICT (tenant_id, idempotency_key) DO UPDATE
+            SET send_status='sending', message_sid=NULL, customer_id=EXCLUDED.customer_id
+            WHERE send_idempotency_keys.send_status NOT IN ('sent','sending')
+        RETURNING id
+
+      • No row exists → the INSERT lands → RETURNING id → rowcount=1 → CLAIMED. This attempt
+        OWNS the send and proceeds to Twilio.
+      • An existing 'sending' row (a TRUE-parallel sibling that won the INSERT race, OR a
+        crash-orphaned marker) → ON CONFLICT, but the WHERE excludes 'sending' → DO UPDATE
+        matches 0 rows → NO RETURNING row → rowcount=0 → NOT claimed → this attempt LOST
+        and must NOT send (the in-flight sibling owns it).
+      • An existing 'sent' row → WHERE excludes 'sent' → 0 rows → rowcount=0 → NOT claimed →
+        must NOT send (defense in depth; _check_idempotency already caught this as a hit).
+      • An existing RETRYABLE row ('error'/'rate_limited'/'window_closed' — which
+        _check_idempotency deliberately returns None for, clearing the retry, VT-387) →
+        the WHERE matches → DO UPDATE flips it to a fresh 'sending' → RETURNING id →
+        rowcount=1 → CLAIMED → proceed. The marker takes the row over for the legit retry
+        WITHOUT a second row, and the next reject/crash window is correctly re-armed.
+
+    THIS is what makes the TOOL self-serialize two TRUE-parallel first-attempts on one key:
+    Postgres' UNIQUE(tenant_id, idempotency_key) lets exactly ONE concurrent statement win
+    the INSERT; the loser blocks on the row lock, then the conditional DO UPDATE finds the
+    winner's row already 'sending' → its WHERE excludes 'sending' → 0 rows updated → 0
+    claimed. So at most ONE attempt ever reaches messages.create — the fix no longer DEPENDS
+    on upstream DBOS workflow-id single-flight or the serial draft loop (VT-420 residual #1).
+    The _check_idempotency gate ahead of this still catches the common in-flight / idempotent
+    hits early; this claim check closes the narrow true-parallel window where two callers both
+    saw None before either wrote a marker.
+
+    Returns True iff this attempt CLAIMED the row (may send), False iff it lost (must not)."""
     cur.execute(
         """
         INSERT INTO send_idempotency_keys
             (tenant_id, idempotency_key, customer_id, message_sid, send_status)
         VALUES (%s, %s, %s, NULL, 'sending')
-        ON CONFLICT (tenant_id, idempotency_key) DO NOTHING
+        ON CONFLICT (tenant_id, idempotency_key) DO UPDATE
+            SET send_status = 'sending',
+                message_sid = NULL,
+                customer_id = EXCLUDED.customer_id
+            WHERE send_idempotency_keys.send_status NOT IN ('sent', 'sending')
+        RETURNING id
         """,
         (tenant_id, idempotency_key, customer_id),
     )
+    # psycopg3 sets rowcount to 1 when this attempt INSERTed-or-claimed the row and 0 when
+    # the conditional DO UPDATE matched nothing (a sibling already holds 'sending', or the
+    # row is terminal 'sent') — the authoritative claim signal (the `cur.rowcount` check the
+    # VT-423 contract calls for). Prefer it; fall back to RETURNING's fetchone() only when a
+    # cursor doesn't surface a usable rowcount (>= 0 means it's meaningful here).
+    rowcount = getattr(cur, "rowcount", None)
+    if isinstance(rowcount, int) and rowcount >= 0:
+        return rowcount == 1
+    return cur.fetchone() is not None
 
 
 def _write_idempotency_ledger(
@@ -612,10 +705,29 @@ def send_whatsapp_template(
                 # the process crashes AFTER Twilio dispatch but BEFORE the 'sent' flip,
                 # the durable 'sending' row makes recovery block the re-send (no
                 # double-charge) instead of re-firing on a missing key.
-                _write_inflight_marker(
+                won_marker = _write_inflight_marker(
                     cur, payload.tenant_id, payload.idempotency_key,
                     payload.customer_id,
                 )
+                # VT-423 self-serialize: if the marker INSERT lost the ON-CONFLICT race
+                # (won_marker False), a TRUE-parallel first-attempt on this same key
+                # already owns the row and is mid-flight to Twilio. Both attempts passed
+                # _check_idempotency seeing None (the race window), but only the INSERT
+                # winner may send. The loser fails SAFE here: do NOT call Twilio (that
+                # would be the double-send), report the same probably-already-delivered
+                # terminal 'sent' (no SID) the crash-recovery path returns.
+                if not won_marker:
+                    logger.warning(
+                        "send_whatsapp_template: inflight_race_lost tenant=%s customer=%s "
+                        "key=%s — a concurrent attempt already holds the 'sending' marker; "
+                        "NOT sending (the marker self-serializes the double-send). SID unknown.",
+                        payload.tenant_id, payload.customer_id, payload.idempotency_key,
+                    )
+                    return SendWhatsappTemplateOutput(
+                        status="sent",
+                        message_sid=None,
+                        customer_id=payload.customer_id,
+                    )
 
                 # --- Twilio Content API send ---
                 try:
