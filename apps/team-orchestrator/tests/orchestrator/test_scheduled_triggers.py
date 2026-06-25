@@ -379,6 +379,32 @@ def test_scheduled_handler_accepts_scheduled_and_actual_time(monkeypatch, fn) ->
     fn(fake_scheduled, fake_actual)
 
 
+def test_trial_evaluation_scheduled_wires_real_owner_notify(monkeypatch) -> None:
+    """VT-426 (Row C): the daily trial sweep handler must pass the REAL owner notify
+    (``trial_sweep._owner_notify`` → the VT-393 send seam) into the body — NOT the
+    logging-only ``_default_notify`` default. Without this, a trial-ending owner gets
+    no WhatsApp. We capture the kwargs the handler hands the body."""
+    from orchestrator.billing import trial_sweep as ts
+
+    captured: dict[str, Any] = {}
+
+    def _fake_body(now=None, *, notify_fn=None):
+        captured["now"] = now
+        captured["notify_fn"] = notify_fn
+        return []
+
+    monkeypatch.setattr(ts, "run_trial_evaluation_body", _fake_body)
+
+    fake_scheduled = datetime(2026, 5, 26, 1, 30, tzinfo=timezone.utc)
+    fake_actual = datetime(2026, 5, 26, 1, 30, 9, tzinfo=timezone.utc)
+    st.trial_evaluation_scheduled(fake_scheduled, fake_actual)
+
+    assert captured["now"] == fake_actual
+    assert captured["notify_fn"] is ts._owner_notify, (
+        "scheduler must wire the real _owner_notify, not the logging _default_notify"
+    )
+
+
 # ---------------------------------------------------------------------------
 # 7. register_scheduled_triggers idempotency
 # ---------------------------------------------------------------------------

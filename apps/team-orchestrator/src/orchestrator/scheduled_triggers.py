@@ -240,10 +240,18 @@ def trial_evaluation_scheduled(
     scheduled_time: datetime,
     actual_time: datetime,
 ) -> None:
-    """DBOS scheduled handler — fires daily 7 AM IST. VT-90 trial sweep. NO LLM."""
-    from orchestrator.billing.trial_sweep import run_trial_evaluation_body
+    """DBOS scheduled handler — fires daily 7 AM IST. VT-90 trial sweep. NO LLM.
 
-    run_trial_evaluation_body(now=actual_time)
+    VT-426 (Row C): wires the REAL owner notify (``_owner_notify`` → the VT-393
+    ``send_owner_template`` seam, registry-driven by template NAME) so a trial-ending /
+    expiring tenant actually gets the owner WhatsApp — replacing the logging-only
+    ``_default_notify`` stub. The notify FAIL-SAFE-SKIPs while the trial-ending Content
+    SID is a pending-approval stub (NEEDS-FAZAL); it sends with zero code change once the
+    approved SID lands in twilio_templates.yaml.
+    """
+    from orchestrator.billing.trial_sweep import _owner_notify, run_trial_evaluation_body
+
+    run_trial_evaluation_body(now=actual_time, notify_fn=_owner_notify)
 
 
 def waitlist_retention_purge_scheduled(
