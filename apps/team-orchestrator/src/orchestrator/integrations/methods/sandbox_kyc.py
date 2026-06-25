@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
@@ -36,6 +37,11 @@ _API_VERSION = "1.0"  # /authenticate (200s as-is — do not change)
 _SEARCH_API_VERSION = "1.0.0"  # VT-409: the GSTIN search wants 1.0.0 (Fazal's proven-good curl); "1.0" mismatched
 _AUTH_PATH = "/authenticate"
 _SEARCH_PATH = "/gst/compliance/public/gstin/search"
+# VT-448 identify (PRIMARY) — Search-GSTIN-by-PAN: POST ?state_code=<NN> with {pan} → the GSTIN(s)
+# registered under the PAN in that state (one per state). PAN = 5 letters + 4 digits + 1 letter.
+_PAN_SEARCH_PATH = "/gst/compliance/public/pan/search"
+_PAN_FMT = re.compile(r"^[A-Z]{5}\d{4}[A-Z]$")
+_GSTIN_FMT = re.compile(r"\b\d{2}[A-Z]{5}\d{4}[A-Z][A-Z0-9]Z[A-Z0-9]\b")
 _TIMEOUT_S = 20.0
 _TOKEN_TTL_S = 23 * 3600  # re-auth before the documented ~24h validity lapses
 
@@ -222,6 +228,76 @@ def _lookup(req: RequestFn, key: str, token: str, gstin: str) -> dict[str, Any]:
         {"x-api-key": key, "authorization": token, "x-api-version": _SEARCH_API_VERSION},
         {"gstin": gstin},
     )
+
+
+@dataclass(frozen=True)
+class PanGstinResult:
+    """The GSTIN(s) registered under a PAN+state (VT-448 identify PRIMARY). ``ok`` = call success;
+    ``gstins`` = the (possibly empty) ordered-unique list the owner PICKS from + we then verify."""
+
+    ok: bool
+    gstins: tuple[str, ...] = ()
+
+
+def _lookup_by_pan(req: RequestFn, key: str, token: str, pan: str, state_code: str) -> dict[str, Any]:
+    return req(
+        "POST", f"{_PAN_SEARCH_PATH}?state_code={state_code}",
+        {"x-api-key": key, "authorization": token, "x-api-version": _SEARCH_API_VERSION},
+        {"pan": pan},
+    )
+
+
+def _extract_gstins(obj: Any) -> list[str]:
+    """Recursively collect GSTIN-format strings from a nested vendor response (shape-tolerant — the
+    success envelope nests a level or two deep, like the gstin search; never depend on its exact shape)."""
+    found: list[str] = []
+
+    def walk(o: Any) -> None:
+        if isinstance(o, str):
+            found.extend(_GSTIN_FMT.findall(o.upper()))
+        elif isinstance(o, dict):
+            for v in o.values():
+                walk(v)
+        elif isinstance(o, (list, tuple)):
+            for v in o:
+                walk(v)
+
+    walk(obj)
+    return list(dict.fromkeys(found))  # ordered-unique
+
+
+def search_gstins_by_pan(pan: str, state_code: str, *, request_fn: RequestFn | None = None) -> PanGstinResult:
+    """Search-GSTIN-by-PAN (Sandbox ``/gst/compliance/public/pan/search?state_code=NN`` with {pan}) → the
+    GSTIN(s) registered under the PAN in that state. Fail-closed (ok=False) on any error / bad input. The
+    identify-and-confirm PRIMARY: PAN → GSTIN list → owner PICKS → ``search_gstin`` verify + name-match →
+    gstin_verified (no 15-char GSTIN typing). ``request_fn`` injectable for tests (no live creds)."""
+    pan = (pan or "").strip().upper()
+    state_code = (state_code or "").strip()
+    if not _PAN_FMT.fullmatch(pan) or not state_code:
+        return PanGstinResult(ok=False)
+    creds = _creds()
+    if creds is None:
+        return PanGstinResult(ok=False)
+    key, secret = creds
+    req = request_fn or _default_request
+    try:
+        token = _get_token(key, secret, req)
+        if not token:
+            return PanGstinResult(ok=False)
+        try:
+            raw = _lookup_by_pan(req, key, token, pan, state_code)
+        except Exception as exc:  # noqa: BLE001
+            if _is_401(exc):  # stale token → re-auth once + retry
+                token = _get_token(key, secret, req, force=True)
+                if not token:
+                    return PanGstinResult(ok=False)
+                raw = _lookup_by_pan(req, key, token, pan, state_code)
+            else:
+                raise
+        return PanGstinResult(ok=True, gstins=tuple(_extract_gstins(raw)))
+    except Exception:
+        logger.exception("sandbox_kyc: search_gstins_by_pan failed (fail-closed)")
+        return PanGstinResult(ok=False)
 
 
 def _is_401(exc: Exception) -> bool:
