@@ -173,6 +173,11 @@ _PURGE_ORDER: tuple[str, ...] = (
     "kyc_verification_log",  # VT-361 (mig 120): per-tenant verification attempts — leaf (FK tenants
     # only; anonymize never CASCADEs). Result-only (no payer names), but it's the subject's
     # verification history → hard-delete on DSR (the episodic_events/platform_listings lesson).
+    "tenant_mca_data",  # VT-449/VT-411 (mig 142): the parsed MCA company-master at rest. Leaf (no FK
+    # in/out — tenant_id-scoped, the tenant row is anonymized NOT deleted on DSR, so no CASCADE path).
+    # registered_address_encrypted + directors_encrypted hold ENCRYPTED PII (director names + address)
+    # — MUST be swept here or the subject's encrypted ownership PII survives erasure (the
+    # tenant_oauth_tokens credential lesson — encrypted-at-rest is still subject data). Hard-delete.
     "founding_tier_claims",  # VT-94: per-tenant founding claim (audit) — hard-delete on DSR
     "template_error_reports",  # VT-335: owner template-error reports (PII free text) — hard-delete
     "owner_inputs",

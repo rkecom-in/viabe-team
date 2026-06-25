@@ -37,6 +37,8 @@ logger = logging.getLogger(__name__)
 
 # GSTIN: 2 state digits + PAN(5 letters + 4 digits + 1 letter) + 1 entity char + 'Z' + 1 checksum.
 _GSTIN_RE = re.compile(r"\b\d{2}[A-Z]{5}\d{4}[A-Z][A-Z0-9]Z[A-Z0-9]\b")
+# VT-449 CIN: U/L + 5-digit industry + 2-letter state + 4-digit year + 3-letter type + 6-digit serial.
+_CIN_RE = re.compile(r"\b[UL]\d{5}[A-Z]{2}\d{4}[A-Z]{3}\d{6}\b")
 
 # Apify google-search actor for the candidate-GSTIN leg (Fazal: a plain Google "<name> gst number"
 # surfaces it). Configurable; graceful-degrade to no candidates when token/actor absent.
@@ -54,10 +56,12 @@ class EntityCandidate:
     HINT to round-trip through Sandbox — never shown as verified until confirm_and_verify says so."""
 
     trade_name: str | None
-    source: str  # 'web' | 'gbp'
+    source: str  # 'web' | 'gbp' | 'registry'
     candidate_gstin: str | None = None
     legal_name: str | None = None
     detail: str | None = None  # address/category — disambiguates "Sundaram"-class collisions
+    candidate_cin: str | None = None  # VT-449: a registry CIN → MCA Company Master Data (validate/enrich)
+    phone: str | None = None          # VT-411: the GBP public number → the ownership-OTP target
 
 
 def fetch_candidates(
@@ -76,12 +80,13 @@ def fetch_candidates(
         return []
     candidates: list[EntityCandidate] = []
     candidates.extend(_web_candidates(name, city, search_fn))
+    candidates.extend(_cin_candidates(name, city, search_fn))  # VT-449 registry leg → CIN → MCA
     candidates.extend(_gbp_candidates(name, city, gbp_fetch_fn))
-    # De-dup by (gstin or trade_name); keep the first (web GSTIN-bearing) seen.
+    # De-dup by (gstin or cin or trade_name); keep the first seen.
     seen: set[str] = set()
     out: list[EntityCandidate] = []
     for c in candidates:
-        key = (c.candidate_gstin or c.trade_name or "").upper()
+        key = (c.candidate_gstin or c.candidate_cin or c.trade_name or "").upper()
         if key and key not in seen:
             seen.add(key)
             out.append(c)
@@ -130,6 +135,26 @@ def business_name_matches(typed: str | None, registry: str | None) -> bool:
     return bool(tn) and bool(rn) and (tn in rn or rn in tn)
 
 
+def enrich_company_from_cin(
+    tenant_id: str, cin: str, *, reason: str, request_fn: Any = None
+) -> str | None:
+    """VT-449: fetch MCA Company Master Data by CIN → best-effort store (encrypted PII via mca_store) +
+    return the AUTHORITATIVE canonical company name — the STRONGER name-match anchor for GST identify
+    (registry-canonical, not the owner-typed name). None on any vendor/parse failure (never raises)."""
+    from orchestrator.integrations.methods.mca import company_master_data
+
+    cmd = company_master_data((cin or "").strip(), reason=reason, request_fn=request_fn)
+    if not cmd.ok:
+        return None
+    try:
+        from orchestrator.onboarding.mca_store import store_company_master_data
+
+        store_company_master_data(tenant_id, cmd)
+    except Exception:  # noqa: BLE001 — enrichment store is best-effort, never blocks identify
+        logger.warning("entity_match: MCA company store failed (non-terminal)", exc_info=True)
+    return cmd.company_name
+
+
 def _web_candidates(name: str, city: str, search_fn: SearchFn | None) -> list[EntityCandidate]:
     token = os.environ.get(_TOKEN_ENV)
     fn = search_fn
@@ -154,6 +179,38 @@ def _web_candidates(name: str, city: str, search_fn: SearchFn | None) -> list[En
                     trade_name=_clean(r.get("title")),
                     source="web",
                     candidate_gstin=gstin,
+                    detail=_clean(r.get("description")),
+                )
+            )
+    return out
+
+
+def _cin_candidates(name: str, city: str, search_fn: SearchFn | None) -> list[EntityCandidate]:
+    """VT-449 registry leg: a "<name> <city> CIN" SERP → MCA CIN candidate(s) (the input to Company
+    Master Data). Relevance-filtered like the web leg; degrade to [] on absent token / failure."""
+    token = os.environ.get(_TOKEN_ENV)
+    fn = search_fn
+    if fn is None:
+        if not token:
+            return []
+        fn = _default_search
+    try:
+        results = fn(f"{name} {city} CIN".strip())
+    except Exception:  # noqa: BLE001 — fragile web search; degrade, never raise into signup
+        logger.warning("entity_match: CIN candidate search failed (degrade)", exc_info=True)
+        return []
+    sig = _significant_tokens(name)
+    out: list[EntityCandidate] = []
+    for r in results or []:
+        blob = " ".join(str(r.get(k, "")) for k in ("title", "description", "url", "text"))
+        if not _result_is_relevant(blob, sig):
+            continue
+        for cin in dict.fromkeys(_CIN_RE.findall(blob.upper())):  # ordered-unique
+            out.append(
+                EntityCandidate(
+                    trade_name=_clean(r.get("title")),
+                    source="registry",
+                    candidate_cin=cin,
                     detail=_clean(r.get("description")),
                 )
             )
@@ -192,11 +249,13 @@ def _gbp_candidates(
             continue  # VT-448: drop a Maps result that doesn't name the queried business (fuzzy neighbour)
         loc = _clean(place.get("city")) or _clean(place.get("address"))
         cat = _clean(place.get("categoryName"))
+        phone = _clean(place.get("phone") or place.get("phoneUnformatted"))  # VT-411 ownership-OTP target
         out.append(
             EntityCandidate(
                 trade_name=title,
                 source="gbp",
                 detail=" · ".join(x for x in (cat, loc) if x) or None,
+                phone=phone,
             )
         )
     return out

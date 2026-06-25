@@ -87,6 +87,19 @@ def test_business_name_matches_all_generic_falls_back_to_substring() -> None:
     assert not entity_match.business_name_matches("Services", "TELECOM CORP")
 
 
+def test_fetch_candidates_cin_registry_leg_surfaces_cin() -> None:
+    # VT-449: a "<name> <city> CIN" SERP → a registry CIN candidate (the MCA Company-Master-Data input).
+    def search_fn(q: str) -> list[dict[str, Any]]:
+        if "CIN" in q:
+            return [{"title": "RKeCom Services Pvt Ltd", "description": "CIN: U52609MH2020OPC344309", "url": "x"}]
+        return []  # the GST-number leg finds nothing
+
+    cands = entity_match.fetch_candidates(
+        "RKeCom Services Pvt Ltd", "Mumbai", search_fn=search_fn, gbp_fetch_fn=lambda *_: []
+    )
+    assert "U52609MH2020OPC344309" in [c.candidate_cin for c in cands if c.source == "registry"]
+
+
 def _gbp_one(*_: Any) -> list[dict[str, Any]]:
     return [{"title": "Sundaram Multi Pap Limited", "categoryName": "Stationery", "city": "Chennai"}]
 

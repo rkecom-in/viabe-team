@@ -21,11 +21,12 @@ import type {
   EntityCandidate,
   EntityCandidatesResult,
   EntityConfirmResult,
+  GstinsByPanResult,
 } from '@/lib/orchestrator-client'
 
 type Fetch = typeof fetch
 
-export type { EntityCandidate, EntityCandidatesResult, EntityConfirmResult }
+export type { EntityCandidate, EntityCandidatesResult, EntityConfirmResult, GstinsByPanResult }
 
 /**
  * The terminal classification of a confirm attempt. `verified` is the ONLY outcome that may unlock
@@ -40,8 +41,10 @@ export type ConfirmOutcome =
 /** The full wizard sub-step state machine. The component renders one screen per `step`. */
 export type WizardStep =
   | 'idle' // name+city entered, not yet looked up
+  | 'pan_entry' // VT-448 PRIMARY: owner enters their 10-char PAN; we IDENTIFY their GSTIN(s)
+  | 'pan_pick' // VT-448 PRIMARY: the PAN's GSTIN(s) listed; owner taps one to verify
   | 'picking' // candidates rendered; owner choosing (or "none of these")
-  | 'manual_gstin' // VT-448: owner enters their GSTIN directly (discovery thin / found-but-no-GSTIN)
+  | 'manual_gstin' // VT-448: owner enters their GSTIN directly (FALLBACK — "don't have your PAN?")
   | 'verified' // a gstin_verified confirm landed — create-account is now unlocked
   | 'reject' // graceful terminus — not a GST-registered business
   | 'retry' // transient vendor failure on confirm — show retry affordance
@@ -159,4 +162,82 @@ export function isConfirmable(c: EntityCandidate): boolean {
  */
 export function isValidGstinFormat(gstin: string): boolean {
   return /^\d{2}[A-Z]{5}\d{4}[A-Z][A-Z0-9]Z[A-Z0-9]$/.test((gstin || '').trim().toUpperCase())
+}
+
+/**
+ * VT-448 — client-side PAN FORMAT pre-check for the PRIMARY identify path: 5 letters + 4 digits +
+ * 1 letter = 10 chars (the standard Indian PAN shape). This is a format gate ONLY (lets the owner
+ * fix a typo before we round-trip the lookup) — it is NOT verification. Input is normalized upper +
+ * trimmed before the test.
+ */
+export function isValidPanFormat(pan: string): boolean {
+  return /^[A-Z]{5}\d{4}[A-Z]$/.test((pan || '').trim().toUpperCase())
+}
+
+/**
+ * VT-448 — map a city to its GST state code (the first 2 digits of any GSTIN registered in that
+ * state). Used to scope the PAN→GSTIN lookup. Case-insensitive, trimmed. Returns null for an unknown
+ * city — the component then asks the owner for a small state hint rather than guessing a wrong code.
+ * Deliberately small (the launch cities + their states); extend as coverage grows.
+ */
+const _CITY_TO_STATE_CODE: Record<string, string> = {
+  // Maharashtra — 27
+  mumbai: '27',
+  pune: '27',
+  nagpur: '27',
+  nashik: '27',
+  thane: '27',
+  maharashtra: '27',
+  // Delhi — 07
+  delhi: '07',
+  'new delhi': '07',
+  // Karnataka — 29
+  bengaluru: '29',
+  bangalore: '29',
+  mysuru: '29',
+  mysore: '29',
+  karnataka: '29',
+  // Tamil Nadu — 33
+  chennai: '33',
+  coimbatore: '33',
+  madurai: '33',
+  'tamil nadu': '33',
+  tamilnadu: '33',
+  // West Bengal — 19
+  kolkata: '19',
+  'west bengal': '19',
+  // Telangana — 36
+  hyderabad: '36',
+  telangana: '36',
+}
+
+export function cityToStateCode(city: string): string | null {
+  const key = (city || '').trim().toLowerCase()
+  return _CITY_TO_STATE_CODE[key] ?? null
+}
+
+/**
+ * VT-448 PRIMARY identify — fetch the GSTIN(s) registered against the owner's PAN via the server-side
+ * proxy route. The route holds the INTERNAL_API_SECRET and forwards to the orchestrator; the browser
+ * only ever talks to /api/team. Fail-CLOSED to an empty list (the manual-GSTIN fallback always
+ * exists — a lookup failure never blocks signup). The returned GSTIN(s) are IDENTIFIED, not verified:
+ * the owner picks one and the existing confirm spine (status gstin_verified) is the sole verify gate.
+ */
+export async function fetchGstinsByPan(
+  pan: string,
+  stateCode: string,
+  f: Fetch = fetch,
+): Promise<GstinsByPanResult> {
+  try {
+    const res = await f('/api/team/onboard/gstins-by-pan', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ pan, state_code: stateCode }),
+    })
+    if (!res.ok) return { ok: false, gstins: [], reason: `http_${res.status}` }
+    const data = (await res.json().catch(() => ({}))) as { gstins?: string[] }
+    return { ok: true, gstins: data.gstins ?? [], reason: 'ok' }
+  } catch {
+    return { ok: false, gstins: [], reason: 'error' }
+  }
 }

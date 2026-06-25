@@ -237,6 +237,49 @@ export async function fetchEntityCandidates(
   }
 }
 
+export interface GstinsByPanResult {
+  /** True iff the orchestrator returned 2xx (even with an empty list). */
+  ok: boolean
+  /** The GSTIN(s) registered against the PAN (one per state). Empty on no-match / fail-closed. */
+  gstins: string[]
+  /** ok | http_<n> | timeout | error — render-only; a GSTIN here is IDENTIFIED, never verified. */
+  reason: string
+}
+
+/**
+ * VT-448 — IDENTIFY the GSTIN(s) registered against an owner's 10-char PAN (+ derived state code).
+ * The orchestrator holds the vendor creds + does the PAN→GSTIN lookup; team-web NEVER calls the
+ * vendor directly. Fail-CLOSED to an empty list on any non-2xx / throw — a lookup failure must never
+ * stall signup (the manual-GSTIN fallback always exists). The returned GSTIN(s) are IDENTIFIED, not
+ * verified: the owner still PICKS one and we round-trip the Sandbox confirm (status gstin_verified)
+ * before anything reads as verified.
+ */
+export async function fetchGstinsByPan(
+  pan: string,
+  stateCode: string,
+): Promise<GstinsByPanResult> {
+  const base = process.env.TEAM_ORCHESTRATOR_URL ?? _ORCHESTRATOR_DEFAULT
+  const secret = process.env.INTERNAL_API_SECRET ?? ''
+  try {
+    const res = await fetch(`${base}/api/orchestrator/onboard/gstins-by-pan`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'X-Internal-Secret': secret },
+      body: JSON.stringify({ pan, state_code: stateCode }),
+      signal: AbortSignal.timeout(_ENTITY_CANDIDATES_TIMEOUT_MS),
+    })
+    if (!res.ok) {
+      console.error(`gstins-by-pan: http_${res.status}; failing closed`) // CL-390: path + status only
+      return { ok: false, gstins: [], reason: `http_${res.status}` }
+    }
+    const data = (await res.json()) as { gstins?: string[] }
+    return { ok: true, gstins: data.gstins ?? [], reason: 'ok' }
+  } catch (err) {
+    const timedOut = err instanceof Error && err.name === 'TimeoutError'
+    console.error(`gstins-by-pan: ${timedOut ? 'timeout' : 'error'}; failing closed`) // CL-390: no PAN/body
+    return { ok: false, gstins: [], reason: timedOut ? 'timeout' : 'error' }
+  }
+}
+
 export interface EntityConfirmResult {
   /** True iff the chosen GSTIN verified ACTIVE at Sandbox (status === 'gstin_verified'). */
   ok: boolean
