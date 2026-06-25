@@ -138,3 +138,20 @@ def test_sweep_expire_is_idempotent_after_lapse(pool, patched):
     )
     assert m not in dict(transitions)
     assert m not in {t for t, _ in notifies}
+
+
+def test_sweep_passes_per_tenant_language_into_notify(pool, patched, monkeypatch):
+    """VT-426 (Row D): the sweep resolves the tenant's preferred language and passes
+    THAT variant into the notify call — not a hardcoded 'en'. A 'hi'-preference tenant
+    on the warn day → the notify receives ('trial_ending', 'hi')."""
+    from orchestrator.billing import trial_sweep as ts
+
+    transitions, notifies = patched
+    monkeypatch.setattr(ts, "_preferred_language", lambda tid: "hi")
+
+    w = _tenant(pool, trial_start=_T0)  # end T0+30; warn at T0+28
+    ts.run_trial_evaluation_body(
+        now=_T0 + timedelta(days=_TRIAL_DAYS - _WARN_LEAD, hours=2),
+        notify_fn=lambda t, tpl, lang, p: notifies.append((str(t), tpl, lang)),
+    )
+    assert (w, "trial_ending", "hi") in notifies
