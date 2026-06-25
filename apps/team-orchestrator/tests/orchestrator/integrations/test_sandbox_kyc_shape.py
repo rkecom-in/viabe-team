@@ -70,6 +70,35 @@ def test_two_step_auth_then_post_search_body_shape():
     assert "x-api-secret" not in search["headers"]  # secret only on /authenticate
 
 
+def test_search_gstins_by_pan_extracts_gstins_and_sends_pan_body_state_query():
+    """VT-448 identify PRIMARY: PAN + state_code → GSTIN(s). PAN in the BODY, state_code as a QUERY param
+    (the vendor's shape); the shape-tolerant parse collects GSTIN-format strings from the nested response."""
+    from orchestrator.integrations.methods import sandbox_kyc
+
+    req, calls = _recorder({
+        "/authenticate": {"access_token": "TOK123"},
+        "/gst/compliance/public/pan/search?state_code=27": {
+            "data": {"data": [{"gstin": "27AAKCR3738B1ZE", "state": "27", "sts": "Active"}]}
+        },
+    })
+    res = sandbox_kyc.search_gstins_by_pan("AAKCR3738B", "27", request_fn=req)
+    assert res.ok and res.gstins == ("27AAKCR3738B1ZE",)
+
+    pan_call = calls[1]
+    assert pan_call["method"] == "POST"
+    assert pan_call["path"] == "/gst/compliance/public/pan/search?state_code=27"  # state_code is a query param
+    assert pan_call["body"] == {"pan": "AAKCR3738B"}  # PAN in the body
+    assert pan_call["headers"]["authorization"] == "TOK123" and "Bearer" not in pan_call["headers"]["authorization"]
+
+
+def test_search_gstins_by_pan_fail_closed_on_bad_pan_or_state():
+    from orchestrator.integrations.methods import sandbox_kyc
+
+    req, _ = _recorder({"/authenticate": {"access_token": "T"}})
+    assert sandbox_kyc.search_gstins_by_pan("NOTAPAN", "27", request_fn=req).ok is False  # bad PAN format
+    assert sandbox_kyc.search_gstins_by_pan("AAKCR3738B", "", request_fn=req).ok is False  # missing state_code
+
+
 def test_vt409_auth_prefers_top_level_token_not_nested():
     """VT-409 regression: /authenticate returns the token at BOTH top-level access_token (WORKS) AND
     nested data.access_token (500s on search). We MUST send the TOP-LEVEL one. The structural guard so
