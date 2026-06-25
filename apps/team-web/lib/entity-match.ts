@@ -41,6 +41,7 @@ export type ConfirmOutcome =
 export type WizardStep =
   | 'idle' // name+city entered, not yet looked up
   | 'picking' // candidates rendered; owner choosing (or "none of these")
+  | 'manual_gstin' // VT-448: owner enters their GSTIN directly (discovery thin / found-but-no-GSTIN)
   | 'verified' // a gstin_verified confirm landed — create-account is now unlocked
   | 'reject' // graceful terminus — not a GST-registered business
   | 'retry' // transient vendor failure on confirm — show retry affordance
@@ -143,8 +144,19 @@ export function canCreateAccount(verified: VerifiedEntity | null): boolean {
   return verified != null && Boolean(verified.gstin)
 }
 
-/** True iff this candidate can be confirmed at all (a GBP candidate with no GSTIN cannot be verified —
- *  the only path forward for it is the not-listed/reject terminus, since verify needs a registry id). */
+/** True iff this candidate can be confirmed via its own id. A GBP candidate with no GSTIN cannot be
+ *  one-tap confirmed — but the owner can still verify it by entering their GSTIN (VT-448 manual path). */
 export function isConfirmable(c: EntityCandidate): boolean {
   return Boolean(c.candidate_gstin && c.candidate_gstin.trim())
+}
+
+/**
+ * VT-448 — client-side GSTIN FORMAT pre-check for the manual-entry path: 2 state digits + PAN
+ * (5 letters + 4 digits + 1 letter) + 1 entity char + 'Z' + 1 checksum char = 15 chars. This is a
+ * format gate ONLY (lets the owner fix a typo before we round-trip) — it is NOT verification; the
+ * authoritative gate stays the Sandbox confirm (status === 'gstin_verified'). Mirrors the
+ * orchestrator's _GSTIN_RE, anchored. Input is normalized upper + trimmed before the test.
+ */
+export function isValidGstinFormat(gstin: string): boolean {
+  return /^\d{2}[A-Z]{5}\d{4}[A-Z][A-Z0-9]Z[A-Z0-9]$/.test((gstin || '').trim().toUpperCase())
 }

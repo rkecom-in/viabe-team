@@ -22,6 +22,7 @@ import {
   confirmCandidate,
   fetchCandidates,
   isConfirmable,
+  isValidGstinFormat,
   type EntityCandidate,
   type VerifiedEntity,
   type WizardStep,
@@ -35,6 +36,9 @@ type EmMsgKey =
   | 'none_of_these' | 'verified_heading' | 'verified_note' | 'continue'
   | 'reject_heading' | 'reject_body' | 'retry_heading' | 'retry_body' | 'try_again'
   | 'empty_candidates'
+  | 'manual_with_gstin' | 'manual_heading' | 'manual_hint' | 'manual_label'
+  | 'manual_placeholder' | 'manual_verify' | 'manual_format_error' | 'manual_not_registered'
+  | 'manual_back'
 
 const EM_MESSAGES: Record<Lang, Record<EmMsgKey, string>> = {
   en: {
@@ -58,7 +62,16 @@ const EM_MESSAGES: Record<Lang, Record<EmMsgKey, string>> = {
     retry_heading: 'Couldn’t check right now',
     retry_body: 'This is on our side — the verification service didn’t respond. Please try again in a moment.',
     try_again: 'Try again',
-    empty_candidates: 'We couldn’t find your business in public records.',
+    empty_candidates: 'We couldn’t find your business in public records — you can enter your GST number to verify.',
+    manual_with_gstin: 'Enter my GST number',
+    manual_heading: 'Enter your GST number',
+    manual_hint: 'We’ll verify it against the official GST registry.',
+    manual_label: 'Your 15-character GSTIN',
+    manual_placeholder: '22AAAAA0000A1Z5',
+    manual_verify: 'Verify',
+    manual_format_error: 'That doesn’t look like a valid 15-character GSTIN. Please check and re-enter.',
+    manual_not_registered: 'I’m not GST-registered',
+    manual_back: 'Back',
   },
   hi: {
     heading: 'अपना व्यवसाय पुष्टि करें',
@@ -80,7 +93,16 @@ const EM_MESSAGES: Record<Lang, Record<EmMsgKey, string>> = {
     retry_heading: 'अभी जांच नहीं कर सके',
     retry_body: 'यह हमारी ओर से है — सत्यापन सेवा ने जवाब नहीं दिया। कृपया थोड़ी देर में पुनः प्रयास करें।',
     try_again: 'पुनः प्रयास करें',
-    empty_candidates: 'हमें सार्वजनिक रिकॉर्ड में आपका व्यवसाय नहीं मिला।',
+    empty_candidates: 'हमें सार्वजनिक रिकॉर्ड में आपका व्यवसाय नहीं मिला — आप सत्यापित करने के लिए अपना GST नंबर दर्ज कर सकते हैं।',
+    manual_with_gstin: 'मेरा GST नंबर दर्ज करें',
+    manual_heading: 'अपना GST नंबर दर्ज करें',
+    manual_hint: 'हम इसे आधिकारिक GST रजिस्ट्री से सत्यापित करेंगे।',
+    manual_label: 'आपका 15-अंकीय GSTIN',
+    manual_placeholder: '22AAAAA0000A1Z5',
+    manual_verify: 'सत्यापित करें',
+    manual_format_error: 'यह एक मान्य 15-अंकीय GSTIN नहीं लगता। कृपया जांचें और पुनः दर्ज करें।',
+    manual_not_registered: 'मैं GST-पंजीकृत नहीं हूं',
+    manual_back: 'वापस',
   },
 }
 
@@ -104,6 +126,8 @@ export function EntityMatchStep({
   const [candidates, setCandidates] = useState<EntityCandidate[]>([])
   const [confirming, setConfirming] = useState<string | null>(null) // the gstin being confirmed
   const [verified, setVerified] = useState<VerifiedEntity | null>(null)
+  const [manualGstin, setManualGstin] = useState('') // VT-448 manual-entry input
+  const [manualError, setManualError] = useState(false) // client-side GSTIN format error
 
   // Step 1: fetch candidates on mount. The component mounts in 'idle' (the loading screen); the
   // async result flips to 'picking'. Fail-closed → empty list → the picking screen still renders
@@ -121,31 +145,55 @@ export function EntityMatchStep({
     }
   }, [businessName, city])
 
-  async function pick(candidate: EntityCandidate) {
-    const gstin = candidate.candidate_gstin
-    if (!gstin) return // GBP-only candidate (no registry id) can't be verified — guarded in render too
+  // The shared confirm spine — a GSTIN (from a pick OR manual entry) → Sandbox confirm → classify.
+  // The Sandbox confirm is the AUTHORITATIVE gate for both paths (a manually-typed GSTIN is verified
+  // exactly like a picked one — it is never self-asserted).
+  async function confirmGstin(gstin: string) {
     setConfirming(gstin)
     try {
-      const envelope = await confirmCandidate(gstin)
-      const outcome = classifyConfirm(envelope, gstin)
+      const outcome = classifyConfirm(await confirmCandidate(gstin), gstin)
       if (outcome.kind === 'verified') {
-        // Show the owner the verified result (authoritative name + chip) FIRST; the Continue button
-        // bridges to the OTP/create step via onVerified. We don't auto-advance — the owner sees the
-        // confirmed entity before proceeding.
+        // Show the verified result (authoritative name + chip) FIRST; Continue bridges to OTP/create
+        // via onVerified. No auto-advance — the owner sees the confirmed entity before proceeding.
         setVerified({ gstin: outcome.gstin, name: outcome.name })
         setStep('verified')
       } else if (outcome.kind === 'retry') {
         setStep('retry')
       } else {
         setStep('reject')
+        onReject()
       }
     } finally {
       setConfirming(null)
     }
   }
 
-  function noneOfThese() {
-    // The graceful, generic terminus — SAME outcome as an invalid_gstin confirm (no oracle).
+  function pick(candidate: EntityCandidate) {
+    const gstin = candidate.candidate_gstin
+    if (!gstin) return // GBP-only candidate (no registry id) → the manual-GSTIN path (VT-448), guarded in render
+    void confirmGstin(gstin)
+  }
+
+  // VT-448 — the manual-GSTIN path: discovery is thin, OR the owner's only match is a bare/closed GBP
+  // listing with no GSTIN (e.g. RKeCom). The owner types their GSTIN; the Sandbox confirm stays the gate.
+  function openManual() {
+    setManualGstin('')
+    setManualError(false)
+    setStep('manual_gstin')
+  }
+
+  function submitManualGstin() {
+    const gstin = manualGstin.trim().toUpperCase()
+    if (!isValidGstinFormat(gstin)) {
+      setManualError(true) // format typo → inline retry (NOT a reject; the format gate is not an oracle)
+      return
+    }
+    setManualError(false)
+    void confirmGstin(gstin)
+  }
+
+  function notRegistered() {
+    // The honest terminus when the owner has no GSTIN — the SAME generic reject (no enumeration oracle).
     setStep('reject')
     onReject()
   }
@@ -230,6 +278,65 @@ export function EntityMatchStep({
     )
   }
 
+  if (step === 'manual_gstin') {
+    return (
+      <section data-entity-step="manual" className={`mt-8 ${card}`}>
+        <h2 className="text-lg font-semibold text-gray-900">{t.manual_heading}</h2>
+        <p className="mt-1 text-sm leading-relaxed text-gray-600">{t.manual_hint}</p>
+        <label className="mt-4 block text-sm font-medium text-gray-700" htmlFor="manual-gstin">
+          {t.manual_label}
+        </label>
+        <input
+          id="manual-gstin"
+          data-manual-gstin-input
+          type="text"
+          autoCapitalize="characters"
+          autoComplete="off"
+          maxLength={15}
+          value={manualGstin}
+          onChange={(e) => {
+            setManualGstin(e.target.value.toUpperCase())
+            if (manualError) setManualError(false)
+          }}
+          placeholder={t.manual_placeholder}
+          className="mt-1 w-full rounded-xl border border-gray-300 px-4 py-3 font-mono uppercase tracking-wide text-gray-900 outline-none focus:border-emerald-500"
+        />
+        {manualError && (
+          <p data-manual-error className="mt-2 text-sm text-red-600">{t.manual_format_error}</p>
+        )}
+        <div className="mt-5 flex flex-wrap items-center gap-3">
+          <button
+            type="button"
+            data-manual-verify
+            disabled={confirming !== null || manualGstin.trim() === ''}
+            onClick={submitManualGstin}
+            className="rounded-xl bg-emerald-600 px-5 py-3 font-semibold text-white shadow-sm transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {confirming !== null ? t.confirming : t.manual_verify}
+          </button>
+          <button
+            type="button"
+            data-manual-back
+            disabled={confirming !== null}
+            onClick={() => setStep('picking')}
+            className="rounded-xl border border-gray-300 px-5 py-2.5 font-medium text-gray-700 transition hover:bg-gray-50 disabled:opacity-50"
+          >
+            {t.manual_back}
+          </button>
+        </div>
+        <button
+          type="button"
+          data-manual-not-registered
+          disabled={confirming !== null}
+          onClick={notRegistered}
+          className="mt-4 block text-sm text-gray-500 underline underline-offset-2 transition hover:text-gray-700 disabled:opacity-50"
+        >
+          {t.manual_not_registered}
+        </button>
+      </section>
+    )
+  }
+
   // step === 'picking'
   return (
     <section data-entity-step="picking" className={`mt-8 ${card}`}>
@@ -281,14 +388,16 @@ export function EntityMatchStep({
           })}
         </ul>
       )}
+      {/* VT-448: "not listed / found-but-no-GSTIN" is no longer a dead end — it opens the manual-GSTIN
+          path (the owner verifies by typing their GSTIN; "not registered" inside is the honest reject). */}
       <button
         type="button"
-        data-entity-none
+        data-entity-manual
         disabled={confirming !== null}
-        onClick={noneOfThese}
+        onClick={openManual}
         className="mt-5 rounded-xl border border-gray-300 px-5 py-2.5 font-medium text-gray-700 transition hover:bg-gray-50 disabled:opacity-50"
       >
-        {t.none_of_these}
+        {t.manual_with_gstin}
       </button>
     </section>
   )

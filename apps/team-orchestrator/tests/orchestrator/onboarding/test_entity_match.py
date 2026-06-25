@@ -24,6 +24,46 @@ def test_fetch_candidates_extracts_gstin_from_web_results() -> None:
     assert cands[0].trade_name == "Sundaram Book Store"
 
 
+_OTHER_GSTIN = "27ZZZZZ9999Z1Z3"  # a 2nd valid-format GSTIN for the noise fixtures
+
+
+def test_fetch_candidates_web_drops_irrelevant_noise() -> None:
+    # VT-448: a "<name> GST number" SERP for "RKeCom Services" returns Telecom GST pages that DON'T name
+    # the business (they fuzzy-share only the generic "Services" token). The web leg must DROP them.
+    def search_fn(_query: str) -> list[dict[str, Any]]:
+        return [
+            {"title": "Telecom Services", "description": f"GSTIN {_VALID_GSTIN}", "url": "x"},
+            {"title": "Shubham Telecom Services", "description": f"GSTIN {_OTHER_GSTIN}", "url": "y"},
+        ]
+
+    cands = entity_match.fetch_candidates(
+        "RKeCom Services Pvt Ltd", "Mumbai", search_fn=search_fn, gbp_fetch_fn=lambda *_: []
+    )
+    assert cands == []  # none echo the distinctive "rkecom" token → all dropped as noise
+
+
+def test_fetch_candidates_web_keeps_named_match() -> None:
+    # The owner's real business DOES name them in the result → kept (the filter is precision, not blanket).
+    def search_fn(_query: str) -> list[dict[str, Any]]:
+        return [{"title": "RKeCom Services Pvt Ltd", "description": f"GSTIN {_VALID_GSTIN}", "url": "x"}]
+
+    cands = entity_match.fetch_candidates(
+        "RKeCom Services Pvt Ltd", "Mumbai", search_fn=search_fn, gbp_fetch_fn=lambda *_: []
+    )
+    assert len(cands) == 1 and cands[0].candidate_gstin == _VALID_GSTIN
+
+
+def test_fetch_candidates_web_all_generic_name_not_overfiltered() -> None:
+    # An all-generic name ("Services Pvt Ltd") has no distinctive token → we must NOT over-filter.
+    def search_fn(_query: str) -> list[dict[str, Any]]:
+        return [{"title": "City Services GST", "description": f"GSTIN {_VALID_GSTIN}", "url": "x"}]
+
+    cands = entity_match.fetch_candidates(
+        "Services Pvt Ltd", "Mumbai", search_fn=search_fn, gbp_fetch_fn=lambda *_: []
+    )
+    assert len(cands) == 1  # sig_tokens empty → relevance gate passes everything
+
+
 def _gbp_one(*_: Any) -> list[dict[str, Any]]:
     return [{"title": "Sundaram Multi Pap Limited", "categoryName": "Stationery", "city": "Chennai"}]
 

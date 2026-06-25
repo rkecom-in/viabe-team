@@ -88,6 +88,31 @@ def fetch_candidates(
     return out
 
 
+# Generic business-suffix/filler tokens that carry no distinctive identity — excluded when deciding
+# whether a web result is ABOUT the queried business, so "RKeCom Services" doesn't match every
+# "...Services"/"Telecom Services" GST page. VT-448 (the RKeCom discovery-noise fix).
+_GENERIC_NAME_TOKENS = frozenset({
+    "services", "service", "pvt", "ltd", "private", "limited", "the", "and", "co", "company",
+    "llp", "opc", "inc", "enterprises", "enterprise", "solutions", "solution", "india", "indian",
+    "store", "stores", "shop", "trading", "traders", "industries", "corporation", "group",
+})
+
+
+def _significant_tokens(name: str) -> set[str]:
+    """The distinctive (non-generic, >=3-char) tokens of a business name — the identity signal a
+    relevant web result must echo. Empty when a name is ALL generic (then we do NOT over-filter)."""
+    return {t for t in re.findall(r"[a-z0-9]+", name.lower()) if len(t) >= 3 and t not in _GENERIC_NAME_TOKENS}
+
+
+def _result_is_relevant(blob: str, sig_tokens: set[str]) -> bool:
+    """A web GST-search result is about the queried business only if its text echoes a distinctive
+    name token. No distinctive token (all-generic name) → return True (don't drop real hits)."""
+    if not sig_tokens:
+        return True
+    low = blob.lower()
+    return any(t in low for t in sig_tokens)
+
+
 def _web_candidates(name: str, city: str, search_fn: SearchFn | None) -> list[EntityCandidate]:
     token = os.environ.get(_TOKEN_ENV)
     fn = search_fn
@@ -100,9 +125,12 @@ def _web_candidates(name: str, city: str, search_fn: SearchFn | None) -> list[En
     except Exception:  # noqa: BLE001 — fragile web search; degrade, never raise into signup
         logger.warning("entity_match: web candidate search failed (degrade to none)", exc_info=True)
         return []
+    sig = _significant_tokens(name)
     out: list[EntityCandidate] = []
     for r in results or []:
         blob = " ".join(str(r.get(k, "")) for k in ("title", "description", "url", "text"))
+        if not _result_is_relevant(blob, sig):
+            continue  # VT-448: drop GST-SERP noise that doesn't name the queried business
         for gstin in dict.fromkeys(_GSTIN_RE.findall(blob.upper())):  # ordered-unique
             out.append(
                 EntityCandidate(
@@ -137,11 +165,14 @@ def _gbp_candidates(
     except Exception:  # noqa: BLE001
         logger.warning("entity_match: GBP candidate fetch failed (degrade)", exc_info=True)
         return []
+    sig = _significant_tokens(name)
     out: list[EntityCandidate] = []
     for place in (items or [])[:3]:
         title = _clean(place.get("title"))
         if not title:
             continue
+        if not _result_is_relevant(title, sig):
+            continue  # VT-448: drop a Maps result that doesn't name the queried business (fuzzy neighbour)
         loc = _clean(place.get("city")) or _clean(place.get("address"))
         cat = _clean(place.get("categoryName"))
         out.append(

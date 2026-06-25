@@ -23,6 +23,7 @@ import {
   confirmCandidate,
   fetchCandidates,
   isConfirmable,
+  isValidGstinFormat,
   type EntityCandidate,
   type EntityConfirmResult,
 } from '@/lib/entity-match'
@@ -180,5 +181,26 @@ describe('VT-406 provenance — the wizard never badges a candidate as verified'
   it('the verified branch renders the authoritative registry name (verified.name), not a candidate name', () => {
     expect(src).toContain('data-verified-name')
     expect(src).toContain('verified.name')
+  })
+})
+
+describe('VT-448 isValidGstinFormat (manual-entry format gate)', () => {
+  it('accepts a well-formed 15-char GSTIN (any case / surrounding space)', () => {
+    expect(isValidGstinFormat('27AAACR5055K1Z7')).toBe(true)
+    expect(isValidGstinFormat(' 27aaacr5055k1z7 ')).toBe(true) // trimmed + upper-cased before test
+  })
+
+  it('rejects wrong length / shape', () => {
+    expect(isValidGstinFormat('')).toBe(false)
+    expect(isValidGstinFormat('27AAACR5055K1Z')).toBe(false) // 14 chars
+    expect(isValidGstinFormat('27AAACR5055K1Z77')).toBe(false) // 16 chars
+    expect(isValidGstinFormat('AB27AACR5055K1Z7')).toBe(false) // letters in the state-code slot
+    expect(isValidGstinFormat('27AAACR5055K1A7')).toBe(false) // no mandatory Z in slot 14
+  })
+
+  it('is a FORMAT gate only — a valid format is NOT verification (Sandbox stays the authority)', () => {
+    // A format-valid string never unlocks create on its own; canCreateAccount needs a verified entity.
+    expect(canCreateAccount({ gstin: '27AAACR5055K1Z7', name: 'X' })).toBe(true)
+    expect(canCreateAccount(null)).toBe(false)
   })
 })
