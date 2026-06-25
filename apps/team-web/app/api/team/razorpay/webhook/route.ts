@@ -7,7 +7,7 @@ import { verifyRazorpaySignature } from '@/lib/razorpay'
 /**
  * Razorpay webhook receiver (VT-89).
  *
- * Verify the HMAC (RZP_WEBHOOK_SECRET_DEV / TEAM_RAZORPAY_WEBHOOK_SECRET), then
+ * Verify the HMAC (RAZORPAY_WEBHOOK_SECRET), then
  * forward the event to the orchestrator's razorpay-ingress — the durable inbox +
  * the sole writer of subscription fee state + billing phase transitions.
  *
@@ -17,15 +17,13 @@ import { verifyRazorpaySignature } from '@/lib/razorpay'
  * `subscription.charged` would silently undercount fees and under-refund later.
  * Bad signature -> 403. Malformed body -> 400.
  *
- * LIVE keys are NEEDS-FAZAL, hard-gated by VT-93-N1 + VT-329. The secret read here
- * is the TEST (`_DEV`) secret until cutover.
+ * LIVE keys are NEEDS-FAZAL, hard-gated by VT-93-N1 + VT-329.
  */
 export async function POST(req: NextRequest): Promise<NextResponse> {
   // Raw body (not re-serialised JSON) — the HMAC is computed over the exact bytes.
   const rawBody = await req.text()
   const signature = req.headers.get('x-razorpay-signature')
-  const secret =
-    process.env.RZP_WEBHOOK_SECRET_DEV ?? process.env.TEAM_RAZORPAY_WEBHOOK_SECRET ?? ''
+  const secret = process.env.RAZORPAY_WEBHOOK_SECRET ?? ''
 
   if (!verifyRazorpaySignature(signature, rawBody, secret)) {
     return NextResponse.json({ error: 'invalid signature' }, { status: 403 })

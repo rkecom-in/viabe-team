@@ -24,11 +24,11 @@ function signedReq(rawBody: string, sig?: string): Request {
 }
 
 beforeEach(() => {
-  process.env.RZP_WEBHOOK_SECRET_DEV = SECRET
+  process.env.RAZORPAY_WEBHOOK_SECRET = SECRET
 })
 afterEach(() => {
   vi.restoreAllMocks()
-  delete process.env.RZP_WEBHOOK_SECRET_DEV
+  delete process.env.RAZORPAY_WEBHOOK_SECRET
 })
 
 describe('VT-330 webhook real-HMAC e2e', () => {
