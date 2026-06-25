@@ -1,6 +1,6 @@
 """VT-208 — Shopify connector.
 
-Shopify Admin REST API 2024-04.
+Shopify Admin REST API 2026-04 (VT-422: bumped from 2024-04 — outside Shopify's ~1yr supported window by 2026-06).
 
 CANONICAL AUTH = OAuth authorization-code install (VT-283 / VT-422)
 ------------------------------------------------------------------
@@ -102,7 +102,7 @@ from orchestrator.observability.encrypt_value import (
 logger = logging.getLogger(__name__)
 
 
-_SHOPIFY_API_VERSION = "2024-04"
+_SHOPIFY_API_VERSION = "2026-04"
 # VT-422 GAP-0 — read + WRITE scopes for the PUBLIC OAuth app. This constant is the
 # SINGLE SOURCE: the authorize URL, the offline token, and Shopify's consent screen
 # all derive from it, so widening it here is all the install needs to request write.
