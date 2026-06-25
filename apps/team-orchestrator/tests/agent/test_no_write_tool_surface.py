@@ -41,12 +41,16 @@ ORCHESTRATOR_EXPECTED = {
 }
 INTEGRATION_EXPECTED = {
     "list_connectors_tool",
-    "start_connector_setup_stub",
-    "pull_sample_stub",
+    # VT-425 Phase A — de-stubbed (real Shopify): renamed out of `_stub`. pull_sample returns
+    # COUNTS ONLY (no raw PII to the LLM). The connector COMMIT is NOT here — it runs server-side
+    # (shopify_onboarding.pull_and_ingest_shopify), never as an agent tool (VT-268 fail-closed).
+    "start_connector_setup",
+    "pull_sample",
+    # Field-mapping stubs kept for Phase C (Sheets/CSV); Phase A Shopify uses fixed-schema auto-map.
     "propose_field_mapping_stub",
     "confirm_field_mapping_stub",
     "setup_recurring_ingestion_stub",
-    "dedupe_against_existing_stub",
+    # dedupe_against_existing_stub DELETED (plan §3 "delete the concept") — commit is server-side.
     "integration_escalate_to_fazal",
 }
 HANDOFF_EXPECTED = {"spawn_sales_recovery", "spawn_integration"}
