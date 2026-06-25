@@ -728,6 +728,31 @@ def webhook_pipeline_run(tenant_id: str, run_id: str, twilio_fields: dict) -> di
                 "journey_done": journey_result.get("done"),
             }
 
+    # VT-425 — the integration-onboarding RESUME gate (closes the VT-267 chat-resume gap).
+    # After a link-out, an inbound WhatsApp message must RESUME the connector onboarding in chat
+    # (re-check the connector status, advance the phase) — NOT re-enter the brain fresh. Each
+    # inbound gets a distinct thread_id, so the LangGraph checkpointer carries nothing; resume is
+    # DB-state driven off tenant_integration_state.pending_owner_input. Mirrors the journey gate:
+    # runs BEFORE pre_filter, inbound + non-dupe only, FAIL-OPEN (any error → None → normal flow).
+    # Opt-out / DSR is short-circuited inside the gate (returns None) so it never consumes a STOP.
+    if event.message_type == "inbound_message" and not event.dupe_status:
+        from orchestrator.onboarding.shopify_onboarding import (
+            maybe_resume_shopify_onboarding,
+        )
+
+        resume_result = maybe_resume_shopify_onboarding(
+            tenant_id, event.body or "", event.twilio_message_sid, event.sender_phone
+        )
+        if resume_result is not None:
+            close_webhook_run(tenant_id, run_id, "completed")
+            return {
+                "run_id": run_id,
+                "tenant_id": tenant_id,
+                "routed": "integration_onboarding_resume",
+                "handler": None,
+                "onboarding_done": resume_result.get("done"),
+            }
+
     # VT-384 — the demote CAS leg (plan-ack §2). A substantive owner inbound during an L3 hold
     # demotes the auto_send_pending batch to awaiting_approval (the owner wants eyes on it; the
     # batch re-enters the normal approval path — nothing is lost). The demote runs BEFORE pre_filter

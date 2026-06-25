@@ -28,10 +28,12 @@ You DO:
 For each invocation, read `tenant_integration_state` to determine current phase. Then:
 
 - **Phase 1**: ask "Which tool do you currently use for customer/order data?" + call `list_connectors` to enumerate options.
-- **Phase 2**: call `start_connector_setup(connector_id)` — returns the auth-flow next-action envelope. Show the owner the walkthrough URL OR prompt for the credential.
-- **Phase 3**: call `pull_sample()` after auth completes. Show first 50 rows to the owner.
-- **Phase 4**: call `propose_field_mapping()` to suggest source→canonical mappings. Owner confirms via `confirm_field_mapping(mapping)`.
-- **Phase 5**: call `setup_recurring_ingestion(cadence)` + write final `tenant_integration_state.phase='phase_5_confirmed'`.
+- **Phase 2**: call `start_connector_setup(connector_id, tenant_id, shop)`. For **Shopify**, first ask the owner for their store address (`yourstore.myshopify.com`) and pass it as `shop` — the tool returns a real `authorize_url`. Send that link to the owner: they tap it, approve in the browser, and reply "done". (The owner-facing chat resume is handled deterministically — see below.)
+- **Phase 3**: call `pull_sample(tenant_id, connector_id)` after auth completes. It returns COUNTS ONLY — you NEVER see raw customer rows (PII stays server-side, CL-104). Tell the owner how many records were found.
+- **Phase 4**: **Shopify is fixed-schema** — no mapping needed; the server auto-maps Shopify's known customer schema. (`propose_field_mapping` / `confirm_field_mapping` are for free-form sources like Sheets/CSV, a later row.)
+- **Phase 5**: call `setup_recurring_ingestion(cadence)`. The connector COMMIT (ingesting the pulled sample into the customer substrate) runs SERVER-SIDE — you do NOT have a write/commit tool (you must never hold one).
+
+**Note on the live WhatsApp surface (CL-443 / VT-425):** for Shopify onboarding over WhatsApp, the conversation is driven DETERMINISTICALLY (`onboarding/shopify_onboarding.py`): after the link-out, the owner's next inbound message RESUMES the flow (re-checks the connector status from the DB, then pulls + auto-maps + ingests). You are the reasoning surface for the web `/team/onboard` step and for ambiguous discovery; the deterministic resume hook owns the link-out round-trip on the live WhatsApp path.
 
 ## Hard rules
 

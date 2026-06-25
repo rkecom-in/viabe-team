@@ -311,6 +311,20 @@ def maybe_handle_journey_reply(
             return {"done": False, "pending": True}
         r = handle_reply(tenant_id, body, message_sid, lang=lang)
         _send(recipient, {"prompt_en": r["reply_en"], "prompt_hi": r["reply_hi"]}, lang)
+        # VT-425 — the journey → integration SEAM (sequential handoff, CL-443 plan §8 option a).
+        # When the journey COMPLETES profile-confirm on THIS reply, hand off to connector
+        # onboarding so the owner isn't dropped into a cold brain between the two spines. The
+        # journey owns "confirm who you are"; the integration onboarding owns "connect your data".
+        # Best-effort + fail-OPEN: a seam failure must never block the journey's own completion.
+        if r.get("done"):
+            try:
+                from orchestrator.onboarding.shopify_onboarding import begin_shopify_onboarding
+
+                begin_shopify_onboarding(tenant_id, recipient)
+            except Exception:  # noqa: BLE001 — seam is best-effort; journey completion already committed
+                logger.exception(
+                    "journey→integration seam (begin_shopify_onboarding) failed tenant=%s", tenant_id
+                )
         return r
     except Exception:  # noqa: BLE001 — owner-inbound HOT PATH: any failure falls through, never blocks
         logger.exception("maybe_handle_journey_reply failed tenant=%s — fall through", tenant_id)
