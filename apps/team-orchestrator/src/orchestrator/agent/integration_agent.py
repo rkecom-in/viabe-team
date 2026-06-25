@@ -125,27 +125,55 @@ def list_connectors_tool(category: str = "") -> str:
 
 
 @tool
-def start_connector_setup_stub(connector_id: str, tenant_id: str) -> dict[str, str]:
-    """STUB — begin auth flow for connector_id. TODO(VT-207+) wire real auth."""
-    logger.info(
-        "[VT-207+ STUB] start_connector_setup connector=%s tenant=%s",
-        connector_id, tenant_id,
-    )
+def start_connector_setup(connector_id: str, tenant_id: str, shop: str = "") -> dict[str, str]:
+    """Begin the auth flow for ``connector_id``. VT-425 Phase A — Shopify is REAL: mints the
+    Shopify ``authorize_url`` link-out (the owner taps it in the WA in-app browser, approves,
+    returns) and writes the oauth_completion pending-state for the VT-267 resume.
+
+    ``shop`` is the owner's ``*.myshopify.com`` domain (required for Shopify). Returns the
+    ``authorize_url`` (key is ``authorize_url``, NOT ``auth_url``). Other connectors are not
+    yet wired in Phase A — they return a placeholder envelope.
+    """
+    if connector_id == "shopify":
+        if not shop:
+            return {
+                "connector_id": connector_id,
+                "next_action": "prompt_shop_domain",
+                "prompt": "Ask the owner for their Shopify store address (yourstore.myshopify.com).",
+            }
+        from orchestrator.onboarding.shopify_onboarding import start_shopify_setup
+
+        result = start_shopify_setup(tenant_id, shop)
+        logger.info("VT-425 start_connector_setup shopify tenant=%s (authorize_url minted)", tenant_id)
+        return {
+            "connector_id": connector_id,
+            "next_action": "owner_completes_oauth_then_says_done",
+            "authorize_url": result["authorize_url"],
+        }
+    logger.info("start_connector_setup connector=%s tenant=%s (not wired in Phase A)", connector_id, tenant_id)
     return {
         "connector_id": connector_id,
         "next_action": "show_walkthrough_or_prompt_credential",
-        "stub": "true",
+        "not_wired_phase_a": "true",
     }
 
 
 @tool
-def pull_sample_stub(tenant_id: str, connector_id: str) -> dict[str, Any]:
-    """STUB — fetch first ~50 rows from connector. TODO(VT-207+) wire real pull."""
-    logger.info(
-        "[VT-207+ STUB] pull_sample tenant=%s connector=%s",
-        tenant_id, connector_id,
-    )
-    return {"row_count": 0, "rows": [], "stub": "true"}
+def pull_sample(tenant_id: str, connector_id: str) -> dict[str, Any]:
+    """Fetch a sample from the connector. VT-425 Phase A — Shopify is REAL.
+
+    PII (CL-104 / CL-390): returns COUNTS ONLY — NEVER raw rows. Raw customer phone/email/name
+    must never reach the LLM prompt, so the sample row CONTENT stays server-side; the agent only
+    sees how many were found.
+    """
+    if connector_id == "shopify":
+        from orchestrator.integrations.connectors.shopify import ShopifyConnector
+
+        sample = ShopifyConnector().pull_sample(UUID(tenant_id))
+        logger.info("VT-425 pull_sample shopify tenant=%s rows=%d (counts only)", tenant_id, len(sample))
+        return {"connector_id": connector_id, "row_count": len(sample)}  # COUNTS ONLY — no PII
+    logger.info("pull_sample connector=%s tenant=%s (not wired in Phase A)", connector_id, tenant_id)
+    return {"row_count": 0, "not_wired_phase_a": "true"}
 
 
 @tool
@@ -214,13 +242,12 @@ def setup_recurring_ingestion_stub(
     return {"scheduled": "true", "next_run": next_run.isoformat()}
 
 
-@tool
-def dedupe_against_existing_stub(
-    tenant_id: str, candidate_rows: list[dict[str, Any]]
-) -> dict[str, int]:
-    """STUB — dedupe new rows against existing tenant data. TODO(VT-209)."""
-    logger.info("[VT-209 STUB] dedupe tenant=%s rows=%d", tenant_id, len(candidate_rows))
-    return {"new_rows": 0, "duplicate_rows": 0}
+# VT-425 Phase A — the `dedupe_against_existing_stub` is DELETED (plan §3 "delete the concept").
+# A connector commit must NEVER be an agent tool: the integration agent is fail-CLOSED against
+# ledger/customer-writes (VT-268 assert_agent_tools_safe). The Shopify sample commit (fixed-schema
+# auto-map → ingest_customer_rows + dedup_and_merge) runs SERVER-SIDE in
+# orchestrator.onboarding.shopify_onboarding.pull_and_ingest_shopify, invoked by the deterministic
+# resume hook — never from inside the agent's tool list.
 
 
 @tool
@@ -237,12 +264,14 @@ def integration_escalate_to_fazal(
 
 INTEGRATION_AGENT_TOOLS: list[BaseTool] = [
     list_connectors_tool,
-    start_connector_setup_stub,
-    pull_sample_stub,
+    start_connector_setup,  # VT-425 — de-stubbed (real Shopify authorize_url link-out)
+    pull_sample,  # VT-425 — de-stubbed (real Shopify pull; COUNTS-ONLY return, no PII to LLM)
+    # VT-425 Phase A uses a FIXED-SCHEMA auto-map for Shopify (no mapping form, no reasoner), so
+    # the field-mapping stubs are NOT in the active launch path — kept for Phase C (Sheets/CSV).
     propose_field_mapping_stub,
     confirm_field_mapping_stub,
     setup_recurring_ingestion_stub,
-    dedupe_against_existing_stub,
+    # dedupe_against_existing_stub DELETED (plan §3) — commit is server-side, never an agent tool.
     integration_escalate_to_fazal,
 ]
 
