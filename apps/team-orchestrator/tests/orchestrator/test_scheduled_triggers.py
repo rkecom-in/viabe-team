@@ -88,6 +88,8 @@ def test_cron_expressions_match_brief() -> None:
     assert st.IMPLICIT_ATTRIBUTION_SWEEP_CRON == "0 23 * * *"
     # VT-439 — 19th trigger: daily Razorpay orphan-detect backstop, 01:00 UTC / 06:30 IST.
     assert st.RECONCILE_SUBSCRIPTION_ORPHANS_CRON == "0 1 * * *"
+    # VT-440 — 20th trigger: daily Razorpay dead-letter backstop, 22:30 UTC / 04:00 IST.
+    assert st.DEAD_LETTER_RETRY_SWEEP_CRON == "30 22 * * *"
 
 
 # ---------------------------------------------------------------------------
@@ -507,6 +509,134 @@ def test_reconcile_subscription_orphans_handler_is_best_effort(monkeypatch) -> N
 
 
 # ---------------------------------------------------------------------------
+# VT-440 — dead_letter_retry_sweep handler (20th trigger). DETECT/ALERT-ONLY.
+# ---------------------------------------------------------------------------
+
+
+def _patch_count_pending(monkeypatch, value: int) -> None:
+    """Stub orchestrator.billing.dead_letter.count_pending to return `value`."""
+    import orchestrator.billing.dead_letter as dl_mod
+
+    monkeypatch.setattr(dl_mod, "count_pending", lambda: value)
+
+
+def test_dead_letter_retry_sweep_alerts_when_pending(monkeypatch) -> None:
+    """VT-440: with pending dead-letters, the handler alerts Fazal exactly once
+    with a COUNT (PII-free), and never reaches a replay/charge/send-of-money path."""
+    _patch_count_pending(monkeypatch, 3)
+
+    import orchestrator.alerts.clients as clients_mod
+
+    alerts: list[str] = []
+    monkeypatch.setattr(clients_mod, "alert_fazal", lambda text: alerts.append(text))
+
+    # Guard against any replay/send: patching replay to explode proves it is never called.
+    import orchestrator.billing.dead_letter as dl_mod
+
+    def _no_replay(*a, **k):
+        raise AssertionError("VT-440 sweep must NEVER call dead_letter.replay")
+
+    monkeypatch.setattr(dl_mod, "replay", _no_replay)
+
+    fake_scheduled = datetime(2026, 6, 25, 22, 30, tzinfo=timezone.utc)
+    fake_actual = datetime(2026, 6, 25, 22, 30, 4, tzinfo=timezone.utc)
+    st.dead_letter_retry_sweep_scheduled(fake_scheduled, fake_actual)
+
+    assert len(alerts) == 1, "exactly one Fazal alert when pending > 0"
+    assert "3 pending" in alerts[0], "alert must carry the count"
+    # PII-free: no event_id / payload leak — the count only.
+    assert "event_id" not in alerts[0].lower()
+
+
+def test_dead_letter_retry_sweep_silent_when_empty(monkeypatch) -> None:
+    """VT-440: zero pending dead-letters → NO alert (no noise)."""
+    _patch_count_pending(monkeypatch, 0)
+
+    import orchestrator.alerts.clients as clients_mod
+
+    alerts: list[str] = []
+    monkeypatch.setattr(clients_mod, "alert_fazal", lambda text: alerts.append(text))
+
+    fake_scheduled = datetime(2026, 6, 25, 22, 30, tzinfo=timezone.utc)
+    fake_actual = datetime(2026, 6, 25, 22, 30, 4, tzinfo=timezone.utc)
+    st.dead_letter_retry_sweep_scheduled(fake_scheduled, fake_actual)
+
+    assert alerts == [], "no alert when there are no pending dead-letters"
+
+
+def test_dead_letter_retry_sweep_no_send(monkeypatch) -> None:
+    """VT-440: DETECT/ALERT-ONLY — the sweep NEVER reaches Twilio or the raw
+    Resend/Telegram send clients (the Fazal alert is the only outbound, and it is
+    a count, not a money/customer send). Patch the low-level send clients and
+    assert neither fires even with pending rows."""
+    _patch_count_pending(monkeypatch, 5)
+
+    import orchestrator.alerts.clients as clients_mod
+
+    send_called: list[str] = []
+    monkeypatch.setattr(
+        clients_mod, "send_telegram", lambda *a, **kw: send_called.append("telegram")
+    )
+    monkeypatch.setattr(
+        clients_mod, "send_resend_email", lambda *a, **kw: send_called.append("resend")
+    )
+    # alert_fazal is allowed (the observability alert); stub it to a no-op so the
+    # real client doesn't try to reach the network in the unit test.
+    monkeypatch.setattr(clients_mod, "alert_fazal", lambda text: None)
+
+    fake_scheduled = datetime(2026, 6, 25, 22, 30, tzinfo=timezone.utc)
+    fake_actual = datetime(2026, 6, 25, 22, 30, 4, tzinfo=timezone.utc)
+    st.dead_letter_retry_sweep_scheduled(fake_scheduled, fake_actual)
+
+    assert not send_called, (
+        f"VT-440 sweep must not directly send via Telegram/Resend; called: {send_called}"
+    )
+
+
+def test_dead_letter_retry_sweep_is_best_effort(monkeypatch) -> None:
+    """VT-440: a count_pending exception must NOT propagate (best-effort sweep)."""
+    import orchestrator.billing.dead_letter as dl_mod
+
+    def _boom():
+        raise RuntimeError("DB unavailable")
+
+    monkeypatch.setattr(dl_mod, "count_pending", _boom)
+
+    fake_scheduled = datetime(2026, 6, 25, 22, 30, tzinfo=timezone.utc)
+    fake_actual = datetime(2026, 6, 25, 22, 30, 4, tzinfo=timezone.utc)
+    # Must not raise — handler wraps in try/except BLE001.
+    st.dead_letter_retry_sweep_scheduled(fake_scheduled, fake_actual)
+
+
+def test_dead_letter_retry_sweep_idempotent_double_run(monkeypatch) -> None:
+    """VT-440 money-safety (handler level): running the sweep TWICE over the same
+    pending state produces the SAME alert each time and ZERO money effect — no
+    replay/charge/write. The sweep is read-only; the alert is the only side effect
+    and is itself idempotent (same count both runs)."""
+    _patch_count_pending(monkeypatch, 2)
+
+    import orchestrator.alerts.clients as clients_mod
+    import orchestrator.billing.dead_letter as dl_mod
+
+    alerts: list[str] = []
+    monkeypatch.setattr(clients_mod, "alert_fazal", lambda text: alerts.append(text))
+    monkeypatch.setattr(
+        dl_mod, "replay", lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("replay must never be called by the sweep")
+        ),
+    )
+
+    fake_scheduled = datetime(2026, 6, 25, 22, 30, tzinfo=timezone.utc)
+    fake_actual = datetime(2026, 6, 25, 22, 30, 4, tzinfo=timezone.utc)
+    st.dead_letter_retry_sweep_scheduled(fake_scheduled, fake_actual)
+    st.dead_letter_retry_sweep_scheduled(fake_scheduled, fake_actual)
+
+    # Two identical alerts — the count is unchanged because the sweep wrote nothing.
+    assert len(alerts) == 2
+    assert alerts[0] == alerts[1], "both runs alert with the identical (count-only) text"
+
+
+# ---------------------------------------------------------------------------
 # 5. Pillar 1 — deterministic bodies must NOT import LLM modules
 # ---------------------------------------------------------------------------
 
@@ -546,6 +676,7 @@ def test_deterministic_bodies_do_not_import_orchestrator_agent() -> None:
         st.monthly_impact_scheduled,
         st.implicit_attribution_sweep_scheduled,  # VT-432
         st.reconcile_subscription_orphans_scheduled,  # VT-439
+        st.dead_letter_retry_sweep_scheduled,  # VT-440
     ],
 )
 def test_scheduled_handler_accepts_scheduled_and_actual_time(monkeypatch, fn) -> None:
@@ -556,10 +687,12 @@ def test_scheduled_handler_accepts_scheduled_and_actual_time(monkeypatch, fn) ->
     # VT-365: the trial sweep scans active trials via get_pool().connection();
     # the empty-pool stub below yields zero rows so the body is a clean no-op.
 
-    # Monthly impact body + VT-439 orphan handler query the pool inline; stub it.
+    # Monthly impact body + VT-439 orphan handler + VT-440 dead-letter count query the
+    # pool inline; stub it. fetchone() returns a 0-count tuple for count_pending (VT-440).
     class _EmptyCursor:
         def execute(self, *a, **k): pass
         def fetchall(self): return []
+        def fetchone(self): return {"n": 0}  # count_pending reads row["n"] (dict_row)
         def __enter__(self): return self
         def __exit__(self, *exc): return False
 
@@ -643,10 +776,12 @@ def test_register_scheduled_triggers_idempotent(monkeypatch) -> None:
     # outbox_redaction_sweep (VT-382 — the CL-437 ruling-3.3 redaction backfill/backstop),
     # l2_approved_send_sweep (VT-418 — the L2 owner-approve→send reconciler, recovery-only),
     # implicit_attribution_sweep (VT-432 — daily VT-198 feedback tier-1 sweep, NO SEND),
-    # reconcile_subscription_orphans (VT-439 — daily Razorpay orphan-DETECT backstop, DETECT-ONLY).
+    # reconcile_subscription_orphans (VT-439 — daily Razorpay orphan-DETECT backstop, DETECT-ONLY),
+    # dead_letter_retry_sweep (VT-440 — daily Razorpay dead-letter backstop, DETECT/ALERT-ONLY).
     # VT-365 removed two triggers (day-39 refund evaluation + the VT-85 refund-offer
     # 48h timeout sweep): 16 → 14; VT-374 added one: 14 → 15; VT-382 added one: 15 → 16;
-    # VT-418 added one: 16 → 17; VT-432 added one: 17 → 18; VT-439 added one: 18 → 19.
-    assert first == 19, "expected 19 triggers registered on first call"
-    assert second == 19, "second call must short-circuit (idempotent)"
+    # VT-418 added one: 16 → 17; VT-432 added one: 17 → 18; VT-439 added one: 18 → 19;
+    # VT-440 added one: 19 → 20.
+    assert first == 20, "expected 20 triggers registered on first call"
+    assert second == 20, "second call must short-circuit (idempotent)"
     st._registered = False
