@@ -68,6 +68,9 @@ VTR_DIGEST_CRON = "30 8 * * *"  # VT-280 — daily 8:30 AM IST VTR digest (de-id
 # VT-432: daily 04:30 IST (23:00 UTC) — after the attribution_close + redaction/reconstitution
 # batch; before the trial-evaluation sweep. Pure SQL, no LLM, no send.
 IMPLICIT_ATTRIBUTION_SWEEP_CRON = "0 23 * * *"
+# VT-439: daily 01:00 UTC (06:30 IST) — Razorpay orphan-DETECT backstop. Runs after the
+# attribution_close and outbox batches; off-peak billing window. DETECT-ONLY (no cancel/charge).
+RECONCILE_SUBSCRIPTION_ORPHANS_CRON = "0 1 * * *"
 
 
 SHELL_STATUS = "skipped_schema_pending"
@@ -562,6 +565,56 @@ def implicit_attribution_sweep_scheduled(
 
 
 # ---------------------------------------------------------------------------
+# VT-439: daily Razorpay vendor-orphan reconciliation — DETECT-ONLY backstop
+# ---------------------------------------------------------------------------
+# Pairs with billing/dead_letter.py F7 (VT-352). DETECT-ONLY: no cancel,
+# no charge, no send. Fetches all committed razorpay_subscription_ids from the
+# subscriptions table and delegates to reconcile_subscription_orphans — which
+# finds any vendor subscription with NO matching DB row and alerts Fazal.
+#
+# Pre-LIVE posture: the subscription.create is still a STUB, so the known set
+# equals the DB set and orphan detection produces an empty list (vacuously safe).
+# At TEAM_RAZORPAY_LIVE cutover, replace the DB query with razorpay.subscription.all()
+# to get the vendor-authoritative list (VT-352 F2 acceptance step).
+
+
+def reconcile_subscription_orphans_scheduled(
+    scheduled_time: datetime,
+    actual_time: datetime,
+) -> None:
+    """DBOS scheduled handler — daily 01:00 UTC / 06:30 IST (VT-439). Runs the
+    VT-352 F2 Razorpay vendor-orphan DETECT backstop: fetches all committed
+    razorpay_subscription_ids from the subscriptions table and calls
+    :func:`orchestrator.api.razorpay_subscribe.reconcile_subscription_orphans` to
+    surface any vendor subscription with NO DB row (a commit-after-vendor failure
+    the Idempotency-Key didn't cover). DETECT-ONLY — NO auto-cancel, NO charge,
+    NO send. Best-effort: a reconcile failure must not crash the scheduler.
+
+    Pre-LIVE: vendor list = DB-committed subscriptions (vacuously zero orphans).
+    At TEAM_RAZORPAY_LIVE cutover, swap the DB query for razorpay.subscription.all()
+    to get the vendor-authoritative list (VT-352 F2 live acceptance step)."""
+    from orchestrator.api.razorpay_subscribe import reconcile_subscription_orphans
+    from orchestrator.graph import get_pool
+    from psycopg.rows import dict_row
+
+    try:
+        with get_pool().connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                "SELECT razorpay_subscription_id FROM subscriptions "
+                "WHERE razorpay_subscription_id IS NOT NULL"
+            )
+            vendor_ids = [r["razorpay_subscription_id"] for r in cur.fetchall()]
+        orphans = reconcile_subscription_orphans(vendor_ids)
+        logger.info(
+            "VT-439 reconcile_subscription_orphans: checked=%d orphans=%d",
+            len(vendor_ids),
+            len(orphans),
+        )
+    except Exception:  # noqa: BLE001 — daily sweep is best-effort; next run retries
+        logger.exception("VT-439 reconcile_subscription_orphans scheduled run failed")
+
+
+# ---------------------------------------------------------------------------
 # 4. Monthly impact — REAL body (VT-176, partial — PDF generation downstream)
 # ---------------------------------------------------------------------------
 
@@ -864,6 +917,9 @@ def register_scheduled_triggers() -> None:
     )
 
     DBOS.scheduled(L2_APPROVED_SEND_SWEEP_CRON)(l2_approved_send_sweep_scheduled)
+    # VT-439: daily Razorpay orphan-DETECT backstop (VT-352 F7). DETECT-ONLY — no
+    # cancel, no charge, no send. Runs at 01:00 UTC / 06:30 IST (off-peak billing).
+    DBOS.scheduled(RECONCILE_SUBSCRIPTION_ORPHANS_CRON)(reconcile_subscription_orphans_scheduled)
     _registered = True
 
 
@@ -874,6 +930,7 @@ __all__ = [
     "ATTRIBUTION_CLOSE_CRON",
     "ATTRIBUTION_CLOSE_SHELL_EVENT",
     "IMPLICIT_ATTRIBUTION_SWEEP_CRON",
+    "RECONCILE_SUBSCRIPTION_ORPHANS_CRON",
     "L3_CONSTRUCTION_CRON",
     "MONTHLY_IMPACT_CRON",
     "MONTHLY_IMPACT_SHELL_EVENT",
@@ -892,6 +949,7 @@ __all__ = [
     "PII_LOG_SWEEP_CRON",
     "audit_chain_verify_scheduled",
     "implicit_attribution_sweep_scheduled",
+    "reconcile_subscription_orphans_scheduled",
     "kg_drain_sweep_scheduled",
     "l2_retention_sweep_scheduled",
     "pii_log_sweep_scheduled",

@@ -86,6 +86,8 @@ def test_cron_expressions_match_brief() -> None:
     assert st.APPROVAL_TIMEOUT_SWEEP_CRON == "*/30 * * * *"
     # VT-432 — 18th trigger: daily implicit-attribution sweep, 23:00 UTC / 04:30 IST.
     assert st.IMPLICIT_ATTRIBUTION_SWEEP_CRON == "0 23 * * *"
+    # VT-439 — 19th trigger: daily Razorpay orphan-detect backstop, 01:00 UTC / 06:30 IST.
+    assert st.RECONCILE_SUBSCRIPTION_ORPHANS_CRON == "0 1 * * *"
 
 
 # ---------------------------------------------------------------------------
@@ -393,6 +395,118 @@ def test_implicit_attribution_sweep_handler_is_best_effort(monkeypatch) -> None:
 
 
 # ---------------------------------------------------------------------------
+# VT-439 — reconcile_subscription_orphans handler (19th trigger)
+# ---------------------------------------------------------------------------
+
+
+def _make_empty_pool():
+    """Shared pool stub that returns zero subscription rows."""
+    class _Cursor:
+        def execute(self, *a, **k): pass
+        def fetchall(self): return []
+        def __enter__(self): return self
+        def __exit__(self, *exc): return False
+
+    class _Conn:
+        def cursor(self, row_factory=None): return _Cursor()
+        def __enter__(self): return self
+        def __exit__(self, *exc): return False
+
+    class _Pool:
+        def connection(self): return _Conn()
+
+    return _Pool()
+
+
+def test_reconcile_subscription_orphans_scheduled_calls_reconcile(monkeypatch) -> None:
+    """VT-439: the scheduled handler delegates to reconcile_subscription_orphans
+    with the DB-fetched subscription IDs and logs the result. Monkeypatched DB
+    returns one known ID; reconcile stub reports zero orphans. No send path."""
+    import orchestrator.api.razorpay_subscribe as rs_mod
+    from orchestrator import graph as graph_mod
+
+    known_id = "sub_stub_tenant1_abc123"
+
+    class _Cursor:
+        def execute(self, *a, **k): pass
+        def fetchall(self): return [{"razorpay_subscription_id": known_id}]
+        def __enter__(self): return self
+        def __exit__(self, *exc): return False
+
+    class _Conn:
+        def cursor(self, row_factory=None): return _Cursor()
+        def __enter__(self): return self
+        def __exit__(self, *exc): return False
+
+    class _Pool:
+        def connection(self): return _Conn()
+
+    monkeypatch.setattr(graph_mod, "_pool", _Pool())
+
+    called_with: list[list[str]] = []
+
+    def _fake_reconcile(vendor_ids: list[str]) -> list[str]:
+        called_with.append(vendor_ids)
+        return []  # no orphans
+
+    monkeypatch.setattr(rs_mod, "reconcile_subscription_orphans", _fake_reconcile)
+
+    fake_scheduled = datetime(2026, 6, 25, 1, 0, tzinfo=timezone.utc)
+    fake_actual = datetime(2026, 6, 25, 1, 0, 3, tzinfo=timezone.utc)
+    st.reconcile_subscription_orphans_scheduled(fake_scheduled, fake_actual)
+
+    assert called_with, "reconcile_subscription_orphans must be called by the handler"
+    assert called_with[0] == [known_id], "handler must pass the DB-fetched IDs"
+
+
+def test_reconcile_subscription_orphans_no_send(monkeypatch) -> None:
+    """VT-439: the sweep path NEVER reaches Twilio or Resend (DETECT-ONLY).
+    Patch both send clients and assert neither is called when the handler runs."""
+    import orchestrator.api.razorpay_subscribe as rs_mod
+    from orchestrator import graph as graph_mod
+
+    monkeypatch.setattr(graph_mod, "_pool", _make_empty_pool())
+    monkeypatch.setattr(rs_mod, "reconcile_subscription_orphans", lambda ids: [])
+
+    send_called: list[str] = []
+    try:
+        import orchestrator.alerts.clients as clients_mod
+
+        monkeypatch.setattr(
+            clients_mod, "send_telegram", lambda *a, **kw: send_called.append("telegram")
+        )
+        monkeypatch.setattr(
+            clients_mod, "send_resend_email", lambda *a, **kw: send_called.append("resend")
+        )
+    except (ImportError, AttributeError):
+        pass
+
+    fake_scheduled = datetime(2026, 6, 25, 1, 0, tzinfo=timezone.utc)
+    fake_actual = datetime(2026, 6, 25, 1, 0, 3, tzinfo=timezone.utc)
+    st.reconcile_subscription_orphans_scheduled(fake_scheduled, fake_actual)
+
+    assert not send_called, (
+        f"VT-439 handler must NOT send via Telegram/Resend; called: {send_called}"
+    )
+
+
+def test_reconcile_subscription_orphans_handler_is_best_effort(monkeypatch) -> None:
+    """VT-439: a reconcile exception must not propagate — handler is best-effort."""
+    from orchestrator import graph as graph_mod
+
+    class _RaisingPool:
+        def connection(self):
+            raise RuntimeError("DB unavailable")
+
+    monkeypatch.setattr(graph_mod, "_pool", _RaisingPool())
+
+    fake_scheduled = datetime(2026, 6, 25, 1, 0, tzinfo=timezone.utc)
+    fake_actual = datetime(2026, 6, 25, 1, 0, 3, tzinfo=timezone.utc)
+    # Must not raise — handler wraps in try/except BLE001.
+    st.reconcile_subscription_orphans_scheduled(fake_scheduled, fake_actual)
+
+
+# ---------------------------------------------------------------------------
 # 5. Pillar 1 — deterministic bodies must NOT import LLM modules
 # ---------------------------------------------------------------------------
 
@@ -431,6 +545,7 @@ def test_deterministic_bodies_do_not_import_orchestrator_agent() -> None:
         st.trial_evaluation_scheduled,  # VT-365: replaced the removed day-39 handler
         st.monthly_impact_scheduled,
         st.implicit_attribution_sweep_scheduled,  # VT-432
+        st.reconcile_subscription_orphans_scheduled,  # VT-439
     ],
 )
 def test_scheduled_handler_accepts_scheduled_and_actual_time(monkeypatch, fn) -> None:
@@ -441,7 +556,7 @@ def test_scheduled_handler_accepts_scheduled_and_actual_time(monkeypatch, fn) ->
     # VT-365: the trial sweep scans active trials via get_pool().connection();
     # the empty-pool stub below yields zero rows so the body is a clean no-op.
 
-    # Monthly impact body queries the pool inline; stub the pool getter.
+    # Monthly impact body + VT-439 orphan handler query the pool inline; stub it.
     class _EmptyCursor:
         def execute(self, *a, **k): pass
         def fetchall(self): return []
@@ -492,7 +607,7 @@ def test_register_scheduled_triggers_idempotent(monkeypatch) -> None:
     first = call_count["n"]
     st.register_scheduled_triggers()
     second = call_count["n"]
-    # The registered set (18): weekly_cadence, attribution_close, trial_evaluation
+    # The registered set (19): weekly_cadence, attribution_close, trial_evaluation
     # (VT-90, the kept lifecycle sweep — NOT the removed VT-365 day-39 refund eval),
     # monthly_impact, approval_timeout_sweep (VT-47), L3_construction (VT-68),
     # reconstitution_sweep (VT-76), audit_chain_verify (VT-304), pii_log_sweep
@@ -501,10 +616,11 @@ def test_register_scheduled_triggers_idempotent(monkeypatch) -> None:
     # override_expiry_sweep (VT-374 — the F8 next-run pin expiry bound),
     # outbox_redaction_sweep (VT-382 — the CL-437 ruling-3.3 redaction backfill/backstop),
     # l2_approved_send_sweep (VT-418 — the L2 owner-approve→send reconciler, recovery-only),
-    # implicit_attribution_sweep (VT-432 — daily VT-198 feedback tier-1 sweep, NO SEND).
+    # implicit_attribution_sweep (VT-432 — daily VT-198 feedback tier-1 sweep, NO SEND),
+    # reconcile_subscription_orphans (VT-439 — daily Razorpay orphan-DETECT backstop, DETECT-ONLY).
     # VT-365 removed two triggers (day-39 refund evaluation + the VT-85 refund-offer
     # 48h timeout sweep): 16 → 14; VT-374 added one: 14 → 15; VT-382 added one: 15 → 16;
-    # VT-418 added one: 16 → 17; VT-432 added one: 17 → 18.
-    assert first == 18, "expected 18 triggers registered on first call"
-    assert second == 18, "second call must short-circuit (idempotent)"
+    # VT-418 added one: 16 → 17; VT-432 added one: 17 → 18; VT-439 added one: 18 → 19.
+    assert first == 19, "expected 19 triggers registered on first call"
+    assert second == 19, "second call must short-circuit (idempotent)"
     st._registered = False
