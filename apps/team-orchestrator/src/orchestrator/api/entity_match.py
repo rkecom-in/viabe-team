@@ -40,6 +40,11 @@ class EntityConfirmBody(BaseModel):
     gstin: str
 
 
+class GstinsByPanBody(BaseModel):
+    pan: str
+    state_code: str
+
+
 @router.post("/api/orchestrator/onboard/entity-candidates")
 def entity_candidates(
     body: EntityCandidatesBody,
@@ -74,3 +79,22 @@ def entity_confirm(
     from orchestrator.onboarding import entity_match
 
     return entity_match.confirm_and_verify(body.tenant_id, body.gstin)
+
+
+@router.post("/api/orchestrator/onboard/gstins-by-pan")
+def gstins_by_pan(
+    body: GstinsByPanBody,
+    x_internal_secret: str | None = Header(default=None, alias="X-Internal-Secret"),
+) -> dict[str, Any]:
+    """VT-448 identify PRIMARY — the GSTIN(s) registered under a PAN+state (Sandbox Search-GSTIN-by-PAN).
+    The owner enters a 10-char PAN; we return the GSTIN(s) for them to PICK (then /entity-confirm verifies
+    the picked one + name-matches). Fail-closed to an empty list — never stalls signup."""
+    if not _verify_internal_secret(x_internal_secret):
+        raise HTTPException(status_code=403, detail={"code": "forbidden"})
+    if not body.pan.strip() or not body.state_code.strip():
+        raise HTTPException(status_code=422, detail={"code": "pan_and_state_required"})
+
+    from orchestrator.integrations.methods.sandbox_kyc import search_gstins_by_pan
+
+    res = search_gstins_by_pan(body.pan, body.state_code)
+    return {"ok": res.ok, "gstins": list(res.gstins)}
