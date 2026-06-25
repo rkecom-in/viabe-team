@@ -20,11 +20,19 @@ from orchestrator.api import router
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     from dbos_config import launch_dbos, shutdown_dbos
+    from orchestrator.auth.prod_safety import assert_prod_safe_flags
     from orchestrator.dbos_purge import register_purge_scheduler
     from orchestrator.observability.envelopes import (
         validate_registry_completeness,
     )
     from orchestrator.scheduled_triggers import register_scheduled_triggers
+
+    # VT-434 fail-closed boot guard (FIRST — before any effect): refuse to boot
+    # under EXPECTED_ENV=prod if a dangerous test/mock auth-bypass / send-mock
+    # flag is on (TEAM_TWILIO_VERIFY_MOCK_MODE → static-OTP login bypass;
+    # TEAM_TWILIO_MOCK_MODE → real sends silently dropped). Prod detection
+    # mirrors VT-362's EXPECTED_ENV signal; dev/CI is a no-op.
+    assert_prod_safe_flags()
 
     # VT-179 boot hook (CL-419 / VT-179 fix-1): validate the typed-envelope
     # registry covers every step_kind=<literal> in source. Fail-fast at
