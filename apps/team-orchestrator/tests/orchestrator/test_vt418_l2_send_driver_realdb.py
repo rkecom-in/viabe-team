@@ -175,15 +175,31 @@ class _RaisingCustomerSend:
 
 
 def _new_tenant(dsn: str) -> UUID:
+    # VT-421: agent_send_draft now has a Gate-0 ACTIVATION gate. This driver's batches must reach the
+    # send, so the tenant is fully activated: journey-complete + gstin_verified + ≥1 enabled+ok
+    # connector (the per-test _seed_customer satisfies the ≥1-customer leg). The bar is now
+    # journey-complete (onboarding_journey.status='complete'), NOT paid-active — so seed that row.
     with psycopg.connect(dsn, autocommit=True) as conn:
         row = conn.execute(
             "INSERT INTO tenants (business_name, plan_tier, phase, phase_entered_at, "
-            "business_type, owner_inputs, whatsapp_number) "
-            "VALUES (%s, 'founding', 'paid_active', now(), 'restaurant', true, %s) RETURNING id",
+            "business_type, owner_inputs, verification_status, whatsapp_number) "
+            "VALUES (%s, 'founding', 'paid_active', now(), 'restaurant', true, 'gstin_verified', %s) "
+            "RETURNING id",
             (f"VT418 {uuid4().hex[:8]}", f"+9198{uuid4().int % 10**8:08d}"),
         ).fetchone()
-    assert row is not None
-    return UUID(str(row[0]))
+        assert row is not None
+        tenant = UUID(str(row[0]))
+        conn.execute(
+            "INSERT INTO tenant_connector_status (tenant_id, connector_id, enabled, last_status, "
+            "last_ingested_date) VALUES (%s, %s, TRUE, 'ok', CURRENT_DATE)",
+            (str(tenant), f"conn-{uuid4().hex[:8]}"),
+        )
+        conn.execute(
+            "INSERT INTO onboarding_journey (tenant_id, status, completed_at) "
+            "VALUES (%s, 'complete', now())",
+            (str(tenant),),
+        )
+    return tenant
 
 
 def _seed_customer(dsn: str, tenant: UUID, *, phone: str | None = None) -> tuple[UUID, str]:
