@@ -154,8 +154,15 @@ team_campaign_not_sent:
 # SIDs below fail-closed in templates_registry.resolve() until replaced; the trial
 # sweep's owner notify is a stubbed/injectable seam, so nothing sends with these.
 trial_ending:
-  audience: customer
+  # VT-426 audience correction (was 'customer'): a trial-ending message TO the business
+  # owner IS owner-audience — its variables are owner_name/trial_end_date, it sends on the
+  # owner's own WhatsApp via the owner-notify seam. The old 'customer' value was a data bug
+  # that also failed the VT-426 audience gate. Flag for Cowork to confirm.
+  audience: owner
   agent_selectable: false
+  # VT-426 fail-closed: a real SID is present, but _owner_notify will NOT send until Fazal
+  # flips this to true (the deploy-safe gate — nothing sends on the daily cron meanwhile).
+  approved_for_live: false
   variables:
     - owner_name        # {{1}}
     - trial_end_date    # {{2}}
@@ -187,6 +194,9 @@ support_resolved:
 trial_subscribe_link:
   audience: owner
   agent_selectable: false
+  # VT-426 fail-closed: a real SID is present, but _owner_notify will NOT send until Fazal
+  # flips this to true (the deploy-safe gate — nothing sends on the daily cron meanwhile).
+  approved_for_live: false
   variables:
     - owner_name
     - subscribe_link
