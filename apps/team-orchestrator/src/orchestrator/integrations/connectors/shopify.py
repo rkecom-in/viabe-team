@@ -340,16 +340,20 @@ def _total_price_to_paise(total_price: Any) -> int | None:
     return paise if paise >= 0 else None
 
 
-def _order_date(created_at: Any) -> date | None:
-    """Shopify ``created_at`` (ISO 8601) → date-only (the ledger stores DATE)."""
-    if not created_at:
+def _order_date(raw: Any) -> date | None:
+    """A Shopify order date (ISO 8601) → date-only (the ledger stores DATE). The caller passes
+    ``processed_at`` (the real transaction date) with a ``created_at`` fallback — VT-447:
+    ``processed_at`` is the paid/transaction date AND the only date that STICKS on an API-created
+    order (Shopify forces ``created_at``=now on order creation), so it is both more correct for
+    real merchants and the field a backdated seed order registers under."""
+    if not raw:
         return None
     try:
-        return datetime.fromisoformat(str(created_at).replace("Z", "+00:00")).date()
+        return datetime.fromisoformat(str(raw).replace("Z", "+00:00")).date()
     except (ValueError, TypeError):
         # Fallback: a bare ISO date prefix.
         try:
-            return date.fromisoformat(str(created_at).strip()[:10])
+            return date.fromisoformat(str(raw).strip()[:10])
         except (ValueError, TypeError):
             return None
 
@@ -395,7 +399,9 @@ def shopify_order_to_canonical(payload: dict[str, Any]) -> _OrderMapResult:
     skipped_non_inr = False
     currency = (payload.get("currency") or "").upper()
     paise = _total_price_to_paise(payload.get("total_price"))
-    entry_date = _order_date(payload.get("created_at"))
+    # VT-447: processed_at (the real transaction date that also sticks on backdated/API orders),
+    # falling back to created_at for older payloads that omit it.
+    entry_date = _order_date(payload.get("processed_at") or payload.get("created_at"))
 
     if paise is not None and entry_date is not None:
         if currency and currency != _INR:

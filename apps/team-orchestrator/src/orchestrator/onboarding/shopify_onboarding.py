@@ -8,7 +8,7 @@ This module is the LAUNCH-CRITICAL minimum that onboards a Shopify tenant entire
     journey completes  →  [SEAM]  →  start_setup (mint authorize_url link-out)
                                        ↓  owner taps the link, approves in WA browser, returns
     inbound "done"     →  [RESUME] →  re-check connector status (tenant_oauth_tokens)
-                                       ↓  status connected → pull_sample (mock-injectable)
+                                       ↓  status connected → pull_orders (mock-injectable)
                                        →  fixed-schema auto-map → ingest_customer_rows (server-side)
                                        →  phase_5_confirmed (recurring ingestion scheduled)
 
@@ -20,9 +20,13 @@ thread_id, so the checkpointer carries nothing — resume is DB-state, never thr
 DE-STUB MAP (the 3 launch tools, REAL counterparts cited):
   * ``start_connector_setup``  → ``ShopifyConnector.build_oauth_install_url`` + the VT-289
                                   ``mint_install_state`` nonce → a real ``authorize_url`` link-out.
-  * ``pull_sample``            → ``ShopifyConnector.pull_sample`` (injectable for the Phase-A canary;
-                                  the LIVE real-merchant OAuth+pull is DEFERRED to VT-422 Partner app).
-  * commit/ingest              → ``shopify_sample_row_to_canonical`` (fixed schema, NO mapping form)
+  * ``pull_orders``            → ``ShopifyConnector.pull_orders`` (/orders.json — the sale-of-record;
+                                  injectable for the Phase-A canary; LIVE real-merchant OAuth+pull
+                                  DEFERRED to VT-422 Partner app). VT-447: orders, NOT abandoned checkouts
+                                  — SR recovers lapsed BUYERS. ``pull_sample`` is retained for a future
+                                  abandoned-cart-recovery agent.
+  * commit/ingest              → ``shopify_order_to_canonical`` (fixed schema, NO mapping form; reads
+                                  ``processed_at`` — the real transaction date)
                                   → ``ingest_customer_rows(acquired_via='shopify')`` SERVER-SIDE
                                   (NOT an agent tool — the agent is fail-CLOSED against write tools).
 
@@ -232,7 +236,7 @@ def shopify_is_connected(tenant_id: UUID | str) -> bool:
     return row is not None
 
 
-# --- DE-STUB 2+3: pull_sample → fixed-schema auto-map → server-side ingest -------------------
+# --- DE-STUB 2+3: pull_orders → fixed-schema auto-map → server-side ingest (VT-447) ----------
 
 # A connector factory is injectable so the Phase-A canary can pass a MOCK Shopify connector
 # (the live OAuth+pull is deferred to Fazal's VT-422 Partner app). Production default builds the
@@ -251,37 +255,46 @@ def pull_and_ingest_shopify(
     *,
     connector_factory: ConnectorFactory = _default_connector_factory,
 ) -> dict[str, int]:
-    """The Phase-A commit: real ``pull_sample`` → fixed-schema auto-map (NO mapping form,
-    NO LLM) → ``ingest_customer_rows(acquired_via='shopify')`` SERVER-SIDE.
+    """The Phase-A commit: real ``pull_orders`` (the sale-of-record substrate) → fixed-schema
+    auto-map (NO mapping form, NO LLM) → ``ingest_customer_rows(acquired_via='shopify')`` SERVER-SIDE.
+
+    VT-447: the onboarding sales-history source is real ORDERS (``/orders.json``), NOT abandoned
+    checkouts — Sales-Recovery recovers lapsed BUYERS, so the substrate must be actual orders.
+    ``pull_sample`` (/customers + /checkouts) is retained for a future abandoned-cart-recovery agent,
+    not used here. The order mapper reads ``processed_at`` (the real transaction date).
 
     The ingest write runs HERE (not as an agent tool) — the integration agent is fail-CLOSED
     against ledger/write tools (VT-268). Returns counts only (no PII).
     """
-    from orchestrator.integrations.connectors.shopify import shopify_sample_row_to_canonical
+    from orchestrator.integrations.connectors.shopify import shopify_order_to_canonical
     from orchestrator.integrations.ingest import CanonicalRow, ingest_customer_rows
 
     connector = connector_factory()
-    sample = connector.pull_sample(UUID(str(tenant_id)))  # real /customers + /checkouts
+    orders = connector.pull_orders(UUID(str(tenant_id)))  # real /orders.json (sale-of-record)
     rows: list[CanonicalRow] = []
-    for raw in sample:
-        mapped = shopify_sample_row_to_canonical(raw)
-        if mapped is not None:
-            rows.append(mapped)
+    skipped_non_inr = 0
+    for raw in orders:
+        mapped = shopify_order_to_canonical(raw)
+        if mapped.skipped_non_inr:
+            skipped_non_inr += 1
+        if mapped.row is not None:
+            rows.append(mapped.row)
 
     summary = ingest_customer_rows(tenant_id, rows, acquired_via=_CONNECTOR_ID)
     logger.info(
-        "VT-425 pull_and_ingest_shopify tenant=%s sample_rows=%d mapped=%d committed=%d "
-        "sales_written=%d (counts only — no PII)",
-        tenant_id, len(sample), len(rows), summary.committed, summary.sales_written,
+        "VT-447 pull_and_ingest_shopify tenant=%s orders_pulled=%d mapped=%d committed=%d "
+        "sales_written=%d skipped_non_inr=%d (counts only — no PII)",
+        tenant_id, len(orders), len(rows), summary.committed, summary.sales_written, skipped_non_inr,
     )
     return {
-        "sample_rows": len(sample),
+        "orders_pulled": len(orders),
         "mapped": len(rows),
         "committed": summary.committed,
         "ambiguous": summary.ambiguous,
         "dropped": summary.dropped,
         "sales_written": summary.sales_written,
         "sales_skipped_duplicate": summary.sales_skipped_duplicate,
+        "skipped_non_inr": skipped_non_inr,
     }
 
 
