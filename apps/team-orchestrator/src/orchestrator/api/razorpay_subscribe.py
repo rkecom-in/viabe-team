@@ -66,7 +66,7 @@ def _verify_internal_secret(provided: str | None) -> bool:
 # double-subscribe protection is the DB before-vendor check + the per-tenant advisory lock + the
 # ``razorpay_subscription_id`` UNIQUE — NOT this header. The PRE-LIVE canary (below) must prove
 # whether Razorpay actually dedupes; if it does NOT, the DB guards still hold (no orphan).
-_IDEMPOTENCY_HEADER = "X-Razorpay-Idempotency"
+_IDEMPOTENCY_HEADER = "Idempotency-Key"  # Cowork VT-424 directive; standard idempotency header (Razorpay subscriptions endpoint is undocumented for it — the LIVE canary proves dedupe; DB guards hold regardless)
 
 
 class RazorpayKeysNotConfiguredError(RuntimeError):
@@ -98,7 +98,7 @@ def _create_razorpay_subscription(
 ) -> dict[str, str]:
     """Create the REAL Razorpay subscription (VT-424 — replaces the ``sub_stub_*`` STUB).
 
-    Calls ``client.subscription.create(data, headers={'X-Razorpay-Idempotency': <key>})`` with the
+    Calls ``client.subscription.create(data, headers={'Idempotency-Key': <key>})`` with the
     plan_id from config, the per-attempt idempotency key in both the header AND ``notes`` (so the
     subscription is greppable to its conversion even if the header is not honoured), and the
     tenant bound via ``notes.tenant_id``. ``client`` is INJECTABLE — tests pass a stub so no

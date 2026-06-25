@@ -47,7 +47,7 @@ class _FakeSubscriptionResource:
 
     def create(self, data, headers=None):
         self.calls.append((data, headers or {}))
-        key = (headers or {}).get("X-Razorpay-Idempotency", "")
+        key = (headers or {}).get("Idempotency-Key", "")
         digest = hashlib.sha256(key.encode()).hexdigest()[:12]
         tenant = data.get("notes", {}).get("tenant_id", "x")
         return {"id": f"sub_{digest}", "customer_id": f"cust_{tenant}"}
