@@ -615,6 +615,72 @@ def reconcile_subscription_orphans_scheduled(
 
 
 # ---------------------------------------------------------------------------
+# VT-440: dead-letter retry sweep — DETECT/ALERT-ONLY backstop
+# ---------------------------------------------------------------------------
+# Pairs with billing/dead_letter.py F7 (VT-352). The dead-letter "retry" is the
+# operator-driven dead_letter.replay(event_id, corrected_payload): it RE-FEEDS a
+# CORRECTED event through razorpay_ingress so the dropped charge's fee NOW applies.
+# That replay CANNOT be automated by a cron — it needs an operator-supplied
+# corrected payload (the row was dropped precisely because its amount was a
+# DETERMINISTIC malformation; the sweep has no way to invent the correct integer).
+# So this scheduled handler is DETECT/ALERT-ONLY: it counts the still-pending
+# dead-letters and alerts Fazal when any exist (the F7 "scheduled job that
+# list_pending → alerts" prescription). NO replay, NO charge, NO send-of-money,
+# NO write — a read-only sweep, trivially idempotent (running it twice produces
+# the same count + the same best-effort alert; zero money effect either way).
+#
+# MONEY-SAFETY (the load-bearing invariant): the exactly-once guarantee for the
+# ACTUAL retry lives in razorpay_ingress — the razorpay_webhook_events.event_id
+# dedup row is the COMMIT POINT (ingress docstring Q1). A genuinely-PROCESSED
+# event re-arriving (the same event_id, processed_at set) CONFLICTs → no
+# re-processing → {"status": "duplicate", "action": "noop"}: fees never
+# double-count. Only an un-applied parse-drop (processed_at IS NULL AND
+# _status='dropped_parse_error') replays past the dedup and applies its fee
+# exactly once, then sets processed_at + flips the dead-letter row to 'replayed'.
+# This sweep surfaces the stuck drops; the ingress keystone makes any replay of
+# them exactly-once.
+#
+# 22:30 UTC / 04:00 IST — off-peak, after the 01:00 UTC VT-439 orphan-detect
+# backstop (same daily Razorpay-reconciliation batch).
+DEAD_LETTER_RETRY_SWEEP_CRON = "30 22 * * *"
+
+
+def dead_letter_retry_sweep_scheduled(
+    scheduled_time: datetime,
+    actual_time: datetime,
+) -> None:
+    """DBOS scheduled handler — daily 04:00 IST / 22:30 UTC (VT-440). The VT-352 F7
+    dead-letter backstop: counts still-pending Razorpay webhook dead-letters
+    (parse-dropped charge events awaiting an operator-supplied corrected replay)
+    and alerts Fazal when any exist. DETECT/ALERT-ONLY — NO replay, NO charge, NO
+    send-of-money, NO write (the actual replay is operator-driven
+    dead_letter.replay, which needs a corrected payload a cron can't synthesize).
+
+    Idempotent: read-only COUNT + best-effort alert; two runs produce the same
+    result and zero money effect. The exactly-once guarantee for any eventual
+    replay lives in razorpay_ingress (the event_id dedup keystone — a processed
+    event re-arriving is a noop, never a double-charge). Best-effort: a count
+    failure must not crash the scheduler (the next run re-catches)."""
+    from orchestrator.billing.dead_letter import count_pending
+
+    try:
+        pending = count_pending()
+        logger.info("VT-440 dead_letter_retry_sweep: pending=%d", pending)
+        if pending > 0:
+            from orchestrator.alerts.clients import alert_fazal
+
+            # PII-free: a count only (the dead-letter table is PII-free routing
+            # fields). No event_ids/payloads in the alert.
+            alert_fazal(
+                f"VT-352/VT-440 razorpay dead-letter backstop: {pending} pending "
+                "parse-dropped charge event(s) awaiting a corrected replay "
+                "(dead_letter.replay) — manual reconciliation needed."
+            )
+    except Exception:  # noqa: BLE001 — daily sweep is best-effort; next run retries
+        logger.exception("VT-440 dead_letter_retry_sweep scheduled run failed")
+
+
+# ---------------------------------------------------------------------------
 # 4. Monthly impact — REAL body (VT-176, partial — PDF generation downstream)
 # ---------------------------------------------------------------------------
 
@@ -920,6 +986,11 @@ def register_scheduled_triggers() -> None:
     # VT-439: daily Razorpay orphan-DETECT backstop (VT-352 F7). DETECT-ONLY — no
     # cancel, no charge, no send. Runs at 01:00 UTC / 06:30 IST (off-peak billing).
     DBOS.scheduled(RECONCILE_SUBSCRIPTION_ORPHANS_CRON)(reconcile_subscription_orphans_scheduled)
+    # VT-440: daily dead-letter retry backstop (VT-352 F7). DETECT/ALERT-ONLY — counts
+    # pending parse-dropped charge events + alerts Fazal; NO replay/charge/send/write.
+    # The actual replay is operator-driven (needs a corrected payload); exactly-once is
+    # guaranteed by the razorpay_ingress event_id dedup keystone. 22:30 UTC / 04:00 IST.
+    DBOS.scheduled(DEAD_LETTER_RETRY_SWEEP_CRON)(dead_letter_retry_sweep_scheduled)
     _registered = True
 
 
@@ -929,6 +1000,7 @@ __all__ = [
     "ATTRIBUTION_CLOSED_EVENT",
     "ATTRIBUTION_CLOSE_CRON",
     "ATTRIBUTION_CLOSE_SHELL_EVENT",
+    "DEAD_LETTER_RETRY_SWEEP_CRON",
     "IMPLICIT_ATTRIBUTION_SWEEP_CRON",
     "RECONCILE_SUBSCRIPTION_ORPHANS_CRON",
     "L3_CONSTRUCTION_CRON",
@@ -948,6 +1020,7 @@ __all__ = [
     "L2_RETENTION_SWEEP_CRON",
     "PII_LOG_SWEEP_CRON",
     "audit_chain_verify_scheduled",
+    "dead_letter_retry_sweep_scheduled",
     "implicit_attribution_sweep_scheduled",
     "reconcile_subscription_orphans_scheduled",
     "kg_drain_sweep_scheduled",
