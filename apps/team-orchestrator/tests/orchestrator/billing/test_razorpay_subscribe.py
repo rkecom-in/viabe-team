@@ -1,13 +1,21 @@
-"""VT-331 — Razorpay subscription creation (orchestrator-authoritative). Real-PG canary.
+"""VT-331 / VT-424 — Razorpay subscription creation (orchestrator-authoritative). Real-PG canary.
 
 Keystones (Cowork plan-ack): idempotency BEFORE the vendor call + concurrency-safe (a
 double-POST race creates EXACTLY ONE subscription / one vendor call — the VT-93-N1
-lesson), and NO phase flip (conversion stays webhook-only). Vendor is stubbed; the plan
-ID comes from a TEST env var (LIVE is NEEDS-FAZAL).
+lesson), and NO phase flip (conversion stays webhook-only).
+
+VT-424 — the vendor call is now the REAL ``razorpay.subscription.create`` (was a ``sub_stub_*``
+stub). Tests inject a STUB razorpay client (no network, no live key) via the injectable seam
+(``_get_razorpay_client`` monkeypatched module-wide for the endpoint path; a ``client=`` arg for the
+direct unit tests). The fake derives the subscription id from the Idempotency-Key header, so a
+vendor RETRY with the SAME key returns the SAME id (models the VT-352 F2 orphan-avoidance) while a
+new key → a new id. The plan ID comes from a TEST env var; LIVE keys/plan-IDs + the real-API canary
+are NEEDS-FAZAL.
 """
 
 from __future__ import annotations
 
+import hashlib
 import os
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -17,12 +25,37 @@ import pytest
 
 pytest.importorskip("psycopg")
 
+import orchestrator.api.razorpay_subscribe as _subscribe_mod  # noqa: E402
 from orchestrator.api.razorpay_subscribe import (  # noqa: E402
     RazorpaySubscribeBody,
     razorpay_subscribe,
 )
 
 _SECRET = "test-internal-secret-vt331"
+# Capture the REAL client builder BEFORE the autouse fixture stubs it — fail-closed tests need the
+# genuine env-reading builder, not the stub.
+_REAL_GET_CLIENT = _subscribe_mod._get_razorpay_client
+
+
+class _FakeSubscriptionResource:
+    """Stub for ``client.subscription`` — records every create call (data + headers) and returns a
+    real-shaped subscription whose id is DERIVED from the Idempotency-Key header, so the SAME key →
+    the SAME id (a vendor retry is a no-op, modelling VT-352 F2) and a NEW key → a NEW id."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[dict, dict]] = []
+
+    def create(self, data, headers=None):
+        self.calls.append((data, headers or {}))
+        key = (headers or {}).get("Idempotency-Key", "")
+        digest = hashlib.sha256(key.encode()).hexdigest()[:12]
+        tenant = data.get("notes", {}).get("tenant_id", "x")
+        return {"id": f"sub_{digest}", "customer_id": f"cust_{tenant}"}
+
+
+class _FakeRazorpayClient:
+    def __init__(self) -> None:
+        self.subscription = _FakeSubscriptionResource()
 
 
 @pytest.fixture(autouse=True)
@@ -32,6 +65,13 @@ def _env(monkeypatch):
     monkeypatch.setenv("FOUNDING_RZP_PLAN_ID", "plan_test_founding")
     monkeypatch.setenv("STANDARD_RZP_PLAN_ID", "plan_test_standard")
     # PRO_RZP_PLAN_ID intentionally unset -> NEEDS-FAZAL 503 path.
+    # VT-424: keys present so the live path resolves a client, but it's the STUB — no network.
+    monkeypatch.setenv("TEAM_RAZORPAY_KEY_ID", "rzp_test_keyid")
+    monkeypatch.setenv("TEAM_RAZORPAY_KEY_SECRET", "rzp_test_secret")
+    # Inject the stub client into the endpoint path (no SDK import, no network).
+    import orchestrator.api.razorpay_subscribe as mod
+
+    monkeypatch.setattr(mod, "_get_razorpay_client", _FakeRazorpayClient)
 
 
 @pytest.fixture
@@ -111,6 +151,25 @@ def test_unconfigured_plan_id_503() -> None:
 
 
 @pytest.mark.integration
+def test_keys_absent_endpoint_503_no_row(_dbpool, monkeypatch) -> None:
+    """VT-424 fail-closed at the HTTP boundary: live keys absent → the endpoint 503s (NEEDS-FAZAL),
+    the txn rolls back, and NO subscriptions row is bound (no stub fallback)."""
+    from fastapi import HTTPException
+
+    monkeypatch.delenv("TEAM_RAZORPAY_KEY_ID", raising=False)
+    monkeypatch.delenv("TEAM_RAZORPAY_KEY_SECRET", raising=False)
+    # Restore the REAL client builder so it actually checks for keys (the autouse fixture stubbed it).
+    monkeypatch.setattr(_subscribe_mod, "_get_razorpay_client", _REAL_GET_CLIENT)
+
+    tid = uuid4()
+    _seed(_dbpool, tid, phase="trial")
+    with pytest.raises(HTTPException) as exc:
+        _post(tid, "founding")
+    assert exc.value.status_code == 503
+    assert len(_rows(_dbpool, tid)) == 0  # no row bound — fail-closed, no stub
+
+
+@pytest.mark.integration
 def test_create_binds_subscription_no_phase_flip(_dbpool) -> None:
     tid = uuid4()
     _seed(_dbpool, tid, phase="trial")
@@ -118,8 +177,9 @@ def test_create_binds_subscription_no_phase_flip(_dbpool) -> None:
     assert out["status"] == "created"
     rows = _rows(_dbpool, tid)
     assert len(rows) == 1
-    assert rows[0]["sid"].startswith(f"sub_stub_{tid}")
-    assert rows[0]["cid"] == f"cust_stub_{tid}"
+    # VT-424: a REAL-shaped vendor id (sub_<hash>), NOT the retired sub_stub_* form.
+    assert rows[0]["sid"].startswith("sub_") and not rows[0]["sid"].startswith("sub_stub_")
+    assert rows[0]["cid"] == f"cust_{tid}"
     assert rows[0]["pid"] == "plan_test_founding"
     # NO phase flip — conversion is webhook-only (VT-89 payment.captured).
     assert _phase(_dbpool, tid) == "trial"
@@ -258,22 +318,104 @@ def test_trial_end_jti_rolled_back_when_subscribe_fails(_dbpool) -> None:
     assert _consumed(_dbpool, jti) == 0  # jti NOT consumed — the token stays usable on a real retry
 
 
-# --- VT-352 F2 — vendor-orphan protection (idempotency-key + detect-only reconcile) -------------
+# --- VT-424 — REAL razorpay.subscription.create (replaces sub_stub_*) unit tests ----------------
+# These call _create_razorpay_subscription directly with an INJECTED stub client (the seam) — no
+# network, no live key, no SDK import. Pure (non-integration) so they run in dep-less smoke.
+def test_create_calls_vendor_with_plan_id_customer_and_idempotency_header() -> None:
+    """VT-424 happy: the real call hits the vendor ONCE with the resolved plan_id, the per-attempt
+    Idempotency-Key header, tenant binding in notes, total_count + quantity — and returns the REAL
+    subscription id (NOT a sub_stub_*)."""
+    from orchestrator.api.razorpay_subscribe import _IDEMPOTENCY_HEADER, _create_razorpay_subscription
+    from orchestrator.billing.plans import resolve_plan
+
+    plan = resolve_plan("founding")  # plan_test_founding, total_count 120 (config)
+    client = _FakeRazorpayClient()
+    tid = str(uuid4())
+    key = f"subscribe:{tid}:jti-abc"
+
+    out = _create_razorpay_subscription(plan, tid, key, client=client)
+
+    assert len(client.subscription.calls) == 1  # exactly one vendor create
+    data, headers = client.subscription.calls[0]
+    assert data["plan_id"] == "plan_test_founding"
+    assert data["total_count"] == 120 and data["quantity"] == 1
+    assert data["notes"]["tenant_id"] == tid  # customer/tenant binding at the vendor
+    assert headers == {_IDEMPOTENCY_HEADER: key}  # the Idempotency-Key header is sent
+    assert out["subscription_id"].startswith("sub_")
+    assert not out["subscription_id"].startswith("sub_stub_")  # the stub is gone
+
+
 def test_idempotency_key_same_key_same_sub() -> None:
-    """VT-352 F2: the SAME Idempotency-Key → the SAME vendor subscription (a retry after a
-    commit-after-vendor failure does NOT create an orphan); a NEW key (new authorized attempt) →
-    a NEW subscription (a re-subscribe after cancel can't collide on the UNIQUE)."""
-    from orchestrator.api.razorpay_subscribe import _create_razorpay_subscription
+    """VT-352 F2 / VT-424: the SAME Idempotency-Key → the SAME header sent every retry, so Razorpay
+    (if it honours it) returns the SAME subscription — a retry after a commit-after-vendor failure
+    does NOT create an orphan; a NEW key (new authorized attempt) → a different header → a NEW
+    subscription (a re-subscribe after cancel can't collide on the UNIQUE)."""
+    from orchestrator.api.razorpay_subscribe import _IDEMPOTENCY_HEADER, _create_razorpay_subscription
     from orchestrator.billing.plans import resolve_plan
 
     plan = resolve_plan("founding")
+    client = _FakeRazorpayClient()
     tid = str(uuid4())
     key = f"subscribe:{tid}:jti-abc"
-    a = _create_razorpay_subscription(plan, tid, key)
-    b = _create_razorpay_subscription(plan, tid, key)  # retry — same key
+    a = _create_razorpay_subscription(plan, tid, key, client=client)
+    b = _create_razorpay_subscription(plan, tid, key, client=client)  # retry — SAME key
+    # The SAME Idempotency-Key header is sent on the retry (so the vendor would dedupe).
+    assert client.subscription.calls[0][1] == client.subscription.calls[1][1] == {
+        _IDEMPOTENCY_HEADER: key
+    }
     assert a["subscription_id"] == b["subscription_id"]  # SAME sub → no vendor orphan
-    c = _create_razorpay_subscription(plan, tid, f"subscribe:{tid}:jti-xyz")  # new attempt
+    c = _create_razorpay_subscription(
+        plan, tid, f"subscribe:{tid}:jti-xyz", client=client
+    )  # new attempt → new key
+    assert client.subscription.calls[2][1] == {_IDEMPOTENCY_HEADER: f"subscribe:{tid}:jti-xyz"}
     assert c["subscription_id"] != a["subscription_id"]  # new key → new sub
+
+
+def test_keys_absent_fail_closed_raises_keys_not_configured(monkeypatch) -> None:
+    """VT-424 fail-closed: with live keys absent, the live client builder raises
+    RazorpayKeysNotConfiguredError (→503 at the endpoint) — never a stub fallback. Importantly it
+    raises BEFORE importing the SDK, so the dep is genuinely lazy/NEEDS-FAZAL."""
+    from orchestrator.api.razorpay_subscribe import RazorpayKeysNotConfiguredError
+
+    monkeypatch.delenv("TEAM_RAZORPAY_KEY_ID", raising=False)
+    monkeypatch.delenv("TEAM_RAZORPAY_KEY_SECRET", raising=False)
+    # _REAL_GET_CLIENT is the genuine env-reading builder (captured before the autouse stub).
+    with pytest.raises(RazorpayKeysNotConfiguredError):
+        _REAL_GET_CLIENT()
+
+
+def test_vendor_error_surfaced_no_partial_state() -> None:
+    """VT-424 error: if the razorpay client raises, the error surfaces cleanly (no stub fallback,
+    no malformed return) — the caller's txn rolls back, leaving no partial state."""
+    from orchestrator.api.razorpay_subscribe import _create_razorpay_subscription
+    from orchestrator.billing.plans import resolve_plan
+
+    class _RaisingClient:
+        class subscription:
+            @staticmethod
+            def create(data, headers=None):
+                raise RuntimeError("simulated razorpay 5xx")
+
+    plan = resolve_plan("founding")
+    with pytest.raises(RuntimeError, match="simulated razorpay 5xx"):
+        _create_razorpay_subscription(plan, str(uuid4()), "k", client=_RaisingClient())
+
+
+def test_vendor_empty_id_surfaced_as_clean_error() -> None:
+    """VT-424: a malformed vendor response (no subscription id) is a clean RuntimeError, NOT a row
+    bound to an empty id."""
+    from orchestrator.api.razorpay_subscribe import _create_razorpay_subscription
+    from orchestrator.billing.plans import resolve_plan
+
+    class _EmptyClient:
+        class subscription:
+            @staticmethod
+            def create(data, headers=None):
+                return {"id": None}
+
+    plan = resolve_plan("founding")
+    with pytest.raises(RuntimeError, match="no subscription id"):
+        _create_razorpay_subscription(plan, str(uuid4()), "k", client=_EmptyClient())
 
 
 @pytest.mark.integration
@@ -338,3 +480,109 @@ def test_commit_after_vendor_retry_no_orphan(_dbpool, monkeypatch) -> None:
     assert out["status"] == "created"
     assert len(_rows(_dbpool, tid)) == 1
     assert len(calls) == 2 and calls[0] == calls[1]  # same key both attempts (no orphan at vendor)
+
+
+# --------------------------------------------------------------------------- #
+# VT-424 (Cowork extension) — env-isolation guard: mode must match key type
+# --------------------------------------------------------------------------- #
+# All tests use _REAL_GET_CLIENT (the genuine env-reading builder captured before the autouse
+# fixture stubbed it) so the guard logic is exercised directly — no SDK, no network, dep-less.
+
+
+def test_env_isolation_live1_test_key_raises(monkeypatch) -> None:
+    """TEAM_RAZORPAY_LIVE=1 + rzp_test_… key → RazorpayModeMismatchError (mismatch: test key in
+    live mode). The error message names the mode/prefix but NEVER includes any key value (CL-431)."""
+    from orchestrator.api.razorpay_subscribe import RazorpayModeMismatchError
+
+    monkeypatch.setenv("TEAM_RAZORPAY_LIVE", "1")
+    monkeypatch.setenv("TEAM_RAZORPAY_KEY_ID", "rzp_test_mismatch")
+    monkeypatch.setenv("TEAM_RAZORPAY_KEY_SECRET", "secret")
+    with pytest.raises(RazorpayModeMismatchError, match="rzp_test_") as exc:
+        _REAL_GET_CLIENT()
+    # Ensure the full key value is NOT in the error (only the prefix is mentioned — CL-431).
+    assert "rzp_test_mismatch" not in str(exc.value)
+
+
+def test_env_isolation_live0_live_key_raises(monkeypatch) -> None:
+    """TEAM_RAZORPAY_LIVE=0 (or unset) + rzp_live_… key → RazorpayModeMismatchError (mismatch:
+    live key in test mode). Refuses live keys in a non-live env."""
+    from orchestrator.api.razorpay_subscribe import RazorpayModeMismatchError
+
+    monkeypatch.setenv("TEAM_RAZORPAY_LIVE", "0")
+    monkeypatch.setenv("TEAM_RAZORPAY_KEY_ID", "rzp_live_mismatch")
+    monkeypatch.setenv("TEAM_RAZORPAY_KEY_SECRET", "secret")
+    with pytest.raises(RazorpayModeMismatchError, match="rzp_live_") as exc:
+        _REAL_GET_CLIENT()
+    assert "rzp_live_mismatch" not in str(exc.value)
+
+
+def test_env_isolation_dev_canary_live0_test_key_ok(monkeypatch) -> None:
+    """KEYSTONE — dev TEST canary: TEAM_RAZORPAY_LIVE=0 + rzp_test_… key → no mismatch error.
+    The autouse fixture sets rzp_test_keyid; we exercise _REAL_GET_CLIENT with the lazy SDK
+    import guarded: we monkeypatch the 'razorpay' module so no real SDK import is needed."""
+    import sys
+    import types
+
+    monkeypatch.setenv("TEAM_RAZORPAY_LIVE", "0")
+    monkeypatch.setenv("TEAM_RAZORPAY_KEY_ID", "rzp_test_canary")
+    monkeypatch.setenv("TEAM_RAZORPAY_KEY_SECRET", "secret")
+    # Stub 'razorpay' in sys.modules so the lazy import doesn't require the package installed.
+    fake_rzp = types.ModuleType("razorpay")
+    fake_rzp.Client = lambda auth: object()  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "razorpay", fake_rzp)
+    # Must NOT raise — test key in test mode is the valid dev canary path.
+    client = _REAL_GET_CLIENT()
+    assert client is not None
+
+
+def test_env_isolation_live1_live_key_ok(monkeypatch) -> None:
+    """TEAM_RAZORPAY_LIVE=1 + rzp_live_… key → no mismatch error (live key in live mode is correct).
+    The lazy SDK import is stubbed — no real SDK install required."""
+    import sys
+    import types
+
+    monkeypatch.setenv("TEAM_RAZORPAY_LIVE", "1")
+    monkeypatch.setenv("TEAM_RAZORPAY_KEY_ID", "rzp_live_prod")
+    monkeypatch.setenv("TEAM_RAZORPAY_KEY_SECRET", "secret")
+    fake_rzp = types.ModuleType("razorpay")
+    fake_rzp.Client = lambda auth: object()  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "razorpay", fake_rzp)
+    client = _REAL_GET_CLIENT()
+    assert client is not None
+
+
+def test_env_isolation_nonstandard_prefix_not_blocked(monkeypatch) -> None:
+    """A key with neither rzp_test_/rzp_live_ prefix is NOT blocked regardless of LIVE mode —
+    only a CONFIRMED mismatch raises. Prevents false-positives on non-standard/internal keys."""
+    import sys
+    import types
+
+    monkeypatch.setenv("TEAM_RAZORPAY_LIVE", "1")
+    monkeypatch.setenv("TEAM_RAZORPAY_KEY_ID", "custom_nonstandard_key")  # no standard prefix
+    monkeypatch.setenv("TEAM_RAZORPAY_KEY_SECRET", "secret")
+    fake_rzp = types.ModuleType("razorpay")
+    fake_rzp.Client = lambda auth: object()  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "razorpay", fake_rzp)
+    # Must NOT raise — no standard prefix means no confirmed mismatch.
+    client = _REAL_GET_CLIENT()
+    assert client is not None
+
+
+def test_env_isolation_mismatch_maps_to_503(monkeypatch) -> None:
+    """RazorpayModeMismatchError propagated from _do_subscribe → the endpoint maps it to 503
+    (same fail-closed contract as missing keys/plan-id; no partial state). _do_subscribe is
+    stubbed to raise directly so no DB pool is required for this unit test."""
+    from fastapi import HTTPException
+    from orchestrator.api.razorpay_subscribe import RazorpayModeMismatchError
+
+    import orchestrator.api.razorpay_subscribe as mod
+
+    def _raising_do_subscribe(plan, body, tenant_id):
+        raise RazorpayModeMismatchError("mode mismatch (test)")
+
+    monkeypatch.setattr(mod, "_do_subscribe", _raising_do_subscribe)
+
+    with pytest.raises(HTTPException) as exc:
+        _post(uuid4(), "founding")
+    assert exc.value.status_code == 503
+    assert exc.value.detail == "razorpay key/mode mismatch"

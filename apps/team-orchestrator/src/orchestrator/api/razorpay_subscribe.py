@@ -18,7 +18,6 @@ privileged pool with an explicit ``WHERE tenant_id`` (mirrors razorpay_ingress).
 
 from __future__ import annotations
 
-import hashlib
 import hmac
 import logging
 import os
@@ -60,32 +59,104 @@ def _verify_internal_secret(provided: str | None) -> bool:
     return hmac.compare_digest(provided, expected)
 
 
+# VT-424 — Razorpay idempotency header. Razorpay's idempotency support is per-endpoint and
+# documented for Payouts/Refunds (``X-Payout-Idempotency`` / ``X-Refund-Idempotency``); the
+# subscriptions endpoint is NOT documented to honour it. We send the vendor-convention header
+# anyway (cheap; if the endpoint DOES dedupe, it's the cleanest guard), BUT the load-bearing
+# double-subscribe protection is the DB before-vendor check + the per-tenant advisory lock + the
+# ``razorpay_subscription_id`` UNIQUE — NOT this header. The PRE-LIVE canary (below) must prove
+# whether Razorpay actually dedupes; if it does NOT, the DB guards still hold (no orphan).
+_IDEMPOTENCY_HEADER = "Idempotency-Key"  # Cowork VT-424 directive; standard idempotency header (Razorpay subscriptions endpoint is undocumented for it — the LIVE canary proves dedupe; DB guards hold regardless)
+
+
+class RazorpayKeysNotConfiguredError(RuntimeError):
+    """The live Razorpay API key id/secret env vars are unset (NEEDS-FAZAL for LIVE).
+
+    Maps to a 503 (same fail-closed contract as PlanIdNotConfiguredError) — a missing key is not
+    a caller-fixable error, and we must NEVER fall back to a stub at the money layer."""
+
+
+class RazorpayModeMismatchError(RuntimeError):
+    """The key-type prefix (rzp_test_/rzp_live_) does not match TEAM_RAZORPAY_LIVE.
+
+    Raised fail-closed (→503) to prevent using TEST keys against LIVE and vice-versa.
+    Only the PREFIX (not any key value) appears in the error message (CL-431)."""
+
+
+def _get_razorpay_client() -> Any:
+    """Build a live Razorpay client from env keys, BY REFERENCE (CL-431/Rule-18 — the values are
+    read straight into the SDK constructor; they never touch a log/stdout/this process's surfaced
+    context). Lazy-imports the SDK so the module loads dep-less (the razorpay package is NOT a
+    smoke-test dep). Raises RazorpayKeysNotConfiguredError (→503) when keys are absent — fail-closed,
+    never a stub fallback.
+
+    Env-isolation guard (Cowork ask — VT-424 extension): the key_id prefix (rzp_test_/rzp_live_)
+    MUST match TEAM_RAZORPAY_LIVE (1=LIVE, 0/unset=TEST). A mismatch raises
+    RazorpayModeMismatchError (→503, same fail-closed contract). Keys with neither standard prefix
+    are NOT blocked (only a CONFIRMED mismatch raises) — avoids false-positives on non-standard
+    keys. NO key value appears in any error message or log (CL-431 — prefix only)."""
+    key_id = os.environ.get("TEAM_RAZORPAY_KEY_ID", "")
+    key_secret = os.environ.get("TEAM_RAZORPAY_KEY_SECRET", "")
+    if not key_id or not key_secret:
+        raise RazorpayKeysNotConfiguredError(
+            "TEAM_RAZORPAY_KEY_ID/SECRET unset — live Razorpay keys are NEEDS-FAZAL (LIVE)"
+        )
+    live_mode = os.environ.get("TEAM_RAZORPAY_LIVE", "0") == "1"
+    if live_mode and key_id.startswith("rzp_test_"):
+        raise RazorpayModeMismatchError(
+            "TEST keys (rzp_test_…) under TEAM_RAZORPAY_LIVE=1 — refusing to run live payments with test keys"
+        )
+    if not live_mode and key_id.startswith("rzp_live_"):
+        raise RazorpayModeMismatchError(
+            "LIVE keys (rzp_live_…) under TEAM_RAZORPAY_LIVE=0 — refusing to use live keys in test mode"
+        )
+    import razorpay  # lazy — NEEDS-FAZAL dep; keeps the module dep-less-smoke importable
+
+    return razorpay.Client(auth=(key_id, key_secret))
+
+
 def _create_razorpay_subscription(
-    plan: ResolvedPlan, tenant_id: str, idempotency_key: str
+    plan: ResolvedPlan, tenant_id: str, idempotency_key: str, client: Any | None = None
 ) -> dict[str, str]:
-    """STUB — NEEDS-FAZAL. Live: ``razorpay.subscription.create(plan_id=...,
-    headers={'Idempotency-Key': idempotency_key})``, gated by LIVE keys (VT-93-N1 + VT-329 +
-    VT-330 + this row's idempotency-before-vendor).
+    """Create the REAL Razorpay subscription (VT-424 — replaces the ``sub_stub_*`` STUB).
 
-    VT-352 F2 — the Idempotency-Key prevents a vendor ORPHAN: if the vendor create succeeds but the
-    DB commit fails (rollback), the retry sends the SAME key, so Razorpay returns the SAME
-    subscription instead of creating a second (orphaned) one. The stub MODELS that: the id is
-    DERIVED from the key, so the same key → the same id (a retry is a vendor no-op), while a new
-    authorized attempt (new jti → new key) → a new id (a re-subscribe after cancel can't collide on
-    the razorpay_subscription_id UNIQUE).
+    Calls ``client.subscription.create(data, headers={'Idempotency-Key': <key>})`` with the
+    plan_id from config, the per-attempt idempotency key in both the header AND ``notes`` (so the
+    subscription is greppable to its conversion even if the header is not honoured), and the
+    tenant bound via ``notes.tenant_id``. ``client`` is INJECTABLE — tests pass a stub so no
+    network/key is needed; the live path builds it from env (:func:`_get_razorpay_client`), which
+    503s fail-closed when keys are absent.
 
-    PRE-LIVE ACCEPTANCE (Cowork sharpening): a REAL-API canary at the TEAM_RAZORPAY_LIVE cutover
-    MUST prove Razorpay actually honors the Idempotency-Key (same key → same sub) — "Razorpay
-    supports this" is verified against the live endpoint, not assumed; if it does NOT honor it, fall
-    back to a pre-committed intent row before flipping live. The detect-only sweep
-    (:func:`reconcile_subscription_orphans`) is the defense-in-depth backstop either way.
+    VT-352 F2 — the idempotency key keys a vendor RETRY to the same subscription: if the vendor
+    create succeeds but the DB commit then fails (rollback), the retry sends the SAME key. IF
+    Razorpay honours it, the vendor returns the SAME subscription instead of a second (orphaned)
+    one; if it does NOT (see ``_IDEMPOTENCY_HEADER`` note), the DB before-vendor check + advisory
+    lock + UNIQUE still prevent a second BOUND subscription, and :func:`reconcile_subscription_orphans`
+    detects any vendor orphan for manual reconcile.
+
+    PRE-LIVE ACCEPTANCE (Cowork sharpening — NEEDS-FAZAL): a REAL-API (test-mode) canary at the
+    TEAM_RAZORPAY_LIVE cutover MUST prove whether Razorpay honours the idempotency key on the
+    SUBSCRIPTIONS endpoint (same key → same sub). "Razorpay supports this" is verified against the
+    live endpoint, NOT assumed. If it does NOT honour it, the pre-committed-intent + the detect-only
+    orphan sweep are the fallback before flipping live.
     """
-    # NEEDS-FAZAL: replace with the live Razorpay create + the Idempotency-Key header.
-    key_hash = hashlib.sha256(idempotency_key.encode()).hexdigest()[:10]
-    return {
-        "subscription_id": f"sub_stub_{tenant_id}_{key_hash}",
-        "customer_id": f"cust_stub_{tenant_id}",
+    rzp = client if client is not None else _get_razorpay_client()
+    data = {
+        "plan_id": plan.razorpay_plan_id,
+        "total_count": plan.total_count,
+        "quantity": 1,
+        "customer_notify": 1,
+        # Bind the subscription to its tenant + conversion attempt at the vendor for reconciliation.
+        "notes": {"tenant_id": tenant_id, "idempotency_key": idempotency_key},
     }
+    sub = rzp.subscription.create(data, headers={_IDEMPOTENCY_HEADER: idempotency_key})
+    sub_id = sub.get("id") if isinstance(sub, dict) else getattr(sub, "id", None)
+    if not sub_id:
+        # No partial state to clean up (the DB write hasn't run); surface a clean error so the txn
+        # rolls back rather than binding a malformed/empty subscription id.
+        raise RuntimeError("razorpay.subscription.create returned no subscription id")
+    cust_id = sub.get("customer_id") if isinstance(sub, dict) else getattr(sub, "customer_id", None)
+    return {"subscription_id": str(sub_id), "customer_id": str(cust_id) if cust_id else ""}
 
 
 @router.post("/api/orchestrator/razorpay-subscribe")
@@ -94,8 +165,9 @@ def razorpay_subscribe(
     x_internal_secret: str | None = Header(default=None),
 ) -> dict[str, Any]:
     """Create (or return the existing) Razorpay subscription for a tenant. 403 bad
-    secret; 400 unknown plan_tier; 503 plan-id not configured (NEEDS-FAZAL). Returns
-    ``{status: created|exists, razorpay_subscription_id}``. Never flips phase."""
+    secret; 400 unknown plan_tier; 503 plan-id OR live keys not configured (NEEDS-FAZAL,
+    fail-closed — never a stub). Returns ``{status: created|exists, razorpay_subscription_id}``.
+    Never flips phase."""
     if not _verify_internal_secret(x_internal_secret):
         raise HTTPException(status_code=403, detail="invalid internal secret")
 
@@ -108,6 +180,24 @@ def razorpay_subscribe(
         raise HTTPException(status_code=503, detail="plan not configured") from None
 
     tenant_id = body.tenant_id
+    try:
+        return _do_subscribe(plan, body, tenant_id)
+    except RazorpayKeysNotConfiguredError:
+        # Live keys absent — same fail-closed contract as a missing plan-id (NEEDS-FAZAL). The
+        # txn rolled back inside _do_subscribe, so there is NO partial state (no jti consumed, no
+        # subscriptions row). Never a stub fallback at the money layer.
+        raise HTTPException(status_code=503, detail="razorpay keys not configured") from None
+    except RazorpayModeMismatchError:
+        # Key-type prefix does not match TEAM_RAZORPAY_LIVE — env misconfiguration (fail-closed,
+        # same 503 contract). The txn rolled back; no partial state, no jti consumed.
+        raise HTTPException(status_code=503, detail="razorpay key/mode mismatch") from None
+
+
+def _do_subscribe(
+    plan: ResolvedPlan, body: RazorpaySubscribeBody, tenant_id: str
+) -> dict[str, Any]:
+    """The transactional core (split out so the endpoint can map RazorpayKeysNotConfiguredError →
+    503 cleanly). Returns the same shape the endpoint returns."""
     with get_pool().connection() as conn, conn.cursor(row_factory=dict_row) as cur:
         with conn.transaction():
             # Concurrency: serialize per-tenant creates (VT-93-N1 pattern). A double-POST
@@ -142,9 +232,9 @@ def razorpay_subscribe(
                     "status": "exists",
                     "razorpay_subscription_id": existing["razorpay_subscription_id"],
                 }
-            # First claimer — create at the vendor (STUB) inside the lock so a racing
-            # caller can't also create. Stub is instant; the live call serializes on the
-            # lock (acceptable — the point is exactly-one vendor subscription).
+            # First claimer — create at the vendor (REAL razorpay.subscription.create, VT-424)
+            # inside the lock so a racing caller can't also create. The live call serializes on the
+            # advisory lock (acceptable — the point is exactly-one vendor subscription).
             # VT-352 F2: the Idempotency-Key keys a vendor retry to the same subscription. jti
             # (the trial-end token, the customer money path) is the per-attempt key — a new
             # authorized attempt = new jti = new key; a retry of THIS attempt = same key = same
