@@ -65,6 +65,9 @@ L3_CONSTRUCTION_CRON = "0 3 * * *"  # VT-68 — nightly 3 AM IST L3 rebuild
 WAITLIST_RETENTION_PURGE_CRON = "0 4 * * *"  # VT-354 — daily 4 AM IST waitlist 6-month bound
 SLA_BREACH_SWEEP_CRON = "0 * * * *"  # VT-357 — hourly: alert Fazal on SLA-breached open escalations
 VTR_DIGEST_CRON = "30 8 * * *"  # VT-280 — daily 8:30 AM IST VTR digest (de-identified, app_vtr_role)
+# VT-432: daily 04:30 IST (23:00 UTC) — after the attribution_close + redaction/reconstitution
+# batch; before the trial-evaluation sweep. Pure SQL, no LLM, no send.
+IMPLICIT_ATTRIBUTION_SWEEP_CRON = "0 23 * * *"
 
 
 SHELL_STATUS = "skipped_schema_pending"
@@ -534,6 +537,38 @@ def outbox_redaction_sweep_scheduled(
         logger.exception("VT-382 outbox-redaction sweep scheduled run failed")
 
 
+# VT-432: daily implicit-attribution sweep. 23:00 UTC = 04:30 IST — after the
+# attribution_close + outbox-redaction/reconstitution batch. Pure SQL, no LLM,
+# NO SEND — derives thumbs_up/thumbs_down from attribution_outcome vs baseline
+# and writes implicit owner_feedback rows (idempotent via partial unique index
+# on migration 041). The sweep is a computation/write pass only; no Twilio/Resend
+# path is reachable from run_implicit_attribution_sweep.
+
+
+def implicit_attribution_sweep_scheduled(
+    scheduled_time: datetime,
+    actual_time: datetime,
+) -> None:
+    """DBOS scheduled handler — daily 04:30 IST (VT-432). Runs the VT-198 implicit
+    attribution sweep: derives thumbs_up/thumbs_down from attribution_outcome vs
+    baseline for campaigns completed in the last 7 days and writes implicit
+    owner_feedback rows. Pure SQL (NO LLM, NO SEND). Idempotent — the partial unique
+    index on (tenant_id, run_id, tier='implicit') makes re-runs safe. Best-effort: a
+    sweep failure must not crash the scheduler."""
+    from orchestrator.feedback.implicit_attribution import run_implicit_attribution_sweep
+
+    try:
+        result = run_implicit_attribution_sweep()
+        logger.info(
+            "VT-432 implicit_attribution_sweep: considered=%d written=%d skipped=%d",
+            result.get("considered", 0),
+            result.get("written", 0),
+            result.get("skipped_no_outcome", 0),
+        )
+    except Exception:  # noqa: BLE001 — daily sweep is best-effort; next run retries
+        logger.exception("VT-432 implicit-attribution sweep scheduled run failed")
+
+
 # ---------------------------------------------------------------------------
 # 4. Monthly impact — REAL body (VT-176, partial — PDF generation downstream)
 # ---------------------------------------------------------------------------
@@ -822,6 +857,10 @@ def register_scheduled_triggers() -> None:
     # VT-382: daily outbox-redaction backfill/backstop sweep (CL-437 ruling 3.3).
     # EXTENDS this surface (same register-before-launch posture), NOT a parallel poller.
     DBOS.scheduled(OUTBOX_REDACTION_SWEEP_CRON)(outbox_redaction_sweep_scheduled)
+    # VT-432: daily implicit-attribution sweep (VT-198 feedback tier-1). Runs at
+    # 23:00 UTC / 04:30 IST — after attribution_close and the redaction/reconstitution
+    # batch. Pure SQL, NO LLM, NO SEND. EXTENDS this surface, NOT a parallel poller.
+    DBOS.scheduled(IMPLICIT_ATTRIBUTION_SWEEP_CRON)(implicit_attribution_sweep_scheduled)
     # VT-418: the L2 owner-approve→send reconciler sweep — recovery-only (heals the
     # crash-between-commit-and-start residual where the runner's post-commit start_l2_send
     # never ran). Idempotent on the l2_send_{batch_id} workflow-id; the per-draft ledger
@@ -842,6 +881,7 @@ __all__ = [
     "ATTRIBUTION_CLOSED_EVENT",
     "ATTRIBUTION_CLOSE_CRON",
     "ATTRIBUTION_CLOSE_SHELL_EVENT",
+    "IMPLICIT_ATTRIBUTION_SWEEP_CRON",
     "L3_CONSTRUCTION_CRON",
     "MONTHLY_IMPACT_CRON",
     "MONTHLY_IMPACT_SHELL_EVENT",
@@ -859,6 +899,7 @@ __all__ = [
     "L2_RETENTION_SWEEP_CRON",
     "PII_LOG_SWEEP_CRON",
     "audit_chain_verify_scheduled",
+    "implicit_attribution_sweep_scheduled",
     "kg_drain_sweep_scheduled",
     "l2_retention_sweep_scheduled",
     "pii_log_sweep_scheduled",
