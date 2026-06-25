@@ -418,6 +418,77 @@ def shopify_order_to_canonical(payload: dict[str, Any]) -> _OrderMapResult:
     )
 
 
+# ---------- VT-425 Phase A: Shopify SAMPLE row → CanonicalRow (fixed-schema auto-map) ----------
+# The `pull_sample` shape is /customers.json + /checkouts.json objects (NOT orders) —
+# a different schema than `shopify_order_to_canonical` (which maps /orders.json). Phase A
+# onboarding auto-maps Shopify's KNOWN, FIXED customer/checkout schema → CanonicalRow with
+# NO owner mapping form and NO field-mapping reasoner (CL-443 fixed-schema auto-map). Because
+# the schema is fixed, NO column NAME or cell VALUE is ever sent to an LLM (CL-104 satisfied by
+# construction — Phase A's map path has no LLM call at all).
+#
+# PII boundary (§3, identical to the order mapper): persist ONLY phone(E.164) / email / name
+# + (for abandoned checkouts) the checkout TOTAL as ONE sale magnitude. Address / line-items
+# are NEVER read into the CanonicalRow.
+
+
+def shopify_sample_row_to_canonical(payload: dict[str, Any]) -> CanonicalRow | None:
+    """Map ONE Shopify ``pull_sample`` row (a /customers.json customer OR a
+    /checkouts.json abandoned checkout, tagged ``__source``) → ``CanonicalRow``.
+
+    Fixed-schema (no owner mapping, no reasoner):
+      * ``__source == 'customers'`` — identity only (phone / email / first+last name).
+        A bare contact carries no sale (empty ``sales``).
+      * ``__source == 'abandoned_checkouts'`` — identity + an INR ``total_price`` →
+        ONE ``SaleLine`` (an abandoned-checkout value is a real demand signal; the
+        Sales-Recovery substrate wants it). Non-INR keeps identity, skips the sale
+        (no FX — mirrors the order mapper's currency guard).
+
+    Returns ``None`` when no identity anchor (phone / email / name) is present.
+    PII boundary: address / line-items are dropped here, never read into CanonicalRow.
+    """
+    source = payload.get("__source")
+    # /checkouts.json nests the buyer under "customer"; /customers.json is the buyer itself.
+    customer = payload.get("customer") if source == "abandoned_checkouts" else payload
+    customer = customer or {}
+
+    phone_raw = (
+        customer.get("phone")
+        or payload.get("phone")
+        or (customer.get("default_address") or {}).get("phone")
+        or (payload.get("shipping_address") or {}).get("phone")
+    )
+    phone_e164 = _normalize_e164(phone_raw)
+    email_raw = customer.get("email") or payload.get("email")
+    email = (
+        email_raw.strip().lower()
+        if isinstance(email_raw, str) and email_raw.strip()
+        else None
+    )
+    display_name = (
+        f"{customer.get('first_name', '')} {customer.get('last_name', '')}".strip()
+        or None
+    )
+
+    if not (phone_e164 or email or display_name):
+        return None
+
+    sales: tuple[SaleLine, ...] = ()
+    if source == "abandoned_checkouts":
+        currency = (payload.get("currency") or "").upper()
+        paise = _total_price_to_paise(payload.get("total_price"))
+        entry_date = _order_date(payload.get("created_at"))
+        if paise is not None and entry_date is not None and (not currency or currency == _INR):
+            sales = (SaleLine(amount_paise=paise, entry_date=entry_date, confidence=1.0),)
+
+    return CanonicalRow(
+        phone_e164=phone_e164,
+        email=email,
+        display_name=display_name,
+        sales=sales,
+        consent=None,  # option A — Shopify writes no consent (detector AND-gate stays closed)
+    )
+
+
 class ShopifyConnector(ConnectorBase):
     """Shopify Admin API connector."""
 
@@ -899,6 +970,7 @@ __all__ = [
     "ShopDomainError",
     "ShopifyConnector",
     "shopify_order_to_canonical",
+    "shopify_sample_row_to_canonical",
     "validate_shop_domain",
     "verify_oauth_hmac",
 ]
