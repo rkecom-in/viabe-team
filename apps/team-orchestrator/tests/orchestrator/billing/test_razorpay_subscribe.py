@@ -480,3 +480,109 @@ def test_commit_after_vendor_retry_no_orphan(_dbpool, monkeypatch) -> None:
     assert out["status"] == "created"
     assert len(_rows(_dbpool, tid)) == 1
     assert len(calls) == 2 and calls[0] == calls[1]  # same key both attempts (no orphan at vendor)
+
+
+# --------------------------------------------------------------------------- #
+# VT-424 (Cowork extension) — env-isolation guard: mode must match key type
+# --------------------------------------------------------------------------- #
+# All tests use _REAL_GET_CLIENT (the genuine env-reading builder captured before the autouse
+# fixture stubbed it) so the guard logic is exercised directly — no SDK, no network, dep-less.
+
+
+def test_env_isolation_live1_test_key_raises(monkeypatch) -> None:
+    """TEAM_RAZORPAY_LIVE=1 + rzp_test_… key → RazorpayModeMismatchError (mismatch: test key in
+    live mode). The error message names the mode/prefix but NEVER includes any key value (CL-431)."""
+    from orchestrator.api.razorpay_subscribe import RazorpayModeMismatchError
+
+    monkeypatch.setenv("TEAM_RAZORPAY_LIVE", "1")
+    monkeypatch.setenv("TEAM_RAZORPAY_KEY_ID", "rzp_test_mismatch")
+    monkeypatch.setenv("TEAM_RAZORPAY_KEY_SECRET", "secret")
+    with pytest.raises(RazorpayModeMismatchError, match="rzp_test_") as exc:
+        _REAL_GET_CLIENT()
+    # Ensure the full key value is NOT in the error (only the prefix is mentioned — CL-431).
+    assert "rzp_test_mismatch" not in str(exc.value)
+
+
+def test_env_isolation_live0_live_key_raises(monkeypatch) -> None:
+    """TEAM_RAZORPAY_LIVE=0 (or unset) + rzp_live_… key → RazorpayModeMismatchError (mismatch:
+    live key in test mode). Refuses live keys in a non-live env."""
+    from orchestrator.api.razorpay_subscribe import RazorpayModeMismatchError
+
+    monkeypatch.setenv("TEAM_RAZORPAY_LIVE", "0")
+    monkeypatch.setenv("TEAM_RAZORPAY_KEY_ID", "rzp_live_mismatch")
+    monkeypatch.setenv("TEAM_RAZORPAY_KEY_SECRET", "secret")
+    with pytest.raises(RazorpayModeMismatchError, match="rzp_live_") as exc:
+        _REAL_GET_CLIENT()
+    assert "rzp_live_mismatch" not in str(exc.value)
+
+
+def test_env_isolation_dev_canary_live0_test_key_ok(monkeypatch) -> None:
+    """KEYSTONE — dev TEST canary: TEAM_RAZORPAY_LIVE=0 + rzp_test_… key → no mismatch error.
+    The autouse fixture sets rzp_test_keyid; we exercise _REAL_GET_CLIENT with the lazy SDK
+    import guarded: we monkeypatch the 'razorpay' module so no real SDK import is needed."""
+    import sys
+    import types
+
+    monkeypatch.setenv("TEAM_RAZORPAY_LIVE", "0")
+    monkeypatch.setenv("TEAM_RAZORPAY_KEY_ID", "rzp_test_canary")
+    monkeypatch.setenv("TEAM_RAZORPAY_KEY_SECRET", "secret")
+    # Stub 'razorpay' in sys.modules so the lazy import doesn't require the package installed.
+    fake_rzp = types.ModuleType("razorpay")
+    fake_rzp.Client = lambda auth: object()  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "razorpay", fake_rzp)
+    # Must NOT raise — test key in test mode is the valid dev canary path.
+    client = _REAL_GET_CLIENT()
+    assert client is not None
+
+
+def test_env_isolation_live1_live_key_ok(monkeypatch) -> None:
+    """TEAM_RAZORPAY_LIVE=1 + rzp_live_… key → no mismatch error (live key in live mode is correct).
+    The lazy SDK import is stubbed — no real SDK install required."""
+    import sys
+    import types
+
+    monkeypatch.setenv("TEAM_RAZORPAY_LIVE", "1")
+    monkeypatch.setenv("TEAM_RAZORPAY_KEY_ID", "rzp_live_prod")
+    monkeypatch.setenv("TEAM_RAZORPAY_KEY_SECRET", "secret")
+    fake_rzp = types.ModuleType("razorpay")
+    fake_rzp.Client = lambda auth: object()  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "razorpay", fake_rzp)
+    client = _REAL_GET_CLIENT()
+    assert client is not None
+
+
+def test_env_isolation_nonstandard_prefix_not_blocked(monkeypatch) -> None:
+    """A key with neither rzp_test_/rzp_live_ prefix is NOT blocked regardless of LIVE mode —
+    only a CONFIRMED mismatch raises. Prevents false-positives on non-standard/internal keys."""
+    import sys
+    import types
+
+    monkeypatch.setenv("TEAM_RAZORPAY_LIVE", "1")
+    monkeypatch.setenv("TEAM_RAZORPAY_KEY_ID", "custom_nonstandard_key")  # no standard prefix
+    monkeypatch.setenv("TEAM_RAZORPAY_KEY_SECRET", "secret")
+    fake_rzp = types.ModuleType("razorpay")
+    fake_rzp.Client = lambda auth: object()  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "razorpay", fake_rzp)
+    # Must NOT raise — no standard prefix means no confirmed mismatch.
+    client = _REAL_GET_CLIENT()
+    assert client is not None
+
+
+def test_env_isolation_mismatch_maps_to_503(monkeypatch) -> None:
+    """RazorpayModeMismatchError propagated from _do_subscribe → the endpoint maps it to 503
+    (same fail-closed contract as missing keys/plan-id; no partial state). _do_subscribe is
+    stubbed to raise directly so no DB pool is required for this unit test."""
+    from fastapi import HTTPException
+    from orchestrator.api.razorpay_subscribe import RazorpayModeMismatchError
+
+    import orchestrator.api.razorpay_subscribe as mod
+
+    def _raising_do_subscribe(plan, body, tenant_id):
+        raise RazorpayModeMismatchError("mode mismatch (test)")
+
+    monkeypatch.setattr(mod, "_do_subscribe", _raising_do_subscribe)
+
+    with pytest.raises(HTTPException) as exc:
+        _post(uuid4(), "founding")
+    assert exc.value.status_code == 503
+    assert exc.value.detail == "razorpay key/mode mismatch"

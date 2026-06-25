@@ -76,17 +76,39 @@ class RazorpayKeysNotConfiguredError(RuntimeError):
     a caller-fixable error, and we must NEVER fall back to a stub at the money layer."""
 
 
+class RazorpayModeMismatchError(RuntimeError):
+    """The key-type prefix (rzp_test_/rzp_live_) does not match TEAM_RAZORPAY_LIVE.
+
+    Raised fail-closed (→503) to prevent using TEST keys against LIVE and vice-versa.
+    Only the PREFIX (not any key value) appears in the error message (CL-431)."""
+
+
 def _get_razorpay_client() -> Any:
     """Build a live Razorpay client from env keys, BY REFERENCE (CL-431/Rule-18 — the values are
     read straight into the SDK constructor; they never touch a log/stdout/this process's surfaced
     context). Lazy-imports the SDK so the module loads dep-less (the razorpay package is NOT a
     smoke-test dep). Raises RazorpayKeysNotConfiguredError (→503) when keys are absent — fail-closed,
-    never a stub fallback."""
+    never a stub fallback.
+
+    Env-isolation guard (Cowork ask — VT-424 extension): the key_id prefix (rzp_test_/rzp_live_)
+    MUST match TEAM_RAZORPAY_LIVE (1=LIVE, 0/unset=TEST). A mismatch raises
+    RazorpayModeMismatchError (→503, same fail-closed contract). Keys with neither standard prefix
+    are NOT blocked (only a CONFIRMED mismatch raises) — avoids false-positives on non-standard
+    keys. NO key value appears in any error message or log (CL-431 — prefix only)."""
     key_id = os.environ.get("TEAM_RAZORPAY_KEY_ID", "")
     key_secret = os.environ.get("TEAM_RAZORPAY_KEY_SECRET", "")
     if not key_id or not key_secret:
         raise RazorpayKeysNotConfiguredError(
             "TEAM_RAZORPAY_KEY_ID/SECRET unset — live Razorpay keys are NEEDS-FAZAL (LIVE)"
+        )
+    live_mode = os.environ.get("TEAM_RAZORPAY_LIVE", "0") == "1"
+    if live_mode and key_id.startswith("rzp_test_"):
+        raise RazorpayModeMismatchError(
+            "TEST keys (rzp_test_…) under TEAM_RAZORPAY_LIVE=1 — refusing to run live payments with test keys"
+        )
+    if not live_mode and key_id.startswith("rzp_live_"):
+        raise RazorpayModeMismatchError(
+            "LIVE keys (rzp_live_…) under TEAM_RAZORPAY_LIVE=0 — refusing to use live keys in test mode"
         )
     import razorpay  # lazy — NEEDS-FAZAL dep; keeps the module dep-less-smoke importable
 
@@ -165,6 +187,10 @@ def razorpay_subscribe(
         # txn rolled back inside _do_subscribe, so there is NO partial state (no jti consumed, no
         # subscriptions row). Never a stub fallback at the money layer.
         raise HTTPException(status_code=503, detail="razorpay keys not configured") from None
+    except RazorpayModeMismatchError:
+        # Key-type prefix does not match TEAM_RAZORPAY_LIVE — env misconfiguration (fail-closed,
+        # same 503 contract). The txn rolled back; no partial state, no jti consumed.
+        raise HTTPException(status_code=503, detail="razorpay key/mode mismatch") from None
 
 
 def _do_subscribe(
