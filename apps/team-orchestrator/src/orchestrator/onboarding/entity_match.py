@@ -139,8 +139,9 @@ def enrich_company_from_cin(
     tenant_id: str, cin: str, *, reason: str, request_fn: Any = None
 ) -> str | None:
     """VT-449: fetch MCA Company Master Data by CIN → best-effort store (encrypted PII via mca_store) +
-    return the AUTHORITATIVE canonical company name — the STRONGER name-match anchor for GST identify
-    (registry-canonical, not the owner-typed name). None on any vendor/parse failure (never raises)."""
+    return the canonical company name for PROFILE ENRICHMENT. NOTE: the GST create-gate name-match anchor
+    stays the Sandbox ``verified_name`` (server-authoritative) — this MCA name is SUPPLEMENTARY enrichment,
+    NEVER a substitute for the verify gate. None on any vendor/parse failure (never raises)."""
     from orchestrator.integrations.methods.mca import company_master_data
 
     cmd = company_master_data((cin or "").strip(), reason=reason, request_fn=request_fn)
