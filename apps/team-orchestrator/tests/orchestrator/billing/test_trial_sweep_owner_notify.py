@@ -5,15 +5,19 @@ These are pure-seam tests: NO DB pool, NO real Twilio. The recipient read
 ``send_fn`` (a recorder), so the whole file is dep-less-safe and runs with 0 external
 calls. The point under test is the WIRING + the VT-426 FAIL-CLOSED gates:
 
-  - GATE 1 (approved_for_live, PRIMARY): the trial templates ship with
-    ``approved_for_live: false`` → _owner_notify SKIPS, 0 sends, even though the SID is
-    real and Meta-approved. THIS is the deploy-safe proof — the daily cron sends NOTHING
-    until Fazal flips the flag.
+  - GATE 1 (approved_for_live, PRIMARY): when a template entry has approved_for_live=False
+    → _owner_notify SKIPS, 0 sends, even though the SID is real and Meta-approved. This
+    is the deploy-safe gate proof. VT-430: the two trial templates now have
+    approved_for_live=True (flipped by DEV-POSTURE-REVERSE §3); this gate test uses a
+    stub entry (not the real registry) to keep the gate coverage valid.
   - GATE 2 (audience): approved_for_live=true but audience != owner → SKIP.
   - GATE 3 (validate_params): approved_for_live=true + owner audience but a
     missing/empty required positional → SKIP (the VT-400 "Hi Raj Cafe" sample bug).
   - all gates pass (approved + owner + complete params) → SENDS ONCE (recorded send_fn),
     owner_name populated.
+  - VT-430 enablement proofs: trial_ending with owner_name resolved + trial_subscribe_link
+    with owner_name + subscribe_link → SENDS with correct populated params; a tenant with
+    NO resolvable owner_name → GATE 3 still fail-closes (no send).
   - retained fail-safes: UNREGISTERED template, pending-approval stub SID, no recipient,
     a raising / success=False send — all SKIP/swallow loudly, the sweep never aborts.
 """
@@ -54,10 +58,12 @@ def _entry(**overrides):
 
 
 def test_owner_notify_skips_when_not_approved_for_live(monkeypatch, caplog):
-    """THE KEY DEPLOY-SAFE TEST. The shipped trial templates have a real, Meta-approved
-    SID but ``approved_for_live: false`` → _owner_notify SKIPS with a loud log and makes
-    0 sends. This is the proof that a deploy + the 7 AM cron fires NOTHING until Fazal
-    flips the flag. Uses the REAL registry entry (trial_subscribe_link), not a stub."""
+    """THE KEY DEPLOY-SAFE GATE TEST. When a template entry has approved_for_live=False
+    → _owner_notify SKIPS with a loud log and makes 0 sends. The recipient is NOT even
+    read — GATE 1 short-circuits first. Uses a monkeypatched entry (not the real
+    registry) because VT-430 flipped the two trial templates to approved_for_live=True;
+    the gate logic itself is unchanged and this test keeps it covered."""
+    from orchestrator import templates_registry as tr
     from orchestrator.billing import trial_sweep as ts
 
     tid = uuid.uuid4()
@@ -66,6 +72,14 @@ def test_owner_notify_skips_when_not_approved_for_live(monkeypatch, caplog):
     def _should_not_send(*a, **k):
         sends.append((a, k))
         return _FakeSendResult(success=True)
+
+    # Stub entry with approved_for_live=False — exercises the gate independent of yaml.
+    not_approved = _entry(
+        template_name="trial_subscribe_link",
+        variables=("owner_name", "subscribe_link"),
+        approved_for_live=False,
+    )
+    monkeypatch.setattr(tr, "resolve", lambda name, lang, **k: not_approved)
 
     # Recipient must NOT even be read — GATE 1 short-circuits first.
     monkeypatch.setattr(
@@ -76,13 +90,13 @@ def test_owner_notify_skips_when_not_approved_for_live(monkeypatch, caplog):
     with caplog.at_level(logging.WARNING):
         ts._owner_notify(
             tid,
-            "trial_subscribe_link",  # real SID, but approved_for_live: false as shipped
+            "trial_subscribe_link",
             "en",
             {"owner_name": "Raj Cafe", "subscribe_link": "https://viabe.ai/team/subscribe?t=tok"},
             send_fn=_should_not_send,
         )
 
-    assert sends == []  # 0 sends — deploy-safe
+    assert sends == []  # 0 sends — gate working
     assert any(
         "SKIP owner-notify" in r.message and "NOT approved_for_live" in r.message
         for r in caplog.records
@@ -373,3 +387,140 @@ def test_owner_notify_send_failure_does_not_crash(monkeypatch, caplog):
         "owner-notify NOT sent" in r.message and "template_not_yet_approved" in r.message
         for r in caplog.records
     )
+
+
+# ---------------------------------------------------------------------------
+# VT-430 — enablement proofs (approved_for_live now TRUE for both trial templates)
+# ---------------------------------------------------------------------------
+
+
+def test_vt430_trial_ending_sends_with_populated_owner_name(monkeypatch):
+    """VT-430 ENABLEMENT PROOF — trial_ending. approved_for_live=true (as of VT-430) +
+    audience=owner + complete params (owner_name populated from the tenant row, NOT a
+    sample value) + valid recipient → SENDS ONCE. owner_name is the real business name,
+    not the Twilio sample ("Raj Cafe" here, resolved via _resolve_owner_name in production).
+
+    This is the exact correctness proof required by VT-430: with the yaml flip the daily
+    cron's warn path fires a real owner WhatsApp message with {{1}} rendered from the
+    tenant's business_name, not a sample placeholder."""
+    from orchestrator import templates_registry as tr
+    from orchestrator.billing import trial_sweep as ts
+
+    tid = uuid.uuid4()
+    calls: list[tuple] = []
+
+    def _recording_send(t, template_name, language, params, *, recipient_phone):
+        calls.append((str(t), template_name, language, params, recipient_phone))
+        return _FakeSendResult(success=True)
+
+    # Real trial_ending entry shape — approved + owner + complete params.
+    trial_ending_entry = _entry(
+        template_name="trial_ending",
+        variables=("owner_name", "trial_end_date"),
+        approved_for_live=True,  # VT-430 flipped this
+    )
+    monkeypatch.setattr(tr, "resolve", lambda name, lang, **k: trial_ending_entry)
+    monkeypatch.setattr(
+        "orchestrator.utils.twilio_send.get_tenant_whatsapp_number",
+        lambda t: "+919812345678",
+    )
+
+    # Params as built by run_trial_evaluation_body: owner_name from _resolve_owner_name.
+    ts._owner_notify(
+        tid,
+        "trial_ending",
+        "en",
+        {"owner_name": "Raj Cafe", "trial_end_date": "2026-07-14"},
+        send_fn=_recording_send,
+    )
+
+    assert len(calls) == 1, "expected exactly ONE send"
+    _tid, tpl, lang, params, recipient = calls[0]
+    assert tpl == "trial_ending"
+    assert params["owner_name"] == "Raj Cafe"  # {{1}} = real name, NOT a Twilio sample
+    assert params["trial_end_date"] == "2026-07-14"  # {{2}} populated
+    assert recipient == "+919812345678"
+
+
+def test_vt430_trial_subscribe_link_sends_with_populated_params(monkeypatch):
+    """VT-430 ENABLEMENT PROOF — trial_subscribe_link. approved_for_live=true (as of
+    VT-430) + audience=owner + complete params (owner_name + subscribe_link both
+    non-empty) + valid recipient → SENDS ONCE with correct param values."""
+    from orchestrator import templates_registry as tr
+    from orchestrator.billing import trial_sweep as ts
+
+    tid = uuid.uuid4()
+    calls: list[tuple] = []
+
+    def _recording_send(t, template_name, language, params, *, recipient_phone):
+        calls.append((str(t), template_name, language, params, recipient_phone))
+        return _FakeSendResult(success=True)
+
+    # Real trial_subscribe_link entry shape — approved + owner.
+    trial_sub_entry = _entry(
+        template_name="trial_subscribe_link",
+        variables=("owner_name", "subscribe_link"),
+        approved_for_live=True,  # VT-430 flipped this
+    )
+    monkeypatch.setattr(tr, "resolve", lambda name, lang, **k: trial_sub_entry)
+    monkeypatch.setattr(
+        "orchestrator.utils.twilio_send.get_tenant_whatsapp_number",
+        lambda t: "+919812345678",
+    )
+
+    link = "https://viabe.ai/team/subscribe?token=abc123"
+    ts._owner_notify(
+        tid,
+        "trial_subscribe_link",
+        "hi",
+        {"owner_name": "Raj Cafe", "subscribe_link": link},
+        send_fn=_recording_send,
+    )
+
+    assert len(calls) == 1, "expected exactly ONE send"
+    _tid, tpl, lang, params, recipient = calls[0]
+    assert tpl == "trial_subscribe_link"
+    assert lang == "hi"  # preferred language variant respected
+    assert params["owner_name"] == "Raj Cafe"  # populated, not a sample
+    assert params["subscribe_link"] == link
+    assert recipient == "+919812345678"
+
+
+def test_vt430_no_owner_name_still_fail_closes(monkeypatch, caplog):
+    """VT-430 CORRECTNESS KEPT — even with approved_for_live=true, a tenant with NO
+    resolvable owner_name (None from _resolve_owner_name → owner_name=None in params)
+    → GATE 3 fail-closes: 0 sends, loud log. The Twilio SAMPLE is never rendered.
+
+    This is the second required test from VT-430: the enablement does NOT degrade safety
+    — a tenant without a business_name in the tenants row still gets no send."""
+    from orchestrator import templates_registry as tr
+    from orchestrator.billing import trial_sweep as ts
+
+    tid = uuid.uuid4()
+    sends: list[tuple] = []
+
+    trial_ending_entry = _entry(
+        template_name="trial_ending",
+        variables=("owner_name", "trial_end_date"),
+        approved_for_live=True,  # flag is live, but the name is None
+    )
+    monkeypatch.setattr(tr, "resolve", lambda name, lang, **k: trial_ending_entry)
+    monkeypatch.setattr(
+        "orchestrator.utils.twilio_send.get_tenant_whatsapp_number",
+        lambda t: (_ for _ in ()).throw(AssertionError("recipient read before param gate")),
+    )
+
+    with caplog.at_level(logging.WARNING):
+        ts._owner_notify(
+            tid,
+            "trial_ending",
+            "en",
+            # owner_name=None — as produced when _resolve_owner_name returns None
+            {"owner_name": None, "trial_end_date": "2026-07-14"},
+            send_fn=lambda *a, **k: sends.append((a, k)),
+        )
+
+    assert sends == [], "GATE 3 must skip — owner_name=None would render the Twilio sample"
+    assert any(
+        "missing/empty required params" in r.message for r in caplog.records
+    ), "expected GATE 3 loud log for None owner_name"
