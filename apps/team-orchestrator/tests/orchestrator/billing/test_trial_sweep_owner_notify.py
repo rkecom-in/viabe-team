@@ -1,18 +1,21 @@
-"""VT-426 (Row C) — the trial-sweep owner-notify seam (``trial_sweep._owner_notify``).
+"""VT-426 (Row C, hardened) — the trial-sweep owner-notify seam (``trial_sweep._owner_notify``).
 
 These are pure-seam tests: NO DB pool, NO real Twilio. The recipient read
 (``get_tenant_whatsapp_number``) is monkeypatched and the send is injected via
 ``send_fn`` (a recorder), so the whole file is dep-less-safe and runs with 0 external
-calls. The point under test is the WIRING:
+calls. The point under test is the WIRING + the VT-426 FAIL-CLOSED gates:
 
-  - registered + approved template → notify resolves it by NAME from the registry,
-    resolves the owner recipient, and sends ONCE with the owner's preferred-language
-    variant + the conversion-link params;
-  - UNREGISTERED template (the current NEEDS-FAZAL reality for the owner trial-ending
-    SID) → FAIL-SAFE SKIP with a loud log, 0 sends, no crash;
-  - pending-approval stub SID (content_sid=None) → same fail-safe skip;
-  - no reachable recipient → skip;
-  - a raising / success=False send → swallowed loudly, the sweep never aborts.
+  - GATE 1 (approved_for_live, PRIMARY): the trial templates ship with
+    ``approved_for_live: false`` → _owner_notify SKIPS, 0 sends, even though the SID is
+    real and Meta-approved. THIS is the deploy-safe proof — the daily cron sends NOTHING
+    until Fazal flips the flag.
+  - GATE 2 (audience): approved_for_live=true but audience != owner → SKIP.
+  - GATE 3 (validate_params): approved_for_live=true + owner audience but a
+    missing/empty required positional → SKIP (the VT-400 "Hi Raj Cafe" sample bug).
+  - all gates pass (approved + owner + complete params) → SENDS ONCE (recorded send_fn),
+    owner_name populated.
+  - retained fail-safes: UNREGISTERED template, pending-approval stub SID, no recipient,
+    a raising / success=False send — all SKIP/swallow loudly, the sweep never aborts.
 """
 
 from __future__ import annotations
@@ -29,10 +32,68 @@ class _FakeSendResult:
         self.error_code = error_code
 
 
-def test_owner_notify_sends_registered_template_with_language(monkeypatch):
-    """A REGISTERED template (real SID in the registry) → notify resolves it by NAME,
-    resolves the owner recipient, and invokes the send_fn ONCE with the tenant's
-    preferred-language variant + the params (the conversion link). 0 real Twilio."""
+def _entry(**overrides):
+    """Build a TemplateEntry with the VT-426-passing defaults; override per test."""
+    from orchestrator import templates_registry as tr
+
+    base = dict(
+        template_name="trial_subscribe_link",
+        language="en",
+        content_sid="HX" + "0" * 32,
+        audience="owner",
+        variables=("owner_name", "subscribe_link"),
+        approved_for_live=True,
+    )
+    base.update(overrides)
+    return tr.TemplateEntry(**base)
+
+
+# ---------------------------------------------------------------------------
+# GATE 1 — approved_for_live (the deploy-safe PRIMARY gate)
+# ---------------------------------------------------------------------------
+
+
+def test_owner_notify_skips_when_not_approved_for_live(monkeypatch, caplog):
+    """THE KEY DEPLOY-SAFE TEST. The shipped trial templates have a real, Meta-approved
+    SID but ``approved_for_live: false`` → _owner_notify SKIPS with a loud log and makes
+    0 sends. This is the proof that a deploy + the 7 AM cron fires NOTHING until Fazal
+    flips the flag. Uses the REAL registry entry (trial_subscribe_link), not a stub."""
+    from orchestrator.billing import trial_sweep as ts
+
+    tid = uuid.uuid4()
+    sends: list[tuple] = []
+
+    def _should_not_send(*a, **k):
+        sends.append((a, k))
+        return _FakeSendResult(success=True)
+
+    # Recipient must NOT even be read — GATE 1 short-circuits first.
+    monkeypatch.setattr(
+        "orchestrator.utils.twilio_send.get_tenant_whatsapp_number",
+        lambda t: (_ for _ in ()).throw(AssertionError("recipient read before approved gate")),
+    )
+
+    with caplog.at_level(logging.WARNING):
+        ts._owner_notify(
+            tid,
+            "trial_subscribe_link",  # real SID, but approved_for_live: false as shipped
+            "en",
+            {"owner_name": "Raj Cafe", "subscribe_link": "https://viabe.ai/team/subscribe?t=tok"},
+            send_fn=_should_not_send,
+        )
+
+    assert sends == []  # 0 sends — deploy-safe
+    assert any(
+        "SKIP owner-notify" in r.message and "NOT approved_for_live" in r.message
+        for r in caplog.records
+    ), "expected a loud SKIP/NOT-approved_for_live warning"
+
+
+def test_owner_notify_sends_when_all_gates_pass(monkeypatch):
+    """ALL gates pass — approved_for_live=true + owner audience + complete non-empty
+    params → notify resolves the recipient and invokes the send_fn ONCE with the
+    preferred-language variant + the params (owner_name populated). 0 real Twilio."""
+    from orchestrator import templates_registry as tr
     from orchestrator.billing import trial_sweep as ts
 
     tid = uuid.uuid4()
@@ -42,16 +103,14 @@ def test_owner_notify_sends_registered_template_with_language(monkeypatch):
         calls.append((str(t), template_name, language, params, recipient_phone))
         return _FakeSendResult(success=True)
 
-    # _owner_notify lazy-imports get_tenant_whatsapp_number FROM twilio_send at call
-    # time, so patching the source attribute is what the function picks up.
+    # approved + owner + real SID — the live-approved entry (Fazal flipped the flag).
+    monkeypatch.setattr(tr, "resolve", lambda name, lang, **k: _entry())
     monkeypatch.setattr(
         "orchestrator.utils.twilio_send.get_tenant_whatsapp_number",
         lambda t: "+919812345678",
     )
 
     link = "https://viabe.ai/team/subscribe?t=tok"
-    # trial_subscribe_link is a REGISTERED template (real SID, owner audience) — resolves
-    # past the fail-safe, so the recorded send_fn is invoked. 0 real Twilio (injected fn).
     ts._owner_notify(
         tid,
         "trial_subscribe_link",
@@ -65,14 +124,124 @@ def test_owner_notify_sends_registered_template_with_language(monkeypatch):
     assert sent_tid == str(tid)
     assert tpl == "trial_subscribe_link"
     assert lang == "hi"  # the owner's preferred-language variant, not hardcoded 'en'
+    assert params["owner_name"] == "Raj Cafe"  # {{1}} populated — no Twilio sample render
     assert params["subscribe_link"] == link
     assert recipient == "+919812345678"
 
 
+# ---------------------------------------------------------------------------
+# GATE 2 — audience enforcement (VULN4)
+# ---------------------------------------------------------------------------
+
+
+def test_owner_notify_skips_non_owner_audience(monkeypatch, caplog):
+    """approved_for_live=true but audience != 'owner' (a customer-audience template) →
+    SKIP, 0 sends. The owner-notify seam never lands a customer template on an owner."""
+    from orchestrator import templates_registry as tr
+    from orchestrator.billing import trial_sweep as ts
+
+    tid = uuid.uuid4()
+    sends: list[tuple] = []
+
+    monkeypatch.setattr(
+        tr, "resolve",
+        lambda name, lang, **k: _entry(audience="customer", variables=("owner_name", "trial_end_date")),
+    )
+    monkeypatch.setattr(
+        "orchestrator.utils.twilio_send.get_tenant_whatsapp_number",
+        lambda t: (_ for _ in ()).throw(AssertionError("recipient read before audience gate")),
+    )
+
+    with caplog.at_level(logging.WARNING):
+        ts._owner_notify(
+            tid, "trial_ending", "en",
+            {"owner_name": "Raj Cafe", "trial_end_date": "2026-07-14"},
+            send_fn=lambda *a, **k: sends.append((a, k)),
+        )
+
+    assert sends == []
+    assert any(
+        "SKIP owner-notify" in r.message and "not 'owner'" in r.message
+        for r in caplog.records
+    ), "expected a loud SKIP/audience warning"
+
+
+# ---------------------------------------------------------------------------
+# GATE 3 — validate_params fail-closed (VULN1)
+# ---------------------------------------------------------------------------
+
+
+def test_owner_notify_skips_missing_required_param(monkeypatch, caplog):
+    """approved_for_live=true + owner audience but a declared positional is MISSING →
+    SKIP, 0 sends. Never send a template that would render the Twilio SAMPLE (VT-400)."""
+    from orchestrator import templates_registry as tr
+    from orchestrator.billing import trial_sweep as ts
+
+    tid = uuid.uuid4()
+    sends: list[tuple] = []
+
+    monkeypatch.setattr(
+        tr, "resolve",
+        lambda name, lang, **k: _entry(variables=("owner_name", "subscribe_link")),
+    )
+    monkeypatch.setattr(
+        "orchestrator.utils.twilio_send.get_tenant_whatsapp_number",
+        lambda t: (_ for _ in ()).throw(AssertionError("recipient read before param gate")),
+    )
+
+    with caplog.at_level(logging.WARNING):
+        ts._owner_notify(
+            tid, "trial_subscribe_link", "en",
+            {"subscribe_link": "https://viabe.ai/team/subscribe?t=tok"},  # owner_name MISSING
+            send_fn=lambda *a, **k: sends.append((a, k)),
+        )
+
+    assert sends == []
+    assert any(
+        "SKIP owner-notify" in r.message and "missing/empty required params" in r.message
+        for r in caplog.records
+    ), "expected a loud SKIP/missing-param warning"
+
+
+def test_owner_notify_skips_empty_required_param(monkeypatch, caplog):
+    """A declared positional present but EMPTY ('') → SKIP (an empty {{1}} also renders
+    the Twilio sample). Stricter than key-set equality."""
+    from orchestrator import templates_registry as tr
+    from orchestrator.billing import trial_sweep as ts
+
+    tid = uuid.uuid4()
+    sends: list[tuple] = []
+
+    monkeypatch.setattr(
+        tr, "resolve",
+        lambda name, lang, **k: _entry(variables=("owner_name", "subscribe_link")),
+    )
+    monkeypatch.setattr(
+        "orchestrator.utils.twilio_send.get_tenant_whatsapp_number",
+        lambda t: (_ for _ in ()).throw(AssertionError("recipient read before param gate")),
+    )
+
+    with caplog.at_level(logging.WARNING):
+        ts._owner_notify(
+            tid, "trial_subscribe_link", "en",
+            {"owner_name": "", "subscribe_link": "https://viabe.ai/team/subscribe?t=tok"},
+            send_fn=lambda *a, **k: sends.append((a, k)),
+        )
+
+    assert sends == []
+    assert any(
+        "missing/empty required params" in r.message for r in caplog.records
+    )
+
+
+# ---------------------------------------------------------------------------
+# Retained fail-safes
+# ---------------------------------------------------------------------------
+
+
 def test_owner_notify_skips_unregistered_template_loudly(monkeypatch, caplog):
-    """The CURRENT reality for the owner trial-ending SID is NEEDS-FAZAL: an UNREGISTERED
-    template name → _owner_notify FAIL-SAFE SKIPS with a loud log, makes 0 sends, and
-    never even resolves a recipient or crashes."""
+    """An UNREGISTERED template name → _owner_notify FAIL-SAFE SKIPS with a loud log,
+    makes 0 sends, and never even resolves a recipient or crashes."""
     from orchestrator.billing import trial_sweep as ts
 
     tid = uuid.uuid4()
@@ -104,20 +273,18 @@ def test_owner_notify_skips_unregistered_template_loudly(monkeypatch, caplog):
 
 
 def test_owner_notify_skips_pending_stub_sid(monkeypatch, caplog):
-    """A registered template whose SID is a pending-approval stub (content_sid=None) →
-    FAIL-SAFE SKIP, 0 sends. This is the exact fail-safe the owner trial-ending SID rides
-    until Fazal provisions the approved SID into the registry."""
+    """A registered, approved-for-live, owner-audience template whose SID is a
+    pending-approval stub (content_sid=None) → FAIL-SAFE SKIP, 0 sends."""
     from orchestrator import templates_registry as tr
     from orchestrator.billing import trial_sweep as ts
 
     tid = uuid.uuid4()
     sends: list[tuple] = []
 
-    pending = tr.TemplateEntry(
+    # approved + owner so we reach the SID-None gate (not short-circuited by GATE 1/2).
+    pending = _entry(
         template_name="trial_ending",
-        language="en",
         content_sid=None,  # pending Meta approval
-        audience="owner",
         variables=("owner_name", "trial_end_date"),
     )
     monkeypatch.setattr(tr, "resolve", lambda name, lang, **k: pending)
@@ -141,20 +308,15 @@ def test_owner_notify_skips_pending_stub_sid(monkeypatch, caplog):
 
 
 def test_owner_notify_no_recipient_skips(monkeypatch, caplog):
-    """Registered + approved template but the tenant has no reachable whatsapp_number →
-    skip with a loud log, 0 sends, no crash."""
+    """All gates pass but the tenant has no reachable whatsapp_number → skip with a loud
+    log, 0 sends, no crash."""
     from orchestrator import templates_registry as tr
     from orchestrator.billing import trial_sweep as ts
 
     tid = uuid.uuid4()
     sends: list[tuple] = []
 
-    approved = tr.TemplateEntry(
-        template_name="trial_subscribe_link", language="en",
-        content_sid="HX" + "0" * 32, audience="owner",
-        variables=("owner_name", "subscribe_link"),
-    )
-    monkeypatch.setattr(tr, "resolve", lambda name, lang, **k: approved)
+    monkeypatch.setattr(tr, "resolve", lambda name, lang, **k: _entry())
     monkeypatch.setattr(
         "orchestrator.utils.twilio_send.get_tenant_whatsapp_number", lambda t: None
     )
@@ -180,12 +342,7 @@ def test_owner_notify_send_failure_does_not_crash(monkeypatch, caplog):
     from orchestrator.billing import trial_sweep as ts
 
     tid = uuid.uuid4()
-    approved = tr.TemplateEntry(
-        template_name="trial_subscribe_link", language="en",
-        content_sid="HX" + "0" * 32, audience="owner",
-        variables=("owner_name", "subscribe_link"),
-    )
-    monkeypatch.setattr(tr, "resolve", lambda name, lang, **k: approved)
+    monkeypatch.setattr(tr, "resolve", lambda name, lang, **k: _entry())
     monkeypatch.setattr(
         "orchestrator.utils.twilio_send.get_tenant_whatsapp_number",
         lambda t: "+919812345678",

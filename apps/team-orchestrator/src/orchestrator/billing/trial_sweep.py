@@ -48,24 +48,36 @@ def _owner_notify(
     *,
     send_fn: Callable[..., Any] | None = None,
 ) -> None:
-    """VT-426 (Row C) — the REAL trial-ending owner-WhatsApp notify seam.
+    """VT-426 (Row C, hardened) — the REAL trial-ending owner-WhatsApp notify seam.
 
     Resolves the template **by NAME** from the registry (``twilio_templates.yaml``,
     the runtime mirror of ``.viabe/templates.md``) and sends it to the owner via the
     VT-393 owner-utility seam (``owner_surface.send_owner_template``). NO hard-coded
     SID — the SID is looked up by ``(template_name, language)`` (CL template-registry
-    rule). When Fazal provisions the approved trial-ending Content SID into the
-    registry, this path sends with ZERO code change.
+    rule).
 
-    FAIL-SAFE SKIP (loud log, NO send, NO crash) when the template can't be sent:
-      - the template name is unregistered (``UnknownTemplateError``),
-      - the requested language variant is absent (``UnknownLanguageVariantError``),
-      - the registry SID is a pending-approval stub (``content_sid is None``),
-      - the owner has no reachable WhatsApp recipient,
-      - the underlying send returns ``success=False`` (e.g. ``template_not_yet_approved``)
-        or raises.
-    A broken/unapproved template is NEVER sent and a notify failure NEVER aborts the
-    daily sweep (one tenant's send must not stall the rest).
+    FAIL-CLOSED by default (VT-426 hardening). Three INDEPENDENT gates each cause a
+    loud-log, 0-send, no-crash SKIP — the seam sends ONLY when ALL pass:
+
+      GATE 1 (``approved_for_live``, the PRIMARY gate): the resolved registry Entry
+        must carry ``approved_for_live is True``. The field DEFAULTS FALSE when absent
+        from the yaml, so a template with a real, Meta-approved SID still sends NOTHING
+        on deploy until Fazal explicitly flips ``approved_for_live: true`` in
+        ``twilio_templates.yaml``. This is the deploy-safe gate — the daily 7 AM cron
+        cannot fire a single real owner send while the flag is false.
+      GATE 2 (audience): the Entry's ``audience`` must be exactly ``"owner"``. The
+        owner-notify seam never sends a customer-audience template to an owner number.
+      GATE 3 (validate_params): EVERY declared template variable ({{1}}, {{2}}, …) must
+        have a non-empty value in ``params``. A missing/empty positional would let
+        Twilio render the template's SAMPLE value (the VT-400 "Hi Raj Cafe" bug), so a
+        template that would render a sample is NEVER sent.
+
+    Pre-existing fail-safe SKIPs (retained): unregistered template
+    (``UnknownTemplateError``), absent language variant
+    (``UnknownLanguageVariantError``), pending-approval stub SID
+    (``content_sid is None``), no reachable WhatsApp recipient, and a send that returns
+    ``success=False`` or raises. A notify failure NEVER aborts the daily sweep (one
+    tenant's send must not stall the rest).
 
     ``send_fn`` is an injectable send seam (defaults to the live
     ``owner_surface.send_owner_template``) so tests record the call with 0 real Twilio.
@@ -91,11 +103,55 @@ def _owner_notify(
             tenant_id, template_name, language,
         )
         return
+
+    # GATE 1 (PRIMARY, fail-closed): approved_for_live. Defaults FALSE in the registry
+    # when the yaml key is absent, so even a real Meta-approved SID sends NOTHING until
+    # Fazal flips approved_for_live: true. This is the deploy-safe gate — the 7 AM cron
+    # cannot fire a single owner send while the flag is false. Checked FIRST so an
+    # un-approved template short-circuits before any param/recipient work.
+    if entry.approved_for_live is not True:
+        logger.warning(
+            "trial_sweep: SKIP owner-notify tenant=%s template=%s lang=%s — NOT "
+            "approved_for_live (fail-closed default; flip approved_for_live: true in "
+            "twilio_templates.yaml once Fazal approves); nothing sent.",
+            tenant_id, template_name, language,
+        )
+        return
+
+    # GATE 2 (VULN4): audience enforcement — the owner-notify seam sends owner-audience
+    # templates ONLY. A customer-audience template must never land on an owner number.
+    if entry.audience != "owner":
+        logger.warning(
+            "trial_sweep: SKIP owner-notify tenant=%s template=%s lang=%s — audience=%r "
+            "is not 'owner'; the owner-notify seam sends owner-audience templates only; "
+            "nothing sent.",
+            tenant_id, template_name, language, entry.audience,
+        )
+        return
+
     if entry.content_sid is None:
         logger.warning(
             "trial_sweep: SKIP owner-notify tenant=%s template=%s lang=%s — registry "
             "SID is a pending-approval stub (content_sid=None, NEEDS-FAZAL); nothing sent.",
             tenant_id, template_name, language,
+        )
+        return
+
+    # GATE 3 (VULN1): validate_params — fail-closed if ANY declared positional ({{1}},
+    # {{2}}, …) is missing or empty. An absent/blank positional makes Twilio render the
+    # template's SAMPLE value (the VT-400 "Hi Raj Cafe" bug); a template that would
+    # render a sample is NEVER sent. Stricter than templates_registry.validate_params
+    # (which only checks key-set equality) — we also reject empty values.
+    missing_or_empty = [
+        var for var in entry.variables
+        if params.get(var) in (None, "")
+    ]
+    if missing_or_empty:
+        logger.warning(
+            "trial_sweep: SKIP owner-notify tenant=%s template=%s lang=%s — missing/empty "
+            "required params %s (a blank positional renders the Twilio SAMPLE — VT-400); "
+            "nothing sent.",
+            tenant_id, template_name, language, sorted(missing_or_empty),
         )
         return
 
@@ -167,6 +223,32 @@ def _compose_trial_subscribe_link(tenant_id: UUID) -> dict[str, Any] | None:
     except Exception:
         logger.exception(
             "trial_sweep: trial_subscribe_link compose skipped tenant=%s (dormant/secret unset?)",
+            tenant_id,
+        )
+        return None
+
+
+def _resolve_owner_name(tenant_id: UUID) -> str | None:
+    """VT-426 hardening — resolve the tenant's business/owner display name for the
+    ``trial_ending`` template's ``owner_name`` ({{1}}) positional.
+
+    Returns the ``tenants.business_name`` (the same field ``_compose_trial_subscribe_link``
+    uses) or ``None`` on any read failure / empty value. Returning ``None`` lets the
+    caller fail-CLOSED (skip the send) rather than send a template with a blank {{1}}
+    that Twilio would render as the SAMPLE value (the VT-400 bug). Best-effort: ANY
+    DB/import error → ``None`` (a name-read hiccup must never crash the daily sweep)."""
+    try:
+        from orchestrator.graph import get_pool
+
+        with get_pool().connection() as conn:
+            row = conn.execute(
+                "SELECT business_name FROM tenants WHERE id = %s", (str(tenant_id),)
+            ).fetchone()
+        name = (dict(row).get("business_name") if row else None) or None
+        return name
+    except Exception:  # noqa: BLE001 — name read is best-effort; None → fail-closed skip
+        logger.warning(
+            "trial_sweep: owner_name resolve failed tenant=%s; owner-notify will skip",
             tenant_id,
         )
         return None
@@ -272,7 +354,15 @@ def run_trial_evaluation_body(
         # their preferred language, not a hardcoded "en". Best-effort read (None on any
         # DB hiccup) → fall back to "en"; a language-read miss never breaks the sweep.
         language = _preferred_language(tid)
-        params = {"trial_end_date": v.trial_end.date().isoformat() if v.trial_end else ""}
+        # VT-426 hardening (VULN1): build the trial_ending params with BOTH declared
+        # positionals — owner_name ({{1}}) + trial_end_date ({{2}}). owner_name resolves
+        # to the business name; if it's unavailable it stays None and the owner-notify
+        # GATE 3 fail-closes (skips) rather than sending a blank {{1}} that Twilio would
+        # render as the SAMPLE ("Hi Raj Cafe", VT-400).
+        params = {
+            "owner_name": _resolve_owner_name(tid),
+            "trial_end_date": v.trial_end.date().isoformat() if v.trial_end else "",
+        }
         if v.decision == "expire":
             _apply_trial_transition(tid, "trial_expired")
             # VT-359: trial-end conversion nudge — the VT-332 subscribe-link send, fired ONCE at

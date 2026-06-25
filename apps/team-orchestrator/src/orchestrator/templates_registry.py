@@ -148,6 +148,13 @@ class TemplateEntry:
     money_bearing: bool = False
     optout_line: bool = False
     body_sha256: str | None = None  # per-language APPROVED-body hash pin (VT-383)
+    # VT-426 hardening: per-template "Fazal has approved this for LIVE owner sends"
+    # gate. Defaults FALSE when absent in the yaml — a template the registry knows
+    # about (real SID present) still does NOT send via _owner_notify until Fazal
+    # flips this flag. The flag is read ONLY by the trial-sweep owner-notify path;
+    # every other send path is unaffected (a missing key is backward-safe — all
+    # pre-existing entries keep their existing behaviour on those paths).
+    approved_for_live: bool = False
 
 
 # Known values for the Gap-5 ``category`` field (canary_load rejects others).
@@ -253,6 +260,8 @@ def resolve(
         money_bearing=bool(raw.get("money_bearing", False)),
         optout_line=bool(raw.get("optout_line", False)),
         body_sha256=body_sha256,
+        # VT-426: default FALSE when the key is absent — fail-closed for live sends.
+        approved_for_live=bool(raw.get("approved_for_live", False)),
     )
 
 
@@ -366,7 +375,7 @@ def canary_load(path: Path | None = None) -> None:
             errors.append(
                 f"  [{name}] category {category!r} not in {sorted(TEMPLATE_CATEGORIES)}"
             )
-        for flag in ("money_bearing", "optout_line"):
+        for flag in ("money_bearing", "optout_line", "approved_for_live"):
             if flag in raw and not isinstance(raw[flag], bool):
                 errors.append(f"  [{name}] {flag} must be a bool")
         if category == "customer_marketing" and raw.get("optout_line") is not True:
