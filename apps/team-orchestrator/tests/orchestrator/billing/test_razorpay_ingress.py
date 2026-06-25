@@ -459,3 +459,43 @@ def test_dead_letter_replay_correct_sub_applies_fee(_dbpool, _transitions, monke
     assert out["status"] == "processed" and out["action"] == "fees_incremented"
     assert _sub_state(_dbpool, tid)[0] == 499900
     assert _dead_letter(_dbpool, f"{_RUN}_evt_dl_correctsub")["status"] == "replayed"
+
+
+# --- VT-440 — dead-letter retry sweep premise: count_pending + exactly-once on re-retry ----------
+@pytest.mark.integration
+def test_count_pending_and_replay_exactly_once(_dbpool, _transitions, monkeypatch) -> None:
+    """VT-440 MONEY-SAFETY PROOF (real PG): the dead-letter retry is exactly-once.
+
+    1. A parse-dropped charge → count_pending() rises by 1 (the sweep's metric).
+    2. dead_letter.replay() applies the fee ONCE (the operator-driven retry) and clears
+       the pending row → count_pending() drops back.
+    3. RETRYING THE SAME EVENT AGAIN (re-feed the corrected payload) is a genuine
+       DUPLICATE — NO second fee, NO second dead-letter, NO double-charge. This is the
+       razorpay_ingress event_id dedup keystone the VT-440 sweep relies on: re-processing
+       an already-processed event is exactly-once.
+    """
+    monkeypatch.setattr("orchestrator.alerts.clients.alert_fazal", lambda m: None)
+    from orchestrator.billing import dead_letter
+
+    tid, sub = uuid4(), "sub_dl_count440"
+    _seed(_dbpool, tid, sub)
+    eid = f"{_RUN}_evt_dl_count440"
+
+    before = dead_letter.count_pending()
+    # 1. drop → a pending dead-letter; count rises by exactly 1.
+    assert _post("evt_dl_count440", "subscription.charged", _charged(sub, "abc"))["status"] == "dropped_parse_error"
+    assert dead_letter.count_pending() == before + 1
+    assert _dead_letter(_dbpool, eid)["status"] == "pending"
+
+    # 2. operator-driven retry (replay) applies the fee ONCE + clears the pending row.
+    out = dead_letter.replay(eid, _charged(sub, 499900))
+    assert out["status"] == "processed" and out["action"] == "fees_incremented"
+    assert _sub_state(_dbpool, tid)[0] == 499900  # fee applied exactly once
+    assert _dead_letter(_dbpool, eid)["status"] == "replayed"
+    assert dead_letter.count_pending() == before  # no longer pending
+
+    # 3. RE-RETRY the SAME corrected event → genuine duplicate, EXACTLY-ONCE held:
+    #    no double-fee, no new pending dead-letter. (The keystone the sweep depends on.)
+    assert _post("evt_dl_count440", "subscription.charged", _charged(sub, 499900))["status"] == "duplicate"
+    assert _sub_state(_dbpool, tid)[0] == 499900  # STILL single — no double-charge
+    assert dead_letter.count_pending() == before  # still cleared — no resurrected pending row
