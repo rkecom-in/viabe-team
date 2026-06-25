@@ -377,7 +377,8 @@ def run_signup(
 
     # VT-408 PRIMARY GATE — verify-then-create. Fail-closed: anything but a confirmed ACTIVE
     # GSTIN raises SignupGateError and creates NOTHING (so no product kick can fire below).
-    from orchestrator.onboarding.signup_gate import verify_gstin_for_signup
+    from orchestrator.onboarding.entity_match import business_name_matches
+    from orchestrator.onboarding.signup_gate import INVALID_GSTIN, verify_gstin_for_signup
 
     verify = verify_gstin_for_signup(inp.gstin, search_fn=verify_search_fn)
     if not verify.ok:
@@ -386,6 +387,11 @@ def run_signup(
             retryable=verify.retryable,
             language=inp.preferred_language,
         )
+    # VT-448 NAME-MATCH SECURITY: a valid+active GSTIN earns a tenant ONLY if its authoritative registry
+    # name plausibly matches the owner's CLAIMED business name. An unrelated-but-valid GSTIN (a different
+    # business's registration) is REJECTED → the SAME generic invalid_gstin reject (no enumeration oracle).
+    if not business_name_matches(inp.business_name, verify.verified_name):
+        raise SignupGateError(outcome=INVALID_GSTIN, retryable=False, language=inp.preferred_language)
 
     now = (now_fn or _utcnow)()
     _now = now_fn or (lambda: now)  # single instant for both create + trial_end
