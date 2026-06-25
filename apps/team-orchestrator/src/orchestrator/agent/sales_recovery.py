@@ -1,9 +1,7 @@
 """Sales Recovery specialist — Agent SDK skeleton (VT-32).
 
 This module is the real specialist that the orchestrator's specialist
-dispatch will eventually call (currently still routed through the stub —
-see ``sales_recovery_stub.py``; switching dispatch call sites is a later
-subtask).
+dispatch calls directly (``run_sales_recovery_agent``, VT-32).
 
 Tier 2 plumbing only (CL-242)
 -----------------------------
