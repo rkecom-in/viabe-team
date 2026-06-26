@@ -22,6 +22,7 @@ import type { VerifiedEntity } from '@/lib/entity-match'
 import { requestSignupOtp, verifyOtpAndCreate } from '@/lib/signup-otp'
 
 import { EntityMatchStep } from './entity-match-step'
+import { OwnershipStep } from './ownership-step'
 
 type Lang = 'en' | 'hi'
 type BizType = { key: string; label_en: string; label_hi: string }
@@ -100,11 +101,13 @@ export function SignupForm() {
   const [error, setError] = useState<string | null>(null)
   const [done, setDone] = useState(false)
   const [submitting, setSubmitting] = useState(false)
-  // VT-96 + VT-406: a 3-step flow — details, then entity-match (confirm the GST-registered
-  // business BEFORE creating an account — VT-406/VT-408 verify-then-create gate), then OTP-verify
-  // the WhatsApp number (the VT-326 proof token; a direct POST would 401). Account-creation is
-  // unreachable without a server-confirmed verified entity (the create-account gate).
-  const [step, setStep] = useState<'details' | 'entity' | 'verify'>('details')
+  // VT-96 + VT-406 + VT-411: a 4-step flow — details, then entity-match (confirm the GST-registered
+  // business BEFORE creating an account — VT-406/VT-408 verify-then-create gate), then OWNERSHIP
+  // (prove the owner CONTROLS the business via a DISTINCT OTP to the discovered public number — a GST
+  // entity is real, not necessarily yours), then OTP-verify the WhatsApp number (the VT-326 proof
+  // token; a direct POST would 401). Account-creation is unreachable without a server-confirmed
+  // verified entity AND a proven owner channel.
+  const [step, setStep] = useState<'details' | 'entity' | 'ownership' | 'verify'>('details')
   const [otpCode, setOtpCode] = useState('')
   // VT-406: the Sandbox-verified entity (gstin + authoritative name). null until a gstin_verified
   // confirm lands; it gates the transition to the OTP/create steps and rides into the create payload.
@@ -146,11 +149,21 @@ export function SignupForm() {
     setStep('entity')
   }
 
-  // VT-406 → VT-326 bridge — fired ONLY after the entity-match step server-confirms a verified
+  // VT-406 → VT-411 bridge — fired ONLY after the entity-match step server-confirms a verified
   // entity. Record the verified entity (it gates create + rides into the create payload), then
-  // request the OTP and advance to the verify step. Account-creation stays unreachable until here.
-  async function onEntityVerified(entity: VerifiedEntity) {
+  // advance to the OWNERSHIP step: a verified GST entity proves the business is real, not that this
+  // owner controls it (Fazal's bar). The personal-WhatsApp OTP is deferred to AFTER ownership proof.
+  function onEntityVerified(entity: VerifiedEntity) {
     setVerifiedEntity(entity)
+    if (step === 'ownership' || step === 'verify' || submitting) return // double-click guard
+    setError(null)
+    setStep('ownership')
+  }
+
+  // VT-411 → VT-326 bridge — fired ONLY after the ownership step proves owner_channel_verified (a
+  // DISTINCT OTP to the discovered public business number, or DIN). NOW request the personal-WhatsApp
+  // OTP and advance to the verify step. Account-creation stays unreachable until BOTH proofs land.
+  async function onOwnershipVerified() {
     if (step === 'verify' || submitting) return // double-click guard on the Continue button
     setError(null)
     setSubmitting(true)
@@ -363,7 +376,7 @@ export function SignupForm() {
       </form>
       ) : step === 'entity' ? (
       // VT-406 entity-match sub-step — confirm a GST-registered business before account-creation.
-      // onVerified bridges to the OTP step + records the verified entity (the create-account gate);
+      // onVerified records the verified entity (the create-account gate) + advances to ownership;
       // onReject is the graceful "GST-registered only" terminus (no account offered).
       <EntityMatchStep
         businessName={form.business_name}
@@ -371,6 +384,20 @@ export function SignupForm() {
         lang={lang}
         onVerified={onEntityVerified}
         onReject={() => { /* terminal — the reject screen renders in-place; no create path */ }}
+      />
+      ) : step === 'ownership' ? (
+      // VT-411 ownership sub-step — prove the owner CONTROLS the business via a DISTINCT OTP to the
+      // discovered public business number (or DIN). A verified GST entity is real, not necessarily
+      // theirs. onVerified bridges to the personal-WhatsApp OTP step. tenant_id is '' pre-create
+      // (VT-408 ordering); the discovered phone rides from the verified candidate (null → owner enters
+      // it). cin is unknown at signup (the orchestrator validates against the company) → ''.
+      <OwnershipStep
+        tenantId=""
+        publicPhone={verifiedEntity?.phone ?? null}
+        businessName={verifiedEntity?.name ?? form.business_name}
+        cin=""
+        lang={lang}
+        onVerified={() => void onOwnershipVerified()}
       />
       ) : (
       <form

@@ -202,15 +202,16 @@ export function EntityMatchStep({
 
   // The shared confirm spine — a GSTIN (from a pick OR manual entry) → Sandbox confirm → classify.
   // The Sandbox confirm is the AUTHORITATIVE gate for both paths (a manually-typed GSTIN is verified
-  // exactly like a picked one — it is never self-asserted).
-  async function confirmGstin(gstin: string) {
+  // exactly like a picked one — it is never self-asserted). `discoveredPhone` (VT-411) rides along on
+  // the GBP-pick path only — it's the public business number the ownership step OTPs (null otherwise).
+  async function confirmGstin(gstin: string, discoveredPhone: string | null = null) {
     setConfirming(gstin)
     try {
       const outcome = classifyConfirm(await confirmCandidate(gstin), gstin)
       if (outcome.kind === 'verified') {
         // Show the verified result (authoritative name + chip) FIRST; Continue bridges to OTP/create
         // via onVerified. No auto-advance — the owner sees the confirmed entity before proceeding.
-        setVerified({ gstin: outcome.gstin, name: outcome.name })
+        setVerified({ gstin: outcome.gstin, name: outcome.name, phone: discoveredPhone })
         setStep('verified')
       } else if (outcome.kind === 'retry') {
         setStep('retry')
@@ -226,7 +227,9 @@ export function EntityMatchStep({
   function pick(candidate: EntityCandidate) {
     const gstin = candidate.candidate_gstin
     if (!gstin) return // GBP-only candidate (no registry id) → the manual-GSTIN path (VT-448), guarded in render
-    void confirmGstin(gstin)
+    // VT-411: carry the candidate's discovered public number into the verified entity (GBP only) so
+    // the ownership step can OTP it. Manual/PAN paths have no discovered number → ownership asks for it.
+    void confirmGstin(gstin, candidate.phone ?? null)
   }
 
   // VT-448 — the manual-GSTIN path: discovery is thin, OR the owner's only match is a bare/closed GBP

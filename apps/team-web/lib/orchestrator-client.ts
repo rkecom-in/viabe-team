@@ -196,6 +196,10 @@ export interface EntityCandidate {
   candidate_gstin: string | null
   legal_name: string | null
   detail: string | null
+  /** VT-411 — the discovered PUBLIC business number (GBP candidates only; null otherwise). It is the
+   *  ownership-verification target: a DISTINCT OTP is sent here to prove the owner controls the public
+   *  business channel. NEVER rendered as verified — it's a discovered public listing value. */
+  phone?: string | null
 }
 
 export interface EntityCandidatesResult {
@@ -334,6 +338,145 @@ export async function confirmEntity(
     const timedOut = err instanceof Error && err.name === 'TimeoutError'
     console.error(`entity-confirm: ${timedOut ? 'timeout' : 'error'}; failing closed`) // CL-390: no detail/body
     return { ok: false, reason: timedOut ? 'timeout' : 'error' }
+  }
+}
+
+
+// ---------------------------------------------------------------------------
+// VT-411 — ownership verification (Fazal's bar): after the entity verifies (gstin_verified), the
+// owner must prove they OWN the business — a DISTINCT OTP to the DISCOVERED PUBLIC business number
+// (NOT the personal WhatsApp the signup OTP already proved), with a DIN-verify offered alongside.
+// team-web PROXIES the orchestrator's internal-secret-gated endpoints; the browser NEVER sees
+// INTERNAL_API_SECRET and team-web NEVER calls the OTP/registry vendors directly. All three fns fail
+// CLOSED: a vendor/transport failure → {ok:false, reason} and NEVER fakes owner_channel_verified.
+//
+// CL-390: log path + status ONLY — never the public_phone / din / cin / reason / any body (those are
+// business identity, and an echoed body in Vercel logs is a CL-390 breach).
+// ---------------------------------------------------------------------------
+
+const _OWNERSHIP_OTP_TIMEOUT_MS = 15_000
+
+export interface OwnershipOtpStartResult {
+  /** True iff the orchestrator returned 2xx (an OTP was dispatched to the public number). */
+  ok: boolean
+  /** The vendor verification sid (opaque handle for the confirm leg). null on fail-closed. */
+  verificationSid: string | null
+  /** pending | http_<n> | timeout | error — render-only; never implies ownership is proven. */
+  status: string
+}
+
+/**
+ * VT-411 — start the ownership OTP: dispatch a DISTINCT code to the DISCOVERED PUBLIC business number
+ * (the GBP candidate's `phone`). The orchestrator holds the OTP vendor creds + sends; team-web NEVER
+ * calls the vendor directly. Fail-CLOSED on any non-2xx / throw — the owner can fall back to DIN. The
+ * code dispatch is NOT proof of ownership: only the confirm leg (owner_channel_verified) proves it.
+ */
+export async function startOwnershipOtp(
+  tenantId: string,
+  publicPhone: string,
+): Promise<OwnershipOtpStartResult> {
+  const base = process.env.TEAM_ORCHESTRATOR_URL ?? _ORCHESTRATOR_DEFAULT
+  const secret = process.env.INTERNAL_API_SECRET ?? ''
+  try {
+    const res = await fetch(`${base}/api/orchestrator/onboard/ownership/otp/start`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'X-Internal-Secret': secret },
+      body: JSON.stringify({ tenant_id: tenantId, public_phone: publicPhone }),
+      signal: AbortSignal.timeout(_OWNERSHIP_OTP_TIMEOUT_MS),
+    })
+    if (!res.ok) {
+      console.error(`ownership-otp-start: http_${res.status}; failing closed`) // CL-390: path + status only
+      return { ok: false, verificationSid: null, status: `http_${res.status}` }
+    }
+    const data = (await res.json()) as { verification_sid?: string | null; status?: string }
+    return {
+      ok: true,
+      verificationSid: data.verification_sid ?? null,
+      status: data.status ?? 'pending',
+    }
+  } catch (err) {
+    const timedOut = err instanceof Error && err.name === 'TimeoutError'
+    console.error(`ownership-otp-start: ${timedOut ? 'timeout' : 'error'}; failing closed`) // CL-390: no phone/body
+    return { ok: false, verificationSid: null, status: timedOut ? 'timeout' : 'error' }
+  }
+}
+
+export interface OwnershipVerifyResult {
+  /** True iff the orchestrator confirmed the owner controls the channel (owner_channel_verified). */
+  ok: boolean
+  /** The authoritative verification flag — the SOLE signal that ownership is proven. */
+  ownerChannelVerified: boolean
+  /** ok | invalid_code | http_<n> | timeout | error — render-only; never overrides ownerChannelVerified. */
+  reason: string
+}
+
+/**
+ * VT-411 — confirm the ownership OTP: the owner enters the code that landed on the public business
+ * number; the orchestrator verifies it against the vendor and flips owner_channel_verified. Fail-CLOSED
+ * on any non-2xx / throw → {ok:false, ownerChannelVerified:false} — a vendor failure NEVER fakes a
+ * proven owner. owner_channel_verified is the only thing that may render "ownership confirmed".
+ */
+export async function confirmOwnershipOtp(
+  tenantId: string,
+  publicPhone: string,
+  code: string,
+): Promise<OwnershipVerifyResult> {
+  const base = process.env.TEAM_ORCHESTRATOR_URL ?? _ORCHESTRATOR_DEFAULT
+  const secret = process.env.INTERNAL_API_SECRET ?? ''
+  try {
+    const res = await fetch(`${base}/api/orchestrator/onboard/ownership/otp/confirm`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'X-Internal-Secret': secret },
+      body: JSON.stringify({ tenant_id: tenantId, public_phone: publicPhone, code }),
+      signal: AbortSignal.timeout(_OWNERSHIP_OTP_TIMEOUT_MS),
+    })
+    if (!res.ok) {
+      console.error(`ownership-otp-confirm: http_${res.status}; failing closed`) // CL-390: path + status only
+      return { ok: false, ownerChannelVerified: false, reason: `http_${res.status}` }
+    }
+    const data = (await res.json()) as { owner_channel_verified?: boolean; reason?: string }
+    const verified = Boolean(data.owner_channel_verified)
+    return { ok: verified, ownerChannelVerified: verified, reason: data.reason ?? 'ok' }
+  } catch (err) {
+    const timedOut = err instanceof Error && err.name === 'TimeoutError'
+    console.error(`ownership-otp-confirm: ${timedOut ? 'timeout' : 'error'}; failing closed`) // CL-390: no code/body
+    return { ok: false, ownerChannelVerified: false, reason: timedOut ? 'timeout' : 'error' }
+  }
+}
+
+/**
+ * VT-411 — verify ownership via DIN (the alternative path). The owner asserts their Director
+ * Identification Number against the company's CIN; the orchestrator checks it against the registry and
+ * flips owner_channel_verified. Fail-CLOSED on any non-2xx / throw → {ok:false, ownerChannelVerified:
+ * false} — a registry failure NEVER fakes a proven owner. `reason` is a free-text owner-supplied note
+ * (e.g. "I'm a director, no public number") — forwarded for the orchestrator's audit, never logged.
+ */
+export async function verifyOwnerViaDin(
+  tenantId: string,
+  din: string,
+  cin: string,
+  reason: string,
+): Promise<OwnershipVerifyResult> {
+  const base = process.env.TEAM_ORCHESTRATOR_URL ?? _ORCHESTRATOR_DEFAULT
+  const secret = process.env.INTERNAL_API_SECRET ?? ''
+  try {
+    const res = await fetch(`${base}/api/orchestrator/onboard/ownership/din`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'X-Internal-Secret': secret },
+      body: JSON.stringify({ tenant_id: tenantId, din, cin, reason }),
+      signal: AbortSignal.timeout(_OWNERSHIP_OTP_TIMEOUT_MS),
+    })
+    if (!res.ok) {
+      console.error(`ownership-din: http_${res.status}; failing closed`) // CL-390: path + status only
+      return { ok: false, ownerChannelVerified: false, reason: `http_${res.status}` }
+    }
+    const data = (await res.json()) as { owner_channel_verified?: boolean; reason?: string }
+    const verified = Boolean(data.owner_channel_verified)
+    return { ok: verified, ownerChannelVerified: verified, reason: data.reason ?? 'ok' }
+  } catch (err) {
+    const timedOut = err instanceof Error && err.name === 'TimeoutError'
+    console.error(`ownership-din: ${timedOut ? 'timeout' : 'error'}; failing closed`) // CL-390: no din/cin/body
+    return { ok: false, ownerChannelVerified: false, reason: timedOut ? 'timeout' : 'error' }
   }
 }
 
