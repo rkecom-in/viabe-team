@@ -135,25 +135,9 @@ def business_name_matches(typed: str | None, registry: str | None) -> bool:
     return bool(tn) and bool(rn) and (tn in rn or rn in tn)
 
 
-def enrich_company_from_cin(
-    tenant_id: str, cin: str, *, reason: str, request_fn: Any = None
-) -> str | None:
-    """VT-449: fetch MCA Company Master Data by CIN → best-effort store (encrypted PII via mca_store) +
-    return the canonical company name for PROFILE ENRICHMENT. NOTE: the GST create-gate name-match anchor
-    stays the Sandbox ``verified_name`` (server-authoritative) — this MCA name is SUPPLEMENTARY enrichment,
-    NEVER a substitute for the verify gate. None on any vendor/parse failure (never raises)."""
-    from orchestrator.integrations.methods.mca import company_master_data
-
-    cmd = company_master_data((cin or "").strip(), reason=reason, request_fn=request_fn)
-    if not cmd.ok:
-        return None
-    try:
-        from orchestrator.onboarding.mca_store import store_company_master_data
-
-        store_company_master_data(tenant_id, cmd)
-    except Exception:  # noqa: BLE001 — enrichment store is best-effort, never blocks identify
-        logger.warning("entity_match: MCA company store failed (non-terminal)", exc_info=True)
-    return cmd.company_name
+# NOTE (VT-449 follow-up): the former enrich_company_from_cin helper was removed — run_signup does the MCA
+# fetch (company_master_data) + persist (store_company_master_data) inline (fetch pre-create for the
+# canonical name-match, store post-create with the real tenant_id), so the combined helper was dead.
 
 
 def _web_candidates(name: str, city: str, search_fn: SearchFn | None) -> list[EntityCandidate]:

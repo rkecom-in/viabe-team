@@ -11,13 +11,19 @@ from __future__ import annotations
 
 import hmac
 import os
+import re
 import time
 from typing import Any
 
 from fastapi import APIRouter, Header, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 router = APIRouter()
+
+# VT-449 follow-up: server-side CIN shape — U/L + 5-digit industry + 2-letter state + 4-digit year +
+# 3-letter type + 6-digit serial. Empty is allowed (cin is optional); a non-empty malformed value is
+# rejected (422) — the team-web caller sends an OWNER-CONFIRMED registry CIN, so a bad shape = tamper/bug.
+_CIN_RE = re.compile(r"^[UL]\d{5}[A-Z]{2}\d{4}[A-Z]{3}\d{6}$")
 
 
 def _verify_internal_secret(provided: str | None) -> bool:
@@ -61,6 +67,14 @@ class SignupBody(BaseModel):
     # Company Master Data → uses the AUTHORITATIVE canonical name for the GST name-match + persists the
     # (encrypted) tenant_mca_data. Optional; absent → the name-match anchors on the typed business_name.
     cin: str = Field(default="", max_length=21)
+
+    @field_validator("cin")
+    @classmethod
+    def _validate_cin_shape(cls, v: str) -> str:
+        v = (v or "").strip().upper()
+        if v and not _CIN_RE.match(v):
+            raise ValueError("malformed CIN")
+        return v
 
 
 @router.get("/api/signup/business-types")

@@ -630,3 +630,39 @@ def test_welcome_trial_end_derives_from_trial_yaml(pool):
         f"welcome trial_end must be trial_started_at + trial.yaml trial_days ({yaml_days})"
     )
     assert not hasattr(signup_mod, "_TRIAL_DAYS"), "the stale constant must be gone (grep-zero)"
+
+
+def test_signup_cin_shape_validation(pool, monkeypatch):
+    """VT-449 follow-up: SignupBody.cin is shape-validated at the HTTP boundary — a malformed non-empty
+    CIN → 422 (Pydantic, before the handler); empty or a valid CIN → accepted (201). Hardens the optional
+    MCA-enrich field. No SANDBOX creds in test → the MCA enrich fail-closes (no network); name-match falls
+    back to the typed name (which matches the mocked verified name) so a valid CIN still reaches 201."""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from orchestrator.api.signup import router
+    from orchestrator.integrations.methods import sandbox_kyc
+
+    monkeypatch.setenv("INTERNAL_API_SECRET", "vt326-test-secret")
+    hdr = {"X-Internal-Secret": "vt326-test-secret"}
+    monkeypatch.setattr(
+        sandbox_kyc, "search_gstin",
+        lambda g, **k: sandbox_kyc.GstinLookup(ok=True, legal_name="Asha Kirana", status="Active"),
+    )
+    app = FastAPI()
+    app.include_router(router)
+    client = TestClient(app)
+    base = {
+        "business_name": "Asha Kirana", "owner_name": "Asha Devi",
+        "preferred_language": "en", "city": "Mumbai", "business_type": "kirana",
+        "consent_dpdpa": True, "consent_residency": True, "gstin": "27AAKCR3738B1ZE",
+    }
+    # Malformed non-empty CIN → 422 at the validation layer.
+    assert client.post("/api/signup", json={**base, "whatsapp_number": _wa_91(), "cin": "NOTACIN123"},
+                       headers=hdr).status_code == 422
+    # Empty CIN → accepted (optional field).
+    assert client.post("/api/signup", json={**base, "whatsapp_number": _wa_91(), "cin": ""},
+                       headers=hdr).status_code == 201
+    # Valid CIN (lower-case → normalized) → accepted.
+    assert client.post("/api/signup", json={**base, "whatsapp_number": _wa_91(), "cin": "u52609mh2020opc344309"},
+                       headers=hdr).status_code == 201
