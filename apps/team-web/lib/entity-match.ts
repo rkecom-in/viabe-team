@@ -54,6 +54,9 @@ export interface VerifiedEntity {
   gstin: string
   /** The AUTHORITATIVE registry name (Sandbox), never the candidate's web/LLM trade name. */
   name: string | null
+  /** VT-411 — the DISCOVERED public business number from the picked candidate (GBP only; null
+   *  otherwise). The ownership step OTPs THIS number; null → the owner enters it on that step. */
+  phone?: string | null
 }
 
 /**

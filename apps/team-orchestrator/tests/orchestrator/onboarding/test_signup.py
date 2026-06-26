@@ -253,6 +253,36 @@ def test_run_signup_rejects_name_mismatch_unrelated_gstin(pool):
     assert ei.value.outcome == "invalid_gstin"  # generic reject — no enumeration oracle
 
 
+def test_run_signup_mca_enrich_canonical_name_match_and_persist(pool, monkeypatch):
+    """VT-449 WIRING: a signup with a CIN fetches MCA → the name-match uses the MCA CANONICAL name (so a
+    typed name that would FAIL still passes when the GSTIN matches the registry canonical) AND the MCA
+    company data is persisted (encrypted) post-create. Proves the enrich is on the critical path, not dormant."""
+    from orchestrator.integrations.methods import mca
+    from orchestrator.onboarding import mca_store
+    from orchestrator.onboarding.signup import run_signup
+
+    cmd = mca.CompanyMasterData(ok=True, cin="U52609MH2020OPC344309",
+                                company_name="RKECOM SERVICES OPC PRIVATE LIMITED")
+    monkeypatch.setattr(mca, "company_master_data", lambda _cin, *, reason, request_fn=None: cmd)
+    stored = {"n": 0}
+    monkeypatch.setattr(mca_store, "store_company_master_data", lambda _t, _c: stored.update(n=stored["n"] + 1))
+
+    def _active(_g):
+        from orchestrator.integrations.methods.sandbox_kyc import GstinLookup
+        return GstinLookup(ok=True, legal_name="RKECOM SERVICES OPC PRIVATE LIMITED", status="Active")
+
+    # Typed "My Shop" shares NO distinctive token with the GSTIN's verified name → would REJECT without
+    # MCA; the MCA canonical "RKECOM…" matches the verified name → the create SUCCEEDS, proving the
+    # MCA canonical anchor (not the typed name) gates the name-match.
+    out = run_signup(
+        _valid_input(business_name="My Shop", cin="U52609MH2020OPC344309"),
+        welcome_send_fn=lambda *a, **k: True,
+        verify_search_fn=_active,
+    )
+    assert out.tenant_id is not None
+    assert stored["n"] == 1  # MCA company data persisted post-create (enrich is wired, not dormant)
+
+
 def test_run_signup_discovery_kick_failure_non_blocking(pool, monkeypatch):
     """VT-366: a failing Auto-Discovery kick (post-commit, best-effort) must NEVER 500 the signup —
     the tenant is already committed; discovery is fire-and-forget."""

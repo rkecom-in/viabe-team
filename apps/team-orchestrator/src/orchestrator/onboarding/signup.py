@@ -30,6 +30,8 @@ logger = logging.getLogger(__name__)
 # (phonenumbers is not installed; a fuller-validation upgrade is a follow-up).
 _PHONE_RE = re.compile(r"^\+91[6-9]\d{9}$")
 _LANGUAGES = frozenset({"en", "hi"})
+# VT-449: the DPDP consent/purpose string (≥20 chars, required) on the MCA company lookup at signup.
+_MCA_SIGNUP_REASON = "Owner business identity verification during Viabe signup"
 
 # .../team-orchestrator/src/orchestrator/onboarding/signup.py → parents[3] = team-orchestrator
 # .../team-orchestrator/src/orchestrator/onboarding/signup.py → parents[3] = team-orchestrator
@@ -271,6 +273,10 @@ class SignupInput:
     # nothing). Defaults to '' so the field stays optional at the dataclass boundary, but
     # run_signup rejects an empty/unverified value (fail-closed).
     gstin: str = ""
+    # VT-449: the MCA CIN the owner picked/resolved (registry leg). When present, run_signup fetches
+    # MCA Company Master Data → uses the AUTHORITATIVE canonical name for the GST name-match (stronger
+    # than the client-typed business_name) + persists tenant_mca_data (encrypted) post-create. Optional.
+    cin: str = ""
 
 
 @dataclass(frozen=True)
@@ -387,10 +393,22 @@ def run_signup(
             retryable=verify.retryable,
             language=inp.preferred_language,
         )
+    # VT-449: when the owner resolved a CIN, fetch MCA Company Master Data → use its AUTHORITATIVE
+    # canonical name as the name-match anchor (registry-vs-registry — stronger than the client-typed
+    # name, and it closes the impersonation-weak client-name gap). Best-effort: a vendor miss falls back
+    # to the typed business_name (the VT-448 gate still holds). The MCA row is persisted post-create.
+    mca_cmd = None
+    if inp.cin.strip():
+        from orchestrator.integrations.methods.mca import company_master_data
+
+        mca_cmd = company_master_data(inp.cin, reason=_MCA_SIGNUP_REASON)
+    name_anchor = (
+        mca_cmd.company_name if (mca_cmd and mca_cmd.ok and mca_cmd.company_name) else inp.business_name
+    )
     # VT-448 NAME-MATCH SECURITY: a valid+active GSTIN earns a tenant ONLY if its authoritative registry
-    # name plausibly matches the owner's CLAIMED business name. An unrelated-but-valid GSTIN (a different
-    # business's registration) is REJECTED → the SAME generic invalid_gstin reject (no enumeration oracle).
-    if not business_name_matches(inp.business_name, verify.verified_name):
+    # name plausibly matches the (MCA-canonical or owner-claimed) name. An unrelated-but-valid GSTIN (a
+    # different business's registration) is REJECTED → the SAME generic invalid_gstin reject (no oracle).
+    if not business_name_matches(name_anchor, verify.verified_name):
         raise SignupGateError(outcome=INVALID_GSTIN, retryable=False, language=inp.preferred_language)
 
     now = (now_fn or _utcnow)()
@@ -424,6 +442,16 @@ def run_signup(
             persist_entity_anchor(res.tenant_id, gstin=verify.gstin, verified_name=verify.verified_name)
         except Exception:  # noqa: BLE001 — anchor is best-effort; never fail a committed signup
             logger.exception("signup: entity anchor persist failed tenant=%s (non-terminal)", res.tenant_id)
+
+    # VT-449: persist the MCA company data (encrypted PII via mca_store) on the new tenant — best-effort,
+    # non-terminal, like the anchor + the kicks below. Counts-only logging; no PII reaches a log line.
+    if mca_cmd and mca_cmd.ok:
+        try:
+            from orchestrator.onboarding.mca_store import store_company_master_data
+
+            store_company_master_data(res.tenant_id, mca_cmd)
+        except Exception:  # noqa: BLE001 — MCA store is best-effort; never fail a committed signup
+            logger.exception("signup: MCA company store failed tenant=%s (non-terminal)", res.tenant_id)
 
     # Welcome send: GUARDED + non-terminal. The tenant is already committed; a send (or the
     # trial.yaml read) failure must NOT 500 the signup — log + report welcome_sent=False.
