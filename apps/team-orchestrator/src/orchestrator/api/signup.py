@@ -57,6 +57,10 @@ class SignupBody(BaseModel):
     # form (VT-406) collects it as a gating sub-step. Optional at the schema boundary; an
     # empty/unverified value is a hard reject in run_signup's gate (no GST => nothing).
     gstin: str = Field(default="", max_length=20)
+    # VT-449: the MCA CIN the owner picked/confirmed (registry leg). When present, run_signup fetches MCA
+    # Company Master Data → uses the AUTHORITATIVE canonical name for the GST name-match + persists the
+    # (encrypted) tenant_mca_data. Optional; absent → the name-match anchors on the typed business_name.
+    cin: str = Field(default="", max_length=21)
 
 
 @router.get("/api/signup/business-types")
