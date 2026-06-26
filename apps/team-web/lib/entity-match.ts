@@ -57,6 +57,10 @@ export interface VerifiedEntity {
   /** VT-411 — the DISCOVERED public business number from the picked candidate (GBP only; null
    *  otherwise). The ownership step OTPs THIS number; null → the owner enters it on that step. */
   phone?: string | null
+  /** VT-449 — the owner-CONFIRMED registry CIN (a public registry id, not personal PII). Empty/absent
+   *  unless the owner confirmed a discovered registry candidate; rides into the create payload for the
+   *  orchestrator's MCA-canonical name-match. NEVER carries a SERP-scraped CIN the owner didn't confirm. */
+  cin?: string
 }
 
 /**
@@ -154,6 +158,30 @@ export function canCreateAccount(verified: VerifiedEntity | null): boolean {
  *  one-tap confirmed — but the owner can still verify it by entering their GSTIN (VT-448 manual path). */
 export function isConfirmable(c: EntityCandidate): boolean {
   return Boolean(c.candidate_gstin && c.candidate_gstin.trim())
+}
+
+/** One discovered REGISTRY candidate (source==='registry') surfaced for the owner to CONFIRM is theirs. */
+export interface CinCandidate {
+  cin: string
+  /** The registry trade/company name for the confirm copy ("…we also found [tradeName]…"). */
+  tradeName: string | null
+}
+
+/**
+ * VT-449 — find the FIRST registry candidate that carries a CIN (the orchestrator already de-dups +
+ * orders the list, so the first registry hit is the surfaced one). Returns null when discovery
+ * surfaced no registry CIN — the owner is then never shown a CIN-confirm affordance, and create sends
+ * `cin: ''` (the name-match falls back to the typed business_name). Pure so the component + test agree.
+ * NOTE: this only SURFACES a candidate — the owner must explicitly confirm before any CIN is captured.
+ */
+export function findCinCandidate(candidates: EntityCandidate[]): CinCandidate | null {
+  for (const c of candidates) {
+    const cin = (c.candidate_cin ?? '').trim()
+    if (c.source === 'registry' && cin) {
+      return { cin, tradeName: c.trade_name }
+    }
+  }
+  return null
 }
 
 /**

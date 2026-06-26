@@ -53,6 +53,17 @@ describe('VT-96 verifyOtpAndCreate', () => {
     expect(await verifyOtpAndCreate(payload, '123456', f)).toEqual({ ok: true, tenantId: null })
   })
 
+  it('VT-449 — the create POST carries extra payload fields (confirmed cin) verbatim', async () => {
+    const withCin = { ...payload, verified_gstin: '29ABCDE1234F1Z5', cin: 'U22210KA1995PLC012345' }
+    const f = vi
+      .fn()
+      .mockResolvedValueOnce(resp(200, { token: 'tok' }))
+      .mockResolvedValueOnce(resp(201, { tenant_id: 'ten_1' }))
+    await verifyOtpAndCreate(withCin, '123456', f)
+    const [, init] = f.mock.calls[1] as [string, RequestInit]
+    expect(JSON.parse(init.body as string).cin).toBe('U22210KA1995PLC012345')
+  })
+
   it('verify 429 → rate_limited, NO signup call', async () => {
     const f = vi.fn().mockResolvedValueOnce(resp(429))
     expect(await verifyOtpAndCreate(payload, '000000', f)).toEqual({

@@ -23,9 +23,11 @@ import {
   confirmCandidate,
   fetchCandidates,
   fetchGstinsByPan,
+  findCinCandidate,
   isConfirmable,
   isValidGstinFormat,
   isValidPanFormat,
+  type CinCandidate,
   type EntityCandidate,
   type VerifiedEntity,
   type WizardStep,
@@ -48,6 +50,8 @@ type EmMsgKey =
   | 'pan_identify' | 'pan_identifying' | 'pan_format_error' | 'pan_state_error'
   | 'pan_back' | 'pan_pick_heading' | 'pan_pick_hint' | 'pan_pick_this'
   | 'pan_pick_empty' | 'pan_no_pan'
+  // VT-449 registry-CIN confirm keys
+  | 'cin_heading' | 'cin_prefix' | 'cin_label' | 'cin_confirm' | 'cin_dismiss' | 'cin_confirmed'
 
 const EM_MESSAGES: Record<Lang, Record<EmMsgKey, string>> = {
   en: {
@@ -100,6 +104,14 @@ const EM_MESSAGES: Record<Lang, Record<EmMsgKey, string>> = {
     pan_pick_this: 'This is mine',
     pan_pick_empty: 'We couldn’t find a GST registration for that PAN — you can enter your GST number instead.',
     pan_no_pan: 'Don’t have your PAN? Enter your GST number',
+    // VT-449 — registry-CIN confirm. Surfaced on the verified screen when discovery found a company
+    // registration. The owner CONFIRMS it's theirs (never auto-captured) → it rides into create.
+    cin_heading: 'We also found your company registration',
+    cin_prefix: 'Is this your company?',
+    cin_label: 'CIN',
+    cin_confirm: 'Yes, that’s my company',
+    cin_dismiss: 'Not mine',
+    cin_confirmed: 'Company registration confirmed.',
   },
   hi: {
     heading: 'अपना व्यवसाय पुष्टि करें',
@@ -150,6 +162,13 @@ const EM_MESSAGES: Record<Lang, Record<EmMsgKey, string>> = {
     pan_pick_this: 'यह मेरा है',
     pan_pick_empty: 'हमें उस PAN के लिए कोई GST पंजीकरण नहीं मिला — आप इसके बजाय अपना GST नंबर दर्ज कर सकते हैं।',
     pan_no_pan: 'PAN नहीं है? अपना GST नंबर दर्ज करें',
+    // VT-449 — रजिस्ट्री-CIN पुष्टि। स्वामी पुष्टि करते हैं कि यह उनका है (कभी स्वतः नहीं) → यह create में जाता है।
+    cin_heading: 'हमें आपकी कंपनी का पंजीकरण भी मिला',
+    cin_prefix: 'क्या यह आपकी कंपनी है?',
+    cin_label: 'CIN',
+    cin_confirm: 'हाँ, यह मेरी कंपनी है',
+    cin_dismiss: 'मेरी नहीं',
+    cin_confirmed: 'कंपनी पंजीकरण की पुष्टि हुई।',
   },
 }
 
@@ -181,6 +200,13 @@ export function EntityMatchStep({
   const [panError, setPanError] = useState<'format' | 'state' | null>(null) // inline PAN/state error
   const [panLoading, setPanLoading] = useState(false) // PAN→GSTIN lookup in flight
   const [panGstins, setPanGstins] = useState<string[]>([]) // the IDENTIFIED GSTIN(s) for pan_pick
+  // VT-449 — the discovered registry CIN candidate (from the fetched candidates) + the owner's
+  // confirm/dismiss decision. `cinCandidate` is null when discovery found no registry CIN (no
+  // affordance shown). `cinConfirmed` flips only on an explicit owner confirm — NEVER auto-captured;
+  // `cinDismissed` hides the affordance when the owner says "not mine".
+  const [cinCandidate, setCinCandidate] = useState<CinCandidate | null>(null)
+  const [cinConfirmed, setCinConfirmed] = useState<string>('') // the CONFIRMED CIN ('' until confirmed)
+  const [cinDismissed, setCinDismissed] = useState(false)
   // The state code derived from the city prop (null when we don't know the city → owner hint needed).
   const derivedStateCode = cityToStateCode(city)
 
@@ -193,6 +219,9 @@ export function EntityMatchStep({
     fetchCandidates(businessName, city).then((r) => {
       if (cancelled) return
       setCandidates(r.candidates)
+      // VT-449: capture any discovered registry CIN candidate now (surfaced for owner confirm on the
+      // verified screen). null when discovery found none → no CIN affordance, create sends cin: ''.
+      setCinCandidate(findCinCandidate(r.candidates))
       setStep('picking')
     })
     return () => {
@@ -332,11 +361,56 @@ export function EntityMatchStep({
           {verified.name ?? businessName}
         </p>
         <p className="mt-2 text-sm leading-relaxed text-gray-600">{t.verified_note}</p>
+        {/* VT-449 — registry-CIN confirm. Shown ONLY when discovery surfaced a registry CIN and the
+            owner hasn't dismissed it. The owner must CONFIRM it's theirs — we NEVER auto-capture a
+            SERP-scraped CIN. On confirm, the CIN rides into create for the MCA-canonical name-match;
+            on dismiss (or if none surfaced), create sends cin: '' (name-match falls back to the
+            typed business_name). */}
+        {cinCandidate && !cinDismissed && (
+          <div data-cin-affordance className="mt-4 rounded-xl border border-gray-200 bg-gray-50 p-4">
+            <p className="text-sm font-medium text-gray-900">{t.cin_heading}</p>
+            {cinCandidate.tradeName && (
+              <p className="mt-1 text-sm text-gray-700">{cinCandidate.tradeName}</p>
+            )}
+            <p className="mt-1 text-xs text-gray-500">
+              {t.cin_label} <span data-cin-value className="font-mono tracking-wide text-gray-700">{cinCandidate.cin}</span>
+            </p>
+            {cinConfirmed ? (
+              <p data-cin-confirmed className="mt-2 text-sm font-medium text-emerald-700">
+                {t.cin_confirmed}
+              </p>
+            ) : (
+              <>
+                <p className="mt-2 text-sm text-gray-600">{t.cin_prefix}</p>
+                <div className="mt-3 flex flex-wrap items-center gap-3">
+                  <button
+                    type="button"
+                    data-cin-confirm
+                    onClick={() => setCinConfirmed(cinCandidate.cin)}
+                    className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-emerald-700"
+                  >
+                    {t.cin_confirm}
+                  </button>
+                  <button
+                    type="button"
+                    data-cin-dismiss
+                    onClick={() => setCinDismissed(true)}
+                    className="rounded-lg border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 transition hover:bg-gray-100"
+                  >
+                    {t.cin_dismiss}
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+        )}
         <button
           type="button"
           data-entity-continue
           disabled={!canCreateAccount(verified)}
-          onClick={() => onVerified(verified)}
+          // VT-449: thread the owner-CONFIRMED CIN (or '' when none confirmed/dismissed) into the
+          // verified entity — the create payload sends `cin`. A SERP-scraped CIN never rides unconfirmed.
+          onClick={() => onVerified({ ...verified, cin: cinConfirmed })}
           className="mt-5 rounded-xl bg-emerald-600 px-5 py-3 font-semibold text-white shadow-sm transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50"
         >
           {t.continue}
@@ -577,17 +651,21 @@ export function EntityMatchStep({
   }
 
   // step === 'picking'
+  // VT-449: registry (CIN-only) candidates are NOT GST-verify picks — they're surfaced as the
+  // CIN-confirm affordance on the verified screen. Show only web/GBP rows in the pick list (a
+  // registry row has no GSTIN and would otherwise render a confusing "no GST number" line here).
+  const pickable = candidates.filter((c) => c.source !== 'registry')
   return (
     <section data-entity-step="picking" className={`mt-8 ${card}`}>
       <h2 className="text-lg font-semibold text-gray-900">{t.heading}</h2>
       <p className="mt-1 text-sm leading-relaxed text-gray-600">{t.subhead}</p>
-      {candidates.length === 0 ? (
+      {pickable.length === 0 ? (
         <p data-entity-empty className="mt-4 text-sm leading-relaxed text-gray-600">
           {t.empty_candidates}
         </p>
       ) : (
         <ul className="mt-4 flex flex-col gap-3">
-          {candidates.map((c, i) => {
+          {pickable.map((c, i) => {
             const confirmable = isConfirmable(c)
             const display = c.trade_name || c.legal_name || businessName
             return (

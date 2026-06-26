@@ -192,10 +192,14 @@ const _ENTITY_CONFIRM_TIMEOUT_MS = 15_000
  *  candidates (address/category). */
 export interface EntityCandidate {
   trade_name: string | null
-  source: 'web' | 'gbp'
+  source: 'web' | 'gbp' | 'registry'
   candidate_gstin: string | null
   legal_name: string | null
   detail: string | null
+  /** VT-449 — a discovered REGISTRY CIN (source==='registry' candidates only; null otherwise). A
+   *  public registry id, NOT verified: the owner CONFIRMS it's theirs, then it rides into the create
+   *  payload for the orchestrator's MCA-canonical name-match. NEVER auto-sent without confirmation. */
+  candidate_cin?: string | null
   /** VT-411 — the discovered PUBLIC business number (GBP candidates only; null otherwise). It is the
    *  ownership-verification target: a DISTINCT OTP is sent here to prove the owner controls the public
    *  business channel. NEVER rendered as verified — it's a discovered public listing value. */

@@ -212,12 +212,16 @@ export function SignupForm() {
     try {
       // Carry the verified entity into the create payload so the orchestrator anchors discovery to
       // the CONFIRMED entity (gstin + authoritative name), not the owner-typed name (VT-406 fix).
+      // VT-449: thread the owner-CONFIRMED registry CIN ('' when none confirmed) — the orchestrator's
+      // SignupBody.cin drives the MCA-canonical name-match + persists tenant_mca_data; '' falls back
+      // to the typed business_name (existing behavior). CIN is a public registry id (CL-390-safe).
       const r = await verifyOtpAndCreate(
         {
           ...form,
           preferred_language: lang,
           verified_gstin: verifiedEntity.gstin,
           verified_name: verifiedEntity.name,
+          cin: verifiedEntity.cin ?? '',
         },
         otpCode.trim(),
       )
