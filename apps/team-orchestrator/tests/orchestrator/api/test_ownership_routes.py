@@ -27,6 +27,7 @@ def client(monkeypatch):
     from orchestrator.api.ownership import router
 
     monkeypatch.setenv("INTERNAL_API_SECRET", _SECRET)
+    monkeypatch.setenv("ENABLE_SANDBOX_MCA", "true")  # DIN-KYC route is parked OFF by default; ON for these
     app = FastAPI()
     app.include_router(router)
     return TestClient(app)
@@ -167,3 +168,22 @@ def test_din_missing_reason_422(client):
         headers=_HDR,
     )
     assert r.status_code == 422
+
+
+def test_din_disabled_when_mca_flag_off(client, monkeypatch):
+    """VT-411 PARK: with ENABLE_SANDBOX_MCA OFF (default), the DIN-KYC route returns disabled WITHOUT
+    invoking verify_owner_via_din — ownership rides the public-number OTP only."""
+    monkeypatch.delenv("ENABLE_SANDBOX_MCA", raising=False)
+    monkeypatch.setattr(
+        "orchestrator.onboarding.ownership.verify_owner_via_din",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("DIN-KYC must not fire when parked")),
+    )
+    r = client.post(
+        "/api/orchestrator/onboard/ownership/din",
+        json={"tenant_id": "t1", "din": "00000001", "cin": "U52609MH2020OPC344309",
+              "reason": "owner KYC ownership director verification"},
+        headers=_HDR,
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["owner_channel_verified"] is False and body.get("disabled") is True

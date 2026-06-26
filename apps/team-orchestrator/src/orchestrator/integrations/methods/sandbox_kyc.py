@@ -42,7 +42,9 @@ _SEARCH_PATH = "/gst/compliance/public/gstin/search"
 _PAN_SEARCH_PATH = "/gst/compliance/public/pan/search"
 _PAN_FMT = re.compile(r"^[A-Z]{5}\d{4}[A-Z]$")
 _GSTIN_FMT = re.compile(r"\b\d{2}[A-Z]{5}\d{4}[A-Z][A-Z0-9]Z[A-Z0-9]\b")
-_TIMEOUT_S = 20.0
+# Fazal 2026-06-27: Sandbox GST works but is HIGH-LATENCY → 45s so a slow-but-eventual 200 isn't
+# false-failed into a vendor_down HOLD. (A 504 is the gateway's own timeout, not this.)
+_TIMEOUT_S = 45.0
 _TOKEN_TTL_S = 23 * 3600  # re-auth before the documented ~24h validity lapses
 
 # In-process token cache (single secret pair). time.time() is fine in orchestrator runtime (the

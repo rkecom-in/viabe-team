@@ -78,9 +78,11 @@ def verify_gstin_for_signup(gstin: str, *, search_fn: SearchFn | None = None) ->
         return SignupVerifyResult(ok=False, outcome=INVALID_GSTIN, retryable=False)
 
     if search_fn is None:
-        from orchestrator.integrations.methods import sandbox_kyc
+        # Provider seam (Fazal 2026-06-27): resolve the GST verifier via the adapter module, so the
+        # planned Sandbox→reliable-provider swap is a gst_verifier change, not a signup-path edit.
+        from orchestrator.onboarding.gst_verifier import default_gst_verifier
 
-        search_fn = sandbox_kyc.search_gstin
+        search_fn = default_gst_verifier()
 
     result = search_fn(gstin)
 
