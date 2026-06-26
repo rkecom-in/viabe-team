@@ -24,6 +24,7 @@ import {
   confirmCandidate,
   fetchCandidates,
   fetchGstinsByPan,
+  findCinCandidate,
   isConfirmable,
   isValidGstinFormat,
   isValidPanFormat,
@@ -289,5 +290,45 @@ describe('VT-448 cityToStateCode', () => {
   it('returns null for an unknown city (component asks for a state hint, never guesses)', () => {
     expect(cityToStateCode('Atlantis')).toBeNull()
     expect(cityToStateCode('')).toBeNull()
+  })
+})
+
+describe('VT-449 findCinCandidate', () => {
+  const REGISTRY: EntityCandidate = {
+    trade_name: 'Sundaram Multi Pap Limited',
+    source: 'registry',
+    candidate_gstin: null,
+    legal_name: null,
+    detail: null,
+    candidate_cin: 'U22210KA1995PLC012345',
+  }
+
+  it('surfaces the first registry candidate with a CIN', () => {
+    expect(findCinCandidate([WEB_CANDIDATE, GBP_CANDIDATE, REGISTRY])).toEqual({
+      cin: 'U22210KA1995PLC012345',
+      tradeName: 'Sundaram Multi Pap Limited',
+    })
+  })
+
+  it('returns null when no registry candidate is present (create then sends cin: \'\')', () => {
+    expect(findCinCandidate([WEB_CANDIDATE, GBP_CANDIDATE])).toBeNull()
+    expect(findCinCandidate([])).toBeNull()
+  })
+
+  it('ignores a registry candidate with an empty/missing CIN (never surfaces a blank confirm)', () => {
+    const noCin: EntityCandidate = { ...REGISTRY, candidate_cin: '   ' }
+    const undefCin: EntityCandidate = { ...REGISTRY, candidate_cin: undefined }
+    expect(findCinCandidate([noCin, undefCin])).toBeNull()
+  })
+
+  it('does NOT treat a web/gbp candidate as a CIN source even if it carried a candidate_cin', () => {
+    // Defence-in-depth: only source==='registry' surfaces a CIN-confirm (no SERP web row mislabeled).
+    const webWithCin: EntityCandidate = { ...WEB_CANDIDATE, candidate_cin: 'U99999XX0000ZZZ999999' }
+    expect(findCinCandidate([webWithCin])).toBeNull()
+  })
+
+  it('trims the surfaced CIN', () => {
+    const padded: EntityCandidate = { ...REGISTRY, candidate_cin: '  U22210KA1995PLC012345  ' }
+    expect(findCinCandidate([padded])?.cin).toBe('U22210KA1995PLC012345')
   })
 })
