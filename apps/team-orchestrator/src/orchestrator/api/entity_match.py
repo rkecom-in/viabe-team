@@ -91,6 +91,12 @@ def gstins_by_pan(
     the picked one + name-matches). Fail-closed to an empty list — never stalls signup."""
     if not _verify_internal_secret(x_internal_secret):
         raise HTTPException(status_code=403, detail={"code": "forbidden"})
+    # VT-448 PARKED (Fazal 2026-06-27): PAN→GSTIN is gated OFF (Sandbox PAN gov backend 504s) — the owner
+    # enters the GSTIN manually. Return disabled (not an error) so team-web degrades to the manual path.
+    from orchestrator.feature_flags import pan_identify_enabled
+
+    if not pan_identify_enabled():
+        return {"ok": False, "gstins": [], "disabled": True}
     if not body.pan.strip() or not body.state_code.strip():
         raise HTTPException(status_code=422, detail={"code": "pan_and_state_required"})
 

@@ -398,7 +398,12 @@ def run_signup(
     # name, and it closes the impersonation-weak client-name gap). Best-effort: a vendor miss falls back
     # to the typed business_name (the VT-448 gate still holds). The MCA row is persisted post-create.
     mca_cmd = None
-    if inp.cin.strip():
+    # VT-449 PARKED (Fazal 2026-06-27): Sandbox MCA is unreliable (gov 504s) → gated OFF by default. When
+    # off, NO company_master_data call fires; the name-match anchors on the confirmed business_name. Flip
+    # ENABLE_SANDBOX_MCA on when a reliable provider lands (revertible — the code stays).
+    from orchestrator.feature_flags import sandbox_mca_enabled
+
+    if inp.cin.strip() and sandbox_mca_enabled():
         from orchestrator.integrations.methods.mca import company_master_data
 
         mca_cmd = company_master_data(inp.cin, reason=_MCA_SIGNUP_REASON)

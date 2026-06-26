@@ -257,6 +257,7 @@ def test_run_signup_mca_enrich_canonical_name_match_and_persist(pool, monkeypatc
     """VT-449 WIRING: a signup with a CIN fetches MCA → the name-match uses the MCA CANONICAL name (so a
     typed name that would FAIL still passes when the GSTIN matches the registry canonical) AND the MCA
     company data is persisted (encrypted) post-create. Proves the enrich is on the critical path, not dormant."""
+    monkeypatch.setenv("ENABLE_SANDBOX_MCA", "true")  # the ENABLED path (MCA parked OFF by default now)
     from orchestrator.integrations.methods import mca
     from orchestrator.onboarding import mca_store
     from orchestrator.onboarding.signup import run_signup
@@ -281,6 +282,32 @@ def test_run_signup_mca_enrich_canonical_name_match_and_persist(pool, monkeypatc
     )
     assert out.tenant_id is not None
     assert stored["n"] == 1  # MCA company data persisted post-create (enrich is wired, not dormant)
+
+
+def test_run_signup_parked_mca_makes_zero_calls_when_flag_off(pool, monkeypatch):
+    """VT-449 PARK (Fazal 2026-06-27): with ENABLE_SANDBOX_MCA OFF (default), a signup carrying a CIN makes
+    ZERO MCA calls — company_master_data is never invoked, the name-match falls back to the typed name, and
+    the tenant is still created (gstin_verified). The clean parked-flow guarantee."""
+    monkeypatch.delenv("ENABLE_SANDBOX_MCA", raising=False)  # default OFF
+    from orchestrator.integrations.methods import mca
+    from orchestrator.onboarding.signup import run_signup
+
+    def _must_not_call(*_a, **_k):
+        raise AssertionError("MCA company_master_data must NOT be called when parked (flag off)")
+
+    monkeypatch.setattr(mca, "company_master_data", _must_not_call)
+
+    def _active(_g):
+        from orchestrator.integrations.methods.sandbox_kyc import GstinLookup
+        return GstinLookup(ok=True, legal_name="Asha Kirana", status="Active")
+
+    # CIN supplied, but parked → no MCA call; the name-match anchors on the typed "Asha Kirana".
+    out = run_signup(
+        _valid_input(business_name="Asha Kirana", cin="U52609MH2020OPC344309"),
+        welcome_send_fn=lambda *a, **k: True,
+        verify_search_fn=_active,
+    )
+    assert out.tenant_id is not None  # tenant created via GST-verify alone, zero MCA calls
 
 
 def test_run_signup_discovery_kick_failure_non_blocking(pool, monkeypatch):

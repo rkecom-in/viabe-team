@@ -92,6 +92,12 @@ def ownership_din(
     purpose-of-access string and MUST be >= 20 chars."""
     if not _verify_internal_secret(x_internal_secret):
         raise HTTPException(status_code=403, detail={"code": "forbidden"})
+    # VT-411 DIN-KYC PARKED with MCA (Fazal 2026-06-27): off by default (Sandbox MCA gov 504s) — ownership
+    # rides the public-number OTP only. Return disabled (not an error) so team-web hides the DIN affordance.
+    from orchestrator.feature_flags import sandbox_mca_enabled
+
+    if not sandbox_mca_enabled():
+        return {"owner_channel_verified": False, "disabled": True}
     if len(body.reason.strip()) < 20:
         raise HTTPException(status_code=422, detail={"code": "reason_too_short"})
 

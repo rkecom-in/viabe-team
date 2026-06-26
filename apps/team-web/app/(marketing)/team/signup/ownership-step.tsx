@@ -29,6 +29,10 @@ import {
   startOwnershipOtp,
   verifyOwnerViaDin,
 } from '@/lib/ownership-verify'
+// VT-448 — the "verify with your DIN instead" affordance is PARKED behind DIN_KYC_ENABLED (default
+// OFF, Fazal 2026-06-26: Sandbox MCA/DIN is gov-unreliable). With it OFF, ownership is public-number
+// OTP ONLY (Twilio, reliable). The DIN screen + verify path stay intact behind the flag.
+import { DIN_KYC_ENABLED } from '@/lib/feature-flags'
 
 type Lang = 'en' | 'hi'
 
@@ -285,9 +289,12 @@ export function OwnershipStep({
           >
             {busy ? t.sending : t.try_again}
           </button>
-          <button type="button" data-ownership-din-from-error disabled={busy} onClick={openDin} className={ghostBtn}>
-            {t.din_cta}
-          </button>
+          {/* VT-448: DIN parked behind DIN_KYC_ENABLED (default OFF) — OTP-only ownership. */}
+          {DIN_KYC_ENABLED && (
+            <button type="button" data-ownership-din-from-error disabled={busy} onClick={openDin} className={ghostBtn}>
+              {t.din_cta}
+            </button>
+          )}
         </div>
       </section>
     )
@@ -405,15 +412,18 @@ export function OwnershipStep({
             {t.resend}
           </button>
         </div>
-        <button
-          type="button"
-          data-ownership-din-from-code
-          disabled={busy}
-          onClick={openDin}
-          className={`mt-4 ${linkBtn}`}
-        >
-          {t.din_cta}
-        </button>
+        {/* VT-448: DIN parked behind DIN_KYC_ENABLED (default OFF) — OTP-only ownership. */}
+        {DIN_KYC_ENABLED && (
+          <button
+            type="button"
+            data-ownership-din-from-code
+            disabled={busy}
+            onClick={openDin}
+            className={`mt-4 ${linkBtn}`}
+          >
+            {t.din_cta}
+          </button>
+        )}
       </section>
     )
   }
@@ -463,10 +473,14 @@ export function OwnershipStep({
           {busy ? t.sending : t.send_code}
         </button>
       </div>
-      {/* DIN is offered alongside the OTP (Fazal's bar) — a director / company without a public number. */}
-      <button type="button" data-ownership-din-cta disabled={busy} onClick={openDin} className={`mt-4 ${linkBtn}`}>
-        {t.din_cta}
-      </button>
+      {/* DIN is offered alongside the OTP (Fazal's bar) — a director / company without a public number.
+          VT-448: PARKED behind DIN_KYC_ENABLED (default OFF, Sandbox MCA/DIN unreliable) — when OFF,
+          ownership is public-number OTP ONLY (Twilio). The DIN screen + verify path stay behind the flag. */}
+      {DIN_KYC_ENABLED && (
+        <button type="button" data-ownership-din-cta disabled={busy} onClick={openDin} className={`mt-4 ${linkBtn}`}>
+          {t.din_cta}
+        </button>
+      )}
     </section>
   )
 }

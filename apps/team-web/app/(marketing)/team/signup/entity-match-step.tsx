@@ -32,6 +32,11 @@ import {
   type VerifiedEntity,
   type WizardStep,
 } from '@/lib/entity-match'
+// VT-448 — PAN identify + the registry-CIN confirm are PARKED behind PAN_IDENTIFY_ENABLED (default
+// OFF, Fazal 2026-06-26: Sandbox MCA/PAN are gov-unreliable). With it OFF, MANUAL GSTIN entry is the
+// primary identify and the CIN-confirm affordance is not surfaced. The PAN/CIN code stays intact
+// behind the flag — flip it back ON when a reliable provider lands.
+import { PAN_IDENTIFY_ENABLED, primaryIdentifyStep } from '@/lib/feature-flags'
 
 type Lang = 'en' | 'hi'
 
@@ -221,7 +226,9 @@ export function EntityMatchStep({
       setCandidates(r.candidates)
       // VT-449: capture any discovered registry CIN candidate now (surfaced for owner confirm on the
       // verified screen). null when discovery found none → no CIN affordance, create sends cin: ''.
-      setCinCandidate(findCinCandidate(r.candidates))
+      // VT-448: when PAN identify is OFF (default) the MCA enrich is parked too — never surface the
+      // CIN-confirm affordance, so create always sends cin: '' (the orchestrator's MCA enrich is off).
+      setCinCandidate(PAN_IDENTIFY_ENABLED ? findCinCandidate(r.candidates) : null)
       setStep('picking')
     })
     return () => {
@@ -287,6 +294,15 @@ export function EntityMatchStep({
 
   function retry() {
     setStep('picking')
+  }
+
+  // VT-448 — the PRIMARY identify entry, gated by PAN_IDENTIFY_ENABLED via primaryIdentifyStep:
+  // PAN-entry when PAN identify is ON, MANUAL GSTIN entry when OFF (default). Both the picking-screen
+  // primary CTA and any "not listed" path route through this single decision point so the flag has
+  // exactly one effect on the primary path.
+  function openPrimaryIdentify() {
+    if (primaryIdentifyStep() === 'pan_entry') openPanEntry()
+    else openManual()
   }
 
   // VT-448 PRIMARY identify — open the PAN-entry screen. Seed the state code from the city (so the
@@ -705,28 +721,46 @@ export function EntityMatchStep({
           })}
         </ul>
       )}
-      {/* VT-448: identify-and-confirm. PRIMARY = find-my-GST-with-PAN (owner enters their PAN, we
-          identify the GSTIN(s) → pick → verify). FALLBACK = enter the 15-char GSTIN directly. Both
-          are offered here; "not listed / found-but-no-GSTIN" is never a dead end. */}
+      {/* VT-448: identify-and-confirm. With PAN identify ON, PRIMARY = find-my-GST-with-PAN (owner
+          enters their PAN, we identify the GSTIN(s) → pick → verify) + a manual-GSTIN fallback.
+          With PAN identify OFF (default, Fazal 2026-06-26 — Sandbox MCA/PAN unreliable), the PAN
+          path is not offered at all and MANUAL GSTIN entry is the PRIMARY identify (emerald CTA).
+          "not listed / found-but-no-GSTIN" is never a dead end either way. */}
       <div className="mt-5 flex flex-wrap items-center gap-3">
-        <button
-          type="button"
-          data-entity-pan
-          disabled={confirming !== null}
-          onClick={openPanEntry}
-          className="rounded-xl bg-emerald-600 px-5 py-3 font-semibold text-white shadow-sm transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50"
-        >
-          {t.pan_cta}
-        </button>
-        <button
-          type="button"
-          data-entity-manual
-          disabled={confirming !== null}
-          onClick={openManual}
-          className="rounded-xl border border-gray-300 px-5 py-2.5 font-medium text-gray-700 transition hover:bg-gray-50 disabled:opacity-50"
-        >
-          {t.manual_with_gstin}
-        </button>
+        {PAN_IDENTIFY_ENABLED ? (
+          <>
+            <button
+              type="button"
+              data-entity-pan
+              disabled={confirming !== null}
+              onClick={openPrimaryIdentify}
+              className="rounded-xl bg-emerald-600 px-5 py-3 font-semibold text-white shadow-sm transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {t.pan_cta}
+            </button>
+            <button
+              type="button"
+              data-entity-manual
+              disabled={confirming !== null}
+              onClick={openManual}
+              className="rounded-xl border border-gray-300 px-5 py-2.5 font-medium text-gray-700 transition hover:bg-gray-50 disabled:opacity-50"
+            >
+              {t.manual_with_gstin}
+            </button>
+          </>
+        ) : (
+          // PAN identify OFF — manual GSTIN entry is the PRIMARY identify (no PAN affordance shown).
+          // Routed through openPrimaryIdentify (→ manual via primaryIdentifyStep) — the single gate.
+          <button
+            type="button"
+            data-entity-manual
+            disabled={confirming !== null}
+            onClick={openPrimaryIdentify}
+            className="rounded-xl bg-emerald-600 px-5 py-3 font-semibold text-white shadow-sm transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {t.manual_with_gstin}
+          </button>
+        )}
       </div>
     </section>
   )
