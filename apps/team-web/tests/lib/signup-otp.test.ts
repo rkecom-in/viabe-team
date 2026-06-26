@@ -37,12 +37,20 @@ describe('VT-96 verifyOtpAndCreate', () => {
     const f = vi
       .fn()
       .mockResolvedValueOnce(resp(200, { token: 'tok_abc' })) // verify-otp-for-signup
-      .mockResolvedValueOnce(resp(201)) // signup
-    expect(await verifyOtpAndCreate(payload, '123456', f)).toEqual({ ok: true })
+      .mockResolvedValueOnce(resp(201, { tenant_id: 'ten_123' })) // signup → new tenant_id (VT-411)
+    expect(await verifyOtpAndCreate(payload, '123456', f)).toEqual({ ok: true, tenantId: 'ten_123' })
     const [url, init] = f.mock.calls[1] as [string, RequestInit]
     expect(url).toBe('/api/team/signup')
     expect(init.headers).toMatchObject({ authorization: 'Bearer tok_abc' })
     expect(init.body).toBe(JSON.stringify(payload)) // the OTP code is NOT forwarded to signup
+  })
+
+  it('VT-411 — 201 with no tenant_id → ok with tenantId null (degrades, never throws)', async () => {
+    const f = vi
+      .fn()
+      .mockResolvedValueOnce(resp(200, { token: 'tok' }))
+      .mockResolvedValueOnce(resp(201, {}))
+    expect(await verifyOtpAndCreate(payload, '123456', f)).toEqual({ ok: true, tenantId: null })
   })
 
   it('verify 429 → rate_limited, NO signup call', async () => {

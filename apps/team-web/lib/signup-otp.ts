@@ -23,13 +23,18 @@ export async function requestSignupOtp(phone: string, f: Fetch = fetch): Promise
 }
 
 export type CreateResult =
-  | { ok: true }
+  // VT-411: the create response carries the NEW tenant_id so the POST-create ownership step can
+  // flip owner_channel_verified on the REAL tenant (a pre-create tenant_id='' would be a no-op).
+  | { ok: true; tenantId: string | null }
   | { ok: false; error: 'rate_limited' | 'invalid_code' | 'duplicate' | 'generic' }
 
 /**
  * Step 2 — verify the OTP → get the pre-tenant verified-number token → create the tenant with
  * `Authorization: Bearer <token>`. Invalid vs expired are NOT distinguished (both → invalid_code,
  * no enumeration). A missing token is treated the same. The token is only ever a header.
+ *
+ * VT-411: on a 201 the orchestrator returns the new tenant_id (signup.py) — thread it out so the
+ * POST-create ownership step targets the REAL tenant. tenant_id is an opaque id, not PII (CL-390).
  */
 export async function verifyOtpAndCreate(
   payload: Record<string, unknown> & { whatsapp_number: string },
@@ -51,7 +56,12 @@ export async function verifyOtpAndCreate(
     headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
     body: JSON.stringify(payload),
   })
-  if (res.status === 201) return { ok: true }
-  const body = await res.json().catch(() => ({}))
+  const body = (await res.json().catch(() => ({}))) as {
+    tenant_id?: unknown
+    detail?: { code?: string }
+  }
+  if (res.status === 201) {
+    return { ok: true, tenantId: typeof body?.tenant_id === 'string' ? body.tenant_id : null }
+  }
   return { ok: false, error: body?.detail?.code === 'duplicate' ? 'duplicate' : 'generic' }
 }

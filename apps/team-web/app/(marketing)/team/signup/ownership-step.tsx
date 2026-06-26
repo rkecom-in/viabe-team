@@ -1,11 +1,12 @@
 'use client'
 
 /**
- * VT-411 — the signup OWNERSHIP-verification sub-step (bilingual EN/HI). Sits AFTER the entity-match
- * 'verified' step, BEFORE account-creation completes. Fazal's bar: a verified GST entity is not the
- * same as a proven OWNER — so here the owner proves they CONTROL the business by receiving a DISTINCT
- * OTP on the DISCOVERED PUBLIC business number (NOT the personal WhatsApp the signup OTP already
- * proved). A DIN verify is offered alongside (for directors / companies without a public number).
+ * VT-411 — the signup OWNERSHIP-verification sub-step (bilingual EN/HI). Runs POST-create (the
+ * tier-2 model: gstin_verified gates create, owner_channel_verified flips right after) — the tenant
+ * already exists, so this step targets the REAL tenant_id. Fazal's bar: a verified GST entity is not
+ * the same as a proven OWNER — so here the owner proves they CONTROL the business by receiving a
+ * DISTINCT OTP on the DISCOVERED PUBLIC business number (NOT the personal WhatsApp the signup OTP
+ * already proved). A DIN verify is offered alongside (for directors / companies without a public number).
  *
  * Flow (OTP path): show "confirm you own [business] — we'll send a code to your public number" →
  * start → enter code → confirm → owner_channel_verified=true → onVerified(). When the discovered
@@ -144,7 +145,8 @@ export function OwnershipStep({
   lang,
   onVerified,
 }: {
-  /** '' pre-create (the wizard runs before the tenant exists — VT-408 ordering). */
+  /** VT-411: the REAL tenant_id — this step runs POST-create (the tenant exists), so the orchestrator
+   *  flips owner_channel_verified on the actual tenant (a pre-create '' would be a `WHERE id=''` no-op). */
   tenantId: string
   /** The DISCOVERED public business number (GBP candidate's `phone`); null/'' → owner enters it. */
   publicPhone: string | null

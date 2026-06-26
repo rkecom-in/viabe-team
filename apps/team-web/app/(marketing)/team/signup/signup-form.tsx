@@ -102,16 +102,25 @@ export function SignupForm() {
   const [done, setDone] = useState(false)
   const [submitting, setSubmitting] = useState(false)
   // VT-96 + VT-406 + VT-411: a 4-step flow — details, then entity-match (confirm the GST-registered
-  // business BEFORE creating an account — VT-406/VT-408 verify-then-create gate), then OWNERSHIP
-  // (prove the owner CONTROLS the business via a DISTINCT OTP to the discovered public number — a GST
-  // entity is real, not necessarily yours), then OTP-verify the WhatsApp number (the VT-326 proof
-  // token; a direct POST would 401). Account-creation is unreachable without a server-confirmed
-  // verified entity AND a proven owner channel.
-  const [step, setStep] = useState<'details' | 'entity' | 'ownership' | 'verify'>('details')
+  // business BEFORE creating an account — VT-406/VT-408 verify-then-create gate), then OTP-verify the
+  // WhatsApp number (the VT-326 proof token; a direct POST would 401) which CREATES the tenant, then
+  // OWNERSHIP (the tier-2 step — prove the owner CONTROLS the business via a DISTINCT OTP to the
+  // discovered public number; a GST entity is real, not necessarily yours).
+  //
+  // VT-411 ORDERING (Cowork fix): ownership runs POST-create so the orchestrator flips
+  // owner_channel_verified on the REAL tenant. A PRE-create ownership step would call the
+  // orchestrator with tenant_id='' → `WHERE id=''` no-op → the flag never persists. So: GST verify
+  // gates create (tier-1, VT-408); ownership is the tier-2 step right after create — it gates the
+  // journey/dashboard, NOT the create row (the tenant already exists when ownership runs).
+  const [step, setStep] = useState<'details' | 'entity' | 'verify' | 'ownership'>('details')
   const [otpCode, setOtpCode] = useState('')
-  // VT-406: the Sandbox-verified entity (gstin + authoritative name). null until a gstin_verified
-  // confirm lands; it gates the transition to the OTP/create steps and rides into the create payload.
+  // VT-406: the Sandbox-verified entity (gstin + authoritative name + discovered public phone). null
+  // until a gstin_verified confirm lands; it gates create + rides into the create payload, and its
+  // `phone` is the VT-411 ownership-OTP target.
   const [verifiedEntity, setVerifiedEntity] = useState<VerifiedEntity | null>(null)
+  // VT-411: the REAL tenant_id returned by the create (201). The POST-create ownership step targets
+  // it so owner_channel_verified flips on the actual tenant (never a no-op pre-create '').
+  const [tenantId, setTenantId] = useState<string | null>(null)
   const t = MESSAGES[lang]
 
   useEffect(() => {
@@ -149,22 +158,13 @@ export function SignupForm() {
     setStep('entity')
   }
 
-  // VT-406 → VT-411 bridge — fired ONLY after the entity-match step server-confirms a verified
+  // VT-406 → VT-326 bridge — fired ONLY after the entity-match step server-confirms a verified
   // entity. Record the verified entity (it gates create + rides into the create payload), then
-  // advance to the OWNERSHIP step: a verified GST entity proves the business is real, not that this
-  // owner controls it (Fazal's bar). The personal-WhatsApp OTP is deferred to AFTER ownership proof.
-  function onEntityVerified(entity: VerifiedEntity) {
+  // request the personal-WhatsApp OTP and advance to the verify step (which CREATES the tenant).
+  // Ownership is deferred to AFTER create (VT-411 ordering) so it targets the real tenant.
+  async function onEntityVerified(entity: VerifiedEntity) {
     setVerifiedEntity(entity)
-    if (step === 'ownership' || step === 'verify' || submitting) return // double-click guard
-    setError(null)
-    setStep('ownership')
-  }
-
-  // VT-411 → VT-326 bridge — fired ONLY after the ownership step proves owner_channel_verified (a
-  // DISTINCT OTP to the discovered public business number, or DIN). NOW request the personal-WhatsApp
-  // OTP and advance to the verify step. Account-creation stays unreachable until BOTH proofs land.
-  async function onOwnershipVerified() {
-    if (step === 'verify' || submitting) return // double-click guard on the Continue button
+    if (step === 'verify' || step === 'ownership' || submitting) return // double-click guard
     setError(null)
     setSubmitting(true)
     try {
@@ -181,9 +181,19 @@ export function SignupForm() {
     }
   }
 
-  // Step 2 — verify the OTP → receive the pre-tenant verified-number token → create the tenant
+  // VT-411 — fired ONLY after the POST-create ownership step proves owner_channel_verified on the
+  // REAL tenant (a DISTINCT OTP to the discovered public business number, or DIN). The tenant already
+  // exists (created at the verify step); ownership is the tier-2 gate on the journey, so this just
+  // closes the wizard. No further server call here — the flag flipped server-side in the step.
+  function onOwnershipVerified() {
+    setDone(true)
+  }
+
+  // Step 2 — verify the OTP → receive the pre-tenant verified-number token → CREATE the tenant
   // with `Authorization: Bearer <token>`. Invalid vs expired are NOT distinguished (generic —
-  // no enumeration). The token is threaded straight to the proxy; never logged (CL-390).
+  // no enumeration). The token is threaded straight to the proxy; never logged (CL-390). On a 201
+  // the create returns the new tenant_id (VT-411) — store it + advance to the POST-create ownership
+  // step so owner_channel_verified flips on the REAL tenant.
   async function onVerifyAndCreate(e: React.FormEvent) {
     e.preventDefault()
     setError(null)
@@ -212,7 +222,17 @@ export function SignupForm() {
         otpCode.trim(),
       )
       if (r.ok) {
-        setDone(true)
+        // VT-411: the tenant now EXISTS. Advance to the POST-create ownership step (tier-2) ONLY with
+        // a real tenant_id — it's what targets the orchestrator's owner_channel_verified flip. If the
+        // create somehow returned no id (degraded), don't run an ownership step that would flip nothing
+        // on tenant_id='' (the exact no-op this ordering fixes) — the tenant exists; complete the wizard
+        // and let the in-app journey re-prompt ownership. The create row is never blocked on tier-2.
+        if (r.tenantId) {
+          setTenantId(r.tenantId)
+          setStep('ownership')
+        } else {
+          setDone(true)
+        }
         return
       }
       const map = {
@@ -376,30 +396,16 @@ export function SignupForm() {
       </form>
       ) : step === 'entity' ? (
       // VT-406 entity-match sub-step — confirm a GST-registered business before account-creation.
-      // onVerified records the verified entity (the create-account gate) + advances to ownership;
-      // onReject is the graceful "GST-registered only" terminus (no account offered).
+      // onVerified records the verified entity (the create-account gate) + requests the WhatsApp OTP
+      // (→ verify step → create); onReject is the graceful "GST-registered only" terminus.
       <EntityMatchStep
         businessName={form.business_name}
         city={form.city}
         lang={lang}
-        onVerified={onEntityVerified}
+        onVerified={(entity) => void onEntityVerified(entity)}
         onReject={() => { /* terminal — the reject screen renders in-place; no create path */ }}
       />
-      ) : step === 'ownership' ? (
-      // VT-411 ownership sub-step — prove the owner CONTROLS the business via a DISTINCT OTP to the
-      // discovered public business number (or DIN). A verified GST entity is real, not necessarily
-      // theirs. onVerified bridges to the personal-WhatsApp OTP step. tenant_id is '' pre-create
-      // (VT-408 ordering); the discovered phone rides from the verified candidate (null → owner enters
-      // it). cin is unknown at signup (the orchestrator validates against the company) → ''.
-      <OwnershipStep
-        tenantId=""
-        publicPhone={verifiedEntity?.phone ?? null}
-        businessName={verifiedEntity?.name ?? form.business_name}
-        cin=""
-        lang={lang}
-        onVerified={() => void onOwnershipVerified()}
-      />
-      ) : (
+      ) : step === 'verify' ? (
       <form
         onSubmit={onVerifyAndCreate}
         className="mt-8 flex flex-col gap-5 rounded-2xl border border-gray-200 bg-white p-6 shadow-sm sm:p-8"
@@ -440,6 +446,20 @@ export function SignupForm() {
           {t.change_number}
         </button>
       </form>
+      ) : (
+      // VT-411 ownership sub-step — runs POST-create (the tenant EXISTS now). Prove the owner CONTROLS
+      // the business via a DISTINCT OTP to the discovered public business number (or DIN). The REAL
+      // tenant_id (from the create 201) targets the orchestrator's owner_channel_verified flip — a
+      // pre-create '' would be a no-op. The discovered phone rides from the verified candidate (null →
+      // owner enters it). cin is unknown at signup (the orchestrator validates against the company) → ''.
+      <OwnershipStep
+        tenantId={tenantId ?? ''}
+        publicPhone={verifiedEntity?.phone ?? null}
+        businessName={verifiedEntity?.name ?? form.business_name}
+        cin=""
+        lang={lang}
+        onVerified={onOwnershipVerified}
+      />
       )}
       </div>
     </main>
