@@ -150,3 +150,28 @@ def test_set_owner_channel_verified_flips_flag(substrate):
         ).fetchone()
     assert after["owner_channel_verified"] is True
     assert after["owner_channel_verified_at"] is not None
+
+
+def test_confirm_ownership_otp_flips_flag_end_to_end(substrate, monkeypatch):
+    """VT-411 END-TO-END: confirm_ownership_otp (mock-approved Twilio) → set_owner_channel_verified → the
+    REAL tenant's owner_channel_verified flips. Proves the wired ownership chain actually FIRES (not dormant)."""
+    monkeypatch.setenv("TEAM_TWILIO_VERIFY_MOCK_MODE", "1")
+    from orchestrator.onboarding.ownership import confirm_ownership_otp
+
+    tid = _tenant(substrate)
+    assert confirm_ownership_otp(tid, "+919321553267", "123456") is True  # the mock OTP approves
+    with psycopg.connect(substrate, autocommit=True, row_factory=psycopg.rows.dict_row) as conn:
+        row = conn.execute("SELECT owner_channel_verified FROM tenants WHERE id = %s", (tid,)).fetchone()
+    assert row["owner_channel_verified"] is True
+
+
+def test_confirm_ownership_otp_wrong_code_does_not_flip(substrate, monkeypatch):
+    """Fail-closed: a wrong/denied OTP → owner_channel_verified stays false (no flip without proof)."""
+    monkeypatch.setenv("TEAM_TWILIO_VERIFY_MOCK_MODE", "1")
+    from orchestrator.onboarding.ownership import confirm_ownership_otp
+
+    tid = _tenant(substrate)
+    assert confirm_ownership_otp(tid, "+919321553267", "999999") is False  # wrong code → denied
+    with psycopg.connect(substrate, autocommit=True, row_factory=psycopg.rows.dict_row) as conn:
+        row = conn.execute("SELECT owner_channel_verified FROM tenants WHERE id = %s", (tid,)).fetchone()
+    assert row["owner_channel_verified"] is False
