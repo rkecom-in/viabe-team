@@ -14,9 +14,14 @@ keyword matching:
 - established (has consent) -> a templated business-voice reply (v1; a customer-facing
   reasoning agent is DEFERRED to VT-299).
 
-All OUTBOUND sends are gated by `whatsapp_account.wa_send_allowed` (fail-CLOSED — no send
-unless the WABA is `live`: Meta verification + privacy URL). State (consent, conversation
-marker) is recorded regardless so a STOP is never lost.
+All OUTBOUND sends pass the shared customer-send pre-gate
+(`agents.customer_send_choke.assert_customer_send_allowed`, VT-460): the onboarded/activation
+bar (`onboarding_gate.is_agent_eligible`) AND the WABA-live gate
+(`whatsapp_account.wa_send_allowed` — fail-CLOSED, no send unless the WABA is Meta-verified `live`).
+This is the SESSION_OPTIN class (distinct from marketing — opt-in solicitation is NOT folded under
+the marketing-consent gate). State (consent, conversation marker) is recorded regardless so a STOP
+is never lost, and the dispatch runs inside `customer_send_context()` so the transport's structural
+customer-send choke admits it.
 
 Consent COPY is legal-sensitive: the binding text lives in `.viabe/consent-text.md`
 (versioned; Cowork drafts + Fazal legal). This module records the version a customer
@@ -36,7 +41,6 @@ from uuid import UUID
 import yaml
 
 from orchestrator.db import tenant_connection
-from orchestrator.integrations.whatsapp_account import wa_send_allowed
 from orchestrator.keyword_match import boundary_patterns, contains_any
 from orchestrator.privacy import consent as consent_service
 from orchestrator.utils.phone_token import hash_phone
@@ -77,7 +81,11 @@ class InboundResult:
 def _default_send(body: str, recipient_phone: str) -> str:
     from orchestrator.utils.twilio_send import send_freeform_message
 
-    return send_freeform_message(body, recipient_phone)
+    # VT-460 gap (c)+(d): the VT-287 inbound class is a CUSTOMER session send (intro / opt-in /
+    # opt-out acks) — flag it so the transport's structural choke admits it (handle_customer_inbound
+    # enters customer_send_context around the dispatch). is_customer_session=True also classes it
+    # explicitly as the SESSION_OPTIN audit class, distinct from marketing.
+    return send_freeform_message(body, recipient_phone, is_customer_session=True)
 
 
 def _touch_conversation(tenant_id: str, phone_token: str, *, mark_intro: bool) -> None:
@@ -122,19 +130,41 @@ def handle_customer_inbound(
     """Process one customer inbound message deterministically. Returns the action taken.
 
     Order: STOP (always honored) → affirmative (opt-in) → established (reply) →
-    first-contact (intro-once). Sends gated by `wa_send_allowed`; state always recorded.
+    first-contact (intro-once). Sends gated by the shared onboarded + WABA-live pre-gate
+    (VT-460); state always recorded.
     """
     send = send_fn or _default_send
     tid = str(tenant_id)
     token = hash_phone(customer_phone)
     norm = " ".join(body.split()).casefold()
-    can_send = wa_send_allowed(tid)
+
+    # VT-460 gaps (b)+(d): the SESSION_OPTIN class shares the universal WABA-live pre-gate with the
+    # marketing paths, AND adds the onboarded/activation pre-gate (consistency with agent +
+    # campaign). This is the SESSION class — first-contact intro + opt-in/opt-out acks to a
+    # not-yet-consented customer is lawful opt-in solicitation, so it is NOT folded under the
+    # marketing-CONSENT gate (gap d). It STILL passes the onboarded + WABA bound. STATE (consent
+    # withdrawal / opt-in / conversation marker) is recorded REGARDLESS — a STOP is never lost even
+    # when the send is suppressed (the original VT-287 contract, preserved).
+    from orchestrator.agents.customer_send_choke import (
+        CustomerSendClass,  # noqa: F401 — names the audited class for this path (gap d)
+        assert_customer_send_allowed,
+    )
+    from orchestrator.utils.twilio_send import customer_send_context
+
+    with tenant_connection(tid) as _pre_conn:
+        _pregate = assert_customer_send_allowed(tid, agent="sales_recovery", conn=_pre_conn)
+    can_send = _pregate.allowed
 
     def _maybe_send(text: str) -> bool:
         if not can_send:
-            logger.info("VT-287 send suppressed (WABA not live) tenant=%s token=%s", tid, token)
+            logger.info(
+                "VT-287 send suppressed tenant=%s token=%s class=%s reason=%s",
+                tid, token, CustomerSendClass.SESSION_OPTIN.value, _pregate.reason,
+            )
             return False
-        send(text, customer_phone)
+        # gap (c): the gated transport extent for the customer session send.
+        with customer_send_context():
+            send(text, customer_phone)
         return True
 
     # 1. STOP — withdraw consent. Always recorded (never lost), ack best-effort. VT-358:

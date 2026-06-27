@@ -86,13 +86,34 @@ def _seed_tenant(
     row = conn.execute(
         """
         INSERT INTO tenants (business_name, plan_tier, phase, whatsapp_number,
-                             owner_phone)
-        VALUES (%s, 'founding', 'paid_active', %s, %s)
+                             owner_phone, verification_status)
+        VALUES (%s, 'founding', 'paid_active', %s, %s, 'gstin_verified')
         RETURNING id
         """,
         (business_name, whatsapp_number, owner_phone),
     ).fetchone()
     tenant_id = UUID(str(row[0] if not isinstance(row, dict) else row["id"]))
+
+    # VT-460: the agent + campaign customer-send paths now pass the shared onboarded (Gate-0) +
+    # WABA-live pre-gate. A real tenant reaching a send has all four activation signals plus a live
+    # WABA; seed them so the e2e loop reaches the campaign send (else the pre-gate blocks it and
+    # campaign_messages records 0 rows). journey-complete + gstin_verified (above) + ≥1 enabled
+    # connector + ≥1 customer (the cohort below) + a 'live' WABA.
+    conn.execute(
+        "INSERT INTO onboarding_journey (tenant_id, status, completed_at) "
+        "VALUES (%s, 'complete', now())",
+        (str(tenant_id),),
+    )
+    conn.execute(
+        "INSERT INTO tenant_connector_status (tenant_id, connector_id, enabled, last_status, "
+        "last_ingested_date) VALUES (%s, %s, TRUE, 'ok', CURRENT_DATE)",
+        (str(tenant_id), f"conn-{tenant_id.hex[:8]}"),
+    )
+    conn.execute(
+        "INSERT INTO tenant_whatsapp_accounts (tenant_id, status, phone_number) "
+        "VALUES (%s, 'live', %s)",
+        (str(tenant_id), _synthetic_phone()),
+    )
 
     rrow = conn.execute(
         """

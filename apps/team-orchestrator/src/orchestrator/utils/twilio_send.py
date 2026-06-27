@@ -17,9 +17,12 @@ before the DBOS checkpoint commits — accepted at Phase 1 scale.
 
 from __future__ import annotations
 
+import contextvars
 import json
 import logging
 import os
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from functools import lru_cache
 from pathlib import Path
@@ -42,6 +45,81 @@ from orchestrator.utils.phone_token import hash_phone
 logger = logging.getLogger(__name__)
 
 _TEMPLATES_FILE = Path(__file__).resolve().parents[3] / "config" / "twilio_templates.yaml"
+
+
+# --- VT-460 gap (c): transport-level structural customer-send choke ----------------------------
+#
+# The rail-harness finding: `send_template_message`/`send_freeform_message` dispatch to ANY phone
+# with valid creds. The brain is structurally barred from holding a send tool (VT-268), and the
+# agent + campaign customer-send paths run the full deterministic gate stack — but the TRANSPORT
+# itself had no structural boundary. A FUTURE direct caller passing a CUSTOMER phone would bypass
+# every gate; only convention + the lint + review stood in the way (NOT a structural choke).
+#
+# This makes the transport itself FAIL CLOSED for un-gated customer sends. A send EXPLICITLY FLAGGED
+# as customer-bound — a template send with `is_customer_send=True` (set ONLY by the VT-45 tool, the
+# single chokepoint the agent + campaign paths funnel through) or a freeform with
+# `is_customer_session=True` (the VT-287 inbound session class) — MUST be issued from inside
+# `customer_send_context()`. The legitimate customer paths enter that context after their
+# deterministic gate stack. A new direct caller that flags a customer send but forgets the context
+# raises `UngatedCustomerSendError` rather than silently sending.
+#
+# WHY AN EXPLICIT FLAG, NOT THE REGISTRY `audience`: some `audience: customer` templates
+# (team_opt_out_confirmation, team_status_ping) are sent BY owner-reply handlers TO the owner — the
+# audience field labels the template's typical reader, NOT whether THIS dispatch targets an
+# end-customer. Only the caller knows, so the caller flags it.
+#
+# OWNER sends are exempt and UNCHANGED: every owner template (default is_customer_send=False) + owner
+# freeforms (ops_resolve, business_plan/delivery, breach_notification, onboarding,
+# request_owner_approval, the owner-reply direct_handlers, l3_hold presend-notice) carry no flag and
+# never enter the context.
+
+_GATED_CUSTOMER_SEND: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "viabe_gated_customer_send", default=False
+)
+
+
+class UngatedCustomerSendError(RuntimeError):
+    """Raised when a CUSTOMER-bound send is attempted OUTSIDE ``customer_send_context()``.
+
+    The structural backstop (VT-460 gap c): a customer send that did not route through a gated
+    choke (the VT-45 tool's deterministic gate stack, or the VT-287 inbound session class) fails
+    CLOSED at the transport rather than reaching Twilio. Owner sends never trip this.
+    """
+
+
+@contextmanager
+def customer_send_context() -> Iterator[None]:
+    """Mark the dynamic extent of a GATED customer send.
+
+    Entered ONLY by a caller that has already run (or is about to run, in the same call) the
+    deterministic customer-send choke — `agents.customer_send_choke.assert_customer_send_allowed`
+    (onboarded + WABA-live) plus the per-recipient consent/opt-out/caps stack. The transport
+    permits a customer-bound dispatch only while this context is active. Re-entrant (nested
+    gated sends are fine); the token restores the prior value on exit.
+    """
+    token = _GATED_CUSTOMER_SEND.set(True)
+    try:
+        yield
+    finally:
+        _GATED_CUSTOMER_SEND.reset(token)
+
+
+def _assert_gated_if_customer(*, is_customer: bool, template_name: str, recipient_token: str) -> None:
+    """Fail-CLOSED transport boundary: a customer-bound send MUST be inside ``customer_send_context``.
+
+    ``is_customer`` is an EXPLICIT caller flag (``is_customer_send`` for templates, set only by the
+    VT-45 tool; ``is_customer_session`` for freeforms, set only by the VT-287 inbound path) — not the
+    registry audience (some audience:customer templates are owner-reply sends). Owner sends pass
+    ``is_customer=False`` and are never checked. Raises ``UngatedCustomerSendError`` (before any
+    Twilio call) when a flagged customer send is issued outside the gated context.
+    """
+    if is_customer and not _GATED_CUSTOMER_SEND.get():
+        raise UngatedCustomerSendError(
+            f"un-gated customer send refused at the transport: template={template_name!r} "
+            f"-> {recipient_token}. Customer sends MUST route through customer_send_context() "
+            "after the deterministic send choke (VT-460 gap c); a direct transport call to a "
+            "customer is a structural boundary breach."
+        )
 
 
 class SendResult(BaseModel):
@@ -204,6 +282,7 @@ def send_template_message(
     *,
     recipient_phone: str | None = None,
     language: str = "en",
+    is_customer_send: bool = False,
 ) -> SendResult:
     """Send a Meta-approved WhatsApp template via Twilio. See the module docstring.
 
@@ -215,6 +294,16 @@ def send_template_message(
     ``language`` selects the template's language variant SID; it defaults to "en"
     (the pre-VT-163 implicit behaviour — every existing caller keeps "en"). VT-393:
     the owner welcome honors the owner's preferred_language (team_welcome has EN+HI).
+
+    VT-460 gap (c): ``is_customer_send=True`` marks a send to an END-CUSTOMER (the
+    business owner's WhatsApp customer) — set ONLY by the VT-45 ``send_whatsapp_template``
+    tool, the SINGLE gated chokepoint every customer template send (agent + campaign)
+    funnels through. Such a send MUST be inside ``customer_send_context()`` or it fails
+    closed at the transport (a future un-gated direct caller breaks here, never sends).
+    Default (False) is an OWNER send — exempt, unchanged. NOTE: the registry ``audience``
+    field is NOT the trigger: some ``audience: customer`` templates (team_opt_out_confirmation,
+    team_status_ping) are sent BY owner-reply handlers TO the owner — only the explicit flag
+    distinguishes a real end-customer dispatch.
     """
     # Resolve via registry (D1 migration). Raises UnknownTemplateError (== TemplateNotConfigured)
     # for unknown names, UnknownLanguageVariantError for missing language variants.
@@ -231,6 +320,17 @@ def send_template_message(
         )
     recipient_token = hash_phone(recipient)
     attempted_at = datetime.now(UTC)
+
+    # VT-460 gap (c): structural transport choke. A CUSTOMER send (is_customer_send=True — set only
+    # by the VT-45 tool, the single gated chokepoint the agent + campaign paths funnel through) MUST
+    # be inside customer_send_context(). A future un-gated direct caller passing is_customer_send=True
+    # without the context fails closed here. Owner sends (default False) are exempt. Checked BEFORE
+    # the no-SID early-out so even a stub customer template cannot be dispatched un-gated.
+    _assert_gated_if_customer(
+        is_customer=is_customer_send,
+        template_name=template_name,
+        recipient_token=recipient_token,
+    )
 
     content_sid = entry.content_sid
     if content_sid is None:
@@ -297,7 +397,9 @@ def send_template_message(
     )
 
 
-def send_freeform_message(body: str, recipient_phone: str) -> str:
+def send_freeform_message(
+    body: str, recipient_phone: str, *, is_customer_session: bool = False
+) -> str:
     """Send a free-form WhatsApp message via Twilio (VT-44).
 
     Parallel to send_template_message but uses Body= instead of content_sid.
@@ -309,10 +411,23 @@ def send_freeform_message(body: str, recipient_phone: str) -> str:
     The caller (send_whatsapp_message) handles the exception split — this
     function does NOT swallow errors so the caller can record them cleanly.
 
+    VT-460 gap (c)+(d): ``is_customer_session=True`` flags this as the VT-287 inbound
+    CUSTOMER session class (intro / opt-in / opt-out acks) — a structurally-distinct,
+    separately-audited send class from marketing. Such a send MUST be inside
+    customer_send_context() (handle_customer_inbound enters it) or it fails closed at
+    the transport. The default (False) is an OWNER session send (owner-reply acks,
+    onboarding, breach/business-plan delivery) — exempt, unchanged.
+
     Note: NOT a @DBOS.step — the idempotency is handled at the DB layer
     (send_idempotency_keys table) by the standalone tool, not DBOS replay.
     """
     recipient_token = hash_phone(recipient_phone)
+    # VT-460 gap (c): customer session freeform sends fail-close outside the gated context.
+    _assert_gated_if_customer(
+        is_customer=is_customer_session,
+        template_name="<freeform_session>",
+        recipient_token=recipient_token,
+    )
     logger.info(
         "twilio-send: freeform -> %s body_len=%d",
         recipient_token,

@@ -45,18 +45,43 @@ def substrate():  # type: ignore[no-untyped-def]
         shutdown_dbos()
 
 
-def _tenant(dsn: str, *, wa_status: str | None = "live") -> str:
-    """Create a tenant; optionally give it a WABA at `wa_status` (None = no WABA)."""
+def _tenant(dsn: str, *, wa_status: str | None = "live", onboarded: bool = True) -> str:
+    """Create a tenant; optionally give it a WABA at `wa_status` (None = no WABA).
+
+    VT-460: the inbound session-send now also passes the shared onboarded (Gate-0) pre-gate
+    (``assert_customer_send_allowed``) on top of the WABA-live gate. By default seed the tenant
+    fully onboarded (journey-complete + gstin_verified + ≥1 enabled connector + ≥1 customer) so the
+    SEND-asserting tests still send; ``onboarded=False`` exercises the new fail-closed path.
+    """
     with psycopg.connect(dsn, autocommit=True) as conn:
         tid = str(conn.execute(
-            "INSERT INTO tenants (business_name, plan_tier, phase) "
-            "VALUES ('VT-287 test', 'founding', 'paid_active') RETURNING id"
+            "INSERT INTO tenants (business_name, plan_tier, phase, verification_status) "
+            "VALUES ('VT-287 test', 'founding', 'paid_active', %s) RETURNING id",
+            ("gstin_verified" if onboarded else "unverified",),
         ).fetchone()[0])
         if wa_status is not None:
             conn.execute(
                 "INSERT INTO tenant_whatsapp_accounts (tenant_id, status, phone_number) "
                 "VALUES (%s, %s, %s)",
                 (tid, wa_status, f"+9180{uuid4().int % 10**8:08d}"),
+            )
+        if onboarded:
+            # The activation bar for 'sales_recovery' (activation_registry): journey-complete +
+            # gstin_verified (above) + ≥1 enabled+pulled connector + ≥1 customer.
+            conn.execute(
+                "INSERT INTO onboarding_journey (tenant_id, status, completed_at) "
+                "VALUES (%s, 'complete', now())",
+                (tid,),
+            )
+            conn.execute(
+                "INSERT INTO tenant_connector_status (tenant_id, connector_id, enabled, "
+                "last_status, last_ingested_date) VALUES (%s, %s, TRUE, 'ok', CURRENT_DATE)",
+                (tid, f"conn-{uuid4().hex[:8]}"),
+            )
+            conn.execute(
+                "INSERT INTO customers (tenant_id, display_name, phone_e164, opt_out_status) "
+                "VALUES (%s, 'seed', %s, 'subscribed')",
+                (tid, f"+9197{uuid4().int % 10**8:08d}"),
             )
     return tid
 

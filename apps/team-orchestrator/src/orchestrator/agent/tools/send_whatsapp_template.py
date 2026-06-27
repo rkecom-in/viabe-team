@@ -523,8 +523,17 @@ def send_whatsapp_template(
         pool = get_pool()
 
     if send_fn is None:
+        from functools import partial
+
         from orchestrator.utils.twilio_send import send_template_message
-        send_fn = send_template_message
+
+        # VT-460 gap (c): the VT-45 tool is the SINGLE gated chokepoint every customer template send
+        # (agent + campaign) funnels through. Mark the real transport call is_customer_send=True so
+        # the transport's structural choke admits it ONLY inside customer_send_context() (the gated
+        # callers enter that context). An injected test send_fn never reaches the real transport, so
+        # the flag is bound only on this default. The choke also fails closed if this tool were ever
+        # called outside the context.
+        send_fn = partial(send_template_message, is_customer_send=True)
 
     try:
         with pool.connection() as conn:
