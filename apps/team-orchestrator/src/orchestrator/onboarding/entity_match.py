@@ -100,6 +100,9 @@ _GENERIC_NAME_TOKENS = frozenset({
     "services", "service", "pvt", "ltd", "private", "limited", "the", "and", "co", "company",
     "llp", "opc", "inc", "enterprises", "enterprise", "solutions", "solution", "india", "indian",
     "store", "stores", "shop", "trading", "traders", "industries", "corporation", "group",
+    # VT-455: more generic business-filler — short/common tokens that matched unrelated registry rows
+    # (e.g. a "…biz…" name surfaced 3 noise companies on the gibberish-input unhappy path).
+    "biz", "ventures", "venture", "holdings", "global", "online", "mart", "hub", "world", "international",
 })
 
 
