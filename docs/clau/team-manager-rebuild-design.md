@@ -31,3 +31,14 @@ Gates are NOT prompt text — they are TOOLS/GUARDS the brain MUST route through
 ## Finished first (independent, DONE + pushed d511ac2): persona-leak context + onboarding-contamination reset (owner never gets customer-service); VT-458 16-defect sweep; VT-459 brand colors.
 
 Source: Cowork 20260628T204000Z design + Fazal FOLD-IN 20260628T204500Z. Build autonomously to exec_order; Cowork audits-after; raise blockers to Fazal. NO send until the new-brain re-drive + sign-off. main untouched.
+
+## 6) AUTONOMY MODEL (Fazal 2026-06-28 — binding, reshapes §4)
+The owner does NOT babysit / mentor / monitor. The Agent Team RUNS THE BUSINESS autonomously and makes it better for the owner. The owner is reached ONLY in **extreme scenarios**, and ALL owner communication is **WhatsApp-only**.
+
+Reconciles the §4 rail "no-send-without-owner-approval" — it is NOT per-message approval:
+- **Deterministic safety rails (unchanged, non-bypassable, AUTOMATIC — no owner in the loop):** consent allowlist + opt-out, send caps/budget, onboarded-gate, GST/ownership verify. These are the bounds the team operates WITHIN; the brain has no code path around them. (Scenario set D stays 100%.)
+- **Action authority = owner POLICY granted at onboarding** ("run win-backs to lapsed customers within these bounds / caps / tone"), then the team acts AUTONOMOUSLY inside that policy + the safety rails. Not a per-send tap.
+- **Owner escalation = EXTREME scenarios only** (anomaly, high-stakes/irreversible decision outside policy, complaint, repeated failure, policy-boundary judgment). Escalation channel = WhatsApp, concise.
+- **Launch sign-off (separate, one-time):** Fazal validates the FIRST real send at sign-off (VT-464). Steady-state ≠ the launch gate. After sign-off + the granted policy, the team sends autonomously within the rails.
+
+Design implication: the supervisor (VT-461) defaults to ACT (within policy + rails), not ASK. "Ask the owner" is a last-resort escalation tool, gated to extreme criteria — NOT the default for routine business actions. The brain must be biased to run the business, not to seek permission. The rail harness (VT-460) enforces the SAFETY bounds deterministically so autonomy is safe WITHOUT per-action owner approval.
