@@ -142,6 +142,12 @@ def handle_reply(
     new_cursor = g["cursor"] + 1
     _advance(tenant_id, new_cursor, answers, skipped, message_sid)
 
+    # CONTRACT (unchanged, pre-VT-462): the owner's reply applied to the PRESENTED question
+    # (``_current`` at the cursor) above, and the cursor advanced. The NEXT presented question is the
+    # new cursor head, and ``done`` is the DETERMINISTIC queue-exhaustion check (every seeded question
+    # answered/skipped). VT-462's conductor does NOT alter this per-reply apply/advance/done path — it
+    # influences only WHICH questions are COMPOSED into the queue (the queue-composition seam in
+    # ``maybe_handle_journey_reply``); the cursor then walks that composed queue deterministically.
     g2 = get_journey(tenant_id)
     nxt = _current(g2) if g2 else None
     if nxt is None:
@@ -236,18 +242,36 @@ def _tenant_phase_and_type(tenant_id: UUID | str) -> tuple[str | None, str | Non
 
 
 def _compose_queue(tenant_id: UUID | str, business_type: str | None) -> list[dict[str, Any]]:
-    """Compose the ordered question set from the 2a draft via 2b. [] if the draft isn't ready yet."""
+    """Compose the ordered question set from the 2a draft. [] if the draft isn't ready yet.
+
+    VT-462 — the QUEUE is conductor-COMPOSED: the conductor's ``decide_next_question`` orders the
+    registry-bounded candidate set (confirm-first, then gaps) against current journey state (already-
+    answered fields excluded so a volunteered/out-of-order answer is never queued; skipped fields
+    deferred). The cursor then walks this composed queue deterministically (the apply/advance/done
+    contract is unchanged) — the conductor decides WHICH questions/order; the cursor owns the walk.
+    """
+    from orchestrator.onboarding.conductor import decide_next_question
     from orchestrator.onboarding.draft_profile import get_draft
-    from orchestrator.onboarding.question_brain import compose_onboarding_questions
 
     draft = get_draft(tenant_id)
     if not draft.get("attributes"):
         return []
-    questions = compose_onboarding_questions(business_type or "other", draft, answered=[])
+    # Re-derive against current state so the composed queue reflects anything the owner already
+    # answered/skipped (resumability + volunteered/out-of-order handling). On a fresh start these are
+    # empty, so the queue is the full registry-bounded confirm-first-then-gap set.
+    g = get_journey(tenant_id) or {}
+    answered = list((g.get("answers") or {}).keys())
+    skipped = list(g.get("skipped") or [])
+    decision = decide_next_question(
+        business_type=business_type,
+        draft=draft,
+        answered=answered,
+        skipped=skipped,
+    )
     return [
         {"field": q.field, "kind": q.kind, "prompt_en": q.prompt_en, "prompt_hi": q.prompt_hi,
          "draft_value": q.draft_value}
-        for q in questions
+        for q in decision.remaining
     ]
 
 
@@ -304,6 +328,11 @@ def maybe_handle_journey_reply(
             queue = _compose_queue(tenant_id, btype)
             if queue:
                 set_queue_if_empty(tenant_id, queue)
+                # The first presented question is the head of the just-composed queue (the cursor at
+                # 0). VT-462: the QUEUE itself is conductor-composed (``_compose_queue`` orders it via
+                # the conductor's registry-grounded decision over the just-discovered draft), so the
+                # cursor head already reflects the conductor's dynamic pick — no separate per-reply
+                # conductor call (that would break the cursor/apply contract).
                 g = get_journey(tenant_id) or g
                 _send(recipient, _current(g) or _opener(), lang)
             else:

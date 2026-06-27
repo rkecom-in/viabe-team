@@ -159,6 +159,25 @@ def _build_integration_update(state: dict[str, Any]) -> dict[str, Any]:
     return {}
 
 
+def _build_onboarding_conductor_update(state: dict[str, Any]) -> dict[str, Any]:
+    """Build the ``spawn_onboarding_conductor`` Command.update extension (VT-462).
+
+    Minimal: the conductor reads the tenant's draft + journey state on its own (its tools key on
+    tenant_id); no specialist bundle needed at handoff. Fail-loud on missing tenant_id / run_id per
+    CL-195 + Pillar 3 (parity with ``_build_integration_update``)."""
+    tenant_id = state.get("tenant_id")
+    if tenant_id is None:
+        raise TenantIsolationError(
+            "spawn_onboarding_conductor: tenant_id missing from state"
+        )
+    run_id = state.get("run_id")
+    if run_id is None:
+        raise TenantIsolationError(
+            "spawn_onboarding_conductor: run_id missing from state"
+        )
+    return {}
+
+
 spawn_integration = make_spawn_tool(
     agent_name="integration_agent",
     tool_name="spawn_integration",
@@ -181,4 +200,18 @@ spawn_sales_recovery = make_spawn_tool(
         "the owner wants to recover sales from inactive customers."
     ),
     update_builder=_build_sales_recovery_update,
+)
+
+
+spawn_onboarding_conductor = make_spawn_tool(
+    agent_name="onboarding_conductor",
+    tool_name="spawn_onboarding_conductor",
+    description=(
+        "Hand off to the Onboarding-Conductor for the owner's PROFILE-SETUP "
+        "conversation (confirming the discovered business profile + collecting "
+        "the missing business-context fields). Use when the owner is new or "
+        "mid-onboarding and the next step is setting up their business profile "
+        "— BEFORE connecting a data source (which is the Integration Agent)."
+    ),
+    update_builder=_build_onboarding_conductor_update,
 )

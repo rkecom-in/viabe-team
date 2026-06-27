@@ -54,7 +54,8 @@ def test_existing_specialists_registered_with_pre_vt465_wiring() -> None:
     roster must reproduce them so the existing graph shape + tests are identical.
     """
     by_name = {s.name: s for s in ROSTER}
-    assert set(by_name) == {"sales_recovery", "integration"}
+    # VT-462 — the onboarding-conductor lane joined the two pre-existing specialists.
+    assert set(by_name) == {"sales_recovery", "integration", "onboarding_conductor"}
 
     sr = by_name["sales_recovery"]
     assert sr.agent_name == "sales_recovery_agent"
@@ -71,12 +72,22 @@ def test_existing_specialists_registered_with_pre_vt465_wiring() -> None:
     assert integ.edge_to is None  # -> END (no campaign plan to persist)
     assert integ.wrap_node is False  # CompiledStateGraph — never wrapped
 
+    # VT-462 — the onboarding-conductor: dynamic profile-setup specialist, mirrors integration's
+    # CompiledStateGraph wiring (wrap_node=False, edge_to=None -> END).
+    cond = by_name["onboarding_conductor"]
+    assert cond.agent_name == "onboarding_conductor"
+    assert cond.spawn_tool_name == "spawn_onboarding_conductor"
+    assert cond.route_key == "spawn_onboarding_conductor"
+    assert cond.edge_to is None  # -> END (no campaign plan to persist)
+    assert cond.wrap_node is False  # CompiledStateGraph — never wrapped
+
 
 def test_spawn_tool_route_keys_maps_both_lanes() -> None:
     """The routing function reads this map; it must cover every roster member."""
     assert spawn_tool_route_keys() == {
         "spawn_sales_recovery": "spawn",
         "spawn_integration": "spawn_integration",
+        "spawn_onboarding_conductor": "spawn_onboarding_conductor",  # VT-462
     }
 
 
@@ -84,7 +95,11 @@ def test_roster_spawn_tools_have_expected_names() -> None:
     """The manager's extra_tools come from the roster; names are pinned (the
     test_no_write_tool_surface HANDOFF_EXPECTED contract)."""
     names = {t.name for t in roster_spawn_tools()}
-    assert names == {"spawn_sales_recovery", "spawn_integration"}
+    assert names == {
+        "spawn_sales_recovery",
+        "spawn_integration",
+        "spawn_onboarding_conductor",  # VT-462
+    }
 
 
 # --- The standard handoff PAYLOAD (design §7) --------------------------------
@@ -258,11 +273,12 @@ def test_existing_graph_shape_unchanged_by_roster_refactor() -> None:
     g = graph.get_graph()
     nodes = set(g.nodes)
 
-    # All pre-VT-465 nodes present.
+    # All pre-VT-465 nodes present (+ the VT-462 onboarding-conductor lane).
     for expected in (
         "orchestrator_agent",
         "sales_recovery_agent",
         "integration_agent",
+        "onboarding_conductor",  # VT-462
         "collapse",
         "orchestrator_terminal",
         "request_owner_approval",
@@ -277,6 +293,10 @@ def test_existing_graph_shape_unchanged_by_roster_refactor() -> None:
     # integration -> END (no collapse — sub-graph emits no campaign plan).
     integ_targets = {e.target for e in g.edges if e.source == "integration_agent"}
     assert integ_targets == {"__end__"}
+
+    # VT-462 — onboarding_conductor -> END (no campaign plan; same shape as integration).
+    cond_targets = {e.target for e in g.edges if e.source == "onboarding_conductor"}
+    assert cond_targets == {"__end__"}
 
 
 def test_uuid_run_identity_still_required_for_existing_handoff(
