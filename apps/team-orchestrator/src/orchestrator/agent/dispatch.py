@@ -245,6 +245,34 @@ def dispatch_brain(
     if l1_block:
         _messages.insert(0, SystemMessage(content=l1_block))
 
+    # VT-466: the Team-Manager's business-context READ seam — surface the IDENTITY
+    # anchor (verified business name + verification status + phase) + the manager-
+    # held BUSINESS OBJECTIVE as a SEPARATE ``## Business context`` system block.
+    # The manager prompt already declares "you hold the business objective + the
+    # cross-functional context"; this wires the store that backs it. Composes over
+    # the EXISTING L1 business_profile entity (read_business_context) — NOT a new
+    # store. Best-effort, like the L1 block above: a read miss never breaks
+    # dispatch. Inserted AFTER the cached system prefix (a per-turn SystemMessage),
+    # so the VT-194 cache still hits. The L1 block (above) carries the owner-stated
+    # profile; this block adds the identity + objective the L1 block does not.
+    try:
+        from orchestrator.knowledge import (
+            read_business_context,
+            render_business_context_block,
+        )
+
+        business_block = render_business_context_block(
+            read_business_context(tenant_id)
+        )
+    except Exception:  # noqa: BLE001 — business-context enrichment is best-effort
+        logger.warning(
+            "dispatch: business-context assembly failed (tenant=%s); proceeding without",
+            tenant_id,
+        )
+        business_block = None
+    if business_block:
+        _messages.insert(0, SystemMessage(content=business_block))
+
     # VT-461: inject the Manager-intent signal as a separate system block so the
     # Team-Manager brain reads it as a prior (the prompt's "## Manager intent signal"
     # contract) when deciding handle-directly-vs-delegate. Reuses the classification the

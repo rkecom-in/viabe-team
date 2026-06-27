@@ -179,6 +179,52 @@ def query_l0(
     )
 
 
+# VT-466: the manager's WRITE seam — record/update the per-tenant business
+# OBJECTIVE / will / decisions / learnings the manager holds across turns. This
+# is TENANT-SCOPED context (vs. write_l0_fragment, which is the cross-tenant
+# k-anonymous cohort path). Composes over the EXISTING L1 business_profile entity
+# (MERGE-not-clobber, RLS-scoped) — NOT a new store, NOT a send/ledger/accounts
+# write (passes the VT-268 guardrail: the name carries no forbidden capability).
+@tool
+def record_business_objective(
+    tenant_id: str,
+    objective: str | None = None,
+    will: str | None = None,
+    policy: str | None = None,
+    decisions: str | None = None,
+    learnings: str | None = None,
+) -> dict[str, Any]:
+    """Record/update what you (the manager) hold for THIS business — the standing
+    OBJECTIVE / owner WILL / action POLICY / cross-turn DECISIONS / LEARNINGS.
+
+    Use this to persist the "what's good for this business" you reason about, so a
+    LATER turn (and the scoped slice you hand a specialist) sees it. TENANT-scoped
+    — for THIS owner only (cohort-generalizable learnings that should reach OTHER
+    businesses go to ``write_l0_fragment`` instead).
+
+    MERGE-not-clobber: supply ONLY the fields you are setting; omitted fields keep
+    their prior value (a single learning never wipes the standing objective). The
+    objective is owner/business context, NEVER customer PII.
+
+    Returns the merged objective record (the full current state after your patch).
+    """
+    from orchestrator.knowledge import write_business_objective
+
+    patch = {
+        k: v
+        for k, v in (
+            ("objective", objective),
+            ("will", will),
+            ("policy", policy),
+            ("decisions", decisions),
+            ("learnings", learnings),
+        )
+        if v is not None
+    }
+    merged = write_business_objective(tenant_id, patch)
+    return {"status": "recorded", "objective": merged}
+
+
 # VT-194 dropped 3 STUBs (send_whatsapp_template_stub /
 # get_subscriber_state_stub / query_pipeline_history_stub). Each carried
 # ~300 tokens of schema text in the agent's prompt (~900 tokens total)
@@ -200,6 +246,7 @@ ORCHESTRATOR_AGENT_TOOLS: list[BaseTool] = [
     compose_owner_output_tool,
     write_l0_fragment,
     query_l0,
+    record_business_objective,  # VT-466 manager WRITE seam (tenant-scoped objective)
 ]
 
 

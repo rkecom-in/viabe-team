@@ -38,6 +38,10 @@ ORCHESTRATOR_EXPECTED = {
     "compose_owner_output_tool",
     "write_l0_fragment",
     "query_l0",
+    # VT-466 — the manager's WRITE seam: tenant-scoped business objective record.
+    # Composes over the L1 business_profile entity (MERGE-not-clobber); NOT a
+    # send/ledger/accounts write (passes the VT-268 forbidden-capability guard).
+    "record_business_objective",
 }
 INTEGRATION_EXPECTED = {
     "list_connectors_tool",
