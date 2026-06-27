@@ -174,15 +174,24 @@ def search_gstin(gstin: str, *, request_fn: RequestFn | None = None) -> GstinLoo
         token = _get_token(key, secret, req)
         if not token:
             return GstinLookup(ok=False)
-        try:
-            raw = _lookup(req, key, token, gstin)
-        except Exception as exc:  # noqa: BLE001
-            if _is_401(exc):  # stale token → re-auth once + retry
-                token = _get_token(key, secret, req, force=True)
-                if not token:
-                    return GstinLookup(ok=False)
+        # VT-451: a TRANSIENT slow/no-response (timeout / 5xx gateway) gets ONE automatic server-side retry
+        # before we surface vendor_down — so a momentary Sandbox blip doesn't bounce the owner to a manual
+        # retry. A 401 re-auths once (separate); a 4xx / parse error is terminal (no retry, fail-closed).
+        raw = None
+        for _attempt in (0, 1):
+            try:
                 raw = _lookup(req, key, token, gstin)
-            else:
+                break
+            except Exception as exc:  # noqa: BLE001
+                if _is_401(exc):  # stale token → re-auth once + retry
+                    token = _get_token(key, secret, req, force=True)
+                    if not token:
+                        return GstinLookup(ok=False)
+                    raw = _lookup(req, key, token, gstin)
+                    break
+                if _attempt == 0 and _is_transient(exc):
+                    logger.warning("sandbox_kyc: GST lookup transient (%s) — one auto-retry", type(exc).__name__)
+                    continue
                 raise
         # Sandbox nests the GST record one level deeper than the envelope: the lookup body is
         # {"data": {"data": {lgnm, tradeNam, sts, ...}, "status_cd": ...}}. The single-level read
@@ -305,6 +314,17 @@ def search_gstins_by_pan(pan: str, state_code: str, *, request_fn: RequestFn | N
 def _is_401(exc: Exception) -> bool:
     resp = getattr(exc, "response", None)
     return getattr(resp, "status_code", None) == 401
+
+
+def _is_transient(exc: Exception) -> bool:
+    """VT-451: a transient GST-vendor failure worth ONE auto-retry — a timeout/connection error, or a
+    5xx/504 gateway response. A 4xx (bad input / not-found) is terminal, never retried."""
+    import httpx
+
+    if isinstance(exc, (httpx.TimeoutException, httpx.ConnectError, httpx.ReadError, httpx.RemoteProtocolError)):
+        return True
+    code = getattr(getattr(exc, "response", None), "status_code", 0) or 0
+    return 500 <= code < 600
 
 
 def _clean(v: Any) -> str | None:

@@ -213,6 +213,8 @@ When sandbox `git add` fails with `fatal: Unable to create '.git/index.lock': Fi
 
 **Ultracode + parallel fan-out (CL-424).** CC runs xhigh ultracode for all tasks; dynamic-workflow fan-out happens when the orchestrator warrants it. Binding guardrails: (1) allocate every VT-ID and migration number ONCE up-front, before any parallel phase — never let parallel subagents grab IDs/numbers concurrently (both allocators are flock-serialized but the discipline is to assign before fan-out, not race the lock); (2) one coherent PR per numeric VT row regardless of subagent count; (3) Cowork plan-first review still applies on big/risky rows; (4) Pillar-7 Fazal-authorized merge is unchanged.
 
+**Fix agreed issues IMMEDIATELY — no "post-e2e" parking (STANDING, Fazal 2026-06-28).** Once Fazal + Cowork agree something is broken/wrong, build the fix NOW — do NOT roster it as "after the run / post-e2e." The build-discipline is unchanged ("immediately" ≠ "skip the gates"): allocate the VT-id up-front → plan/build → adversarial-verify → Cowork gate → Fazal's explicit origin/dev push → deploy; risk rows (e.g. anything touching the GST verify/gate path) still get the plan-first gate; one coherent PR per row. Only genuinely-new SCOPE (vs an agreed fix) waits for a Fazal grant.
+
 **Don't re-litigate Standing decisions.** If it's in the ledger, it's settled.
 
 **Before asking Fazal anything,** state what you checked (snapshot + ledger + active-context). Bare questions get bounced.
