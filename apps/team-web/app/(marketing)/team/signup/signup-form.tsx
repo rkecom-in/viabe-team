@@ -33,6 +33,7 @@ type MsgKey =
   | 'submit' | 'invalid_phone' | 'required' | 'duplicate' | 'generic' | 'success'
   | 'send_code' | 'code_sent' | 'enter_code' | 'verify_create' | 'invalid_code'
   | 'rate_limited' | 'change_number'
+  | 'verify_unavailable' | 'gst_reject' | 'vendor_down'
 
 const MESSAGES: Record<Lang, Record<MsgKey, string>> = {
   en: {
@@ -58,6 +59,9 @@ const MESSAGES: Record<Lang, Record<MsgKey, string>> = {
     invalid_code: 'That code is invalid or expired. Try again.',
     rate_limited: 'Too many attempts. Please wait a few minutes.',
     change_number: 'Change number',
+    verify_unavailable: 'Couldn’t verify right now — this is on our side. Please try again.',
+    gst_reject: 'Viabe Team is for GST-registered businesses. We couldn’t confirm one, so we can’t create an account right now.',
+    vendor_down: 'This is on our side — the verification service didn’t respond. Please try again in a moment.',
   },
   hi: {
     title: 'Viabe Team के लिए साइन अप करें',
@@ -82,6 +86,9 @@ const MESSAGES: Record<Lang, Record<MsgKey, string>> = {
     invalid_code: 'यह कोड अमान्य या समाप्त है। फिर से कोशिश करें।',
     rate_limited: 'बहुत अधिक प्रयास। कृपया कुछ मिनट प्रतीक्षा करें।',
     change_number: 'नंबर बदलें',
+    verify_unavailable: 'अभी सत्यापित नहीं कर सके — यह हमारी ओर से है। कृपया पुनः प्रयास करें।',
+    gst_reject: 'Viabe Team GST-पंजीकृत व्यवसायों के लिए है। हम इसकी पुष्टि नहीं कर सके, इसलिए अभी खाता नहीं बना सकते।',
+    vendor_down: 'यह हमारी ओर से है — सत्यापन सेवा ने जवाब नहीं दिया। कृपया थोड़ी देर में पुनः प्रयास करें।',
   },
 }
 
@@ -240,13 +247,21 @@ export function SignupForm() {
         }
         return
       }
-      const map = {
+      // Sweep #8/#11: the new error variants are surfaced here too. `gst_reject` (422) is a TERMINAL
+      // GST-registered-only reject; `vendor_down` (503) and `verify_unavailable` (502) are RETRYABLE
+      // "on our side" outages — the form keeps the verify step (the owner can resubmit). We prefer
+      // the orchestrator's authored bilingual `message` (gate_copy()) when the create gate provided
+      // one, falling back to the local copy; the failure is no longer collapsed to one generic.
+      const map: Record<typeof r.error, string> = {
         rate_limited: t.rate_limited,
         invalid_code: t.invalid_code,
+        verify_unavailable: t.verify_unavailable,
         duplicate: t.duplicate,
+        gst_reject: t.gst_reject,
+        vendor_down: t.vendor_down,
         generic: t.generic,
       }
-      setError(map[r.error])
+      setError(r.message ?? map[r.error])
     } catch {
       setError(t.generic)
     } finally {
@@ -407,8 +422,13 @@ export function SignupForm() {
         businessName={form.business_name}
         city={form.city}
         lang={lang}
+        // Sweep #1/#6: thread the parent OTP-request error + in-flight state into the entity step so a
+        // failed "Verified → Continue" OTP send is VISIBLE on the verified screen and the Continue
+        // button reflects the in-flight/blocked state (no silent re-fire of the OTP request).
+        error={error}
+        submitting={submitting}
         onVerified={(entity) => void onEntityVerified(entity)}
-        onReject={() => { /* terminal — the reject screen renders in-place; no create path */ }}
+        onReject={() => { /* reject is recoverable IN the child step machine (re-enter GST / re-search) — no parent create path */ }}
       />
       ) : step === 'verify' ? (
       <form

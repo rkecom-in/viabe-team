@@ -174,6 +174,8 @@ def _web_candidates(name: str, city: str, search_fn: SearchFn | None) -> list[En
     sig = _significant_tokens(name)
     out: list[EntityCandidate] = []
     for r in results or []:
+        if not isinstance(r, dict):
+            continue  # malformed vendor element → degrade like a failed call (NEVER raise into signup)
         blob = " ".join(str(r.get(k, "")) for k in ("title", "description", "url", "text"))
         if not _result_is_relevant(blob, sig):
             continue  # VT-448: drop GST-SERP noise that doesn't name the queried business
@@ -206,6 +208,8 @@ def _cin_candidates(name: str, city: str, search_fn: SearchFn | None) -> list[En
     sig = _significant_tokens(name)
     out: list[EntityCandidate] = []
     for r in results or []:
+        if not isinstance(r, dict):
+            continue  # malformed vendor element → degrade like a failed call (NEVER raise into signup)
         blob = " ".join(str(r.get(k, "")) for k in ("title", "description", "url", "text"))
         if not _result_is_relevant(blob, sig):
             continue
@@ -246,6 +250,8 @@ def _gbp_candidates(
     sig = _significant_tokens(name)
     out: list[EntityCandidate] = []
     for place in (items or [])[:3]:
+        if not isinstance(place, dict):
+            continue  # malformed vendor element → degrade like a failed call (NEVER raise into signup)
         title = _clean(place.get("title"))
         if not title:
             continue
@@ -269,6 +275,7 @@ def confirm_and_verify(
     tenant_id: UUID | str,
     gstin: str,
     *,
+    name_anchor: str | None = None,
     lookup_fn: Callable[..., dict[str, Any]] | None = None,
     seed: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -276,7 +283,14 @@ def confirm_and_verify(
     — attempt-capped, fail-closed, sets tenants.verification_status='gstin_verified' on ACTIVE). On
     verify: persist the entity anchor + seed async discovery with the VERIFIED entity. Returns the
     run_lookup result verbatim (ok / reason / status / name); a non-verified result does NOT raise and
-    does NOT block — the hard reject is VT-408."""
+    does NOT block — the hard reject is VT-408.
+
+    VT-448/#10 name-match at the CONFIRM seam: when ``name_anchor`` (the owner's typed/MCA-canonical
+    business name) is supplied, a valid+ACTIVE GSTIN whose authoritative registry name does NOT plausibly
+    match the anchor is collapsed into the SAME generic ``invalid_gstin`` reject. This catches a
+    name-mismatch HERE — on the recoverable 'Verified'/pick screen, BEFORE the owner is told "Verified"
+    and BEFORE an OTP is spent — rather than only at create (run_signup keeps the create-time gate as
+    defense-in-depth). No oracle: mismatch and not-found both return one generic ``invalid_gstin``."""
     gstin = (gstin or "").strip().upper()
     if not _GSTIN_RE.fullmatch(gstin):
         return {"ok": False, "reason": "invalid_gstin_format", "status": "unverified"}
@@ -287,7 +301,7 @@ def confirm_and_verify(
     # DB, no anchor) — the tenant is stamped gstin_verified at CREATE by run_signup. (Live e2e 2026-06-28:
     # confirm_and_verify('', '27AAKCR3738B1ZE') → 500.)
     if lookup_fn is None and not str(tenant_id).strip():
-        return _verify_gstin_tenantless(gstin)
+        return _verify_gstin_tenantless(gstin, name_anchor=name_anchor)
 
     run = lookup_fn
     if run is None:
@@ -301,23 +315,35 @@ def confirm_and_verify(
         return result  # vendor_down (retryable) or invalid_gstin (bad input) — caller/VT-408 decides
 
     name = result.get("name")
+    # #10 name-match at the confirm seam — collapse a name-mismatch into the generic invalid_gstin reject
+    # (no oracle) so "Verified" never shows for a name that will fail the create-time gate.
+    if name_anchor and not business_name_matches(name_anchor, name):
+        return {"ok": False, "reason": "invalid_gstin", "status": "unverified"}
     _persist_anchor(tenant_id, gstin=gstin, verified_name=name)
     _seed_discovery(tenant_id, verified_name=name, gstin=gstin, seed=seed or {})
     return result
 
 
-def _verify_gstin_tenantless(gstin: str, *, search_fn: SearchFn | None = None) -> dict[str, Any]:
+def _verify_gstin_tenantless(
+    gstin: str, *, name_anchor: str | None = None, search_fn: SearchFn | None = None
+) -> dict[str, Any]:
     """Pre-create GST verify (no tenant yet) — the Sandbox GSTIN search ONLY, returning the same
     {ok, status, name/reason} shape as run_lookup but WITHOUT the tenant-scoped attempt-cap / kyc_log /
     tenants-UPDATE / anchor (all of which need a real tenant). The signup CREATE path (run_signup →
     verify_gstin_for_signup) re-verifies + stamps the tenant. Fail-closed (a vendor failure → vendor_down
-    HOLD, never a false verify). ``search_fn`` injectable for tests."""
+    HOLD, never a false verify). ``search_fn`` injectable for tests.
+
+    #10: when ``name_anchor`` is supplied, an ACTIVE-but-unrelated GSTIN (different business's
+    registration) is collapsed into the SAME generic ``invalid_gstin`` reject — name-match caught at the
+    recoverable confirm seam, never after the OTP burn (no enumeration oracle)."""
     from orchestrator.integrations.methods import sandbox_kyc
 
     result = (search_fn or sandbox_kyc.search_gstin)(gstin)
     if not result.ok:
         return {"ok": False, "reason": "vendor_down", "status": "unverified"}
     if not result.is_active() or not result.authoritative_name():
+        return {"ok": False, "reason": "invalid_gstin", "status": "unverified"}
+    if name_anchor and not business_name_matches(name_anchor, result.authoritative_name()):
         return {"ok": False, "reason": "invalid_gstin", "status": "unverified"}
     return {"ok": True, "status": "gstin_verified", "gstin": gstin, "name": result.authoritative_name()}
 

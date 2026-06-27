@@ -24,13 +24,15 @@ export const dynamic = 'force-dynamic'
 export async function POST(request: Request): Promise<Response> {
   const body = (await request.json().catch(() => null)) as Record<string, unknown> | null
   const gstin = body && typeof body.gstin === 'string' ? body.gstin : ''
+  const businessName = body && typeof body.business_name === 'string' ? body.business_name : ''
   if (!gstin.trim()) {
     return NextResponse.json({ ok: false, reason: 'invalid_gstin_format', status: 'unverified' }, { status: 400 })
   }
 
   // tenant_id '' — pre-create (VT-408 ordering). The verify status round-trips; the verified entity
   // is carried client-side into the create payload, never anchored to a tenant that doesn't exist.
-  const result = await confirmEntity('', gstin)
+  // business_name threads through so the orchestrator enforces the name-match at verify (VT-#10).
+  const result = await confirmEntity('', gstin, businessName)
   return NextResponse.json({
     ok: result.ok,
     status: result.status ?? 'unverified',

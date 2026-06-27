@@ -174,8 +174,15 @@ export function OwnershipStep({
   const [dinReason, setDinReason] = useState('')
   const [dinError, setDinError] = useState<'format' | 'invalid' | null>(null)
   const [busy, setBusy] = useState(false) // any in-flight request (start/confirm/din)
+  // Sweep #5/#13 — force the editable phone field on intro even when a number was discovered. Set by
+  // the intro "Use a different number" override (a wrong DISCOVERED number must be correctable before
+  // the first send) AND by the 'code'-step "change number" recovery (a wrong OTP-target — stale GBP
+  // phone or owner typo — isn't a dead-end). A local boolean (not mutating the derived `hasDiscovered`
+  // or clearing `phone`, which would discard the value the owner may want to lightly edit).
+  const [editingPhone, setEditingPhone] = useState(false)
 
-  // The number is "known" (discovered or already valid) → hide the entry field on intro.
+  // The number is "known" (discovered or already valid) → hide the entry field on intro UNLESS the
+  // owner has chosen to override/edit it (sweep #5/#13).
   const hasDiscovered = discovered !== ''
 
   async function send() {
@@ -411,6 +418,24 @@ export function OwnershipStep({
           >
             {t.resend}
           </button>
+          {/* Sweep #13: "change number" recovery — a wrong OTP-target number (stale discovered GBP
+              phone or owner typo) is no longer a dead-end. Return to intro in edit mode and clear the
+              bad code; the intro editable phone field renders (editingPhone) so the owner can correct
+              the number and re-send. */}
+          <button
+            type="button"
+            data-ownership-change-phone
+            disabled={busy}
+            onClick={() => {
+              setEditingPhone(true)
+              setCode('')
+              setCodeError(false)
+              setStep('intro')
+            }}
+            className={ghostBtn}
+          >
+            {t.change_phone}
+          </button>
         </div>
         {/* VT-448: DIN parked behind DIN_KYC_ENABLED (default OFF) — OTP-only ownership. */}
         {DIN_KYC_ENABLED && (
@@ -433,10 +458,27 @@ export function OwnershipStep({
     <section data-ownership-step="intro" className={`mt-8 ${card}`}>
       <h2 className="text-lg font-semibold text-foreground">{t.heading}</h2>
       <p className="mt-1 text-sm leading-relaxed text-muted-foreground">{t.subhead}</p>
-      {hasDiscovered ? (
-        <p data-ownership-phone className="mt-4 text-sm text-foreground">
-          {t.phone_prefix} <span className="font-mono font-medium text-foreground">{discovered}</span>
-        </p>
+      {hasDiscovered && !editingPhone ? (
+        <>
+          <p data-ownership-phone className="mt-4 text-sm text-foreground">
+            {t.phone_prefix} <span className="font-mono font-medium text-foreground">{discovered}</span>
+          </p>
+          {/* Sweep #5: a wrong DISCOVERED number must be correctable BEFORE the first send. Reveal the
+              editable phone input (pre-populated with the discovered value, still in `phone`) so the
+              owner can override it; isValidPublicPhoneFormat already gates send(). */}
+          <button
+            type="button"
+            data-ownership-edit-phone
+            disabled={busy}
+            onClick={() => {
+              setEditingPhone(true)
+              setPhoneError(false)
+            }}
+            className={`mt-2 ${linkBtn}`}
+          >
+            {t.change_phone}
+          </button>
+        </>
       ) : (
         <>
           <label className="mt-4 block text-sm font-medium text-foreground" htmlFor="ownership-phone">

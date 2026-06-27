@@ -85,10 +85,11 @@ describe('VT-406 fetchCandidates', () => {
 describe('VT-406 confirmCandidate + classifyConfirm', () => {
   it('candidates render + pick → confirm called with the picked gstin', async () => {
     const f = vi.fn().mockResolvedValue(resp(200, { ok: true, status: 'gstin_verified', name: 'SUNDARAM MULTI PAP LIMITED' }))
-    const envelope = await confirmCandidate('29ABCDE1234F1Z5', f)
+    const envelope = await confirmCandidate('29ABCDE1234F1Z5', 'Sundaram Multi Pap', f)
     const [url, init] = f.mock.calls[0] as [string, RequestInit]
     expect(url).toBe('/api/team/onboard/entity-confirm')
-    expect(JSON.parse(init.body as string)).toEqual({ gstin: '29ABCDE1234F1Z5' })
+    // VT-#10: the typed business_name threads through so the orchestrator name-matches at verify.
+    expect(JSON.parse(init.body as string)).toEqual({ gstin: '29ABCDE1234F1Z5', business_name: 'Sundaram Multi Pap' })
     expect(envelope.status).toBe('gstin_verified')
   })
 
@@ -133,14 +134,14 @@ describe('VT-406 confirmCandidate + classifyConfirm', () => {
 
   it('confirm proxy fails CLOSED on non-2xx (→ classified retry, never a false verified)', async () => {
     const f = vi.fn().mockResolvedValue(resp(500))
-    const envelope = await confirmCandidate('G', f)
+    const envelope = await confirmCandidate('G', '', f)
     expect(envelope.ok).toBe(false)
     expect(classifyConfirm(envelope, 'G').kind).toBe('retry')
   })
 
   it('confirm proxy fails CLOSED on throw (→ retry)', async () => {
     const f = vi.fn().mockRejectedValue(new Error('network'))
-    const envelope = await confirmCandidate('G', f)
+    const envelope = await confirmCandidate('G', '', f)
     expect(envelope).toEqual({ ok: false, reason: 'error' })
     expect(classifyConfirm(envelope, 'G').kind).toBe('retry')
   })

@@ -312,6 +312,7 @@ export interface EntityConfirmResult {
 export async function confirmEntity(
   tenantId: string,
   gstin: string,
+  businessName = '',
 ): Promise<EntityConfirmResult> {
   const base = process.env.TEAM_ORCHESTRATOR_URL ?? _ORCHESTRATOR_DEFAULT
   const secret = process.env.INTERNAL_API_SECRET ?? ''
@@ -319,7 +320,9 @@ export async function confirmEntity(
     const res = await fetch(`${base}/api/orchestrator/onboard/entity-confirm`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', 'X-Internal-Secret': secret },
-      body: JSON.stringify({ tenant_id: tenantId, gstin }),
+      // VT-#10: pass the typed business_name so the orchestrator enforces the name-match at the
+      // verify seam (caught before the owner sees "Verified" + spends an OTP), not only at create.
+      body: JSON.stringify({ tenant_id: tenantId, gstin, business_name: businessName }),
       signal: AbortSignal.timeout(_ENTITY_CONFIRM_TIMEOUT_MS),
     })
     if (!res.ok) {

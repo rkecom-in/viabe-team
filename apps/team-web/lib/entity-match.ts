@@ -95,13 +95,15 @@ export async function fetchCandidates(
  */
 export async function confirmCandidate(
   gstin: string,
+  businessName = '',
   f: Fetch = fetch,
 ): Promise<EntityConfirmResult> {
   try {
     const res = await f('/api/team/onboard/entity-confirm', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ gstin }),
+      // VT-#10: send the typed business_name so the name-match fires at verify (before "Verified").
+      body: JSON.stringify({ gstin, business_name: businessName }),
     })
     if (!res.ok) return { ok: false, reason: `http_${res.status}` }
     const data = (await res.json().catch(() => ({}))) as {

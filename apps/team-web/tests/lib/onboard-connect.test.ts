@@ -129,6 +129,47 @@ describe('VT-267 PR-C — checkConnection (resume signal, fail-closed)', () => {
     expect(s.connected).toBe(false)
   })
 
+  it('sweep #16 — shopify token row + webhooks_registered=false → NOT connected, reregister action', async () => {
+    const c = client('tenant_oauth_tokens', {
+      data: { shop_url: 'shop.myshopify.com', webhooks_registered: false },
+      error: null,
+    })
+    const s = await checkConnection('t1', 'shopify', c as never)
+    expect(s.connected).toBe(false)
+    expect(s.actionRequired).toBe('reregister_webhooks')
+    expect(s.detail).toBe('connected_webhooks_unregistered')
+  })
+
+  it('sweep #16 — shopify token row + webhooks_registered=true → connected (no action)', async () => {
+    const c = client('tenant_oauth_tokens', {
+      data: { shop_url: 'shop.myshopify.com', webhooks_registered: true },
+      error: null,
+    })
+    const s = await checkConnection('t1', 'shopify', c as never)
+    expect(s.connected).toBe(true)
+    expect(s.actionRequired).toBeUndefined()
+  })
+
+  it('sweep #16 — shopify flag column absent (older schema) → falls back to token-only connected', async () => {
+    // The flag-aware select errors when the column doesn't exist; checkConnection retries the
+    // token-only read. Build a client whose FIRST maybeSingle errors and SECOND succeeds.
+    let call = 0
+    const builder: any = {
+      select: () => builder,
+      eq: () => builder,
+      maybeSingle: async () => {
+        call += 1
+        return call === 1
+          ? { data: null, error: { message: 'column "webhooks_registered" does not exist' } }
+          : { data: { shop_url: 'shop.myshopify.com' }, error: null }
+      },
+    }
+    const c = { from: () => builder }
+    const s = await checkConnection('t1', 'shopify', c as never)
+    expect(s.connected).toBe(true)
+    expect(s.detail).toBe('shop.myshopify.com')
+  })
+
   it('whatsapp NOT connected while pending', async () => {
     const c = client('tenant_whatsapp_accounts', { data: { status: 'pending' }, error: null })
     const s = await checkConnection('t1', 'whatsapp', c as never)
