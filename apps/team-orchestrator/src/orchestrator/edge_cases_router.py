@@ -38,12 +38,23 @@ def _send_edge_ack(tenant_id: UUID | str, recipient_phone: str | None, text: str
 
 
 def route_edge_case(
-    *, tenant_id: UUID | str, event: Any, classify_fn: Any | None = None
+    *,
+    tenant_id: UUID | str,
+    event: Any,
+    classify_fn: Any | None = None,
+    intent_sink: dict[str, Any] | None = None,
 ) -> "DispatchResult | Literal['owner_initiated'] | None":
     """Classify the owner message; route the PR-1 edge-cases (exclusion / status_query) to
     their fast handlers and return a DispatchResult. Return None to fall through to the
     agent (any other intent, incl. the PR-2 adhoc/template intents). ``classify_fn`` is
-    injectable for tests (no live Anthropic)."""
+    injectable for tests (no live Anthropic).
+
+    VT-461: the SAME classification this router already runs is surfaced to the
+    Team-Manager brain when the turn falls through to the agent. Pass ``intent_sink``
+    (a mutable dict); on a successful classify it is populated with the typed envelope
+    (``classification`` / ``confidence`` / ``suggested_action``) so dispatch can inject a
+    ``## Manager intent signal`` prior WITHOUT a second Haiku call. A classify failure
+    leaves the sink untouched (the brain reasons from the message alone)."""
     from orchestrator.agent.dispatch import DispatchResult  # lazy: avoid import cycle
 
     body = getattr(event, "body", "") or ""
@@ -64,6 +75,14 @@ def route_edge_case(
         _out = classify_fn(body)
         classification = getattr(_out, "classification", None)
         confidence = float(getattr(_out, "confidence", 0.0) or 0.0)
+        # VT-461: surface the classification to the brain (handle-directly-vs-delegate
+        # prior). Only the typed fields — never the raw body — cross into the sink.
+        if intent_sink is not None and classification is not None:
+            intent_sink["classification"] = classification
+            intent_sink["confidence"] = confidence
+            intent_sink["suggested_action"] = str(
+                getattr(_out, "suggested_action", "") or ""
+            )
     except Exception:
         # A classify failure (bad model JSON / envelope validation) must NOT crash
         # dispatch or trigger a workflow retry — fall through to the agent (the prior

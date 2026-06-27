@@ -107,6 +107,33 @@ class DispatchResult:
 _DEFAULT_MAX_TOKENS = 4096
 
 
+def _build_manager_intent_block(intent: dict[str, Any]) -> str | None:
+    """VT-461 — render the captured Haiku classification as the brain's ``## Manager
+    intent signal`` prior.
+
+    ``intent`` is the dict the edge router populated (see ``route_edge_case``'s
+    ``intent_sink``): a successful classify carries ``classification`` / ``confidence`` /
+    ``suggested_action``; an empty dict means classify was skipped or failed. Returns the
+    system-block text, or ``None`` when there is no signal to inject (the brain then reasons
+    from the owner's message alone). Carries ONLY the typed envelope fields — never the raw
+    owner body (that already rides in the HumanMessage; the consent gate governs its
+    transmit, CL-425/VT-270)."""
+    classification = intent.get("classification")
+    if not classification:
+        return None
+    confidence = float(intent.get("confidence", 0.0) or 0.0)
+    suggested = str(intent.get("suggested_action", "") or "").strip()
+    lines = [
+        "## Manager intent signal",
+        "A fast pre-read of the owner's message (a PRIOR, not a verdict — reason from it):",
+        f"- classification: {classification}",
+        f"- confidence: {confidence:.2f}",
+    ]
+    if suggested:
+        lines.append(f"- suggested next step: {suggested}")
+    return "\n".join(lines)
+
+
 def _resolve_model() -> ChatAnthropic:
     # The orchestrator-agent default model is Opus 4.7. mypy --strict needs
     # the call-arg ignore because ChatAnthropic's pydantic kwargs aren't
@@ -167,7 +194,16 @@ def dispatch_brain(
     # Returns a DispatchResult to terminate, or None to fall through to the agent below.
     from orchestrator.edge_cases_router import route_edge_case
 
-    _edge = route_edge_case(tenant_id=tenant_id, event=event)
+    # VT-461: capture the SAME Haiku classification the edge router already runs, so the
+    # Team-Manager brain can reason handle-directly-vs-delegate from it (no 2nd classify
+    # call). REUSE classify_owner_message via the edge router's intent_sink — do NOT build
+    # a parallel classifier. When the turn falls through to the agent, _manager_intent
+    # carries the typed envelope; an empty dict means classify was skipped/failed (the
+    # brain reasons from the message alone).
+    _manager_intent: dict[str, Any] = {}
+    _edge = route_edge_case(
+        tenant_id=tenant_id, event=event, intent_sink=_manager_intent
+    )
     if isinstance(_edge, DispatchResult):
         return _edge
     # VT-335: the adhoc-campaign request returns the "owner_initiated" str marker, which
@@ -208,6 +244,16 @@ def dispatch_brain(
         l1_block = None
     if l1_block:
         _messages.insert(0, SystemMessage(content=l1_block))
+
+    # VT-461: inject the Manager-intent signal as a separate system block so the
+    # Team-Manager brain reads it as a prior (the prompt's "## Manager intent signal"
+    # contract) when deciding handle-directly-vs-delegate. Reuses the classification the
+    # edge router already computed — no extra Haiku call. Inserted AFTER the cached system
+    # prefix (it's a per-turn SystemMessage in `messages`, not the cached system_prompt), so
+    # the VT-194 cache still hits. Absent/failed classify → no block; the brain still works.
+    intent_block = _build_manager_intent_block(_manager_intent)
+    if intent_block:
+        _messages.insert(0, SystemMessage(content=intent_block))
 
     initial_state: dict[str, Any] = {
         "messages": _messages,
