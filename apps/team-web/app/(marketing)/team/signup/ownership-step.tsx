@@ -245,26 +245,26 @@ export function OwnershipStep({
     setStep('din')
   }
 
-  const card = 'rounded-2xl border border-gray-200 bg-white p-6 shadow-sm sm:p-8'
+  const card = 'rounded-2xl border border-border bg-card p-6 shadow-sm sm:p-8'
   const primaryBtn =
-    'rounded-xl bg-emerald-600 px-5 py-3 font-semibold text-white shadow-sm transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50'
+    'rounded-xl bg-primary px-5 py-3 font-semibold text-primary-foreground shadow-sm transition hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50'
   const ghostBtn =
-    'rounded-xl border border-gray-300 px-5 py-2.5 font-medium text-gray-700 transition hover:bg-gray-50 disabled:opacity-50'
+    'rounded-xl border border-input px-5 py-2.5 font-medium text-foreground transition hover:bg-muted disabled:opacity-50'
   const linkBtn =
-    'block text-sm text-gray-500 underline underline-offset-2 transition hover:text-gray-700 disabled:opacity-50'
+    'block text-sm text-muted-foreground underline underline-offset-2 transition hover:text-foreground disabled:opacity-50'
   const input =
-    'mt-1 w-full rounded-xl border border-gray-300 px-4 py-3 text-gray-900 outline-none focus:border-emerald-500'
+    'mt-1 w-full rounded-xl border border-input bg-card px-4 py-3 text-foreground outline-none focus:border-primary'
 
   if (step === 'verified') {
     return (
       <section data-ownership-step="verified" className={`mt-8 ${card}`}>
         <div className="flex items-center gap-2">
-          <h2 className="text-lg font-semibold text-gray-900">{t.verified_heading}</h2>
-          <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-xs font-semibold text-emerald-700">
+          <h2 className="text-lg font-semibold text-foreground">{t.verified_heading}</h2>
+          <span className="rounded-full bg-secondary/10 px-2 py-0.5 text-xs font-semibold text-secondary">
             ✓
           </span>
         </div>
-        <p className="mt-3 text-sm leading-relaxed text-gray-600">{t.verified_note}</p>
+        <p className="mt-3 text-sm leading-relaxed text-muted-foreground">{t.verified_note}</p>
         <button type="button" data-ownership-continue onClick={onVerified} className={`mt-5 ${primaryBtn}`}>
           {t.continue}
         </button>
@@ -275,8 +275,8 @@ export function OwnershipStep({
   if (step === 'error') {
     return (
       <section data-ownership-step="error" className={`mt-8 ${card}`}>
-        <h2 className="text-lg font-semibold text-gray-900">{t.error_heading}</h2>
-        <p data-ownership-error-body className="mt-3 text-sm leading-relaxed text-gray-600">
+        <h2 className="text-lg font-semibold text-foreground">{t.error_heading}</h2>
+        <p data-ownership-error-body className="mt-3 text-sm leading-relaxed text-muted-foreground">
           {t.error_body}
         </p>
         <div className="mt-5 flex flex-wrap items-center gap-3">
@@ -303,9 +303,9 @@ export function OwnershipStep({
   if (step === 'din') {
     return (
       <section data-ownership-step="din" className={`mt-8 ${card}`}>
-        <h2 className="text-lg font-semibold text-gray-900">{t.din_heading}</h2>
-        <p className="mt-1 text-sm leading-relaxed text-gray-600">{t.din_subhead}</p>
-        <label className="mt-4 block text-sm font-medium text-gray-700" htmlFor="ownership-din">
+        <h2 className="text-lg font-semibold text-foreground">{t.din_heading}</h2>
+        <p className="mt-1 text-sm leading-relaxed text-muted-foreground">{t.din_subhead}</p>
+        <label className="mt-4 block text-sm font-medium text-foreground" htmlFor="ownership-din">
           {t.din_label}
         </label>
         <input
@@ -324,12 +324,12 @@ export function OwnershipStep({
           className={`${input} font-mono tracking-wide`}
         />
         {dinError === 'format' && (
-          <p data-ownership-din-error className="mt-2 text-sm text-red-600">{t.din_format_error}</p>
+          <p data-ownership-din-error className="mt-2 text-sm text-destructive">{t.din_format_error}</p>
         )}
         {dinError === 'invalid' && (
-          <p data-ownership-din-invalid className="mt-2 text-sm text-red-600">{t.din_invalid}</p>
+          <p data-ownership-din-invalid className="mt-2 text-sm text-destructive">{t.din_invalid}</p>
         )}
-        <label className="mt-4 block text-sm font-medium text-gray-700" htmlFor="ownership-din-reason">
+        <label className="mt-4 block text-sm font-medium text-foreground" htmlFor="ownership-din-reason">
           {t.din_reason_label}
         </label>
         <input
@@ -370,9 +370,9 @@ export function OwnershipStep({
   if (step === 'code') {
     return (
       <section data-ownership-step="code" className={`mt-8 ${card}`}>
-        <h2 className="text-lg font-semibold text-gray-900">{t.code_heading}</h2>
-        <p className="mt-1 text-sm leading-relaxed text-gray-600">{t.code_subhead}</p>
-        <label className="mt-4 block text-sm font-medium text-gray-700" htmlFor="ownership-code">
+        <h2 className="text-lg font-semibold text-foreground">{t.code_heading}</h2>
+        <p className="mt-1 text-sm leading-relaxed text-muted-foreground">{t.code_subhead}</p>
+        <label className="mt-4 block text-sm font-medium text-foreground" htmlFor="ownership-code">
           {t.code_label}
         </label>
         <input
@@ -390,7 +390,7 @@ export function OwnershipStep({
           className={`${input} text-center text-lg tracking-[0.3em]`}
         />
         {codeError && (
-          <p data-ownership-code-error className="mt-2 text-sm text-red-600">{t.code_invalid}</p>
+          <p data-ownership-code-error className="mt-2 text-sm text-destructive">{t.code_invalid}</p>
         )}
         <div className="mt-5 flex flex-wrap items-center gap-3">
           <button
@@ -431,18 +431,18 @@ export function OwnershipStep({
   // step === 'intro'
   return (
     <section data-ownership-step="intro" className={`mt-8 ${card}`}>
-      <h2 className="text-lg font-semibold text-gray-900">{t.heading}</h2>
-      <p className="mt-1 text-sm leading-relaxed text-gray-600">{t.subhead}</p>
+      <h2 className="text-lg font-semibold text-foreground">{t.heading}</h2>
+      <p className="mt-1 text-sm leading-relaxed text-muted-foreground">{t.subhead}</p>
       {hasDiscovered ? (
-        <p data-ownership-phone className="mt-4 text-sm text-gray-700">
-          {t.phone_prefix} <span className="font-mono font-medium text-gray-900">{discovered}</span>
+        <p data-ownership-phone className="mt-4 text-sm text-foreground">
+          {t.phone_prefix} <span className="font-mono font-medium text-foreground">{discovered}</span>
         </p>
       ) : (
         <>
-          <label className="mt-4 block text-sm font-medium text-gray-700" htmlFor="ownership-phone">
+          <label className="mt-4 block text-sm font-medium text-foreground" htmlFor="ownership-phone">
             {t.phone_label}
           </label>
-          <p className="mt-1 text-xs leading-relaxed text-gray-500">{t.phone_hint}</p>
+          <p className="mt-1 text-xs leading-relaxed text-muted-foreground">{t.phone_hint}</p>
           <input
             id="ownership-phone"
             data-ownership-phone-input
@@ -458,7 +458,7 @@ export function OwnershipStep({
             className={`${input} font-mono tracking-wide`}
           />
           {phoneError && (
-            <p data-ownership-phone-error className="mt-2 text-sm text-red-600">{t.phone_format_error}</p>
+            <p data-ownership-phone-error className="mt-2 text-sm text-destructive">{t.phone_format_error}</p>
           )}
         </>
       )}

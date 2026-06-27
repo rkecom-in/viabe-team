@@ -407,8 +407,8 @@ export function EntityMatchStep({
     <span
       className={
         tone === 'verified'
-          ? 'rounded-full bg-emerald-100 px-2 py-0.5 text-xs font-semibold text-emerald-700'
-          : 'rounded-full bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-700'
+          ? 'rounded-full bg-secondary/10 px-2 py-0.5 text-xs font-semibold text-secondary'
+          : 'rounded-full bg-gold/15 px-2 py-0.5 text-xs font-medium text-gold-foreground'
       }
     >
       {text}
@@ -416,12 +416,12 @@ export function EntityMatchStep({
   )
 
   const card =
-    'rounded-2xl border border-gray-200 bg-white p-6 shadow-sm sm:p-8'
+    'rounded-2xl border border-border bg-card p-6 shadow-sm sm:p-8'
 
   if (step === 'idle') {
     return (
       <section data-entity-step="loading" className={`mt-8 ${card}`}>
-        <p className="text-sm leading-relaxed text-gray-600">{t.looking}</p>
+        <p className="text-sm leading-relaxed text-muted-foreground">{t.looking}</p>
       </section>
     )
   }
@@ -430,41 +430,41 @@ export function EntityMatchStep({
     return (
       <section data-entity-step="verified" className={`mt-8 ${card}`}>
         <div className="flex items-center gap-2">
-          <h2 className="text-lg font-semibold text-gray-900">{t.verified_heading}</h2>
+          <h2 className="text-lg font-semibold text-foreground">{t.verified_heading}</h2>
           {chip(t.verified_chip, 'verified')}
         </div>
         {/* The AUTHORITATIVE registry name — Sandbox, not the candidate's web/LLM name. */}
-        <p data-verified-name className="mt-3 text-base font-medium text-gray-900">
+        <p data-verified-name className="mt-3 text-base font-medium text-foreground">
           {verified.name ?? businessName}
         </p>
-        <p className="mt-2 text-sm leading-relaxed text-gray-600">{t.verified_note}</p>
+        <p className="mt-2 text-sm leading-relaxed text-muted-foreground">{t.verified_note}</p>
         {/* VT-449 — registry-CIN confirm. Shown ONLY when discovery surfaced a registry CIN and the
             owner hasn't dismissed it. The owner must CONFIRM it's theirs — we NEVER auto-capture a
             SERP-scraped CIN. On confirm, the CIN rides into create for the MCA-canonical name-match;
             on dismiss (or if none surfaced), create sends cin: '' (name-match falls back to the
             typed business_name). */}
         {cinCandidate && !cinDismissed && (
-          <div data-cin-affordance className="mt-4 rounded-xl border border-gray-200 bg-gray-50 p-4">
-            <p className="text-sm font-medium text-gray-900">{t.cin_heading}</p>
+          <div data-cin-affordance className="mt-4 rounded-xl border border-border bg-muted/40 p-4">
+            <p className="text-sm font-medium text-foreground">{t.cin_heading}</p>
             {cinCandidate.tradeName && (
-              <p className="mt-1 text-sm text-gray-700">{cinCandidate.tradeName}</p>
+              <p className="mt-1 text-sm text-foreground">{cinCandidate.tradeName}</p>
             )}
-            <p className="mt-1 text-xs text-gray-500">
-              {t.cin_label} <span data-cin-value className="font-mono tracking-wide text-gray-700">{cinCandidate.cin}</span>
+            <p className="mt-1 text-xs text-muted-foreground">
+              {t.cin_label} <span data-cin-value className="font-mono tracking-wide text-foreground">{cinCandidate.cin}</span>
             </p>
             {cinConfirmed ? (
-              <p data-cin-confirmed className="mt-2 text-sm font-medium text-emerald-700">
+              <p data-cin-confirmed className="mt-2 text-sm font-medium text-secondary">
                 {t.cin_confirmed}
               </p>
             ) : (
               <>
-                <p className="mt-2 text-sm text-gray-600">{t.cin_prefix}</p>
+                <p className="mt-2 text-sm text-muted-foreground">{t.cin_prefix}</p>
                 <div className="mt-3 flex flex-wrap items-center gap-3">
                   <button
                     type="button"
                     data-cin-confirm
                     onClick={() => setCinConfirmed(cinCandidate.cin)}
-                    className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-emerald-700"
+                    className="rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground transition hover:bg-primary/90"
                   >
                     {t.cin_confirm}
                   </button>
@@ -472,7 +472,7 @@ export function EntityMatchStep({
                     type="button"
                     data-cin-dismiss
                     onClick={() => setCinDismissed(true)}
-                    className="rounded-lg border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 transition hover:bg-gray-100"
+                    className="rounded-lg border border-input px-4 py-2 text-sm font-medium text-foreground transition hover:bg-muted"
                   >
                     {t.cin_dismiss}
                   </button>
@@ -488,7 +488,7 @@ export function EntityMatchStep({
           // VT-449: thread the owner-CONFIRMED CIN (or '' when none confirmed/dismissed) into the
           // verified entity — the create payload sends `cin`. A SERP-scraped CIN never rides unconfirmed.
           onClick={() => onVerified({ ...verified, cin: cinConfirmed })}
-          className="mt-5 rounded-xl bg-emerald-600 px-5 py-3 font-semibold text-white shadow-sm transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50"
+          className="mt-5 rounded-xl bg-primary px-5 py-3 font-semibold text-primary-foreground shadow-sm transition hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50"
         >
           {t.continue}
         </button>
@@ -499,8 +499,8 @@ export function EntityMatchStep({
   if (step === 'reject') {
     return (
       <section data-entity-step="reject" className={`mt-8 ${card}`}>
-        <h2 className="text-lg font-semibold text-gray-900">{t.reject_heading}</h2>
-        <p data-reject-body className="mt-3 text-sm leading-relaxed text-gray-600">
+        <h2 className="text-lg font-semibold text-foreground">{t.reject_heading}</h2>
+        <p data-reject-body className="mt-3 text-sm leading-relaxed text-muted-foreground">
           {t.reject_body}
         </p>
       </section>
@@ -510,13 +510,13 @@ export function EntityMatchStep({
   if (step === 'retry') {
     return (
       <section data-entity-step="retry" className={`mt-8 ${card}`}>
-        <h2 className="text-lg font-semibold text-gray-900">{t.retry_heading}</h2>
-        <p data-retry-body className="mt-3 text-sm leading-relaxed text-gray-600">{t.retry_body}</p>
+        <h2 className="text-lg font-semibold text-foreground">{t.retry_heading}</h2>
+        <p data-retry-body className="mt-3 text-sm leading-relaxed text-muted-foreground">{t.retry_body}</p>
         <button
           type="button"
           data-entity-retry
           onClick={retry}
-          className="mt-5 rounded-xl bg-emerald-600 px-5 py-3 font-semibold text-white shadow-sm transition hover:bg-emerald-700"
+          className="mt-5 rounded-xl bg-primary px-5 py-3 font-semibold text-primary-foreground shadow-sm transition hover:bg-primary/90"
         >
           {t.try_again}
         </button>
@@ -531,14 +531,14 @@ export function EntityMatchStep({
     // This is NOT the "couldn't find your business" empty-state — we DID find the company.
     return (
       <section data-entity-step="found_no_gstin" className={`mt-8 ${card}`}>
-        <h2 className="text-lg font-semibold text-gray-900">
+        <h2 className="text-lg font-semibold text-foreground">
           {t.fnog_heading_prefix}
-          <span data-found-name className="font-semibold text-gray-900">{foundNoGstin.tradeName}</span>
+          <span data-found-name className="font-semibold text-foreground">{foundNoGstin.tradeName}</span>
           {t.fnog_heading_suffix}
         </h2>
-        <p className="mt-2 text-sm leading-relaxed text-gray-600">{t.fnog_hint}</p>
+        <p className="mt-2 text-sm leading-relaxed text-muted-foreground">{t.fnog_hint}</p>
         {/* (a) Change the company name → re-run the discovery search with the edited name. */}
-        <label className="mt-4 block text-sm font-medium text-gray-700" htmlFor="fnog-name">
+        <label className="mt-4 block text-sm font-medium text-foreground" htmlFor="fnog-name">
           {t.fnog_name_label}
         </label>
         <input
@@ -548,7 +548,7 @@ export function EntityMatchStep({
           autoComplete="off"
           value={searchName}
           onChange={(e) => setSearchName(e.target.value)}
-          className="mt-1 w-full rounded-xl border border-gray-300 px-4 py-3 text-gray-900 outline-none focus:border-emerald-500"
+          className="mt-1 w-full rounded-xl border border-input bg-card px-4 py-3 text-foreground outline-none focus:border-primary"
         />
         <div className="mt-5 flex flex-wrap items-center gap-3">
           <button
@@ -556,7 +556,7 @@ export function EntityMatchStep({
             data-found-research
             disabled={researching || searchName.trim() === ''}
             onClick={() => void rerunSearch()}
-            className="rounded-xl border border-gray-300 px-5 py-2.5 font-medium text-gray-700 transition hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+            className="rounded-xl border border-input px-5 py-2.5 font-medium text-foreground transition hover:bg-muted disabled:cursor-not-allowed disabled:opacity-50"
           >
             {researching ? t.fnog_researching : t.fnog_research}
           </button>
@@ -566,7 +566,7 @@ export function EntityMatchStep({
             data-found-enter-gstin
             disabled={researching}
             onClick={openManual}
-            className="rounded-xl bg-emerald-600 px-5 py-3 font-semibold text-white shadow-sm transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50"
+            className="rounded-xl bg-primary px-5 py-3 font-semibold text-primary-foreground shadow-sm transition hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50"
           >
             {t.fnog_enter_gstin}
           </button>
@@ -578,9 +578,9 @@ export function EntityMatchStep({
   if (step === 'manual_gstin') {
     return (
       <section data-entity-step="manual" className={`mt-8 ${card}`}>
-        <h2 className="text-lg font-semibold text-gray-900">{t.manual_heading}</h2>
-        <p className="mt-1 text-sm leading-relaxed text-gray-600">{t.manual_hint}</p>
-        <label className="mt-4 block text-sm font-medium text-gray-700" htmlFor="manual-gstin">
+        <h2 className="text-lg font-semibold text-foreground">{t.manual_heading}</h2>
+        <p className="mt-1 text-sm leading-relaxed text-muted-foreground">{t.manual_hint}</p>
+        <label className="mt-4 block text-sm font-medium text-foreground" htmlFor="manual-gstin">
           {t.manual_label}
         </label>
         <input
@@ -596,10 +596,10 @@ export function EntityMatchStep({
             if (manualError) setManualError(false)
           }}
           placeholder={t.manual_placeholder}
-          className="mt-1 w-full rounded-xl border border-gray-300 px-4 py-3 font-mono uppercase tracking-wide text-gray-900 outline-none focus:border-emerald-500"
+          className="mt-1 w-full rounded-xl border border-input bg-card px-4 py-3 font-mono uppercase tracking-wide text-foreground outline-none focus:border-primary"
         />
         {manualError && (
-          <p data-manual-error className="mt-2 text-sm text-red-600">{t.manual_format_error}</p>
+          <p data-manual-error className="mt-2 text-sm text-destructive">{t.manual_format_error}</p>
         )}
         <div className="mt-5 flex flex-wrap items-center gap-3">
           <button
@@ -607,7 +607,7 @@ export function EntityMatchStep({
             data-manual-verify
             disabled={confirming !== null || manualGstin.trim() === ''}
             onClick={submitManualGstin}
-            className="rounded-xl bg-emerald-600 px-5 py-3 font-semibold text-white shadow-sm transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50"
+            className="rounded-xl bg-primary px-5 py-3 font-semibold text-primary-foreground shadow-sm transition hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50"
           >
             {confirming !== null ? t.confirming : t.manual_verify}
           </button>
@@ -616,7 +616,7 @@ export function EntityMatchStep({
             data-manual-back
             disabled={confirming !== null}
             onClick={backToList}
-            className="rounded-xl border border-gray-300 px-5 py-2.5 font-medium text-gray-700 transition hover:bg-gray-50 disabled:opacity-50"
+            className="rounded-xl border border-input px-5 py-2.5 font-medium text-foreground transition hover:bg-muted disabled:opacity-50"
           >
             {t.manual_back}
           </button>
@@ -626,7 +626,7 @@ export function EntityMatchStep({
           data-manual-not-registered
           disabled={confirming !== null}
           onClick={notRegistered}
-          className="mt-4 block text-sm text-gray-500 underline underline-offset-2 transition hover:text-gray-700 disabled:opacity-50"
+          className="mt-4 block text-sm text-muted-foreground underline underline-offset-2 transition hover:text-foreground disabled:opacity-50"
         >
           {t.manual_not_registered}
         </button>
@@ -640,9 +640,9 @@ export function EntityMatchStep({
     const needsStateHint = derivedStateCode === null
     return (
       <section data-entity-step="pan_entry" className={`mt-8 ${card}`}>
-        <h2 className="text-lg font-semibold text-gray-900">{t.pan_heading}</h2>
-        <p className="mt-1 text-sm leading-relaxed text-gray-600">{t.pan_hint}</p>
-        <label className="mt-4 block text-sm font-medium text-gray-700" htmlFor="pan-input">
+        <h2 className="text-lg font-semibold text-foreground">{t.pan_heading}</h2>
+        <p className="mt-1 text-sm leading-relaxed text-muted-foreground">{t.pan_hint}</p>
+        <label className="mt-4 block text-sm font-medium text-foreground" htmlFor="pan-input">
           {t.pan_label}
         </label>
         <input
@@ -658,17 +658,17 @@ export function EntityMatchStep({
             if (panError) setPanError(null)
           }}
           placeholder={t.pan_placeholder}
-          className="mt-1 w-full rounded-xl border border-gray-300 px-4 py-3 font-mono uppercase tracking-wide text-gray-900 outline-none focus:border-emerald-500"
+          className="mt-1 w-full rounded-xl border border-input bg-card px-4 py-3 font-mono uppercase tracking-wide text-foreground outline-none focus:border-primary"
         />
         {panError === 'format' && (
-          <p data-pan-error className="mt-2 text-sm text-red-600">{t.pan_format_error}</p>
+          <p data-pan-error className="mt-2 text-sm text-destructive">{t.pan_format_error}</p>
         )}
         {needsStateHint && (
           <>
-            <label className="mt-4 block text-sm font-medium text-gray-700" htmlFor="pan-state">
+            <label className="mt-4 block text-sm font-medium text-foreground" htmlFor="pan-state">
               {t.pan_state_label}
             </label>
-            <p className="mt-1 text-xs leading-relaxed text-gray-500">{t.pan_state_hint}</p>
+            <p className="mt-1 text-xs leading-relaxed text-muted-foreground">{t.pan_state_hint}</p>
             <input
               id="pan-state"
               data-pan-state-input
@@ -680,12 +680,12 @@ export function EntityMatchStep({
                 if (panError === 'state') setPanError(null)
               }}
               placeholder={t.pan_state_placeholder}
-              className="mt-1 w-full rounded-xl border border-gray-300 px-4 py-3 text-gray-900 outline-none focus:border-emerald-500"
+              className="mt-1 w-full rounded-xl border border-input bg-card px-4 py-3 text-foreground outline-none focus:border-primary"
             />
           </>
         )}
         {panError === 'state' && (
-          <p data-pan-state-error className="mt-2 text-sm text-red-600">{t.pan_state_error}</p>
+          <p data-pan-state-error className="mt-2 text-sm text-destructive">{t.pan_state_error}</p>
         )}
         <div className="mt-5 flex flex-wrap items-center gap-3">
           <button
@@ -693,7 +693,7 @@ export function EntityMatchStep({
             data-pan-identify
             disabled={panLoading || pan.trim() === ''}
             onClick={() => void submitPan()}
-            className="rounded-xl bg-emerald-600 px-5 py-3 font-semibold text-white shadow-sm transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50"
+            className="rounded-xl bg-primary px-5 py-3 font-semibold text-primary-foreground shadow-sm transition hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50"
           >
             {panLoading ? t.pan_identifying : t.pan_identify}
           </button>
@@ -702,7 +702,7 @@ export function EntityMatchStep({
             data-pan-back
             disabled={panLoading}
             onClick={() => setStep('picking')}
-            className="rounded-xl border border-gray-300 px-5 py-2.5 font-medium text-gray-700 transition hover:bg-gray-50 disabled:opacity-50"
+            className="rounded-xl border border-input px-5 py-2.5 font-medium text-foreground transition hover:bg-muted disabled:opacity-50"
           >
             {t.pan_back}
           </button>
@@ -713,7 +713,7 @@ export function EntityMatchStep({
           data-pan-no-pan
           disabled={panLoading}
           onClick={openManual}
-          className="mt-4 block text-sm text-gray-500 underline underline-offset-2 transition hover:text-gray-700 disabled:opacity-50"
+          className="mt-4 block text-sm text-muted-foreground underline underline-offset-2 transition hover:text-foreground disabled:opacity-50"
         >
           {t.pan_no_pan}
         </button>
@@ -724,10 +724,10 @@ export function EntityMatchStep({
   if (step === 'pan_pick') {
     return (
       <section data-entity-step="pan_pick" className={`mt-8 ${card}`}>
-        <h2 className="text-lg font-semibold text-gray-900">{t.pan_pick_heading}</h2>
-        <p className="mt-1 text-sm leading-relaxed text-gray-600">{t.pan_pick_hint}</p>
+        <h2 className="text-lg font-semibold text-foreground">{t.pan_pick_heading}</h2>
+        <p className="mt-1 text-sm leading-relaxed text-muted-foreground">{t.pan_pick_hint}</p>
         {panGstins.length === 0 ? (
-          <p data-pan-pick-empty className="mt-4 text-sm leading-relaxed text-gray-600">
+          <p data-pan-pick-empty className="mt-4 text-sm leading-relaxed text-muted-foreground">
             {t.pan_pick_empty}
           </p>
         ) : (
@@ -736,16 +736,16 @@ export function EntityMatchStep({
               <li
                 key={g}
                 data-pan-gstin
-                className="flex flex-col gap-2 rounded-xl border border-gray-200 p-4 sm:flex-row sm:items-center sm:justify-between"
+                className="flex flex-col gap-2 rounded-xl border border-border p-4 sm:flex-row sm:items-center sm:justify-between"
               >
                 {/* IDENTIFIED, not verified — the pick round-trips the Sandbox confirm. */}
-                <span className="font-mono text-sm tracking-wide text-gray-900">{g}</span>
+                <span className="font-mono text-sm tracking-wide text-foreground">{g}</span>
                 <button
                   type="button"
                   data-pan-pick
                   disabled={confirming !== null}
                   onClick={() => void confirmGstin(g)}
-                  className="self-start rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50 sm:self-auto"
+                  className="self-start rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground transition hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50 sm:self-auto"
                 >
                   {confirming === g ? t.confirming : t.pan_pick_this}
                 </button>
@@ -759,7 +759,7 @@ export function EntityMatchStep({
             data-pan-pick-retry
             disabled={confirming !== null}
             onClick={openPanEntry}
-            className="rounded-xl border border-gray-300 px-5 py-2.5 font-medium text-gray-700 transition hover:bg-gray-50 disabled:opacity-50"
+            className="rounded-xl border border-input px-5 py-2.5 font-medium text-foreground transition hover:bg-muted disabled:opacity-50"
           >
             {t.pan_back}
           </button>
@@ -769,7 +769,7 @@ export function EntityMatchStep({
             data-pan-pick-manual
             disabled={confirming !== null}
             onClick={openManual}
-            className="rounded-xl border border-gray-300 px-5 py-2.5 font-medium text-gray-700 transition hover:bg-gray-50 disabled:opacity-50"
+            className="rounded-xl border border-input px-5 py-2.5 font-medium text-foreground transition hover:bg-muted disabled:opacity-50"
           >
             {t.manual_with_gstin}
           </button>
@@ -785,10 +785,10 @@ export function EntityMatchStep({
   const pickable = candidates.filter((c) => c.source !== 'registry')
   return (
     <section data-entity-step="picking" className={`mt-8 ${card}`}>
-      <h2 className="text-lg font-semibold text-gray-900">{t.heading}</h2>
-      <p className="mt-1 text-sm leading-relaxed text-gray-600">{t.subhead}</p>
+      <h2 className="text-lg font-semibold text-foreground">{t.heading}</h2>
+      <p className="mt-1 text-sm leading-relaxed text-muted-foreground">{t.subhead}</p>
       {pickable.length === 0 ? (
-        <p data-entity-empty className="mt-4 text-sm leading-relaxed text-gray-600">
+        <p data-entity-empty className="mt-4 text-sm leading-relaxed text-muted-foreground">
           {t.empty_candidates}
         </p>
       ) : (
@@ -801,32 +801,32 @@ export function EntityMatchStep({
                 key={`${c.candidate_gstin ?? c.trade_name ?? 'c'}-${i}`}
                 data-candidate
                 data-source={c.source}
-                className="flex flex-col gap-2 rounded-xl border border-gray-200 p-4"
+                className="flex flex-col gap-2 rounded-xl border border-border p-4"
               >
                 <div className="flex items-center gap-2">
-                  <span className="font-medium text-gray-900">{display}</span>
+                  <span className="font-medium text-foreground">{display}</span>
                   {/* Provenance: web/GBP candidates are FOUND, never verified. */}
                   {chip(t.found_chip, 'found')}
-                  <span className="text-xs text-gray-400">
+                  <span className="text-xs text-muted-foreground">
                     {c.source === 'gbp' ? t.source_gbp : t.source_web}
                   </span>
                 </div>
                 {c.legal_name && c.legal_name !== display && (
-                  <span className="text-sm text-gray-600">{c.legal_name}</span>
+                  <span className="text-sm text-muted-foreground">{c.legal_name}</span>
                 )}
-                {c.detail && <span className="text-xs text-gray-500">{c.detail}</span>}
+                {c.detail && <span className="text-xs text-muted-foreground">{c.detail}</span>}
                 {confirmable ? (
                   <button
                     type="button"
                     data-candidate-pick
                     disabled={confirming !== null}
                     onClick={() => pick(c)}
-                    className="mt-1 self-start rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50"
+                    className="mt-1 self-start rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground transition hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50"
                   >
                     {confirming === c.candidate_gstin ? t.confirming : t.pick}
                   </button>
                 ) : (
-                  <span data-no-gstin className="mt-1 text-xs text-gray-400">{t.no_gstin}</span>
+                  <span data-no-gstin className="mt-1 text-xs text-muted-foreground">{t.no_gstin}</span>
                 )}
               </li>
             )
@@ -836,7 +836,7 @@ export function EntityMatchStep({
       {/* VT-448: identify-and-confirm. With PAN identify ON, PRIMARY = find-my-GST-with-PAN (owner
           enters their PAN, we identify the GSTIN(s) → pick → verify) + a manual-GSTIN fallback.
           With PAN identify OFF (default, Fazal 2026-06-26 — Sandbox MCA/PAN unreliable), the PAN
-          path is not offered at all and MANUAL GSTIN entry is the PRIMARY identify (emerald CTA).
+          path is not offered at all and MANUAL GSTIN entry is the PRIMARY identify (primary CTA).
           "not listed / found-but-no-GSTIN" is never a dead end either way. */}
       <div className="mt-5 flex flex-wrap items-center gap-3">
         {PAN_IDENTIFY_ENABLED ? (
@@ -846,7 +846,7 @@ export function EntityMatchStep({
               data-entity-pan
               disabled={confirming !== null}
               onClick={openPrimaryIdentify}
-              className="rounded-xl bg-emerald-600 px-5 py-3 font-semibold text-white shadow-sm transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50"
+              className="rounded-xl bg-primary px-5 py-3 font-semibold text-primary-foreground shadow-sm transition hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50"
             >
               {t.pan_cta}
             </button>
@@ -855,7 +855,7 @@ export function EntityMatchStep({
               data-entity-manual
               disabled={confirming !== null}
               onClick={openManual}
-              className="rounded-xl border border-gray-300 px-5 py-2.5 font-medium text-gray-700 transition hover:bg-gray-50 disabled:opacity-50"
+              className="rounded-xl border border-input px-5 py-2.5 font-medium text-foreground transition hover:bg-muted disabled:opacity-50"
             >
               {t.manual_with_gstin}
             </button>
@@ -868,7 +868,7 @@ export function EntityMatchStep({
             data-entity-manual
             disabled={confirming !== null}
             onClick={openPrimaryIdentify}
-            className="rounded-xl bg-emerald-600 px-5 py-3 font-semibold text-white shadow-sm transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50"
+            className="rounded-xl bg-primary px-5 py-3 font-semibold text-primary-foreground shadow-sm transition hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50"
           >
             {t.manual_with_gstin}
           </button>

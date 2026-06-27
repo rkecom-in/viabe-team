@@ -11,8 +11,9 @@
  * CL-390: NO PII (name / phone / city) in any analytics/telemetry event.
  *
  * VT-378: the form shipped markup-only like the landing did (VT-372 twin — no stylesheet ever
- * existed). Styled with Tailwind utilities (the repo's system): light theme, emerald accent,
- * mobile-first; copy/flow/validation untouched. Semantic classes kept alongside.
+ * existed). Styled with Tailwind utilities (the repo's system): light theme, Viabe brand tokens
+ * (saffron primary / warm-cream background — see globals.css), mobile-first; copy/flow/validation
+ * untouched. Semantic classes kept alongside.
  */
 'use client'
 
@@ -255,15 +256,15 @@ export function SignupForm() {
 
   if (done) {
     return (
-      <main className="signup-success flex min-h-screen flex-col items-center justify-center bg-gray-50 px-5 text-center text-gray-900 antialiased">
-        <div className="w-full max-w-md rounded-2xl border border-gray-200 bg-white p-8 shadow-sm">
+      <main className="signup-success flex min-h-screen flex-col items-center justify-center bg-background px-5 text-center text-foreground antialiased">
+        <div className="w-full max-w-md rounded-2xl border border-border bg-card p-8 shadow-sm">
           <span
             aria-hidden
-            className="mx-auto flex h-12 w-12 items-center justify-center rounded-full bg-emerald-100 text-2xl font-bold text-emerald-700"
+            className="mx-auto flex h-12 w-12 items-center justify-center rounded-full bg-secondary/10 text-2xl font-bold text-secondary"
           >
             ✓
           </span>
-          <p className="mt-4 font-medium leading-relaxed text-gray-900">{t.success}</p>
+          <p className="mt-4 font-medium leading-relaxed text-foreground">{t.success}</p>
         </div>
       </main>
     )
@@ -271,14 +272,14 @@ export function SignupForm() {
 
   const langBtn = (active: boolean) =>
     active
-      ? 'rounded-full bg-emerald-600 px-4 py-1.5 font-semibold text-white'
-      : 'rounded-full border border-gray-300 px-4 py-1.5 text-gray-600 transition hover:bg-gray-100'
-  const fieldLabel = 'flex flex-col gap-1.5 text-sm font-medium text-gray-700'
+      ? 'rounded-full bg-primary px-4 py-1.5 font-semibold text-primary-foreground'
+      : 'rounded-full border border-input px-4 py-1.5 text-muted-foreground transition hover:bg-muted'
+  const fieldLabel = 'flex flex-col gap-1.5 text-sm font-medium text-foreground'
   const fieldInput =
-    'rounded-lg border border-gray-300 bg-white px-3 py-2.5 text-base font-normal text-gray-900 outline-none transition focus:border-emerald-600 focus:ring-2 focus:ring-emerald-600/20'
+    'rounded-lg border border-input bg-card px-3 py-2.5 text-base font-normal text-foreground outline-none transition focus:border-primary focus:ring-2 focus:ring-ring/20'
 
   return (
-    <main className="signup min-h-screen bg-gray-50 px-5 py-10 text-gray-900 antialiased sm:py-16">
+    <main className="signup min-h-screen bg-background px-5 py-10 text-foreground antialiased sm:py-16">
       <div className="mx-auto w-full max-w-md">
         <div className="signup-lang flex justify-center gap-2 text-sm">
           <button
@@ -298,13 +299,13 @@ export function SignupForm() {
             हिंदी
           </button>
         </div>
-        <h1 className="mt-6 text-center text-2xl font-bold tracking-tight text-gray-900 sm:text-3xl">
+        <h1 className="mt-6 text-center text-2xl font-bold tracking-tight text-foreground sm:text-3xl">
           {t.title}
         </h1>
         {step === 'details' ? (
         <form
           onSubmit={onSubmitDetails}
-          className="mt-8 flex flex-col gap-5 rounded-2xl border border-gray-200 bg-white p-6 shadow-sm sm:p-8"
+          className="mt-8 flex flex-col gap-5 rounded-2xl border border-border bg-card p-6 shadow-sm sm:p-8"
         >
         <label className={fieldLabel}>
           {t.business_name}
@@ -365,35 +366,35 @@ export function SignupForm() {
             ))}
           </select>
         </label>
-        <label className="signup-consent flex items-start gap-2.5 text-sm font-normal leading-relaxed text-gray-600">
+        <label className="signup-consent flex items-start gap-2.5 text-sm font-normal leading-relaxed text-muted-foreground">
           <input
             type="checkbox"
             checked={form.consent_dpdpa}
             onChange={(e) => update('consent_dpdpa', e.target.checked)}
-            className="mt-0.5 h-4 w-4 shrink-0 accent-emerald-600"
+            className="mt-0.5 h-4 w-4 shrink-0 accent-primary"
           />
           {t.consent_dpdpa}
           {/* NEEDS-FAZAL: link to the DPDP disclosure copy (dpdpa_v1_2026-06). */}
         </label>
-        <label className="signup-consent flex items-start gap-2.5 text-sm font-normal leading-relaxed text-gray-600">
+        <label className="signup-consent flex items-start gap-2.5 text-sm font-normal leading-relaxed text-muted-foreground">
           <input
             type="checkbox"
             checked={form.consent_residency}
             onChange={(e) => update('consent_residency', e.target.checked)}
-            className="mt-0.5 h-4 w-4 shrink-0 accent-emerald-600"
+            className="mt-0.5 h-4 w-4 shrink-0 accent-primary"
           />
           {t.consent_residency}
           {/* NEEDS-FAZAL: link to the residency disclosure copy (residency_v1_2026-06). */}
         </label>
         {error && (
-          <p className="signup-error rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700" role="alert">
+          <p className="signup-error rounded-lg bg-destructive/10 px-3 py-2 text-sm text-destructive" role="alert">
             {error}
           </p>
         )}
         <button
           type="submit"
           disabled={submitting || !form.consent_dpdpa || !form.consent_residency}
-          className="rounded-xl bg-emerald-600 px-5 py-3 font-semibold text-white shadow-sm transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50"
+          className="rounded-xl bg-primary px-5 py-3 font-semibold text-primary-foreground shadow-sm transition hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50"
         >
           {t.send_code}
         </button>
@@ -412,9 +413,9 @@ export function SignupForm() {
       ) : step === 'verify' ? (
       <form
         onSubmit={onVerifyAndCreate}
-        className="mt-8 flex flex-col gap-5 rounded-2xl border border-gray-200 bg-white p-6 shadow-sm sm:p-8"
+        className="mt-8 flex flex-col gap-5 rounded-2xl border border-border bg-card p-6 shadow-sm sm:p-8"
       >
-        <p className="text-sm leading-relaxed text-gray-600">{t.code_sent}</p>
+        <p className="text-sm leading-relaxed text-muted-foreground">{t.code_sent}</p>
         <label className={fieldLabel}>
           {t.enter_code}
           <input
@@ -427,14 +428,14 @@ export function SignupForm() {
           />
         </label>
         {error && (
-          <p className="signup-error rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700" role="alert">
+          <p className="signup-error rounded-lg bg-destructive/10 px-3 py-2 text-sm text-destructive" role="alert">
             {error}
           </p>
         )}
         <button
           type="submit"
           disabled={submitting}
-          className="rounded-xl bg-emerald-600 px-5 py-3 font-semibold text-white shadow-sm transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50"
+          className="rounded-xl bg-primary px-5 py-3 font-semibold text-primary-foreground shadow-sm transition hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50"
         >
           {t.verify_create}
         </button>
@@ -445,7 +446,7 @@ export function SignupForm() {
             setOtpCode('')
             setError(null)
           }}
-          className="rounded-xl border border-gray-300 px-5 py-2.5 font-medium text-gray-700 transition hover:bg-gray-50"
+          className="rounded-xl border border-input px-5 py-2.5 font-medium text-foreground transition hover:bg-muted"
         >
           {t.change_number}
         </button>
