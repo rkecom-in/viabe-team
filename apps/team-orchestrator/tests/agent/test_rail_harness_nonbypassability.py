@@ -99,19 +99,26 @@ def test_D21_pinned_agent_surface_exposes_no_side_effect_capability() -> None:
     contains none of the forbidden capability substrings. Proves the shipped surface is safe, not
     just that the guard would catch a bad addition."""
     from orchestrator.agent.integration_agent import INTEGRATION_AGENT_TOOLS
+    from orchestrator.agent.onboarding_conductor import ONBOARDING_CONDUCTOR_TOOLS
     from orchestrator.agent.orchestrator_agent import ORCHESTRATOR_AGENT_TOOLS
     from orchestrator.agent.tool_guardrail import (
         FORBIDDEN_CAPABILITY_SUBSTRINGS,
         assert_agent_tools_safe,
         find_forbidden_tools,
     )
-    from orchestrator.handoffs import spawn_integration, spawn_sales_recovery
+    from orchestrator.handoffs import (
+        spawn_integration,
+        spawn_onboarding_conductor,
+        spawn_sales_recovery,
+    )
 
     full_surface = [
         *ORCHESTRATOR_AGENT_TOOLS,
         *INTEGRATION_AGENT_TOOLS,
+        *ONBOARDING_CONDUCTOR_TOOLS,  # VT-462
         spawn_sales_recovery,
         spawn_integration,
+        spawn_onboarding_conductor,  # VT-462
     ]
     # No raise on the real surface.
     assert_agent_tools_safe(full_surface, surface="rail_harness_full_surface")

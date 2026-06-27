@@ -53,7 +53,16 @@ INTEGRATION_EXPECTED = {
     # dedupe_against_existing_stub DELETED (plan §3 "delete the concept") — commit is server-side.
     "integration_escalate_to_fazal",
 }
-HANDOFF_EXPECTED = {"spawn_sales_recovery", "spawn_integration"}
+HANDOFF_EXPECTED = {"spawn_sales_recovery", "spawn_integration", "spawn_onboarding_conductor"}
+
+# VT-462 — the onboarding-conductor specialist's tool surface (parity allowlist pin with the
+# orchestrator + integration surfaces). No send/write tool — it reasons about WHAT to ask; the
+# deterministic journey reply path owns the side-effects.
+ONBOARDING_CONDUCTOR_EXPECTED = {
+    "onboarding_next_question",
+    "onboarding_profile_complete",
+    "conductor_escalate_to_fazal",
+}
 
 
 def test_orchestrator_tool_allowlist_pinned():
@@ -71,9 +80,24 @@ def test_integration_tool_allowlist_pinned():
 
 
 def test_handoff_tools_pinned():
-    from orchestrator.handoffs import spawn_integration, spawn_sales_recovery
+    from orchestrator.handoffs import (
+        spawn_integration,
+        spawn_onboarding_conductor,
+        spawn_sales_recovery,
+    )
 
-    assert _names([spawn_sales_recovery, spawn_integration]) == HANDOFF_EXPECTED
+    assert (
+        _names([spawn_sales_recovery, spawn_integration, spawn_onboarding_conductor])
+        == HANDOFF_EXPECTED
+    )
+
+
+def test_onboarding_conductor_tool_allowlist_pinned():
+    from orchestrator.agent.onboarding_conductor import ONBOARDING_CONDUCTOR_TOOLS
+
+    # VT-462 — exact match: a NEW tool fails → forces VT-268 review that the new capability is not a
+    # send/write boundary breach. The conductor reasons; it holds no send/write tool.
+    assert _names(ONBOARDING_CONDUCTOR_TOOLS) == ONBOARDING_CONDUCTOR_EXPECTED
 
 
 def test_dangerous_standalone_functions_are_not_agent_tools():
@@ -103,6 +127,11 @@ def test_guard_passes_real_surfaces():
         surface="orchestrator_agent",
     )
     assert_agent_tools_safe(INTEGRATION_AGENT_TOOLS, surface="integration_agent")
+
+    # VT-462 — the onboarding-conductor surface is also safe (no send/write tool).
+    from orchestrator.agent.onboarding_conductor import ONBOARDING_CONDUCTOR_TOOLS
+
+    assert_agent_tools_safe(ONBOARDING_CONDUCTOR_TOOLS, surface="onboarding_conductor")
 
 
 @pytest.mark.parametrize(

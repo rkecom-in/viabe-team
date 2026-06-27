@@ -80,7 +80,9 @@ def test_prompt_keeps_safety_framing_brain_not_sender() -> None:
 
 def test_prompt_routes_greeting_and_onboarding_correctly() -> None:
     p = _prompt().lower()
-    # greeting mid-onboarding -> onboarding (spawn_integration), not customer-service.
+    # VT-462 — greeting mid-onboarding -> profile-setup (spawn_onboarding_conductor) FIRST, with
+    # connect (spawn_integration) as the subsequent step. Not customer-service.
+    assert "spawn_onboarding_conductor" in p
     assert "spawn_integration" in p
     assert "spawn_sales_recovery" in p
     assert "greeting" in p
