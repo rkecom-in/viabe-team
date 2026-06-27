@@ -228,7 +228,10 @@ def test_callback_install_survives_webhook_registration_failure(app_ctx, monkeyp
 
     monkeypatch.setattr(shopify_mod, "_default_oauth_exchange", _fake_exchange)
 
+    calls = {"n": 0}
+
     def _boom(self, tenant_id):
+        calls["n"] += 1
         raise RuntimeError("webhook register failed (e.g. transient 5xx)")
 
     monkeypatch.setattr(shopify_mod.ShopifyConnector, "setup_push", _boom)
@@ -241,7 +244,12 @@ def test_callback_install_survives_webhook_registration_failure(app_ctx, monkeyp
         "/api/orchestrator/integrations/shopify/oauth/callback", params=params
     )
     assert resp.status_code == 200, resp.text
-    assert resp.json()["webhooks_registered"] == "false"
+    body = resp.json()
+    assert body["webhooks_registered"] == "false"
+    # VT-453 harden: a bounded retry (2 attempts) + an ACTIONABLE state (no bare "ok" — the miss is visible).
+    assert calls["n"] == 2  # retried once before giving up
+    assert body["status"] == "connected_webhooks_unregistered"
+    assert body["action_required"] == "reregister_webhooks"
     # the token still persisted despite the webhook-registration failure.
     with psycopg.connect(app_ctx.dsn, autocommit=True) as c:
         row = c.execute(
@@ -249,3 +257,34 @@ def test_callback_install_survives_webhook_registration_failure(app_ctx, monkeyp
             (t,),
         ).fetchone()
     assert row is not None, "install must persist the token even if webhooks fail to register"
+
+
+def test_callback_webhook_registration_retry_recovers(app_ctx, monkeypatch):
+    """VT-453: a TRANSIENT setup_push failure on the FIRST attempt is auto-retried → the second
+    succeeds → webhooks_registered=true, status ok. The silent-miss is absorbed, not surfaced to the owner."""
+    import orchestrator.integrations.connectors.shopify as shopify_mod
+
+    def _fake_exchange(shop, client_id, client_secret, code):
+        return {"access_token": "shpat_wh_retry", "scope": "read_orders"}
+
+    monkeypatch.setattr(shopify_mod, "_default_oauth_exchange", _fake_exchange)
+
+    calls = {"n": 0}
+
+    def _flaky(self, tenant_id):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("transient 5xx")
+        return {"topics": ["orders/create"]}
+
+    monkeypatch.setattr(shopify_mod.ShopifyConnector, "setup_push", _flaky)
+
+    t = _tenant(app_ctx.dsn)
+    state = _mint_via_setup(app_ctx, t)
+    params = {"code": "authcode123", "shop": _SHOP, "state": state, "timestamp": "1700000000"}
+    params["hmac"] = _sign(params)
+    resp = app_ctx.client.get("/api/orchestrator/integrations/shopify/oauth/callback", params=params)
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["webhooks_registered"] == "true" and calls["n"] == 2  # retry recovered
+    assert body["status"] == "ok"
