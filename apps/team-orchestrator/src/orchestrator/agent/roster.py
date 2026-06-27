@@ -143,6 +143,40 @@ class SpecialistReturn:
     reason: str = ""
 
 
+def _build_context_slice(
+    *, spec: SpecialistSpec, state: dict[str, Any]
+) -> dict[str, Any]:
+    """Produce the lane-scoped ``context_slice`` for this handoff (VT-466).
+
+    Reads the manager's business context for the turn's tenant (RLS-scoped) and
+    narrows it to ``spec.name``'s lane via ``context_slice_for_lane``. Best-effort:
+    a missing tenant_id or a read miss yields ``{}`` — the standard envelope still
+    carries the per-lane ``data`` bundle the specialist consumed before VT-466, so
+    a slice miss never blocks the handoff. Imported lazily to keep the roster's
+    import surface (it's iterated at supervisor-graph build) free of the knowledge
+    layer's DB deps until a handoff actually fires.
+    """
+    tenant_id = state.get("tenant_id")
+    if not tenant_id:
+        return {}
+    try:
+        from orchestrator.knowledge import (
+            context_slice_for_lane,
+            read_business_context,
+        )
+
+        ctx = read_business_context(tenant_id)
+        return context_slice_for_lane(ctx, spec.name)
+    except Exception:  # noqa: BLE001 — slice is enrichment; a miss yields {}
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "roster: context_slice build failed (lane=%s); handing off without slice",
+            spec.name,
+        )
+        return {}
+
+
 def build_handoff_update(
     *,
     spec: SpecialistSpec,
@@ -162,6 +196,16 @@ def build_handoff_update(
     envelope, so a future generic consumer can read {situation, outcome,
     context_slice, data} uniformly without knowing the lane-specific key.
 
+    VT-466: the ``context_slice`` is now populated with the LANE-SCOPED slice of
+    the manager's business context (``context_slice_for_lane``) — the objective +
+    the lane-relevant profile keys ONLY. So a Finance specialist gets the
+    finance-relevant slice, a Sales specialist the sales-relevant slice, etc. The
+    manager holds the WHOLE cross-functional context; the specialist sees only its
+    slice (design §7 "specialists get scoped slices"). Built from the ONE tenant's
+    ``BusinessContext`` (no cross-tenant data). Best-effort: a read miss yields an
+    empty slice rather than blocking the handoff (the per-lane ``data`` bundle the
+    specialist already consumed pre-VT-466 is unchanged).
+
     NOTE: this is the typed helper for the PAYLOAD. The actual
     ``Command(goto, graph=PARENT)`` routing stays in ``make_spawn_tool`` — this
     only assembles the ``update`` dict it carries, via ``update_builder``.
@@ -170,10 +214,12 @@ def build_handoff_update(
     if spec.update_builder is not None:
         lane_bundle = spec.update_builder(state)
 
+    context_slice = _build_context_slice(spec=spec, state=state)
+
     envelope = SpecialistHandoff(
         desired_outcome=spec.default_outcome,
         situation="",
-        context_slice={},
+        context_slice=context_slice,
         data=dict(lane_bundle),
     )
     update: dict[str, Any] = {HANDOFF_STATE_KEY: envelope}
