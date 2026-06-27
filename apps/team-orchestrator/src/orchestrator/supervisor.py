@@ -49,9 +49,9 @@ from orchestrator.agent.tools.request_owner_approval import (
     request_owner_approval_node,
 )
 from orchestrator.agent.tools.self_evaluate import SelfEvaluateAdapter
+from orchestrator.agent.roster import roster_spawn_tools
 from orchestrator.collapse import collapse_node
 from orchestrator.db import tenant_connection
-from orchestrator.handoffs import spawn_integration, spawn_sales_recovery
 from orchestrator.routing import (
     orchestrator_terminal_node,
     route_after_approval,
@@ -281,15 +281,16 @@ def build_supervisor_graph(
     ``checkpointer`` (PR 2/3): when given, the graph compiles with Postgres
     checkpointing; PR 1/3 callers pass nothing and compile checkpoint-free.
     """
-    orchestrator = build_orchestrator_agent(
-        model=model, extra_tools=[spawn_sales_recovery, spawn_integration]
-    )
-    # VT-206: build integration_agent subgraph alongside sales_recovery.
-    # Mirrors orchestrator subgraph wiring; observability:opt-out same
-    # CompiledStateGraph constraint as the orchestrator node.
-    from orchestrator.agent.integration_agent import build_integration_agent
+    # VT-465 — the roster registry drives the manager's spawn-tool set + the
+    # specialist nodes + their conditional-edge route map. Adding a future lane
+    # = ONE SpecialistSpec entry in agent/roster.py — no edit here. The two
+    # existing specialists (sales_recovery, integration) are roster entries that
+    # reproduce their pre-VT-465 wiring byte-for-byte.
+    from orchestrator.agent.roster import ROSTER
 
-    integration = build_integration_agent(model=model)
+    orchestrator = build_orchestrator_agent(
+        model=model, extra_tools=roster_spawn_tools()
+    )
 
     # VT-183 retrofit: 3 function-based supervisor StateGraph nodes wrapped
     # with `with_state_transition_hook` so each execution writes one
@@ -316,14 +317,20 @@ def build_supervisor_graph(
     graph = StateGraph(AgentGraphState)
     # observability:opt-out reason=CompiledStateGraph-subgraph-rejects-function-wrappers-per-VT-183
     graph.add_node("orchestrator_agent", orchestrator)
-    graph.add_node(
-        "sales_recovery_agent",
-        with_state_transition_hook(_sales_recovery_node, node_name="sales_recovery_agent"),
-    )
-    # VT-206 — Integration Agent subgraph node. CompiledStateGraph (no
-    # function wrapper) for parity with the orchestrator node.
+
+    # VT-465 — roster-driven specialist nodes. Each spec contributes its node
+    # under spec.agent_name (built via spec.node_builder, fed the shared model).
+    # spec.wrap_node=True => a plain function wrapped with the VT-183
+    # state-transition hook (sales_recovery); False => a CompiledStateGraph
+    # sub-graph added raw (integration — LangGraph rejects function wrappers
+    # around compiled sub-graphs, VT-183/VT-206).
     # observability:opt-out reason=CompiledStateGraph-subgraph-rejects-function-wrappers-per-VT-183
-    graph.add_node("integration_agent", integration)
+    for spec in ROSTER:
+        node = spec.node_builder(model)
+        if spec.wrap_node:
+            node = with_state_transition_hook(node, node_name=spec.agent_name)
+        graph.add_node(spec.agent_name, node)
+
     graph.add_node(
         "collapse",
         with_state_transition_hook(collapse_node, node_name="collapse"),
@@ -341,22 +348,27 @@ def build_supervisor_graph(
     # observability:opt-out reason=interrupt-raising-control-node-must-not-be-hook-wrapped-VT-47
     graph.add_node("request_owner_approval", request_owner_approval_node)
     graph.add_edge(START, "orchestrator_agent")
+    # VT-465 — the conditional-edge path map is derived from the roster: each
+    # spec's route_key -> its agent_name node, plus the 'terminal' sink for the
+    # no-spawn case. route_after_orchestrator returns whichever applies. A new
+    # lane's branch appears here automatically from its SpecialistSpec.
+    orchestrator_route_map: dict[str, str] = {
+        spec.route_key: spec.agent_name for spec in ROSTER
+    }
+    orchestrator_route_map["terminal"] = "orchestrator_terminal"
     graph.add_conditional_edges(
         "orchestrator_agent",
         route_after_orchestrator,
-        {
-            "spawn": "sales_recovery_agent",
-            "spawn_integration": "integration_agent",
-            "terminal": "orchestrator_terminal",
-        },
+        orchestrator_route_map,
     )
-    graph.add_edge("sales_recovery_agent", "collapse")
-    # VT-206 — integration_agent's own subgraph emits internal state
-    # transitions; the supervisor only routes the spawn handoff. Once
-    # the integration_agent subgraph reaches its own END, control
-    # returns to the supervisor's END (no collapse needed — no campaign
-    # plan to persist).
-    graph.add_edge("integration_agent", END)
+    # VT-465 — each lane's outgoing edge is declared by spec.edge_to:
+    #   - sales_recovery -> 'collapse' (its CampaignPlan needs persisting +
+    #     the approval rail).
+    #   - integration -> END (spec.edge_to=None): the integration_agent
+    #     sub-graph emits its own internal state transitions and produces no
+    #     campaign plan, so control returns straight to the supervisor's END.
+    for spec in ROSTER:
+        graph.add_edge(spec.agent_name, spec.edge_to if spec.edge_to is not None else END)
     # VT-47 — after collapse persists a PROPOSED campaign it attaches
     # pending_approval_request; route_after_collapse sends that to the
     # approval gate (which pauses via interrupt()). Every other collapse

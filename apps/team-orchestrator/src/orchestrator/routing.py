@@ -17,24 +17,35 @@ from orchestrator.state.agent_graph_state import AgentGraphState
 def route_after_orchestrator(state: AgentGraphState) -> str:
     """Return the conditional-edge key after the orchestrator node runs.
 
-    'spawn'    — the last AIMessage carries a spawn_sales_recovery tool_call;
-                 path map routes to 'sales_recovery_agent'.
-    'terminal' — no spawn tool_call; path map routes to 'orchestrator_terminal'.
+    Registry-driven (VT-465): for each spawn tool the manager's LLM may fire,
+    the roster declares the conditional-edge ``route_key`` it maps to. This
+    function looks up the FIRST roster spawn tool present in the last
+    AIMessage's tool_calls and returns its ``route_key``; no spawn tool ->
+    'terminal'. Adding a lane needs NO edit here — the new spec's
+    ``spawn_tool_name -> route_key`` enters the map automatically.
 
-    Precedence (§4.5 / CL-209): if the last AIMessage carries BOTH a
-    spawn_sales_recovery and an escalate_to_fazal tool_call, 'spawn' wins —
-    spawning the specialist is the routable action; escalation is handled
-    inside the agent loop, not by this conditional edge.
+    'spawn'           — spawn_sales_recovery fired; path map -> 'sales_recovery_agent'.
+    'spawn_integration' — spawn_integration fired; path map -> 'integration_agent'.
+    'terminal'        — no spawn tool_call; path map -> 'orchestrator_terminal'.
+
+    Precedence (§4.5 / CL-209): if the last AIMessage carries BOTH a spawn
+    tool_call and an escalate_to_fazal tool_call, the spawn wins — spawning the
+    specialist is the routable action; escalation is handled inside the agent
+    loop, not by this conditional edge. Tool-call order within the AIMessage
+    decides which roster member wins if (rarely) two spawn tools are emitted.
 
     CL-183 VERIFICATION TARGET (verified in test_supervisor.py):
     Whether this function fires on the spawn path depends on langgraph's
     Command.PARENT-vs-conditional-edge precedence, which Context7 does not
     document for this composition. test_supervisor_graph_spawn_path_and_
-    conditional_edge_dont_double_fire exercises it empirically. Returning
-    'spawn' for the spawn path is safe either way — it agrees with the
-    Command's goto target, or it is dead code on that path. Do not remove
+    conditional_edge_dont_double_fire exercises it empirically. Returning the
+    spawn ``route_key`` for the spawn path is safe either way — it agrees with
+    the Command's goto target, or it is dead code on that path. Do not remove
     that test as "redundant".
     """
+    # Local import avoids a module-load cycle (roster -> supervisor -> routing).
+    from orchestrator.agent.roster import spawn_tool_route_keys
+
     messages = state.get("messages", [])
     latest_ai = next(
         (m for m in reversed(messages) if isinstance(m, AIMessage)),
@@ -43,17 +54,12 @@ def route_after_orchestrator(state: AgentGraphState) -> str:
     if latest_ai is None:
         # Orchestrator never produced an AIMessage — treat as terminal.
         return "terminal"
+    route_for_tool = spawn_tool_route_keys()
     tool_calls = list(getattr(latest_ai, "tool_calls", None) or [])
     for tc in tool_calls:
-        if tc.get("name") == "spawn_sales_recovery":
-            return "spawn"
-        if tc.get("name") == "spawn_integration":
-            # VT-206 — orchestrator-agent decided to hand off to the
-            # Integration Agent. Same conditional-edge precedence
-            # discussion as spawn_sales_recovery (Command.PARENT vs
-            # explicit edge); both targets agree on goto so safe either
-            # way.
-            return "spawn_integration"
+        route_key = route_for_tool.get(tc.get("name", ""))
+        if route_key is not None:
+            return route_key
     return "terminal"
 
 
