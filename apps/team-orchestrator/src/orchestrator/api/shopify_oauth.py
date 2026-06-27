@@ -155,22 +155,34 @@ def shopify_oauth_callback(
     # is already stored, the merchant is connected); it is logged and surfaced as
     # ``webhooks_registered=false`` so the canary (GET webhooks.json) can flag it. A
     # subsequent re-run / scheduled re-register can recover.
+    # VT-453 (fix-immediately): a webhook-registration miss must NOT silently leave the merchant
+    # connected-but-uningested. Bounded retry on a transient failure, then surface an ACTIONABLE state
+    # (the status is no longer a bare "ok", and action_required names the recovery) so a quiet miss is
+    # visible to the caller / a re-register path, not hidden in a log line.
     webhooks_registered = False
-    try:
-        push = connector.setup_push(tenant_uuid)
-        webhooks_registered = bool(push.get("topics"))
-    except Exception:
-        logger.exception(
-            "VT-422 Shopify webhook registration failed post-install (token stored, "
-            "merchant connected; webhooks NOT registered)",
-            extra={"tenant_id": str(tenant_uuid)},
+    for _attempt in range(2):  # one bounded retry
+        try:
+            push = connector.setup_push(tenant_uuid)
+            webhooks_registered = bool(push.get("topics"))
+            if webhooks_registered:
+                break
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "VT-453 Shopify webhook registration attempt %d failed (token stored, merchant connected)",
+                _attempt + 1, extra={"tenant_id": str(tenant_uuid)}, exc_info=True,
+            )
+    if not webhooks_registered:
+        logger.error(
+            "VT-453 Shopify webhooks NOT registered after retry — merchant connected but orders will NOT "
+            "ingest until re-registered (tenant=%s)", str(tenant_uuid),
         )
 
     return {
-        "status": "ok",
+        "status": "ok" if webhooks_registered else "connected_webhooks_unregistered",
         "connector_id": connector.connector_id,
         "mode": str(result.get("mode", "oauth_install")),
         "shop_url": str(result.get("shop_url", "")),
         "scopes": ",".join(result.get("scopes", [])),
         "webhooks_registered": str(webhooks_registered).lower(),
+        "action_required": "" if webhooks_registered else "reregister_webhooks",
     }
