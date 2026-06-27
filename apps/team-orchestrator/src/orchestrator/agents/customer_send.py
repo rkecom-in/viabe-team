@@ -101,6 +101,7 @@ SKIP_CAP_90D = "skipped_cap_90d"
 SKIP_CAP_L3_DAILY = "skipped_cap_l3_daily"             # VT-384: 50/agent/24h L3 auto-send cap
 SKIP_SIGNATURE_MISMATCH = "skipped_signature_mismatch" # VT-384: registry vs executor variable drift
 SKIP_NOT_ONBOARDED = "skipped_not_onboarded"           # VT-421: Gate 0 — tenant not fully onboarded
+SKIP_WABA_NOT_LIVE = "skipped_waba_not_live"           # VT-460: Gate 0b — WABA not Meta-verified 'live'
 
 _DRAFT_TERMINAL_STATUSES = ("sent", "skipped", "halted")
 
@@ -523,6 +524,18 @@ def agent_send_draft(
     if not is_agent_eligible(tid, "sales_recovery", conn=conn):
         return _skip(conn, tid, draft, SKIP_NOT_ONBOARDED, persist=True)
 
+    # --- Gate 0b: universal WABA-live pre-gate (VT-460 gap b) — fail-closed ---
+    # The WABA must be Meta-verified 'live' (business verification + privacy URL) BEFORE any
+    # customer dispatch. Previously this path discovered a not-live WABA only as a downstream
+    # Twilio 4xx; VT-460 makes it a deterministic pre-gate consistent with the campaign + inbound
+    # paths. NOT persisted on the draft: a not-live WABA is a transient tenant condition (it goes
+    # live later), so the batch may still send once the WABA is approved.
+    from orchestrator.integrations.whatsapp_account import wa_send_allowed
+
+    if not wa_send_allowed(tid, conn=conn):
+        logger.info("agent_send: WABA not live tenant=%s draft=%s", tid, did)
+        return _skip(conn, tid, draft, SKIP_WABA_NOT_LIVE, persist=False)
+
     # --- Gate 1: batch state (L2 = Pillar-7 approved; 'sending' = mid-batch;
     # VT-384 L3 = 'auto_send_pending', the delivery-anchored hold window) ---
     _ok_batch_states = ("auto_send_pending",) if autonomy_level == "L3" else ("approved", "sending")
@@ -624,6 +637,7 @@ def agent_send_draft(
         send_whatsapp_template,
     )
     from orchestrator.agents.outbox_redaction import capture_then_redact_draft
+    from orchestrator.utils.twilio_send import customer_send_context
 
     raw_params = draft["params"] or {}
     payload = SendWhatsappTemplateInput(
@@ -655,7 +669,11 @@ def agent_send_draft(
                 # A concurrent demote (or cancel) won the row — abort BEFORE the irreversible send.
                 # NOT persisted on the draft (the batch may be re-approved later via the L2 path).
                 return _skip(conn, tid, draft, SKIP_BATCH_NOT_APPROVED, persist=False)
-            out = send_whatsapp_template(payload, send_fn=send_fn)
+            # VT-460 gap (c): the gated extent of a customer dispatch — the transport refuses a
+            # customer send outside this context. Every pre-gate (Gate-0/0b) + gate (1-5) has
+            # passed; this is the irreversible region.
+            with customer_send_context():
+                out = send_whatsapp_template(payload, send_fn=send_fn)
             if out.status == "unauthorized":
                 code = out.error_envelope.code if out.error_envelope else ""
                 reason = SKIP_CONSENT if code == "recipient_not_opted_in" else SKIP_OPT_OUT
@@ -708,7 +726,10 @@ def agent_send_draft(
             draft_id=did, status=status, message_sid=out.message_sid, batch_status=batch_status,
         )
 
-    out = send_whatsapp_template(payload, send_fn=send_fn)
+    # VT-460 gap (c): the L2 owner-approved arm — gated transport extent (the transport refuses a
+    # customer send outside this context). All gates (0/0b/1-5) have passed.
+    with customer_send_context():
+        out = send_whatsapp_template(payload, send_fn=send_fn)
 
     if out.status == "unauthorized":
         # VT-45's own consent/opt-out refusal (defense-in-depth; should have
@@ -794,7 +815,9 @@ __all__ = [
     "MAX_AGENT_CONTACTS_PER_90D",
     "RECONTACT_SUPPRESSION_DAYS",
     "SKIP_CAP_L3_DAILY",
+    "SKIP_NOT_ONBOARDED",
     "SKIP_SIGNATURE_MISMATCH",
+    "SKIP_WABA_NOT_LIVE",
     "agent_send_draft",
     "assert_winback_signature",
     "check_agent_send_caps",

@@ -315,14 +315,28 @@ def _ctx(tenant: UUID, work_item: UUID) -> AgentItemContext:
     )
 
 
+def _seed_live_waba(dsn: str, tenant: UUID) -> None:
+    """A 'live' WABA so the VT-460 Gate-0b WABA pre-gate passes on the send path. Harmless for the
+    gate-0-only (is_agent_eligible) tests, which never read the WABA."""
+    from uuid import uuid4
+
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute(
+            "INSERT INTO tenant_whatsapp_accounts (tenant_id, status, phone_number) "
+            "VALUES (%s, 'live', %s)",
+            (str(tenant), f"+9180{uuid4().int % 10**8:08d}"),
+        )
+
+
 def _activated_tenant(dsn: str, *, phase: str = "trial") -> SimpleNamespace:
     """A fully-ACTIVATED tenant: journey-complete + gstin_verified + enabled+ok connector +
-    ≥1 customer + owner_inputs. Defaults to phase='trial' to prove journey-complete (not paid) is
-    the bar."""
+    ≥1 customer + owner_inputs + a 'live' WABA (VT-460 Gate-0b). Defaults to phase='trial' to prove
+    journey-complete (not paid) is the bar."""
     tenant = _new_tenant(dsn, phase=phase, verification_status="gstin_verified")
     _seed_journey(dsn, tenant, status="complete")
     _seed_connector(dsn, tenant)
     customer, phone = _seed_customer(dsn, tenant)
+    _seed_live_waba(dsn, tenant)
     return SimpleNamespace(tenant=tenant, customer=customer, phone=phone)
 
 

@@ -132,6 +132,14 @@ def _new_tenant(dsn: str, *, name: str = "VT-382 outbox-redaction") -> UUID:
             "VALUES (%s, 'complete', now())",
             (str(tenant),),
         )
+        # VT-460 Gate-0b: agent_send_draft now also passes the universal WABA-live pre-gate. Seed a
+        # 'live' WABA so these send/redaction tests reach the send (a not-live tenant short-circuits
+        # on SKIP_WABA_NOT_LIVE before the gate stack).
+        conn.execute(
+            "INSERT INTO tenant_whatsapp_accounts (tenant_id, status, phone_number) "
+            "VALUES (%s, 'live', %s)",
+            (str(tenant), f"+9180{uuid4().int % 10**8:08d}"),
+        )
     return tenant
 
 

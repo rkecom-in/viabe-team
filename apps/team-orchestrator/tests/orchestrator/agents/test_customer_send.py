@@ -225,6 +225,14 @@ def _new_tenant(dsn: str, *, name: str = "VT-369 customer_send test") -> UUID:
             "VALUES (%s, 'complete', now())",
             (str(tenant),),
         )
+        # VT-460 Gate-0b: agent_send_draft now also passes the universal WABA-live pre-gate
+        # (wa_send_allowed). For the gate-1..6 tests to reach the gate they assert, seed a 'live'
+        # WABA — a not-live tenant would short-circuit on SKIP_WABA_NOT_LIVE before those gates.
+        conn.execute(
+            "INSERT INTO tenant_whatsapp_accounts (tenant_id, status, phone_number) "
+            "VALUES (%s, 'live', %s)",
+            (str(tenant), f"+9180{uuid4().int % 10**8:08d}"),
+        )
     return tenant
 
 

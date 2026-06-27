@@ -35,6 +35,25 @@ pytest.importorskip("langchain")
 # Helpers
 # ---------------------------------------------------------------------------
 
+
+@pytest.fixture(autouse=True)
+def _allow_customer_send_pregate(monkeypatch: pytest.MonkeyPatch) -> None:
+    """VT-460: execute_approved_campaign now runs the SHARED onboarded + WABA-live pre-gate
+    (``assert_customer_send_allowed``) before the send loop. These are MagicMock-conn UNIT tests of
+    the send-loop bookkeeping, NOT the pre-gate (its own fail-closed behavior is proven in
+    tests/agent/test_rail_harness_nonbypassability.py against a real DB). Patch the pre-gate to
+    ALLOW so the loop logic is exercised. The dispatch-guard (phase) tests are unaffected — that
+    guard short-circuits BEFORE the pre-gate. Patches the SOURCE module (execute.py imports the
+    symbol lazily inside the function, so the source attribute is what binds at call time)."""
+    from orchestrator.agents import customer_send_choke
+
+    monkeypatch.setattr(
+        customer_send_choke,
+        "assert_customer_send_allowed",
+        lambda *a, **k: customer_send_choke.CustomerSendGate(allowed=True),
+    )
+
+
 _TENANT_ID = "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11"
 _CAMPAIGN_ID = "b0eebc99-9c0b-4ef8-bb6d-6bb9bd380a22"
 _CUSTOMER_1 = "c0eebc99-9c0b-4ef8-bb6d-6bb9bd380a33"

@@ -193,16 +193,24 @@ def set_status(tenant_id: UUID | str, status: str) -> bool:
         return cur.rowcount > 0
 
 
-def wa_send_allowed(tenant_id: UUID | str) -> bool:
+def wa_send_allowed(tenant_id: UUID | str, *, conn: Any = None) -> bool:
     """Fail-CLOSED send gate: True iff the tenant's WABA is `live` (business verified +
     display name approved). No row, or any non-live status, returns False. VT-287's send
-    path MUST call this."""
-    with tenant_connection(tenant_id) as conn, conn.cursor() as cur:
-        cur.execute(
-            "SELECT status FROM tenant_whatsapp_accounts WHERE tenant_id = %s",
-            (str(tenant_id),),
-        )
-        row = cur.fetchone()
+    path MUST call this.
+
+    ``conn`` (VT-460): an already-open, RLS-scoped tenant connection. When given, the read runs on
+    it (one connection, one RLS scope — used by the shared customer-send choke so a caller that
+    already holds a tenant_connection does not open a SECOND pool connection, and so a caller with
+    no substrate pool — e.g. a direct-psycopg test — still works). When None, opens its own
+    ``tenant_connection`` (the original VT-286 contract, unchanged for existing callers)."""
+    query = "SELECT status FROM tenant_whatsapp_accounts WHERE tenant_id = %s"
+    params = (str(tenant_id),)
+    if conn is not None:
+        row = conn.execute(query, params).fetchone()
+    else:
+        with tenant_connection(tenant_id) as own_conn, own_conn.cursor() as cur:
+            cur.execute(query, params)
+            row = cur.fetchone()
     if row is None:
         return False
     status = row["status"] if isinstance(row, dict) else row[0]
