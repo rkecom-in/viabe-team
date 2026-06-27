@@ -43,20 +43,20 @@ export default async function DashboardOverviewPage({
         <Card label="top-customers">
           <CardTitle>{t(dict, 'overview.topCustomers')}</CardTitle>
           {summary.top_customers.length === 0 ? (
-            <p className="mt-4 text-sm text-gray-500">{t(dict, 'campaigns.none')}</p>
+            <p className="mt-4 text-sm text-muted-foreground">{t(dict, 'campaigns.none')}</p>
           ) : (
-            <ul className="mt-4 divide-y divide-gray-100">
+            <ul className="mt-4 divide-y divide-border">
               {summary.top_customers.map((c, i) => (
                 <li key={i} className="flex items-center justify-between gap-3 py-3">
                   <div className="min-w-0">
-                    <p className="truncate font-medium text-gray-900">
+                    <p className="truncate font-medium text-foreground">
                       {c.display_name ?? t(dict, 'common.unknown')}
                     </p>
                     {c.phone_last4 ? (
-                      <p className="text-xs text-gray-400">···· {c.phone_last4}</p>
+                      <p className="text-xs text-muted-foreground">···· {c.phone_last4}</p>
                     ) : null}
                   </div>
-                  <span className="shrink-0 font-semibold tabular-nums text-gray-900">
+                  <span className="shrink-0 font-semibold tabular-nums text-foreground">
                     ₹{c.spend_rupees.toLocaleString('en-IN')}
                   </span>
                 </li>
@@ -68,13 +68,13 @@ export default async function DashboardOverviewPage({
         <Card label="recent-campaigns">
           <CardTitle>{t(dict, 'overview.recentCampaigns')}</CardTitle>
           {summary.recent_campaigns.length === 0 ? (
-            <p className="mt-4 text-sm text-gray-500">{t(dict, 'campaigns.none')}</p>
+            <p className="mt-4 text-sm text-muted-foreground">{t(dict, 'campaigns.none')}</p>
           ) : (
-            <ul className="mt-4 divide-y divide-gray-100">
+            <ul className="mt-4 divide-y divide-border">
               {summary.recent_campaigns.map((c) => (
                 <li key={c.campaign_id} className="flex items-center justify-between gap-3 py-3">
                   <StatusChip status={c.status} unknownLabel={t(dict, 'common.unknown')} />
-                  <span className="text-sm text-gray-600">
+                  <span className="text-sm text-muted-foreground">
                     {c.responses} {t(dict, 'overview.responses')}
                   </span>
                 </li>

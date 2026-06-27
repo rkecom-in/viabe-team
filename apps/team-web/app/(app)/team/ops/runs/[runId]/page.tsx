@@ -123,20 +123,20 @@ export default async function RunReplayPage({ params }: PageProps) {
 
   return (
     <main
-      className="ops-run-replay bg-gray-50 min-h-screen p-6 space-y-6"
+      className="ops-run-replay bg-background min-h-screen p-6 space-y-6"
       data-area="team-ops-run"
       data-run-id={runId}
     >
-      <header className="bg-white rounded-lg shadow-sm border border-gray-200 p-6 space-y-2">
-        <h1 className="text-2xl font-semibold text-gray-900">Run replay</h1>
-        <p className="text-sm text-gray-600">
-          run_id: <code className="font-mono text-xs text-gray-700">{runId}</code> | tenant_id:{' '}
-          <code className="font-mono text-xs text-gray-700">{tenantId ?? '—'}</code> | steps: {steps.length}
+      <header className="bg-card rounded-lg shadow-sm border border-border p-6 space-y-2">
+        <h1 className="text-2xl font-semibold text-foreground">Run replay</h1>
+        <p className="text-sm text-muted-foreground">
+          run_id: <code className="font-mono text-xs text-foreground">{runId}</code> | tenant_id:{' '}
+          <code className="font-mono text-xs text-foreground">{tenantId ?? '—'}</code> | steps: {steps.length}
         </p>
         <a
           href={`/team/ops/runs/${runId}/debug`}
           data-element="debug-view-link"
-          className="inline-block bg-blue-50 text-blue-700 px-3 py-1 rounded text-sm hover:bg-blue-100"
+          className="inline-block bg-primary/10 text-primary px-3 py-1 rounded text-sm hover:bg-primary/20"
         >
           Debug view
         </a>

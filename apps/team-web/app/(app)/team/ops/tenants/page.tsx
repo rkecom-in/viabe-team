@@ -43,10 +43,10 @@ const VERIFICATION_LABEL: Record<string, string> = {
 
 function Chip({ children, tone }: { children: React.ReactNode; tone: 'gray' | 'blue' | 'green' | 'amber' }) {
   const tones: Record<string, string> = {
-    gray: 'bg-gray-100 text-gray-700 border-gray-200',
-    blue: 'bg-blue-50 text-blue-700 border-blue-200',
-    green: 'bg-green-50 text-green-700 border-green-200',
-    amber: 'bg-amber-50 text-amber-800 border-amber-200',
+    gray: 'bg-muted text-muted-foreground border-border',
+    blue: 'bg-primary/10 text-primary border-primary/30',
+    green: 'bg-secondary/10 text-secondary border-secondary/30',
+    amber: 'bg-gold/15 text-gold-foreground border-gold/40',
   }
   return (
     <span className={`inline-block rounded-full border px-2 py-0.5 text-xs font-medium ${tones[tone]}`}>
@@ -81,31 +81,31 @@ export default async function OpsTenantsIndexPage() {
   const scopeLabel = operator.assignedTenants === null ? 'all businesses' : 'your businesses'
 
   return (
-    <main className="ops-tenants-index min-h-screen space-y-6 bg-gray-50 p-6" data-area="team-ops-tenants-index">
-      <header className="rounded-lg border border-gray-200 bg-white p-6 shadow-sm">
-        <h1 className="text-2xl font-semibold text-gray-900">Tenants ({scopeLabel})</h1>
-        <p className="mt-1 text-sm text-gray-500">
+    <main className="ops-tenants-index min-h-screen space-y-6 bg-background p-6" data-area="team-ops-tenants-index">
+      <header className="rounded-lg border border-border bg-card p-6 shadow-sm">
+        <h1 className="text-2xl font-semibold text-foreground">Tenants ({scopeLabel})</h1>
+        <p className="mt-1 text-sm text-muted-foreground">
           Businesses you are assigned to. Open one for its full profile, plan and agents.
         </p>
       </header>
 
       {error ? (
-        <section className="rounded-lg border border-gray-200 bg-white p-6 shadow-sm">
-          <p data-section-error className="text-sm text-red-700">
+        <section className="rounded-lg border border-border bg-card p-6 shadow-sm">
+          <p data-section-error className="text-sm text-destructive">
             couldn&apos;t load tenants: {error}
           </p>
         </section>
       ) : rows.length === 0 ? (
-        <section className="rounded-lg border border-gray-200 bg-white p-6 shadow-sm">
-          <p data-ops-empty className="text-sm text-gray-500">
+        <section className="rounded-lg border border-border bg-card p-6 shadow-sm">
+          <p data-ops-empty className="text-sm text-muted-foreground">
             No tenants assigned to you yet.
           </p>
         </section>
       ) : (
-        <section className="overflow-hidden rounded-lg border border-gray-200 bg-white shadow-sm">
+        <section className="overflow-hidden rounded-lg border border-border bg-card shadow-sm">
           <table data-ops-tenants-index className="w-full text-left text-sm">
             <thead>
-              <tr className="border-b border-gray-200 text-[11px] uppercase tracking-wide text-gray-500">
+              <tr className="border-b border-border text-[11px] uppercase tracking-wide text-muted-foreground">
                 <th className="px-4 py-3 font-medium">Business</th>
                 <th className="px-4 py-3 font-medium">Verification</th>
                 <th className="px-4 py-3 font-medium">Phase</th>
@@ -114,23 +114,23 @@ export default async function OpsTenantsIndexPage() {
                 <th className="px-4 py-3 font-medium" />
               </tr>
             </thead>
-            <tbody className="divide-y divide-gray-100">
+            <tbody className="divide-y divide-border">
               {rows.map((r) => (
-                <tr key={r.tenant_id} data-tenant-id={r.tenant_id} className="hover:bg-gray-50">
+                <tr key={r.tenant_id} data-tenant-id={r.tenant_id} className="hover:bg-muted/40">
                   <td className="px-4 py-3">
-                    <div className="font-medium text-gray-900">{r.business_name ?? '—'}</div>
-                    <code className="font-mono text-[11px] text-gray-400">{r.tenant_id}</code>
+                    <div className="font-medium text-foreground">{r.business_name ?? '—'}</div>
+                    <code className="font-mono text-[11px] text-muted-foreground">{r.tenant_id}</code>
                   </td>
                   <td className="px-4 py-3">
                     <VerificationChip status={r.verification_status} />
                   </td>
                   <td className="px-4 py-3">{r.phase ? <Chip tone="blue">{r.phase}</Chip> : '—'}</td>
                   <td className="px-4 py-3">{r.plan_tier ? <Chip tone="gray">{r.plan_tier}</Chip> : '—'}</td>
-                  <td className="px-4 py-3 text-gray-700">{fmtDate(r.created_at)}</td>
+                  <td className="px-4 py-3 text-foreground">{fmtDate(r.created_at)}</td>
                   <td className="px-4 py-3 text-right">
                     <Link
                       href={`/team/ops/tenants/${r.tenant_id}`}
-                      className="rounded-md border border-gray-300 px-3 py-1.5 text-sm text-gray-700 hover:bg-gray-50"
+                      className="rounded-md border border-input px-3 py-1.5 text-sm text-foreground hover:bg-muted"
                     >
                       Open →
                     </Link>

@@ -37,12 +37,12 @@ export default async function TenantDashboardPage({ params }: PageProps) {
   if (!canAccessTenant(operator.assignedTenants, tenantId)) {
     return (
       <main
-        className="ops-tenant min-h-screen bg-gray-50 p-6"
+        className="ops-tenant min-h-screen bg-background p-6"
         data-area="team-ops-tenant"
         data-tenant-id={tenantId}
       >
-        <section className="rounded-lg border border-gray-200 bg-white p-6 shadow-sm">
-          <p className="text-sm text-gray-600">You are not assigned to this tenant.</p>
+        <section className="rounded-lg border border-border bg-card p-6 shadow-sm">
+          <p className="text-sm text-muted-foreground">You are not assigned to this tenant.</p>
         </section>
       </main>
     )
@@ -52,13 +52,13 @@ export default async function TenantDashboardPage({ params }: PageProps) {
 
   return (
     <main
-      className="ops-tenant min-h-screen space-y-6 bg-gray-50 p-6"
+      className="ops-tenant min-h-screen space-y-6 bg-background p-6"
       data-area="team-ops-tenant"
       data-tenant-id={tenantId}
     >
       {!ok || !profile ? (
-        <section className="rounded-lg border border-gray-200 bg-white p-6 shadow-sm">
-          <p data-section-error className="text-sm text-red-700">
+        <section className="rounded-lg border border-border bg-card p-6 shadow-sm">
+          <p data-section-error className="text-sm text-destructive">
             {!ok ? `couldn't load this tenant: ${reason}` : 'tenant not found, or not visible to you'}
           </p>
         </section>

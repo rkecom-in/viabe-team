@@ -37,7 +37,7 @@ export default async function SettingsPage({
       <div className="grid gap-6 lg:grid-cols-2">
         <Card label="business">
           <CardTitle>{t(dict, 'settings.business')}</CardTitle>
-          <dl className="mt-4 divide-y divide-gray-100 text-sm">
+          <dl className="mt-4 divide-y divide-border text-sm">
             <Row label={t(dict, 'settings.businessName')} value={b?.business_name} />
             <Row label={t(dict, 'settings.ownerName')} value={b?.owner_name} />
             <Row label={t(dict, 'settings.archetype')} value={b?.business_archetype} />
@@ -47,7 +47,7 @@ export default async function SettingsPage({
 
         <Card label="plan">
           <CardTitle>{t(dict, 'settings.plan')}</CardTitle>
-          <dl className="mt-4 divide-y divide-gray-100 text-sm">
+          <dl className="mt-4 divide-y divide-border text-sm">
             <Row label={t(dict, 'settings.planTier')} value={p.plan_tier} />
             <Row
               label={t(dict, 'settings.trialEnds')}
@@ -68,12 +68,12 @@ export default async function SettingsPage({
           <button
             type="submit"
             data-testid="dsr-export"
-            className="rounded-lg border border-gray-300 px-4 py-2 text-sm font-semibold text-gray-800 transition hover:bg-gray-50"
+            className="rounded-lg border border-input px-4 py-2 text-sm font-semibold text-foreground transition hover:bg-muted"
           >
             {t(dict, 'settings.exportData')}
           </button>
         </form>
-        <p data-testid="dsr-delete-note" className="mt-3 text-sm text-gray-500">
+        <p data-testid="dsr-delete-note" className="mt-3 text-sm text-muted-foreground">
           {t(dict, 'settings.deleteContact')}
         </p>
       </Card>
@@ -85,8 +85,8 @@ export default async function SettingsPage({
 function Row({ label, value }: { label: string; value?: string | null }) {
   return (
     <div className="flex items-center justify-between gap-4 py-2.5">
-      <dt className="text-gray-500">{label}</dt>
-      <dd className="text-right font-medium text-gray-900">{value ?? '—'}</dd>
+      <dt className="text-muted-foreground">{label}</dt>
+      <dd className="text-right font-medium text-foreground">{value ?? '—'}</dd>
     </div>
   )
 }

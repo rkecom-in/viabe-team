@@ -74,7 +74,7 @@ export function FoundingCounterWidget({
       <div
         data-widget="founding-counter"
         data-state="loading"
-        className="text-sm text-gray-400"
+        className="text-sm text-muted-foreground"
       >
         Loading availability…
       </div>
@@ -86,7 +86,7 @@ export function FoundingCounterWidget({
       <div
         data-widget="founding-counter"
         data-state="full"
-        className="rounded-xl bg-gray-100 px-5 py-3 text-sm text-gray-600"
+        className="rounded-xl bg-muted px-5 py-3 text-sm text-muted-foreground"
       >
         <p>All {d.cap} founding spots are claimed. Standard pricing applies.</p>
       </div>
@@ -96,9 +96,9 @@ export function FoundingCounterWidget({
     <div
       data-widget="founding-counter"
       data-state={d.almostFull ? 'almost-full' : 'available'}
-      className="flex w-full max-w-md flex-col gap-2 rounded-2xl border border-emerald-200 bg-emerald-50 p-5 text-center"
+      className="flex w-full max-w-md flex-col gap-2 rounded-2xl border border-secondary/20 bg-secondary/5 p-5 text-center"
     >
-      <p data-count className="font-semibold text-emerald-900">
+      <p data-count className="font-semibold text-secondary">
         {d.claimed} of {d.cap} founding spots claimed
         {d.almostFull ? ` — only ${d.remaining} left` : ''}
       </p>
@@ -108,20 +108,20 @@ export function FoundingCounterWidget({
         aria-valuenow={d.claimed}
         aria-valuemin={0}
         aria-valuemax={d.cap}
-        className="h-2 w-full overflow-hidden rounded-full bg-emerald-100"
+        className="h-2 w-full overflow-hidden rounded-full bg-secondary/15"
       >
         <div
-          className="h-full rounded-full bg-emerald-600 transition-all"
+          className="h-full rounded-full bg-primary transition-all"
           style={{ width: `${Math.min(100, Math.round((d.claimed / d.cap) * 100))}%` }}
         />
       </div>
-      <p className="text-sm text-emerald-800">
+      <p className="text-sm text-secondary/90">
         Founding pricing is locked in forever for these first {d.cap} customers.
       </p>
       <a
         data-cta="claim-founding"
         href="/team/signup?plan=founding"
-        className="mt-1 rounded-xl bg-emerald-600 px-5 py-2.5 font-semibold text-white transition hover:bg-emerald-700"
+        className="mt-1 rounded-xl bg-primary px-5 py-2.5 font-semibold text-primary-foreground transition hover:bg-primary/90"
       >
         Claim a founding spot
       </a>

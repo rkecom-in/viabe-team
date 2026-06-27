@@ -41,18 +41,18 @@ export default async function OpsBehaviourPage() {
   return (
     <main
       data-area="team-ops-behaviour"
-      className="ops-behaviour min-h-screen space-y-6 bg-gray-50 p-6"
+      className="ops-behaviour min-h-screen space-y-6 bg-background p-6"
     >
       <header>
-        <h1 className="text-2xl font-semibold text-gray-900">Decision Audit</h1>
-        <p className="mt-1 text-sm text-gray-600">
+        <h1 className="text-2xl font-semibold text-foreground">Decision Audit</h1>
+        <p className="mt-1 text-sm text-muted-foreground">
           Operator decision metrics and recent decisions. Log feedback on a decision to record an
           audit note.
         </p>
       </header>
       {error ? (
-        <section className="rounded-lg border border-gray-200 bg-white p-6 shadow-sm">
-          <p data-section-error className="text-sm text-red-700">
+        <section className="rounded-lg border border-border bg-card p-6 shadow-sm">
+          <p data-section-error className="text-sm text-destructive">
             couldn&apos;t load: {error}
           </p>
         </section>

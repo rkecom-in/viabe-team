@@ -36,7 +36,7 @@ export default async function CustomersPage({
     `?page=${p}${excludedOnly ? '&excluded=1' : ''}${sp.lang ? `&lang=${sp.lang}` : ''}`
 
   const pageLinkClass =
-    'rounded-lg border border-gray-300 px-3 py-1.5 text-sm font-medium text-gray-700 transition hover:bg-gray-50'
+    'rounded-lg border border-input px-3 py-1.5 text-sm font-medium text-foreground transition hover:bg-muted'
 
   return (
     <div data-testid="dashboard-customers">
@@ -58,21 +58,21 @@ export default async function CustomersPage({
             ]}
           >
             {data.customers.map((c, i) => (
-              <tr key={i} className="hover:bg-gray-50/60">
-                <td className="px-4 py-3 font-medium text-gray-900">
+              <tr key={i} className="hover:bg-muted/40">
+                <td className="px-4 py-3 font-medium text-foreground">
                   {c.display_name ?? t(dict, 'common.unknown')}
                 </td>
-                <td className="px-4 py-3 text-gray-500">
+                <td className="px-4 py-3 text-muted-foreground">
                   {c.phone_last4 ? `···· ${c.phone_last4}` : '—'}
                 </td>
                 <td className="px-4 py-3">
                   {c.opt_out_status ? (
                     <StatusChip status={c.opt_out_status} unknownLabel={t(dict, 'common.unknown')} />
                   ) : (
-                    <span className="text-gray-400">—</span>
+                    <span className="text-muted-foreground">—</span>
                   )}
                 </td>
-                <td className="px-4 py-3 text-right font-medium tabular-nums text-gray-900">
+                <td className="px-4 py-3 text-right font-medium tabular-nums text-foreground">
                   ₹{c.spend_rupees.toLocaleString('en-IN')}
                 </td>
               </tr>
@@ -81,7 +81,7 @@ export default async function CustomersPage({
 
           <nav
             aria-label="pagination"
-            className="mt-5 flex items-center justify-between gap-3 text-sm text-gray-500"
+            className="mt-5 flex items-center justify-between gap-3 text-sm text-muted-foreground"
           >
             {page > 1 ? (
               <Link href={qs(page - 1)} className={pageLinkClass}>

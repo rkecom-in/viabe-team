@@ -17,12 +17,13 @@ describe('VT-235 — Ops Console styling', () => {
     'app/(app)/team/ops/tenants/[tenantId]/page.tsx',
   ]
 
-  it.each(pages)('A1 — %s applies bg-gray-50 + min-h-screen to <main>', async (path) => {
+  it.each(pages)('A1 — %s applies bg-background + min-h-screen to <main>', async (path) => {
     const { readFile } = await import('fs/promises')
     const pathMod = await import('path')
     const filePath = pathMod.resolve(process.cwd(), path)
     const src = await readFile(filePath, 'utf8')
-    expect(src).toContain('bg-gray-50')
+    // Viabe brand migration: the Ops canvas moved from stock bg-gray-50 to the bg-background token.
+    expect(src).toContain('bg-background')
     expect(src).toContain('min-h-screen')
   })
 

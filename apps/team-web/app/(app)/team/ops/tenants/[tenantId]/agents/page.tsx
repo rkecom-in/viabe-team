@@ -39,16 +39,16 @@ export default async function TenantAgentsPage({ params }: PageProps) {
 
   return (
     <main
-      className="ops-tenant-agents bg-gray-50 min-h-screen p-6 space-y-6"
+      className="ops-tenant-agents bg-background min-h-screen p-6 space-y-6"
       data-area="team-ops-tenant-agents"
       data-tenant-id={tenantId}
     >
-      <header className="bg-white rounded-lg shadow-sm border border-gray-200 p-6 space-y-2">
-        <h1 className="text-2xl font-semibold text-gray-900">Agents — autonomy &amp; batches</h1>
-        <p className="text-sm text-gray-600">
-          tenant_id: <code className="font-mono text-xs text-gray-700">{tenantId}</code>
+      <header className="bg-card rounded-lg shadow-sm border border-border p-6 space-y-2">
+        <h1 className="text-2xl font-semibold text-foreground">Agents — autonomy &amp; batches</h1>
+        <p className="text-sm text-muted-foreground">
+          tenant_id: <code className="font-mono text-xs text-foreground">{tenantId}</code>
         </p>
-        <p className="text-xs text-gray-500">
+        <p className="text-xs text-muted-foreground">
           <a className="underline" href={`/team/ops/tenants/${tenantId}`}>
             ← tenant dashboard
           </a>{' '}
@@ -60,12 +60,12 @@ export default async function TenantAgentsPage({ params }: PageProps) {
       </header>
 
       {!agentState.ok && (
-        <p data-section-error className="text-sm text-red-700">
+        <p data-section-error className="text-sm text-destructive">
           couldn&apos;t load agent state: {agentState.reason}
         </p>
       )}
       {!batches.ok && (
-        <p data-section-error className="text-sm text-red-700">
+        <p data-section-error className="text-sm text-destructive">
           couldn&apos;t load draft batches: {batches.reason}
         </p>
       )}
