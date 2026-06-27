@@ -62,23 +62,23 @@ export function SocialProof({
   return (
     <section aria-label="social proof" className="px-5 py-16">
       <div className="mx-auto flex w-full max-w-4xl flex-col gap-8">
-      <h2 className="text-center text-2xl font-bold tracking-tight text-gray-900 sm:text-3xl">
+      <h2 className="text-center text-2xl font-bold tracking-tight text-foreground sm:text-3xl">
         {labels.heading}
       </h2>
 
       {s.testimonials === 'content' ? (
         <ul aria-label="customer testimonials" className="sp-testimonials grid gap-6 sm:grid-cols-2">
           {data.testimonials.map((tt, i) => (
-            <li key={i} className="rounded-2xl border border-gray-200 bg-white p-6 shadow-sm">
-              <blockquote className="leading-relaxed text-gray-700">{tt.quote}</blockquote>
-              <cite className="mt-3 block text-sm not-italic text-gray-500">
+            <li key={i} className="rounded-2xl border border-border bg-card p-6 shadow-sm">
+              <blockquote className="leading-relaxed text-foreground">{tt.quote}</blockquote>
+              <cite className="mt-3 block text-sm not-italic text-muted-foreground">
                 {tt.owner_name} · {tt.business_type} · {tt.locality}
               </cite>
             </li>
           ))}
         </ul>
       ) : (
-        <p className="sp-placeholder rounded-xl border border-dashed border-gray-300 px-5 py-6 text-center text-sm italic text-gray-500">
+        <p className="sp-placeholder rounded-xl border border-dashed border-input px-5 py-6 text-center text-sm italic text-muted-foreground">
           {labels.testimonials_placeholder}
         </p>
       )}
@@ -97,13 +97,13 @@ export function SocialProof({
         <ul aria-label="aggregate results" className="sp-metrics flex flex-wrap justify-center gap-10 text-center">
           {data.metrics.map((m, i) => (
             <li key={i} className="flex flex-col">
-              <span className="sp-metric-value text-3xl font-extrabold text-emerald-700">{m.value}</span>
-              <span className="sp-metric-label text-sm text-gray-500">{m.label}</span>
+              <span className="sp-metric-value text-3xl font-extrabold text-secondary">{m.value}</span>
+              <span className="sp-metric-label text-sm text-muted-foreground">{m.label}</span>
             </li>
           ))}
         </ul>
       ) : (
-        <p className="sp-placeholder rounded-xl border border-dashed border-gray-300 px-5 py-6 text-center text-sm italic text-gray-500">
+        <p className="sp-placeholder rounded-xl border border-dashed border-input px-5 py-6 text-center text-sm italic text-muted-foreground">
           {labels.metrics_placeholder}
         </p>
       )}

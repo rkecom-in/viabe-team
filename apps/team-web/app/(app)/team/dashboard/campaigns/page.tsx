@@ -40,14 +40,14 @@ export default async function CampaignsPage({
           ]}
         >
           {data.campaigns.map((c) => (
-            <tr key={c.campaign_id} className="hover:bg-gray-50/60">
-              <td className="px-4 py-3 text-gray-600">
+            <tr key={c.campaign_id} className="hover:bg-muted/40">
+              <td className="px-4 py-3 text-muted-foreground">
                 {c.sent_at ? new Date(c.sent_at).toLocaleDateString('en-IN') : '—'}
               </td>
               <td className="px-4 py-3">
                 <StatusChip status={c.status} unknownLabel={t(dict, 'common.unknown')} />
               </td>
-              <td className="px-4 py-3 text-right font-medium tabular-nums text-gray-900">
+              <td className="px-4 py-3 text-right font-medium tabular-nums text-foreground">
                 {c.responses}
               </td>
             </tr>

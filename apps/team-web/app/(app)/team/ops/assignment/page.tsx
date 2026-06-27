@@ -32,7 +32,7 @@ export default async function OpsAssignmentPage() {
       <main data-area="team-ops-assignment" className="space-y-5 p-6">
         <OpsPageHeader title="Assignment" />
         <OpsCard className="p-6">
-          <p data-ops-forbidden className="text-sm text-gray-600">
+          <p data-ops-forbidden className="text-sm text-muted-foreground">
             Assignment management is VTAdmin-only. Ask a VTAdmin to change business assignments.
           </p>
         </OpsCard>

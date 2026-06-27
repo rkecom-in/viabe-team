@@ -41,17 +41,17 @@ export default async function OpsStreamPage() {
   if (!hasFullReadAccess(operator.assignedTenants)) {
     return (
       <main
-        className="ops-stream bg-gray-50 min-h-screen p-6 space-y-6"
+        className="ops-stream bg-background min-h-screen p-6 space-y-6"
         data-area="team-ops-stream"
         data-stream-restricted="vtr"
       >
         <header>
-          <h1 className="text-2xl font-semibold text-gray-900">Ops Console — Live Stream</h1>
+          <h1 className="text-2xl font-semibold text-foreground">Ops Console — Live Stream</h1>
         </header>
-        <section className="rounded-lg border border-gray-200 bg-white p-6 shadow-sm">
-          <p data-element="vtr-restricted" className="text-sm text-gray-600">
+        <section className="rounded-lg border border-border bg-card p-6 shadow-sm">
+          <p data-element="vtr-restricted" className="text-sm text-muted-foreground">
             The live stream is not available to your role yet. Use{' '}
-            <a className="text-blue-700 hover:underline" href="/team/ops/stream/history">
+            <a className="text-primary hover:underline" href="/team/ops/stream/history">
               Stream History
             </a>{' '}
             or open a run from Run Control for a scoped, de-identified replay.
@@ -77,11 +77,11 @@ export default async function OpsStreamPage() {
 
   return (
     <main
-      className="ops-stream bg-gray-50 min-h-screen p-6 space-y-6"
+      className="ops-stream bg-background min-h-screen p-6 space-y-6"
       data-area="team-ops-stream"
     >
       <header>
-        <h1 className="text-2xl font-semibold text-gray-900">
+        <h1 className="text-2xl font-semibold text-foreground">
           Ops Console — Live Stream
         </h1>
       </header>

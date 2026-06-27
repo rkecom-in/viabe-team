@@ -41,7 +41,7 @@ export default async function OpsLayout({ children }: { children: ReactNode }) {
   }
 
   return (
-    <section data-area="team-ops" className="min-h-screen bg-gray-50 text-gray-900">
+    <section data-area="team-ops" className="min-h-screen bg-background text-foreground">
       <StickyBannerLive initialCounts={counts} />
       <OverlayProvider>
         <div data-ops-shell className="flex gap-0">

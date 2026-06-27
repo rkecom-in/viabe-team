@@ -39,12 +39,12 @@ export default async function DashboardLayout({ children }: { children: ReactNod
   ]
 
   return (
-    <div data-area="team-dashboard" className="min-h-screen bg-gray-50 text-gray-900 antialiased">
-      <header className="border-b border-gray-200 bg-white">
+    <div data-area="team-dashboard" className="min-h-screen bg-background text-foreground antialiased">
+      <header className="border-b border-border bg-card">
         <div className="mx-auto flex w-full max-w-6xl items-center justify-between px-4 py-4 sm:px-6">
           <Link
             href="/team/dashboard"
-            className="text-lg font-bold tracking-tight text-emerald-700"
+            className="text-lg font-bold tracking-tight text-primary"
           >
             {t(dict, 'brand')}
           </Link>
@@ -53,15 +53,15 @@ export default async function DashboardLayout({ children }: { children: ReactNod
           <nav
             aria-label="language"
             data-testid="locale-toggle"
-            className="text-sm text-gray-500"
+            className="text-sm text-muted-foreground"
           >
-            <Link href="?lang=en" className="rounded px-2 py-1 hover:bg-gray-100 hover:text-gray-900">
+            <Link href="?lang=en" className="rounded px-2 py-1 hover:bg-muted hover:text-foreground">
               English
             </Link>
-            <span aria-hidden className="text-gray-300">
+            <span aria-hidden className="text-border">
               |
             </span>
-            <Link href="?lang=hi" className="rounded px-2 py-1 hover:bg-gray-100 hover:text-gray-900">
+            <Link href="?lang=hi" className="rounded px-2 py-1 hover:bg-muted hover:text-foreground">
               हिंदी
             </Link>
           </nav>

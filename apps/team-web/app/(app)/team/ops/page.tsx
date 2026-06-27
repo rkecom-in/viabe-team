@@ -68,11 +68,11 @@ export default async function OpsWorkspacePage() {
 
   return (
     <main
-      className="ops-workspace bg-gray-50 min-h-screen p-6 space-y-6"
+      className="ops-workspace bg-background min-h-screen p-6 space-y-6"
       data-area="team-ops-workspace"
     >
       <header>
-        <h1 className="text-2xl font-semibold text-gray-900">
+        <h1 className="text-2xl font-semibold text-foreground">
           Ops Console — Workspace
         </h1>
       </header>
@@ -82,51 +82,51 @@ export default async function OpsWorkspacePage() {
 
       <section
         data-section="counters"
-        className="bg-white rounded-lg shadow-sm border border-gray-200 p-6"
+        className="bg-card rounded-lg shadow-sm border border-border p-6"
       >
-        <h2 className="text-lg font-medium text-gray-800 mb-4">Today</h2>
+        <h2 className="text-lg font-medium text-foreground mb-4">Today</h2>
         {counters ? (
           <dl className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-            <div className="p-4 bg-gray-50 rounded">
-              <dt className="text-xs uppercase tracking-wide text-gray-500">
+            <div className="p-4 bg-muted/40 rounded">
+              <dt className="text-xs uppercase tracking-wide text-muted-foreground">
                 In-flight runs
               </dt>
               <dd
                 data-counter="in_flight_runs"
-                className="text-3xl font-bold text-gray-900 mt-1"
+                className="text-3xl font-bold text-foreground mt-1"
               >
                 {counters.in_flight_runs}
               </dd>
             </div>
-            <div className="p-4 bg-gray-50 rounded">
-              <dt className="text-xs uppercase tracking-wide text-gray-500">
+            <div className="p-4 bg-muted/40 rounded">
+              <dt className="text-xs uppercase tracking-wide text-muted-foreground">
                 Total runs today
               </dt>
               <dd
                 data-counter="total_runs_today"
-                className="text-3xl font-bold text-gray-900 mt-1"
+                className="text-3xl font-bold text-foreground mt-1"
               >
                 {counters.total_runs_today}
               </dd>
             </div>
-            <div className="p-4 bg-gray-50 rounded">
-              <dt className="text-xs uppercase tracking-wide text-gray-500">
+            <div className="p-4 bg-muted/40 rounded">
+              <dt className="text-xs uppercase tracking-wide text-muted-foreground">
                 Escalations today
               </dt>
               <dd
                 data-counter="escalations_today"
-                className="text-3xl font-bold text-gray-900 mt-1"
+                className="text-3xl font-bold text-foreground mt-1"
               >
                 {counters.escalations_today}
               </dd>
             </div>
-            <div className="p-4 bg-gray-50 rounded">
-              <dt className="text-xs uppercase tracking-wide text-gray-500">
+            <div className="p-4 bg-muted/40 rounded">
+              <dt className="text-xs uppercase tracking-wide text-muted-foreground">
                 Cost burn today (paise)
               </dt>
               <dd
                 data-counter="cost_burn_today_paise"
-                className="text-3xl font-bold text-gray-900 mt-1"
+                className="text-3xl font-bold text-foreground mt-1"
               >
                 {counters.cost_burn_today_paise}
               </dd>
@@ -135,7 +135,7 @@ export default async function OpsWorkspacePage() {
         ) : (
           <p
             data-section-error
-            className="text-sm text-red-700 bg-red-50 border border-red-200 rounded p-3"
+            className="text-sm text-destructive bg-destructive/10 border border-destructive/30 rounded p-3"
           >
             couldn&apos;t load: {countersError}
           </p>
@@ -144,42 +144,42 @@ export default async function OpsWorkspacePage() {
 
       <section
         data-section="top-tenants"
-        className="bg-white rounded-lg shadow-sm border border-gray-200 p-6"
+        className="bg-card rounded-lg shadow-sm border border-border p-6"
       >
-        <h2 className="text-lg font-medium text-gray-800 mb-4">
+        <h2 className="text-lg font-medium text-foreground mb-4">
           Top tenants by activity
         </h2>
         {topTenantsError ? (
           <p
             data-section-error
-            className="text-sm text-red-700 bg-red-50 border border-red-200 rounded p-3"
+            className="text-sm text-destructive bg-destructive/10 border border-destructive/30 rounded p-3"
           >
             couldn&apos;t load: {topTenantsError}
           </p>
         ) : (
-          <table className="min-w-full divide-y divide-gray-200">
-            <thead className="bg-gray-50">
+          <table className="min-w-full divide-y divide-border">
+            <thead className="bg-muted/40">
               <tr>
-                <th className="px-4 py-2 text-xs font-medium uppercase text-gray-500 text-left">
+                <th className="px-4 py-2 text-xs font-medium uppercase text-muted-foreground text-left">
                   Tenant
                 </th>
-                <th className="px-4 py-2 text-xs font-medium uppercase text-gray-500 text-left">
+                <th className="px-4 py-2 text-xs font-medium uppercase text-muted-foreground text-left">
                   Runs
                 </th>
               </tr>
             </thead>
-            <tbody className="divide-y divide-gray-200">
+            <tbody className="divide-y divide-border">
               {topTenants.map((t) => (
-                <tr key={t.tenant_id} className="hover:bg-gray-50 transition-colors">
+                <tr key={t.tenant_id} className="hover:bg-muted/40 transition-colors">
                   <td className="px-4 py-3 text-sm">
                     <a
                       href={`/team/ops/tenants/${t.tenant_id}`}
-                      className="text-blue-600 hover:underline font-mono text-xs"
+                      className="text-primary hover:underline font-mono text-xs"
                     >
                       {t.business_name ?? t.tenant_id}
                     </a>
                   </td>
-                  <td className="px-4 py-3 text-sm text-gray-700">{t.runs_count}</td>
+                  <td className="px-4 py-3 text-sm text-foreground">{t.runs_count}</td>
                 </tr>
               ))}
             </tbody>
@@ -189,40 +189,40 @@ export default async function OpsWorkspacePage() {
 
       <section
         data-section="in-flight"
-        className="bg-white rounded-lg shadow-sm border border-gray-200 p-6"
+        className="bg-card rounded-lg shadow-sm border border-border p-6"
       >
-        <h2 className="text-lg font-medium text-gray-800 mb-4">
+        <h2 className="text-lg font-medium text-foreground mb-4">
           In-flight runs
         </h2>
         {inFlightError ? (
           <p
             data-section-error
-            className="text-sm text-red-700 bg-red-50 border border-red-200 rounded p-3"
+            className="text-sm text-destructive bg-destructive/10 border border-destructive/30 rounded p-3"
           >
             couldn&apos;t load: {inFlightError}
           </p>
         ) : (
-          <table className="min-w-full divide-y divide-gray-200">
-            <thead className="bg-gray-50">
+          <table className="min-w-full divide-y divide-border">
+            <thead className="bg-muted/40">
               <tr>
-                <th className="px-4 py-2 text-xs font-medium uppercase text-gray-500 text-left">
+                <th className="px-4 py-2 text-xs font-medium uppercase text-muted-foreground text-left">
                   Run
                 </th>
-                <th className="px-4 py-2 text-xs font-medium uppercase text-gray-500 text-left">
+                <th className="px-4 py-2 text-xs font-medium uppercase text-muted-foreground text-left">
                   Tenant
                 </th>
-                <th className="px-4 py-2 text-xs font-medium uppercase text-gray-500 text-left">
+                <th className="px-4 py-2 text-xs font-medium uppercase text-muted-foreground text-left">
                   Started
                 </th>
               </tr>
             </thead>
-            <tbody className="divide-y divide-gray-200">
+            <tbody className="divide-y divide-border">
               {inFlight.map((r) => (
-                <tr key={r.run_id} className="hover:bg-gray-50 transition-colors">
+                <tr key={r.run_id} className="hover:bg-muted/40 transition-colors">
                   <td className="px-4 py-3">
                     <a
                       href={`/team/ops/runs/${r.run_id}`}
-                      className="font-mono text-xs text-blue-600 hover:underline"
+                      className="font-mono text-xs text-primary hover:underline"
                     >
                       {r.run_id}
                     </a>
@@ -230,12 +230,12 @@ export default async function OpsWorkspacePage() {
                   <td className="px-4 py-3">
                     <a
                       href={`/team/ops/tenants/${r.tenant_id}`}
-                      className="font-mono text-xs text-blue-600 hover:underline"
+                      className="font-mono text-xs text-primary hover:underline"
                     >
                       {r.tenant_id}
                     </a>
                   </td>
-                  <td className="px-4 py-3 text-sm text-gray-500">
+                  <td className="px-4 py-3 text-sm text-muted-foreground">
                     {new Date(r.started_at).toLocaleString()}
                   </td>
                 </tr>

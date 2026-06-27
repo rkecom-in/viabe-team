@@ -87,29 +87,29 @@ function PauseConfirm({
         onConfirm(reason)
       }}
     >
-      <p className="text-sm text-gray-700">
+      <p className="text-sm text-foreground">
         Pause this workflow for the tenant. In-flight steps finish; new arms of this kind are held
         until you release.
       </p>
-      <label className="block text-sm text-gray-700 space-y-1">
+      <label className="block text-sm text-foreground space-y-1">
         <span>Reason (optional)</span>
         <textarea
-          className="w-full border border-gray-300 rounded px-2 py-1 text-sm text-gray-900"
+          className="w-full border border-input rounded px-2 py-1 text-sm text-foreground"
           rows={3}
           maxLength={500}
           value={reason}
           onChange={(e) => setReason(e.target.value)}
         />
       </label>
-      <p className="text-xs text-gray-500">{RC_REASON_REDACTED_COPY}</p>
+      <p className="text-xs text-muted-foreground">{RC_REASON_REDACTED_COPY}</p>
       <div className="flex gap-2">
         <button
           type="submit"
-          className="text-sm border border-amber-300 rounded px-3 py-1 bg-amber-50 text-amber-800"
+          className="text-sm border border-gold/40 rounded px-3 py-1 bg-gold/15 text-gold-foreground"
         >
           Pause
         </button>
-        <button type="button" className="text-sm underline text-gray-600" onClick={onCancel}>
+        <button type="button" className="text-sm underline text-muted-foreground" onClick={onCancel}>
           Back
         </button>
       </div>
@@ -152,7 +152,7 @@ export function PauseReleaseControls({
         <button
           type="button"
           data-rc-release-btn
-          className="text-xs underline text-gray-800"
+          className="text-xs underline text-foreground"
           disabled={pending}
           onClick={doRelease}
         >
@@ -162,7 +162,7 @@ export function PauseReleaseControls({
         <button
           type="button"
           data-rc-pause-btn
-          className="text-xs underline text-amber-700"
+          className="text-xs underline text-gold-foreground"
           disabled={pending}
           onClick={() =>
             overlay.open({
@@ -184,7 +184,7 @@ export function PauseReleaseControls({
         </button>
       )}
       {flash && (
-        <span data-rc-pause-flash className="text-[10px] text-gray-600">
+        <span data-rc-pause-flash className="text-[10px] text-muted-foreground">
           {flash}
         </span>
       )}
@@ -228,24 +228,24 @@ function OverrideDialog({
       }}
     >
       {/* BLIND-WRITE warning — the operator edits values they cannot see (I7). */}
-      <p data-rc-blind-write className="text-xs font-medium text-amber-800 bg-amber-50 border border-amber-200 rounded p-2">
+      <p data-rc-blind-write className="text-xs font-medium text-gold-foreground bg-gold/15 border border-gold/40 rounded p-2">
         {RC_BLIND_WRITE_COPY}
       </p>
       {/* CONSUME-FAILURE disclosure (F-5) — visible near the dialog. */}
-      <p data-rc-consume-fail className="text-xs text-gray-600">
+      <p data-rc-consume-fail className="text-xs text-muted-foreground">
         {RC_CONSUME_FAIL_COPY}
       </p>
       {keys.length === 0 ? (
-        <p className="text-sm text-gray-600">This step pins no keys.</p>
+        <p className="text-sm text-muted-foreground">This step pins no keys.</p>
       ) : (
         <div className="space-y-2">
           {keys.map((k) => (
-            <label key={k} className="block text-sm text-gray-700 space-y-1">
+            <label key={k} className="block text-sm text-foreground space-y-1">
               <span className="font-mono text-xs">{k}</span>
               <input
                 type="text"
                 data-rc-override-key={k}
-                className="w-full border border-gray-300 rounded px-2 py-1 text-sm text-gray-900 font-mono"
+                className="w-full border border-input rounded px-2 py-1 text-sm text-foreground font-mono"
                 value={values[k] ?? ''}
                 onChange={(e) => setValues((v) => ({ ...v, [k]: e.target.value }))}
               />
@@ -253,28 +253,28 @@ function OverrideDialog({
           ))}
         </div>
       )}
-      <label className="block text-sm text-gray-700 space-y-1">
+      <label className="block text-sm text-foreground space-y-1">
         <span>Reason (optional)</span>
         <textarea
-          className="w-full border border-gray-300 rounded px-2 py-1 text-sm text-gray-900"
+          className="w-full border border-input rounded px-2 py-1 text-sm text-foreground"
           rows={2}
           maxLength={500}
           value={reason}
           onChange={(e) => setReason(e.target.value)}
         />
       </label>
-      <p className="text-xs text-gray-500">{RC_REASON_REDACTED_COPY}</p>
-      <p className="text-[11px] text-gray-400">
+      <p className="text-xs text-muted-foreground">{RC_REASON_REDACTED_COPY}</p>
+      <p className="text-[11px] text-muted-foreground">
         Next-run pins expire in {NEXT_RUN_DEFAULT_EXPIRY_DAYS} days by default.
       </p>
       <div className="flex gap-2">
         <button
           type="submit"
-          className="text-sm border border-indigo-300 rounded px-3 py-1 bg-indigo-50 text-indigo-800"
+          className="text-sm border border-primary/40 rounded px-3 py-1 bg-primary/10 text-primary"
         >
           Pin override
         </button>
-        <button type="button" className="text-sm underline text-gray-600" onClick={onCancel}>
+        <button type="button" className="text-sm underline text-muted-foreground" onClick={onCancel}>
           Back
         </button>
       </div>
@@ -332,7 +332,7 @@ export function OverrideControl({
       <button
         type="button"
         data-rc-override-btn
-        className="text-xs underline text-indigo-700"
+        className="text-xs underline text-primary"
         disabled={pending}
         onClick={() =>
           overlay.open({
@@ -357,7 +357,7 @@ export function OverrideControl({
         <CancelOverrideControl overrideId={step.override_id} />
       )}
       {flash && (
-        <span data-rc-override-flash className="text-[10px] text-gray-600">
+        <span data-rc-override-flash className="text-[10px] text-muted-foreground">
           {flash}
         </span>
       )}
@@ -375,7 +375,7 @@ export function CancelOverrideControl({ overrideId }: { overrideId: string }) {
       <button
         type="button"
         data-rc-cancel-override-btn
-        className="text-xs underline text-gray-600"
+        className="text-xs underline text-muted-foreground"
         disabled={pending || flash === 'cancelled'}
         onClick={() =>
           start(async () => {
@@ -387,7 +387,7 @@ export function CancelOverrideControl({ overrideId }: { overrideId: string }) {
       >
         Cancel pin
       </button>
-      {flash && <span className="text-[10px] text-gray-600">{flash}</span>}
+      {flash && <span className="text-[10px] text-muted-foreground">{flash}</span>}
     </span>
   )
 }
@@ -427,24 +427,24 @@ function RerunConfirm({
   return (
     <div data-rc-rerun-confirm className="space-y-3 pt-2">
       {/* I2 — outputs re-enter owner approval. */}
-      <p data-rc-rerun-i2 className="text-xs font-medium text-gray-800 bg-gray-50 border border-gray-200 rounded p-2">
+      <p data-rc-rerun-i2 className="text-xs font-medium text-foreground bg-muted/40 border border-border rounded p-2">
         {RC_RERUN_I2_COPY}
       </p>
-      <p className="text-sm text-gray-700">
+      <p className="text-sm text-foreground">
         Re-dispatch run <span className="font-mono text-xs">{runId}</span> from{' '}
         <span className="font-mono text-xs">{fromStep}</span>. This starts a NEW run (no
         time-travel); prior steps re-execute only if the entry point requires them.
       </p>
       {openApproval === null ? (
-        <p data-rc-rerun-preflight-checking className="text-xs text-gray-500">
+        <p data-rc-rerun-preflight-checking className="text-xs text-muted-foreground">
           Checking owner-approval state…
         </p>
       ) : openApproval ? (
-        <p data-rc-rerun-preflight-warn className="text-xs font-medium text-red-700 bg-red-50 border border-red-200 rounded p-2">
+        <p data-rc-rerun-preflight-warn className="text-xs font-medium text-destructive bg-destructive/10 border border-destructive/30 rounded p-2">
           {RC_RERUN_PREFLIGHT_WARN}
         </p>
       ) : (
-        <p data-rc-rerun-preflight-clear className="text-xs text-gray-500">
+        <p data-rc-rerun-preflight-clear className="text-xs text-muted-foreground">
           No owner approval pending.
         </p>
       )}
@@ -452,13 +452,13 @@ function RerunConfirm({
         <button
           type="button"
           data-rc-rerun-submit
-          className="text-sm border border-indigo-300 rounded px-3 py-1 bg-indigo-50 text-indigo-800 disabled:opacity-40"
+          className="text-sm border border-primary/40 rounded px-3 py-1 bg-primary/10 text-primary disabled:opacity-40"
           disabled={blocked}
           onClick={onSubmit}
         >
           Re-run
         </button>
-        <button type="button" className="text-sm underline text-gray-600" onClick={onCancel}>
+        <button type="button" className="text-sm underline text-muted-foreground" onClick={onCancel}>
           Back
         </button>
       </div>
@@ -488,7 +488,7 @@ export function RerunControl({
   // Non-rerunnable kinds: NO button — the per-kind why-copy from forbidden_reason instead.
   if (!rerunnable) {
     return (
-      <span data-rc-rerun-forbidden className="text-[11px] italic text-gray-500">
+      <span data-rc-rerun-forbidden className="text-[11px] italic text-muted-foreground">
         {forbiddenWhyCopy(forbiddenReason)}
       </span>
     )
@@ -520,7 +520,7 @@ export function RerunControl({
       <button
         type="button"
         data-rc-rerun-btn
-        className="text-xs underline text-indigo-700"
+        className="text-xs underline text-primary"
         disabled={pending}
         onClick={() =>
           overlay.open({
@@ -545,18 +545,18 @@ export function RerunControl({
       {result?.kind === 'overlap' && (
         <span
           data-rc-rerun-escalated-overlap
-          className="text-[11px] font-medium text-red-700 bg-red-50 border border-red-200 rounded px-1.5 py-0.5"
+          className="text-[11px] font-medium text-destructive bg-destructive/10 border border-destructive/30 rounded px-1.5 py-0.5"
         >
           {result.text}
         </span>
       )}
       {result?.kind === 'ok' && (
-        <span data-rc-rerun-ok className="text-[10px] text-gray-600">
+        <span data-rc-rerun-ok className="text-[10px] text-muted-foreground">
           {result.text}
         </span>
       )}
       {result?.kind === 'err' && (
-        <span data-rc-rerun-err className="text-[10px] text-red-600">
+        <span data-rc-rerun-err className="text-[10px] text-destructive">
           {result.text}
         </span>
       )}

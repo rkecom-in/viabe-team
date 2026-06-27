@@ -146,8 +146,8 @@ export default async function RunControlPage() {
   return (
     <main data-area="team-ops-run-control" className="p-6 space-y-4">
       <header className="space-y-1">
-        <h1 className="text-2xl font-semibold text-gray-900">Run Control — Canvas</h1>
-        <p className="text-sm text-gray-500">
+        <h1 className="text-2xl font-semibold text-foreground">Run Control — Canvas</h1>
+        <p className="text-sm text-muted-foreground">
           Each tenant&apos;s programs and step timelines, with pause/release, step override, and
           re-dispatch controls. Only controllable steps expose controls; observed steps are
           display-only. Every action is audited and re-checked server-side.
@@ -157,12 +157,12 @@ export default async function RunControlPage() {
       {loadError ? (
         <p
           data-section-error
-          className="text-sm text-red-700 bg-red-50 border border-red-200 rounded p-3"
+          className="text-sm text-destructive bg-destructive/10 border border-destructive/30 rounded p-3"
         >
           couldn&apos;t load tenants: {loadError}
         </p>
       ) : data.length === 0 ? (
-        <p className="text-sm text-gray-500">No tenants in scope.</p>
+        <p className="text-sm text-muted-foreground">No tenants in scope.</p>
       ) : (
         <RunControlCanvas tenants={data} />
       )}

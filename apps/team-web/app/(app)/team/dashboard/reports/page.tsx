@@ -34,20 +34,20 @@ export default async function ReportsPage({
         <EmptyState>{t(dict, 'reports.none')}</EmptyState>
       ) : (
         <Card label="reports" className="!p-0">
-          <ul className="divide-y divide-gray-100">
+          <ul className="divide-y divide-border">
             {data.reports.map((r) => (
               <li key={r.year_month} className="flex items-center justify-between gap-3 px-5 py-4">
-                <span className="font-medium text-gray-900">{r.year_month}</span>
+                <span className="font-medium text-foreground">{r.year_month}</span>
                 {r.has_pdf ? (
                   <a
                     href={`/api/team/reports/${r.year_month}/download`}
                     data-testid="report-download"
-                    className="rounded-lg bg-emerald-600 px-4 py-1.5 text-sm font-semibold text-white transition hover:bg-emerald-700"
+                    className="rounded-lg bg-primary px-4 py-1.5 text-sm font-semibold text-primary-foreground transition hover:bg-primary/90"
                   >
                     {t(dict, 'reports.download')}
                   </a>
                 ) : (
-                  <span className="text-sm text-gray-400">{t(dict, 'reports.preparing')}</span>
+                  <span className="text-sm text-muted-foreground">{t(dict, 'reports.preparing')}</span>
                 )}
               </li>
             ))}

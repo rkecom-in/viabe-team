@@ -69,14 +69,14 @@ function statusPillClass(status: string): string {
   switch (status) {
     case 'ok':
     case 'success':
-      return 'bg-green-50 text-green-700 border border-green-200'
+      return 'bg-secondary/10 text-secondary border border-secondary/30'
     case 'error':
     case 'failed':
-      return 'bg-red-50 text-red-700 border border-red-200'
+      return 'bg-destructive/10 text-destructive border border-destructive/30'
     case 'running':
-      return 'bg-blue-50 text-blue-700 border border-blue-200'
+      return 'bg-primary/10 text-primary border border-primary/30'
     default:
-      return 'bg-gray-100 text-gray-700 border border-gray-200'
+      return 'bg-muted text-muted-foreground border border-border'
   }
 }
 
@@ -91,20 +91,20 @@ function StepCard({ step }: { step: PipelineStepRow }) {
       data-step-seq={step.step_seq}
       data-step-kind={step.step_kind}
       data-step-status={step.status}
-      className="bg-white rounded-lg shadow-sm border border-gray-200 p-6 mb-4"
+      className="bg-card rounded-lg shadow-sm border border-border p-6 mb-4"
     >
       <header className="flex items-start justify-between gap-4 mb-3">
         <div>
-          <h2 className="text-lg font-semibold text-gray-900">
+          <h2 className="text-lg font-semibold text-foreground">
             <span data-element="step-kind">{step.step_kind}</span>
             {step.step_name ? (
-              <span className="text-gray-500 font-normal">
+              <span className="text-muted-foreground font-normal">
                 {' '}
                 — {step.step_name}
               </span>
             ) : null}
           </h2>
-          <p className="text-xs text-gray-500 font-mono mt-1">
+          <p className="text-xs text-muted-foreground font-mono mt-1">
             seq #{step.step_seq} · {durMs !== null ? `${durMs}ms` : '—'} ·{' '}
             in={tokensIn} · out={tokensOut} · cost={costPaise}p
           </p>
@@ -120,7 +120,7 @@ function StepCard({ step }: { step: PipelineStepRow }) {
       {step.decision_rationale ? (
         <div
           data-element="reasoning-trace"
-          className="text-xs text-gray-700 italic bg-gray-50 rounded p-3 mb-2"
+          className="text-xs text-foreground italic bg-muted/40 rounded p-3 mb-2"
         >
           {step.decision_rationale}
         </div>
@@ -176,24 +176,24 @@ export default async function RunDebugPage({ params }: PageProps) {
 
   return (
     <main
-      className="ops-run-debug bg-gray-50 min-h-screen p-6"
+      className="ops-run-debug bg-background min-h-screen p-6"
       data-area="team-ops-run-debug"
       data-run-id={runId}
     >
-      <header className="bg-white rounded-lg shadow-sm border border-gray-200 p-6 mb-4">
-        <h1 className="text-2xl font-semibold text-gray-900">Debug view</h1>
-        <p className="text-sm text-gray-600 mt-1">
+      <header className="bg-card rounded-lg shadow-sm border border-border p-6 mb-4">
+        <h1 className="text-2xl font-semibold text-foreground">Debug view</h1>
+        <p className="text-sm text-muted-foreground mt-1">
           run_id:{' '}
-          <code className="font-mono text-xs text-gray-700">{runId}</code> ·
+          <code className="font-mono text-xs text-foreground">{runId}</code> ·
           steps: {steps.length}
         </p>
-        <p className="text-xs text-gray-500 mt-2">
+        <p className="text-xs text-muted-foreground mt-2">
           Read-only envelope inspection. Step-by-step pipeline replay.
         </p>
         <a
           href={`/team/ops/runs/${runId}`}
           data-element="back-to-run"
-          className="inline-block mt-3 text-sm text-blue-700 hover:underline"
+          className="inline-block mt-3 text-sm text-primary hover:underline"
         >
           ← back to run replay
         </a>

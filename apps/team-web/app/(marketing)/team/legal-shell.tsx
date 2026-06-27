@@ -29,9 +29,9 @@ export function LegalShell({ pageKey, lang }: { pageKey: LegalPageKey; lang?: st
         style={{
           margin: '1rem 0',
           padding: '0.75rem 1rem',
-          border: '1px solid #b45309',
-          background: '#fffbeb',
-          color: '#92400e',
+          border: '1px solid hsl(var(--gold))',
+          background: 'hsl(var(--gold) / 0.12)',
+          color: 'hsl(var(--gold-foreground))',
           borderRadius: 8,
           fontSize: 14,
         }}
@@ -39,9 +39,9 @@ export function LegalShell({ pageKey, lang }: { pageKey: LegalPageKey; lang?: st
         ⚠️ {t(d, 'draft.banner')}
       </div>
       <h1>{t(d, `${pageKey}.title`)}</h1>
-      <p style={{ color: '#5b6470' }}>{t(d, `${pageKey}.intro`)}</p>
+      <p style={{ color: 'hsl(var(--muted-foreground))' }}>{t(d, `${pageKey}.intro`)}</p>
       <p>{t(d, `${pageKey}.body`)}</p>
-      <p style={{ marginTop: '1.5rem', fontSize: 13, color: '#5b6470' }}>
+      <p style={{ marginTop: '1.5rem', fontSize: 13, color: 'hsl(var(--muted-foreground))' }}>
         {t(d, 'updated.label')}: {t(d, 'updated.value')}
       </p>
     </main>
