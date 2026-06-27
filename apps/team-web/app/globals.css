@@ -1,1 +1,168 @@
 @import 'tailwindcss';
+
+/*
+ * Canonical Viabe brand color scheme — VISUAL TOKENS ONLY.
+ *
+ * shadcn-style semantic CSS variables. Values are the space-separated HSL triplet
+ * (no `hsl()` wrapper) and are consumed by Tailwind utilities via `hsl(var(--token))`,
+ * mapped below in the Tailwind v4 `@theme inline` block (this repo has no
+ * tailwind.config.* — v4 is configured in CSS).
+ *
+ * BRAND CORE
+ *   Saffron PRIMARY   25 95% 50%  (#F96B06) — CTAs / links / focus rings
+ *   Deep Green        162 55% 18% (#154738) — secondary
+ *   Gold accent       42 88% 55%  (#F1B527)
+ *   Charcoal ink      222 30% 12% (#151B28)
+ *   Warm Cream canvas 42 30% 97%  (#FAF8F5)
+ *   Primary gradient  linear-gradient(135deg,#F96B06,#F1B527) — hero / CTAs
+ */
+
+@custom-variant dark (&:is(.dark *));
+
+:root {
+  /* canvas / ink */
+  --background: 42 30% 97%;
+  --foreground: 222 30% 8%;
+
+  /* surfaces */
+  --card: 42 25% 95%;
+  --card-foreground: 222 30% 8%;
+  --popover: 42 25% 95%;
+  --popover-foreground: 222 30% 8%;
+
+  /* brand */
+  --primary: 25 95% 50%;
+  --primary-foreground: 42 30% 99%;
+  --secondary: 162 55% 18%;
+  --secondary-foreground: 42 30% 99%;
+  --accent: 25 85% 94%;
+  --accent-foreground: 25 95% 30%;
+
+  /* muted / borders / inputs / ring */
+  --muted: 220 12% 92%;
+  --muted-foreground: 220 12% 42%;
+  --border: 40 18% 87%;
+  --input: 40 18% 87%;
+  --ring: 25 95% 50%;
+
+  /* status */
+  --destructive: 0 84% 60%;
+  --destructive-foreground: 42 30% 99%;
+
+  /* brand-named aliases (charcoal ink + gold accent) */
+  --gold: 42 88% 55%;
+  --gold-foreground: 222 30% 12%;
+  --ink: 222 30% 12%;
+
+  --radius: 0.625rem;
+
+  /* primary gradient — hero / CTAs */
+  --gradient-primary: linear-gradient(135deg, #f96b06, #f1b527);
+
+  /* VRI score colors */
+  --score-good: 142 65% 38%;
+  --score-medium: 38 88% 50%;
+  --score-bad: 0 75% 52%;
+
+  /* chart palette */
+  --chart-1: 28 89% 42%; /* #CB6B0B */
+  --chart-2: 152 65% 32%; /* #1D8755 */
+  --chart-3: 0 75% 48%; /* #D61F1F */
+  --chart-4: 209 81% 42%; /* #156BC1 */
+  --chart-5: 274 55% 48%; /* #7A37BE */
+  --chart-6: 23 90% 45%; /* #DA570B */
+}
+
+.dark {
+  /* canvas / ink — charcoal base */
+  --background: 222 30% 8%;
+  --foreground: 42 20% 92%;
+
+  /* surfaces */
+  --card: 222 25% 12%;
+  --card-foreground: 42 20% 92%;
+  --popover: 222 25% 12%;
+  --popover-foreground: 42 20% 92%;
+
+  /* brand — primary stays saffron */
+  --primary: 25 95% 50%;
+  --primary-foreground: 42 30% 99%;
+  --secondary: 162 45% 24%;
+  --secondary-foreground: 42 20% 95%;
+  --accent: 25 40% 20%;
+  --accent-foreground: 25 90% 88%;
+
+  /* muted / borders / inputs / ring — derived from charcoal */
+  --muted: 222 20% 18%;
+  --muted-foreground: 220 12% 64%;
+  --border: 222 18% 22%;
+  --input: 222 18% 22%;
+  --ring: 25 95% 50%;
+
+  /* status */
+  --destructive: 0 70% 52%;
+  --destructive-foreground: 42 20% 95%;
+
+  /* brand-named aliases */
+  --gold: 42 88% 55%;
+  --gold-foreground: 222 30% 12%;
+  --ink: 42 20% 92%;
+
+  /* VRI score colors */
+  --score-good: 142 60% 45%;
+  --score-medium: 38 88% 55%;
+  --score-bad: 0 70% 58%;
+
+  /* chart palette */
+  --chart-1: 28 89% 52%;
+  --chart-2: 152 60% 42%;
+  --chart-3: 0 72% 58%;
+  --chart-4: 209 78% 56%;
+  --chart-5: 274 55% 62%;
+  --chart-6: 23 88% 56%;
+}
+
+@theme inline {
+  --color-background: hsl(var(--background));
+  --color-foreground: hsl(var(--foreground));
+
+  --color-card: hsl(var(--card));
+  --color-card-foreground: hsl(var(--card-foreground));
+  --color-popover: hsl(var(--popover));
+  --color-popover-foreground: hsl(var(--popover-foreground));
+
+  --color-primary: hsl(var(--primary));
+  --color-primary-foreground: hsl(var(--primary-foreground));
+  --color-secondary: hsl(var(--secondary));
+  --color-secondary-foreground: hsl(var(--secondary-foreground));
+  --color-accent: hsl(var(--accent));
+  --color-accent-foreground: hsl(var(--accent-foreground));
+
+  --color-muted: hsl(var(--muted));
+  --color-muted-foreground: hsl(var(--muted-foreground));
+  --color-border: hsl(var(--border));
+  --color-input: hsl(var(--input));
+  --color-ring: hsl(var(--ring));
+
+  --color-destructive: hsl(var(--destructive));
+  --color-destructive-foreground: hsl(var(--destructive-foreground));
+
+  --color-gold: hsl(var(--gold));
+  --color-gold-foreground: hsl(var(--gold-foreground));
+  --color-ink: hsl(var(--ink));
+
+  --color-score-good: hsl(var(--score-good));
+  --color-score-medium: hsl(var(--score-medium));
+  --color-score-bad: hsl(var(--score-bad));
+
+  --color-chart-1: hsl(var(--chart-1));
+  --color-chart-2: hsl(var(--chart-2));
+  --color-chart-3: hsl(var(--chart-3));
+  --color-chart-4: hsl(var(--chart-4));
+  --color-chart-5: hsl(var(--chart-5));
+  --color-chart-6: hsl(var(--chart-6));
+
+  --radius-lg: var(--radius);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-sm: calc(var(--radius) - 4px);
+}
