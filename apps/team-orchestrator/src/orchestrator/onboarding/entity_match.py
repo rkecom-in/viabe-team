@@ -278,6 +278,14 @@ def confirm_and_verify(
     if not _GSTIN_RE.fullmatch(gstin):
         return {"ok": False, "reason": "invalid_gstin_format", "status": "unverified"}
 
+    # PRE-CREATE signup (the manual-GSTIN confirm fires BEFORE the tenant exists → tenant_id=''):
+    # run_lookup's tenant_connection / attempt-cap / kyc_log / tenants-UPDATE ALL need a real tenant, so
+    # an empty tenant_id 500s (tenant_connection('')). Do a TENANT-LESS verify (Sandbox search only, no
+    # DB, no anchor) — the tenant is stamped gstin_verified at CREATE by run_signup. (Live e2e 2026-06-28:
+    # confirm_and_verify('', '27AAKCR3738B1ZE') → 500.)
+    if lookup_fn is None and not str(tenant_id).strip():
+        return _verify_gstin_tenantless(gstin)
+
     run = lookup_fn
     if run is None:
         # Import the real verifier ONLY when not injected — verification pulls the psycopg/db chain,
@@ -293,6 +301,22 @@ def confirm_and_verify(
     _persist_anchor(tenant_id, gstin=gstin, verified_name=name)
     _seed_discovery(tenant_id, verified_name=name, gstin=gstin, seed=seed or {})
     return result
+
+
+def _verify_gstin_tenantless(gstin: str, *, search_fn: SearchFn | None = None) -> dict[str, Any]:
+    """Pre-create GST verify (no tenant yet) — the Sandbox GSTIN search ONLY, returning the same
+    {ok, status, name/reason} shape as run_lookup but WITHOUT the tenant-scoped attempt-cap / kyc_log /
+    tenants-UPDATE / anchor (all of which need a real tenant). The signup CREATE path (run_signup →
+    verify_gstin_for_signup) re-verifies + stamps the tenant. Fail-closed (a vendor failure → vendor_down
+    HOLD, never a false verify). ``search_fn`` injectable for tests."""
+    from orchestrator.integrations.methods import sandbox_kyc
+
+    result = (search_fn or sandbox_kyc.search_gstin)(gstin)
+    if not result.ok:
+        return {"ok": False, "reason": "vendor_down", "status": "unverified"}
+    if not result.is_active() or not result.authoritative_name():
+        return {"ok": False, "reason": "invalid_gstin", "status": "unverified"}
+    return {"ok": True, "status": "gstin_verified", "gstin": gstin, "name": result.authoritative_name()}
 
 
 def _persist_anchor(

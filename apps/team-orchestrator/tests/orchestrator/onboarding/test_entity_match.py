@@ -182,3 +182,28 @@ def test_confirm_vendor_down_returns_unverified_no_anchor(monkeypatch) -> None:
     )
     assert out["reason"] == "vendor_down"
     assert persisted["n"] == 0  # no anchor on a non-verified result
+
+
+def test_confirm_and_verify_empty_tenant_is_tenantless_no_db(monkeypatch) -> None:
+    """Live-e2e regression (2026-06-28): the pre-create manual-GSTIN confirm passes tenant_id='' →
+    run_lookup's tenant_connection('') 500'd. confirm_and_verify must take the TENANT-LESS path (Sandbox
+    search only, NO _persist_anchor / DB) on an empty tenant_id."""
+    from orchestrator.integrations.methods import sandbox_kyc
+
+    persisted = {"n": 0}
+    monkeypatch.setattr(entity_match, "_persist_anchor", lambda *a, **k: persisted.update(n=persisted["n"] + 1))
+    monkeypatch.setattr(
+        sandbox_kyc, "search_gstin",
+        lambda g: sandbox_kyc.GstinLookup(ok=True, legal_name="RKECOM SERVICES OPC PRIVATE LIMITED", status="Active"),
+    )
+    out = entity_match.confirm_and_verify("", _VALID_GSTIN)  # empty tenant → tenantless, no 500
+    assert out["ok"] and out["status"] == "gstin_verified" and out["name"]
+    assert persisted["n"] == 0  # no anchor pre-create (no tenant to scope)
+
+
+def test_verify_gstin_tenantless_vendor_down_fail_closed() -> None:
+    # A vendor failure pre-create → vendor_down HOLD (never a false verify).
+    from orchestrator.integrations.methods.sandbox_kyc import GstinLookup
+
+    out = entity_match._verify_gstin_tenantless(_VALID_GSTIN, search_fn=lambda _g: GstinLookup(ok=False))
+    assert out["ok"] is False and out["reason"] == "vendor_down"
