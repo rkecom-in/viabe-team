@@ -170,3 +170,9 @@ This file is regenerated when new Standing entries appear; do not edit by hand.
 **4 discipline rules still TODO** at `docs/clau/discipline-rules.md`: #6, #7, #10, #11 — no CL entries define them. Possibly renumbered duplicates of early rules. Awaiting Clau dump or confirmation.
 
 **Per Rule #14 itself (CL-386):** every line in this ledger has been verified against its source `entries/CL-<N>.md` file. The reconciliation is not from memory.
+
+---
+
+**CL-2026-06-28-push-authority (Standing, Fazal 2026-06-28).** CC granted authority to push `origin/dev` WHEN REQUIRED — no longer Fazal-explicit-per-push (supersedes the 2026-06-27 explicit-push rule). Guardrails: push at a deployable checkpoint (coherent, green, gate-passed unit), BATCH commits into one push, pre-push hook green, `main` stays Fazal-only. Paired with the finished-product mandate (CC drives the whole e2e — happy + unhappy paths — for Fazal's single sign-off, not a UAT). Source: 20260628T201500Z Cowork mandate carrying Fazal's 20:15 directive.
+
+**CL-2026-06-28-dev-consent-activation (dev grant, Fazal 2026-06-28).** On DEV ONLY, `MARKETING_CONSENT_VERSIONS=winback_optin_v1_dev_2026-06` is set + +917738859946 (Fazal's internal number) gets a matching `record_of_consent` so SR-detect surfaces it for the e2e. The C2 prod-boot guard is UNCHANGED — PROD `MARKETING_CONSENT_VERSIONS` stays empty/counsel-gated, never set. CL-422 holds (no real customer data on dev). Source: 20260628T202500Z.
