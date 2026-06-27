@@ -38,6 +38,12 @@ class EntityCandidatesBody(BaseModel):
 class EntityConfirmBody(BaseModel):
     tenant_id: str
     gstin: str
+    # #10: the owner's typed (or MCA-canonical) business name — when present, the confirm seam
+    # name-matches it against the Sandbox-authoritative registry name and collapses a mismatch into
+    # the SAME generic invalid_gstin reject, so "Verified" never shows for a name that will fail the
+    # create-time gate (the recoverable seam catches it, not a post-OTP dead-end). Optional/backward-
+    # compatible: an absent name_anchor preserves the prior GSTIN-only verify behaviour.
+    business_name: str = ""
 
 
 class GstinsByPanBody(BaseModel):
@@ -78,7 +84,9 @@ def entity_confirm(
 
     from orchestrator.onboarding import entity_match
 
-    return entity_match.confirm_and_verify(body.tenant_id, body.gstin)
+    return entity_match.confirm_and_verify(
+        body.tenant_id, body.gstin, name_anchor=body.business_name.strip() or None
+    )
 
 
 @router.post("/api/orchestrator/onboard/gstins-by-pan")

@@ -93,6 +93,14 @@ export interface ConnectionStatus {
   connected: boolean
   /** Raw status detail for display (no PII). */
   detail: string
+  /**
+   * Sweep #16 — a named recovery the owner can take when the connection landed in a
+   * connected-but-not-fully-ingesting state. Today the only value is `'reregister_webhooks'`
+   * (Shopify VT-453: OAuth token stored but the order webhooks never registered → go-forward
+   * orders silently don't ingest). Empty/undefined = nothing to do. The wizard surfaces a
+   * re-register affordance (re-fire the connect handoff) when this is set.
+   */
+  actionRequired?: 'reregister_webhooks'
 }
 
 /** Read the true connection status server-side (the resume signal after the browser handoff).
@@ -124,6 +132,36 @@ export async function checkConnection(
       // VT-422 GAP-3: connected once the OAuth-install persisted a token row for the
       // tenant (the callback writes tenant_oauth_tokens on success). Service-role read,
       // tenant-scoped server-side (never client-trusted). Fail-closed: no row → not connected.
+      //
+      // Sweep #16 (VT-453 web consumer): a token row alone is NOT "fully connected" — if the
+      // install-time webhook registration missed (Shopify outage), go-forward orders silently
+      // don't ingest. Read the persisted `webhooks_registered` flag (set by the orchestrator
+      // callback / sweeper). When it's explicitly FALSE we keep the owner on the connect step
+      // with a re-register action, rather than advancing past a connector that won't ingest.
+      // Forward-compatible: if the column isn't present yet (older schema), the flag-aware select
+      // errors and we fall back to the token-only read (current behavior) — no regression.
+      const withFlag = await client
+        .from('tenant_oauth_tokens')
+        .select('shop_url, webhooks_registered')
+        .eq('tenant_id', tenantId)
+        .eq('connector_id', 'shopify')
+        .maybeSingle()
+      if (!withFlag.error) {
+        if (!withFlag.data) return { connector, connected: false, detail: 'not connected' }
+        const row = withFlag.data as { shop_url: string | null; webhooks_registered: boolean | null }
+        // A token row exists. Only treat the install as fully connected when webhooks are confirmed
+        // registered (true), or when the flag is absent/null (legacy rows pre-VT-453 — keep working).
+        if (row.webhooks_registered === false) {
+          return {
+            connector,
+            connected: false,
+            detail: 'connected_webhooks_unregistered',
+            actionRequired: 'reregister_webhooks',
+          }
+        }
+        return { connector, connected: true, detail: row.shop_url ?? 'connected' }
+      }
+      // Fallback: column not present yet → token-row existence is the connected signal (pre-#16).
       const { data, error } = await client
         .from('tenant_oauth_tokens')
         .select('shop_url')

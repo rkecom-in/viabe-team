@@ -82,6 +82,15 @@ describe('VT-96 verifyOtpAndCreate', () => {
     expect(f).toHaveBeenCalledTimes(1)
   })
 
+  it('sweep #8 — verify-service outage (502) → verify_unavailable (retryable), NO signup call', async () => {
+    const f = vi.fn().mockResolvedValueOnce(resp(502))
+    expect(await verifyOtpAndCreate(payload, '000000', f)).toEqual({
+      ok: false,
+      error: 'verify_unavailable',
+    })
+    expect(f).toHaveBeenCalledTimes(1)
+  })
+
   it('verify ok but token missing → invalid_code, NO signup call', async () => {
     const f = vi.fn().mockResolvedValueOnce(resp(200, {}))
     expect(await verifyOtpAndCreate(payload, '123456', f)).toEqual({
@@ -105,5 +114,48 @@ describe('VT-96 verifyOtpAndCreate', () => {
       .mockResolvedValueOnce(resp(200, { token: 'tok' }))
       .mockResolvedValueOnce(resp(500, {}))
     expect(await verifyOtpAndCreate(payload, '123456', f)).toEqual({ ok: false, error: 'generic' })
+  })
+
+  it('sweep #7 — signup create rate limit (429 rate_limited) → rate_limited (wait copy, not generic)', async () => {
+    const f = vi
+      .fn()
+      .mockResolvedValueOnce(resp(200, { token: 'tok' }))
+      .mockResolvedValueOnce(resp(429, { detail: { code: 'rate_limited' } }))
+    expect(await verifyOtpAndCreate(payload, '123456', f)).toEqual({
+      ok: false,
+      error: 'rate_limited',
+    })
+  })
+
+  it('sweep #7 — a disabled-signup 404 (not_enabled) is NOT swallowed into the wait copy → generic', async () => {
+    const f = vi
+      .fn()
+      .mockResolvedValueOnce(resp(200, { token: 'tok' }))
+      .mockResolvedValueOnce(resp(404, { detail: { code: 'not_enabled' } }))
+    expect(await verifyOtpAndCreate(payload, '123456', f)).toEqual({ ok: false, error: 'generic' })
+  })
+
+  it('sweep #11 — create GST gate 422 invalid_gstin → gst_reject, surfaces the server message', async () => {
+    const f = vi
+      .fn()
+      .mockResolvedValueOnce(resp(200, { token: 'tok' }))
+      .mockResolvedValueOnce(resp(422, { detail: { code: 'invalid_gstin', message: 'GST-only.' } }))
+    expect(await verifyOtpAndCreate(payload, '123456', f)).toEqual({
+      ok: false,
+      error: 'gst_reject',
+      message: 'GST-only.',
+    })
+  })
+
+  it('sweep #11 — create gate 503 vendor_down → vendor_down (retryable), surfaces the server message', async () => {
+    const f = vi
+      .fn()
+      .mockResolvedValueOnce(resp(200, { token: 'tok' }))
+      .mockResolvedValueOnce(resp(503, { detail: { code: 'vendor_down', message: 'Try later.' } }))
+    expect(await verifyOtpAndCreate(payload, '123456', f)).toEqual({
+      ok: false,
+      error: 'vendor_down',
+      message: 'Try later.',
+    })
   })
 })

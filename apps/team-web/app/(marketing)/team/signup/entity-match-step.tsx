@@ -203,12 +203,20 @@ export function EntityMatchStep({
   businessName,
   city,
   lang,
+  error,
+  submitting,
   onVerified,
   onReject,
 }: {
   businessName: string
   city: string
   lang: Lang
+  /** Sweep #1/#6: the parent's OTP-request error (the "Verified → Continue" → requestSignupOtp leg).
+   *  Surfaced on the verified screen so a failed OTP send is visible, not a silent button no-op. */
+  error?: string | null
+  /** Sweep #1/#6: the parent OTP request is in flight — the Continue button reflects it so repeated
+   *  clicks don't silently re-fire the OTP request. */
+  submitting?: boolean
   /** Called when a gstin_verified confirm lands — the verified entity unlocks account-creation. */
   onVerified: (entity: VerifiedEntity) => void
   /** Called on the graceful terminus (none-of-these / not GST-registered). */
@@ -224,6 +232,10 @@ export function EntityMatchStep({
   // VT-450 — the found-but-no-GSTIN candidate name (e.g. "RKeCom"); null when none / a confirmable hit.
   const [foundNoGstin, setFoundNoGstin] = useState<{ tradeName: string } | null>(null)
   const [confirming, setConfirming] = useState<string | null>(null) // the gstin being confirmed
+  // Sweep #4 — the screen the in-flight confirm was launched FROM ('manual_gstin' | 'pan_pick' |
+  // 'picking'). A transient verify failure (retry) returns the owner HERE with their typed value
+  // intact, instead of dumping a manual/PAN entrant onto the candidate pick list (losing the GSTIN).
+  const [retryOrigin, setRetryOrigin] = useState<WizardStep>('picking')
   const [verified, setVerified] = useState<VerifiedEntity | null>(null)
   const [manualGstin, setManualGstin] = useState('') // VT-448 manual-entry input
   const [manualError, setManualError] = useState(false) // client-side GSTIN format error
@@ -296,8 +308,15 @@ export function EntityMatchStep({
   // the GBP-pick path only — it's the public business number the ownership step OTPs (null otherwise).
   async function confirmGstin(gstin: string, discoveredPhone: string | null = null) {
     setConfirming(gstin)
+    // Sweep #4: remember the screen this confirm came from so a transient-failure retry returns the
+    // owner to their exact entry screen (manual/PAN/pick) with the typed value preserved. Read the
+    // current step via the functional setter (avoids a stale closure) without mutating it.
+    setStep((s) => {
+      setRetryOrigin(s)
+      return s
+    })
     try {
-      const outcome = classifyConfirm(await confirmCandidate(gstin), gstin)
+      const outcome = classifyConfirm(await confirmCandidate(gstin, businessName), gstin)
       if (outcome.kind === 'verified') {
         // Show the verified result (authoritative name + chip) FIRST; Continue bridges to OTP/create
         // via onVerified. No auto-advance — the owner sees the confirmed entity before proceeding.
@@ -347,7 +366,11 @@ export function EntityMatchStep({
   }
 
   function retry() {
-    setStep('picking')
+    // Sweep #4: return to the screen the failed confirm came from — manual/PAN entrants land back on
+    // their entry screen with manualGstin / panGstins still populated (we set the step DIRECTLY, never
+    // via openManual()/openPanEntry() which reset the inputs), matching the "try again" copy. A pick
+    // came from 'picking' → the candidate list, as before.
+    setStep(retryOrigin)
   }
 
   // VT-450 — the "Back" target from the manual/PAN screens: return to the found-no-GSTIN screen when
@@ -481,28 +504,54 @@ export function EntityMatchStep({
             )}
           </div>
         )}
+        {/* Sweep #1/#6: surface the parent's OTP-request error so a failed "Verified → Continue" OTP
+            send is VISIBLE here, not a silent button no-op. */}
+        {error && (
+          <p
+            data-entity-continue-error
+            role="alert"
+            className="mt-4 rounded-lg bg-destructive/10 px-3 py-2 text-sm text-destructive"
+          >
+            {error}
+          </p>
+        )}
         <button
           type="button"
           data-entity-continue
-          disabled={!canCreateAccount(verified)}
+          // Sweep #1/#6: reflect the parent in-flight state — disable while the OTP request is in
+          // flight so repeated clicks don't silently re-fire it (the parent has a double-click guard,
+          // but the button must visually reflect the blocked state).
+          disabled={!canCreateAccount(verified) || Boolean(submitting)}
           // VT-449: thread the owner-CONFIRMED CIN (or '' when none confirmed/dismissed) into the
           // verified entity — the create payload sends `cin`. A SERP-scraped CIN never rides unconfirmed.
           onClick={() => onVerified({ ...verified, cin: cinConfirmed })}
           className="mt-5 rounded-xl bg-primary px-5 py-3 font-semibold text-primary-foreground shadow-sm transition hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50"
         >
-          {t.continue}
+          {submitting ? t.confirming : t.continue}
         </button>
       </section>
     )
   }
 
   if (step === 'reject') {
+    // Sweep #2: reject is no longer a dead-end. Offer a "Re-enter GST number" recovery (→ the manual
+    // GSTIN screen, inputs reset via openManual) so a recoverable GSTIN typo / wrong name isn't a
+    // permanent trap. The affordance is shown UNCONDITIONALLY on every reject regardless of cause, so
+    // it carries no inactive-vs-not-found enumeration oracle; the generic reject copy is unchanged.
     return (
       <section data-entity-step="reject" className={`mt-8 ${card}`}>
         <h2 className="text-lg font-semibold text-foreground">{t.reject_heading}</h2>
         <p data-reject-body className="mt-3 text-sm leading-relaxed text-muted-foreground">
           {t.reject_body}
         </p>
+        <button
+          type="button"
+          data-reject-reenter
+          onClick={openManual}
+          className="mt-5 rounded-xl bg-primary px-5 py-3 font-semibold text-primary-foreground shadow-sm transition hover:bg-primary/90"
+        >
+          {t.manual_with_gstin}
+        </button>
       </section>
     )
   }
@@ -833,6 +882,36 @@ export function EntityMatchStep({
           })}
         </ul>
       )}
+      {/* Sweep #3: re-search by name on the picking screen — for BOTH the wrong-candidates list and
+          the empty-candidates state. Reuses the found_no_gstin spine (searchName + rerunSearch) so an
+          owner who mistyped the business name (or whose result is wrong/empty) can re-run discovery
+          with the corrected name WITHOUT leaving the step. rerunSearch passes the same `city` prop, so
+          a city-typo is also covered. No new state — the existing change-name machinery is reused. */}
+      <div className="mt-5 border-t border-border pt-5">
+        <label className="block text-sm font-medium text-foreground" htmlFor="picking-name">
+          {t.fnog_name_label}
+        </label>
+        <div className="mt-1 flex flex-wrap items-end gap-3">
+          <input
+            id="picking-name"
+            data-picking-name-input
+            type="text"
+            autoComplete="off"
+            value={searchName}
+            onChange={(e) => setSearchName(e.target.value)}
+            className="min-w-0 flex-1 rounded-xl border border-input bg-card px-4 py-3 text-foreground outline-none focus:border-primary"
+          />
+          <button
+            type="button"
+            data-picking-research
+            disabled={researching || searchName.trim() === ''}
+            onClick={() => void rerunSearch()}
+            className="rounded-xl border border-input px-5 py-2.5 font-medium text-foreground transition hover:bg-muted disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {researching ? t.fnog_researching : t.fnog_research}
+          </button>
+        </div>
+      </div>
       {/* VT-448: identify-and-confirm. With PAN identify ON, PRIMARY = find-my-GST-with-PAN (owner
           enters their PAN, we identify the GSTIN(s) → pick → verify) + a manual-GSTIN fallback.
           With PAN identify OFF (default, Fazal 2026-06-26 — Sandbox MCA/PAN unreliable), the PAN

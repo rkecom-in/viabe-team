@@ -64,6 +64,10 @@ export function OnboardingWizard({
   })
   const [authUrls, setAuthUrls] = useState<Partial<Record<WizardConnector, string>>>({})
   const [connectMsg, setConnectMsg] = useState<Partial<Record<WizardConnector, string>>>({})
+  // Sweep #16 (VT-453): per-connector recovery flag. Set when a re-check returns a connected-but-
+  // not-fully-ingesting state (Shopify: token stored, order webhooks never registered). Surfaces a
+  // re-register affordance so the merchant isn't silently connected-but-uningested.
+  const [needsReregister, setNeedsReregister] = useState<Partial<Record<WizardConnector, boolean>>>({})
   // VT-422 GAP-3: the owner's *.myshopify.com domain — the one UI addition Shopify needs
   // (sheets/whatsapp don't). Passed to startConnect → /setup; the tenant is session-resolved
   // server-side, never client-trusted.
@@ -97,9 +101,18 @@ export function OnboardingWizard({
     startTransition(async () => {
       const res = await checkConnectionAction(connector)
       setConnected((c) => ({ ...c, [connector]: res.connected }))
+      // Sweep #16: a connected-but-webhooks-unregistered Shopify install reads back as NOT connected
+      // with actionRequired='reregister_webhooks'. Surface a re-register affordance + an honest message
+      // so the merchant isn't silently connected-but-uningested (go-forward orders never deliver).
+      const reregister = res.actionRequired === 'reregister_webhooks'
+      setNeedsReregister((r) => ({ ...r, [connector]: reregister }))
       setConnectMsg((m) => ({
         ...m,
-        [connector]: res.connected ? 'Connected ✓' : `Not connected yet (${res.detail})`,
+        [connector]: res.connected
+          ? 'Connected ✓'
+          : reregister
+            ? 'Almost there — we couldn’t finish setting up order sync. Tap “Re-register” to retry.'
+            : `Not connected yet (${res.detail})`,
       }))
     })
   }
@@ -191,6 +204,19 @@ export function OnboardingWizard({
                   </>
                 )}
                 {connectMsg[connector] && <span data-connect-msg> {connectMsg[connector]}</span>}
+                {/* Sweep #16 (VT-453): re-register recovery — re-fire the connect handoff so the
+                    owner can complete order-sync registration instead of being silently stuck
+                    connected-but-uningested. */}
+                {needsReregister[connector] && (
+                  <button
+                    type="button"
+                    data-reregister={connector}
+                    disabled={pending || (connector === 'shopify' && !shopDomain.trim())}
+                    onClick={() => beginConnect(connector)}
+                  >
+                    Re-register
+                  </button>
+                )}
               </>
             )}
           </div>
