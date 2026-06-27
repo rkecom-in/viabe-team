@@ -207,3 +207,14 @@ def test_verify_gstin_tenantless_vendor_down_fail_closed() -> None:
 
     out = entity_match._verify_gstin_tenantless(_VALID_GSTIN, search_fn=lambda _g: GstinLookup(ok=False))
     assert out["ok"] is False and out["reason"] == "vendor_down"
+
+
+def test_vt455_generic_biz_token_not_distinctive() -> None:
+    """VT-455: short business-filler ('biz', 'ventures', 'global', 'mart', …) must NOT count as a
+    distinctive token — a gibberish name sharing only 'biz' must NOT match unrelated '…biz…' rows."""
+    assert "biz" not in entity_match._significant_tokens("zxqwvk nonexistent biz 99812")
+    assert not entity_match._result_is_relevant(
+        "MAXBIZ-CONNECT PRIVATE LIMITED", entity_match._significant_tokens("zxqwvk nonexistent biz 99812")
+    )
+    # a real distinctive name is unaffected
+    assert "rkecom" in entity_match._significant_tokens("RKeCom Services Pvt Ltd")
