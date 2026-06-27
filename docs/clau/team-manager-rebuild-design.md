@@ -42,3 +42,32 @@ Reconciles the §4 rail "no-send-without-owner-approval" — it is NOT per-messa
 - **Launch sign-off (separate, one-time):** Fazal validates the FIRST real send at sign-off (VT-464). Steady-state ≠ the launch gate. After sign-off + the granted policy, the team sends autonomously within the rails.
 
 Design implication: the supervisor (VT-461) defaults to ACT (within policy + rails), not ASK. "Ask the owner" is a last-resort escalation tool, gated to extreme criteria — NOT the default for routine business actions. The brain must be biased to run the business, not to seek permission. The rail harness (VT-460) enforces the SAFETY bounds deterministically so autonomy is safe WITHOUT per-action owner approval.
+
+## 7) FULL-SIX MANAGER + division correction + extended rails (Fazal 2026-06-28, supersedes §1 v1-roster scope)
+**Remit = the WHOLE business:** Sales, Marketing, Finance, Accounting, Tech, Cost-Optimisation. Sign-off WAITS until all six lanes are built + wired (Fazal chose full-six). Build the lane-independent FOUNDATION now; lanes build to CHARTERS (Cowork drafts, Fazal ratifies advise-vs-act on Finance/Accounting/Cost-Opt); PROVE each lane incrementally (not big-bang-then-validate).
+
+### Division of intelligence (211500Z correction — load-bearing)
+- **Manager = SITUATION + OUTCOME.** Reads business situation/context (from the KG/business-profile) + decides/SUGGESTS the OUTCOME that benefits the business + WHICH specialist + arbitrates cross-functional tradeoffs + monitors outcomes. Does NOT prescribe the action. Outcome-accountable. **Never needs domain expertise** (never picks the action).
+- **Specialist = ACTION.** Takes {situation, desired outcome, context-slice, data} + decides the ACTION itself using its domain expertise (the expertise — incl. WHAT to do — lives in the agent). Action-accountable. Lane-scoped; does NOT hold cross-functional strategy.
+- **Handoff = TWO-WAY:** manager→agent {situation, outcome, context-slice, data} (NOT an action plan); agent→manager: if the outcome is infeasible/unwise in-lane, the agent PUSHES BACK + proposes a better outcome before acting (rail-gated).
+- Business knowledge/context lives in the **KG/business-profile** (the moat, VT-466): manager reads/writes; specialists get scoped slices.
+
+### Rails — EXTEND to business-impact (VT-467, extends VT-460)
+- Compliance rails (unchanged, non-bypassable): DPDP/consent, ownership, GST, opt-out, no-customer-send-without-owner-approval.
+- **NEW business-impact rails:** spend money / customer send / external commitment / config-integration change → owner-approval-gated guarded tools, THRESHOLD-based, **DECAYING-HITL** (approval loosens as the owner grants autonomy + the manager earns trust — REUSE the existing VTR decaying-HITL). Manager has NO code path to a consequential side-effect except via a guarded tool. Same guarded-tool framework as VT-460's customer-send choke; business-impact actions plug in per-lane.
+
+### Roster registry + handoff protocol (VT-465 — the spine all six plug into)
+Standard specialist interface + a registry so adding a lane = a sub-graph + a registry entry + its tool-set + its prereq registry (NOT graph surgery). REUSE make_spawn_tool + build_supervisor_graph + routing.
+
+### The six lanes (build to charters; VT mapping)
+| Lane | VT | First-cut charter | Rail |
+|---|---|---|---|
+| Sales | VT-463 (SR handoff, exists) | win-back lapsed → repeat/upsell/re-engage | no send w/o approval + consent |
+| Marketing | VT-468 | campaigns, festival offers, segments, content drafts | no send/spend w/o approval |
+| Finance | VT-469 | cash-flow, receivables/payables, payment reminders, margin/pricing input | ADVISE + owner-approved reminders; NEVER moves money |
+| Accounting | VT-470 | bookkeeping/categorization, GST+tax-summary prep, invoice/expense, reconciliation | PREPARE/summarize; does NOT file/transact |
+| Tech | VT-471 | store/website/listings (GBP/Shopify), integrations, setup | config/integration changes owner-gated |
+| Cost-Opt | VT-472 | wasteful spend, subscriptions/vendor cost, marketing ROI, savings | ADVISE; any cut owner-gated |
+
+### Revised build order (foundation now; lanes to charters)
+exec-1 VT-460 rail harness (compliance + the guarded-tool framework) → VT-467 business-impact rails (extends it) → exec-2 VT-461 supervisor (situation+outcome+which-specialist+tradeoffs, reads/writes KG) → VT-465 roster registry + handoff protocol → VT-466 KG/business-context store → exec-3 VT-462 onboarding-conductor → VT-463 Sales/SR handoff → [CHARTERS] VT-468..472 lanes (incremental, each verified incl. its rails) → VT-464 full live e2e re-drive → Fazal sign-off.
