@@ -162,9 +162,34 @@ def _get_token(key: str, secret: str, request_fn: RequestFn, *, force: bool = Fa
     return _token
 
 
+# VT-457 (Fazal-authorized dev test bypass, 2026-06-28): a DEV-ONLY GST-verify fixture so the e2e isn't
+# hostage to Sandbox GST uptime (the gov backend intermittently 500s). PROD-SAFE — TEAM_SANDBOX_GST_MOCK_MODE
+# is in auth/prod_safety._PROD_FORBIDDEN_FLAGS, so the process REFUSES to boot if it's set under
+# EXPECTED_ENV=prod. The fixture VERIFIES the e2e test GSTIN(s); any other valid-format GSTIN returns
+# Inactive → invalid_gstin, so the REJECT path stays real (the gate is mocked, not removed).
+_GST_MOCK_FIXTURE: dict[str, tuple[str, str]] = {
+    "27AAKCR3738B1ZE": ("RKECOM SERVICES (OPC) PRIVATE LIMITED", "RKECOM"),
+}
+
+
+def _gst_mock_mode() -> bool:
+    return os.environ.get("TEAM_SANDBOX_GST_MOCK_MODE", "0") == "1"
+
+
+def _gst_mock_lookup(gstin: str) -> GstinLookup:
+    fx = _GST_MOCK_FIXTURE.get((gstin or "").strip().upper())
+    if fx is None:
+        return GstinLookup(ok=True, status="Inactive")  # valid-format, not a fixture → invalid_gstin reject
+    legal, trade = fx
+    return GstinLookup(ok=True, legal_name=legal, trade_name=trade, status="Active")
+
+
 def search_gstin(gstin: str, *, request_fn: RequestFn | None = None) -> GstinLookup:
     """Two-step (auth → lookup) GSTIN search → authoritative name + status. Fail-closed (ok=False) on
     any error. Result-only. Re-auths once on a 401 (stale token)."""
+    if _gst_mock_mode():  # VT-457 dev fixture (prod-guarded)
+        logger.warning("[TEAM_SANDBOX_GST_MOCK_MODE] dev GST fixture verify for %s…", (gstin or "")[:6])
+        return _gst_mock_lookup(gstin)
     creds = _creds()
     if creds is None:
         return GstinLookup(ok=False)

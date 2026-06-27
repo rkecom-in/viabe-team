@@ -57,6 +57,8 @@ _PROD_FORBIDDEN_FLAGS: tuple[str, ...] = (
     "TEAM_TWILIO_VERIFY_MOCK_MODE",
     # Send mock: real customer sends become fake-success no-ops → silent drop.
     "TEAM_TWILIO_MOCK_MODE",
+    # GST-verify mock (VT-457): dev fixture approves the e2e test GSTIN → identity gate bypassed in prod.
+    "TEAM_SANDBOX_GST_MOCK_MODE",
 )
 
 
