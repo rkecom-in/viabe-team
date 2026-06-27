@@ -167,6 +167,46 @@ def test_401_triggers_reauth_once():
     assert state["auth_calls"] == 2 and state["lookup_calls"] == 2  # re-authed once, retried once
 
 
+def test_gst_lookup_transient_retries_once_then_ok():
+    """VT-451: a TRANSIENT (timeout/5xx) GST lookup gets ONE auto-retry before vendor_down — a momentary
+    Sandbox blip is absorbed so the owner isn't bounced to a manual retry."""
+    import httpx
+
+    from orchestrator.integrations.methods import sandbox_kyc
+
+    calls = {"n": 0}
+
+    def req(_m, path, _h, _b):
+        if path == "/authenticate":
+            return {"data": {"access_token": "TOK"}}
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise httpx.TimeoutException("transient")  # first attempt slow
+        return {"data": {"data": {"lgnm": "RKECOM", "sts": "Active"}}}
+
+    res = sandbox_kyc.search_gstin("27AAKCR3738B1ZE", request_fn=req)
+    assert res.ok is True and res.status == "Active"
+    assert calls["n"] == 2  # retried exactly once
+
+
+def test_gst_lookup_transient_twice_fail_closed():
+    """VT-451: transient on BOTH attempts → fail-closed (vendor_down), bounded (one retry, no loop)."""
+    import httpx
+
+    from orchestrator.integrations.methods import sandbox_kyc
+
+    calls = {"n": 0}
+
+    def req(_m, path, _h, _b):
+        if path == "/authenticate":
+            return {"data": {"access_token": "TOK"}}
+        calls["n"] += 1
+        raise httpx.TimeoutException("transient")
+
+    res = sandbox_kyc.search_gstin("27AAKCR3738B1ZE", request_fn=req)
+    assert res.ok is False and calls["n"] == 2  # one retry, then give up
+
+
 def test_no_creds_fails_closed(monkeypatch):
     from orchestrator.integrations.methods import sandbox_kyc
 
