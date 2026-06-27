@@ -61,6 +61,26 @@ FORBIDDEN_CAPABILITY_SUBSTRINGS: tuple[str, ...] = (
     "write_ledger",
     "ledger_entr",
     "insert_ledger",
+    # VT-467 business-impact effects (SPEND / COMMITMENT / CONFIG): the brain MUST NOT hold a tool
+    # that commits money, makes an external commitment, or changes an owner-depended-on config
+    # directly — every such effect routes through assert_or_gate_business_action +
+    # business_action_context (the deterministic gate), never a direct agent tool. Deliberately
+    # SPECIFIC (not a bare "spend"/"pay"/"charge") so benign reads — query_spend, get_payment_status,
+    # read_config — are NOT false-flagged; the substrings name the WRITE/EXECUTE capability.
+    "execute_spend",
+    "commit_spend",
+    "make_payment",
+    "charge_card",
+    "place_order",
+    "create_purchase",
+    "make_commitment",
+    "create_commitment",
+    "place_booking",
+    "sign_contract",
+    "write_config",
+    "update_integration_config",
+    "push_config",
+    "apply_config_change",
 )
 
 

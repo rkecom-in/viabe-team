@@ -74,6 +74,11 @@ ApprovalType = Literal[
     # source of truth — migration 128 keeps the DB CHECK in exact sync (all three added
     # in both, same PR; VT-384 PR-3 activates autonomy_upgrade — the offer/ENABLE consent row).
     "agent_customer_send", "autonomy_upgrade", "l3_presend_notice",
+    # VT-467 — the business-impact rails surface (SPEND / COMMITMENT / CONFIG action above the
+    # tenant's autonomy threshold). CL-428: this Literal is the source of truth — migration 143
+    # keeps the DB CHECK in exact sync (added in both, same PR). The business-impact gate routes its
+    # owner-approval ask through the SAME arm_pause_request path agent_customer_send uses.
+    "business_impact_action",
 ]
 # The raw owner decision verb recorded on pending_approvals.decision. CL-428: this Literal is
 # the source of truth — migration 110 keeps the DB CHECK in exact sync ('defer' added in both,
