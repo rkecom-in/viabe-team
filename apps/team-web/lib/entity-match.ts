@@ -44,6 +44,7 @@ export type WizardStep =
   | 'pan_entry' // VT-448 PRIMARY: owner enters their 10-char PAN; we IDENTIFY their GSTIN(s)
   | 'pan_pick' // VT-448 PRIMARY: the PAN's GSTIN(s) listed; owner taps one to verify
   | 'picking' // candidates rendered; owner choosing (or "none of these")
+  | 'found_no_gstin' // VT-450: a company was FOUND (name) but no candidate has a GSTIN — show it + recover
   | 'manual_gstin' // VT-448: owner enters their GSTIN directly (FALLBACK — "don't have your PAN?")
   | 'verified' // a gstin_verified confirm landed — create-account is now unlocked
   | 'reject' // graceful terminus — not a GST-registered business
@@ -165,6 +166,35 @@ export interface CinCandidate {
   cin: string
   /** The registry trade/company name for the confirm copy ("…we also found [tradeName]…"). */
   tradeName: string | null
+}
+
+/**
+ * VT-450 — the display name of a found candidate (trade_name first, then legal_name). Used by both
+ * the picking-list cards and the found-no-GSTIN state so the SAME name shows in both. Returns '' when
+ * the candidate carries no usable name (the caller then doesn't treat it as a "found" company). Pure.
+ */
+export function candidateDisplayName(c: EntityCandidate): string {
+  return (c.trade_name || c.legal_name || '').trim()
+}
+
+/**
+ * VT-450 — surface the FIRST found-but-unconfirmable candidate when discovery returned a company name
+ * (GBP/registry, e.g. RKeCom) yet NO candidate carries a `candidate_gstin`. This is the "we DID find
+ * the company, just no GST number" state: show the real returned name + offer change-name / enter-GST,
+ * NEVER the "couldn't find your business" empty-state. Returns null when (a) discovery returned zero
+ * candidates, or (b) ANY candidate is confirmable (then the normal pick list stands). Pure so the
+ * component + the test agree. Mirrors the component's filter: registry rows are not pickable, but a
+ * registry/GBP row's NAME still counts as "found" here.
+ */
+export function findNamedNoGstin(candidates: EntityCandidate[]): { tradeName: string } | null {
+  if (candidates.length === 0) return null
+  // If anything is one-tap confirmable, the normal pick list handles it — not this state.
+  if (candidates.some(isConfirmable)) return null
+  for (const c of candidates) {
+    const name = candidateDisplayName(c)
+    if (name) return { tradeName: name }
+  }
+  return null
 }
 
 /**

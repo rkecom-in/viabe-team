@@ -19,12 +19,14 @@ import { describe, expect, it, vi } from 'vitest'
 
 import {
   canCreateAccount,
+  candidateDisplayName,
   cityToStateCode,
   classifyConfirm,
   confirmCandidate,
   fetchCandidates,
   fetchGstinsByPan,
   findCinCandidate,
+  findNamedNoGstin,
   isConfirmable,
   isValidGstinFormat,
   isValidPanFormat,
@@ -186,6 +188,22 @@ describe('VT-406 provenance — the wizard never badges a candidate as verified'
     expect(src).toContain('data-verified-name')
     expect(src).toContain('verified.name')
   })
+
+  it('VT-450 — a found-company-no-GSTIN candidate renders the found state, NOT the empty-state', () => {
+    // The found-no-GSTIN screen exists with its data-* hooks (the real returned name + both CTAs).
+    expect(src).toContain('data-entity-step="found_no_gstin"')
+    expect(src).toContain('data-found-name')
+    expect(src).toContain('data-found-name-input') // (a) change company name → re-search
+    expect(src).toContain('data-found-research')
+    expect(src).toContain('data-found-enter-gstin') // (b) enter my GST number → manual path
+    // The fetch result routes to found_no_gstin via findNamedNoGstin — so a named-no-GSTIN result
+    // does NOT fall through to the "couldn't find your business" empty-state (data-entity-empty).
+    expect(src).toContain('findNamedNoGstin')
+    expect(src).toContain("setStep(named ? 'found_no_gstin' : 'picking')")
+    // (b) reuses the existing manual-GSTIN path (openManual), keeping the Sandbox verify gate intact.
+    const foundBlock = src.slice(src.indexOf('data-entity-step="found_no_gstin"'))
+    expect(foundBlock).toContain('onClick={openManual}')
+  })
 })
 
 describe('VT-448 isValidGstinFormat (manual-entry format gate)', () => {
@@ -330,5 +348,68 @@ describe('VT-449 findCinCandidate', () => {
   it('trims the surfaced CIN', () => {
     const padded: EntityCandidate = { ...REGISTRY, candidate_cin: '  U22210KA1995PLC012345  ' }
     expect(findCinCandidate([padded])?.cin).toBe('U22210KA1995PLC012345')
+  })
+})
+
+describe('VT-450 candidateDisplayName', () => {
+  it('prefers trade_name, then legal_name', () => {
+    expect(candidateDisplayName(WEB_CANDIDATE)).toBe('Sundaram Book Store')
+    expect(
+      candidateDisplayName({ ...GBP_CANDIDATE, trade_name: null, legal_name: 'Sundaram Multi Pap Ltd' }),
+    ).toBe('Sundaram Multi Pap Ltd')
+  })
+
+  it('returns "" (trimmed) when no usable name is present', () => {
+    expect(candidateDisplayName({ ...GBP_CANDIDATE, trade_name: '  ', legal_name: null })).toBe('')
+    expect(candidateDisplayName({ ...GBP_CANDIDATE, trade_name: null, legal_name: null })).toBe('')
+  })
+})
+
+describe('VT-450 findNamedNoGstin (found-company-no-GSTIN state)', () => {
+  // The Fazal e2e case: discovery found RKeCom via GBP (trade_name set) but no candidate carries a
+  // GSTIN. This is the FOUND state, not the empty-state.
+  const GBP_NO_GSTIN: EntityCandidate = {
+    trade_name: 'RKeCom',
+    source: 'gbp',
+    candidate_gstin: null,
+    legal_name: null,
+    detail: 'Sector 62, Noida · Software company',
+    phone: '+919321553267',
+  }
+
+  it('surfaces the found name when a named candidate exists but NONE is confirmable', () => {
+    expect(findNamedNoGstin([GBP_NO_GSTIN])).toEqual({ tradeName: 'RKeCom' })
+  })
+
+  it('returns null on a genuinely ZERO-candidate result (→ the empty-state)', () => {
+    expect(findNamedNoGstin([])).toBeNull()
+  })
+
+  it('returns null when ANY candidate is confirmable (→ the normal pick list stands)', () => {
+    // A GSTIN-bearing web hit alongside the no-GSTIN GBP one → pick list, not the found-no-GSTIN state.
+    expect(findNamedNoGstin([GBP_NO_GSTIN, WEB_CANDIDATE])).toBeNull()
+  })
+
+  it('counts a registry candidate name as "found" too (uses trade_name)', () => {
+    const REGISTRY_NO_GSTIN: EntityCandidate = {
+      trade_name: 'RKeCom Services Pvt Ltd',
+      source: 'registry',
+      candidate_gstin: null,
+      legal_name: null,
+      detail: null,
+      candidate_cin: 'U72900UP2020PTC000000',
+    }
+    expect(findNamedNoGstin([REGISTRY_NO_GSTIN])).toEqual({ tradeName: 'RKeCom Services Pvt Ltd' })
+  })
+
+  it('returns null when candidates exist but carry no usable name (no GSTIN AND no name)', () => {
+    const nameless: EntityCandidate = {
+      trade_name: null,
+      source: 'gbp',
+      candidate_gstin: null,
+      legal_name: null,
+      detail: 'A listing with no name',
+    }
+    expect(findNamedNoGstin([nameless])).toBeNull()
   })
 })

@@ -24,6 +24,7 @@ import {
   fetchCandidates,
   fetchGstinsByPan,
   findCinCandidate,
+  findNamedNoGstin,
   isConfirmable,
   isValidGstinFormat,
   isValidPanFormat,
@@ -46,6 +47,9 @@ type EmMsgKey =
   | 'none_of_these' | 'verified_heading' | 'verified_note' | 'continue'
   | 'reject_heading' | 'reject_body' | 'retry_heading' | 'retry_body' | 'try_again'
   | 'empty_candidates'
+  // VT-450 found-company-no-GSTIN keys
+  | 'fnog_heading_prefix' | 'fnog_heading_suffix' | 'fnog_hint' | 'fnog_name_label'
+  | 'fnog_change_name' | 'fnog_research' | 'fnog_researching' | 'fnog_enter_gstin'
   | 'manual_with_gstin' | 'manual_heading' | 'manual_hint' | 'manual_label'
   | 'manual_placeholder' | 'manual_verify' | 'manual_format_error' | 'manual_not_registered'
   | 'manual_back'
@@ -81,6 +85,15 @@ const EM_MESSAGES: Record<Lang, Record<EmMsgKey, string>> = {
     retry_body: 'This is on our side — the verification service didn’t respond. Please try again in a moment.',
     try_again: 'Try again',
     empty_candidates: 'We couldn’t find your business in public records — you can enter your GST number to verify.',
+    // VT-450 — a company WAS found (name) but no GSTIN. Show the found name; offer change-name + enter-GST.
+    fnog_heading_prefix: 'We found ',
+    fnog_heading_suffix: ' but couldn’t find a GST number for it.',
+    fnog_hint: 'Fix the name to search again, or enter your GST number to verify.',
+    fnog_name_label: 'Business name',
+    fnog_change_name: 'Change company name',
+    fnog_research: 'Search again',
+    fnog_researching: 'Searching…',
+    fnog_enter_gstin: 'Enter my GST number',
     manual_with_gstin: 'Enter my GST number',
     manual_heading: 'Enter your GST number',
     manual_hint: 'We’ll verify it against the official GST registry.',
@@ -139,6 +152,15 @@ const EM_MESSAGES: Record<Lang, Record<EmMsgKey, string>> = {
     retry_body: 'यह हमारी ओर से है — सत्यापन सेवा ने जवाब नहीं दिया। कृपया थोड़ी देर में पुनः प्रयास करें।',
     try_again: 'पुनः प्रयास करें',
     empty_candidates: 'हमें सार्वजनिक रिकॉर्ड में आपका व्यवसाय नहीं मिला — आप सत्यापित करने के लिए अपना GST नंबर दर्ज कर सकते हैं।',
+    // VT-450 — कंपनी मिली (नाम) पर GST नंबर नहीं। मिला नाम दिखाएं; नाम बदलें + GST दर्ज करें विकल्प दें।
+    fnog_heading_prefix: 'हमें ',
+    fnog_heading_suffix: ' मिला पर इसका GST नंबर नहीं मिला।',
+    fnog_hint: 'फिर से खोजने के लिए नाम ठीक करें, या सत्यापित करने के लिए अपना GST नंबर दर्ज करें।',
+    fnog_name_label: 'व्यवसाय का नाम',
+    fnog_change_name: 'कंपनी का नाम बदलें',
+    fnog_research: 'फिर से खोजें',
+    fnog_researching: 'खोजा जा रहा है…',
+    fnog_enter_gstin: 'मेरा GST नंबर दर्ज करें',
     manual_with_gstin: 'मेरा GST नंबर दर्ज करें',
     manual_heading: 'अपना GST नंबर दर्ज करें',
     manual_hint: 'हम इसे आधिकारिक GST रजिस्ट्री से सत्यापित करेंगे।',
@@ -195,6 +217,12 @@ export function EntityMatchStep({
   const t = EM_MESSAGES[lang]
   const [step, setStep] = useState<WizardStep>('idle')
   const [candidates, setCandidates] = useState<EntityCandidate[]>([])
+  // VT-450 — the (editable) name we SEARCH on. Seeded from the businessName prop; the found-no-GSTIN
+  // state lets the owner correct it and re-run the discovery search (the typed name may be off).
+  const [searchName, setSearchName] = useState(businessName)
+  const [researching, setResearching] = useState(false) // a change-name re-search is in flight
+  // VT-450 — the found-but-no-GSTIN candidate name (e.g. "RKeCom"); null when none / a confirmable hit.
+  const [foundNoGstin, setFoundNoGstin] = useState<{ tradeName: string } | null>(null)
   const [confirming, setConfirming] = useState<string | null>(null) // the gstin being confirmed
   const [verified, setVerified] = useState<VerifiedEntity | null>(null)
   const [manualGstin, setManualGstin] = useState('') // VT-448 manual-entry input
@@ -215,26 +243,52 @@ export function EntityMatchStep({
   // The state code derived from the city prop (null when we don't know the city → owner hint needed).
   const derivedStateCode = cityToStateCode(city)
 
+  // Apply a candidates result to state — shared by the mount fetch and the VT-450 change-name
+  // re-search. Captures the registry-CIN affordance (VT-449) and routes to the right screen:
+  // VT-450 — when discovery returned a company NAME but NO confirmable GSTIN (e.g. RKeCom from GBP),
+  // show the found-no-GSTIN state ("We found <name>…" + recover), NOT the "couldn't find" empty-state;
+  // that empty-state is reserved for a genuinely ZERO-candidate result.
+  function applyCandidates(found: EntityCandidate[]) {
+    setCandidates(found)
+    // VT-449: capture any discovered registry CIN candidate now (surfaced for owner confirm on the
+    // verified screen). null when discovery found none → no CIN affordance, create sends cin: ''.
+    // VT-448: when PAN identify is OFF (default) the MCA enrich is parked too — never surface the
+    // CIN-confirm affordance, so create always sends cin: '' (the orchestrator's MCA enrich is off).
+    setCinCandidate(PAN_IDENTIFY_ENABLED ? findCinCandidate(found) : null)
+    const named = findNamedNoGstin(found)
+    setFoundNoGstin(named)
+    setStep(named ? 'found_no_gstin' : 'picking')
+  }
+
   // Step 1: fetch candidates on mount. The component mounts in 'idle' (the loading screen); the
-  // async result flips to 'picking'. Fail-closed → empty list → the picking screen still renders
-  // with the not-listed path (lookup never blocks signup). name/city are fixed for the wizard's
-  // lifetime (props from the details step), so this runs once — no setState-in-effect cascade.
+  // async result flips to 'picking' (or 'found_no_gstin'). Fail-closed → empty list → the picking
+  // screen still renders with the not-listed path (lookup never blocks signup). name/city are fixed
+  // for the wizard's lifetime (props from the details step), so this runs once — no cascade.
   useEffect(() => {
     let cancelled = false
     fetchCandidates(businessName, city).then((r) => {
       if (cancelled) return
-      setCandidates(r.candidates)
-      // VT-449: capture any discovered registry CIN candidate now (surfaced for owner confirm on the
-      // verified screen). null when discovery found none → no CIN affordance, create sends cin: ''.
-      // VT-448: when PAN identify is OFF (default) the MCA enrich is parked too — never surface the
-      // CIN-confirm affordance, so create always sends cin: '' (the orchestrator's MCA enrich is off).
-      setCinCandidate(PAN_IDENTIFY_ENABLED ? findCinCandidate(r.candidates) : null)
-      setStep('picking')
+      applyCandidates(r.candidates)
     })
     return () => {
       cancelled = true
     }
   }, [businessName, city])
+
+  // VT-450 — re-run discovery with the EDITED company name (the typed name may be off). Reuses the
+  // existing fetchCandidates/applyCandidates spine; on a still-no-GSTIN result the found-no-GSTIN
+  // screen simply re-renders with the new name. Fail-closed (empty → the empty-state) like the mount.
+  async function rerunSearch() {
+    const name = searchName.trim()
+    if (!name || researching) return
+    setResearching(true)
+    try {
+      const r = await fetchCandidates(name, city)
+      applyCandidates(r.candidates)
+    } finally {
+      setResearching(false)
+    }
+  }
 
   // The shared confirm spine — a GSTIN (from a pick OR manual entry) → Sandbox confirm → classify.
   // The Sandbox confirm is the AUTHORITATIVE gate for both paths (a manually-typed GSTIN is verified
@@ -294,6 +348,13 @@ export function EntityMatchStep({
 
   function retry() {
     setStep('picking')
+  }
+
+  // VT-450 — the "Back" target from the manual/PAN screens: return to the found-no-GSTIN screen when
+  // that's where the owner came from (a found company with no GSTIN), else the normal pick list. This
+  // keeps Back from dumping the owner onto the bare pick list after they entered via the found state.
+  function backToList() {
+    setStep(foundNoGstin ? 'found_no_gstin' : 'picking')
   }
 
   // VT-448 — the PRIMARY identify entry, gated by PAN_IDENTIFY_ENABLED via primaryIdentifyStep:
@@ -463,6 +524,57 @@ export function EntityMatchStep({
     )
   }
 
+  if (step === 'found_no_gstin' && foundNoGstin) {
+    // VT-450 — discovery FOUND the company (real returned name) but no candidate carried a GSTIN.
+    // We say so honestly ("We found <name> but couldn't find a GST number for it.") and offer BOTH
+    // recovery paths: (a) correct the name + re-search, (b) the existing manual-GSTIN verify path.
+    // This is NOT the "couldn't find your business" empty-state — we DID find the company.
+    return (
+      <section data-entity-step="found_no_gstin" className={`mt-8 ${card}`}>
+        <h2 className="text-lg font-semibold text-gray-900">
+          {t.fnog_heading_prefix}
+          <span data-found-name className="font-semibold text-gray-900">{foundNoGstin.tradeName}</span>
+          {t.fnog_heading_suffix}
+        </h2>
+        <p className="mt-2 text-sm leading-relaxed text-gray-600">{t.fnog_hint}</p>
+        {/* (a) Change the company name → re-run the discovery search with the edited name. */}
+        <label className="mt-4 block text-sm font-medium text-gray-700" htmlFor="fnog-name">
+          {t.fnog_name_label}
+        </label>
+        <input
+          id="fnog-name"
+          data-found-name-input
+          type="text"
+          autoComplete="off"
+          value={searchName}
+          onChange={(e) => setSearchName(e.target.value)}
+          className="mt-1 w-full rounded-xl border border-gray-300 px-4 py-3 text-gray-900 outline-none focus:border-emerald-500"
+        />
+        <div className="mt-5 flex flex-wrap items-center gap-3">
+          <button
+            type="button"
+            data-found-research
+            disabled={researching || searchName.trim() === ''}
+            onClick={() => void rerunSearch()}
+            className="rounded-xl border border-gray-300 px-5 py-2.5 font-medium text-gray-700 transition hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {researching ? t.fnog_researching : t.fnog_research}
+          </button>
+          {/* (b) Enter my GST number → the existing manual-GSTIN verify path (Sandbox stays the gate). */}
+          <button
+            type="button"
+            data-found-enter-gstin
+            disabled={researching}
+            onClick={openManual}
+            className="rounded-xl bg-emerald-600 px-5 py-3 font-semibold text-white shadow-sm transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {t.fnog_enter_gstin}
+          </button>
+        </div>
+      </section>
+    )
+  }
+
   if (step === 'manual_gstin') {
     return (
       <section data-entity-step="manual" className={`mt-8 ${card}`}>
@@ -503,7 +615,7 @@ export function EntityMatchStep({
             type="button"
             data-manual-back
             disabled={confirming !== null}
-            onClick={() => setStep('picking')}
+            onClick={backToList}
             className="rounded-xl border border-gray-300 px-5 py-2.5 font-medium text-gray-700 transition hover:bg-gray-50 disabled:opacity-50"
           >
             {t.manual_back}
