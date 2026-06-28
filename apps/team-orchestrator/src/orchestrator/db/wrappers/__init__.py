@@ -714,6 +714,29 @@ class PendingApprovalsWrapper(TenantScopedTable):
             return None
         return str(row["bid"] if isinstance(row, dict) else row[0])
 
+    def approved_batch_for_send_approval(
+        self, tenant_id: UUID | str, approval_id: UUID | str, *, conn: Any = None
+    ) -> str | None:
+        """The agent_draft_batches id linked to an ``agent_customer_send`` approval that has
+        reached ``'approved'`` — the VT-418 start-after-commit lookup (the
+        pending_approvals×agent_draft_batches join lives HERE, wrapper-scoped). None when the
+        batch did not reach approved / it is not an agent_customer_send approval (a safe no-op)."""
+        tid = self._uuid(tenant_id)
+        with self._conn(tid, conn) as c:
+            row = c.execute(
+                "SELECT b.id::text AS batch_id "
+                "FROM pending_approvals a "
+                "JOIN agent_draft_batches b "
+                "  ON b.tenant_id = a.tenant_id AND b.id = a.draft_batch_id "
+                "WHERE a.tenant_id = %s AND a.id = %s "
+                "  AND a.approval_type = 'agent_customer_send' "
+                "  AND b.status = 'approved'",
+                (str(tid), str(self._uuid(approval_id))),
+            ).fetchone()
+        if row is None:
+            return None
+        return str(row["batch_id"] if isinstance(row, dict) else row[0])
+
     def get_open_by_id(
         self, tenant_id: UUID | str, approval_id: UUID | str, *, conn: Any = None
     ) -> dict[str, Any] | None:

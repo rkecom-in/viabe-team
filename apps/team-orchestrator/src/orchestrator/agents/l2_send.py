@@ -226,22 +226,15 @@ def start_l2_send_for_resolved_approval(tenant_id: str, approval_id: str) -> str
     recovery posture. Errors are logged + swallowed (the batch is durably ``approved`` and the sweep
     is the recovery seam) — an arm error must NEVER fail the owner-reply path."""
     try:
-        with tenant_connection(tenant_id) as conn:
-            row = conn.execute(
-                "SELECT b.id::text AS batch_id "
-                "FROM pending_approvals a "
-                "JOIN agent_draft_batches b "
-                "  ON b.tenant_id = a.tenant_id AND b.id = a.draft_batch_id "
-                "WHERE a.tenant_id = %s AND a.id = %s "
-                "  AND a.approval_type = 'agent_customer_send' "
-                "  AND b.status = 'approved'",
-                (tenant_id, approval_id),
-            ).fetchone()
-        if row is None:
+        from orchestrator.db.wrappers import PendingApprovalsWrapper
+
+        # Wrapper-scoped composite read (VT-72): the pending_approvals×agent_draft_batches join lives
+        # in the wrapper, not inline here.
+        batch_id = PendingApprovalsWrapper().approved_batch_for_send_approval(tenant_id, approval_id)
+        if batch_id is None:
             # The batch did not reach 'approved' (stale resolution / non-resolvable batch /
             # not an agent_customer_send approval) — nothing to drive. Safe no-op.
             return None
-        batch_id = str(_col(row, "batch_id", 0))
         start_l2_send(tenant_id, batch_id)
         logger.info(
             "l2_send: started post-approval send tenant=%s batch=%s approval=%s",
