@@ -168,6 +168,19 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         logging.getLogger(__name__).exception(
             "VT-374 warm_pause_cache failed at startup (best-effort)"
         )
+    # VT-481: reap runs stranded status='running' by a prior process that died mid-run
+    # (a deploy-restart). DBOS cannot recover a prior-app-version row, so these never close
+    # on their own. Runs AFTER launch_dbos() so DBOS's own same-version recovery has already
+    # fired; the >1h age floor keeps it clear of any live in-flight run. Best-effort: a reaper
+    # failure must never block boot (reap_orphan_runs never raises, but guard the import too).
+    try:
+        from orchestrator.orphan_reaper import reap_orphan_runs
+
+        reap_orphan_runs()
+    except Exception:
+        logging.getLogger(__name__).exception(
+            "VT-481 orphan-reaper failed at startup (best-effort)"
+        )
     yield
     shutdown_dbos()
 
