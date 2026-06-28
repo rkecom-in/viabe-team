@@ -547,3 +547,257 @@ def test_handle_reply_on_complete_journey_returns_done(substrate):  # type: igno
     assert g is not None
     assert g["cursor"] == 1
     assert "another message" not in g["answers"].values()
+
+
+# --- VT-478: recompose of a STALE onboarding queue (the real onboarding defect) ------------------
+#
+# VT-475 fixed FORWARD composition (a NEW queue confirms the reconciled business_type, not the raw
+# GBP category). But a queue composed BEFORE VT-475 was never recomposed, so a mid-journey tenant
+# keeps being asked the pre-fix "We found you're a Telecommunications service provider — is that
+# right?" (the raw GBP categoryName). ``_recompose_stale_confirms`` heals an ACTIVE queue IN-PLACE on
+# the next inbound: it re-derives the live (reconciled) confirm set and, IFF the un-answered confirm
+# tail is stale, swaps in the corrected confirm — PRESERVING cursor / answers / skipped /
+# last_message_sid (never lose the owner's progress, never re-ask an answered question).
+
+
+def _seed_draft(dsn: str, tenant_id: UUID, attributes: dict[str, Any]) -> None:
+    """Seed the tenant's business_profile_draft (what ``get_draft`` reads) via a direct service-role
+    connection. The recompose re-derives the live confirm set from this draft."""
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute(
+            "INSERT INTO business_profile_draft (tenant_id, attributes, provenance) "
+            "VALUES (%s, %s::jsonb, '{}'::jsonb) "
+            "ON CONFLICT (tenant_id) DO UPDATE SET attributes = EXCLUDED.attributes",
+            (str(tenant_id), psycopg.types.json.Jsonb(attributes)),
+        )
+
+
+def test_recompose_heals_stale_category_confirm_preserving_progress(substrate):  # type: ignore[no-untyped-def]
+    """THE VT-478 defect: a queue whose HEAD confirm carries the raw pre-VT-475 GBP category
+    ("Telecommunications service provider") is recomposed to the RECONCILED business_type confirm,
+    while the cursor / answers / skipped / last_message_sid are PRESERVED. The recompose re-derives
+    the reconciled type from the draft's own signals (rkecom.in domain wins over the telecom
+    mis-category → 'services'), suppressing the raw category confirm in favour of the business_type one.
+    """
+    from orchestrator.onboarding import journey
+
+    # RKeCom-like draft: telecom mis-category + the real domain (domain wins → 'services').
+    tenant = _new_tenant(substrate.dsn, name="stale recompose", business_type="other")
+    _seed_draft(
+        substrate.dsn,
+        tenant,
+        {"business_name": "RKeCom", "category": "Telecommunications service provider",
+         "website": "https://rkecom.in", "city": "Mumbai"},
+    )
+    # A pre-VT-475 STALE queue: the head confirm is the RAW GBP category. An ANSWERED gap precedes it
+    # (cursor at 1) to prove the answered prefix + cursor + answers are preserved across the heal.
+    stale_queue = [
+        _gap_q("operating_hours"),  # cursor 0 — already answered below
+        _confirm_q("category", "Telecommunications service provider"),  # cursor 1 — STALE head
+        _gap_q("price_range"),      # cursor 2 — a real gap, carried forward verbatim
+    ]
+    journey.start_journey(tenant, stale_queue)
+    journey.handle_reply(tenant, "9am to 9pm", "SM-stale-pre")  # answer the gap → cursor 0→1
+    before = _journey_row(substrate.dsn, tenant)
+    assert before is not None and before["cursor"] == 1
+    assert before["answers"].get("operating_hours") == "9am to 9pm"
+    assert before["last_message_sid"] == "SM-stale-pre"
+
+    g = journey.get_journey(tenant)
+    healed = journey._recompose_stale_confirms(tenant, g, "other")
+    assert healed is True, "a stale category confirm at the cursor head must be recomposed"
+
+    after = _journey_row(substrate.dsn, tenant)
+    assert after is not None
+    # Progress preserved — NOTHING but the queue moved.
+    assert after["cursor"] == 1, "recompose must NOT move the cursor"
+    assert after["answers"] == before["answers"], "recompose must NOT touch answers"
+    assert after["skipped"] == before["skipped"], "recompose must NOT touch skipped"
+    assert after["last_message_sid"] == before["last_message_sid"], (
+        "recompose must NOT touch last_message_sid (the idempotency marker survives)"
+    )
+    # The answered prefix is byte-identical (the answered gap is never re-asked).
+    assert after["question_queue"][0] == stale_queue[0], "the answered prefix must be untouched"
+    # The cursor head is now the RECONCILED business_type confirm — the raw category is suppressed.
+    head = after["question_queue"][after["cursor"]]
+    assert head["field"] == "business_type", (
+        f"the stale 'category' confirm must be replaced by the reconciled 'business_type' confirm; "
+        f"got {head!r}"
+    )
+    assert head["draft_value"] == "services", "the reconciled draft_value (rkecom domain → services)"
+    assert "Telecommunications" not in head["prompt_en"], "the raw mis-category must no longer be asked"
+    assert "Local services" in head["prompt_en"], "the confirm now shows the reconciled label"
+    # The downstream gap (price_range) is carried forward verbatim — never re-run through the gap LLM.
+    fields_after = [q["field"] for q in after["question_queue"]]
+    assert "price_range" in fields_after, "the existing gap question must be carried forward"
+    assert "category" not in fields_after, "the suppressed raw-category confirm must be dropped"
+
+
+def test_recompose_leaves_a_non_stale_queue_untouched(substrate):  # type: ignore[no-untyped-def]
+    """A queue whose confirm already carries the CURRENT (reconciled) value is NOT stale → the
+    recompose is a no-op: it returns False and the queue is byte-identical. (A sane GBP category that
+    reconciles to itself, e.g. a real sweet shop, must never be churned.)"""
+    from orchestrator.onboarding import journey
+
+    tenant = _new_tenant(substrate.dsn, name="non-stale untouched", business_type="sweets")
+    # Draft already reconciled: business_type present + matching the queued confirm value.
+    _seed_draft(
+        substrate.dsn,
+        tenant,
+        {"business_name": "Sharma Sweets", "category": "Sweet shop",
+         "business_type": "sweets", "city": "Pune"},
+    )
+    fresh_queue = [
+        _confirm_q("business_type", "sweets"),  # already the reconciled value
+        _gap_q("operating_hours"),
+    ]
+    journey.start_journey(tenant, fresh_queue)
+    g = journey.get_journey(tenant)
+    before = _journey_row(substrate.dsn, tenant)
+
+    healed = journey._recompose_stale_confirms(tenant, g, "sweets")
+    assert healed is False, "a non-stale queue must NOT be recomposed"
+
+    after = _journey_row(substrate.dsn, tenant)
+    assert after is not None and before is not None
+    assert after["question_queue"] == before["question_queue"], (
+        "a non-stale queue must be left byte-identical"
+    )
+    assert after["cursor"] == before["cursor"]
+
+
+def test_recompose_via_intercept_auto_heals_then_confirm_advances(substrate, monkeypatch):  # type: ignore[no-untyped-def]
+    """END-TO-END through the gate: a mid-journey tenant with a STALE category confirm at the cursor
+    head sends an inbound; ``maybe_handle_journey_reply`` LAZILY recomposes (the reconciled
+    business_type confirm replaces the telecom one) BEFORE presenting, and a 'yes' then confirms the
+    RECONCILED business_type (not the stale raw category). Send is stubbed; this asserts the auto-heal
+    + correct advance on the same inbound the owner sends."""
+    from orchestrator.onboarding import journey
+    from orchestrator.utils import twilio_send
+
+    monkeypatch.setattr(twilio_send, "send_freeform_message", lambda *a, **k: "SM" + "0" * 32)
+
+    tenant = _new_tenant(substrate.dsn, name="intercept auto-heal", business_type="other")
+    _seed_draft(
+        substrate.dsn,
+        tenant,
+        {"business_name": "RKeCom", "category": "Telecommunications service provider",
+         "website": "https://rkecom.in"},
+    )
+    journey.start_journey(
+        tenant, [_confirm_q("category", "Telecommunications service provider")]
+    )
+
+    # The owner says "yes" — but to the WRONG (stale) question. The gate heals it FIRST, so the 'yes'
+    # confirms the reconciled business_type.
+    r = journey.maybe_handle_journey_reply(tenant, "yes", "SM-heal-yes", recipient="+919999002222")
+    assert r is not None
+
+    g = journey.get_journey(tenant)
+    assert g is not None
+    # The reconciled business_type was confirmed — NOT the stale telecom category.
+    assert g["answers"].get("business_type") == "services", (
+        f"the 'yes' must confirm the reconciled business_type after the lazy heal; got {g['answers']!r}"
+    )
+    assert "category" not in g["answers"], "the stale raw-category confirm must never be recorded"
+
+
+# --- VT-477 REGRESSION (the plan's §3): pin the already-correct confirm/advance/idempotency seam ---
+#
+# VT-477 proved there is NO confirm-advance bug — the "cursor stuck at 1" reading was a MISREAD of a
+# normal 0→1 advance. These tests PIN that correct behaviour (and would have caught the misdiagnosis):
+# a confirm "yes" records draft_value (never "yes") + advances EXACTLY ONCE; N bare greetings
+# re-present WITHOUT advancing; a redelivered-SID "yes" does NOT double-advance.
+
+
+def test_vt477_confirm_yes_records_draft_value_and_advances_exactly_once(substrate):  # type: ignore[no-untyped-def]
+    """A confirm-"yes" records the DRAFT_VALUE (never the literal "yes") and advances the cursor
+    EXACTLY ONCE (0→1). The genuine NEXT reply (new sid) then advances 1→2 — proving a real reply
+    after the first still advances (not frozen)."""
+    from orchestrator.onboarding import journey
+
+    tenant = _new_tenant(substrate.dsn, name="vt477 confirm-yes once")
+    journey.start_journey(
+        tenant, [_confirm_q("city", "Mumbai"), _gap_q("operating_hours")]
+    )
+
+    r1 = journey.handle_reply(tenant, "yes", "SMaaa")
+    g1 = journey.get_journey(tenant)
+    assert g1 is not None
+    assert g1["answers"].get("city") == "Mumbai", "draft_value recorded, NOT the literal 'yes'"
+    assert g1["answers"].get("city") != "yes"
+    assert g1["cursor"] == 1, "a confirm 'yes' advances the cursor EXACTLY once (0→1)"
+    assert g1["last_message_sid"] == "SMaaa"
+    assert r1.get("already_presented") in (None, False), (
+        "a FIRST presentation is not an idempotent re-present (it DOES send the next question)"
+    )
+
+    # The genuine NEXT reply (new sid) at cursor 1 (the gap) advances 1→2 → completes the queue.
+    journey.handle_reply(tenant, "9 to 9", "SMbbb")
+    g2 = journey.get_journey(tenant)
+    assert g2 is not None
+    assert g2["answers"].get("operating_hours") == "9 to 9"
+    assert g2["cursor"] == 2, "a real new reply after the first confirm still advances (not frozen)"
+
+
+def test_vt477_five_greetings_then_yes_advances_once(substrate):  # type: ignore[no-untyped-def]
+    """The exact live 63211ce5 pattern: FIVE bare greetings (distinct sids) RE-PRESENT the confirm
+    WITHOUT advancing the cursor and WITHOUT setting last_message_sid; the ONE substantive 'yes'
+    (distinct sid) then advances EXACTLY once (0→1) and records the draft_value. This is the test that
+    would have caught the misdiagnosis ('Mumbai-confirm yes ignored') — it pins the correct 0→1."""
+    from orchestrator.onboarding import journey
+
+    tenant = _new_tenant(substrate.dsn, name="vt477 5greet+yes")
+    journey.start_journey(tenant, [_confirm_q("category", "restaurant")])
+
+    for i, greet in enumerate(["hi", "hello", "namaste", "hey", "hii"]):
+        r = journey.handle_reply(tenant, greet, f"SM-greet-{i}")
+        assert r.get("re_present") is True, f"a bare greeting {greet!r} must re-present"
+        g = journey.get_journey(tenant)
+        assert g is not None
+        assert g["cursor"] == 0, f"greeting {greet!r} must NOT advance the cursor"
+        assert g["answers"] == {}, f"greeting {greet!r} must NOT be recorded"
+        assert g["last_message_sid"] is None, (
+            f"a greeting must NOT set last_message_sid (it never goes down the advance path); {greet!r}"
+        )
+
+    # The ONE substantive 'yes' (distinct sid) advances exactly once and records the draft_value.
+    journey.handle_reply(tenant, "yes", "SM-the-yes")
+    g = journey.get_journey(tenant)
+    assert g is not None
+    assert g["cursor"] == 1, "the substantive 'yes' advances EXACTLY once (0→1)"
+    assert g["answers"].get("category") == "restaurant", "the draft_value is recorded (never 'yes')"
+    assert g["last_message_sid"] == "SM-the-yes", "the advance set last_message_sid to the 'yes' sid"
+
+
+def test_vt477_redelivered_yes_does_not_double_advance(substrate):  # type: ignore[no-untyped-def]
+    """A redelivered-SID 'yes' (same sid == last_message_sid) re-presents the CURRENT (post-advance)
+    question WITHOUT a second advance and WITHOUT a second write — guarding the idempotency contract
+    (and the duplicate-send misdiagnosis). A genuinely-new sid then still advances (not frozen)."""
+    from orchestrator.onboarding import journey
+
+    tenant = _new_tenant(substrate.dsn, name="vt477 redeliver yes")
+    journey.start_journey(
+        tenant, [_confirm_q("city", "Mumbai"), _gap_q("operating_hours")]
+    )
+
+    # First 'yes' (sid SMaaa) → city=Mumbai, cursor 0→1, last_message_sid=SMaaa.
+    journey.handle_reply(tenant, "yes", "SMaaa")
+    g1 = journey.get_journey(tenant)
+    assert g1 is not None and g1["cursor"] == 1 and g1["answers"].get("city") == "Mumbai"
+
+    # REDELIVERY: the SAME sid 'yes' arrives again → NO double-advance, NO second write.
+    r = journey.handle_reply(tenant, "yes", "SMaaa")
+    assert r.get("already_presented") is True, (
+        "a redelivered sid must signal already_presented (the intercept must NOT re-send)"
+    )
+    g2 = journey.get_journey(tenant)
+    assert g2 is not None
+    assert g2["cursor"] == 1, "a redelivered 'yes' must NOT double-advance the cursor"
+    assert g2["answers"] == g1["answers"], "a redelivered 'yes' must NOT write a second answer"
+
+    # A genuinely-new sid then advances normally (idempotency is sid-keyed, not stuck).
+    journey.handle_reply(tenant, "9 to 9", "SMbbb")
+    g3 = journey.get_journey(tenant)
+    assert g3 is not None
+    assert g3["cursor"] == 2, "a new sid after a redelivery still advances (not frozen)"

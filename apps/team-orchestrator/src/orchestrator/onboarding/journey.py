@@ -327,6 +327,175 @@ def _compose_queue(tenant_id: UUID | str, business_type: str | None) -> list[dic
     ]
 
 
+def _draft_with_reconciled_type(draft: dict[str, Any]) -> dict[str, Any]:
+    """VT-478/VT-475 — return a COPY of ``draft`` whose ``attributes`` carry the reconciled
+    ``business_type`` the VT-475 reconcile "would now produce" from the draft's own public signals
+    (raw GBP ``category`` + website + business_name + GST nature). A pre-VT-475 draft has the raw
+    category but no reconciled type (the reconcile ran only at GBP-discovery, which never re-ran for an
+    existing tenant) — so re-deriving it here is what lets the confirm recompose surface the corrected
+    business-type confirm and suppress the raw category. If a reconciled ``business_type`` is already
+    present we leave it. Fail-soft: any error → the draft unchanged (the confirm step still works)."""
+    try:
+        attrs = dict(draft.get("attributes") or {})
+        if attrs.get("business_type"):
+            return draft  # already reconciled — nothing to add
+        if not attrs.get("category"):
+            return draft  # no raw category to reconcile from
+        from orchestrator.onboarding.business_type_reconcile import reconcile_business_type
+
+        reconciled = reconcile_business_type(
+            business_name=attrs.get("business_name"),
+            gbp_category=attrs.get("category"),
+            website=attrs.get("website"),
+            gst_nature=attrs.get("gst_nature") or attrs.get("nature_of_business"),
+        ).business_type
+        if reconciled:
+            attrs["business_type"] = reconciled
+            return {**draft, "attributes": attrs}
+        return draft
+    except Exception:  # noqa: BLE001 — reconcile is best-effort; never break the recompose
+        logger.exception("journey: draft business-type reconcile (recompose) failed")
+        return draft
+
+
+def _live_confirm_questions(tenant_id: UUID | str, business_type: str | None) -> list[dict[str, Any]]:
+    """VT-478 — the CONFIRM questions the question-brain would compose RIGHT NOW from the live draft,
+    as queue dicts. This is the corrected confirm set used to detect + heal a STALE queue: when a
+    queue was composed BEFORE VT-475's business-type reconcile landed, its head confirm still carries
+    the raw GBP ``category`` (e.g. ``draft_value='Telecommunications service provider'``); re-deriving
+    here yields the reconciled ``business_type`` confirm instead (and SUPPRESSES the raw category).
+
+    Deterministic + cheap on purpose: the GAP source is stubbed to ``[]`` (``llm_fn=lambda …: []``) so
+    this re-derivation NEVER hits the gap LLM — it recomposes only the confirm-the-draft questions
+    (whose value comes from the draft + the deterministic reconcile, no network). Already-answered
+    fields are excluded at source (passed as ``answered``) so a confirmed field is never re-queued.
+    Returns [] when the draft isn't ready (nothing to confirm) or on any error (fail-soft).
+    """
+    try:
+        from orchestrator.onboarding.draft_profile import get_draft
+        from orchestrator.onboarding.question_brain import compose_onboarding_questions
+
+        draft = get_draft(tenant_id)
+        if not draft.get("attributes"):
+            return []
+        # VT-475 reconcile applied AT RECOMPOSE: the value VT-475 "would now produce". A pre-VT-475
+        # draft carries the raw GBP ``category`` but NO reconciled ``business_type`` (the reconcile
+        # then ran only at GBP-discovery, which never re-ran for an existing tenant). Re-derive the
+        # reconciled type from the draft's own signals here so the live confirm set reflects the fix
+        # even when the draft itself was never re-discovered. Best-effort; missing → leave the draft.
+        draft = _draft_with_reconciled_type(draft)
+        g = get_journey(tenant_id) or {}
+        answered = list((g.get("answers") or {}).keys())
+        questions = compose_onboarding_questions(
+            business_type or "other", draft, answered=answered, llm_fn=lambda *a, **k: []
+        )
+        return [
+            {"field": q.field, "kind": "confirm", "prompt_en": q.prompt_en,
+             "prompt_hi": q.prompt_hi, "draft_value": q.draft_value}
+            for q in questions
+            if q.kind == "confirm"
+        ]
+    except Exception:  # noqa: BLE001 — recompose is best-effort; a derivation failure must not block
+        logger.exception("journey: live-confirm derivation failed tenant=%s", tenant_id)
+        return []
+
+
+def _confirm_is_stale(queued: dict[str, Any], live_confirms: list[dict[str, Any]]) -> bool:
+    """A queued CONFIRM question is STALE iff the live reconcile would now produce a DIFFERENT confirm
+    for the same conceptual field:
+
+      - SAME field present in the live set with a DIFFERENT ``draft_value`` → stale (a plain value
+        correction, e.g. the reconciled business_type label changed);
+      - the queued raw GBP ``category`` confirm while the live set now confirms ``business_type``
+        instead → stale (the VT-475 SUPPRESSION: the raw mis-categorized GBP field is replaced by the
+        reconciled type — the exact 63211ce5 "Telecommunications service provider" case).
+
+    CONSERVATIVE elsewhere: a non-confirm (gap) is never stale; a confirm whose field is simply absent
+    from the live set for any OTHER reason is NOT treated as stale (we don't churn a queue we can't
+    positively prove is wrong). The empty-live-set guard lives in the caller."""
+    if queued.get("kind") != "confirm":
+        return False
+    field = queued.get("field")
+    live_fields = {lc.get("field") for lc in live_confirms}
+    for lc in live_confirms:
+        if lc.get("field") == field:
+            return lc.get("draft_value") != queued.get("draft_value")
+    # The queued raw ``category`` confirm is superseded by the reconciled ``business_type`` confirm.
+    if field == "category" and "business_type" in live_fields:
+        return True
+    return False
+
+
+def _recompose_stale_confirms(tenant_id: UUID | str, g: dict[str, Any], business_type: str | None) -> bool:
+    """VT-478 — heal a STALE onboarding queue IN-PLACE, preserving the owner's real progress.
+
+    The forward-composition fix (VT-475) corrected how NEW queues are built but never touched EXISTING
+    active queues, so a mid-journey tenant keeps being asked the pre-fix question (the raw GBP
+    ``category`` confirm). This re-derives the live confirm set and, IFF the un-answered confirm tail
+    is stale, rebuilds ONLY that tail's confirm questions with the reconciled value.
+
+    PRESERVES PROGRESS (the cursor contract is sacrosanct):
+      - the ANSWERED PREFIX ``queue[:cursor]`` is left byte-identical — an already-answered question is
+        never re-asked, the cursor never moves, ``answers``/``skipped``/``last_message_sid`` are NOT
+        touched (this writes ONLY ``question_queue``).
+      - the queued GAP questions in the tail are carried forward VERBATIM (never re-run the gap LLM) —
+        only the stale CONFIRM content is swapped for the reconciled confirm set.
+
+    Returns True iff it rewrote the queue (a stale tail was found + healed), False otherwise. Cheap +
+    fail-OPEN: any error → False (the existing queue stands, the owner inbound is never blocked).
+    """
+    try:
+        queue = g["question_queue"]
+        cursor = g["cursor"]
+        if not (0 <= cursor < len(queue)):
+            return False
+        tail = queue[cursor:]
+        live_confirms = _live_confirm_questions(tenant_id, business_type)
+        # CONSERVATIVE: an EMPTY live confirm set is "can't re-derive" (no draft yet / derivation
+        # failed), NOT evidence of staleness — never recompose against nothing (it would wrongly drop
+        # the in-flight confirm + empty the queue). Only heal when we have a positive set to compare.
+        if not live_confirms:
+            return False
+        # Detect: is any UN-answered confirm in the tail stale vs the live reconcile?
+        if not any(_confirm_is_stale(q, live_confirms) for q in tail):
+            return False
+
+        answers = g.get("answers") or {}
+        skipped = set(g.get("skipped") or [])
+        answered = set(answers.keys())
+        # Rebuild the tail: corrected confirms (excluding already-answered/skipped fields) FIRST, then
+        # the existing queued GAP questions verbatim (minus any whose field is now answered). Stale
+        # queued confirms are dropped — the live confirm set replaces them (handles the suppressed-
+        # category → reconciled-business_type swap as well as a plain draft_value correction).
+        new_confirms = [
+            lc for lc in live_confirms
+            if lc.get("field") not in answered and lc.get("field") not in skipped
+        ]
+        new_confirm_fields = {lc.get("field") for lc in new_confirms}
+        carried_gaps = [
+            q for q in tail
+            if q.get("kind") != "confirm" and q.get("field") not in answered
+            # a stale confirm whose field IS still confirmed lives in new_confirms; never double it
+            and q.get("field") not in new_confirm_fields
+        ]
+        new_tail = new_confirms + carried_gaps
+        new_queue = queue[:cursor] + new_tail
+
+        if new_queue == queue:
+            return False
+        with tenant_connection(tenant_id) as conn:
+            conn.execute(
+                "UPDATE onboarding_journey SET question_queue = %s, updated_at = now() "
+                "WHERE tenant_id = %s AND status = 'active'",
+                (Jsonb(new_queue), str(tenant_id)),
+            )
+        logger.info("journey: recomposed stale confirm queue tenant=%s cursor=%s", tenant_id, cursor)
+        return True
+    except Exception:  # noqa: BLE001 — recompose is best-effort; never block the owner inbound
+        logger.exception("journey: stale-confirm recompose failed tenant=%s — using existing queue", tenant_id)
+        return False
+
+
 def _opener() -> dict[str, Any]:
     return {
         "prompt_en": "Hi! Give us a moment — we're setting up your assistant and will ask a couple of quick questions.",
@@ -390,6 +559,21 @@ def maybe_handle_journey_reply(
             else:
                 _send(recipient, _opener(), lang)  # still setting up
             return {"done": False, "pending": True}
+        # VT-478 — LAZY recompose of a STALE queue, BEFORE the current confirm question is presented.
+        # VT-475 fixed forward composition but never recomposed EXISTING active queues, so a tenant
+        # whose queue was composed pre-VT-475 keeps being asked the wrong confirm (the raw GBP
+        # ``category``, e.g. "Telecommunications service provider?") instead of the reconciled
+        # ``business_type``. If the question about to be presented is a confirm whose ``draft_value``
+        # is stale vs the live reconcile, swap the un-answered confirm tail in-place — preserving
+        # cursor/answers/skipped/last_message_sid (the idempotency marker + no-double-advance survive).
+        # Cheap (only when a confirm is the cursor head) + fail-OPEN (any error → existing queue stands,
+        # the owner inbound is never blocked). This auto-heals any mid-journey tenant on their next
+        # inbound — no migration/sweep needed.
+        cur = _current(g)
+        if cur is not None and cur.get("kind") == "confirm":
+            _, btype = _tenant_phase_and_type(tenant_id)
+            if _recompose_stale_confirms(tenant_id, g, btype):
+                g = get_journey(tenant_id) or g  # re-read so a downstream read sees the healed queue
         r = handle_reply(tenant_id, body, message_sid, lang=lang)
         # Idempotent presentation: a redelivered inbound re-emits the SAME in-flight question that was
         # already presented on its first delivery — do NOT send it again (the live duplicate-question
@@ -420,5 +604,5 @@ def maybe_handle_journey_reply(
 
 __all__ = [
     "start_journey", "set_queue_if_empty", "get_journey", "is_active", "handle_reply",
-    "maybe_handle_journey_reply",
+    "maybe_handle_journey_reply", "_recompose_stale_confirms",
 ]
