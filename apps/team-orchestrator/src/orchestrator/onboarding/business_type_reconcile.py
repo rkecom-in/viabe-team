@@ -88,7 +88,9 @@ def _taxonomy() -> dict[str, str]:
             out.setdefault("other", "Other")
             return out
     except Exception:  # noqa: BLE001 — config read is best-effort; fall back to the in-code floor
-        logger.warning("business_type_reconcile: taxonomy load failed — in-code fallback", exc_info=True)
+        logger.warning(
+            "business_type_reconcile: taxonomy load failed — in-code fallback", exc_info=True
+        )
     return {"services": "Local services", "other": "Other"}
 
 
@@ -136,7 +138,14 @@ _KEYWORDS: dict[str, tuple[str, ...]] = {
     # EXCLUDED (too generic: 'Telecommunications service provider' would spuriously match on 'service'
     # and the mis-category would falsely "agree", masking the conflict the domain is supposed to win).
     "services": (
-        "ecom", "ecommerce", "commerce", "software", "saas", "shopify", "repair", "garment-tech",
+        "ecom",
+        "ecommerce",
+        "commerce",
+        "software",
+        "saas",
+        "shopify",
+        "repair",
+        "garment-tech",
     ),
     "kirana": ("kirana", "grocery", "general store", "provision", "supermarket"),
     "restaurant": ("restaurant", "dhaba", "diner", "eatery", "food"),
@@ -180,6 +189,31 @@ def _domain_of(website: str | None) -> str | None:
     if "google." in host or "goo.gl" in host:
         return None
     return host or None
+
+
+def _coerce_nature(gst_nature: object) -> str | None:
+    """Normalize a GST ``nature_of_business`` into a single keyword-matchable string.
+
+    The GST verify (``sandbox_kyc.GstinLookup.nature_of_business``) is a ``list[str]`` of
+    activities (e.g. ``['Supplier of Services', 'Others', 'Warehouse / Depot']``) — that real
+    shape flows verbatim into the draft and on into ``reconcile_business_type`` via the VT-478
+    recompose (``journey._draft_with_reconciled_type`` passes ``attrs['nature_of_business']``).
+    The keyword matcher (``_best_keyword_key``) does ``t.lower()`` on each input and so raised
+    ``AttributeError: 'list' object has no attribute 'lower'`` on a list — the reconcile then
+    failed-soft to a no-op, silently re-surfacing the raw mis-categorized GBP ``category``
+    (the "Telecommunications service provider?" confirm) instead of the reconciled type. Join
+    the list into one space-separated blob so every list element's keywords are matched. A bare
+    string passes through; anything else / empty → ``None`` (no signal)."""
+    if gst_nature is None:
+        return None
+    if isinstance(gst_nature, str):
+        return gst_nature or None
+    if isinstance(gst_nature, (list, tuple)):
+        joined = " ".join(str(part) for part in gst_nature if part)
+        return joined or None
+    # Any other scalar (defensive) — stringify; empty → None.
+    text = str(gst_nature).strip()
+    return text or None
 
 
 def _gbp_category_to_key(gbp_category: str | None) -> str | None:
@@ -247,7 +281,9 @@ def _deterministic_reconcile(
 
     # 1. GBP maps to a sane bucket AND agrees with the own-signal (or we have no own-signal) → high.
     if gbp_key and (own_key is None or own_key == gbp_key):
-        return ReconciledType(gbp_key, "high" if own_key == gbp_key else "medium", signals, gbp_category)
+        return ReconciledType(
+            gbp_key, "high" if own_key == gbp_key else "medium", signals, gbp_category
+        )
 
     # 2. GBP maps to a sane bucket but the own-signal DISAGREES → the own-signal wins (RKeCom: GBP
     #    'Telecommunications' maps to nothing here, but even if a wrong GBP category DID map, a
@@ -271,18 +307,25 @@ def reconcile_business_type(
     business_name: str | None = None,
     gbp_category: str | None = None,
     website: str | None = None,
-    gst_nature: str | None = None,
+    gst_nature: str | list[str] | None = None,
     reconcile_fn: ReconcileFn | None = None,
 ) -> ReconciledType:
     """Reconcile the available public signals into ONE Viabe-taxonomy ``business_type`` + confidence +
     the signals used. GBP ``categoryName`` is ONE signal, not gospel; a domain/name/GST signal that
     contradicts a mis-categorized GBP field WINS (the RKeCom fix — never lead with the wrong one).
 
+    ``gst_nature`` accepts the real GST shape: a ``list[str]`` of activities (from
+    ``sandbox_kyc.GstinLookup.nature_of_business``) OR a bare string. It is normalized to one
+    keyword-matchable string at the boundary so a list never reaches the matcher (the silent-no-op
+    bug: a list ``t.lower()`` raised, failing the recompose soft so the raw mis-categorized GBP
+    category re-surfaced).
+
     The LLM leg (VT-452 pattern: lazy ``from anthropic import Anthropic`` + ``claude-opus-4-8``,
     optional web_search) is used when ENABLED + available; its output is RANGE-CHECKED against the
     taxonomy and discarded if out-of-range. ``reconcile_fn`` is the injectable seam (no key/network in
     tests). On ANY LLM failure / absence we fall back to ``_deterministic_reconcile`` — which still
     prefers the domain over a conflicting GBP category. NEVER raises (fail-soft into discovery)."""
+    gst_nature = _coerce_nature(gst_nature)
     domain = _domain_of(website)
     deterministic = _deterministic_reconcile(business_name, gbp_category, domain, gst_nature)
 
@@ -295,7 +338,9 @@ def reconcile_business_type(
     try:
         key = fn(business_name, gbp_category, domain, gst_nature)
     except Exception:  # noqa: BLE001 — LLM/parse fragile; degrade to the deterministic reconcile
-        logger.warning("business_type_reconcile: LLM leg failed — deterministic fallback", exc_info=True)
+        logger.warning(
+            "business_type_reconcile: LLM leg failed — deterministic fallback", exc_info=True
+        )
         return deterministic
 
     if is_valid_business_type(key):

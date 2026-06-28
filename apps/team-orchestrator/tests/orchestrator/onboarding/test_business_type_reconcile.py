@@ -169,3 +169,36 @@ def test_never_raises_on_garbage_inputs():
         out = reconcile_business_type(**kwargs)
         assert isinstance(out, ReconciledType)
         assert is_valid_business_type(out.business_type)
+
+
+def test_gst_nature_as_list_does_not_no_op_the_reconcile():
+    """REGRESSION (the 63211ce5 silent no-op): the GST verify writes ``nature_of_business`` as a
+    ``list[str]`` (``sandbox_kyc.GstinLookup.nature_of_business``), and the VT-478 recompose passes
+    that list verbatim as ``gst_nature``. The keyword matcher's ``t.lower()`` raised
+    ``AttributeError`` on a list → the reconcile failed-soft to a no-op → the raw mis-categorized GBP
+    'Telecommunications service provider' confirm re-surfaced. The reconciler MUST accept the list
+    shape, use its keywords, and still beat the mis-category."""
+    out = reconcile_business_type(
+        business_name="Reecomps teleservices pvt. ltd",
+        gbp_category="Telecommunications service provider",
+        website="http://reecomps.in/",
+        gst_nature=["Supplier of Services", "Others", "Warehouse / Depot"],
+    )
+    assert isinstance(out, ReconciledType)
+    assert is_valid_business_type(out.business_type)
+    assert out.business_type != "telecommunications"  # the mis-category must not win
+    assert out.business_type == "services"  # domain+name+gst all point at services
+    assert "gst_nature" in out.signals_used  # the list signal was actually consumed
+
+
+def test_gst_nature_empty_list_is_no_signal():
+    # An empty list carries no GST signal — must not raise, must not invent one.
+    out = reconcile_business_type(
+        business_name="RKeCom Services",
+        gbp_category="Telecommunications service provider",
+        website="https://rkecom.in",
+        gst_nature=[],
+    )
+    assert isinstance(out, ReconciledType)
+    assert out.business_type == "services"
+    assert "gst_nature" not in out.signals_used
