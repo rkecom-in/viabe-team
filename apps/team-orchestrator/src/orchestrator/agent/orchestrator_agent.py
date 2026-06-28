@@ -107,7 +107,9 @@ def escalate_to_fazal(run_id: str, reason: str, context: str) -> str:
     """Escalate to Fazal. Log-only in this skeleton; real wiring is VT-3.6."""
     logger.warning(
         "ESCALATE_TO_FAZAL run_id=%s reason=%s context=%s",
-        run_id, reason, context,
+        run_id,
+        reason,
+        context,
     )
     return f"[skeleton] escalation logged for run_id={run_id}"
 
@@ -209,6 +211,27 @@ def record_business_objective(
     Returns the merged objective record (the full current state after your patch).
     """
     from orchestrator.knowledge import write_business_objective
+    from orchestrator.observability.decorators import _observability_context
+
+    # Pillar 3 — the AUTHORITATIVE tenant is the ambient dispatch context, NOT the
+    # model-supplied arg. The brain occasionally hallucinates a malformed/placeholder
+    # ``tenant_id`` string ("the tenant's id", a truncated uuid, …); trusting it raised
+    # ``ValueError: badly formed hexadecimal UUID string`` inside ``write_business_objective``
+    # and crashed the whole brain run (langgraph re-raised the tool error → the run hung at
+    # 'running', never reaching the next tool / a specialist spawn). Resolve from the
+    # ObservabilityContext when present; fall back to the arg only if the context is absent.
+    ctx = _observability_context.get()
+    resolved_tenant: UUID | str | None = ctx.tenant_id if ctx is not None else None
+    if resolved_tenant is None:
+        try:
+            resolved_tenant = UUID(str(tenant_id))
+        except (ValueError, TypeError):
+            # No ambient context AND an unusable arg — surface a tool error the agent can
+            # read and route around, NOT an exception that aborts the whole run.
+            return {
+                "status": "error",
+                "error": "record_business_objective: no resolvable tenant context",
+            }
 
     patch = {
         k: v
@@ -221,7 +244,7 @@ def record_business_objective(
         )
         if v is not None
     }
-    merged = write_business_objective(tenant_id, patch)
+    merged = write_business_objective(resolved_tenant, patch)
     return {"status": "recorded", "objective": merged}
 
 
