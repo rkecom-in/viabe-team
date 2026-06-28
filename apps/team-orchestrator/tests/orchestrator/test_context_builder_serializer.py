@@ -145,7 +145,7 @@ def test_serializer_propagates_bundle_values() -> None:
     # dormant/high-value cohorts). business_type appears in BOTH the business
     # profile and the ledger summary block now.
     ledger_block = rendered.split("## Customer ledger summary", 1)[1].split("##", 1)[0]
-    assert "p50=30" in ledger_block  # recency days-since-last-inbound median
+    assert "p50=30" in ledger_block  # recency days-since-last-activity median (VT-485)
     assert "p90=95" in ledger_block
     assert "p50=22500" in ledger_block  # spend-paise median
     assert "business_type: cafe" in ledger_block

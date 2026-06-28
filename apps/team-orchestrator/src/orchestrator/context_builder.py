@@ -302,7 +302,13 @@ def _build_ledger_summary(tenant_id: UUID) -> tuple[LedgerSummary, bool]:
 
     Reads live per-tenant SQL via ``tenant_connection`` (RLS — the owner's own
     data, lawful; no cross-tenant):
-    - ``recency_days_pctl``: p25/50/75/90 of days-since-last_inbound (customers).
+    - ``recency_days_pctl``: p25/50/75/90 of days-since-LAST-ACTIVITY per
+      customer — activity = the LATER of ``customers.last_inbound_at`` and the
+      customer's latest purchase-ledger ``entry_date`` (VT-485). Using the
+      purchase ledger (not ``last_inbound_at`` alone) means a Shopify-sourced
+      customer lapsed BY PURCHASE (bought 90+ days ago, never messaged) is a
+      valid dormant-cohort member instead of being excluded → the agent can
+      ground a win-back instead of falling through to ``insufficient_data``.
     - ``spend_paise_pctl``: p25/50/75/90 of per-customer total SALE paise
       (customer_ledger_entries, entry_type='sale').
     - ``business_type`` + ``total_customers``.
@@ -759,6 +765,82 @@ def _default_templates_available() -> tuple[str, ...]:
     return approved_template_names("en")
 
 
+def _target_recovered_paise(context: SalesRecoveryContext) -> int:
+    """The expected-ARRR sizing target the agent (and the self_evaluate gate)
+    use to judge a plan's ``expected_arrr`` band (VT-164). Single-sourced so the
+    prompt's ``## Expected outcome`` figure and the gate's grounding context
+    agree on the same number."""
+    return max(
+        round(
+            context.attribution_snapshot.last_7d_recovered_paise
+            * context.recovery_target_multiplier
+        ),
+        context.recovery_target_floor_paise,
+    )
+
+
+def build_self_evaluate_context_summary(
+    context: SalesRecoveryContext,
+    *,
+    target_recovered_paise: int | None = None,
+) -> dict[str, Any]:
+    """VT-485 — the compact grounding context the self_evaluate gate
+    cross-references on its ``consistency`` category.
+
+    Before VT-485 the gate adapter passed ``context_summary={}``, so the model
+    saw an empty context and could not verify whether a draft's
+    ``target_cohort`` / ``expected_arrr`` were grounded in the tenant's actual
+    data — a fabricated plan and a real one looked identical to the
+    ``consistency`` check. This derives a SMALL dict (a subset of the bundle —
+    the gate gets a compact summary, NOT the agent's full bundle or its
+    reasoning, per Pillar-7 independence) carrying exactly the substrate the
+    prompt's ``consistency`` examples reference:
+
+    - ``customer_ledger_summary``: total_customers + the recency/spend
+      percentile distributions, plus an explicit ``recency_basis`` note that
+      recency = last inbound OR last purchase (VT-485) — so the gate can sanity-
+      check a dormant ``target_cohort`` against the real distribution.
+    - ``attribution_snapshot``: the figure the prompt's first ``consistency``
+      example names verbatim (a draft targeting a bucket with zero attributed
+      customers should flag).
+    - ``recent_campaigns_count`` + ``data_completeness``: which sections are
+      substrate-backed vs safe-empty, so the gate weights accordingly.
+    - ``expected_arrr_target_paise``: the same target the agent sized its
+      ``expected_arrr`` band against — the gate flags an implausible band.
+
+    It carries NO PII (no customer ids, names, or phones — only counts /
+    distributions / aggregates) and NO reasoning chain.
+    """
+    ls = context.customer_ledger_summary
+    att = context.attribution_snapshot
+    target = (
+        target_recovered_paise
+        if target_recovered_paise is not None
+        else _target_recovered_paise(context)
+    )
+    return {
+        "customer_ledger_summary": {
+            "total_customers": ls.total_customers,
+            "business_type": ls.business_type,
+            "recency_days_pctl": dict(ls.recency_days_pctl),
+            "recency_basis": (
+                "days since last activity = the later of last inbound message "
+                "and last purchase (entry_date); a customer lapsed by purchase "
+                "alone is included"
+            ),
+            "spend_paise_pctl": dict(ls.spend_paise_pctl),
+        },
+        "attribution_snapshot": {
+            "cumulative_recovered_paise": att.cumulative_recovered_paise,
+            "last_7d_recovered_paise": att.last_7d_recovered_paise,
+            "last_30d_recovered_paise": att.last_30d_recovered_paise,
+        },
+        "recent_campaigns_count": len(context.recent_campaigns),
+        "expected_arrr_target_paise": target,
+        "data_completeness": dict(context.data_completeness),
+    }
+
+
 def serialize_bundle_for_prompt(
     context: SalesRecoveryContext,
     *,
@@ -790,13 +872,9 @@ def serialize_bundle_for_prompt(
         # _build_recovery_target_config in build_sales_recovery_context).
         # Falls back to the module-level defaults when context fields are
         # their defaults — so a missing DB read never changes the number.
-        target_recovered_paise = max(
-            round(
-                context.attribution_snapshot.last_7d_recovered_paise
-                * context.recovery_target_multiplier
-            ),
-            context.recovery_target_floor_paise,
-        )
+        # Single-sourced via _target_recovered_paise so the gate's grounding
+        # context (build_self_evaluate_context_summary) uses the same figure.
+        target_recovered_paise = _target_recovered_paise(context)
 
     parts: list[str] = ["# Sales Recovery Context"]
 
@@ -824,7 +902,8 @@ def serialize_bundle_for_prompt(
     parts.append(
         f"- total_customers: {ls.total_customers}\n"
         f"- business_type: {ls.business_type or '(unknown)'}\n"
-        f"- recency days-since-last-inbound (percentiles): {_pctl_fmt(ls.recency_days_pctl)}\n"
+        f"- recency days-since-last-activity, i.e. last inbound message OR last "
+        f"purchase, whichever is newer (percentiles): {_pctl_fmt(ls.recency_days_pctl)}\n"
         f"- spend paise per customer, lifetime sales (percentiles): {_pctl_fmt(ls.spend_paise_pctl)}\n"
         f"- substrate_populated: "
         f"{context.data_completeness.get('customer_ledger_summary', False)}"

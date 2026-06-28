@@ -322,15 +322,43 @@ class CustomersWrapper(TenantScopedTable):
     def recency_days_percentiles(
         self, tenant_id: UUID | str, pctls: list[float], *, conn: Any = None
     ) -> dict[str, Any] | None:
-        """percentile_cont of days-since-last-inbound over customers with a
-        last_inbound_at (VT-312). Returns the row dict ({"p": [...]}) or None."""
+        """percentile_cont of days-since-LAST-ACTIVITY per customer (VT-485).
+
+        Recency is the days since the customer's most-recent ACTIVITY, where
+        activity = the LATER of ``customers.last_inbound_at`` and the customer's
+        latest purchase-ledger ``entry_date`` (``entry_type='sale'``). A customer
+        is included iff at least ONE of those two signals exists.
+
+        VT-485 fix: this previously read ``last_inbound_at`` ALONE, filtered
+        ``IS NOT NULL`` — which EXCLUDED every Shopify-sourced customer who bought
+        but never messaged (``last_inbound_at`` NULL), so a customer lapsed BY
+        PURCHASE (bought 90+ days ago, never inbound) surfaced NO dormant cohort
+        and the agent fell through to ``insufficient_data``. The purchase-ledger
+        ``entry_date`` is the actual last-purchase recency; combining it with
+        ``last_inbound_at`` (GREATEST = the freshest signal wins) makes a
+        purchase-lapsed customer a valid dormant-cohort member without losing the
+        inbound signal for chat-active customers. Returns ``{"p": [...]}`` or None.
+        """
         tid = self._uuid(tenant_id)
         with self._conn(tid, conn) as c:
             row = c.execute(
-                "SELECT percentile_cont(%s) WITHIN GROUP "
-                "(ORDER BY (now()::date - last_inbound_at::date)) AS p "
-                "FROM customers WHERE tenant_id = %s AND last_inbound_at IS NOT NULL",
-                (list(pctls), str(tid)),
+                "WITH last_sale AS ("
+                "  SELECT customer_id, MAX(entry_date) AS last_sale_date "
+                "  FROM customer_ledger_entries "
+                "  WHERE tenant_id = %(tid)s AND entry_type = 'sale' "
+                "  GROUP BY customer_id"
+                "), activity AS ("
+                "  SELECT GREATEST(c.last_inbound_at::date, ls.last_sale_date) "
+                "         AS last_activity_date "
+                "  FROM customers c "
+                "  LEFT JOIN last_sale ls ON ls.customer_id = c.id "
+                "  WHERE c.tenant_id = %(tid)s "
+                "    AND (c.last_inbound_at IS NOT NULL OR ls.last_sale_date IS NOT NULL)"
+                ") "
+                "SELECT percentile_cont(%(pctls)s) WITHIN GROUP "
+                "(ORDER BY (now()::date - last_activity_date)) AS p "
+                "FROM activity WHERE last_activity_date IS NOT NULL",
+                {"tid": str(tid), "pctls": list(pctls)},
             ).fetchone()
         return dict(row) if row else None
 

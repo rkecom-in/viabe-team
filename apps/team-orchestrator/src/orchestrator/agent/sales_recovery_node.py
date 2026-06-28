@@ -29,6 +29,7 @@ from orchestrator._tenant_guard import TenantIsolationError
 from orchestrator.agent.limits.wallclock_timer import WALL_CLOCK_HARD_LIMIT_S
 from orchestrator.agent.sales_recovery import run_sales_recovery_agent
 from orchestrator.agent.tools.self_evaluate import SelfEvaluateAdapter
+from orchestrator.context_builder import build_self_evaluate_context_summary
 from orchestrator.db import tenant_connection
 
 
@@ -79,7 +80,14 @@ def sales_recovery_node(state: Mapping[str, Any]) -> dict[str, Any]:
         wallclock_remaining_ms=_RUN_WALLCLOCK_BUDGET_MS,
         db_handle=tenant_connection,
     )
-    evaluator = SelfEvaluateAdapter(ctx=tool_ctx)
+    # VT-485: feed the gate the real grounding context derived from the bundle
+    # (cohort distribution, recency basis, expected-ARRR target) instead of the
+    # old hardcoded ``{}``. The gate's ``consistency`` category needs this
+    # substrate to verify a draft's target_cohort / expected_arrr are grounded —
+    # without it a legitimately-grounded win-back and a fabricated one are
+    # indistinguishable to the gate. Compact subset only (no PII, no reasoning).
+    context_summary = build_self_evaluate_context_summary(context)
+    evaluator = SelfEvaluateAdapter(ctx=tool_ctx, context_summary=context_summary)
 
     result = run_sales_recovery_agent(context, evaluator=evaluator)
     return {"agent_result": asdict(result)}
