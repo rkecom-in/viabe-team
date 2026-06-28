@@ -24,7 +24,6 @@ import os
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
-from functools import lru_cache
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -40,6 +39,7 @@ from orchestrator.templates_registry import (
     UnknownTemplateError,
     resolve as _registry_resolve,
 )
+from orchestrator.utils.dev_send_guard import maybe_wrap_for_dev
 from orchestrator.utils.phone_token import hash_phone
 
 logger = logging.getLogger(__name__)
@@ -202,26 +202,41 @@ class _MockTwilioClient:
     messages = _MockTwilioMessages()
 
 
-@lru_cache(maxsize=1)
 def _client() -> Client:
-    """Build the Twilio REST client from env.
+    """Build the Twilio REST client from env, wrapped by the VT-476 dev send-guard.
 
     Lazy (not import-time) so importing this module needs no Twilio creds —
     the CI ``orchestrator`` job has none and tests mock the send. When
     ``TEAM_TWILIO_MOCK_MODE=1``, returns a mock client that logs sends
     instead of dispatching them. Default OFF; the flag is explicit + the
     log line surfaces every send so production drift is loud.
+
+    VT-476 (SAFETY-CRITICAL): the resolved client is passed through
+    ``dev_send_guard.maybe_wrap_for_dev`` — the OUTER transport gate. On a
+    non-prod env (``EXPECTED_ENV`` != prod) it returns a ``DevSendGuardClient``
+    that MOCKS any send whose ``to`` is not in ``DEV_SEND_ALLOWLIST`` (empty by
+    default → mock ALL), so dev can never silently message a real number through
+    ANY send path. On prod the guard is inert (real sends, unchanged). This is
+    the single install point: every WhatsApp send funnels through this client.
+
+    NOT @lru_cache'd: the guard reads ``EXPECTED_ENV`` / ``DEV_SEND_ALLOWLIST``
+    when it builds the wrapper, so the client is rebuilt per send-call to honour
+    a runtime env change. The real underlying Twilio ``Client`` is cheap to
+    construct (no network until ``messages.create``); the per-call cost is
+    negligible next to the network round-trip a real send makes.
     """
     if os.environ.get("TEAM_TWILIO_MOCK_MODE", "0") == "1":
         logger.warning(
             "TEAM_TWILIO_MOCK_MODE=1 — NOT making real Twilio API calls. "
             "All sends will log and return a mock SID."
         )
-        return cast(Client, _MockTwilioClient())  # type: ignore[arg-type]
-    return Client(
-        os.environ["TEAM_TWILIO_ACCOUNT_SID"],
-        os.environ["TEAM_TWILIO_AUTH_TOKEN"],
-    )
+        inner: Any = _MockTwilioClient()
+    else:
+        inner = Client(
+            os.environ["TEAM_TWILIO_ACCOUNT_SID"],
+            os.environ["TEAM_TWILIO_AUTH_TOKEN"],
+        )
+    return cast(Client, maybe_wrap_for_dev(inner))
 
 
 def get_tenant_whatsapp_number(tenant_id: UUID) -> str | None:

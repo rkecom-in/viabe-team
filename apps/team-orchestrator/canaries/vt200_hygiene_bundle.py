@@ -96,11 +96,19 @@ def run_canary() -> int:
     os.environ["TEAM_TWILIO_MOCK_MODE"] = "1"
     os.environ.pop("TEAM_TWILIO_ACCOUNT_SID", None)
     os.environ.pop("TEAM_TWILIO_AUTH_TOKEN", None)
+    # VT-476: _client() now wraps the resolved client in the dev send-guard
+    # (DevSendGuardClient) on any non-prod env. To exercise mock-mode in
+    # ISOLATION (the original A1 intent), pin EXPECTED_ENV=prod for this block so
+    # the guard is inert and _client() returns the bare _MockTwilioClient. The
+    # dev send-guard itself is covered by its own test (test_dev_send_guard.py).
+    original_env = os.environ.get("EXPECTED_ENV")
+    os.environ["EXPECTED_ENV"] = "prod"
     try:
-        # Clear lru_cache so the next _client() call sees the new env.
+        # _client() is no longer @lru_cache'd (VT-476) — it reads env fresh each
+        # call, so the new TEAM_TWILIO_MOCK_MODE / EXPECTED_ENV take effect
+        # immediately; no cache to clear.
         from orchestrator.utils.twilio_send import _client
 
-        _client.cache_clear()
         with warnings.catch_warnings(record=True):
             warnings.simplefilter("always")
             client = _client()
@@ -126,7 +134,10 @@ def run_canary() -> int:
             expected={"client_type": "_MockTwilioClient", "sid_prefix": "MK"},
         )
     finally:
-        _client.cache_clear()
+        if original_env is None:
+            os.environ.pop("EXPECTED_ENV", None)
+        else:
+            os.environ["EXPECTED_ENV"] = original_env
         if original_mock is None:
             os.environ.pop("TEAM_TWILIO_MOCK_MODE", None)
         else:
