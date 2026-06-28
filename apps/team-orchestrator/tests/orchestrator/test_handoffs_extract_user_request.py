@@ -10,9 +10,16 @@ scans for the FIRST HumanMessage instead of indexing [0].
 from __future__ import annotations
 
 import pytest
-from langchain_core.messages import HumanMessage, SystemMessage
 
-from orchestrator.handoffs import _extract_user_request_from_state
+# langchain_core + the handoffs module (which imports langgraph/langchain) are absent in the
+# lean CI ``test`` job and the pre-push dep-less smoke — skip there so collection never breaks
+# (the full ``orchestrator`` job, deps present, runs these). Mirrors the dep-less-smoke discipline.
+pytest.importorskip("langchain_core")
+pytest.importorskip("langgraph")
+
+from langchain_core.messages import HumanMessage, SystemMessage  # noqa: E402
+
+from orchestrator.handoffs import _extract_user_request_from_state  # noqa: E402
 
 
 def test_user_request_found_after_prepended_system_blocks():
