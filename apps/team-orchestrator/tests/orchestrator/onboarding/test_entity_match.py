@@ -4,7 +4,14 @@ from __future__ import annotations
 
 from typing import Any
 
-from orchestrator.onboarding import entity_match
+import pytest
+
+# entity_match transitively imports orchestrator.integrations → pydantic, which is absent
+# in the lean CI ``test`` job / pre-push dep-less smoke. Skip there so collection never
+# breaks (the full ``orchestrator`` job, deps present, runs these).
+pytest.importorskip("pydantic")
+
+from orchestrator.onboarding import entity_match  # noqa: E402
 
 _VALID_GSTIN = "29ABCDE1234F1Z5"  # 2 state + PAN(ABCDE1234F) + entity '1' + 'Z' + checksum '5'
 
