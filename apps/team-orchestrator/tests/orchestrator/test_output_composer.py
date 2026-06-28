@@ -111,6 +111,17 @@ def test_unknown_intent_outside_window_falls_back_to_unable_to_complete() -> Non
     assert out.template_name == "team_unable_to_complete_request"
 
 
+def test_reengage_outside_window_selects_team_reengage() -> None:
+    """VT-486: >24h since last inbound + intent 'reengage' → the out-of-window owner
+    re-engagement template, with {{1}}=owner_name as the only positional param."""
+    now = datetime(2026, 6, 29, 12, 0, tzinfo=timezone.utc)
+    state = _state(last_owner_message_at=now - timedelta(hours=30), owner_name="Sundaram")
+    out = compose_owner_output(None, state, "reengage", now=now)
+    assert out.message_type == "template"
+    assert out.template_name == "team_reengage"
+    assert out.template_params == {"owner_name": "Sundaram"}
+
+
 # ---------------------------------------------------------------------------
 # Honesty rule #1 — no ARRR overstatement
 # ---------------------------------------------------------------------------

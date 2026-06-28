@@ -118,6 +118,20 @@ team_status_ping:
     en: HX11199e6fc93eaa1f8b26071995614476
     hi: HXa386953554630e233f5875299f2d2c94
 
+team_reengage:
+  # VT-486: owner-facing OUT-OF-WINDOW (>24h) re-engagement. When >24h have passed since the
+  # tenant's last inbound, the owner-care window is CLOSED → a free-form send fails (Twilio 63016),
+  # so we send THIS Meta-approved template instead. The owner's reply re-opens the 24h window and
+  # the conversation continues free-form (VT-349 in-window split / VT-479 in-window path). Category
+  # utility, owner-facing, NO STOP line (STOP is a customer-marketing opt-out, not an owner utility).
+  audience: owner
+  agent_selectable: false  # system-invoked on the >24h out-of-window owner path; never agent-chosen
+  variables:
+    - owner_name        # {{1}}
+  languages:
+    en: HXbdb250089fafc02a0d75ce6817e9ce11  # VT-486 (Fazal-provided)
+    hi: HX27a50d65fedbb7b6a3c2fb6a6a24f13c  # VT-486 (Fazal-provided)
+
 team_unable_to_complete_request:
   audience: owner
   agent_selectable: false

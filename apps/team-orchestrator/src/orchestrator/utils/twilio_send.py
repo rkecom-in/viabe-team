@@ -21,6 +21,7 @@ import contextvars
 import json
 import logging
 import os
+import re
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
@@ -255,15 +256,61 @@ def get_tenant_whatsapp_number(tenant_id: UUID) -> str | None:
 
 _WHATSAPP_PREFIX = "whatsapp:"
 
+# VT-487: structural E.164 transport backstop. A WhatsApp recipient/sender MUST be a
+# well-formed E.164 number: a leading '+', a non-zero country-code digit, then 7..14 more
+# digits (8..15 total — the ITU E.164 max). This is the LAST line of defence against a
+# malformed/corrupted number reaching Twilio — e.g. the float-corruption breach where a phone
+# stored as a number rendered to scientific notation ("+91998886e+11"), which Twilio rejected
+# with 21211 ("invalid To") on six live sends. Coercion at ingest (contacts._normalize_phone)
+# is the primary fix; this guard makes it STRUCTURALLY impossible for a non-E.164 string to be
+# dispatched even if a future ingest path slips one through.
+_E164_RE = re.compile(r"^\+[1-9]\d{7,14}$")
 
-def _wa(number: str) -> str:
-    """Idempotently apply the WhatsApp channel scheme to an E.164 number.
+
+class BlockedRecipientError(ValueError):
+    """Raised (fail-closed) when a send target is not a well-formed E.164 number (VT-487).
+
+    The transport refuses to dispatch a malformed/corrupted number — a scientific-notation
+    float artifact, an empty/garbage string, or anything that does not match
+    ``^\\+[1-9]\\d{7,14}$``. PII-safe: the message carries only a hashed token + a last-4
+    fragment, never the raw value (CL-390).
+    """
+
+
+def _assert_e164(number: str, *, role: str) -> None:
+    """Fail-CLOSED E.164 structural guard (VT-487). ``role`` is 'recipient' or 'sender'.
+
+    Strips an already-applied ``whatsapp:`` scheme before matching (idempotent with ``_wa``).
+    Raises ``BlockedRecipientError`` — never sends — when the bare number is not valid E.164.
+    The raised message is PII-safe: hashed token + last-4 only, never the plaintext number
+    (CL-390). Catches the float-corruption artifact (``+91998886e+11`` contains 'e' → no match)
+    and any other malformed target before it can reach ``messages.create``.
+    """
+    bare = number[len(_WHATSAPP_PREFIX):] if number.startswith(_WHATSAPP_PREFIX) else number
+    if not _E164_RE.match(bare):
+        token = hash_phone(bare) if bare else "<empty>"
+        last4 = bare[-4:] if len(bare) >= 4 else "??"
+        raise BlockedRecipientError(
+            f"BLOCKED non-E.164 {role} at the transport (VT-487): {token} (..{last4}). "
+            "A send target MUST match ^\\+[1-9]\\d{7,14}$; a malformed/corrupted number "
+            "(e.g. a scientific-notation float artifact) is refused fail-closed before Twilio."
+        )
+
+
+def _wa(number: str, *, role: str = "recipient") -> str:
+    """Validate (VT-487) then idempotently apply the WhatsApp channel scheme to an E.164 number.
 
     ``TEAM_TWILIO_FROM_NUMBER`` and recipient numbers are stored/passed as PLAIN E.164 (CL-435).
     Twilio requires ``whatsapp:+…`` on BOTH ``from_`` and ``to`` to route on the WhatsApp channel;
     a raw number misroutes to SMS and fails (VT-399: the welcome to a real signup failed Twilio
     error 21659 because both ends were unprefixed). Idempotent — never double-prefixes.
+
+    VT-487: BEFORE prefixing, the bare number is asserted to be well-formed E.164
+    (``_assert_e164``). A malformed/corrupted target (scientific-notation float artifact, empty,
+    garbage) raises ``BlockedRecipientError`` and is NEVER dispatched — the structural backstop so
+    a corrupted number can never reach Twilio (the six 21211 "invalid To" failures in the log).
     """
+    _assert_e164(number, role=role)
     return number if number.startswith(_WHATSAPP_PREFIX) else f"{_WHATSAPP_PREFIX}{number}"
 
 
@@ -374,7 +421,7 @@ def send_template_message(
         message = _client().messages.create(
             content_sid=content_sid,
             content_variables=json.dumps(content_variables),
-            from_=_wa(os.environ["TEAM_TWILIO_FROM_NUMBER"]),
+            from_=_wa(os.environ["TEAM_TWILIO_FROM_NUMBER"], role="sender"),
             to=_wa(recipient),
         )
     except TwilioRestException as exc:
@@ -450,7 +497,7 @@ def send_freeform_message(
     )
     message = _client().messages.create(
         body=body,
-        from_=_wa(os.environ["TEAM_TWILIO_FROM_NUMBER"]),
+        from_=_wa(os.environ["TEAM_TWILIO_FROM_NUMBER"], role="sender"),
         to=_wa(recipient_phone),
     )
     logger.info(
@@ -495,7 +542,7 @@ def send_interactive_message(
     )
     create_kwargs: dict[str, Any] = {
         "content_sid": content_sid,
-        "from_": _wa(os.environ["TEAM_TWILIO_FROM_NUMBER"]),
+        "from_": _wa(os.environ["TEAM_TWILIO_FROM_NUMBER"], role="sender"),
         "to": _wa(recipient_phone),
     }
     if content_variables:
