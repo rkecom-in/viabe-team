@@ -128,3 +128,123 @@ def test_interrupt_state_is_handled_before_classify_terminal():
     assert interrupted_state.get("__interrupt__"), (
         "dispatch_brain keys the paused branch on '__interrupt__' truthiness"
     )
+
+
+# --- VT-480: brain model tiering (select_brain_model) --------------------------
+#
+# Fazal CHOSE tiering over raising the ₹5 cost cap: route ROUTINE turns to Sonnet
+# (cheap, completes within the cap), reserve Opus for COMPLEX/ambiguous reasoning.
+# These are pure-function tests — no LLM, no DB — and assert the selection reuses
+# the ALREADY-COMPUTED intent (just a dict) and fails safe to Opus.
+
+
+def test_select_brain_model_routine_intent_picks_sonnet():
+    """A clearly-simple intent (a one-step approval ack) → Sonnet — the cheap
+    path that completes within the ₹5 cap."""
+    from orchestrator.agent.dispatch import (
+        _BRAIN_MODEL_SONNET,
+        select_brain_model,
+    )
+
+    model_id, tier = select_brain_model({"classification": "approval", "confidence": 0.95})
+
+    assert model_id == _BRAIN_MODEL_SONNET == "claude-sonnet-4-6"
+    assert tier == "sonnet"
+
+
+@pytest.mark.parametrize(
+    "routine", ["approval", "rejection", "question", "status_query"]
+)
+def test_select_brain_model_all_routine_intents_pick_sonnet(routine: str):
+    """Every intent in the routine allow-set routes to Sonnet."""
+    from orchestrator.agent.dispatch import select_brain_model
+
+    model_id, tier = select_brain_model({"classification": routine})
+    assert (model_id, tier) == ("claude-sonnet-4-6", "sonnet")
+
+
+def test_select_brain_model_business_action_picks_opus():
+    """A business action / send request (adhoc_campaign_request → owner_initiated)
+    is COMPLEX → Opus. Under-powering a customer-facing decision is worse than
+    the cost."""
+    from orchestrator.agent.dispatch import (
+        _BRAIN_MODEL_OPUS,
+        select_brain_model,
+    )
+
+    model_id, tier = select_brain_model(
+        {"classification": "adhoc_campaign_request", "confidence": 0.9}
+    )
+
+    assert model_id == _BRAIN_MODEL_OPUS == "claude-opus-4-8"
+    assert tier == "opus"
+
+
+@pytest.mark.parametrize(
+    "complex_intent",
+    ["feedback", "first_data_step_onboarding", "exclusion_request", "other"],
+)
+def test_select_brain_model_complex_or_ambiguous_picks_opus(complex_intent: str):
+    """Anything NOT in the routine allow-set — business signals, onboarding
+    spawns, ambiguous mutations, the 'other' catch-all — stays on Opus."""
+    from orchestrator.agent.dispatch import select_brain_model
+
+    model_id, tier = select_brain_model({"classification": complex_intent})
+    assert (model_id, tier) == ("claude-opus-4-8", "opus")
+
+
+def test_select_brain_model_missing_signal_fails_safe_to_opus():
+    """CORRECTNESS-FIRST fail-safe: an empty intent dict (classify skipped or
+    failed) → Opus, the capable model. Never under-power a turn we couldn't
+    read."""
+    from orchestrator.agent.dispatch import select_brain_model
+
+    model_id, tier = select_brain_model({})
+    assert (model_id, tier) == ("claude-opus-4-8", "opus")
+
+
+def test_select_brain_model_unknown_classification_fails_safe_to_opus():
+    """A classification string we don't recognise (e.g. a future intent added to
+    the classifier before this allow-set is updated) defaults to Opus, not a
+    crash."""
+    from orchestrator.agent.dispatch import select_brain_model
+
+    model_id, tier = select_brain_model({"classification": "some_new_intent"})
+    assert (model_id, tier) == ("claude-opus-4-8", "opus")
+
+
+def test_select_brain_model_non_string_classification_fails_safe_to_opus():
+    """Defensive: a malformed signal (classification is None / not a str) must
+    not crash the selector — it fails safe to Opus."""
+    from orchestrator.agent.dispatch import select_brain_model
+
+    assert select_brain_model({"classification": None})[1] == "opus"
+
+
+def test_brain_model_ids_are_the_single_source_of_truth():
+    """The two model-id constants are the ONE place the brain model strings
+    live; select_brain_model returns exactly those values."""
+    from orchestrator.agent.dispatch import (
+        _BRAIN_MODEL_OPUS,
+        _BRAIN_MODEL_SONNET,
+        select_brain_model,
+    )
+
+    assert _BRAIN_MODEL_SONNET == "claude-sonnet-4-6"
+    assert _BRAIN_MODEL_OPUS == "claude-opus-4-8"
+    assert select_brain_model({"classification": "question"})[0] == _BRAIN_MODEL_SONNET
+    assert select_brain_model({})[0] == _BRAIN_MODEL_OPUS
+
+
+def test_brain_models_are_in_the_cost_rate_table():
+    """VT-480 invariant: both tiered brain models MUST be in the cost RATES
+    table, or the cost callback silently skips attribution (KeyError caught +
+    logged) and the ₹5 cost-cap telemetry zeroes out for that run."""
+    from orchestrator.agent.cost import RATES
+    from orchestrator.agent.dispatch import (
+        _BRAIN_MODEL_OPUS,
+        _BRAIN_MODEL_SONNET,
+    )
+
+    assert _BRAIN_MODEL_SONNET in RATES
+    assert _BRAIN_MODEL_OPUS in RATES
