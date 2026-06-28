@@ -263,6 +263,19 @@ class OrchestratorReasoningCallback(BaseCallbackHandler):
                 tenant_id=ctx.tenant_id,
                 step_name="orchestrator_agent_turn",
                 input_envelope={
+                    # VT-464 D4: prompt_token_count is a REQUIRED field on
+                    # AgentReasoningStepInput (extra="forbid"). The LIVE brain
+                    # path runs through THIS langchain callback (step_name
+                    # 'orchestrator_agent_turn'), not agent_callback — it
+                    # previously omitted prompt_token_count, so every deployed
+                    # brain reasoning-step envelope soft-failed validation
+                    # (payload_validation_failed=True) and Ops replay degraded.
+                    # The prompt (input) token count is the same source
+                    # agent_callback uses: this turn's response usage
+                    # input_tokens (extracted into usage_data above).
+                    "prompt_token_count": int(
+                        usage_data.get("input_tokens", 0) or 0
+                    ),
                     "context_bundle_hash": "<langchain-passthrough>",
                     "context_bundle_components": [],
                     "context_bundle_token_count": 0,

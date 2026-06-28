@@ -69,12 +69,19 @@ class _ComposeOwnerOutputOutput(BaseModel):
     honesty_notes: list[str] | None = None
 
 
+# VT-464 D5: ``tenant_from_context=True`` injects the authoritative DISPATCH
+# tenant_id (from the ambient ObservabilityContext set by agent/dispatch.py) over
+# whatever ``tenant_id`` the LLM supplied — the model unreliably passes the
+# business NAME here, which fail-closed the VT-73 in-flight guard and stranded
+# 100% of brain runs at compose_owner_output. The guard is NOT weakened: it still
+# fires, but now sees the dispatch tenant (== ctx) instead of the junk value.
 @tool
 @tool_step(
     step_kind="mcp_tool_call",
     envelope_in=_ComposeOwnerOutputInput,
     envelope_out=_ComposeOwnerOutputOutput,
     step_name="compose_owner_output",
+    tenant_from_context=True,
 )
 def compose_owner_output_tool(
     intent_or_trigger: str,
@@ -90,6 +97,10 @@ def compose_owner_output_tool(
         intent_or_trigger: Routing key (e.g. ``"welcome"``,
             ``"weekly_approval"``, ``"agent_stuck"``).
         tenant_id: UUID string of the tenant the message is addressed to.
+            NOTE (VT-464 D5): this argument is OVERRIDDEN at runtime by the
+            authoritative dispatch tenant (from the ambient
+            ObservabilityContext) — pass the dispatch tenant UUID if you
+            know it, but a wrong value here is corrected, not honoured.
         phase: Current subscriber phase (``"onboarding"`` / ``"trial"`` /
             ``"paid_active"`` / ``"paid_at_risk"`` / ``"lapsed"`` etc.).
         last_owner_message_at_iso: ISO-8601 UTC timestamp of the last

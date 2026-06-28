@@ -141,6 +141,7 @@ def tool_step(
     envelope_in: type[BaseModel],
     envelope_out: type[BaseModel],
     step_name: str | None = None,
+    tenant_from_context: bool = False,
 ) -> Callable[[T], T]:
     """Decorator that routes a tool's invocation through ``write_step``.
 
@@ -152,6 +153,19 @@ def tool_step(
     default ``'mcp_tool_call'`` covers generic tools; semantic tools
     (e.g., ``self_evaluate`` → ``self_evaluate_gate``) override to
     preserve the CL-281 verdict-model + downstream Ops UI replay path.
+
+    VT-464 D5: ``tenant_from_context`` — when True and the ambient
+    ``ObservabilityContext`` names a tenant, the wrapper OVERRIDES the
+    tool's ``tenant_id`` argument with the authoritative dispatch tenant
+    (``ctx.tenant_id``) BEFORE the VT-73 in-flight guard runs AND before
+    the wrapped function executes. This is the injection seam for tools
+    whose ``tenant_id`` arg is LLM-supplied and therefore unreliable
+    (e.g. ``compose_owner_output`` — the model passes the business NAME
+    as ``tenant_id``, which fail-closed the guard and stranded the brain,
+    VT-464). The guard is NOT weakened: it always fires, but now sees the
+    dispatch tenant (which trivially matches ctx) instead of the LLM's
+    junk value. Tools without a ``tenant_id`` parameter, or invocations
+    with no ambient context, are unaffected.
     """
 
     def deco(func: T) -> T:
@@ -172,15 +186,39 @@ def tool_step(
             # (e.g., the wrapped function uses *args/**kwargs natively)
             # fall back to a positional/keyword summary.
             sig = inspect.signature(func)
+            bound_args: inspect.BoundArguments | None = None
             try:
                 bound = sig.bind(*args, **kwargs)
                 bound.apply_defaults()
+                bound_args = bound
                 tool_args_dict: dict[str, Any] = dict(bound.arguments)
             except TypeError:
                 tool_args_dict = {
                     "args": [repr(a) for a in args],
                     "kwargs": dict(kwargs),
                 }
+
+            # VT-464 D5: authoritative tenant injection. When opted in and the
+            # dispatch context names a tenant AND the tool exposes a ``tenant_id``
+            # parameter, OVERRIDE the (LLM-supplied) tenant_id with the dispatch
+            # tenant BEFORE the VT-73 guard + before func runs. The call below
+            # uses the corrected bound arguments so the function executes against
+            # the authoritative tenant, not the model's junk value.
+            call_args: tuple[Any, ...] = args
+            call_kwargs: dict[str, Any] = kwargs
+            if (
+                tenant_from_context
+                and ctx is not None
+                and bound_args is not None
+                and "tenant_id" in sig.parameters
+            ):
+                authoritative = str(ctx.tenant_id)
+                tool_args_dict["tenant_id"] = authoritative
+                bound_args.arguments["tenant_id"] = authoritative
+                # Re-derive the call args/kwargs from the corrected binding so
+                # the wrapped function runs against the authoritative tenant.
+                call_args = bound_args.args
+                call_kwargs = bound_args.kwargs
 
             error: dict[str, Any] = {}
 
@@ -211,7 +249,7 @@ def tool_step(
             _assert_tool_tenant(ctx, tool_args_dict, resolved_step_name)
 
             try:
-                result = func(*args, **kwargs)
+                result = func(*call_args, **call_kwargs)
                 tool_result_dict = _to_envelope_dict(result)
                 try:
                     envelope_out.model_validate(tool_result_dict)
