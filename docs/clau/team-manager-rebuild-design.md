@@ -71,3 +71,20 @@ Standard specialist interface + a registry so adding a lane = a sub-graph + a re
 
 ### Revised build order (foundation now; lanes to charters)
 exec-1 VT-460 rail harness (compliance + the guarded-tool framework) → VT-467 business-impact rails (extends it) → exec-2 VT-461 supervisor (situation+outcome+which-specialist+tradeoffs, reads/writes KG) → VT-465 roster registry + handoff protocol → VT-466 KG/business-context store → exec-3 VT-462 onboarding-conductor → VT-463 Sales/SR handoff → [CHARTERS] VT-468..472 lanes (incremental, each verified incl. its rails) → VT-464 full live e2e re-drive → Fazal sign-off.
+
+## 8) RATIFIED CHARTERS + autonomy rulings (Fazal/Cowork 2026-06-29; supersedes §7's first-cut)
+### Autonomy hardening (Cowork audit, APPROVED + 2 hardenings)
+- A2: **"within policy" = a DETERMINISTIC bound-check (a rail/guard), NOT the brain's self-judgment.** The onboarding-granted policy = machine-enforceable bounds (segments, frequency caps, spend ceiling, allowed action types). The brain cannot reason itself out of policy.
+- A3: **escalation = concrete deterministic triggers** (repeated rail-trip; spend/volume anomaly vs baseline; out-of-policy irreversible attempt; complaint/opt-out surge; repeated specialist failure; any money-movement/return-filing request; send-quality flag). WhatsApp-only, concise.
+### SEND ruling (Fazal): DECAYING CHECKPOINT
+The customer-SEND action EARNS autonomy — tight owner visibility on the FIRST sends per new tenant/campaign → decays to full autonomy once proven safe (reuse VTR decay + owner-approval). NOT per-send-forever. Build as the send-path's autonomy curve. (VT-474)
+### The 6 lane charters (v1 = advise/act-within-policy; FUTURE scope documented, do NOT build future-autonomy now)
+| VT | Lane | v1 scope | Rail | FUTURE (architect, don't build) |
+|---|---|---|---|---|
+| 468 | Sales | win-back (SR exists)→repeat/upsell/re-engage | send: decaying-checkpoint + consent/caps | — |
+| 469 | Marketing | campaigns, seasonal/festival offers, segments, content | send/spend within policy; send: decaying-checkpoint | — |
+| 470 | Finance (ADVISORY always) | cash-flow, receivables/payables, payment-reminder drafts, margin/pricing; SUGGEST money movement, IDENTIFY losses/debt/loss-reduction | NEVER moves money; reminders=sends(decaying-checkpoint) | stays advisory |
+| 471 | Accounting (v1 PREPARE-only) | bookkeeping, GST+tax-summary prep, invoice/expense, reconciliation | prepare/summarize; does NOT file/submit | gated behind explicit Fazal grant + regulatory auth: FILE returns, balance sheet, SUBMIT GST |
+| 472 | Tech | store/website/listings (GBP/Shopify) health, integrations, setup | config/integration changes owner-gated (business-impact) | — |
+| 473 | Cost-Opt (v1 ADVISE) | wasteful spend, subscriptions/vendor cost, marketing ROI; resource recalibration (human+non-human: sharing/sharding/parallel/full-utilization) | v1 SUGGEST; acting owner-gated | act on recalibration (owner-gated, expandable) |
+### Build order: VT-474 (policy-bound determinism + escalation + send-checkpoint rails) → lanes VT-468..473 incrementally (each: land → adversarial-verify incl rails + policy-bound determinism → Cowork audit → next) → VT-464 full live re-drive → Fazal sign-off.
