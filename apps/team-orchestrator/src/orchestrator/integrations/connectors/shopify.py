@@ -297,17 +297,27 @@ _SHOPIFY_ACQUIRED_VIA = "shopify"
 _INR = "INR"
 
 
-def _normalize_e164(raw: str | None) -> str | None:
+def _normalize_e164(raw: object) -> str | None:
     """Best-effort E.164 for an Indian-first store; ``None`` if un-normalizable.
 
     Shopify usually stores E.164 already for IN. If we cannot confidently
     normalize, return ``None`` and let email / name anchor the customer (never
     invent a number). Mirrors the methods' ``contacts._normalize_phone`` shape but
     drops the confidence channel (connector data is structured, not OCR).
+
+    VT-487 (SAFETY): coerce to str FIRST (a JSON phone arriving as a number, or a
+    re-imported float, never survives numeric — the old ``str``-typed signature would
+    AttributeError on ``.strip()``) and REJECT any 'e'/'E'/'.' scientific-notation /
+    decimal artifact — a corrupted numeric phone — instead of digit-gluing it into a
+    plausible-but-wrong number (the Twilio 21211 breach).
     """
     if not raw:
         return None
-    s = raw.strip()
+    s = str(raw).strip()
+    if not s:
+        return None
+    if "e" in s or "E" in s or "." in s:
+        return None  # VT-487: scientific-notation / decimal = corrupted numeric phone → reject
     has_plus = s.startswith("+")
     digits = re.sub(r"\D", "", s)
     if not digits:

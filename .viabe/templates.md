@@ -17,10 +17,11 @@ The number the runtime sends FROM (`TEAM_TWILIO_FROM_NUMBER`) — a Twilio Whats
 | Env | Display name | Number | Twilio sender SID | Meta phone_number_id | Status |
 |---|---|---|---|---|---|
 | **dev** | **Viabe** | `+918108084223` | `XE5dca19b08f04ba5e11d69735c6969a9d` | `1166430683220266` | ONLINE — wired 2026-06-16 |
-| dev (prev) | — | `+18704122234` | `XE47d50f0ba019ad3ad3cc252e511a2e9f` | — | ONLINE — superseded as the dev FROM |
 
-Notes (dev wiring, 2026-06-16, CL-431-autonomous):
-- Dev `TEAM_TWILIO_FROM_NUMBER` = `+918108084223` — **plain E.164, NO `whatsapp:` prefix**. The send path (`utils/twilio_send.py`) passes both `from_` and `to=` raw (no prefix added anywhere in code), matching the prior ONLINE sender's plain form. A `whatsapp:`-prefixed `from_` against a raw `to=` would Twilio-21910 channel-mismatch. (Open: the real send/receive is canary-gated — flip to the `whatsapp:` prefix only if the canary proves it's required, in which case `to=` must be prefixed too.)
+Notes (dev wiring, 2026-06-16, CL-431-autonomous; **prefix question RESOLVED VT-488 2026-06-29**):
+- Dev `TEAM_TWILIO_FROM_NUMBER` = `+918108084223` — stored as **plain E.164, NO `whatsapp:` prefix in env**. The `whatsapp:` channel scheme IS REQUIRED on the wire and the send path (`utils/twilio_send._wa()`) applies it **idempotently to BOTH `from_` AND `to=` at the call site** (never double-prefixed). **The Twilio log proved the prefix is mandatory:** the one send that went out with a RAW E.164 `from_=+918108084223` (no `whatsapp:`) hit Twilio error **21659**; the 21 sends that carried `whatsapp:` on both ends delivered. This supersedes the earlier "NO prefix in code / flip only if the canary proves it" framing — the prefix is ON, on both ends, decided. (VT-399 first added `_wa`; VT-488 confirms + makes it the standing contract.)
+- VT-487 backstop: `_wa()` now also FAIL-CLOSES on a non-E.164 target (`^\+[1-9]\d{7,14}$`) — a malformed/corrupted number (e.g. a scientific-notation float artifact like `+91998886e+11`, the six 21211 "invalid To" failures) raises `BlockedRecipientError` and is never dispatched.
+- The superseded prev dev sender `+18704122234` (Twilio sender SID `XE47d50f0ba019ad3ad3cc252e511a2e9f`) was DROPPED from the registry (VT-488). It is no longer a FROM; current dev FROM = `+918108084223` only. It carried no code/config reference (grep-clean).
 - Dev **inbound** callback (Twilio sender webhook) → team-web `…/api/team/twilio/webhook` on `viabe-team-web-dev`, behind a Vercel **Protection-Bypass-for-Automation** token. The bypass secret is kept OUT of the repo — it lives only in the Twilio sender callback URL and in `TEAM_TWILIO_WEBHOOK_URL` (Vercel `viabe-team-web-dev`, Production). Twilio signs the full callback URL incl. the bypass query param, so those two must stay byte-identical.
 
 ## Why this file exists in this place
@@ -166,6 +167,25 @@ we'll try a different approach in 24 hours.
 
 ```
 Hi {{1}}, things are running. Last activity on your account: {{2}}. {{3}} is up next.
+```
+
+---
+
+### `team_reengage`  *(VT-486 — owner-facing OUT-OF-WINDOW (>24h) re-engagement; system-invoked, NOT agent-selectable)*
+
+- **Twilio Content SID (en):** `HXbdb250089fafc02a0d75ce6817e9ce11`
+- **Twilio Content SID (hi):** `HX27a50d65fedbb7b6a3c2fb6a6a24f13c`
+- **Category:** Utility · **Audience:** owner · **NO STOP line** (STOP is a customer-marketing opt-out, not an owner utility)
+- **Variables:** `{{1}}` = owner_name
+- **VT-486:** the window-aware owner send. When >24h have passed since the tenant's last inbound, the
+  24h owner-care window is CLOSED, so a free-form re-engage send fails (Twilio 63016). This
+  Meta-approved template is sent instead (out-of-window). The owner's reply RE-OPENS the 24h window
+  and the conversation continues free-form (the VT-349 in/out-of-window split + the VT-479 in-window
+  path). Routed via `template_routing.yaml` `reengage: any → team_reengage`; the composer selects it
+  out-of-window. `agent_selectable: false`.
+
+```
+Hi {{1}}, this is your Viabe Team. I have updates ready on your business — are you available to continue? Reply to this message and I'll pick up where we left off.
 ```
 
 ---

@@ -251,6 +251,105 @@ def test_wa_prefix_is_idempotent():
 
 
 # --------------------------------------------------------------------------- #
+# VT-487: transport-level E.164 fail-closed guard. A malformed/corrupted recipient
+# (e.g. a scientific-notation float artifact, the six Twilio 21211 failures) is BLOCKED
+# before reaching Twilio. Both from_ and to are validated; the body/copy never leaks.
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "+91998886e+11",   # scientific-notation float artifact — the breach
+        "+919988.6e11",    # decimal-point artifact
+        "999886123456",    # no leading '+'
+        "+0123456789",     # E.164 country code cannot start with 0
+        "+12",             # too short
+        "",                # empty
+        "whatsapp:+91garbage",  # non-digit body
+    ],
+)
+def test_wa_blocks_non_e164_failclosed(bad):
+    from orchestrator.utils.twilio_send import BlockedRecipientError, _wa
+
+    with pytest.raises(BlockedRecipientError):
+        _wa(bad)
+
+
+def test_wa_blocks_non_e164_message_is_pii_safe():
+    """The raised error must NOT carry the raw plaintext number (CL-390) — only a token + last-4."""
+    from orchestrator.utils.twilio_send import BlockedRecipientError, _wa
+
+    raw = "+91998886e+11"
+    with pytest.raises(BlockedRecipientError) as ei:
+        _wa(raw)
+    msg = str(ei.value)
+    assert raw not in msg  # the full corrupted number never appears in the message
+    assert "phone_tok_" in msg  # the hashed token does
+    assert "..e+11"[-4:] in msg or "..+11" in msg  # last-4 fragment only
+
+
+def test_template_send_to_corrupted_number_is_blocked(send_ctx, twilio_create):
+    """A scientific-notation recipient (the float-corruption breach) fails CLOSED at the transport —
+    BlockedRecipientError, and messages.create is NEVER called (nothing reaches Twilio)."""
+    from orchestrator.utils.twilio_send import BlockedRecipientError, send_template_message
+
+    with pytest.raises(BlockedRecipientError):
+        send_template_message(
+            uuid4(), "team_status_ping", _PING_PARAMS, recipient_phone="+91998886e+11"
+        )
+    twilio_create.assert_not_called()
+
+
+def test_freeform_send_to_corrupted_number_is_blocked(send_ctx, twilio_create):
+    from orchestrator.utils.twilio_send import BlockedRecipientError, send_freeform_message
+
+    with pytest.raises(BlockedRecipientError):
+        send_freeform_message("re-engage?", "+91998886e+11")
+    twilio_create.assert_not_called()
+
+
+def test_valid_e164_still_sends(send_ctx, twilio_create):
+    """The guard never blocks a well-formed number — the happy path is unchanged."""
+    from orchestrator.utils.twilio_send import send_template_message
+
+    send_template_message(uuid4(), "team_status_ping", _PING_PARAMS, recipient_phone="+919321553267")
+    twilio_create.assert_called_once()
+
+
+# --------------------------------------------------------------------------- #
+# VT-486: team_reengage out-of-window owner re-engagement template resolves + sends.
+# --------------------------------------------------------------------------- #
+
+
+def test_team_reengage_resolves_in_registry():
+    from orchestrator.templates_registry import resolve
+
+    en = resolve("team_reengage", "en")
+    hi = resolve("team_reengage", "hi")
+    assert en.content_sid == "HXbdb250089fafc02a0d75ce6817e9ce11"
+    assert hi.content_sid == "HX27a50d65fedbb7b6a3c2fb6a6a24f13c"
+    assert en.audience == "owner"
+    assert en.agent_selectable is False  # system-invoked, never agent-chosen
+    assert en.variables == ("owner_name",)
+
+
+def test_team_reengage_sends_owner_name_positional(send_ctx, twilio_create):
+    import json
+
+    from orchestrator.utils.twilio_send import send_template_message
+
+    send_template_message(
+        uuid4(), "team_reengage", {"owner_name": "Sundaram"}, recipient_phone="+919321553267"
+    )
+    kwargs = twilio_create.call_args.kwargs
+    assert kwargs["content_sid"] == "HXbdb250089fafc02a0d75ce6817e9ce11"
+    assert kwargs["to"] == "whatsapp:+919321553267"
+    assert kwargs["from_"] == "whatsapp:+910000000000"
+    assert json.loads(kwargs["content_variables"]) == {"1": "Sundaram"}
+
+
+# --------------------------------------------------------------------------- #
 # VT-400: named params -> POSITIONAL content_variables. Named keys are ignored by
 # Twilio (it renders the template SAMPLE, "Hi Raj Cafe"); we map onto {{1}}/{{2}}.
 # --------------------------------------------------------------------------- #

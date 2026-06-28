@@ -484,6 +484,11 @@ def _derive_template_params(
         params["unverified_count"] = str(int(out.get("rejected_count", 0)))
         return params
 
+    # VT-486: the out-of-window owner re-engagement template carries a single var, {{1}}=owner_name.
+    if intent_or_trigger == "reengage":
+        params["owner_name"] = _owner_name(state)
+        return params
+
     if isinstance(out, dict):
         for key in ("customer_name", "amount_paise", "campaign_name", "month"):
             if key in out:

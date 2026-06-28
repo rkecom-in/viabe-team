@@ -234,10 +234,25 @@ def _normalize_e164(raw: Any) -> str | None:
     Mirrors the Shopify connector's normalizer (an IN store-owner's sheet carries
     bare 10-digit or +91 numbers). We never invent a country code for ambiguous
     bare digits — email / name still anchor the customer.
+
+    VT-487 (SAFETY): a Google-Sheet / Excel cell that LOOKS numeric is read as a
+    FLOAT/INT by openpyxl / gspread / pandas; ``str()``-ing it yields scientific
+    notation ("9.98886e+11") or a trailing ".0". The old digit-strip
+    (``re.sub(r"\\D","")``) silently GLUED the mantissa + exponent digits into a
+    plausible-but-WRONG number — the corruption that sent six Twilio 21211
+    "invalid To" failures. We now REJECT (return None) any value carrying an
+    'e'/'E' (scientific notation) or a '.' (decimal) — a phone has neither — so a
+    numerically-corrupted cell never normalizes into a bad number; email/name
+    still anchor the customer.
     """
     if raw is None:
         return None
-    s = str(raw).strip()
+    s = str(raw).strip()  # coerce-to-str; a float/int never survives as a number
+    if not s:
+        return None
+    # VT-487: scientific-notation / decimal artifact = corrupted numeric phone → reject, don't glue.
+    if "e" in s or "E" in s or "." in s:
+        return None
     has_plus = s.startswith("+")
     digits = re.sub(r"\D", "", s)
     if not digits:
