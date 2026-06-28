@@ -156,6 +156,11 @@ _PURGE_ORDER: tuple[str, ...] = (
     # so a tenant DSR-delete MUST sweep it here or the business-autonomy grants survive the purge
     # (the tenant_agent_autonomy lesson, on the new table).
     "tenant_business_autonomy",
+    # VT-474: the per-tenant business POLICY (allowed action-types / segments / freq-caps / spend
+    # ceiling — the A2 machine-enforceable bound). Leaf (FK tenants only; CASCADE never fires — tenant
+    # anonymized, not deleted), so a tenant DSR-delete MUST sweep it here or the policy grant survives
+    # the purge (the tenant_business_autonomy lesson, on the new single-row-per-tenant table).
+    "tenant_business_policy",
     # VT-323: L2 episodic memory. Leaf (references tenants — anonymized, NOT
     # deleted — and no child tables point at it), so order-insensitive. payload
     # CAN carry PII at rest, and there is NO ON DELETE CASCADE + no other

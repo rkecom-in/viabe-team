@@ -58,14 +58,18 @@ class CustomerSendClass(str, Enum):
 # Distinct fail-closed skip markers for the shared pre-gate (mirror the customer_send.SKIP_* style).
 SKIP_NOT_ONBOARDED = "skipped_not_onboarded"   # onboarded/activation bar not crossed (Gate-0)
 SKIP_WABA_NOT_LIVE = "skipped_waba_not_live"   # WABA not Meta-verified 'live' (universal pre-gate)
+SKIP_OUT_OF_POLICY = "skipped_out_of_policy"   # VT-474 A2: the send is outside the owner's policy bound
 
 
 @dataclass(frozen=True, slots=True)
 class CustomerSendGate:
-    """Outcome of the shared onboarded + WABA pre-gate. ``reason`` is a SKIP_* marker when blocked."""
+    """Outcome of the shared onboarded + WABA (+ VT-474 policy) pre-gate. ``reason`` is a SKIP_*
+    marker when blocked; ``policy_reason`` carries the deterministic OUT_OF_POLICY code when the
+    block was the policy bound (which bound was breached — for the escalation/owner-notify path)."""
 
     allowed: bool
     reason: str | None = None
+    policy_reason: str | None = None
 
 
 def assert_customer_send_allowed(
@@ -73,8 +77,11 @@ def assert_customer_send_allowed(
     *,
     agent: str = "sales_recovery",
     conn: Any,
+    segment: str | None = None,
+    enforce_policy: bool = False,
 ) -> CustomerSendGate:
-    """The shared, deterministic onboarded + WABA-live pre-gate for EVERY customer-send path.
+    """The shared, deterministic onboarded + WABA-live (+ VT-474 policy) pre-gate for EVERY
+    customer-send path.
 
     REUSES the existing gate functions (does not re-implement them):
       1. ``onboarding_gate.is_agent_eligible(tenant_id, agent, conn=conn)`` — the Gate-0
@@ -82,10 +89,18 @@ def assert_customer_send_allowed(
          per the activation registry). Fail-closed (unknown/NULL/error → ineligible).
       2. ``whatsapp_account.wa_send_allowed(tenant_id)`` — the universal WABA-live gate (Meta
          business-verification + privacy URL). Fail-closed (no row / non-live → False).
+      3. (VT-474 A2, when ``enforce_policy``) ``business_policy.assert_within_policy`` — the OUTER
+         policy bound: CUSTOMER_SEND must be an allowed action type AND the target ``segment`` must be
+         allowed. An out-of-policy campaign segment is blocked here, BEFORE the per-recipient
+         consent/opt-out/caps gates — the brain cannot target a segment the owner never granted. The
+         compliance rails (consent/opt-out/onboarded — VT-460) are UNTOUCHED and still bind; policy is
+         an ADDITIONAL outer bound, not a replacement. ``enforce_policy`` defaults False so the
+         existing callers/tests are byte-for-byte unchanged; a lane opts in by passing the segment +
+         ``enforce_policy=True`` once the onboarding policy grant exists.
 
-    Both fail CLOSED. ``conn`` is the caller's RLS-scoped ``tenant_connection``; BOTH reads run on
-    it (one connection, one RLS scope), so RLS independently confirms the tenant and a caller with
-    no substrate pool still works.
+    Both compliance gates fail CLOSED. ``conn`` is the caller's RLS-scoped ``tenant_connection``; ALL
+    reads run on it (one connection, one RLS scope), so RLS independently confirms the tenant and a
+    caller with no substrate pool still works.
 
     Returns ``CustomerSendGate(allowed=False, reason=SKIP_*)`` on the FIRST failing gate, else
     ``CustomerSendGate(allowed=True)``. This is the pre-gate ONLY — the per-recipient
@@ -113,6 +128,26 @@ def assert_customer_send_allowed(
         )
         return CustomerSendGate(allowed=False, reason=SKIP_WABA_NOT_LIVE)
 
+    # VT-474 A2: the OUTER policy bound (opt-in per caller). Deterministic — the brain cannot target
+    # an out-of-policy segment. Fail-closed (no policy row → out of policy → blocked).
+    if enforce_policy:
+        from orchestrator.agents.business_policy import (
+            PolicyActionClass,
+            assert_within_policy,
+        )
+
+        check = assert_within_policy(
+            tid, PolicyActionClass.CUSTOMER_SEND, {"segment": segment}, conn=conn
+        )
+        if check.out_of_policy:
+            logger.info(
+                "customer_send_choke: pre-gate blocked tenant=%s agent=%s reason=%s policy=%s",
+                tid, agent, SKIP_OUT_OF_POLICY, check.reason,
+            )
+            return CustomerSendGate(
+                allowed=False, reason=SKIP_OUT_OF_POLICY, policy_reason=check.reason
+            )
+
     return CustomerSendGate(allowed=True)
 
 
@@ -121,5 +156,6 @@ __all__ = [
     "CustomerSendGate",
     "SKIP_NOT_ONBOARDED",
     "SKIP_WABA_NOT_LIVE",
+    "SKIP_OUT_OF_POLICY",
     "assert_customer_send_allowed",
 ]
