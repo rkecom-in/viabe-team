@@ -101,9 +101,61 @@ class DispatchResult:
 
 
 # Same model surface as build_orchestrator_agent's module-level default.
-# Caller wants Opus 4.7 with a small max_tokens cap (defense against
-# runaway generation; hard-limit callback covers the cost dimension).
+# Small max_tokens cap (defense against runaway generation; the hard-limit
+# callback covers the cost dimension).
 _DEFAULT_MAX_TOKENS = 4096
+
+# VT-480 — brain model tiering. Fazal CHOSE this over raising the ₹5 cost cap
+# (ORCHESTRATOR_COST_HARD_LIMIT_PAISE=500): a multi-turn Opus run on routine
+# chatter exceeded the cap → HardLimitExceeded → reply truncated to
+# team_unable_to_complete_request. Route ROUTINE/simple turns to Sonnet (cheap,
+# completes within ₹5); reserve Opus for COMPLEX reasoning (business actions,
+# specialist spawns, cross-lane decisions, anything ambiguous).
+#
+# SINGLE SOURCE OF TRUTH for the brain model IDs — every brain-model selection
+# reads these two constants (do NOT inline the strings elsewhere in this file).
+_BRAIN_MODEL_SONNET = "claude-sonnet-4-6"  # routine/simple turns — cheap, fast
+_BRAIN_MODEL_OPUS = "claude-opus-4-8"  # complex reasoning — the capable default
+
+# Classifications that are CLEARLY simple → route to Sonnet. CORRECTNESS-FIRST:
+# anything NOT in this allow-set (incl. an absent/failed classify) falls back to
+# Opus — under-powering a business decision is worse than the cost. Each entry
+# is a low-stakes, typically single-step turn that does not drive a specialist
+# spawn or a customer-facing send:
+#   - approval / rejection      : a one-step ack of a pending owner decision
+#   - question                  : a simple FAQ / factual "what's my plan" read
+#   - status_query              : read-only state lookup (also edge-fast-pathed)
+# Everything else stays on Opus by design:
+#   - feedback                  : may carry a business signal → reason hard
+#   - first_data_step_onboarding: can drive an onboarding-conductor spawn
+#   - adhoc_campaign_request    : a SEND / business action (owner_initiated)
+#   - exclusion_request         : low-confidence fall-through = ambiguous mutate
+#   - other                     : ambiguous by definition
+# Values mirror agent.tools.classify_owner_message.Classification.
+_ROUTINE_INTENTS: frozenset[str] = frozenset(
+    {"approval", "rejection", "question", "status_query"}
+)
+
+
+def select_brain_model(intent: dict[str, Any]) -> tuple[str, str]:
+    """VT-480 — pick the brain model from the ALREADY-COMPUTED intent signal.
+
+    ``intent`` is the same dict the VT-461 edge router populated via its
+    ``intent_sink`` (``classification`` / ``confidence`` / ``suggested_action``):
+    a successful classify carries those fields; an empty dict means classify was
+    skipped or failed. This REUSES that classification — it does NOT make a
+    second classify / LLM call.
+
+    Returns ``(model_id, tier)`` where ``tier`` is ``"sonnet"`` | ``"opus"`` (a
+    PII-safe label for observability — never the owner body). CORRECTNESS-FIRST:
+    a routine classification in ``_ROUTINE_INTENTS`` → Sonnet; ANY other value,
+    including a missing/empty signal, fails safe to Opus (the capable model).
+    """
+    classification = intent.get("classification")
+    if isinstance(classification, str) and classification in _ROUTINE_INTENTS:
+        return (_BRAIN_MODEL_SONNET, "sonnet")
+    # Complex, ambiguous, or signal-absent → the capable model (fail-safe).
+    return (_BRAIN_MODEL_OPUS, "opus")
 
 
 def _build_manager_intent_block(intent: dict[str, Any]) -> str | None:
@@ -133,13 +185,14 @@ def _build_manager_intent_block(intent: dict[str, Any]) -> str | None:
     return "\n".join(lines)
 
 
-def _resolve_model() -> ChatAnthropic:
-    # The orchestrator-agent default model is Opus 4.7. mypy --strict needs
-    # the call-arg ignore because ChatAnthropic's pydantic kwargs aren't
-    # expanded without the pydantic mypy plugin (parity with
-    # orchestrator_agent.py:_MODEL).
+def _resolve_model(model_id: str = _BRAIN_MODEL_OPUS) -> ChatAnthropic:
+    # VT-480: ``model_id`` is the tier-selected brain model (see
+    # select_brain_model). Defaults to Opus (the capable model) so any caller
+    # that doesn't pass a selection still fails safe. mypy --strict needs the
+    # call-arg ignore because ChatAnthropic's pydantic kwargs aren't expanded
+    # without the pydantic mypy plugin (parity with orchestrator_agent.py:_MODEL).
     return ChatAnthropic(  # type: ignore[call-arg]
-        model="claude-opus-4-7", max_tokens=_DEFAULT_MAX_TOKENS
+        model=model_id, max_tokens=_DEFAULT_MAX_TOKENS
     )
 
 
@@ -306,8 +359,26 @@ def dispatch_brain(
             # checkpoint rows on thread_id -> pipeline_runs.tenant_id).
             from orchestrator.graph import get_checkpointer
 
+            # VT-480: tier the BRAIN model from the already-computed intent
+            # (_manager_intent — populated by route_edge_case's intent_sink
+            # above; NO second classify call). Routine/simple → Sonnet (cheap,
+            # completes within the ₹5 cap); complex/ambiguous/absent → Opus.
+            brain_model_id, brain_tier = select_brain_model(_manager_intent)
+            # PII-safe observability: the TIER + the (typed) intent label only —
+            # never the owner body. Lets Ops see the Sonnet/Opus split.
+            logger.info(
+                "dispatch_brain: brain model tier selected",
+                extra={
+                    "run_id": str(run_id),
+                    "tenant_id": str(tenant_id),
+                    "brain_model_tier": brain_tier,
+                    "brain_model_id": brain_model_id,
+                    "intent_classification": _manager_intent.get("classification"),
+                },
+            )
             graph = build_supervisor_graph(
-                model=_resolve_model(), checkpointer=get_checkpointer()
+                model=_resolve_model(brain_model_id),
+                checkpointer=get_checkpointer(),
             )
             terminal_state: dict[str, Any] = graph.invoke(
                 initial_state,
@@ -652,4 +723,10 @@ class _NullDriver:
             )
 
 
-__all__ = ["DispatchResult", "FinalStatus", "TerminalPath", "dispatch_brain"]
+__all__ = [
+    "DispatchResult",
+    "FinalStatus",
+    "TerminalPath",
+    "dispatch_brain",
+    "select_brain_model",
+]
