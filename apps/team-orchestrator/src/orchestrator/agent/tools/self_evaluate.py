@@ -394,10 +394,21 @@ class SelfEvaluateAdapter:
         ctx: ToolContext,
         attempt_number: int = 1,
         tool: SelfEvaluateTool | None = None,
+        context_summary: dict[str, Any] | None = None,
     ) -> None:
         self._ctx = ctx
         self._tool = tool or SelfEvaluateTool()
         self.attempt_number = attempt_number
+        # VT-485: the compact grounding context the gate cross-references on the
+        # ``consistency`` category (cohort size, recency basis, expected-ARRR
+        # substrate). Before VT-485 this was hardcoded ``{}`` at the call site,
+        # so the gate logged an empty context and could not verify the plan's
+        # grounding — a legitimately-grounded draft and a fabricated one looked
+        # identical to the ``consistency`` check. The production caller
+        # (``sales_recovery_node``) now derives this from the bundle. ``None`` /
+        # absent stays ``{}`` for the unit-test transport fixtures (which assert
+        # transport, not grounding) — never weakens the gate, only feeds it.
+        self.context_summary: dict[str, Any] = context_summary or {}
 
     def evaluate(
         self,
@@ -419,7 +430,10 @@ class SelfEvaluateAdapter:
 
         raw_inputs: dict[str, Any] = {
             "draft_campaign_plan": draft_dict,
-            "context_summary": {},
+            # VT-485: feed the real grounding context (cohort size / recency
+            # basis / expected-ARRR substrate) the gate cross-references on the
+            # ``consistency`` category, instead of the old hardcoded ``{}``.
+            "context_summary": self.context_summary,
             "attempt_number": self.attempt_number,
         }
 
