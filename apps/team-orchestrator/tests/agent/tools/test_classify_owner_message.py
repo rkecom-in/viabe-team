@@ -123,6 +123,59 @@ def test_classify_owner_message_invalid_json_raises() -> None:
         )
 
 
+# --- VT-464 D1: markdown-fenced JSON must parse (the approval-resume crash) ----
+
+_FENCE_CASES = [
+    pytest.param(
+        '```json\n{"classification": "approval", "confidence": 0.95, '
+        '"suggested_action": "execute"}\n```',
+        id="fenced_json_label_newlines",
+    ),
+    pytest.param(
+        '```\n{"classification": "approval", "confidence": 0.9, '
+        '"suggested_action": "execute"}\n```',
+        id="fenced_bare_newlines",
+    ),
+    pytest.param(
+        '```json{"classification": "approval", "confidence": 0.92, '
+        '"suggested_action": "execute"}```',
+        id="fenced_json_inline",
+    ),
+    pytest.param(
+        '{"classification": "approval", "confidence": 0.91, '
+        '"suggested_action": "execute"}',
+        id="bare_json_still_parses",
+    ),
+]
+
+
+@pytest.mark.parametrize("raw", _FENCE_CASES)
+def test_classify_parses_markdown_fenced_json(raw: str) -> None:
+    """VT-464 D1: Haiku-4.5 now wraps the JSON envelope in a ```json fence.
+    Un-stripped, json.loads raised — and resolve_decision_from_reply
+    (runner.py, a direct call with NO try/except) crashed the DBOS step,
+    stranding the run 'running' forever. The writer must strip the fence;
+    a bare JSON response must still parse unchanged.
+    """
+    from orchestrator.agent.tools.classify_owner_message import (
+        ClassifyOwnerMessageInput,
+        classify_owner_message,
+    )
+    if os.environ.get("VT49_REAL_API") == "1":
+        pytest.skip("real-API mode active")
+    fake = _patched_client(_fake_response(text=raw))
+    result = classify_owner_message(
+        ClassifyOwnerMessageInput(
+            text="yes go ahead",
+            tenant_id="11111111-1111-1111-1111-111111111111",
+        ),
+        client=fake,
+        consent_check=lambda _t: True,
+    )
+    assert result.classification == "approval"
+    assert 0.0 <= result.confidence <= 1.0
+
+
 def test_classify_owner_message_invalid_envelope_raises() -> None:
     from orchestrator.agent.tools.classify_owner_message import (
         ClassifyOwnerMessageInput,

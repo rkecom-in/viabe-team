@@ -942,44 +942,61 @@ def register_scheduled_triggers() -> None:
     global _registered
     if _registered:
         return
-    DBOS.scheduled(WEEKLY_CADENCE_CRON)(weekly_cadence_scheduled)
-    DBOS.scheduled(ATTRIBUTION_CLOSE_CRON)(attribution_close_scheduled)
+
+    # VT-464 D3: register each handler as a @DBOS.workflow BEFORE applying
+    # @DBOS.scheduled. In DBOS 2.x (we run 2.22), DBOS.scheduled() ONLY
+    # registers a cron POLLER — it does NOT also register the function as a
+    # workflow. When the poller fires, the scheduler enqueues the function by
+    # its registered workflow name and recovery looks it up in
+    # workflow_info_map; a function that was only scheduled (never decorated
+    # @DBOS.workflow) has no dbos_function_name, so the fire raises
+    # DBOSWorkflowFunctionNotFoundError ("not a registered workflow function")
+    # — observed every ~30 min for approval_timeout_sweep_scheduled +
+    # l2_approved_send_sweep_scheduled (their crons fire most often). The
+    # daily/nightly handlers carried the same latent gap; wrapping ALL of them
+    # is the correct, non-weakening fix (the approval-timeout sweep MUST run so
+    # stale Pillar-7 approvals clear). Idempotent via the _registered guard.
+    def _register_scheduled(cron: str, fn: Any) -> None:
+        DBOS.scheduled(cron)(DBOS.workflow()(fn))
+
+    _register_scheduled(WEEKLY_CADENCE_CRON, weekly_cadence_scheduled)
+    _register_scheduled(ATTRIBUTION_CLOSE_CRON, attribution_close_scheduled)
     # VT-90 (VT-365): daily trial-lifecycle sweep — trial expiry to `lapsed`.
-    DBOS.scheduled(TRIAL_EVALUATION_CRON)(trial_evaluation_scheduled)
-    DBOS.scheduled(MONTHLY_IMPACT_CRON)(monthly_impact_scheduled)
-    DBOS.scheduled(APPROVAL_TIMEOUT_SWEEP_CRON)(approval_timeout_sweep_scheduled)
-    DBOS.scheduled(L3_CONSTRUCTION_CRON)(l3_construction_scheduled)
+    _register_scheduled(TRIAL_EVALUATION_CRON, trial_evaluation_scheduled)
+    _register_scheduled(MONTHLY_IMPACT_CRON, monthly_impact_scheduled)
+    _register_scheduled(APPROVAL_TIMEOUT_SWEEP_CRON, approval_timeout_sweep_scheduled)
+    _register_scheduled(L3_CONSTRUCTION_CRON, l3_construction_scheduled)
     # VT-76 (CL-240): 7th handler — opt-out reconstitution sweep. EXTENDS this
     # surface, NOT a parallel poller. The cron + body live in privacy/reconstitution.
     from orchestrator.privacy.reconstitution import RECONSTITUTION_CRON
 
-    DBOS.scheduled(RECONSTITUTION_CRON)(reconstitution_sweep_scheduled)
+    _register_scheduled(RECONSTITUTION_CRON, reconstitution_sweep_scheduled)
     # VT-304: 8th handler — nightly audit-chain verify. EXTENDS the surface
     # (same register-before-launch posture; app_version shifts once, here).
-    DBOS.scheduled(AUDIT_CHAIN_VERIFY_CRON)(audit_chain_verify_scheduled)
+    _register_scheduled(AUDIT_CHAIN_VERIFY_CRON, audit_chain_verify_scheduled)
     # VT-305: 9th handler — nightly PII-in-log sweep (VT-79 Detector-5).
-    DBOS.scheduled(PII_LOG_SWEEP_CRON)(pii_log_sweep_scheduled)
+    _register_scheduled(PII_LOG_SWEEP_CRON, pii_log_sweep_scheduled)
     # VT-307: 10th handler — nightly KG-events outbox-drain straggler sweep.
-    DBOS.scheduled(KG_DRAIN_SWEEP_CRON)(kg_drain_sweep_scheduled)
+    _register_scheduled(KG_DRAIN_SWEEP_CRON, kg_drain_sweep_scheduled)
     # VT-311: 11th handler — nightly L2 episodic retention soft-delete sweep.
-    DBOS.scheduled(L2_RETENTION_SWEEP_CRON)(l2_retention_sweep_scheduled)
+    _register_scheduled(L2_RETENTION_SWEEP_CRON, l2_retention_sweep_scheduled)
     # VT-354: waitlist 6-month retention purge — ENFORCES the DPDP pre-launch PII bound (was
     # runbook-manual). EXTENDS this surface (same register-before-launch posture).
-    DBOS.scheduled(WAITLIST_RETENTION_PURGE_CRON)(waitlist_retention_purge_scheduled)
+    _register_scheduled(WAITLIST_RETENTION_PURGE_CRON, waitlist_retention_purge_scheduled)
     # VT-357: hourly SLA-breach sweep — 2nd Fazal alert on overdue open escalations (marker-gated).
-    DBOS.scheduled(SLA_BREACH_SWEEP_CRON)(sla_breach_sweep_scheduled)
+    _register_scheduled(SLA_BREACH_SWEEP_CRON, sla_breach_sweep_scheduled)
     # VT-280: daily VTR digest — de-identified, app_vtr_role + the VT-281 views only.
-    DBOS.scheduled(VTR_DIGEST_CRON)(vtr_digest_scheduled)
+    _register_scheduled(VTR_DIGEST_CRON, vtr_digest_scheduled)
     # VT-374: daily expired-override cancel sweep (F8 next-run pin expiry bound).
     # EXTENDS this surface (same register-before-launch posture), NOT a parallel poller.
-    DBOS.scheduled(OVERRIDE_EXPIRY_SWEEP_CRON)(override_expiry_sweep_scheduled)
+    _register_scheduled(OVERRIDE_EXPIRY_SWEEP_CRON, override_expiry_sweep_scheduled)
     # VT-382: daily outbox-redaction backfill/backstop sweep (CL-437 ruling 3.3).
     # EXTENDS this surface (same register-before-launch posture), NOT a parallel poller.
-    DBOS.scheduled(OUTBOX_REDACTION_SWEEP_CRON)(outbox_redaction_sweep_scheduled)
+    _register_scheduled(OUTBOX_REDACTION_SWEEP_CRON, outbox_redaction_sweep_scheduled)
     # VT-432: daily implicit-attribution sweep (VT-198 feedback tier-1). Runs at
     # 23:00 UTC / 04:30 IST — after attribution_close and the redaction/reconstitution
     # batch. Pure SQL, NO LLM, NO SEND. EXTENDS this surface, NOT a parallel poller.
-    DBOS.scheduled(IMPLICIT_ATTRIBUTION_SWEEP_CRON)(implicit_attribution_sweep_scheduled)
+    _register_scheduled(IMPLICIT_ATTRIBUTION_SWEEP_CRON, implicit_attribution_sweep_scheduled)
     # VT-418: the L2 owner-approve→send reconciler sweep — recovery-only (heals the
     # crash-between-commit-and-start residual where the runner's post-commit start_l2_send
     # never ran). Idempotent on the l2_send_{batch_id} workflow-id; the per-draft ledger
@@ -990,15 +1007,17 @@ def register_scheduled_triggers() -> None:
         l2_approved_send_sweep_scheduled,
     )
 
-    DBOS.scheduled(L2_APPROVED_SEND_SWEEP_CRON)(l2_approved_send_sweep_scheduled)
+    _register_scheduled(L2_APPROVED_SEND_SWEEP_CRON, l2_approved_send_sweep_scheduled)
     # VT-439: daily Razorpay orphan-DETECT backstop (VT-352 F7). DETECT-ONLY — no
     # cancel, no charge, no send. Runs at 01:00 UTC / 06:30 IST (off-peak billing).
-    DBOS.scheduled(RECONCILE_SUBSCRIPTION_ORPHANS_CRON)(reconcile_subscription_orphans_scheduled)
+    _register_scheduled(
+        RECONCILE_SUBSCRIPTION_ORPHANS_CRON, reconcile_subscription_orphans_scheduled
+    )
     # VT-440: daily dead-letter retry backstop (VT-352 F7). DETECT/ALERT-ONLY — counts
     # pending parse-dropped charge events + alerts Fazal; NO replay/charge/send/write.
     # The actual replay is operator-driven (needs a corrected payload); exactly-once is
     # guaranteed by the razorpay_ingress event_id dedup keystone. 22:30 UTC / 04:00 IST.
-    DBOS.scheduled(DEAD_LETTER_RETRY_SWEEP_CRON)(dead_letter_retry_sweep_scheduled)
+    _register_scheduled(DEAD_LETTER_RETRY_SWEEP_CRON, dead_letter_retry_sweep_scheduled)
     _registered = True
 
 

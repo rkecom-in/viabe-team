@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from collections.abc import Callable
 from pathlib import Path
 from typing import Literal
@@ -78,6 +79,35 @@ _PROMPT_PATH = (
 _SYSTEM_PROMPT = _PROMPT_PATH.read_text(encoding="utf-8")
 
 _MODEL = "claude-haiku-4-5-20251001"
+
+# Markdown code-fence stripper. Haiku-4.5 intermittently wraps the JSON
+# envelope in a ```json … ``` fence even though the prompt asks for bare
+# JSON; an un-stripped fence makes json.loads raise, which (via
+# resolve_decision_from_reply, a direct call in runner.py with no
+# try/except) crashes the DBOS approval-resume step and strands the run
+# 'running' forever. Mirrors the narrow fence-strip in sales_recovery.py
+# (_CODE_FENCE_RE) but also tolerates the inline single-line form
+# (```json{...}``` with no surrounding newlines) Haiku sometimes emits.
+# NARROW by design: it only unwraps a recognised outer fence — it does NOT
+# extract a JSON object from arbitrary surrounding prose (that would mask
+# genuinely malformed output) and it never touches field VALUES (P8).
+_CODE_FENCE_RE = re.compile(
+    r"^\s*```(?:json)?[ \t]*\n?(?P<body>.*?)\n?```\s*$",
+    re.DOTALL | re.IGNORECASE,
+)
+
+
+def _strip_code_fence(raw: str) -> str:
+    """Unwrap an optional outer ```json … ``` / ``` … ``` markdown fence.
+
+    Returns the inner content (stripped) if ``raw`` is fully wrapped in a
+    recognised fence; otherwise returns ``raw`` unchanged. Bare JSON passes
+    through untouched.
+    """
+    match = _CODE_FENCE_RE.match(raw)
+    if match is not None:
+        return match.group("body").strip()
+    return raw
 
 
 def _skipped_envelope(reason: str) -> ClassifyOwnerMessageOutput:
@@ -146,6 +176,10 @@ def classify_owner_message(
     raw = "".join(text_blocks).strip()
     if not raw:
         raise ValueError("classify_owner_message: model returned empty content")
+
+    # Haiku-4.5 may wrap the JSON envelope in a markdown code fence; unwrap it
+    # before json.loads so a fenced response doesn't crash the resume path.
+    raw = _strip_code_fence(raw)
 
     try:
         parsed = json.loads(raw)

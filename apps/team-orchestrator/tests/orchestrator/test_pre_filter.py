@@ -273,15 +273,41 @@ def test_status_callback_failed_routes_to_template_error_handler(gate):
 
 
 def test_status_ping_routes_to_status_ping_handler(gate):
+    # VT-464 D2: a genuine STATUS query routes to status_ping (a bare greeting
+    # like "hi" no longer does — it falls through to the brain; see
+    # test_bare_greeting_falls_through_to_brain below).
     tenant_id = _new_tenant(gate.dsn)
     sub = _state(gate, tenant_id)
-    result = gate.pre_filter(_inbound(gate, "hi"), sub)
+    result = gate.pre_filter(_inbound(gate, "any update?"), sub)
     assert isinstance(result, gate.t.RouteToDirectHandler)
     assert result.handler_name == "status_ping_handler"
 
-    outcome = gate.HANDLERS["status_ping_handler"](_inbound(gate, "hi"), sub)
+    outcome = gate.HANDLERS["status_ping_handler"](_inbound(gate, "any update?"), sub)
     assert outcome["send_result"]["success"] is True  # VT-3.3c: honest send
     assert "trial" in outcome["status_text"]  # accurate phase, no fabrication
+
+
+@pytest.mark.parametrize("greeting", ["Hi", "Hello", "Hey", "hey there", "namaste"])
+def test_bare_greeting_falls_through_to_brain(gate, greeting):
+    """VT-464 D2 (HEADLINE): a bare greeting must reach the brain, NOT
+    status_ping. The old _STATUS_PING regex swallowed hi/hello/hey into
+    status_ping_handler BEFORE the brain ran, bypassing the rebuilt
+    Team-Manager's 'Hi → business-manager, not customer-service' greeting +
+    onboarding. DPDP routing (opt-out/DSR/consent) is unchanged."""
+    result = gate.pre_filter(_inbound(gate, greeting), _state(gate, uuid4()))
+    assert isinstance(result, gate.t.RouteToBrain), (
+        f"bare greeting {greeting!r} must route to the brain, got {result!r}"
+    )
+
+
+@pytest.mark.parametrize(
+    "query", ["any update?", "any updates", "what's the status", "kya hua"]
+)
+def test_status_query_still_routes_to_status_ping(gate, query):
+    """VT-464 D2: genuine status-intent phrases still route to status_ping."""
+    result = gate.pre_filter(_inbound(gate, query), _state(gate, uuid4()))
+    assert isinstance(result, gate.t.RouteToDirectHandler)
+    assert result.handler_name == "status_ping_handler"
 
 
 def test_substantive_message_routes_to_brain(gate):

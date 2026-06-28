@@ -59,7 +59,6 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from typing import Any, Literal, cast
 from uuid import UUID
 
@@ -472,8 +471,14 @@ def _write_dispatch_entry(
     ``agent_invocation`` envelope. The old placeholder writer
     (``record_brain_pending``) is deleted by this PR.
 
-    ``output_envelope.reason`` preserved for backward compatibility
-    with prior tests that read this field from the placeholder row.
+    VT-464 D4: the AgentInvocationInput schema REQUIRES ``agent_role`` +
+    ``reason`` (extra="forbid") and AgentInvocationEnvelope.output_envelope is
+    ``None``. The previous writer put ``reason`` in output_envelope and packed
+    undeclared keys (inbound_body_len / trigger / dispatched_at) into
+    input_envelope, so every brain dispatch-entry envelope soft-failed
+    validation (payload_validation_failed=True) — degrading Ops replay. The
+    dispatch ``reason`` text now lives in the validated input_envelope (it
+    still carries the "owner message" substring downstream readers assert on).
     """
     try:
         write_step(
@@ -482,13 +487,10 @@ def _write_dispatch_entry(
             tenant_id=tenant_id,
             step_name="brain_dispatch_entry",
             input_envelope={
-                "inbound_body_len": len(event.body or ""),
-                "trigger": "owner_substantive_message",
-                "dispatched_at": datetime.now(UTC).isoformat(),
-            },
-            output_envelope={
+                "agent_role": "orchestrator",
                 "reason": "substantive owner message — needs orchestrator-agent reasoning",
             },
+            output_envelope=None,
             status="running",
         )
     except Exception as exc:  # noqa: BLE001
