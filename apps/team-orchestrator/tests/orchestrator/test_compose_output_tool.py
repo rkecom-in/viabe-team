@@ -85,3 +85,74 @@ def test_tool_handles_specialist_result_json() -> None:
     })
     assert out["message_type"] == "free_form_24h"
     assert "₹50 cost budget" in out["message_body"]
+
+
+# --- VT-464 D5: dispatch-tenant injection over an LLM-supplied junk tenant ----
+
+
+def test_tool_uses_dispatch_tenant_over_llm_business_name(monkeypatch) -> None:
+    """THE LAUNCH-BLOCKER regression guard.
+
+    Live root cause: the LLM passes the business NAME as the ``tenant_id``
+    tool arg; the VT-73 in-flight guard (decorators._assert_tool_tenant) sees
+    ``tenant <name> != dispatch <uuid>`` and fail-closes → the brain turn
+    crashes → the run is stuck ``running`` forever. The fix injects the
+    authoritative dispatch tenant from the ambient ObservabilityContext BEFORE
+    the guard runs. This test invokes the tool with a junk business-name
+    tenant_id under a real dispatch context and asserts:
+      1. no ContextIsolationViolation is raised (guard passes legitimately),
+      2. compose succeeds (returns a valid envelope),
+      3. the DISPATCH tenant — NOT the LLM's junk value — reached the composer.
+    """
+    from orchestrator.observability.decorators import observability_context
+
+    dispatch_tenant = uuid4()
+    captured: dict[str, object] = {}
+
+    # Capture the tenant_id the underlying composer actually receives via state.
+    import orchestrator.agent.tools.compose_output as compose_mod
+
+    orig = compose_mod.compose_owner_output
+
+    def _spy(specialist_result, state, intent_or_trigger, **kw):
+        captured["tenant_id"] = state["tenant_id"]
+        return orig(specialist_result, state, intent_or_trigger, **kw)
+
+    monkeypatch.setattr(compose_mod, "compose_owner_output", _spy)
+
+    # The LLM supplies a business-name slug as tenant_id (the live failure mode).
+    junk_tenant = "rajus-chai-corner"
+
+    with observability_context(run_id=uuid4(), tenant_id=dispatch_tenant):
+        out = compose_owner_output_tool.invoke({
+            "intent_or_trigger": "welcome",
+            "tenant_id": junk_tenant,
+            "phase": "onboarding",
+            "last_owner_message_at_iso": None,
+        })
+
+    # (1)+(2): no raise, valid envelope returned.
+    assert "message_body" in out
+    assert out["message_type"] in {"template", "free_form_24h"}
+    # (3): the authoritative DISPATCH tenant reached the composer, NOT the junk.
+    assert captured["tenant_id"] == dispatch_tenant
+    assert str(captured["tenant_id"]) != junk_tenant
+
+
+def test_tool_guard_still_blocks_when_not_opted_in() -> None:
+    """The VT-73 guard is NOT globally weakened: a tool that does NOT opt into
+    ``tenant_from_context`` still fail-closes on a cross-tenant tenant_id. This
+    guards against a future regression that turns the override on everywhere.
+    """
+    import pytest as _pytest
+
+    from orchestrator.context_validator import ContextIsolationViolation
+    from orchestrator.observability.decorators import (
+        ObservabilityContext,
+        _assert_tool_tenant,
+    )
+
+    dispatch = uuid4()
+    ctx = ObservabilityContext(run_id=uuid4(), tenant_id=dispatch)
+    with _pytest.raises(ContextIsolationViolation):
+        _assert_tool_tenant(ctx, {"tenant_id": "some-other-business"}, "some_tool")
