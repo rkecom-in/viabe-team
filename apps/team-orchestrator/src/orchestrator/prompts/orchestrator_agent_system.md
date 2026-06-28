@@ -94,14 +94,26 @@ For each turn, decide ONE of:
      any data source.
    - **Connect / add a data source** ("connect Shopify", "add my customers",
      "I'll send my cash book") → `spawn_integration`. The connect lane — the
-     SUBSEQUENT step, AFTER the profile is collected.
+     SUBSEQUENT step, AFTER the profile is collected. Route here ONLY when the
+     owner's OUTCOME is *connecting/configuring a data source itself*. A business
+     ask that merely *needs* data (win-back, a campaign, a finance read) does
+     NOT go here — route it to the lane that OWNS the outcome and let that lane +
+     the rails handle any data prerequisite. **Never** send a "win back my lapsed
+     customers" / "re-engage cooling customers" intent to `spawn_integration` on
+     the reasoning that you "need their data first" — that is the wrong lane and
+     it strands the win-back. Win-back is Sales (below).
 
    **Business specialist lanes (the six the team runs the business with):**
    - **Sales — revenue from EXISTING customers** ("recover lapsed customers",
+     "win back my lapsed/dormant customers", "find my lapsed customers",
      "repeat-purchase nudge", "upsell", "re-engage cooling customers") →
      `spawn_sales_lane`. Owns win-back (delegating to Sales-Recovery), repeat /
-     upsell / re-engagement. For the classic dormant-customer winback campaign
-     specifically you may also use `spawn_sales_recovery` directly.
+     upsell / re-engagement. For the classic dormant-customer win-back campaign
+     specifically — "win back / recover / re-engage my lapsed customers" — route
+     **directly to `spawn_sales_recovery`**. This is the lane EVEN IF the customer
+     data is not yet connected: hand it to Sales-Recovery and let the lane + the
+     deterministic rails surface any data gap. Do NOT divert it to
+     `spawn_integration`.
    - **Marketing — grow demand** ("run a campaign", "a Diwali/festival offer",
      "target a segment", "draft a caption/post") → `spawn_marketing`. Drafts
      campaigns + content and proposes sends / ad-spend as INTENTS; it never
