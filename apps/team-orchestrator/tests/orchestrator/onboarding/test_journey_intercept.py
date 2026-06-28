@@ -218,6 +218,66 @@ def test_active_journey_delegates_to_handle_reply(substrate, send_spy):  # type:
     assert "price range" in sent_body.lower(), "the NEXT question must be sent"
 
 
+# --- (b2) idempotent PRESENTATION — an already-presented pending Q isn't re-sent -------------------
+
+
+def test_redelivered_inbound_does_not_resend_pending_question(substrate, send_spy):  # type: ignore[no-untyped-def]
+    """THE live duplicate-question bug ("based in Mumbai?" sent TWICE): a redelivered inbound (same
+    message_sid as the one already in flight) must NOT re-send the pending question — it was already
+    presented on the first delivery. The FIRST presentation DOES send; the redelivery does not."""
+    from orchestrator.onboarding import journey
+
+    tenant = _new_tenant(substrate.dsn, name="no-resend on redeliver", phase="trial")
+    journey.start_journey(
+        tenant,
+        [
+            {"field": "operating_hours", "kind": "gap", "prompt_en": "What are your hours?",
+             "prompt_hi": "समय?", "draft_value": None},
+            {"field": "price_range", "kind": "gap", "prompt_en": "What is your price range?",
+             "prompt_hi": "कीमत?", "draft_value": None},
+        ],
+    )
+
+    # First inbound (new sid) → answer recorded, NEXT question presented + SENT once.
+    journey.maybe_handle_journey_reply(tenant, "9 to 9", "SM-rd-1", recipient="+919999001000")
+    assert len(send_spy) == 1, "the first presentation must send the next question"
+    assert "price range" in send_spy[0][0].lower()
+    row = _journey_row(substrate.dsn, tenant)
+    assert row is not None and row["cursor"] == 1
+
+    # Redeliver the SAME sid → the in-flight (price_range) question is already presented → NO re-send.
+    journey.maybe_handle_journey_reply(tenant, "9 to 9", "SM-rd-1", recipient="+919999001000")
+    assert len(send_spy) == 1, (
+        "a redelivered inbound must NOT re-send the already-presented pending question "
+        f"(the live duplicate bug); sends={send_spy!r}"
+    )
+    row = _journey_row(substrate.dsn, tenant)
+    assert row is not None and row["cursor"] == 1, "redelivery must not advance the cursor"
+
+
+def test_bare_greeting_mid_journey_re_presents_without_advancing(substrate, send_spy):  # type: ignore[no-untyped-def]
+    """A bare greeting mid-journey (the live "Hi → category" bug) routes through the intercept: it is
+    NOT recorded / does NOT advance, and the intercept SENDS a conversational re-present (greet-back +
+    the pending question)."""
+    from orchestrator.onboarding import journey
+
+    tenant = _new_tenant(substrate.dsn, name="greeting re-present intercept", phase="trial")
+    journey.start_journey(
+        tenant,
+        [{"field": "category", "kind": "confirm",
+          "prompt_en": "We found you're a restaurant — is that right?",
+          "prompt_hi": "रेस्टोरेंट — सही है?", "draft_value": "restaurant"}],
+    )
+
+    result = journey.maybe_handle_journey_reply(tenant, "Hi", "SM-greet-icpt-1", recipient="+919999001111")
+
+    assert result is not None and result.get("re_present") is True
+    row = _journey_row(substrate.dsn, tenant)
+    assert row is not None and row["cursor"] == 0, "a greeting must not advance the cursor"
+    assert len(send_spy) == 1, "the intercept must SEND the conversational re-present"
+    assert "is that right" in send_spy[0][0].lower(), "the re-present must re-ask the pending question"
+
+
 # --- (c) ESTABLISHED tenant, no journey → fall through ----------------------
 
 

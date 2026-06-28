@@ -24,11 +24,32 @@ logger = logging.getLogger(__name__)
 # Deterministic affirmations / skips (EN + HI/Hinglish), token-exact (the approval_reply discipline).
 _YES = {"yes", "y", "correct", "right", "ok", "okay", "haan", "ha", "sahi", "हाँ", "हां", "सही", "ठीक"}
 _SKIP = {"skip", "later", "pass", "baad", "naa", "बाद", "छोड़ो", "स्किप"}
+# Bare negatives to a CONFIRM ("no") — NOT a value (a city isn't named "no"). A bare-negative confirm
+# is treated as "not yet answered": re-present the question so the owner supplies the correct value,
+# rather than recording "no" verbatim as the field value. Token-exact, same discipline as _YES/_SKIP.
+_NO = {"no", "nope", "nah", "nahi", "nahin", "galat", "नहीं", "नही", "गलत"}
+# Bare greetings (EN + HI/Hinglish) — a greeting is NEVER an answer to the pending question (the live
+# "Hi → category" bug). Token-exact; a body that is ONLY greeting tokens is re-presented, not recorded.
+_GREETING = {
+    "hi", "hello", "hey", "helo", "hii", "hiii", "hey", "yo", "hola",
+    "namaste", "namaskar", "namaskaar", "namastey", "नमस्ते", "नमस्कार",
+    "salaam", "salam", "assalamualaikum", "adaab",
+    "morning", "evening", "afternoon",  # "good morning"/"good evening" — "good" alone isn't a greeting
+}
 
 
 def _tokens(body: str) -> set[str]:
     norm = (body or "").strip().casefold().replace("'", "")
     return {t for t in re.split(r"[\s,.!?;:।/\\-]+", norm) if t}
+
+
+def _is_bare_greeting(body: str) -> bool:
+    """True iff EVERY token in ``body`` is a greeting token (a bare greeting like "hi" / "namaste" /
+    "good morning") — i.e. the owner greeted but gave no answer. A greeting MIXED with substantive
+    content ("hi my hours are 9-9") is NOT bare → it still carries an answer and is recorded. Empty
+    body → not a greeting (handled by the existing empty-body guards)."""
+    toks = _tokens(body)
+    return bool(toks) and toks <= _GREETING
 
 
 def start_journey(tenant_id: UUID | str, question_queue: list[dict[str, Any]]) -> None:
@@ -98,23 +119,44 @@ def _current(g: dict[str, Any]) -> dict[str, Any] | None:
     return q[c] if 0 <= c < len(q) else None
 
 
+def _current_q_reply(q: dict[str, Any], *, done: bool = False) -> dict[str, Any]:
+    """A reply that re-emits the in-flight question verbatim (no greet-back)."""
+    return {"reply_en": q.get("prompt_en", ""), "reply_hi": q.get("prompt_hi", ""), "done": done}
+
+
+def _greet_then_question(q: dict[str, Any]) -> dict[str, Any]:
+    """A conversational re-present: a brief manager greet-back PREPENDED to the pending question. Used
+    when the owner sends a bare greeting / non-answer mid-question — we acknowledge the greeting and
+    re-ask, WITHOUT recording it as the answer or advancing the cursor (the VT live "Hi → category"
+    bug). ``re_present=True`` tells the intercept this is a fresh, sendable re-presentation."""
+    en = f"Hi! {q.get('prompt_en', '')}".strip()
+    hi = f"नमस्ते! {q.get('prompt_hi', '')}".strip()
+    return {"reply_en": en, "reply_hi": hi, "done": False, "re_present": True}
+
+
 def handle_reply(
     tenant_id: UUID | str, body: str, message_sid: str | None, *, lang: str = "en"
 ) -> dict[str, Any]:
     """Process one owner reply against the in-flight question; advance the cursor; return
     {reply_en, reply_hi, done}. IDEMPOTENT: a redelivered message_sid (== last_message_sid) re-emits
-    the SAME current question without double-advancing. Confirm-Q → confirm_draft; gap-Q → store
-    value; 'skip' → skip. On queue exhaustion → complete + fire the Gap-4 seam."""
+    the SAME current question without double-advancing AND signals ``already_presented`` so the
+    intercept does NOT re-send it (the VT live duplicate-question bug). A bare greeting / non-answer
+    to the in-flight question is NOT recorded + does NOT advance — the question is re-presented
+    conversationally (``re_present``). Confirm-Q → confirm_draft; gap-Q → store value; 'skip' → skip.
+    On queue exhaustion → complete + fire the Gap-4 seam."""
     g = get_journey(tenant_id)
     if g is None or g["status"] != "active":
         return {"reply_en": "", "reply_hi": "", "done": True}
 
-    # Idempotency: a redelivered inbound must not double-advance.
+    # Idempotency: a redelivered inbound must not double-advance — AND must not re-SEND the in-flight
+    # question (it was already presented on the first delivery). ``already_presented`` tells the
+    # intercept to skip the send (the live duplicate "based in Mumbai?" bug: a redelivered inbound
+    # re-emitted the same pending question and the intercept dutifully sent it a second time).
     if message_sid and message_sid == g.get("last_message_sid"):
         q = _current(g)
         if q is None:
-            return {"reply_en": "", "reply_hi": "", "done": True}
-        return {"reply_en": q.get("prompt_en", ""), "reply_hi": q.get("prompt_hi", ""), "done": False}
+            return {"reply_en": "", "reply_hi": "", "done": True, "already_presented": True}
+        return {**_current_q_reply(q), "already_presented": True}
 
     q = _current(g)
     if q is None:
@@ -126,7 +168,17 @@ def handle_reply(
     answers = g["answers"]
     skipped = g["skipped"]
 
-    if toks & _SKIP:
+    # A bare greeting / non-answer must NOT be recorded as the answer and must NOT advance the cursor
+    # (the live "Hi → category" bug). For a CONFIRM question a bare negative ("no") is likewise NOT a
+    # value (a city isn't named "no") — re-present so the owner supplies the correct value. yes / skip
+    # / a real correction stay valid answers; only a greeting (any kind) or a bare-no (confirm) is
+    # rejected. Re-present the pending question conversationally WITHOUT touching state.
+    is_skip = bool(toks & _SKIP)
+    is_bare_no_confirm = q.get("kind") == "confirm" and bool(toks) and toks <= _NO
+    if not is_skip and (_is_bare_greeting(body) or is_bare_no_confirm):
+        return _greet_then_question(q)
+
+    if is_skip:
         if field and field not in skipped:
             skipped.append(field)
     elif q.get("kind") == "confirm":
@@ -339,7 +391,13 @@ def maybe_handle_journey_reply(
                 _send(recipient, _opener(), lang)  # still setting up
             return {"done": False, "pending": True}
         r = handle_reply(tenant_id, body, message_sid, lang=lang)
-        _send(recipient, {"prompt_en": r["reply_en"], "prompt_hi": r["reply_hi"]}, lang)
+        # Idempotent presentation: a redelivered inbound re-emits the SAME in-flight question that was
+        # already presented on its first delivery — do NOT send it again (the live duplicate-question
+        # bug). ``handle_reply`` flags this with ``already_presented``. A FIRST presentation, a normal
+        # advance, and a conversational re-present (``re_present`` — a bare greeting mid-question) all
+        # DO send.
+        if not r.get("already_presented"):
+            _send(recipient, {"prompt_en": r["reply_en"], "prompt_hi": r["reply_hi"]}, lang)
         # VT-425 — the journey → integration SEAM (sequential handoff, CL-443 plan §8 option a).
         # When the journey COMPLETES profile-confirm on THIS reply, hand off to connector
         # onboarding so the owner isn't dropped into a cold brain between the two spines. The
