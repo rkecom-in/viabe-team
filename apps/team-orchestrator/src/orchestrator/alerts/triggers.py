@@ -113,6 +113,66 @@ def _make_trigger(
     )
 
 
+# VT-476 dev_send_guard mock-SID marker. A mocked dev send returns a SID with
+# this prefix instead of a real Twilio ``SM…`` SID (utils/dev_send_guard._MockMessage).
+_MOCK_SID_PREFIX = "MKDEV"
+# The two outbound-send ledger tables (mig 049) that carry the resolved message_sid.
+_SEND_LEDGER_TABLES = ("send_idempotency_keys", "campaign_messages")
+_VOLUME_WINDOW = "1 hour"
+
+
+def _volume_is_mock_only(tenant_id: UUID) -> bool:
+    """VT-489 (b): True when the tenant's outbound sends in the volume window were
+    ALL mocked (VT-476 ``MKDEV…`` SIDs) — i.e. ZERO real sends landed.
+
+    A mocked send is not a real send (no customer was messaged), so a run-volume
+    spike whose entire outbound activity was mocked is a dev/test artifact, not a
+    real-send volume alarm. The send ledger (mig 049) carries ``message_sid`` +
+    ``send_status``; we count REAL successful sends (``send_status='sent'`` /
+    ``'template_sent'`` AND a non-MKDEV SID) in the same window as the run count.
+
+    Returns True (suppress) ONLY when there is at least one mocked send AND zero
+    real sends in the window. FAIL-SAFE: returns False (do NOT suppress → alert)
+    when uncertain — no mocked sends found, or any read error — so a real prod
+    spike is never silenced by this guard.
+    """
+    pool = get_pool()
+    real_sends = 0
+    mock_sends = 0
+    try:
+        with pool.connection() as conn, conn.cursor() as cur:
+            for table in _SEND_LEDGER_TABLES:
+                cur.execute(
+                    f"""
+                    SELECT
+                        COUNT(*) FILTER (
+                            WHERE message_sid IS NOT NULL
+                              AND message_sid NOT LIKE %s
+                              AND send_status IN ('sent', 'template_sent')
+                        ) AS real_n,
+                        COUNT(*) FILTER (
+                            WHERE message_sid LIKE %s
+                        ) AS mock_n
+                    FROM {table}
+                    WHERE tenant_id = %s
+                      AND created_at > now() - interval '{_VOLUME_WINDOW}'
+                    """,  # noqa: S608 — table name from a fixed module constant, never user input
+                    (f"{_MOCK_SID_PREFIX}%", f"{_MOCK_SID_PREFIX}%", str(tenant_id)),
+                )
+                r = cur.fetchone()
+                rd = (dict(r) if not isinstance(r, dict) else r) if r is not None else {}
+                real_sends += int(rd.get("real_n") or 0)
+                mock_sends += int(rd.get("mock_n") or 0)
+    except Exception:  # noqa: BLE001 — fail-safe: an unreadable ledger must NOT suppress a real spike
+        logger.warning(
+            "VT-489: mock-only volume check failed for tenant %s; NOT suppressing "
+            "(fail-safe — prefer to alert)", tenant_id, exc_info=True,
+        )
+        return False
+    # Suppress ONLY when the window had mocked send(s) and not a single real send.
+    return mock_sends > 0 and real_sends == 0
+
+
 def detect_critical_for_run(run_id: UUID) -> list[Trigger]:
     """Write-hook entry — examine a single just-closed run for critical triggers.
 
@@ -214,6 +274,17 @@ def detect_slow_triggers(tenant_id: UUID) -> list[Trigger]:
             ))
 
     # Volume spike — last-hour count vs baseline.
+    #
+    # VT-489 (b): the volume_spike metric is a REAL-SEND volume alarm. A dev
+    # mocked send (VT-476 dev_send_guard → ``MKDEV…`` SID) is NOT a real send and
+    # must not trip it. The metric counts inbound ``pipeline_runs`` (one per
+    # webhook), which are decoupled from the outbound send ledger — so a mocked
+    # send never increments the run-count directly. But a re-drive burst inflates
+    # the inbound-run count while its OUTBOUND sends are all mocked (the dev guard
+    # mocks every non-allowlisted dev send). So we gate on real-send presence:
+    # if the tenant produced ZERO real (non-``MKDEV``) outbound sends in the
+    # window, the run-volume is a dev/test artifact (mocked-only) — do NOT fire.
+    # FAIL-SAFE: if the ledger read errors, we DON'T suppress (prefer to alert).
     with pool.connection() as conn, conn.cursor() as cur:
         cur.execute(
             "SELECT COUNT(*) AS n FROM pipeline_runs "
@@ -226,11 +297,18 @@ def detect_slow_triggers(tenant_id: UUID) -> list[Trigger]:
         observed = int(vdict.get("n") or 0)
         baseline_vol = base.get("volume_per_hour") or 0
         if baseline_vol and observed > 3 * baseline_vol:
-            triggers.append(_make_trigger(
-                tenant_id, "volume_spike",
-                f"Tenant {tenant_id} hourly volume {observed} exceeds 3× baseline ({baseline_vol})",
-                payload={"observed": observed, "baseline": baseline_vol},
-            ))
+            if _volume_is_mock_only(tenant_id):
+                logger.info(
+                    "VT-489: volume_spike for tenant %s suppressed — all outbound "
+                    "sends in the window were mocked (MKDEV); not a real-send spike",
+                    tenant_id,
+                )
+            else:
+                triggers.append(_make_trigger(
+                    tenant_id, "volume_spike",
+                    f"Tenant {tenant_id} hourly volume {observed} exceeds 3× baseline ({baseline_vol})",
+                    payload={"observed": observed, "baseline": baseline_vol},
+                ))
 
     # Error envelope sweep — recent pipeline_steps with the canonical
     # 'error' step_kind (the VT-179 step_kind for error envelopes —

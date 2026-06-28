@@ -144,6 +144,10 @@ def test_dispatch_fans_out_to_ops_and_assigned_vtr(substrate, monkeypatch):
     monkeypatch.setenv("TELEGRAM_OPS_BOT_TOKEN", "ops-token")
     monkeypatch.setenv("TELEGRAM_OPS_CHAT_ID", "OPS-CHAT")
     monkeypatch.delenv("TEAM_CANARY_TENANT_IDS", raising=False)
+    # VT-489 (c): the OPS fan-out is the PROD path. A non-canary tenant only reaches
+    # the ViabeOps OPS channel on EXPECTED_ENV=prod; on dev it is dev-routed (DEV
+    # bot only) so dev/test traffic never pages a real person.
+    monkeypatch.setenv("EXPECTED_ENV", "prod")
     captured = _capture_telegram(monkeypatch)
 
     t = _tenant(substrate)
