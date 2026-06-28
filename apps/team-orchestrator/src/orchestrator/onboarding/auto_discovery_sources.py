@@ -112,20 +112,42 @@ def discover_gbp(
         return SourceResult("gbp", "empty", cost_usd=_GBP_COST_USD)
     place = items[0]
     website = place.get("website") or place.get("url")
+    raw_category = place.get("categoryName")
     fields = {
         k: v
         for k, v in {
             "business_name": place.get("title"),
-            "category": place.get("categoryName"),
+            "category": raw_category,
             "city": place.get("city"),
             "rating": place.get("totalScore"),
             "website": website,
         }.items()
         if v is not None
     }
+    # VT-475 — RECONCILE the business TYPE (don't surface a raw mis-categorized GBP categoryName). The
+    # GBP category is ONE signal; cross-check it against the business's OWN website domain + name (the
+    # GST nature, when verified, refines it via discover_gst later). On a conflict the domain/name wins
+    # (RKeCom: GBP 'Telecommunications' lost to rkecom.in). Fail-soft: never let it break GBP discovery.
+    business_type = _reconcile_type(business_name=place.get("title"), gbp_category=raw_category, website=website)
+    if business_type:
+        fields["business_type"] = business_type
     if fields:
         write_draft(tenant_id, fields, source="gbp")
     return SourceResult("gbp", "ok" if fields else "empty", cost_usd=_GBP_COST_USD, fields=fields, website=website)
+
+
+def _reconcile_type(*, business_name: str | None, gbp_category: str | None, website: str | None) -> str | None:
+    """Reconcile the GBP signals into a Viabe-taxonomy ``business_type`` (VT-475). Best-effort: any
+    failure degrades to None (the draft keeps the raw ``category`` and onboarding still asks)."""
+    try:
+        from orchestrator.onboarding.business_type_reconcile import reconcile_business_type
+
+        return reconcile_business_type(
+            business_name=business_name, gbp_category=gbp_category, website=website
+        ).business_type
+    except Exception:  # noqa: BLE001 — reconciliation is best-effort; never break GBP discovery
+        logger.warning("discover_gbp: business-type reconcile failed (non-terminal)", exc_info=True)
+        return None
 
 
 def discover_gst(

@@ -27,7 +27,11 @@ _MAX_GAPS = 6  # minimal — never a 20-question dump
 _COMPOSE_TIMEOUT_S = 20.0  # bound the gap-compose LLM call (runs on the owner-inbound hot path)
 
 # Draft fields worth an explicit owner confirm (the discovered identity). Bilingual templates below.
-_CONFIRMABLE = ("category", "city", "about")
+# VT-475: ``business_type`` (the RECONCILED Viabe-taxonomy type, auto_discovery_sources) is the
+# business-type confirm — it SUPERSEDES the raw GBP ``category`` (which was the RKeCom mis-category
+# source). When a reconciled business_type is present we confirm THAT, not the raw category (see
+# ``_business_type_confirm`` below); ``category`` remains the fallback when no reconciliation ran.
+_CONFIRMABLE = ("business_type", "category", "city", "about")
 
 
 @dataclass(frozen=True)
@@ -39,8 +43,33 @@ class Question:
     draft_value: Any = None
 
 
+def _business_type_label(key: Any) -> tuple[str, str]:
+    """Resolve a reconciled taxonomy KEY ('services') to its human (en, hi) label for the confirm —
+    the owner sees "Local services", not the machine key. Falls back to the key itself off-taxonomy
+    or if the taxonomy can't load (fail-soft; the confirm step still lets them correct it)."""
+    try:
+        from orchestrator.onboarding.business_type_reconcile import taxonomy_label
+
+        return taxonomy_label(str(key))
+    except Exception:  # noqa: BLE001 — label lookup is cosmetic; never break the question set
+        s = str(key)
+        return s, s
+
+
 def _confirm_question(field: str, value: Any) -> Question:
     v = value
+    if field == "business_type":
+        # VT-475 — confirm the RECONCILED type by its human label (not the machine key, not the raw
+        # mis-categorized GBP category). The confirm UX is UNCHANGED ("is that right?", never asserted)
+        # — only the GUESS shown is the reconciled one.
+        en_label, hi_label = _business_type_label(value)
+        return Question(
+            field="business_type",
+            kind="confirm",
+            prompt_en=f"We found you're a {en_label} business — is that right?",
+            prompt_hi=f"हमें पता चला आप {hi_label} का व्यापार करते हैं — क्या यह सही है?",
+            draft_value=value,
+        )
     templates = {
         "category": (f"We found you're a {v} — is that right?", f"हमें पता चला आप {v} हैं — क्या यह सही है?"),
         "city": (f"And you're based in {v} — correct?", f"और आप {v} में हैं — क्या यह सही है?"),
@@ -64,11 +93,16 @@ def compose_onboarding_questions(
     answered_set = set(answered or [])
 
     # 1. Confirm-the-draft questions FIRST — only for discovered fields the owner hasn't answered.
-    confirms = [
-        _confirm_question(f, draft_attrs[f])
-        for f in _CONFIRMABLE
+    #    VT-475: when a RECONCILED ``business_type`` is present it is the business-type confirm; the raw
+    #    GBP ``category`` (the RKeCom mis-category source) is then SUPPRESSED — we never surface the raw
+    #    field. ``category`` only confirms when no reconciliation produced a business_type.
+    confirmable = [
+        f for f in _CONFIRMABLE
         if f in draft_attrs and draft_attrs[f] not in (None, "", []) and f not in answered_set
     ]
+    if "business_type" in confirmable and "category" in confirmable:
+        confirmable.remove("category")
+    confirms = [_confirm_question(f, draft_attrs[f]) for f in confirmable]
 
     # 2. Gaps — the LLM reasons which required fields THIS business_type still needs, excluding what's
     #    already known (drafted or answered). It returns bilingual question objects.
