@@ -49,6 +49,17 @@ _TOKEN_ENV = "APIFY_API_TOKEN"
 # (query) -> list of result dicts (each may carry a 'description'/'title'/'url' with a GSTIN in text).
 SearchFn = Callable[[str], list[dict[str, Any]]]
 
+# VT-452 LLM-discovery leg: (business_name, city) -> the LLM's free-text answer (one blob), from an
+# Anthropic web_search-tool call over public records. The blob is REGEX-parsed for GSTIN/CIN like the
+# web/SERP legs — the returned GSTINs are CANDIDATES/HINTS only (Sandbox GST verify stays the gate).
+LlmFn = Callable[[str, str], str]
+
+# VT-452: the model + server-side web_search tool for the LLM-discovery leg. claude-opus-4-8 is the
+# canonical bare id (no date suffix); web_search_20260209 is the current dynamic-filtering web_search
+# tool variant for the Opus-4.x family. ANTHROPIC_API_KEY is the env (valid on deployed dev).
+_LLM_DISCOVERY_MODEL = "claude-opus-4-8"
+_WEB_SEARCH_TOOL = {"type": "web_search_20260209", "name": "web_search"}
+
 
 @dataclass(frozen=True)
 class EntityCandidate:
@@ -56,7 +67,7 @@ class EntityCandidate:
     HINT to round-trip through Sandbox — never shown as verified until confirm_and_verify says so."""
 
     trade_name: str | None
-    source: str  # 'web' | 'gbp' | 'registry'
+    source: str  # 'web' | 'gbp' | 'registry' | 'llm' (VT-452 LLM web-search — candidate, never verified)
     candidate_gstin: str | None = None
     legal_name: str | None = None
     detail: str | None = None  # address/category — disambiguates "Sundaram"-class collisions
@@ -70,11 +81,14 @@ def fetch_candidates(
     *,
     search_fn: SearchFn | None = None,
     gbp_fetch_fn: Callable[[dict[str, Any], str], list[dict[str, Any]]] | None = None,
+    llm_fn: LlmFn | None = None,
 ) -> list[EntityCandidate]:
     """Surface 0..N candidates. Web-search leg extracts candidate GSTINs by regex (then Sandbox is the
-    authority); GBP leg adds a trade-name + locality candidate (no GSTIN). Graceful-degrade to [] when
+    authority); GBP leg adds a trade-name + locality candidate (no GSTIN). VT-452: an LLM web-search
+    leg (behind ``llm_discovery_enabled()``, default OFF) surfaces GSTIN/CIN candidates a small-biz
+    SERP misses — HINTs only, the Sandbox GST verify stays the gate. Graceful-degrade to [] when
     creds/actor are absent or the calls fail — entity-match must NEVER stall signup (VT-406 latency
-    flag). Both legs are injectable for tests (no network/creds)."""
+    flag). All legs are injectable for tests (no network/creds)."""
     name = (business_name or "").strip()
     if not name:
         return []
@@ -82,6 +96,11 @@ def fetch_candidates(
     candidates.extend(_web_candidates(name, city, search_fn))
     candidates.extend(_cin_candidates(name, city, search_fn))  # VT-449 registry leg → CIN → MCA
     candidates.extend(_gbp_candidates(name, city, gbp_fetch_fn))
+    # VT-452 LLM web-search leg — gated OFF by default; an injected llm_fn forces it on for tests.
+    from orchestrator.feature_flags import llm_discovery_enabled
+
+    if llm_fn is not None or llm_discovery_enabled():
+        candidates.extend(_llm_candidates(name, city, llm_fn))
     # De-dup by (gstin or cin or trade_name); keep the first seen.
     seen: set[str] = set()
     out: list[EntityCandidate] = []
@@ -222,6 +241,40 @@ def _cin_candidates(name: str, city: str, search_fn: SearchFn | None) -> list[En
                     detail=_clean(r.get("description")),
                 )
             )
+    return out
+
+
+def _llm_candidates(name: str, city: str, llm_fn: LlmFn | None) -> list[EntityCandidate]:
+    """VT-452 LLM web-search leg: ask claude-opus-4-8 (with the server-side web_search tool) to find
+    the GSTIN/CIN/registered name for the business from PUBLIC RECORDS — what Google/ChatGPT surface
+    for a small-biz GSTIN the SERP/Apify legs miss (RKeCom). REUSE the existing GSTIN/CIN regex +
+    relevance filter on the LLM's free-text answer so noise is dropped; the returned GSTINs/CINs are
+    CANDIDATES (source='llm') only — NEVER verified here. They flow into the existing pick → Sandbox
+    GST verify, which stays the SOLE authoritative gate (this leg cannot weaken or bypass it).
+
+    Best-effort + fail-soft: an LLM/network/parse error → [] degrade (like every other leg); the
+    per-result iteration is inside the try so one malformed item never raises into signup. ``llm_fn``
+    (business_name, city) -> the answer blob is injectable for tests (no real LLM / key)."""
+    fn = llm_fn or _default_llm_search
+    sig = _significant_tokens(name)
+    out: list[EntityCandidate] = []
+    try:
+        blob = fn(name, city) or ""
+        if not _result_is_relevant(blob, sig):
+            return []  # the LLM answer doesn't name the queried business → drop (no distinctive token)
+        blob_u = blob.upper()
+        trade = _clean(name)  # the queried name anchors the candidate (the LLM confirms identity, not renames it)
+        for gstin in dict.fromkeys(_GSTIN_RE.findall(blob_u)):  # ordered-unique
+            out.append(
+                EntityCandidate(trade_name=trade, source="llm", candidate_gstin=gstin, detail=_clean(blob))
+            )
+        for cin in dict.fromkeys(_CIN_RE.findall(blob_u)):  # ordered-unique
+            out.append(
+                EntityCandidate(trade_name=trade, source="llm", candidate_cin=cin, detail=_clean(blob))
+            )
+    except Exception:  # noqa: BLE001 — fragile LLM call/parse; degrade, never raise into signup
+        logger.warning("entity_match: LLM discovery leg failed (degrade to none)", exc_info=True)
+        return []
     return out
 
 
@@ -431,6 +484,40 @@ def _default_search(query: str) -> list[dict[str, Any]]:
         for r in page.get("organicResults", []) or []:
             out.append(r)
     return out
+
+
+def _default_llm_search(name: str, city: str) -> str:
+    """VT-452 default LLM-discovery call: claude-opus-4-8 + the server-side web_search tool, asked to
+    find the business's GSTIN/CIN/registered name from PUBLIC RECORDS. Returns the model's final
+    free-text answer (the caller regex-parses GSTIN/CIN out of it). REUSES the existing lazy ``from
+    anthropic import Anthropic`` SDK pattern (auto_discovery_sources/question_brain) — no new client.
+    ANTHROPIC_API_KEY is read by the SDK from env. Server-side web_search runs the search loop on
+    Anthropic's side; we only consume the model's text. Raises on SDK/parse failure → the leg's
+    try/except degrades it to [] (fail-soft)."""
+    from anthropic import Anthropic
+
+    location = f" in {city}" if (city or "").strip() else ""
+    prompt = (
+        f'Search public records on the web and find the GSTIN (Indian GST identification number), '
+        f'CIN (Corporate Identification Number), and the registered/legal business name for the '
+        f'business "{name}"{location}. Use the web_search tool. Report ONLY business-level identity '
+        f"from public records — the GSTIN, CIN, and registered name. Do NOT include any proprietor/"
+        f"director personal details. State each GSTIN and CIN verbatim. If you cannot find them, say so."
+    )
+    resp = Anthropic().messages.create(
+        model=_LLM_DISCOVERY_MODEL,
+        max_tokens=1024,
+        tools=[_WEB_SEARCH_TOOL],
+        messages=[{"role": "user", "content": prompt}],
+    )
+    # Concatenate the model's text blocks (the answer); web_search_tool_result blocks are skipped —
+    # we regex the GSTIN/CIN out of the model's own prose, which restates what it found.
+    parts = [
+        getattr(block, "text", "")
+        for block in (resp.content or [])
+        if getattr(block, "type", None) == "text"
+    ]
+    return " ".join(p for p in parts if p)
 
 
 def _clean(v: Any) -> str | None:

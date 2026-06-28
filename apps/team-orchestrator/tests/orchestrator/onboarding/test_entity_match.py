@@ -209,6 +209,88 @@ def test_verify_gstin_tenantless_vendor_down_fail_closed() -> None:
     assert out["ok"] is False and out["reason"] == "vendor_down"
 
 
+_LLM_CIN = "U52609MH2020OPC344309"
+
+
+def test_vt452_llm_leg_parses_gstin_cin_name_as_candidates() -> None:
+    """VT-452: the LLM web-search leg regex-parses GSTIN + CIN out of the (mocked) LLM answer and
+    returns them as source='llm' CANDIDATES — never verified (status stays unverified; no Sandbox here).
+    An injected llm_fn forces the leg on regardless of the flag."""
+    def llm_fn(name: str, city: str) -> str:
+        assert "RKeCom" in name and city == "Mumbai"
+        return (
+            f"From public records, RKeCom Services has GSTIN {_VALID_GSTIN} and "
+            f"CIN {_LLM_CIN}, registered as RKECOM SERVICES (OPC) PRIVATE LIMITED."
+        )
+
+    cands = entity_match.fetch_candidates(
+        "RKeCom Services Pvt Ltd", "Mumbai", search_fn=lambda _q: [], gbp_fetch_fn=lambda *_: [], llm_fn=llm_fn
+    )
+    llm = [c for c in cands if c.source == "llm"]
+    assert _VALID_GSTIN in [c.candidate_gstin for c in llm]
+    assert _LLM_CIN in [c.candidate_cin for c in llm]
+    # HINT-only invariant: the candidate carries NO verified flag/status — verification is the
+    # Sandbox gate's job (confirm_and_verify), which this leg never touches.
+    for c in llm:
+        assert c.trade_name == "RKeCom Services Pvt Ltd"
+        assert not hasattr(c, "verified")  # EntityCandidate has no verified field — it is never "verified"
+
+
+def test_vt452_llm_leg_degrades_to_empty_on_failure() -> None:
+    # An LLM/network error in the leg → [] (fail-soft, like the other legs); never raises into signup.
+    def boom(_n: str, _c: str) -> str:
+        raise RuntimeError("anthropic down")
+
+    cands = entity_match.fetch_candidates(
+        "RKeCom Services Pvt Ltd", "Mumbai", search_fn=lambda _q: [], gbp_fetch_fn=lambda *_: [], llm_fn=boom
+    )
+    assert cands == []  # web/gbp empty + llm degraded
+
+
+def test_vt452_llm_leg_drops_irrelevant_answer() -> None:
+    # The LLM answer doesn't name the queried business (no distinctive token) → REUSE the relevance
+    # filter to drop it, even though it contains a valid-format GSTIN (it's a different business).
+    def llm_fn(_n: str, _c: str) -> str:
+        return f"Shubham Telecom Services has GSTIN {_OTHER_GSTIN}."
+
+    cands = entity_match.fetch_candidates(
+        "RKeCom Services Pvt Ltd", "Mumbai", search_fn=lambda _q: [], gbp_fetch_fn=lambda *_: [], llm_fn=llm_fn
+    )
+    assert [c for c in cands if c.source == "llm"] == []  # no 'rkecom' token → dropped as noise
+
+
+def test_vt452_llm_leg_flag_gated_off_by_default(monkeypatch) -> None:
+    # With NO injected llm_fn and the flag OFF (default), the leg is NOT called — _default_llm_search
+    # never runs (so no real LLM/key needed in the unit env). Only web/gbp legs contribute.
+    called = {"n": 0}
+    monkeypatch.setattr(
+        entity_match, "_default_llm_search", lambda n, c: called.__setitem__("n", called["n"] + 1) or ""
+    )
+    from orchestrator import feature_flags
+
+    monkeypatch.setattr(feature_flags, "llm_discovery_enabled", lambda: False)
+    cands = entity_match.fetch_candidates(
+        "RKeCom Services Pvt Ltd", "Mumbai", search_fn=lambda _q: [], gbp_fetch_fn=lambda *_: []
+    )
+    assert called["n"] == 0  # flag off + no injected fn → leg skipped, default never invoked
+    assert [c for c in cands if c.source == "llm"] == []
+
+
+def test_vt452_llm_leg_flag_gated_on_calls_default(monkeypatch) -> None:
+    # With the flag ON and no injected fn, the leg calls the default LLM search (here mocked).
+    from orchestrator import feature_flags
+
+    monkeypatch.setattr(feature_flags, "llm_discovery_enabled", lambda: True)
+    monkeypatch.setattr(
+        entity_match, "_default_llm_search", lambda n, c: f"{n} has GSTIN {_VALID_GSTIN}."
+    )
+    cands = entity_match.fetch_candidates(
+        "RKeCom Services Pvt Ltd", "Mumbai", search_fn=lambda _q: [], gbp_fetch_fn=lambda *_: []
+    )
+    llm = [c for c in cands if c.source == "llm"]
+    assert len(llm) == 1 and llm[0].candidate_gstin == _VALID_GSTIN
+
+
 def test_vt455_generic_biz_token_not_distinctive() -> None:
     """VT-455: short business-filler ('biz', 'ventures', 'global', 'mart', …) must NOT count as a
     distinctive token — a gibberish name sharing only 'biz' must NOT match unrelated '…biz…' rows."""

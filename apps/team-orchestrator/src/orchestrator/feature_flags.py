@@ -22,3 +22,13 @@ def sandbox_mca_enabled() -> bool:
 def pan_identify_enabled() -> bool:
     """VT-448 PAN→GSTIN identify. Default OFF — the owner enters the GSTIN manually (the reliable path)."""
     return _on("ENABLE_PAN_IDENTIFY")
+
+
+def llm_discovery_enabled() -> bool:
+    """VT-452 LLM web-search discovery leg in entity_match.fetch_candidates. An Anthropic
+    ``claude-opus-4-8`` call with the server-side web_search tool surfaces GSTIN/CIN/name CANDIDATES
+    (HINTs only) from public records — what Google/ChatGPT find for a small-biz GSTIN the SERP leg
+    misses (RKeCom). Default OFF until blessed; dev-enableable via ``ENABLE_LLM_DISCOVERY``. The
+    returned GSTINs are NEVER trusted — they flow into the existing pick → Sandbox GST verify, which
+    stays the sole authoritative gate (the leg cannot weaken or bypass it)."""
+    return _on("ENABLE_LLM_DISCOVERY")
