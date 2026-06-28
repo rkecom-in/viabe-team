@@ -503,13 +503,43 @@ def _opener() -> dict[str, Any]:
     }
 
 
+# VT-479: the interactive quick-reply Content object (Yes/No/Skip buttons) for confirm questions.
+# Registered in twilio_templates.yaml (NO hardcoded SID — resolved at send time). In-session use needs
+# NO Meta approval. The journey ONLY sends in RESPONSE to an owner inbound, so the 24h window is open by
+# construction → buttons are always deliverable here (no separate window check needed).
+_CONFIRM_BUTTONS_TEMPLATE = "onboarding_confirm_yesno"
+
+
 def _send(recipient: str | None, q: dict[str, Any], lang: str) -> None:
-    """Best-effort owner send of one question (WABA-gated/stubbed — never crash the pipeline)."""
+    """Best-effort owner send of one question (WABA-gated/stubbed — never crash the pipeline).
+
+    VT-479: a CONFIRM question is sent as tappable Yes/No/Skip quick-reply BUTTONS (in-session
+    interactive Content object) — the button title ("Yes"/"No"/"Skip") flows back as the inbound Body
+    and matches the EXISTING _YES/_NO/_SKIP token sets in handle_reply, so no answer-parse change is
+    needed; buttons just remove the brittle free-text "yes" reliance. Any failure (no SID resolved /
+    WABA / transport) falls back to the plain freeform text — the journey never breaks on presentation.
+    Non-confirm questions stay plain freeform text.
+    """
     if not recipient:
         return
     text = q.get("prompt_hi") if lang == "hi" else q.get("prompt_en")
     if not text:
         return
+    # CONFIRM → try interactive Yes/No/Skip buttons first; fall back to plain text on any failure.
+    if q.get("kind") == "confirm":
+        try:
+            from orchestrator.templates_registry import content_sid_for
+            from orchestrator.utils.twilio_send import send_interactive_message
+
+            content_sid = content_sid_for(_CONFIRM_BUTTONS_TEMPLATE, "en")
+            if content_sid:
+                # {{1}} = the question text (the reconciled confirm prompt); buttons are fixed Yes/No/Skip.
+                send_interactive_message(content_sid, recipient, content_variables={"1": text})
+                return
+        except Exception:  # noqa: BLE001 — buttons are an enhancement; fall through to plain text
+            logger.warning(
+                "journey: interactive confirm-button send failed — falling back to freeform text"
+            )
     try:
         from orchestrator.utils.twilio_send import send_freeform_message
 

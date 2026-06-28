@@ -459,3 +459,56 @@ def send_freeform_message(
         message.sid,
     )
     return message.sid
+
+
+def send_interactive_message(
+    content_sid: str,
+    recipient_phone: str,
+    *,
+    content_variables: dict[str, Any] | None = None,
+    is_customer_session: bool = False,
+) -> str:
+    """Send an interactive WhatsApp message (quick-reply buttons / list-picker / card) IN-SESSION (VT-479).
+
+    Sends a pre-created Twilio Content object (an ``HX…`` content_sid) as a session message — the
+    SAME ``messages.create(content_sid=…)`` mechanism ``send_template_message`` uses, but for the
+    IN-WINDOW (≤24h) free-form path: an interactive content type sent inside the open customer-care
+    window needs NO Meta template approval (twilio-quick-reply: ≤3 buttons in-session). The Content
+    OBJECT must already exist (created once via the Content API; Twilio-side registration, not Meta
+    whitelisting) — that's why the caller passes a content_sid, not inline buttons (``messages.create``
+    has no inline-interactive parameter; interactive types are deliverable only via a Content object).
+
+    Funnels through ``_client()`` like every other send, so the VT-476 dev send-guard AND
+    ``TEAM_TWILIO_MOCK_MODE`` apply unchanged (a dev send to a non-allowlisted number is MOCKED;
+    nothing escapes). ``is_customer_session`` gates a customer interactive send through the VT-460
+    transport choke exactly as the freeform path does; the default (False) is an OWNER send
+    (onboarding-journey questions) — exempt, unchanged.
+
+    Returns the Twilio message SID. Raises TwilioRestException on a 4xx/5xx (no swallow — the caller
+    decides the fallback; ``journey._send`` falls back to plain freeform text on any send failure).
+    """
+    recipient_token = hash_phone(recipient_phone)
+    _assert_gated_if_customer(
+        is_customer=is_customer_session,
+        template_name="<interactive_session>",
+        recipient_token=recipient_token,
+    )
+    create_kwargs: dict[str, Any] = {
+        "content_sid": content_sid,
+        "from_": _wa(os.environ["TEAM_TWILIO_FROM_NUMBER"]),
+        "to": _wa(recipient_phone),
+    }
+    if content_variables:
+        create_kwargs["content_variables"] = json.dumps(content_variables)
+    logger.info(
+        "twilio-send: interactive content_sid=%s -> %s",
+        content_sid,
+        recipient_token,
+    )
+    message = _client().messages.create(**create_kwargs)
+    logger.info(
+        "twilio-send: interactive sent -> %s (sid=%s)",
+        recipient_token,
+        message.sid,
+    )
+    return message.sid
