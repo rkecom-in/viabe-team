@@ -80,6 +80,9 @@ def test_discover_gbp_ok_maps_fields_and_writes_draft(draft_spy, monkeypatch):
         "city": "Jaipur",
         "rating": 4.6,
         "website": "https://sharmasweets.example",
+        # VT-475: the GBP category 'Sweet shop' + name 'Sharma Sweets' reconcile to the 'sweets'
+        # taxonomy key, written alongside the raw category (which is kept for transparency).
+        "business_type": "sweets",
     }
     # the seed name+city built the search query, token threaded through
     assert captured["token"] == "tok-test"

@@ -60,3 +60,32 @@ def test_empty_draft_no_confirms():
     qs = compose_onboarding_questions("apparel", None, answered=[], llm_fn=_gaps("category", "city"))
     assert all(q.kind == "gap" for q in qs)
     assert isinstance(qs[0], Question)
+
+
+# --------------------------------------------------------------------------- VT-475 wiring
+
+
+def test_reconciled_business_type_confirm_supersedes_raw_category():
+    """VT-475: when the draft carries a RECONCILED business_type, the confirm shows it (by human
+    label) and the raw GBP ``category`` (the RKeCom mis-category source) is SUPPRESSED — never asked
+    twice, never surfaced raw."""
+    draft = {"attributes": {"business_type": "services", "category": "Telecommunications service provider"},
+             "provenance": {}}
+    qs = compose_onboarding_questions("services", draft, answered=[], llm_fn=_gaps())
+    confirm_fields = [q.field for q in qs if q.kind == "confirm"]
+    assert "business_type" in confirm_fields
+    assert "category" not in confirm_fields  # raw mis-category NOT surfaced when reconciled type exists
+    bt_q = next(q for q in qs if q.field == "business_type")
+    # the confirm shows the human label, NOT the machine key, and NEVER the telecom mis-category text
+    assert "Telecommunications" not in bt_q.prompt_en
+    assert "is that right?" in bt_q.prompt_en  # confirm UX unchanged
+    assert bt_q.prompt_hi  # bilingual
+
+
+def test_raw_category_still_confirms_when_no_reconciled_type():
+    """Back-compat: a draft with only the raw ``category`` (no reconciliation ran) still confirms it
+    — the reconciled type is additive, not a hard dependency."""
+    draft = {"attributes": {"category": "bookstore"}, "provenance": {}}
+    qs = compose_onboarding_questions("book_stationery", draft, answered=[], llm_fn=_gaps())
+    confirm_fields = [q.field for q in qs if q.kind == "confirm"]
+    assert "category" in confirm_fields
