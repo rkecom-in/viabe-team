@@ -106,19 +106,28 @@ def _journey_row(dsn: str, tenant_id: UUID) -> dict[str, Any] | None:
 
 @pytest.fixture
 def send_spy(monkeypatch):  # type: ignore[no-untyped-def]
-    """Monkeypatch ``send_freeform_message`` to a no-op spy. ``journey._send``
-    imports it at call time (``from orchestrator.utils.twilio_send import
-    send_freeform_message``), so patching the module attribute intercepts it.
-    Returns the list of (body, recipient) calls."""
+    """Monkeypatch BOTH owner-send paths ``journey._send`` may take to a no-op spy. ``journey._send``
+    imports them at call time, so patching the module attributes intercepts them. Returns the list of
+    (text, recipient) calls — VT-479: a CONFIRM question now sends via ``send_interactive_message``
+    (Yes/No/Skip buttons), a gap/re-present via ``send_freeform_message``; the spy NORMALIZES both to
+    (question_text, recipient) so the existing assertions ("the question was sent") hold for either path.
+    """
     from orchestrator.utils import twilio_send
 
     calls: list[tuple[str, str]] = []
 
-    def _spy(body: str, recipient_phone: str) -> str:
+    def _freeform_spy(body: str, recipient_phone: str, **_kw) -> str:
         calls.append((body, recipient_phone))
         return "SM" + "0" * 32
 
-    monkeypatch.setattr(twilio_send, "send_freeform_message", _spy)
+    def _interactive_spy(content_sid: str, recipient_phone: str, *, content_variables=None, **_kw) -> str:
+        # VT-479: the confirm question text is content_variables["1"]; normalize to (text, recipient).
+        text = (content_variables or {}).get("1", "")
+        calls.append((text, recipient_phone))
+        return "SM" + "0" * 32
+
+    monkeypatch.setattr(twilio_send, "send_freeform_message", _freeform_spy)
+    monkeypatch.setattr(twilio_send, "send_interactive_message", _interactive_spy)
     return calls
 
 

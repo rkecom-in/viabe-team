@@ -183,6 +183,21 @@ Hi {{1}}, I couldn't send this week's campaign: {{2}} of the targeted customers 
 
 ---
 
+### `onboarding_confirm_yesno`  *(VT-479 — INTERACTIVE in-session quick-reply buttons; NOT a Meta-approved 24h-window template)*
+
+- **Twilio Content SID:** `HX60ace8008b02439ca0db444dee6327d2` (en)
+- **Content type:** `twilio/quick-reply` (Yes / No / Skip buttons) · **Approval:** NONE NEEDED — in-session interactive content (≤3 buttons) does not require Meta template approval; this HX is a Twilio Content-API registration only (created by CC on the dev account).
+- **Sent by:** `onboarding/journey._send` for a CONFIRM question, via `twilio_send.send_interactive_message` (NOT `send_template_message`). The journey only sends in response to an owner inbound → the 24h session window is open by construction.
+- **Variables:** `{{1}}` = the confirm question text (the reconciled prompt, e.g. "We found you're a Local services business — is that right?").
+- **Button `id` payloads:** `confirm_yes` / `confirm_no` / `confirm_skip`. The button TITLE ("Yes"/"No"/"Skip") flows back as the inbound `Body` and matches the existing `_YES`/`_NO`/`_SKIP` token sets in `handle_reply` — so no answer-parse change was needed; buttons just remove the brittle free-text "yes" reliance (the VT-477 root). Falls back to plain freeform text on any send failure.
+
+```
+{{1}}
+[ Yes ]  [ No ]  [ Skip ]
+```
+
+---
+
 ## Implications for code
 
 When code in `apps/team-orchestrator/` starts sending WhatsApp messages (currently only the orchestrator + supervisor + SR-Agent skeleton exist; output composer VT-30 is Backlog), it needs:

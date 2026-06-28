@@ -50,6 +50,21 @@ team_welcome2:
     en: HX65602e94b48bb2d6e82c70630d01da20
     hi: HXa2e1bcb65189ed25ec1f6b92d9458108
 
+onboarding_confirm_yesno:
+  # VT-479: an INTERACTIVE quick-reply Content object (twilio/quick-reply, Yes/No/Skip buttons) the
+  # onboarding journey sends IN-SESSION (≤24h window) so a confirm question is a tappable button, not
+  # a free-text "yes" parse. NOT a Meta-approved 24h-window template — in-session interactive content
+  # needs NO Meta approval (≤3 buttons); the HX is a Twilio Content-API registration only. Variable
+  # {{1}} = the confirm question text. Button `id` payloads: confirm_yes / confirm_no / confirm_skip
+  # (the journey reads the inbound ButtonPayload as the answer). Sent via send_interactive_message,
+  # NOT send_template_message. OWNER-facing (onboarding).
+  audience: owner
+  agent_selectable: false
+  variables:
+    - question_text
+  languages:
+    en: HX60ace8008b02439ca0db444dee6327d2
+
 team_weekly_approval:
   audience: customer
   agent_selectable: true
