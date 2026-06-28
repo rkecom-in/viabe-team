@@ -39,9 +39,11 @@ from typing import Any, cast
 from uuid import UUID
 
 from langchain.agents import AgentState, create_agent
+from langchain.agents.middleware import wrap_tool_call
 from langchain_anthropic import ChatAnthropic
-from langchain_core.messages import SystemMessage
+from langchain_core.messages import SystemMessage, ToolMessage
 from langchain_core.tools import BaseTool, tool
+from langgraph.errors import GraphBubbleUp
 
 from orchestrator.agent.tools.compose_output import compose_owner_output_tool
 from orchestrator.observability.decorators import tool_step
@@ -294,6 +296,62 @@ class OrchestratorAgentState(AgentState, total=False):
     trigger_reason: TriggerReason | None
 
 
+# ---------------------------------------------------------------------------
+# VT-484 — tool-error recovery middleware (LAUNCH-BLOCKER robustness fix).
+#
+# THE DEFECT it fixes: a tool/spawn that RAISES orphans its ``tool_use`` block.
+# langchain's ``create_agent`` ToolNode defaults to ``_default_handle_tool_errors``,
+# which RE-RAISES every non-``ToolInvocationError`` exception (it only swallows
+# arg/validation errors). A re-raised tool error escapes the ToolNode WITHOUT
+# emitting a ``tool_result`` for that ``tool_use`` id → the conversation is now
+# Anthropic-invalid → the NEXT model call returns 400 ``tool_use ids were found
+# without tool_result blocks`` → the brain run HANGS at ``status='running'`` and
+# never reaches the next tool / a specialist spawn (e.g. spawn_sales_recovery).
+#
+# This is GENERAL: ANY tool that raises hangs the run, not just integration. The
+# live win-back drive hit it via a spawn whose handoff builder raised; VT-483
+# patched ONE tool (``record_business_objective``) to return an error dict, but
+# that does not generalise — this middleware does.
+#
+# THE FIX: wrap every tool call so a raised exception is turned into an ERROR
+# ``ToolMessage`` carrying the SAME ``tool_call_id`` — a valid ``tool_result``.
+# The conversation stays Anthropic-valid; the brain reads the error and either
+# recovers (re-routes / picks another tool) or terminates cleanly. No orphan.
+#
+# ``GraphBubbleUp`` (the base of ``GraphInterrupt`` raised by the owner-approval
+# ``interrupt()`` and of subgraph-control signals) is RE-RAISED unchanged —
+# catching it would break the Pillar-7 approval pause. This mirrors the ToolNode's
+# own ``except GraphBubbleUp: raise`` carve-out. Spawn handoffs that RETURN a
+# ``Command(goto=...)`` are unaffected: they return normally, never raise here.
+@wrap_tool_call
+def _tool_error_to_tool_result(request: Any, handler: Any) -> Any:
+    """Turn a raised tool error into an error ``ToolMessage`` (VT-484).
+
+    Keeps the ``tool_use``/``tool_result`` pairing intact so a raising tool can
+    never orphan its ``tool_use`` and 400 the next Anthropic call. ``GraphBubbleUp``
+    (interrupts / subgraph control) propagates unchanged.
+    """
+    try:
+        return handler(request)
+    except GraphBubbleUp:
+        # The owner-approval interrupt() + subgraph-control signals MUST bubble.
+        raise
+    except Exception as exc:  # noqa: BLE001 — convert ANY tool error to a tool_result
+        tool_call = request.tool_call
+        logger.warning(
+            "orchestrator_agent: tool %r raised; emitting error tool_result "
+            "(VT-484 — preventing orphaned tool_use / 400 hang): %s",
+            tool_call.get("name"),
+            type(exc).__name__,
+        )
+        return ToolMessage(
+            content=f"Error executing tool {tool_call.get('name')!r}: {exc!r}",
+            name=tool_call.get("name"),
+            tool_call_id=tool_call["id"],
+            status="error",
+        )
+
+
 def build_orchestrator_agent(
     model: ChatAnthropic,
     *,
@@ -327,6 +385,10 @@ def build_orchestrator_agent(
         system_prompt=ORCHESTRATOR_AGENT_SYSTEM_MESSAGE,
         name="orchestrator_agent",
         state_schema=OrchestratorAgentState,
+        # VT-484: a raised tool/spawn must STILL emit a tool_result (error) so the
+        # tool_use is never orphaned (no 400 "tool_use without tool_result" → no
+        # hang at status='running'). This is the launch-blocker robustness fix.
+        middleware=[_tool_error_to_tool_result],
     )
 
 

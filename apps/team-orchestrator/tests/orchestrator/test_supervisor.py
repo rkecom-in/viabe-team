@@ -680,6 +680,93 @@ def test_supervisor_graph_spawn_vs_no_spawn_precedence(
     )
 
 
+# --- VT-484: a raised spawn no longer orphans tool_use / hangs the run --------
+
+
+def test_supervisor_raised_spawn_recovers_no_hang(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """VT-484 (a) — the LAUNCH-BLOCKER robustness fix, at the supervisor seam.
+
+    Reproduces the live win-back hang: the orchestrator fires a spawn tool whose
+    body RAISES (here ``spawn_integration``, whose ``_build_integration_update``
+    raises ``TenantIsolationError`` when ``run_id`` is absent from state — the
+    same class of in-tool raise the live drive hit). Before VT-484 this orphaned
+    the ``spawn_integration`` tool_use → the next Anthropic call would 400 →
+    the run hung at ``status='running'``, never reaching a terminal node.
+
+    With the VT-484 middleware the raised spawn becomes an ERROR ``ToolMessage``
+    (a valid tool_result), so the brain loop continues: the canned follow-up
+    AIMessage (no tool_call) routes to ``orchestrator_terminal`` and the graph
+    REACHES A TERMINAL STATE — proof the run recovered instead of hanging.
+
+    Keyless: a ToolBindableFake drives the model layer; the real
+    build_supervisor_graph / create_agent / ToolNode / VT-484 middleware run.
+    """
+    import orchestrator.supervisor as supervisor_mod
+
+    # Neutralise the DB-backed downstream nodes (parity with _run_supervisor_path);
+    # this test never reaches the specialist on the recovery path, but keep the
+    # graph pure-Python regardless.
+    monkeypatch.setattr(supervisor_mod, "collapse_node", lambda state: {})
+    monkeypatch.setattr(
+        supervisor_mod, "_sales_recovery_node", lambda state: {}
+    )
+
+    canned = [
+        # The orchestrator fires spawn_integration. With run_id ABSENT from
+        # initial state, _build_integration_update raises TenantIsolationError
+        # inside the tool body.
+        AIMessage(
+            content="",
+            tool_calls=[{"name": "spawn_integration", "args": {}, "id": "tc-int"}],
+        ),
+        # After the middleware turns the raise into an error tool_result, the
+        # brain continues; this no-tool_call AIMessage terminates the orchestrator
+        # → route_after_orchestrator returns 'terminal'.
+        AIMessage(content="Couldn't start that — let's try another way."),
+        AIMessage(content="cushion"),
+    ]
+
+    fake = ToolBindableFake(messages=iter(canned))
+    graph = build_supervisor_graph(model=fake)
+
+    trace: list[str] = []
+    final_state: dict[str, Any] = {}
+    # run_id DELIBERATELY OMITTED so the spawn builder raises (the in-tool raise
+    # under test). tenant_id present so the raise is a clean TenantIsolationError.
+    initial = {
+        "messages": [{"role": "user", "content": "connect my data"}],
+        "tenant_id": uuid4(),
+    }
+    for mode, chunk in graph.stream(initial, stream_mode=["updates", "values"]):
+        if mode == "updates":
+            trace.extend(chunk.keys())
+        elif mode == "values":
+            final_state = chunk
+
+    msgs = final_state.get("messages", [])
+    # 1. No orphan: the spawn_integration tool_use got an error tool_result.
+    from langchain_core.messages import ToolMessage
+
+    int_results = [
+        m
+        for m in msgs
+        if isinstance(m, ToolMessage) and getattr(m, "tool_call_id", None) == "tc-int"
+    ]
+    assert int_results, (
+        "spawn_integration raised but produced NO tool_result — tool_use 'tc-int' "
+        f"is orphaned (would 400 + hang). trace={trace}"
+    )
+    assert int_results[0].status == "error"
+    # 2. The run RECOVERED to a terminal node (did not hang). The no-spawn
+    # follow-up routed to orchestrator_terminal.
+    assert "orchestrator_terminal" in trace, (
+        f"run did not reach a terminal node after the raised spawn; trace={trace}"
+    )
+    assert final_state.get("terminated_without_spawn") is True
+
+
 # --- Exec-6.85: Context Composer bundle wire-through (keyless) ----------------
 
 
