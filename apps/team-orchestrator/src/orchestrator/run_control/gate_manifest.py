@@ -34,6 +34,11 @@ GATE_MODULES: frozenset[str] = frozenset(
         "orchestrator.agent.tools.request_owner_approval",
         "orchestrator.agent.approval_resume",
         "orchestrator.agents.approval_glue",
+        # Business-impact approval choke (VT-467): the SPEND/COMMITMENT/CONFIG gate that
+        # arms an owner-approval pause for a consequential action — the same Pillar-7
+        # interrupt/resume path customer-send uses. A gate run-control must never make
+        # controllable (its 'approval arming' surface mirrors the customer-send choke).
+        "orchestrator.agents.business_impact_choke",
         # Consent / compliance surfaces (I6 pause-exempt fast paths + lawful-basis
         # capture). The opt-out/DSR direct handlers are listed so no future registry
         # entry can ever make a compliance path holdable.
