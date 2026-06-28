@@ -72,6 +72,7 @@ def propose_spend(
     amount_paise: int,
     *,
     label: str = "spend",
+    enforce_policy: bool = False,
     conn: Any = None,
     send_fn: Any | None = None,
     dry_run: bool = False,
@@ -83,9 +84,19 @@ def propose_spend(
     (``arm_business_action_approval``); the effect does NOT run until the owner approves (a separate
     resume path the lanes wire — out of VT-467 scope). Never raises for a gate decision; the
     transport guard raises only on a structural bypass.
+
+    VT-474 A2: ``enforce_policy`` passes the spend magnitude as the policy ``action_attrs`` so the
+    OUTER policy bound (SPEND must be an allowed action type AND within the policy spend ceiling) runs
+    BEFORE the per-class autonomy tier. An out-of-policy spend is forced to owner approval regardless
+    of the tier (the brain cannot tier its way past the ceiling). Default False keeps the VT-467 proof
+    (tier-only) unchanged; the lanes opt in once the policy grant exists.
     """
+    action_attrs = (
+        {"magnitude_minor": amount_paise} if enforce_policy else None
+    )
     gate = assert_or_gate_business_action(
-        tenant_id, BusinessImpactClass.SPEND, amount_paise, conn=conn
+        tenant_id, BusinessImpactClass.SPEND, amount_paise,
+        action_attrs=action_attrs, conn=conn,
     )
 
     if gate.requires_owner_approval:

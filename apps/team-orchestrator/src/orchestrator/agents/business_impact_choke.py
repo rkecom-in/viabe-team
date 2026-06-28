@@ -263,6 +263,7 @@ def assert_or_gate_business_action(
     action_class: BusinessImpactClass | str,
     magnitude_minor: int,
     *,
+    action_attrs: dict[str, Any] | None = None,
     conn: Any = None,
 ) -> BusinessActionGate:
     """THE entry gate every consequential business-impact action MUST pass before its effect.
@@ -275,7 +276,43 @@ def assert_or_gate_business_action(
 
     The brain/specialist has NO code path to execute a consequential action except via this gate +
     the ``business_action_context`` choke — the structural mirror of VT-460.
+
+    VT-474 A2 — the OUTER policy bound. When the caller supplies ``action_attrs`` (the intent's
+    machine-checkable fields — segment / magnitude / freq-cap-key+count), this gate FIRST runs the
+    deterministic ``assert_within_policy`` bound-check. An OUT_OF_POLICY action is forced to
+    REQUIRES_OWNER_APPROVAL **regardless of the magnitude tier** — the brain cannot tier/threshold its
+    way past the owner's policy (allowed action-types / segments / spend ceiling / freq caps). The
+    policy check is the OUTER bound; the per-class autonomy tier is the INNER autonomous-vs-approval
+    decay BENEATH it. ``action_attrs`` omitted ⇒ tier-only (unchanged) — the policy is enforced where
+    the action path provides the intent attrs (the real consequential callers do; a tier-only
+    diagnostic call is unaffected). The policy short-circuit is fail-CLOSED: no policy row → every
+    attrs-bearing action is OUT_OF_POLICY → owner approval.
     """
+    if action_attrs is not None:
+        from orchestrator.agents.business_policy import assert_within_policy
+
+        check = assert_within_policy(tenant_id, action_class, action_attrs, conn=conn)
+        if check.out_of_policy:
+            # Out-of-policy is forced to owner approval irrespective of tier/magnitude (A2: the brain
+            # cannot reason itself out of policy). Carry the policy reason so the owner-approval ask +
+            # the audit log record WHICH bound was breached.
+            ac = action_class.value if isinstance(action_class, BusinessImpactClass) else str(action_class)
+            state = get_business_autonomy(tenant_id, action_class, conn=conn)
+            gate = BusinessActionGate(
+                decision=BusinessActionDecision.REQUIRES_OWNER_APPROVAL,
+                reason=f"out_of_policy:{check.reason}",
+                action_class=ac,
+                magnitude_minor=magnitude_minor,
+                tier=state.tier,
+            )
+            logger.info(
+                "business_impact_choke: gate tenant=%s class=%s magnitude_minor=%d tier=%s "
+                "decision=%s reason=%s (policy-bound)",
+                str(tenant_id), gate.action_class, gate.magnitude_minor, gate.tier,
+                gate.decision.value, gate.reason,
+            )
+            return gate
+
     state = get_business_autonomy(tenant_id, action_class, conn=conn)
     gate = decide_business_action(state, magnitude_minor)
     logger.info(
