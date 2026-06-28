@@ -36,8 +36,14 @@ from orchestrator.auth.prod_safety import (  # noqa: E402
 )
 
 # The flags the guard must cover. Kept here as an explicit, independent list so the
-# test fails loudly if the guarded set drifts from VT-434's intent.
-_DANGEROUS_FLAGS = ("TEAM_TWILIO_VERIFY_MOCK_MODE", "TEAM_TWILIO_MOCK_MODE")
+# test fails loudly if the guarded set drifts from VT-434's intent. VT-457 added the
+# GST-verify mock (a dev fixture that approves the e2e GSTIN → identity-gate bypass in
+# prod), so it joins the two send/auth mocks the guard must forbid under EXPECTED_ENV=prod.
+_DANGEROUS_FLAGS = (
+    "TEAM_TWILIO_VERIFY_MOCK_MODE",
+    "TEAM_TWILIO_MOCK_MODE",
+    "TEAM_SANDBOX_GST_MOCK_MODE",
+)
 
 
 @pytest.fixture(autouse=True)
