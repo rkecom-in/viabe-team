@@ -353,6 +353,92 @@ def test_handle_reply_skip_adds_to_skipped(substrate):  # type: ignore[no-untype
     assert "peak_days" in g["skipped"], "Hindi/Hinglish skip token must be recognised"
 
 
+def test_handle_reply_bare_greeting_mid_confirm_not_recorded(substrate):  # type: ignore[no-untyped-def]
+    """THE live bug: a bare greeting ("Hi") to a CONFIRM question must NOT be recorded as the answer
+    and must NOT advance the cursor — the question is re-presented (re_present) instead, with the
+    field untouched so the owner can still answer it. ("Hi" became the category in the live DB.)"""
+    from orchestrator.onboarding import journey
+
+    tenant = _new_tenant(substrate.dsn, name="greeting mid-confirm")
+    journey.start_journey(
+        tenant, [_confirm_q("category", "restaurant"), _confirm_q("city", "Mumbai")]
+    )
+
+    r = journey.handle_reply(tenant, "Hi", "SM-greet-1")
+
+    # Re-presented, not advanced, not recorded.
+    assert r["done"] is False
+    assert r.get("re_present") is True, "a bare greeting must re-present the pending question"
+    # The re-present re-asks the SAME confirm Q (the _confirm_q helper's template), greet-back prepended.
+    assert "category: restaurant" in r["reply_en"], "the re-present must re-ask the SAME confirm Q"
+    assert r["reply_en"].lower().startswith("hi!"), "the re-present greets back conversationally"
+
+    g = journey.get_journey(tenant)
+    assert g is not None
+    assert g["cursor"] == 0, "a greeting must NOT advance the cursor"
+    assert "category" not in g["answers"], "a greeting must NOT be recorded as the category answer"
+    assert g["answers"] == {}, f"no answer may be recorded for a greeting; got {g['answers']!r}"
+    # The canonical profile is untouched (no confirm_draft fired on a greeting).
+    assert _canonical_profile_attributes(substrate.dsn, tenant) is None
+
+    # A real answer on the NEXT (new-sid) inbound still works — the cursor contract is intact.
+    journey.handle_reply(tenant, "yes", "SM-greet-2")
+    g = journey.get_journey(tenant)
+    assert g is not None and g["cursor"] == 1
+    assert g["answers"].get("category") == "restaurant", "a real 'yes' after a greeting still confirms"
+
+
+def test_handle_reply_bare_greeting_mid_gap_not_recorded(substrate):  # type: ignore[no-untyped-def]
+    """A bare greeting ("namaste") to a GAP question is likewise re-presented, not stored as the value
+    — a greeting is never an answer, regardless of question kind."""
+    from orchestrator.onboarding import journey
+
+    tenant = _new_tenant(substrate.dsn, name="greeting mid-gap")
+    journey.start_journey(tenant, [_gap_q("operating_hours"), _gap_q("price_range")])
+
+    r = journey.handle_reply(tenant, "namaste", "SM-greet-gap-1")
+    assert r.get("re_present") is True
+    g = journey.get_journey(tenant)
+    assert g is not None
+    assert g["cursor"] == 0, "a greeting must NOT advance the cursor on a gap question"
+    assert "operating_hours" not in g["answers"], "a greeting is not a gap answer"
+
+
+def test_handle_reply_bare_no_to_confirm_not_recorded_as_value(substrate):  # type: ignore[no-untyped-def]
+    """A bare negative ("no") to a CONFIRM is NOT a value (a city isn't named "no") — it re-presents
+    so the owner supplies the correct value, rather than recording "no" verbatim. A real CORRECTION
+    ("Actually Bengaluru") is still a valid answer (covered by the correction test)."""
+    from orchestrator.onboarding import journey
+
+    tenant = _new_tenant(substrate.dsn, name="bare-no confirm")
+    journey.start_journey(tenant, [_confirm_q("city", "Mumbai")])
+
+    r = journey.handle_reply(tenant, "no", "SM-no-1")
+    assert r.get("re_present") is True
+    g = journey.get_journey(tenant)
+    assert g is not None
+    assert g["cursor"] == 0, "a bare 'no' must NOT advance the cursor"
+    assert g["answers"].get("city") != "no", "a bare 'no' must NOT be recorded as the city value"
+    assert g["answers"] == {}
+
+
+def test_handle_reply_greeting_mixed_with_answer_is_recorded(substrate):  # type: ignore[no-untyped-def]
+    """A greeting MIXED with substantive content ("hi 9am to 11pm") is NOT a bare greeting — it
+    carries an answer and is recorded normally (only a BARE greeting is rejected)."""
+    from orchestrator.onboarding import journey
+
+    tenant = _new_tenant(substrate.dsn, name="greeting mixed answer")
+    journey.start_journey(tenant, [_gap_q("operating_hours")])
+
+    r = journey.handle_reply(tenant, "hi 9am to 11pm", "SM-mixed-1")
+    assert r["done"] is True, "a real answer (mixed with a greeting) still advances + completes"
+    g = journey.get_journey(tenant)
+    assert g is not None
+    assert g["answers"].get("operating_hours") == "hi 9am to 11pm", (
+        "a greeting mixed with content is recorded as the answer, not rejected"
+    )
+
+
 def test_handle_reply_idempotent_redelivery_no_double_advance(substrate):  # type: ignore[no-untyped-def]
     """IDEMPOTENCY: a redelivered ``message_sid`` (== last_message_sid) re-emits
     the SAME current question WITHOUT advancing the cursor and WITHOUT mutating
