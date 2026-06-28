@@ -90,9 +90,23 @@ INBOUND_BODY_RULE_ORDER: tuple[str, ...] = (
 # rule_order.test_declarative_rule_list_order_if_present) — the strongest form of the order pin.
 _RULE_ORDER = INBOUND_BODY_RULE_ORDER
 
-# Status ping: narrow regex — matches ONLY a whole-message trivial query.
+# Status ping: narrow regex — matches ONLY a whole-message status QUERY.
+#
+# VT-464 D2: bare greetings (hi/hello/hey/namaste) were REMOVED from this set.
+# A standalone greeting must fall THROUGH to the brain (Rule h) so the rebuilt
+# Team-Manager greets + onboards the owner as a business manager — the prior
+# regex swallowed "Hi"/"Hello"/"Hey" into status_ping_handler before the brain
+# ever ran, bypassing the "Hi → business-manager, not customer-service" fix.
+# Only genuine STATUS-intent phrases ("any update", "what's the status",
+# "kya hua", "कैसा चल रहा है") route to status_ping_handler. This is
+# DPDP-adjacent routing: it does NOT touch opt-out / DSR / consent rules.
 _STATUS_PING = re.compile(
-    r"^\s*(hi|hello|hey|any update|any updates|कैसा चल रहा है)\s*[?!.]*\s*$",
+    r"^\s*("
+    r"any update|any updates|"
+    r"(what'?s|whats)\s+(the\s+)?status|status\s+update|"
+    r"kya\s+hua|kya\s+update|"
+    r"कैसा चल रहा है"
+    r")\s*[?!.]*\s*$",
     re.IGNORECASE,
 )
 

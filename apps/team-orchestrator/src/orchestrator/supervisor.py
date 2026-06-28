@@ -286,7 +286,13 @@ def build_supervisor_graph(
     # = ONE SpecialistSpec entry in agent/roster.py — no edit here. The two
     # existing specialists (sales_recovery, integration) are roster entries that
     # reproduce their pre-VT-465 wiring byte-for-byte.
-    from orchestrator.agent.roster import ROSTER
+    from orchestrator.agent.roster import ROSTER, _register_lanes
+
+    # VT-465 central integration — ensure all six business specialist lanes are
+    # registered before iterating ROSTER. ``_register_lanes`` is idempotent +
+    # re-entrancy-safe; it backfills any lane deferred by the roster<->lane import
+    # cycle (so the graph always gains the full nine-lane node/route set).
+    _register_lanes()
 
     orchestrator = build_orchestrator_agent(
         model=model, extra_tools=roster_spawn_tools()

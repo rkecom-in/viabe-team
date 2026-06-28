@@ -178,6 +178,12 @@ def _record_step(
         tenant_id=ctx.tenant_id,
         step_name="agent_turn",
         input_envelope={
+            # VT-464 D4: prompt_token_count is a REQUIRED field on
+            # AgentReasoningStepInput — it was previously omitted, so every
+            # brain reasoning-step envelope soft-failed validation. The prompt
+            # (input) token count for this turn is the response usage's
+            # input_tokens.
+            "prompt_token_count": in_tokens,
             "context_bundle_hash": pending.context_bundle_hash,
             "context_bundle_components": pending.context_bundle_components,
             "context_bundle_token_count": pending.context_bundle_token_count,

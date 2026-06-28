@@ -470,14 +470,21 @@ def test_substantive_message_marks_run_escalated(ingress):
         status = conn.execute(
             "SELECT status FROM pipeline_runs WHERE id = %s", (result["run_id"],)
         ).fetchone()[0]
+        # VT-464 D4: the dispatch reason lives in the validated input_envelope
+        # (AgentInvocationInput.reason) — output_envelope is None per schema.
         step = conn.execute(
-            "SELECT output_envelope FROM pipeline_steps "
+            "SELECT input_envelope, error FROM pipeline_steps "
             "WHERE run_id = %s AND step_kind = 'agent_invocation'",
             (result["run_id"],),
         ).fetchone()
     assert status == "escalated"
     assert step is not None, "no agent_invocation step record written"
     assert "owner message" in step[0]["reason"]
+    assert step[0]["agent_role"] == "orchestrator"
+    # VT-464 D4: the envelope must validate — no payload_validation_failed flag.
+    assert not (step[1] or {}).get("payload_validation_failed"), (
+        f"agent_invocation envelope failed schema validation: {step[1]!r}"
+    )
 
 
 # --- VT-303: owner_inputs consent gate on the brain transmit (Option B) -------

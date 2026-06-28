@@ -753,6 +753,7 @@ def test_register_scheduled_triggers_idempotent(monkeypatch) -> None:
     """
     from dbos import DBOS
     call_count = {"n": 0}
+    workflow_count = {"n": 0}
 
     def _fake_scheduled(cron):
         def _wrap(fn):
@@ -760,10 +761,23 @@ def test_register_scheduled_triggers_idempotent(monkeypatch) -> None:
             return fn
         return _wrap
 
+    def _fake_workflow(*args, **kwargs):
+        # VT-464 D3: register_scheduled_triggers now wraps each handler with
+        # DBOS.workflow() BEFORE DBOS.scheduled() (DBOS 2.x: scheduled() alone
+        # does NOT register a workflow, so the cron fire raised
+        # DBOSWorkflowFunctionNotFoundError). Patch it too so this stays a pure
+        # unit check that doesn't mutate the real global DBOS registry.
+        def _wrap(fn):
+            workflow_count["n"] += 1
+            return fn
+        return _wrap
+
     monkeypatch.setattr(DBOS, "scheduled", _fake_scheduled)
+    monkeypatch.setattr(DBOS, "workflow", _fake_workflow)
     st._registered = False
     st.register_scheduled_triggers()
     first = call_count["n"]
+    first_wf = workflow_count["n"]
     st.register_scheduled_triggers()
     second = call_count["n"]
     # The registered set (19): weekly_cadence, attribution_close, trial_evaluation
@@ -784,4 +798,39 @@ def test_register_scheduled_triggers_idempotent(monkeypatch) -> None:
     # VT-440 added one: 19 → 20.
     assert first == 20, "expected 20 triggers registered on first call"
     assert second == 20, "second call must short-circuit (idempotent)"
+    # VT-464 D3: every scheduled handler MUST also be registered as a workflow
+    # (one DBOS.workflow() wrap per DBOS.scheduled() call) — otherwise the cron
+    # fire raises DBOSWorkflowFunctionNotFoundError.
+    assert first_wf == 20, "expected 20 handlers wrapped as @DBOS.workflow"
     st._registered = False
+
+
+def test_scheduled_sweeps_are_registered_workflows() -> None:
+    """VT-464 D3: the scheduled sweeps must land in the DBOS workflow registry.
+
+    The live re-drive saw approval_timeout_sweep_scheduled +
+    l2_approved_send_sweep_scheduled fire and raise
+    ``DBOSWorkflowFunctionNotFoundError: ... not a registered workflow function``
+    — because DBOS 2.x's ``DBOS.scheduled`` registers ONLY a cron poller, not a
+    workflow, so the poller-fire enqueue + recovery lookup in
+    ``workflow_info_map`` missed. After the fix (register_scheduled_triggers
+    wraps each handler with ``@DBOS.workflow`` before ``@DBOS.scheduled``) both
+    sweeps resolve. This drives the REAL registration path (no monkeypatch) and
+    asserts the registry contains them — the regression guard for the crash.
+    """
+    from dbos._dbos import _get_or_create_dbos_registry
+
+    st._registered = False
+    try:
+        st.register_scheduled_triggers()
+        reg = _get_or_create_dbos_registry()
+        assert "approval_timeout_sweep_scheduled" in reg.workflow_info_map, (
+            "approval_timeout_sweep_scheduled must be a registered workflow "
+            "(else the 30-min poller fire raises DBOSWorkflowFunctionNotFoundError)"
+        )
+        assert "l2_approved_send_sweep_scheduled" in reg.workflow_info_map, (
+            "l2_approved_send_sweep_scheduled must be a registered workflow "
+            "(else the reconciler poller fire raises DBOSWorkflowFunctionNotFoundError)"
+        )
+    finally:
+        st._registered = False
