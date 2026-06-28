@@ -86,8 +86,54 @@ _LANE_PROFILE_KEYS: dict[str, tuple[str, ...]] = {
         "owner_persona",
         "working_hours",
     ),
-    # Future lanes (VT-468..472) append a key tuple here, NOT a code change
-    # elsewhere. Marketing/Finance/Accounting/Tech/Cost-Opt build to charters.
+    # The six business specialist lanes (VT-468..473). Each keyed on the lane's
+    # ``SpecialistSpec.name`` (the token ``context_slice_for_lane`` receives). A
+    # lane sees ONLY its slice + the objective; an unlisted name falls to the
+    # identity-only default (default-deny on the slice surface).
+    #
+    # Sales (VT-468) — revenue from EXISTING customers (win-back / repeat / upsell
+    # / re-engage); needs the archetype + how/when to reach customers.
+    "sales_lane": (
+        "business_archetype",
+        "communication_prefs",
+        "working_hours",
+    ),
+    # Marketing (VT-469) — campaigns / segments / festival offers / content;
+    # needs the archetype + the owner's contactability prefs + hours (festival /
+    # seasonal timing).
+    "marketing": (
+        "business_archetype",
+        "communication_prefs",
+        "working_hours",
+    ),
+    # Finance (VT-470) — cash-flow / receivables / margin/pricing (ADVISORY);
+    # needs the archetype (revenue/margin shape) + escalation thresholds (the
+    # owner's money-decision bounds the lane reasons within).
+    "finance_lane": (
+        "business_archetype",
+        "escalation_thresholds",
+    ),
+    # Accounting (VT-471) — bookkeeping / GST-tax-summary / reconciliation
+    # (PREPARE-only); needs the archetype to frame the books (the verified GST
+    # identity rides in BusinessContext.identity, not the profile slice).
+    "accounting": (
+        "business_archetype",
+    ),
+    # Tech (VT-472) — store / listing / integration HEALTH; needs the archetype +
+    # the integration map (which connectors/listings exist to diagnose).
+    "tech": (
+        "business_archetype",
+        "integration_map",
+    ),
+    # Cost-Opt (VT-473) — wasteful-spend / subscription / ROI advice + resource
+    # recalibration (ADVISE-only); needs the archetype + the integration map
+    # (vendor/connector cost surface) + escalation thresholds (the owner's
+    # cost-decision bounds).
+    "cost_opt": (
+        "business_archetype",
+        "integration_map",
+        "escalation_thresholds",
+    ),
 }
 
 # Keys ALWAYS in a slice regardless of lane (identity anchor + objective is
