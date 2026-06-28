@@ -39,15 +39,22 @@ def _extract_user_request_from_state(state: dict[str, Any]) -> str:
             "spawn_sales_recovery: state['messages'] is empty —"
             " orchestrator must spawn the specialist with a user request"
         )
-    first = messages[0]
-    if isinstance(first, HumanMessage):
-        content: Any = first.content
-    elif isinstance(first, dict) and first.get("role") == "user":
-        content = first.get("content", "")
-    else:
+    # The dispatch path prepends SystemMessage blocks (L1 / business-context /
+    # manager-intent), so the user message is NOT necessarily messages[0].
+    # Scan for the FIRST HumanMessage / role='user' (matches the docstring) —
+    # indexing [0] crashed the spawn once dispatch started prepending (VT-463).
+    content: Any = None
+    for msg in messages:
+        if isinstance(msg, HumanMessage):
+            content = msg.content
+            break
+        if isinstance(msg, dict) and msg.get("role") == "user":
+            content = msg.get("content", "")
+            break
+    if content is None:
         raise ValueError(
-            "spawn_sales_recovery: state['messages'][0] is not a user"
-            f" message (got {type(first).__name__})"
+            "spawn_sales_recovery: no user message in state['messages']"
+            " (only system/non-user messages present)"
         )
     if isinstance(content, list):
         parts = [b.get("text", "") for b in content if isinstance(b, dict)]
