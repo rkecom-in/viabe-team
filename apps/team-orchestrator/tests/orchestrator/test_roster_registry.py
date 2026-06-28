@@ -55,7 +55,10 @@ def test_existing_specialists_registered_with_pre_vt465_wiring() -> None:
     """
     by_name = {s.name: s for s in ROSTER}
     # VT-462 — the onboarding-conductor lane joined the two pre-existing specialists.
-    assert set(by_name) == {"sales_recovery", "integration", "onboarding_conductor"}
+    # VT-465 central integration — the six business specialist lanes (VT-468..473)
+    # are now registered too. The three onboarding/recovery lanes below keep their
+    # exact pre-VT-465 wiring; this asserts they are PRESENT (not the only members).
+    assert {"sales_recovery", "integration", "onboarding_conductor"} <= set(by_name)
 
     sr = by_name["sales_recovery"]
     assert sr.agent_name == "sales_recovery_agent"
@@ -83,22 +86,40 @@ def test_existing_specialists_registered_with_pre_vt465_wiring() -> None:
 
 
 def test_spawn_tool_route_keys_maps_both_lanes() -> None:
-    """The routing function reads this map; it must cover every roster member."""
+    """The routing function reads this map; it must cover every roster member.
+
+    VT-465 central integration — the map now covers all NINE lanes (3 onboarding/
+    recovery + the 6 business specialists VT-468..473). Each spawn tool maps to its
+    route key; pinned EXACT so a new lane (or a route-key drift) is caught."""
     assert spawn_tool_route_keys() == {
         "spawn_sales_recovery": "spawn",
         "spawn_integration": "spawn_integration",
         "spawn_onboarding_conductor": "spawn_onboarding_conductor",  # VT-462
+        # VT-468..473 — the six business specialist lanes.
+        "spawn_sales_lane": "spawn_sales_lane",
+        "spawn_marketing": "spawn_marketing",
+        "spawn_finance_lane": "spawn_finance_lane",
+        "spawn_accounting": "spawn_accounting",
+        "spawn_tech": "spawn_tech",
+        "spawn_cost_opt": "spawn_cost_opt",
     }
 
 
 def test_roster_spawn_tools_have_expected_names() -> None:
     """The manager's extra_tools come from the roster; names are pinned (the
-    test_no_write_tool_surface HANDOFF_EXPECTED contract)."""
+    test_no_write_tool_surface HANDOFF_EXPECTED contract). VT-465 — all NINE lanes."""
     names = {t.name for t in roster_spawn_tools()}
     assert names == {
         "spawn_sales_recovery",
         "spawn_integration",
         "spawn_onboarding_conductor",  # VT-462
+        # VT-468..473 — the six business specialist lanes.
+        "spawn_sales_lane",
+        "spawn_marketing",
+        "spawn_finance_lane",
+        "spawn_accounting",
+        "spawn_tech",
+        "spawn_cost_opt",
     }
 
 
@@ -200,21 +221,24 @@ def test_appending_one_spec_wires_tool_route_and_node_without_graph_edit(
     registry append (monkeypatched here = an append in the real file).
     """
 
-    def _marketing_node(state: dict[str, Any]) -> dict[str, Any]:
-        return {"active_agent": "marketing_agent"}
+    # A FICTIONAL Phase-2+ lane (not one of the registered nine — VT-465 made
+    # 'marketing' real, so the synthetic probe uses 'reputation' to avoid any
+    # collision with a registered route_key / agent_name).
+    def _reputation_node(state: dict[str, Any]) -> dict[str, Any]:
+        return {"active_agent": "reputation_agent"}
 
     new_spec = SpecialistSpec(
-        name="marketing",
-        agent_name="marketing_agent",
-        spawn_tool_name="spawn_marketing",
-        route_key="spawn_marketing",
-        node_builder=lambda model: _marketing_node,
-        description="Hand off to the Marketing Agent.",
+        name="reputation",
+        agent_name="reputation_agent",
+        spawn_tool_name="spawn_reputation",
+        route_key="spawn_reputation",
+        node_builder=lambda model: _reputation_node,
+        description="Hand off to the (fictional) Reputation Agent.",
         update_builder=None,
         prereq=None,
         edge_to=None,  # -> END
         wrap_node=True,
-        default_outcome="run a festival campaign",
+        default_outcome="manage the business's reputation",
     )
 
     # The ONLY change a new lane requires: one more registry entry. We append
@@ -228,19 +252,19 @@ def test_appending_one_spec_wires_tool_route_and_node_without_graph_edit(
 
     # (1) routing: the new spawn tool now maps to its route_key — no edit to
     # route_after_orchestrator.
-    assert spawn_tool_route_keys()["spawn_marketing"] == "spawn_marketing"
+    assert spawn_tool_route_keys()["spawn_reputation"] == "spawn_reputation"
     state = {
         "messages": [
             AIMessage(
                 content="",
-                tool_calls=[{"name": "spawn_marketing", "args": {}, "id": "1"}],
+                tool_calls=[{"name": "spawn_reputation", "args": {}, "id": "1"}],
             )
         ]
     }
-    assert routing.route_after_orchestrator(state) == "spawn_marketing"
+    assert routing.route_after_orchestrator(state) == "spawn_reputation"
 
     # (2) the manager's spawn-tool set now includes the new handoff tool.
-    assert "spawn_marketing" in {t.name for t in roster_spawn_tools()}
+    assert "spawn_reputation" in {t.name for t in roster_spawn_tools()}
 
     # (3) + (4): the rebuilt graph gains the node + an edge, derived purely from
     # the registry. Build the real supervisor graph with a fake model — no edit
@@ -249,18 +273,18 @@ def test_appending_one_spec_wires_tool_route_and_node_without_graph_edit(
 
     graph = build_supervisor_graph(model=_FakeModel())  # type: ignore[arg-type]
     nodes = set(graph.get_graph().nodes)
-    assert "marketing_agent" in nodes, sorted(nodes)
+    assert "reputation_agent" in nodes, sorted(nodes)
     # The existing lanes are still wired (no regression from the append).
     assert {"sales_recovery_agent", "integration_agent"} <= nodes
 
     # The conditional-edge path map after the orchestrator now routes the new
     # route_key to the new node — assert via the compiled graph's edges that the
-    # marketing node is reachable from orchestrator_agent.
+    # reputation node is reachable from orchestrator_agent.
     edges = graph.get_graph().edges
     targets_from_orchestrator = {
         e.target for e in edges if e.source == "orchestrator_agent"
     }
-    assert "marketing_agent" in targets_from_orchestrator, targets_from_orchestrator
+    assert "reputation_agent" in targets_from_orchestrator, targets_from_orchestrator
 
 
 def test_existing_graph_shape_unchanged_by_roster_refactor() -> None:
