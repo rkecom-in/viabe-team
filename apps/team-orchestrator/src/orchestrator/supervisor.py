@@ -126,12 +126,22 @@ def _sales_recovery_node(state: AgentGraphState) -> dict[str, Any]:
     assembled. Fail loud if the bundle is missing: a None bundle at this
     seam means the handoff is broken (TenantIsolationError-style).
 
-    Parse exception handling (CL-238): catches only
+    Parse exception handling (CL-238 + VT-494): catches only
     ``(json.JSONDecodeError, ValidationError)`` — narrow by design. A
-    ``ValidationError`` from a live agent indicates the agent emitted a
-    malformed CampaignPlan; that must NOT be swallowed as a clean miss
-    (would mask a real bug). The exception re-raises; the graph run
-    fails and DBOS / the error router observes it.
+    ``ValidationError`` here means the live agent emitted a non-None but
+    malformed ``CampaignPlan`` (the CL-288 coerced variant dict that then
+    FAILED ``parse_campaign_plan`` at the agent's gate seam — e.g. the VT-493
+    backdated ``campaign_window`` or an off-enum ``source_kind``). The agent
+    already routed its ``FailureRecord`` (``agent_schema_rejection``), so the
+    bug stays observable; re-parsing here raises the SAME error. VT-494: do
+    NOT let the bare ``ValidationError`` escape — it would unwind
+    ``graph.invoke`` → ``dispatch_brain``'s catch-all re-raise →
+    ``webhook_pipeline_run`` skips ``close_webhook_run`` → the run ORPHANS at
+    ``status='running'`` until the VT-481 reaper. Instead convert it to the
+    SAME structured ``SpecialistNoOutputError`` the output=None path uses
+    (VT-492), so ``dispatch_brain`` maps it to a CLEAN ``escalated`` terminal +
+    the VT-88 SupportBot acks the owner. This is the VT-484 convert-don't-orphan
+    principle, not a silent swallow.
     """
     context = state.get("sales_recovery_context")
     if context is None:
@@ -192,12 +202,25 @@ def _sales_recovery_node(state: AgentGraphState) -> dict[str, Any]:
         )
 
     # Tight exception handling — narrow catch on parse failure. A
-    # ValidationError surfacing here means the live agent emitted a
-    # malformed CampaignPlan; that is a real bug, not a degraded run.
+    # ValidationError surfacing here means the live agent emitted a non-None
+    # but malformed CampaignPlan (e.g. VT-493's backdated campaign_window /
+    # off-enum source_kind that failed parse at the agent's gate seam). That
+    # is a real bug — the agent already routed its FailureRecord, so it stays
+    # observable — but it must NOT escape as a bare raise (VT-494): a bare
+    # ValidationError unwinds graph.invoke → dispatch_brain's catch-all →
+    # the run orphans at status='running' until the VT-481 reaper. Convert it
+    # to the structured SpecialistNoOutputError (the same control signal the
+    # output=None path uses, VT-492) so dispatch_brain resolves a CLEAN
+    # 'escalated' terminal and the owner gets the VT-88 no-silence ack.
     try:
         plan = parse_campaign_plan(agent_result.output)
-    except (json.JSONDecodeError, ValidationError):
-        raise
+    except (json.JSONDecodeError, ValidationError) as exc:
+        raise SpecialistNoOutputError(
+            specialist="sales_recovery",
+            status=str(agent_result.status),
+            run_id=run_uuid,
+            tenant_id=tenant_uuid,
+        ) from exc
 
     overrides: dict[str, Any] = {}
     if plan.tenant_id != tenant_uuid:

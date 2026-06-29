@@ -97,8 +97,8 @@ not matter.
 {
   "status": "proposed",
   "campaign_window": {
-    "start": "2026-05-22T09:00:00+00:00",
-    "end":   "2026-05-29T09:00:00+00:00"
+    "start": "{{CAMPAIGN_WINDOW_START}}",
+    "end":   "{{CAMPAIGN_WINDOW_END}}"
   },
   "target_cohort": {
     "customer_ids": ["b6f3b6c4-3a90-4f86-9a16-7c1ab2a4f1e2"],
@@ -127,6 +127,21 @@ not matter.
   }
 }
 ```
+
+**Dates (proposed variant).** Today's date is `{{TODAY}}` (UTC). Set
+`campaign_window.start` to today or a future date — NEVER a past/backdated
+date — and `campaign_window.end` roughly 7 days after `start`. The
+`CampaignWindow` validator rejects any window whose `start` is before "now",
+so do NOT copy a date from this prompt verbatim; compute the window from the
+current date.
+
+**Evidence sources (proposed variant).** Every `evidence_refs[].source_kind`
+MUST be EXACTLY one of these three values — no others are legal and any
+off-enum value fails schema validation:
+
+- `tool_call` — a result returned by a registered tool this run.
+- `l4_skill_corpus` — a retrieved L4 skill-corpus benchmark/playbook.
+- `l2_episodic_memory` — a prior episode from L2 episodic memory.
 
 ### Example — `out_of_scope`
 
