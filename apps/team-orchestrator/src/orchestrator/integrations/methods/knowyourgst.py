@@ -61,7 +61,9 @@ _RESULT_RE = re.compile(
 _STRONG_RE = re.compile(r"<strong\b[^>]*>(?P<v>.*?)</strong>", re.IGNORECASE | re.DOTALL)
 
 # In-process cost guards (single-process orchestrator runtime).
-_CACHE_TTL_S = 6 * 3600  # GST registry rows are stable; don't re-bill the same query for 6h
+_CACHE_TTL_S = 6 * 3600  # L1 in-process TTL (hot path; under-counts across redeploys)
+_DB_CACHE_TTL_S = 24 * 3600  # VT-507 L2 DB-persistent TTL (survives redeploys)
+_DB_SOURCE = "knowyourgst"
 _RATE_MAX = 60  # at most N ScrapingBee calls per window (circuit-breaker, not the expected rate)
 _RATE_WINDOW_S = 60.0
 _lock = threading.Lock()
@@ -127,6 +129,51 @@ def _cache_put(key: str, rows: list[dict[str, str]]) -> None:
         _cache[key] = (time.time() + _CACHE_TTL_S, list(rows))
 
 
+# VT-507 — L2 DB-persistent cache (survives redeploys; 24h TTL).
+# Lazy import of get_pool so this module stays importable in dep-less environments.
+# All DB operations are best-effort: a pool error falls through to the live scrape.
+
+def _db_cache_get(key: str) -> list[dict[str, str]] | None:
+    """Read from discovery_cache (source='knowyourgst'). Returns None on miss or any error."""
+    try:
+        import json as _json
+        from orchestrator.graph import get_pool
+        with get_pool().connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT response FROM discovery_cache"
+                " WHERE source = %s AND normalized_query = %s AND expires_at > NOW()",
+                (_DB_SOURCE, key),
+            )
+            row = cur.fetchone()
+        if row is None:
+            return None
+        data = row["response"] if isinstance(row, dict) else row[0]
+        if isinstance(data, str):
+            data = _json.loads(data)
+        return list(data) if isinstance(data, list) else None
+    except Exception:  # noqa: BLE001 — DB cache is best-effort; fall through to live scrape
+        return None
+
+
+def _db_cache_put(key: str, rows: list[dict[str, str]]) -> None:
+    """Write (upsert) to discovery_cache (source='knowyourgst', 24h TTL). Best-effort."""
+    try:
+        import json as _json
+        from orchestrator.graph import get_pool
+        with get_pool().connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO discovery_cache (source, normalized_query, response, expires_at)
+                VALUES (%s, %s, %s::jsonb, NOW() + INTERVAL '24 hours')
+                ON CONFLICT (source, normalized_query) DO UPDATE
+                    SET response = EXCLUDED.response, expires_at = EXCLUDED.expires_at
+                """,
+                (_DB_SOURCE, key, _json.dumps(rows)),
+            )
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def _rate_allow() -> bool:
     """Sliding-window circuit-breaker. Returns False (skip the call, fail-open) once the window is
     saturated — bounds ScrapingBee credit spend under a runaway loop / abuse burst."""
@@ -155,9 +202,15 @@ class KnowYourGSTScraper:
         if len(query) < _MIN_QUERY_LEN:
             return []  # the site rejects <5 chars — skip the (billed) call
         cache_key = query.lower()
+        # L1 in-process cache (hot path — no DB round-trip)
         cached = _cache_get(cache_key)
         if cached is not None:
             return cached
+        # L2 DB-persistent cache (VT-507 — survives redeploys, 24h TTL)
+        db_cached = _db_cache_get(cache_key)
+        if db_cached is not None:
+            _cache_put(cache_key, db_cached)  # warm L1 from DB hit
+            return db_cached
         if self._fetch_fn is None and not self._api_key:
             return []  # fail-open: no key → discovery skipped, caller falls through to manual
         if self._fetch_fn is None and not _rate_allow():
@@ -173,7 +226,8 @@ class KnowYourGSTScraper:
         except Exception:  # noqa: BLE001 — markup drift must degrade, not raise
             logger.warning("knowyourgst: parse failed (degrade to none)", exc_info=True)
             return []
-        _cache_put(cache_key, rows)  # cache successful parses (incl. legit 0-results), not errors
+        _cache_put(cache_key, rows)   # L1 — cache successful parses (incl. legit 0-results)
+        _db_cache_put(cache_key, rows)  # L2 — VT-507 persistent store (survives redeploys)
         return rows
 
     def _scrapingbee_fetch(self, query: str) -> str:
