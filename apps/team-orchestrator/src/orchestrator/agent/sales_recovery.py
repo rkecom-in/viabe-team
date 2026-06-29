@@ -327,6 +327,46 @@ def _parse_placeholder_output(text: str) -> dict[str, Any] | None:
 _EMPTY_SENTINELS: tuple[Any, ...] = (None, "", [], {})
 
 
+# VT-499: the campaign_window is the SYSTEM's to set, not the LLM's. It is a
+# MECHANICAL value (the campaign runs from ~now for a fixed span), NOT business
+# judgment — yet it was the dominant win-back parse failure. VT-493 maximally
+# prompted the field (injected today's date, gave a valid example, named the
+# validator) and the SR model (Haiku on dev) STILL emitted a backdated / invalid
+# / missing window 3/3 (VT-496 diagnostic: ``proposed.campaign_window:
+# value_error`` — a ``CampaignWindow._window_validity`` rejection). So the system
+# OWNS the window now: ``_construct_variant_payload`` OVERRIDES it server-side on
+# the PROPOSED variant with an always-valid ``now → now+7d`` span. The model
+# keeps owning every business field (target_cohort, message_plan, expected_arrr,
+# objective, evidence_refs). The validator is NOT weakened — we SUPPLY a valid
+# window so it passes legitimately, and genuinely-bad OTHER fields still fail.
+#
+# START_BUFFER rationale: ``_window_validity`` rejects a past start with a STRICT
+# ``start < now`` where ``now`` is recomputed at VALIDATION time — strictly AFTER
+# this coercion (the agent-gate parse at the parse_campaign_plan seam, then again
+# the supervisor re-parse, the latter across one self-evaluate gate call). A
+# literal ``start == now`` would be backdated by the time the validator runs and
+# be rejected. A small forward buffer lands ``start`` comfortably ahead of every
+# downstream re-validation while staying "approximately now" for a 7-day window.
+# There is NO re-validation later than the supervisor parse — the persisted plan
+# is a validated model object, never re-parsed — so the buffer only has to clear
+# the in-request gap (one Opus self-evaluate call at most).
+_CAMPAIGN_WINDOW_START_BUFFER = timedelta(minutes=5)
+_CAMPAIGN_WINDOW_DURATION = timedelta(days=7)
+
+
+def _server_campaign_window(now: datetime) -> dict[str, str]:
+    """VT-499: a server-computed, always-schema-valid ``campaign_window`` dict.
+
+    ``start = now + START_BUFFER`` (clears the validator's later ``start >= now``
+    recompute), ``end = start + 7 days``. ISO-8601 strings (tz-aware, since
+    ``now`` is server UTC) so the value drops straight into the raw payload that
+    ``parse_campaign_plan`` validates. Deterministic in ``now`` for testability.
+    """
+    start = now + _CAMPAIGN_WINDOW_START_BUFFER
+    end = start + _CAMPAIGN_WINDOW_DURATION
+    return {"start": start.isoformat(), "end": end.isoformat()}
+
+
 def _construct_variant_payload(
     raw: dict[str, Any],
     *,
@@ -382,6 +422,16 @@ def _construct_variant_payload(
     payload["tenant_id"] = context.tenant_id
     payload["run_id"] = context.run_id
     payload["generated_at"] = generated_at.isoformat()
+
+    # VT-499: campaign_window is system-owned, not LLM-owned (see the module
+    # constant above). On the PROPOSED variant ONLY, OVERRIDE whatever the model
+    # emitted — backdated / invalid / missing, the VT-496 failure — with a
+    # server-computed always-valid now→now+7d window, so parse_campaign_plan
+    # clears the CampaignWindow validator LEGITIMATELY (the validator is NOT
+    # weakened; we supply a valid window). out_of_scope / insufficient_data carry
+    # no window — untouched.
+    if variant_enum is CampaignStatus.PROPOSED:
+        payload["campaign_window"] = _server_campaign_window(generated_at)
 
     return payload, dropped_empty, dropped_populated
 
