@@ -30,6 +30,7 @@ from orchestrator.api.shopify_webhook import router as shopify_webhook_router
 from orchestrator.api.razorpay_ingress import router as razorpay_ingress_router
 from orchestrator.api.razorpay_subscribe import router as razorpay_subscribe_router
 from orchestrator.api.twilio_ingress import router as twilio_ingress_router
+from orchestrator.api.version import router as version_router  # VT-508
 from orchestrator.api.whatsapp_oauth import router as whatsapp_oauth_router
 
 router = APIRouter()
@@ -60,3 +61,4 @@ router.include_router(consent_capture_router)
 router.include_router(dsr_router)
 router.include_router(whatsapp_oauth_router)
 router.include_router(hook_links_router)
+router.include_router(version_router)  # VT-508 deploy stamp
