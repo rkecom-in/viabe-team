@@ -105,6 +105,43 @@ def _valid_plan_dict(*, tenant_id: str, run_id: str) -> dict[str, Any]:
     }
 
 
+def _insufficient_data_dict(*, tenant_id: str, run_id: str) -> dict[str, Any]:
+    """A v1.0-valid CampaignPlanInsufficientData dict — the legal
+    "in-scope but not enough context" terminal SR emits when data is
+    genuinely missing (VT-491 regression for runs 44f12ad2 / 0844b0ff)."""
+    now = datetime.now(UTC)
+    return {
+        "version": "1.0",
+        "status": "insufficient_data",
+        "tenant_id": tenant_id,
+        "run_id": run_id,
+        "generated_at": now.isoformat(),
+        "self_evaluate_status": "not_yet_evaluated",
+        "missing_data": [
+            {
+                "category": "dormant_cohort",
+                "description": "no dormant customers in the order history yet",
+                "suggested_remediation": "connect POS / wait for orders to land",
+            },
+        ],
+    }
+
+
+def _out_of_scope_dict(*, tenant_id: str, run_id: str) -> dict[str, Any]:
+    """A v1.0-valid CampaignPlanOutOfScope dict — the sibling
+    non-proposed terminal (same VT-491 bug class)."""
+    now = datetime.now(UTC)
+    return {
+        "version": "1.0",
+        "status": "out_of_scope",
+        "tenant_id": tenant_id,
+        "run_id": run_id,
+        "generated_at": now.isoformat(),
+        "self_evaluate_status": "not_yet_evaluated",
+        "out_of_scope_reason": "request is a reputation issue, not sales recovery",
+    }
+
+
 def _end_turn_response(text: str, *, input_tokens: int = 50, output_tokens: int = 50) -> Any:
     class _TextBlock(SimpleNamespace):
         def model_dump(self) -> dict[str, Any]:
@@ -494,6 +531,170 @@ def test_hard_limit_fires_before_gate_when_already_at_cap(monkeypatch):
     assert evaluator.calls == 0
     assert ctx.is_cancelled
     assert ctx.cancelled_by is HardLimitAxis.TOOL_CALLS
+
+
+# ---------- VT-491: non-proposed variants short-circuit (no LLM grade) --------
+
+
+def _gate_with_raising_seam() -> tuple[SelfEvaluateGate, FakeSelfEvaluator, ToolCounter]:
+    """A gate whose seam ASSERTS if consulted — the determinism crux.
+    If the gate ever calls the LLM seam on a non-proposed variant, the
+    AssertionError surfaces and the test fails. calls==0 proves the seam
+    was never reached."""
+    ctx = CancellationContext()
+    counter = ToolCounter(ctx)
+    evaluator = FakeSelfEvaluator(
+        raise_on_call=AssertionError("self_evaluate seam must NOT be called "
+                                     "on a non-proposed variant")
+    )
+    gate = SelfEvaluateGate(
+        evaluator=evaluator,
+        ctx=ctx,
+        tool_counter=counter,
+        config=GateConfig(max_revisions=2),
+    )
+    return gate, evaluator, counter
+
+
+def test_insufficient_data_short_circuits_accept_without_grading():
+    """VT-491 regression (runs 44f12ad2 / 0844b0ff): an
+    insufficient_data terminal is ACCEPTED (SHIP) deterministically —
+    the LLM seam is NEVER consulted (calls==0, the determinism proof),
+    no tool-budget slot is charged (counter stays 0), no grading attempt
+    (attempt_number==0). The plan flows on UNCHANGED to the downstream
+    data-remediation terminal."""
+    from orchestrator.agent.schemas.campaign_plan import parse_campaign_plan
+
+    gate, evaluator, counter = _gate_with_raising_seam()
+    tenant_id, run_id = _ctx_ids()
+    draft = parse_campaign_plan(
+        _insufficient_data_dict(tenant_id=tenant_id, run_id=run_id)
+    )
+
+    outcome = gate.run(draft)
+
+    assert outcome.action is GateAction.SHIP
+    assert evaluator.calls == 0          # the seam was NEVER consulted
+    assert counter.count == 0            # no record_dispatch → no budget charged
+    assert gate.evaluator_calls == 0
+    assert outcome.attempt_number == 0
+    assert outcome.outcome is None
+    # status field is cosmetic for this variant (record_terminal_verdict
+    # never reads it); left at the GateOutcome default.
+    assert outcome.self_evaluate_status is SelfEvaluateStatus.NOT_YET_EVALUATED
+
+
+def test_out_of_scope_short_circuits_accept_without_grading():
+    """VT-491 sibling case: out_of_scope (also non-proposed) takes the
+    same deterministic short-circuit — seam not called, no budget."""
+    from orchestrator.agent.schemas.campaign_plan import parse_campaign_plan
+
+    gate, evaluator, counter = _gate_with_raising_seam()
+    tenant_id, run_id = _ctx_ids()
+    draft = parse_campaign_plan(
+        _out_of_scope_dict(tenant_id=tenant_id, run_id=run_id)
+    )
+
+    outcome = gate.run(draft)
+
+    assert outcome.action is GateAction.SHIP
+    assert evaluator.calls == 0
+    assert counter.count == 0
+    assert outcome.attempt_number == 0
+
+
+def test_proposed_plan_is_still_fully_graded():
+    """The gate is NOT weakened: a real proposed plan STILL goes to the
+    LLM seam (calls==1), gets a verdict, and one tool-budget slot is
+    charged. Short-circuit applies to non-proposed variants only."""
+    from orchestrator.agent.schemas.campaign_plan import parse_campaign_plan
+
+    ctx = CancellationContext()
+    counter = ToolCounter(ctx)
+    evaluator = FakeSelfEvaluator(verdicts=[_verdict(SelfEvaluateOutcome.PASS)])
+    gate = SelfEvaluateGate(
+        evaluator=evaluator,
+        ctx=ctx,
+        tool_counter=counter,
+        config=GateConfig(max_revisions=2),
+    )
+    tenant_id, run_id = _ctx_ids()
+    draft = parse_campaign_plan(_valid_plan_dict(tenant_id=tenant_id, run_id=run_id))
+
+    outcome = gate.run(draft)
+
+    assert outcome.action is GateAction.SHIP
+    assert outcome.self_evaluate_status is SelfEvaluateStatus.PASSED
+    assert evaluator.calls == 1          # the seam WAS consulted
+    assert counter.count == 1            # one dispatch charged
+    assert outcome.attempt_number == 1
+
+
+def test_thin_proposed_plan_is_still_rejected():
+    """The gate is NOT weakened: a proposed plan that the seam REVISEs
+    twice STILL gets REJECTED (calls==2) — the short-circuit does not
+    let a bad proposed plan skip the grade."""
+    from orchestrator.agent.schemas.campaign_plan import parse_campaign_plan
+
+    ctx = CancellationContext()
+    counter = ToolCounter(ctx)
+    evaluator = FakeSelfEvaluator(
+        verdicts=[
+            _verdict(SelfEvaluateOutcome.REVISE, pillar=["invented number"]),
+            _verdict(SelfEvaluateOutcome.REVISE, legal=["pressure language"]),
+        ]
+    )
+    gate = SelfEvaluateGate(
+        evaluator=evaluator,
+        ctx=ctx,
+        tool_counter=counter,
+        config=GateConfig(max_revisions=2),
+    )
+    tenant_id, run_id = _ctx_ids()
+    draft = parse_campaign_plan(_valid_plan_dict(tenant_id=tenant_id, run_id=run_id))
+
+    # First REVISE → RETRY; caller re-runs the gate with the next draft.
+    first = gate.run(draft)
+    assert first.action is GateAction.RETRY
+    second = gate.run(draft)
+
+    assert second.action is GateAction.REJECTED
+    assert second.self_evaluate_status is SelfEvaluateStatus.FAILED_AFTER_REVISIONS
+    assert evaluator.calls == 2
+
+
+def test_run_sales_recovery_insufficient_data_completes_no_escalation(monkeypatch):
+    """Integration (gate-on, mocked Anthropic): the model emits an
+    insufficient_data terminal; the gate is wired with a raise-on-call
+    seam. The run COMPLETES deterministically — output preserves
+    insufficient_data + missing_data verbatim; the seam is never called
+    (calls==0); NO SELF_EVAL_REJECTED and NO AGENT_INVALID_OUTPUT routed
+    (router untouched). This is the end-to-end VT-491 fix: a legitimate
+    "not enough data" terminal no longer coin-flips into a Fazal page."""
+    router = _patch_router(monkeypatch)
+    tenant_id, run_id = _ctx_ids()
+    _patch_anthropic(
+        monkeypatch, [_insufficient_data_dict(tenant_id=tenant_id, run_id=run_id)]
+    )
+    monkeypatch.setenv("VIABE_ENV", "test")
+
+    evaluator = FakeSelfEvaluator(
+        raise_on_call=AssertionError("seam must not be called on insufficient_data")
+    )
+    result = run_sales_recovery_agent(
+        SalesRecoveryContext(
+            tenant_id=tenant_id, run_id=run_id, user_request="test request"
+        ),
+        evaluator=evaluator,
+    )
+
+    assert result.status == "completed"
+    assert result.output is not None
+    assert result.output["status"] == "insufficient_data"
+    assert result.output["missing_data"][0]["category"] == "dormant_cohort"
+    assert evaluator.calls == 0          # the seam was never consulted
+    # No escalation, no invalid-output routing — the run landed cleanly.
+    router.assert_not_called()
 
 
 # ---------- Sanity: evaluation criteria are the four documented --------------
