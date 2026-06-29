@@ -217,18 +217,22 @@ def test_verify_gstin_tenantless_vendor_down_fail_closed() -> None:
 
 
 _LLM_CIN = "U52609MH2020OPC344309"
+_LLM_COMPANY = "RKECOM SERVICES (OPC) PRIVATE LIMITED"
+
+
+def _llm_json(companies: list[dict]) -> str:
+    """Helper: build a JSON blob as the new structured LLM response format."""
+    import json
+    return json.dumps({"companies": companies})
 
 
 def test_vt452_llm_leg_parses_gstin_cin_name_as_candidates() -> None:
-    """VT-452: the LLM web-search leg regex-parses GSTIN + CIN out of the (mocked) LLM answer and
-    returns them as source='llm' CANDIDATES — never verified (status stays unverified; no Sandbox here).
+    """VT-452/VT-509: the LLM leg now returns strict JSON {"companies":[{name,gstin,cin}]}.
+    trade_name is the LLM-REPORTED registered name (NEVER the echoed query string).
     An injected llm_fn forces the leg on regardless of the flag."""
     def llm_fn(name: str, city: str) -> str:
         assert "RKeCom" in name and city == "Mumbai"
-        return (
-            f"From public records, RKeCom Services has GSTIN {_VALID_GSTIN} and "
-            f"CIN {_LLM_CIN}, registered as RKECOM SERVICES (OPC) PRIVATE LIMITED."
-        )
+        return _llm_json([{"name": _LLM_COMPANY, "gstin": _VALID_GSTIN, "cin": _LLM_CIN}])
 
     cands = entity_match.fetch_candidates(
         "RKeCom Services Pvt Ltd", "Mumbai", search_fn=lambda _q: [], gbp_fetch_fn=lambda *_: [], llm_fn=llm_fn
@@ -236,10 +240,9 @@ def test_vt452_llm_leg_parses_gstin_cin_name_as_candidates() -> None:
     llm = [c for c in cands if c.source == "llm"]
     assert _VALID_GSTIN in [c.candidate_gstin for c in llm]
     assert _LLM_CIN in [c.candidate_cin for c in llm]
-    # HINT-only invariant: the candidate carries NO verified flag/status — verification is the
-    # Sandbox gate's job (confirm_and_verify), which this leg never touches.
+    # VT-509: trade_name is the LLM-REPORTED registered name — NEVER the echoed query string.
     for c in llm:
-        assert c.trade_name == "RKeCom Services Pvt Ltd"
+        assert c.trade_name == _LLM_COMPANY  # registry name from JSON, not "RKeCom Services Pvt Ltd"
         assert not hasattr(c, "verified")  # EntityCandidate has no verified field — it is never "verified"
 
 
@@ -255,10 +258,9 @@ def test_vt452_llm_leg_degrades_to_empty_on_failure() -> None:
 
 
 def test_vt452_llm_leg_drops_irrelevant_answer() -> None:
-    # The LLM answer doesn't name the queried business (no distinctive token) → REUSE the relevance
-    # filter to drop it, even though it contains a valid-format GSTIN (it's a different business).
+    # The JSON company name doesn't contain a distinctive RKeCom token → relevance filter drops it.
     def llm_fn(_n: str, _c: str) -> str:
-        return f"Shubham Telecom Services has GSTIN {_OTHER_GSTIN}."
+        return _llm_json([{"name": "Shubham Telecom Services", "gstin": _OTHER_GSTIN, "cin": ""}])
 
     cands = entity_match.fetch_candidates(
         "RKeCom Services Pvt Ltd", "Mumbai", search_fn=lambda _q: [], gbp_fetch_fn=lambda *_: [], llm_fn=llm_fn
@@ -284,15 +286,95 @@ def test_vt452_llm_leg_flag_gated_off_by_default(monkeypatch) -> None:
 
 
 def test_vt452_llm_leg_flag_gated_on_calls_default(monkeypatch) -> None:
-    # With the flag ON and no injected fn, the leg calls the default LLM search (here mocked).
+    # With the flag ON and no injected fn, the leg calls the default LLM search (here mocked as JSON).
     from orchestrator import feature_flags
 
     monkeypatch.setattr(feature_flags, "llm_discovery_enabled", lambda: True)
     monkeypatch.setattr(
-        entity_match, "_default_llm_search", lambda n, c: f"{n} has GSTIN {_VALID_GSTIN}."
+        entity_match, "_default_llm_search",
+        lambda n, c: _llm_json([{"name": "RKECOM SERVICES OPC PVT LTD", "gstin": _VALID_GSTIN, "cin": ""}]),
     )
     cands = entity_match.fetch_candidates(
         "RKeCom Services Pvt Ltd", "Mumbai", search_fn=lambda _q: [], gbp_fetch_fn=lambda *_: []
+    )
+    llm = [c for c in cands if c.source == "llm"]
+    assert len(llm) == 1 and llm[0].candidate_gstin == _VALID_GSTIN
+
+
+# ---------------------------------------------------------------------------
+# VT-509 — LLM structured-output adversarial tests (DEFECT 1 regression suite)
+# ---------------------------------------------------------------------------
+
+def test_vt509_llm_freetext_notfound_returns_zero_candidates() -> None:
+    """VT-509 DEFECT 1: an LLM 'not found' MONOLOGUE (free-text, not JSON) must produce ZERO
+    candidates — it must NEVER be shown as a Found card with the query echoed as the name."""
+    def llm_fn(_n: str, _c: str) -> str:
+        return (
+            "I'll search public records for RKeCom Service Pvt Ltd...\n"
+            "## Result: Not Found\n"
+            "I could not find a GSTIN for RKeCom Service Pvt Ltd in public records.\n"
+            "No GST number found."
+        )
+
+    cands = entity_match.fetch_candidates(
+        "RKeCom Services Pvt Ltd", "Mumbai", search_fn=lambda _q: [], gbp_fetch_fn=lambda *_: [], llm_fn=llm_fn
+    )
+    assert [c for c in cands if c.source == "llm"] == []  # free-text "not found" → zero candidates
+
+
+def test_vt509_llm_json_empty_companies_returns_zero_candidates() -> None:
+    """VT-509: {"companies": []} → zero candidates (LLM found nothing in structured form)."""
+    def llm_fn(_n: str, _c: str) -> str:
+        return _llm_json([])  # {"companies": []}
+
+    cands = entity_match.fetch_candidates(
+        "RKeCom Services Pvt Ltd", "Mumbai", search_fn=lambda _q: [], gbp_fetch_fn=lambda *_: [], llm_fn=llm_fn
+    )
+    assert [c for c in cands if c.source == "llm"] == []
+
+
+def test_vt509_llm_json_uses_reported_name_not_query() -> None:
+    """VT-509: trade_name on the LLM candidate MUST be the JSON-reported registered company name,
+    NOT the queried/echoed input string (the original bug echoed the query as trade_name)."""
+    def llm_fn(_n: str, _c: str) -> str:
+        return _llm_json([{"name": "RKECOM SERVICES (OPC) PRIVATE LIMITED", "gstin": _VALID_GSTIN, "cin": ""}])
+
+    cands = entity_match.fetch_candidates(
+        "RKeCom Service Pvt Ltd",  # intentionally slightly different from the registry name
+        "Mumbai", search_fn=lambda _q: [], gbp_fetch_fn=lambda *_: [], llm_fn=llm_fn,
+    )
+    llm = [c for c in cands if c.source == "llm"]
+    assert len(llm) == 1
+    # trade_name must be the LLM-reported name, NOT "RKeCom Service Pvt Ltd" (the query)
+    assert llm[0].trade_name == "RKECOM SERVICES (OPC) PRIVATE LIMITED"
+    assert llm[0].candidate_gstin == _VALID_GSTIN
+
+
+def test_vt509_llm_json_name_only_no_gstin_dropped() -> None:
+    """VT-509: a JSON company entry with a name but NO valid 15-char GSTIN must be DROPPED —
+    it must NOT produce a name-only candidate card with 'No GST number found.'"""
+    def llm_fn(_n: str, _c: str) -> str:
+        return _llm_json([
+            {"name": "RKECOM SERVICES (OPC) PRIVATE LIMITED", "gstin": "", "cin": ""},  # no GSTIN
+            {"name": "RKECOM SERVICES (OPC) PRIVATE LIMITED", "gstin": "NOTVALID", "cin": ""},  # bad shape
+        ])
+
+    cands = entity_match.fetch_candidates(
+        "RKeCom Services Pvt Ltd", "Mumbai", search_fn=lambda _q: [], gbp_fetch_fn=lambda *_: [], llm_fn=llm_fn
+    )
+    # Neither entry has a valid GSTIN or CIN → zero LLM candidates (not a garbage "found" card)
+    assert [c for c in cands if c.source == "llm"] == []
+
+
+def test_vt509_llm_json_with_preamble_still_parsed() -> None:
+    """VT-509 robustness: the web_search flow may prepend a short sentence before the JSON object.
+    The parser must extract the embedded JSON rather than failing on the preamble."""
+    def llm_fn(_n: str, _c: str) -> str:
+        # Simulates a model that says one sentence then gives the JSON
+        return f'Here is the result: {_llm_json([{"name": _LLM_COMPANY, "gstin": _VALID_GSTIN, "cin": ""}])}'
+
+    cands = entity_match.fetch_candidates(
+        "RKeCom Services Pvt Ltd", "Mumbai", search_fn=lambda _q: [], gbp_fetch_fn=lambda *_: [], llm_fn=llm_fn
     )
     llm = [c for c in cands if c.source == "llm"]
     assert len(llm) == 1 and llm[0].candidate_gstin == _VALID_GSTIN
