@@ -45,6 +45,7 @@ from orchestrator.agent.limits.coordinator import CancellationContext
 from orchestrator.agent.limits.tool_counter import ToolCounter
 from orchestrator.agent.schemas.campaign_plan import (
     CampaignPlan,
+    CampaignPlanProposed,
     SelfEvaluateStatus,
 )
 
@@ -264,7 +265,38 @@ class SelfEvaluateGate:
         The ``max_revisions`` config value is the threshold at which
         REJECTED fires. With the current ``max_revisions=2``, two
         accumulated REVISE verdicts reject the run.
+
+        VT-491 — variant short-circuit (deterministic, no LLM)
+        ------------------------------------------------------
+        The grader (and its prompt) is written to grade a ``proposed``
+        CampaignPlan ONLY. The other two terminal variants —
+        ``out_of_scope`` (a refusal) and ``insufficient_data`` ("no
+        campaign possible yet, here's the missing data") — are LEGAL
+        terminals with nothing to grade. Handing one to the off-contract
+        LLM seam makes its verdict undefined: it PASSed one run and
+        REVISEd another (with a factually-wrong critique), and a REVISE
+        burns a retry or escalates a legitimate "not enough data"
+        terminal to Fazal. So: detect the non-proposed variant FIRST,
+        deterministically (``isinstance``, never the LLM), and ACCEPT it
+        (SHIP) unchanged — BEFORE ``record_dispatch()`` and before the
+        seam. No Opus call happens, so no tool-budget slot is charged
+        (``evaluator_calls`` stays 0) and no cost accrues; the plan flows
+        on to ``collapse_node`` → ``record_terminal_verdict`` intact (the
+        data-remediation terminal that already exists). A real
+        ``proposed`` plan still gets the full, unchanged four-category
+        grade below — the gate is NOT weakened for real plans.
         """
+        if not isinstance(draft, CampaignPlanProposed):
+            return GateOutcome(
+                action=GateAction.SHIP,
+                # Cosmetic for non-proposed terminals: record_terminal_verdict
+                # reads ``variant`` + ``missing_data``, never this field. Left
+                # at the GateOutcome default (NOT_YET_EVALUATED) — no schema
+                # touch. attempt_number=0 marks "no grading attempt".
+                attempt_number=0,
+                outcome=None,
+            )
+
         self.tool_counter.record_dispatch()
         if self.ctx.is_cancelled:
             return GateOutcome(action=GateAction.ABORTED)
