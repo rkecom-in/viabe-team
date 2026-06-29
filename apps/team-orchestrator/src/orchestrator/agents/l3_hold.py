@@ -714,31 +714,37 @@ def _hold_send_step_body(tenant_id: str, batch_id: str) -> dict[str, Any]:
     return counters
 
 
-_hold_demote_step: Any | None = None
-_hold_send_step: Any | None = None
+# The lazily-decorated @DBOS.step globals — DISTINCT names from the wrapper functions below
+# so the wrappers' re-dispatch does NOT recurse (the l2_send idiom: _l2_send_step_decorated
+# ≠ _l2_send_step). The bug: the original code used `_hold_demote_step` and `_hold_send_step`
+# for BOTH the module-level None sentinels AND the def-name of the wrapper functions — Python
+# rebinds the global to the function at class-body/module time, so `_ensure_hold_steps` found
+# them non-None, never installed the DBOS wrap, and the wrappers called themselves → RecursionError.
+_hold_demote_step_decorated: Any | None = None
+_hold_send_step_decorated: Any | None = None
 
 
 def _ensure_hold_steps() -> None:
     """Lazily decorate the demote/send legs as @DBOS.step (stable qualnames for recovery)."""
     from dbos import DBOS
 
-    global _hold_demote_step, _hold_send_step
-    if _hold_demote_step is None:
-        _hold_demote_step = DBOS.step()(_hold_demote_step_body)
-    if _hold_send_step is None:
-        _hold_send_step = DBOS.step()(_hold_send_step_body)
+    global _hold_demote_step_decorated, _hold_send_step_decorated
+    if _hold_demote_step_decorated is None:
+        _hold_demote_step_decorated = DBOS.step()(_hold_demote_step_body)
+    if _hold_send_step_decorated is None:
+        _hold_send_step_decorated = DBOS.step()(_hold_send_step_body)
 
 
 def _hold_demote_step(tenant_id: str, batch_id: str) -> None:
     _ensure_hold_steps()
-    assert _hold_demote_step is not None
-    return _hold_demote_step(tenant_id, batch_id)  # type: ignore[no-any-return]
+    assert _hold_demote_step_decorated is not None
+    return _hold_demote_step_decorated(tenant_id, batch_id)  # type: ignore[no-any-return]
 
 
 def _hold_send_step(tenant_id: str, batch_id: str) -> dict[str, Any]:
     _ensure_hold_steps()
-    assert _hold_send_step is not None
-    return _hold_send_step(tenant_id, batch_id)  # type: ignore[no-any-return]
+    assert _hold_send_step_decorated is not None
+    return _hold_send_step_decorated(tenant_id, batch_id)  # type: ignore[no-any-return]
 
 
 # ---------------------------------------------------------------------------

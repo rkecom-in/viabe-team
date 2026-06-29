@@ -403,3 +403,6 @@ The dev secrets file (`sandbox.env`) has both test and live keys: `sandbox_api_k
 ---
 
 *This document is a Cowork gate artifact and Fazal authorization brief. CC produced it read-only; no code, DB, env, or git changes were made in this session beyond writing this file.*
+
+
+> **CORRECTION (2026-06-30, VT-505 resolved):** The 'DBOS pooler init failure' risk flagged here was a MISDIAGNOSIS — DBOS works fine on the session-mode pooler; workflow_status lives in the separate `postgres_dbos_sys` DB (not the app `postgres` DB). The real bug was a contained code recursion in l3_hold.py (VT-505, fixed). Prod does NOT need a pooler-vs-direct change FOR DBOS. (apply_migrations.py still needs a direct DSN for its own schema migrations — unrelated to DBOS.)
