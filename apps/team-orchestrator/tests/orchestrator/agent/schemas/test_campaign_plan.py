@@ -39,7 +39,9 @@ from orchestrator.agent.schemas.campaign_plan import (  # noqa: E402
     SuggestedSpecialist,
     TargetCohort,
     parse_campaign_plan,
+    schema_rejection_field_paths,
 )
+from pydantic import ValidationError  # noqa: E402
 
 
 # ---------- fixtures ----------------------------------------------------------
@@ -381,6 +383,129 @@ def test_top_level_campaignplan_alias_works_as_discriminated_union():
     for payload, expected_cls in cases:
         parsed = parse_campaign_plan(payload)
         assert isinstance(parsed, expected_cls)
+
+
+# ---------- 4. VT-496 — schema-rejection field paths survive redaction -------
+
+
+def _proposed_payload_backdated_window_with_pii() -> dict[str, Any]:
+    """A ``proposed`` payload that fails validation on a backdated
+    campaign_window AND carries a customer name in a free-text field.
+
+    Mirrors the dominant win-back re-drive failure (a past
+    ``campaign_window.start`` the model echoed from a stale prompt). The
+    personalization free text holds an obvious PII value so the no-leak
+    assertions have something concrete to catch.
+    """
+    cids = [str(uuid4())]
+    return {
+        "version": "1.0",
+        "status": "proposed",
+        "tenant_id": str(uuid4()),
+        "run_id": str(uuid4()),
+        "generated_at": datetime.now(UTC).isoformat(),
+        "campaign_window": {  # backdated start → CampaignWindow validator rejects
+            "start": (datetime.now(UTC) - timedelta(days=3)).isoformat(),
+            "end": _future(4).isoformat(),
+        },
+        "target_cohort": {
+            "customer_ids": cids,
+            "cohort_label": "dormants",
+            "cohort_size": 1,
+            "selection_reason": "Dormant [E1]",
+        },
+        "expected_arrr": {
+            "low_paise": 1,
+            "high_paise": 2,
+            "confidence": "low",
+            "basis": "b [E1]",
+        },
+        "evidence_refs": [
+            {"claim_id": "E1", "source_kind": "tool_call", "source_id": "s"},
+        ],
+        "message_plan": {
+            "template_id": "t",
+            "template_params": {},
+            "language": "en",
+            # PII value the redactor must keep out of the field-path summary.
+            "personalization": "Customer Ravi Kumar wants 20% off",
+        },
+    }
+
+
+def test_schema_rejection_field_paths_names_failing_field():
+    """(a) The helper names the failing field via loc + pydantic type."""
+    payload = _proposed_payload_backdated_window_with_pii()
+    with pytest.raises(ValidationError) as exc_info:
+        parse_campaign_plan(payload)
+    paths = schema_rejection_field_paths(exc_info.value)
+    assert paths == ["proposed.campaign_window: value_error"]
+
+
+def test_schema_rejection_field_paths_missing_fields_named():
+    """A status-only proposed payload names each absent required field."""
+    payload = {
+        "status": "proposed",
+        "tenant_id": str(uuid4()),
+        "run_id": str(uuid4()),
+        "generated_at": datetime.now(UTC).isoformat(),
+    }
+    with pytest.raises(ValidationError) as exc_info:
+        parse_campaign_plan(payload)
+    paths = schema_rejection_field_paths(exc_info.value)
+    assert "proposed.campaign_window: missing" in paths
+    assert "proposed.message_plan: missing" in paths
+    assert all(p.startswith("proposed.") and ": " in p for p in paths)
+
+
+def test_schema_rejection_field_paths_carry_no_pii_value():
+    """(b) loc+type ONLY — never the offending value (input_value/msg)."""
+    payload = _proposed_payload_backdated_window_with_pii()
+    with pytest.raises(ValidationError) as exc_info:
+        parse_campaign_plan(payload)
+    paths = schema_rejection_field_paths(exc_info.value)
+    joined = " ".join(paths)
+    # The pydantic str(exc) WOULD echo these — the helper must not.
+    assert "input_value" not in joined
+    assert "Ravi Kumar" not in joined
+    assert "in the past" not in joined  # the value-bearing validator msg
+    # Each entry is exactly "<dotted loc>: <type>".
+    for p in paths:
+        loc, _, etype = p.partition(": ")
+        assert loc and etype
+        assert " " not in loc  # dotted field path, no prose
+
+
+def test_schema_rejection_field_paths_survive_redactor():
+    """(c) Carried as structured metadata, the field paths survive the
+    write-time redactor unchanged — while the value-bearing free-text
+    ``message`` is SHA-hashed whole (the swallow VT-496 fixes)."""
+    from orchestrator.observability.pii import redact_for_log
+
+    payload = _proposed_payload_backdated_window_with_pii()
+    with pytest.raises(ValidationError) as exc_info:
+        parse_campaign_plan(payload)
+    paths = schema_rejection_field_paths(exc_info.value)
+
+    # Reconstruct the error dict shape error_router._log_decision writes.
+    error = {
+        "failure_type": "agent_invalid_output",
+        # A long free-text message (>200 chars) — the redactor hashes it whole.
+        "message": "post-coerce CampaignPlan schema rejection " + ("x" * 250),
+        "vendor": None,
+        "metadata": {
+            "source": "agent_schema_rejection",
+            "schema_field_paths": paths,
+        },
+        "occurred_at": datetime.now(UTC).isoformat(),
+    }
+    safe = redact_for_log(error)
+    # Free-text message swallowed (hashed) — this is exactly why the field
+    # path had to move to a structured channel.
+    assert safe["message"].startswith("<body:hash:")
+    # The structured field paths come through byte-identical.
+    assert safe["metadata"]["schema_field_paths"] == paths
+    assert "proposed.campaign_window: value_error" in safe["metadata"]["schema_field_paths"]
 
 
 # Type-alias for static-type assertions; mypy users importing CampaignPlan

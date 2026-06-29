@@ -56,7 +56,7 @@ from orchestrator.agent.limits import (
     ToolCounter,
     WallclockTimer,
 )
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from orchestrator.agent.schemas.campaign_plan import (
     CampaignPlanInsufficientData,
@@ -64,6 +64,7 @@ from orchestrator.agent.schemas.campaign_plan import (
     CampaignPlanProposed,
     CampaignStatus,
     parse_campaign_plan,
+    schema_rejection_field_paths,
 )
 from orchestrator.context_builder import serialize_bundle_for_prompt
 from orchestrator.agent.self_evaluate import (
@@ -687,16 +688,43 @@ def run_sales_recovery_agent(
             # no draft to evaluate. Emit a FailureRecord so the run is
             # observable (CL-238 — no silent swallow). Best-effort,
             # must not re-raise into the loop.
+            #
+            # VT-496: capture the pydantic ValidationError's structured
+            # field paths (``loc`` + error ``type``) as NON-PII metadata
+            # that SURVIVES redaction. The old ``str(exc)`` message was
+            # (a) long enough that the redactor SHA-hashes it whole
+            # (``_hash_raw_body``), so the failing field was un-nameable on
+            # dev, and (b) carried ``input_value`` — the offending VALUE,
+            # potential customer PII. ``schema_rejection_field_paths`` reads
+            # ONLY loc+type (schema paths, never content); the reason string
+            # is rebuilt from those so it no longer echoes a value.
+            field_paths = (
+                schema_rejection_field_paths(exc)
+                if isinstance(exc, ValidationError)
+                else []
+            )
+            if field_paths:
+                reason = (
+                    "post-coerce CampaignPlan schema rejection: "
+                    + "; ".join(field_paths)
+                )
+            else:
+                # Non-ValidationError (should not happen — parse only raises
+                # ValidationError) — name the exception type, NOT str(exc),
+                # to keep any value out of the message.
+                reason = (
+                    "post-coerce CampaignPlan schema rejection ("
+                    + type(exc).__name__
+                    + ")"
+                )
             _emit_invalid_output(
                 context=context,
-                reason=(
-                    "post-coerce CampaignPlan schema rejection; "
-                    + str(exc)[:200]
-                ),
+                reason=reason,
                 tokens_used=input_tokens_used + output_tokens_used,
                 tool_calls_made=tool_calls_made,
                 wallclock_ms=int((time.monotonic() - start) * 1000),
                 source="agent_schema_rejection",
+                schema_field_paths=field_paths,
             )
             status = "invalid"
             break
@@ -909,6 +937,7 @@ def _emit_invalid_output(
     tool_calls_made: int,
     wallclock_ms: int,
     source: str = "self_evaluate_gate",
+    schema_field_paths: list[str] | None = None,
 ) -> None:
     """Route a FailureRecord(AGENT_INVALID_OUTPUT). Callers:
 
@@ -925,19 +954,31 @@ def _emit_invalid_output(
       CampaignPlan schema rejection (e.g. required field absent on a
       legal variant). Closes the third CL-238 silent-failure hole.
 
+    VT-496: ``schema_field_paths`` (the ``agent_schema_rejection`` path)
+    carries the pydantic ValidationError's ``"<loc>: <type>"`` summaries —
+    NON-PII schema paths (loc + error code only, never the offending value).
+    They land in ``metadata['schema_field_paths']`` as a structured list of
+    short, pattern-free strings, so they SURVIVE the write-time redactor
+    (which SHA-hashes the long free-text ``message`` whole). A plain SQL read
+    of ``pipeline_steps.error->'metadata'->'schema_field_paths'`` then names
+    the failing CampaignPlanProposed fields without the LLM key.
+
     Best-effort — routing failure must NOT re-raise into the run."""
+    metadata: dict[str, Any] = {
+        "source": source,
+        "tokens_used": tokens_used,
+        "tool_calls_made": tool_calls_made,
+        "wallclock_ms": wallclock_ms,
+    }
+    if schema_field_paths:
+        metadata["schema_field_paths"] = schema_field_paths
     failure = FailureRecord(
         failure_type=FailureType.AGENT_INVALID_OUTPUT,
         message=reason,
         occurred_at=datetime.now(UTC),
         tenant_id=context.tenant_id,
         run_id=context.run_id,
-        metadata={
-            "source": source,
-            "tokens_used": tokens_used,
-            "tool_calls_made": tool_calls_made,
-            "wallclock_ms": wallclock_ms,
-        },
+        metadata=metadata,
     )
     route_failure(failure)
 
