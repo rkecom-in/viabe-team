@@ -77,7 +77,10 @@ from orchestrator.observability.langchain_callback import (
 from orchestrator.observability.pipeline_observability import write_step
 from orchestrator.output_composer import compose_owner_output
 from orchestrator.state import SubscriberState
-from orchestrator.supervisor import build_supervisor_graph
+from orchestrator.supervisor import (
+    SpecialistNoOutputError,
+    build_supervisor_graph,
+)
 from orchestrator.types import WebhookEvent
 
 logger = logging.getLogger(__name__)
@@ -430,6 +433,36 @@ def dispatch_brain(
             final_status="aborted_hard_limit",
             terminal_path=None,
             reason=f"hard_limit:{hle.axis}",
+        )
+    except SpecialistNoOutputError as snoe:
+        # VT-492 — a specialist dispatch terminated with NO usable output
+        # (status in {refused, invalid, terminated}; e.g. the SR retry emitted
+        # non-dict terminal text → agent_terminal_no_dict). The specialist
+        # already routed its FailureRecord (the invalid output stays
+        # observable). Convert the dead-end to a CLEAN 'escalated' terminal —
+        # the SAME convert-don't-orphan shape as the HardLimitExceeded branch
+        # above (and VT-484's tool-error middleware): a bare re-raise here
+        # escapes to webhook_pipeline_run BEFORE close_webhook_run, orphaning
+        # the run at status='running' until the VT-481 reaper. 'escalated' is a
+        # valid pipeline_runs.status terminal (mig-052 CHECK) AND a VT-88
+        # _UNRESOLVED status, so close_webhook_run records a terminal status
+        # and maybe_escalate_support acks the owner — never silence. PII-safe:
+        # the reason carries the specialist + terminal status only (no body).
+        logger.warning(
+            "dispatch_brain: specialist produced no usable output; resolving "
+            "to a clean 'escalated' terminal (VT-492 — preventing an orphaned "
+            "status='running' hang)",
+            extra={
+                "run_id": str(run_id),
+                "tenant_id": str(tenant_id),
+                "specialist": snoe.specialist,
+                "agent_status": snoe.status,
+            },
+        )
+        return DispatchResult(
+            final_status="escalated",
+            terminal_path="escalated",
+            reason=f"specialist_no_output:{snoe.specialist}:{snoe.status}",
         )
     except Exception:
         # Unhandled — re-raise to DBOS for retry. write_step happens via

@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import json
 from typing import Any
+from uuid import UUID
 
 from langchain_anthropic import ChatAnthropic
 from langgraph.checkpoint.postgres import PostgresSaver
@@ -67,6 +68,47 @@ from orchestrator.state.agent_graph_state import AgentGraphState
 # context shape.
 _RUN_COST_BUDGET_PAISE = 5_000  # ₹50 per VT-35
 _RUN_WALLCLOCK_BUDGET_MS = int(WALL_CLOCK_HARD_LIMIT_S * 1000)
+
+
+class SpecialistNoOutputError(RuntimeError):
+    """A specialist dispatch terminated with NO usable output (VT-492).
+
+    Raised by a specialist node when ``run_<specialist>_agent`` returns a
+    terminal ``AgentResult`` whose ``output`` is None — the live-agent
+    failure modes ``status in {refused, invalid, terminated}`` (e.g. a
+    post-REVISE retry emits non-dict terminal text, classified
+    ``agent_terminal_no_dict``). The agent ALREADY routed its own
+    ``FailureRecord`` (the failure stays observable); this exception is the
+    CONTROL signal that lets ``dispatch_brain`` convert the dead-end into a
+    CLEAN ``escalated`` terminal — instead of letting a bare ``RuntimeError``
+    escape ``graph.invoke`` → ``dispatch_brain``'s catch-all re-raise →
+    ``webhook_pipeline_run`` skip ``close_webhook_run`` → the run ORPHAN at
+    ``status='running'`` until the VT-481 reaper (hours later).
+
+    Mirrors the ``HardLimitExceeded`` clean-terminal pattern (a structured
+    exception the dispatch boundary maps to a known final_status) and the
+    VT-484 convert-don't-orphan principle. PII-safe fields only — specialist
+    name + the terminal ``status`` + run / tenant ids (NO owner body, NO
+    draft).
+    """
+
+    def __init__(
+        self,
+        *,
+        specialist: str,
+        status: str,
+        run_id: UUID,
+        tenant_id: UUID,
+    ) -> None:
+        self.specialist = specialist
+        self.status = status
+        self.run_id = run_id
+        self.tenant_id = tenant_id
+        super().__init__(
+            f"{specialist}_node: agent returned status={status!r} with no "
+            f"output (FailureRecord already routed if applicable; "
+            f"run={run_id} tenant={tenant_id})"
+        )
 
 
 def _sales_recovery_node(state: AgentGraphState) -> dict[str, Any]:
@@ -133,9 +175,20 @@ def _sales_recovery_node(state: AgentGraphState) -> dict[str, Any]:
         # routed a FailureRecord; the supervisor surfaces the failure
         # rather than synthesising a fallback plan (CL-238 — the brief's
         # "real error, not silent fallback").
-        raise RuntimeError(
-            f"sales_recovery_node: agent returned status={agent_result.status!r}"
-            " with no output (FailureRecord already routed if applicable)"
+        #
+        # VT-492: raise the STRUCTURED SpecialistNoOutputError (NOT a bare
+        # RuntimeError). dispatch_brain catches it and maps it to a CLEAN
+        # 'escalated' terminal so the run reaches a terminal status + the
+        # VT-88 SupportBot acks the owner — a bare raise would orphan the run
+        # at status='running' (the original VT-492 defect: the raise escaped
+        # before close_webhook_run, leaving the run stuck until the VT-481
+        # reaper). The invalid output stays observable via the agent's
+        # already-routed FailureRecord — this does not mask the real bug.
+        raise SpecialistNoOutputError(
+            specialist="sales_recovery",
+            status=str(agent_result.status),
+            run_id=run_uuid,
+            tenant_id=tenant_uuid,
         )
 
     # Tight exception handling — narrow catch on parse failure. A

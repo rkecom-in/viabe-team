@@ -248,3 +248,98 @@ def test_brain_models_are_in_the_cost_rate_table():
 
     assert _BRAIN_MODEL_SONNET in RATES
     assert _BRAIN_MODEL_OPUS in RATES
+
+
+# --- VT-492: specialist-no-output resolves to a CLEAN terminal (not orphan) ----
+#
+# The defect: a specialist (sales_recovery) that terminates with NO usable output
+# (status in {refused, invalid, terminated}; e.g. the SR retry emitted non-dict
+# terminal text → agent_terminal_no_dict) raised a bare RuntimeError that escaped
+# graph.invoke → dispatch_brain's catch-all re-raised → webhook_pipeline_run never
+# reached close_webhook_run → the run sat at status='running' until the VT-481
+# reaper. The fix: the node raises a STRUCTURED SpecialistNoOutputError that
+# dispatch_brain converts to a CLEAN 'escalated' terminal (so the runner records a
+# terminal status AND the VT-88 SupportBot acks the owner — never silence).
+
+
+def test_dispatch_brain_specialist_no_output_resolves_to_clean_escalated(
+    monkeypatch,
+):
+    """VT-492 — dispatch_brain converts a SpecialistNoOutputError raised by the
+    graph into a CLEAN ``DispatchResult(final_status='escalated')`` instead of
+    re-raising (which would orphan the run at status='running'). 'escalated' is
+    the value the runner writes to pipeline_runs.status via close_webhook_run.
+    """
+    import contextlib
+    from uuid import uuid4
+
+    import orchestrator.agent.dispatch as dispatch_mod
+    import orchestrator.edge_cases_router as edge_mod
+    import orchestrator.graph as graph_mod
+    from orchestrator.agent.dispatch import dispatch_brain
+    from orchestrator.state import new_subscriber_state
+    from orchestrator.supervisor import SpecialistNoOutputError
+    from orchestrator.types import WebhookEvent
+
+    tenant_id = uuid4()
+    run_id = uuid4()
+
+    # Real key prefix so dispatch doesn't short-circuit to the test-mode
+    # escalated fallback; we drive the brain path and stub the graph.
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-vt492-fake")
+
+    # No edge-case fast-path → fall through to the brain (intent stays empty).
+    monkeypatch.setattr(edge_mod, "route_edge_case", lambda **kwargs: None)
+    # Keep the run keyless/no-DB: null observability context + no checkpointer +
+    # a fake graph whose .invoke raises the structured no-output signal.
+    monkeypatch.setattr(
+        dispatch_mod,
+        "observability_context",
+        lambda **kwargs: contextlib.nullcontext(),
+    )
+    monkeypatch.setattr(graph_mod, "get_checkpointer", lambda: None)
+    monkeypatch.setattr(dispatch_mod, "_resolve_model", lambda *a, **k: object())
+
+    class _FakeGraph:
+        def invoke(self, *args, **kwargs):
+            raise SpecialistNoOutputError(
+                specialist="sales_recovery",
+                status="invalid",
+                run_id=run_id,
+                tenant_id=tenant_id,
+            )
+
+    monkeypatch.setattr(
+        dispatch_mod, "build_supervisor_graph", lambda **kwargs: _FakeGraph()
+    )
+
+    event = WebhookEvent(
+        body="recover my dormant customers",
+        sender_phone="+10000000000",
+        message_type="inbound_message",
+        twilio_message_sid="SMvt492test",
+    )
+    state = new_subscriber_state(tenant_id, run_id)
+
+    result = dispatch_brain(
+        event=event, state=state, run_id=run_id, tenant_id=tenant_id
+    )
+
+    # The run reaches a CLEAN terminal — NOT an unhandled re-raise (no orphan).
+    assert result.final_status == "escalated"
+    assert result.terminal_path == "escalated"
+    assert result.reason == "specialist_no_output:sales_recovery:invalid"
+
+
+def test_specialist_no_output_terminal_is_unresolved_so_owner_gets_ack():
+    """VT-492 — the 'escalated' terminal the no-output path resolves to is a
+    VT-88 _UNRESOLVED status, so maybe_escalate_support fires the owner's
+    no-silence ack. Pins the contract that an invalid SR terminal routes the
+    owner ack (not silence) — and that 'escalated' is a valid FinalStatus."""
+    from typing import get_args
+
+    from orchestrator.agent.dispatch import FinalStatus
+    from orchestrator.owner_surface.support_bot import _UNRESOLVED
+
+    assert "escalated" in get_args(FinalStatus)
+    assert "escalated" in _UNRESOLVED

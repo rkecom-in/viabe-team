@@ -888,6 +888,64 @@ def test_sales_recovery_node_fails_loud_on_missing_bundle(
         )
 
 
+@pytest.mark.parametrize("agent_status", ["invalid", "refused", "terminated"])
+def test_sales_recovery_node_no_output_raises_structured_not_bare(
+    monkeypatch: pytest.MonkeyPatch, agent_status: str
+) -> None:
+    """VT-492 — when the agent terminates with NO usable output (output=None;
+    status in {invalid, refused, terminated} — e.g. a post-REVISE retry emits
+    non-dict terminal text classified ``agent_terminal_no_dict``), the node
+    MUST raise the STRUCTURED ``SpecialistNoOutputError`` (a control signal
+    dispatch_brain converts to a CLEAN 'escalated' terminal) — NOT a bare
+    RuntimeError that would orphan the run at status='running'. The exception
+    carries PII-safe fields only (specialist + terminal status + run/tenant
+    ids). The agent's own _emit_invalid_output FailureRecord already made the
+    invalid output observable, so this does not mask the real bug.
+    """
+    from types import SimpleNamespace
+
+    import orchestrator.supervisor as supervisor_mod
+    from orchestrator.agent.types import AgentResult
+    from orchestrator.supervisor import SpecialistNoOutputError
+
+    tenant_id = uuid4()
+    run_id = uuid4()
+
+    # Keyless / no-DB: the node only reads context.tenant_id + context.run_id
+    # before dispatching; stub the isolation re-query + the adapter + the agent.
+    monkeypatch.setattr(
+        "orchestrator.context_validator.validate_context_isolation",
+        lambda ctx: None,
+    )
+    monkeypatch.setattr(
+        supervisor_mod, "SelfEvaluateAdapter", lambda *, ctx: None
+    )
+    monkeypatch.setattr(
+        supervisor_mod,
+        "run_sales_recovery_agent",
+        lambda context, *, evaluator: AgentResult(
+            status=agent_status, output=None
+        ),
+    )
+
+    bundle = SimpleNamespace(tenant_id=tenant_id, run_id=run_id)
+
+    with pytest.raises(SpecialistNoOutputError) as excinfo:
+        supervisor_mod._sales_recovery_node(
+            {"sales_recovery_context": bundle}
+        )
+
+    exc = excinfo.value
+    assert exc.specialist == "sales_recovery"
+    assert exc.status == agent_status
+    assert exc.run_id == run_id
+    assert exc.tenant_id == tenant_id
+    # SpecialistNoOutputError is a RuntimeError subclass (so existing
+    # broad-except paths still see a RuntimeError) but a DISTINCT type
+    # dispatch_brain can catch specifically.
+    assert isinstance(exc, RuntimeError)
+
+
 def test_spawn_sales_recovery_attaches_bundle_with_user_request(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
