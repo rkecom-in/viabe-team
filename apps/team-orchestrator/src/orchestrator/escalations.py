@@ -141,9 +141,13 @@ def run_sla_breach_sweep_body() -> list[str]:
             r = dict(row)
             eid, tid = str(r["id"]), str(r["tenant_id"])
             try:
+                # VT-502: tenant-scoped → route through the VT-489 dev-routing
+                # gate (a canary/dev tenant's SLA breach never pages ViabeOps; a
+                # real prod tenant's still does).
                 _alert_fazal(
                     f"⚠️ SLA BREACH (VT-357) — escalation {eid} (tenant={tid}) is unresolved past "
-                    f"its SLA. Open it in the Ops Console."
+                    f"its SLA. Open it in the Ops Console.",
+                    tenant_id=tid,
                 )
             except Exception:
                 logger.exception("VT-357 SLA alert failed escalation=%s", eid)

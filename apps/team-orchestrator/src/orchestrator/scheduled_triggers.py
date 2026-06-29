@@ -361,7 +361,11 @@ def _alert_audit_chain_break(result: Any) -> None:
     import asyncio
     import os
 
-    from orchestrator.alerts.clients import send_resend_email, send_telegram
+    from orchestrator.alerts.clients import (
+        alert_is_dev_routed,
+        send_resend_email,
+        send_telegram,
+    )
 
     text = (
         "[CRITICAL] privacy_audit_log hash-chain BREAK (VT-80/VT-304) — "
@@ -370,12 +374,23 @@ def _alert_audit_chain_break(result: Any) -> None:
         f"{getattr(result, 'rows_checked', None)}."
     )
 
+    # VT-502: this is the OTHER alert path that emitted DIRECT to ViabeOps (it
+    # can't use the per-tenant tenant_alerts path — the chain is global/NULL-tenant).
+    # Gate it through the same VT-489 dev-routing decision so a dev-env chain
+    # break routes to the DEV bot (and skips real email), never PROD ops. On
+    # prod (EXPECTED_ENV=prod) this is False → OPS bot + email, exactly as before.
+    dev_routed = alert_is_dev_routed(None)  # global alert — env arm only
+    if dev_routed:
+        bot_token = os.environ.get("TELEGRAM_DEV_BOT_TOKEN", "")
+        chat_id = os.environ.get("TELEGRAM_DEV_CHAT_ID", "")
+    else:
+        bot_token = os.environ.get("TELEGRAM_OPS_BOT_TOKEN", "")
+        chat_id = os.environ.get("TELEGRAM_OPS_CHAT_ID", "")
+
     async def _send() -> None:
-        await send_telegram(
-            os.environ.get("TELEGRAM_OPS_BOT_TOKEN", ""),
-            os.environ.get("TELEGRAM_OPS_CHAT_ID", ""),
-            text,
-        )
+        await send_telegram(bot_token, chat_id, text)
+        if dev_routed:
+            return  # dev/non-prod never emails real ops
         from orchestrator.alerts.email_senders import sender_from
 
         await send_resend_email(

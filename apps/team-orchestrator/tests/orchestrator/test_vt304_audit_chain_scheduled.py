@@ -74,6 +74,10 @@ def _install_alert_spy(monkeypatch) -> dict:
     monkeypatch.setenv("RESEND_API_KEY", "x")
     monkeypatch.setenv("RESEND_FROM_EMAIL", "a@b.c")
     monkeypatch.setenv("RESEND_TO_EMAIL", "d@e.f")
+    # VT-502: the chain-break alert is now dev-routing-gated (alert_is_dev_routed).
+    # OPS Telegram + email is the PROD behaviour; on dev it routes to the DEV bot
+    # and skips email. This canary asserts the full PROD path, so pin prod.
+    monkeypatch.setenv("EXPECTED_ENV", "prod")
     return calls
 
 
