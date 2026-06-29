@@ -17,9 +17,21 @@
 # Adding an agent: top-level key is the agent name (string). Both
 # ``production`` and ``test`` are required.
 
+# VT-501: SR-draft is COMPLEX grounded reasoning — a full CampaignPlan with
+# evidence_refs that must satisfy the two-way marker⇄ref consistency + range/
+# honesty validators. The CL-242 Haiku rationale above ("plumbing-level canary /
+# prove the SDK loop wiring") was the PLACEHOLDER-era posture (VT-32) and no
+# longer holds: on dev (the validation env, CL-2026-06-29) Haiku drafted a VALID
+# grounded plan only ~2/6 — it could not reliably emit the structured grounding.
+# Per the VT-480 tiering principle (complex reasoning → the CAPABLE tier, never
+# Haiku), the dev/test slot is the capable Sonnet 4.6 — the same tier the analogous
+# grounded-citation agent ``business_plan`` runs in production. This is a
+# MISCLASSIFICATION-CORRECTION (a now-complex task was falling to the cheap slot),
+# not a new cost call. Cost/fidelity note for Fazal/Cowork: prod stays Opus 4.7; if
+# EXACT dev↔prod model fidelity is required for the re-drive, set test → Opus.
 sales_recovery:
   production: claude-opus-4-7
-  test: claude-haiku-4-5
+  test: claude-sonnet-4-6
 
 # VT-50 self_evaluate MCP tool — Opus-backed quality gate. The model
 # pin is read by orchestrator.agent.tools.self_evaluate._resolve_self_evaluate_model.
