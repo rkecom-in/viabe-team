@@ -99,10 +99,16 @@ def _alert_fazal_safe(tenant_id: UUID | str, sender_phone: str | None, run_id: s
         except Exception:
             # The fatigue count is best-effort — a DB hiccup must never suppress the alert.
             logger.exception("VT-343 fatigue-count failed (best-effort) tenant=%s", tenant_id)
+        # VT-502: route through the VT-489 dev-routing gate (tenant-scoped). A
+        # dev/canary/bogus tenant (EXPECTED_ENV!=prod OR tenant ∈ canary set) →
+        # DEV bot only, NEVER ViabeOps. A real prod tenant still pages ViabeOps +
+        # the FATIGUE business-stability line still fires. This is the leak class
+        # VT-489 closed for volume_spike, applied to the VT-88 escalation emit.
         _alert_fazal(
             f"⚠️ SupportBot escalation (VT-88)\n"
             f"tenant={tenant_id}\nowner=****{_last4(sender_phone)}\nrun={run_id}\n"
-            f"(2+ unresolved in 24h — open the run in the Ops Console){fatigue}"
+            f"(2+ unresolved in 24h — open the run in the Ops Console){fatigue}",
+            tenant_id=tenant_id,
         )
     except Exception:
         logger.exception("VT-88 Fazal alert failed tenant=%s", tenant_id)
