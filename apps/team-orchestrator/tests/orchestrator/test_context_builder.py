@@ -51,6 +51,9 @@ def _stub_db_backed_builders(monkeypatch: pytest.MonkeyPatch) -> None:
         cb, "_build_pending_owner_inputs", lambda tid: ([], False)
     )
     monkeypatch.setattr(cb, "_build_ledger_summary", lambda tid: (LedgerSummary(), True))
+    # VT-490: _build_dormant_cohort is a live DB read (CL-425 gate + tenant_connection).
+    # Stub it safe-empty so the pure-Python tests here need no DB / pool.
+    monkeypatch.setattr(cb, "_build_dormant_cohort", lambda tid: ([], False))
     monkeypatch.setattr(cb, "_build_l3_priors", lambda tid, rid: (L3Priors(), False))
     monkeypatch.setattr(cb, "_build_l4_skills", lambda tid, req: (L4Skills(), False))
 
@@ -64,6 +67,7 @@ _EXPECTED_FIELDS = {
     "trigger_reason",
     "business_profile",
     "customer_ledger_summary",
+    "dormant_cohort",  # VT-490
     "recent_campaigns",
     "attribution_snapshot",
     "pending_owner_inputs",
@@ -102,12 +106,14 @@ def test_build_sales_recovery_context_safe_empty_when_substrates_absent() -> Non
 
     assert bundle.business_profile == BusinessProfile()
     assert bundle.customer_ledger_summary == LedgerSummary()  # empty: no L2 events yet
+    assert bundle.dormant_cohort == []  # VT-490: no lapsed candidates (stubbed)
     assert bundle.recent_campaigns == []
     assert bundle.pending_owner_inputs == []
     assert bundle.attribution_snapshot == AttributionSnapshot()
     assert bundle.data_completeness == {
         "business_profile": False,
         "customer_ledger_summary": True,  # VT-67: L2 read ran (empty-but-live)
+        "dormant_cohort": False,  # VT-490: gate stubbed safe-empty
         "recent_campaigns": False,
         "attribution_snapshot": False,
         "pending_owner_inputs": False,

@@ -44,6 +44,9 @@ def _stub_db_backed_builders(monkeypatch: pytest.MonkeyPatch) -> None:
         cb, "_build_pending_owner_inputs", lambda tid: ([], False)
     )
     monkeypatch.setattr(cb, "_build_ledger_summary", lambda tid: (LedgerSummary(), True))
+    # VT-490: live DB read (CL-425 gate + tenant_connection) — stub safe-empty
+    # unless the individual test overrides it.
+    monkeypatch.setattr(cb, "_build_dormant_cohort", lambda tid: ([], False))
     monkeypatch.setattr(cb, "_build_l3_priors", lambda tid, rid: (cb.L3Priors(), False))
     monkeypatch.setattr(cb, "_build_l4_skills", lambda tid, req: (cb.L4Skills(), False))
 
