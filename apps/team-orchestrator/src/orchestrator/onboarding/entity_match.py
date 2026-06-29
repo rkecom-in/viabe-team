@@ -67,7 +67,7 @@ class EntityCandidate:
     HINT to round-trip through Sandbox — never shown as verified until confirm_and_verify says so."""
 
     trade_name: str | None
-    source: str  # 'web' | 'gbp' | 'registry' | 'llm' (VT-452 LLM web-search — candidate, never verified)
+    source: str  # 'web'|'gbp'|'registry'|'llm'|'knowyourgst' (VT-495 — all candidates, never verified)
     candidate_gstin: str | None = None
     legal_name: str | None = None
     detail: str | None = None  # address/category — disambiguates "Sundaram"-class collisions
@@ -82,17 +82,21 @@ def fetch_candidates(
     search_fn: SearchFn | None = None,
     gbp_fetch_fn: Callable[[dict[str, Any], str], list[dict[str, Any]]] | None = None,
     llm_fn: LlmFn | None = None,
+    kyg_scraper: Any = None,
 ) -> list[EntityCandidate]:
-    """Surface 0..N candidates. Web-search leg extracts candidate GSTINs by regex (then Sandbox is the
+    """Surface 0..N candidates. VT-495: the knowyourgst.com name→GSTIN leg runs FIRST (highest-
+    precision public-registry match — the durable fix for "couldn't auto-find the GSTIN" before the
+    owner is asked to type one). Web-search leg extracts candidate GSTINs by regex (then Sandbox is the
     authority); GBP leg adds a trade-name + locality candidate (no GSTIN). VT-452: an LLM web-search
     leg (behind ``llm_discovery_enabled()``, default OFF) surfaces GSTIN/CIN candidates a small-biz
-    SERP misses — HINTs only, the Sandbox GST verify stays the gate. Graceful-degrade to [] when
-    creds/actor are absent or the calls fail — entity-match must NEVER stall signup (VT-406 latency
-    flag). All legs are injectable for tests (no network/creds)."""
+    SERP misses. EVERY leg is HINTs-only — the Sandbox GST verify stays the SOLE authoritative gate.
+    Graceful-degrade to [] when creds/actor are absent or the calls fail — entity-match must NEVER
+    stall signup (VT-406 latency flag). All legs are injectable for tests (no network/creds)."""
     name = (business_name or "").strip()
     if not name:
         return []
     candidates: list[EntityCandidate] = []
+    candidates.extend(_knowyourgst_candidates(name, kyg_scraper))  # VT-495 — name→GSTIN, runs first
     candidates.extend(_web_candidates(name, city, search_fn))
     candidates.extend(_cin_candidates(name, city, search_fn))  # VT-449 registry leg → CIN → MCA
     candidates.extend(_gbp_candidates(name, city, gbp_fetch_fn))
@@ -176,6 +180,50 @@ def enrich_company_from_cin(
     except Exception:  # noqa: BLE001 — enrichment store is best-effort, never blocks identify
         logger.warning("entity_match: MCA company store failed (non-terminal)", exc_info=True)
     return cmd.company_name
+
+
+def _knowyourgst_candidates(name: str, scraper: Any) -> list[EntityCandidate]:
+    """VT-495 — name→GSTIN discovery via knowyourgst.com (ScrapingBee), the FIRST + highest-precision
+    leg. Runs the matching layer (``search_company_by_similar_name`` — stopword normalization, 0.72
+    similarity gate, dedup-by-GSTIN, longest-token fallback, stop-after-first-hit) over the public GST
+    registry and surfaces the matched rows as GSTIN CANDIDATES the owner CONFIRMS — which then go
+    through the EXISTING Sandbox GST verify (the SOLE authoritative gate, untouched). Reduces manual
+    GSTIN typing (CL-421 spirit).
+
+    FAIL-OPEN — best-effort only, NEVER blocks onboarding: an injected ``scraper`` forces the leg on
+    (tests); otherwise the leg self-skips when no ScrapingBee key is configured. Any error / 0 results
+    → [] so the remaining legs + the manual-GSTIN-entry path stay the fallback."""
+    from orchestrator.integrations.methods.knowyourgst_match import search_company_by_similar_name
+
+    kyg = scraper
+    if kyg is None:
+        from orchestrator.integrations.methods.knowyourgst import (
+            KnowYourGSTScraper,
+            scraper_configured,
+        )
+
+        if not scraper_configured():
+            return []  # no SCRAPINGBEE_API_KEY → fail-open to the existing legs + manual path
+        kyg = KnowYourGSTScraper()
+    try:
+        rows = search_company_by_similar_name(kyg, name)
+    except Exception:  # noqa: BLE001 — matching/scrape is best-effort; degrade, never raise into signup
+        logger.warning("entity_match: knowyourgst discovery failed (degrade to none)", exc_info=True)
+        return []
+    out: list[EntityCandidate] = []
+    for r in rows or []:
+        gstin = (r.get("gst_number") or "").strip().upper()
+        if not _GSTIN_RE.fullmatch(gstin):
+            continue  # defensive: only surface a well-formed GSTIN hint (Sandbox still verifies it)
+        out.append(
+            EntityCandidate(
+                trade_name=_clean(r.get("company_name")) or name,
+                source="knowyourgst",
+                candidate_gstin=gstin,
+                detail=_clean(r.get("state")),
+            )
+        )
+    return out
 
 
 def _web_candidates(name: str, city: str, search_fn: SearchFn | None) -> list[EntityCandidate]:

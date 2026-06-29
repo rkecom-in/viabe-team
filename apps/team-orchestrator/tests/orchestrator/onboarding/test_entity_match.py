@@ -307,3 +307,84 @@ def test_vt455_generic_biz_token_not_distinctive() -> None:
     )
     # a real distinctive name is unaffected
     assert "rkecom" in entity_match._significant_tokens("RKeCom Services Pvt Ltd")
+
+
+# ---------------------------------------------------------------------------
+# VT-495 — knowyourgst.com name→GSTIN discovery leg (runs BEFORE the manual-GSTIN-entry step)
+# ---------------------------------------------------------------------------
+
+_RKECOM_GSTIN = "27AAKCR3738B1ZE"  # real RKECOM GSTIN (public record), valid 15-char shape
+
+
+class _FakeKyg:
+    """Injectable knowyourgst GSTSearcher fixture (the matching layer drives .search)."""
+
+    def __init__(self, rows: list[dict[str, str]]) -> None:
+        self.rows = rows
+        self.queries: list[str] = []
+
+    def search(self, query: str) -> list[dict[str, str]]:
+        self.queries.append(query)
+        return self.rows
+
+
+def test_vt495_knowyourgst_leg_surfaces_gstin_candidate() -> None:
+    # The durable RKeCom fix: a name→GSTIN candidate surfaces FIRST, BEFORE the owner types a GSTIN.
+    kyg = _FakeKyg(
+        [{"company_name": "RKECOM SERVICES (OPC) PRIVATE LIMITED", "state": "Maharashtra", "gst_number": _RKECOM_GSTIN}]
+    )
+    cands = entity_match.fetch_candidates(
+        "RKECOM Services Pvt Ltd", "Mumbai", search_fn=lambda _q: [], gbp_fetch_fn=lambda *_: [], kyg_scraper=kyg
+    )
+    surfaced = [c for c in cands if c.source == "knowyourgst"]
+    assert len(surfaced) == 1
+    assert surfaced[0].candidate_gstin == _RKECOM_GSTIN
+    assert surfaced[0].trade_name == "RKECOM SERVICES (OPC) PRIVATE LIMITED"
+    assert "Maharashtra" in (surfaced[0].detail or "")
+    # the matching layer issued the normalized distinctive query (services/pvt/ltd stripped)
+    assert kyg.queries == ["rkecom"]
+    # HINT-only invariant — the candidate is never marked verified (Sandbox verify is the gate)
+    assert not hasattr(surfaced[0], "verified")
+
+
+def test_vt495_knowyourgst_leg_fail_open_on_error_never_blocks() -> None:
+    # The scrape erroring must NOT block onboarding: the leg degrades to [] and the OTHER legs
+    # (here the web leg) + the manual-GSTIN path remain.
+    class _Boom:
+        def search(self, query: str) -> list[dict[str, str]]:
+            raise RuntimeError("scrapingbee down")
+
+    cands = entity_match.fetch_candidates(
+        "RKeCom Services Pvt Ltd",
+        "Mumbai",
+        search_fn=lambda _q: [{"title": "RKeCom Services", "description": f"GSTIN {_VALID_GSTIN}", "url": "x"}],
+        gbp_fetch_fn=lambda *_: [],
+        kyg_scraper=_Boom(),
+    )
+    assert [c for c in cands if c.source == "knowyourgst"] == []  # leg degraded, no raise
+    assert any(c.source == "web" for c in cands)  # onboarding continues on the surviving legs
+
+
+def test_vt495_knowyourgst_leg_skipped_without_key(monkeypatch) -> None:
+    # No injected scraper + no SCRAPINGBEE_API_KEY → the leg self-skips (fail-open to manual path).
+    monkeypatch.delenv("SCRAPINGBEE_API_KEY", raising=False)
+    cands = entity_match.fetch_candidates(
+        "RKECOM Services Pvt Ltd", "Mumbai", search_fn=lambda _q: [], gbp_fetch_fn=lambda *_: []
+    )
+    assert [c for c in cands if c.source == "knowyourgst"] == []
+
+
+def test_vt495_knowyourgst_leg_dedups_gstin_against_web_leg() -> None:
+    # knowyourgst runs first; a later web leg surfacing the SAME GSTIN is deduped (one candidate).
+    kyg = _FakeKyg(
+        [{"company_name": "RKECOM SERVICES (OPC) PRIVATE LIMITED", "state": "Maharashtra", "gst_number": _RKECOM_GSTIN}]
+    )
+    cands = entity_match.fetch_candidates(
+        "RKECOM Services Pvt Ltd",
+        "Mumbai",
+        search_fn=lambda _q: [{"title": "RKECOM Services", "description": f"GSTIN {_RKECOM_GSTIN}", "url": "x"}],
+        gbp_fetch_fn=lambda *_: [],
+        kyg_scraper=kyg,
+    )
+    matching = [c for c in cands if c.candidate_gstin == _RKECOM_GSTIN]
+    assert len(matching) == 1 and matching[0].source == "knowyourgst"  # first-seen wins
