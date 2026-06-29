@@ -259,6 +259,51 @@ def test_context_summary_defaults_to_empty_when_absent(monkeypatch):
     assert user_payload["context_summary"] == {}
 
 
+# ---------- 7c. VT-500: grade_tier is forwarded to the model -----------------
+
+
+def test_grade_tier_simple_is_forwarded_to_the_model(monkeypatch):
+    """VT-500: when the gate classifies a draft SIMPLE, the adapter forwards
+    ``grade_tier="simple"`` to the Opus payload as a cooperative hint. The
+    deterministic filter in the gate is the binding contract; this only tells
+    the model not to waste a REVISE on the expected_arrr defensibility axis."""
+    from orchestrator.agent.self_evaluate import GradeTier
+
+    monkeypatch.setenv("VIABE_ENV", "test")
+    payload = {
+        "outcome": "pass",
+        "feedback": {"schema": None, "pillar": None, "consistency": None, "legal": None},
+    }
+    fake = _patch_client_to_return(monkeypatch, json.dumps(payload))
+
+    adapter = SelfEvaluateAdapter(ctx=_ctx())
+    adapter.evaluate(_draft(), criteria=[], tier=GradeTier.SIMPLE)
+
+    user_payload = json.loads(
+        fake.messages.create.call_args.kwargs["messages"][0]["content"]
+    )
+    assert user_payload["grade_tier"] == "simple"
+
+
+def test_grade_tier_defaults_to_strict_when_unspecified(monkeypatch):
+    """Back-compat: an evaluate() call with no ``tier`` forwards
+    ``grade_tier="strict"`` — every pre-VT-500 caller is unchanged."""
+    monkeypatch.setenv("VIABE_ENV", "test")
+    payload = {
+        "outcome": "pass",
+        "feedback": {"schema": None, "pillar": None, "consistency": None, "legal": None},
+    }
+    fake = _patch_client_to_return(monkeypatch, json.dumps(payload))
+
+    adapter = SelfEvaluateAdapter(ctx=_ctx())
+    adapter.evaluate(_draft(), criteria=[])  # no tier kwarg
+
+    user_payload = json.loads(
+        fake.messages.create.call_args.kwargs["messages"][0]["content"]
+    )
+    assert user_payload["grade_tier"] == "strict"
+
+
 # ---------- 8. Independence: input schema rejects reasoning_chain ------------
 
 
