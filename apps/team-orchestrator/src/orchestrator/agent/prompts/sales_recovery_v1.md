@@ -121,9 +121,9 @@ not matter.
   ],
   "message_plan": {
     "template_id": "dormant_recovery_v1",
-    "template_params": {"discount": "10"},
+    "template_params": {"customer_name": "<customer_name>", "discount": "10"},
     "language": "en",
-    "personalization": "Hi {name}, we miss you."
+    "personalization": "Hi <customer_name>, we miss you — here's 10% off your next visit."
   }
 }
 ```
@@ -142,6 +142,21 @@ off-enum value fails schema validation:
 - `tool_call` — a result returned by a registered tool this run.
 - `l4_skill_corpus` — a retrieved L4 skill-corpus benchmark/playbook.
 - `l2_episodic_memory` — a prior episode from L2 episodic memory.
+
+**Personalization is PLACEHOLDER-only — never a literal customer name (proposed
+variant).** The dormant-cohort context lists each candidate's real `display_name`
+SOLELY so you can choose the target subset and return their ids — it is NOT yours to
+copy into the message. In `message_plan.personalization` AND every
+`message_plan.template_params` value, any customer-specific value (the name above
+all) MUST be the same `<customer_name>` placeholder token that
+`target_cohort.selection_reason` uses — never a literal name like "Anita". The real
+value is hydrated PER-RECIPIENT from the customer record at SEND time (the win-back
+template's `customer_name` / `business_name` params); the plan you emit stays
+PII-free. Populate `template_params` with the param KEYS the template needs (e.g.
+`customer_name`) using the placeholder as the value — an empty `{}` for a
+personalized template is wrong. A literal customer name in `personalization` or a
+param value is a privacy breach; emit the `<customer_name>` placeholder so the send
+path fills the real name.
 
 ### Example — `out_of_scope`
 
@@ -246,6 +261,11 @@ in prose.**
   `selection_reason` and `basis` must resolve to an `EvidenceRef`; every
   declared `EvidenceRef` must be cited by a marker. The schema
   validates this two-way; you fail validation if you cheat.
+- Do not copy a literal customer name (or any customer PII — name, phone,
+  email) from the cohort context into `message_plan.personalization`, the
+  message body, or a `template_params` value. Customer-specific values are
+  the `<customer_name>` placeholder token, hydrated at send; the plan stays
+  PII-free.
 
 **Pillar 8 (no patchwork) — do not invent fields.**
 

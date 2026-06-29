@@ -1429,3 +1429,154 @@ def test_cl288_real_opus_emit_shape_round_trips_through_parse(monkeypatch):
     # Identity-injection invariant — agent overwrites, not the model.
     assert str(plan.tenant_id) == context.tenant_id, diag
     assert str(plan.run_id) == context.run_id, diag
+
+
+# --- VT-498: message body is PLACEHOLDER-only — no literal customer PII --------
+#
+# The SR model is shown each dormant-cohort customer's real display_name (so it
+# can pick + name the target subset). The Haiku composing model (dev re-drive,
+# deterministic 3/3) copied that name straight into message_plan.personalization
+# ("Hi Anita, …") — customer PII baked into the persisted plan, while
+# target_cohort.selection_reason was correctly placeholdered. The fix: (1) the
+# prompt forbids literal PII + asks for a {{customer_name}} placeholder hydrated
+# at send; (2) _construct_variant_payload scrubs any literal cohort name the model
+# emits in the message body back to <customer_name> (the VT-499 server-owns-the-
+# field discipline). The real name is resolved per-recipient at SEND from the
+# customer record (sales_recovery_executor._allowed_param_values).
+
+
+def _ctx_with_cohort(*names: str, business: str = "Bogus Winback Kirana"):
+    """A SalesRecoveryContext whose dormant_cohort carries the given customer
+    display names — i.e. the names the model is shown in its prompt context."""
+    from uuid import uuid4
+
+    from orchestrator.agents.sales_recovery_executor import CustomerFactBundle
+
+    cohort = [
+        CustomerFactBundle(
+            customer_id=uuid4(),
+            display_name=n,
+            days_since_last_sale=61,
+            last_sale_amount_paise=10_000,
+            lifetime_spend_paise=50_000,
+            business_name=business,
+        )
+        for n in names
+    ]
+    return SalesRecoveryContext(
+        tenant_id=str(uuid4()),
+        run_id=str(uuid4()),
+        user_request="test request",
+        dormant_cohort=cohort,
+    )
+
+
+def test_vt498_prompt_instructs_placeholder_personalization_no_literal_pii():
+    """VT-498 — the rendered SR prompt forbids literal customer PII in the message
+    body and shows a corrected example using the {{customer_name}} placeholder
+    token (mirroring the selection_reason <customer_name> discipline), not a
+    literal name."""
+    from orchestrator.agent.sales_recovery import _render_sr_system_prompt
+
+    rendered = _render_sr_system_prompt()
+
+    # The placeholder token the model must emit is present (the SAME <customer_name>
+    # token target_cohort.selection_reason already carries — mirrored discipline)...
+    assert "<customer_name>" in rendered
+    # ...the corrected proposed example uses it in personalization...
+    assert "Hi <customer_name>, we miss you" in rendered
+    # ...and the old literal-name-shaped placeholder is gone.
+    assert "Hi {name}" not in rendered
+
+    # Explicit no-literal-PII guidance is present (prose + a Pillar-7 "Do not").
+    assert "never a literal name" in rendered
+    assert "PII-free" in rendered
+
+
+def test_vt498_construct_payload_scrubs_literal_cohort_name_from_message_plan():
+    """VT-498 — a proposed raw dict whose message_plan carries a LITERAL cohort
+    customer name (the exact dev-re-drive leak) is scrubbed to <customer_name> in
+    BOTH personalization and the template_params value before the plan parses +
+    persists. The business name (not a customer name) is left intact."""
+    from datetime import UTC, datetime
+
+    from orchestrator.agent.sales_recovery import _construct_variant_payload
+    from orchestrator.agent.schemas.campaign_plan import (
+        CampaignPlanProposed,
+        parse_campaign_plan,
+    )
+
+    raw = _proposed_raw_minimal()
+    raw["message_plan"]["personalization"] = (
+        "Hi Anita, we'd love to welcome you back to Bogus Winback Kirana."
+    )
+    raw["message_plan"]["template_params"] = {
+        "customer_name": "Anita",
+        "business_name": "Bogus Winback Kirana",
+    }
+
+    ctx = _ctx_with_cohort("Anita", business="Bogus Winback Kirana")
+    payload, _de, _dp = _construct_variant_payload(
+        raw, context=ctx, generated_at=datetime.now(UTC)
+    )
+
+    plan = parse_campaign_plan(payload)
+    assert isinstance(plan, CampaignPlanProposed)
+    # The literal customer name is gone from both leak fields → placeholder token.
+    assert "Anita" not in plan.message_plan.personalization
+    assert "<customer_name>" in plan.message_plan.personalization
+    assert plan.message_plan.template_params["customer_name"] == "<customer_name>"
+    # The business name is NOT customer PII — it is preserved.
+    assert plan.message_plan.template_params["business_name"] == "Bogus Winback Kirana"
+
+
+def test_vt498_construct_payload_leaves_placeholder_personalization_untouched():
+    """VT-498 — when the model obeys the prompt and emits the <customer_name>
+    placeholder, the scrub is a no-op (the placeholder is itself a redactor token,
+    not a registered cohort name): the message still personalizes at send, the plan
+    stays PII-free."""
+    from datetime import UTC, datetime
+
+    from orchestrator.agent.sales_recovery import _construct_variant_payload
+    from orchestrator.agent.schemas.campaign_plan import parse_campaign_plan
+
+    raw = _proposed_raw_minimal()
+    raw["message_plan"]["personalization"] = "Hi <customer_name>, we miss you."
+    raw["message_plan"]["template_params"] = {
+        "customer_name": "<customer_name>",
+        "discount": "10",
+    }
+
+    ctx = _ctx_with_cohort("Anita")
+    payload, _de, _dp = _construct_variant_payload(
+        raw, context=ctx, generated_at=datetime.now(UTC)
+    )
+
+    plan = parse_campaign_plan(payload)
+    assert plan.message_plan.personalization == "Hi <customer_name>, we miss you."
+    assert plan.message_plan.template_params["customer_name"] == "<customer_name>"
+
+
+def test_vt498_send_time_hydrator_fills_customer_name_from_record():
+    """VT-498 — the placeholder the PLAN carries is resolved at SEND from the
+    customer record: sales_recovery_executor._allowed_param_values (the per-
+    recipient win-back hydrator) maps the customer_name param to the customer's
+    own display_name, so the message still personalizes while the plan stays
+    PII-free. The hydrator's param KEYS are exactly the template signature."""
+    from uuid import uuid4
+
+    from orchestrator.agents import sales_recovery_executor as sre
+
+    bundle = sre.CustomerFactBundle(
+        customer_id=uuid4(),
+        display_name="Anita",
+        days_since_last_sale=61,
+        last_sale_amount_paise=10_000,
+        lifetime_spend_paise=50_000,
+        business_name="Bogus Winback Kirana",
+    )
+    allowed = sre._allowed_param_values(bundle)
+    assert allowed["customer_name"] == "Anita"          # hydrated from the record
+    assert allowed["business_name"] == "Bogus Winback Kirana"
+    # The plan's placeholder KEYS must be exactly the hydrator/template contract.
+    assert set(sre.WINBACK_TEMPLATE_PARAMS) == {"customer_name", "business_name"}

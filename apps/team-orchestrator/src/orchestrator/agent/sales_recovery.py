@@ -42,7 +42,7 @@ import re
 import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Callable, cast
 
 import yaml
 from anthropic import Anthropic, APITimeoutError
@@ -76,6 +76,7 @@ from orchestrator.agent.types import AgentResult
 from orchestrator.error_router import route_failure
 from orchestrator.failures import FailureRecord, FailureType, HardLimitAxis
 from orchestrator.observability.agent_callback import with_reasoning_capture
+from orchestrator.privacy.pii_redactor import redact
 
 _logger = logging.getLogger(__name__)
 
@@ -367,6 +368,72 @@ def _server_campaign_window(now: datetime) -> dict[str, str]:
     return {"start": start.isoformat(), "end": end.isoformat()}
 
 
+# VT-498: the message body is PLACEHOLDER-only — never literal customer PII.
+# serialize_bundle_for_prompt shows the model each dormant-cohort customer's real
+# ``display_name`` (so it can pick + name the target subset). The SR model (Haiku on
+# dev) was observed copying that name straight into ``message_plan.personalization``
+# ("Hi Anita, …") — customer PII baked into the persisted plan (collapse_campaign_plan
+# stores plan_json raw). The real personalization is hydrated PER-RECIPIENT at SEND
+# from the customer record (the team_winback_simple ``customer_name`` param —
+# sales_recovery_executor._allowed_param_values fills it from bundle.display_name), so
+# the PLAN must carry a placeholder, never a literal name. Mirroring the VT-499
+# server-owned-field discipline, this scrub strips any literal cohort name the model
+# emitted (in personalization AND every template_params value) back to the
+# ``<customer_name>`` token — the SAME token target_cohort.selection_reason already
+# carries — regardless of whether the model obeyed the prompt. The placeholder the
+# prompt asks for (``<customer_name>``) is itself a redactor token, so it passes
+# through untouched (idempotent); only a real cohort name is rewritten.
+
+
+def _cohort_name_registry(
+    context: SalesRecoveryContext,
+) -> Callable[[str], bool] | None:
+    """A redactor name-predicate over the dormant-cohort display names the model saw.
+
+    Mirrors ``customer_registry.make_name_registry`` (exact case-folded match) but
+    sources the names from the IN-CONTEXT cohort — NO DB read (this module is Tier-2,
+    CL-242). Returns ``None`` when the cohort carries no names (nothing to scrub).
+    """
+    names = frozenset(
+        m.display_name.casefold()
+        for m in context.dormant_cohort
+        if getattr(m, "display_name", None)
+    )
+    if not names:
+        return None
+    return lambda text: text.casefold() in names
+
+
+def _scrub_message_plan_pii(
+    payload: dict[str, Any], context: SalesRecoveryContext
+) -> None:
+    """VT-498 — strip literal cohort-customer PII from a PROPOSED plan's message_plan.
+
+    In-place: rewrites ``message_plan.personalization`` and every
+    ``message_plan.template_params`` value through the redactor with the cohort
+    name-registry, so any literal customer name (or pattern PII the model leaked into
+    the body) becomes a ``<customer_name>`` / pattern token before the plan is parsed
+    + persisted. A no-op when the cohort has no names or message_plan is absent.
+    """
+    registry = _cohort_name_registry(context)
+    if registry is None:
+        return
+    message_plan = payload.get("message_plan")
+    if not isinstance(message_plan, dict):
+        return
+    personalization = message_plan.get("personalization")
+    if isinstance(personalization, str):
+        message_plan["personalization"] = redact(
+            personalization, name_registry=registry
+        )
+    params = message_plan.get("template_params")
+    if isinstance(params, dict):
+        message_plan["template_params"] = {
+            key: (redact(value, name_registry=registry) if isinstance(value, str) else value)
+            for key, value in params.items()
+        }
+
+
 def _construct_variant_payload(
     raw: dict[str, Any],
     *,
@@ -432,6 +499,11 @@ def _construct_variant_payload(
     # no window — untouched.
     if variant_enum is CampaignStatus.PROPOSED:
         payload["campaign_window"] = _server_campaign_window(generated_at)
+        # VT-498: scrub any literal cohort-customer name the model copied into the
+        # message body (personalization / template_params) → <customer_name> token,
+        # so the persisted plan is PII-free. The real name is hydrated per-recipient
+        # at send (see _scrub_message_plan_pii docstring + the module note above).
+        _scrub_message_plan_pii(payload, context)
 
     return payload, dropped_empty, dropped_populated
 
