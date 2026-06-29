@@ -946,6 +946,76 @@ def test_sales_recovery_node_no_output_raises_structured_not_bare(
     assert isinstance(exc, RuntimeError)
 
 
+def test_sales_recovery_node_parse_failure_resolves_to_clean_terminal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """VT-494 (VT-492 sibling) — when the agent returns a NON-None output that
+    FAILS ``parse_campaign_plan`` (the CL-288 coerced variant dict whose
+    campaign_window / source_kind is invalid — the VT-493 root cause), the node
+    MUST convert the ValidationError into the STRUCTURED
+    ``SpecialistNoOutputError`` (which dispatch_brain maps to a CLEAN
+    'escalated' terminal) instead of letting the bare ValidationError escape
+    graph.invoke → dispatch_brain's catch-all re-raise → the run ORPHANS at
+    status='running' until the VT-481 reaper.
+
+    The output=None path (VT-492) is covered by
+    ``test_sales_recovery_node_no_output_raises_structured_not_bare``; this pins
+    the OTHER no-usable-plan terminal — non-None-but-unparseable. dispatch_brain
+    converting SpecialistNoOutputError → 'escalated' (and 'escalated' ∈
+    support_bot._UNRESOLVED so the owner gets the no-silence ack) is covered by
+    the VT-492 dispatch tests in test_dispatch_classify.py.
+    """
+    from types import SimpleNamespace
+
+    import orchestrator.supervisor as supervisor_mod
+    from orchestrator.agent.types import AgentResult
+    from orchestrator.supervisor import SpecialistNoOutputError
+
+    tenant_id = uuid4()
+    run_id = uuid4()
+
+    monkeypatch.setattr(
+        "orchestrator.context_validator.validate_context_isolation",
+        lambda ctx: None,
+    )
+    monkeypatch.setattr(
+        supervisor_mod, "SelfEvaluateAdapter", lambda *, ctx: None
+    )
+    # A non-None 'proposed' output with a BACKDATED campaign_window (the VT-493
+    # A1 failure) — also missing required proposed fields — so
+    # parse_campaign_plan raises a ValidationError exactly as it does on the
+    # agent's already-routed agent_schema_rejection terminal (status='invalid').
+    bad_output = {
+        "status": "proposed",
+        "campaign_window": {
+            "start": "2020-01-01T09:00:00+00:00",
+            "end": "2020-01-08T09:00:00+00:00",
+        },
+    }
+    monkeypatch.setattr(
+        supervisor_mod,
+        "run_sales_recovery_agent",
+        lambda context, *, evaluator: AgentResult(
+            status="invalid", output=bad_output
+        ),
+    )
+
+    bundle = SimpleNamespace(tenant_id=tenant_id, run_id=run_id)
+
+    with pytest.raises(SpecialistNoOutputError) as excinfo:
+        supervisor_mod._sales_recovery_node(
+            {"sales_recovery_context": bundle}
+        )
+
+    exc = excinfo.value
+    assert exc.specialist == "sales_recovery"
+    # the agent's terminal status is carried through (NOT a bare re-raise).
+    assert exc.status == "invalid"
+    assert exc.run_id == run_id
+    assert exc.tenant_id == tenant_id
+    assert isinstance(exc, RuntimeError)
+
+
 def test_spawn_sales_recovery_attaches_bundle_with_user_request(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

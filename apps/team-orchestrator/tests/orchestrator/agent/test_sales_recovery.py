@@ -926,6 +926,75 @@ def test_construct_variant_payload_drops_populated_forbidden_and_emits(
     )
 
 
+# --- VT-493: SR system-prompt schema conformance (date + source_kind enum) ---
+#
+# The VT-490 re-drive surfaced two parse_campaign_plan failures on the grounded
+# proposed plan: (A1) the prompt hardcoded a stale 2026-05-22 campaign_window
+# the model echoed verbatim → CampaignWindow start>=now rejection; (A2) the
+# prompt never enumerated EvidenceSourceKind so the model invented off-enum
+# source_kind values. Both are fixed by rendering the template with the current
+# date + enumerating the 3 legal source_kind values.
+
+
+def test_sr_prompt_injects_current_date_not_stale_literal_and_enum_source_kinds():
+    """VT-493 A1+A2 — the ASSEMBLED prompt carries today's date (not the stale
+    2026-05-22 literal) with a >=today campaign_window instruction, fully renders
+    every template token, and enumerates the 3 legal EvidenceSourceKind values.
+    Deterministic in a fixed ``now``."""
+    from datetime import UTC, datetime
+
+    from orchestrator.agent.sales_recovery import _render_sr_system_prompt
+
+    fixed_now = datetime(2026, 7, 1, 14, 30, tzinfo=UTC)
+    rendered = _render_sr_system_prompt(now=fixed_now)
+
+    # A1 — the stale absolute window is gone and the template fully rendered.
+    assert "2026-05-22" not in rendered
+    assert "2026-05-29" not in rendered
+    assert "{{" not in rendered  # no unrendered tokens leaked into the prompt
+    # today's date is injected into the campaign_window instruction.
+    assert "2026-07-01" in rendered
+    # the proposed example's window starts TOMORROW 09:00 UTC (future-dated so a
+    # verbatim echo still satisfies CampaignWindow start>=now) + ends 7d later.
+    assert "2026-07-02T09:00:00+00:00" in rendered
+    assert "2026-07-09T09:00:00+00:00" in rendered
+
+    # A2 — all three legal EvidenceSourceKind values enumerated for the model.
+    for kind in ("tool_call", "l4_skill_corpus", "l2_episodic_memory"):
+        assert kind in rendered
+
+
+def test_sr_prompt_example_window_passes_campaign_window_validator():
+    """VT-493 A1 — the rendered proposed example's campaign_window must ITSELF
+    pass the CampaignWindow validator. A verbatim echo (the original failure
+    mode) must not re-trigger the backdated-start rejection."""
+    import re
+
+    from orchestrator.agent.sales_recovery import _render_sr_system_prompt
+    from orchestrator.agent.schemas.campaign_plan import CampaignWindow
+
+    rendered = _render_sr_system_prompt()
+    m = re.search(
+        r'"start":\s*"([^"]+)",\s*"end":\s*"([^"]+)"', rendered
+    )
+    assert m is not None, "campaign_window example not found in rendered prompt"
+    # Constructs without raising → start>=now and end>start hold.
+    window = CampaignWindow(start=m.group(1), end=m.group(2))  # type: ignore[arg-type]
+    assert window.end > window.start
+
+
+def test_sr_prompt_default_render_uses_real_now():
+    """VT-493 — the no-arg render uses the live server date (today appears,
+    the stale literal does not)."""
+    from datetime import UTC, datetime
+
+    from orchestrator.agent.sales_recovery import _render_sr_system_prompt
+
+    rendered = _render_sr_system_prompt()
+    assert datetime.now(UTC).date().isoformat() in rendered
+    assert "2026-05-22" not in rendered
+
+
 # --- Canary: real API, env-gated, NEVER runs in CI ---------------------------
 
 

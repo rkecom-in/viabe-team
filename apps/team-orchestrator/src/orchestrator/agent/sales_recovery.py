@@ -40,7 +40,7 @@ import logging
 import os
 import re
 import time
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, cast
 
@@ -97,7 +97,45 @@ _VARIANT_MODELS: dict[CampaignStatus, type[BaseModel]] = {
 _SR_AGENT_PROMPT_PATH = (
     Path(__file__).resolve().parent / "prompts" / "sales_recovery_v1.md"
 )
-_SR_AGENT_SYSTEM_PROMPT = _SR_AGENT_PROMPT_PATH.read_text(encoding="utf-8")
+# VT-493 A1: the markdown is a TEMPLATE, not the final prompt. The proposed-
+# variant example's ``campaign_window`` and the ``{{TODAY}}`` instruction are
+# date-anchored and MUST reflect the server's CURRENT date at dispatch. The
+# original prompt hardcoded an absolute window (``2026-05-22…`` / ``…05-29``);
+# 5+ weeks later the model echoed it verbatim, the ``CampaignWindow`` validator
+# rejected the backdated ``start`` (campaign_plan.py:156), ``parse_campaign_plan``
+# raised, and no plan was emitted. A hardcoded FUTURE date would simply re-stale.
+# Fix: keep the dates as tokens in the file and render them per dispatch.
+_SR_AGENT_PROMPT_TEMPLATE = _SR_AGENT_PROMPT_PATH.read_text(encoding="utf-8")
+
+
+def _render_sr_system_prompt(now: datetime | None = None) -> str:
+    """Render the SR system-prompt template with the current server date (VT-493).
+
+    Substitutes three tokens so the proposed example + the campaign_window
+    instruction always carry a CURRENT, schema-valid date:
+
+      - ``{{TODAY}}`` → today's UTC date (``YYYY-MM-DD``), used in the
+        campaign_window instruction ("start must be today or later").
+      - ``{{CAMPAIGN_WINDOW_START}}`` / ``{{CAMPAIGN_WINDOW_END}}`` → the
+        proposed example's window: a 7-day window starting TOMORROW 09:00 UTC.
+        A future-dated start (not "today") is deliberate — it keeps a verbatim
+        echo of the example safe against the ``CampaignWindow`` ``start >= now``
+        validator regardless of the dispatch time-of-day (a today-09:00 example
+        would be in the past for any run after 09:00 UTC).
+
+    Deterministic in ``now`` for testability; defaults to ``datetime.now(UTC)``.
+    """
+    now = now or datetime.now(UTC)
+    today = now.date()
+    start = datetime(
+        today.year, today.month, today.day, 9, 0, 0, tzinfo=UTC
+    ) + timedelta(days=1)
+    end = start + timedelta(days=7)
+    return (
+        _SR_AGENT_PROMPT_TEMPLATE.replace("{{TODAY}}", today.isoformat())
+        .replace("{{CAMPAIGN_WINDOW_START}}", start.isoformat())
+        .replace("{{CAMPAIGN_WINDOW_END}}", end.isoformat())
+    )
 
 # Markdown code-fence stripper. Matches a recognised fence shape and
 # captures the inner content. NARROW by design: it does not extract a
@@ -418,6 +456,10 @@ def run_sales_recovery_agent(
     start = time.monotonic()
     client = Anthropic()
     model = _resolve_model("sales_recovery")
+    # VT-493 A1: render the date-anchored template ONCE per dispatch so the
+    # proposed example + campaign_window instruction carry today's date (not the
+    # stale 2026-05-22 literal the model used to echo into a backdated window).
+    system_prompt = _render_sr_system_prompt()
     # CL-287: the orchestrator-supplied user request is the initial user
     # message — NOT a hardcoded "begin" cue. Empty / whitespace-only is
     # a structural error (the orchestrator never spawns a specialist
@@ -478,7 +520,7 @@ def run_sales_recovery_agent(
             response = _run_one_turn(
                 client,
                 model=model,
-                system_prompt=_SR_AGENT_SYSTEM_PROMPT,
+                system_prompt=system_prompt,
                 messages=messages,
             )
         except APITimeoutError:
