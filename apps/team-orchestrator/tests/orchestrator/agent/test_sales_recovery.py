@@ -170,8 +170,9 @@ def test_run_sales_recovery_agent_placeholder_happy_path(monkeypatch):
 
 
 def test_run_sales_recovery_agent_uses_resolved_model_from_env(monkeypatch):
-    """VIABE_ENV='production' → Opus; default → Haiku. The model id is
-    read from config/models.yaml, never hardcoded in the runner."""
+    """VIABE_ENV='production' → Opus; default/dev/test → the CAPABLE tier (Sonnet,
+    VT-501 — NOT Haiku: SR-draft is complex grounded reasoning per VT-480). The
+    model id is read from config/models.yaml, never hardcoded in the runner."""
     response = _fake_response(text='{"status": "placeholder"}')
     fake_client = _patched_client(response)
     monkeypatch.setattr(
@@ -185,7 +186,11 @@ def test_run_sales_recovery_agent_uses_resolved_model_from_env(monkeypatch):
     fake_client.messages.create.reset_mock()
     monkeypatch.setenv("VIABE_ENV", "test")
     run_sales_recovery_agent(SalesRecoveryContext(tenant_id="t1", run_id="r1", user_request="test request"))
-    assert fake_client.messages.create.call_args.kwargs["model"] == "claude-haiku-4-5"
+    # VT-501: dev/test SR-draft now resolves to the capable model, never Haiku —
+    # complex grounded reasoning must not fall to the cheap slot (misclassification fix).
+    resolved = fake_client.messages.create.call_args.kwargs["model"]
+    assert resolved == "claude-sonnet-4-6"
+    assert resolved != "claude-haiku-4-5"
 
 
 def test_run_sales_recovery_agent_passes_brief_required_params(monkeypatch):
@@ -519,10 +524,16 @@ def test_run_sales_recovery_agent_schema_rejection_emits_failure(monkeypatch):
 
 
 def test_run_sales_recovery_agent_cost_uses_compute_cost_paise(monkeypatch):
-    """The agent's cost_paise matches the cost.py table for the resolved model."""
+    """The agent's cost_paise matches the cost.py table for the resolved model.
+
+    Relative to ``_resolve_model`` (not a hardcoded model id) so it survives a
+    config/models.yaml tier change — e.g. VT-501 moved the dev/test slot off Haiku
+    onto the capable Sonnet."""
+    from orchestrator.agent.sales_recovery import _resolve_model
+
     response = _fake_response(text='{"status": "placeholder"}', input_tokens=1000, output_tokens=200)
     fake_client = _patched_client(response)
-    monkeypatch.setenv("VIABE_ENV", "test")  # Haiku
+    monkeypatch.setenv("VIABE_ENV", "test")  # dev/test slot (Sonnet 4.6, VT-501)
     monkeypatch.setattr(
         "orchestrator.agent.sales_recovery.Anthropic", lambda: fake_client
     )
@@ -532,9 +543,10 @@ def test_run_sales_recovery_agent_cost_uses_compute_cost_paise(monkeypatch):
     )
 
     expected = compute_cost_paise(
-        model="claude-haiku-4-5", input_tokens=1000, output_tokens=200
+        model=_resolve_model("sales_recovery"), input_tokens=1000, output_tokens=200
     )
     assert result.cost_paise == expected
+    assert result.cost_paise > 0
 
 
 # --- compute_cost_paise table sanity -----------------------------------------
@@ -1163,6 +1175,152 @@ def test_vt499_window_override_does_not_mask_other_field_errors():
     assert not any("campaign_window" in p for p in paths), paths
 
 
+# --- VT-501: evidence_refs structure heal (the dominant remaining parse miss) --
+#
+# The SR model writes grounded prose-markers ([E\d+]) in selection_reason + basis
+# but mechanically fails the evidence_refs STRUCTURE — empty/short list
+# (proposed.evidence_refs: too_short) or claim_ids that don't match the markers
+# (proposed: value_error, the marker⇄ref consistency rule). _repair_evidence_refs
+# (called from _construct_variant_payload on the PROPOSED variant) heals the
+# structure FROM the model's own citations, without inventing grounding.
+
+
+def test_vt501_empty_evidence_refs_with_prose_markers_healed_and_parses():
+    """The dominant failure: prose cites [E1] in BOTH blocks but evidence_refs is
+    EMPTY (too_short). The repair synthesizes a backing ref FROM the cited marker,
+    so the plan parses — the validator passes legitimately, not bypassed."""
+    from datetime import UTC, datetime
+
+    from orchestrator.agent.sales_recovery import _construct_variant_payload
+    from orchestrator.agent.schemas.campaign_plan import (
+        CampaignPlanProposed,
+        EvidenceSourceKind,
+        parse_campaign_plan,
+    )
+
+    raw = _proposed_raw_minimal()
+    raw["evidence_refs"] = []  # the Haiku miss: grounded prose, empty refs
+
+    ctx = _ctx_with_real_uuids()
+    payload, _de, _dp = _construct_variant_payload(
+        raw, context=ctx, generated_at=datetime.now(UTC)
+    )
+
+    plan = parse_campaign_plan(payload)
+    assert isinstance(plan, CampaignPlanProposed)
+    # Exactly the cited marker (E1) is backed; honest bundle-sourced ref.
+    assert [r.claim_id for r in plan.evidence_refs] == ["E1"]
+    ref = plan.evidence_refs[0]
+    assert ref.source_kind is EvidenceSourceKind.L2_EPISODIC_MEMORY
+    assert ref.source_id == "context_bundle"
+    assert ref.note and "VT-501" in ref.note
+
+
+def test_vt501_mismatched_claim_id_healed_orphan_dropped():
+    """prose cites [E1] but evidence_refs declares a DIFFERENT claim_id (E2) —
+    both unbacked (E1) AND uncited (E2). The repair rebuilds the list to exactly
+    the cited markers: E1 synthesized, the orphan E2 dropped → parses."""
+    from datetime import UTC, datetime
+
+    from orchestrator.agent.sales_recovery import _construct_variant_payload
+    from orchestrator.agent.schemas.campaign_plan import (
+        CampaignPlanProposed,
+        parse_campaign_plan,
+    )
+
+    raw = _proposed_raw_minimal()
+    raw["evidence_refs"] = [
+        {"claim_id": "E2", "source_kind": "l4_skill_corpus", "source_id": "orphan-ref"}
+    ]
+
+    ctx = _ctx_with_real_uuids()
+    payload, _de, _dp = _construct_variant_payload(
+        raw, context=ctx, generated_at=datetime.now(UTC)
+    )
+
+    plan = parse_campaign_plan(payload)
+    assert isinstance(plan, CampaignPlanProposed)
+    assert [r.claim_id for r in plan.evidence_refs] == ["E1"]  # E2 orphan dropped
+
+
+def test_vt501_wellformed_model_refs_preserved_idempotent():
+    """A model that ALREADY emitted a well-formed, cited ref keeps it verbatim —
+    the repair supplies structure only where it is missing, never overwrites the
+    model's real grounding."""
+    from datetime import UTC, datetime
+
+    from orchestrator.agent.sales_recovery import _construct_variant_payload
+    from orchestrator.agent.schemas.campaign_plan import (
+        EvidenceSourceKind,
+        parse_campaign_plan,
+    )
+
+    raw = _proposed_raw_minimal()  # prose [E1] + a well-formed E1 l4 ref
+
+    ctx = _ctx_with_real_uuids()
+    payload, _de, _dp = _construct_variant_payload(
+        raw, context=ctx, generated_at=datetime.now(UTC)
+    )
+
+    plan = parse_campaign_plan(payload)
+    assert [r.claim_id for r in plan.evidence_refs] == ["E1"]
+    ref = plan.evidence_refs[0]
+    # The MODEL's ref is preserved — NOT replaced by the synthesized bundle ref.
+    assert ref.source_kind is EvidenceSourceKind.L4_SKILL_CORPUS
+    assert ref.source_id == "dormant-recovery-benchmark"
+
+
+def test_vt501_multiple_markers_each_backed():
+    """Markers spread across the two prose blocks ([E1] in selection_reason, [E2]
+    in basis) with empty refs → each cited marker gets a backing ref."""
+    from datetime import UTC, datetime
+
+    from orchestrator.agent.sales_recovery import _construct_variant_payload
+    from orchestrator.agent.schemas.campaign_plan import parse_campaign_plan
+
+    raw = _proposed_raw_minimal()
+    raw["target_cohort"]["selection_reason"] = "Inactive customers last 60d [E1]."
+    raw["expected_arrr"]["basis"] = "Historical recovery rate 20-40% per [E2]."
+    raw["evidence_refs"] = []
+
+    ctx = _ctx_with_real_uuids()
+    payload, _de, _dp = _construct_variant_payload(
+        raw, context=ctx, generated_at=datetime.now(UTC)
+    )
+
+    plan = parse_campaign_plan(payload)
+    assert sorted(r.claim_id for r in plan.evidence_refs) == ["E1", "E2"]
+
+
+def test_vt501_no_grounding_at_all_still_fails():
+    """The hard boundary: a proposed plan whose prose cites NO markers AND has
+    empty evidence_refs has NO grounding to heal from — the repair is a no-op and
+    parse_campaign_plan STILL REJECTS it (too_short). The repair supplies structure
+    from existing grounding; it never fabricates grounding to pass the validator."""
+    from datetime import UTC, datetime
+
+    from pydantic import ValidationError
+
+    from orchestrator.agent.sales_recovery import _construct_variant_payload
+    from orchestrator.agent.schemas.campaign_plan import parse_campaign_plan
+
+    raw = _proposed_raw_minimal()
+    raw["target_cohort"]["selection_reason"] = "Inactive customers last 60 days."
+    raw["expected_arrr"]["basis"] = "Recovery rate estimated 20-40 percent."
+    raw["evidence_refs"] = []
+
+    ctx = _ctx_with_real_uuids()
+    payload, _de, _dp = _construct_variant_payload(
+        raw, context=ctx, generated_at=datetime.now(UTC)
+    )
+    # No markers cited → evidence_refs left empty → validator rejects (not bypassed).
+    assert payload["evidence_refs"] == []
+    with pytest.raises(ValidationError) as exc_info:
+        parse_campaign_plan(payload)
+    paths = {".".join(str(p) for p in e["loc"]) for e in exc_info.value.errors()}
+    assert any("evidence_refs" in p for p in paths), paths
+
+
 # --- Canary: real API, env-gated, NEVER runs in CI ---------------------------
 
 
@@ -1172,10 +1330,10 @@ def test_vt499_window_override_does_not_mask_other_field_errors():
     reason="canary skipped — needs VIABE_RUN_AGENT_CANARY=1 + ANTHROPIC_API_KEY",
 )
 def test_canary_real_haiku_run_completes_with_parseable_json(monkeypatch):
-    """One real Messages-API call against claude-haiku-4-5 to prove the SDK
-    plumbing + v1.0 system prompt work end-to-end. Fazal runs this
-    manually once before merge. CI must NEVER reach here
-    (VIABE_RUN_AGENT_CANARY unset).
+    """One real Messages-API call against the dev/test SR model (Sonnet 4.6 since
+    VT-501; was Haiku) to prove the SDK plumbing + v1.0 system prompt work
+    end-to-end. Fazal runs this manually once before merge. CI must NEVER reach
+    here (VIABE_RUN_AGENT_CANARY unset).
 
     VT-33 updated this canary's success criteria. The v1.0 prompt
     instructs the agent to emit a CampaignPlan JSON — no longer the
@@ -1183,7 +1341,7 @@ def test_canary_real_haiku_run_completes_with_parseable_json(monkeypatch):
     model produced parseable JSON the loop classified as 'completed'
     (or, validly, 'refused' if Haiku declined). Tokens accrued + the
     raw message trace landed."""
-    monkeypatch.setenv("VIABE_ENV", "test")  # forces Haiku
+    monkeypatch.setenv("VIABE_ENV", "test")  # dev/test slot (Sonnet 4.6, VT-501)
     result = run_sales_recovery_agent(
         SalesRecoveryContext(
             tenant_id="canary",
