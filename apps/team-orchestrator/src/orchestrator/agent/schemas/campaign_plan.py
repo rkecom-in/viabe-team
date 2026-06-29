@@ -57,6 +57,7 @@ from pydantic import (
     ConfigDict,
     Field,
     TypeAdapter,
+    ValidationError,
     field_validator,
     model_validator,
 )
@@ -399,6 +400,41 @@ def parse_campaign_plan(data: object) -> CampaignPlan:
     return _CAMPAIGN_PLAN_ADAPTER.validate_python(data)
 
 
+def schema_rejection_field_paths(exc: ValidationError) -> list[str]:
+    """Summarise a parse rejection as NON-PII ``"<field path>: <type>"`` strings.
+
+    VT-496 — when ``parse_campaign_plan`` raises, the dominant win-back
+    diagnostic question is *which CampaignPlanProposed field failed and why*.
+    The caller previously stuffed ``str(exc)`` into a free-text FailureRecord
+    message, but (a) that string is long enough that the PII redactor
+    SHA-hashes it whole (``pii_redactor._hash_raw_body``), so the field path
+    is un-nameable on dev, and (b) the pydantic string echoes ``input_value``
+    /``msg`` — the OFFENDING VALUE, which can be customer PII.
+
+    A pydantic error's ``loc`` (the field-path tuple, e.g.
+    ``('proposed', 'campaign_window')``) and ``type`` (the pydantic error
+    code, e.g. ``'value_error'`` / ``'missing'`` / ``'enum'``) are SCHEMA
+    PATHS — they name structure, never content. This helper returns ONLY
+    those two, joined as ``"proposed.campaign_window: value_error"``. It
+    NEVER reads ``err['input']`` or ``err['msg']``; ``errors()`` is called
+    with ``include_input``/``include_context``/``include_url`` all ``False``
+    so the value-bearing fields are not even materialised.
+
+    The result is a list of short, pattern-free strings — it survives the
+    redactor unchanged (no long-body hash, no PII pattern match) when carried
+    as structured metadata, so a plain SQL read of ``pipeline_steps.error``
+    names the failing field with zero PII and without the LLM key.
+    """
+    paths: list[str] = []
+    for err in exc.errors(
+        include_url=False, include_context=False, include_input=False
+    ):
+        loc = ".".join(str(part) for part in err.get("loc", ()))
+        etype = str(err.get("type", "unknown"))
+        paths.append(f"{loc}: {etype}" if loc else etype)
+    return paths
+
+
 __all__ = [
     "CampaignPlan",
     "CampaignPlanInsufficientData",
@@ -419,4 +455,5 @@ __all__ = [
     "SuggestedSpecialist",
     "TargetCohort",
     "parse_campaign_plan",
+    "schema_rejection_field_paths",
 ]

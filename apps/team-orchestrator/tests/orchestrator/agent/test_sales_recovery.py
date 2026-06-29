@@ -491,6 +491,23 @@ def test_run_sales_recovery_agent_schema_rejection_emits_failure(monkeypatch):
     assert failure.run_id == run_id
     assert failure.metadata["source"] == "agent_schema_rejection"
     assert "schema rejection" in failure.message
+    # VT-496: structured field paths (loc + pydantic type) on the
+    # FailureRecord metadata — names the failing CampaignPlanProposed
+    # fields so the win-back parse failure is diagnosable on dev.
+    field_paths = failure.metadata["schema_field_paths"]
+    assert isinstance(field_paths, list)
+    # {"status": "proposed"} → every required variant field is absent.
+    assert "proposed.campaign_window: missing" in field_paths
+    assert "proposed.message_plan: missing" in field_paths
+    # (b) NO PII / value leakage — only "<loc>: <type>" pairs. No pydantic
+    # ``input_value=`` / ``msg`` echo in either the paths or the message.
+    for path in field_paths:
+        assert path.startswith("proposed.")
+        assert path.endswith(": missing")
+        assert "input_value" not in path
+    assert "input_value" not in failure.message
+    # The reason is rebuilt from the same NON-PII paths (no str(exc) echo).
+    assert "proposed.campaign_window: missing" in failure.message
 
 
 def test_run_sales_recovery_agent_cost_uses_compute_cost_paise(monkeypatch):
