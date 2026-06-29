@@ -331,20 +331,25 @@ def _llm_db_cache_put(key: str, blob: str) -> None:
 
 
 def _llm_candidates(name: str, city: str, llm_fn: LlmFn | None) -> list[EntityCandidate]:
-    """VT-452 LLM web-search leg: ask claude-opus-4-8 (with the server-side web_search tool) to find
-    the GSTIN/CIN/registered name for the business from PUBLIC RECORDS — what Google/ChatGPT surface
-    for a small-biz GSTIN the SERP/Apify legs miss (RKeCom). REUSE the existing GSTIN/CIN regex +
-    relevance filter on the LLM's free-text answer so noise is dropped; the returned GSTINs/CINs are
-    CANDIDATES (source='llm') only — NEVER verified here. They flow into the existing pick → Sandbox
-    GST verify, which stays the SOLE authoritative gate (this leg cannot weaken or bypass it).
+    """VT-452/VT-509 LLM web-search leg: ask claude-opus-4-8 (with the server-side web_search tool)
+    to find the GSTIN/CIN/registered name for the business from PUBLIC RECORDS. Returns STRUCTURED
+    candidates only — the LLM now returns strict JSON {"companies":[{"name","gstin","cin"}]}.
+
+    VT-509 HARD INVARIANTS (the defects this fixes):
+    - A non-JSON/"not found"/reasoning response → ZERO candidates (never a garbage card).
+    - trade_name is the LLM-reported REGISTERED company name — NEVER the echoed query string.
+    - Only surface a candidate that carries a real 15-char GSTIN shape (drop name-only entries).
+    - detail is NOT populated from the LLM monologue (never put reasoning prose in a candidate).
 
     Best-effort + fail-soft: an LLM/network/parse error → [] degrade (like every other leg); the
     per-result iteration is inside the try so one malformed item never raises into signup. ``llm_fn``
-    (business_name, city) -> the answer blob is injectable for tests (no real LLM / key).
+    (business_name, city) -> JSON blob is injectable for tests (no real LLM / key).
 
     VT-507: DB-persistent 24h cache (source='llm') — a repeated query for the same business
     returns the cached blob in ms, skipping the LLM call. Only the real ``_default_llm_search``
     path is cached; an injected ``llm_fn`` (test path) bypasses the cache."""
+    import json as _json  # stdlib, but kept local (dep-less smoke-env discipline)
+
     fn = llm_fn or _default_llm_search
     sig = _significant_tokens(name)
     out: list[EntityCandidate] = []
@@ -352,27 +357,75 @@ def _llm_candidates(name: str, city: str, llm_fn: LlmFn | None) -> list[EntityCa
         cache_key = f"{name.lower().strip()}|{(city or '').lower().strip()}"
         blob: str
         if fn is _default_llm_search:
-            # Check DB cache before making the (expensive) LLM call.
             cached_blob = _llm_db_cache_get(cache_key)
             if cached_blob is not None:
                 blob = cached_blob
             else:
                 blob = fn(name, city) or ""
-                _llm_db_cache_put(cache_key, blob)
+                if blob:
+                    _llm_db_cache_put(cache_key, blob)
         else:
             blob = fn(name, city) or ""
-        if not _result_is_relevant(blob, sig):
-            return []  # the LLM answer doesn't name the queried business → drop (no distinctive token)
-        blob_u = blob.upper()
-        trade = _clean(name)  # the queried name anchors the candidate (the LLM confirms identity, not renames it)
-        for gstin in dict.fromkeys(_GSTIN_RE.findall(blob_u)):  # ordered-unique
-            out.append(
-                EntityCandidate(trade_name=trade, source="llm", candidate_gstin=gstin, detail=_clean(blob))
-            )
-        for cin in dict.fromkeys(_CIN_RE.findall(blob_u)):  # ordered-unique
-            out.append(
-                EntityCandidate(trade_name=trade, source="llm", candidate_cin=cin, detail=_clean(blob))
-            )
+
+        if not blob.strip():
+            return []
+
+        # Strict JSON parse — a free-text/"not found"/"I'll search..." LLM monologue → zero candidates.
+        # The LLM is prompted to return ONLY {"companies": [...]}; a non-JSON response is a model
+        # failure (not a "found" result) and must produce ZERO candidates (VT-509 DEFECT 1 root cause).
+        try:
+            data = _json.loads(blob.strip())
+        except (ValueError, TypeError):
+            # Web_search flow sometimes prepends a short sentence before the JSON object. Try to
+            # find and extract the JSON object from the response before giving up.
+            m = re.search(r'\{[^<>]*?"companies"\s*:', blob, re.DOTALL)
+            if not m:
+                logger.debug("entity_match: LLM returned non-JSON — zero candidates (not a found card)")
+                return []
+            substr = blob[m.start():]
+            depth, end = 0, 0
+            for i, ch in enumerate(substr):
+                if ch == '{':
+                    depth += 1
+                elif ch == '}':
+                    depth -= 1
+                    if depth == 0:
+                        end = i + 1
+                        break
+            if not end:
+                return []
+            try:
+                data = _json.loads(substr[:end])
+            except (ValueError, TypeError):
+                return []
+
+        if not isinstance(data, dict):
+            return []
+        companies = data.get("companies", [])
+        if not isinstance(companies, list) or not companies:
+            return []  # {"companies": []} → LLM explicitly found nothing → zero candidates
+
+        seen_gstin: set[str] = set()
+        seen_cin: set[str] = set()
+        for entry in companies:
+            if not isinstance(entry, dict):
+                continue
+            trade = _clean(entry.get("name"))  # LLM-reported registered name — never the queried name
+            if not trade:
+                continue
+            # Relevance: the LLM-reported company name must plausibly be the queried business.
+            if sig and not _result_is_relevant(trade, sig):
+                continue
+            gstin = (entry.get("gstin") or "").strip().upper()
+            cin = (entry.get("cin") or "").strip().upper()
+            # Only surface a candidate that carries a real 15-char GSTIN — drop name-only entries.
+            if _GSTIN_RE.fullmatch(gstin) and gstin not in seen_gstin:
+                seen_gstin.add(gstin)
+                out.append(EntityCandidate(trade_name=trade, source="llm", candidate_gstin=gstin))
+            # CIN candidates are separately useful for the MCA enrichment affordance (VT-449).
+            if _CIN_RE.fullmatch(cin) and cin not in seen_cin:
+                seen_cin.add(cin)
+                out.append(EntityCandidate(trade_name=trade, source="llm", candidate_cin=cin))
     except Exception:  # noqa: BLE001 — fragile LLM call/parse; degrade, never raise into signup
         logger.warning("entity_match: LLM discovery leg failed (degrade to none)", exc_info=True)
         return []
@@ -588,37 +641,45 @@ def _default_search(query: str) -> list[dict[str, Any]]:
 
 
 def _default_llm_search(name: str, city: str) -> str:
-    """VT-452 default LLM-discovery call: claude-opus-4-8 + the server-side web_search tool, asked to
-    find the business's GSTIN/CIN/registered name from PUBLIC RECORDS. Returns the model's final
-    free-text answer (the caller regex-parses GSTIN/CIN out of it). REUSES the existing lazy ``from
-    anthropic import Anthropic`` SDK pattern (auto_discovery_sources/question_brain) — no new client.
-    ANTHROPIC_API_KEY is read by the SDK from env. Server-side web_search runs the search loop on
-    Anthropic's side; we only consume the model's text. Raises on SDK/parse failure → the leg's
-    try/except degrades it to [] (fail-soft)."""
+    """VT-452/VT-509 default LLM-discovery call: claude-opus-4-8 + server-side web_search tool.
+    Returns strict JSON {"companies":[{"name","gstin","cin"}]} or {"companies":[]} if not found.
+    The caller (_llm_candidates) parses this JSON strictly; a non-JSON response -> zero candidates.
+
+    ANTHROPIC_API_KEY is read by the SDK from env (valid on deployed dev/prod).
+    Server-side web_search runs on Anthropic's side; we only consume the model's final text block.
+    Raises on SDK failure -> the leg's try/except degrades it to [] (fail-soft)."""
     from anthropic import Anthropic
 
     location = f" in {city}" if (city or "").strip() else ""
     prompt = (
-        f'Search public records on the web and find the GSTIN (Indian GST identification number), '
-        f'CIN (Corporate Identification Number), and the registered/legal business name for the '
-        f'business "{name}"{location}. Use the web_search tool. Report ONLY business-level identity '
-        f"from public records — the GSTIN, CIN, and registered name. Do NOT include any proprietor/"
-        f"director personal details. State each GSTIN and CIN verbatim. If you cannot find them, say so."
+        f'Find the GSTIN (Indian GST registration number), CIN (Corporate Identification Number), '
+        f'and registered company name for "{name}"{location} from public records. '
+        f'Search the web if needed. '
+        f'Return ONLY this exact JSON format - no prose, no markdown, no explanation: '
+        f'{{"companies": [{{"name": "Registered Company Name", "gstin": "15-char-GSTIN", "cin": "CIN-or-empty-string"}}]}} '
+        f'or {{"companies": []}} if not found. '
+        f'Include ONLY companies with a confirmed 15-character GSTIN. '
+        f'Your ENTIRE response must be parseable by json.loads().'
     )
     resp = Anthropic().messages.create(
         model=_LLM_DISCOVERY_MODEL,
-        max_tokens=1024,
+        max_tokens=512,
+        system=(
+            "You are a structured data extraction agent. "
+            "You MUST respond with ONLY valid JSON -- no prose, no markdown, no explanation. "
+            "Your entire response must be parseable by json.loads()."
+        ),
         tools=[_WEB_SEARCH_TOOL],
         messages=[{"role": "user", "content": prompt}],
     )
-    # Concatenate the model's text blocks (the answer); web_search_tool_result blocks are skipped —
-    # we regex the GSTIN/CIN out of the model's own prose, which restates what it found.
+    # Take the LAST text block -- the model's final answer after the web_search completes.
+    # Earlier text blocks may be "I'll search..." preamble; the last block is the structured result.
     parts = [
         getattr(block, "text", "")
         for block in (resp.content or [])
         if getattr(block, "type", None) == "text"
     ]
-    return " ".join(p for p in parts if p)
+    return (parts[-1] if parts else "").strip()
 
 
 def _clean(v: Any) -> str | None:

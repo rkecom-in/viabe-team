@@ -226,8 +226,23 @@ class KnowYourGSTScraper:
         except Exception:  # noqa: BLE001 — markup drift must degrade, not raise
             logger.warning("knowyourgst: parse failed (degrade to none)", exc_info=True)
             return []
-        _cache_put(cache_key, rows)   # L1 — cache successful parses (incl. legit 0-results)
-        _db_cache_put(cache_key, rows)  # L2 — VT-507 persistent store (survives redeploys)
+        # VT-509 bounded retry: if the live ScrapingBee fetch returned [] (the form submit may have
+        # missed — a transient race between the js_scenario click and the server render), retry once.
+        # Only applies to the live ScrapingBee path (not injected fetch_fn fixtures for tests).
+        if not rows and self._fetch_fn is None:
+            logger.debug("knowyourgst: first scrape returned empty — retrying once")
+            if _rate_allow():  # consume a second rate slot for the retry
+                try:
+                    html_text = self._scrapingbee_fetch(query)
+                    rows = _parse_results(html_text)
+                except Exception:  # noqa: BLE001 — retry is best-effort; original empty result stands
+                    rows = []
+        _cache_put(cache_key, rows)   # L1 — cache in-process (incl. empty; short-lived per-process)
+        # VT-509: only persist NON-EMPTY results to L2 DB. An empty scrape (form submit missed /
+        # bot-block / transient network) must NOT poison the 24h persistent cache across restarts —
+        # the root cause of the "scrape contributed nothing" defect in Fazal's live run.
+        if rows:
+            _db_cache_put(cache_key, rows)
         return rows
 
     def _scrapingbee_fetch(self, query: str) -> str:
