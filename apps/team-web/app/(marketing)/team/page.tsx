@@ -1,5 +1,6 @@
 import Link from 'next/link'
 
+import { DeployStamp } from '@/components/deploy-stamp'
 import { getLandingDictionary, resolveLocale, t } from '@/lib/i18n'
 import { launchMode } from '@/lib/launch-mode'
 import { planPrices } from '@/lib/team-pricing'
@@ -260,6 +261,7 @@ export default async function TeamLandingPage({
           <small className="text-xs text-muted-foreground">{t(d, 'footer.rights')}</small>
         </div>
       </footer>
+      <DeployStamp />
     </main>
   )
 }
