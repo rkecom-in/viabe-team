@@ -350,6 +350,103 @@ export async function confirmEntity(
 
 
 // ---------------------------------------------------------------------------
+// VT-507 — progressive discovery: parallel async entity search (LLM + KnowYourGST). Returns a
+// discovery_id immediately; the browser polls for progressive candidate surfacing. Both fns fail
+// CLOSED: start → {discoveryId:null} (browser falls back to old blocking search); status →
+// {ok:false} (browser retries, degrades to manual option after N errors). Never blocks signup.
+//
+// CL-390: log path + status ONLY — never business_name/city/discovery_id body.
+// ---------------------------------------------------------------------------
+
+const _DISCOVERY_TIMEOUT_MS = 5_000
+
+export interface DiscoveryStartResult {
+  ok: boolean
+  discoveryId: string | null
+  reason: string
+}
+
+/**
+ * VT-507 — start a parallel async entity discovery session. Returns a discovery_id immediately;
+ * the browser polls getDiscoveryStatus to surface candidates progressively. Fail-CLOSED: any
+ * non-2xx / throw → {ok:false, discoveryId:null} so the browser falls back gracefully.
+ * CL-390: log path + status only — no business_name/city in the log output.
+ */
+export async function startEntityDiscovery(
+  businessName: string,
+  city: string,
+): Promise<DiscoveryStartResult> {
+  const base = process.env.TEAM_ORCHESTRATOR_URL ?? _ORCHESTRATOR_DEFAULT
+  const secret = process.env.INTERNAL_API_SECRET ?? ''
+  try {
+    const res = await fetch(`${base}/api/orchestrator/onboard/discovery/start`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'X-Internal-Secret': secret },
+      body: JSON.stringify({ business_name: businessName, city }),
+      signal: AbortSignal.timeout(_DISCOVERY_TIMEOUT_MS),
+    })
+    if (!res.ok) {
+      console.error(`discovery-start: http_${res.status}; failing closed`) // CL-390: path + status only
+      return { ok: false, discoveryId: null, reason: `http_${res.status}` }
+    }
+    const data = (await res.json()) as { discovery_id?: string | null }
+    return { ok: true, discoveryId: data.discovery_id ?? null, reason: 'ok' }
+  } catch (err) {
+    const timedOut = err instanceof Error && err.name === 'TimeoutError'
+    console.error(`discovery-start: ${timedOut ? 'timeout' : 'error'}; failing closed`) // CL-390: no body
+    return { ok: false, discoveryId: null, reason: timedOut ? 'timeout' : 'error' }
+  }
+}
+
+export interface DiscoveryStatusResult {
+  ok: boolean
+  overallStatus: 'searching' | 'complete' | 'error'
+  candidates: EntityCandidate[]
+  bothCompleteZero: boolean
+  reason: string
+}
+
+/**
+ * VT-507 — poll the status of a running discovery session. Fast (reads pre-computed state; no
+ * 90s wait). Fail-CLOSED: any non-2xx / throw → {ok:false} so the browser retries N times then
+ * degrades to the manual GST-entry path. `both_complete_zero` is the authoritative signal that
+ * both sources returned zero results — the sole trigger for "couldn't find" copy on the browser.
+ * CL-390: log path + status only.
+ */
+export async function getDiscoveryStatus(discoveryId: string): Promise<DiscoveryStatusResult> {
+  const base = process.env.TEAM_ORCHESTRATOR_URL ?? _ORCHESTRATOR_DEFAULT
+  const secret = process.env.INTERNAL_API_SECRET ?? ''
+  try {
+    const res = await fetch(`${base}/api/orchestrator/onboard/discovery/${discoveryId}`, {
+      method: 'GET',
+      headers: { 'X-Internal-Secret': secret },
+      signal: AbortSignal.timeout(_DISCOVERY_TIMEOUT_MS),
+    })
+    if (!res.ok) {
+      console.error(`discovery-status: http_${res.status}; failing closed`) // CL-390: path + status only
+      return { ok: false, overallStatus: 'error', candidates: [], bothCompleteZero: false, reason: `http_${res.status}` }
+    }
+    const data = (await res.json()) as {
+      overall_status?: string
+      candidates?: EntityCandidate[]
+      both_complete_zero?: boolean
+    }
+    return {
+      ok: true,
+      overallStatus: data.overall_status === 'complete' ? 'complete' : 'searching',
+      candidates: data.candidates ?? [],
+      bothCompleteZero: Boolean(data.both_complete_zero),
+      reason: 'ok',
+    }
+  } catch (err) {
+    const timedOut = err instanceof Error && err.name === 'TimeoutError'
+    console.error(`discovery-status: ${timedOut ? 'timeout' : 'error'}; failing closed`) // CL-390: no id/body
+    return { ok: false, overallStatus: 'error', candidates: [], bothCompleteZero: false, reason: timedOut ? 'timeout' : 'error' }
+  }
+}
+
+
+// ---------------------------------------------------------------------------
 // VT-411 — ownership verification (Fazal's bar): after the entity verifies (gstin_verified), the
 // owner must prove they OWN the business — a DISTINCT OTP to the DISCOVERED PUBLIC business number
 // (NOT the personal WhatsApp the signup OTP already proved), with a DIN-verify offered alongside.

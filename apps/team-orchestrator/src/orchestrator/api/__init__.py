@@ -22,6 +22,7 @@ from orchestrator.api.owner_verify import router as owner_verify_router
 from orchestrator.api.ownership import router as ownership_router  # VT-411
 from orchestrator.api.sheet_push import router as sheet_push_router
 from orchestrator.api.business_verification import router as business_verification_router  # VT-361
+from orchestrator.api.discovery import router as discovery_router  # VT-507
 from orchestrator.api.entity_match import router as entity_match_router  # VT-406
 from orchestrator.api.signup import router as signup_router
 from orchestrator.api.waitlist import router as waitlist_router
@@ -48,6 +49,7 @@ router.include_router(oauth_callback_router)
 router.include_router(sheet_push_router)
 router.include_router(signup_router)
 router.include_router(business_verification_router)  # VT-361
+router.include_router(discovery_router)  # VT-507 async parallel discovery
 router.include_router(entity_match_router)  # VT-406 entity-match at signup
 router.include_router(waitlist_router)  # VT-97
 router.include_router(integration_push_router)

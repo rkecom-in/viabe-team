@@ -30,6 +30,8 @@ import {
   isConfirmable,
   isValidGstinFormat,
   isValidPanFormat,
+  pollDiscoveryStatus,
+  startDiscovery,
   type EntityCandidate,
   type EntityConfirmResult,
 } from '@/lib/entity-match'
@@ -412,5 +414,177 @@ describe('VT-450 findNamedNoGstin (found-company-no-GSTIN state)', () => {
       detail: 'A listing with no name',
     }
     expect(findNamedNoGstin([nameless])).toBeNull()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// VT-507 — progressive discovery: startDiscovery + pollDiscoveryStatus
+// ---------------------------------------------------------------------------
+
+describe('VT-507 startDiscovery', () => {
+  it('200 → ok:true, discoveryId set, posts {business_name, city} to the proxy route', async () => {
+    const f = vi.fn().mockResolvedValue(resp(200, { discovery_id: 'disc-abc123' }))
+    const r = await startDiscovery('Sundaram Book Store', 'Bengaluru', f)
+    expect(r.ok).toBe(true)
+    expect(r.discoveryId).toBe('disc-abc123')
+    const [url, init] = f.mock.calls[0] as [string, RequestInit]
+    expect(url).toBe('/api/team/onboard/discovery/start')
+    expect(JSON.parse(init.body as string)).toEqual({
+      business_name: 'Sundaram Book Store',
+      city: 'Bengaluru',
+    })
+  })
+
+  it('200 with missing discovery_id → ok:true, discoveryId:null (caller degrades gracefully)', async () => {
+    const f = vi.fn().mockResolvedValue(resp(200, {}))
+    const r = await startDiscovery('X', 'Y', f)
+    expect(r.ok).toBe(true)
+    expect(r.discoveryId).toBeNull()
+  })
+
+  it('fails CLOSED on non-2xx → {ok:false, discoveryId:null} (never blocks signup)', async () => {
+    const f = vi.fn().mockResolvedValue(resp(502))
+    const r = await startDiscovery('X', 'Y', f)
+    expect(r.ok).toBe(false)
+    expect(r.discoveryId).toBeNull()
+    expect(r.reason).toBe('http_502')
+  })
+
+  it('fails CLOSED on throw → {ok:false, reason:"error"}', async () => {
+    const f = vi.fn().mockRejectedValue(new Error('network'))
+    const r = await startDiscovery('X', 'Y', f)
+    expect(r.ok).toBe(false)
+    expect(r.discoveryId).toBeNull()
+    expect(r.reason).toBe('error')
+  })
+})
+
+describe('VT-507 pollDiscoveryStatus', () => {
+  it('200 → parses overall_status, candidates, both_complete_zero; GETs the right URL', async () => {
+    const f = vi.fn().mockResolvedValue(
+      resp(200, {
+        overall_status: 'searching',
+        candidates: [WEB_CANDIDATE],
+        both_complete_zero: false,
+      }),
+    )
+    const r = await pollDiscoveryStatus('disc-abc123', f)
+    expect(r.ok).toBe(true)
+    expect(r.overallStatus).toBe('searching')
+    expect(r.candidates).toHaveLength(1)
+    expect(r.bothCompleteZero).toBe(false)
+    const [url] = f.mock.calls[0] as [string, RequestInit]
+    expect(url).toBe('/api/team/onboard/discovery/disc-abc123')
+  })
+
+  it('overall_status "complete" is mapped correctly', async () => {
+    const f = vi.fn().mockResolvedValue(
+      resp(200, { overall_status: 'complete', candidates: [WEB_CANDIDATE], both_complete_zero: false }),
+    )
+    expect((await pollDiscoveryStatus('d', f)).overallStatus).toBe('complete')
+  })
+
+  it('any non-"complete" overall_status maps to "searching" (default)', async () => {
+    const f = vi.fn().mockResolvedValue(
+      resp(200, { overall_status: 'running', candidates: [], both_complete_zero: false }),
+    )
+    expect((await pollDiscoveryStatus('d', f)).overallStatus).toBe('searching')
+  })
+
+  it("both_complete_zero:true — honest-empty signal; spinner must NOT be replaced by \"couldn't find\" on a source error", async () => {
+    const f = vi.fn().mockResolvedValue(
+      resp(200, { overall_status: 'complete', candidates: [], both_complete_zero: true }),
+    )
+    const r = await pollDiscoveryStatus('d', f)
+    expect(r.bothCompleteZero).toBe(true)
+    expect(r.ok).toBe(true)
+    expect(r.candidates).toHaveLength(0)
+  })
+
+  it('missing candidates defaults to empty array', async () => {
+    const f = vi.fn().mockResolvedValue(resp(200, { overall_status: 'searching' }))
+    const r = await pollDiscoveryStatus('d', f)
+    expect(r.candidates).toEqual([])
+    expect(r.bothCompleteZero).toBe(false)
+  })
+
+  it("fails CLOSED on non-2xx → ok:false, no candidates, no honest-empty signal (retry, not \"couldn't find\")", async () => {
+    const f = vi.fn().mockResolvedValue(resp(503))
+    const r = await pollDiscoveryStatus('d', f)
+    expect(r.ok).toBe(false)
+    expect(r.candidates).toHaveLength(0)
+    expect(r.bothCompleteZero).toBe(false)
+    expect(r.reason).toBe('http_503')
+  })
+
+  it('fails CLOSED on throw → ok:false, reason:"error"', async () => {
+    const f = vi.fn().mockRejectedValue(new Error('network'))
+    const r = await pollDiscoveryStatus('d', f)
+    expect(r.ok).toBe(false)
+    expect(r.reason).toBe('error')
+  })
+})
+
+describe('VT-507 progressive discovery — component source-code structure checks', () => {
+  const src = readFileSync(
+    fileURLToPath(new URL('../../app/(marketing)/team/signup/entity-match-step.tsx', import.meta.url)),
+    'utf-8',
+  )
+
+  it('has a "discovering" screen (data-entity-step="discovering")', () => {
+    expect(src).toContain('data-entity-step="discovering"')
+  })
+
+  it('shows the manual option at 10s via showManualEarly (data-entity-manual-early)', () => {
+    expect(src).toContain('data-entity-manual-early')
+    expect(src).toContain('showManualEarly')
+    // The 10s timer fires setTimeout at exactly 10_000ms.
+    expect(src).toContain('10_000')
+  })
+
+  it('honest-empty (data-entity-honest-empty) is guarded by bothCompleteZero — never by a source error', () => {
+    expect(src).toContain('data-entity-honest-empty')
+    // The honest-empty block is inside a `bothCompleteZero` condition.
+    const honestBlock = src.slice(src.indexOf('data-entity-honest-empty'))
+    // The enclosing conditional check is visible nearby — the honest-empty message can't appear
+    // unconditionally (a source error should NOT show "couldn't find").
+    expect(src).toContain('bothCompleteZero')
+  })
+
+  it('degraded state (data-entity-discovery-degraded) is separate from honest-empty', () => {
+    expect(src).toContain('data-entity-discovery-degraded')
+    expect(src).toContain('degraded')
+  })
+
+  it('stopDiscovery() is called in pick() — cancel-on-commit when user selects a candidate', () => {
+    // The pick function must call stopDiscovery() before confirmGstin.
+    const pickFnIdx = src.indexOf('function pick(')
+    const pickFnBody = src.slice(pickFnIdx, src.indexOf('\n  }', pickFnIdx) + 10)
+    expect(pickFnBody).toContain('stopDiscovery()')
+  })
+
+  it('stopDiscovery() is called in submitManualGstin() — cancel-on-commit when GSTIN is entered', () => {
+    const submitFnIdx = src.indexOf('function submitManualGstin(')
+    const submitFnBody = src.slice(submitFnIdx, src.indexOf('\n  }', submitFnIdx) + 10)
+    expect(submitFnBody).toContain('stopDiscovery()')
+  })
+
+  it('uses startDiscovery + pollDiscoveryStatus from @/lib/entity-match', () => {
+    expect(src).toContain('startDiscovery')
+    expect(src).toContain('pollDiscoveryStatus')
+  })
+
+  it('verified chip is NOT in the discovering screen (provenance: found candidates are "found", never verified)', () => {
+    const discoveringBlock = src.slice(src.indexOf('data-entity-step="discovering"'))
+    const nextSectionIdx = discoveringBlock.indexOf('data-entity-step="loading"')
+    const discoveringOnly = nextSectionIdx > 0 ? discoveringBlock.slice(0, nextSectionIdx) : discoveringBlock.slice(0, 3000)
+    expect(discoveringOnly).not.toContain("chip(t.verified_chip, 'verified')")
+  })
+
+  it('the verified chip is still rendered ONLY in the verified-step branch (existing provenance test)', () => {
+    expect(src).toContain('data-entity-step="verified"')
+    expect(src).toContain("chip(t.verified_chip, 'verified')")
+    const pickingBlock = src.slice(src.indexOf('data-entity-step="picking"'))
+    expect(pickingBlock).not.toContain("chip(t.verified_chip, 'verified')")
   })
 })

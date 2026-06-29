@@ -18,6 +18,8 @@
  */
 
 import type {
+  DiscoveryStartResult,
+  DiscoveryStatusResult,
   EntityCandidate,
   EntityCandidatesResult,
   EntityConfirmResult,
@@ -26,7 +28,14 @@ import type {
 
 type Fetch = typeof fetch
 
-export type { EntityCandidate, EntityCandidatesResult, EntityConfirmResult, GstinsByPanResult }
+export type {
+  DiscoveryStartResult,
+  DiscoveryStatusResult,
+  EntityCandidate,
+  EntityCandidatesResult,
+  EntityConfirmResult,
+  GstinsByPanResult,
+}
 
 /**
  * The terminal classification of a confirm attempt. `verified` is the ONLY outcome that may unlock
@@ -41,6 +50,7 @@ export type ConfirmOutcome =
 /** The full wizard sub-step state machine. The component renders one screen per `step`. */
 export type WizardStep =
   | 'idle' // name+city entered, not yet looked up
+  | 'discovering' // VT-507: parallel async discovery in progress — progressive candidate surfacing
   | 'pan_entry' // VT-448 PRIMARY: owner enters their 10-char PAN; we IDENTIFY their GSTIN(s)
   | 'pan_pick' // VT-448 PRIMARY: the PAN's GSTIN(s) listed; owner taps one to verify
   | 'picking' // candidates rendered; owner choosing (or "none of these")
@@ -277,6 +287,67 @@ const _CITY_TO_STATE_CODE: Record<string, string> = {
 export function cityToStateCode(city: string): string | null {
   const key = (city || '').trim().toLowerCase()
   return _CITY_TO_STATE_CODE[key] ?? null
+}
+
+/**
+ * VT-507 — start a parallel async discovery session via the server-side proxy route. The route
+ * forwards {business_name, city} to the orchestrator's discovery/start endpoint which launches the
+ * search and returns a discovery_id immediately. Fail-CLOSED to {discoveryId:null} (the component
+ * falls back to the old blocking fetchCandidates path — signup is never blocked on a failed start).
+ */
+export async function startDiscovery(
+  businessName: string,
+  city: string,
+  f: Fetch = fetch,
+): Promise<DiscoveryStartResult> {
+  try {
+    const res = await f('/api/team/onboard/discovery/start', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ business_name: businessName, city }),
+    })
+    if (!res.ok) return { ok: false, discoveryId: null, reason: `http_${res.status}` }
+    const data = (await res.json().catch(() => ({}))) as { discovery_id?: string | null }
+    return { ok: true, discoveryId: data.discovery_id ?? null, reason: 'ok' }
+  } catch {
+    return { ok: false, discoveryId: null, reason: 'error' }
+  }
+}
+
+/**
+ * VT-507 — poll a running discovery session for its latest merged+de-duped candidates. Fast
+ * (reads pre-computed state; no 90s wait). Fail-CLOSED to {ok:false} on any non-2xx / throw
+ * so the component retries a few times before degrading to the manual GST-entry path. The
+ * returned candidates are UNVERIFIED (the Sandbox confirm stays the sole verify gate); the
+ * `both_complete_zero` flag is the ONLY trigger for "couldn't find" copy — a source error or
+ * ongoing search is NEVER "couldn't find".
+ */
+export async function pollDiscoveryStatus(
+  discoveryId: string,
+  f: Fetch = fetch,
+): Promise<DiscoveryStatusResult> {
+  try {
+    const res = await f(`/api/team/onboard/discovery/${discoveryId}`, {
+      method: 'GET',
+    })
+    if (!res.ok) {
+      return { ok: false, overallStatus: 'error', candidates: [], bothCompleteZero: false, reason: `http_${res.status}` }
+    }
+    const data = (await res.json().catch(() => ({}))) as {
+      overall_status?: string
+      candidates?: EntityCandidate[]
+      both_complete_zero?: boolean
+    }
+    return {
+      ok: true,
+      overallStatus: data.overall_status === 'complete' ? 'complete' : 'searching',
+      candidates: data.candidates ?? [],
+      bothCompleteZero: Boolean(data.both_complete_zero),
+      reason: 'ok',
+    }
+  } catch {
+    return { ok: false, overallStatus: 'error', candidates: [], bothCompleteZero: false, reason: 'error' }
+  }
 }
 
 /**

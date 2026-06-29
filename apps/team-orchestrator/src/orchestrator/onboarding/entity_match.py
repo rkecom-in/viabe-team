@@ -292,6 +292,44 @@ def _cin_candidates(name: str, city: str, search_fn: SearchFn | None) -> list[En
     return out
 
 
+def _llm_db_cache_get(key: str) -> str | None:
+    """VT-507 — read the LLM answer blob from discovery_cache (source='llm'). Returns None on miss."""
+    try:
+        from orchestrator.graph import get_pool
+        with get_pool().connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT response FROM discovery_cache"
+                " WHERE source = 'llm' AND normalized_query = %s AND expires_at > NOW()",
+                (key,),
+            )
+            row = cur.fetchone()
+        if row is None:
+            return None
+        data = row["response"] if isinstance(row, dict) else row[0]
+        return data if isinstance(data, str) else None
+    except Exception:  # noqa: BLE001 — DB cache is best-effort; fall through to live LLM call
+        return None
+
+
+def _llm_db_cache_put(key: str, blob: str) -> None:
+    """VT-507 — write the LLM answer blob to discovery_cache (source='llm', 24h TTL). Best-effort."""
+    try:
+        import json as _json
+        from orchestrator.graph import get_pool
+        with get_pool().connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO discovery_cache (source, normalized_query, response, expires_at)
+                VALUES ('llm', %s, %s::jsonb, NOW() + INTERVAL '24 hours')
+                ON CONFLICT (source, normalized_query) DO UPDATE
+                    SET response = EXCLUDED.response, expires_at = EXCLUDED.expires_at
+                """,
+                (key, _json.dumps(blob)),
+            )
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def _llm_candidates(name: str, city: str, llm_fn: LlmFn | None) -> list[EntityCandidate]:
     """VT-452 LLM web-search leg: ask claude-opus-4-8 (with the server-side web_search tool) to find
     the GSTIN/CIN/registered name for the business from PUBLIC RECORDS — what Google/ChatGPT surface
@@ -302,12 +340,27 @@ def _llm_candidates(name: str, city: str, llm_fn: LlmFn | None) -> list[EntityCa
 
     Best-effort + fail-soft: an LLM/network/parse error → [] degrade (like every other leg); the
     per-result iteration is inside the try so one malformed item never raises into signup. ``llm_fn``
-    (business_name, city) -> the answer blob is injectable for tests (no real LLM / key)."""
+    (business_name, city) -> the answer blob is injectable for tests (no real LLM / key).
+
+    VT-507: DB-persistent 24h cache (source='llm') — a repeated query for the same business
+    returns the cached blob in ms, skipping the LLM call. Only the real ``_default_llm_search``
+    path is cached; an injected ``llm_fn`` (test path) bypasses the cache."""
     fn = llm_fn or _default_llm_search
     sig = _significant_tokens(name)
     out: list[EntityCandidate] = []
     try:
-        blob = fn(name, city) or ""
+        cache_key = f"{name.lower().strip()}|{(city or '').lower().strip()}"
+        blob: str
+        if fn is _default_llm_search:
+            # Check DB cache before making the (expensive) LLM call.
+            cached_blob = _llm_db_cache_get(cache_key)
+            if cached_blob is not None:
+                blob = cached_blob
+            else:
+                blob = fn(name, city) or ""
+                _llm_db_cache_put(cache_key, blob)
+        else:
+            blob = fn(name, city) or ""
         if not _result_is_relevant(blob, sig):
             return []  # the LLM answer doesn't name the queried business → drop (no distinctive token)
         blob_u = blob.upper()
