@@ -496,9 +496,15 @@ def test_run_sales_recovery_agent_schema_rejection_emits_failure(monkeypatch):
     # fields so the win-back parse failure is diagnosable on dev.
     field_paths = failure.metadata["schema_field_paths"]
     assert isinstance(field_paths, list)
-    # {"status": "proposed"} → every required variant field is absent.
-    assert "proposed.campaign_window: missing" in field_paths
+    # {"status": "proposed"} → every OTHER required variant field is absent.
     assert "proposed.message_plan: missing" in field_paths
+    assert "proposed.target_cohort: missing" in field_paths
+    assert "proposed.expected_arrr: missing" in field_paths
+    assert "proposed.evidence_refs: missing" in field_paths
+    # VT-499: campaign_window is NO LONGER a missing field — the coercer
+    # server-injects an always-valid now->now+7d window on the proposed
+    # variant, so it is supplied even when the model emits nothing for it.
+    assert "proposed.campaign_window: missing" not in field_paths
     # (b) NO PII / value leakage — only "<loc>: <type>" pairs. No pydantic
     # ``input_value=`` / ``msg`` echo in either the paths or the message.
     for path in field_paths:
@@ -507,7 +513,9 @@ def test_run_sales_recovery_agent_schema_rejection_emits_failure(monkeypatch):
         assert "input_value" not in path
     assert "input_value" not in failure.message
     # The reason is rebuilt from the same NON-PII paths (no str(exc) echo).
-    assert "proposed.campaign_window: missing" in failure.message
+    # campaign_window is VT-499 server-supplied, so message names a STILL-missing
+    # field rather than the (now-filled) window.
+    assert "proposed.message_plan: missing" in failure.message
 
 
 def test_run_sales_recovery_agent_cost_uses_compute_cost_paise(monkeypatch):
@@ -1010,6 +1018,149 @@ def test_sr_prompt_default_render_uses_real_now():
     rendered = _render_sr_system_prompt()
     assert datetime.now(UTC).date().isoformat() in rendered
     assert "2026-05-22" not in rendered
+
+
+# --- VT-499: campaign_window is system-owned (server-injected, not LLM) -------
+#
+# VT-493 maximally prompted the campaign_window (injected today's date, valid
+# example, named the validator) and the SR model (Haiku on dev) STILL emitted a
+# backdated / invalid / missing window 3/3 — VT-496 named it deterministically
+# (``proposed.campaign_window: value_error``). The window is a MECHANICAL value,
+# not business judgment, so _construct_variant_payload now OVERRIDES it server-
+# side on the PROPOSED variant with an always-valid now->now+7d span. The model
+# keeps owning the business fields; the validator is NOT weakened.
+
+
+def test_server_campaign_window_is_valid_now_to_now_plus_7d():
+    """VT-499 — the server-computed window is tz-aware, ~now, spans exactly 7d,
+    and constructs through the REAL CampaignWindow validator without raising."""
+    from datetime import UTC, datetime, timedelta
+
+    from orchestrator.agent.sales_recovery import _server_campaign_window
+    from orchestrator.agent.schemas.campaign_plan import CampaignWindow
+
+    now = datetime.now(UTC)
+    w = _server_campaign_window(now)
+    start = datetime.fromisoformat(w["start"])
+    end = datetime.fromisoformat(w["end"])
+
+    assert start.tzinfo is not None and end.tzinfo is not None
+    assert start >= now - timedelta(seconds=1)  # ~now (small forward buffer)
+    assert end - start == timedelta(days=7)
+    # Constructs without raising → _window_validity passes (start>=now, end>start).
+    window = CampaignWindow(start=w["start"], end=w["end"])  # type: ignore[arg-type]
+    assert window.end > window.start
+
+
+@pytest.mark.parametrize("bad_window", ["backdated", "missing", "naive_end_before_start"])
+def test_vt499_proposed_window_overridden_so_bad_model_window_now_parses(bad_window):
+    """VT-499 — a proposed raw dict whose model-emitted campaign_window is the
+    EXACT Haiku failure (backdated / missing / invalid) now PARSES, because
+    _construct_variant_payload replaces it with a server now->now+7d window.
+    The business fields the model owns are preserved unchanged."""
+    from datetime import UTC, datetime, timedelta
+
+    from orchestrator.agent.sales_recovery import _construct_variant_payload
+    from orchestrator.agent.schemas.campaign_plan import (
+        CampaignPlanProposed,
+        CampaignStatus,
+        CampaignWindow,
+        parse_campaign_plan,
+    )
+
+    raw = _proposed_raw_minimal()
+    if bad_window == "backdated":
+        # The VT-493/VT-496 failure: the stale 2026-05-22 literal echoed back.
+        bad = {"start": "2026-05-22T09:00:00+00:00", "end": "2026-05-29T09:00:00+00:00"}
+        raw["campaign_window"] = bad
+        # Sanity: this window is genuinely rejected by the validator on its own,
+        # so a green parse below can ONLY come from the server override.
+        with pytest.raises(ValueError):
+            CampaignWindow(start=bad["start"], end=bad["end"])  # type: ignore[arg-type]
+    elif bad_window == "missing":
+        raw.pop("campaign_window")
+    elif bad_window == "naive_end_before_start":
+        raw["campaign_window"] = {
+            "start": "2026-01-01T00:00:00",  # naive (no tz) AND end < start
+            "end": "2025-01-01T00:00:00",
+        }
+
+    ctx = _ctx_with_real_uuids()
+    now = datetime.now(UTC)
+    payload, _dropped_empty, _dropped_populated = _construct_variant_payload(
+        raw, context=ctx, generated_at=now
+    )
+
+    # Pre-VT-499 this raised proposed.campaign_window: value_error. Now it parses.
+    plan = parse_campaign_plan(payload)
+    assert isinstance(plan, CampaignPlanProposed)
+    assert plan.status is CampaignStatus.PROPOSED
+
+    start = plan.campaign_window.start
+    end = plan.campaign_window.end
+    assert start.tzinfo is not None and end.tzinfo is not None
+    assert start >= now - timedelta(seconds=1)  # ~now — NOT the backdated start
+    assert end - start == timedelta(days=7)
+
+    # Business fields stay exactly what the model emitted — only the window moved.
+    assert plan.target_cohort.cohort_label == "dormant-60d"
+    assert plan.expected_arrr.low_paise == 100_000
+    assert plan.expected_arrr.high_paise == 500_000
+    assert plan.message_plan.template_id == "dormant_recovery_v1"
+    assert plan.evidence_refs[0].claim_id == "E1"
+
+
+def test_vt499_non_proposed_variants_get_no_server_window():
+    """VT-499 — out_of_scope / insufficient_data carry no window; the override
+    is scoped to PROPOSED only and must NOT inject one onto the others."""
+    from datetime import UTC, datetime
+
+    from orchestrator.agent.sales_recovery import _construct_variant_payload
+    from orchestrator.agent.schemas.campaign_plan import parse_campaign_plan
+
+    ctx = _ctx_with_real_uuids()
+    now = datetime.now(UTC)
+    for raw in (_out_of_scope_raw_minimal(), _insufficient_data_raw_minimal()):
+        payload, _de, _dp = _construct_variant_payload(
+            raw, context=ctx, generated_at=now
+        )
+        assert "campaign_window" not in payload
+        # Still a valid plan of its variant (extra='forbid' would reject a window).
+        parse_campaign_plan(payload)
+
+
+def test_vt499_window_override_does_not_mask_other_field_errors():
+    """VT-499 — the override fills ONLY campaign_window. A genuinely-bad OTHER
+    field (expected_arrr.low > high) must STILL fail parse, and the surfaced
+    error is that field — NOT a campaign_window error. Proves the fix supplies a
+    valid window without weakening validation of anything else."""
+    from datetime import UTC, datetime
+
+    from pydantic import ValidationError
+
+    from orchestrator.agent.sales_recovery import _construct_variant_payload
+    from orchestrator.agent.schemas.campaign_plan import parse_campaign_plan
+
+    raw = _proposed_raw_minimal()
+    # Backdate the window too — so the ONLY thing keeping the window valid is the
+    # server override — AND corrupt expected_arrr (low > high → _ordered fails).
+    raw["campaign_window"] = {
+        "start": "2026-05-22T09:00:00+00:00",
+        "end": "2026-05-29T09:00:00+00:00",
+    }
+    raw["expected_arrr"]["low_paise"] = 999_999
+    raw["expected_arrr"]["high_paise"] = 1
+
+    ctx = _ctx_with_real_uuids()
+    payload, _de, _dp = _construct_variant_payload(
+        raw, context=ctx, generated_at=datetime.now(UTC)
+    )
+    with pytest.raises(ValidationError) as exc_info:
+        parse_campaign_plan(payload)
+
+    paths = {".".join(str(p) for p in e["loc"]) for e in exc_info.value.errors()}
+    assert any("expected_arrr" in p for p in paths), paths
+    assert not any("campaign_window" in p for p in paths), paths
 
 
 # --- Canary: real API, env-gated, NEVER runs in CI ---------------------------
