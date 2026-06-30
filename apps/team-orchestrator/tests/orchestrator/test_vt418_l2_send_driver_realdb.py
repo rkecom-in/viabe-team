@@ -174,18 +174,20 @@ class _RaisingCustomerSend:
 # ---------------------------------------------------------------------------
 
 
-def _new_tenant(dsn: str) -> UUID:
+def _new_tenant(dsn: str, *, ownership_verified: bool = True) -> UUID:
     # VT-421: agent_send_draft now has a Gate-0 ACTIVATION gate. This driver's batches must reach the
     # send, so the tenant is fully activated: journey-complete + gstin_verified + ≥1 enabled+ok
     # connector (the per-test _seed_customer satisfies the ≥1-customer leg). The bar is now
     # journey-complete (onboarding_journey.status='complete'), NOT paid-active — so seed that row.
+    # VT-517: ownership_verified (renamed from owner_channel_verified) is now required by the
+    # universal Gate-0 for sales_recovery; default True so all eligible-path seeds clear the gate.
     with psycopg.connect(dsn, autocommit=True) as conn:
         row = conn.execute(
             "INSERT INTO tenants (business_name, plan_tier, phase, phase_entered_at, "
-            "business_type, owner_inputs, verification_status, whatsapp_number) "
-            "VALUES (%s, 'founding', 'paid_active', now(), 'restaurant', true, 'gstin_verified', %s) "
+            "business_type, owner_inputs, verification_status, whatsapp_number, ownership_verified) "
+            "VALUES (%s, 'founding', 'paid_active', now(), 'restaurant', true, 'gstin_verified', %s, %s) "
             "RETURNING id",
-            (f"VT418 {uuid4().hex[:8]}", f"+9198{uuid4().int % 10**8:08d}"),
+            (f"VT418 {uuid4().hex[:8]}", f"+9198{uuid4().int % 10**8:08d}", ownership_verified),
         ).fetchone()
         assert row is not None
         tenant = UUID(str(row[0]))

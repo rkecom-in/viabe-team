@@ -206,10 +206,10 @@ def _new_tenant(dsn: str) -> UUID:
     with psycopg.connect(dsn, autocommit=True) as conn:
         row = conn.execute(
             "INSERT INTO tenants (business_name, plan_tier, phase, phase_entered_at, "
-            "business_type, owner_inputs, verification_status, whatsapp_number) "
-            "VALUES (%s, 'founding', 'paid_active', now(), 'restaurant', true, 'gstin_verified', %s) "
+            "business_type, owner_inputs, verification_status, whatsapp_number, ownership_verified) "
+            "VALUES (%s, 'founding', 'paid_active', now(), 'restaurant', true, 'gstin_verified', %s, %s) "
             "RETURNING id",
-            (f"VT384 {uuid4().hex[:8]}", f"+9198{uuid4().int % 10**8:08d}"),
+            (f"VT384 {uuid4().hex[:8]}", f"+9198{uuid4().int % 10**8:08d}", True),
         ).fetchone()
         assert row is not None
         tenant = UUID(str(row[0]))

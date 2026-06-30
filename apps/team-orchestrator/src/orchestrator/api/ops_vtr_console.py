@@ -123,6 +123,14 @@ class VtrConfirmFieldBody(BaseModel):
     basis: str = ""
 
 
+class VtrOwnershipDecisionBody(BaseModel):
+    operator_id: str
+    tenant_id: str
+    decision: Literal["verified", "rejected"]
+    note: str = ""
+    evidence: str = ""
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -445,6 +453,78 @@ def vtr_confirm_field(
         )
     logger.info("vtr_confirm_field OK operator=%s tenant=%s field=%s", operator, body.tenant_id, field)
     return {"ok": True, "field": field, "status": "vtr_confirmed"}
+
+
+@router.post("/api/orchestrator/ops/vtr-ownership-decision")
+def vtr_ownership_decision(
+    body: VtrOwnershipDecisionBody,
+    x_internal_secret: str | None = Header(default=None, alias="X-Internal-Secret"),
+    x_operator_jwt: str | None = Header(default=None, alias="X-Operator-Jwt"),
+) -> dict[str, Any]:
+    """VT-517 — a VTR human marks tenant ownership Verified or Rejected (replaces the zero-proof
+    self-entered-number OTP). The decision flips the NON-BYPASSABLE execution gate
+    (``tenants.ownership_verified``, read by the activation gate / Gate-0): only a VTR 'verified' lets
+    an agent send/act. ONE atomic transaction — the tenants UPDATE + an ``ops_audit`` row + a
+    fail-closed ``tm_audit`` row (VT-514): no decision without a guaranteed audit (the emit raises →
+    the whole txn rolls back). CL-390: the audit carries the DECISION + booleans only, never the
+    operator note / evidence text. IDOR-safe: ``_gate`` confirms the operator is assigned to the
+    tenant before any write.
+    """
+    _require_uuid(body.tenant_id, "tenant_id")
+    operator = _gate(
+        x_internal_secret=x_internal_secret,
+        x_operator_jwt=x_operator_jwt,
+        body_operator_id=body.operator_id,
+        tenant_id=body.tenant_id,
+        deny_action="ownership_decision_denied",
+        deny_target_kind="tenant",
+    )
+    # Deferred import — emit_tm_audit lazy-loads its DB deps (dep-less-smoke convention).
+    from orchestrator.observability.tm_audit import emit_tm_audit
+
+    verified = body.decision == "verified"
+    note = _scrub_reason(body.note)         # free-text hygiene (CL-390)
+    evidence = (body.evidence or "")[:500]  # URL/reference — clamp only
+    with get_pool().connection() as conn, conn.transaction():
+        cur = conn.cursor()
+        cur.execute(
+            "UPDATE tenants SET ownership_verified = %s, "
+            "ownership_verified_at = CASE WHEN %s THEN now() ELSE NULL END, "
+            "ownership_status = %s, ownership_reviewer_note = %s, "
+            "ownership_reviewer_evidence = %s, ownership_reviewed_at = now(), "
+            "ownership_reviewed_by = %s WHERE id = %s",
+            (verified, verified, body.decision, note or None, evidence or None, operator, body.tenant_id),
+        )
+        if cur.rowcount == 0:
+            raise HTTPException(status_code=404, detail="tenant not found")
+        audit(
+            cur,
+            operator_id=operator,
+            tenant_id=body.tenant_id,
+            action="vtr_ownership_decision",
+            target_kind="tenant",
+            target_id=body.tenant_id,
+            detail=body.decision,  # decision enum only — never note/evidence text (CL-390)
+        )
+        # Fail-closed TM audit (VT-514): can't-audit ⇒ can't-decide (raises → txn rollback).
+        emit_tm_audit(
+            event_layer="does",
+            event_kind="ownership_decision",
+            actor="vtr_operator",
+            tenant_id=body.tenant_id,
+            summary=f"VTR ownership decision: {body.decision}",
+            decision={"decision": body.decision, "by": operator},
+            action={"has_note": bool(note), "has_evidence": bool(evidence)},
+            result={"ownership_verified": verified},
+            severity="info",
+            status="ok" if verified else "rejected",
+            conn=conn,
+        )
+    logger.info(
+        "vtr_ownership_decision OK operator=%s tenant=%s decision=%s",
+        operator, body.tenant_id, body.decision,
+    )
+    return {"ok": True, "decision": body.decision, "ownership_verified": verified}
 
 
 @router.post("/api/orchestrator/ops/vtr-draft-batches")

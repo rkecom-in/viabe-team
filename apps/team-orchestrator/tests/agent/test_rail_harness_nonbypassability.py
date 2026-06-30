@@ -213,18 +213,21 @@ def allow_test_consent_version(monkeypatch: pytest.MonkeyPatch) -> str:
 # --- seeding helpers (direct service-role connection — RLS bypassed at seed) ---
 
 
-def _new_tenant(dsn: str, *, onboarded: bool = True, wa_live: bool = True) -> UUID:
+def _new_tenant(
+    dsn: str, *, onboarded: bool = True, wa_live: bool = True, ownership_verified: bool = True
+) -> UUID:
     """Seed a tenant. ``onboarded`` satisfies the activation bar (journey-complete + gstin_verified
     + ≥1 enabled connector; ≥1 customer is the per-test _seed_customer). ``wa_live`` seeds a live
     WABA so the universal WABA pre-gate passes (the agent path's Gate-0b + the campaign/inbound
-    pre-gate)."""
+    pre-gate). ``ownership_verified`` (VT-517) flips the tenants ownership gate true so the eligible
+    fixture clears the universal ownership bar; a test sets it False to exercise that gate."""
     with psycopg.connect(dsn, autocommit=True) as conn:
         verification = "gstin_verified" if onboarded else "unverified"
         row = conn.execute(
             "INSERT INTO tenants (business_name, plan_tier, phase, phase_entered_at, "
-            "business_type, verification_status, whatsapp_number) "
-            "VALUES (%s, 'founding', 'paid_active', now(), 'restaurant', %s, %s) RETURNING id",
-            ("VT-460 railproof", verification, f"+9198{uuid4().int % 10**8:08d}"),
+            "business_type, verification_status, whatsapp_number, ownership_verified) "
+            "VALUES (%s, 'founding', 'paid_active', now(), 'restaurant', %s, %s, %s) RETURNING id",
+            ("VT-460 railproof", verification, f"+9198{uuid4().int % 10**8:08d}", ownership_verified),
         ).fetchone()
         assert row is not None
         tenant = UUID(str(row[0]))
@@ -421,6 +424,27 @@ def test_D24b_not_live_waba_is_blocked_at_gate0b(substrate, fake_registry, allow
 
     assert result.status == "skipped"
     assert result.skip_reason == customer_send.SKIP_WABA_NOT_LIVE
+    assert send_fn.calls == []
+
+
+@requires_db
+def test_D24c_ownership_not_verified_is_blocked_at_gate0(substrate, fake_registry, allow_test_consent_version):  # type: ignore[no-untyped-def]
+    """D24c — VT-517: a fully-onboarded, WABA-live tenant whose ownership has NOT been VTR-verified is
+    blocked at Gate-0 (the activation gate's universal ownership bar) BEFORE any transport call. Only a
+    VTR human marking ownership_verified=true lets the agent send — a self-entered number can no longer
+    open the rail. Everything else eligible; ONLY ownership is false → ZERO sends."""
+    tenant = _new_tenant(substrate.dsn, onboarded=True, wa_live=True, ownership_verified=False)
+    customer, phone = _seed_customer(substrate.dsn, tenant)
+    work_item = _seed_work_item(substrate.dsn, tenant)
+    batch = _seed_batch(substrate.dsn, tenant, work_item)
+    draft = _seed_draft(substrate.dsn, tenant, batch, customer)
+    _seed_consent(substrate.dsn, tenant, phone, version="railproof-v1")
+    send_fn = _FakeSendFn()
+
+    result = _send(tenant, draft, send_fn)
+
+    assert result.status == "skipped"
+    assert result.skip_reason == customer_send.SKIP_NOT_ONBOARDED
     assert send_fn.calls == []
 
 

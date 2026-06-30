@@ -56,13 +56,13 @@ def _phone() -> str:
     return f"+9199{uuid4().int % 10**8:08d}"
 
 
-def _new_tenant(dsn: str, whatsapp_number: str) -> str:
+def _new_tenant(dsn: str, whatsapp_number: str, *, ownership_verified: bool = True) -> str:
     with psycopg.connect(dsn, autocommit=True) as conn:
         row = conn.execute(
             "INSERT INTO tenants (business_name, plan_tier, phase, phase_entered_at, "
-            "whatsapp_number) VALUES ('VT-3.3c Handler Test', 'founding', 'trial', "
-            "now(), %s) RETURNING id",
-            (whatsapp_number,),
+            "whatsapp_number, ownership_verified) VALUES ('VT-3.3c Handler Test', 'founding', 'trial', "
+            "now(), %s, %s) RETURNING id",
+            (whatsapp_number, ownership_verified),
         ).fetchone()
     assert row is not None
     return str(row[0])

@@ -113,25 +113,22 @@ export function SignupForm() {
   const [gstRejectError, setGstRejectError] = useState(false)
   const [done, setDone] = useState(false)
   const [submitting, setSubmitting] = useState(false)
-  // VT-96 + VT-406 + VT-411: a 4-step flow — details, then entity-match (confirm the GST-registered
+  // VT-96 + VT-406 + VT-517: a 4-step flow — details, then entity-match (confirm the GST-registered
   // business BEFORE creating an account — VT-406/VT-408 verify-then-create gate), then OTP-verify the
   // WhatsApp number (the VT-326 proof token; a direct POST would 401) which CREATES the tenant, then
-  // OWNERSHIP (the tier-2 step — prove the owner CONTROLS the business via a DISTINCT OTP to the
-  // discovered public number; a GST entity is real, not necessarily yours).
+  // OWNERSHIP — now an honest "pending Viabe team review" screen (VT-517 killed self-serve ownership
+  // OTP; a Viabe human decides ownership).
   //
-  // VT-411 ORDERING (Cowork fix): ownership runs POST-create so the orchestrator flips
-  // owner_channel_verified on the REAL tenant. A PRE-create ownership step would call the
-  // orchestrator with tenant_id='' → `WHERE id=''` no-op → the flag never persists. So: GST verify
-  // gates create (tier-1, VT-408); ownership is the tier-2 step right after create — it gates the
-  // journey/dashboard, NOT the create row (the tenant already exists when ownership runs).
+  // VT-517: the ownership step runs POST-create (the tenant EXISTS) but no longer proves anything —
+  // it informs the owner that EXECUTION stays gated server-side until a Viabe human verifies
+  // ownership, then closes the wizard. GST verify still gates create (tier-1, VT-408).
   const [step, setStep] = useState<'details' | 'entity' | 'verify' | 'ownership'>('details')
   const [otpCode, setOtpCode] = useState('')
-  // VT-406: the Sandbox-verified entity (gstin + authoritative name + discovered public phone). null
-  // until a gstin_verified confirm lands; it gates create + rides into the create payload, and its
-  // `phone` is the VT-411 ownership-OTP target.
+  // VT-406: the Sandbox-verified entity (gstin + authoritative name). null until a gstin_verified
+  // confirm lands; it gates create + rides into the create payload.
   const [verifiedEntity, setVerifiedEntity] = useState<VerifiedEntity | null>(null)
-  // VT-411: the REAL tenant_id returned by the create (201). The POST-create ownership step targets
-  // it so owner_channel_verified flips on the actual tenant (never a no-op pre-create '').
+  // VT-517: the REAL tenant_id returned by the create (201). Surfaced to the pending-ownership-review
+  // screen for the e2e harness; the screen makes no server call.
   const [tenantId, setTenantId] = useState<string | null>(null)
   const t = MESSAGES[lang]
 
@@ -173,7 +170,7 @@ export function SignupForm() {
   // VT-406 → VT-326 bridge — fired ONLY after the entity-match step server-confirms a verified
   // entity. Record the verified entity (it gates create + rides into the create payload), then
   // request the personal-WhatsApp OTP and advance to the verify step (which CREATES the tenant).
-  // Ownership is deferred to AFTER create (VT-411 ordering) so it targets the real tenant.
+  // The ownership step is the POST-create pending-review screen (VT-517) — informational only.
   async function onEntityVerified(entity: VerifiedEntity) {
     setVerifiedEntity(entity)
     if (step === 'verify' || step === 'ownership' || submitting) return // double-click guard
@@ -194,10 +191,9 @@ export function SignupForm() {
     }
   }
 
-  // VT-411 — fired ONLY after the POST-create ownership step proves owner_channel_verified on the
-  // REAL tenant (a DISTINCT OTP to the discovered public business number, or DIN). The tenant already
-  // exists (created at the verify step); ownership is the tier-2 gate on the journey, so this just
-  // closes the wizard. No further server call here — the flag flipped server-side in the step.
+  // VT-517 — fired when the owner taps Continue on the pending-ownership-review screen. Ownership is
+  // NOT proven here (a Viabe human decides it later in the Ops Console); this just closes the wizard so
+  // the owner reaches the dashboard. EXECUTION stays gated server-side until ownership is verified.
   function onOwnershipVerified() {
     setDone(true)
   }
@@ -205,8 +201,8 @@ export function SignupForm() {
   // Step 2 — verify the OTP → receive the pre-tenant verified-number token → CREATE the tenant
   // with `Authorization: Bearer <token>`. Invalid vs expired are NOT distinguished (generic —
   // no enumeration). The token is threaded straight to the proxy; never logged (CL-390). On a 201
-  // the create returns the new tenant_id (VT-411) — store it + advance to the POST-create ownership
-  // step so owner_channel_verified flips on the REAL tenant.
+  // the create returns the new tenant_id (VT-517) — store it + advance to the POST-create
+  // pending-ownership-review screen.
   async function onVerifyAndCreate(e: React.FormEvent) {
     e.preventDefault()
     setError(null)
@@ -243,11 +239,9 @@ export function SignupForm() {
         otpCode.trim(),
       )
       if (r.ok) {
-        // VT-411: the tenant now EXISTS. Advance to the POST-create ownership step (tier-2) ONLY with
-        // a real tenant_id — it's what targets the orchestrator's owner_channel_verified flip. If the
-        // create somehow returned no id (degraded), don't run an ownership step that would flip nothing
-        // on tenant_id='' (the exact no-op this ordering fixes) — the tenant exists; complete the wizard
-        // and let the in-app journey re-prompt ownership. The create row is never blocked on tier-2.
+        // VT-517: the tenant now EXISTS. Advance to the POST-create pending-ownership-review screen with
+        // the real tenant_id. If the create returned no id (degraded), just complete the wizard — the
+        // pending-review screen is informational, so there is nothing to gate on a missing id.
         if (r.tenantId) {
           setTenantId(r.tenantId)
           setStep('ownership')
@@ -494,16 +488,14 @@ export function SignupForm() {
         </button>
       </form>
       ) : (
-      // VT-411 ownership sub-step — runs POST-create (the tenant EXISTS now). Prove the owner CONTROLS
-      // the business via a DISTINCT OTP to the discovered public business number (or DIN). The REAL
-      // tenant_id (from the create 201) targets the orchestrator's owner_channel_verified flip — a
-      // pre-create '' would be a no-op. The discovered phone rides from the verified candidate (null →
-      // owner enters it). cin is unknown at signup (the orchestrator validates against the company) → ''.
+      // VT-517 ownership sub-step — runs POST-create (the tenant EXISTS now). Self-serve ownership OTP
+      // is GONE: this is now an honest "pending Viabe team review" screen. The owner reaches the
+      // dashboard, but EXECUTION stays gated server-side until a Viabe human verifies ownership. The
+      // REAL tenant_id (from the create 201) is surfaced for the e2e harness; Continue just closes the
+      // wizard via onOwnershipVerified.
       <OwnershipStep
         tenantId={tenantId ?? ''}
-        publicPhone={verifiedEntity?.phone ?? null}
         businessName={verifiedEntity?.name ?? form.business_name}
-        cin=""
         lang={lang}
         onVerified={onOwnershipVerified}
       />

@@ -446,145 +446,6 @@ export async function getDiscoveryStatus(discoveryId: string): Promise<Discovery
 }
 
 
-// ---------------------------------------------------------------------------
-// VT-411 — ownership verification (Fazal's bar): after the entity verifies (gstin_verified), the
-// owner must prove they OWN the business — a DISTINCT OTP to the DISCOVERED PUBLIC business number
-// (NOT the personal WhatsApp the signup OTP already proved), with a DIN-verify offered alongside.
-// team-web PROXIES the orchestrator's internal-secret-gated endpoints; the browser NEVER sees
-// INTERNAL_API_SECRET and team-web NEVER calls the OTP/registry vendors directly. All three fns fail
-// CLOSED: a vendor/transport failure → {ok:false, reason} and NEVER fakes owner_channel_verified.
-//
-// CL-390: log path + status ONLY — never the public_phone / din / cin / reason / any body (those are
-// business identity, and an echoed body in Vercel logs is a CL-390 breach).
-// ---------------------------------------------------------------------------
-
-const _OWNERSHIP_OTP_TIMEOUT_MS = 15_000
-
-export interface OwnershipOtpStartResult {
-  /** True iff the orchestrator returned 2xx (an OTP was dispatched to the public number). */
-  ok: boolean
-  /** The vendor verification sid (opaque handle for the confirm leg). null on fail-closed. */
-  verificationSid: string | null
-  /** pending | http_<n> | timeout | error — render-only; never implies ownership is proven. */
-  status: string
-}
-
-/**
- * VT-411 — start the ownership OTP: dispatch a DISTINCT code to the DISCOVERED PUBLIC business number
- * (the GBP candidate's `phone`). The orchestrator holds the OTP vendor creds + sends; team-web NEVER
- * calls the vendor directly. Fail-CLOSED on any non-2xx / throw — the owner can fall back to DIN. The
- * code dispatch is NOT proof of ownership: only the confirm leg (owner_channel_verified) proves it.
- */
-export async function startOwnershipOtp(
-  tenantId: string,
-  publicPhone: string,
-): Promise<OwnershipOtpStartResult> {
-  const base = process.env.TEAM_ORCHESTRATOR_URL ?? _ORCHESTRATOR_DEFAULT
-  const secret = process.env.INTERNAL_API_SECRET ?? ''
-  try {
-    const res = await fetch(`${base}/api/orchestrator/onboard/ownership/otp/start`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', 'X-Internal-Secret': secret },
-      body: JSON.stringify({ tenant_id: tenantId, public_phone: publicPhone }),
-      signal: AbortSignal.timeout(_OWNERSHIP_OTP_TIMEOUT_MS),
-    })
-    if (!res.ok) {
-      console.error(`ownership-otp-start: http_${res.status}; failing closed`) // CL-390: path + status only
-      return { ok: false, verificationSid: null, status: `http_${res.status}` }
-    }
-    const data = (await res.json()) as { verification_sid?: string | null; status?: string }
-    return {
-      ok: true,
-      verificationSid: data.verification_sid ?? null,
-      status: data.status ?? 'pending',
-    }
-  } catch (err) {
-    const timedOut = err instanceof Error && err.name === 'TimeoutError'
-    console.error(`ownership-otp-start: ${timedOut ? 'timeout' : 'error'}; failing closed`) // CL-390: no phone/body
-    return { ok: false, verificationSid: null, status: timedOut ? 'timeout' : 'error' }
-  }
-}
-
-export interface OwnershipVerifyResult {
-  /** True iff the orchestrator confirmed the owner controls the channel (owner_channel_verified). */
-  ok: boolean
-  /** The authoritative verification flag — the SOLE signal that ownership is proven. */
-  ownerChannelVerified: boolean
-  /** ok | invalid_code | http_<n> | timeout | error — render-only; never overrides ownerChannelVerified. */
-  reason: string
-}
-
-/**
- * VT-411 — confirm the ownership OTP: the owner enters the code that landed on the public business
- * number; the orchestrator verifies it against the vendor and flips owner_channel_verified. Fail-CLOSED
- * on any non-2xx / throw → {ok:false, ownerChannelVerified:false} — a vendor failure NEVER fakes a
- * proven owner. owner_channel_verified is the only thing that may render "ownership confirmed".
- */
-export async function confirmOwnershipOtp(
-  tenantId: string,
-  publicPhone: string,
-  code: string,
-): Promise<OwnershipVerifyResult> {
-  const base = process.env.TEAM_ORCHESTRATOR_URL ?? _ORCHESTRATOR_DEFAULT
-  const secret = process.env.INTERNAL_API_SECRET ?? ''
-  try {
-    const res = await fetch(`${base}/api/orchestrator/onboard/ownership/otp/confirm`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', 'X-Internal-Secret': secret },
-      body: JSON.stringify({ tenant_id: tenantId, public_phone: publicPhone, code }),
-      signal: AbortSignal.timeout(_OWNERSHIP_OTP_TIMEOUT_MS),
-    })
-    if (!res.ok) {
-      console.error(`ownership-otp-confirm: http_${res.status}; failing closed`) // CL-390: path + status only
-      return { ok: false, ownerChannelVerified: false, reason: `http_${res.status}` }
-    }
-    const data = (await res.json()) as { owner_channel_verified?: boolean; reason?: string }
-    const verified = Boolean(data.owner_channel_verified)
-    return { ok: verified, ownerChannelVerified: verified, reason: data.reason ?? 'ok' }
-  } catch (err) {
-    const timedOut = err instanceof Error && err.name === 'TimeoutError'
-    console.error(`ownership-otp-confirm: ${timedOut ? 'timeout' : 'error'}; failing closed`) // CL-390: no code/body
-    return { ok: false, ownerChannelVerified: false, reason: timedOut ? 'timeout' : 'error' }
-  }
-}
-
-/**
- * VT-411 — verify ownership via DIN (the alternative path). The owner asserts their Director
- * Identification Number against the company's CIN; the orchestrator checks it against the registry and
- * flips owner_channel_verified. Fail-CLOSED on any non-2xx / throw → {ok:false, ownerChannelVerified:
- * false} — a registry failure NEVER fakes a proven owner. `reason` is a free-text owner-supplied note
- * (e.g. "I'm a director, no public number") — forwarded for the orchestrator's audit, never logged.
- */
-export async function verifyOwnerViaDin(
-  tenantId: string,
-  din: string,
-  cin: string,
-  reason: string,
-): Promise<OwnershipVerifyResult> {
-  const base = process.env.TEAM_ORCHESTRATOR_URL ?? _ORCHESTRATOR_DEFAULT
-  const secret = process.env.INTERNAL_API_SECRET ?? ''
-  try {
-    const res = await fetch(`${base}/api/orchestrator/onboard/ownership/din`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', 'X-Internal-Secret': secret },
-      body: JSON.stringify({ tenant_id: tenantId, din, cin, reason }),
-      signal: AbortSignal.timeout(_OWNERSHIP_OTP_TIMEOUT_MS),
-    })
-    if (!res.ok) {
-      console.error(`ownership-din: http_${res.status}; failing closed`) // CL-390: path + status only
-      return { ok: false, ownerChannelVerified: false, reason: `http_${res.status}` }
-    }
-    const data = (await res.json()) as { owner_channel_verified?: boolean; reason?: string }
-    const verified = Boolean(data.owner_channel_verified)
-    return { ok: verified, ownerChannelVerified: verified, reason: data.reason ?? 'ok' }
-  } catch (err) {
-    const timedOut = err instanceof Error && err.name === 'TimeoutError'
-    console.error(`ownership-din: ${timedOut ? 'timeout' : 'error'}; failing closed`) // CL-390: no din/cin/body
-    return { ok: false, ownerChannelVerified: false, reason: timedOut ? 'timeout' : 'error' }
-  }
-}
-
-
 /** VT-211 onboard-step result envelope. */
 export interface OnboardStepResult {
   ok: boolean
@@ -1002,6 +863,11 @@ export interface VtrTenantProfile {
     string,
     { source?: string; status?: string; confirmed_by?: string; at?: string }
   > | null
+  /** VT-517 — ownership review state (vtr_tenant_profile view, migration 148). `ownership_status` is
+   *  pending | verified | rejected; `ownership_verified` is the bool the EXECUTION gate reads. Both are
+   *  business-level (non-PII) — they drive the Ops Console ownership-review surface. */
+  ownership_verified?: boolean | null
+  ownership_status?: string | null
 }
 
 export async function vtrTenantProfile(
@@ -1044,6 +910,50 @@ export async function vtrConfirmField(
   if (r.status === 403) return { ok: false, field: null, status: null, reason: 'forbidden' }
   if (r.status === 404) return { ok: false, field: null, status: null, reason: 'not_found' }
   return { ok: false, field: null, status: null, reason: r.reason }
+}
+
+export interface VtrOwnershipDecisionResult {
+  ok: boolean
+  /** The recorded decision (verified | rejected) on success; null otherwise. */
+  decision: string | null
+  /** The resulting tenants.ownership_verified bool — the EXECUTION gate reads this. */
+  ownershipVerified: boolean
+  /** ok | forbidden | not_found | conflict | http_<n> | timeout | error */
+  reason: string
+}
+
+/**
+ * VT-517 — a VTR human decides ownership (the self-serve OTP path is gone). The orchestrator writes
+ * the tenants row + an ops_audit row + a fail-closed tm_audit row in one transaction behind the
+ * standard VTR action gate (X-Internal-Secret + X-Operator-Jwt + operator-assignment). `note` +
+ * `evidence` are the operator's free-text justification (audited server-side). Fail-closed on any
+ * non-200 — a transport/gate failure NEVER reads as a recorded decision. Modeled on vtrConfirmField.
+ */
+export async function vtrOwnershipDecision(
+  operatorId: string,
+  tenantId: string,
+  decision: 'verified' | 'rejected',
+  note: string,
+  evidence: string,
+): Promise<VtrOwnershipDecisionResult> {
+  const r = await vtrCall('vtr-ownership-decision', operatorId, {
+    tenant_id: tenantId,
+    decision,
+    note,
+    evidence,
+  })
+  if (r.status === 200) {
+    return {
+      ok: true,
+      decision: typeof r.body.decision === 'string' ? r.body.decision : decision,
+      ownershipVerified: Boolean(r.body.ownership_verified),
+      reason: 'ok',
+    }
+  }
+  if (r.status === 403) return { ok: false, decision: null, ownershipVerified: false, reason: 'forbidden' }
+  if (r.status === 404) return { ok: false, decision: null, ownershipVerified: false, reason: 'not_found' }
+  if (r.status === 409) return { ok: false, decision: null, ownershipVerified: false, reason: 'conflict' }
+  return { ok: false, decision: null, ownershipVerified: false, reason: r.reason }
 }
 
 /** vtr_draft_batches view row — AGGREGATES ONLY (no params/owner_feedback/customer_id by view). */

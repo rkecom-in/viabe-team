@@ -90,9 +90,9 @@ def _synthetic_phone() -> str:
 def _new_tenant(dsn: str) -> UUID:
     with psycopg.connect(dsn, autocommit=True) as conn:
         row = conn.execute(
-            "INSERT INTO tenants (business_name, plan_tier, phase, whatsapp_number) "
-            "VALUES ('VT423 marker', 'founding', 'paid_active', %s) RETURNING id",
-            (f"+9199{uuid4().int % 10**8:08d}",),
+            "INSERT INTO tenants (business_name, plan_tier, phase, whatsapp_number, ownership_verified) "
+            "VALUES ('VT423 marker', 'founding', 'paid_active', %s, %s) RETURNING id",
+            (f"+9199{uuid4().int % 10**8:08d}", True),
         ).fetchone()
     assert row is not None
     return UUID(str(row[0]))

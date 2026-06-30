@@ -173,17 +173,20 @@ def _new_tenant(
     phase: str = "trial",
     verification_status: str = "gstin_verified",
     owner_inputs: bool = True,
+    ownership_verified: bool = True,
 ) -> UUID:
     """A tenants row. ``phase`` is now IRRELEVANT to eligibility (the gate keys on the journey row,
-    not phase) — defaulted to 'trial' precisely to prove journey-complete, not paid, is the bar."""
+    not phase) — defaulted to 'trial' precisely to prove journey-complete, not paid, is the bar.
+    ``ownership_verified`` (VT-517) defaults True so the eligible fixture clears the universal
+    ownership bar; a test passes False to exercise that gate."""
     with psycopg.connect(dsn, autocommit=True) as conn:
         row = conn.execute(
             "INSERT INTO tenants (business_name, plan_tier, phase, phase_entered_at, "
-            "business_type, owner_inputs, verification_status, whatsapp_number) "
-            "VALUES (%s, 'founding', %s, now(), 'restaurant', %s, %s, %s) RETURNING id",
+            "business_type, owner_inputs, verification_status, whatsapp_number, ownership_verified) "
+            "VALUES (%s, 'founding', %s, now(), 'restaurant', %s, %s, %s, %s) RETURNING id",
             (
                 f"VT421 {uuid4().hex[:8]}", phase, owner_inputs, verification_status,
-                f"+9198{uuid4().int % 10**8:08d}",
+                f"+9198{uuid4().int % 10**8:08d}", ownership_verified,
             ),
         ).fetchone()
     assert row is not None
@@ -361,6 +364,24 @@ def test_trial_tenant_with_full_set_is_admitted(substrate):  # type: ignore[no-u
     with tenant_connection(s.tenant) as conn:
         assert onboarding_gate.is_agent_eligible(s.tenant, _AGENT, conn=conn) is True
         assert onboarding_gate.unmet_prerequisites(s.tenant, _AGENT, conn=conn) == []
+
+
+def test_ownership_unverified_returns_false(substrate):  # type: ignore[no-untyped-def]
+    """VT-517: journey-complete + verified + connector + customers, but ownership_verified=false →
+    ineligible. Ownership is a UNIVERSAL execution bar — a self-entered number can no longer open the
+    rail; only a VTR-human decision flips it. Everything else met; ONLY ownership trips the gate."""
+    tenant = _new_tenant(
+        substrate.dsn, phase="paid_active", verification_status="gstin_verified",
+        ownership_verified=False,
+    )
+    _seed_journey(substrate.dsn, tenant, status="complete")
+    _seed_connector(substrate.dsn, tenant)
+    _seed_customer(substrate.dsn, tenant)
+    with tenant_connection(tenant) as conn:
+        assert onboarding_gate.is_agent_eligible(tenant, _AGENT, conn=conn) is False
+        assert "ownership not verified (pending Viabe team review)" in onboarding_gate.unmet_prerequisites(
+            tenant, _AGENT, conn=conn
+        )
 
 
 def test_journey_incomplete_returns_false(substrate):  # type: ignore[no-untyped-def]

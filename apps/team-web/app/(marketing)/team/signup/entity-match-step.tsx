@@ -455,9 +455,9 @@ export function EntityMatchStep({
 
   // The shared confirm spine — a GSTIN (from a pick OR manual entry) → Sandbox confirm → classify.
   // The Sandbox confirm is the AUTHORITATIVE gate for both paths (a manually-typed GSTIN is verified
-  // exactly like a picked one — it is never self-asserted). `discoveredPhone` (VT-411) rides along on
-  // the GBP-pick path only — it's the public business number the ownership step OTPs (null otherwise).
-  async function confirmGstin(gstin: string, discoveredPhone: string | null = null) {
+  // exactly like a picked one — it is never self-asserted). VT-517: the discovered public phone no
+  // longer rides along — self-serve ownership OTP is gone; ownership is decided by a Viabe human.
+  async function confirmGstin(gstin: string) {
     setConfirming(gstin)
     // Sweep #4: remember the screen this confirm came from so a transient-failure retry returns the
     // owner to their exact entry screen (manual/PAN/pick) with the typed value preserved. Read the
@@ -471,7 +471,7 @@ export function EntityMatchStep({
       if (outcome.kind === 'verified') {
         // Show the verified result (authoritative name + chip) FIRST; Continue bridges to OTP/create
         // via onVerified. No auto-advance — the owner sees the confirmed entity before proceeding.
-        setVerified({ gstin: outcome.gstin, name: outcome.name, phone: discoveredPhone })
+        setVerified({ gstin: outcome.gstin, name: outcome.name })
         setStep('verified')
       } else if (outcome.kind === 'retry') {
         setStep('retry')
@@ -489,9 +489,7 @@ export function EntityMatchStep({
     if (!gstin) return // GBP-only candidate (no registry id) → the manual-GSTIN path (VT-448), guarded in render
     // VT-507 cancel-on-commit: stop polling when the user selects a candidate.
     stopDiscovery()
-    // VT-411: carry the candidate's discovered public number into the verified entity (GBP only) so
-    // the ownership step can OTP it. Manual/PAN paths have no discovered number → ownership asks for it.
-    void confirmGstin(gstin, candidate.phone ?? null)
+    void confirmGstin(gstin)
   }
 
   // VT-448 — the manual-GSTIN path: discovery is thin, OR the owner's only match is a bare/closed GBP

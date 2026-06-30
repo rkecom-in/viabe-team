@@ -19,7 +19,11 @@ import { redirect } from 'next/navigation'
 
 import { UnauthorizedError } from '@/lib/auth/require-fazal'
 import { requireOpsOperator } from '@/lib/auth/require-ops-operator'
-import { fetchAssignedTenants, type TenantIndexRow } from '@/lib/ops/tenants-index'
+import {
+  fetchAssignedTenants,
+  fetchOwnershipPendingTenants,
+  type TenantIndexRow,
+} from '@/lib/ops/tenants-index'
 
 export const dynamic = 'force-dynamic'
 
@@ -60,7 +64,11 @@ function VerificationChip({ status }: { status: string | null }) {
   return <Chip tone={VERIFICATION_TONE[status] ?? 'gray'}>{VERIFICATION_LABEL[status] ?? status}</Chip>
 }
 
-export default async function OpsTenantsIndexPage() {
+export default async function OpsTenantsIndexPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ filter?: string }>
+}) {
   let operator: Awaited<ReturnType<typeof requireOpsOperator>>
   try {
     operator = await requireOpsOperator()
@@ -69,13 +77,20 @@ export default async function OpsTenantsIndexPage() {
     throw err
   }
 
+  // VT-517 — the ownership-review tab. ?filter=ownership_pending narrows to tenants awaiting a human
+  // ownership decision (same server-side assignment scope; the operator never picks the tenant set).
+  const { filter } = await searchParams
+  const ownershipPending = filter === 'ownership_pending'
+
   let rows: TenantIndexRow[] = []
   let error: string | null = null
   try {
-    rows = await fetchAssignedTenants(operator)
+    rows = ownershipPending
+      ? await fetchOwnershipPendingTenants(operator)
+      : await fetchAssignedTenants(operator)
   } catch (err) {
     error = err instanceof Error ? err.message : 'unknown error'
-    console.error('OpsTenantsIndexPage: fetchAssignedTenants failed', err)
+    console.error('OpsTenantsIndexPage: tenant query failed', err)
   }
 
   const scopeLabel = operator.assignedTenants === null ? 'all businesses' : 'your businesses'
@@ -87,6 +102,31 @@ export default async function OpsTenantsIndexPage() {
         <p className="mt-1 text-sm text-muted-foreground">
           Businesses you are assigned to. Open one for its full profile, plan and agents.
         </p>
+        {/* VT-517 — Assigned | Ownership pending toggle. Light-mode only (hardcoded grays, no dark:). */}
+        <nav data-ops-tenants-tabs className="mt-4 flex gap-2">
+          <Link
+            href="/team/ops/tenants"
+            aria-current={!ownershipPending ? 'page' : undefined}
+            className={
+              !ownershipPending
+                ? 'rounded-md border border-gray-300 bg-gray-100 px-3 py-1.5 text-sm font-medium text-gray-900'
+                : 'rounded-md border border-transparent px-3 py-1.5 text-sm text-gray-600 hover:bg-gray-50'
+            }
+          >
+            Assigned
+          </Link>
+          <Link
+            href="/team/ops/tenants?filter=ownership_pending"
+            aria-current={ownershipPending ? 'page' : undefined}
+            className={
+              ownershipPending
+                ? 'rounded-md border border-gray-300 bg-gray-100 px-3 py-1.5 text-sm font-medium text-gray-900'
+                : 'rounded-md border border-transparent px-3 py-1.5 text-sm text-gray-600 hover:bg-gray-50'
+            }
+          >
+            Ownership pending
+          </Link>
+        </nav>
       </header>
 
       {error ? (
@@ -98,7 +138,9 @@ export default async function OpsTenantsIndexPage() {
       ) : rows.length === 0 ? (
         <section className="rounded-lg border border-border bg-card p-6 shadow-sm">
           <p data-ops-empty className="text-sm text-muted-foreground">
-            No tenants assigned to you yet.
+            {ownershipPending
+              ? 'No tenants are awaiting an ownership decision.'
+              : 'No tenants assigned to you yet.'}
           </p>
         </section>
       ) : (

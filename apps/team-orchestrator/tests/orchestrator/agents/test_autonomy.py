@@ -87,14 +87,14 @@ def substrate():  # type: ignore[no-untyped-def]
 # --- seeding helpers (direct service-role connection — RLS bypassed at seed) ---
 
 
-def _new_tenant(dsn: str) -> UUID:
+def _new_tenant(dsn: str, *, ownership_verified: bool = True) -> UUID:
     with psycopg.connect(dsn, autocommit=True) as conn:
         row = conn.execute(
             "INSERT INTO tenants (business_name, plan_tier, phase, phase_entered_at, "
-            "business_type, whatsapp_number) "
-            "VALUES ('VT-369 autonomy test', 'founding', 'trial', now(), 'restaurant', %s) "
+            "business_type, whatsapp_number, ownership_verified) "
+            "VALUES ('VT-369 autonomy test', 'founding', 'trial', now(), 'restaurant', %s, %s) "
             "RETURNING id",
-            (f"+9198{uuid4().int % 10**8:08d}",),
+            (f"+9198{uuid4().int % 10**8:08d}", ownership_verified),
         ).fetchone()
     assert row is not None
     return UUID(str(row[0]))
