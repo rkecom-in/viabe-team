@@ -285,13 +285,14 @@ export function SignupForm() {
     return (
       <main className="signup-success flex min-h-screen flex-col items-center justify-center bg-background px-5 text-center text-foreground antialiased">
         <div className="w-full max-w-md rounded-2xl border border-border bg-card p-8 shadow-sm">
-          <span
+          {/* VT-511: celebratory icon */}
+          <div
             aria-hidden
-            className="mx-auto flex h-12 w-12 items-center justify-center rounded-full bg-secondary/10 text-2xl font-bold text-secondary"
+            className="mx-auto flex h-16 w-16 items-center justify-center rounded-full bg-secondary text-3xl font-bold text-secondary-foreground"
           >
             ✓
-          </span>
-          <p className="mt-4 font-medium leading-relaxed text-foreground">{t.success}</p>
+          </div>
+          <p className="mt-5 text-base font-medium leading-relaxed text-foreground">{t.success}</p>
         </div>
       </main>
     )
@@ -303,11 +304,21 @@ export function SignupForm() {
       : 'rounded-full border border-input px-4 py-1.5 text-muted-foreground transition hover:bg-muted'
   const fieldLabel = 'flex flex-col gap-1.5 text-sm font-medium text-foreground'
   const fieldInput =
-    'rounded-lg border border-input bg-card px-3 py-2.5 text-base font-normal text-foreground outline-none transition focus:border-primary focus:ring-2 focus:ring-ring/20'
+    'rounded-lg border border-input bg-card px-3 py-2.5 text-base font-normal text-foreground outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/20'
+  const errBlock = (msg: string) => (
+    <div className="signup-error flex items-start gap-2.5 rounded-lg border border-destructive/20 bg-destructive/5 px-4 py-3" role="alert">
+      <span aria-hidden className="mt-0.5 shrink-0 text-destructive">⚠</span>
+      <p className="text-sm leading-relaxed text-destructive">{msg}</p>
+    </div>
+  )
 
   return (
     <main className="signup min-h-screen bg-background px-5 py-10 text-foreground antialiased sm:py-16">
       <div className="mx-auto w-full max-w-md">
+        {/* VT-511: brand anchor — keeps the identity present across all sub-steps */}
+        <div className="mb-7 text-center">
+          <span className="text-xl font-bold tracking-tight text-primary">Viabe Team</span>
+        </div>
         <div className="signup-lang flex justify-center gap-2 text-sm">
           <button
             type="button"
@@ -326,7 +337,7 @@ export function SignupForm() {
             हिंदी
           </button>
         </div>
-        <h1 className="mt-6 text-center text-2xl font-bold tracking-tight text-foreground sm:text-3xl">
+        <h1 className="mt-6 text-center text-2xl font-bold tracking-tight text-foreground">
           {t.title}
         </h1>
         {step === 'details' ? (
@@ -413,16 +424,13 @@ export function SignupForm() {
           {t.consent_residency}
           {/* NEEDS-FAZAL: link to the residency disclosure copy (residency_v1_2026-06). */}
         </label>
-        {error && (
-          <p className="signup-error rounded-lg bg-destructive/10 px-3 py-2 text-sm text-destructive" role="alert">
-            {error}
-          </p>
-        )}
+        {error && errBlock(error)}
         <button
           type="submit"
           disabled={submitting || !form.consent_dpdpa || !form.consent_residency}
-          className="rounded-xl bg-primary px-5 py-3 font-semibold text-primary-foreground shadow-sm transition hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50"
+          className="flex w-full items-center justify-center gap-2 rounded-xl bg-primary px-5 py-3 font-semibold text-primary-foreground shadow-sm transition hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50"
         >
+          {submitting && <span aria-hidden className="inline-block h-4 w-4 animate-spin rounded-full border-2 border-primary-foreground border-t-transparent" />}
           {t.send_code}
         </button>
       </form>
@@ -456,23 +464,20 @@ export function SignupForm() {
             inputMode="numeric"
             autoComplete="one-time-code"
             required
-            className={`${fieldInput} text-center text-lg tracking-[0.3em]`}
+            className={`${fieldInput} py-4 text-center text-2xl font-mono tracking-[0.4em]`}
           />
         </label>
         {/* VT-512: gst_reject is gated on !verifiedEntity — when the entity IS verified,
             the GST-gate block is suppressed so a stale/spurious gst_reject never confuses
             an owner who passed the entity step. Other errors (invalid_code, rate_limited,
             duplicate, generic) render regardless of verifiedEntity. */}
-        {error && !(gstRejectError && verifiedEntity) && (
-          <p className="signup-error rounded-lg bg-destructive/10 px-3 py-2 text-sm text-destructive" role="alert">
-            {error}
-          </p>
-        )}
+        {error && !(gstRejectError && verifiedEntity) && errBlock(error)}
         <button
           type="submit"
           disabled={submitting}
-          className="rounded-xl bg-primary px-5 py-3 font-semibold text-primary-foreground shadow-sm transition hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50"
+          className="flex w-full items-center justify-center gap-2 rounded-xl bg-primary px-5 py-3 font-semibold text-primary-foreground shadow-sm transition hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50"
         >
+          {submitting && <span aria-hidden className="inline-block h-4 w-4 animate-spin rounded-full border-2 border-primary-foreground border-t-transparent" />}
           {t.verify_create}
         </button>
         <button
@@ -483,7 +488,7 @@ export function SignupForm() {
             setError(null)
             setGstRejectError(false)
           }}
-          className="rounded-xl border border-input px-5 py-2.5 font-medium text-foreground transition hover:bg-muted"
+          className="w-full rounded-xl border border-input px-5 py-2.5 font-medium text-foreground transition hover:bg-muted"
         >
           {t.change_number}
         </button>

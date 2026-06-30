@@ -265,14 +265,15 @@ export function OwnershipStep({
   if (step === 'verified') {
     return (
       <section data-ownership-step="verified" className={`mt-8 ${card}`}>
-        <div className="flex items-center gap-2">
-          <h2 className="text-lg font-semibold text-foreground">{t.verified_heading}</h2>
-          <span className="rounded-full bg-secondary/10 px-2 py-0.5 text-xs font-semibold text-secondary">
+        {/* VT-511: celebratory ownership-verified header */}
+        <div className="flex items-center gap-3">
+          <span aria-hidden className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-secondary text-xl font-bold text-secondary-foreground">
             ✓
           </span>
+          <h2 className="text-lg font-semibold text-foreground">{t.verified_heading}</h2>
         </div>
         <p className="mt-3 text-sm leading-relaxed text-muted-foreground">{t.verified_note}</p>
-        <button type="button" data-ownership-continue onClick={onVerified} className={`mt-5 ${primaryBtn}`}>
+        <button type="button" data-ownership-continue onClick={onVerified} className={`mt-5 w-full ${primaryBtn}`}>
           {t.continue}
         </button>
       </section>
@@ -331,10 +332,16 @@ export function OwnershipStep({
           className={`${input} font-mono tracking-wide`}
         />
         {dinError === 'format' && (
-          <p data-ownership-din-error className="mt-2 text-sm text-destructive">{t.din_format_error}</p>
+          <p data-ownership-din-error className="mt-2 flex items-center gap-1.5 text-sm text-destructive">
+            <span aria-hidden>⚠</span>
+            {t.din_format_error}
+          </p>
         )}
         {dinError === 'invalid' && (
-          <p data-ownership-din-invalid className="mt-2 text-sm text-destructive">{t.din_invalid}</p>
+          <p data-ownership-din-invalid className="mt-2 flex items-center gap-1.5 text-sm text-destructive">
+            <span aria-hidden>⚠</span>
+            {t.din_invalid}
+          </p>
         )}
         <label className="mt-4 block text-sm font-medium text-foreground" htmlFor="ownership-din-reason">
           {t.din_reason_label}
@@ -394,10 +401,13 @@ export function OwnershipStep({
             if (codeError) setCodeError(false)
           }}
           placeholder={t.code_placeholder}
-          className={`${input} text-center text-lg tracking-[0.3em]`}
+          className={`${input} py-4 text-center text-2xl font-mono tracking-[0.4em]`}
         />
         {codeError && (
-          <p data-ownership-code-error className="mt-2 text-sm text-destructive">{t.code_invalid}</p>
+          <p data-ownership-code-error className="mt-2 flex items-center gap-1.5 text-sm text-destructive">
+            <span aria-hidden>⚠</span>
+            {t.code_invalid}
+          </p>
         )}
         <div className="mt-5 flex flex-wrap items-center gap-3">
           <button
@@ -500,7 +510,10 @@ export function OwnershipStep({
             className={`${input} font-mono tracking-wide`}
           />
           {phoneError && (
-            <p data-ownership-phone-error className="mt-2 text-sm text-destructive">{t.phone_format_error}</p>
+            <p data-ownership-phone-error className="mt-2 flex items-center gap-1.5 text-sm text-destructive">
+              <span aria-hidden>⚠</span>
+              {t.phone_format_error}
+            </p>
           )}
         </>
       )}
@@ -510,8 +523,9 @@ export function OwnershipStep({
           data-ownership-send
           disabled={busy || phone.trim() === ''}
           onClick={() => void send()}
-          className={primaryBtn}
+          className={`w-full ${primaryBtn}`}
         >
+          {busy && <span aria-hidden className="mr-2 inline-block h-4 w-4 animate-spin rounded-full border-2 border-primary-foreground border-t-transparent" />}
           {busy ? t.sending : t.send_code}
         </button>
       </div>
