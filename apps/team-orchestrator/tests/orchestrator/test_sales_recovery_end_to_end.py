@@ -91,9 +91,9 @@ def _seed_tenant(dsn: str) -> UUID:
     can stage the row without going through tenant context."""
     with psycopg.connect(dsn, autocommit=True) as conn:
         row = conn.execute(
-            "INSERT INTO tenants (business_name, plan_tier, phase) "
-            "VALUES (%s, 'founding', 'paid_at_risk') RETURNING id",
-            ("vt4-ship-thin",),
+            "INSERT INTO tenants (business_name, plan_tier, phase, ownership_verified) "
+            "VALUES (%s, 'founding', 'paid_at_risk', %s) RETURNING id",
+            ("vt4-ship-thin", True),
         ).fetchone()
     assert row is not None
     return UUID(str(row[0]))

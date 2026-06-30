@@ -19,7 +19,6 @@ from orchestrator.api.ops_runcontrol import router as ops_runcontrol_router
 from orchestrator.api.ops_vtr_console import router as ops_vtr_console_router  # VT-370
 from orchestrator.api.owner_dashboard import router as owner_dashboard_router
 from orchestrator.api.owner_verify import router as owner_verify_router
-from orchestrator.api.ownership import router as ownership_router  # VT-411
 from orchestrator.api.sheet_push import router as sheet_push_router
 from orchestrator.api.business_verification import router as business_verification_router  # VT-361
 from orchestrator.api.discovery import router as discovery_router  # VT-507
@@ -44,7 +43,6 @@ router.include_router(ops_run_control_router)  # VT-374 run-control substrate
 router.include_router(ops_vtr_console_router)  # VT-370 Gap-6 VTR console
 router.include_router(owner_verify_router)
 router.include_router(owner_dashboard_router)  # VT-87
-router.include_router(ownership_router)  # VT-411 owner identity-binding at signup
 router.include_router(oauth_callback_router)
 router.include_router(sheet_push_router)
 router.include_router(signup_router)

@@ -12,7 +12,12 @@
  */
 
 import { requireOpsOperator } from '@/lib/auth/require-ops-operator'
-import { vtrConfirmField, type VtrConfirmFieldResult } from '@/lib/orchestrator-client'
+import {
+  vtrConfirmField,
+  vtrOwnershipDecision,
+  type VtrConfirmFieldResult,
+  type VtrOwnershipDecisionResult,
+} from '@/lib/orchestrator-client'
 
 export async function confirmFieldAction(
   tenantId: string,
@@ -28,4 +33,24 @@ export async function confirmFieldAction(
     return { ok: false, field: null, status: null, reason: 'invalid_field' }
   }
   return vtrConfirmField(operator.operatorId, tenantId, clean)
+}
+
+/**
+ * VT-517 — record a human ownership decision (verified | rejected). Same gating shape as
+ * confirmFieldAction: requireOpsOperator() + an early assignment guard (UX only); operator_id is
+ * derived from the SESSION claim, never the client (ops-actions-resolve-scope-serverside). The
+ * orchestrator independently re-verifies body operator_id == JWT claim + assignment, fail-closed,
+ * and writes the tenants row + ops_audit + tm_audit in one transaction.
+ */
+export async function verifyOwnershipAction(
+  tenantId: string,
+  decision: 'verified' | 'rejected',
+  note: string,
+  evidence: string,
+): Promise<VtrOwnershipDecisionResult> {
+  const operator = await requireOpsOperator()
+  if (operator.assignedTenants !== null && !operator.assignedTenants.includes(tenantId)) {
+    return { ok: false, decision: null, ownershipVerified: false, reason: 'forbidden' }
+  }
+  return vtrOwnershipDecision(operator.operatorId, tenantId, decision, note, evidence)
 }

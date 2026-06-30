@@ -77,12 +77,12 @@ def pool():  # type: ignore[no-untyped-def]
     return graph_mod.get_pool()
 
 
-def _seed_tenant(dsn: str, *, business_type: str = "apparel") -> UUID:
+def _seed_tenant(dsn: str, *, business_type: str = "apparel", ownership_verified: bool = True) -> UUID:
     with psycopg.connect(dsn, autocommit=True) as conn:
         row = conn.execute(
-            "INSERT INTO tenants (business_name, business_type, plan_tier, phase) "
-            "VALUES ('vt485 winback', %s, 'founding', 'paid_at_risk') RETURNING id",
-            (business_type,),
+            "INSERT INTO tenants (business_name, business_type, plan_tier, phase, ownership_verified) "
+            "VALUES ('vt485 winback', %s, 'founding', 'paid_at_risk', %s) RETURNING id",
+            (business_type, ownership_verified),
         ).fetchone()
     assert row is not None
     return UUID(str(row[0]))

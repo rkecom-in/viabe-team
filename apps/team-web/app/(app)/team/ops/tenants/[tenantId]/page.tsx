@@ -13,6 +13,7 @@ import { issueOperatorJwt, OPERATOR_STREAM_TTL_SEC } from '@/lib/auth/operator-j
 import { UnauthorizedError } from '@/lib/auth/require-fazal'
 import { requireOpsOperator } from '@/lib/auth/require-ops-operator'
 import { canAccessTenant } from '@/lib/ops/assignments'
+import { OwnershipDecisionPanel } from '@/components/ops/ownership-decision-panel'
 import { TenantDiscoveryPanel } from '@/components/ops/tenant-discovery-panel'
 import { TmActivityFeed } from '@/components/ops/tm-activity-feed'
 import { vtrTenantProfile } from '@/lib/orchestrator-client'
@@ -72,7 +73,15 @@ export default async function TenantDashboardPage({ params }: PageProps) {
           </p>
         </section>
       ) : (
-        <TenantDiscoveryPanel profile={profile} />
+        <>
+          {/* VT-517 — when ownership is awaiting a human decision, surface the review surface above the
+              discovery panel. The page already gates with requireOpsOperator + canAccessTenant; the
+              orchestrator re-checks the operator-assignment behind the action. */}
+          {profile.ownership_status === 'pending' ? (
+            <OwnershipDecisionPanel tenantId={tenantId} operatorId={operator.operatorId} />
+          ) : null}
+          <TenantDiscoveryPanel profile={profile} />
+        </>
       )}
       {ok && profile && operatorJwt ? (
         <TmActivityFeed tenantId={tenantId} operatorJwt={operatorJwt} />

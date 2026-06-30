@@ -1,7 +1,7 @@
-"""VT-449 / VT-411 — MCA company-master persistence + tier-2 ownership flag.
+"""VT-449 — MCA company-master persistence.
 
 The store half of the Sandbox MCA bundle (integrations/methods/mca.py parses; this module
-persists). Two public entry points:
+persists). One public entry point:
 
 - ``store_company_master_data(tenant_id, cmd)`` — UPSERT the parsed ``CompanyMasterData`` into
   ``tenant_mca_data`` (one row per tenant). The PII (``registered_address`` + ``directors[]``)
@@ -9,10 +9,12 @@ persists). Two public entry points:
   a log, or an LLM prompt; only ciphertext is stored. Company financials/status/class/category/
   roc/incorporation/cin are NON-PII registry facts, stored plain. BEST-EFFORT: a failure logs
   (counts-only — never names/address/cin values) and RETURNS; it never raises into onboarding.
-- ``set_owner_channel_verified(tenant_id)`` — flip the VT-411 tier-2 ownership flag on the
-  tenants row (``owner_channel_verified = true`` + stamp ``owner_channel_verified_at``).
 
-Both writers go through ``tenant_connection(tenant_id)`` so ``FORCE ROW LEVEL SECURITY`` on
+(VT-517 removed ``set_owner_channel_verified``: ownership is now a VTR-human decision written by
+the Ops Console endpoint, not a self-serve OTP flip. The ``owner_channel_verified`` column was
+renamed to ``ownership_verified`` in mig 148.)
+
+The writer goes through ``tenant_connection(tenant_id)`` so ``FORCE ROW LEVEL SECURITY`` on
 ``tenant_mca_data`` (mig 142) is genuinely enforced (CL-71/CL-122). The tenants column is ``id``
 (the table has no ``tenant_id`` column — see every other tenants writer, e.g. verification.py).
 
@@ -24,7 +26,6 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 from uuid import UUID
 
@@ -106,19 +107,4 @@ def store_company_master_data(tenant_id: UUID | str, cmd: CompanyMasterData) -> 
         return
 
 
-def set_owner_channel_verified(tenant_id: UUID | str) -> None:
-    """Flip the VT-411 tier-2 ownership flag on the tenants row.
-
-    ``owner_channel_verified = true`` + stamp ``owner_channel_verified_at = now()``. Scoped via
-    ``tenant_connection`` (RLS); the tenants PK column is ``id``.
-    """
-    tid = str(tenant_id)
-    with tenant_connection(tid) as conn:
-        conn.execute(
-            "UPDATE tenants SET owner_channel_verified = true, "
-            "owner_channel_verified_at = %s WHERE id = %s",
-            (datetime.now(timezone.utc), tid),
-        )
-
-
-__all__ = ["store_company_master_data", "set_owner_channel_verified"]
+__all__ = ["store_company_master_data"]

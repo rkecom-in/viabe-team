@@ -23,8 +23,8 @@ export async function requestSignupOtp(phone: string, f: Fetch = fetch): Promise
 }
 
 export type CreateResult =
-  // VT-411: the create response carries the NEW tenant_id so the POST-create ownership step can
-  // flip owner_channel_verified on the REAL tenant (a pre-create tenant_id='' would be a no-op).
+  // VT-517: the create response carries the NEW tenant_id so the wizard can advance to the
+  // post-create pending-ownership-review screen targeting the real tenant (informational only).
   | { ok: true; tenantId: string | null }
   // `verify_unavailable` (sweep #8): a transient verify-service outage (502) — retryable "on our
   // side", NOT "code invalid". `gst_reject` / `vendor_down` (sweep #11): the create-step GST gate
@@ -48,8 +48,9 @@ export type CreateResult =
  * `Authorization: Bearer <token>`. Invalid vs expired are NOT distinguished (both → invalid_code,
  * no enumeration). A missing token is treated the same. The token is only ever a header.
  *
- * VT-411: on a 201 the orchestrator returns the new tenant_id (signup.py) — thread it out so the
- * POST-create ownership step targets the REAL tenant. tenant_id is an opaque id, not PII (CL-390).
+ * VT-517: on a 201 the orchestrator returns the new tenant_id (signup.py) — thread it out so the
+ * post-create pending-ownership-review screen targets the REAL tenant. tenant_id is an opaque id,
+ * not PII (CL-390).
  */
 export async function verifyOtpAndCreate(
   payload: Record<string, unknown> & { whatsapp_number: string },

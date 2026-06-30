@@ -74,6 +74,7 @@ def _seed_tenant(
     n_subscribed: int,
     n_opted_out: int,
     seed_inbound: bool,
+    ownership_verified: bool = True,
 ) -> SeededTenant:
     """Insert one tenants row + a pipeline_runs row + a customer cohort.
 
@@ -86,11 +87,11 @@ def _seed_tenant(
     row = conn.execute(
         """
         INSERT INTO tenants (business_name, plan_tier, phase, whatsapp_number,
-                             owner_phone, verification_status)
-        VALUES (%s, 'founding', 'paid_active', %s, %s, 'gstin_verified')
+                             owner_phone, verification_status, ownership_verified)
+        VALUES (%s, 'founding', 'paid_active', %s, %s, 'gstin_verified', %s)
         RETURNING id
         """,
-        (business_name, whatsapp_number, owner_phone),
+        (business_name, whatsapp_number, owner_phone, ownership_verified),
     ).fetchone()
     tenant_id = UUID(str(row[0] if not isinstance(row, dict) else row["id"]))
 
@@ -255,6 +256,7 @@ def seed(dsn: str) -> SeedResult:
             n_subscribed=2,
             n_opted_out=1,
             seed_inbound=False,
+            ownership_verified=False,
         )
         t2_campaign_id = _seed_decoy_campaign(conn, t2)
     return SeedResult(t1=t1, t2=t2, t2_campaign_id=t2_campaign_id)

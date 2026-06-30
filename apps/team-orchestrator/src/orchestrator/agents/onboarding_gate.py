@@ -51,6 +51,7 @@ from orchestrator.agents.activation_registry import (
     PREREQ_CUSTOMERS,
     PREREQ_DATA_SOURCE,
     PREREQ_JOURNEY_COMPLETE,
+    PREREQ_OWNERSHIP_VERIFIED,
     PREREQ_VERIFICATION,
     AgentPrerequisites,
     get_prerequisites,
@@ -92,6 +93,17 @@ def _unmet_codes(tenant_id: UUID | str, prereqs: AgentPrerequisites, *, conn: An
         ).fetchone()
         if trow is None or _col(trow, "verification_status", 0) not in _VERIFIED_TIERS:
             unmet.append(PREREQ_VERIFICATION)
+
+    # ownership_verified — VT-517 VTR-human ownership review (a UNIVERSAL execution bar). A VTR human
+    # confirmed owner→business; until then the agent cannot send/act. Fail-closed: missing row or
+    # false → unmet (and a read error raises → is_agent_eligible converts to ineligible).
+    if prereqs.requires_ownership_verified:
+        orow = conn.execute(
+            "SELECT ownership_verified FROM tenants WHERE id = %s",
+            (tid,),
+        ).fetchone()
+        if orow is None or not _col(orow, "ownership_verified", 0):
+            unmet.append(PREREQ_OWNERSHIP_VERIFIED)
 
     # onboarding_journey.status='complete' — the journey-complete bar (admits trial AND paid).
     if prereqs.requires_journey_complete:

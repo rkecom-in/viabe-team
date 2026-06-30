@@ -1,10 +1,12 @@
-"""VT-449 / VT-411 — MCA company-master persistence + tier-2 ownership. Real-PG canary (synthetic; CL-422).
+"""VT-449 — MCA company-master persistence. Real-PG canary (synthetic; CL-422).
 
 Proves: store_company_master_data UPSERTs a tenant_mca_data row with the PLAIN registry facts +
 NON-EMPTY ciphertext for the two PII fields (registered_address, directors[]) — and that the
 plaintext address / director name does NOT appear in the stored ciphertext columns (encryption is
-real, not a passthrough). set_owner_channel_verified flips the tenants tier-2 flag + stamps the time.
-UPSERT idempotency (second store overwrites, stays one row).
+real, not a passthrough). UPSERT idempotency (second store overwrites, stays one row).
+
+(VT-517 removed the tier-2 ownership-flag tests: ownership is now a VTR-human decision, not a
+self-serve OTP flip; the column was renamed owner_channel_verified → ownership_verified.)
 """
 
 from __future__ import annotations
@@ -129,49 +131,3 @@ def test_store_is_upsert_idempotent(substrate):
         ).fetchall()
     assert len(rows) == 1  # ON CONFLICT (tenant_id) — one row per tenant
     assert rows[0]["status"] == "STRK"
-
-
-def test_set_owner_channel_verified_flips_flag(substrate):
-    from orchestrator.onboarding.mca_store import set_owner_channel_verified
-
-    tid = _tenant(substrate)
-    with psycopg.connect(substrate, autocommit=True, row_factory=psycopg.rows.dict_row) as conn:
-        before = conn.execute(
-            "SELECT owner_channel_verified, owner_channel_verified_at FROM tenants WHERE id = %s", (tid,)
-        ).fetchone()
-    assert before["owner_channel_verified"] is False
-    assert before["owner_channel_verified_at"] is None
-
-    set_owner_channel_verified(tid)
-
-    with psycopg.connect(substrate, autocommit=True, row_factory=psycopg.rows.dict_row) as conn:
-        after = conn.execute(
-            "SELECT owner_channel_verified, owner_channel_verified_at FROM tenants WHERE id = %s", (tid,)
-        ).fetchone()
-    assert after["owner_channel_verified"] is True
-    assert after["owner_channel_verified_at"] is not None
-
-
-def test_confirm_ownership_otp_flips_flag_end_to_end(substrate, monkeypatch):
-    """VT-411 END-TO-END: confirm_ownership_otp (mock-approved Twilio) → set_owner_channel_verified → the
-    REAL tenant's owner_channel_verified flips. Proves the wired ownership chain actually FIRES (not dormant)."""
-    monkeypatch.setenv("TEAM_TWILIO_VERIFY_MOCK_MODE", "1")
-    from orchestrator.onboarding.ownership import confirm_ownership_otp
-
-    tid = _tenant(substrate)
-    assert confirm_ownership_otp(tid, "+919321553267", "123456") is True  # the mock OTP approves
-    with psycopg.connect(substrate, autocommit=True, row_factory=psycopg.rows.dict_row) as conn:
-        row = conn.execute("SELECT owner_channel_verified FROM tenants WHERE id = %s", (tid,)).fetchone()
-    assert row["owner_channel_verified"] is True
-
-
-def test_confirm_ownership_otp_wrong_code_does_not_flip(substrate, monkeypatch):
-    """Fail-closed: a wrong/denied OTP → owner_channel_verified stays false (no flip without proof)."""
-    monkeypatch.setenv("TEAM_TWILIO_VERIFY_MOCK_MODE", "1")
-    from orchestrator.onboarding.ownership import confirm_ownership_otp
-
-    tid = _tenant(substrate)
-    assert confirm_ownership_otp(tid, "+919321553267", "999999") is False  # wrong code → denied
-    with psycopg.connect(substrate, autocommit=True, row_factory=psycopg.rows.dict_row) as conn:
-        row = conn.execute("SELECT owner_channel_verified FROM tenants WHERE id = %s", (tid,)).fetchone()
-    assert row["owner_channel_verified"] is False

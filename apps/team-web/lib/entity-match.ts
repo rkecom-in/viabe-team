@@ -65,9 +65,6 @@ export interface VerifiedEntity {
   gstin: string
   /** The AUTHORITATIVE registry name (Sandbox), never the candidate's web/LLM trade name. */
   name: string | null
-  /** VT-411 — the DISCOVERED public business number from the picked candidate (GBP only; null
-   *  otherwise). The ownership step OTPs THIS number; null → the owner enters it on that step. */
-  phone?: string | null
   /** VT-449 — the owner-CONFIRMED registry CIN (a public registry id, not personal PII). Empty/absent
    *  unless the owner confirmed a discovered registry candidate; rides into the create payload for the
    *  orchestrator's MCA-canonical name-match. NEVER carries a SERP-scraped CIN the owner didn't confirm. */

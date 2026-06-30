@@ -47,6 +47,7 @@ PREREQ_JOURNEY_COMPLETE = "onboarding_incomplete"
 PREREQ_VERIFICATION = "verification_below_gstin"
 PREREQ_DATA_SOURCE = "no_connected_data_source"
 PREREQ_CUSTOMERS = "no_customers_ingested"
+PREREQ_OWNERSHIP_VERIFIED = "ownership_not_verified"  # VT-517 — VTR-human ownership review
 
 # Human-readable reasons paired with each code (rendered in the owner portal "why inactive" surface).
 _PREREQ_REASONS: dict[str, str] = {
@@ -54,6 +55,7 @@ _PREREQ_REASONS: dict[str, str] = {
     PREREQ_VERIFICATION: "GSTIN not verified",
     PREREQ_DATA_SOURCE: "no connected customer-data source",
     PREREQ_CUSTOMERS: "no customers ingested",
+    PREREQ_OWNERSHIP_VERIFIED: "ownership not verified (pending Viabe team review)",
 }
 
 
@@ -81,6 +83,11 @@ class AgentPrerequisites:
                                            data (any ingest connector: shopify | google_sheet | csv |
                                            …; generalized — NOT shopify-specific).
       - ``min_customers``                — minimum ingested ``customers`` count (0 = no requirement).
+      - ``requires_ownership_verified``  — gate on ``tenants.ownership_verified=true`` (VT-517 — a VTR
+                                           human confirmed owner→business). Defaults True: ownership is
+                                           a UNIVERSAL execution bar (like journey/verification), so
+                                           every execution agent inherits it unless it explicitly opts
+                                           out. SETUP paths never read this gate.
     """
 
     agent: str
@@ -88,6 +95,7 @@ class AgentPrerequisites:
     requires_verification: bool = True
     requires_enabled_data_source: bool = False
     min_customers: int = 0
+    requires_ownership_verified: bool = True
 
 
 # === The registry — one entry per agent ========================================================
@@ -101,6 +109,7 @@ REGISTRY: dict[str, AgentPrerequisites] = {
         requires_verification=True,
         requires_enabled_data_source=True,
         min_customers=1,
+        requires_ownership_verified=True,
     ),
 }
 
@@ -123,6 +132,7 @@ __all__ = [
     "PREREQ_CUSTOMERS",
     "PREREQ_DATA_SOURCE",
     "PREREQ_JOURNEY_COMPLETE",
+    "PREREQ_OWNERSHIP_VERIFIED",
     "PREREQ_VERIFICATION",
     "AgentPrerequisites",
     "REGISTRY",
