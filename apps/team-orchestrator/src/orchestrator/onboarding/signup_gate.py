@@ -75,6 +75,12 @@ def verify_gstin_for_signup(gstin: str, *, search_fn: SearchFn | None = None) ->
     if not gstin or not gstin.strip():
         # No GSTIN supplied is a reject, not a hold — there is nothing to verify, and the
         # ruling is explicit: no GST ⇒ nothing. Terminal, generic copy (same as invalid).
+        _emit_verify_event(
+            failure_type="validation",
+            operation="empty_gstin",
+            error="No GSTIN supplied — terminal reject (no GST → no tenant)",
+            impact="blocked_signup",
+        )
         return SignupVerifyResult(ok=False, outcome=INVALID_GSTIN, retryable=False)
 
     if search_fn is None:
@@ -90,12 +96,26 @@ def verify_gstin_for_signup(gstin: str, *, search_fn: SearchFn | None = None) ->
     # not permanently turn away a legit GST business. Cap-exempt (Cowork ruling 5).
     if not getattr(result, "ok", False):
         logger.info("VT-408 signup gate: vendor_down — HOLD (no tenant created)")
+        _emit_verify_event(
+            failure_type="vendor_error",
+            operation="vendor_down",
+            error="Sandbox GST verify call failed (ok=False) — retryable HOLD",
+            severity="error",
+            impact=None,
+            vendor="sandbox",
+        )
         return SignupVerifyResult(ok=False, outcome=VENDOR_DOWN, retryable=True)
 
     # invalid_gstin: the call succeeded but the GSTIN is not an active registration (inactive
     # OR not-found — indistinguishable to the caller on purpose; no enumeration oracle).
     if not result.is_active() or not result.authoritative_name():
         logger.info("VT-408 signup gate: invalid_gstin — REJECT (no tenant created)")
+        _emit_verify_event(
+            failure_type="validation",
+            operation="invalid_gstin",
+            error="GSTIN not active or no authoritative name — terminal reject",
+            impact="blocked_signup",
+        )
         return SignupVerifyResult(ok=False, outcome=INVALID_GSTIN, retryable=False)
 
     # gstin_verified: ACTIVE + authoritative name. The ONLY path that earns a tenant.
@@ -168,6 +188,38 @@ def gate_copy(kind: str, language: str) -> str:
     variants = SIGNUP_GATE_COPY[kind]
     lang = language if language in _SUPPORTED_LANGS else "en"
     return variants.get(lang) or variants["en"]
+
+
+# ---------------------------------------------------------------------------
+# VT-515: debug event helper (inline — no tenant context at this gate)
+# ---------------------------------------------------------------------------
+
+def _emit_verify_event(
+    *,
+    failure_type: str,
+    operation: str,
+    error: str,
+    severity: str = "error",
+    impact: str | None = None,
+    vendor: str | None = None,
+) -> None:
+    """Emit a debug_event for a signup-gate verify failure. Fail-soft — never raises."""
+    try:
+        from orchestrator.observability.debug_log import emit_debug_event
+
+        emit_debug_event(
+            failure_type=failure_type,
+            component="verify",
+            operation=operation,
+            error=error,
+            severity=severity,
+            impact=impact,
+            vendor=vendor,
+            # No tenant_id or trace_id at this stage — the gate runs before a tenant exists
+            # and without a discovery_id in scope. The viewer correlates via created_at window.
+        )
+    except Exception:  # noqa: BLE001 — never raise into the gate
+        pass
 
 
 __all__ = [

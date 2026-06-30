@@ -112,3 +112,74 @@ function _matchesFilters(
   }
   return true
 }
+
+
+// ─── Debug Events ──────────────────────────────────────────────────────────────
+// VT-515: Supabase Realtime subscription for debug_events INSERTs.
+// Mirrors the subscribePipelineSteps pattern above.
+
+export interface DebugEvent {
+  id: string
+  created_at: string
+  tenant_id: string | null
+  trace_id: string | null
+  failure_type: 'exception' | 'timeout' | 'vendor_error' | 'network' | 'validation' | 'crash' | 'silent_degrade'
+  component: string
+  operation: string | null
+  error_message: string | null
+  error_stack: string | null
+  context: unknown
+  severity: 'warning' | 'error' | 'critical'
+  impact: string | null
+  vendor: string | null
+  vendor_status: string | null
+  latency_ms: number | null
+}
+
+export interface DebugEventFilters {
+  /** Exact tenant_id match; null events (pre-tenant) still show when omitted. */
+  tenant_id?: string
+  /** Exact component match (e.g. 'discovery', 'create'). */
+  component?: string
+  /** Exact severity match: 'warning' | 'error' | 'critical'. */
+  severity?: string
+}
+
+export function subscribeDebugEvents(
+  client: SupabaseClient,
+  filters: DebugEventFilters,
+  onEvent: (event: DebugEvent) => void,
+): () => void {
+  const channel = client
+    .channel('ops:debug_events')
+    .on(
+      'postgres_changes' as never,
+      { event: 'INSERT', schema: 'public', table: 'debug_events' },
+      (payload: RealtimePostgresInsertPayload<DebugEvent>) => {
+        const row = payload.new
+        if (!_matchesDebugFilters(row, filters)) return
+        onEvent(row)
+      },
+    )
+    .subscribe()
+  return () => {
+    void client.removeChannel(channel)
+  }
+}
+
+/**
+ * Pure filter predicate — exported for testing.
+ * Returns true when the event passes ALL active filters (absent filter = pass-all).
+ * A null tenant_id on the event (pre-tenant signup failure) only passes a tenant_id
+ * filter if the filter explicitly matches null, which it never does — callers clear
+ * tenant_id filter to see pre-tenant events.
+ */
+export function _matchesDebugFilters(
+  event: DebugEvent,
+  filters: DebugEventFilters,
+): boolean {
+  if (filters.tenant_id !== undefined && event.tenant_id !== filters.tenant_id) return false
+  if (filters.component && event.component !== filters.component) return false
+  if (filters.severity && event.severity !== filters.severity) return false
+  return true
+}

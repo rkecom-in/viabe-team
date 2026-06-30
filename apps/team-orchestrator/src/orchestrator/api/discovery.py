@@ -146,6 +146,21 @@ def discovery_poll(
         and len(sources.get("knowyourgst", {}).get("candidates") or []) == 0
     )
 
+    # VT-515: when both sources complete with zero candidates the signup is stuck
+    # with no GSTIN to verify — surface this as a blocked_signup debug event.
+    if both_complete_zero and overall_status == "complete":
+        from orchestrator.observability.debug_log import emit_debug_event
+
+        emit_debug_event(
+            failure_type="silent_degrade",
+            component="discovery",
+            operation="both_complete_zero",
+            error="Both knowyourgst and LLM discovery sources returned zero candidates",
+            severity="error",
+            impact="blocked_signup",
+            trace_id=discovery_id,
+        )
+
     return {
         "overall_status": overall_status,
         "sources": sources,
@@ -164,6 +179,7 @@ async def _run_source(
     """Background coroutine: run one discovery source in a thread (blocking I/O), write
     to entity_discovery_requests when done. Never raises out — fail-soft per source."""
     t0 = time.monotonic()
+    caught_exc: Exception | None = None
     try:
         loop = asyncio.get_running_loop()
         if source == "knowyourgst":
@@ -174,13 +190,25 @@ async def _run_source(
             candidates, failure_reason = await loop.run_in_executor(
                 None, _fetch_llm, name, city
             )
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
         logger.warning("discovery: source %s failed for %r", source, name, exc_info=True)
         candidates, failure_reason = [], "scrape_error"
+        caught_exc = exc
 
     latency_ms = int((time.monotonic() - t0) * 1000)
     status = "error" if failure_reason else "complete"
     _update_source_row(discovery_id, source, status, failure_reason, candidates, latency_ms)
+
+    # VT-515: emit a debug event for every non-happy-path outcome so the viewer
+    # surfaces silent-degrades (no_key, zero_results) and vendor errors.
+    _emit_source_event(
+        discovery_id=discovery_id,
+        source=source,
+        failure_reason=failure_reason,
+        candidates=candidates,
+        latency_ms=latency_ms,
+        exc=caught_exc,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -315,3 +343,91 @@ def _read_source_rows(discovery_id_str: str) -> dict[str, dict[str, Any]]:
     except Exception:  # noqa: BLE001
         logger.warning("discovery: failed to read rows for %s", discovery_id_str, exc_info=True)
         return {}
+
+
+# ---------------------------------------------------------------------------
+# VT-515: debug event emission for discovery failures
+# ---------------------------------------------------------------------------
+
+# failure_reason → (failure_type, component, vendor)
+_FAILURE_REASON_MAP: dict[str, tuple[str, str, str | None]] = {
+    "no_key":       ("silent_degrade", "discovery",    None),
+    "scrape_error": ("vendor_error",   "scrapingbee",  "scrapingbee"),
+    "timeout":      ("timeout",        "scrapingbee",  "scrapingbee"),
+}
+_SOURCE_COMPONENT: dict[str, str] = {
+    "knowyourgst": "knowyourgst",
+    "llm":         "anthropic",
+}
+
+
+def _emit_source_event(
+    *,
+    discovery_id: uuid.UUID,
+    source: str,
+    failure_reason: str | None,
+    candidates: list[dict[str, Any]],
+    latency_ms: int,
+    exc: Exception | None,
+) -> None:
+    """VT-515: emit a debug_event for every non-happy discovery-source outcome.
+
+    Covers:
+    - no_key (ScrapingBee key / Anthropic key absent) → silent_degrade
+    - scrape_error / timeout → vendor_error (the scraper or LLM call failed)
+    - zero_results (source completed successfully but returned nothing) → silent_degrade
+    - crash (the outer _run_source try-except caught an unhandled exception) → exception
+
+    Happy path (failure_reason=None AND candidates present) → no emit.
+    """
+    from orchestrator.observability.debug_log import emit_debug_event
+
+    tid = str(discovery_id)
+
+    if exc is not None:
+        # Unhandled exception from the background coroutine itself (rare crash path).
+        emit_debug_event(
+            failure_type="exception",
+            component=_SOURCE_COMPONENT.get(source, "discovery"),
+            operation=f"run_source_{source}",
+            error=exc,
+            severity="error",
+            impact="degraded_to_manual",
+            trace_id=tid,
+            latency_ms=latency_ms,
+        )
+        return
+
+    if failure_reason:
+        ft, comp, vend = _FAILURE_REASON_MAP.get(
+            failure_reason, ("vendor_error", _SOURCE_COMPONENT.get(source, "discovery"), None)
+        )
+        # no_key for the LLM leg should point at anthropic, not scrapingbee.
+        if failure_reason == "no_key":
+            comp = _SOURCE_COMPONENT.get(source, "discovery")
+            vend = None
+        emit_debug_event(
+            failure_type=ft,
+            component=comp,
+            operation=failure_reason,
+            error=failure_reason,
+            severity="warning" if failure_reason == "no_key" else "error",
+            impact="degraded_to_manual",
+            trace_id=tid,
+            vendor=vend,
+            latency_ms=latency_ms,
+        )
+        return
+
+    # No failure_reason but zero candidates → a "found nothing" silent degrade.
+    if not candidates:
+        emit_debug_event(
+            failure_type="silent_degrade",
+            component=_SOURCE_COMPONENT.get(source, "discovery"),
+            operation="zero_results",
+            error=f"{source} completed but returned zero candidates",
+            severity="warning",
+            impact="degraded_to_manual",
+            trace_id=tid,
+            latency_ms=latency_ms,
+        )
