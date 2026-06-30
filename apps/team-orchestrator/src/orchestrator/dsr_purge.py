@@ -201,6 +201,23 @@ _PURGE_ORDER: tuple[str, ...] = (
     # never outlive the runs they controlled.
     "step_overrides",
     "workflow_controls",
+    # VT-518 (DSR-purge gap, Cowork audit-after of VT-514/515): the two tenant-scoped
+    # PII-bearing observability tables added by VT-514/VT-515 were NEVER in this order →
+    # a right-to-erasure tenant survived in the audit + debug logs (redact-at-write +
+    # RLS is insufficient for erasure — redacted activity history is STILL the subject's
+    # data). Both swept here, BEFORE pipeline_runs:
+    #   * tm_audit_log (mig 147): run_id → pipeline_runs(id) NO ACTION, so it MUST precede
+    #     pipeline_runs or the runs delete fails on the dangling ref. parent_audit_id is a
+    #     self-FK (→ tm_audit_log.id) NO ACTION — a single `DELETE … WHERE tenant_id = %s`
+    #     removes parent+child in ONE statement, so the FK is checked at statement end with
+    #     both already gone (safe; no per-row RESTRICT). tenant_id NOT NULL.
+    #   * debug_events (mig 146): no FK at all (trace_id is bare TEXT), order-insensitive.
+    #     tenant_id is NULLABLE (pre-tenant failures carry no tenant) — the tenant-scoped
+    #     DELETE correctly sweeps only the subject's rows and leaves NULL-tenant rows (not
+    #     subject data). mig 147 documented "DSR-purge-scoped via the VT-185 path"; this row
+    #     is the impl that finally delivers it (the recurring hand-maintained-order drift).
+    "tm_audit_log",
+    "debug_events",
     "pipeline_steps",
     "pipeline_runs",
     "subscriber_states",

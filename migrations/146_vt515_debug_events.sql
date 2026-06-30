@@ -16,6 +16,15 @@
 -- Realtime: REPLICA IDENTITY FULL + `supabase_realtime` publication, exactly
 -- mirroring migration 030 (pipeline_steps / pipeline_runs). The DO $$ block
 -- is idempotent in both vanilla Postgres (CI) and Supabase Prod.
+--
+-- Retention / DSR (VT-518 — added when the Cowork audit-after of VT-514/515 found
+-- this table absent from the purge order): tenant-scoped subject data, purged with
+-- the tenant via the VT-185 DSR path (dsr_purge.py `_PURGE_ORDER`). Rows are
+-- PII-redacted at write, but redacted activity history is STILL the subject's data,
+-- so a right-to-erasure tenant's rows MUST be hard-deleted. The DELETE is
+-- tenant-scoped (`WHERE tenant_id = %s`); the NULLABLE tenant_id above lets
+-- pre-tenant failures (no subject) persist — they carry no erasable subject. Mirrors
+-- mig 147 tm_audit_log's retention note (which documented the DSR path from day one).
 
 CREATE TABLE IF NOT EXISTS public.debug_events (
     id            UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
