@@ -1,52 +1,47 @@
 # Latest State Snapshot
 
-**As of:** 2026-06-24. **dev HEAD:** `5e82d37` (VT-387 idempotency fix; #488). **main HEAD:** `2de4b36` (#436 — UNCHANGED; Fazal-only promotion per CL-432). **BINDING Team go-live: 2026-07-15.** Branch governance per CL-432 (`dev` staging / `main` Fazal-authorized promotion only).
+**As of:** 2026-07-01. **dev HEAD:** `a41a904` (VT-515 debug/failure log + live VTR feed; `origin/dev` matches). **main HEAD:** UNCHANGED (Fazal-only promotion per CL-432). **BINDING Team go-live: 2026-07-15.**
 
-> Reconciled against `git log origin/dev` (Rule #14). The Run-Control batch (CL-435/436) shipped long ago — the prior 2026-06-12 snapshot was ~12 days stale and is fully superseded by this one.
+> Reconciled against `git log origin/dev`, the sprint rows, and the latest Cowork/CC signals (Rule #14). The prior 2026-06-29 snapshot was materially stale: it described the VT-490/491/492 win-back chain, which is superseded. The critical path is now **Fazal's first real signup/onboarding journey on deployed dev** (the public signup form → discovery → GST verify → OTP → account create), plus the **VT-514/515/516 observability** Fazal asked for. Branch is `cc-winback-followups` tracking `origin/dev`.
 
 ---
 
 ## CRITICAL PATH
 
-**The verify-then-create owner-signup e2e is LIVE on dev — Fazal to run the Sundaram e2e.**
+**Get Fazal's real signup for "RKeCom Services Pvt Ltd" to create an account end-to-end on deployed dev, with full observability of every failure.**
 
-The "get everything in place before we restart the e2e" foundation is COMPLETE. The whole signup spine now enforces the CL-442 hard GST gate (no `gstin_verified` ⇒ no account, no trial) with verify-then-create: GSTIN is verified server-side BEFORE the `tenants` row is persisted, so nothing is held for a rejected business. Live URL: `https://viabe-team-dev.vercel.app/team/signup`.
+The deployed-dev signup journey was repaired across this session from Fazal's live runs (each fix proven on the deployed path before claiming, raw-evidence bar):
+- **VT-507** — async parallel discovery (LLM + knowyourgst), never blocks the form; 24h **persistent** cache (replaced the in-process dict wiped on redeploy); `entity_discovery_requests` observability. Done.
+- **VT-509** — LLM leg structured-only (no garbage "not found" cards); the scraper cache-poison fixed (my VT-507 cache was caching `[]` and serving it 24h — the scraper code always worked); source label genericized to "public records". Done.
+- **VT-510** — confirm-seam name-match normalized (the OPC/parens/spacing diff no longer false-rejects an active GSTIN); verify-before-OTP confirmed; GSTIN shown on the card. Done, proven (`gstin_verified` on deployed).
+- **VT-512** — the create payload field-mismatch (`verified_gstin` → `gstin`); create was 422-rejecting EVERY signup since `69831e8` (the verified GSTIN never reached the create gate). Done.
+- **VT-511** — design pass across all signup screens + 10 screenshots at `apps/team-web/screenshots-vt511/` for eye-review. Done.
+- **VT-513** — GSTIN-uniqueness build CANCELLED (a chain shares one GSTIN across stores). **Launch = single-owner-only** (multi-store parked). Cleared Fazal's prior tenant `63211ce5` (269 child rows) so his re-run creates fresh. Done.
 
-**Shipped to dev this cycle (all merged, verified against `git log origin/dev`):**
-- **VT-404** (#478) — welcome message invites the owner's reply (`team_welcome2`).
-- **VT-405 A+B** (#476 `8ec6a64`, #477 `d7955ec`) — Ops VTR tenant discovery panel: signup + auto-discovered profile, scoped; per-field confirm + owner_name fix + provenance badges.
-- **VT-406 A+B+reconciliation** (#479 `7c39051`, #482 `69831e8`, #484 `7a939ca`) — entity-match verify-gated signup spine + candidate-pick wizard + verified/found provenance; `run_signup` anchors the verified entity post-create.
-- **VT-407 + minors** (#480 `a6d727a`, #487 `1d55bd4`) — widen Sandbox GSTIN parse + `discover_gst` source; strip empty/comma-only address subfields; geo-empty confirmed on RKECOM.
-- **VT-408** (#481 `f5712f6`) — hard GST gate at signup, verify-then-create (CL-442).
-- **VT-409** (#483 `da736bf`) — Sandbox auth-token fix: the GSTIN-search 500 was OUR top-level-vs-nested token bug (+ search api-version 1.0.0). Real `search_gstin` now returns `ok=True, status=Active`.
-- **VT-387** (#488 `5e82d37`) — idempotency retry-window fix: transiently-failed agent draft is now retryable (drop `error` from the idempotent-hit set).
-- **VT-388 addendum** (#485 `68bf801`) — `book_stationery` business type EN/HI (Sundaram e2e taxonomy).
-- **CI hygiene** (#486 `6c345dd`) — quarantine DBOS-sigkill-resume + VT-384 isolation flakes (overnight).
-
-**Externals unchanged (the launch long poles):** Meta F1 templates Meta-APPROVED (CL-438); counsel C1–C3 still the only gate to real customer sends (CL-439); VT-231 Mumbai cutover required before any `dev→main` promotion. Customer messaging remains FAIL-CLOSED (CL-434 three stops).
+Observability (Fazal's ask; **dev-full-parity** — build on dev now, not prod-later):
+- **VT-515** — debug/failure log (`debug_events`, mig 146) + a live "Debug / Failures" feed on the Ops Console. `emit_debug_event` is fail-soft + PII-redacted; wired to every signup-path failure incl the silent-degrades. **Proven on deployed dev** (a garbage-name discovery emitted 3 correlated rows). In Review (Cowork audit-after).
 
 ## IN FLIGHT (CC)
 
-- None actively building. The verify-then-create signup batch closed; awaiting the Fazal e2e run.
+- **VT-515** — pushed (`a41a904`), mig 146 applied to dev, emit proven on deployed dev. The browser Realtime feed is Fazal/Cowork eye-check on the Ops Console → "Debug / Failures".
 
 ## BLOCKED ON
 
-- **Fazal:** run the Sundaram signup e2e on dev (`/team/signup`); Meta-side / counsel C1–C3; VT-231 Mumbai cutover.
-- **VT-386** (PII redaction registry) — plan-first, parked at the Cowork gate.
-- **Taxonomy 4 extra types** (tailor / florist / meat_fish / optician) — Fazal k-anonymity ruling pending before they're added.
-- **VT-410** (`send_whatsapp_message` sibling idempotency bug) — Queued.
+- **Fazal's signup re-run** — the tenant is cleared + all path fixes deployed at `a41a904`; awaiting Fazal to re-run "RKeCom Services Pvt Ltd" (the bottom-left version stamp must read `a41a904`). His re-run is the acceptance for the whole signup chain.
+- **`dev -> main`** — VT-231 Mumbai prod cutover + explicit Fazal promotion authorization (CL-432).
 
 ## NEXT ACTION
 
-- **Fazal:** run the Sundaram verify-then-create e2e on dev and report results.
-- **Cowork:** on the e2e result, sequence any follow-up fixes; gate VT-386 if/when dispatched.
-- **CC:** stand by for the next dispatch; VT-410 when rostered.
+- **CC:** build **VT-514** (Team-Manager AUDIT/trace log — choke-point instrumented through the guarded-tool/rail + reasoning + dispatch layers; the no-orphan-action invariant proving completeness; point-in-time knowledge snapshots; PII by-reference via `pii_redactor`) + **VT-516** (the per-tenant grouped summary-first viewer over the audit+debug logs, reusing the Supabase Realtime stream). Build-now on dev, Cowork audit-after. Reuse the substrate: `pipeline_steps` + `agent_invocation`/`agent_reasoning_step` envelopes, `debug_events` (mig 146), `lib/ops/stream.ts subscribePipelineSteps`. Next migration = **147**.
+- **Cowork:** audit-after; pre-check ONLY the audit-log PII boundary (CL-390, by-reference) + verify the no-orphan invariant. Do not block CC (2026-06-28 full-autonomy ruling).
+- **Fazal:** re-run the signup; review the VT-511 screenshots + the live Debug feed by eye.
 
 ## DO NOT
 
-- Touch `main` (CL-432 — `dev→main` promotion is Fazal's word only; main is still `2de4b36`).
-- Carry VT-376 / Run-Control-Panel forward as "in flight" — that batch (CL-435/436, VT-374/375/376/377/380/381) MERGED on 2026-06-12; it is DONE, not pending.
-- Let the VT-406 "use my typed name / no-match" path proceed UNVERIFIED — CL-442 closed that backdoor; `invalid_gstin` rejects, `vendor_down` HOLDS with retry (never rejects a legit GST business).
-- Wipe uncommitted shared-tree files (CL-418 extension): no `git reset --hard` / `checkout -f` over files you didn't author. Obstacle → signal + wait.
-- Re-litigate CL-442 (hard GST gate at signup, verify-then-create) or CL-433 (no card in trial, no refund ever).
-- Trust this snapshot's HEAD claims without `git log origin/dev` (Rule #14).
+- Touch `main` without Fazal's explicit promotion instruction (CL-432).
+- Re-add a GSTIN/business-uniqueness block — single-owner-only launch, multi-store PARKED (CL-2026-07-01-single-owner-only). Dedup stays whatsapp_number-only.
+- Send a real WhatsApp before Fazal's sign-off. Dev = mock-off + `DEV_SEND_ALLOWLIST` (Fazal's 3 numbers real, rest mocked); NEVER drive the live-number tenant. Never fabricate a phone number (only Fazal-provided enter a real path).
+- Log raw PII in the audit log — by-reference + structured facts via `pii_redactor` (CL-390); the VT-514 PII boundary is the one thing Cowork pre-checks.
+- Build parallel logging — extend the existing envelopes (`pipeline_steps`/`agent_invocation`/`agent_reasoning_step`/`debug_events`), don't duplicate.
+- Build on a git worktree / fan out parallel writers on the shared tree — serial on the one tree (read-only design/audit can parallel).
+- Trust this snapshot's HEAD or in-flight claims without reconciling `origin/dev`, sprint rows, and current signals (Rule #14).
