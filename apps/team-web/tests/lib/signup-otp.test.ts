@@ -53,15 +53,40 @@ describe('VT-96 verifyOtpAndCreate', () => {
     expect(await verifyOtpAndCreate(payload, '123456', f)).toEqual({ ok: true, tenantId: null })
   })
 
-  it('VT-449 — the create POST carries extra payload fields (confirmed cin) verbatim', async () => {
-    const withCin = { ...payload, verified_gstin: '29ABCDE1234F1Z5', cin: 'U22210KA1995PLC012345' }
+  it('VT-449 — the create POST carries extra payload fields (confirmed cin + gstin) verbatim', async () => {
+    // VT-512: field name is `gstin` (the orchestrator SignupBody field) — NOT `verified_gstin`.
+    // `verified_gstin` was the old name: Pydantic ignored it, defaulted gstin="", every create
+    // failed with 422 invalid_gstin regardless of the entity-step verify result.
+    const withGstinAndCin = { ...payload, gstin: '29ABCDE1234F1Z5', cin: 'U22210KA1995PLC012345' }
     const f = vi
       .fn()
       .mockResolvedValueOnce(resp(200, { token: 'tok' }))
       .mockResolvedValueOnce(resp(201, { tenant_id: 'ten_1' }))
-    await verifyOtpAndCreate(withCin, '123456', f)
+    await verifyOtpAndCreate(withGstinAndCin, '123456', f)
     const [, init] = f.mock.calls[1] as [string, RequestInit]
-    expect(JSON.parse(init.body as string).cin).toBe('U22210KA1995PLC012345')
+    const body = JSON.parse(init.body as string) as Record<string, unknown>
+    expect(body.gstin).toBe('29ABCDE1234F1Z5')
+    expect(body.cin).toBe('U22210KA1995PLC012345')
+    // Regression guard: the old `verified_gstin` key must NOT appear in the forwarded payload.
+    expect(body.verified_gstin).toBeUndefined()
+  })
+
+  it('VT-512 — create forwards gstin to the orchestrator; 422 invalid_gstin → gst_reject', async () => {
+    // When the entity step verified the GSTIN but the orchestrator's re-verify fails (e.g.
+    // Sandbox momentarily returns a different result), the 422 still maps to gst_reject.
+    // The payload MUST carry `gstin` (not `verified_gstin`) — otherwise the orchestrator
+    // defaults gstin="" and rejects unconditionally (the original VT-512 defect).
+    const withGstin = { ...payload, gstin: '27AAKCR3738B1ZE' }
+    const f = vi
+      .fn()
+      .mockResolvedValueOnce(resp(200, { token: 'tok' }))
+      .mockResolvedValueOnce(resp(422, { detail: { code: 'invalid_gstin', message: 'GST-only.' } }))
+    const r = await verifyOtpAndCreate(withGstin, '123456', f)
+    expect(r).toEqual({ ok: false, error: 'gst_reject', message: 'GST-only.' })
+    const [, init] = f.mock.calls[1] as [string, RequestInit]
+    const body = JSON.parse(init.body as string) as Record<string, unknown>
+    // The `gstin` field reaches the orchestrator (not lost as `verified_gstin`).
+    expect(body.gstin).toBe('27AAKCR3738B1ZE')
   })
 
   it('verify 429 → rate_limited, NO signup call', async () => {

@@ -107,6 +107,10 @@ export function SignupForm() {
     consent_residency: false,
   })
   const [error, setError] = useState<string | null>(null)
+  // VT-512: track whether the current error is a terminal GST-gate reject (gst_reject from
+  // the create call). Used to suppress the GST-error block on the OTP screen when verifiedEntity
+  // is already set — a stale or spurious gst_reject must never confuse an owner who passed GST.
+  const [gstRejectError, setGstRejectError] = useState(false)
   const [done, setDone] = useState(false)
   const [submitting, setSubmitting] = useState(false)
   // VT-96 + VT-406 + VT-411: a 4-step flow — details, then entity-match (confirm the GST-registered
@@ -174,6 +178,7 @@ export function SignupForm() {
     setVerifiedEntity(entity)
     if (step === 'verify' || step === 'ownership' || submitting) return // double-click guard
     setError(null)
+    setGstRejectError(false)
     setSubmitting(true)
     try {
       const r = await requestSignupOtp(form.whatsapp_number)
@@ -205,6 +210,7 @@ export function SignupForm() {
   async function onVerifyAndCreate(e: React.FormEvent) {
     e.preventDefault()
     setError(null)
+    setGstRejectError(false)
     if (!otpCode.trim()) {
       setError(t.invalid_code)
       return
@@ -227,7 +233,10 @@ export function SignupForm() {
         {
           ...form,
           preferred_language: lang,
-          verified_gstin: verifiedEntity.gstin,
+          // VT-512: field must be `gstin` — the orchestrator's SignupBody field name. The old
+          // `verified_gstin` key was ignored by Pydantic (default ""), causing every create to
+          // fail with 422 invalid_gstin regardless of the entity-step verify result.
+          gstin: verifiedEntity.gstin,
           verified_name: verifiedEntity.name,
           cin: verifiedEntity.cin ?? '',
         },
@@ -261,6 +270,9 @@ export function SignupForm() {
         vendor_down: t.vendor_down,
         generic: t.generic,
       }
+      // VT-512: flag GST-gate terminal rejects so the OTP screen can suppress the block
+      // when verifiedEntity is already set (entity verified but create re-verified freshly).
+      setGstRejectError(r.error === 'gst_reject')
       setError(r.message ?? map[r.error])
     } catch {
       setError(t.generic)
@@ -447,7 +459,11 @@ export function SignupForm() {
             className={`${fieldInput} text-center text-lg tracking-[0.3em]`}
           />
         </label>
-        {error && (
+        {/* VT-512: gst_reject is gated on !verifiedEntity — when the entity IS verified,
+            the GST-gate block is suppressed so a stale/spurious gst_reject never confuses
+            an owner who passed the entity step. Other errors (invalid_code, rate_limited,
+            duplicate, generic) render regardless of verifiedEntity. */}
+        {error && !(gstRejectError && verifiedEntity) && (
           <p className="signup-error rounded-lg bg-destructive/10 px-3 py-2 text-sm text-destructive" role="alert">
             {error}
           </p>
@@ -465,6 +481,7 @@ export function SignupForm() {
             setStep('details')
             setOtpCode('')
             setError(null)
+            setGstRejectError(false)
           }}
           className="rounded-xl border border-input px-5 py-2.5 font-medium text-foreground transition hover:bg-muted"
         >
