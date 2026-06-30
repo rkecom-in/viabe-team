@@ -75,6 +75,7 @@ from orchestrator.observability.langchain_callback import (
     OrchestratorReasoningCallback,
 )
 from orchestrator.observability.pipeline_observability import write_step
+from orchestrator.observability.tm_audit import emit_tm_audit
 from orchestrator.output_composer import compose_owner_output
 from orchestrator.state import SubscriberState
 from orchestrator.supervisor import (
@@ -225,6 +226,24 @@ def dispatch_brain(
     # Cowork brief correction (the VT-179 canonical kind).
     _write_dispatch_entry(run_id=run_id, tenant_id=tenant_id, event=event)
 
+    # VT-514 GETS — inbound_received audit spine row (fail-soft, conn=None).
+    # tenant_id/run_id are the dispatch_brain params; no raw body/phone (ids +
+    # length only — emit_tm_audit redacts defensively).
+    emit_tm_audit(
+        event_layer="gets",
+        event_kind="inbound_received",
+        actor="team_manager",
+        tenant_id=tenant_id,
+        run_id=run_id,
+        summary="brain dispatch entry — owner message routed to Team-Manager",
+        input={
+            "message_type": getattr(event, "message_type", None),
+            "twilio_message_sid": getattr(event, "twilio_message_sid", None),
+            "body_len": len(event.body or ""),
+            "dupe_status": getattr(event, "dupe_status", None),
+        },
+    )
+
     api_key = os.environ.get("ANTHROPIC_API_KEY", "")
     # Tests monkeypatch this env to sentinel values like "test-sentinel"
     # (see test_twilio_ingress.py) to exercise non-brain seams without
@@ -338,6 +357,51 @@ def dispatch_brain(
     if intent_block:
         _messages.insert(0, SystemMessage(content=intent_block))
 
+    # VT-514 GETS — retrieval audit spine row: which context sources hit
+    # (presence flags only; the redacted block CONTENT rides the KNOWS row).
+    emit_tm_audit(
+        event_layer="gets",
+        event_kind="retrieval",
+        actor="team_manager",
+        tenant_id=tenant_id,
+        run_id=run_id,
+        summary="assembled L1 / business / manager-intent context blocks",
+        result={
+            "l1_present": bool(l1_block),
+            "business_present": bool(business_block),
+            "intent_present": bool(intent_block),
+            "intent_classification": _manager_intent.get("classification"),
+        },
+    )
+
+    # VT-514 snapshot plumbing + KNOWS context_assembled spine row. snapshot_id
+    # = sha256 of the assembled system blocks; THIS row is the snapshot STORE the
+    # id points at (carries the REDACTED blocks). Best-effort: a hash/emit
+    # failure must never break dispatch.
+    _snapshot_id: str | None = None
+    try:
+        import hashlib
+
+        _blocks_for_hash = "\n--\n".join(
+            b for b in (l1_block, business_block, intent_block) if b
+        )
+        _snapshot_id = hashlib.sha256(_blocks_for_hash.encode("utf-8")).hexdigest()
+    except Exception:  # noqa: BLE001 — snapshot is best-effort
+        _snapshot_id = None
+    emit_tm_audit(
+        event_layer="knows",
+        event_kind="context_assembled",
+        actor="team_manager",
+        tenant_id=tenant_id,
+        run_id=run_id,
+        snapshot_id=_snapshot_id,
+        summary="assembled Team-Manager context snapshot",
+        input={
+            "l1_block": l1_block,
+            "business_block": business_block,
+            "intent_block": intent_block,
+        },
+    )
     initial_state: dict[str, Any] = {
         "messages": _messages,
         "tenant_id": tenant_id,
@@ -352,7 +416,7 @@ def dispatch_brain(
     intent_or_trigger = "owner_substantive_message"
 
     try:
-        with observability_context(run_id=run_id, tenant_id=tenant_id):
+        with observability_context(run_id=run_id, tenant_id=tenant_id, snapshot_id=_snapshot_id):
             # VT-47: compile the supervisor graph WITH the module-level
             # checkpointer + a thread_id == run_id config so the owner-approval
             # gate's interrupt() can persist + later resume on the same run.

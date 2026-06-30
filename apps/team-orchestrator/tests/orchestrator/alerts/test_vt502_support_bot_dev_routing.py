@@ -26,8 +26,10 @@ from uuid import uuid4
 
 import pytest
 
-import orchestrator.alerts.clients as clients
-from orchestrator.owner_surface import support_bot as sb
+pytest.importorskip("httpx")  # alerts.clients imports httpx at module load — dep-less smoke guard
+
+import orchestrator.alerts.clients as clients  # noqa: E402 — after the dependency skip guard
+from orchestrator.owner_surface import support_bot as sb  # noqa: E402
 
 # The actual bogus re-drive tenant (confirmed in dev: a hand-crafted v4-shaped id)
 # + its synthetic +1-555 owner (+15550000901, North-American reserved-for-fiction;

@@ -288,6 +288,7 @@ def assert_or_gate_business_action(
     diagnostic call is unaffected). The policy short-circuit is fail-CLOSED: no policy row → every
     attrs-bearing action is OUT_OF_POLICY → owner approval.
     """
+    from orchestrator.observability.tm_audit import emit_tm_audit
     if action_attrs is not None:
         from orchestrator.agents.business_policy import assert_within_policy
 
@@ -311,6 +312,22 @@ def assert_or_gate_business_action(
                 str(tenant_id), gate.action_class, gate.magnitude_minor, gate.tier,
                 gate.decision.value, gate.reason,
             )
+            emit_tm_audit(
+                event_layer="decides",
+                event_kind="business_action",
+                actor="team_manager",
+                tenant_id=tenant_id,
+                run_id=None,
+                decision={
+                    "action_class": gate.action_class,
+                    "magnitude_minor": gate.magnitude_minor,
+                    "tier": gate.tier,
+                    "gate_decision": gate.decision.value,
+                    "reason": gate.reason,
+                },
+                summary=f"business action gated: {gate.action_class} → {gate.decision.value} ({gate.reason})",
+                conn=None,
+            )
             return gate
 
     state = get_business_autonomy(tenant_id, action_class, conn=conn)
@@ -319,6 +336,22 @@ def assert_or_gate_business_action(
         "business_impact_choke: gate tenant=%s class=%s magnitude_minor=%d tier=%s decision=%s reason=%s",
         str(tenant_id), gate.action_class, gate.magnitude_minor, gate.tier,
         gate.decision.value, gate.reason,
+    )
+    emit_tm_audit(
+        event_layer="decides",
+        event_kind="business_action",
+        actor="team_manager",
+        tenant_id=tenant_id,
+        run_id=None,
+        decision={
+            "action_class": gate.action_class,
+            "magnitude_minor": gate.magnitude_minor,
+            "tier": gate.tier,
+            "gate_decision": gate.decision.value,
+            "reason": gate.reason,
+        },
+        summary=f"business action gated: {gate.action_class} → {gate.decision.value} ({gate.reason})",
+        conn=None,
     )
     return gate
 

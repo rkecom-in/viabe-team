@@ -149,6 +149,7 @@ def mark_approval_resolved(
     needs_changes → 'edit_requested' + owner_feedback + ONE-regeneration cap; rejected →
     'rejected'; timeout / exhausted-defer → 'cancelled'). ``owner_feedback`` is the raw owner
     reply body — persisted on the RLS-protected batch row only, NEVER logged (CL-390)."""
+    from orchestrator.observability.tm_audit import emit_tm_audit
     if decision == "defer":
         new_count = PendingApprovalsWrapper().extend_on_defer(
             tenant_id, approval_id, timeout_hours=48, conn=conn
@@ -165,6 +166,21 @@ def mark_approval_resolved(
             decision="defer", status="rejected",
             owner_message_sid=owner_message_sid, conn=conn,
         )
+        emit_tm_audit(
+            event_layer="does",
+            event_kind="approval_resolved",
+            actor="team_manager",
+            tenant_id=tenant_id,
+            run_id=None,
+            action={
+                "approval_id": str(approval_id),
+                "decision": "defer",
+                "status": "rejected",
+                "owner_message_sid": owner_message_sid,
+            },
+            summary=f"approval resolved: decision={decision}",
+            conn=conn,
+        )
         _apply_agent_glue(conn, tenant_id, approval_id, "defer", owner_feedback)
         return True
 
@@ -175,6 +191,21 @@ def mark_approval_resolved(
         decision=decision,
         status=status,
         owner_message_sid=owner_message_sid,
+        conn=conn,
+    )
+    emit_tm_audit(
+        event_layer="does",
+        event_kind="approval_resolved",
+        actor="team_manager",
+        tenant_id=tenant_id,
+        run_id=None,
+        action={
+            "approval_id": str(approval_id),
+            "decision": decision,
+            "status": status,
+            "owner_message_sid": owner_message_sid,
+        },
+        summary=f"approval resolved: decision={decision}",
         conn=conn,
     )
     _apply_agent_glue(conn, tenant_id, approval_id, decision, owner_feedback)

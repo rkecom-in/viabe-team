@@ -34,6 +34,7 @@ def record_escalation(
     when run_id is provided. Returns True if a row was INSERTED, False if it conflicted (an
     idempotent hit) — the caller gates the Fazal alert on this so a DBOS workflow replay does
     NOT re-fire the Telegram ping (VT-343 nit A)."""
+    from orchestrator.observability.tm_audit import emit_tm_audit
     if severity not in _VALID_SEVERITY:
         raise ValueError(f"invalid severity {severity!r}; valid: {_VALID_SEVERITY}")
     # VT-279: deterministically route the escalation — knowledge-gap → 'vtr', authority/identity →
@@ -51,6 +52,21 @@ def record_escalation(
             (str(tenant_id), str(run_id) if run_id else None, kind, severity, notes, route),
         )
         inserted = (cur.rowcount or 0) > 0
+        emit_tm_audit(
+            event_layer="does",
+            event_kind="escalation",
+            actor="team_manager",
+            tenant_id=tenant_id,
+            run_id=run_id,
+            action={
+                "kind": kind,
+                "severity": severity,
+                "route": route,
+                "inserted": inserted,
+            },
+            summary=f"escalation queued: {kind} severity={severity} route={route}",
+            conn=conn,
+        )
     logger.info(
         "escalation recorded tenant=%s kind=%s severity=%s route=%s inserted=%s",
         tenant_id, kind, severity, route, inserted,

@@ -447,6 +447,7 @@ def _persist_draft_batch(
 ) -> UUID:
     """One batch (``awaiting_approval``) + its ``drafted`` rows, atomically (one transaction —
     a half-persisted batch must never be armable). RLS via the caller's tenant_connection."""
+    from orchestrator.observability.tm_audit import emit_tm_audit
     from psycopg.types.json import Jsonb
 
     with conn.transaction(), conn.cursor() as cur:
@@ -466,6 +467,21 @@ def _persist_draft_batch(
                 (str(tenant_id), str(batch_id), str(customer_id), WINBACK_TEMPLATE_NAME,
                  Jsonb(params)),
             )
+        emit_tm_audit(
+            event_layer="does",
+            event_kind="draft_created",
+            actor="sales_recovery",
+            tenant_id=tenant_id,
+            run_id=None,
+            action={
+                "batch_id": str(batch_id),
+                "work_item_id": str(work_item_id),
+                "draft_count": len(drafts),
+                "template_name": WINBACK_TEMPLATE_NAME,
+            },
+            summary=f"draft batch created: {len(drafts)} draft(s)",
+            conn=conn,
+        )
     return batch_id
 
 

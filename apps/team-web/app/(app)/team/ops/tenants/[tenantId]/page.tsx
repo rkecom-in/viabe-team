@@ -9,10 +9,12 @@
 
 import { redirect } from 'next/navigation'
 
+import { issueOperatorJwt, OPERATOR_STREAM_TTL_SEC } from '@/lib/auth/operator-jwt'
 import { UnauthorizedError } from '@/lib/auth/require-fazal'
 import { requireOpsOperator } from '@/lib/auth/require-ops-operator'
 import { canAccessTenant } from '@/lib/ops/assignments'
 import { TenantDiscoveryPanel } from '@/components/ops/tenant-discovery-panel'
+import { TmActivityFeed } from '@/components/ops/tm-activity-feed'
 import { vtrTenantProfile } from '@/lib/orchestrator-client'
 
 export const dynamic = 'force-dynamic'
@@ -50,6 +52,13 @@ export default async function TenantDashboardPage({ params }: PageProps) {
 
   const { ok, profile, reason } = await vtrTenantProfile(operator.operatorId, tenantId)
 
+  // Mint a short-lived operator JWT for the browser Realtime subscription — only
+  // on the success path so error responses skip the ~50ms issue cost.
+  const operatorJwt =
+    ok && profile
+      ? await issueOperatorJwt(operator.operatorId, { ttlSec: OPERATOR_STREAM_TTL_SEC })
+      : null
+
   return (
     <main
       className="ops-tenant min-h-screen space-y-6 bg-background p-6"
@@ -65,6 +74,9 @@ export default async function TenantDashboardPage({ params }: PageProps) {
       ) : (
         <TenantDiscoveryPanel profile={profile} />
       )}
+      {ok && profile && operatorJwt ? (
+        <TmActivityFeed tenantId={tenantId} operatorJwt={operatorJwt} />
+      ) : null}
     </main>
   )
 }
