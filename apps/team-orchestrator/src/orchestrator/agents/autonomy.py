@@ -184,6 +184,7 @@ def record_regression_event(
     kind, so the kind alone loses the distinction). It rides the ``agent_autonomy_regressed``
     observability event's ``detail`` field so the two demote causes are separable downstream
     without a kind-taxonomy change (that cleanup is VT-385's design input, per the ruling)."""
+    from orchestrator.observability.tm_audit import emit_tm_audit
     tid = str(tenant_id)
     _ensure_row(conn, tid, agent)
     state = get_autonomy(tenant_id, agent, conn=conn)
@@ -205,6 +206,22 @@ def record_regression_event(
         cancelled = cancel_open_batches(tenant_id, agent, reason=kind, conn=conn)
     else:
         cancelled = 0
+    emit_tm_audit(
+        event_layer="does",
+        event_kind="autonomy_change",
+        actor="team_manager",
+        tenant_id=tenant_id,
+        run_id=None,
+        action={
+            "agent": agent,
+            "kind": kind,
+            "revoked": revokes,
+            "frozen": freezes,
+            "batches_cancelled": cancelled,
+        },
+        summary=f"autonomy regression: agent={agent} kind={kind}",
+        conn=conn,
+    )
     _emit(tid, "agent_autonomy_regressed", {"agent": agent, "kind": kind, "detail": detail,
                                             "revoked": revokes, "frozen": freezes,
                                             "batches_cancelled": cancelled})
@@ -226,6 +243,7 @@ def grant_l3(
     """Grant L3 — ONLY from an explicit owner opt-in (the autonomy_upgrade approval row id is the
     durable consent evidence, C3). REVALIDATES IN-TXN (plan §5.3): streak still at threshold, not
     frozen, still L2; stale → no-op (the caller notifies). PR-3 wires the proposal/approval flow."""
+    from orchestrator.observability.tm_audit import emit_tm_audit
     tid = str(tenant_id)
     _ensure_row(conn, tid, agent)
     row = conn.execute(
@@ -238,6 +256,16 @@ def grant_l3(
     if row is None:
         logger.warning("grant_l3: stale grant no-op tenant=%s agent=%s", tid, agent)
     else:
+        emit_tm_audit(
+            event_layer="does",
+            event_kind="autonomy_change",
+            actor="team_manager",
+            tenant_id=tenant_id,
+            run_id=None,
+            action={"agent": agent, "approval_id": str(approval_id), "new_level": "L3"},
+            summary=f"autonomy granted L3: agent={agent}",
+            conn=conn,
+        )
         _emit(tid, "agent_autonomy_granted", {"agent": agent, "approval_id": str(approval_id)})
     return get_autonomy(tenant_id, agent, conn=conn)
 
@@ -417,6 +445,7 @@ def find_open_autonomy_upgrade(tenant_id: UUID | str, *, conn: Any) -> dict[str,
 def revoke_l3(tenant_id: UUID | str, agent: str, *, reason: str, conn: Any) -> AutonomyState:
     """Explicit revoke (owner cancel / VTR / Ops): L3 → L2, streak 0, cancels open batches
     atomically. Idempotent at L2 (still cancels batches — a revoke request means stop the work)."""
+    from orchestrator.observability.tm_audit import emit_tm_audit
     tid = str(tenant_id)
     _ensure_row(conn, tid, agent)
     conn.execute(
@@ -426,6 +455,16 @@ def revoke_l3(tenant_id: UUID | str, agent: str, *, reason: str, conn: Any) -> A
         (reason, tid, agent),
     )
     cancelled = cancel_open_batches(tenant_id, agent, reason=f"revoke_{reason}", conn=conn)
+    emit_tm_audit(
+        event_layer="does",
+        event_kind="autonomy_change",
+        actor="team_manager",
+        tenant_id=tenant_id,
+        run_id=None,
+        action={"agent": agent, "reason": reason, "batches_cancelled": cancelled, "new_level": "L2"},
+        summary=f"autonomy revoked L3→L2: agent={agent} reason={reason}",
+        conn=conn,
+    )
     _emit(tid, "agent_autonomy_revoked", {"agent": agent, "reason": reason,
                                           "batches_cancelled": cancelled})
     return get_autonomy(tenant_id, agent, conn=conn)
@@ -434,6 +473,7 @@ def revoke_l3(tenant_id: UUID | str, agent: str, *, reason: str, conn: Any) -> A
 def set_frozen(tenant_id: UUID | str, agent: str, frozen: bool, *, reason: str, conn: Any) -> AutonomyState:
     """The kill switch (Ops/VTR). Freezing cancels open batches atomically (the binding rule);
     unfreezing cancels nothing (work re-enters via the next coordinator sweep)."""
+    from orchestrator.observability.tm_audit import emit_tm_audit
     tid = str(tenant_id)
     _ensure_row(conn, tid, agent)
     conn.execute(
@@ -442,6 +482,16 @@ def set_frozen(tenant_id: UUID | str, agent: str, frozen: bool, *, reason: str, 
         (frozen, tid, agent),
     )
     cancelled = cancel_open_batches(tenant_id, agent, reason=f"freeze_{reason}", conn=conn) if frozen else 0
+    emit_tm_audit(
+        event_layer="does",
+        event_kind="autonomy_change",
+        actor="team_manager",
+        tenant_id=tenant_id,
+        run_id=None,
+        action={"agent": agent, "reason": reason, "frozen": frozen, "batches_cancelled": cancelled},
+        summary=f"autonomy {'frozen' if frozen else 'unfrozen'}: agent={agent} reason={reason}",
+        conn=conn,
+    )
     _emit(tid, "agent_autonomy_frozen" if frozen else "agent_autonomy_unfrozen",
           {"agent": agent, "reason": reason, "batches_cancelled": cancelled})
     return get_autonomy(tenant_id, agent, conn=conn)

@@ -201,6 +201,7 @@ def arm_pause_request(
     ``send_fn`` defaults to twilio_send.send_template_message.
     ``dry_run`` skips the real Twilio call (canary/CI default at the node).
     """
+    from orchestrator.observability.tm_audit import emit_tm_audit
     if conn_factory is None:
         from orchestrator.db import tenant_connection
 
@@ -342,6 +343,22 @@ def arm_pause_request(
                     ),
                 ),
             )
+
+        emit_tm_audit(
+            event_layer="does",
+            event_kind="approval_armed",
+            actor="team_manager",
+            tenant_id=tenant_id,
+            run_id=run_id,
+            action={
+                "approval_id": str(approval_id),
+                "approval_type": payload.approval_type,
+                "draft_batch_id": str(payload.draft_batch_id) if payload.draft_batch_id else None,
+                "dry_run": dry_run,
+            },
+            summary=f"approval armed: {payload.approval_type}",
+            conn=conn,
+        )
 
     logger.info(
         "request_owner_approval: armed tenant=%s run=%s approval=%s type=%s "

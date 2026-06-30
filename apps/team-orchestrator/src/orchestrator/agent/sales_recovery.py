@@ -77,7 +77,8 @@ from orchestrator.agent.self_evaluate import (
 from orchestrator.agent.types import AgentResult
 from orchestrator.error_router import route_failure
 from orchestrator.failures import FailureRecord, FailureType, HardLimitAxis
-from orchestrator.observability.agent_callback import with_reasoning_capture
+from orchestrator.observability.agent_callback import reasoning_step_input, with_reasoning_capture
+from orchestrator.observability.tm_audit import emit_tm_audit
 from orchestrator.privacy.pii_redactor import redact
 
 _logger = logging.getLogger(__name__)
@@ -745,6 +746,18 @@ def run_sales_recovery_agent(
     status: str = "completed"
     output: dict[str, Any] | None = None
 
+    # VT-182/VT-514 — stage the per-turn reasoning input envelope so the
+    # @with_reasoning_capture callback writes agent_reasoning_step rows (the
+    # DECIDES substrate tm_audit.reasoning_ref points at). Hash is best-effort.
+    import hashlib
+
+    try:
+        _bundle_hash = hashlib.sha256(
+            initial_user_content.encode("utf-8")
+        ).hexdigest()
+    except Exception:  # noqa: BLE001 — observability input is best-effort
+        _bundle_hash = "<unhashable-bundle>"
+
     for _ in range(_MAX_TURNS_PER_RUN):
         # Pre-turn checks: wallclock (the only enforcer that can fire
         # without a per-turn event source — accumulated time).
@@ -753,12 +766,19 @@ def run_sales_recovery_agent(
             break
 
         try:
-            response = _run_one_turn(
-                client,
-                model=model,
-                system_prompt=system_prompt,
-                messages=messages,
-            )
+            with reasoning_step_input(
+                context_bundle_hash=_bundle_hash,
+                context_bundle_components=["sales_recovery_bundle"],
+                context_bundle_token_count=0,
+                prior_tool_calls_count=tool_calls_made,
+                prior_tool_calls_summary=[],
+            ):
+                response = _run_one_turn(
+                    client,
+                    model=model,
+                    system_prompt=system_prompt,
+                    messages=messages,
+                )
         except APITimeoutError:
             # Per-turn HTTP ceiling tripped — one round-trip exceeded
             # PER_TURN_HTTP_TIMEOUT_S. The underlying condition is "this
@@ -975,6 +995,31 @@ def run_sales_recovery_agent(
             outcome=gate_outcome.outcome,
             rejection_feedback=gate_outcome.rejection_feedback,
             feedback_messages=gate_outcome.feedback_messages,
+        )
+
+        # VT-514 DECIDES — self_eval / policy_applied spine row (fail-soft,
+        # conn=None). Verdict + two-revise-then-fail policy outcome; no PII.
+        emit_tm_audit(
+            event_layer="decides",
+            event_kind="self_eval",
+            actor="sales_recovery",
+            tenant_id=context.tenant_id,
+            run_id=context.run_id,
+            summary=(
+                f"self-evaluate gate {gate_outcome.action.value} on attempt "
+                f"{gate_outcome.attempt_number}"
+            ),
+            decision={
+                "gate_action": gate_outcome.action.value,
+                "verdict": (
+                    gate_outcome.outcome.value if gate_outcome.outcome else None
+                ),
+                "self_evaluate_status": (
+                    gate_outcome.self_evaluate_status.value
+                    if gate_outcome.self_evaluate_status else None
+                ),
+                "attempt_number": gate_outcome.attempt_number,
+            },
         )
 
         if gate_outcome.action is GateAction.SHIP:

@@ -34,6 +34,7 @@ from orchestrator.agent.cost import compute_cost_paise
 from orchestrator.observability.decorators import _observability_context
 from orchestrator.observability.pii import redact_for_log
 from orchestrator.observability.pipeline_observability import write_step
+from orchestrator.observability.tm_audit import emit_tm_audit
 
 if TYPE_CHECKING:
     from orchestrator.agent.orchestrator_agent_driver import (
@@ -159,6 +160,28 @@ class OrchestratorReasoningCallback(BaseCallbackHandler):
         self.driver.check_mid_invocation(
             self.usage, run_id=self.run_id, tenant_id=self.tenant_id
         )
+        emit_tm_audit(
+            event_layer="does",
+            event_kind="tool_invoked",
+            actor="team_manager",
+            tenant_id=self.tenant_id,
+            run_id=self.run_id,
+            summary=f"tool_invoked: {serialized.get('name', 'unknown')}",
+            action={"tool_name": serialized.get("name", "unknown"), "input_str": input_str[:500] or None},
+            conn=None,
+        )
+
+    def on_tool_end(self, output: str, **kwargs: Any) -> None:
+        emit_tm_audit(
+            event_layer="gets",
+            event_kind="tool_result",
+            actor="team_manager",
+            tenant_id=self.tenant_id,
+            run_id=self.run_id,
+            summary=f"tool_result: {kwargs.get('name', 'unknown')}",
+            result={"tool_name": kwargs.get("name", "unknown"), "output": str(output)[:1000] if output else None},
+            conn=None,
+        )
 
     # -- helpers -----------------------------------------------------
 
@@ -276,7 +299,7 @@ class OrchestratorReasoningCallback(BaseCallbackHandler):
                     "prompt_token_count": int(
                         usage_data.get("input_tokens", 0) or 0
                     ),
-                    "context_bundle_hash": "<langchain-passthrough>",
+                    "context_bundle_hash": ctx.snapshot_id or "<langchain-passthrough>",
                     "context_bundle_components": [],
                     "context_bundle_token_count": 0,
                     "prior_tool_calls_count": self.usage.tool_calls,
@@ -312,6 +335,29 @@ class OrchestratorReasoningCallback(BaseCallbackHandler):
                 "VT-125 callback write_step swallowed (CL-122 best-effort)",
                 extra={"exc": repr(exc)},
             )
+
+        # VT-514 DECIDES — reasoning_turn spine row (fail-soft, conn=None).
+        # References the pipeline_steps reasoning row written above via
+        # reasoning_ref; carries model + redacted think_text, never raw context.
+        emit_tm_audit(
+            event_layer="decides",
+            event_kind="reasoning_turn",
+            actor="team_manager",
+            tenant_id=ctx.tenant_id,
+            run_id=ctx.run_id,
+            snapshot_id=ctx.snapshot_id,
+            summary=(think_text_redacted[:200] if think_text_redacted else None),
+            decision={
+                "model_used": usage_data.get("model"),
+                "tokens_input": int(usage_data.get("input_tokens", 0) or 0),
+                "tokens_output": int(usage_data.get("output_tokens", 0) or 0),
+                "status": status,
+            },
+            reasoning_ref={
+                "run_id": str(ctx.run_id),
+                "step_name": "orchestrator_agent_turn",
+            },
+        )
 
     def _first_text(self, response: Any) -> str | None:
         try:

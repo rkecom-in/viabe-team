@@ -22,6 +22,7 @@ from langgraph.types import Command
 
 from orchestrator._tenant_guard import TenantIsolationError
 from orchestrator.context_builder import build_sales_recovery_context
+from orchestrator.observability.tm_audit import emit_tm_audit
 from orchestrator.types.trigger_reason import TriggerReason
 
 
@@ -99,6 +100,18 @@ def make_spawn_tool(
         }
         if update_builder is not None:
             update.update(update_builder(state))
+        _spawn_tenant_id = state.get("tenant_id")
+        if _spawn_tenant_id is not None:
+            emit_tm_audit(
+                event_layer="does",
+                event_kind="spawn",
+                actor=state.get("active_agent") or "team_manager",
+                tenant_id=_spawn_tenant_id,
+                run_id=state.get("run_id"),
+                summary=f"Spawning {agent_name}",
+                action={"target_lane": agent_name, "spawn_tool": tool_name},
+                conn=None,
+            )
         return Command(goto=agent_name, graph=Command.PARENT, update=update)
 
     return handoff

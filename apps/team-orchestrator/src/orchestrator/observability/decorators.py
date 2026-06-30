@@ -66,6 +66,7 @@ class ObservabilityContext:
     run_id: UUID
     tenant_id: UUID
     parent_step_id: UUID | None = None
+    snapshot_id: str | None = None
 
 
 _observability_context: ContextVar[ObservabilityContext | None] = ContextVar(
@@ -116,6 +117,7 @@ def observability_context(
     run_id: UUID,
     tenant_id: UUID,
     parent_step_id: UUID | None = None,
+    snapshot_id: str | None = None,
 ) -> Iterator[None]:
     """Set the ContextVar that decorated tools read.
 
@@ -126,7 +128,10 @@ def observability_context(
     """
     token = _observability_context.set(
         ObservabilityContext(
-            run_id=run_id, tenant_id=tenant_id, parent_step_id=parent_step_id
+            run_id=run_id,
+            tenant_id=tenant_id,
+            parent_step_id=parent_step_id,
+            snapshot_id=snapshot_id,
         )
     )
     try:

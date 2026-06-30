@@ -98,6 +98,7 @@ def emit_kg_event(
     MUST be called inside the source write's transaction so the event is atomic
     with it. Returns the event_id.
     """
+    from orchestrator.observability.tm_audit import emit_tm_audit
     eid = uuid4()
     conn.execute(
         """
@@ -105,6 +106,15 @@ def emit_kg_event(
         VALUES (%s, %s, %s, %s)
         """,
         (str(eid), event_type, str(tenant_id), Jsonb(payload)),
+    )
+    emit_tm_audit(
+        event_layer="does",
+        event_kind="memory_write",
+        actor="team_manager",
+        tenant_id=tenant_id,
+        action={"event_id": str(eid), "event_type": event_type},
+        summary=f"KG event written: {event_type}",
+        conn=None,
     )
     return eid
 

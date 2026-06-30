@@ -456,6 +456,7 @@ def agent_send_draft(
     ``NotImplementedError`` for the PR-3 L3 branch and ``ValueError`` for an
     unknown autonomy level — both deliberate fail-LOUD paths.
     """
+    from orchestrator.observability.tm_audit import emit_tm_audit
     if conn is None:
         with tenant_connection(tenant_id) as own_conn:
             return agent_send_draft(
@@ -686,6 +687,33 @@ def agent_send_draft(
                     tid, did, draft["template_name"], code,
                 )
                 # The draft stays 'drafted' (NOT terminal); the txn commits with no flip.
+                # VT-514 send-result audit — FAIL-SOFT (conn=None): an L3 transport failure. Emitted
+                # inside the FOR UPDATE txn but on its OWN service-role connection, so it can never
+                # roll back the (un-flipped) txn; status='failed'/severity='error'. Never raises.
+                emit_tm_audit(
+                    event_layer="does",
+                    event_kind="send_result",
+                    actor=draft["agent"] or "sales_recovery",
+                    tenant_id=tid,
+                    summary=f"agent customer send failed draft={did} code={code}",
+                    action={
+                        "draft_id": did,
+                        "batch_id": draft["batch_id"],
+                        "customer_id": draft["customer_id"],
+                        "work_item_id": draft["work_item_id"],
+                        "template_name": draft["template_name"],
+                        "autonomy_level": autonomy_level,
+                    },
+                    result={
+                        "status": "failed",
+                        "code": code,
+                        "message_sid": out.message_sid,
+                        "batch_status": draft["batch_status"],
+                    },
+                    severity="error",
+                    status="error",
+                    conn=None,
+                )
                 return AgentSendResult(
                     draft_id=did, status="failed",
                     skip_reason=f"send_failed:{code}", batch_status=draft["batch_status"],
@@ -722,6 +750,32 @@ def agent_send_draft(
             status, tid, did, draft["batch_id"], draft["template_name"],
             out.message_sid, batch_status,
         )
+        # VT-514 send-result audit — FAIL-SOFT (conn=None), placed OUTSIDE the FOR UPDATE txn
+        # (lock already released at the `with conn.transaction()` close): records the OUTCOME of an
+        # already-committed L3 auto-send so a failed audit can never roll back the send / double-send.
+        emit_tm_audit(
+            event_layer="does",
+            event_kind="send_result",
+            actor=draft["agent"] or "sales_recovery",
+            tenant_id=tid,
+            summary=f"agent customer send {status} draft={did} sid={out.message_sid}",
+            action={
+                "draft_id": did,
+                "batch_id": draft["batch_id"],
+                "customer_id": draft["customer_id"],
+                "work_item_id": draft["work_item_id"],
+                "template_name": draft["template_name"],
+                "autonomy_level": autonomy_level,
+            },
+            result={
+                "status": status,
+                "message_sid": out.message_sid,
+                "batch_status": batch_status,
+            },
+            severity="info",
+            status="ok",
+            conn=None,
+        )
         return AgentSendResult(
             draft_id=did, status=status, message_sid=out.message_sid, batch_status=batch_status,
         )
@@ -744,6 +798,32 @@ def agent_send_draft(
         logger.info(
             "agent_send: send failed tenant=%s draft=%s template=%s code=%s",
             tid, did, draft["template_name"], code,
+        )
+        # VT-514 send-result audit — FAIL-SOFT: a transport-level send failure (draft stays
+        # 'drafted', no flip). status='failed'/severity='error'. Never raises (conn=None).
+        emit_tm_audit(
+            event_layer="does",
+            event_kind="send_result",
+            actor=draft["agent"] or "sales_recovery",
+            tenant_id=tid,
+            summary=f"agent customer send failed draft={did} code={code}",
+            action={
+                "draft_id": did,
+                "batch_id": draft["batch_id"],
+                "customer_id": draft["customer_id"],
+                "work_item_id": draft["work_item_id"],
+                "template_name": draft["template_name"],
+                "autonomy_level": autonomy_level,
+            },
+            result={
+                "status": "failed",
+                "code": code,
+                "message_sid": out.message_sid,
+                "batch_status": draft["batch_status"],
+            },
+            severity="error",
+            status="error",
+            conn=None,
         )
         return AgentSendResult(
             draft_id=did,
@@ -790,6 +870,32 @@ def agent_send_draft(
         "agent_send: %s tenant=%s draft=%s batch=%s template=%s sid=%s batch_status=%s",
         status, tid, did, draft["batch_id"], draft["template_name"],
         out.message_sid, batch_status,
+    )
+    # VT-514 send-result audit — FAIL-SOFT (conn=None): records the OUTCOME of an already-
+    # performed external WhatsApp send AFTER the draft flip has committed, so a failed audit can
+    # never roll back a sent message or cause a double-send on retry. ids + facts only (no phone).
+    emit_tm_audit(
+        event_layer="does",
+        event_kind="send_result",
+        actor=draft["agent"] or "sales_recovery",
+        tenant_id=tid,
+        summary=f"agent customer send {status} draft={did} sid={out.message_sid}",
+        action={
+            "draft_id": did,
+            "batch_id": draft["batch_id"],
+            "customer_id": draft["customer_id"],
+            "work_item_id": draft["work_item_id"],
+            "template_name": draft["template_name"],
+            "autonomy_level": autonomy_level,
+        },
+        result={
+            "status": status,
+            "message_sid": out.message_sid,
+            "batch_status": batch_status,
+        },
+        severity="info",
+        status="ok",
+        conn=None,
     )
     return AgentSendResult(
         draft_id=did,

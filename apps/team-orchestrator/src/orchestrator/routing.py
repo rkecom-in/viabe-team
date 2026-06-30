@@ -11,6 +11,7 @@ from typing import Any
 
 from langchain_core.messages import AIMessage
 
+from orchestrator.observability.tm_audit import emit_tm_audit
 from orchestrator.state.agent_graph_state import AgentGraphState
 
 
@@ -59,7 +60,31 @@ def route_after_orchestrator(state: AgentGraphState) -> str:
     for tc in tool_calls:
         route_key = route_for_tool.get(tc.get("name", ""))
         if route_key is not None:
+            # VT-514 DECIDES — route_decided spine row (fail-soft, conn=None).
+            emit_tm_audit(
+                event_layer="decides",
+                event_kind="route_decided",
+                actor="team_manager",
+                tenant_id=state.get("tenant_id"),
+                run_id=state.get("run_id"),
+                summary=f"orchestrator spawned specialist via {tc.get('name')}",
+                decision={
+                    "route_key": route_key,
+                    "spawn_tool": tc.get("name"),
+                    "tool_call_args": tc.get("args"),
+                },
+            )
             return route_key
+    # VT-514 DECIDES — terminal route (no spawn tool fired).
+    emit_tm_audit(
+        event_layer="decides",
+        event_kind="route_decided",
+        actor="team_manager",
+        tenant_id=state.get("tenant_id"),
+        run_id=state.get("run_id"),
+        summary="orchestrator terminated without spawning a specialist",
+        decision={"route_key": "terminal", "spawn_tool": None},
+    )
     return "terminal"
 
 

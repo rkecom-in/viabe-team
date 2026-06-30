@@ -132,3 +132,35 @@ export function scopeHistoryTenantFilter(
   const effective = requestedTenantIds.filter((t) => assigned.has(t))
   return { tenantIds: effective, denied: effective.length === 0 }
 }
+
+/**
+ * De-identify ONE tm_audit_log row for a VTR read. Mirrors deIdentifyStepForVtr
+ * (above): spread + null-out the dangerous columns.
+ *
+ * Drops the three PII-bearing / reasoning-bearing columns a VTR must not see:
+ *   - input          (raw agent input payload — may carry PII tokens)
+ *   - result         (raw outcome — may carry resolved values)
+ *   - reasoning_ref  (pointer into pipeline_steps think-text)
+ *
+ * Passes through ids, event_layer/kind, actor, tenant_id, run_id, trace_id,
+ * snapshot_id, summary, decision, action, severity, status, parent_audit_id.
+ * `decision`/`action` carry ids + structured facts per the emit contract; if a
+ * future audit finds raw text there, null them here too — the generic-T shape
+ * makes that a one-line change without touching callers.
+ *
+ * Generic so the function is usable without importing TmAuditEvent into this
+ * dep-less module (which has no stream.ts import). reasoning_ref is JSONB →
+ * typed `unknown` to match the tm_audit_log column.
+ */
+export function deIdentifyTmAuditForVtr<T extends {
+  input: unknown
+  result: unknown
+  reasoning_ref: unknown
+}>(row: T): T {
+  return {
+    ...row,
+    input: null,
+    result: null,
+    reasoning_ref: null,
+  }
+}

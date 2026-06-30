@@ -264,6 +264,7 @@ def _default_escalation_sender(tenant_id: str, params: dict[str, str]) -> Any:
 def _emit(tenant_id: str, reason: EscalationReason, detail: str) -> None:
     """Best-effort observability — never fails the caller."""
     try:
+        from orchestrator.observability.tm_audit import emit_tm_audit
         from orchestrator.observability.log import log_event
 
         log_event(
@@ -273,6 +274,16 @@ def _emit(tenant_id: str, reason: EscalationReason, detail: str) -> None:
             severity="warning",
             component="agents",
             payload={"tenant_id": tenant_id, "reason": reason.value, "detail": detail},
+        )
+        emit_tm_audit(
+            event_layer="does",
+            event_kind="escalation",
+            actor="team_manager",
+            tenant_id=tenant_id,
+            run_id=None,
+            action={"reason": reason.value, "detail": detail},
+            summary=f"owner escalation notified: {reason.value}",
+            conn=None,
         )
     except Exception:  # noqa: BLE001
         logger.exception("escalation: emit failed tenant=%s", tenant_id)
