@@ -609,10 +609,10 @@ export function EntityMatchStep({
       <section data-entity-step="discovering" className={`mt-8 ${card}`}>
         {/* Spinner + heading while polling is active */}
         {discovering && (
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2.5">
             <span
               aria-hidden
-              className="inline-block h-4 w-4 animate-spin rounded-full border-2 border-primary border-t-transparent"
+              className="inline-block h-5 w-5 shrink-0 animate-spin rounded-full border-2 border-primary border-t-transparent"
             />
             <p className="text-sm font-medium text-foreground">{t.discovering_heading}</p>
           </div>
@@ -685,8 +685,9 @@ export function EntityMatchStep({
                   {c.detail && <span className="text-xs text-muted-foreground">{c.detail}</span>}
                   {/* VT-511: show the GSTIN so the owner can recognise which registration we found. */}
                   {c.candidate_gstin && (
-                    <span className="font-mono text-xs tracking-wide text-muted-foreground">
-                      {t.gstin_label}: {c.candidate_gstin}
+                    <span className="inline-flex items-center gap-1.5 rounded bg-muted px-2 py-0.5 font-mono text-xs tracking-wide text-muted-foreground">
+                      <span className="font-medium text-foreground/60">{t.gstin_label}</span>
+                      {c.candidate_gstin}
                     </span>
                   )}
                   {confirmable ? (
@@ -747,21 +748,28 @@ export function EntityMatchStep({
   if (step === 'verified' && verified) {
     return (
       <section data-entity-step="verified" className={`mt-8 ${card}`}>
-        <div className="flex items-center gap-2">
-          <h2 className="text-lg font-semibold text-foreground">{t.verified_heading}</h2>
-          {chip(t.verified_chip, 'verified')}
+        {/* VT-511: celebratory verified header with green icon */}
+        <div className="flex items-center gap-3">
+          <span aria-hidden className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-secondary text-xl font-bold text-secondary-foreground">
+            ✓
+          </span>
+          <div className="flex flex-col gap-1">
+            <h2 className="text-lg font-semibold text-foreground">{t.verified_heading}</h2>
+            {chip(t.verified_chip, 'verified')}
+          </div>
         </div>
         {/* The AUTHORITATIVE registry name — Sandbox, not the candidate's web/LLM name. */}
-        <p data-verified-name className="mt-3 text-base font-medium text-foreground">
+        <p data-verified-name className="mt-4 text-base font-semibold text-foreground">
           {verified.name ?? businessName}
         </p>
-        {/* VT-511: show the verified GSTIN so the owner can confirm we checked the right number. */}
+        {/* VT-511: show the verified GSTIN in a styled trust badge. */}
         {verified.gstin && (
-          <p data-verified-gstin className="mt-1 font-mono text-sm text-muted-foreground">
-            {t.gstin_verified_label}: {verified.gstin}
-          </p>
+          <div data-verified-gstin className="mt-2 inline-flex items-center gap-2 rounded-lg bg-secondary/10 px-3 py-1.5 font-mono text-sm text-secondary">
+            <span className="text-xs font-medium not-italic">{t.gstin_verified_label}</span>
+            <span>{verified.gstin}</span>
+          </div>
         )}
-        <p className="mt-2 text-sm leading-relaxed text-muted-foreground">{t.verified_note}</p>
+        <p className="mt-3 text-sm leading-relaxed text-muted-foreground">{t.verified_note}</p>
         {/* VT-449 — registry-CIN confirm. Shown ONLY when discovery surfaced a registry CIN and the
             owner hasn't dismissed it. The owner must CONFIRM it's theirs — we NEVER auto-capture a
             SERP-scraped CIN. On confirm, the CIN rides into create for the MCA-canonical name-match;
@@ -808,13 +816,14 @@ export function EntityMatchStep({
         {/* Sweep #1/#6: surface the parent's OTP-request error so a failed "Verified → Continue" OTP
             send is VISIBLE here, not a silent button no-op. */}
         {error && (
-          <p
+          <div
             data-entity-continue-error
             role="alert"
-            className="mt-4 rounded-lg bg-destructive/10 px-3 py-2 text-sm text-destructive"
+            className="mt-4 flex items-start gap-2.5 rounded-lg border border-destructive/20 bg-destructive/5 px-4 py-3"
           >
-            {error}
-          </p>
+            <span aria-hidden className="mt-0.5 shrink-0 text-destructive">⚠</span>
+            <p className="text-sm leading-relaxed text-destructive">{error}</p>
+          </div>
         )}
         <button
           type="button"
@@ -841,7 +850,13 @@ export function EntityMatchStep({
     // it carries no inactive-vs-not-found enumeration oracle; the generic reject copy is unchanged.
     return (
       <section data-entity-step="reject" className={`mt-8 ${card}`}>
-        <h2 className="text-lg font-semibold text-foreground">{t.reject_heading}</h2>
+        {/* VT-511: designed reject state — icon + heading, not a raw text blob */}
+        <div className="flex items-start gap-3">
+          <span aria-hidden className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-destructive/10 text-base font-bold text-destructive">
+            ✕
+          </span>
+          <h2 className="text-lg font-semibold text-foreground">{t.reject_heading}</h2>
+        </div>
         <p data-reject-body className="mt-3 text-sm leading-relaxed text-muted-foreground">
           {t.reject_body}
         </p>
@@ -860,7 +875,13 @@ export function EntityMatchStep({
   if (step === 'retry') {
     return (
       <section data-entity-step="retry" className={`mt-8 ${card}`}>
-        <h2 className="text-lg font-semibold text-foreground">{t.retry_heading}</h2>
+        {/* VT-511: designed retry state — icon signals transient (not terminal) */}
+        <div className="flex items-start gap-3">
+          <span aria-hidden className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-muted text-base font-bold text-muted-foreground">
+            ↻
+          </span>
+          <h2 className="text-lg font-semibold text-foreground">{t.retry_heading}</h2>
+        </div>
         <p data-retry-body className="mt-3 text-sm leading-relaxed text-muted-foreground">{t.retry_body}</p>
         <button
           type="button"
@@ -949,7 +970,10 @@ export function EntityMatchStep({
           className="mt-1 w-full rounded-xl border border-input bg-card px-4 py-3 font-mono uppercase tracking-wide text-foreground outline-none focus:border-primary"
         />
         {manualError && (
-          <p data-manual-error className="mt-2 text-sm text-destructive">{t.manual_format_error}</p>
+          <p data-manual-error className="mt-2 flex items-center gap-1.5 text-sm text-destructive">
+            <span aria-hidden>⚠</span>
+            {t.manual_format_error}
+          </p>
         )}
         <div className="mt-5 flex flex-wrap items-center gap-3">
           <button
