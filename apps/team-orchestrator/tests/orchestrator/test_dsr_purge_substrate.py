@@ -270,6 +270,26 @@ def _seed_full_tenant_data(dsn: str, tenant_id: UUID) -> dict[str, UUID]:
             (str(tenant_id),),
         )
 
+        # tm_audit_log (VT-514, mig 147) + debug_events (VT-515, mig 146): VT-518 — the two
+        # tenant-scoped PII-bearing observability tables. Both MUST be hard-deleted on DSR
+        # (redact-at-write + RLS is insufficient for erasure — redacted activity history is
+        # still the subject's data). Seed one row each so the broad sweep + cross-tenant
+        # assertions exercise them. tm_audit_log run_id/parent_audit_id left NULL (FK-free
+        # seed); debug_events tenant_id is set (the subject's row — NULL-tenant pre-tenant
+        # failures are a separate, non-subject class the purge correctly leaves alone).
+        conn.execute(
+            "INSERT INTO tm_audit_log "
+            "(tenant_id, event_layer, event_kind, actor, summary) "
+            "VALUES (%s, 'does', 'business_action', 'sales_recovery', 'dsr-seed')",
+            (str(tenant_id),),
+        )
+        conn.execute(
+            "INSERT INTO debug_events "
+            "(tenant_id, failure_type, component, severity) "
+            "VALUES (%s, 'exception', 'signup', 'error')",
+            (str(tenant_id),),
+        )
+
         # privacy_audit_log — pre-existing event, MUST survive purge. VT-80:
         # write through the real hash-chain writer (a seeded event_type that is
         # NOT one of the purge events, so the purge-count assertions stay exact).
@@ -339,6 +359,8 @@ _PURGED_TABLES = (
     "platform_listings",  # VT-325: per-listing source must be swept by DSR purge
     "kg_events_processed",  # VT-327: KG consumer ledger must be swept by DSR purge
     "kg_events",  # VT-327: KG outbox (TENANT_CREATED business_name PII) must be swept
+    "tm_audit_log",  # VT-518: TM audit/trace (VT-514) — tenant PII activity history, erased on DSR
+    "debug_events",  # VT-518: debug/failure log (VT-515) — tenant PII, erased on DSR
     "owner_inputs",
     "campaigns",
     "pipeline_steps",
@@ -885,3 +907,42 @@ def test_purge_hard_deletes_tenant_oauth_tokens(substrate):  # type: ignore[no-u
     assert _count_tenant_rows(substrate.dsn, "tenant_oauth_tokens", tenant_b) >= 1, (
         "VT-422 GAP-1: cross-tenant leak — purging A wiped B's OAuth token"
     )
+
+
+def test_purge_hard_deletes_tm_audit_and_debug_events(substrate):  # type: ignore[no-untyped-def]
+    """VT-518 (DSR-purge gap, Cowork audit-after of VT-514/515) — the two tenant-scoped
+    PII-bearing observability tables added by VT-514 (tm_audit_log) + VT-515 (debug_events)
+    were missing from _PURGE_ORDER, so a right-to-erasure tenant's audit + debug activity
+    history survived the purge. Redact-at-write + RLS is insufficient for ERASURE — the
+    redacted history is still the subject's data. A tenant DSR-delete MUST hard-delete both
+    (assert 0 rows after purge); a co-resident tenant is untouched. Real PG — mock cursors
+    hide the FK-ordering (tm_audit_log.run_id → pipeline_runs; parent_audit_id self-FK)."""
+    from orchestrator.dsr_purge import _PURGE_ORDER, purge_tenant_data
+
+    # Both tables are in the purge order (drift guard — a future edit dropping either
+    # silently re-opens the erasure gap).
+    assert "tm_audit_log" in _PURGE_ORDER, "tm_audit_log fell out of _PURGE_ORDER (DSR gap)"
+    assert "debug_events" in _PURGE_ORDER, "debug_events fell out of _PURGE_ORDER (DSR gap)"
+
+    tenant_a = _new_tenant(substrate.dsn, name="Tenant A (tm-audit purgee)")
+    tenant_b = _new_tenant(substrate.dsn, name="Tenant B (tm-audit untouched)")
+    _seed_full_tenant_data(substrate.dsn, tenant_a)
+    _seed_full_tenant_data(substrate.dsn, tenant_b)
+
+    # Pre: both tenants have audit + debug rows.
+    for table in ("tm_audit_log", "debug_events"):
+        assert _count_tenant_rows(substrate.dsn, table, tenant_a) >= 1
+        assert _count_tenant_rows(substrate.dsn, table, tenant_b) >= 1
+
+    result = purge_tenant_data(_open_dsr_ticket(substrate.dsn, tenant_a))
+    for table in ("tm_audit_log", "debug_events"):
+        assert result.deleted_counts.get(table, 0) >= 1, (
+            f"VT-518: purge must report {table} deletions"
+        )
+        # Post: A's history is GONE; B's survives (scoping). THE erasure assertion.
+        assert _count_tenant_rows(substrate.dsn, table, tenant_a) == 0, (
+            f"VT-518: DSR-delete left {table} rows behind (subject activity survives erasure)"
+        )
+        assert _count_tenant_rows(substrate.dsn, table, tenant_b) >= 1, (
+            f"VT-518: cross-tenant leak — purging A wiped B's {table}"
+        )
