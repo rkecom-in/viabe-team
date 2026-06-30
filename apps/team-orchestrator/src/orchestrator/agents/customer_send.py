@@ -523,6 +523,28 @@ def agent_send_draft(
     from orchestrator.agents.onboarding_gate import is_agent_eligible
 
     if not is_agent_eligible(tid, "sales_recovery", conn=conn):
+        # VT-519: the Gate-0 skip was SILENT — an ownership/onboarded/verification block
+        # (incl. VT-517 ownership_verified=false) poisoned the draft with NO trace in the
+        # VT-515 debug feed (audit-blocker #1/#5: a send-block must never be invisible).
+        # Emit a first-class, fail-soft debug_event carrying the SPECIFIC unmet prereqs.
+        # Best-effort: never raises into the gate; the skip still happens regardless.
+        try:
+            from orchestrator.agents.onboarding_gate import unmet_prerequisites
+            from orchestrator.observability.debug_log import emit_debug_event
+
+            emit_debug_event(
+                failure_type="silent_degrade",
+                component="customer_send",
+                operation="gate0_skip_not_onboarded",
+                error="agent customer-send skipped at Gate-0: tenant not eligible",
+                context={"unmet": unmet_prerequisites(tid, "sales_recovery", conn=conn),
+                         "agent": "sales_recovery"},
+                severity="warning",
+                impact="blocked_send",
+                tenant_id=tid,
+            )
+        except Exception:  # noqa: BLE001 — observability is best-effort; never block the gate
+            logger.debug("agent_send: Gate-0 skip debug_event emit failed (non-terminal)", exc_info=True)
         return _skip(conn, tid, draft, SKIP_NOT_ONBOARDED, persist=True)
 
     # --- Gate 0b: universal WABA-live pre-gate (VT-460 gap b) — fail-closed ---

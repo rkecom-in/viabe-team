@@ -509,8 +509,34 @@ def run_signup(
             res.tenant_id, inp.whatsapp_number, inp.preferred_language,
             inp.owner_name, trial_end,
         ))
-    except Exception:  # noqa: BLE001 — welcome is best-effort; never fail the signup
+        if not sent:
+            # VT-519: the welcome is the owner's FIRST signal that signup worked. A
+            # non-delivery (unapproved SID, transport refusal, sandbox-not-joined, etc.)
+            # was previously SILENT — `_default_welcome` only `logger.warning`s, so the
+            # owner gets silence and the VT-515 feed shows NOTHING (the exact failure
+            # Fazal hit: "onboarding completed but no welcome arrived"). Emit a first-class
+            # debug_event so a missing welcome is always observable + diagnosable.
+            _emit_signup_event(
+                failure_type="vendor_error",
+                operation="welcome_not_delivered",
+                error="welcome send returned not-delivered (no confirmed SendResult.success)",
+                severity="error",
+                impact="owner_no_welcome",
+                tenant_id=res.tenant_id,
+                vendor="twilio",
+            )
+    except Exception as exc:  # noqa: BLE001 — welcome is best-effort; never fail the signup
         logger.exception("signup: welcome send failed tenant=%s (non-terminal)", res.tenant_id)
+        # VT-519: a raising welcome send was also silent in the feed — emit it too.
+        _emit_signup_event(
+            failure_type="exception",
+            operation="welcome_send_raised",
+            error=exc,
+            severity="error",
+            impact="owner_no_welcome",
+            tenant_id=res.tenant_id,
+            vendor="twilio",
+        )
 
     # VT-366: kick the Auto-Discovery Engine — post-commit, NON-BLOCKING (DBOS bg workflow), exactly
     # like the welcome. The tenant is already committed; the engine assembles a DRAFT profile from
