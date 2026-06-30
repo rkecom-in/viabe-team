@@ -94,6 +94,44 @@ def test_business_name_matches_all_generic_falls_back_to_substring() -> None:
     assert not entity_match.business_name_matches("Services", "TELECOM CORP")
 
 
+# ---------------------------------------------------------------------------
+# VT-510 — OPC/expanded-form normalization via normalized_company_key
+# ---------------------------------------------------------------------------
+
+def test_business_name_matches_opc_expanded_form_treated_as_suffix() -> None:
+    """VT-510: 'one person company' (the OPC expanded long-form) is stripped during normalization →
+    the same company with abbreviated vs expanded OPC still shares the distinctive brand token."""
+    # Abbreviated OPC in candidate card vs expanded form (hypothetical Sandbox variant)
+    assert entity_match.business_name_matches(
+        "RKECOM SERVICES (OPC) PRIVATE LIMITED",
+        "RKECOM SERVICES ONE PERSON COMPANY PRIVATE LIMITED",
+    )
+    # Abbreviated OPC in Sandbox vs different abbreviation style in candidate
+    assert entity_match.business_name_matches(
+        "RKECOM SERVICES (OPC) PRIVATE LIMITED",
+        "RKECOM SERVICES OPC PRIVATE LIMITED",
+    )
+    # Short Sandbox trade_name vs full candidate card name — the exact real e2e scenario:
+    # Sandbox authoritative_name()="RKECOM" (trade_name) vs candidate "RKECOM SERVICES (OPC) PRIVATE LIMITED"
+    assert entity_match.business_name_matches(
+        "RKECOM SERVICES (OPC) PRIVATE LIMITED",
+        "RKECOM",
+    )
+
+
+def test_business_name_matches_genuine_different_company_still_rejects_after_normalization() -> None:
+    """VT-510 SECURITY: the new normalization must NOT loosen the genuine-mismatch protection.
+    A DIFFERENT company's name shares NO distinctive token with the typed name → REJECT."""
+    assert not entity_match.business_name_matches(
+        "RKECOM SERVICES (OPC) PRIVATE LIMITED",
+        "SHUBHAM TELECOM SERVICES",
+    )
+    assert not entity_match.business_name_matches(
+        "RKECOM SERVICES (OPC) PRIVATE LIMITED",
+        "AECOM INDIA PRIVATE LIMITED",
+    )
+
+
 def test_fetch_candidates_cin_registry_leg_surfaces_cin() -> None:
     # VT-449: a "<name> <city> CIN" SERP → a registry CIN candidate (the MCA Company-Master-Data input).
     def search_fn(q: str) -> list[dict[str, Any]]:
@@ -214,6 +252,64 @@ def test_verify_gstin_tenantless_vendor_down_fail_closed() -> None:
 
     out = entity_match._verify_gstin_tenantless(_VALID_GSTIN, search_fn=lambda _g: GstinLookup(ok=False))
     assert out["ok"] is False and out["reason"] == "vendor_down"
+
+
+def test_verify_gstin_tenantless_name_match_passes_for_opc_formatting_diff() -> None:
+    """VT-510: Fazal's actual e2e regression.
+    name_anchor = 'RKECOM SERVICES (OPC) PRIVATE LIMITED' (the candidate card name typed/shown to
+    the owner), Sandbox returns trade_name='RKECOM' as authoritative_name().
+    After VT-510 normalization fix, business_name_matches uses normalized_company_key which strips
+    OPC/PRIVATE/LIMITED → both sides reduce to 'rkecom' → MATCH, gate passes, NOT false-rejected."""
+    from orchestrator.integrations.methods.sandbox_kyc import GstinLookup
+
+    out = entity_match._verify_gstin_tenantless(
+        _RKECOM_GSTIN,
+        name_anchor="RKECOM SERVICES (OPC) PRIVATE LIMITED",
+        search_fn=lambda _g: GstinLookup(
+            ok=True,
+            legal_name="RKECOM SERVICES (OPC) PRIVATE LIMITED",
+            trade_name="RKECOM",
+            status="Active",
+        ),
+    )
+    assert out["ok"] is True and out["status"] == "gstin_verified", f"Expected verified, got: {out}"
+    assert out["gstin"] == _RKECOM_GSTIN
+
+
+def test_verify_gstin_tenantless_inactive_gstin_rejects() -> None:
+    """VT-510 SECURITY: Sandbox-inactive GSTIN → invalid_gstin even if the name-match would pass.
+    The Sandbox-active gate is NEVER skipped."""
+    from orchestrator.integrations.methods.sandbox_kyc import GstinLookup
+
+    out = entity_match._verify_gstin_tenantless(
+        _RKECOM_GSTIN,
+        name_anchor="RKECOM SERVICES (OPC) PRIVATE LIMITED",
+        search_fn=lambda _g: GstinLookup(
+            ok=True,
+            legal_name="RKECOM SERVICES (OPC) PRIVATE LIMITED",
+            trade_name="RKECOM",
+            status="Inactive",
+        ),
+    )
+    assert out["ok"] is False and out["reason"] == "invalid_gstin"
+
+
+def test_verify_gstin_tenantless_name_match_rejects_different_company() -> None:
+    """VT-510 SECURITY: valid+ACTIVE GSTIN belonging to a DIFFERENT company → invalid_gstin.
+    A different business's registration must NEVER earn a tenant even when the Sandbox returns Active."""
+    from orchestrator.integrations.methods.sandbox_kyc import GstinLookup
+
+    out = entity_match._verify_gstin_tenantless(
+        _RKECOM_GSTIN,
+        name_anchor="SHUBHAM TELECOM SERVICES",
+        search_fn=lambda _g: GstinLookup(
+            ok=True,
+            legal_name="RKECOM SERVICES OPC PRIVATE LIMITED",
+            trade_name="RKECOM",
+            status="Active",
+        ),
+    )
+    assert out["ok"] is False and out["reason"] == "invalid_gstin"
 
 
 _LLM_CIN = "U52609MH2020OPC344309"
