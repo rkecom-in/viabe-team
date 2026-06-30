@@ -115,18 +115,20 @@ def verify_gstin_for_signup(gstin: str, *, search_fn: SearchFn | None = None) ->
 
 # §5-approved copy (Cowork 2026-06-24). Latin tokens (Viabe / GST / GSTIN) kept in both langs.
 SIGNUP_GATE_COPY: dict[str, dict[str, str]] = {
-    # invalid_gstin → terminal reject. Generic: never leaks inactive-vs-not-found.
+    # invalid_gstin → terminal reject. Generic: never leaks inactive-vs-not-found OR name-mismatch
+    # vs inactive (no enumeration oracle). VT-510: changed "find" → "verify" so the copy is accurate
+    # when the GSTIN is active but belongs to a genuinely different business (name-mismatch terminal).
     "reject": {
         "en": (
-            "Viabe Team is for GST-registered businesses. We couldn't find an active GST "
-            "registration for the details you entered. Viabe Team runs real business tasks on "
+            "Viabe Team is for GST-registered businesses. We couldn't verify an active GST "
+            "registration for this business. Viabe Team runs real business tasks on "
             "your behalf, so we verify every business's GST before starting — there's no trial "
             "or paid plan without it. If you have a GSTIN, double-check it and try again. If "
             "your business isn't GST-registered yet, we can't onboard you right now."
         ),
         "hi": (
-            "Viabe Team GST-पंजीकृत व्यवसायों के लिए है। आपके द्वारा दर्ज विवरण के लिए हमें कोई सक्रिय "
-            "GST पंजीकरण नहीं मिला। Viabe Team आपकी ओर से असली व्यावसायिक काम करता है, इसलिए शुरू "
+            "Viabe Team GST-पंजीकृत व्यवसायों के लिए है। इस व्यवसाय के लिए हम कोई सक्रिय "
+            "GST पंजीकरण सत्यापित नहीं कर सके। Viabe Team आपकी ओर से असली व्यावसायिक काम करता है, इसलिए शुरू "
             "करने से पहले हम हर व्यवसाय का GST सत्यापित करते हैं — इसके बिना कोई ट्रायल या पेड प्लान "
             "नहीं है। अगर आपके पास GSTIN है, तो उसे दोबारा जाँचें और फिर से प्रयास करें। अगर आपका "
             "व्यवसाय अभी GST-पंजीकृत नहीं है, तो हम अभी आपको ऑनबोर्ड नहीं कर सकते।"

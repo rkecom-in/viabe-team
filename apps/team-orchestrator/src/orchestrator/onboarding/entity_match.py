@@ -145,17 +145,34 @@ def _result_is_relevant(blob: str, sig_tokens: set[str]) -> bool:
 
 
 def business_name_matches(typed: str | None, registry: str | None) -> bool:
-    """VT-448 NAME-MATCH SECURITY: the Sandbox-authoritative registry name must plausibly be the owner's
-    CLAIMED business — they must share a distinctive (non-generic) token. An unrelated-but-valid GSTIN
-    (a DIFFERENT business's registration) therefore FAILS, so a valid GSTIN alone is not enough to earn a
-    tenant. Lenient on suffix/word-order variation ("RKeCom Services Pvt Ltd" vs "RKECOM SERVICES (OPC)
-    PRIVATE LIMITED" share 'rkecom'); strict on zero distinctive overlap. The caller collapses a mismatch
-    into the SAME generic reject as invalid_gstin (no enumeration oracle — never "valid but not yours")."""
-    t = _significant_tokens(typed or "")
-    r = _significant_tokens(registry or "")
-    if t and r:
-        return bool(t & r)  # share ≥1 distinctive token
-    # One side has no distinctive token (all-generic name) → normalized substring/equality fallback.
+    """VT-448/VT-510 NAME-MATCH SECURITY: the Sandbox-authoritative registry name must plausibly be the
+    owner's CLAIMED business — they must share a distinctive (non-legal-suffix) token after normalizing
+    both sides with the KnowYourGST matching layer. An unrelated-but-valid GSTIN (a DIFFERENT business's
+    registration) therefore FAILS, so a valid GSTIN alone is not enough to earn a tenant.
+
+    VT-510 normalization upgrade: uses ``normalized_company_key`` from ``knowyourgst_match`` (strips legal
+    suffixes incl OPC/PRIVATE/LIMITED, handles the 'one person company' expanded-OPC form, removes
+    punctuation, casefolds) on BOTH sides before comparing. This fixes the confirm-seam false-reject for
+    OPC companies: 'RKECOM SERVICES (OPC) PRIVATE LIMITED' vs Sandbox returning 'RKECOM' (trade_name) or
+    'RKECOM SERVICES OPC PRIVATE LIMITED' / 'RKECOM SERVICES ONE PERSON COMPANY PRIVATE LIMITED' (legal_name
+    variants) — all normalize to the same distinctive token set and match correctly.
+
+    The caller collapses a mismatch into the SAME generic reject as invalid_gstin (no enumeration oracle —
+    never 'valid but not yours')."""
+    # VT-510: reuse the knowyourgst_match normalization that drives candidate discovery — the same
+    # company surfaced as a candidate and later verified by Sandbox must always pass this gate even when
+    # the KnowYourGST-formatted name vs the Sandbox registry name differ in OPC abbreviation, parentheses,
+    # or legal suffix form. Lazy import: knowyourgst_match is stdlib-only (no psycopg/pydantic) so it is
+    # available in the dep-less smoke env; defer the import so module load stays fast.
+    from orchestrator.integrations.methods.knowyourgst_match import normalized_company_key
+
+    t_key = normalized_company_key(typed or "")
+    r_key = normalized_company_key(registry or "")
+    if t_key and r_key:
+        # Share ≥1 distinctive token after legal-suffix + generic-word normalization.
+        return bool(set(t_key.split()) & set(r_key.split()))
+    # One/both sides are entirely legal-suffix or generic-only (no distinctive token survives
+    # normalization): fall back to normalized alphanumeric substring/equality check on the raw strings.
     tn = re.sub(r"[^a-z0-9]", "", (typed or "").lower())
     rn = re.sub(r"[^a-z0-9]", "", (registry or "").lower())
     return bool(tn) and bool(rn) and (tn in rn or rn in tn)

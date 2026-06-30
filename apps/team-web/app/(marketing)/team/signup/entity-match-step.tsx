@@ -72,6 +72,8 @@ type EmMsgKey =
   | 'cin_heading' | 'cin_prefix' | 'cin_label' | 'cin_confirm' | 'cin_dismiss' | 'cin_confirmed'
   // VT-507 progressive discovery keys
   | 'discovering_heading' | 'manual_early_hint' | 'discovery_degraded'
+  // VT-511 — GSTIN display on candidate cards + verified screen
+  | 'gstin_label' | 'gstin_verified_label'
 
 const EM_MESSAGES: Record<Lang, Record<EmMsgKey, string>> = {
   en: {
@@ -145,6 +147,9 @@ const EM_MESSAGES: Record<Lang, Record<EmMsgKey, string>> = {
     discovering_heading: 'Finding your company…',
     manual_early_hint: 'Taking a bit longer — you can also enter your GST number now.',
     discovery_degraded: 'We had trouble searching — enter your GST number to continue.',
+    // VT-511 — GSTIN visibility on candidate cards + verified screen
+    gstin_label: 'GSTIN',
+    gstin_verified_label: 'GST verified',
   },
   hi: {
     heading: 'अपना व्यवसाय पुष्टि करें',
@@ -215,6 +220,9 @@ const EM_MESSAGES: Record<Lang, Record<EmMsgKey, string>> = {
     discovering_heading: 'आपकी कंपनी खोजी जा रही है…',
     manual_early_hint: 'थोड़ा अधिक समय लग रहा है — आप अभी अपना GST नंबर भी दर्ज कर सकते हैं।',
     discovery_degraded: 'खोजने में समस्या आई — जारी रखने के लिए अपना GST नंबर दर्ज करें।',
+    // VT-511 — GSTIN visibility on candidate cards + verified screen
+    gstin_label: 'GSTIN',
+    gstin_verified_label: 'GST सत्यापित',
   },
 }
 
@@ -675,6 +683,12 @@ export function EntityMatchStep({
                     <span className="text-sm text-muted-foreground">{c.legal_name}</span>
                   )}
                   {c.detail && <span className="text-xs text-muted-foreground">{c.detail}</span>}
+                  {/* VT-511: show the GSTIN so the owner can recognise which registration we found. */}
+                  {c.candidate_gstin && (
+                    <span className="font-mono text-xs tracking-wide text-muted-foreground">
+                      {t.gstin_label}: {c.candidate_gstin}
+                    </span>
+                  )}
                   {confirmable ? (
                     <button
                       type="button"
@@ -741,6 +755,12 @@ export function EntityMatchStep({
         <p data-verified-name className="mt-3 text-base font-medium text-foreground">
           {verified.name ?? businessName}
         </p>
+        {/* VT-511: show the verified GSTIN so the owner can confirm we checked the right number. */}
+        {verified.gstin && (
+          <p data-verified-gstin className="mt-1 font-mono text-sm text-muted-foreground">
+            {t.gstin_verified_label}: {verified.gstin}
+          </p>
+        )}
         <p className="mt-2 text-sm leading-relaxed text-muted-foreground">{t.verified_note}</p>
         {/* VT-449 — registry-CIN confirm. Shown ONLY when discovery surfaced a registry CIN and the
             owner hasn't dismissed it. The owner must CONFIRM it's theirs — we NEVER auto-capture a
@@ -1145,6 +1165,12 @@ export function EntityMatchStep({
                   <span className="text-sm text-muted-foreground">{c.legal_name}</span>
                 )}
                 {c.detail && <span className="text-xs text-muted-foreground">{c.detail}</span>}
+                {/* VT-511: show the GSTIN so the owner can recognise which registration we found. */}
+                {c.candidate_gstin && (
+                  <span className="font-mono text-xs tracking-wide text-muted-foreground">
+                    {t.gstin_label}: {c.candidate_gstin}
+                  </span>
+                )}
                 {confirmable ? (
                   <button
                     type="button"
