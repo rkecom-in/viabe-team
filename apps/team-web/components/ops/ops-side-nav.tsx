@@ -28,6 +28,7 @@ const NAV: NavItem[] = [
   { href: '/team/ops/assignment', label: 'Assignment', vtAdminOnly: true, vt: 'VT-295' },
   { href: '/team/ops/monitoring', label: 'Monitoring', vt: 'VT-296' },
   { href: '/team/ops/run-control', label: 'Run Control', vt: 'VT-375' },
+  { href: '/team/ops/debug', label: 'Debug / Failures', vt: 'VT-515' },
   { href: '/team/ops/telegram', label: 'Connect Telegram', vt: 'VT-297' },
 ]
 

@@ -165,12 +165,40 @@ def start_verification(
         )
         return VerifyStartResult(verification_sid=sid, status="pending", channel=channel)
 
-    service_sid = _service_sid()
-    verification = (
-        _client()
-        .verify.v2.services(service_sid)
-        .verifications.create(to=phone, channel=channel)
-    )
+    try:
+        service_sid = _service_sid()
+    except VerifyServiceNotConfigured as exc:
+        # VT-515: missing Twilio Verify SID is a first-class failure — the OTP path is
+        # broken; emit so the viewer surfaces the config gap immediately.
+        _emit_otp_event(
+            failure_type="vendor_error",
+            operation="send_otp_not_configured",
+            error=exc,
+            severity="critical",
+            impact="blocked_signup",
+            tenant_id=tenant_id,
+            vendor="twilio",
+        )
+        raise
+
+    try:
+        verification = (
+            _client()
+            .verify.v2.services(service_sid)
+            .verifications.create(to=phone, channel=channel)
+        )
+    except Exception as exc:  # noqa: BLE001
+        _emit_otp_event(
+            failure_type="vendor_error",
+            operation="send_otp_twilio_error",
+            error=exc,
+            severity="error",
+            impact="blocked_signup",
+            tenant_id=tenant_id,
+            vendor="twilio",
+        )
+        raise
+
     logger.info(
         "twilio-verify start: verification_sid=%s tenant_id=%s channel=%s status=%s",
         verification.sid,
@@ -178,6 +206,17 @@ def start_verification(
         channel,
         verification.status,
     )
+    # Emit if the Twilio verification didn't start cleanly (unexpected non-pending status).
+    if verification.status != "pending":
+        _emit_otp_event(
+            failure_type="vendor_error",
+            operation="send_otp_unexpected_status",
+            error=f"Twilio Verify start returned unexpected status: {verification.status!r}",
+            severity="warning",
+            tenant_id=tenant_id,
+            vendor="twilio",
+            vendor_status=verification.status,
+        )
     return VerifyStartResult(
         verification_sid=verification.sid,
         status=verification.status,
@@ -210,14 +249,40 @@ def check_verification(
             tenant_id,
             status,
         )
+        if not approved:
+            # VT-515: even in mock mode, a denied OTP check is a first-class failure
+            # (wrong code entered). Emit so the viewer surfaces it.
+            _emit_otp_event(
+                failure_type="validation",
+                operation="invalid_otp_code",
+                error="OTP check denied — wrong code (mock mode)",
+                severity="warning",
+                impact="blocked_signup",
+                tenant_id=tenant_id,
+                vendor="twilio",
+                vendor_status=status,
+            )
         return VerifyCheckResult(verification_sid=sid, status=status, approved=approved)
 
-    service_sid = _service_sid()
-    check = (
-        _client()
-        .verify.v2.services(service_sid)
-        .verification_checks.create(to=phone, code=code)
-    )
+    try:
+        service_sid = _service_sid()
+        check = (
+            _client()
+            .verify.v2.services(service_sid)
+            .verification_checks.create(to=phone, code=code)
+        )
+    except Exception as exc:  # noqa: BLE001
+        _emit_otp_event(
+            failure_type="vendor_error",
+            operation="check_otp_twilio_error",
+            error=exc,
+            severity="error",
+            impact="blocked_signup",
+            tenant_id=tenant_id,
+            vendor="twilio",
+        )
+        raise
+
     approved = check.status == "approved"
     logger.info(
         "twilio-verify check: verification_sid=%s tenant_id=%s status=%s approved=%s",
@@ -226,8 +291,60 @@ def check_verification(
         check.status,
         approved,
     )
+    if not approved:
+        # VT-515: denied / expired / max-attempts → validation failure.
+        _emit_otp_event(
+            failure_type="validation",
+            operation="invalid_otp_code",
+            error=f"OTP check not approved (status={check.status!r})",
+            severity="warning",
+            impact="blocked_signup",
+            tenant_id=tenant_id,
+            vendor="twilio",
+            vendor_status=check.status,
+        )
     return VerifyCheckResult(
         verification_sid=getattr(check, "sid", None),
         status=check.status,
         approved=approved,
     )
+
+
+# ---------------------------------------------------------------------------
+# VT-515: debug event helper for the OTP leg
+# CL-390: NEVER log the phone number or the OTP code — the emit carries
+# only the tenant_id, vendor, status, and a PII-free operation label.
+# ---------------------------------------------------------------------------
+
+def _emit_otp_event(
+    *,
+    failure_type: str,
+    operation: str,
+    error: BaseException | str,
+    severity: str = "error",
+    impact: str | None = None,
+    tenant_id: str | None = None,
+    vendor: str | None = None,
+    vendor_status: str | None = None,
+) -> None:
+    """Emit a debug_event for an OTP-leg failure. Fail-soft — never raises.
+
+    CL-390 guard: phone numbers and OTP codes are NEVER passed as ``error``
+    or ``context`` here — callers pass PII-free operation labels only.
+    """
+    try:
+        from orchestrator.observability.debug_log import emit_debug_event
+
+        emit_debug_event(
+            failure_type=failure_type,
+            component="otp",
+            operation=operation,
+            error=error,
+            severity=severity,
+            impact=impact,
+            tenant_id=tenant_id,
+            vendor=vendor,
+            vendor_status=vendor_status,
+        )
+    except Exception:  # noqa: BLE001 — never raise into the OTP flow
+        pass

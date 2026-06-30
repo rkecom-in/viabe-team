@@ -379,7 +379,19 @@ def run_signup(
     tenant — every kick below is therefore reachable ONLY on the verified path (the gate is
     upstream of all of them). ``verify_search_fn`` is the injectable GSTIN search seam for tests
     (no live creds)."""
-    _validate(inp)
+    try:
+        _validate(inp)
+    except SignupError as exc:
+        # VT-515: field/consent validation rejects are first-class failures. Emit before
+        # re-raising so the viewer surfaces "consent not given" / "invalid phone" etc.
+        _emit_signup_event(
+            failure_type="validation",
+            operation=exc.code,
+            error=exc,
+            severity="warning",
+            impact="blocked_signup",
+        )
+        raise
 
     # VT-408 PRIMARY GATE — verify-then-create. Fail-closed: anything but a confirmed ACTIVE
     # GSTIN raises SignupGateError and creates NOTHING (so no product kick can fire below).
@@ -388,6 +400,18 @@ def run_signup(
 
     verify = verify_gstin_for_signup(inp.gstin, search_fn=verify_search_fn)
     if not verify.ok:
+        # VT-515: gate rejection is already emitted by verify_gstin_for_signup (signup_gate.py).
+        # Emit one more event at the signup-orchestration level so both the gate's component
+        # ('verify') AND the create entry-point ('signup') appear in the debug log, giving the
+        # viewer a complete chain for any rejection.
+        _emit_signup_event(
+            failure_type="vendor_error" if verify.retryable else "validation",
+            operation=verify.outcome,
+            error=f"signup gate refused tenant creation: {verify.outcome}",
+            severity="warning" if verify.retryable else "error",
+            impact=None if verify.retryable else "blocked_signup",
+            vendor="sandbox" if verify.retryable else None,
+        )
         raise SignupGateError(
             outcome=verify.outcome,
             retryable=verify.retryable,
@@ -414,6 +438,13 @@ def run_signup(
     # name plausibly matches the (MCA-canonical or owner-claimed) name. An unrelated-but-valid GSTIN (a
     # different business's registration) is REJECTED → the SAME generic invalid_gstin reject (no oracle).
     if not business_name_matches(name_anchor, verify.verified_name):
+        _emit_signup_event(
+            failure_type="validation",
+            operation="name_mismatch_at_create",
+            error="Verified GSTIN name does not match claimed business name — terminal reject (no oracle)",
+            severity="error",
+            impact="blocked_signup",
+        )
         raise SignupGateError(outcome=INVALID_GSTIN, retryable=False, language=inp.preferred_language)
 
     now = (now_fn or _utcnow)()
@@ -433,6 +464,17 @@ def run_signup(
         now_fn=_now,
     )
     if not res.created:
+        # VT-515: duplicate registration is a first-class failure — the viewer should surface
+        # it so ops can investigate ownership/support cases. tenant_id is the EXISTING tenant
+        # (the one that already owns this whatsapp_number).
+        _emit_signup_event(
+            failure_type="validation",
+            operation="duplicate_whatsapp",
+            error="whatsapp_number already registered — duplicate create blocked",
+            severity="warning",
+            impact="blocked_signup",
+            tenant_id=res.tenant_id,
+        )
         raise SignupError("duplicate", "this whatsapp_number is already registered")
 
     # VT-406 reconciliation (verify-then-create completion): persist the verified entity as the
@@ -514,6 +556,38 @@ def run_signup(
         city_tier=cast(str, res.city_tier),
         welcome_sent=sent,
     )
+
+
+# ---------------------------------------------------------------------------
+# VT-515: debug event helper for the signup orchestration leg
+# ---------------------------------------------------------------------------
+
+def _emit_signup_event(
+    *,
+    failure_type: str,
+    operation: str,
+    error: BaseException | str,
+    severity: str = "error",
+    impact: str | None = None,
+    tenant_id: UUID | None = None,
+    vendor: str | None = None,
+) -> None:
+    """Emit a debug_event for a signup-path failure. Fail-soft — never raises."""
+    try:
+        from orchestrator.observability.debug_log import emit_debug_event
+
+        emit_debug_event(
+            failure_type=failure_type,
+            component="signup",
+            operation=operation,
+            error=error,
+            severity=severity,
+            impact=impact,
+            tenant_id=tenant_id,
+            vendor=vendor,
+        )
+    except Exception:  # noqa: BLE001 — never raise into the signup flow
+        pass
 
 
 __all__ = [

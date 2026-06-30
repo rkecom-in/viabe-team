@@ -517,6 +517,13 @@ def confirm_and_verify(
     defense-in-depth). No oracle: mismatch and not-found both return one generic ``invalid_gstin``."""
     gstin = (gstin or "").strip().upper()
     if not _GSTIN_RE.fullmatch(gstin):
+        _emit_confirm_event(
+            tenant_id=tenant_id,
+            failure_type="validation",
+            operation="invalid_gstin_format",
+            error="GSTIN failed 15-char format check — terminal reject",
+            impact="blocked_signup",
+        )
         return {"ok": False, "reason": "invalid_gstin_format", "status": "unverified"}
 
     # PRE-CREATE signup (the manual-GSTIN confirm fires BEFORE the tenant exists → tenant_id=''):
@@ -542,6 +549,13 @@ def confirm_and_verify(
     # #10 name-match at the confirm seam — collapse a name-mismatch into the generic invalid_gstin reject
     # (no oracle) so "Verified" never shows for a name that will fail the create-time gate.
     if name_anchor and not business_name_matches(name_anchor, name):
+        _emit_confirm_event(
+            tenant_id=tenant_id,
+            failure_type="validation",
+            operation="name_mismatch",
+            error="Registry name does not match owner-claimed name — terminal reject (no oracle)",
+            impact="blocked_signup",
+        )
         return {"ok": False, "reason": "invalid_gstin", "status": "unverified"}
     _persist_anchor(tenant_id, gstin=gstin, verified_name=name)
     _seed_discovery(tenant_id, verified_name=name, gstin=gstin, seed=seed or {})
@@ -564,10 +578,32 @@ def _verify_gstin_tenantless(
 
     result = (search_fn or sandbox_kyc.search_gstin)(gstin)
     if not result.ok:
+        _emit_confirm_event(
+            tenant_id=None,
+            failure_type="vendor_error",
+            operation="vendor_down",
+            error="Sandbox GST search returned ok=False (tenantless pre-create verify)",
+            severity="error",
+            vendor="sandbox",
+        )
         return {"ok": False, "reason": "vendor_down", "status": "unverified"}
     if not result.is_active() or not result.authoritative_name():
+        _emit_confirm_event(
+            tenant_id=None,
+            failure_type="validation",
+            operation="invalid_gstin",
+            error="GSTIN not active or no authoritative name (tenantless pre-create verify)",
+            impact="blocked_signup",
+        )
         return {"ok": False, "reason": "invalid_gstin", "status": "unverified"}
     if name_anchor and not business_name_matches(name_anchor, result.authoritative_name()):
+        _emit_confirm_event(
+            tenant_id=None,
+            failure_type="validation",
+            operation="name_mismatch",
+            error="Registry name does not match owner-claimed name (tenantless pre-create verify)",
+            impact="blocked_signup",
+        )
         return {"ok": False, "reason": "invalid_gstin", "status": "unverified"}
     return {"ok": True, "status": "gstin_verified", "gstin": gstin, "name": result.authoritative_name()}
 
@@ -704,3 +740,35 @@ def _clean(v: Any) -> str | None:
         return None
     s = str(v).strip()
     return s or None
+
+
+# ---------------------------------------------------------------------------
+# VT-515: debug event helper for the confirm/verify leg
+# ---------------------------------------------------------------------------
+
+def _emit_confirm_event(
+    *,
+    tenant_id: UUID | str | None,
+    failure_type: str,
+    operation: str,
+    error: str,
+    severity: str = "error",
+    impact: str | None = None,
+    vendor: str | None = None,
+) -> None:
+    """Emit a debug_event for a confirm_and_verify failure. Fail-soft — never raises."""
+    try:
+        from orchestrator.observability.debug_log import emit_debug_event
+
+        emit_debug_event(
+            failure_type=failure_type,
+            component="verify",
+            operation=operation,
+            error=error,
+            severity=severity,
+            impact=impact,
+            vendor=vendor,
+            tenant_id=tenant_id if tenant_id and str(tenant_id).strip() else None,
+        )
+    except Exception:  # noqa: BLE001 — never raise into the confirm flow
+        pass
