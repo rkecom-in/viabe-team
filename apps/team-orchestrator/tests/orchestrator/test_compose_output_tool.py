@@ -53,7 +53,7 @@ def test_tool_dispatches_template_for_outside_window() -> None:
         "last_owner_message_at_iso": far_past,
     })
     assert out["message_type"] == "template"
-    assert out["template_name"] == "team_welcome2"  # VT-404: reply-inviting copy
+    assert out["template_name"] == "team_welcome3"  # VT-520: UTILITY welcome (team_welcome2 → MARKETING 63049)
 
 
 def test_tool_signature_deterministic_across_invocations() -> None:

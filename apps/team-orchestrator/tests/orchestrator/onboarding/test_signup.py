@@ -350,7 +350,7 @@ def _send_result(*, success: bool, error_code: str | None = None):
 
 
 def test_default_welcome_calls_send_owner_template_correctly(pool, monkeypatch):
-    """VT-393/VT-404: the un-injected default _default_welcome sends the real team_welcome2
+    """VT-393/VT-404/VT-520: the un-injected default _default_welcome sends the real team_welcome3
     template via the owner_send seam with the owner's language + {owner_name,
     trial_end_date}, and welcome_sent MIRRORS SendResult.success (here: True)."""
     from datetime import datetime, timezone
@@ -377,7 +377,7 @@ def test_default_welcome_calls_send_owner_template_correctly(pool, monkeypatch):
         tid, "+919812300013", "hi", "Asha Devi", trial_end,
     )
     assert sent is True  # mirrors SendResult.success
-    assert captured["template_name"] == "team_welcome2"  # VT-404: reply-inviting copy
+    assert captured["template_name"] == "team_welcome3"  # VT-520: UTILITY welcome (team_welcome2 → MARKETING 63049)
     assert captured["language"] == "hi"  # honors the owner's preferred_language
     assert captured["recipient_phone"] == "+919812300013"  # signup number, NOT owner_phone
     assert captured["tenant_id"] == tid

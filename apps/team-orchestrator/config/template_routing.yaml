@@ -16,8 +16,8 @@
 # `any` if the specific phase isn't listed.
 
 welcome:
-  onboarding: team_welcome2   # VT-404: reply-inviting copy (team_welcome retired — told owner to wait)
-  trial: team_welcome2
+  onboarding: team_welcome3   # VT-520: UTILITY-category (team_welcome2 was MARKETING → Meta 63049 undelivered)
+  trial: team_welcome3
 
 weekly_approval:
   paid_active: team_weekly_approval
