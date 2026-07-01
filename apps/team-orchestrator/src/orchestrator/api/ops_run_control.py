@@ -117,6 +117,12 @@ class RerunBody(BaseModel):
     # NOTE: deliberately NO tenant_id — derived from the source run row (VT-293/294).
 
 
+class RedriveTaskBody(BaseModel):
+    operator_id: str
+    task_id: str
+    # NOTE: deliberately NO tenant_id — derived from the manager_tasks row server-side (VT-293/294).
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -208,6 +214,16 @@ def _resolve_run_tenant(conn: Any, run_id: str) -> str:
     ).fetchone()
     if row is None:
         raise HTTPException(status_code=404, detail="run not found")
+    return str(row["tenant_id"] if isinstance(row, dict) else row[0])
+
+
+def _resolve_task_tenant(conn: Any, task_id: str) -> str:
+    """Server-side tenant derivation from the manager_tasks row (VT-293/294 — never a client id)."""
+    row = conn.execute(
+        "SELECT tenant_id FROM manager_tasks WHERE id = %s LIMIT 1", (task_id,)
+    ).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="task not found")
     return str(row["tenant_id"] if isinstance(row, dict) else row[0])
 
 
@@ -1103,3 +1119,57 @@ def programs(
         "holds": holds,
         "degraded": degraded,
     }
+
+
+# ---------------------------------------------------------------------------
+# /redrive-task — operator redrive of a dead-lettered (or blocked) manager_task (VT-557)
+# ---------------------------------------------------------------------------
+
+
+@router.post("/redrive-task")
+def redrive_task_endpoint(
+    body: RedriveTaskBody,
+    x_internal_secret: str | None = Header(default=None, alias="X-Internal-Secret"),
+    x_operator_jwt: str | None = Header(default=None, alias="X-Operator-Jwt"),
+) -> dict[str, Any]:
+    """VT-557 — reset a dead_letter/blocked manager_task to 'planned' for re-dispatch (attempt=0,
+    next_retry_at=NULL). Tenant DERIVED from the task row (VT-293/294 IDOR); transport auth verified
+    BEFORE the derive so task existence is not probeable (the cancel-override precedent). The
+    assignment gate then runs on the derived tenant. CAS-guarded to the redrivable states → 409 if
+    the task is not redrivable (already active / a completed terminal). Audit-in-txn."""
+    _require_uuid(body.task_id, "task_id")
+    verify_internal_secret(x_internal_secret)
+    verify_operator_jwt(x_operator_jwt)
+    pool = get_pool()
+    with pool.connection() as conn:
+        tenant_id = _resolve_task_tenant(conn, body.task_id)
+        with conn.transaction(), conn.cursor() as cur:
+            operator = require_vtr_action(
+                cur,
+                x_internal_secret=x_internal_secret,
+                x_operator_jwt=x_operator_jwt,
+                body_operator_id=body.operator_id,
+                tenant_id=tenant_id,
+                deny_action="task_redrive_denied",
+                deny_target_kind="manager_task",
+                deny_target_id=body.task_id,
+            )
+            # Audit BEFORE the mutation, same txn — the 409 rolls both back (no redrive, no audit).
+            audit(
+                cur,
+                operator_id=operator,
+                tenant_id=tenant_id,
+                action="task_redrive",
+                target_kind="manager_task",
+                target_id=body.task_id,
+                detail=None,
+            )
+            from orchestrator.manager.task_store import redrive_task
+
+            applied = redrive_task(tenant_id, body.task_id, conn=cur)
+            if not applied:
+                raise HTTPException(status_code=409, detail="task not redrivable")
+    logger.info(
+        "redrive_task OK operator=%s tenant=%s task=%s", operator, tenant_id, body.task_id
+    )
+    return {"ok": True, "task_id": body.task_id, "tenant_id": tenant_id}

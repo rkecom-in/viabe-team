@@ -206,3 +206,112 @@ def test_stalled_reaper_fires_orphaned_task_alert(pool, monkeypatch):
     orphaned = [t for t in fired if t.trigger_kind == "orphaned_task"]
     assert any(t.payload.get("task_id") == str(stalled) for t in orphaned)
     assert all(t.severity == "warning" for t in orphaned)
+
+
+# --- VT-557: the retry-ladder → dead_letter → operator redrive lifecycle ------------------------
+
+
+def _read_retry(pool, task_id):
+    with pool.connection() as conn:
+        return conn.execute(
+            "SELECT status, attempt, next_retry_at FROM manager_tasks WHERE id = %s",
+            (str(task_id),),
+        ).fetchone()
+
+
+def _stall(pool, ts, tid, *, attempt: int = 0):
+    task = ts.create_task(tid, {"goal": f"vt557-{attempt}"})
+    ts.set_task_status(tid, task, "running", expected_from=("clarifying",))
+    with pool.connection() as conn:
+        conn.execute(
+            "UPDATE manager_tasks SET attempt = %s, updated_at = now() - interval '2 hours' "
+            "WHERE id = %s",
+            (attempt, str(task)),
+        )
+    return task
+
+
+def test_retry_ladder_records_attempt_and_backoff(pool):
+    """A first-stall task (attempt 0) → RETRY: attempt=1, next_retry_at set (backoff gate), blocked."""
+    from orchestrator.manager import task_store as ts
+    from orchestrator.orphan_reaper import reap_stalled_manager_tasks
+
+    tid = _seed_tenant(pool)
+    task = _stall(pool, ts, tid, attempt=0)
+    reap_stalled_manager_tasks(pool=pool)
+    r = _read_retry(pool, task)
+    assert (r["status"] if isinstance(r, dict) else r[0]) == "blocked"
+    assert (r["attempt"] if isinstance(r, dict) else r[1]) == 1
+    assert (r["next_retry_at"] if isinstance(r, dict) else r[2]) is not None  # backoff gate armed
+
+
+def test_retry_exhaustion_dead_letters_and_alerts(pool, monkeypatch):
+    """A task at attempt == max-1 → DEAD_LETTER terminal + a dead_letter_task alert (VT-557)."""
+    from orchestrator.alerts import dispatch as dispatch_mod
+    from orchestrator.manager import task_store as ts
+    from orchestrator.orphan_reaper import reap_stalled_manager_tasks
+
+    fired: list = []
+    monkeypatch.setattr(dispatch_mod, "dispatch_alert", lambda t: fired.append(t) or None)
+
+    tid = _seed_tenant(pool)
+    task = _stall(pool, ts, tid, attempt=4)  # next stall reaches max_attempts=5
+    reap_stalled_manager_tasks(pool=pool)
+    r = _read_retry(pool, task)
+    assert (r["status"] if isinstance(r, dict) else r[0]) == "dead_letter"
+    assert (r["attempt"] if isinstance(r, dict) else r[1]) == 5
+    assert (r["next_retry_at"] if isinstance(r, dict) else r[2]) is None  # no further retry
+    dl = [t for t in fired if t.trigger_kind == "dead_letter_task"]
+    assert any(t.payload.get("task_id") == str(task) for t in dl)
+    assert all(t.severity == "warning" for t in dl)
+
+
+def test_next_retry_at_gate_skips_backed_off_task(pool):
+    """A stalled task whose backoff has NOT elapsed is skipped by the reaper (the retry gate)."""
+    from orchestrator.manager import task_store as ts
+    from orchestrator.orphan_reaper import reap_stalled_manager_tasks
+
+    tid = _seed_tenant(pool)
+    task = ts.create_task(tid, {"goal": "backed-off"})
+    ts.set_task_status(tid, task, "running", expected_from=("clarifying",))
+    with pool.connection() as conn:
+        conn.execute(
+            "UPDATE manager_tasks SET updated_at = now() - interval '2 hours', "
+            "next_retry_at = now() + interval '1 hour' WHERE id = %s",
+            (str(task),),
+        )
+    reap_stalled_manager_tasks(pool=pool)
+    r = _read_retry(pool, task)
+    assert (r["status"] if isinstance(r, dict) else r[0]) == "running"  # skipped, backoff pending
+
+
+def test_redrive_resets_dead_letter_to_planned(pool):
+    """Operator redrive: a dead_letter task → planned, attempt=0, next_retry_at cleared (CAS)."""
+    from orchestrator.manager import task_store as ts
+
+    tid = _seed_tenant(pool)
+    task = ts.create_task(tid, {"goal": "redrive"})
+    with pool.connection() as conn:
+        conn.execute(
+            "UPDATE manager_tasks SET status = 'dead_letter', attempt = 5, next_retry_at = now() "
+            "WHERE id = %s",
+            (str(task),),
+        )
+        with conn.cursor() as cur:
+            applied = ts.redrive_task(tid, task, conn=cur)
+    assert applied is True
+    r = _read_retry(pool, task)
+    assert (r["status"] if isinstance(r, dict) else r[0]) == "planned"
+    assert (r["attempt"] if isinstance(r, dict) else r[1]) == 0
+    assert (r["next_retry_at"] if isinstance(r, dict) else r[2]) is None
+
+
+def test_redrive_noop_on_non_redrivable(pool):
+    """A completed task is NOT redrivable — redrive_task is a CAS no-op (False)."""
+    from orchestrator.manager import task_store as ts
+
+    tid = _seed_tenant(pool)
+    task = ts.create_task(tid, {"goal": "done"})
+    ts.set_task_status(tid, task, "completed", expected_from=("clarifying",))
+    with pool.connection() as conn, conn.cursor() as cur:
+        assert ts.redrive_task(tid, task, conn=cur) is False
