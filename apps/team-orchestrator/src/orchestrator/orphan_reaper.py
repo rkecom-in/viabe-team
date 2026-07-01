@@ -93,4 +93,57 @@ def reap_orphan_runs(*, pool: Any = None, age_hours: int = _ORPHAN_AGE_HOURS) ->
         return 0
 
 
-__all__ = ["reap_orphan_runs"]
+# VT-525 (B2): a manager_task is "stalled" if it sits in an ACTIVE-WORK state
+# (planned/running/verifying) with no non-terminal step to advance it — i.e. it has no
+# runnable step, no durable wait, and no explicit blocker. The deliberate WAIT states
+# (clarifying = waiting on the owner's answer, waiting_owner = parked on approval, blocked =
+# an explicit blocker already recorded) are EXCLUDED — those are legitimately idle, not
+# orphaned. The age floor keeps it clear of a task mid-planning (a step about to be added).
+_STALLED_TASK_AGE_HOURS = 1
+_STALLED_TASK_ACTIVE_STATES = ("planned", "running", "verifying")
+
+
+def reap_stalled_manager_tasks(*, pool: Any = None, age_hours: int = _STALLED_TASK_AGE_HOURS) -> int:
+    """Stamp manager_tasks stranded in an active-work state with no runnable step to ``blocked``.
+
+    The invariant B2 asks for: every non-terminal task has a runnable step, a durable wait, or
+    an explicit blocker. A task in planned/running/verifying with NO non-terminal step and no
+    update for > ``age_hours`` violates it (a process died between planning and stepping, or a
+    step-completion never re-planned) — flip it to ``blocked`` so it surfaces for review rather
+    than silently hanging. Best-effort, service-role (cross-tenant), idempotent, NEVER raises.
+    """
+    try:
+        with _service_pool(pool).connection() as conn:
+            rows = conn.execute(
+                "UPDATE manager_tasks t "
+                "SET status = 'blocked', version = version + 1, updated_at = now(), "
+                "    stall_metadata = COALESCE(t.stall_metadata, '{}'::jsonb) "
+                "      || jsonb_build_object('reaped_by', 'vt525_stalled_task_reaper', "
+                "                            'reaped_reason', 'no_runnable_step', "
+                "                            'reaped_from', t.status, "
+                "                            'reaped_at', now()::text) "
+                "WHERE t.status = ANY(%s) "
+                "  AND t.updated_at < now() - make_interval(hours => %s) "
+                "  AND NOT EXISTS ( "
+                "        SELECT 1 FROM manager_task_steps s "
+                "        WHERE s.task_id = t.id "
+                "          AND s.status IN ('pending', 'running', 'waiting') "
+                "  ) "
+                "RETURNING id",
+                (list(_STALLED_TASK_ACTIVE_STATES), age_hours),
+            ).fetchall()
+        n = len(rows)
+        if n:
+            logger.warning(
+                "VT-525 stalled-task reaper: flipped %d manager_task(s) with no runnable step "
+                "(active >%dh) -> blocked", n, age_hours,
+            )
+        else:
+            logger.info("VT-525 stalled-task reaper: no stalled manager_tasks")
+        return n
+    except Exception:  # noqa: BLE001 — best-effort by design; must never block boot
+        logger.warning("VT-525 stalled-task reaper sweep failed (best-effort)", exc_info=True)
+        return 0
+
+
+__all__ = ["reap_orphan_runs", "reap_stalled_manager_tasks"]
