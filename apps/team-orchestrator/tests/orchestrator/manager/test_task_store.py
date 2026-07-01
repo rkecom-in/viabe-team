@@ -183,3 +183,26 @@ def test_stalled_task_reaper(pool):
     assert ts.get_task(tid, stalled)["status"] == "blocked"
     assert ts.get_task(tid, stalled)["stall_metadata"]["reaped_reason"] == "no_runnable_step"
     assert ts.get_task(tid, healthy)["status"] == "running"  # protected by its pending step
+
+
+def test_stalled_reaper_fires_orphaned_task_alert(pool, monkeypatch):
+    """VT-529 (B6): reaping a stalled task surfaces an orphaned_task alert (ops visibility)."""
+    from orchestrator.alerts import dispatch as dispatch_mod
+    from orchestrator.manager import task_store as ts
+    from orchestrator.orphan_reaper import reap_stalled_manager_tasks
+
+    fired: list = []
+    monkeypatch.setattr(dispatch_mod, "dispatch_alert", lambda t: fired.append(t) or None)
+
+    tid = _seed_tenant(pool)
+    stalled = ts.create_task(tid, {"goal": "stalled-alert"})
+    ts.set_task_status(tid, stalled, "running", expected_from=("clarifying",))
+    with pool.connection() as conn:
+        conn.execute(
+            "UPDATE manager_tasks SET updated_at = now() - interval '2 hours' WHERE id = %s",
+            (str(stalled),),
+        )
+    reap_stalled_manager_tasks(pool=pool)
+    orphaned = [t for t in fired if t.trigger_kind == "orphaned_task"]
+    assert any(t.payload.get("task_id") == str(stalled) for t in orphaned)
+    assert all(t.severity == "warning" for t in orphaned)
