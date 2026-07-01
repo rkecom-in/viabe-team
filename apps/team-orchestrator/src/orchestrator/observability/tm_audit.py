@@ -96,7 +96,10 @@ def emit_tm_audit(
         ``draft_created``, ``send_result``, ``approval_armed``,
         ``memory_write``, ``autonomy_change``, ``escalation``, ``ask_owner``,
         ``recovery_attempted`` (VT-530 — a tool error surfaced to the manager
-        to recover or terminate; advisory vocab, no CHECK, no migration).
+        to recover or terminate; advisory vocab, no CHECK, no migration),
+        ``manager_decision`` (VT-526 B3-wiring — the manager decision loop ran
+        on a real specialist return; ``status='observed'`` = observe-only, not
+        yet steering routing).
     actor:
         ``team_manager`` or the specific lane (``sales_recovery`` / …).
     tenant_id:
