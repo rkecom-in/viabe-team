@@ -237,6 +237,10 @@ _PURGE_ORDER: tuple[str, ...] = (
     # are soft pointers (NO FK), so order-insensitive. Holds the PII-redacted correction text →
     # the subject's data, erased on right-to-erasure.
     "agent_corrections",
+    # VT-550 (C3b): agent_memory — the seedable learnable-memory store. Only TENANT rows are the
+    # subject's data; the WHERE tenant_id=… purge erases those and naturally skips GLOBAL seeds
+    # (tenant_id IS NULL — archetype knowledge, not a subject's data).
+    "agent_memory",
     "pipeline_steps",
     "pipeline_runs",
     "subscriber_states",
