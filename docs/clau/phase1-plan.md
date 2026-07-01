@@ -111,13 +111,13 @@ Advisory functions are never described as autonomous execution.
 ## Track D — Business expertise and advice quality
 *Safety and autonomy are worthless if the advice is mediocre. This makes Sales Recovery's output actually good.*
 
-- A **curated, sourced Sales Recovery playbook** — real, attributable plays, not invented tactics.
-- **Vertical applicability and exceptions** — which plays fit which business type, and where they don't.
-- **No invented numerical claims** — the system never fabricates statistics, percentages, or benchmarks.
-- **Advice freshness and provenance** — every piece of guidance is sourced, dated, and traceable.
-- **Retrieval into specialist context** — the playbook feeds the Sales Recovery specialist at decision time.
-- **Gold-set evaluation** — advice is graded against a held-out set for factuality, actionability, relevance, and tone; it must clear the bar before the capability is offered.
-- **Initial acceptance bar:** roughly 100 reviewed notes, each carrying a tip, rationale, an optional sourced number, an applicability exception, provenance, and a review date. The gold set used for evaluation is held separate from the retrieval corpus.
+**RESHAPED (Fazal 2026-07-01):** NO fixed authored playbook. The ~100-note corpus AND the 69-note retrofit are KILLED. Fixed notes = a cage the agent never self-learns beyond; the moat is the LLM's own reasoning + the C3 memory-learning loop (learn from real success/failure). Track D is now advice-quality **guardrails + measurement**, not a knowledge base.
+
+- **Knowledge source = LLM reasoning + the C3 memory/learning loop.** The specialist explores per-situation via the LLM; memory lets it learn from past success and failure. No static retrieval corpus.
+- **Seedable memory (CL-426 accelerant).** Build the seedable-memory MECHANISM + a seed-then-learn-beyond posture (part of C3). The seed is **mutable SEED MEMORY** — prior/archetype experience the agent builds on and can overwrite through learning, NOT a fixed reference it is confined to. Default = SEED the memory (shortens cold-start), not empty. Seed CONTENT is a separate Fazal/archetype follow-up; not blocking the mechanism.
+- **Surviving output rail (the ONE kept piece, consistent with C1):** no fabricated numbers/benchmarks — a factual claim must be grounded or explicitly hedged; never invent a statistic. Reframed as a claim-grounding rail, not a knowledge cage.
+- **Lightweight advice-quality EVAL (measurement only):** factuality / actionability / relevance / tone, on a **held-out MEASUREMENT set** — measures the LLM+memory output before a capability graduates. It does NOT author, script, or confine advice; it is not a retrieval corpus.
+- **Cold-start = concierge:** the VTR reviews day-one advice; every correction feeds memory. No seed notes required for the mechanism to run.
 
 ## Operational contracts (launch foundations)
 
