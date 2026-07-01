@@ -28,7 +28,7 @@ from __future__ import annotations
 import json
 from datetime import date
 from typing import Any
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 
@@ -62,9 +62,12 @@ class _DummyCM:
         return False
 
 
-def _bundle(*, name: str | None = "Asha", days: int = 95, spend: int = 80_000) -> CustomerFactBundle:
+def _bundle(
+    *, name: str | None = "Asha", days: int = 95, spend: int = 80_000,
+    customer_id: UUID | None = None,
+) -> CustomerFactBundle:
     return CustomerFactBundle(
-        customer_id=uuid4(),
+        customer_id=customer_id or uuid4(),
         display_name=name,
         days_since_last_sale=days,
         last_sale_amount_paise=12_500,
@@ -197,7 +200,14 @@ def test_serialize_renders_only_five_allowed_fields() -> None:
     """The render carries ONLY customer_id + display_name + days_since_last_sale +
     lifetime_spend_paise + business_name — ``last_sale_amount_paise`` is omitted
     (minimum-necessary)."""
-    m = _bundle(name="Priya", days=120, spend=64_000)
+    # Deterministic letters-only customer_id: a random uuid4 rendered into the block can carry
+    # an 8+ digit run that the _PHONE_SHAPE_RE backstop (\+?\d{8,}) false-matches (pre-existing
+    # flake, ~1/28 runs). Fixed hex-letter id has no digit run → the negative assertions below
+    # are stable. Version/variant nibbles (4/8) are isolated, never 8-consecutive.
+    m = _bundle(
+        name="Priya", days=120, spend=64_000,
+        customer_id=UUID("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"),
+    )
     rendered = serialize_bundle_for_prompt(_ctx_with_cohort([m]))
 
     block = rendered.split("## Dormant cohort", 1)[1].split("\n## ", 1)[0]
