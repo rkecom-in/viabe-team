@@ -344,12 +344,53 @@ def _tool_error_to_tool_result(request: Any, handler: Any) -> Any:
             tool_call.get("name"),
             type(exc).__name__,
         )
+        # VT-530 (C2a): make the manager's self-handling VISIBLE in the audit spine.
+        _emit_recovery_attempted(tool_call.get("name"), exc)
         return ToolMessage(
             content=f"Error executing tool {tool_call.get('name')!r}: {exc!r}",
             name=tool_call.get("name"),
             tool_call_id=tool_call["id"],
             status="error",
         )
+
+
+def _emit_recovery_attempted(tool_name: str | None, exc: Exception) -> None:
+    """VT-530 (C2a) — record that a tool error was surfaced to the manager as a RECOVERY
+    opportunity.
+
+    Today the VT-484 seam turns a raised tool error into an error ``tool_result`` and the brain
+    "either recovers (re-routes / picks another tool) or terminates cleanly" — but the audit spine
+    only shows two disconnected ``tool_invoked``/``tool_result`` rows, so the self-handling is
+    invisible. This emits one ``recovery_attempted`` row (``event_layer='decides'``,
+    ``status='pending'`` — the outcome is decided on the brain's next turn) correlated by
+    ``run_id`` + the failed tool, so "tool X failed → manager handed the error to recover" is a
+    greppable event.
+
+    Deterministic + fully FAIL-SOFT: an audit failure (or an absent observability context) must
+    NEVER affect the VT-484 error-to-``tool_result`` conversion the brain depends on."""
+    try:
+        from orchestrator.observability.decorators import _observability_context
+        from orchestrator.observability.tm_audit import emit_tm_audit
+
+        ctx = _observability_context.get()
+        if ctx is None:
+            return  # best-effort — no run context to scope the row
+        emit_tm_audit(
+            event_layer="decides",
+            event_kind="recovery_attempted",
+            actor="team_manager",
+            tenant_id=ctx.tenant_id,
+            run_id=ctx.run_id,
+            summary=(
+                f"tool {tool_name!r} raised {type(exc).__name__}; error surfaced to the manager "
+                "to recover or terminate (VT-484 seam)"
+            ),
+            decision={"failed_tool": tool_name, "error_type": type(exc).__name__},
+            severity="warning",
+            status="pending",
+        )
+    except Exception:  # noqa: BLE001 — fail-soft: observability must never break the recovery path
+        logger.debug("VT-530 recovery_attempted audit emit failed (fail-soft)", exc_info=True)
 
 
 def build_orchestrator_agent(

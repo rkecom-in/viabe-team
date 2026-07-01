@@ -94,7 +94,9 @@ def emit_tm_audit(
     event_kind:
         Specific kind, e.g. ``context_assembled``, ``route_decided``,
         ``draft_created``, ``send_result``, ``approval_armed``,
-        ``memory_write``, ``autonomy_change``, ``escalation``, ``ask_owner``.
+        ``memory_write``, ``autonomy_change``, ``escalation``, ``ask_owner``,
+        ``recovery_attempted`` (VT-530 — a tool error surfaced to the manager
+        to recover or terminate; advisory vocab, no CHECK, no migration).
     actor:
         ``team_manager`` or the specific lane (``sales_recovery`` / …).
     tenant_id:
