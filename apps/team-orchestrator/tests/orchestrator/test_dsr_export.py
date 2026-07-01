@@ -142,3 +142,59 @@ def test_verify_internal_secret(monkeypatch):
         dsr_api._verify_internal_secret("wrong")
     with pytest.raises(HTTPException):
         dsr_api._verify_internal_secret(None)
+
+
+def test_export_endpoint_tracks_access_ticket(pool, monkeypatch):
+    """VT-523: the /export endpoint records the access request as a dsr_tickets 'access'
+    ticket and stamps it completed once the ZIP is built (regulator-facing parity with
+    the deletion path — no more off-the-books access fulfilment)."""
+    from orchestrator.api.dsr import DsrTenantBody, dsr_export
+
+    monkeypatch.setenv("INTERNAL_API_SECRET", "test-secret-123")
+    tid = _seed_tenant_with_data(pool, phone="+919812349999")
+
+    resp = dsr_export(DsrTenantBody(tenant_id=tid), x_internal_secret="test-secret-123")
+    assert resp.status_code == 200
+    assert resp.media_type == "application/zip"
+    ticket_id = resp.headers["X-DSR-Access-Ticket"]
+    assert ticket_id
+
+    with pool.connection() as conn:
+        row = conn.execute(
+            "SELECT request_type, status, completed_at FROM dsr_tickets WHERE id = %s",
+            (ticket_id,),
+        ).fetchone()
+    assert row is not None
+    assert (row["request_type"] if isinstance(row, dict) else row[0]) == "access"
+    assert (row["status"] if isinstance(row, dict) else row[1]) == "completed"
+    assert (row["completed_at"] if isinstance(row, dict) else row[2]) is not None
+
+
+def test_export_endpoint_reuses_open_access_ticket(pool, monkeypatch):
+    """A second access export reuses an existing non-completed access ticket rather than
+    spawning duplicates (one fulfilment path, Pillar 8)."""
+    from orchestrator.api.dsr import DsrTenantBody, dsr_export
+
+    monkeypatch.setenv("INTERNAL_API_SECRET", "test-secret-123")
+    tid = _seed_tenant_with_data(pool, phone="+919812340000")
+    with pool.connection() as conn:
+        pre = conn.execute(
+            "INSERT INTO dsr_tickets (tenant_id, request_type, status, acknowledged_at) "
+            "VALUES (%s, 'access', 'acknowledged', now()) RETURNING id::text AS id",
+            (tid,),
+        ).fetchone()
+    pre_id = pre["id"] if isinstance(pre, dict) else pre[0]
+
+    resp = dsr_export(DsrTenantBody(tenant_id=tid), x_internal_secret="test-secret-123")
+    assert resp.headers["X-DSR-Access-Ticket"] == pre_id  # reused the open ticket
+
+    with pool.connection() as conn:
+        n = conn.execute(
+            "SELECT count(*) AS n FROM dsr_tickets WHERE tenant_id = %s AND request_type = 'access'",
+            (tid,),
+        ).fetchone()
+        st = conn.execute(
+            "SELECT status FROM dsr_tickets WHERE id = %s", (pre_id,)
+        ).fetchone()
+    assert (n["n"] if isinstance(n, dict) else n[0]) == 1  # exactly one access ticket
+    assert (st["status"] if isinstance(st, dict) else st[0]) == "completed"
