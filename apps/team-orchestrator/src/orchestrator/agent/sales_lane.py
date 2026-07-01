@@ -197,12 +197,19 @@ def push_back_to_manager(reason: str, proposed_outcome: str) -> dict[str, Any]:
     ``SpecialistReturn(pushback=True, ...)`` seam (roster.py); it carries NO action effect.
     """
     logger.info("sales_lane: push_back_to_manager (no action taken) reason=%s", reason[:120])
-    return {
+    env = {
         "kind": "sales_lane_pushback",
         "pushback": True,
         "reason": reason,
         "proposed_outcome": proposed_outcome,
     }
+    # VT-526 (B3) graph-wiring: run the manager decision loop on this REAL pushback + record the
+    # decision to tm_audit (OBSERVE-ONLY — routing is unchanged; the enforcing flip is a later gated
+    # slice). Lazy import keeps the roster/decision deps off the lane's import surface. Fail-soft.
+    from orchestrator.agent.specialist_return import observe_specialist_return
+
+    observe_specialist_return(env, agent="sales_lane")
+    return env
 
 
 @tool
