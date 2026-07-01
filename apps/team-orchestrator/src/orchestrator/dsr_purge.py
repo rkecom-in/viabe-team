@@ -218,6 +218,10 @@ _PURGE_ORDER: tuple[str, ...] = (
     #     is the impl that finally delivers it (the recurring hand-maintained-order drift).
     "tm_audit_log",
     "debug_events",
+    # VT-524 (B1): owner_notifications — the owner-notification delivery ledger. Tenant-scoped
+    # (tenant_id → tenants, FK; run_id is a soft NO-FK pointer per VT-521), so order-insensitive.
+    # Holds message_sid/template_name/status — tenant data → erased on right-to-erasure.
+    "owner_notifications",
     "pipeline_steps",
     "pipeline_runs",
     "subscriber_states",

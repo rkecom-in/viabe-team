@@ -45,13 +45,23 @@ def send_owner_template(
     Raises whatever ``send_template_message`` raises (UnknownTemplateError for an
     unknown template; a 5xx re-raise for DBOS retry).
     """
-    return send_template_message(
+    result = send_template_message(
         tenant_id,
         template_name,
         params,
         recipient_phone=recipient_phone,
         language=language,
     )
+    # VT-524 (B1): record this owner notification in the delivery ledger — 'accepted' (a transport
+    # SID proves acceptance, not delivery). The async Twilio status callback later flips it to
+    # delivered/failed (runner). Fail-soft: never perturb the send result.
+    if result.success and result.message_sid:
+        from orchestrator.owner_surface.owner_notification import (
+            record_owner_notification,
+        )
+
+        record_owner_notification(tenant_id, template_name, result.message_sid)
+    return result
 
 
 __all__ = ["send_owner_template"]

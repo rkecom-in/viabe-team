@@ -289,6 +289,13 @@ def _seed_full_tenant_data(dsn: str, tenant_id: UUID) -> dict[str, UUID]:
             "VALUES (%s, 'exception', 'signup', 'error')",
             (str(tenant_id),),
         )
+        # VT-524: owner_notifications delivery ledger — tenant data, must be erased on DSR.
+        conn.execute(
+            "INSERT INTO owner_notifications "
+            "(tenant_id, template_name, message_sid, owner_notification_status) "
+            "VALUES (%s, 'team_welcome3', 'SMtest-dsr-seed', 'accepted')",
+            (str(tenant_id),),
+        )
 
         # privacy_audit_log — pre-existing event, MUST survive purge. VT-80:
         # write through the real hash-chain writer (a seeded event_type that is
@@ -361,6 +368,7 @@ _PURGED_TABLES = (
     "kg_events",  # VT-327: KG outbox (TENANT_CREATED business_name PII) must be swept
     "tm_audit_log",  # VT-518: TM audit/trace (VT-514) — tenant PII activity history, erased on DSR
     "debug_events",  # VT-518: debug/failure log (VT-515) — tenant PII, erased on DSR
+    "owner_notifications",  # VT-524: owner-notification delivery ledger — tenant data, erased on DSR
     "owner_inputs",
     "campaigns",
     "pipeline_steps",
