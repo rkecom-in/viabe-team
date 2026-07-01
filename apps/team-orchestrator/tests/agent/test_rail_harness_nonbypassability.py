@@ -485,6 +485,41 @@ def test_shared_pregate_blocks_non_onboarded_and_not_live(substrate):  # type: i
     assert g.allowed is True and g.reason is None
 
 
+def test_OC1_policy_shadow_observes_without_blocking(substrate, monkeypatch):  # type: ignore[no-untyped-def]
+    """OC1 (VT-533): ``observe_policy`` shadows the customer-send policy rail — a would-be block is
+    RECORDED (no policy grant seeded → out_of_policy) but the gate still returns allowed=True
+    (observe-only). ``enforce_policy`` still blocks; a default caller does NO policy eval (byte-for-
+    byte). This gives B5's built-but-dormant policy rail a live consumer + the data to flip
+    enforcement on later."""
+    from orchestrator.agents import customer_send_choke as choke
+    from orchestrator.agents.customer_send_choke import (
+        SKIP_OUT_OF_POLICY,
+        assert_customer_send_allowed,
+    )
+
+    t = _new_tenant(substrate.dsn, onboarded=True, wa_live=True)  # gate-0 + WABA pass; NO policy grant
+    _seed_customer(substrate.dsn, t)
+
+    # observe-only: records the would-be block, returns allowed=True (NEVER blocks).
+    recorded: list = []
+    monkeypatch.setattr(choke, "_record_policy_shadow", lambda tid, **kw: recorded.append(kw))
+    with tenant_connection(t) as conn:
+        g_obs = assert_customer_send_allowed(t, agent="sales_recovery", conn=conn, observe_policy=True)
+    assert g_obs.allowed is True
+    assert len(recorded) == 1 and recorded[0]["reason"]
+
+    # enforcing: the SAME check blocks.
+    with tenant_connection(t) as conn:
+        g_enf = assert_customer_send_allowed(t, agent="sales_recovery", conn=conn, enforce_policy=True)
+    assert g_enf.allowed is False and g_enf.reason == SKIP_OUT_OF_POLICY
+
+    # default (neither flag): no policy eval, no shadow record.
+    recorded.clear()
+    with tenant_connection(t) as conn:
+        g_def = assert_customer_send_allowed(t, agent="sales_recovery", conn=conn)
+    assert g_def.allowed is True and recorded == []
+
+
 # --- D25: the transport itself fails CLOSED for an un-gated customer send ---
 
 

@@ -79,6 +79,7 @@ def assert_customer_send_allowed(
     conn: Any,
     segment: str | None = None,
     enforce_policy: bool = False,
+    observe_policy: bool = False,
 ) -> CustomerSendGate:
     """The shared, deterministic onboarded + WABA-live (+ VT-474 policy) pre-gate for EVERY
     customer-send path.
@@ -147,8 +148,53 @@ def assert_customer_send_allowed(
             return CustomerSendGate(
                 allowed=False, reason=SKIP_OUT_OF_POLICY, policy_reason=check.reason
             )
+    elif observe_policy:
+        # OC1 (VT-533) — SHADOW the policy rail without enforcing: evaluate the SAME check and record
+        # the would-be block to tm_audit (observe-only). This surfaces the operational truth needed to
+        # safely flip ``enforce_policy=True`` later — chiefly "no policy grant exists yet, so
+        # enforcement would block every send". NEVER changes the return; fully fail-soft (a shadow
+        # eval error must not touch the compliance pre-gate).
+        try:
+            from orchestrator.agents.business_policy import (
+                PolicyActionClass,
+                assert_within_policy,
+            )
+
+            check = assert_within_policy(
+                tid, PolicyActionClass.CUSTOMER_SEND, {"segment": segment}, conn=conn
+            )
+            if check.out_of_policy:
+                _record_policy_shadow(tid, agent=agent, reason=check.reason, conn=conn)
+        except Exception:  # noqa: BLE001 — shadow is observe-only; never break the pre-gate
+            logger.warning(
+                "customer_send_choke: policy shadow eval failed (fail-soft) tenant=%s", tid,
+                exc_info=True,
+            )
 
     return CustomerSendGate(allowed=True)
+
+
+def _record_policy_shadow(tid: str, *, agent: str, reason: str | None, conn: Any) -> None:
+    """OC1 — record a would-be policy block as an observe-only tm_audit row (``decides`` layer)."""
+    from orchestrator.observability.decorators import _observability_context
+    from orchestrator.observability.tm_audit import emit_tm_audit
+
+    ctx = _observability_context.get()
+    emit_tm_audit(
+        event_layer="decides",
+        event_kind="policy_shadow",
+        actor=agent or "team_manager",
+        tenant_id=tid,
+        run_id=ctx.run_id if ctx is not None else None,
+        summary=(
+            "customer_send policy rail would BLOCK (observe-only; enforce_policy is off) — "
+            f"reason={reason}"
+        ),
+        decision={"action_class": "customer_send", "policy_reason": reason, "would_block": True},
+        severity="info",
+        status="observed",
+        conn=conn,
+    )
 
 
 __all__ = [
