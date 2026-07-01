@@ -548,6 +548,36 @@ class CampaignsWrapper(TenantScopedTable):
             )
             return cur.rowcount if cur.rowcount is not None else 0
 
+    def get_status(
+        self, tenant_id: UUID | str, campaign_id: str, *, conn: Any = None
+    ) -> str | None:
+        """VT-558 — the campaign's current status (tenant-predicated). None = missing/cross-tenant
+        or a non-str value; the caller treats None as 'not cancelled' (fail-open kill check)."""
+        tid = self._uuid(tenant_id)
+        with self._conn(tid, conn) as c:
+            row = c.execute(
+                "SELECT status FROM campaigns WHERE tenant_id = %s AND id = %s",
+                (str(tid), str(campaign_id)),
+            ).fetchone()
+        if row is None:
+            return None
+        val = row.get("status") if isinstance(row, dict) else (row[0] if row else None)
+        return val if isinstance(val, str) else None
+
+    def cancel(self, tenant_id: UUID | str, campaign_id: str, *, conn: Any = None) -> bool:
+        """VT-558 campaign true-kill — CAS a non-terminal campaign → 'cancelled'. Only 'proposed' /
+        'approved' can be killed; a sent/rejected/failed/already-cancelled campaign is a no-op →
+        False. The execute loop observes 'cancelled' at entry + each recipient boundary and stops the
+        fan-out (the remaining recipients are counted ``killed`` and never sent)."""
+        tid = self._uuid(tenant_id)
+        with self._conn(tid, conn) as c:
+            cur = c.execute(
+                "UPDATE campaigns SET status = 'cancelled' "
+                "WHERE tenant_id = %s AND id = %s AND status IN ('proposed', 'approved')",
+                (str(tid), str(campaign_id)),
+            )
+            return (cur.rowcount or 0) > 0
+
     def count_by_status_in_range(
         self, tenant_id: UUID | str, start: Any, end: Any, *, conn: Any = None
     ) -> dict[str, int]:

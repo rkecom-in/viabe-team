@@ -123,6 +123,19 @@ class RedriveTaskBody(BaseModel):
     # NOTE: deliberately NO tenant_id — derived from the manager_tasks row server-side (VT-293/294).
 
 
+class KillCampaignBody(BaseModel):
+    operator_id: str
+    campaign_id: str
+    reason: str = ""
+    # NOTE: deliberately NO tenant_id — derived from the campaigns row server-side (VT-293/294).
+
+
+class TakeoverBody(BaseModel):
+    operator_id: str
+    tenant_id: str
+    reason: str = ""
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -224,6 +237,16 @@ def _resolve_task_tenant(conn: Any, task_id: str) -> str:
     ).fetchone()
     if row is None:
         raise HTTPException(status_code=404, detail="task not found")
+    return str(row["tenant_id"] if isinstance(row, dict) else row[0])
+
+
+def _resolve_campaign_tenant(conn: Any, campaign_id: str) -> str:
+    """Server-side tenant derivation from the campaigns row (VT-293/294 — never a client id)."""
+    row = conn.execute(
+        "SELECT tenant_id FROM campaigns WHERE id = %s LIMIT 1", (campaign_id,)
+    ).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="campaign not found")
     return str(row["tenant_id"] if isinstance(row, dict) else row[0])
 
 
@@ -1173,3 +1196,150 @@ def redrive_task_endpoint(
         "redrive_task OK operator=%s tenant=%s task=%s", operator, tenant_id, body.task_id
     )
     return {"ok": True, "task_id": body.task_id, "tenant_id": tenant_id}
+
+
+# ---------------------------------------------------------------------------
+# /kill-campaign — campaign-targeted true-kill (VT-558)
+# ---------------------------------------------------------------------------
+
+
+@router.post("/kill-campaign")
+def kill_campaign(
+    body: KillCampaignBody,
+    x_internal_secret: str | None = Header(default=None, alias="X-Internal-Secret"),
+    x_operator_jwt: str | None = Header(default=None, alias="X-Operator-Jwt"),
+) -> dict[str, Any]:
+    """VT-558 — CAS a non-terminal campaign (proposed|approved) → 'cancelled'. The execute loop
+    observes it at entry + each recipient boundary and stops the fan-out. Tenant DERIVED from the
+    campaign row (VT-293/294); transport auth BEFORE the derive (anti-probe). 409 if not killable
+    (already sent/rejected/failed/cancelled). Audit-in-txn on the service cursor."""
+    _require_uuid(body.campaign_id, "campaign_id")
+    verify_internal_secret(x_internal_secret)
+    verify_operator_jwt(x_operator_jwt)
+    pool = get_pool()
+    with pool.connection() as conn:
+        tenant_id = _resolve_campaign_tenant(conn, body.campaign_id)
+        with conn.transaction(), conn.cursor() as cur:
+            operator = require_vtr_action(
+                cur,
+                x_internal_secret=x_internal_secret,
+                x_operator_jwt=x_operator_jwt,
+                body_operator_id=body.operator_id,
+                tenant_id=tenant_id,
+                deny_action="campaign_kill_denied",
+                deny_target_kind="campaign",
+                deny_target_id=body.campaign_id,
+            )
+            audit(
+                cur,
+                operator_id=operator,
+                tenant_id=tenant_id,
+                action="campaign_kill",
+                target_kind="campaign",
+                target_id=body.campaign_id,
+                detail=None,
+            )
+            cur.execute(
+                "UPDATE campaigns SET status = 'cancelled' "
+                "WHERE tenant_id = %s AND id = %s AND status IN ('proposed', 'approved')",
+                (tenant_id, body.campaign_id),
+            )
+            if (cur.rowcount or 0) == 0:
+                raise HTTPException(status_code=409, detail="campaign not killable")
+    logger.info(
+        "kill_campaign OK operator=%s tenant=%s campaign=%s", operator, tenant_id, body.campaign_id
+    )
+    return {"ok": True, "campaign_id": body.campaign_id, "tenant_id": tenant_id}
+
+
+# ---------------------------------------------------------------------------
+# /takeover + /release-takeover — VTR seizes/releases a tenant's automation (VT-558)
+# ---------------------------------------------------------------------------
+
+
+@router.post("/takeover")
+def takeover(
+    body: TakeoverBody,
+    x_internal_secret: str | None = Header(default=None, alias="X-Internal-Secret"),
+    x_operator_jwt: str | None = Header(default=None, alias="X-Operator-Jwt"),
+) -> dict[str, Any]:
+    """VT-558 — the operator SEIZES the tenant: pause agent_dispatch + freeze every registered agent
+    (atomically cancelling in-flight work). Tenant-scoped (body tenant_id + assignment gate).
+    Audit-in-txn on the service cursor. Idempotent."""
+    _require_uuid(body.tenant_id, "tenant_id")
+    reason = _redact_text(body.reason, _registry_or_503(body.tenant_id)) if body.reason else ""
+    pool = get_pool()
+    with pool.connection() as conn, conn.transaction(), conn.cursor() as cur:
+        operator = require_vtr_action(
+            cur,
+            x_internal_secret=x_internal_secret,
+            x_operator_jwt=x_operator_jwt,
+            body_operator_id=body.operator_id,
+            tenant_id=body.tenant_id,
+            deny_action="takeover_denied",
+            deny_target_kind="tenant",
+            deny_target_id=body.tenant_id,
+        )
+        audit(
+            cur,
+            operator_id=operator,
+            tenant_id=body.tenant_id,
+            action="tenant_takeover",
+            target_kind="tenant",
+            target_id=body.tenant_id,
+            detail=f"reason_len={len(reason)}",
+        )
+        from orchestrator.agents.takeover import take_over_tenant
+
+        # take_over_tenant's autonomy freeze emits tm_audit (needs a Connection, not the cursor);
+        # conn + cur share this transaction, so the audit + freeze commit or roll back together.
+        result = take_over_tenant(
+            body.tenant_id, operator_id=operator, reason=f"takeover:{operator}", conn=conn
+        )
+    logger.info(
+        "takeover OK operator=%s tenant=%s frozen=%d",
+        operator, body.tenant_id, len(result["frozen_agents"]),
+    )
+    return {"ok": True, "tenant_id": body.tenant_id, **result}
+
+
+@router.post("/release-takeover")
+def release_takeover_endpoint(
+    body: TakeoverBody,
+    x_internal_secret: str | None = Header(default=None, alias="X-Internal-Secret"),
+    x_operator_jwt: str | None = Header(default=None, alias="X-Operator-Jwt"),
+) -> dict[str, Any]:
+    """VT-558 — reverse a takeover: release the agent_dispatch hold + unfreeze every registered
+    agent (work re-enters via the next sweep). Tenant-scoped + assignment gate. Audit-in-txn."""
+    _require_uuid(body.tenant_id, "tenant_id")
+    pool = get_pool()
+    with pool.connection() as conn, conn.transaction(), conn.cursor() as cur:
+        operator = require_vtr_action(
+            cur,
+            x_internal_secret=x_internal_secret,
+            x_operator_jwt=x_operator_jwt,
+            body_operator_id=body.operator_id,
+            tenant_id=body.tenant_id,
+            deny_action="release_takeover_denied",
+            deny_target_kind="tenant",
+            deny_target_id=body.tenant_id,
+        )
+        audit(
+            cur,
+            operator_id=operator,
+            tenant_id=body.tenant_id,
+            action="tenant_release_takeover",
+            target_kind="tenant",
+            target_id=body.tenant_id,
+            detail=None,
+        )
+        from orchestrator.agents.takeover import release_takeover
+
+        result = release_takeover(
+            body.tenant_id, operator_id=operator, reason=f"release:{operator}", conn=conn
+        )
+    logger.info(
+        "release_takeover OK operator=%s tenant=%s unfrozen=%d",
+        operator, body.tenant_id, len(result["unfrozen_agents"]),
+    )
+    return {"ok": True, "tenant_id": body.tenant_id, **result}
