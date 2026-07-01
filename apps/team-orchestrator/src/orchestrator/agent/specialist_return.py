@@ -88,4 +88,59 @@ def observe_specialist_return(
         return None
 
 
-__all__ = ["parse_specialist_return", "observe_specialist_return"]
+def handle_specialist_return(
+    envelope: Any, *, agent: str, has_next_step: bool = False, enforce: bool | None = None
+) -> Any | None:
+    """VT-554 (B3 action-path): observe the manager decision (always) AND, when ENFORCING, act on the
+    high-stakes ESCALATE deterministically — open + VTR-escalate an incident rather than leaving an
+    in-lane-infeasible, no-path pushback to the model.
+
+    ``enforce`` defaults to the ``MANAGER_ENFORCE_ROUTING`` env flag (default False), so today this is
+    byte-for-byte the observe-only path (CL-2026-07-01-observe-only-rails — the routing-steer flip is
+    a separate, validated step). Fully fail-soft."""
+    decision = observe_specialist_return(envelope, agent=agent, has_next_step=has_next_step)
+    if decision is None:
+        return None
+    try:
+        from orchestrator.manager.decision import ManagerDecisionKind
+
+        if _enforce_enabled(enforce) and decision.kind is ManagerDecisionKind.ESCALATE:
+            _enforce_escalate(agent, decision)
+    except Exception:  # noqa: BLE001 — enforcement is best-effort; never break the turn
+        logger.debug("VT-554 handle_specialist_return enforce failed (fail-soft)", exc_info=True)
+    return decision
+
+
+def _enforce_enabled(enforce: bool | None) -> bool:
+    if enforce is not None:
+        return enforce
+    import os
+
+    return os.environ.get("MANAGER_ENFORCE_ROUTING", "").strip().lower() in ("1", "true", "yes")
+
+
+def _enforce_escalate(agent: str, decision: Any) -> None:
+    """Deterministically open + VTR-escalate an incident for a manager ESCALATE. Reads the ambient
+    observability context for tenant/run; fail-soft."""
+    from orchestrator.observability.decorators import _observability_context
+    from orchestrator.observability.incident_store import create_incident, escalate_incident
+
+    ctx = _observability_context.get()
+    if ctx is None:
+        return
+    iid = create_incident(
+        ctx.tenant_id,
+        incident_kind="other",
+        run_id=ctx.run_id,
+        severity="warning",
+        detail={"source": "manager_escalate", "agent": agent, "reason": decision.reason},
+    )
+    if iid is not None:
+        escalate_incident(ctx.tenant_id, iid, to_tier=2)  # in-lane-infeasible, no path → straight to VTR
+
+
+__all__ = [
+    "parse_specialist_return",
+    "observe_specialist_return",
+    "handle_specialist_return",
+]
