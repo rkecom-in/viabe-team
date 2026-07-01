@@ -642,6 +642,20 @@ def webhook_pipeline_run(tenant_id: str, run_id: str, twilio_fields: dict) -> di
     open_webhook_run(tenant_id, run_id, tokenised)
     record_webhook_received(tenant_id, run_id, tokenised)
 
+    # VT-524 (B1) — owner-notification delivery ledger. Persist the async delivery truth
+    # (delivered/failed) against the owner send, keyed by the outbound message_sid, for EVERY
+    # status-callback state — runs BEFORE pre_filter (which Rejects 'delivered' as
+    # observability-only) so the delivery result is never lost. Fail-soft; a no-op when no owner
+    # send matches the sid.
+    if event.message_type == "status_callback" and event.twilio_message_sid:
+        from orchestrator.owner_surface.owner_notification import (
+            record_owner_notification_delivery,
+        )
+
+        record_owner_notification_delivery(
+            tenant_id, event.twilio_message_sid, event.status_callback_state
+        )
+
     # VT-384 — the L3 delivery-anchor leg. A 'delivered' status callback for the owner's
     # team_l3_presend_notice stamps the F6 anchor on its auto_send_pending batch and starts the
     # hold clock (send_not_before = delivered_at + hold_hours). Runs BEFORE pre_filter (which
