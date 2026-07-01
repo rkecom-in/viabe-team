@@ -96,9 +96,13 @@ def _new_tenant(dsn: str, *, name: str, owner_inputs: bool = True) -> UUID:
     # is now journey-complete (onboarding_journey.status='complete'), NOT paid-active — so seed it.
     with psycopg.connect(dsn, autocommit=True) as conn:
         row = conn.execute(
+            # VT-522/VT-517: ownership_verified is a universal execution bar (VTR-human review).
+            # Seed it verified so these end-to-end SR tests reach detection/drafting past the gate.
             "INSERT INTO tenants (business_name, plan_tier, phase, phase_entered_at, "
-            "business_type, whatsapp_number, owner_inputs, verification_status) "
-            "VALUES (%s, 'founding', 'paid_active', now(), 'restaurant', %s, %s, 'gstin_verified') "
+            "business_type, whatsapp_number, owner_inputs, verification_status, "
+            "ownership_verified, ownership_status) "
+            "VALUES (%s, 'founding', 'paid_active', now(), 'restaurant', %s, %s, 'gstin_verified', "
+            "TRUE, 'verified') "
             "RETURNING id",
             (name, f"+9198{uuid4().int % 10**8:08d}", owner_inputs),
         ).fetchone()

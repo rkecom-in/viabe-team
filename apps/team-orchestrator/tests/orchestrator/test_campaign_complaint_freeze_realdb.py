@@ -62,8 +62,11 @@ def _seed_tenant(conn) -> str:
 
     tenant = str(
         conn.execute(
-            "INSERT INTO tenants (business_name, plan_tier, phase, verification_status) "
-            "VALUES ('VT321 Co', 'standard', 'paid_active', 'gstin_verified') RETURNING id"
+            # VT-522/VT-517: ownership_verified is a universal execution bar (VTR-human review) —
+            # seed it verified so execute_approved_campaign reaches the complaint-freeze logic.
+            "INSERT INTO tenants (business_name, plan_tier, phase, verification_status, "
+            "ownership_verified, ownership_status) "
+            "VALUES ('VT321 Co', 'standard', 'paid_active', 'gstin_verified', TRUE, 'verified') RETURNING id"
         ).fetchone()["id"]
     )
     conn.execute(
