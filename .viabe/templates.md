@@ -41,15 +41,20 @@ This file becomes the contract. Code in `apps/team-orchestrator/` (when wired) r
 
 ## Approved templates
 
-### `team_welcome2`
+### `team_welcome3`
 
-- **Twilio Content SID (en):** `HX65602e94b48bb2d6e82c70630d01da20`
-- **Twilio Content SID (hi):** `HXa2e1bcb65189ed25ec1f6b92d9458108`
+- **Twilio Content SID (en):** `HX3ec52f76cf477cebf80b3eff5835817e`
+- **Twilio Content SID (hi):** `HX1ee2cb5bb504137ff8be5071ee9b7799`
+- **Meta category:** **UTILITY** (submitted 2026-07-01 via Content API; approval ASYNC — `status=received` at submit)
 - **Tier:** Tier-A (launch-blocking, onboarding flow)
-- **Variables:** `{{1}}` = owner name, `{{2}}` = trial end date (positional — VT-400)
-- **VT-404:** replaces `team_welcome`. The Meta-approved copy invites the owner's reply, opening the
-  24h window so onboarding's lazy question-queue fills on the first inbound. The live signup send
-  (`_default_welcome`) and the `welcome` routing both point here.
+- **Variables:** `{{1}}` = owner name, `{{2}}` = trial end date (positional — VT-400; unchanged from team_welcome2)
+- **Copy (en):** `Hi {{1}}, your Viabe Team account is set up and active until {{2}}. Reply to this message to continue setting up your business profile.`
+- **Copy (hi):** `नमस्ते {{1}}, आपका Viabe Team अकाउंट सेट हो गया है और {{2}} तक सक्रिय है। अपनी बिज़नेस प्रोफ़ाइल का सेटअप जारी रखने के लिए इस संदेश का उत्तर दें।` *(HI copy = CC draft; flag for native review)*
+- **VT-520:** replaces `team_welcome2` (which Meta approved as MARKETING → declined delivery, error 63049). Strictly-transactional copy so Meta classifies + delivers it as UTILITY. The live signup send (`_default_welcome`) and the `welcome` routing both point here.
+
+---
+
+### `team_welcome2` — **DEPRECATED (VT-520)**: Meta-approved as **MARKETING** → delivery declined (63049 "Meta chose not to deliver this marketing message"). Superseded by `team_welcome3` (UTILITY). SIDs en `HX65602e94b48bb2d6e82c70630d01da20` / hi `HXa2e1bcb65189ed25ec1f6b92d9458108`. Not sent by any live path.
 
 ---
 

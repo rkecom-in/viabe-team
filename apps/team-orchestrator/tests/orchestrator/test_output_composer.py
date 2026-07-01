@@ -45,7 +45,7 @@ def test_template_routing_yaml_loads_with_all_eight_tier_a_names() -> None:
     for phase_map in routing.values():
         reachable.update(phase_map.values())
     expected = {
-        "team_welcome2",  # VT-404: welcome routing repointed (team_welcome retired, not reachable)
+        "team_welcome3",  # VT-520: welcome routing repointed to UTILITY template (team_welcome2 MARKETING → 63049)
         "team_weekly_approval",
         "team_opt_out_confirmation",
         "team_dsr_acknowledgment",
@@ -76,7 +76,7 @@ def test_outside_24h_window_forces_template() -> None:
     state = _state(last_owner_message_at=now - timedelta(hours=25))
     out = compose_owner_output(None, state, "welcome", now=now)
     assert out.message_type == "template"
-    assert out.template_name == "team_welcome2"  # VT-404: reply-inviting copy
+    assert out.template_name == "team_welcome3"  # VT-520: UTILITY welcome (team_welcome2 → MARKETING 63049)
 
 
 def test_inside_24h_window_with_template_still_uses_template() -> None:
@@ -369,8 +369,8 @@ def test_signature_differs_when_intent_differs() -> None:
 @pytest.mark.parametrize(
     "intent,phase,expected_template",
     [
-        ("welcome", "onboarding", "team_welcome2"),  # VT-404: reply-inviting copy
-        ("welcome", "trial", "team_welcome2"),
+        ("welcome", "onboarding", "team_welcome3"),  # VT-520: UTILITY welcome (team_welcome2 → MARKETING 63049)
+        ("welcome", "trial", "team_welcome3"),
         ("weekly_approval", "paid_active", "team_weekly_approval"),
         ("weekly_approval", "paid_at_risk", "team_weekly_approval"),
         ("opt_out_confirmed", "trial", "team_opt_out_confirmation"),
