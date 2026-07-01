@@ -228,6 +228,18 @@ def _advance_campaign_status(
     CampaignsWrapper().set_status(tenant_id, campaign_id, "sent", conn=conn)
 
 
+def _campaign_status(conn: Any, tenant_id: str, campaign_id: str) -> str | None:
+    """VT-558 — read the campaign's current status via the wrapper on the caller's conn (a fresh
+    statement, so a concurrently-committed operator kill IS observed mid-loop; the loop body runs in
+    autocommit). FAIL-OPEN: any unreadable status (missing row / read error / non-str value) returns
+    None → the kill check treats it as NOT cancelled, because aborting a live campaign on an UNCERTAIN
+    status read would wrongly drop legitimate sends. A real kill lands a real 'cancelled'."""
+    try:
+        return CampaignsWrapper().get_status(tenant_id, campaign_id, conn=conn)
+    except Exception:  # noqa: BLE001 — a status-read failure must never kill a live campaign
+        return None
+
+
 # Type alias for the injectable send function (matches VT-45's public API).
 # The injected callable receives (payload, *, pool) -> SendWhatsappTemplateOutput.
 _SendFn = Callable[..., SendWhatsappTemplateOutput]
@@ -372,6 +384,17 @@ def execute_approved_campaign(
     skipped_opt_out = 0
     skipped_complaint_freeze = 0
     failed = 0
+    killed = 0
+
+    # VT-558 campaign true-kill (entry gate): an operator cancel that landed before this run started
+    # aborts the whole fan-out — nothing is sent. The per-iteration re-check below stops an in-flight
+    # kill. 'cancelled' is a real terminal; the operator sets it via ops/run-control/kill-campaign.
+    if _campaign_status(conn, tenant_id_str, campaign_id_str) == "cancelled":
+        logger.info(
+            "execute_approved_campaign: killed_before_start tenant=%s campaign=%s",
+            tenant_id_str, campaign_id_str,
+        )
+        return {"killed": len(recipients), "pre_gate_blocked": 1}
 
     # VT-460 gap (c): the gated extent of the customer-send fan-out. The transport refuses a
     # customer send outside this context; the campaign path is a legitimate gated caller (the
@@ -380,7 +403,19 @@ def execute_approved_campaign(
     from orchestrator.utils.twilio_send import customer_send_context
 
     with customer_send_context():
-        for recipient in recipients:
+        for idx, recipient in enumerate(recipients):
+            # VT-558 campaign true-kill (in-flight gate): an operator cancel that lands mid-fan-out
+            # stops the loop at the next recipient boundary — the remaining recipients are counted
+            # ``killed`` and never sent. Fresh read (autocommit loop) → the committed kill is seen.
+            if _campaign_status(conn, tenant_id_str, campaign_id_str) == "cancelled":
+                killed = len(recipients) - idx
+                logger.info(
+                    "execute_approved_campaign: killed_in_flight tenant=%s campaign=%s "
+                    "sent_so_far=%d remaining_killed=%d",
+                    tenant_id_str, campaign_id_str, sent, killed,
+                )
+                break
+
             customer_id_str = recipient["customer_id"]
             opt_out_status: str | None = recipient.get("opt_out_status")
             complaint_status: str | None = recipient.get("complaint_status")
@@ -507,22 +542,26 @@ def execute_approved_campaign(
     # --- Advance campaign status → sent (D2: stop here, no attribution) ---
     # VT-65 PR-2: the status UPDATE + campaign_sent emit (with the cohort for
     # TARGETED edges) atomic in one txn — NOT the I/O send loop above.
-    from orchestrator.knowledge.kg_emit import drain_kg_events, emit_kg_event
-    from orchestrator.knowledge.kg_vocab import KgEventType
+    # VT-558: a killed campaign is NOT advanced to 'sent' (it stays 'cancelled') and does NOT emit
+    # CAMPAIGN_SENT — only the recipients actually contacted before the kill went out.
+    if killed == 0:
+        from orchestrator.knowledge.kg_emit import drain_kg_events, emit_kg_event
+        from orchestrator.knowledge.kg_vocab import KgEventType
 
-    with conn.transaction():
-        _advance_campaign_status(conn, tenant_id_str, campaign_id_str)
-        emit_kg_event(conn, KgEventType.CAMPAIGN_SENT, tenant_id_str, {
-            "campaign_id": campaign_id_str,
-            "customer_ids": [r["customer_id"] for r in recipients],
-        })
-    drain_kg_events(tenant_id_str)
+        with conn.transaction():
+            _advance_campaign_status(conn, tenant_id_str, campaign_id_str)
+            emit_kg_event(conn, KgEventType.CAMPAIGN_SENT, tenant_id_str, {
+                "campaign_id": campaign_id_str,
+                "customer_ids": [r["customer_id"] for r in recipients],
+            })
+        drain_kg_events(tenant_id_str)
 
     summary = {
         "sent": sent,
         "skipped_opt_out": skipped_opt_out,
         "skipped_complaint_freeze": skipped_complaint_freeze,
         "failed": failed,
+        "killed": killed,
     }
     logger.info(
         "execute_approved_campaign: done tenant=%s campaign=%s summary=%s",

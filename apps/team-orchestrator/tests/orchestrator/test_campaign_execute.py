@@ -473,6 +473,7 @@ def test_empty_cohort_status_still_advanced() -> None:
         "skipped_opt_out": 0,
         "skipped_complaint_freeze": 0,
         "failed": 0,
+        "killed": 0,  # VT-558: campaign true-kill counter (0 = not killed)
     }
     send_fn.assert_not_called()
 
@@ -481,6 +482,30 @@ def test_empty_cohort_status_still_advanced() -> None:
         if "UPDATE campaigns" in sql
     ]
     assert len(update_calls) == 1
+
+
+def test_cancelled_campaign_killed_before_start() -> None:
+    """VT-558 campaign true-kill: a campaign an operator cancelled before this run started aborts
+    the fan-out — nothing sent, NOT advanced to 'sent', remaining recipients counted ``killed``."""
+    from orchestrator.campaign.execute import execute_approved_campaign
+
+    row = _campaign_row()
+    row["status"] = "cancelled"  # operator killed it via ops/run-control/kill-campaign
+    conn = _make_conn(
+        campaign_row=row,
+        recipients=[{"customer_id": _CUSTOMER_1, "opt_out_status": None, "complaint_status": None}],
+    )
+    send_fn = MagicMock(return_value=_ok_send_result())
+
+    summary = execute_approved_campaign(
+        _TENANT_ID, _CAMPAIGN_ID, conn=conn, send_template_fn=send_fn
+    )
+
+    assert summary["killed"] == 1
+    send_fn.assert_not_called()  # no recipient contacted
+    # a killed campaign is NOT advanced to 'sent' (no UPDATE campaigns).
+    update_calls = [sql for sql, _ in conn._execute_calls if "UPDATE campaigns" in sql]
+    assert update_calls == []
 
 
 # ---------------------------------------------------------------------------

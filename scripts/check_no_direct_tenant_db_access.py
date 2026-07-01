@@ -107,6 +107,15 @@ _ALLOWLIST = frozenset(
         # through `tenant_connection` (RLS), not direct access. Same documented,
         # audited cross-tenant-exception discipline as k_anonymity / l3_construction.
         "apps/team-orchestrator/src/orchestrator/privacy/reconstitution.py",
+        # VT-558 kill-campaign — the operator campaign true-kill runs on the SERVICE pool (the
+        # ops_audit write needs the privileged role; the app_role wrapper cursor has no ops_audit
+        # grant). Two campaigns touches, both un-wrapper-able by construction: (1) _resolve_campaign
+        # _tenant derives the tenant FROM the campaign row before any tenant is known (the VT-293/294
+        # IDOR derive — cross-tenant by necessity); (2) the by-PK UPDATE ... SET status='cancelled'
+        # under BYPASSRLS with WHERE tenant_id (server-derived) AND id AND status IN (proposed,
+        # approved) — no client tenant_id, no cross-tenant write possible. Same audited residual
+        # discipline as attribution_close's by-PK campaigns UPDATE.
+        "apps/team-orchestrator/src/orchestrator/api/ops_run_control.py",
     }
 )
 
