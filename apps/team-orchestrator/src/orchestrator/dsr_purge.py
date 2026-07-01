@@ -229,6 +229,10 @@ _PURGE_ORDER: tuple[str, ...] = (
     # is STILL the subject's data → erased on right-to-erasure (the VT-518 lesson).
     "manager_task_steps",
     "manager_tasks",
+    # VT-527 (B4): pending_questions — the owner-clarification ledger. Tenant-scoped; task_id/run_id
+    # are soft pointers (NO FK), so order-insensitive. Holds redacted question + the owner's redacted
+    # answer → tenant data, erased on right-to-erasure.
+    "pending_questions",
     "pipeline_steps",
     "pipeline_runs",
     "subscriber_states",

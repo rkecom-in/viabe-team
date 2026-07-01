@@ -309,6 +309,13 @@ def _seed_full_tenant_data(dsn: str, tenant_id: UUID) -> dict[str, UUID]:
             "VALUES (%s, %s, 1, 'specialist_dispatch', 'pending')",
             (str(tenant_id), str(mtask_id)),
         )
+        # VT-527: pending_questions — owner-clarification ledger, tenant data, erased on DSR.
+        conn.execute(
+            "INSERT INTO pending_questions "
+            "(tenant_id, task_id, question_kind, question_text, status) "
+            "VALUES (%s, %s, 'clarification', 'which cohort?', 'open')",
+            (str(tenant_id), str(mtask_id)),
+        )
 
         # privacy_audit_log — pre-existing event, MUST survive purge. VT-80:
         # write through the real hash-chain writer (a seeded event_type that is
@@ -384,6 +391,7 @@ _PURGED_TABLES = (
     "owner_notifications",  # VT-524: owner-notification delivery ledger — tenant data, erased on DSR
     "manager_task_steps",  # VT-525: task step plan — tenant data, erased on DSR
     "manager_tasks",  # VT-525: task spine — tenant data, erased on DSR
+    "pending_questions",  # VT-527: owner-clarification ledger — tenant data, erased on DSR
     "owner_inputs",
     "campaigns",
     "pipeline_steps",
