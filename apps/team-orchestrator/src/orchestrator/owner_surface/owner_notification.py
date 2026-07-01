@@ -78,9 +78,43 @@ def record_owner_notification_delivery(
         return  # unknown state — leave the ledger untouched
     try:
         with get_pool().connection() as conn:
-            _update_delivery(conn, tenant_id, message_sid, new_status, comm, ts_col)
+            rowcount = _update_delivery(conn, tenant_id, message_sid, new_status, comm, ts_col)
     except Exception as exc:  # noqa: BLE001 — fail-soft; the callback routing is unaffected
         logger.warning("owner_notification delivery update failed (fail-soft): %s", exc)
+        return
+    # VT-534 (B1-part-2): on a NEW failed transition (a real row flipped, not a terminal-safe
+    # no-op re-callback), fire the outbound_failure alert — the declared-but-never-fired critical
+    # detector. This is the reviewer-visibility stage: an owner was ACCEPTED but delivery failed,
+    # so the owner is silently un-notified (the exact VT-519 class). Separate fail-soft guard: an
+    # alert failure must never touch the ledger write or the inbound webhook.
+    if new_status == "failed" and rowcount > 0:
+        _alert_owner_delivery_failure(tenant_id, message_sid)
+
+
+def _alert_owner_delivery_failure(tenant_id: UUID | str, message_sid: str) -> None:
+    """Fire the outbound_failure critical alert for a failed owner-notification delivery.
+
+    Dev-routed by ``dispatch_alert`` (a dev/canary tenant reaches only the dev bot, never pages
+    Fazal), and fully fail-soft. The message_sid is an opaque Twilio id, not PII; ``dispatch_alert``
+    additionally PII-scrubs the text."""
+    try:
+        from orchestrator.alerts.dispatch import dispatch_alert
+        from orchestrator.alerts.triggers import Trigger, severity_for
+
+        tid = tenant_id if isinstance(tenant_id, UUID) else UUID(str(tenant_id))
+        dispatch_alert(Trigger(
+            tenant_id=tid,
+            trigger_kind="outbound_failure",
+            severity=severity_for("outbound_failure"),
+            message_text=(
+                f"Owner-notification delivery FAILED (message_sid={message_sid}). The owner was "
+                "accepted by Twilio but Meta/carrier did not deliver — the owner is un-notified. "
+                "Investigate template category / opt-in / number."
+            ),
+            payload={"surface": "owner_notification", "message_sid": message_sid},
+        ))
+    except Exception as exc:  # noqa: BLE001 — fail-soft: an alert failure must not affect the ledger/webhook
+        logger.warning("owner_notification failure-alert dispatch failed (fail-soft): %s", exc)
 
 
 def _update_delivery(
@@ -90,15 +124,18 @@ def _update_delivery(
     new_status: str,
     comm: str,
     ts_col: str,
-) -> None:
+) -> int:
+    """Apply the terminal-safe delivery flip; return the affected row count (0 = a no-op
+    re-callback on an already-terminal row, so the caller does not re-fire the alert)."""
     # ts_col is one of two fixed literals (delivered_at/failed_at) — not user input.
-    conn.execute(
+    cur = conn.execute(
         f"UPDATE owner_notifications "  # noqa: S608 — ts_col from a fixed 2-value set
         f"SET owner_notification_status = %s, communication_status = %s, {ts_col} = now() "
         "WHERE tenant_id = %s AND message_sid = %s "
         "  AND owner_notification_status IN ('pending', 'accepted')",
         (new_status, comm, str(tenant_id), message_sid),
     )
+    return cur.rowcount
 
 
 __all__ = ["record_owner_notification", "record_owner_notification_delivery"]

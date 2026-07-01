@@ -138,3 +138,70 @@ def test_unknown_sid_is_noop(pool):
     sid = f"SM{uuid4().hex}"
     record_owner_notification_delivery(tid, sid, "delivered")  # no raise
     assert _row(pool, sid) is None
+
+
+# ── VT-534 (B1-part-2): outbound_failure alert fires on a delivery failure ────
+def _spy_dispatch(monkeypatch) -> list:
+    from orchestrator.alerts import dispatch as dispatch_mod
+
+    fired: list = []
+    monkeypatch.setattr(dispatch_mod, "dispatch_alert", lambda trig: fired.append(trig) or None)
+    return fired
+
+
+def test_failed_delivery_fires_outbound_failure_alert(pool, monkeypatch):
+    from orchestrator.owner_surface.owner_notification import (
+        record_owner_notification,
+        record_owner_notification_delivery,
+    )
+
+    fired = _spy_dispatch(monkeypatch)
+    tid = _seed_tenant(pool)
+    sid = f"SM{uuid4().hex}"
+    record_owner_notification(tid, "team_welcome3", sid)
+    record_owner_notification_delivery(tid, sid, "undelivered")  # the 63049 case
+    assert len(fired) == 1
+    assert fired[0].trigger_kind == "outbound_failure"
+    assert fired[0].severity == "critical"
+    assert sid in fired[0].message_text
+
+
+def test_delivered_does_not_fire_alert(pool, monkeypatch):
+    from orchestrator.owner_surface.owner_notification import (
+        record_owner_notification,
+        record_owner_notification_delivery,
+    )
+
+    fired = _spy_dispatch(monkeypatch)
+    tid = _seed_tenant(pool)
+    sid = f"SM{uuid4().hex}"
+    record_owner_notification(tid, "team_welcome3", sid)
+    record_owner_notification_delivery(tid, sid, "delivered")
+    assert fired == []
+
+
+def test_failed_alert_fires_once_on_duplicate_callback(pool, monkeypatch):
+    """A redelivered 'failed' callback is a rowcount-0 terminal-safe no-op → no second alert."""
+    from orchestrator.owner_surface.owner_notification import (
+        record_owner_notification,
+        record_owner_notification_delivery,
+    )
+
+    fired = _spy_dispatch(monkeypatch)
+    tid = _seed_tenant(pool)
+    sid = f"SM{uuid4().hex}"
+    record_owner_notification(tid, "team_welcome3", sid)
+    record_owner_notification_delivery(tid, sid, "failed")
+    record_owner_notification_delivery(tid, sid, "failed")  # duplicate
+    assert len(fired) == 1
+
+
+def test_unknown_sid_failed_does_not_fire(pool, monkeypatch):
+    from orchestrator.owner_surface.owner_notification import (
+        record_owner_notification_delivery,
+    )
+
+    fired = _spy_dispatch(monkeypatch)
+    tid = _seed_tenant(pool)
+    record_owner_notification_delivery(tid, f"SM{uuid4().hex}", "failed")  # no ledger row
+    assert fired == []
