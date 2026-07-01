@@ -99,7 +99,9 @@ def emit_tm_audit(
         to recover or terminate; advisory vocab, no CHECK, no migration),
         ``manager_decision`` (VT-526 B3-wiring — the manager decision loop ran
         on a real specialist return; ``status='observed'`` = observe-only, not
-        yet steering routing).
+        yet steering routing), ``policy_shadow`` (OC1/VT-533 — the customer-send
+        policy rail would BLOCK, recorded observe-only while ``enforce_policy`` is
+        off; the data that de-risks flipping enforcement on).
     actor:
         ``team_manager`` or the specific lane (``sales_recovery`` / …).
     tenant_id:

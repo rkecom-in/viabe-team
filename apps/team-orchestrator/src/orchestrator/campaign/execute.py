@@ -321,7 +321,12 @@ def execute_approved_campaign(
     # not-live tenant sends ZERO and the campaign short-circuits (count-only summary, no PII).
     from orchestrator.agents.customer_send_choke import assert_customer_send_allowed
 
-    _pregate = assert_customer_send_allowed(tenant_id_str, agent="sales_recovery", conn=conn)
+    # OC1 (VT-533): shadow the customer-send policy rail on this live campaign path (observe-only —
+    # enforce_policy stays off, so the return is unchanged). Surfaces "enforcement would block here"
+    # data (chiefly: no policy grant seeded yet) to de-risk flipping enforce_policy=True later.
+    _pregate = assert_customer_send_allowed(
+        tenant_id_str, agent="sales_recovery", conn=conn, observe_policy=True
+    )
     if not _pregate.allowed:
         logger.info(
             "execute_approved_campaign: pre_gate_blocked tenant=%s campaign=%s reason=%s",
