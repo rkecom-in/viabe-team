@@ -200,6 +200,25 @@ def test_finance_pushback_returns_structured_envelope():
     assert result["proposed_outcome"] == "monitor; revisit in 30 days"
 
 
+def test_finance_pushback_runs_manager_decision_observe_only(monkeypatch):
+    """VT-549 (B3-wiring 2): the finance pushback runs the manager decision loop observe-only via the
+    same bridge as sales — the envelope is unchanged (backward-compat) and the wire fires tagged
+    'finance'."""
+    import orchestrator.agent.specialist_return as sr
+    from orchestrator.agent.finance_lane import finance_pushback
+
+    seen: list = []
+    monkeypatch.setattr(
+        sr, "observe_specialist_return", lambda env, *, agent: seen.append((env, agent))
+    )
+    result = finance_pushback.invoke(
+        {"desired_outcome": "x", "reason": "y", "proposed_outcome": "monitor 30d"}
+    )
+    assert result["pushback"] is True  # envelope byte-for-byte (backward-compat)
+    assert len(seen) == 1 and seen[0][1] == "finance"
+    assert seen[0][0]["proposed_outcome"] == "monitor 30d"
+
+
 # --- READ tools: aggregate-only, PII-free, best-effort ----------------------------------
 
 

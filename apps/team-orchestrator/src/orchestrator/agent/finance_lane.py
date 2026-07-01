@@ -311,12 +311,18 @@ def finance_pushback(
     pushback envelope; takes no side effect.
     """
     logger.info("finance.pushback desired=%r -> proposed=%r", desired_outcome, proposed_outcome)
-    return {
+    env = {
         "pushback": True,
         "desired_outcome": desired_outcome,
         "reason": reason,
         "proposed_outcome": proposed_outcome,
     }
+    # VT-549 (B3-wiring 2): run the manager decision loop on this REAL finance pushback + record the
+    # decision to tm_audit (OBSERVE-ONLY — routing unchanged; same proven bridge as the sales lane).
+    from orchestrator.agent.specialist_return import observe_specialist_return
+
+    observe_specialist_return(env, agent="finance")
+    return env
 
 
 @tool
