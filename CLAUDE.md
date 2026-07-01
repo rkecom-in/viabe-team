@@ -38,14 +38,15 @@ If the snapshot's HEAD / IN FLIGHT / NEXT ACTION doesn't match what `git log` sh
 
 ---
 
-## The four roles (full text in `docs/clau/operating-brief.md`)
+## The three roles (full text in `docs/clau/operating-brief.md`)
+
+**Clau REMOVED 2026-07-02 (CL-2026-07-02-drop-clau).** The model is now THREE roles; Clau's audit-AFTER + architecture layer folds into Cowork.
 
 | Role | Owns |
 |---|---|
 | **Fazal (CEO)** | All final calls. Product, pricing, privacy/legal, scope, launch. Authorizes every merge (Pillar 7). Can override anything. |
-| **Cowork (delivery captain)** | The tracker, sprint progress, status reconciliation, daily briefs, rostering, routing work to CC. Decides within-sprint operational matters using standing rules. Runs the loop **without Clau** by default. |
-| **Claude Code (implementer)** | Decision role inside a task — implementation approach, code-level design, refactors, library use, tests, bug fixes. MUST log every material step + decision so Clau's audit layer has substrate. |
-| **Clau (architect)** | Implementation strategy + cross-sprint sequencing. Audit-AFTER, not approval-before. Runs at sprint boundaries, on request, or when something looks off. |
+| **Cowork (delivery captain + audit-after)** | The tracker, sprint progress, status reconciliation, daily briefs, rostering, routing work to CC. Decides within-sprint operational matters using standing rules. **Audits what CC lands (the layer that was Clau's).** |
+| **Claude Code (implementer)** | Decision role inside a task — implementation approach, code-level design, refactors, library use, tests, bug fixes. Builds + logs + **self-gates** before landing. |
 
 ---
 

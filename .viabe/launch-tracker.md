@@ -142,10 +142,15 @@ customer data / messaging goes live. Sourced from the 2026-06-03 conformance pas
 |---|---|---|---|
 | Opt-in required before WhatsApp send | VT-301 enforces `has_consent_for_phone` fail-closed | merged #240 — CC | done (at merge) |
 | Phone encrypted at rest | consent tokenised + resolution seam Fernet-encrypted; `customers.phone_e164` PLAINTEXT (RLS/access-controlled) | claim corrected in privacy-policy §7 + DPA Annex C; **optional hardening row: encrypt `customers.phone_e164`** — Fazal to decide | pre-publish |
-| Hosted in India (Mumbai) | dev=Seoul (ap-northeast-2); prod-Mumbai = VT-231 (parked); CL-422 no real data until then | close VT-231 — Fazal/infra | before any real customer data |
+| Hosted in India (Mumbai) | **prod-Mumbai DB IN PLACE (Fazal 2026-07-02)** — deploy when tested (prod deploy stays Fazal-authorized); dev=Seoul, CL-422 no real data on dev until cutover | deploy-when-tested — Fazal-authorized | before any real customer data |
+| Shopify OAuth (managed install) | **HAVE (Fazal 2026-07-02)** — credentials in place | — | — |
+| Razorpay Live | **IN PLACE (Fazal 2026-07-02)** — KYC + Live activated + plans | — | — |
+| Meta WhatsApp `team_welcome3` | Meta APPROVED but **force-converted to MARKETING** → welcome real-delivery GATED until reclassified UTILITY; **Fazal filing a reclassification appeal (2026-07-02)** | Meta appeal — Fazal | before welcome real-delivery |
+| Google OAuth (GBP) | status to confirm if a live path needs it (Fazal 2026-07-02) | confirm — Fazal | if live GBP path |
 | Sub-processor: Voyage | not used in source | marked planned-not-active (done) | — |
 | Cookies: analytics | essential-only, no analytics | corrected to essential-only (done) | — |
-| Data-principal access/correction + Grievance Officer | erasure (`purge_consent`) ✓; access/correction UI + officer not built/appointed | build access/correction; appoint officer — build + Fazal | pre-publish |
+| Data-principal access/correction + Grievance Officer | erasure (`purge_consent`) ✓; **DPDP review DONE (Fazal 2026-07-02 — counsel/DPDP closed)**; access/correction UI still to build; confirm Grievance Officer appointment is inside the DPDP close or flag if separate | build access/correction; confirm officer — Fazal | pre-publish |
+| VTR capacity + assignment-scoping | **3 VTRs × ≥100 tenants (~300), 1:100 = graduated target (Fazal 2026-07-02, CL-2026-07-02-vtr-capacity)**; per-tenant assignment-scoping ALREADY BUILT (VT-377/mig-134 + VT-295 UI, 18/18 green — CL-2026-07-02-vtr-scoping-already-built) — 2nd/3rd VTR NOT DB/UI-blocked | assign tenants to new VTRs — operational | before 2nd/3rd VTR |
 | Children's data not collected | no age controls; AUP prohibition only | decide controls — build/policy | pre-publish |
 
 **Hardening candidate (flag for Fazal, NOT rostered):** column-encrypt `customers.phone_e164`

@@ -7,6 +7,8 @@ Project coordination is now automated between **Cowork** (Project Manager / deli
 
 ## 2. Roles — who does what
 
+> **SUPERSEDED 2026-07-02 (CL-2026-07-02-drop-clau):** Clau is REMOVED. The model is now **THREE roles** — Fazal (decides), Cowork (routes + reconciles + **audits-after**, the layer that was Clau's), Claude Code (builds + logs + self-gates). The §7/§7a Clau-review loop below is dead; audit-after sits with Cowork (per the 2026-06-28 CC-full-autonomy decision). Read the paragraphs below with Clau's role folded into Cowork.
+
 The project runs on **four roles**, each owning a layer of decision and logging its calls so the others can act without re-deriving.
 
 **Fazal (CEO):** Makes every final call. Product, pricing, privacy/legal/regulatory, public communications, scope, launch. Can override any role's decision at any time; an override is final and not re-argued.
