@@ -27,9 +27,11 @@ logger = logging.getLogger(__name__)
 # ── State vocabularies (mirror the migration CHECK constraints) ──────────────
 TASK_STATUSES = frozenset({
     "clarifying", "planned", "running", "waiting_owner", "blocked", "verifying",
-    "completed", "failed", "cancelled",
+    "completed", "failed", "cancelled", "dead_letter",
 })
-TASK_TERMINAL = frozenset({"completed", "failed", "cancelled"})
+# VT-557: dead_letter is a terminal (retry budget spent) — but an OPERATOR-REDRIVABLE one
+# (redrive_task resets it to 'planned'); the reaper never auto-retries a dead_letter row.
+TASK_TERMINAL = frozenset({"completed", "failed", "cancelled", "dead_letter"})
 TASK_NON_TERMINAL = TASK_STATUSES - TASK_TERMINAL
 
 STEP_KINDS = frozenset({"specialist_dispatch", "effect", "clarification", "verification"})
@@ -138,6 +140,20 @@ def set_task_status(
             )
             return False
     return True
+
+
+def redrive_task(tenant_id: UUID | str, task_id: UUID | str, *, conn: Any) -> bool:
+    """VT-557 operator redrive — reset a dead_letter/blocked task to 'planned' for re-dispatch:
+    attempt=0, next_retry_at=NULL, version+1. CAS-guarded to the redrivable states so a double
+    redrive (or a completed/cancelled task) is a no-op → returns False. Runs on the caller's conn
+    (the ops endpoint's service cursor) so the operator-audit row commits in the SAME txn."""
+    cur = conn.execute(
+        "UPDATE manager_tasks SET status = 'planned', attempt = 0, next_retry_at = NULL, "
+        "    version = version + 1, updated_at = now() "
+        "WHERE tenant_id = %s AND id = %s AND status IN ('dead_letter', 'blocked')",
+        (str(tenant_id), str(task_id)),
+    )
+    return cur.rowcount > 0
 
 
 def get_task(tenant_id: UUID | str, task_id: UUID | str) -> dict[str, Any] | None:

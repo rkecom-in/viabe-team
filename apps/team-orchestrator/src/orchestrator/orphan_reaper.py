@@ -104,48 +104,91 @@ _STALLED_TASK_ACTIVE_STATES = ("planned", "running", "verifying")
 
 
 def reap_stalled_manager_tasks(*, pool: Any = None, age_hours: int = _STALLED_TASK_AGE_HOURS) -> int:
-    """Stamp manager_tasks stranded in an active-work state with no runnable step to ``blocked``.
+    """Apply the VT-557 retry ladder to manager_tasks stranded active with no runnable step.
 
-    The invariant B2 asks for: every non-terminal task has a runnable step, a durable wait, or
-    an explicit blocker. A task in planned/running/verifying with NO non-terminal step and no
-    update for > ``age_hours`` violates it (a process died between planning and stepping, or a
-    step-completion never re-planned) — flip it to ``blocked`` so it surfaces for review rather
-    than silently hanging. Best-effort, service-role (cross-tenant), idempotent, NEVER raises.
+    The invariant B2 asks for: every non-terminal task has a runnable step, a durable wait, or an
+    explicit blocker. A task in planned/running/verifying with NO non-terminal step and no update
+    for > ``age_hours`` violates it (a process died between planning and stepping, or a
+    step-completion never re-planned). VT-557 turns the old "always → blocked" into a BOUNDED,
+    deterministically-backed-off retry ladder (task_retry.decide_retry, reusing backoff.compute_delay):
+
+      * attempt < max_attempts → RETRY: record ``attempt+1`` + ``next_retry_at`` (backoff gate) and
+        flip to ``blocked`` (surfaced for review; the reaper skips it until the backoff elapses) →
+        orphaned_task alert (VT-529, unchanged for the common single-stall case).
+      * attempt reaches max_attempts → DEAD_LETTER: a real retry-exhausted terminal (operator-
+        redrivable, never auto-retried again) → dead_letter_task alert (VT-557).
+
+    Best-effort, service-role (cross-tenant), idempotent, NEVER raises.
     """
     try:
+        from orchestrator.manager.task_retry import decide_retry
+
         with _service_pool(pool).connection() as conn:
-            rows = conn.execute(
-                "UPDATE manager_tasks t "
-                "SET status = 'blocked', version = version + 1, updated_at = now(), "
-                "    stall_metadata = COALESCE(t.stall_metadata, '{}'::jsonb) "
-                "      || jsonb_build_object('reaped_by', 'vt525_stalled_task_reaper', "
-                "                            'reaped_reason', 'no_runnable_step', "
-                "                            'reaped_from', t.status, "
-                "                            'reaped_at', now()::text) "
+            candidates = conn.execute(
+                "SELECT t.id, t.tenant_id, t.attempt, t.max_attempts, t.status "
+                "FROM manager_tasks t "
                 "WHERE t.status = ANY(%s) "
                 "  AND t.updated_at < now() - make_interval(hours => %s) "
+                "  AND (t.next_retry_at IS NULL OR t.next_retry_at < now()) "  # backoff gate
                 "  AND NOT EXISTS ( "
                 "        SELECT 1 FROM manager_task_steps s "
                 "        WHERE s.task_id = t.id "
                 "          AND s.status IN ('pending', 'running', 'waiting') "
-                "  ) "
-                "RETURNING id, tenant_id",
+                "  )",
                 (list(_STALLED_TASK_ACTIVE_STATES), age_hours),
             ).fetchall()
-        n = len(rows)
+
+            retried: list[Any] = []
+            dead_lettered: list[Any] = []
+            for row in candidates:
+                tid = row["tenant_id"] if isinstance(row, dict) else row[1]
+                task_id = row["id"] if isinstance(row, dict) else row[0]
+                attempt = int(row["attempt"] if isinstance(row, dict) else row[2])
+                max_attempts = int(row["max_attempts"] if isinstance(row, dict) else row[3])
+                from_status = row["status"] if isinstance(row, dict) else row[4]
+                d = decide_retry(attempt, max_attempts)
+                if d.kind == "dead_letter":
+                    conn.execute(
+                        "UPDATE manager_tasks SET status = 'dead_letter', attempt = %s, "
+                        "    next_retry_at = NULL, version = version + 1, updated_at = now(), "
+                        "    stall_metadata = COALESCE(stall_metadata, '{}'::jsonb) "
+                        "      || jsonb_build_object('reaped_by', 'vt557_retry_ladder', "
+                        "         'reaped_reason', 'retry_budget_exhausted', 'reaped_from', %s::text, "
+                        "         'attempt', %s::int, 'reaped_at', now()::text) "
+                        "WHERE tenant_id = %s AND id = %s",
+                        (d.next_attempt, from_status, d.next_attempt, str(tid), str(task_id)),
+                    )
+                    dead_lettered.append((task_id, tid, d.next_attempt))
+                else:
+                    conn.execute(
+                        "UPDATE manager_tasks SET status = 'blocked', attempt = %s, "
+                        "    next_retry_at = now() + make_interval(secs => %s::double precision), "
+                        "    version = version + 1, updated_at = now(), "
+                        "    stall_metadata = COALESCE(stall_metadata, '{}'::jsonb) "
+                        "      || jsonb_build_object('reaped_by', 'vt557_retry_ladder', "
+                        "         'reaped_reason', 'no_runnable_step', 'reaped_from', %s::text, "
+                        "         'attempt', %s::int, 'reaped_at', now()::text) "
+                        "WHERE tenant_id = %s AND id = %s",
+                        (d.next_attempt, float(d.delay_s or 0.0), from_status, d.next_attempt,
+                         str(tid), str(task_id)),
+                    )
+                    retried.append((task_id, tid))
+
+        n = len(candidates)
         if n:
             logger.warning(
-                "VT-525 stalled-task reaper: flipped %d manager_task(s) with no runnable step "
-                "(active >%dh) -> blocked", n, age_hours,
+                "VT-557 retry-ladder reaper: %d stalled task(s) — %d retried (blocked+backoff), "
+                "%d dead-lettered", n, len(retried), len(dead_lettered),
             )
-            # VT-529 (B6): surface each reaped task as an orphaned_task alert (ops visibility —
-            # a task hung with no runnable step needs a human). Fail-soft per task + dev-routed.
-            _alert_orphaned_tasks(rows)
+            # VT-529 orphaned_task for the retried (still surfaced); VT-557 dead_letter_task for the
+            # exhausted. Fail-soft per alert + dev-routed (a dev/canary tenant never pages Fazal).
+            _alert_orphaned_tasks([{"id": t, "tenant_id": g} for t, g in retried])
+            _alert_dead_letter_tasks(dead_lettered)
         else:
-            logger.info("VT-525 stalled-task reaper: no stalled manager_tasks")
+            logger.info("VT-557 retry-ladder reaper: no stalled manager_tasks")
         return n
     except Exception:  # noqa: BLE001 — best-effort by design; must never block boot
-        logger.warning("VT-525 stalled-task reaper sweep failed (best-effort)", exc_info=True)
+        logger.warning("VT-557 retry-ladder reaper sweep failed (best-effort)", exc_info=True)
         return 0
 
 
@@ -177,6 +220,36 @@ def _alert_orphaned_tasks(rows: Any) -> None:
             ))
         except Exception:  # noqa: BLE001 — one alert failing must not stop the rest or the reaper
             logger.warning("VT-529 orphaned_task alert dispatch failed (fail-soft)", exc_info=True)
+
+
+def _alert_dead_letter_tasks(rows: Any) -> None:
+    """VT-557 — fire one ``dead_letter_task`` alert per retry-exhausted task (an operator must
+    redrive it). ``rows`` carry (task_id, tenant_id, attempt). Fail-soft per task + dev-routed."""
+    try:
+        from uuid import UUID
+
+        from orchestrator.alerts.dispatch import dispatch_alert
+        from orchestrator.alerts.triggers import Trigger, severity_for
+    except Exception:  # noqa: BLE001 — alerts import must never break the reaper
+        logger.warning("VT-557 dead_letter_task alert import failed (fail-soft)", exc_info=True)
+        return
+    for task_id, tid, attempt in rows:
+        try:
+            tenant_uuid = tid if isinstance(tid, UUID) else UUID(str(tid))
+            dispatch_alert(Trigger(
+                tenant_id=tenant_uuid,
+                trigger_kind="dead_letter_task",
+                severity=severity_for("dead_letter_task"),
+                message_text=(
+                    f"Manager task {task_id} exhausted its retry budget (attempt {attempt}) and was "
+                    "dead-lettered. It will NOT auto-retry — an operator must redrive it "
+                    "(ops/run-control/redrive-task) after investigating the stall cause."
+                ),
+                payload={"task_id": str(task_id), "attempt": attempt,
+                         "reaped_reason": "retry_budget_exhausted"},
+            ))
+        except Exception:  # noqa: BLE001 — one alert failing must not stop the rest or the reaper
+            logger.warning("VT-557 dead_letter_task alert dispatch failed (fail-soft)", exc_info=True)
 
 
 _SILENT_TERMINAL_AGE_MINUTES = 30
