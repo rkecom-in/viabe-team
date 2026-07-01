@@ -222,6 +222,13 @@ _PURGE_ORDER: tuple[str, ...] = (
     # (tenant_id → tenants, FK; run_id is a soft NO-FK pointer per VT-521), so order-insensitive.
     # Holds message_sid/template_name/status — tenant data → erased on right-to-erasure.
     "owner_notifications",
+    # VT-525 (B2): the manager task/step spine. Both tenant-scoped (tenant_id → tenants). Steps
+    # FK task_id → manager_tasks ON DELETE CASCADE; listed steps-BEFORE-tasks (children first,
+    # house convention) though the CASCADE would also cover it. evidence_ref is a by-value
+    # pointer (NO FK), so order re: pipeline_runs is insensitive. Redacted objective/step detail
+    # is STILL the subject's data → erased on right-to-erasure (the VT-518 lesson).
+    "manager_task_steps",
+    "manager_tasks",
     "pipeline_steps",
     "pipeline_runs",
     "subscriber_states",

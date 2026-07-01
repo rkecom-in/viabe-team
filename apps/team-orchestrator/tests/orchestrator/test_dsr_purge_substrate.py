@@ -296,6 +296,19 @@ def _seed_full_tenant_data(dsn: str, tenant_id: UUID) -> dict[str, UUID]:
             "VALUES (%s, 'team_welcome3', 'SMtest-dsr-seed', 'accepted')",
             (str(tenant_id),),
         )
+        # VT-525: manager_tasks + manager_task_steps — task spine, tenant data, erased on DSR.
+        mtask = conn.execute(
+            "INSERT INTO manager_tasks (tenant_id, objective, status) "
+            "VALUES (%s, '{\"goal\": \"dsr-seed\"}'::jsonb, 'running') RETURNING id",
+            (str(tenant_id),),
+        ).fetchone()
+        mtask_id = mtask["id"] if isinstance(mtask, dict) else mtask[0]
+        conn.execute(
+            "INSERT INTO manager_task_steps "
+            "(tenant_id, task_id, step_seq, kind, status) "
+            "VALUES (%s, %s, 1, 'specialist_dispatch', 'pending')",
+            (str(tenant_id), str(mtask_id)),
+        )
 
         # privacy_audit_log — pre-existing event, MUST survive purge. VT-80:
         # write through the real hash-chain writer (a seeded event_type that is
@@ -369,6 +382,8 @@ _PURGED_TABLES = (
     "tm_audit_log",  # VT-518: TM audit/trace (VT-514) — tenant PII activity history, erased on DSR
     "debug_events",  # VT-518: debug/failure log (VT-515) — tenant PII, erased on DSR
     "owner_notifications",  # VT-524: owner-notification delivery ledger — tenant data, erased on DSR
+    "manager_task_steps",  # VT-525: task step plan — tenant data, erased on DSR
+    "manager_tasks",  # VT-525: task spine — tenant data, erased on DSR
     "owner_inputs",
     "campaigns",
     "pipeline_steps",
