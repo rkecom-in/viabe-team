@@ -321,6 +321,14 @@ def apply_agent_decision(
                 (tid, bid),
             ).fetchone()
             if updated is not None:
+                # VT-531 (C3): capture the correction BEFORE redact_batch_close sha256s
+                # owner_feedback — the durable, PII-redacted learning substrate.
+                from orchestrator.agents.correction_store import record_correction
+
+                record_correction(
+                    conn, tid, agent=agent, correction_kind="reject",
+                    decision_verb="needs_changes", owner_feedback=owner_feedback, batch_id=bid,
+                )
                 # VT-382 (CL-437.3) + gate F1: terminal 'rejected' close — halt the
                 # batch's still-'drafted' children, THEN redact owner_feedback +
                 # halted params (the helper owns the halt+redact logic; no audit
@@ -343,6 +351,15 @@ def apply_agent_decision(
             "WHERE tenant_id = %s AND id = %s RETURNING edit_cycles",
             (owner_feedback, tid, bid),
         ).fetchone()
+        if updated is not None:
+            # VT-531 (C3): capture the edit correction into the durable store. The batch's raw
+            # owner_feedback here is destroyed when the batch later goes terminal; this survives.
+            from orchestrator.agents.correction_store import record_correction
+
+            record_correction(
+                conn, tid, agent=agent, correction_kind="edit",
+                decision_verb="needs_changes", owner_feedback=owner_feedback, batch_id=bid,
+            )
         if updated is not None and agent:
             from orchestrator.agents.autonomy import record_regression_event
 
@@ -362,6 +379,13 @@ def apply_agent_decision(
             (tid, bid, list(_RESOLVABLE_FROM)),
         ).fetchone()
         if updated is not None:
+            # VT-531 (C3): capture the correction BEFORE redact_batch_close destroys owner_feedback.
+            from orchestrator.agents.correction_store import record_correction
+
+            record_correction(
+                conn, tid, agent=agent, correction_kind="reject",
+                decision_verb="rejected", owner_feedback=owner_feedback, batch_id=bid,
+            )
             # VT-382 (CL-437.3) + gate F1: terminal 'rejected' close — halt the
             # batch's still-'drafted' children, THEN redact owner_feedback + halted
             # params (the helper owns the halt+redact logic; no audit rows — nothing
