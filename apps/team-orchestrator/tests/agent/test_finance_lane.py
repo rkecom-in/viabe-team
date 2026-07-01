@@ -209,7 +209,7 @@ def test_finance_pushback_runs_manager_decision_observe_only(monkeypatch):
 
     seen: list = []
     monkeypatch.setattr(
-        sr, "observe_specialist_return", lambda env, *, agent: seen.append((env, agent))
+        sr, "handle_specialist_return", lambda env, **kw: seen.append((env, kw.get("agent")))
     )
     result = finance_pushback.invoke(
         {"desired_outcome": "x", "reason": "y", "proposed_outcome": "monitor 30d"}

@@ -121,6 +121,12 @@ def recommend_sales_play(
     """
     intent: dict[str, Any] = {
         "kind": "sales_play_recommendation",
+        # VT-554 (B3 action-path): the UNIFORM action-return envelope — pushback=False + action_taken
+        # + outcome, so this ACTION flows through the SAME specialist_return bridge as a pushback and
+        # the manager decision loop observes it (ACCEPT / NEXT_SPECIALIST), not just pushbacks.
+        "pushback": False,
+        "action_taken": f"recommended {play} play",
+        "outcome": target_framing,
         "play": play,
         "delegates_to": WINBACK_DELEGATES_TO if play == "winback" else None,
         "target_framing": target_framing,
@@ -132,6 +138,10 @@ def recommend_sales_play(
         play,
         confidence,
     )
+    # Observe the manager decision on this real action (config-gated enforce; default observe-only).
+    from orchestrator.agent.specialist_return import handle_specialist_return
+
+    handle_specialist_return(intent, agent="sales")
     return intent
 
 
@@ -203,12 +213,12 @@ def push_back_to_manager(reason: str, proposed_outcome: str) -> dict[str, Any]:
         "reason": reason,
         "proposed_outcome": proposed_outcome,
     }
-    # VT-526 (B3) graph-wiring: run the manager decision loop on this REAL pushback + record the
-    # decision to tm_audit (OBSERVE-ONLY — routing is unchanged; the enforcing flip is a later gated
-    # slice). Lazy import keeps the roster/decision deps off the lane's import surface. Fail-soft.
-    from orchestrator.agent.specialist_return import observe_specialist_return
+    # VT-526 (B3) graph-wiring + VT-554 (config-gated enforce): run the manager decision loop on this
+    # REAL pushback — observe-only by default (routing unchanged); when MANAGER_ENFORCE_ROUTING is on,
+    # a no-path ESCALATE is acted on deterministically. Lazy import keeps deps off the lane's surface.
+    from orchestrator.agent.specialist_return import handle_specialist_return
 
-    observe_specialist_return(env, agent="sales_lane")
+    handle_specialist_return(env, agent="sales_lane")
     return env
 
 

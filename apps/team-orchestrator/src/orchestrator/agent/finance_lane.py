@@ -317,11 +317,11 @@ def finance_pushback(
         "reason": reason,
         "proposed_outcome": proposed_outcome,
     }
-    # VT-549 (B3-wiring 2): run the manager decision loop on this REAL finance pushback + record the
-    # decision to tm_audit (OBSERVE-ONLY — routing unchanged; same proven bridge as the sales lane).
-    from orchestrator.agent.specialist_return import observe_specialist_return
+    # VT-549 (B3-wiring 2) + VT-554 (config-gated enforce): run the manager decision loop on this REAL
+    # finance pushback — observe-only by default; enforces a no-path ESCALATE when the flag is on.
+    from orchestrator.agent.specialist_return import handle_specialist_return
 
-    observe_specialist_return(env, agent="finance")
+    handle_specialist_return(env, agent="finance")
     return env
 
 
