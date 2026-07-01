@@ -12,6 +12,7 @@ import { redirect } from 'next/navigation'
 import { UnauthorizedError } from '@/lib/auth/require-fazal'
 import { requireOpsOperator } from '@/lib/auth/require-ops-operator'
 import { AgentsPanel } from '@/components/ops/agents-panel'
+import { DirectiveForm } from '@/components/ops/directive-form'
 import { vtrAgentState, vtrDraftBatches } from '@/lib/orchestrator-client'
 
 export const dynamic = 'force-dynamic'
@@ -70,6 +71,7 @@ export default async function TenantAgentsPage({ params }: PageProps) {
         </p>
       )}
       <AgentsPanel tenantId={tenantId} agents={agentState.agents} batches={batches.rows} />
+      <DirectiveForm tenantId={tenantId} />
     </main>
   )
 }
