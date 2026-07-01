@@ -330,6 +330,12 @@ def _seed_full_tenant_data(dsn: str, tenant_id: UUID) -> dict[str, UUID]:
             "VALUES (%s, 'tenant', 'learned', 'tone_pref', 'owner likes short warm messages')",
             (str(tenant_id),),
         )
+        # VT-552: incidents — durable incident records, tenant data, erased on DSR.
+        conn.execute(
+            "INSERT INTO incidents (tenant_id, incident_kind, severity) "
+            "VALUES (%s, 'silent_terminal', 'warning')",
+            (str(tenant_id),),
+        )
 
         # privacy_audit_log — pre-existing event, MUST survive purge. VT-80:
         # write through the real hash-chain writer (a seeded event_type that is
@@ -408,6 +414,7 @@ _PURGED_TABLES = (
     "pending_questions",  # VT-527: owner-clarification ledger — tenant data, erased on DSR
     "agent_corrections",  # VT-531: reviewer-correction store — tenant data, erased on DSR
     "agent_memory",  # VT-550: tenant learnable memory — tenant data, erased on DSR (global seeds survive)
+    "incidents",  # VT-552: durable incident records — tenant data, erased on DSR
     "owner_inputs",
     "campaigns",
     "pipeline_steps",

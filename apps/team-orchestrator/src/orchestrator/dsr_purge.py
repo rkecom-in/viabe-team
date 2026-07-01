@@ -241,6 +241,9 @@ _PURGE_ORDER: tuple[str, ...] = (
     # subject's data; the WHERE tenant_id=… purge erases those and naturally skips GLOBAL seeds
     # (tenant_id IS NULL — archetype knowledge, not a subject's data).
     "agent_memory",
+    # VT-552 (B1 part-2b): incidents — durable incident records (run_id soft, no FK), tenant data,
+    # erased on right-to-erasure.
+    "incidents",
     "pipeline_steps",
     "pipeline_runs",
     "subscriber_states",
