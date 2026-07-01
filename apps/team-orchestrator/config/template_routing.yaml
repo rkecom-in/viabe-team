@@ -16,8 +16,8 @@
 # `any` if the specific phase isn't listed.
 
 welcome:
-  onboarding: team_welcome3   # VT-520: UTILITY-category (team_welcome2 was MARKETING → Meta 63049 undelivered)
-  trial: team_welcome3
+  onboarding: team_welcome4   # VT-555: UTILITY quick-reply (team_welcome3 was force-converted MARKETING)
+  trial: team_welcome4
 
 weekly_approval:
   paid_active: team_weekly_approval

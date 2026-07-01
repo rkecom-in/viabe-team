@@ -53,12 +53,11 @@ team_welcome2:
     hi: HXa2e1bcb65189ed25ec1f6b92d9458108
 
 team_welcome3:
-  # VT-520: replaces team_welcome2. Submitted to Meta as category=UTILITY with strictly transactional
-  # copy (account-set-up confirmation + continue-your-own-setup — triggered by the owner's signup, a
-  # legitimate utility message, NOT marketing) so Meta actually DELIVERS it (team_welcome2 = MARKETING
-  # was declined 63049). Variables UNCHANGED: positional [owner_name, trial_end_date] = {{1}},{{2}}.
-  # Submitted 2026-07-01 via Content API; Meta approval is ASYNC (status=received at submit) — delivery
-  # works once Meta approves. en/hi content_sids below.
+  # DEPRECATED (VT-555): Meta force-converted this template from UTILITY to MARKETING after approval,
+  # so it would be declined the same way team_welcome2 was (63049). Superseded by team_welcome4 (a
+  # strictly-transactional UTILITY quick-reply — the trial/date wording that read promotional is gone).
+  # RETAINED for history/back-compat resolution only — NOT sent by any live path. The appeal path was
+  # dropped in favour of the fresh template (Fazal 2026-07-02).
   audience: owner
   agent_selectable: false
   variables:
@@ -67,6 +66,24 @@ team_welcome3:
   languages:
     en: HX3ec52f76cf477cebf80b3eff5835817e
     hi: HX1ee2cb5bb504137ff8be5071ee9b7799
+
+team_welcome4:
+  # VT-555: replaces team_welcome3 (Meta force-converted that UTILITY→MARKETING). Strictly-transactional
+  # UTILITY quick-reply — leads with the account-created FACT + a "Complete Setup" button; NO free/trial
+  # wording, NO "welcome"-brand greeting (exactly what the auto-classifier flags MARKETING), no offer.
+  # ONE variable {{1}} = owner name (the trial-date {{2}} var is DROPPED — the send path passes name
+  # only). Quick-reply button id COMPLETE_SETUP (SAME id both langs) = the welcome→onboarding continue-
+  # trigger; the onboarding journey lazy-starts on the button tap (Body = title) OR any typed reply, so
+  # both continue setup. Created + submitted category=UTILITY 2026-07-02 via the Content API
+  # (canaries/vt555_welcome4_create.py); Meta approval is ASYNC (status=received at submit) — delivery
+  # works once Meta approves. _default_welcome + the `welcome` routing both point here.
+  audience: owner
+  agent_selectable: false
+  variables:
+    - owner_name
+  languages:
+    en: HXc8188616b2e97b557f4c7330157c4f8f
+    hi: HXd8a8d5945c79c75d373d9c24edd4b183
 
 onboarding_confirm_yesno:
   # VT-479: an INTERACTIVE quick-reply Content object (twilio/quick-reply, Yes/No/Skip buttons) the

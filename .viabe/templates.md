@@ -41,16 +41,21 @@ This file becomes the contract. Code in `apps/team-orchestrator/` (when wired) r
 
 ## Approved templates
 
-### `team_welcome3`
+### `team_welcome4`  *(live welcome — Tier-A launch-blocking)*
 
-- **Twilio Content SID (en):** `HX3ec52f76cf477cebf80b3eff5835817e`
-- **Twilio Content SID (hi):** `HX1ee2cb5bb504137ff8be5071ee9b7799`
-- **Meta category:** **UTILITY** (submitted 2026-07-01 via Content API; approval ASYNC — `status=received` at submit)
-- **Tier:** Tier-A (launch-blocking, onboarding flow)
-- **Variables:** `{{1}}` = owner name, `{{2}}` = trial end date (positional — VT-400; unchanged from team_welcome2)
-- **Copy (en):** `Hi {{1}}, your Viabe Team account is set up and active until {{2}}. Reply to this message to continue setting up your business profile.`
-- **Copy (hi):** `नमस्ते {{1}}, आपका Viabe Team अकाउंट सेट हो गया है और {{2}} तक सक्रिय है। अपनी बिज़नेस प्रोफ़ाइल का सेटअप जारी रखने के लिए इस संदेश का उत्तर दें।` *(HI copy = CC draft; flag for native review)*
-- **VT-520:** replaces `team_welcome2` (which Meta approved as MARKETING → declined delivery, error 63049). Strictly-transactional copy so Meta classifies + delivers it as UTILITY. The live signup send (`_default_welcome`) and the `welcome` routing both point here.
+- **Twilio Content SID (en):** `HXc8188616b2e97b557f4c7330157c4f8f`
+- **Twilio Content SID (hi):** `HXd8a8d5945c79c75d373d9c24edd4b183`
+- **Meta category:** **UTILITY** (created + submitted 2026-07-02 via Content API — `canaries/vt555_welcome4_create.py`; approval ASYNC — `status=received` at submit)
+- **Content type:** `twilio/quick-reply` — a "Complete Setup" button (id/payload **`COMPLETE_SETUP`**, same both langs)
+- **Variables:** `{{1}}` = owner name ONLY (the `{{2}}` trial-date var was dropped — no trial/free wording)
+- **Copy (en):** `Hi {{1}}, your Viabe account has been created. To complete your setup, tap the button below.`
+- **Copy (hi):** `नमस्ते {{1}}, आपका Viabe अकाउंट बन गया है। सेटअप पूरा करने के लिए नीचे दिए गए बटन पर टैप करें।` *(HI copy = Fazal-approved)*
+- **Button (en/hi):** `Complete Setup` / `सेटअप पूरा करें`
+- **VT-555:** replaces `team_welcome3` (Meta force-converted that UTILITY→MARKETING). Leads with the account-created FACT + one transactional next-step (a button), no offer/promotion/brand-greeting → Meta classifies UTILITY. `_default_welcome` + the `welcome` routing both point here. Continue-trigger: the onboarding journey lazy-starts on the button tap OR any typed reply.
+
+---
+
+### `team_welcome3` — **DEPRECATED (VT-555)**: Meta force-converted this from **UTILITY → MARKETING** after approval → would be declined like team_welcome2 (63049). Superseded by `team_welcome4` (strictly-transactional UTILITY quick-reply, trial wording removed). SIDs en `HX3ec52f76cf477cebf80b3eff5835817e` / hi `HX1ee2cb5bb504137ff8be5071ee9b7799`. The appeal path was dropped for the fresh template (Fazal 2026-07-02). Not sent by any live path.
 
 ---
 
