@@ -48,6 +48,8 @@ TriggerKind = Literal[
     "reconstitution_sla_breach",  # P0 — opted-out customer un-reconstituted past 8d
     # VT-307 KG-events outbox-drain straggler (nightly drain sweep, warning).
     "kg_drain_straggler",  # an outbox event the immediate + nightly drain failed to project
+    # VT-529 (B6): a manager_task stranded active with no runnable step, reaped to 'blocked'.
+    "orphaned_task",  # the B2 stalled-task reaper flipped a task → blocked
 ]
 
 Severity = Literal["critical", "warning"]
@@ -70,6 +72,8 @@ _SEVERITY_BY_KIND: dict[TriggerKind, Severity] = {
     "reconstitution_sla_breach": "critical",
     # VT-307 KG-drain straggler — reliability backstop signal (batched digest).
     "kg_drain_straggler": "warning",
+    # VT-529 — a stalled/orphaned task needs attention but isn't a customer-facing critical.
+    "orphaned_task": "warning",
 }
 
 # VT-79 Detector-3: DSR request-rate threshold (Phase-1 fixed value; cohort

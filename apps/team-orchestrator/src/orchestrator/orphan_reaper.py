@@ -129,7 +129,7 @@ def reap_stalled_manager_tasks(*, pool: Any = None, age_hours: int = _STALLED_TA
                 "        WHERE s.task_id = t.id "
                 "          AND s.status IN ('pending', 'running', 'waiting') "
                 "  ) "
-                "RETURNING id",
+                "RETURNING id, tenant_id",
                 (list(_STALLED_TASK_ACTIVE_STATES), age_hours),
             ).fetchall()
         n = len(rows)
@@ -138,12 +138,45 @@ def reap_stalled_manager_tasks(*, pool: Any = None, age_hours: int = _STALLED_TA
                 "VT-525 stalled-task reaper: flipped %d manager_task(s) with no runnable step "
                 "(active >%dh) -> blocked", n, age_hours,
             )
+            # VT-529 (B6): surface each reaped task as an orphaned_task alert (ops visibility —
+            # a task hung with no runnable step needs a human). Fail-soft per task + dev-routed.
+            _alert_orphaned_tasks(rows)
         else:
             logger.info("VT-525 stalled-task reaper: no stalled manager_tasks")
         return n
     except Exception:  # noqa: BLE001 — best-effort by design; must never block boot
         logger.warning("VT-525 stalled-task reaper sweep failed (best-effort)", exc_info=True)
         return 0
+
+
+def _alert_orphaned_tasks(rows: Any) -> None:
+    """Fire one ``orphaned_task`` alert per reaped task (ops visibility). Each dispatch is
+    fail-soft + dev-routed (a dev/canary tenant never pages Fazal). ``rows`` carry (id, tenant_id)."""
+    try:
+        from uuid import UUID
+
+        from orchestrator.alerts.dispatch import dispatch_alert
+        from orchestrator.alerts.triggers import Trigger, severity_for
+    except Exception:  # noqa: BLE001 — alerts import must never break the reaper
+        logger.warning("VT-529 orphaned_task alert import failed (fail-soft)", exc_info=True)
+        return
+    for row in rows:
+        try:
+            tid = row["tenant_id"] if isinstance(row, dict) else row[1]
+            task_id = row["id"] if isinstance(row, dict) else row[0]
+            tenant_uuid = tid if isinstance(tid, UUID) else UUID(str(tid))
+            dispatch_alert(Trigger(
+                tenant_id=tenant_uuid,
+                trigger_kind="orphaned_task",
+                severity=severity_for("orphaned_task"),
+                message_text=(
+                    f"Manager task {task_id} was stranded active with no runnable step and reaped "
+                    "to 'blocked' (no runnable step / durable wait / explicit blocker). Investigate."
+                ),
+                payload={"task_id": str(task_id), "reaped_reason": "no_runnable_step"},
+            ))
+        except Exception:  # noqa: BLE001 — one alert failing must not stop the rest or the reaper
+            logger.warning("VT-529 orphaned_task alert dispatch failed (fail-soft)", exc_info=True)
 
 
 __all__ = ["reap_orphan_runs", "reap_stalled_manager_tasks"]
