@@ -181,6 +181,8 @@ def build_handoff_update(
     *,
     spec: SpecialistSpec,
     state: dict[str, Any],
+    situation: str = "",
+    desired_outcome: str | None = None,
 ) -> dict[str, Any]:
     """Compose the Command.update for a specialist handoff (the standard payload).
 
@@ -216,9 +218,13 @@ def build_handoff_update(
 
     context_slice = _build_context_slice(spec=spec, state=state)
 
+    # VT-526 (B3): the manager may AUTHOR the situation + desired_outcome for this handoff (the
+    # "empty framing" gap — design §7 wants a manager-framed situation, not a static default).
+    # Backward-compatible: unset ⇒ the prior behaviour (empty situation, the spec's default
+    # outcome), so an existing caller that doesn't frame is unchanged.
     envelope = SpecialistHandoff(
-        desired_outcome=spec.default_outcome,
-        situation="",
+        desired_outcome=desired_outcome if desired_outcome is not None else spec.default_outcome,
+        situation=situation,
         context_slice=context_slice,
         data=dict(lane_bundle),
     )
