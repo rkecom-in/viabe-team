@@ -131,6 +131,15 @@ class VtrOwnershipDecisionBody(BaseModel):
     evidence: str = ""
 
 
+class VtrAgentDirectiveBody(BaseModel):
+    operator_id: str
+    tenant_id: str
+    memory_key: str
+    content: str
+    agent: str = "manager"
+    directive_kind: Literal["strategy", "behavioural"] = "strategy"
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -742,3 +751,79 @@ def vtr_batch_drafts(
         operator, tenant_id, body.batch_id, len(drafts),
     )
     return {"drafts": drafts}
+
+
+# ---------------------------------------------------------------------------
+# Screen — VTR strategy/behavioural directive ingest (VT-556 teach-loop)
+# ---------------------------------------------------------------------------
+
+
+@router.post("/api/orchestrator/ops/vtr-agent-directive")
+def vtr_agent_directive(
+    body: VtrAgentDirectiveBody,
+    x_internal_secret: str | None = Header(default=None, alias="X-Internal-Secret"),
+    x_operator_jwt: str | None = Header(default=None, alias="X-Operator-Jwt"),
+) -> dict[str, Any]:
+    """VT-556 — a VTR ingests a STRATEGY/BEHAVIOURAL directive the Team Manager picks up next run.
+
+    Human-as-teacher input (NOT a draft correction — that is vtr-plan-edit): the verified VTR authors
+    a directive that lands in agent_memory with provenance (operator id + authority='vtr') and is
+    marked retrieval-eligible, so the manager reads it on its next dispatch (subject to the
+    MANAGER_MEMORY_RETRIEVAL config gate). The ``_gate`` below IS the authority + tenant-scope check
+    (require_vtr_action: the operator↔tenant assignment) — a VTR can only teach a tenant it is
+    assigned to. Content is scrubbed here AND PII-redacted at the store. Fail-loud ops_audit row.
+    """
+    _require_uuid(body.tenant_id, "tenant_id")
+    key = (body.memory_key or "").strip()
+    if not key:
+        raise HTTPException(status_code=400, detail="memory_key required")
+    content = _scrub_reason(body.content)  # scrub_pii + clamp 500 (store also PII-redacts)
+    if not content:
+        raise HTTPException(status_code=400, detail="content required")
+    operator = _gate(
+        x_internal_secret=x_internal_secret,
+        x_operator_jwt=x_operator_jwt,
+        body_operator_id=body.operator_id,
+        tenant_id=body.tenant_id,
+        deny_action="agent_directive_denied",
+        deny_target_kind="agent_memory",
+        deny_target_id=key,
+    )
+    from orchestrator.agents.agent_memory import upsert_directive
+
+    stored_key = f"{body.directive_kind}:{key}"
+    version = upsert_directive(
+        body.tenant_id,
+        memory_key=stored_key,
+        content=content,
+        authored_by_operator_id=operator,
+        agent=body.agent,
+        authority="vtr",
+    )
+    # Operator-attribution ops_audit row — NAMES/ids + version only, fail-LOUD (the plan-edit idiom).
+    try:
+        pool = get_pool()
+        with pool.connection() as conn, conn.cursor() as cur:
+            audit(
+                cur,
+                operator_id=operator,
+                tenant_id=body.tenant_id,
+                action="agent_directive",
+                target_kind="agent_memory",
+                target_id=key,
+                detail=f"kind={body.directive_kind} agent={body.agent} v{version}",
+            )
+    except Exception as exc:
+        logger.error(
+            "vtr_agent_directive audit append FAILED operator=%s tenant=%s key=%s exc=%r",
+            operator, body.tenant_id, key, exc,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=f"directive stored as v{version} but the audit append failed",
+        ) from exc
+    logger.info(
+        "vtr_agent_directive OK operator=%s tenant=%s key=%s kind=%s v=%s",
+        operator, body.tenant_id, key, body.directive_kind, version,
+    )
+    return {"ok": True, "version": version, "memory_key": stored_key}

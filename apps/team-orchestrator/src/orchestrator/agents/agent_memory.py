@@ -68,6 +68,83 @@ def upsert_learned(
     )
 
 
+def upsert_directive(
+    tenant_id: UUID | str,
+    *,
+    memory_key: str,
+    content: str,
+    authored_by_operator_id: str,
+    agent: str = "manager",
+    authority: str = "vtr",
+    make_retrievable: bool = True,
+    run_id: UUID | str | None = None,
+) -> int:
+    """VT-556 — a VTR human-as-teacher STRATEGY/BEHAVIOURAL directive. Written via the SERVICE path
+    (a VTR is an operator, not a tenant connection): the caller's endpoint has ALREADY verified the
+    operator↔tenant assignment (require_vtr_action) before this runs — the authority gate lives there.
+
+    The directive is a LEARNED row carrying provenance (``authored_by_operator_id`` + ``authority``)
+    and is marked ``retrieval_eligible`` so the manager PICKS IT UP on its next run (subject to the
+    dispatch-side ``MANAGER_MEMORY_RETRIEVAL`` config gate — double safety: flag AND per-row flip).
+    Content is PII-redacted at write. Emits a fail-soft tm_audit ``knows`` trail. Returns the version.
+    """
+    from orchestrator.graph import get_pool
+
+    sql = (
+        "INSERT INTO agent_memory "
+        "(tenant_id, memory_scope, source, agent, memory_key, content, authority, "
+        " authored_by_operator_id, retrieval_eligible) "
+        "VALUES (%s, 'tenant', 'learned', %s, %s, %s, %s, %s, %s) "
+        "ON CONFLICT (tenant_id, agent, memory_key) WHERE tenant_id IS NOT NULL "
+        "DO UPDATE SET content = EXCLUDED.content, source = 'learned', "
+        "              authority = EXCLUDED.authority, "
+        "              authored_by_operator_id = EXCLUDED.authored_by_operator_id, "
+        "              retrieval_eligible = EXCLUDED.retrieval_eligible, "
+        "              version = agent_memory.version + 1, updated_at = now() "
+        "RETURNING version"
+    )
+    params = (
+        str(tenant_id), agent, memory_key, _redact_text(content),
+        authority, authored_by_operator_id, make_retrievable,
+    )
+    with get_pool().connection() as c:  # SERVICE path — RLS-bypassing; explicit tenant_id
+        version = c.execute(sql, params).fetchone()
+        version = version[0] if not isinstance(version, dict) else version["version"]
+    _audit_directive(
+        tenant_id=tenant_id, agent=agent, memory_key=memory_key,
+        authority=authority, operator_id=authored_by_operator_id, run_id=run_id,
+    )
+    return int(version)
+
+
+def _audit_directive(
+    *, tenant_id: UUID | str, agent: str, memory_key: str, authority: str,
+    operator_id: str, run_id: UUID | str | None,
+) -> None:
+    """Fail-soft tm_audit knowledge-trail for a VTR directive ingest (NAMES/ids only — the directive
+    content itself is redacted-at-write and is NOT echoed into the audit row)."""
+    try:
+        from orchestrator.observability.tm_audit import emit_tm_audit
+
+        emit_tm_audit(
+            event_layer="knows",
+            event_kind="vtr_directive_ingested",
+            actor="vtr",
+            tenant_id=tenant_id,
+            run_id=run_id,
+            summary=f"VTR directive ingested for agent={agent!r} key={memory_key!r}",
+            decision={
+                "memory_key": memory_key, "agent": agent,
+                "authority": authority, "operator_id": operator_id,
+            },
+            severity="info",
+            status="ok",
+            conn=None,  # fail-soft service write; the endpoint adds a fail-loud ops_audit row
+        )
+    except Exception:  # noqa: BLE001 — audit is best-effort; the directive stands
+        logger.warning("VT-556 directive tm_audit failed (fail-soft)", exc_info=True)
+
+
 def _upsert_tenant(
     tenant_id: UUID | str, *, source: str, agent: str, memory_key: str, content: str, conn: Any
 ) -> None:
@@ -111,12 +188,12 @@ def get_active_memory(
     DEFAULT-CLOSED: nothing is eligible until Phase-2 flips ``retrieval_eligible``, so this returns []
     today (seed/learn-now, retrieve-later — the agent_corrections posture)."""
     sql = (
-        "SELECT memory_scope, source, agent, memory_key, content, version "
+        "SELECT memory_scope, source, agent, memory_key, content, version, authority "
         "FROM agent_memory "
         "WHERE retrieval_eligible "
         "  AND (tenant_id = app_current_tenant() OR tenant_id IS NULL) "
         "  AND agent IN (%s, '') "
-        "ORDER BY (source = 'learned') DESC, updated_at DESC"
+        "ORDER BY (authority = 'vtr') DESC, (source = 'learned') DESC, updated_at DESC"
     )
     rows = (
         conn.execute(sql, (agent,)).fetchall()
@@ -126,7 +203,7 @@ def get_active_memory(
     return [_row_to_dict(r) for r in rows]
 
 
-_MEMORY_COLS = ("memory_scope", "source", "agent", "memory_key", "content", "version")
+_MEMORY_COLS = ("memory_scope", "source", "agent", "memory_key", "content", "version", "authority")
 
 
 def _row_to_dict(r: Any) -> dict[str, Any]:
@@ -159,4 +236,10 @@ def mark_retrievable(
         return c.execute(sql, params).rowcount
 
 
-__all__ = ["upsert_seed", "upsert_learned", "get_active_memory", "mark_retrievable"]
+__all__ = [
+    "upsert_seed",
+    "upsert_learned",
+    "upsert_directive",
+    "get_active_memory",
+    "mark_retrievable",
+]

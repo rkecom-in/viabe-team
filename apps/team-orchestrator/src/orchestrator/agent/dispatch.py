@@ -189,6 +189,42 @@ def _build_manager_intent_block(intent: dict[str, Any]) -> str | None:
     return "\n".join(lines)
 
 
+def _manager_memory_retrieval_enabled() -> bool:
+    """VT-556 config gate — the manager reads VTR directives ONLY when this is explicitly on
+    (default OFF). The observe-first posture: the retrieval seam lands dark, is flipped per-env
+    (dev for the teach→pickup e2e) once validated. Prod stays off until authorized."""
+    return os.environ.get("MANAGER_MEMORY_RETRIEVAL", "").strip().lower() in {"1", "true", "yes"}
+
+
+def _build_manager_directive_block(tenant_id: UUID) -> str | None:
+    """VT-556 — render the tenant's retrieval-eligible VTR directives as the ``## VTR directives``
+    system block. Returns ``None`` when the config gate is off, retrieval fails, or there are no
+    eligible directives (the manager then reasons without them). Content is already PII-redacted at
+    write; only ``authority=vtr`` / global-seed rows that a VTR marked eligible surface here."""
+    if not _manager_memory_retrieval_enabled():
+        return None
+    try:
+        from orchestrator.agents.agent_memory import get_active_memory
+
+        rows = get_active_memory(tenant_id, agent="manager")
+    except Exception:  # noqa: BLE001 — directive retrieval is best-effort, like L1/business
+        logger.warning(
+            "dispatch: VTR-directive retrieval failed (tenant=%s); proceeding without", tenant_id
+        )
+        return None
+    if not rows:
+        return None
+    lines = [
+        "## VTR directives",
+        "Human VTR operators set these strategic/behavioural directives for this tenant. Treat them "
+        "as authoritative guidance and apply them in your decisions this run:",
+    ]
+    for r in rows:
+        tag = "VTR" if r.get("authority") == "vtr" else str(r.get("authority") or "memory")
+        lines.append(f"- [{tag}] {r['content']}")
+    return "\n".join(lines)
+
+
 def _resolve_model(model_id: str = _BRAIN_MODEL_OPUS) -> ChatAnthropic:
     # VT-480: ``model_id`` is the tier-selected brain model (see
     # select_brain_model). Defaults to Opus (the capable model) so any caller
@@ -347,6 +383,17 @@ def dispatch_brain(
     if business_block:
         _messages.insert(0, SystemMessage(content=business_block))
 
+    # VT-556: the VTR teach-loop retrieval seam — inject retrieval-eligible VTR strategy/
+    # behavioural directives as a separate ``## VTR directives`` system block so the Team-Manager
+    # PICKS THEM UP on its next run (closes the human-as-teacher → learn loop the C3 memory backs).
+    # Config-gated by MANAGER_MEMORY_RETRIEVAL (default OFF) — double safety with the per-row
+    # retrieval_eligible flip: BOTH must be true for a directive to steer a decision. Best-effort
+    # (a read miss never breaks dispatch) + inserted AFTER the cached prefix (a per-turn
+    # SystemMessage), so the VT-194 cache still hits.
+    directive_block = _build_manager_directive_block(tenant_id)
+    if directive_block:
+        _messages.insert(0, SystemMessage(content=directive_block))
+
     # VT-461: inject the Manager-intent signal as a separate system block so the
     # Team-Manager brain reads it as a prior (the prompt's "## Manager intent signal"
     # contract) when deciding handle-directly-vs-delegate. Reuses the classification the
@@ -369,6 +416,7 @@ def dispatch_brain(
         result={
             "l1_present": bool(l1_block),
             "business_present": bool(business_block),
+            "directive_present": bool(directive_block),
             "intent_present": bool(intent_block),
             "intent_classification": _manager_intent.get("classification"),
         },
@@ -383,7 +431,7 @@ def dispatch_brain(
         import hashlib
 
         _blocks_for_hash = "\n--\n".join(
-            b for b in (l1_block, business_block, intent_block) if b
+            b for b in (l1_block, business_block, directive_block, intent_block) if b
         )
         _snapshot_id = hashlib.sha256(_blocks_for_hash.encode("utf-8")).hexdigest()
     except Exception:  # noqa: BLE001 — snapshot is best-effort

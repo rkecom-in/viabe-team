@@ -803,6 +803,54 @@ export async function vtrPlanEdit(
   return { ok: false, newVersion: null, reason: r.reason, violations: [] }
 }
 
+/** VT-556 — VTR strategy/behavioural directive ingest result. */
+export interface VtrAgentDirectiveResult {
+  ok: boolean
+  version: number | null
+  memoryKey: string | null
+  /** ok | invalid | forbidden | not_found | http_<n> | timeout | error */
+  reason: string
+  violations: string[]
+}
+
+/**
+ * VT-556 — a VTR ingests a strategy/behavioural DIRECTIVE the Team Manager picks up on its next run
+ * (human-as-teacher input; distinct from vtr-plan-edit's draft correction). The orchestrator writes
+ * it into agent_memory with provenance + authority='vtr', marks it retrieval-eligible, and audits it
+ * (ops_audit fail-loud + tm_audit). The operator↔tenant assignment gate is enforced server-side.
+ */
+export async function vtrAgentDirective(
+  operatorId: string,
+  tenantId: string,
+  memoryKey: string,
+  content: string,
+  directiveKind: 'strategy' | 'behavioural',
+  agent = 'manager',
+): Promise<VtrAgentDirectiveResult> {
+  const r = await vtrCall('vtr-agent-directive', operatorId, {
+    tenant_id: tenantId,
+    memory_key: memoryKey,
+    content,
+    directive_kind: directiveKind,
+    agent,
+  })
+  if (r.status === 200) {
+    return {
+      ok: true,
+      version: typeof r.body.version === 'number' ? r.body.version : null,
+      memoryKey: typeof r.body.memory_key === 'string' ? r.body.memory_key : null,
+      reason: 'ok',
+      violations: [],
+    }
+  }
+  if (r.status === 400) {
+    return { ok: false, version: null, memoryKey: null, reason: 'invalid', violations: _detailStrings(r.body) }
+  }
+  if (r.status === 403) return { ok: false, version: null, memoryKey: null, reason: 'forbidden', violations: [] }
+  if (r.status === 404) return { ok: false, version: null, memoryKey: null, reason: 'not_found', violations: [] }
+  return { ok: false, version: null, memoryKey: null, reason: r.reason, violations: [] }
+}
+
 /** vtr_agent_autonomy view row. NO revoke_reason (excluded by construction — free text). */
 export interface VtrAgentAutonomy {
   tenant_id: string

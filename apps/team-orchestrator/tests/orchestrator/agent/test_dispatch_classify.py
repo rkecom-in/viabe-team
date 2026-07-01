@@ -38,6 +38,58 @@ def test_classify_terminal_cohort_rejected_is_clean_completed():
     assert result.output == {"rejected_count": 3}
 
 
+# --- VT-556: the manager VTR-directive block is config-gated (observe-first, default OFF) --------
+
+
+def test_directive_block_gated_off_returns_none(monkeypatch):
+    """Default posture: MANAGER_MEMORY_RETRIEVAL off → no block, and get_active_memory is never
+    called (the retrieval seam stays dark until explicitly flipped per-env)."""
+    from uuid import uuid4
+
+    from orchestrator.agent import dispatch
+
+    monkeypatch.delenv("MANAGER_MEMORY_RETRIEVAL", raising=False)
+    called = {"n": 0}
+    import orchestrator.agents.agent_memory as am
+
+    monkeypatch.setattr(am, "get_active_memory", lambda *a, **k: called.__setitem__("n", 1))
+    assert dispatch._build_manager_directive_block(uuid4()) is None
+    assert called["n"] == 0  # gate short-circuits before retrieval
+
+
+def test_directive_block_renders_when_enabled(monkeypatch):
+    from uuid import uuid4
+
+    from orchestrator.agent import dispatch
+
+    monkeypatch.setenv("MANAGER_MEMORY_RETRIEVAL", "true")
+    import orchestrator.agents.agent_memory as am
+
+    monkeypatch.setattr(
+        am, "get_active_memory",
+        lambda *a, **k: [
+            {"memory_key": "strategy:winback", "content": "focus on dormant customers",
+             "authority": "vtr", "source": "learned"},
+        ],
+    )
+    block = dispatch._build_manager_directive_block(uuid4())
+    assert block is not None
+    assert "## VTR directives" in block
+    assert "[VTR] focus on dormant customers" in block
+
+
+def test_directive_block_empty_rows_returns_none(monkeypatch):
+    from uuid import uuid4
+
+    from orchestrator.agent import dispatch
+
+    monkeypatch.setenv("MANAGER_MEMORY_RETRIEVAL", "1")
+    import orchestrator.agents.agent_memory as am
+
+    monkeypatch.setattr(am, "get_active_memory", lambda *a, **k: [])
+    assert dispatch._build_manager_directive_block(uuid4()) is None
+
+
 def test_classify_terminal_cohort_reject_wins_over_stale_plan():
     """The collapse rollback leaves the ``campaign_plan`` object in state even
     though no campaign row persisted. The rejection MUST be checked first, or

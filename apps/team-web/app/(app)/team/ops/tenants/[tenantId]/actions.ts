@@ -13,8 +13,10 @@
 
 import { requireOpsOperator } from '@/lib/auth/require-ops-operator'
 import {
+  vtrAgentDirective,
   vtrConfirmField,
   vtrOwnershipDecision,
+  type VtrAgentDirectiveResult,
   type VtrConfirmFieldResult,
   type VtrOwnershipDecisionResult,
 } from '@/lib/orchestrator-client'
@@ -53,4 +55,29 @@ export async function verifyOwnershipAction(
     return { ok: false, decision: null, ownershipVerified: false, reason: 'forbidden' }
   }
   return vtrOwnershipDecision(operator.operatorId, tenantId, decision, note, evidence)
+}
+
+/**
+ * VT-556 — a VTR ingests a strategy/behavioural directive the Team Manager picks up next run.
+ * Same gating shape as the actions above: requireOpsOperator() + an early assignment guard (UX
+ * only); operator_id is derived from the SESSION claim, never the client. The orchestrator
+ * independently re-verifies operator_id == JWT claim + assignment (require_vtr_action, fail-closed)
+ * and writes agent_memory + ops_audit + tm_audit.
+ */
+export async function ingestDirectiveAction(
+  tenantId: string,
+  memoryKey: string,
+  content: string,
+  directiveKind: 'strategy' | 'behavioural',
+): Promise<VtrAgentDirectiveResult> {
+  const operator = await requireOpsOperator()
+  if (operator.assignedTenants !== null && !operator.assignedTenants.includes(tenantId)) {
+    return { ok: false, version: null, memoryKey: null, reason: 'forbidden', violations: [] }
+  }
+  const key = (memoryKey ?? '').trim()
+  const body = (content ?? '').trim()
+  if (!key || !body) {
+    return { ok: false, version: null, memoryKey: null, reason: 'invalid', violations: [] }
+  }
+  return vtrAgentDirective(operator.operatorId, tenantId, key, body, directiveKind)
 }
