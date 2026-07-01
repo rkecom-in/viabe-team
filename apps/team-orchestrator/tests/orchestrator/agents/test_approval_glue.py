@@ -408,3 +408,81 @@ def test_budget_counts_agent_rows_alongside_campaign_rows(substrate) -> None:
             tenant, days=7, conn=conn
         )
     assert n == 2, "agent_customer_send must count against the shared 2/week budget"
+
+
+# ---------------------------------------------------------------------------
+# VT-531 (C3) — reviewer-correction store: captured BEFORE redact_batch_close
+# ---------------------------------------------------------------------------
+
+
+def _corrections(dsn: str, tenant: UUID, batch: UUID) -> list[dict[str, Any]]:
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        rows = conn.execute(
+            "SELECT correction_kind, decision_verb, correction_text, retrieval_eligible "
+            "FROM agent_corrections WHERE tenant_id = %s AND batch_id = %s ORDER BY created_at",
+            (str(tenant), str(batch)),
+        ).fetchall()
+    return [
+        {"kind": r[0], "verb": r[1], "text": r[2], "eligible": r[3]} for r in rows
+    ]
+
+
+def test_needs_changes_captures_edit_correction(substrate) -> None:
+    dsn = substrate.dsn
+    tenant = _new_tenant(dsn)
+    batch = _seed_batch(dsn, tenant)
+    _seed_draft(dsn, tenant, batch, _seed_customer(dsn, tenant))
+    armed = _arm(dsn, tenant, batch, _OkSend())
+
+    _resolve(tenant, armed.approval_id, "needs_changes", owner_feedback="make it softer")
+    corr = _corrections(dsn, tenant, batch)
+    assert len(corr) == 1
+    assert corr[0]["kind"] == "edit"
+    assert corr[0]["verb"] == "needs_changes"
+    assert "softer" in corr[0]["text"]
+    assert corr[0]["eligible"] is False  # capture-now, retrieve-later (default closed)
+
+
+def test_rejected_captures_correction(substrate) -> None:
+    dsn = substrate.dsn
+    tenant = _new_tenant(dsn)
+    batch = _seed_batch(dsn, tenant)
+    _seed_draft(dsn, tenant, batch, _seed_customer(dsn, tenant))
+    armed = _arm(dsn, tenant, batch, _OkSend())
+
+    _resolve(tenant, armed.approval_id, "rejected", owner_feedback="off-brand tone")
+    corr = _corrections(dsn, tenant, batch)
+    assert any(c["kind"] == "reject" and "brand" in (c["text"] or "") for c in corr)
+
+
+def test_correction_survives_redact_batch_close(substrate) -> None:
+    """The whole point: the batch's raw owner_feedback is sha256'd on the terminal close, but the
+    correction store kept the READABLE substance (captured BEFORE the destroy)."""
+    dsn = substrate.dsn
+    tenant = _new_tenant(dsn)
+    batch = _seed_batch(dsn, tenant)
+    _seed_draft(dsn, tenant, batch, _seed_customer(dsn, tenant))
+
+    armed = _arm(dsn, tenant, batch, _OkSend())
+    _resolve(tenant, armed.approval_id, "needs_changes", owner_feedback="make it softer")
+    rearmed = _arm(dsn, tenant, batch, _OkSend())
+    _resolve(tenant, rearmed.approval_id, "needs_changes", owner_feedback="still off")  # terminal
+
+    # the batch's raw feedback is destroyed …
+    assert _batch_row(dsn, tenant, batch)["owner_feedback"].startswith("redacted:sha256:")
+    # … but the correction store kept the readable edit correction.
+    corr = _corrections(dsn, tenant, batch)
+    assert any(c["text"] == "make it softer" for c in corr)
+
+
+def test_correction_redacts_pii(substrate) -> None:
+    dsn = substrate.dsn
+    tenant = _new_tenant(dsn)
+    batch = _seed_batch(dsn, tenant)
+    _seed_draft(dsn, tenant, batch, _seed_customer(dsn, tenant))
+    armed = _arm(dsn, tenant, batch, _OkSend())
+
+    _resolve(tenant, armed.approval_id, "needs_changes",
+             owner_feedback="call them on +919876543210 first")
+    corr = _corrections(dsn, tenant, batch)
+    assert corr and "9876543210" not in (corr[0]["text"] or "")

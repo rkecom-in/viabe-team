@@ -233,6 +233,10 @@ _PURGE_ORDER: tuple[str, ...] = (
     # are soft pointers (NO FK), so order-insensitive. Holds redacted question + the owner's redacted
     # answer → tenant data, erased on right-to-erasure.
     "pending_questions",
+    # VT-531 (C3): agent_corrections — the reviewer-correction store. Tenant-scoped; run_id/batch_id
+    # are soft pointers (NO FK), so order-insensitive. Holds the PII-redacted correction text →
+    # the subject's data, erased on right-to-erasure.
+    "agent_corrections",
     "pipeline_steps",
     "pipeline_runs",
     "subscriber_states",
