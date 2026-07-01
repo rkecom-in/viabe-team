@@ -50,16 +50,53 @@ def dsr_export(
     body: DsrTenantBody,
     x_internal_secret: str | None = Header(default=None),
 ) -> Response:
-    """Return a ZIP (manifest.json + <table>.json) of the tenant's data."""
+    """Return a ZIP (manifest.json + <table>.json) of the tenant's data, TRACKED as a
+    DPDP data-principal ACCESS request in dsr_tickets — parity with the deletion path
+    (VT-523). Every fulfilled access request leaves a regulator-facing ticket with a
+    completed_at, so an access request can no longer be answered off-the-books.
+    """
     _verify_internal_secret(x_internal_secret)
     tid = _parse_tenant(body.tenant_id)
+
+    # One fulfilment path (Pillar 8): reuse an open/acknowledged access ticket for the
+    # tenant, else open one. Service-role insert with an explicit tenant_id — mirrors the
+    # deletion path + dsr_purge's privileged access.
+    with get_pool().connection() as conn:
+        row = conn.execute(
+            "SELECT id::text AS id FROM dsr_tickets "
+            "WHERE tenant_id = %s AND request_type = 'access' "
+            "  AND status <> 'completed' "
+            "ORDER BY acknowledged_at DESC NULLS LAST LIMIT 1",
+            (tid,),
+        ).fetchone()
+        if row:
+            ticket_id = row["id"] if isinstance(row, dict) else row[0]
+        else:
+            created = conn.execute(
+                "INSERT INTO dsr_tickets (tenant_id, request_type, status, "
+                "acknowledged_at) VALUES (%s, 'access', 'acknowledged', now()) "
+                "RETURNING id::text AS id",
+                (tid,),
+            ).fetchone()
+            ticket_id = created["id"] if isinstance(created, dict) else created[0]
+
+    # Build the export FIRST; only stamp the ticket completed once the ZIP exists. A failed
+    # export leaves the ticket 'acknowledged' (fail-open to retry) — never a silent completed.
     export = export_tenant_data(tid)
     zip_bytes = build_export_zip(export)
+
+    with get_pool().connection() as conn:
+        conn.execute(
+            "UPDATE dsr_tickets SET status = 'completed', completed_at = now() WHERE id = %s",
+            (ticket_id,),
+        )
+
     return Response(
         content=zip_bytes,
         media_type="application/zip",
         headers={
-            "Content-Disposition": f'attachment; filename="dsr-export-{tid}.zip"'
+            "Content-Disposition": f'attachment; filename="dsr-export-{tid}.zip"',
+            "X-DSR-Access-Ticket": ticket_id,
         },
     )
 
