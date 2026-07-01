@@ -333,15 +333,15 @@ def _default_welcome(
     tenants.owner_phone), so this is independent of the owner_phone-NULL blocker."""
     from orchestrator.owner_surface.owner_send import send_owner_template
 
-    # The team_welcome {{2}} trial-end date — formatted as the template expects (a
-    # human date string). Matches trial_sweep's owner-notify formatting for the same
-    # variable family (trial_end.date().isoformat(), e.g. "2026-07-14").
-    trial_end_date = trial_end.date().isoformat()
+    # VT-555: team_welcome4 is a strictly-transactional UTILITY quick-reply template — ONE variable
+    # ({{1}} = owner name), NO trial/free wording, a "Complete Setup" button. ``trial_end`` is kept in
+    # the signature for caller compatibility but is no longer sent (the copy dropped the trial date so
+    # Meta classifies it UTILITY, not MARKETING). team_welcome3 was Meta-force-converted to MARKETING.
     result = send_owner_template(
         tenant_id,
-        "team_welcome3",  # VT-520: UTILITY-category (team_welcome2 was MARKETING → Meta declined delivery 63049)
+        "team_welcome4",
         language,
-        {"owner_name": owner_name, "trial_end_date": trial_end_date},
+        {"owner_name": owner_name},
         recipient_phone=whatsapp_number,
     )
     if not result.success:

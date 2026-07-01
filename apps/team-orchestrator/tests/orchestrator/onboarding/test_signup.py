@@ -377,17 +377,13 @@ def test_default_welcome_calls_send_owner_template_correctly(pool, monkeypatch):
         tid, "+919812300013", "hi", "Asha Devi", trial_end,
     )
     assert sent is True  # mirrors SendResult.success
-    assert captured["template_name"] == "team_welcome3"  # VT-520: UTILITY welcome (team_welcome2 → MARKETING 63049)
+    assert captured["template_name"] == "team_welcome4"  # VT-555: UTILITY quick-reply welcome (team_welcome3 → MARKETING)
     assert captured["language"] == "hi"  # honors the owner's preferred_language
     assert captured["recipient_phone"] == "+919812300013"  # signup number, NOT owner_phone
     assert captured["tenant_id"] == tid
-    assert captured["params"] == {
-        "owner_name": "Asha Devi",
-        # trial_end formatted as the template expects: a human date string.
-        "trial_end_date": "2026-07-14",
-    }
-    # Sanity: the formatted date is trial_end's calendar date.
-    assert captured["params"]["trial_end_date"] == (trial_end.date()).isoformat()
+    # VT-555: name-only params — the trial-date var was dropped (no trial/free wording → UTILITY).
+    assert captured["params"] == {"owner_name": "Asha Devi"}
+    assert "trial_end_date" not in captured["params"]  # dropped var must not leak back in
 
 
 def test_run_signup_unapproved_sid_reports_not_sent_but_signup_succeeds(pool, monkeypatch):
