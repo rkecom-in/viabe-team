@@ -174,12 +174,19 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     # fired; the >1h age floor keeps it clear of any live in-flight run. Best-effort: a reaper
     # failure must never block boot (reap_orphan_runs never raises, but guard the import too).
     try:
-        from orchestrator.orphan_reaper import reap_orphan_runs, reap_stalled_manager_tasks
+        from orchestrator.orphan_reaper import (
+            detect_silent_terminal_runs,
+            reap_orphan_runs,
+            reap_stalled_manager_tasks,
+        )
 
         reap_orphan_runs()
         # VT-525 (B2): surface manager_tasks stranded active with no runnable step (same
         # best-effort startup discipline; the >1h floor keeps it clear of a task mid-planning).
         reap_stalled_manager_tasks()
+        # VT-552 (B1 part-2b): open incidents for runs that completed with no final_outcome
+        # (silent terminals — the owner never heard), same best-effort startup discipline.
+        detect_silent_terminal_runs()
     except Exception:
         logging.getLogger(__name__).exception(
             "VT-481 orphan-reaper failed at startup (best-effort)"

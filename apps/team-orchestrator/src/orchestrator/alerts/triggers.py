@@ -50,6 +50,8 @@ TriggerKind = Literal[
     "kg_drain_straggler",  # an outbox event the immediate + nightly drain failed to project
     # VT-529 (B6): a manager_task stranded active with no runnable step, reaped to 'blocked'.
     "orphaned_task",  # the B2 stalled-task reaper flipped a task → blocked
+    # VT-552 (B1 part-2b): a run reached terminal with no outcome + no effect + no owner contact.
+    "silent_terminal",  # the detector opened a silent-terminal incident
 ]
 
 Severity = Literal["critical", "warning"]
@@ -74,6 +76,8 @@ _SEVERITY_BY_KIND: dict[TriggerKind, Severity] = {
     "kg_drain_straggler": "warning",
     # VT-529 — a stalled/orphaned task needs attention but isn't a customer-facing critical.
     "orphaned_task": "warning",
+    # VT-552 — a silent terminal (owner never heard) is a real reliability failure → warning.
+    "silent_terminal": "warning",
 }
 
 # VT-79 Detector-3: DSR request-rate threshold (Phase-1 fixed value; cohort

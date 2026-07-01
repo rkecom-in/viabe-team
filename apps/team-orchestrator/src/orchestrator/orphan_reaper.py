@@ -179,4 +179,90 @@ def _alert_orphaned_tasks(rows: Any) -> None:
             logger.warning("VT-529 orphaned_task alert dispatch failed (fail-soft)", exc_info=True)
 
 
-__all__ = ["reap_orphan_runs", "reap_stalled_manager_tasks"]
+_SILENT_TERMINAL_AGE_MINUTES = 30
+
+
+def detect_silent_terminal_runs(
+    *, pool: Any = None, age_minutes: int = _SILENT_TERMINAL_AGE_MINUTES
+) -> int:
+    """VT-552 (B1 part-2b): find runs that reached ``status='completed'`` with NO ``final_outcome``
+    (a SILENT TERMINAL — ended clean but produced nothing the owner/ops can see), open a durable
+    ``silent_terminal`` incident per run (idempotent), and fire the ``silent_terminal`` alert.
+
+    Best-effort, cross-tenant, never raises (a detector failure must not block boot). ``age_minutes``
+    (>> a normal completed run's settle time) avoids racing a run whose ``final_outcome`` write is
+    just in flight."""
+    try:
+        with _service_pool(pool).connection() as conn:
+            rows = conn.execute(
+                "SELECT r.id, r.tenant_id FROM pipeline_runs r "
+                "WHERE r.status = 'completed' "
+                "  AND NULLIF(btrim(COALESCE(r.final_outcome, '')), '') IS NULL "
+                "  AND r.ended_at IS NOT NULL "
+                "  AND r.ended_at < now() - make_interval(mins => %s) "
+                "  AND NOT EXISTS (SELECT 1 FROM incidents i "
+                "                  WHERE i.run_id = r.id AND i.incident_kind = 'silent_terminal') "
+                "LIMIT 500",
+                (age_minutes,),
+            ).fetchall()
+            opened = 0
+            from orchestrator.observability.incident_store import create_incident
+
+            for row in rows:
+                tid = row["tenant_id"] if isinstance(row, dict) else row[1]
+                rid = row["id"] if isinstance(row, dict) else row[0]
+                # Service conn bypasses RLS → the tenant-scoped incident INSERT works with explicit tid.
+                inc = create_incident(
+                    tid, incident_kind="silent_terminal", run_id=rid,
+                    detail={"detector": "vt552_silent_terminal", "age_minutes": age_minutes},
+                    conn=conn,
+                )
+                if inc is not None:
+                    opened += 1
+        if opened:
+            logger.warning(
+                "VT-552 silent-terminal detector: opened %d incident(s) for runs completed with "
+                "no final_outcome (>%dm)", opened, age_minutes,
+            )
+            _alert_silent_terminals(rows)
+        else:
+            logger.info("VT-552 silent-terminal detector: none")
+        return opened
+    except Exception:  # noqa: BLE001 — detector must never break boot
+        logger.warning("VT-552 silent-terminal detector failed (fail-soft)", exc_info=True)
+        return 0
+
+
+def _alert_silent_terminals(rows: Any) -> None:
+    """Fire one ``silent_terminal`` alert per detected run (fail-soft + dev-routed)."""
+    try:
+        from uuid import UUID
+
+        from orchestrator.alerts.dispatch import dispatch_alert
+        from orchestrator.alerts.triggers import Trigger, severity_for
+    except Exception:  # noqa: BLE001
+        logger.warning("VT-552 silent_terminal alert import failed (fail-soft)", exc_info=True)
+        return
+    for row in rows:
+        try:
+            tid = row["tenant_id"] if isinstance(row, dict) else row[1]
+            rid = row["id"] if isinstance(row, dict) else row[0]
+            dispatch_alert(Trigger(
+                tenant_id=tid if isinstance(tid, UUID) else UUID(str(tid)),
+                trigger_kind="silent_terminal",
+                severity=severity_for("silent_terminal"),
+                message_text=(
+                    f"Run {rid} completed with no final outcome and no owner contact "
+                    "(silent terminal) — incident opened. Investigate / escalate."
+                ),
+                payload={"run_id": str(rid)},
+            ))
+        except Exception:  # noqa: BLE001
+            logger.warning("VT-552 silent_terminal alert dispatch failed (fail-soft)", exc_info=True)
+
+
+__all__ = [
+    "reap_orphan_runs",
+    "reap_stalled_manager_tasks",
+    "detect_silent_terminal_runs",
+]
