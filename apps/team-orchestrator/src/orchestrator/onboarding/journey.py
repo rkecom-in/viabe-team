@@ -749,7 +749,12 @@ def _maybe_refresh_owner_website(
     website-source refresh (``website_refresh_workflow``) so the NEXT turn genuinely knows the site.
     Deduped on CONTENT, not URL: a re-mention re-fires until the scrape has actually produced the
     site's about-text (the live drill had the URL recorded but a failed scrape — a URL-equality
-    no-op wedged it forever). Fully fail-soft: a refresh failure never touches the reply path."""
+    no-op wedged it forever). Fully fail-soft: a refresh failure never touches the reply path.
+
+    VT-570 note: the turn brain can now ALSO fetch the owner's site IN-CALL (server-side web_fetch) and
+    fire this same refresh via its ``refresh_discovery`` tool. This code-side heuristic STAYS as
+    belt-and-braces — it guarantees the ≤10s same-turn wait + persistence even when the brain doesn't
+    decide to fetch, so the reply reflects the site without depending on the LLM's tool choice."""
     try:
         m = _URL_RE.search(body or "")
         if not m:
@@ -821,8 +826,10 @@ def _handle_reply_with_turn_brain(
     # fires at most once per distinct URL (the draft merge makes the second detection a no-op check).
     _maybe_refresh_owner_website(tenant_id, body, draft_attrs)
 
+    # VT-570 — pass tenant_id so the brain's tool belt (refresh_discovery / read_journey_history) has a
+    # tenant context; its presence is also what engages the bounded agentic loop (see compose_turn).
     plan = turn_brain.compose_turn(
-        g, draft_attrs, body, locale=lang, provenance=provenance, is_start=is_start
+        g, draft_attrs, body, locale=lang, provenance=provenance, is_start=is_start, tenant_id=tenant_id
     )
     if plan is None:
         # Fail-soft: the deterministic walker owns this turn (and applies the VT-569a bare-no re-prompt).
