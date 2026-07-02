@@ -11,6 +11,7 @@ on WhatsApp redelivery. A draft-confirm promotes ONLY the confirmed field via 2a
 from __future__ import annotations
 
 import logging
+import os
 import re
 from typing import Any
 from uuid import UUID, uuid4
@@ -20,6 +21,14 @@ from psycopg.types.json import Jsonb
 from orchestrator.db import tenant_connection
 
 logger = logging.getLogger(__name__)
+
+
+def _turn_brain_enabled() -> bool:
+    """VT-569 config gate — the in-session conversation is LLM-driven ONLY when this is explicitly on
+    (default OFF; dev flips it). Read FRESH per call (parity with dispatch's ``MANAGER_MEMORY_RETRIEVAL``
+    idiom) so an env flip takes effect without a restart. When off, the deterministic walker below runs
+    byte-identical to pre-VT-569 (except the mandated VT-569a bare-negative re-prompt fix)."""
+    return os.environ.get("ONBOARDING_TURN_BRAIN", "").strip().lower() in {"1", "true", "yes"}
 
 # Deterministic affirmations / skips (EN + HI/Hinglish), token-exact (the approval_reply discipline).
 _YES = {"yes", "y", "correct", "right", "ok", "okay", "haan", "ha", "sahi", "हाँ", "हां", "सही", "ठीक"}
@@ -134,6 +143,30 @@ def _greet_then_question(q: dict[str, Any]) -> dict[str, Any]:
     return {"reply_en": en, "reply_hi": hi, "done": False, "re_present": True}
 
 
+def _reprompt_after_no(q: dict[str, Any]) -> dict[str, Any]:
+    """VT-569a (the deterministic dead-end fix) — a bare negative ("no") to a CONFIRM must NOT re-send
+    the IDENTICAL question. The live defect: replying "No" to "We found you're a Local services
+    business — is that right?" re-presented that exact string forever. Instead we acknowledge the
+    rejection and ask for the CORRECT value, referencing what they rejected — a DIFFERENT string from
+    the confirm prompt. State is untouched (cursor/answers unchanged; the field stays a candidate);
+    ``re_present=True`` makes the intercept send this. Holds even with the turn-brain OFF / LLM down."""
+    dv = q.get("draft_value")
+    field = q.get("field")
+    not_txt_en = f" (not {dv})" if dv not in (None, "") else ""
+    not_txt_hi = f" ({dv} नहीं)" if dv not in (None, "") else ""
+    if field in ("business_type", "category"):
+        en = f"No problem — so what kind of business is it?{not_txt_en}"
+        hi = f"कोई बात नहीं — तो यह किस तरह का व्यापार है?{not_txt_hi}"
+    elif field == "city":
+        en = f"Got it — which city are you actually based in?{not_txt_en}"
+        hi = f"ठीक है — आप असल में किस शहर में हैं?{not_txt_hi}"
+    else:
+        label = field or "value"
+        en = f"Got it — what's the correct {label} then?"
+        hi = f"ठीक है — तो सही {label} क्या है?"
+    return {"reply_en": en, "reply_hi": hi, "done": False, "re_present": True}
+
+
 def handle_reply(
     tenant_id: UUID | str, body: str, message_sid: str | None, *, lang: str = "en"
 ) -> dict[str, Any]:
@@ -175,8 +208,13 @@ def handle_reply(
     # rejected. Re-present the pending question conversationally WITHOUT touching state.
     is_skip = bool(toks & _SKIP)
     is_bare_no_confirm = q.get("kind") == "confirm" and bool(toks) and toks <= _NO
-    if not is_skip and (_is_bare_greeting(body) or is_bare_no_confirm):
+    if not is_skip and _is_bare_greeting(body):
+        # A bare greeting → acknowledge + re-present the SAME question (the owner just said hi).
         return _greet_then_question(q)
+    if not is_skip and is_bare_no_confirm:
+        # VT-569a — a bare "no" to a confirm → ask for the correct value, NOT the identical prompt
+        # (the live dead-end). Deterministic; holds even with the turn-brain off / LLM unavailable.
+        return _reprompt_after_no(q)
 
     if is_skip:
         if field and field not in skipped:
@@ -548,6 +586,193 @@ def _send(recipient: str | None, q: dict[str, Any], lang: str) -> None:
         logger.warning("journey: owner send failed (recipient hashed in send util) — state advanced")
 
 
+# --- VT-569: the LLM turn-brain path (behind ONBOARDING_TURN_BRAIN) ---------------------------------
+
+
+def _is_confirm_button_set(buttons: list[str]) -> bool:
+    """True iff EVERY requested button is a Yes/No/Skip token — the ONLY interactive button set with a
+    registered Twilio Content object (``onboarding_confirm_yesno``). WhatsApp quick-reply buttons are
+    deliverable ONLY via a pre-registered Content object, so dynamically-titled buttons (discovered
+    alternatives) cannot be sent as tappable buttons with today's infra — they degrade to inline text
+    in ``_send_turn``. Reuses the existing token sets so the button titles round-trip through
+    ``handle_reply``'s _YES/_NO/_SKIP matching unchanged."""
+    if not buttons:
+        return False
+    allowed = _YES | _NO | _SKIP
+    return all(bool(_tokens(b)) and _tokens(b) <= allowed for b in buttons)
+
+
+def _send_turn(recipient: str | None, text: str, buttons: list[str], lang: str) -> None:
+    """Send a turn-brain reply: ``text`` free-form, with quick-reply buttons when they help. A Yes/No/
+    Skip button set reuses the registered interactive Content object (parity with the confirm-question
+    send). Any OTHER button set has no registered Content object (WhatsApp needs one per button set),
+    so its options are appended inline as text — the owner can still reply with the option. Best-effort:
+    any transport failure degrades to plain free-form; the journey state has already advanced."""
+    if not recipient or not text:
+        return
+    if buttons and _is_confirm_button_set(buttons):
+        try:
+            from orchestrator.templates_registry import content_sid_for
+            from orchestrator.utils.twilio_send import send_interactive_message
+
+            content_sid = content_sid_for(_CONFIRM_BUTTONS_TEMPLATE, "en")
+            if content_sid:
+                send_interactive_message(content_sid, recipient, content_variables={"1": text})
+                return
+        except Exception:  # noqa: BLE001 — buttons are an enhancement; fall through to plain text
+            logger.warning("journey: turn-brain interactive confirm send failed — freeform fallback")
+    body = text
+    if buttons and not _is_confirm_button_set(buttons):
+        body = f"{text}\n\n({' / '.join(buttons[:3])})"
+    try:
+        from orchestrator.utils.twilio_send import send_freeform_message
+
+        send_freeform_message(body, recipient)
+    except Exception:  # noqa: BLE001 — send is WABA-gated; the journey state advances regardless
+        logger.warning("journey: turn-brain owner send failed (recipient hashed) — state advanced")
+
+
+def _coerce_answer(value: Any) -> str:
+    return "" if value is None else str(value).strip()
+
+
+def _apply_turn_plan(
+    tenant_id: UUID | str, g: dict[str, Any], plan: Any, draft_attrs: dict[str, Any]
+) -> tuple[dict[str, Any], list[str]]:
+    """Record the turn-brain's proposed extractions through the EXISTING deterministic recorders — the
+    never-assert boundary is preserved: a field is PROMOTED to canonical (``confirm_draft``) ONLY when
+    the owner confirmed it, and an extracted ``business_type`` is promoted ONLY when it is a valid
+    taxonomy key (garbage is recorded as a plain answer, never asserted as fact). Returns the updated
+    (answers, skipped); the caller persists them via ``_advance`` (this does NOT write the queue)."""
+    answers = dict(g.get("answers") or {})
+    skipped = list(g.get("skipped") or [])
+
+    # 1. Record every extracted answer (gap-style; the body IS the value — parity with the walker).
+    for fieldname, value in (plan.extracted_answers or {}).items():
+        v = _coerce_answer(value)
+        if fieldname and v:
+            answers[fieldname] = v
+
+    # 2. Promote CONFIRMED fields through the promotion gate (confirm_draft). A confirmed field with no
+    #    explicit new value takes the discovered draft value. business_type is taxonomy-guarded so the
+    #    LLM can never promote un-validated garbage as fact (CL-390 never-assert).
+    from orchestrator.onboarding.business_type_reconcile import is_valid_business_type
+
+    promote: dict[str, Any] = {}
+    for fieldname in plan.mark_confirmed or ():
+        raw = plan.extracted_answers.get(fieldname, draft_attrs.get(fieldname))
+        v = _coerce_answer(raw)
+        if not fieldname or not v:
+            continue
+        if fieldname == "business_type" and not is_valid_business_type(v):
+            answers[fieldname] = v  # record as a free answer, but NEVER assert an off-taxonomy type
+            continue
+        answers[fieldname] = v
+        promote[fieldname] = v
+    if promote:
+        _confirm(tenant_id, promote)
+    return answers, skipped
+
+
+def _advance_cursor_past_answered(g: dict[str, Any], answers: dict[str, Any], skipped: list[str]) -> int:
+    """The new cursor = the first queue entry from the current cursor whose field is neither answered
+    nor skipped. The turn-brain may resolve several fields (or an out-of-order one) in a single reply,
+    so the cursor can jump past all of them — fewer turns, no burden. Past the end → the queue (the
+    conductor-composed objective set) is exhausted → completion. Preserves the durable-queue spine."""
+    queue = list(g.get("question_queue") or [])
+    cursor = int(g.get("cursor") or 0)
+    ans = set(answers or {})
+    skip = set(skipped or [])
+    c = max(cursor, 0)
+    while c < len(queue) and (queue[c].get("field") in ans or queue[c].get("field") in skip):
+        c += 1
+    return c
+
+
+def _handle_reply_with_turn_brain(
+    tenant_id: UUID | str, body: str, message_sid: str | None, *, lang: str = "en", is_start: bool = False
+) -> dict[str, Any]:
+    """The LLM-driven per-reply path. Composes the SAY + interprets the reply via the turn-brain, then
+    records extractions through the EXISTING deterministic recorders and advances the durable cursor.
+    FAIL-SOFT: if the turn-brain returns None (LLM error/timeout/unparseable), fall back to the
+    deterministic walker for THIS turn — onboarding never stalls. Idempotent on redelivery (same as the
+    walker): a redelivered sid re-presents without re-invoking the LLM or double-applying."""
+    g = get_journey(tenant_id)
+    if g is None or g["status"] != "active":
+        return {"reply_en": "", "reply_hi": "", "done": True}
+
+    # Idempotency: a redelivered inbound must not re-invoke the LLM nor double-advance. Mirror the
+    # walker — signal already_presented so the intercept does NOT re-send (the first delivery sent it).
+    if message_sid and message_sid == g.get("last_message_sid"):
+        return {"already_presented": True, "done": _current(g) is None}
+
+    from orchestrator.onboarding import turn_brain
+    from orchestrator.onboarding.draft_profile import get_draft
+
+    draft = get_draft(tenant_id)
+    draft_attrs = dict(draft.get("attributes") or {})
+    provenance = dict(draft.get("provenance") or {})
+
+    plan = turn_brain.compose_turn(
+        g, draft_attrs, body, locale=lang, provenance=provenance, is_start=is_start
+    )
+    if plan is None:
+        # Fail-soft: the deterministic walker owns this turn (and applies the VT-569a bare-no re-prompt).
+        return handle_reply(tenant_id, body, message_sid, lang=lang)
+
+    answers, skipped = _apply_turn_plan(tenant_id, g, plan, draft_attrs)
+    new_cursor = _advance_cursor_past_answered(g, answers, skipped)
+    _advance(tenant_id, new_cursor, answers, skipped, message_sid)
+
+    done = new_cursor >= len(g.get("question_queue") or [])
+    if done:
+        _complete(tenant_id)
+        completion = _completion_message()
+        # On completion send the durable closer (not a possibly-questioning LLM line); the integration
+        # seam then continues the conversation, so the owner is never left on a dangling question.
+        return {
+            "turn_brain": True,
+            "reply_text": completion["reply_hi"] if lang == "hi" else completion["reply_en"],
+            "buttons": [],
+            "done": True,
+        }
+    return {
+        "turn_brain": True,
+        "reply_text": plan.reply_text,
+        "buttons": list(plan.buttons),
+        "done": False,
+    }
+
+
+def _fire_integration_seam(tenant_id: UUID | str, recipient: str | None) -> None:
+    """VT-425 — the journey → connector-onboarding handoff on profile-confirm completion. Best-effort +
+    fail-OPEN: a seam failure must never block the journey's own completion (already committed)."""
+    try:
+        from orchestrator.onboarding.shopify_onboarding import begin_shopify_onboarding
+
+        begin_shopify_onboarding(tenant_id, recipient)
+    except Exception:  # noqa: BLE001 — seam is best-effort; journey completion already committed
+        logger.exception("journey→integration seam (begin_shopify_onboarding) failed tenant=%s", tenant_id)
+
+
+def _run_turn_brain_and_send(
+    tenant_id: UUID | str, body: str, message_sid: str | None, recipient: str | None,
+    *, lang: str, is_start: bool,
+) -> dict[str, Any]:
+    """Run the turn-brain reply path, SEND the result, and fire the completion seam. Sends the composed
+    ``reply_text`` (+ any buttons) for a turn-brain result, or the deterministic reply for a fail-soft
+    walker fallback (which carries reply_en/reply_hi, not reply_text)."""
+    r = _handle_reply_with_turn_brain(tenant_id, body, message_sid, lang=lang, is_start=is_start)
+    if not r.get("already_presented"):
+        if r.get("turn_brain"):
+            _send_turn(recipient, r.get("reply_text", ""), r.get("buttons") or [], lang)
+        else:
+            _send(recipient, {"prompt_en": r.get("reply_en", ""), "prompt_hi": r.get("reply_hi", "")}, lang)
+    if r.get("done"):
+        _fire_integration_seam(tenant_id, recipient)
+    return r
+
+
 def maybe_handle_journey_reply(
     tenant_id: UUID | str, body: str, message_sid: str | None, recipient: str | None, *, lang: str = "en"
 ) -> dict[str, Any] | None:
@@ -585,6 +810,19 @@ def maybe_handle_journey_reply(
                 # cursor head already reflects the conductor's dynamic pick — no separate per-reply
                 # conductor call (that would break the cursor/apply contract).
                 g = get_journey(tenant_id) or g
+                # VT-569 — the JOURNEY-START turn. With the turn-brain on, greet ONCE + open with the
+                # first question conversationally (no "Hi! {canned question}" prefix) and absorb any info
+                # the owner volunteered in their first message. Fail-soft: any turn-brain error falls
+                # back to the deterministic first-question send below.
+                if _turn_brain_enabled():
+                    try:
+                        return _run_turn_brain_and_send(
+                            tenant_id, body, message_sid, recipient, lang=lang, is_start=True
+                        )
+                    except Exception:  # noqa: BLE001 — start turn falls back to the deterministic opener
+                        logger.exception(
+                            "journey: turn-brain start turn failed tenant=%s — deterministic opener", tenant_id
+                        )
                 _send(recipient, _current(g) or _opener(), lang)
             else:
                 _send(recipient, _opener(), lang)  # still setting up
@@ -604,6 +842,21 @@ def maybe_handle_journey_reply(
             _, btype = _tenant_phase_and_type(tenant_id)
             if _recompose_stale_confirms(tenant_id, g, btype):
                 g = get_journey(tenant_id) or g  # re-read so a downstream read sees the healed queue
+        # VT-569 — the LLM turn-brain reply path (behind ONBOARDING_TURN_BRAIN). It composes the SAY +
+        # interprets the reply, recording extractions through the SAME deterministic recorders and
+        # advancing the durable cursor. Any turn-brain failure that reaches here falls back to the
+        # deterministic walker for this turn (onboarding never stalls); a persist failure means nothing
+        # was sent, so the deterministic path re-runs cleanly. The stale-confirm heal above still runs
+        # first so the brain presents the reconciled draft, not the pre-VT-475 category.
+        if _turn_brain_enabled():
+            try:
+                return _run_turn_brain_and_send(
+                    tenant_id, body, message_sid, recipient, lang=lang, is_start=False
+                )
+            except Exception:  # noqa: BLE001 — turn-brain failure → deterministic walker (never stall)
+                logger.exception(
+                    "journey: turn-brain reply path failed tenant=%s — deterministic walker", tenant_id
+                )
         r = handle_reply(tenant_id, body, message_sid, lang=lang)
         # Idempotent presentation: a redelivered inbound re-emits the SAME in-flight question that was
         # already presented on its first delivery — do NOT send it again (the live duplicate-question
@@ -618,14 +871,7 @@ def maybe_handle_journey_reply(
         # journey owns "confirm who you are"; the integration onboarding owns "connect your data".
         # Best-effort + fail-OPEN: a seam failure must never block the journey's own completion.
         if r.get("done"):
-            try:
-                from orchestrator.onboarding.shopify_onboarding import begin_shopify_onboarding
-
-                begin_shopify_onboarding(tenant_id, recipient)
-            except Exception:  # noqa: BLE001 — seam is best-effort; journey completion already committed
-                logger.exception(
-                    "journey→integration seam (begin_shopify_onboarding) failed tenant=%s", tenant_id
-                )
+            _fire_integration_seam(tenant_id, recipient)
         return r
     except Exception:  # noqa: BLE001 — owner-inbound HOT PATH: any failure falls through, never blocks
         logger.exception("maybe_handle_journey_reply failed tenant=%s — fall through", tenant_id)
