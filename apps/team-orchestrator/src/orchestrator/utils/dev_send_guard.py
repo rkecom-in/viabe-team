@@ -39,6 +39,15 @@ This is an ADDITIONAL OUTER gate. It is NOT the customer-send compliance rail
 (consent / opt-out / approval / onboarded — VT-460/467/474); those stay and run
 exactly as before, BENEATH this guard. The dev guard only ever turns a real send
 into a mocked one on dev; it never relaxes a compliance refusal.
+
+VT-559 addendum: ``DevSendGuardClient`` also wraps ``client.verify.v2.services(sid)
+.verifications.create`` — the Twilio Verify OTP dispatch used by
+``auth/twilio_verify.py``. That module built its own raw ``twilio.rest.Client`` and
+called Verify directly, never funneling through ``twilio_send._client()`` — a second
+rail-bypass where a dev signup could deliver a real WhatsApp OTP to a real number.
+Same allowlist semantics as ``.messages``. ``.verification_checks`` (validates a code
+against Twilio's own record; never sends anything to the destination) is left
+UNGUARDED — it passes through to the real client unchanged.
 """
 
 from __future__ import annotations
@@ -124,16 +133,116 @@ class _MockMessage:
         self.error_message = None
 
 
+class _MockVerification:
+    """Success-shaped stand-in for a Twilio VerificationInstance, returned by a mocked
+    dev Verify OTP send (VT-559).
+
+    Shaped like the fields ``twilio_verify.start_verification`` reads (``.sid``,
+    ``.status``) so a mocked dev OTP proceeds through the calling flow identically to
+    a real one. The SID carries a ``VEDEV`` marker (mirrors ``_MockMessage``'s
+    ``MKDEV``) so a mocked dev Verify send is greppable and never mistaken for a real
+    Twilio ``VE…`` verification SID, nor for the ``VEmock…`` SIDs the SEPARATE full
+    ``TEAM_TWILIO_VERIFY_MOCK_MODE`` path already generates.
+    """
+
+    def __init__(self) -> None:
+        self.sid = f"VEDEV{uuid4().hex[:26]}"
+        self.status = "pending"
+        self.error_code = None
+        self.error_message = None
+
+
+class _DevSendGuardVerifications:
+    """The ``.verifications`` namespace of a guarded Verify ``ServiceContext`` (VT-559).
+
+    Guards ONLY ``.create`` — the call that actually dispatches an OTP to the
+    destination (``twilio_verify.start_verification``). Same allowlist semantics as
+    ``_DevSendGuardMessages.create``: a destination not in ``DEV_SEND_ALLOWLIST`` is
+    mocked (no real Twilio call); an allowlisted destination reaches the real inner
+    ``verifications.create``.
+    """
+
+    def __init__(self, inner: Any) -> None:
+        self._inner = inner
+
+    def create(self, **kwargs: Any) -> Any:
+        to_norm = _normalize_number(kwargs.get("to"))
+        if to_norm and to_norm in _allowlist():
+            logger.info(
+                "[VT-559 dev-send-guard] ALLOWLISTED dev Verify OTP -> ..%s (real Twilio)",
+                _last4(to_norm),
+            )
+            return self._inner.create(**kwargs)
+        logger.warning(
+            "[VT-559 dev-send-guard] MOCKED dev Verify OTP -> ..%s "
+            "(EXPECTED_ENV!=prod, destination not in DEV_SEND_ALLOWLIST). "
+            "NO real OTP was sent; returned a mock verification.",
+            _last4(to_norm) or "<none>",
+        )
+        return _MockVerification()
+
+
+class _DevSendGuardVerifyServiceContext:
+    """Proxy for ``client.verify.v2.services(sid)`` (VT-559).
+
+    Guards ONLY the ``.verifications`` resource (the OTP dispatch). Every other
+    attribute — notably ``.verification_checks``, which validates a code against
+    Twilio's own record and never sends anything to the destination — passes
+    through UNGUARDED to the real service context via ``__getattr__``.
+    """
+
+    def __init__(self, real_context: Any) -> None:
+        self._real = real_context
+
+    @property
+    def verifications(self) -> _DevSendGuardVerifications:
+        return _DevSendGuardVerifications(self._real.verifications)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._real, name)
+
+
+class _DevSendGuardVerifyV2:
+    """Proxy for ``client.verify.v2`` (VT-559). Guards ``.services(sid)``; every other
+    attribute passes through UNGUARDED via ``__getattr__``."""
+
+    def __init__(self, inner: Any) -> None:
+        self._inner = inner
+
+    def services(self, sid: str) -> _DevSendGuardVerifyServiceContext:
+        return _DevSendGuardVerifyServiceContext(self._inner.services(sid))
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+
+class _DevSendGuardVerify:
+    """Proxy for ``client.verify`` (VT-559). Guards ``.v2``; every other attribute
+    passes through UNGUARDED via ``__getattr__``."""
+
+    def __init__(self, inner: Any) -> None:
+        self._inner = inner
+
+    @property
+    def v2(self) -> _DevSendGuardVerifyV2:
+        return _DevSendGuardVerifyV2(self._inner.v2)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+
 class DevSendGuardClient:
-    """Transport wrapper that MOCKS non-allowlisted sends on dev (VT-476).
+    """Transport wrapper that MOCKS non-allowlisted sends on dev (VT-476, VT-559).
 
     Wraps the real Twilio REST client. Exposes the same ``client.messages.create``
-    surface every send path uses. On a non-prod env (the only env this wrapper is
-    ever installed on), each ``messages.create(to=…)`` is allowlist-checked:
+    surface every send path uses, PLUS the ``client.verify.v2.services(sid)
+    .verifications.create`` surface the Twilio Verify OTP path uses (VT-559). On a
+    non-prod env (the only env this wrapper is ever installed on), each guarded
+    ``create(to=…)`` call is allowlist-checked:
 
-      - ``to`` normalized ∉ ``DEV_SEND_ALLOWLIST`` → return a ``_MockMessage`` (fake
-        success SID), NO real Twilio call. The breach-stopping default: an empty
-        allowlist mocks EVERYTHING.
+      - ``to`` normalized ∉ ``DEV_SEND_ALLOWLIST`` → return a mock (fake success SID),
+        NO real Twilio call. The breach-stopping default: an empty allowlist mocks
+        EVERYTHING.
       - ``to`` ∈ the allowlist → delegate to the wrapped real client (real send).
 
     The allowlist is read fresh per call, so the fail-closed default can never be
@@ -146,6 +255,14 @@ class DevSendGuardClient:
     @property
     def messages(self) -> _DevSendGuardMessages:
         return _DevSendGuardMessages(self._inner)
+
+    @property
+    def verify(self) -> _DevSendGuardVerify:
+        """VT-559: guards the Twilio Verify OTP dispatch with the SAME allowlist
+        semantics as ``.messages`` — closes the rail-bypass where
+        ``auth/twilio_verify.py`` built its own raw client and never funneled
+        through this wrapper."""
+        return _DevSendGuardVerify(self._inner.verify)
 
 
 class _DevSendGuardMessages:
