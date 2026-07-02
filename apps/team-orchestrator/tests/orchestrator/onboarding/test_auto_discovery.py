@@ -157,27 +157,27 @@ def test_cost_ceiling_aborts_before_next_source():
     @_named("discover_gbp")
     def pricey_a(tenant_id, seed):
         ran.append("gbp")
-        return SourceResult("gbp", "ok", cost_usd=0.010)
+        return SourceResult("gbp", "ok", cost_usd=0.035)
 
     @_named("discover_website")
     def pricey_b(tenant_id, seed):
         ran.append("website")
-        return SourceResult("website", "ok", cost_usd=0.010)  # cumulative 0.020 > 0.018
+        return SourceResult("website", "ok", cost_usd=0.035)  # cumulative 0.070 > 0.060 ceiling
 
     @_named("discover_serper")
     def should_not_run(tenant_id, seed):
         ran.append("serper")
-        return SourceResult("serper", "ok", cost_usd=0.010)
+        return SourceResult("serper", "ok", cost_usd=0.035)
 
     out = auto_discovery_run(
         TENANT, {"business_name": "x"}, sources=[pricey_a, pricey_b, should_not_run]
     )
 
-    # third source is gated out — spent (0.020) exceeds the 0.018 ceiling before it runs
+    # third source is gated out — spent (0.070) exceeds the 0.060 ceiling before it runs
     assert ran == ["gbp", "website"]
     assert "serper" not in out["sources"]
     assert out["aborted"] is True
-    assert out["spent_usd"] == 0.020
+    assert out["spent_usd"] == 0.070
 
 
 def test_under_ceiling_does_not_abort():
@@ -203,7 +203,7 @@ def test_ceiling_checked_before_source_not_after():
     @_named("discover_gbp")
     def huge(tenant_id, seed):
         ran.append("gbp")
-        return SourceResult("gbp", "ok", cost_usd=0.050)  # alone over ceiling
+        return SourceResult("gbp", "ok", cost_usd=0.070)  # alone over the 0.060 ceiling
 
     @_named("discover_website")
     def after(tenant_id, seed):
@@ -213,7 +213,7 @@ def test_ceiling_checked_before_source_not_after():
     out = auto_discovery_run(TENANT, {"business_name": "x"}, sources=[huge, after])
     assert ran == ["gbp"]  # huge ran (no pre-cost), after was gated
     assert out["aborted"] is True
-    assert out["spent_usd"] == 0.050
+    assert out["spent_usd"] == 0.070
 
 
 # ------------------------------------------------------------------- summary shape
@@ -275,3 +275,133 @@ def test_cost_record_failure_does_not_break_run(monkeypatch):
     out = auto_discovery_run(TENANT, {"business_name": "x"}, sources=[a])
     assert out["sources"] == {"gbp": "ok"}
     assert out["spent_usd"] == 0.004
+
+
+# ------------------------------------------------------------- VT-568 reorder + seed anchors
+
+
+def test_default_source_order_is_gst_before_gbp(monkeypatch):
+    """VT-568 — GST runs FIRST so its verified anchors seed GBP's identity adjudication."""
+    order: list[str] = []
+    import orchestrator.onboarding.auto_discovery_sources as srcmod
+
+    def _mk(name):
+        @_named(name)
+        def fn(tenant_id, seed):
+            order.append(name.replace("discover_", ""))
+            return SourceResult(name.replace("discover_", ""), "skipped", cost_usd=0.0)
+
+        return fn
+
+    for n in ("discover_gst", "discover_gbp", "discover_website", "discover_serper"):
+        monkeypatch.setattr(srcmod, n, _mk(n))
+
+    auto_discovery_run(TENANT, {"business_name": "x"})  # sources=None → the default list
+    assert order == ["gst", "gbp", "website", "serper"]
+
+
+def test_seed_updates_feed_downstream_source():
+    """A source's ``seed_updates`` (GST identity anchors) reach a later source via the seed."""
+    seen: dict = {}
+
+    @_named("discover_gst")
+    def fake_gst(tenant_id, seed):
+        return SourceResult(
+            "gst", "ok", cost_usd=0.0,
+            seed_updates={"gst_trade_name": "RKECOM", "gst_legal_name": "RKECOM SERVICES (OPC) PRIVATE LIMITED"},
+        )
+
+    @_named("discover_gbp")
+    def fake_gbp(tenant_id, seed):
+        seen["trade"] = seed.get("gst_trade_name")
+        seen["legal"] = seed.get("gst_legal_name")
+        return SourceResult("gbp", "rejected", cost_usd=0.029)
+
+    auto_discovery_run(TENANT, {"business_name": "RKECOM"}, sources=[fake_gst, fake_gbp])
+    assert seen["trade"] == "RKECOM"
+    assert seen["legal"] == "RKECOM SERVICES (OPC) PRIVATE LIMITED"
+
+
+def test_seed_updates_do_not_clobber_existing_seed_key():
+    seen: dict = {}
+
+    @_named("discover_gst")
+    def fake_gst(tenant_id, seed):
+        return SourceResult("gst", "ok", cost_usd=0.0, seed_updates={"gst_trade_name": "FROM_GST"})
+
+    @_named("discover_gbp")
+    def fake_gbp(tenant_id, seed):
+        seen["trade"] = seed.get("gst_trade_name")
+        return SourceResult("gbp", "rejected", cost_usd=0.0)
+
+    auto_discovery_run(
+        TENANT, {"business_name": "x", "gst_trade_name": "PREEXISTING"}, sources=[fake_gst, fake_gbp]
+    )
+    assert seen["trade"] == "PREEXISTING"  # setdefault: never overwrite an anchor the seed already carries
+
+
+# ------------------------------------------------------------------------ VT-568 redrive
+
+
+def test_redrive_resets_draft_before_rerun(monkeypatch):
+    import orchestrator.onboarding.auto_discovery as ad
+
+    calls: list[tuple] = []
+    monkeypatch.setattr(ad, "_reset_draft", lambda tid: calls.append(("reset", str(tid))))
+    monkeypatch.setattr(
+        ad, "auto_discovery_run", lambda tid, seed: calls.append(("run", str(tid), seed)) or {"ok": True}
+    )
+
+    seed = {"business_name": "RKECOM SERVICES (OPC) PRIVATE LIMITED", "gstin": "27AAKCR3738B1ZE"}
+    out = ad.redrive_discovery(TENANT, seed=seed)
+
+    assert out == {"ok": True}
+    assert [c[0] for c in calls] == ["reset", "run"]  # draft cleared BEFORE the rerun
+    assert calls[1][2] == seed
+
+
+def test_rebuild_seed_prefers_verified_name(monkeypatch):
+    import orchestrator.onboarding.auto_discovery as ad
+
+    class _Conn:
+        def __init__(self, row):
+            self._row = row
+
+        def execute(self, _q, _params):
+            return self
+
+        def fetchone(self):
+            return self._row
+
+    class _Ctx:
+        def __init__(self, conn):
+            self._conn = conn
+
+        def __enter__(self):
+            return self._conn
+
+        def __exit__(self, *_a):
+            return False
+
+    class _Pool:
+        def __init__(self, row):
+            self._row = row
+
+        def connection(self):
+            return _Ctx(_Conn(self._row))
+
+    row = {
+        "business_name": "RKECOM Services PVT LTD",
+        "verified_business_name": "RKECOM SERVICES (OPC) PRIVATE LIMITED",
+        "gstin": "27AAKCR3738B1ZE",
+        "business_type": "services",
+    }
+    monkeypatch.setattr("orchestrator.graph.get_pool", lambda: _Pool(row))
+
+    seed = ad._rebuild_seed(TENANT)
+    # the SERVER-VERIFIED name anchors the redrive (not the raw typed signup name)
+    assert seed == {
+        "business_name": "RKECOM SERVICES (OPC) PRIVATE LIMITED",
+        "gstin": "27AAKCR3738B1ZE",
+        "business_type": "services",
+    }

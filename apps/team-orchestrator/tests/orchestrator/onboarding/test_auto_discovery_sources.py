@@ -18,6 +18,7 @@ import pytest
 pytest.importorskip("psycopg")
 
 from orchestrator.onboarding import auto_discovery_sources as src
+from orchestrator.onboarding import entity_resolution as er
 from orchestrator.onboarding.auto_discovery_sources import (
     SourceResult,
     discover_gbp,
@@ -27,6 +28,27 @@ from orchestrator.onboarding.auto_discovery_sources import (
 )
 
 TENANT = uuid.uuid4()
+
+# VT-568 — injected adjudicators (the LLM seam). The deterministic floor still runs for real; only the
+# LLM verdict is stubbed — so a wrong LLM pick can be blocked by the floor, and a correct one accepted.
+
+
+def _accept(idx: int = 0, website: str | None = None, confidence: str = "high"):
+    def _fn(anchors, candidates):
+        return {
+            "matched_candidate_index": idx, "resolved_website": website,
+            "confidence": confidence, "reasoning": "test-accept",
+        }
+    return _fn
+
+
+def _reject(website: str | None = None):
+    def _fn(anchors, candidates):
+        return {
+            "matched_candidate_index": None, "resolved_website": website,
+            "confidence": "high", "reasoning": "test-reject",
+        }
+    return _fn
 
 
 @pytest.fixture
@@ -48,7 +70,7 @@ def draft_spy(monkeypatch):
 # --------------------------------------------------------------------------- GBP
 
 
-def test_discover_gbp_ok_maps_fields_and_writes_draft(draft_spy, monkeypatch):
+def test_discover_gbp_accept_maps_fields_and_writes_draft(draft_spy, monkeypatch):
     monkeypatch.setenv("APIFY_API_TOKEN", "tok-test")
     place = {
         "title": "Sharma Sweets",
@@ -66,13 +88,15 @@ def test_discover_gbp_ok_maps_fields_and_writes_draft(draft_spy, monkeypatch):
         return [place]
 
     seed = {"business_name": "Sharma Sweets", "city": "Jaipur"}
-    result = discover_gbp(TENANT, seed, fetch_fn=fake_fetch)
+    # The floor passes ("Sharma Sweets" == "Sharma Sweets") and the LLM accepts candidate 0.
+    result = discover_gbp(TENANT, seed, fetch_fn=fake_fetch, adjudicate_fn=_accept(idx=0))
 
     assert isinstance(result, SourceResult)
     assert result.source == "gbp"
     assert result.status == "ok"
-    assert result.cost_usd == src._GBP_COST_USD
-    # website preferred over url, surfaced for the GBP→website chain
+    # cost = the GBP fetch + the entity-resolution adjudication (rides inside the GBP source)
+    assert result.cost_usd == src._GBP_COST_USD + er.ADJUDICATION_COST_USD
+    # the accepted candidate's website, surfaced for the GBP→website chain
     assert result.website == "https://sharmasweets.example"
     assert result.fields == {
         "business_name": "Sharma Sweets",
@@ -84,24 +108,76 @@ def test_discover_gbp_ok_maps_fields_and_writes_draft(draft_spy, monkeypatch):
         # taxonomy key, written alongside the raw category (which is kept for transparency).
         "business_type": "sweets",
     }
-    # the seed name+city built the search query, token threaded through
+    # the seed name+city built the search query; VT-568 bounds the fetch to top-N candidates
     assert captured["token"] == "tok-test"
     assert captured["run_input"]["searchStringsArray"] == ["Sharma Sweets Jaipur"]
     assert captured["run_input"]["maxReviews"] == 0
+    assert captured["run_input"]["maxCrawledPlacesPerSearch"] == src._GBP_MAX_CANDIDATES
 
-    assert len(draft_spy) == 1
-    assert draft_spy[0]["source"] == "gbp"
-    assert draft_spy[0]["tenant_id"] == TENANT
-    assert draft_spy[0]["fields"] == result.fields
+    # two writes: the entity_resolution decision provenance FIRST, then the accepted GBP fields.
+    assert [c["source"] for c in draft_spy] == ["entity_resolution", "gbp"]
+    assert draft_spy[1]["fields"] == result.fields
+    prov = draft_spy[0]["fields"]["entity_resolution"]
+    assert prov["decision"] == "accept"
+    assert prov["matched_index"] == 0
 
 
-def test_discover_gbp_website_falls_back_to_url(draft_spy, monkeypatch):
+def test_discover_gbp_accept_website_falls_back_to_url(draft_spy, monkeypatch):
     monkeypatch.setenv("APIFY_API_TOKEN", "tok-test")
     place = {"title": "No-Site Cafe", "url": "https://maps.google/place/999"}
-    result = discover_gbp(TENANT, {"business_name": "No-Site Cafe"}, fetch_fn=lambda ri, t: [place])
+    result = discover_gbp(
+        TENANT, {"business_name": "No-Site Cafe"}, fetch_fn=lambda ri, t: [place], adjudicate_fn=_accept()
+    )
     assert result.status == "ok"
     assert result.website == "https://maps.google/place/999"
     assert result.fields["website"] == "https://maps.google/place/999"
+
+
+def test_discover_gbp_reject_writes_no_gbp_fields(draft_spy, monkeypatch):
+    """VT-568 — the RKeCom case. GBP returns the phonetic near-miss 'Reecomps'; even when the LLM
+    (wrongly) picks it, the deterministic name floor blocks it → NO GBP-derived field enters the draft
+    (no telecom category, no reecomps.in, no wrong about). Only the audit provenance is recorded."""
+    monkeypatch.setenv("APIFY_API_TOKEN", "tok-test")
+    place = {
+        "title": "Reecomps teleservices pvt ltd",
+        "categoryName": "Telecommunications service provider",
+        "website": "https://reecomps.in",
+        "city": "Mumbai",
+    }
+    seed = {
+        "business_name": "RKECOM",
+        "gst_legal_name": "RKECOM SERVICES (OPC) PRIVATE LIMITED",
+        "gst_trade_name": "RKECOM",
+        "gst_principal_address": "A/403, Santacruz West, Mumbai, Maharashtra, 400054",
+    }
+    # LLM WRONGLY accepts idx 0 — the floor must still reject ("RKECOM" shares no token with "Reecomps").
+    result = discover_gbp(TENANT, seed, fetch_fn=lambda ri, t: [place], adjudicate_fn=_accept(idx=0))
+
+    assert result.status == "rejected"
+    assert result.fields == {}
+    assert result.website is None
+    assert result.cost_usd == src._GBP_COST_USD + er.ADJUDICATION_COST_USD
+    # ONLY the entity_resolution provenance was written — no GBP fields.
+    assert [c["source"] for c in draft_spy] == ["entity_resolution"]
+    prov = draft_spy[0]["fields"]["entity_resolution"]
+    assert prov["decision"] == "reject"
+    assert "Reecomps teleservices pvt ltd" in prov["rejected"]
+
+
+def test_discover_gbp_reject_surfaces_organic_owner_website(draft_spy, monkeypatch):
+    """On reject, an organic-resolved OWNER website (domain plausibly matches the name anchors) is still
+    chained to the website source — the drill's ideal outcome: drop Reecomps, still discover rkecom.in."""
+    monkeypatch.setenv("APIFY_API_TOKEN", "tok-test")
+    place = {"title": "Reecomps teleservices pvt ltd", "website": "https://reecomps.in", "city": "Mumbai"}
+    seed = {"business_name": "RKECOM SERVICES", "gst_trade_name": "RKECOM"}
+    result = discover_gbp(
+        TENANT, seed, fetch_fn=lambda ri, t: [place], adjudicate_fn=_reject(website="https://rkecom.in")
+    )
+    assert result.status == "rejected"
+    assert result.fields == {}
+    # rkecom.in's domain label 'rkecom' matches the owner anchors → plausible → chained
+    assert result.website == "https://rkecom.in"
+    assert [c["source"] for c in draft_spy] == ["entity_resolution"]
 
 
 def test_discover_gbp_no_token_skips_without_write(draft_spy, monkeypatch):
@@ -318,6 +394,13 @@ def test_discover_gst_active_company_writes_business_fields(draft_spy):
     assert draft_spy[0]["tenant_id"] == TENANT
     assert draft_spy[0]["fields"] == result.fields
 
+    # VT-568 — the GST-verified identity anchors are surfaced into the seed for GBP adjudication.
+    assert result.seed_updates == {
+        "gst_legal_name": "RKECOM SERVICES (OPC) PRIVATE LIMITED",
+        "gst_trade_name": "RKECOM",
+        "gst_principal_address": result.fields["principal_address"],
+    }
+
 
 def test_discover_gst_proprietorship_does_not_write_person_name(draft_spy):
     """PII NEGATIVE TEST (CL-390/425): for a Proprietorship, lgnm='Ramesh Kumar' is a natural
@@ -346,6 +429,12 @@ def test_discover_gst_proprietorship_does_not_write_person_name(draft_spy):
     assert len(draft_spy) == 1
     assert "legal_name" not in draft_spy[0]["fields"]
     assert "Ramesh Kumar" not in draft_spy[0]["fields"].values()
+
+    # VT-568 — the proprietor's personal name is NEVER surfaced as an anchor (gst_legal_name absent);
+    # business-level anchors (trade name, locality) still cross.
+    assert "gst_legal_name" not in result.seed_updates
+    assert result.seed_updates["gst_trade_name"] == "Ramesh General Store"
+    assert "Ramesh Kumar" not in result.seed_updates.values()
 
 
 def test_discover_gst_vendor_down_errors_no_write(draft_spy):
