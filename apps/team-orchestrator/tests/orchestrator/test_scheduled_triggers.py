@@ -90,9 +90,10 @@ def test_cron_expressions_match_brief() -> None:
     assert st.RECONCILE_SUBSCRIPTION_ORPHANS_CRON == "0 1 * * *"
     # VT-440 — 20th trigger: daily Razorpay dead-letter backstop, 22:30 UTC / 04:00 IST.
     assert st.DEAD_LETTER_RETRY_SWEEP_CRON == "30 22 * * *"
-    # VT-560 — 3 steady-state sweeps: retry-ladder + silent-terminal every 10 min, orphan-run hourly.
+    # VT-560 — 2 steady-state sweeps: retry-ladder every 10 min, orphan-run hourly. The VT-552
+    # silent-terminal detector is deliberately NOT scheduled (no final_outcome writer yet —
+    # batch-review finding; boot-only until that lands).
     assert st.STALLED_TASK_SWEEP_CRON == "*/10 * * * *"
-    assert st.SILENT_TERMINAL_SWEEP_CRON == "*/10 * * * *"
     assert st.ORPHAN_RUN_REAPER_CRON == "0 * * * *"
 
 
@@ -658,17 +659,13 @@ def test_stalled_task_sweep_scheduled_delegates(monkeypatch) -> None:
     assert called, "handler must call reap_stalled_manager_tasks"
 
 
-def test_silent_terminal_sweep_scheduled_delegates(monkeypatch) -> None:
-    """VT-560: the 10-min handler calls detect_silent_terminal_runs (the VT-552 detector)."""
-    import orchestrator.orphan_reaper as reaper_mod
-
-    called: list[int] = []
-    monkeypatch.setattr(reaper_mod, "detect_silent_terminal_runs", lambda: called.append(1) or 0)
-
-    fake_scheduled = datetime(2026, 7, 2, 10, 0, tzinfo=timezone.utc)
-    fake_actual = datetime(2026, 7, 2, 10, 0, 3, tzinfo=timezone.utc)
-    st.silent_terminal_sweep_scheduled(fake_scheduled, fake_actual)
-    assert called, "handler must call detect_silent_terminal_runs"
+def test_silent_terminal_detector_is_not_scheduled() -> None:
+    """Batch-review finding (VT-560): the VT-552 silent-terminal detector must NOT be on the
+    scheduled substrate — no live code writes the final_outcome it keys on, so a scheduled
+    detector would open an incident + alert per completed run under traffic. It stays a
+    boot-time catch-up (main.py) until the close-path final_outcome writer lands."""
+    assert not hasattr(st, "silent_terminal_sweep_scheduled")
+    assert not hasattr(st, "SILENT_TERMINAL_SWEEP_CRON")
 
 
 def test_orphan_run_reaper_scheduled_delegates(monkeypatch) -> None:
@@ -688,7 +685,6 @@ def test_orphan_run_reaper_scheduled_delegates(monkeypatch) -> None:
     ("handler", "target"),
     [
         ("stalled_task_sweep_scheduled", "reap_stalled_manager_tasks"),
-        ("silent_terminal_sweep_scheduled", "detect_silent_terminal_runs"),
         ("orphan_run_reaper_scheduled", "reap_orphan_runs"),
     ],
 )
@@ -865,15 +861,16 @@ def test_register_scheduled_triggers_idempotent(monkeypatch) -> None:
     # VT-365 removed two triggers (day-39 refund evaluation + the VT-85 refund-offer
     # 48h timeout sweep): 16 → 14; VT-374 added one: 14 → 15; VT-382 added one: 15 → 16;
     # VT-418 added one: 16 → 17; VT-432 added one: 17 → 18; VT-439 added one: 18 → 19;
-    # VT-440 added one: 19 → 20; VT-560 added three (stalled_task_sweep +
-    # silent_terminal_sweep + orphan_run_reaper — the boot-only reapers/detectors
-    # promoted to steady-state @DBOS.scheduled sweeps): 20 → 23.
-    assert first == 23, "expected 23 triggers registered on first call"
-    assert second == 23, "second call must short-circuit (idempotent)"
+    # VT-440 added one: 19 → 20; VT-560 added two (stalled_task_sweep +
+    # orphan_run_reaper — the boot-only reapers promoted to steady-state
+    # @DBOS.scheduled sweeps; the silent-terminal detector deliberately stays
+    # boot-only — no final_outcome writer yet, batch-review finding): 20 → 22.
+    assert first == 22, "expected 22 triggers registered on first call"
+    assert second == 22, "second call must short-circuit (idempotent)"
     # VT-464 D3: every scheduled handler MUST also be registered as a workflow
     # (one DBOS.workflow() wrap per DBOS.scheduled() call) — otherwise the cron
     # fire raises DBOSWorkflowFunctionNotFoundError.
-    assert first_wf == 23, "expected 23 handlers wrapped as @DBOS.workflow"
+    assert first_wf == 22, "expected 22 handlers wrapped as @DBOS.workflow"
     st._registered = False
 
 
@@ -904,12 +901,12 @@ def test_scheduled_sweeps_are_registered_workflows() -> None:
             "l2_approved_send_sweep_scheduled must be a registered workflow "
             "(else the reconciler poller fire raises DBOSWorkflowFunctionNotFoundError)"
         )
-        # VT-560: the three boot-only reapers/detectors are now steady-state scheduled
-        # sweeps — each MUST be a registered workflow or its poller fire would raise
+        # VT-560: the two boot-only reapers are now steady-state scheduled sweeps —
+        # each MUST be a registered workflow or its poller fire would raise
         # DBOSWorkflowFunctionNotFoundError (the same class the live re-drive hit).
+        # (The silent-terminal detector is deliberately NOT here — boot-only.)
         for name in (
             "stalled_task_sweep_scheduled",
-            "silent_terminal_sweep_scheduled",
             "orphan_run_reaper_scheduled",
         ):
             assert name in reg.workflow_info_map, (

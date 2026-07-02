@@ -298,13 +298,24 @@ def detect_silent_terminal_runs(
 
     Best-effort, cross-tenant, never raises (a detector failure must not block boot). ``age_minutes``
     (>> a normal completed run's settle time) avoids racing a run whose ``final_outcome`` write is
-    just in flight."""
+    just in flight.
+
+    VT-560 review follow-up: the predicate honors BOTH outcome substrates — the mig-025
+    ``final_outcome`` COLUMN and the mig-052 house-pattern ``terminal_state_metadata->>
+    'final_outcome'`` JSONB key (what rerun/coordinator actually write; the column has no live
+    writer). NOTE: the close path (``close_webhook_run``) stamps NEITHER, so most completed
+    webhook runs genuinely match this predicate — which is why this detector is deliberately NOT
+    on the @DBOS.scheduled substrate (under traffic it would open an incident + alert per
+    completed run every tick). It stays a boot-time catch-up until the close-path final_outcome
+    writer lands (rostered follow-up); schedule it only after that."""
     try:
         with _service_pool(pool).connection() as conn:
             rows = conn.execute(
                 "SELECT r.id, r.tenant_id FROM pipeline_runs r "
                 "WHERE r.status = 'completed' "
-                "  AND NULLIF(btrim(COALESCE(r.final_outcome, '')), '') IS NULL "
+                "  AND NULLIF(btrim(COALESCE("
+                "        r.final_outcome, r.terminal_state_metadata->>'final_outcome', '')), '') "
+                "      IS NULL "
                 "  AND r.ended_at IS NOT NULL "
                 "  AND r.ended_at < now() - make_interval(mins => %s) "
                 "  AND NOT EXISTS (SELECT 1 FROM incidents i "

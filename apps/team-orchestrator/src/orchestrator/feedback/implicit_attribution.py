@@ -77,7 +77,7 @@ def run_implicit_attribution_sweep() -> dict[str, int]:
 
         try:
             with pool.connection() as conn:
-                conn.execute(
+                cur = conn.execute(
                     """
                     INSERT INTO owner_feedback
                         (tenant_id, run_id, tier, signal, source_metadata)
@@ -93,7 +93,12 @@ def run_implicit_attribution_sweep() -> dict[str, int]:
                         '{"derived_from":"attribution_outcome"}',
                     ),
                 )
-                written += 1
+                # rowcount is 0 on an ON-CONFLICT no-op — a re-swept run must not
+                # over-report `written` (batch-review metric fix).
+                if cur.rowcount and cur.rowcount > 0:
+                    written += 1
+                else:
+                    skipped += 1
         except Exception:  # noqa: BLE001
             logger.exception(
                 "implicit_attribution write failed (tenant=%s, run=%s)",

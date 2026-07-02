@@ -704,19 +704,25 @@ def dead_letter_retry_sweep_scheduled(
 
 
 # ---------------------------------------------------------------------------
-# VT-560: the boot-only reapers/detectors as STEADY-STATE scheduled sweeps
+# VT-560: the boot-only reapers as STEADY-STATE scheduled sweeps
 # ---------------------------------------------------------------------------
 # reap_stalled_manager_tasks (VT-525/VT-557 retry ladder — VT-560 also wakes
-# reaper-parked tasks), detect_silent_terminal_runs (VT-552), and reap_orphan_runs
-# (VT-481) previously ran EXACTLY ONCE in the FastAPI lifespan (a boot catch-up).
-# On a long-lived process they therefore never re-swept — so the VT-557 retry
-# ladder could never progress and the silent-terminal detector never re-fired.
-# VT-560 registers all three on the @DBOS.scheduled substrate as the steady-state
-# sweeps; the main.py boot invocations stay as the startup catch-up. All three
-# bodies are already best-effort (never raise); the handler wrappers mirror the
-# other sweeps in this module. NO LLM — pure SQL reaper/detector paths (Pillar 1).
+# reaper-parked tasks) and reap_orphan_runs (VT-481) previously ran EXACTLY ONCE
+# in the FastAPI lifespan (a boot catch-up). On a long-lived process they
+# therefore never re-swept — so the VT-557 retry ladder could never progress.
+# VT-560 registers BOTH on the @DBOS.scheduled substrate as the steady-state
+# sweeps; the main.py boot invocations stay as the startup catch-up. Both bodies
+# are already best-effort (never raise); the handler wrappers mirror the other
+# sweeps in this module. NO LLM — pure SQL reaper paths (Pillar 1).
+#
+# detect_silent_terminal_runs (VT-552) is DELIBERATELY NOT scheduled (batch-review
+# finding): no live code writes the final_outcome the detector keys on — the
+# close path stamps neither the column nor the JSONB key — so under traffic a
+# scheduled detector would open an incident + fire an alert for essentially every
+# completed run, every tick (a storm that also drowns real silent terminals). It
+# stays a boot-time catch-up (main.py); schedule it ONLY once the close-path
+# final_outcome writer lands (rostered follow-up).
 STALLED_TASK_SWEEP_CRON = "*/10 * * * *"  # every 10 min — VT-557 retry-ladder progression
-SILENT_TERMINAL_SWEEP_CRON = "*/10 * * * *"  # every 10 min — VT-552 silent-terminal detection
 ORPHAN_RUN_REAPER_CRON = "0 * * * *"  # hourly — VT-481 stranded-'running' run reaper
 
 
@@ -735,22 +741,6 @@ def stalled_task_sweep_scheduled(
         reap_stalled_manager_tasks()
     except Exception:  # noqa: BLE001 — sweep is best-effort; next run retries
         logger.exception("VT-560 stalled-task sweep scheduled run failed")
-
-
-def silent_terminal_sweep_scheduled(
-    scheduled_time: datetime,
-    actual_time: datetime,
-) -> None:
-    """DBOS scheduled handler — every 10 min (VT-560). Runs the VT-552 silent-terminal
-    detector: opens a durable incident per run that completed with no final_outcome (the
-    owner never heard) and fires the silent_terminal alert. NO LLM; the body is best-effort
-    (never raises). Best-effort: a detector failure must not crash the scheduler."""
-    from orchestrator.orphan_reaper import detect_silent_terminal_runs
-
-    try:
-        detect_silent_terminal_runs()
-    except Exception:  # noqa: BLE001 — detector is best-effort; next run retries
-        logger.exception("VT-560 silent-terminal sweep scheduled run failed")
 
 
 def orphan_run_reaper_scheduled(
@@ -1099,12 +1089,13 @@ def register_scheduled_triggers() -> None:
     # The actual replay is operator-driven (needs a corrected payload); exactly-once is
     # guaranteed by the razorpay_ingress event_id dedup keystone. 22:30 UTC / 04:00 IST.
     _register_scheduled(DEAD_LETTER_RETRY_SWEEP_CRON, dead_letter_retry_sweep_scheduled)
-    # VT-560: the three boot-only reapers/detectors as STEADY-STATE scheduled sweeps —
-    # they previously ran ONLY at boot, so on a long-lived process the VT-557 retry ladder
-    # never progressed and the VT-552 detector never re-fired. EXTENDS this surface (same
-    # register-before-launch posture), NOT parallel pollers. NO LLM (pure SQL reaper/detector).
+    # VT-560: the boot-only reapers as STEADY-STATE scheduled sweeps — they previously ran
+    # ONLY at boot, so on a long-lived process the VT-557 retry ladder never progressed.
+    # EXTENDS this surface (same register-before-launch posture), NOT parallel pollers.
+    # NO LLM (pure SQL reaper). The VT-552 silent-terminal detector is deliberately NOT
+    # here — see the comment above STALLED_TASK_SWEEP_CRON (no final_outcome writer yet ⇒
+    # scheduling it would storm an incident/alert per completed run).
     _register_scheduled(STALLED_TASK_SWEEP_CRON, stalled_task_sweep_scheduled)
-    _register_scheduled(SILENT_TERMINAL_SWEEP_CRON, silent_terminal_sweep_scheduled)
     _register_scheduled(ORPHAN_RUN_REAPER_CRON, orphan_run_reaper_scheduled)
     _registered = True
 
@@ -1126,7 +1117,6 @@ __all__ = [
     "OUTBOX_REDACTION_SWEEP_CRON",
     "OVERRIDE_EXPIRY_SWEEP_CRON",
     "SHELL_STATUS",
-    "SILENT_TERMINAL_SWEEP_CRON",
     "STALLED_TASK_SWEEP_CRON",
     "WEEKLY_CADENCE_CRON",
     "WEEKLY_CADENCE_EVENT",
@@ -1151,7 +1141,6 @@ __all__ = [
     "override_expiry_sweep_scheduled",
     "reconstitution_sweep_scheduled",
     "register_scheduled_triggers",
-    "silent_terminal_sweep_scheduled",
     "stalled_task_sweep_scheduled",
     "run_approval_timeout_sweep_body",
     "run_attribution_close_body",
