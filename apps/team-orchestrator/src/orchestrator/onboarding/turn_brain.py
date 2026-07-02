@@ -223,11 +223,22 @@ def _build_prompts(
         if recent else "(no prior exchange this session)"
     )
 
+    # VT-571 distilled memory (mig 163): durable facts/decisions/preferences from turns that scrolled OUT
+    # of the recent window. Rendered ABOVE the raw window ONLY when non-empty — so the brain still knows
+    # what was said 20 turns ago after the cap-8 window has rolled past it (compact, don't drop).
+    summary = str(journey_state.get("conversation_summary") or "").strip()
+    summary_block = (
+        "CONVERSATION SO FAR (distilled memory — durable facts and decisions from earlier turns):\n"
+        f"{summary}\n\n"
+        if summary else ""
+    )
+
     # ``.replace`` (not ``.format``) — the system prompt contains literal JSON braces ({} / {field: value}).
     system = _SYSTEM_PROMPT.replace("{locale}", locale or "en")
     user = (
         "DISCOVERED (facts found from public sources — the ONLY facts you may state):\n"
         f"{_fmt_discovered(draft_attrs, provenance)}\n\n"
+        f"{summary_block}"
         "RECENT CONVERSATION (oldest first — what was already said; NEVER re-ask or contradict it):\n"
         f"{convo}\n\n"
         "STILL NEEDED (collect these, conversationally, at most one new ask per turn):\n"

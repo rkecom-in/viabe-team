@@ -396,8 +396,12 @@ def test_build_prompts_includes_recent_conversation() -> None:
     assert "OWNER: Use that" in user
 
 
-def test_append_recent_turns_caps_and_preserves_order(substrate) -> None:
+def test_append_recent_turns_caps_and_preserves_order(substrate, monkeypatch) -> None:
     from orchestrator.onboarding.journey import _append_recent_turns, get_journey, start_journey
+
+    # VT-571 note: overflow now fires the distill workflow — stub it so this VT-569 cap test stays a
+    # pure window-shape assertion (the distillation is exercised by the VT-571 tests below).
+    monkeypatch.setattr("dbos.DBOS.start_workflow", lambda *a, **k: None)
 
     tenant = _new_tenant(substrate.dsn, name="VT-569 memory cap")
     start_journey(tenant, [{"field": "about", "kind": "gap", "prompt_en": "x"}])
@@ -410,3 +414,150 @@ def test_append_recent_turns_caps_and_preserves_order(substrate) -> None:
     assert len(turns) == 8  # capped
     assert turns[-1]["text"] == "b5" and turns[-2]["text"] == "o5"  # newest last, order kept
     assert turns[0]["text"] == "o2"  # oldest surviving entry
+
+
+# ---------------------------------------------------------------------------
+# VT-571: the memory must COMPACT, not drop — overflow distillation (mig 163)
+# ---------------------------------------------------------------------------
+
+
+def test_overflow_fires_distill_with_evicted_head_and_prior_summary(substrate, monkeypatch) -> None:
+    """Appending PAST the cap keeps the newest 8 in ``recent_turns`` AND fires the distill workflow
+    (fire-and-forget) with the EVICTED head + the prior ``conversation_summary`` — the compact-not-drop
+    seam. ``DBOS.start_workflow`` is stubbed to capture the fired workflow + its args."""
+    from orchestrator.onboarding import journey, memory_distiller
+
+    fired: list[tuple[Any, tuple[Any, ...]]] = []
+    monkeypatch.setattr("dbos.DBOS.start_workflow", lambda wf, *a, **k: fired.append((wf, a)))
+
+    tenant = _new_tenant(substrate.dsn, name="vt571 overflow fires")
+    journey.start_journey(tenant, [_gap_q("about")])
+    # Seed a prior summary (direct service-role) so we can assert it flows into the workflow args.
+    with psycopg.connect(substrate.dsn, autocommit=True) as conn:
+        conn.execute(
+            "UPDATE onboarding_journey SET conversation_summary = %s WHERE tenant_id = %s",
+            ("Prior memory.", str(tenant)),
+        )
+
+    # 5 appends × 2 entries = 10 → exactly 2 overflow past the cap-8 (the first overflow is at append 5).
+    for i in range(5):
+        journey._append_recent_turns(
+            tenant, {"role": "owner", "text": f"o{i}"}, {"role": "bot", "text": f"b{i}"}
+        )
+
+    g = journey.get_journey(tenant)
+    assert len(g["recent_turns"]) == 8, "the window stays capped at 8"
+    assert g["recent_turns"][-1]["text"] == "b4", "the newest entry is kept last"
+    assert g["recent_turns"][0]["text"] == "o1", "o0/b0 are evicted; o1 is the oldest surviving"
+
+    assert len(fired) == 1, "exactly one overflow fired the distill workflow"
+    wf, args = fired[0]
+    assert wf is memory_distiller.journey_distill_workflow, "the distill workflow was fired"
+    assert args[0] == str(tenant), "arg 0 is the tenant id"
+    assert [e["text"] for e in args[1]] == ["o0", "b0"], "arg 1 is the evicted head (oldest-first)"
+    assert args[2] == "Prior memory.", "arg 2 is the prior summary (to be folded into)"
+
+
+def test_no_overflow_does_not_fire_distill(substrate, monkeypatch) -> None:
+    """Appends that stay within the cap evict nothing → the distill workflow must NOT fire."""
+    from orchestrator.onboarding import journey
+
+    fired: list[Any] = []
+    monkeypatch.setattr("dbos.DBOS.start_workflow", lambda wf, *a, **k: fired.append(wf))
+
+    tenant = _new_tenant(substrate.dsn, name="vt571 no overflow")
+    journey.start_journey(tenant, [_gap_q("about")])
+    # 3 appends × 2 = 6 entries, ≤ cap 8 → no eviction, no fire.
+    for i in range(3):
+        journey._append_recent_turns(
+            tenant, {"role": "owner", "text": f"o{i}"}, {"role": "bot", "text": f"b{i}"}
+        )
+
+    g = journey.get_journey(tenant)
+    assert len(g["recent_turns"]) == 6
+    assert not fired, "no overflow → the distill workflow must not fire"
+
+
+def test_distill_unavailable_dbos_does_not_break_append(substrate, monkeypatch) -> None:
+    """The degrade contract: a DBOS-unavailable environment (``start_workflow`` raises) must NOT break
+    the append — the trimmed window still commits (the evicted tail is simply dropped, as pre-VT-571)."""
+    from orchestrator.onboarding import journey
+
+    def _boom(*a, **k):
+        raise RuntimeError("DBOS not launched")
+
+    monkeypatch.setattr("dbos.DBOS.start_workflow", _boom)
+
+    tenant = _new_tenant(substrate.dsn, name="vt571 dbos down")
+    journey.start_journey(tenant, [_gap_q("about")])
+    for i in range(5):  # 10 entries → overflow → fire attempt raises, must be swallowed
+        journey._append_recent_turns(
+            tenant, {"role": "owner", "text": f"o{i}"}, {"role": "bot", "text": f"b{i}"}
+        )
+
+    g = journey.get_journey(tenant)
+    assert len(g["recent_turns"]) == 8, "the window trim still committed despite the failed fire"
+    assert g["recent_turns"][0]["text"] == "o1", "the newest 8 survived (the fire failure is swallowed)"
+
+
+def test_distill_workflow_body_updates_summary_and_get_journey_exposes(substrate, monkeypatch) -> None:
+    """The workflow BODY (``_run_distill``): distill → persist onto ``conversation_summary`` (RLS'd
+    tenant path), and ``get_journey`` exposes it. The Haiku call is stubbed to a deterministic summary."""
+    from orchestrator.onboarding import journey, memory_distiller
+
+    monkeypatch.setattr(
+        memory_distiller, "distill_evicted_turns",
+        lambda tid, evicted, prior: "Distilled: owner sells sarees; wants festival promos.",
+    )
+
+    tenant = _new_tenant(substrate.dsn, name="vt571 workflow body")
+    journey.start_journey(tenant, [_gap_q("about")])
+
+    memory_distiller._run_distill(tenant, [{"role": "owner", "text": "old turn"}], None)
+
+    g = journey.get_journey(tenant)
+    assert g["conversation_summary"] == "Distilled: owner sells sarees; wants festival promos.", (
+        "get_journey must expose the persisted distilled summary"
+    )
+    # Direct service-role readback confirms it landed through the RLS'd tenant path.
+    with psycopg.connect(substrate.dsn, autocommit=True) as conn:
+        row = conn.execute(
+            "SELECT conversation_summary FROM onboarding_journey WHERE tenant_id = %s", (str(tenant),)
+        ).fetchone()
+    assert row is not None and row[0] == "Distilled: owner sells sarees; wants festival promos."
+
+
+def test_distill_workflow_body_none_leaves_prior_summary_unchanged(substrate, monkeypatch) -> None:
+    """A None distill (LLM failure / nothing durable) must LEAVE the prior summary untouched — the
+    drop-silently degrade, never a wipe."""
+    from orchestrator.onboarding import journey, memory_distiller
+
+    monkeypatch.setattr(memory_distiller, "distill_evicted_turns", lambda tid, e, p: None)
+
+    tenant = _new_tenant(substrate.dsn, name="vt571 none noop")
+    journey.start_journey(tenant, [_gap_q("about")])
+    with psycopg.connect(substrate.dsn, autocommit=True) as conn:
+        conn.execute(
+            "UPDATE onboarding_journey SET conversation_summary = %s WHERE tenant_id = %s",
+            ("keep me", str(tenant)),
+        )
+
+    memory_distiller._run_distill(tenant, [{"role": "owner", "text": "x"}], "keep me")
+
+    g = journey.get_journey(tenant)
+    assert g["conversation_summary"] == "keep me", "a None distill must not wipe the prior summary"
+
+
+def test_mig163_conversation_summary_column_present_and_idempotent(substrate) -> None:
+    """Migration 163 added ``conversation_summary`` and re-applying the migration set is a clean no-op
+    (ADD COLUMN IF NOT EXISTS)."""
+    import apply_migrations
+
+    r = apply_migrations.apply(dsn=substrate.dsn)  # re-apply — must not fail
+    assert not r["failed"], r["failed"]
+    with psycopg.connect(substrate.dsn, autocommit=True) as conn:
+        col = conn.execute(
+            "SELECT 1 FROM information_schema.columns "
+            "WHERE table_name = 'onboarding_journey' AND column_name = 'conversation_summary'"
+        ).fetchone()
+    assert col is not None, "mig 163 must have added onboarding_journey.conversation_summary"

@@ -149,3 +149,40 @@ def test_extraction_values_stringified_and_empties_dropped(monkeypatch):
     plan = compose_turn(_CONFIRM_STATE, {}, "x", locale="en")
     assert plan is not None
     assert plan.extracted_answers == {"a": "spaced", "d": "42"}
+
+
+# --- VT-571: the distilled-memory block (mig 163) — compact, don't drop --------------------------
+
+
+def test_build_prompts_renders_distilled_memory_when_present():
+    """When the journey carries a non-empty ``conversation_summary``, the user prompt renders a
+    'CONVERSATION SO FAR (distilled memory …)' block ABOVE the raw recent-conversation window."""
+    from orchestrator.onboarding.turn_brain import _build_prompts
+
+    state = {
+        "question_queue": [{"field": "about", "kind": "gap", "prompt_en": "Tell me about it"}],
+        "cursor": 0, "answers": {}, "skipped": [],
+        "recent_turns": [{"role": "owner", "text": "hi"}],
+        "conversation_summary": "Owner runs a bakery in Pune; prefers Hinglish; wants festival promos.",
+    }
+    _, user = _build_prompts(state, {}, "hello", locale="en", provenance=None, is_start=False)
+    assert "CONVERSATION SO FAR (distilled memory" in user
+    assert "Owner runs a bakery in Pune; prefers Hinglish; wants festival promos." in user
+    assert user.index("CONVERSATION SO FAR") < user.index("RECENT CONVERSATION"), (
+        "the distilled memory must sit ABOVE the raw recent window"
+    )
+
+
+def test_build_prompts_omits_distilled_memory_when_absent():
+    """No summary (None or empty) → the distilled block is omitted entirely (no empty header)."""
+    from orchestrator.onboarding.turn_brain import _build_prompts
+
+    for summary in (None, "", "   "):
+        state = {
+            "question_queue": [{"field": "about", "kind": "gap", "prompt_en": "x"}],
+            "cursor": 0, "answers": {}, "skipped": [],
+            "recent_turns": [], "conversation_summary": summary,
+        }
+        _, user = _build_prompts(state, {}, "hello", locale="en", provenance=None, is_start=False)
+        assert "distilled memory" not in user
+        assert "CONVERSATION SO FAR" not in user

@@ -97,7 +97,7 @@ def get_journey(tenant_id: UUID | str) -> dict[str, Any] | None:
     with tenant_connection(tenant_id) as conn:
         row = conn.execute(
             "SELECT status, question_queue, cursor, answers, skipped, last_message_sid, "
-            "       recent_turns "
+            "       recent_turns, conversation_summary "
             "FROM onboarding_journey WHERE tenant_id = %s",
             (str(tenant_id),),
         ).fetchone()
@@ -106,12 +106,14 @@ def get_journey(tenant_id: UUID | str) -> dict[str, Any] | None:
     g = dict(row) if isinstance(row, dict) else {
         "status": row[0], "question_queue": row[1], "cursor": row[2],
         "answers": row[3], "skipped": row[4], "last_message_sid": row[5],
-        "recent_turns": row[6],
+        "recent_turns": row[6], "conversation_summary": row[7],
     }
     g["question_queue"] = list(g["question_queue"] or [])
     g["answers"] = dict(g["answers"] or {})
     g["skipped"] = list(g["skipped"] or [])
     g["recent_turns"] = list(g.get("recent_turns") or [])
+    # VT-571: the running distilled memory (mig 163). May be None (nothing folded yet).
+    g["conversation_summary"] = g.get("conversation_summary")
     return g
 
 
@@ -122,9 +124,40 @@ def get_journey(tenant_id: UUID | str) -> dict[str, Any] | None:
 _RECENT_TURNS_CAP = 8
 
 
+def _split_overflow(
+    existing: list[dict[str, Any]], cleaned: list[dict[str, Any]], cap: int
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Append ``cleaned`` to ``existing`` and split into (kept, evicted): the newest ``cap`` entries are
+    KEPT as the rolling window; the older overflow HEAD is EVICTED. VT-571 — the evicted head is returned
+    to be distilled into the running summary, NOT dropped (compact, don't drop). No overflow → (all, [])."""
+    combined = list(existing or []) + list(cleaned or [])
+    if len(combined) <= cap:
+        return combined, []
+    split = len(combined) - cap
+    return combined[split:], combined[:split]
+
+
+def _fire_distill(
+    tenant_id: UUID | str, evicted: list[dict[str, Any]], prior_summary: str | None
+) -> None:
+    """Fire the OFF-hot-path distillation of the evicted turns into the running summary — fire-and-forget
+    (``DBOS.start_workflow``). VT-571: this is what makes the memory COMPACT rather than drop. Fully
+    fail-soft: a DBOS-unavailable environment (pure unit tests) or any start error degrades to the
+    pre-VT-571 drop-silently behaviour — the window trim already committed above, so nothing breaks."""
+    try:
+        from dbos import DBOS
+
+        from orchestrator.onboarding.memory_distiller import journey_distill_workflow
+
+        DBOS.start_workflow(journey_distill_workflow, str(tenant_id), evicted, prior_summary)
+    except Exception:  # noqa: BLE001 — DBOS down / not launched → the evicted tail is dropped, as pre-VT-571
+        logger.warning("journey: distill workflow start failed (fail-soft; evicted tail dropped)", exc_info=True)
+
+
 def _append_recent_turns(tenant_id: UUID | str, *entries: dict[str, Any]) -> None:
-    """Append {role, text} entries to the journey's rolling window, capped. Fail-soft — the
-    transcript is memory, never a gate."""
+    """Append {role, text} entries to the journey's rolling window, capped. VT-571: on OVERFLOW the older
+    head is not dropped — it is distilled (off the hot path) into ``conversation_summary`` so durable
+    facts survive past the cap-8 window. Fail-soft throughout — the transcript is memory, never a gate."""
     try:
         cleaned = [
             {"role": e.get("role", ""), "text": str(e.get("text", ""))[:600]}
@@ -132,22 +165,35 @@ def _append_recent_turns(tenant_id: UUID | str, *entries: dict[str, Any]) -> Non
         ]
         if not cleaned:
             return
+        # Read-modify-write so the OVERFLOW head can be captured (the old pure-SQL trim silently dropped
+        # it). FOR UPDATE serialises concurrent appends for this one tenant (they're already serial per
+        # WhatsApp inbound); last-writer-wins is acceptable at this cadence. Row shape may be dict or tuple.
+        evicted: list[dict[str, Any]] = []
+        prior_summary: str | None = None
         with tenant_connection(tenant_id) as conn:
+            row = conn.execute(
+                "SELECT recent_turns, conversation_summary FROM onboarding_journey "
+                "WHERE tenant_id = %s FOR UPDATE",
+                (str(tenant_id),),
+            ).fetchone()
+            if row is None:
+                return
+            if isinstance(row, dict):
+                existing = list(row.get("recent_turns") or [])
+                prior_summary = row.get("conversation_summary")
+            else:
+                existing = list(row[0] or [])
+                prior_summary = row[1]
+            kept, evicted = _split_overflow(existing, cleaned, _RECENT_TURNS_CAP)
             conn.execute(
-                """
-                UPDATE onboarding_journey
-                   SET recent_turns = (
-                         SELECT COALESCE(jsonb_agg(t ORDER BY ord), '[]'::jsonb) FROM (
-                           SELECT t, ord
-                             FROM jsonb_array_elements(recent_turns || %s::jsonb) WITH ORDINALITY AS x(t, ord)
-                            ORDER BY ord DESC LIMIT %s
-                         ) latest(t, ord)
-                       ),
-                       updated_at = now()
-                 WHERE tenant_id = %s
-                """,
-                (Jsonb(cleaned), _RECENT_TURNS_CAP, str(tenant_id)),
+                "UPDATE onboarding_journey SET recent_turns = %s, updated_at = now() "
+                "WHERE tenant_id = %s",
+                (Jsonb(kept), str(tenant_id)),
             )
+        # The trimmed window is now committed. Fold the evicted head into the running summary OFF the hot
+        # path — its own guarded fire so a DBOS-unavailable env degrades to drop-silently (never re-raises).
+        if evicted:
+            _fire_distill(tenant_id, evicted, prior_summary)
     except Exception:  # noqa: BLE001 — memory only; never break the reply path
         logger.warning("journey: recent_turns append failed (fail-soft)", exc_info=True)
 
