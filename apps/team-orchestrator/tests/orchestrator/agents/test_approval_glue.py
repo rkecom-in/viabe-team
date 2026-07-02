@@ -440,7 +440,9 @@ def test_needs_changes_captures_edit_correction(substrate) -> None:
     assert corr[0]["kind"] == "edit"
     assert corr[0]["verb"] == "needs_changes"
     assert "softer" in corr[0]["text"]
-    assert corr[0]["eligible"] is False  # capture-now, retrieve-later (default closed)
+    # VT-566: a first-party owner verdict is retrieval-eligible AT CAPTURE (the read-back promotion
+    # seam) — the clean read of mig-154's "capture-now, retrieve-later" for the owner's OWN feedback.
+    assert corr[0]["eligible"] is True
 
 
 def test_rejected_captures_correction(substrate) -> None:

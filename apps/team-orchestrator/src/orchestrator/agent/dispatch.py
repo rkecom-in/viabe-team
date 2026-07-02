@@ -225,6 +225,38 @@ def _build_manager_directive_block(tenant_id: UUID) -> str | None:
     return "\n".join(lines)
 
 
+def _build_manager_lessons_block(tenant_id: UUID) -> str | None:
+    """VT-566 — the flywheel's read-back leg. Render this owner's captured lessons
+    (``agent_corrections`` — the owner's own edit/reject/approve verdicts, authoritative) + weak
+    outcome signals (``owner_feedback``, tier-branched) as the ``## Lessons from this owner`` (+
+    optional ``## Outcome signals (weak)``) system block, so the Team-Manager reasons WITH the
+    owner's accumulated verdicts on its NEXT run — closing the capture→retrieve loop.
+
+    Gate: REUSES ``MANAGER_MEMORY_RETRIEVAL`` (the VTR-directive flag) — both blocks are 'manager
+    memory read-back', so one env switch activates the family (fewer flags; the per-source
+    granularity lives in the per-row ``retrieval_eligible`` gate, which ``record_correction`` sets at
+    capture). Default OFF; dev flips it once validated. Returns ``None`` when the gate is off,
+    retrieval fails, or there is nothing captured yet. Best-effort + PII-safe: content is redacted at
+    capture; a read miss never breaks dispatch, and only presence booleans are ever logged."""
+    if not _manager_memory_retrieval_enabled():
+        return None
+    try:
+        from orchestrator.agents.correction_store import get_recent_lessons
+        from orchestrator.agents.lesson_readback import (
+            get_recent_outcome_signals,
+            render_lessons_block,
+        )
+
+        lessons = get_recent_lessons(tenant_id)
+        outcomes = get_recent_outcome_signals(tenant_id)
+    except Exception:  # noqa: BLE001 — read-back is best-effort, like the directive block
+        logger.warning(
+            "dispatch: lesson read-back failed (tenant=%s); proceeding without", tenant_id
+        )
+        return None
+    return render_lessons_block(lessons, outcomes)
+
+
 def _resolve_model(model_id: str = _BRAIN_MODEL_OPUS) -> ChatAnthropic:
     # VT-480: ``model_id`` is the tier-selected brain model (see
     # select_brain_model). Defaults to Opus (the capable model) so any caller
@@ -394,6 +426,16 @@ def dispatch_brain(
     if directive_block:
         _messages.insert(0, SystemMessage(content=directive_block))
 
+    # VT-566: the flywheel's read-back leg — inject this owner's captured lessons (their own
+    # edit/reject/approve verdicts, authoritative) + weak outcome signals (tier-branched) as a
+    # separate ``## Lessons from this owner`` system block, so a captured correction/approval steers
+    # the manager's NEXT run. Same double gate as the VTR-directive block above (MANAGER_MEMORY_
+    # RETRIEVAL env flag + per-row retrieval_eligible). Best-effort + inserted AFTER the cached prefix
+    # (a per-turn SystemMessage), so the VT-194 cache still hits.
+    lessons_block = _build_manager_lessons_block(tenant_id)
+    if lessons_block:
+        _messages.insert(0, SystemMessage(content=lessons_block))
+
     # VT-461: inject the Manager-intent signal as a separate system block so the
     # Team-Manager brain reads it as a prior (the prompt's "## Manager intent signal"
     # contract) when deciding handle-directly-vs-delegate. Reuses the classification the
@@ -417,6 +459,7 @@ def dispatch_brain(
             "l1_present": bool(l1_block),
             "business_present": bool(business_block),
             "directive_present": bool(directive_block),
+            "lessons_present": bool(lessons_block),
             "intent_present": bool(intent_block),
             "intent_classification": _manager_intent.get("classification"),
         },
@@ -431,7 +474,9 @@ def dispatch_brain(
         import hashlib
 
         _blocks_for_hash = "\n--\n".join(
-            b for b in (l1_block, business_block, directive_block, intent_block) if b
+            b
+            for b in (l1_block, business_block, directive_block, lessons_block, intent_block)
+            if b
         )
         _snapshot_id = hashlib.sha256(_blocks_for_hash.encode("utf-8")).hexdigest()
     except Exception:  # noqa: BLE001 — snapshot is best-effort
@@ -447,6 +492,7 @@ def dispatch_brain(
         input={
             "l1_block": l1_block,
             "business_block": business_block,
+            "lessons_block": lessons_block,
             "intent_block": intent_block,
         },
     )
