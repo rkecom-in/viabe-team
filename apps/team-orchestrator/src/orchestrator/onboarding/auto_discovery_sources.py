@@ -28,6 +28,10 @@ _WEBSITE_COST_USD = 0.001
 # adding NO incremental discovery cost. 0.0 keeps the engine's cost ceiling honest (we don't
 # double-bill a call the verification step already accounts for).
 _GST_COST_USD = 0.0
+# VT-568 — adjudicate the GBP top-N (not items[0] blind) against the owner's own anchors. N≈5 is
+# enough to cover a phonetic near-miss ranking above the real listing without inflating the prompt;
+# the Apify actor is bounded to the same N so the per-run cost stays ~_GBP_COST_USD (one search).
+_GBP_MAX_CANDIDATES = 5
 _HTTP_TIMEOUT = 20.0
 _WEBSITE_MAX_CHARS = 12000  # cap the page text fed to the LLM (cost + prompt-injection surface)
 _WEBSITE_MAX_BYTES = 3_000_000  # cap the response body fetched (DoS/cost)
@@ -74,10 +78,14 @@ def _assert_public_url(url: str) -> None:
 @dataclass(frozen=True)
 class SourceResult:
     source: str
-    status: str  # "ok" | "empty" | "skipped" | "error"
+    status: str  # "ok" | "empty" | "skipped" | "error" | "rejected"
     cost_usd: float = 0.0
     fields: dict[str, Any] = field(default_factory=dict)
     website: str | None = None  # GBP exposes the business's website for the website source
+    # VT-568 — anchors a source contributes back to the seed for a DOWNSTREAM source to read (the
+    # engine merges these into the seed with setdefault). GST populates the owner identity anchors
+    # that GBP's entity resolution adjudicates against.
+    seed_updates: dict[str, Any] = field(default_factory=dict)
 
 
 def _gbp_query(seed: dict[str, Any]) -> str | None:
@@ -94,9 +102,19 @@ def discover_gbp(
     *,
     token: str | None = None,
     fetch_fn: Callable[[dict[str, Any], str], list[dict[str, Any]]] | None = None,
+    adjudicate_fn: Any = None,
 ) -> SourceResult:
-    """GBP via compass/crawler-google-places (maxReviews:0 — profile only, no reviews/PII). Extracts
-    the business's own listing fields INCLUDING its website (which the website source then fetches)."""
+    """GBP via compass/crawler-google-places (maxReviews:0 — profile only, no reviews/PII).
+
+    VT-568 — ENTITY RESOLUTION: instead of taking ``items[0]`` BLIND (the RKeCom bug — Google's Maps
+    panel returned the phonetic near-miss "Reecomps teleservices" and its site/category/about polluted
+    the draft), fetch the top N candidates and ADJUDICATE which one, if any, IS the owner's company
+    against the owner's own anchors (signup name + the GST-verified entity, seeded by ``discover_gst``
+    which now runs first). ONLY an accepted candidate's fields enter the draft; a reject writes NO
+    GBP-derived field (no category, no website chain, no about from a maybe-wrong listing) — the GST
+    facts stand alone. If the adjudicator resolves the owner's OWN website from organic evidence, that
+    site is still chained to the website source. The decision + reasoning are recorded to the draft for
+    the VTR/audit. See ``entity_resolution``."""
     token = token or os.environ.get("APIFY_API_TOKEN")
     if not token:
         return SourceResult("gbp", "skipped")
@@ -106,12 +124,32 @@ def discover_gbp(
     from orchestrator.integrations.methods.apify_gbp import _default_fetch
 
     fetch = fetch_fn or _default_fetch
-    run_input = {"maxReviews": 0, "maxImages": 0, "language": "en", "searchStringsArray": [query]}
+    run_input = {
+        "maxReviews": 0, "maxImages": 0, "language": "en",
+        "maxCrawledPlacesPerSearch": _GBP_MAX_CANDIDATES,  # VT-568: top-N to adjudicate, not [0] blind
+        "searchStringsArray": [query],
+    }
     items = fetch(run_input, token)
     if not items:
         return SourceResult("gbp", "empty", cost_usd=_GBP_COST_USD)
-    place = items[0]
-    website = place.get("website") or place.get("url")
+
+    # VT-568 — resolve identity BEFORE trusting any GBP field. The adjudicator (one LLM call) rides
+    # inside the GBP source's cost so the engine's ceiling accounts for it.
+    from orchestrator.onboarding.entity_resolution import ADJUDICATION_COST_USD, resolve_entity
+
+    candidates = _to_candidates(items[:_GBP_MAX_CANDIDATES])
+    anchors = _owner_anchors(seed)
+    resolution = resolve_entity(anchors, candidates, adjudicate_fn=adjudicate_fn)
+    cost = _GBP_COST_USD + ADJUDICATION_COST_USD
+    _record_entity_resolution(tenant_id, resolution)
+
+    if resolution.decision != "accept" or resolution.matched_index is None:
+        # REJECT ALL GBP candidates — no GBP-derived field enters the draft. A plausibly owner-resolved
+        # website (from organic evidence) may still seed the website source against the RIGHT site.
+        return SourceResult("gbp", "rejected", cost_usd=cost, website=resolution.resolved_website)
+
+    place = items[resolution.matched_index]
+    website = resolution.resolved_website  # the accepted candidate's site (or an organic-resolved owner site)
     raw_category = place.get("categoryName")
     fields = {
         k: v
@@ -133,7 +171,66 @@ def discover_gbp(
         fields["business_type"] = business_type
     if fields:
         write_draft(tenant_id, fields, source="gbp")
-    return SourceResult("gbp", "ok" if fields else "empty", cost_usd=_GBP_COST_USD, fields=fields, website=website)
+    return SourceResult("gbp", "ok" if fields else "empty", cost_usd=cost, fields=fields, website=website)
+
+
+def _to_candidates(items: list[dict[str, Any]]) -> list[Any]:
+    """Map the GBP actor's top-N place dicts to entity_resolution ``GbpCandidate``s (index = rank)."""
+    from orchestrator.onboarding.entity_resolution import GbpCandidate
+
+    out = []
+    for i, place in enumerate(items):
+        if not isinstance(place, dict):
+            continue  # malformed vendor element → skip (never raise into discovery)
+        out.append(
+            GbpCandidate(
+                index=i,
+                title=place.get("title"),
+                category=place.get("categoryName"),
+                address=place.get("address") or place.get("street"),
+                city=place.get("city"),
+                website=place.get("website") or place.get("url"),
+            )
+        )
+    return out
+
+
+def _owner_anchors(seed: dict[str, Any]) -> Any:
+    """Build the owner identity anchors for adjudication. ``business_name`` is the (VT-406 verified)
+    signup name; the ``gst_*`` anchors are populated into the seed by ``discover_gst`` (run first).
+    All business-level (a proprietor's personal name is never in the GST anchors — the GST leg gates
+    it out), so this stays PII-safe (CL-390/425)."""
+    from orchestrator.onboarding.entity_resolution import OwnerAnchors
+
+    return OwnerAnchors(
+        signup_name=seed.get("business_name"),
+        gst_legal_name=seed.get("gst_legal_name"),
+        gst_trade_name=seed.get("gst_trade_name"),
+        gst_principal_address=seed.get("gst_principal_address"),
+        owner_website=seed.get("website"),
+        city=seed.get("city"),
+    )
+
+
+def _record_entity_resolution(tenant_id: UUID | str, resolution: Any) -> None:
+    """Record the entity-resolution decision + reasoning to the DRAFT so the VTR/audit can see WHY a
+    GBP listing was accepted or rejected. Written under the non-owner-facing ``entity_resolution`` key
+    (question_brain's confirm whitelist excludes it, so it never surfaces as a confirm question).
+    Best-effort — a record failure must not break GBP discovery."""
+    prov: dict[str, Any] = {
+        "decision": resolution.decision,
+        "confidence": resolution.confidence,
+        "reasoning": resolution.reasoning,
+        "rejected": list(resolution.rejected_titles),
+    }
+    if resolution.matched_index is not None:
+        prov["matched_index"] = resolution.matched_index
+    if resolution.resolved_website:
+        prov["resolved_website"] = resolution.resolved_website
+    try:
+        write_draft(tenant_id, {"entity_resolution": prov}, source="entity_resolution")
+    except Exception:  # noqa: BLE001 — audit record is best-effort; never break discovery
+        logger.warning("discover_gbp: entity_resolution record failed tenant=%s (non-terminal)", tenant_id)
 
 
 def _reconcile_type(*, business_name: str | None, gbp_category: str | None, website: str | None) -> str | None:
@@ -181,7 +278,22 @@ def discover_gst(
         fields["legal_name"] = lookup.legal_name
     if fields:
         write_draft(tenant_id, fields, source="gst")
-    return SourceResult("gst", "ok" if fields else "empty", cost_usd=_GST_COST_USD, fields=fields)
+    # VT-568 — surface the GST-verified identity anchors into the seed so GBP's entity resolution (run
+    # AFTER gst) can adjudicate candidates against the owner's OWN authoritative name + locality. Only
+    # business-level identity crosses (legal_name here is company-only per the PII gate above; a
+    # proprietor's personal name is never in ``fields`` and so never becomes an anchor).
+    seed_updates = {
+        k: v
+        for k, v in {
+            "gst_legal_name": fields.get("legal_name"),
+            "gst_trade_name": fields.get("trade_name"),
+            "gst_principal_address": fields.get("principal_address"),
+        }.items()
+        if v
+    }
+    return SourceResult(
+        "gst", "ok" if fields else "empty", cost_usd=_GST_COST_USD, fields=fields, seed_updates=seed_updates
+    )
 
 
 def discover_website(
