@@ -590,3 +590,56 @@ def test_inbound_dsr_detection_is_phase_agnostic() -> None:
 
     assert matches_opt_out_or_dsr("please delete my data") is True
     assert matches_opt_out_or_dsr("STOP") is True
+
+
+# ---------------------------------------------------------------------------
+# VT-562 follow-up (review F2): post-send bookkeeping failures must not
+# discard the summary — the sends already happened and the owner-outcome
+# report reads only the summary.
+# ---------------------------------------------------------------------------
+
+def test_status_advance_failure_still_returns_summary(monkeypatch) -> None:
+    """A status-advance/KG-emit failure AFTER real sends returns the honest summary
+    (flagged status_advance_failed) instead of raising it away."""
+    import orchestrator.campaign.execute as execute_mod
+    from orchestrator.campaign.execute import execute_approved_campaign
+
+    recipients = [_recipient(_CUSTOMER_1), _recipient(_CUSTOMER_2)]
+    conn = _make_conn(campaign_row=_campaign_row(), recipients=recipients)
+    send_fn = MagicMock(return_value=_ok_send_result())
+
+    def _boom(*_a: Any, **_k: Any) -> None:
+        raise RuntimeError("advance failed")
+
+    monkeypatch.setattr(execute_mod, "_advance_campaign_status", _boom)
+
+    summary = execute_approved_campaign(
+        _TENANT_ID, _CAMPAIGN_ID, conn=conn, send_template_fn=send_fn
+    )
+
+    assert summary["sent"] == 2
+    assert summary["status_advance_failed"] is True
+    assert send_fn.call_count == 2
+
+
+def test_kg_drain_failure_still_returns_clean_summary(monkeypatch) -> None:
+    """A post-commit KG drain failure is observability-only: summary returned WITHOUT
+    the status_advance_failed flag (the status DID advance; the outbox drain retries)."""
+    import orchestrator.knowledge.kg_emit as kg_emit_mod
+    from orchestrator.campaign.execute import execute_approved_campaign
+
+    recipients = [_recipient(_CUSTOMER_1)]
+    conn = _make_conn(campaign_row=_campaign_row(), recipients=recipients)
+    send_fn = MagicMock(return_value=_ok_send_result())
+
+    def _boom(*_a: Any, **_k: Any) -> None:
+        raise RuntimeError("drain failed")
+
+    monkeypatch.setattr(kg_emit_mod, "drain_kg_events", _boom)
+
+    summary = execute_approved_campaign(
+        _TENANT_ID, _CAMPAIGN_ID, conn=conn, send_template_fn=send_fn
+    )
+
+    assert summary["sent"] == 1
+    assert "status_advance_failed" not in summary

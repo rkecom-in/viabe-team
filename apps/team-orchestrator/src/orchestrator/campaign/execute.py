@@ -544,17 +544,39 @@ def execute_approved_campaign(
     # TARGETED edges) atomic in one txn — NOT the I/O send loop above.
     # VT-558: a killed campaign is NOT advanced to 'sent' (it stays 'cancelled') and does NOT emit
     # CAMPAIGN_SENT — only the recipients actually contacted before the kill went out.
+    # VT-562 follow-up (review F2): the sends above already HAPPENED — from here down everything is
+    # bookkeeping, and a bookkeeping failure must never discard the summary (it is the only truth
+    # the owner-outcome report reads; raising here silently un-tells the owner about real sends).
+    status_advance_failed = False
     if killed == 0:
         from orchestrator.knowledge.kg_emit import drain_kg_events, emit_kg_event
         from orchestrator.knowledge.kg_vocab import KgEventType
 
-        with conn.transaction():
-            _advance_campaign_status(conn, tenant_id_str, campaign_id_str)
-            emit_kg_event(conn, KgEventType.CAMPAIGN_SENT, tenant_id_str, {
-                "campaign_id": campaign_id_str,
-                "customer_ids": [r["customer_id"] for r in recipients],
-            })
-        drain_kg_events(tenant_id_str)
+        try:
+            with conn.transaction():
+                _advance_campaign_status(conn, tenant_id_str, campaign_id_str)
+                emit_kg_event(conn, KgEventType.CAMPAIGN_SENT, tenant_id_str, {
+                    "campaign_id": campaign_id_str,
+                    "customer_ids": [r["customer_id"] for r in recipients],
+                })
+        except Exception:  # noqa: BLE001 — sends happened; the summary must survive bookkeeping
+            status_advance_failed = True
+            logger.error(
+                "execute_approved_campaign: status-advance/CAMPAIGN_SENT emit FAILED after real "
+                "sends (tenant=%s campaign=%s) — campaign NOT advanced to 'sent'. Do NOT redrive "
+                "without checking the per-recipient send_result audit rows first (re-execution "
+                "would double-send).",
+                tenant_id_str, campaign_id_str, exc_info=True,
+            )
+        else:
+            try:
+                drain_kg_events(tenant_id_str)
+            except Exception:  # noqa: BLE001 — post-commit observability; outbox drain will retry
+                logger.warning(
+                    "execute_approved_campaign: KG drain failed post-advance (tenant=%s "
+                    "campaign=%s) — outbox rows persist for the scheduled drain",
+                    tenant_id_str, campaign_id_str, exc_info=True,
+                )
 
     summary = {
         "sent": sent,
@@ -563,6 +585,9 @@ def execute_approved_campaign(
         "failed": failed,
         "killed": killed,
     }
+    if status_advance_failed:
+        # Honest marker for the audit trail + operators; the owner report reads only the counts.
+        summary["status_advance_failed"] = True
     logger.info(
         "execute_approved_campaign: done tenant=%s campaign=%s summary=%s",
         tenant_id_str, campaign_id_str, summary,
