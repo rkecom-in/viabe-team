@@ -438,9 +438,24 @@ def build_supervisor_graph(
         spec.route_key: spec.agent_name for spec in ROSTER
     }
     orchestrator_route_map["terminal"] = "orchestrator_terminal"
+
+    def _route_after_orchestrator_producing(state: AgentGraphState) -> str:
+        """VT-565 — wrap the routing decision so an objective-bearing SPAWN mints the run's
+        durable manager_task at the delegation seam (the B2 live producer). This is the seam the
+        landmine test proved fires exactly once per run ('spawn' on the spawn path, 'terminal'
+        on the no-spawn path). Pure state-tracking + fully fail-soft: ``on_route_decided`` never
+        raises and never changes the route returned, so routing is byte-for-byte unchanged.
+        ``route_after_orchestrator`` is referenced as a module global so the existing tests that
+        monkeypatch it still drive this wrapper."""
+        route = route_after_orchestrator(state)
+        from orchestrator.manager.task_producer import on_route_decided
+
+        on_route_decided(state, route)
+        return route
+
     graph.add_conditional_edges(
         "orchestrator_agent",
-        route_after_orchestrator,
+        _route_after_orchestrator_producing,
         orchestrator_route_map,
     )
     # VT-465 — each lane's outgoing edge is declared by spec.edge_to:

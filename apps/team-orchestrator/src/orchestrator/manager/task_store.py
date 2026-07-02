@@ -168,6 +168,20 @@ def get_task(tenant_id: UUID | str, task_id: UUID | str) -> dict[str, Any] | Non
     return dict(row) if row is not None else None
 
 
+def find_task_id(tenant_id: UUID | str, idempotency_key: str) -> UUID | None:
+    """Resolve a task's id from its ``(tenant, idempotency_key)`` — the live producer's run-keyed
+    handle. A manager_task is minted at the delegation seam keyed on the run, so the later
+    run-terminal seams (completed / paused / failed) look it up here instead of threading the id
+    through graph state. RLS-scoped read; None when no such task exists (a conversational turn
+    minted nothing)."""
+    with tenant_connection(tenant_id) as conn:
+        row = conn.execute(
+            "SELECT id FROM manager_tasks WHERE tenant_id = %s AND idempotency_key = %s",
+            (str(tenant_id), idempotency_key),
+        ).fetchone()
+    return _uuid(row) if row is not None else None
+
+
 # ── Steps ──────────────────────────────────────────────────────────────────
 def add_step(
     tenant_id: UUID | str,
@@ -253,6 +267,6 @@ def get_steps(tenant_id: UUID | str, task_id: UUID | str) -> list[dict[str, Any]
 __all__ = [
     "TASK_STATUSES", "TASK_TERMINAL", "TASK_NON_TERMINAL",
     "STEP_KINDS", "STEP_STATUSES", "STEP_TERMINAL", "STEP_NON_TERMINAL", "EVIDENCE_KINDS",
-    "create_task", "set_task_status", "get_task",
+    "create_task", "set_task_status", "get_task", "find_task_id",
     "add_step", "set_step_status", "get_steps",
 ]
