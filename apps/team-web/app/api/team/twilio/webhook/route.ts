@@ -80,6 +80,14 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
 
   const rawBody = await request.text()
   const signature = request.headers.get('x-twilio-signature')
+  // Signature validation needs BOTH env vars on this Vercel project or every real Twilio
+  // POST 403s (Twilio error 11200) while unsigned probes *also* 403 — indistinguishable from
+  // healthy from the outside. TEAM_TWILIO_WEBHOOK_URL must equal the EXACT URL configured on
+  // the Twilio Messaging Service (Twilio signs against it; behind the Vercel proxy
+  // request.url is the deployment-internal host, so the fallback fails for aliased traffic),
+  // and TEAM_TWILIO_AUTH_TOKEN must be the account token (missing token = fail-closed 403).
+  // Found live 2026-07-02: both were absent/stale → the drill's COMPLETE_SETUP tap never
+  // reached the orchestrator.
   const webhookUrl = process.env.TEAM_TWILIO_WEBHOOK_URL ?? request.url
   const params = parseTwilioBody(rawBody)
 
