@@ -118,6 +118,16 @@ def reap_stalled_manager_tasks(*, pool: Any = None, age_hours: int = _STALLED_TA
       * attempt reaches max_attempts → DEAD_LETTER: a real retry-exhausted terminal (operator-
         redrivable, never auto-retried again) → dead_letter_task alert (VT-557).
 
+    VT-560 (Defect 1) — WAKE the ladder. VT-557 armed ``next_retry_at`` on the blocked rung but
+    nothing ever re-swept 'blocked', so zero auto-retries fired and dead_letter was unreachable via
+    the ladder (only the human redrive worked). This sweep now also flips every DUE reaper-parked
+    task ('blocked' with ``next_retry_at`` elapsed) back to a runnable 'planned' — keeping the
+    incremented ``attempt`` — so a task that stalls again re-enters the ladder and decide_retry
+    walks it to dead_letter at the budget. Order matters: the stall sweep runs FIRST, the wake
+    SECOND, so a task just blocked this tick (its ``next_retry_at`` is in the future) is NOT
+    immediately re-woken and a task just woken to 'planned' is NOT re-scanned by the already-run
+    stall query — attempt can never double-increment in one tick, independent of ``age_hours``.
+
     Best-effort, service-role (cross-tenant), idempotent, NEVER raises.
     """
     try:
@@ -174,7 +184,31 @@ def reap_stalled_manager_tasks(*, pool: Any = None, age_hours: int = _STALLED_TA
                     )
                     retried.append((task_id, tid))
 
+            # VT-560 (Defect 1): wake DUE reaper-parked tasks. The ``next_retry_at IS NOT NULL``
+            # gate is load-bearing — only the ladder's own parked rows wake automatically; a
+            # 'blocked' task with no ``next_retry_at`` (any other blocker semantics — an explicit
+            # manager block) is left for a human. CAS on status='blocked' (optimistic-concurrency,
+            # the file's pattern); clear next_retry_at; KEEP attempt so the ladder progresses.
+            woken = conn.execute(
+                "UPDATE manager_tasks SET status = 'planned', next_retry_at = NULL, "
+                "    version = version + 1, updated_at = now(), "
+                "    stall_metadata = COALESCE(stall_metadata, '{}'::jsonb) "
+                "      || jsonb_build_object('woken_by', 'vt560_retry_ladder', "
+                "         'woken_reason', 'backoff_elapsed', 'woken_from', 'blocked', "
+                "         'attempt', attempt::int, 'woken_at', now()::text) "
+                "WHERE status = 'blocked' "
+                "  AND next_retry_at IS NOT NULL "
+                "  AND next_retry_at <= now() "
+                "RETURNING id",
+            ).fetchall()
+
         n = len(candidates)
+        n_woken = len(woken)
+        if n_woken:
+            logger.warning(
+                "VT-560 retry-ladder wake: %d reaper-parked task(s) woken blocked->planned "
+                "(backoff elapsed; re-enter the stall ladder if still no runnable step)", n_woken,
+            )
         if n:
             logger.warning(
                 "VT-557 retry-ladder reaper: %d stalled task(s) — %d retried (blocked+backoff), "
@@ -184,8 +218,8 @@ def reap_stalled_manager_tasks(*, pool: Any = None, age_hours: int = _STALLED_TA
             # exhausted. Fail-soft per alert + dev-routed (a dev/canary tenant never pages Fazal).
             _alert_orphaned_tasks([{"id": t, "tenant_id": g} for t, g in retried])
             _alert_dead_letter_tasks(dead_lettered)
-        else:
-            logger.info("VT-557 retry-ladder reaper: no stalled manager_tasks")
+        elif not n_woken:
+            logger.info("VT-557 retry-ladder reaper: no stalled or wakeable manager_tasks")
         return n
     except Exception:  # noqa: BLE001 — best-effort by design; must never block boot
         logger.warning("VT-557 retry-ladder reaper sweep failed (best-effort)", exc_info=True)

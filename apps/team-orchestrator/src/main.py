@@ -173,6 +173,12 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     # on their own. Runs AFTER launch_dbos() so DBOS's own same-version recovery has already
     # fired; the >1h age floor keeps it clear of any live in-flight run. Best-effort: a reaper
     # failure must never block boot (reap_orphan_runs never raises, but guard the import too).
+    #
+    # VT-560: these three are a STARTUP CATCH-UP only. The STEADY-STATE re-sweep now runs on
+    # the @DBOS.scheduled substrate (scheduled_triggers.py: stalled_task_sweep_scheduled +
+    # silent_terminal_sweep_scheduled every 10 min, orphan_run_reaper_scheduled hourly) — a
+    # long-lived process would otherwise never re-sweep, so the VT-557 retry ladder never
+    # progressed and the VT-552 detector never re-fired. Keep the boot calls for the first pass.
     try:
         from orchestrator.orphan_reaper import (
             detect_silent_terminal_runs,
