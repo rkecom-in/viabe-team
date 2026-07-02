@@ -13,9 +13,11 @@ aggregator survives on this surface.
 """
 
 from orchestrator.billing.attribution_close import close_attribution
+from orchestrator.billing.attribution_writer import build_campaign_attributions
 from orchestrator.billing.types import AttributionCloseResult
 
 __all__ = [
     "AttributionCloseResult",
+    "build_campaign_attributions",
     "close_attribution",
 ]

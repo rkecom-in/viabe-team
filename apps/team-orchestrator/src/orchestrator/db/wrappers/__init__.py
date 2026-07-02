@@ -536,6 +536,30 @@ class CampaignsWrapper(TenantScopedTable):
         self._validate(out, tid)
         return out
 
+    def recovered_paise_for_campaigns(
+        self, tenant_id: UUID | str, campaign_ids: list[str], *, conn: Any = None
+    ) -> dict[str, int]:
+        """{campaign_id: recovered_paise} — per-campaign attributed ARRR
+        (SUM ``attributions.attributed_paise``) for the given campaigns; the
+        VT-563 context-builder recent-campaigns read. Tenant-predicated on
+        ``attributions`` (RLS + explicit WHERE); ``campaigns`` is not touched.
+        A campaign with no attribution rows is ABSENT from the map (the caller
+        defaults it to 0)."""
+        tid = self._uuid(tenant_id)
+        ids = [str(c) for c in campaign_ids]
+        if not ids:
+            return {}
+        with self._conn(tid, conn) as c:
+            rows = c.execute(
+                "SELECT campaign_id::text AS cid, "
+                "       COALESCE(SUM(attributed_paise), 0) AS arrr "
+                "FROM attributions "
+                "WHERE tenant_id = %s AND campaign_id = ANY(%s) "
+                "GROUP BY campaign_id",
+                (str(tid), ids),
+            ).fetchall()
+        return {dict(r)["cid"]: int(dict(r)["arrr"]) for r in rows}
+
     def set_status(
         self, tenant_id: UUID | str, campaign_id: str, status: str, *, conn: Any = None
     ) -> int:
