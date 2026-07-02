@@ -28,6 +28,9 @@ from orchestrator.direct_handlers.autonomy_kill_handler import autonomy_kill_han
 from orchestrator.direct_handlers.consent_required_handler import (
     consent_required_handler,
 )
+from orchestrator.direct_handlers.customer_send_delivery_handler import (
+    customer_send_delivery_handler,
+)
 from orchestrator.direct_handlers.data_inputs_enable_handler import (
     data_inputs_enable_handler,
 )
@@ -50,6 +53,8 @@ HANDLERS: dict[str, Handler] = {
     # VT-303 — owner_inputs consent gate (Option B) + enable path.
     "consent_required_handler": consent_required_handler,
     "data_inputs_enable_handler": data_inputs_enable_handler,
+    # VT-564 — customer-send delivery reconciliation (delivered/read/undelivered callbacks).
+    "customer_send_delivery_handler": customer_send_delivery_handler,
     # VT-384 — L3 autonomy keyword paths (pre_filter rules b2/b3, AFTER opt-out + DSR).
     "autonomy_kill_handler": autonomy_kill_handler,
     "autonomy_enable_handler": autonomy_enable_handler,

@@ -314,13 +314,18 @@ def check_agent_send_caps(
 
 
 def _load_draft(conn: Any, tenant_id: str, draft_id: str) -> dict[str, Any] | None:
+    # VT-564: LEFT JOIN the work item so the draft carries its originating run_id (a SOFT
+    # pointer — the work item may be gone) — threaded into the send_result audit emits so the
+    # accept → deliver audit chain is join-able (was NULL, chain un-joinable).
     row = conn.execute(
         "SELECT d.id::text AS draft_id, d.batch_id::text AS batch_id, "
         "       d.customer_id::text AS customer_id, d.template_name, d.params, "
         "       d.status AS draft_status, d.skip_reason, d.message_sid, "
-        "       b.status AS batch_status, b.work_item_id::text AS work_item_id, b.agent "
+        "       b.status AS batch_status, b.work_item_id::text AS work_item_id, b.agent, "
+        "       w.run_id::text AS run_id "
         "FROM agent_drafts d "
         "JOIN agent_draft_batches b ON b.tenant_id = d.tenant_id AND b.id = d.batch_id "
+        "LEFT JOIN agent_work_items w ON w.tenant_id = b.tenant_id AND w.id = b.work_item_id "
         "WHERE d.tenant_id = %s AND d.id = %s",
         (tenant_id, draft_id),
     ).fetchone()
@@ -329,7 +334,7 @@ def _load_draft(conn: Any, tenant_id: str, draft_id: str) -> dict[str, Any] | No
     keys = (
         "draft_id", "batch_id", "customer_id", "template_name", "params",
         "draft_status", "skip_reason", "message_sid", "batch_status",
-        "work_item_id", "agent",
+        "work_item_id", "agent", "run_id",
     )
     return {k: _col(row, k, i) for i, k in enumerate(keys)}
 
@@ -717,6 +722,7 @@ def agent_send_draft(
                     event_kind="send_result",
                     actor=draft["agent"] or "sales_recovery",
                     tenant_id=tid,
+                    run_id=draft["run_id"],  # VT-564: join the accept→deliver chain
                     summary=f"agent customer send failed draft={did} code={code}",
                     action={
                         "draft_id": did,
@@ -780,6 +786,7 @@ def agent_send_draft(
             event_kind="send_result",
             actor=draft["agent"] or "sales_recovery",
             tenant_id=tid,
+            run_id=draft["run_id"],  # VT-564: join the accept→deliver chain
             summary=f"agent customer send {status} draft={did} sid={out.message_sid}",
             action={
                 "draft_id": did,
@@ -828,6 +835,7 @@ def agent_send_draft(
             event_kind="send_result",
             actor=draft["agent"] or "sales_recovery",
             tenant_id=tid,
+            run_id=draft["run_id"],  # VT-564: join the accept→deliver chain
             summary=f"agent customer send failed draft={did} code={code}",
             action={
                 "draft_id": did,
@@ -901,6 +909,7 @@ def agent_send_draft(
         event_kind="send_result",
         actor=draft["agent"] or "sales_recovery",
         tenant_id=tid,
+        run_id=draft["run_id"],  # VT-564: join the accept→deliver chain
         summary=f"agent customer send {status} draft={did} sid={out.message_sid}",
         action={
             "draft_id": did,
@@ -927,6 +936,182 @@ def agent_send_draft(
     )
 
 
+# --- VT-564: async delivery reconciliation ------------------------------------
+#
+# The success path (above) records ACCEPTANCE — agent_drafts.status='sent', the
+# agent_customer_contacts ledger row, and a send_result audit — the moment Twilio returns a
+# message_sid. That is NOT delivery. The async Twilio status callback (delivered/read/failed/
+# undelivered) is the delivery truth. This reconciler resolves the callback's sid → the contact
+# ledger row and stamps a delivery_status (mig 161) — its OWN dimension, so a delivery failure
+# NEVER rewrites the acceptance (agent_drafts.status stays 'sent'). A delivery FAILURE (failed/
+# undelivered) emits a send_result status-UPDATE audit + fires the reviewer outbound_failure alert;
+# a delivered/read records positive evidence (no alert). Mirrors the VT-524/534 owner path
+# (owner_surface/owner_notification.record_owner_notification_delivery). Everything is FAIL-SOFT:
+# a reconcile failure must never break the inbound webhook (observability is not a gate, Pillar 1).
+
+# Twilio status-callback state → the durable delivery_status (mig 161 CHECK). 'read' implies
+# delivered; 'undelivered' is a delivery failure like 'failed'.
+_DELIVERY_STATE_MAP: dict[str, str] = {
+    "delivered": "delivered",
+    "read": "delivered",
+    "failed": "failed",
+    "undelivered": "undelivered",
+}
+_DELIVERY_FAILURE_STATES = frozenset({"failed", "undelivered"})
+
+
+@dataclass(frozen=True, slots=True)
+class ReconcileResult:
+    """Outcome of one delivery-callback reconciliation (PII-safe: ids + status only)."""
+
+    matched: bool
+    delivery_status: str | None = None
+
+
+def reconcile_customer_send_delivery(
+    tenant_id: UUID | str,
+    message_sid: str | None,
+    callback_state: str | None,
+) -> ReconcileResult:
+    """Reconcile an async Twilio delivery callback against the customer-send ledger.
+
+    Resolves ``message_sid`` → the ``agent_customer_contacts`` row for ``tenant_id`` and stamps
+    ``delivery_status`` — terminal-safe: only a NULL ``delivery_status`` flips, so the FIRST
+    delivery callback wins and a redelivered callback is a no-op (no second alert). On a NEW
+    delivery FAILURE (failed/undelivered) it emits a ``send_result`` status-UPDATE audit row and
+    fires the reviewer ``outbound_failure`` alert. On delivered/read it records the positive
+    outcome (no alert). Returns whether a customer-send row matched + newly flipped.
+
+    Service-role write (``get_pool``, RLS-bypassing) with an explicit ``tenant_id`` — mirrors
+    ``owner_notification.record_owner_notification_delivery``. Fully FAIL-SOFT: any error is logged
+    and swallowed (a no-op result), never raised into the status-callback handler / inbound webhook.
+    A callback whose sid is not a customer send (an owner notification, an unknown sid) or already
+    reconciled is a silent no-op.
+    """
+    new_status = _DELIVERY_STATE_MAP.get(callback_state or "")
+    if not message_sid or new_status is None:
+        return ReconcileResult(matched=False)
+    from orchestrator.graph import get_pool
+
+    try:
+        with get_pool().connection() as conn:
+            row = conn.execute(
+                "UPDATE agent_customer_contacts "
+                "SET delivery_status = %s, delivery_updated_at = now() "
+                "WHERE tenant_id = %s AND message_sid = %s AND delivery_status IS NULL "
+                "RETURNING id::text AS id, draft_id::text AS draft_id, batch_id::text AS batch_id",
+                (new_status, str(tenant_id), message_sid),
+            ).fetchone()
+    except Exception:  # noqa: BLE001 — fail-soft: reconciliation must never break the webhook
+        logger.warning(
+            "VT-564: customer-send delivery reconcile failed (fail-soft) sid=%s state=%s",
+            message_sid, callback_state, exc_info=True,
+        )
+        return ReconcileResult(matched=False)
+    if row is None:
+        # No customer-send row for this sid (an owner notification / unknown sid), OR the row was
+        # already terminal (a redelivered callback) — a silent no-op either way.
+        return ReconcileResult(matched=False)
+
+    contact_id = _col(row, "id", 0)
+    draft_id = _col(row, "draft_id", 1)
+    batch_id = _col(row, "batch_id", 2)
+    run_id = _reconcile_run_id(tenant_id, batch_id)
+
+    _emit_delivery_audit(
+        tenant_id, new_status,
+        message_sid=message_sid, draft_id=draft_id, contact_id=contact_id, run_id=run_id,
+    )
+    if new_status in _DELIVERY_FAILURE_STATES:
+        _alert_customer_delivery_failure(tenant_id, message_sid, new_status)
+    return ReconcileResult(matched=True, delivery_status=new_status)
+
+
+def _reconcile_run_id(tenant_id: UUID | str, batch_id: str | None) -> str | None:
+    """Best-effort run_id for the delivery-reconcile audit: contact → batch → work_item.run_id.
+    Fail-soft (returns None) — the batch/work-item may be purged; run_id is a correlation nicety,
+    never load-bearing for the reconcile."""
+    if not batch_id:
+        return None
+    from orchestrator.graph import get_pool
+
+    try:
+        with get_pool().connection() as conn:
+            row = conn.execute(
+                "SELECT w.run_id::text AS run_id "
+                "FROM agent_draft_batches b "
+                "JOIN agent_work_items w ON w.tenant_id = b.tenant_id AND w.id = b.work_item_id "
+                "WHERE b.tenant_id = %s AND b.id = %s",
+                (str(tenant_id), batch_id),
+            ).fetchone()
+    except Exception:  # noqa: BLE001 — best-effort correlation only
+        return None
+    return _col(row, "run_id", 0) if row is not None else None
+
+
+def _emit_delivery_audit(
+    tenant_id: UUID | str,
+    delivery_status: str,
+    *,
+    message_sid: str,
+    draft_id: str | None,
+    contact_id: str | None,
+    run_id: str | None,
+) -> None:
+    """Emit a send_result status-UPDATE audit row for a reconciled delivery outcome. Follows the
+    send-time send_result shape (event_layer='does', event_kind='send_result'); FAIL-SOFT
+    (conn=None) — the send + its acceptance audit already committed."""
+    from orchestrator.observability.tm_audit import emit_tm_audit
+
+    failed = delivery_status in _DELIVERY_FAILURE_STATES
+    emit_tm_audit(
+        event_layer="does",
+        event_kind="send_result",
+        actor="sales_recovery",
+        tenant_id=tenant_id,
+        run_id=run_id,
+        summary=f"agent customer send delivery {delivery_status} draft={draft_id} sid={message_sid}",
+        action={"draft_id": draft_id, "contact_id": contact_id, "message_sid": message_sid},
+        result={
+            "status": "delivery_failed" if failed else "delivered",
+            "delivery_status": delivery_status,
+            "message_sid": message_sid,
+        },
+        severity="error" if failed else "info",
+        status="error" if failed else "ok",
+        conn=None,
+    )
+
+
+def _alert_customer_delivery_failure(
+    tenant_id: UUID | str, message_sid: str, delivery_status: str
+) -> None:
+    """Fire the outbound_failure reviewer alert for a failed customer-send delivery (VT-564,
+    reusing the VT-534 pattern). Dev-routed + PII-scrubbed by ``dispatch_alert``; the message_sid is
+    an opaque Twilio id, not PII. Fully fail-soft — an alert failure must never touch the ledger."""
+    try:
+        from orchestrator.alerts.dispatch import dispatch_alert
+        from orchestrator.alerts.triggers import Trigger, severity_for
+
+        tid = tenant_id if isinstance(tenant_id, UUID) else UUID(str(tenant_id))
+        dispatch_alert(Trigger(
+            tenant_id=tid,
+            trigger_kind="outbound_failure",
+            severity=severity_for("outbound_failure"),
+            message_text=(
+                f"Customer-send delivery {delivery_status.upper()} (message_sid={message_sid}). The "
+                "customer message was accepted by Twilio but Meta/carrier did not deliver — the "
+                "customer was not reached. Investigate template category / opt-in / number."
+            ),
+            payload={"surface": "customer_send", "message_sid": message_sid,
+                     "delivery_status": delivery_status},
+        ))
+    except Exception:  # noqa: BLE001 — fail-soft: an alert failure must not affect the ledger/webhook
+        logger.warning(
+            "VT-564: customer-send failure-alert dispatch failed (fail-soft)", exc_info=True
+        )
+
+
 # VT-384 import-time signature pin (contract item 5): the ARMED registry's team_winback_simple
 # signature MUST match the executor WINBACK_TEMPLATE_PARAMS — a drift fails THIS import (fail
 # LOUD). Best-effort on a missing registry/executor (dep-less smoke), so the module stays importable.
@@ -942,6 +1127,7 @@ __all__ = [
     "L3_DAILY_AUTO_SEND_CAP",
     "MAX_AGENT_CONTACTS_PER_90D",
     "RECONTACT_SUPPRESSION_DAYS",
+    "ReconcileResult",
     "SKIP_CAP_L3_DAILY",
     "SKIP_NOT_ONBOARDED",
     "SKIP_SIGNATURE_MISMATCH",
@@ -950,4 +1136,5 @@ __all__ = [
     "assert_winback_signature",
     "check_agent_send_caps",
     "has_marketing_consent_for_phone",
+    "reconcile_customer_send_delivery",
 ]

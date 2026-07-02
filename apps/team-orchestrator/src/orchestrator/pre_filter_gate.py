@@ -21,7 +21,6 @@ from orchestrator.keyword_match import boundary_patterns, nfc as _nfc
 from orchestrator.state import SubscriberState
 from orchestrator.types import (
     PreFilterResult,
-    Reject,
     RouteToBrain,
     RouteToDirectHandler,
     WebhookEvent,
@@ -174,13 +173,22 @@ def pre_filter(event: WebhookEvent, state: SubscriberState) -> PreFilterResult:
     if event.message_type == "status_callback":
         state = event.status_callback_state
         if state == "failed":
+            # 'failed' keeps the owner error-notification path; template_error_handler ALSO
+            # reconciles the customer-send delivery ledger (VT-564) as a fail-soft first step.
             return RouteToDirectHandler(
                 handler_name="template_error_handler",
                 payload={"twilio_message_sid": event.twilio_message_sid},
             )
-        if state in ("delivered", "read"):
-            return Reject(reason=f"status callback '{state}' — observability only (VT-122)")
-        # 'undelivered' or missing — conservative: let the brain decide.
+        if state in ("delivered", "read", "undelivered"):
+            # VT-564 — reconcile the customer-send delivery ledger. 'undelivered' is a delivery
+            # FAILURE (stamps the ledger + fires the reviewer outbound_failure alert);
+            # 'delivered'/'read' record positive evidence (no alert). A no-op when the sid is not a
+            # customer send (owner notifications reconcile in the runner, VT-524).
+            return RouteToDirectHandler(
+                handler_name="customer_send_delivery_handler",
+                payload={"twilio_message_sid": event.twilio_message_sid},
+            )
+        # missing/unknown state — conservative: let the brain decide.
         return RouteToBrain(reason=f"status callback state '{state}' — needs review")
 
     # --- Inbound message body checks ---

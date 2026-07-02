@@ -260,10 +260,13 @@ def test_hinglish_opt_out_routes(gate):
         assert result.handler_name == "opt_out_handler"
 
 
-def test_status_callback_delivered_is_rejected(gate):
-    result = gate.pre_filter(_callback(gate, "delivered"), _state(gate, uuid4()))
-    assert isinstance(result, gate.t.Reject)
-    assert "observability" in result.reason
+@pytest.mark.parametrize("cb_state", ["delivered", "read", "undelivered"])
+def test_status_callback_delivery_routes_to_reconciler(gate, cb_state):
+    """VT-564: delivered/read/undelivered callbacks now route to the customer-send delivery
+    reconciler (was: delivered/read Rejected, undelivered → brain)."""
+    result = gate.pre_filter(_callback(gate, cb_state), _state(gate, uuid4()))
+    assert isinstance(result, gate.t.RouteToDirectHandler)
+    assert result.handler_name == "customer_send_delivery_handler"
 
 
 def test_status_callback_failed_routes_to_template_error_handler(gate):
