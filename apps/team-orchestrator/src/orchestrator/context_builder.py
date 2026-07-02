@@ -449,40 +449,47 @@ def _build_l4_skills(tenant_id: UUID, user_request: str) -> tuple[L4Skills, bool
 
 
 def _build_recent_campaigns(tenant_id: UUID) -> tuple[list[CampaignSnapshot], bool]:
-    """campaigns-table read (VT-138).
+    """campaigns-table read (VT-138) + per-campaign recovered ARRR (VT-563).
 
     Reads the live ``campaigns`` table via ``tenant_connection`` (RLS +
     GUC scoped); returns the most-recent ``LIMIT 5`` rows mapped to
     ``CampaignSnapshot``. ``id``, ``status`` and ``generated_at`` map
-    directly; ``recovered_paise`` is set to ``0`` because the per-
-    campaign attribution substrate does not exist yet (CL blocker
-    367387c2-cc5a-81a7-aa37-e6e23c222357 — Option 2, completeness-
-    flag-honest).
+    directly; ``recovered_paise`` is the campaign's real attributed ARRR
+    (SUM ``attributions.attributed_paise``) — 0 when a campaign has no
+    closed attribution yet, which is complete knowledge, not a placeholder.
 
-    The completeness flag is ``False`` whenever this builder runs —
-    even when real rows return — because ``recovered_paise`` is a
-    placeholder. The flag will flip to ``True`` only when a future
-    ``campaign_attribution`` substrate populates the real recovered-
-    paise figure; that substrate is its own VT row and is OUT of scope
-    here.
+    Completeness is ``True`` when the attribution read SUCCEEDS. It fails
+    open — an unreadable substrate degrades to ``recovered_paise=0`` +
+    completeness ``False`` and NEVER raises into dispatch context building.
 
     Belt-and-braces over RLS (CL-71 / CL-190): the raw rows are passed
-    through ``assert_tenant_scoped`` before mapping — RLS should make a
-    cross-tenant row impossible, but the assertion logs + raises if it
-    ever happens.
+    through ``assert_tenant_scoped`` (in the wrapper) before mapping.
     """
     # VT-306: via the wrapper (own tenant_connection + assert_tenant_scoped).
-    rows = CampaignsWrapper().list_recent_basic(tenant_id, limit=5)
+    wrapper = CampaignsWrapper()
+    rows = wrapper.list_recent_basic(tenant_id, limit=5)
+    recovered: dict[str, int] = {}
+    complete = True
+    try:
+        recovered = wrapper.recovered_paise_for_campaigns(
+            tenant_id, [str(row["id"]) for row in rows]
+        )
+    except Exception:  # noqa: BLE001 — attribution read is best-effort; never break dispatch
+        logger.warning(
+            "recovered_paise read failed (tenant=%s); recovered=0 + incomplete",
+            tenant_id,
+        )
+        complete = False
     snapshots = [
         CampaignSnapshot(
             campaign_id=row["id"],
             status=row["status"],
-            recovered_paise=0,
+            recovered_paise=recovered.get(str(row["id"]), 0),
             proposed_at=row["generated_at"],
         )
         for row in rows
     ]
-    return snapshots, False
+    return snapshots, complete
 
 
 def _build_attribution_snapshot(tenant_id: UUID) -> tuple[AttributionSnapshot, bool]:

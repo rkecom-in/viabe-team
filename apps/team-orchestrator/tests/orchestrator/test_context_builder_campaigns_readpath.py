@@ -1,14 +1,13 @@
-"""VT-138 — _build_recent_campaigns DB-substrate tests.
+"""VT-138 / VT-563 — _build_recent_campaigns DB-substrate tests.
 
 Exercises the live campaigns-table read path. Requires Postgres via
 ``DATABASE_URL`` + the dbos stack; runs in the CI ``orchestrator`` job.
 
-Per the VT-138 brief (CL blocker 367387c2-cc5a-81a7-aa37-e6e23c222357,
-Option 2): three campaigns columns map directly (id, status,
-generated_at) and ``recovered_paise`` is a literal ``0`` placeholder.
-The section completeness flag stays ``False`` whenever this builder
-runs — real rows or not — because ``recovered_paise`` is incomplete
-until a future ``campaign_attribution`` substrate lands.
+VT-563 update: ``recovered_paise`` is now the campaign's REAL attributed ARRR
+(SUM ``attributions.attributed_paise``) — 0 when a campaign has no attribution
+rows yet, which is complete knowledge, not a placeholder. The section
+completeness flag is ``True`` whenever the attribution read succeeds (the stale
+"always False" contract is gone).
 """
 
 from __future__ import annotations
@@ -96,13 +95,22 @@ def _seed_campaign(
     return campaign_id
 
 
+def _seed_attribution(dsn: str, tenant_id: UUID, campaign_id: UUID, paise: int) -> None:
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute(
+            "INSERT INTO attributions (tenant_id, campaign_id, attributed_paise) "
+            "VALUES (%s, %s, %s)",
+            (str(tenant_id), str(campaign_id), paise),
+        )
+
+
 # --- Tests -------------------------------------------------------------------
 
 
-def test_returns_real_snapshots_with_recovered_paise_placeholder(substrate):  # type: ignore[no-untyped-def]
+def test_returns_real_snapshots_with_real_recovered_paise(substrate):  # type: ignore[no-untyped-def]
     """Seeded campaigns return as CampaignSnapshot rows with the three
-    derivable fields mapped + ``recovered_paise=0`` placeholder and
-    the section completeness flag False."""
+    derivable fields mapped + the REAL ``recovered_paise`` (SUM of the
+    campaign's attributions) and section completeness True (VT-563)."""
     from orchestrator.context_builder import _build_recent_campaigns
 
     tenant_id = _new_tenant(substrate.dsn)
@@ -111,26 +119,42 @@ def test_returns_real_snapshots_with_recovered_paise_placeholder(substrate):  # 
     campaign_id = _seed_campaign(
         substrate.dsn, tenant_id, run_id, generated_at=now, status="proposed"
     )
+    _seed_attribution(substrate.dsn, tenant_id, campaign_id, 300)
+    _seed_attribution(substrate.dsn, tenant_id, campaign_id, 450)
 
     snapshots, complete = _build_recent_campaigns(tenant_id)
 
-    assert complete is False, (
-        "section completeness must be False — recovered_paise is a placeholder"
-    )
+    assert complete is True, "completeness True once the attribution read succeeds"
     assert len(snapshots) == 1
     snap = snapshots[0]
     assert snap.campaign_id == campaign_id
     assert snap.status == "proposed"
-    assert snap.recovered_paise == 0
+    assert snap.recovered_paise == 750  # 300 + 450, real SUM
     # generated_at round-trips through psycopg as a tz-aware datetime; equality
     # comparison tolerates microsecond precision per Postgres TIMESTAMPTZ.
     assert snap.proposed_at == now
 
 
+def test_recovered_paise_is_real_zero_without_attributions(substrate):  # type: ignore[no-untyped-def]
+    """A campaign with no attribution rows reports ``recovered_paise=0`` — real
+    zero (complete knowledge), with completeness True."""
+    from orchestrator.context_builder import _build_recent_campaigns
+
+    tenant_id = _new_tenant(substrate.dsn)
+    run_id = _new_pipeline_run(substrate.dsn, tenant_id)
+    now = datetime.now(UTC)
+    _seed_campaign(substrate.dsn, tenant_id, run_id, generated_at=now, status="proposed")
+
+    snapshots, complete = _build_recent_campaigns(tenant_id)
+
+    assert complete is True
+    assert len(snapshots) == 1
+    assert snapshots[0].recovered_paise == 0
+
+
 def test_returns_safe_empty_when_no_rows_for_tenant(substrate):  # type: ignore[no-untyped-def]
-    """A tenant with no campaigns rows returns ``([], False)`` — no
-    error. The completeness flag stays False as a contract — the
-    section is structurally incomplete regardless of row count."""
+    """A tenant with no campaigns rows returns ``([], True)`` — no error. The
+    read succeeded (nothing to recover), so completeness is True (VT-563)."""
     from orchestrator.context_builder import _build_recent_campaigns
 
     tenant_id = _new_tenant(substrate.dsn)
@@ -138,7 +162,7 @@ def test_returns_safe_empty_when_no_rows_for_tenant(substrate):  # type: ignore[
     snapshots, complete = _build_recent_campaigns(tenant_id)
 
     assert snapshots == []
-    assert complete is False
+    assert complete is True
 
 
 def test_tenant_isolation_no_cross_tenant_leak(substrate):  # type: ignore[no-untyped-def]
@@ -191,7 +215,7 @@ def test_orders_most_recent_first_and_limits_to_five(substrate):  # type: ignore
 
     snapshots, complete = _build_recent_campaigns(tenant_id)
 
-    assert complete is False
+    assert complete is True
     assert len(snapshots) == 5, "LIMIT 5 not enforced"
     # Newest-first: the offset=5h row (oldest) must be the one dropped.
     returned_ts = [snap.proposed_at for snap in snapshots]
