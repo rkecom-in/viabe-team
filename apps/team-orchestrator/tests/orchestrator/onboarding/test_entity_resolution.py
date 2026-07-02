@@ -8,8 +8,19 @@ floor, and a correct one accepted. Dep-less: ``entity_resolution`` imports only 
 
 from __future__ import annotations
 
-from orchestrator.onboarding import entity_resolution as er
-from orchestrator.onboarding.entity_resolution import GbpCandidate, OwnerAnchors, resolve_entity
+import pytest
+
+# The floor reuses entity_match.business_name_matches → knowyourgst_match, whose parent package
+# (orchestrator.integrations.__init__) pulls pydantic at import — absent in the dep-less smoke job.
+# The full CI/pre-push suite runs these; the smoke skips them cleanly (house idiom).
+pytest.importorskip("pydantic")
+
+from orchestrator.onboarding import entity_resolution as er  # noqa: E402
+from orchestrator.onboarding.entity_resolution import (  # noqa: E402
+    GbpCandidate,
+    OwnerAnchors,
+    resolve_entity,
+)
 
 
 def _accept(idx: int = 0, website: str | None = None, confidence: str = "high"):
