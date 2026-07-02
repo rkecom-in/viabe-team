@@ -939,3 +939,43 @@ def test_ingress_resilient_on_classifier_failure(ingress, monkeypatch):
     assert webhook_step == 1
     assert brain_step == 1
     assert owner_inputs_count == 0
+
+
+# ---------------------------------------------------------------------------
+# VT-567 — live WhatsApp inbound is channel-prefixed ('whatsapp:+91…'); the
+# ingress must normalize to plain E.164 for lookups AND the workflow fields.
+# Live-drill root cause 2026-07-02: without this, every real inbound was
+# reason='unknown_sender' → 200-and-drop.
+# ---------------------------------------------------------------------------
+
+def test_normalize_wa_fields_strips_prefix_pure() -> None:
+    from orchestrator.api.twilio_ingress import _normalize_wa_fields
+
+    raw = {"From": "whatsapp:+919800000001", "To": "whatsapp:+910000000000",
+           "WaId": "919800000001", "Body": "Hi", "MessageSid": "SMx"}
+    out = _normalize_wa_fields(raw)
+    assert out["From"] == "+919800000001"
+    assert out["To"] == "+910000000000"
+    assert out["Body"] == "Hi" and out["MessageSid"] == "SMx"
+    # plain payload passes byte-identical
+    plain = {"From": "+919800000001", "To": "+910000000000"}
+    assert _normalize_wa_fields(plain) == plain
+
+
+def test_whatsapp_prefixed_inbound_resolves_tenant_and_runs(ingress):
+    """A REAL-format inbound (From='whatsapp:+91…') must resolve the tenant whose
+    whatsapp_number is stored plain-E.164 and start the webhook workflow — the exact
+    live-drill failure (COMPLETE_SETUP tap dropped as unknown_sender)."""
+    phone = _phone()
+    _new_tenant(ingress.dsn, phone)
+    resp = _post(ingress, _fields(f"whatsapp:{phone}", Body="Complete Setup"))
+    body = resp.json()
+    assert body.get("reason") != "unknown_sender", body
+    assert body.get("workflow_id"), body
+    result = _await_workflow(body["workflow_id"])
+    assert result["run_id"]
+    with psycopg.connect(ingress.dsn, autocommit=True) as conn:
+        status = conn.execute(
+            "SELECT status FROM pipeline_runs WHERE id = %s", (result["run_id"],)
+        ).fetchone()[0]
+    assert status in ("completed", "escalated")
