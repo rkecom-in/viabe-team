@@ -562,7 +562,29 @@ def try_resume_pending_approval(tenant_id: str, body: str, message_sid: str | No
     # arm_pause_request is a no-op now the row is resolved). Then close the
     # original paused run.
     paused_run_id = approval["run_id"]
-    resume_run(paused_run_id, decision)
+    terminal_state = resume_run(paused_run_id, decision)
+
+    # VT-562 — the loop must not end silently at "executed". On an APPROVED resolution the
+    # resumed graph ran campaign_execute, whose terminal state carries campaign_execution_summary
+    # (sent/skipped/failed/killed) — consumed by nothing before now. Report the honest outcome to
+    # the owner (free-form, in-window: the owner just replied ⇒ inside the 24h window) BEFORE we
+    # close. maybe_report_campaign_outcome no-ops when the resume did not execute a campaign
+    # (rejected/needs_changes carry no summary) or a run-control HOLD produced no send, and is
+    # FULLY FAIL-SOFT: the campaign already sent, so a report-send failure must never fail the
+    # resume/close (it logs + fires the outbound_failure alert). Belt-and-braces try/except so
+    # even an unexpected raise cannot strand the paused run un-closed.
+    try:
+        from orchestrator.owner_surface.campaign_outcome import (
+            maybe_report_campaign_outcome,
+        )
+
+        maybe_report_campaign_outcome(tenant_id, terminal_state, run_id=paused_run_id)
+    except Exception:  # noqa: BLE001 — the outcome report must never block the run close
+        logger.exception(
+            "approval-resume: outcome-report raised (fail-soft) tenant=%s run=%s",
+            tenant_id, paused_run_id,
+        )
+
     close_webhook_run(tenant_id, paused_run_id, "completed")
 
     logger.info(
