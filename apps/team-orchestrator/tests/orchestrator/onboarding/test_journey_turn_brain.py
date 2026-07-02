@@ -143,7 +143,7 @@ def test_no_to_confirm_records_nothing_and_reply_is_non_identical(substrate, mon
 
     confirm_prompt = "We found business_type: services — correct?"
 
-    def _fake(journey_state, draft_attrs, owner_message, *, locale="en", provenance=None, is_start=False):
+    def _fake(journey_state, draft_attrs, owner_message, *, locale="en", provenance=None, is_start=False, tenant_id=None):
         return turn_brain.TurnPlan(
             reply_text="No problem — what kind of business is it then?",
             buttons=(), extracted_answers={}, mark_confirmed=(), mark_rejected=("business_type",),
@@ -172,7 +172,7 @@ def test_multi_field_extraction_records_and_promotes_valid_confirm(substrate, mo
     fires through confirm_draft). The cursor jumps past every resolved field."""
     from orchestrator.onboarding import journey, turn_brain
 
-    def _fake(journey_state, draft_attrs, owner_message, *, locale="en", provenance=None, is_start=False):
+    def _fake(journey_state, draft_attrs, owner_message, *, locale="en", provenance=None, is_start=False, tenant_id=None):
         return turn_brain.TurnPlan(
             reply_text="Great, got all that!",
             buttons=(),
@@ -209,7 +209,7 @@ def test_offtaxonomy_business_type_is_recorded_but_never_promoted(substrate, mon
     recorded as a free answer but NEVER promoted to canonical fact (the LLM cannot assert garbage)."""
     from orchestrator.onboarding import journey, turn_brain
 
-    def _fake(journey_state, draft_attrs, owner_message, *, locale="en", provenance=None, is_start=False):
+    def _fake(journey_state, draft_attrs, owner_message, *, locale="en", provenance=None, is_start=False, tenant_id=None):
         return turn_brain.TurnPlan(
             reply_text="Noted!",
             extracted_answers={"business_type": "totally-made-up-type"},
@@ -292,7 +292,7 @@ def test_completion_uses_durable_closer_and_fires_seam(substrate, monkeypatch, _
     monkeypatch.setattr(shopify_onboarding, "begin_shopify_onboarding",
                         lambda tid, rcp, *a, **k: seam_calls.append(tid))
 
-    def _fake(journey_state, draft_attrs, owner_message, *, locale="en", provenance=None, is_start=False):
+    def _fake(journey_state, draft_attrs, owner_message, *, locale="en", provenance=None, is_start=False, tenant_id=None):
         return turn_brain.TurnPlan(reply_text="anything", extracted_answers={"operating_hours": "9-9"})
 
     _enable_turn_brain(monkeypatch, _fake)
@@ -316,7 +316,7 @@ def test_idempotent_redelivery_does_not_reinvoke_llm(substrate, monkeypatch, _st
 
     calls: list[int] = []
 
-    def _fake(journey_state, draft_attrs, owner_message, *, locale="en", provenance=None, is_start=False):
+    def _fake(journey_state, draft_attrs, owner_message, *, locale="en", provenance=None, is_start=False, tenant_id=None):
         calls.append(1)
         return turn_brain.TurnPlan(reply_text="ok", extracted_answers={"city": "Pune"}, mark_confirmed=())
 
