@@ -253,6 +253,7 @@ def apply_agent_decision(
     decision: str,
     *,
     owner_feedback: str | None = None,
+    run_id: UUID | str | None = None,
 ) -> AgentBatchDecision | None:
     """Apply a RESOLVED owner decision to the linked agent draft batch (plan
     §4.3), on the caller's connection — atomic with ``mark_resolved`` when the
@@ -262,6 +263,16 @@ def apply_agent_decision(
     ``draft_batch_id`` (SET NULL'd), unknown decisions, and batches no longer in
     a resolvable state. ``owner_feedback`` is persisted on the batch row for a
     needs_changes (RLS-protected; NEVER logged — CL-390).
+
+    VT-561: every verdict (reject / edit / approve) records a trainable
+    (proposal → verdict → correction) row in ``agent_corrections`` — the proposal
+    snapshot is captured BEFORE ``redact_batch_close`` destroys the drafts (finding
+    a), approve-as-is writes a positive lesson (finding b), and each row carries the
+    ``run_id`` so the decision→action→outcome chain joins (finding c). ``run_id``
+    defaults to the AUTHORITATIVE arm-time id read straight off the durable
+    ``pending_approvals`` row, so the resolution choke point (which has no rid in
+    scope) still lands a non-NULL run_id; an explicit caller-passed ``run_id``
+    overrides it.
     """
     approval_id = approval_row.get("id")
     if approval_id is None:
@@ -275,6 +286,10 @@ def apply_agent_decision(
     if batch_id is None:
         return None
     tid, bid = str(tenant_id), str(batch_id)
+    # VT-561 (finding c): prefer an explicit caller-passed run_id; else the arm-time run_id off the
+    # durable pending_approvals row (find_by_id is SELECT *) — the id of the run that armed this
+    # approval, the correct correlation key for the correction store.
+    rid = run_id if run_id is not None else row.get("run_id")
     agent_row = conn.execute(
         "SELECT agent FROM agent_draft_batches WHERE tenant_id = %s AND id = %s", (tid, bid)
     ).fetchone()
@@ -294,6 +309,21 @@ def apply_agent_decision(
 
             cycles = int(updated["edit_cycles"] if isinstance(updated, dict) else updated[0])
             record_approval_outcome(tid, agent, clean=(cycles == 0), conn=conn)
+        if updated is not None:
+            # VT-561 (finding b): approve-as-is is a labeled POSITIVE example — record it
+            # (correction_kind='approve', no correction_text) with the proposal snapshot, so the
+            # dataset is not all-negatives. Same resolution txn; the approved drafts are still
+            # 'drafted' (customer_send sends them later), so the snapshot reads their raw params.
+            from orchestrator.agents.correction_store import (
+                load_batch_draft_snapshot,
+                record_correction,
+            )
+
+            record_correction(
+                conn, tid, agent=agent, correction_kind="approve",
+                decision_verb="approved", owner_feedback=None, run_id=rid, batch_id=bid,
+                proposal_snapshot=load_batch_draft_snapshot(conn, tid, bid),
+            )
         return _decided(tid, bid, "approved", updated)
 
     if decision == "needs_changes":
@@ -323,11 +353,18 @@ def apply_agent_decision(
             if updated is not None:
                 # VT-531 (C3): capture the correction BEFORE redact_batch_close sha256s
                 # owner_feedback — the durable, PII-redacted learning substrate.
-                from orchestrator.agents.correction_store import record_correction
+                # VT-561 (finding a): snapshot the proposed drafts in the SAME beat, likewise BEFORE
+                # redact_batch_close destroys their params — the correction now labels a surviving
+                # example, not one that was destroyed in this very txn.
+                from orchestrator.agents.correction_store import (
+                    load_batch_draft_snapshot,
+                    record_correction,
+                )
 
                 record_correction(
                     conn, tid, agent=agent, correction_kind="reject",
-                    decision_verb="needs_changes", owner_feedback=owner_feedback, batch_id=bid,
+                    decision_verb="needs_changes", owner_feedback=owner_feedback, run_id=rid,
+                    batch_id=bid, proposal_snapshot=load_batch_draft_snapshot(conn, tid, bid),
                 )
                 # VT-382 (CL-437.3) + gate F1: terminal 'rejected' close — halt the
                 # batch's still-'drafted' children, THEN redact owner_feedback +
@@ -354,11 +391,18 @@ def apply_agent_decision(
         if updated is not None:
             # VT-531 (C3): capture the edit correction into the durable store. The batch's raw
             # owner_feedback here is destroyed when the batch later goes terminal; this survives.
-            from orchestrator.agents.correction_store import record_correction
+            # VT-561 (finding a): snapshot the proposed drafts too — the batch stays 'edit_requested'
+            # for the one regeneration, so its 'drafted' rows are still readable now; the snapshot is
+            # the edited-FROM artifact this correction labels.
+            from orchestrator.agents.correction_store import (
+                load_batch_draft_snapshot,
+                record_correction,
+            )
 
             record_correction(
                 conn, tid, agent=agent, correction_kind="edit",
-                decision_verb="needs_changes", owner_feedback=owner_feedback, batch_id=bid,
+                decision_verb="needs_changes", owner_feedback=owner_feedback, run_id=rid,
+                batch_id=bid, proposal_snapshot=load_batch_draft_snapshot(conn, tid, bid),
             )
         if updated is not None and agent:
             from orchestrator.agents.autonomy import record_regression_event
@@ -380,11 +424,17 @@ def apply_agent_decision(
         ).fetchone()
         if updated is not None:
             # VT-531 (C3): capture the correction BEFORE redact_batch_close destroys owner_feedback.
-            from orchestrator.agents.correction_store import record_correction
+            # VT-561 (finding a): snapshot the proposed drafts in the same beat, likewise BEFORE
+            # redact_batch_close sha256s their params.
+            from orchestrator.agents.correction_store import (
+                load_batch_draft_snapshot,
+                record_correction,
+            )
 
             record_correction(
                 conn, tid, agent=agent, correction_kind="reject",
-                decision_verb="rejected", owner_feedback=owner_feedback, batch_id=bid,
+                decision_verb="rejected", owner_feedback=owner_feedback, run_id=rid,
+                batch_id=bid, proposal_snapshot=load_batch_draft_snapshot(conn, tid, bid),
             )
             # VT-382 (CL-437.3) + gate F1: terminal 'rejected' close — halt the
             # batch's still-'drafted' children, THEN redact owner_feedback + halted

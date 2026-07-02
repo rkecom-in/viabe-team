@@ -486,3 +486,155 @@ def test_correction_redacts_pii(substrate) -> None:
              owner_feedback="call them on +919876543210 first")
     corr = _corrections(dsn, tenant, batch)
     assert corr and "9876543210" not in (corr[0]["text"] or "")
+
+
+# ---------------------------------------------------------------------------
+# VT-561 — trainable (proposal → verdict → correction) pairs
+# ---------------------------------------------------------------------------
+
+
+def _corrections_full(dsn: str, tenant: UUID, batch: UUID) -> list[dict[str, Any]]:
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        rows = conn.execute(
+            "SELECT correction_kind, decision_verb, correction_text, run_id::text AS run_id, "
+            "proposal_snapshot, corrected_snapshot, outcome "
+            "FROM agent_corrections WHERE tenant_id = %s AND batch_id = %s ORDER BY created_at",
+            (str(tenant), str(batch)),
+        ).fetchall()
+    return [
+        {
+            "kind": r[0], "verb": r[1], "text": r[2], "run_id": r[3],
+            "proposal": r[4], "corrected": r[5], "outcome": r[6],
+        }
+        for r in rows
+    ]
+
+
+def _draft_params(dsn: str, tenant: UUID, batch: UUID) -> list[dict[str, Any]]:
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        rows = conn.execute(
+            "SELECT params FROM agent_drafts WHERE tenant_id = %s AND batch_id = %s",
+            (str(tenant), str(batch)),
+        ).fetchall()
+    return [r[0] or {} for r in rows]
+
+
+def _approval_run_id(dsn: str, tenant: UUID, approval_id: UUID | str) -> str:
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        row = conn.execute(
+            "SELECT run_id::text FROM pending_approvals WHERE tenant_id = %s AND id = %s",
+            (str(tenant), str(approval_id)),
+        ).fetchone()
+    assert row is not None
+    return row[0]
+
+
+def test_reject_captures_proposal_snapshot_surviving_redaction(substrate) -> None:
+    """finding (a): the draft params are sha256-DESTROYED by redact_batch_close in the resolution
+    txn, but the correction row kept a PII-REDACTED, still-readable snapshot of the proposal — the
+    label now points at a surviving example."""
+    dsn = substrate.dsn
+    tenant = _new_tenant(dsn)
+    batch = _seed_batch(dsn, tenant)
+    _seed_draft(dsn, tenant, batch, _seed_customer(dsn, tenant))
+    armed = _arm(dsn, tenant, batch, _OkSend())
+
+    _resolve(tenant, armed.approval_id, "rejected", owner_feedback="off-brand tone")
+
+    # the drafts' raw params are sha256-destroyed (outbox_redaction shape) …
+    params = _draft_params(dsn, tenant, batch)
+    assert params and all(
+        isinstance(v, dict) and v.get("redacted") is True and isinstance(v.get("sha256"), str)
+        for p in params for v in p.values()
+    ), "redact_batch_close must have sha256'd the draft params"
+
+    # … but the correction row kept the readable, PII-redacted proposal.
+    reject = next(c for c in _corrections_full(dsn, tenant, batch) if c["kind"] == "reject")
+    snap = reject["proposal"]
+    assert snap is not None and snap["draft_count"] == 1 and snap["captured"] == 1
+    assert snap["drafts"][0]["template_name"] == "team_winback_simple", "template signal kept"
+    # the params SURVIVE as substance (the key set is intact) but the PII value is redacted.
+    assert "customer_name" in snap["drafts"][0]["params"]
+    assert _CUSTOMER_NAME not in json.dumps(snap), "customer PII leaked into the snapshot"
+    assert reject["run_id"] == _approval_run_id(dsn, tenant, armed.approval_id)
+
+
+def test_edit_captures_proposal_snapshot(substrate) -> None:
+    """finding (a) on the edit path: the 1st needs_changes keeps the batch 'edit_requested' for the
+    one regeneration, so its drafts are still readable — the snapshot is the edited-FROM artifact."""
+    dsn = substrate.dsn
+    tenant = _new_tenant(dsn)
+    batch = _seed_batch(dsn, tenant)
+    _seed_draft(dsn, tenant, batch, _seed_customer(dsn, tenant))
+    armed = _arm(dsn, tenant, batch, _OkSend())
+
+    _resolve(tenant, armed.approval_id, "needs_changes", owner_feedback="make it shorter")
+    edit = next(c for c in _corrections_full(dsn, tenant, batch) if c["kind"] == "edit")
+    snap = edit["proposal"]
+    assert snap is not None
+    assert snap["drafts"][0]["template_name"] == "team_winback_simple"
+    assert _CUSTOMER_NAME not in json.dumps(snap)
+    assert edit["run_id"] == _approval_run_id(dsn, tenant, armed.approval_id)
+    assert edit["corrected"] is None  # no corrected artifact yet (ahead-of-consumer)
+
+
+def test_approve_writes_positive_lesson(substrate) -> None:
+    """finding (b): approve-as-is now writes a labeled POSITIVE example (kind='approve', no
+    correction_text) with the proposal snapshot — the dataset is no longer all-negatives."""
+    dsn = substrate.dsn
+    tenant = _new_tenant(dsn)
+    batch = _seed_batch(dsn, tenant)
+    _seed_draft(dsn, tenant, batch, _seed_customer(dsn, tenant))
+    armed = _arm(dsn, tenant, batch, _OkSend())
+
+    assert _resolve(tenant, armed.approval_id, "approved") is True
+    corr = _corrections_full(dsn, tenant, batch)
+    approve = [c for c in corr if c["kind"] == "approve"]
+    assert len(approve) == 1, "approve-as-is must write exactly one positive lesson"
+    assert approve[0]["verb"] == "approved"
+    assert approve[0]["text"] is None, "a positive lesson carries no correction prose"
+    assert approve[0]["proposal"] is not None
+    assert approve[0]["proposal"]["drafts"][0]["template_name"] == "team_winback_simple"
+    assert _CUSTOMER_NAME not in json.dumps(approve[0]["proposal"])
+    assert approve[0]["run_id"] == _approval_run_id(dsn, tenant, armed.approval_id)
+
+
+def test_run_id_lands_on_every_correction_kind(substrate) -> None:
+    """finding (c): each correction row carries the arm-time run_id, so decision→action→outcome
+    joins — even though the resolution choke point passes no run_id (it is sourced off the durable
+    pending_approvals row)."""
+    dsn = substrate.dsn
+    tenant = _new_tenant(dsn)
+    batch = _seed_batch(dsn, tenant)
+    _seed_draft(dsn, tenant, batch, _seed_customer(dsn, tenant))
+    armed = _arm(dsn, tenant, batch, _OkSend())
+    expected = _approval_run_id(dsn, tenant, armed.approval_id)
+
+    _resolve(tenant, armed.approval_id, "needs_changes", owner_feedback="softer")
+    corr = _corrections_full(dsn, tenant, batch)
+    assert corr and all(c["run_id"] == expected for c in corr)
+    assert expected is not None, "the arm-time run_id must be non-NULL to be joinable"
+
+
+def test_migration_160_is_idempotent(substrate) -> None:
+    """The migration must be safe to re-apply (fixtures re-apply): IF NOT EXISTS columns +
+    DROP CONSTRAINT IF EXISTS before the re-add. Running the raw SQL twice is a no-op, and the
+    widened CHECK admits 'approve'."""
+    from pathlib import Path
+
+    migration = (
+        Path(__file__).resolve().parents[5]
+        / "migrations"
+        / "160_vt561_agent_corrections_pairs.sql"
+    )
+    sql = migration.read_text()
+    with psycopg.connect(substrate.dsn, autocommit=True) as conn:
+        conn.execute(sql)  # re-apply once
+        conn.execute(sql)  # …and again — must not raise
+        # the widened CHECK admits 'approve' (drop + re-add landed the superset constraint).
+        tenant = _new_tenant(substrate.dsn)
+        conn.execute(
+            "INSERT INTO agent_corrections (tenant_id, correction_kind, decision_verb) "
+            "VALUES (%s, 'approve', 'approved')",
+            (str(tenant),),
+        )
