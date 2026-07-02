@@ -638,3 +638,48 @@ def test_migration_160_is_idempotent(substrate) -> None:
             "VALUES (%s, 'approve', 'approved')",
             (str(tenant),),
         )
+
+
+# ---------------------------------------------------------------------------
+# VT-561 follow-up (review F1): the snapshot loader is argument-position
+# evaluated BEFORE record_correction's fail-soft try — so it must carry its
+# own savepoint-guarded fail-soft, or a read error unwinds the whole
+# resolution txn and discards the owner's approve/reject reply.
+# ---------------------------------------------------------------------------
+
+def test_snapshot_loader_failure_is_fail_soft() -> None:
+    """A raising conn inside load_batch_draft_snapshot returns None (lesson lost,
+    resolution unharmed) instead of propagating."""
+    from contextlib import contextmanager
+
+    from orchestrator.agents.correction_store import load_batch_draft_snapshot
+
+    class _BoomConn:
+        @contextmanager
+        def transaction(self):  # type: ignore[no-untyped-def]
+            yield self
+
+        def execute(self, *_a, **_k):  # type: ignore[no-untyped-def]
+            raise RuntimeError("db error")
+
+    out = load_batch_draft_snapshot(_BoomConn(), uuid4(), uuid4())
+    assert out is None
+
+
+def test_snapshot_loader_failure_does_not_poison_caller_txn(substrate) -> None:
+    """Realdb: force the loader's SELECT to fail mid-txn (undefined column via a broken
+    search path is hard to fake — use a savepoint-poisoning statement instead) and prove
+    the caller's transaction stays usable afterwards."""
+    from psycopg.rows import dict_row
+
+    from orchestrator.agents.correction_store import load_batch_draft_snapshot
+
+    dsn = substrate.dsn
+    tenant = _new_tenant(dsn)
+    with psycopg.connect(dsn, row_factory=dict_row) as conn, conn.transaction():
+        # Poison attempt INSIDE the loader's own savepoint: pass a batch_id of the wrong
+        # type so the execute raises, then verify the outer txn still accepts statements.
+        out = load_batch_draft_snapshot(conn, tenant, "not-a-uuid")
+        assert out is None
+        row = conn.execute("SELECT 1 AS ok").fetchone()
+        assert row["ok"] == 1

@@ -52,28 +52,43 @@ def load_batch_draft_snapshot(
     return a RAW proposal snapshot — ``{"drafts": [{"template_name", "params"}], "draft_count",
     "captured", "truncated"}`` — or None when the batch has no drafted rows.
 
-    RAW by design: the redaction is ``record_correction``'s job (the ``correction_text`` layer), so
-    this stays a pure reader. Filters status='drafted' to match the arm-time sample
+    RAW by design: the redaction is ``record_correction``'s job (the ``correction_text`` layer).
+    Filters status='drafted' to match the arm-time sample
     (``approval_glue._render_sample_message`` / ``_batch_draft_count``); at every call site (reject /
     edit / approve) the proposal rows are still 'drafted' — ``redact_batch_close`` has NOT yet run,
     so the params are raw. Capped at ``limit`` drafts (ordered by created_at, the send-preview order)
     with the total count + a truncation flag preserved.
+
+    FAIL-SOFT like ``record_correction`` itself (the snapshot is capture, and capture must never
+    break the approval resolution): the reads run inside their OWN nested transaction (⇒ SAVEPOINT
+    when the caller is mid-txn), so a read failure rolls back only the savepoint — the caller's
+    resolution txn stays usable — and returns None (lesson lost, WARNING logged, owner unharmed).
+    Argument-position matters: this is evaluated BEFORE ``record_correction``'s own try at every
+    call site, so without this envelope a read error would unwind the whole resolution txn and
+    discard the owner's approve/reject reply.
     """
     tid, bid = str(tenant_id), str(batch_id)
-    total_row = conn.execute(
-        "SELECT count(*) AS n FROM agent_drafts "
-        "WHERE tenant_id = %s AND batch_id = %s AND status = 'drafted'",
-        (tid, bid),
-    ).fetchone()
-    total = int((total_row["n"] if isinstance(total_row, dict) else total_row[0]) or 0)
-    if total == 0:
+    try:
+        with conn.transaction():  # nested ⇒ SAVEPOINT: a failed read must not poison the caller's txn
+            total_row = conn.execute(
+                "SELECT count(*) AS n FROM agent_drafts "
+                "WHERE tenant_id = %s AND batch_id = %s AND status = 'drafted'",
+                (tid, bid),
+            ).fetchone()
+            total = int((total_row["n"] if isinstance(total_row, dict) else total_row[0]) or 0)
+            if total == 0:
+                return None
+            rows = conn.execute(
+                "SELECT template_name, params FROM agent_drafts "
+                "WHERE tenant_id = %s AND batch_id = %s AND status = 'drafted' "
+                "ORDER BY created_at ASC LIMIT %s",
+                (tid, bid, int(limit)),
+            ).fetchall()
+    except Exception:  # noqa: BLE001 — capture is fail-soft; the approval resolution must not break
+        logger.warning(
+            "load_batch_draft_snapshot failed (fail-soft; lesson lost) batch=%s", bid, exc_info=True
+        )
         return None
-    rows = conn.execute(
-        "SELECT template_name, params FROM agent_drafts "
-        "WHERE tenant_id = %s AND batch_id = %s AND status = 'drafted' "
-        "ORDER BY created_at ASC LIMIT %s",
-        (tid, bid, int(limit)),
-    ).fetchall()
     drafts = [
         {
             "template_name": (r["template_name"] if isinstance(r, dict) else r[0]),
