@@ -372,3 +372,41 @@ def test_confirm_button_set_detection_and_inline_cap(substrate, monkeypatch):
     journey._send_turn("+919999000009", "Pick one:", ["A", "B", "C", "D"], "en")
     assert sent and sent[-1].count("/") == 2, "at most 3 inline options (2 separators)"
     assert "D" not in sent[-1], "the 4th option is dropped (cap 3)"
+
+
+# ---------------------------------------------------------------------------
+# VT-569 follow-up (live-drill amnesia): conversation memory (mig 162)
+# ---------------------------------------------------------------------------
+
+def test_build_prompts_includes_recent_conversation() -> None:
+    """The turn brain must see what IT proposed last turn (affirmation-extraction depends on it)."""
+    from orchestrator.onboarding.turn_brain import _build_prompts
+
+    state = {
+        "question_queue": [{"field": "about", "kind": "gap", "prompt_en": "Tell me about it"}],
+        "cursor": 0, "answers": {}, "skipped": [],
+        "recent_turns": [
+            {"role": "bot", "text": "Should I use: AI-powered business intelligence?"},
+            {"role": "owner", "text": "Use that"},
+        ],
+    }
+    _, user = _build_prompts(state, {}, "Use that", locale="en", provenance=None, is_start=False)
+    assert "RECENT CONVERSATION" in user
+    assert "AI-powered business intelligence" in user
+    assert "OWNER: Use that" in user
+
+
+def test_append_recent_turns_caps_and_preserves_order(substrate) -> None:
+    from orchestrator.onboarding.journey import _append_recent_turns, get_journey, start_journey
+
+    tenant = _new_tenant(substrate.dsn, name="VT-569 memory cap")
+    start_journey(tenant, [{"field": "about", "kind": "gap", "prompt_en": "x"}])
+    for i in range(6):
+        _append_recent_turns(
+            tenant, {"role": "owner", "text": f"o{i}"}, {"role": "bot", "text": f"b{i}"}
+        )
+    g = get_journey(tenant)
+    turns = g["recent_turns"]
+    assert len(turns) == 8  # capped
+    assert turns[-1]["text"] == "b5" and turns[-2]["text"] == "o5"  # newest last, order kept
+    assert turns[0]["text"] == "o2"  # oldest surviving entry

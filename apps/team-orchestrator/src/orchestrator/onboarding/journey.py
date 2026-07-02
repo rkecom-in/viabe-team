@@ -96,7 +96,8 @@ def set_queue_if_empty(tenant_id: UUID | str, question_queue: list[dict[str, Any
 def get_journey(tenant_id: UUID | str) -> dict[str, Any] | None:
     with tenant_connection(tenant_id) as conn:
         row = conn.execute(
-            "SELECT status, question_queue, cursor, answers, skipped, last_message_sid "
+            "SELECT status, question_queue, cursor, answers, skipped, last_message_sid, "
+            "       recent_turns "
             "FROM onboarding_journey WHERE tenant_id = %s",
             (str(tenant_id),),
         ).fetchone()
@@ -105,11 +106,50 @@ def get_journey(tenant_id: UUID | str) -> dict[str, Any] | None:
     g = dict(row) if isinstance(row, dict) else {
         "status": row[0], "question_queue": row[1], "cursor": row[2],
         "answers": row[3], "skipped": row[4], "last_message_sid": row[5],
+        "recent_turns": row[6],
     }
     g["question_queue"] = list(g["question_queue"] or [])
     g["answers"] = dict(g["answers"] or {})
     g["skipped"] = list(g["skipped"] or [])
+    g["recent_turns"] = list(g.get("recent_turns") or [])
     return g
+
+
+# VT-569 conversation memory: the rolling short transcript window (mig 162). The turn brain must see
+# what IT said last turn so an owner affirmation ("Use that") can carry the bot-proposed value — the
+# live-drill amnesia defect (2026-07-03): a conversation-born value fell through both recording paths
+# and the agent re-asked forever.
+_RECENT_TURNS_CAP = 8
+
+
+def _append_recent_turns(tenant_id: UUID | str, *entries: dict[str, Any]) -> None:
+    """Append {role, text} entries to the journey's rolling window, capped. Fail-soft — the
+    transcript is memory, never a gate."""
+    try:
+        cleaned = [
+            {"role": e.get("role", ""), "text": str(e.get("text", ""))[:600]}
+            for e in entries if e.get("text")
+        ]
+        if not cleaned:
+            return
+        with tenant_connection(tenant_id) as conn:
+            conn.execute(
+                """
+                UPDATE onboarding_journey
+                   SET recent_turns = (
+                         SELECT COALESCE(jsonb_agg(t ORDER BY ord), '[]'::jsonb) FROM (
+                           SELECT t, ord
+                             FROM jsonb_array_elements(recent_turns || %s::jsonb) WITH ORDINALITY AS x(t, ord)
+                            ORDER BY ord DESC LIMIT %s
+                         ) latest(t, ord)
+                       ),
+                       updated_at = now()
+                 WHERE tenant_id = %s
+                """,
+                (Jsonb(cleaned), _RECENT_TURNS_CAP, str(tenant_id)),
+            )
+    except Exception:  # noqa: BLE001 — memory only; never break the reply path
+        logger.warning("journey: recent_turns append failed (fail-soft)", exc_info=True)
 
 
 def is_active(tenant_id: UUID | str) -> bool:
@@ -756,6 +796,7 @@ def _handle_reply_with_turn_brain(
     )
     if plan is None:
         # Fail-soft: the deterministic walker owns this turn (and applies the VT-569a bare-no re-prompt).
+        _append_recent_turns(tenant_id, {"role": "owner", "text": body})
         return handle_reply(tenant_id, body, message_sid, lang=lang)
 
     answers, skipped = _apply_turn_plan(tenant_id, g, plan, draft_attrs)
@@ -766,14 +807,24 @@ def _handle_reply_with_turn_brain(
     if done:
         _complete(tenant_id)
         completion = _completion_message()
+        reply = completion["reply_hi"] if lang == "hi" else completion["reply_en"]
+        # VT-569 memory: persist this exchange so any later conversation sees it.
+        _append_recent_turns(
+            tenant_id, {"role": "owner", "text": body}, {"role": "bot", "text": reply}
+        )
         # On completion send the durable closer (not a possibly-questioning LLM line); the integration
         # seam then continues the conversation, so the owner is never left on a dangling question.
         return {
             "turn_brain": True,
-            "reply_text": completion["reply_hi"] if lang == "hi" else completion["reply_en"],
+            "reply_text": reply,
             "buttons": [],
             "done": True,
         }
+    # VT-569 memory: the brain must see what IT said this turn — an owner affirmation next turn
+    # ("Use that") carries THIS bot-proposed value (the live-drill amnesia fix).
+    _append_recent_turns(
+        tenant_id, {"role": "owner", "text": body}, {"role": "bot", "text": plan.reply_text}
+    )
     return {
         "turn_brain": True,
         "reply_text": plan.reply_text,
