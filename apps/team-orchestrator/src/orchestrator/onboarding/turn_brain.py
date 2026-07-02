@@ -76,7 +76,16 @@ confirm one discovered fact and, if it flows naturally, ask one next thing).
 - CLAIM-GROUNDING: you may ONLY state business facts that appear in DISCOVERED below. NEVER invent a \
 business fact (no made-up address, category, hours, name). If unsure, ask — do not assert.
 - EXTRACTION IS NOT INVENTION: put a value in extracted_answers ONLY if the owner literally stated it \
-in THIS message. Never fabricate an answer or guess.
+in THIS message, OR the owner AFFIRMED this message a value that appears verbatim in RECENT \
+CONVERSATION (e.g. you proposed a description and they replied "use that" — the affirmation makes \
+that exact proposed text owner-approved; record it). Never fabricate or guess.
+- RECORD-AND-MOVE-ON: the moment the owner states or affirms something a STILL-NEEDED field asks \
+for, put it in extracted_answers and NEVER ask about that field again — asking again after being \
+told is the single most annoying failure. If the owner already answered in RECENT CONVERSATION and \
+it somehow was not collected, record it NOW from there instead of re-asking.
+- GST "nature of business" values (e.g. "Supplier of Services", "Warehouse / Depot", "Others") are \
+coarse TAX-ACTIVITY codes, NOT a description of what the business does. NEVER present them as \
+guesses about the business or offer them as choices.
 - If the owner REJECTS a discovered value (says it is wrong, or just "no"), do NOT repeat the same \
 question word-for-word. Acknowledge it, then ask what the correct value is — and if DISCOVERED offers \
 plausible alternatives, offer up to 3 of them as buttons.
@@ -174,11 +183,21 @@ def _build_prompts(
     else:
         asked = "(no specific question is pending)"
 
+    # VT-569 conversation memory (mig 162): the rolling window — the brain must see what IT proposed
+    # last turn so an owner affirmation ("Use that") carries that value into extracted_answers.
+    recent = list(journey_state.get("recent_turns") or [])
+    convo = (
+        "\n".join(f"{'OWNER' if t.get('role') == 'owner' else 'YOU'}: {t.get('text', '')}" for t in recent)
+        if recent else "(no prior exchange this session)"
+    )
+
     # ``.replace`` (not ``.format``) — the system prompt contains literal JSON braces ({} / {field: value}).
     system = _SYSTEM_PROMPT.replace("{locale}", locale or "en")
     user = (
         "DISCOVERED (facts found from public sources — the ONLY facts you may state):\n"
         f"{_fmt_discovered(draft_attrs, provenance)}\n\n"
+        "RECENT CONVERSATION (oldest first — what was already said; NEVER re-ask or contradict it):\n"
+        f"{convo}\n\n"
         "STILL NEEDED (collect these, conversationally, at most one new ask per turn):\n"
         f"{_fmt_still_needed(objective)}\n\n"
         "WHAT YOU LAST ASKED:\n"
