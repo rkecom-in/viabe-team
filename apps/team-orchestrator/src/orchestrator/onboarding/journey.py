@@ -689,6 +689,38 @@ def _advance_cursor_past_answered(g: dict[str, Any], answers: dict[str, Any], sk
     return c
 
 
+_URL_RE = re.compile(r"(?:https?://|www\.)[^\s>\"']+", re.IGNORECASE)
+
+
+def _maybe_refresh_owner_website(
+    tenant_id: UUID | str, body: str, draft_attrs: dict[str, Any]
+) -> None:
+    """VT-568/569 follow-up (live drill): when the owner's message names a URL, record it as the
+    owner-stated website and fire the async website-source refresh (``website_refresh_workflow``)
+    so the NEXT turn genuinely knows the site — the agent must never claim to have "checked" a site
+    it hasn't. No-op when the draft already carries this website (idempotent per URL). Fully
+    fail-soft: a refresh failure never touches the reply path."""
+    try:
+        m = _URL_RE.search(body or "")
+        if not m:
+            return
+        url = m.group(0).rstrip(".,;:!?)")
+        if not url.lower().startswith("http"):
+            url = f"https://{url}"
+        current = str(draft_attrs.get("website") or "")
+        if current and current.rstrip("/").lower() == url.rstrip("/").lower():
+            return  # already known — nothing to refresh
+        from dbos import DBOS
+
+        from orchestrator.onboarding.auto_discovery import website_refresh_workflow
+
+        DBOS.start_workflow(website_refresh_workflow, str(tenant_id), url)
+        draft_attrs["website"] = url  # visible to THIS turn's prompt as an owner-stated fact
+        logger.info("journey: owner-stated website refresh fired (tenant=%s)", tenant_id)
+    except Exception:  # noqa: BLE001 — enrichment only; the reply path must never break
+        logger.warning("journey: owner-website refresh failed (fail-soft)", exc_info=True)
+
+
 def _handle_reply_with_turn_brain(
     tenant_id: UUID | str, body: str, message_sid: str | None, *, lang: str = "en", is_start: bool = False
 ) -> dict[str, Any]:
@@ -712,6 +744,12 @@ def _handle_reply_with_turn_brain(
     draft = get_draft(tenant_id)
     draft_attrs = dict(draft.get("attributes") or {})
     provenance = dict(draft.get("provenance") or {})
+
+    # VT-568/569 follow-up (live drill): the owner naming their OWN website mid-chat is the strongest
+    # identity anchor there is — record it + fire the async website-source refresh so the NEXT turn
+    # genuinely knows what the site says (the agent must never fake having "checked" it). Fail-soft;
+    # fires at most once per distinct URL (the draft merge makes the second detection a no-op check).
+    _maybe_refresh_owner_website(tenant_id, body, draft_attrs)
 
     plan = turn_brain.compose_turn(
         g, draft_attrs, body, locale=lang, provenance=provenance, is_start=is_start

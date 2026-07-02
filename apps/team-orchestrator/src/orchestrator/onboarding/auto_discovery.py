@@ -27,6 +27,21 @@ def auto_discovery_workflow(tenant_id: str, seed: dict[str, Any]) -> dict[str, A
     stays plain + unit-testable."""
     return auto_discovery_run(tenant_id, seed)
 
+
+@DBOS.workflow()
+def website_refresh_workflow(tenant_id: str, website: str) -> dict[str, Any]:
+    """VT-568/569 follow-up (live drill): the owner pointed the agent at their OWN website mid-chat
+    ("can you not find it by reviewing my website https://…"). An owner-stated URL is the strongest
+    identity anchor there is — record it with ``owner_stated`` provenance, then run ONLY the website
+    source against it (no draft reset, no GBP leg — there is no entity risk when the owner names the
+    site) so the NEXT conversational turn genuinely knows what the site says. Fired async from the
+    journey turn path via ``DBOS.start_workflow`` — never blocks the reply."""
+    from orchestrator.onboarding.auto_discovery_sources import discover_website
+    from orchestrator.onboarding.draft_profile import write_draft
+
+    write_draft(tenant_id, {"website": website}, source="owner_stated")
+    return auto_discovery_run(tenant_id, {"website": website}, sources=[discover_website])
+
 # Per-run economics. Estimate = GBP fetch (~$0.004) + VT-568 entity-resolution adjudication (one
 # claude-opus-4-8 call + bounded web_search, ~$0.025) + website Haiku (~$0.001); GST reuses the paid
 # verify lookup (no incremental cost). The ceiling is a circuit-breaker (a source that
