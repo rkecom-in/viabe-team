@@ -458,3 +458,53 @@ def test_discover_gst_inactive_gstin_errors_no_write(draft_spy):
     )
     assert result.status == "error"
     assert draft_spy == []
+
+
+# ---------------------------------------------------------------------------
+# VT-568 follow-up: the site's own words derive the business type (validated,
+# never overriding a stronger signal, off-taxonomy dropped). No-DB spy idiom.
+# ---------------------------------------------------------------------------
+
+def _patch_current_type(monkeypatch, current):
+    import orchestrator.onboarding.draft_profile as dp
+
+    monkeypatch.setattr(
+        dp, "get_draft", lambda _tid: {"attributes": {"business_type": current} if current else {}}
+    )
+
+
+def test_website_derives_type_when_floor_is_other(draft_spy, monkeypatch):
+    _patch_current_type(monkeypatch, "other")
+    r = src.discover_website(
+        uuid.uuid4(), {"website": "https://example.in"},
+        fetch_fn=lambda _u: "site text",
+        extract_fn=lambda _t: {
+            "about": "AI-powered business intelligence for small businesses.",
+            "category": "AI-powered business intelligence",
+            "business_type": "services",
+        },
+    )
+    assert r.status == "ok"
+    fields = draft_spy[-1]["fields"]
+    assert fields["business_type"] == "services"  # floor 'other' upgraded
+    assert fields["category"] == "AI-powered business intelligence"
+
+
+def test_website_type_never_overrides_stronger_signal(draft_spy, monkeypatch):
+    _patch_current_type(monkeypatch, "restaurant")  # entity-accepted signal stands
+    src.discover_website(
+        uuid.uuid4(), {"website": "https://example.in"},
+        fetch_fn=lambda _u: "site text",
+        extract_fn=lambda _t: {"about": "x", "business_type": "services"},
+    )
+    assert "business_type" not in draft_spy[-1]["fields"]
+
+
+def test_website_off_taxonomy_type_dropped(draft_spy, monkeypatch):
+    _patch_current_type(monkeypatch, None)
+    src.discover_website(
+        uuid.uuid4(), {"website": "https://example.in"},
+        fetch_fn=lambda _u: "site text",
+        extract_fn=lambda _t: {"about": "x", "business_type": "quantum_fintech_ai"},
+    )
+    assert "business_type" not in draft_spy[-1]["fields"]  # invented key never asserted

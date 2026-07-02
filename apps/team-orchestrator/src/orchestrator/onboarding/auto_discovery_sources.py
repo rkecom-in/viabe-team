@@ -318,6 +318,25 @@ def discover_website(
         return SourceResult("website", "empty", cost_usd=0.0)
     fields = (extract_fn or _extract_website)(text[:_WEBSITE_MAX_CHARS])
     fields = {k: v for k, v in fields.items() if v}
+    # VT-568 follow-up: the site's own words may DERIVE the business type — but only through the
+    # validator, and never overriding an entity-accepted stronger signal: the website suggestion
+    # lands ONLY when the draft's current type is empty/'other' (the coarse floor). Off-taxonomy
+    # output is dropped (never asserted). category (the natural self-description) always merges —
+    # it is what the confirm turn should present instead of a coarse bucket label.
+    if "business_type" in fields:
+        suggested = str(fields.pop("business_type") or "").strip()
+        try:
+            from orchestrator.onboarding.business_type_reconcile import is_valid_business_type
+            from orchestrator.onboarding.draft_profile import get_draft
+
+            current = str((get_draft(tenant_id).get("attributes") or {}).get("business_type") or "")
+            if (
+                suggested and suggested != "other" and is_valid_business_type(suggested)
+                and current in ("", "other")
+            ):
+                fields["business_type"] = suggested
+        except Exception:  # noqa: BLE001 — a suggestion; never break the source
+            logger.warning("discover_website: business_type suggestion dropped (fail-soft)")
     if fields:
         write_draft(tenant_id, fields, source="website")
     return SourceResult("website", "ok" if fields else "empty", cost_usd=_WEBSITE_COST_USD, fields=fields)
@@ -360,16 +379,33 @@ def _fetch_website(url: str) -> str:
 
 
 def _extract_website(text: str) -> dict[str, Any]:
-    """Haiku-extract a small context set from the page text. Returns {} on any failure (fail-soft)."""
+    """Haiku-extract a small context set from the page text. Returns {} on any failure (fail-soft).
+
+    VT-568 follow-up (live drill, Fazal): a GST-VERIFIED business whose own site plainly says what
+    it does ("AI-powered business intelligence…") still identified as 'other' — the scrape captured
+    about/services but nothing DERIVED the business type from the site's own words. The extraction
+    now also returns ``category`` (the business's own natural one-line self-description — what the
+    confirm turn should present) and ``business_type`` (the closest key from the Viabe taxonomy, or
+    'other'). Both are DRAFT fields — owner-confirm-gated downstream, never asserted (CL-390)."""
     from anthropic import Anthropic
+
+    try:
+        from orchestrator.onboarding.business_type_reconcile import taxonomy_keys
+
+        keys = ", ".join(taxonomy_keys())
+    except Exception:  # noqa: BLE001 — taxonomy load is cosmetic here; the validator gates later
+        keys = "other"
 
     prompt = (
         "From this business website text, extract a short factual summary as JSON with keys "
-        '"about" (1-2 sentences on what the business does) and "services" (a short list of '
-        "offerings, max 6). Use ONLY what the text states; if unknown, use null/[]. "
-        "EXCLUDE all personal names, customer testimonials/reviews, and any personal contact "
-        "details (phone/email/address of individuals) — extract ONLY the business's own "
-        "about/services, never anyone's PII (CL-390). No prose, JSON only.\n\n"
+        '"about" (1-2 sentences on what the business does), "services" (a short list of '
+        'offerings, max 6), "category" (the business\'s own natural one-line self-description, '
+        'e.g. "AI-powered business intelligence for small businesses" — in ITS words, not yours), '
+        f'and "business_type" (the single CLOSEST key from this fixed list: {keys} — when nothing '
+        'genuinely fits, use "other"; never invent a key). Use ONLY what the text states; if '
+        "unknown, use null/[]. EXCLUDE all personal names, customer testimonials/reviews, and any "
+        "personal contact details (phone/email/address of individuals) — extract ONLY the "
+        "business's own about/services, never anyone's PII (CL-390). No prose, JSON only.\n\n"
         f"TEXT:\n{text}"
     )
     try:
@@ -383,7 +419,12 @@ def _extract_website(text: str) -> dict[str, Any]:
         raw = resp.content[0].text if resp.content else "{}"
         start, end = raw.find("{"), raw.rfind("}")
         data = json.loads(raw[start : end + 1]) if start != -1 and end != -1 else {}
-        return {"about": data.get("about"), "services": data.get("services")}
+        return {
+            "about": data.get("about"),
+            "services": data.get("services"),
+            "category": data.get("category"),
+            "business_type": data.get("business_type"),
+        }
     except Exception as exc:  # noqa: BLE001 — LLM/parse fragile; degrade to no website fields
         logger.warning("discover_website: extract failed (%s)", type(exc).__name__)
         return {}
