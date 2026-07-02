@@ -83,6 +83,9 @@ that exact proposed text owner-approved; record it). Never fabricate or guess.
 for, put it in extracted_answers and NEVER ask about that field again — asking again after being \
 told is the single most annoying failure. If the owner already answered in RECENT CONVERSATION and \
 it somehow was not collected, record it NOW from there instead of re-asking.
+- PRESENT, DON'T ASK: when a STILL-NEEDED field carries a DISCOVERED value (from the owner's own \
+website or verified records), present that value for a one-tap confirmation in the business's own \
+words — NEVER ask the owner to type what their own site already says.
 - GST "nature of business" values (e.g. "Supplier of Services", "Warehouse / Depot", "Others") are \
 coarse TAX-ACTIVITY codes, NOT a description of what the business does. NEVER present them as \
 guesses about the business or offer them as choices.
@@ -130,17 +133,28 @@ def _fmt_discovered(draft_attrs: dict[str, Any], provenance: dict[str, Any] | No
     return "\n".join(lines) if lines else "(nothing discovered yet)"
 
 
-def _fmt_still_needed(objective: list[dict[str, Any]]) -> str:
-    """The remaining fields to collect (queue tail), with kind + the deterministic prompt as a hint."""
+def _fmt_still_needed(
+    objective: list[dict[str, Any]], draft_attrs: dict[str, Any] | None = None
+) -> str:
+    """The remaining fields to collect (queue tail), with kind + the deterministic prompt as a hint.
+
+    Each field is ALSO annotated with its CURRENT discovered value (live from the draft — the queue's
+    baked draft_value goes stale the moment a website refresh lands mid-journey). A field that
+    already has a discovered value should be PRESENTED for confirmation, never asked from scratch —
+    the live-drill 'why are you asking me what my own site says' failure."""
     if not objective:
         return "(nothing outstanding — do not ask for anything new)"
+    attrs = draft_attrs or {}
     lines: list[str] = []
     for q in objective:
         kind = q.get("kind", "gap")
         fieldname = q.get("field", "")
-        dv = q.get("draft_value")
+        dv = attrs.get(fieldname) or q.get("draft_value")
         hint = q.get("prompt_en") or ""
-        dv_txt = f" (discovered guess: {dv})" if kind == "confirm" and dv not in (None, "") else ""
+        dv_txt = (
+            f" (DISCOVERED value — present this for confirmation, do NOT ask them to type it: {dv})"
+            if dv not in (None, "") else ""
+        )
         lines.append(f"- {fieldname} [{kind}]{dv_txt} — e.g. \"{hint}\"")
     return "\n".join(lines)
 
@@ -203,7 +217,7 @@ def _build_prompts(
         "RECENT CONVERSATION (oldest first — what was already said; NEVER re-ask or contradict it):\n"
         f"{convo}\n\n"
         "STILL NEEDED (collect these, conversationally, at most one new ask per turn):\n"
-        f"{_fmt_still_needed(objective)}\n\n"
+        f"{_fmt_still_needed(objective, draft_attrs)}\n\n"
         "WHAT YOU LAST ASKED:\n"
         f"{asked}\n\n"
         "ALREADY COLLECTED (do not re-ask):\n"
