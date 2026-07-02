@@ -315,3 +315,125 @@ def test_redrive_noop_on_non_redrivable(pool):
     ts.set_task_status(tid, task, "completed", expected_from=("clarifying",))
     with pool.connection() as conn, conn.cursor() as cur:
         assert ts.redrive_task(tid, task, conn=cur) is False
+
+
+# --- VT-560 (Defect 1): the retry-ladder WAKE — blocked rows re-enter the ladder -----------------
+
+
+def _park_blocked(pool, ts, tid, *, attempt: int, next_retry_at_sql: str) -> str:
+    """Park a task at status='blocked' with an explicit attempt + next_retry_at (SQL expr)."""
+    task = ts.create_task(tid, {"goal": f"parked-{attempt}"})
+    with pool.connection() as conn:
+        conn.execute(
+            "UPDATE manager_tasks SET status = 'blocked', attempt = %s, "
+            f"next_retry_at = {next_retry_at_sql} WHERE id = %s",
+            (attempt, str(task)),
+        )
+    return task
+
+
+def test_wake_flips_due_blocked_to_planned_keeping_attempt(pool):
+    """A reaper-parked 'blocked' task whose next_retry_at is DUE is woken back to 'planned',
+    attempt KEPT, next_retry_at cleared, wake audit stamped (this is what VT-557 never did)."""
+    from orchestrator.manager import task_store as ts
+    from orchestrator.orphan_reaper import reap_stalled_manager_tasks
+
+    tid = _seed_tenant(pool)
+    task = _park_blocked(pool, ts, tid, attempt=2, next_retry_at_sql="now() - interval '1 minute'")
+    reap_stalled_manager_tasks(pool=pool)
+    r = _read_retry(pool, task)
+    assert (r["status"] if isinstance(r, dict) else r[0]) == "planned"
+    assert (r["attempt"] if isinstance(r, dict) else r[1]) == 2  # attempt kept, not reset
+    assert (r["next_retry_at"] if isinstance(r, dict) else r[2]) is None  # gate cleared
+    meta = ts.get_task(tid, task)["stall_metadata"]
+    assert meta["woken_by"] == "vt560_retry_ladder"
+    assert meta["woken_reason"] == "backoff_elapsed"
+
+
+def test_wake_skips_not_yet_due_blocked(pool):
+    """A reaper-parked 'blocked' task whose backoff has NOT elapsed stays blocked (the gate)."""
+    from orchestrator.manager import task_store as ts
+    from orchestrator.orphan_reaper import reap_stalled_manager_tasks
+
+    tid = _seed_tenant(pool)
+    task = _park_blocked(pool, ts, tid, attempt=1, next_retry_at_sql="now() + interval '1 hour'")
+    reap_stalled_manager_tasks(pool=pool)
+    r = _read_retry(pool, task)
+    assert (r["status"] if isinstance(r, dict) else r[0]) == "blocked"  # backoff pending
+    assert (r["attempt"] if isinstance(r, dict) else r[1]) == 1
+
+
+def test_wake_skips_blocked_without_next_retry_at(pool):
+    """A 'blocked' task with NO next_retry_at (a non-ladder / explicit blocker) is NEVER
+    auto-woken — only reaper-parked rows (next_retry_at set) wake. Left for a human."""
+    from orchestrator.manager import task_store as ts
+    from orchestrator.orphan_reaper import reap_stalled_manager_tasks
+
+    tid = _seed_tenant(pool)
+    task = _park_blocked(pool, ts, tid, attempt=0, next_retry_at_sql="NULL")
+    reap_stalled_manager_tasks(pool=pool)
+    r = _read_retry(pool, task)
+    assert (r["status"] if isinstance(r, dict) else r[0]) == "blocked"  # untouched
+
+
+def test_ladder_walks_to_dead_letter_across_sweeps(pool):
+    """VT-560: with the wake in place the ladder actually PROGRESSES. Alternating stall+wake
+    sweeps (timing fields aged as wall-clock would) walk a permanently-stalled task attempt
+    1→2→3→4 and finally to dead_letter at max_attempts=5 — the path that was UNREACHABLE
+    before the wake (a blocked row was never re-swept)."""
+    from orchestrator.manager import task_store as ts
+    from orchestrator.orphan_reaper import reap_stalled_manager_tasks
+
+    tid = _seed_tenant(pool)
+    task = ts.create_task(tid, {"goal": "permanently-stalled"})
+    ts.set_task_status(tid, task, "running", expected_from=("clarifying",))
+
+    def _age_active():  # the >1h stall floor elapses on the runnable row
+        with pool.connection() as conn:
+            conn.execute(
+                "UPDATE manager_tasks SET updated_at = now() - interval '2 hours' WHERE id = %s",
+                (str(task),),
+            )
+
+    def _make_due():  # the backoff window elapses on the blocked row
+        with pool.connection() as conn:
+            conn.execute(
+                "UPDATE manager_tasks SET next_retry_at = now() - interval '1 second' WHERE id = %s",
+                (str(task),),
+            )
+
+    for expected_attempt in (1, 2, 3, 4):
+        _age_active()
+        reap_stalled_manager_tasks(pool=pool)  # stall sweep → blocked, attempt++
+        r = _read_retry(pool, task)
+        assert (r["status"] if isinstance(r, dict) else r[0]) == "blocked"
+        assert (r["attempt"] if isinstance(r, dict) else r[1]) == expected_attempt
+        _make_due()
+        reap_stalled_manager_tasks(pool=pool)  # wake sweep → planned, attempt kept
+        r = _read_retry(pool, task)
+        assert (r["status"] if isinstance(r, dict) else r[0]) == "planned"
+        assert (r["attempt"] if isinstance(r, dict) else r[1]) == expected_attempt
+
+    # attempt is 4 and planned; one more aged stall reaches max_attempts=5 → dead_letter terminal
+    _age_active()
+    reap_stalled_manager_tasks(pool=pool)
+    r = _read_retry(pool, task)
+    assert (r["status"] if isinstance(r, dict) else r[0]) == "dead_letter"
+    assert (r["attempt"] if isinstance(r, dict) else r[1]) == 5
+    assert (r["next_retry_at"] if isinstance(r, dict) else r[2]) is None
+
+
+def test_wake_does_not_double_increment_same_tick(pool):
+    """VT-560: a task just blocked THIS tick (next_retry_at in the future) is not immediately
+    re-woken, and a task just woken is not re-caught by the already-run stall query — attempt
+    advances by exactly ONE per sweep. Drives a fresh stall and asserts a single increment."""
+    from orchestrator.manager import task_store as ts
+    from orchestrator.orphan_reaper import reap_stalled_manager_tasks
+
+    tid = _seed_tenant(pool)
+    task = _stall(pool, ts, tid, attempt=0)  # running, no step, updated 2h ago
+    reap_stalled_manager_tasks(pool=pool)
+    r = _read_retry(pool, task)
+    # one sweep → exactly one rung: blocked, attempt 1 (NOT 2 from a same-tick wake+re-stall)
+    assert (r["status"] if isinstance(r, dict) else r[0]) == "blocked"
+    assert (r["attempt"] if isinstance(r, dict) else r[1]) == 1
