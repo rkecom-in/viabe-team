@@ -29,7 +29,6 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import dataclass
-from functools import lru_cache
 from typing import Any
 from uuid import uuid4
 
@@ -122,20 +121,39 @@ def _service_sid() -> str:
     return sid
 
 
-@lru_cache(maxsize=1)
 def _client() -> Any:
-    """Build the Twilio REST client from env.
+    """Build the Twilio REST client from env, wrapped by the VT-476/VT-559 dev
+    send-guard.
 
-    Lazy (not import-time) so importing this module needs no Twilio creds.
-    When ``TEAM_TWILIO_VERIFY_MOCK_MODE=1`` the real client is never built —
-    callers branch into the mock path before reaching here.
+    Lazy (not import-time) so importing this module needs no Twilio creds. When
+    ``TEAM_TWILIO_VERIFY_MOCK_MODE=1`` the real client is never built — callers
+    branch into the mock path before reaching here.
+
+    VT-559 (SAFETY-CRITICAL): this previously built a bare ``twilio.rest.Client``
+    that never passed through ``dev_send_guard.maybe_wrap_for_dev`` — the OTP
+    ``verifications.create`` call reached real Twilio on dev regardless of
+    ``DEV_SEND_ALLOWLIST`` (a dev signup pointed at any real number sent a real
+    WhatsApp OTP — the single-chokepoint rail the VT-476 guard exists to enforce).
+    Wrapping here, identically to ``twilio_send._client()``, closes the gap: on a
+    non-prod env the returned client mocks ``verify.v2.services(sid)
+    .verifications.create`` for any destination not in ``DEV_SEND_ALLOWLIST``; on
+    prod the guard is inert (real client, unchanged).
+
+    NOT ``@lru_cache``'d (dropped from the prior implementation): the guard reads
+    ``EXPECTED_ENV`` / ``DEV_SEND_ALLOWLIST`` when it builds the wrapper, so a
+    cached client would freeze a stale wrap/allowlist decision across an env
+    change within the same process — mirrors ``twilio_send._client()``'s
+    documented reasoning for staying uncached.
     """
     from twilio.rest import Client
 
-    return Client(
+    from orchestrator.utils.dev_send_guard import maybe_wrap_for_dev
+
+    inner = Client(
         os.environ["TEAM_TWILIO_ACCOUNT_SID"],
         os.environ["TEAM_TWILIO_AUTH_TOKEN"],
     )
+    return maybe_wrap_for_dev(inner)
 
 
 def start_verification(
