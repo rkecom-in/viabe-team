@@ -45,6 +45,33 @@ class TwilioIngressBody(BaseModel):
     twilio_fields: dict[str, Any]
 
 
+# VT-567 (live-drill root cause, 2026-07-02): a REAL WhatsApp inbound arrives channel-prefixed —
+# From='whatsapp:+91…' / To='whatsapp:+91…' — while every downstream identity (tenants.
+# whatsapp_number, phone tokenisation, consent/opt-out lookups) keys on PLAIN E.164. Nothing in
+# the chain stripped the prefix, so _lookup_tenant missed every live inbound → reason=
+# 'unknown_sender' → 200-and-drop: the owner's COMPLETE_SETUP tap never started a run (tests had
+# only ever posted plain E.164). Normalize ONCE, here at the ingress boundary, for BOTH the
+# lookups and the fields handed to the workflow — a partial strip would fork the phone-token
+# space (hash_phone('whatsapp:+91…') != hash_phone('+91…')).
+_WA_CHANNEL_PREFIX = "whatsapp:"
+_WA_PHONE_FIELDS = ("From", "To", "WaId")
+
+
+def _strip_wa_prefix(value: str) -> str:
+    return value[len(_WA_CHANNEL_PREFIX):] if value.startswith(_WA_CHANNEL_PREFIX) else value
+
+
+def _normalize_wa_fields(fields: dict[str, Any]) -> dict[str, Any]:
+    """Return ``fields`` with the WhatsApp channel prefix stripped off phone-bearing keys.
+    Plain-E.164 payloads (tests, SMS) pass through byte-identical."""
+    out = dict(fields)
+    for key in _WA_PHONE_FIELDS:
+        v = out.get(key)
+        if isinstance(v, str) and v.startswith(_WA_CHANNEL_PREFIX):
+            out[key] = _strip_wa_prefix(v)
+    return out
+
+
 def _verify_internal_secret(provided: str | None) -> bool:
     """Constant-time compare against INTERNAL_API_SECRET (Pillar 8 — no bespoke crypto)."""
     expected = os.environ.get("INTERNAL_API_SECRET", "")
@@ -195,7 +222,9 @@ def twilio_ingress(
     # Twilio always sends a MessageSid; a missing one is a team-web forwarder
     # bug — surface it so team-web can log/alert rather than collapsing every
     # malformed request into one workflow_id.
-    fields = body.twilio_fields
+    # VT-567: normalize the WhatsApp channel prefix ONCE at the boundary — lookups AND the
+    # workflow both see plain E.164 (see _normalize_wa_fields).
+    fields = _normalize_wa_fields(body.twilio_fields)
     message_sid = str(fields.get("MessageSid", ""))
     if not message_sid:
         raise HTTPException(status_code=400, detail="missing MessageSid")
