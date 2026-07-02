@@ -99,6 +99,13 @@ def is_valid_business_type(value: str | None) -> bool:
     return bool(value) and value in _taxonomy()
 
 
+def taxonomy_keys() -> tuple[str, ...]:
+    """The fixed taxonomy key set — for prompts that ask an LLM to pick the closest bucket
+    (VT-568 website-derived type). The validator (`is_valid_business_type`) still gates every
+    pick; this is prompt material, not a trust boundary."""
+    return tuple(_taxonomy().keys())
+
+
 # English → Hindi label map for the confirm UX (the taxonomy yaml carries label_hi; we cache the en
 # map for is_valid_business_type and keep the hi map here for the bilingual confirm question).
 @lru_cache(maxsize=1)
