@@ -515,6 +515,12 @@ def dispatch_brain(
                 "run=%s tenant=%s",
                 str(run_id), str(tenant_id),
             )
+            # VT-565 — park this run's manager_task at 'waiting_owner' so the stalled-task reaper
+            # (which scans only planned/running/verifying) never mis-reads an awaiting-approval
+            # task as stalled and walks it to dead_letter. Fail-soft.
+            from orchestrator.manager.task_producer import on_run_paused
+
+            on_run_paused(tenant_id, run_id)
             return DispatchResult(
                 final_status="paused",
                 terminal_path="paused",
@@ -541,6 +547,11 @@ def dispatch_brain(
             event=event,
             exc=hle,
         )
+        # VT-565 — an aborted run's task settles to 'failed' (an honest terminal the reaper leaves
+        # alone; re-running would just re-hit the ceiling). Fail-soft, no-op if no task was minted.
+        from orchestrator.manager.task_producer import on_run_failed
+
+        on_run_failed(tenant_id, run_id, reason=f"hard_limit:{hle.axis}")
         return DispatchResult(
             final_status="aborted_hard_limit",
             terminal_path=None,
@@ -571,6 +582,10 @@ def dispatch_brain(
                 "agent_status": snoe.status,
             },
         )
+        # VT-565 — the specialist produced nothing usable; settle the task to 'failed'. Fail-soft.
+        from orchestrator.manager.task_producer import on_run_failed
+
+        on_run_failed(tenant_id, run_id, reason=f"specialist_no_output:{snoe.specialist}")
         return DispatchResult(
             final_status="escalated",
             terminal_path="escalated",
@@ -597,6 +612,18 @@ def dispatch_brain(
         intent_or_trigger=intent_or_trigger,
         terminal_path=terminal_path or "terminal",
     )
+
+    # VT-565 — close the run's manager_task at its terminal (a no-op when the manager answered
+    # directly and minted no task). A completed run → 'completed' + a 'done' step; an escalation →
+    # 'failed'. 'paused' / 'aborted_hard_limit' already returned above. Fail-soft.
+    if final_status == "completed":
+        from orchestrator.manager.task_producer import on_run_completed
+
+        on_run_completed(tenant_id, run_id)
+    elif final_status == "escalated":
+        from orchestrator.manager.task_producer import on_run_failed
+
+        on_run_failed(tenant_id, run_id, reason=reason)
 
     return DispatchResult(
         final_status=final_status,
