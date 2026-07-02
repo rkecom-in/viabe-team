@@ -729,27 +729,40 @@ def _advance_cursor_past_answered(g: dict[str, Any], answers: dict[str, Any], sk
     return c
 
 
-_URL_RE = re.compile(r"(?:https?://|www\.)[^\s>\"']+", re.IGNORECASE)
+# Scheme/www URLs OR bare domains ("rkecom.in") — the live drill showed owners type the bare form.
+# The bare pattern requires a plausible dotted host + short TLD and excludes trailing punctuation;
+# false positives are harmless (the refresh is fail-soft and the fetch of a non-site just errors).
+_URL_RE = re.compile(
+    r"(?:https?://|www\.)[^\s>\"']+"
+    r"|\b[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+\.?(?<!\.)\b(?:/[^\s>\"']*)?",
+    re.IGNORECASE,
+)
+# Bare-domain guard: require a 2-6 alpha TLD so "e.g." / version strings don't fire.
+_BARE_TLD_RE = re.compile(r"\.[a-z]{2,6}(?:/|$)", re.IGNORECASE)
 
 
 def _maybe_refresh_owner_website(
     tenant_id: UUID | str, body: str, draft_attrs: dict[str, Any]
 ) -> None:
-    """VT-568/569 follow-up (live drill): when the owner's message names a URL, record it as the
-    owner-stated website and fire the async website-source refresh (``website_refresh_workflow``)
-    so the NEXT turn genuinely knows the site — the agent must never claim to have "checked" a site
-    it hasn't. No-op when the draft already carries this website (idempotent per URL). Fully
-    fail-soft: a refresh failure never touches the reply path."""
+    """VT-568/569 follow-up (live drill): when the owner's message names a URL — scheme'd, www, or a
+    bare domain ("rkecom.in") — record it as the owner-stated website and fire the async
+    website-source refresh (``website_refresh_workflow``) so the NEXT turn genuinely knows the site.
+    Deduped on CONTENT, not URL: a re-mention re-fires until the scrape has actually produced the
+    site's about-text (the live drill had the URL recorded but a failed scrape — a URL-equality
+    no-op wedged it forever). Fully fail-soft: a refresh failure never touches the reply path."""
     try:
         m = _URL_RE.search(body or "")
         if not m:
             return
         url = m.group(0).rstrip(".,;:!?)")
+        if not url.lower().startswith(("http", "www.")) and not _BARE_TLD_RE.search(url):
+            return  # bare token without a plausible TLD — not a URL
         if not url.lower().startswith("http"):
-            url = f"https://{url}"
+            url = f"https://{url.lstrip('/')}"
         current = str(draft_attrs.get("website") or "")
-        if current and current.rstrip("/").lower() == url.rstrip("/").lower():
-            return  # already known — nothing to refresh
+        same_site = bool(current) and current.rstrip("/").lower() == url.rstrip("/").lower()
+        if same_site and draft_attrs.get("about"):
+            return  # already scraped THIS site's content — nothing to refresh
         from dbos import DBOS
 
         from orchestrator.onboarding.auto_discovery import website_refresh_workflow

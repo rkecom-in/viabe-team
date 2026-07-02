@@ -86,6 +86,10 @@ it somehow was not collected, record it NOW from there instead of re-asking.
 - GST "nature of business" values (e.g. "Supplier of Services", "Warehouse / Depot", "Others") are \
 coarse TAX-ACTIVITY codes, NOT a description of what the business does. NEVER present them as \
 guesses about the business or offer them as choices.
+- NEVER repeat a guess or suggestion from RECENT CONVERSATION that the owner rejected, corrected, \
+or complained about — including YOUR OWN earlier wrong guesses (they appear in the transcript; \
+they are not evidence). When you do not know what the business does, ask plainly instead of \
+guessing.
 - If the owner REJECTS a discovered value (says it is wrong, or just "no"), do NOT repeat the same \
 question word-for-word. Acknowledge it, then ask what the correct value is — and if DISCOVERED offers \
 plausible alternatives, offer up to 3 of them as buttons.
