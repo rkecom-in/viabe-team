@@ -552,13 +552,15 @@ def test_enable_keyword_grants_consent_then_brain_runs(ingress):
 
 
 def test_status_callback_delivered_completes_clean(ingress):
-    """A 'delivered' status callback is a Reject (observability-only) — the run
-    completes cleanly with status 'completed' and NO agent_invocation record."""
+    """A 'delivered' status callback routes to the deterministic delivery reconciler
+    (VT-564 — was a bare Reject pre-batch) — the run still completes cleanly with
+    status 'completed' and NO agent_invocation record (zero LLM on machine events)."""
     phone = _phone()
     _new_tenant(ingress.dsn, phone)
     resp = _post(ingress, _fields(phone, MessageStatus="delivered"))
     result = _await_workflow(resp.json()["workflow_id"])
-    assert result["routed"] == "reject"
+    assert result["routed"] == "direct_handler"
+    assert result["handler"] == "customer_send_delivery_handler"
 
     with psycopg.connect(ingress.dsn, autocommit=True) as conn:
         status = conn.execute(
