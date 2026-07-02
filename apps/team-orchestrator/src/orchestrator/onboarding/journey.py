@@ -770,6 +770,23 @@ def _maybe_refresh_owner_website(
         DBOS.start_workflow(website_refresh_workflow, str(tenant_id), url)
         draft_attrs["website"] = url  # visible to THIS turn's prompt as an owner-stated fact
         logger.info("journey: owner-stated website refresh fired (tenant=%s)", tenant_id)
+
+        # Live-drill race fix: the owner EXPECTS this very reply to reflect their site ("analyse
+        # the website, draft the content, get me to just confirm") — the async scrape typically
+        # lands in seconds, so wait a bounded beat for it and fold the result into THIS turn's
+        # context. Fail-open: on timeout the turn proceeds with the honest "reviewing it" ack and
+        # the NEXT turn uses the landed content (conversation memory carries the thread).
+        import time
+
+        from orchestrator.onboarding.draft_profile import get_draft
+
+        for _ in range(5):  # ≤ ~10s — WhatsApp-tolerable, bounded
+            time.sleep(2)
+            fresh = dict((get_draft(tenant_id).get("attributes") or {}))
+            if fresh.get("about") or fresh.get("category"):
+                draft_attrs.update(fresh)
+                logger.info("journey: website refresh landed in-turn (tenant=%s)", tenant_id)
+                break
     except Exception:  # noqa: BLE001 — enrichment only; the reply path must never break
         logger.warning("journey: owner-website refresh failed (fail-soft)", exc_info=True)
 
