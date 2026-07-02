@@ -90,6 +90,121 @@ def test_directive_block_empty_rows_returns_none(monkeypatch):
     assert dispatch._build_manager_directive_block(uuid4()) is None
 
 
+# --- VT-566: the flywheel read-back — the lessons block reuses the SAME config gate --------------
+
+
+def test_lessons_block_gated_off_returns_none(monkeypatch):
+    """Default posture: MANAGER_MEMORY_RETRIEVAL off → no block, and the readers are never called
+    (the read-back seam stays dark until explicitly flipped per-env)."""
+    from uuid import uuid4
+
+    from orchestrator.agent import dispatch
+
+    monkeypatch.delenv("MANAGER_MEMORY_RETRIEVAL", raising=False)
+    called = {"n": 0}
+    import orchestrator.agents.correction_store as cs
+
+    monkeypatch.setattr(cs, "get_recent_lessons", lambda *a, **k: called.__setitem__("n", 1))
+    assert dispatch._build_manager_lessons_block(uuid4()) is None
+    assert called["n"] == 0  # gate short-circuits before retrieval
+
+
+def test_lessons_block_renders_when_enabled(monkeypatch):
+    """Gate on + captured lessons/outcomes → the ## Lessons block renders, with implicit outcomes
+    down-weighted into the separate weak block (tier branch)."""
+    from uuid import uuid4
+
+    from orchestrator.agent import dispatch
+
+    monkeypatch.setenv("MANAGER_MEMORY_RETRIEVAL", "true")
+    import orchestrator.agents.correction_store as cs
+    import orchestrator.agents.lesson_readback as lr
+
+    monkeypatch.setattr(
+        cs, "get_recent_lessons",
+        lambda *a, **k: [
+            {"kind": "reject", "verb": "rejected", "correction_text": "off-brand tone",
+             "template_hint": "team_winback_simple", "authority": "owner"},
+        ],
+    )
+    monkeypatch.setattr(
+        lr, "get_recent_outcome_signals",
+        lambda *a, **k: [{"tier": "implicit", "signal": "thumbs_down"}],
+    )
+    block = dispatch._build_manager_lessons_block(uuid4())
+    assert block is not None
+    assert "## Lessons from this owner" in block
+    assert "off-brand tone" in block
+    assert "[weak signal — outcome-derived, not owner-stated] thumbs_down" in block
+
+
+def test_lessons_block_empty_returns_none(monkeypatch):
+    from uuid import uuid4
+
+    from orchestrator.agent import dispatch
+
+    monkeypatch.setenv("MANAGER_MEMORY_RETRIEVAL", "1")
+    import orchestrator.agents.correction_store as cs
+    import orchestrator.agents.lesson_readback as lr
+
+    monkeypatch.setattr(cs, "get_recent_lessons", lambda *a, **k: [])
+    monkeypatch.setattr(lr, "get_recent_outcome_signals", lambda *a, **k: [])
+    assert dispatch._build_manager_lessons_block(uuid4()) is None
+
+
+def test_gets_retrieval_audit_carries_lessons_present(monkeypatch):
+    """VT-566 — when the lessons block renders, dispatch records lessons_present=True on the GETS
+    retrieval audit spine row (mirrors directive_present / intent_present). Drives dispatch_brain
+    through the block-assembly + retrieval-emit path with the graph stubbed (no LLM, no DB)."""
+    import contextlib
+    from uuid import uuid4
+
+    import orchestrator.agent.dispatch as dispatch_mod
+    import orchestrator.edge_cases_router as edge_mod
+    import orchestrator.graph as graph_mod
+    from orchestrator.agent.dispatch import dispatch_brain
+    from orchestrator.state import new_subscriber_state
+    from orchestrator.supervisor import SpecialistNoOutputError
+    from orchestrator.types import WebhookEvent
+
+    tenant_id, run_id = uuid4(), uuid4()
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-vt566-fake")
+    monkeypatch.setattr(edge_mod, "route_edge_case", lambda **kwargs: None)
+    monkeypatch.setattr(
+        dispatch_mod, "observability_context", lambda **kwargs: contextlib.nullcontext()
+    )
+    monkeypatch.setattr(graph_mod, "get_checkpointer", lambda: None)
+    monkeypatch.setattr(dispatch_mod, "_resolve_model", lambda *a, **k: object())
+    # The lessons block renders (stubbed — no DB); the other block builders fail soft to None
+    # without a pool. Then the retrieval GETS row must carry lessons_present=True.
+    monkeypatch.setattr(
+        dispatch_mod, "_build_manager_lessons_block",
+        lambda *a, **k: "## Lessons from this owner\n- [rejected · rejected] off-brand",
+    )
+
+    captured: list[dict] = []
+    monkeypatch.setattr(dispatch_mod, "emit_tm_audit", lambda **kwargs: captured.append(kwargs))
+
+    class _FakeGraph:
+        def invoke(self, *args, **kwargs):
+            raise SpecialistNoOutputError(
+                specialist="x", status="invalid", run_id=run_id, tenant_id=tenant_id
+            )
+
+    monkeypatch.setattr(dispatch_mod, "build_supervisor_graph", lambda **kwargs: _FakeGraph())
+
+    event = WebhookEvent(
+        body="hello", sender_phone="+10000000000",
+        message_type="inbound_message", twilio_message_sid="SMvt566test",
+    )
+    state = new_subscriber_state(tenant_id, run_id)
+    dispatch_brain(event=event, state=state, run_id=run_id, tenant_id=tenant_id)
+
+    retrieval = [c for c in captured if c.get("event_kind") == "retrieval"]
+    assert retrieval, "a gets/retrieval audit row must be emitted"
+    assert retrieval[0]["result"]["lessons_present"] is True
+
+
 def test_classify_terminal_cohort_reject_wins_over_stale_plan():
     """The collapse rollback leaves the ``campaign_plan`` object in state even
     though no campaign row persisted. The rejection MUST be checked first, or

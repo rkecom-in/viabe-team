@@ -16,7 +16,17 @@ Redaction posture (binding): every snapshot goes through the SAME ``pii_redactor
 redacted params) survives; customer PII is stripped. Redaction happens HERE (inside
 ``record_correction``, the same layer ``correction_text`` is redacted at) so no caller can forget.
 
-Append-only; capture-now, retrieve-later (the gate columns default closed).
+Append-only; capture-now, retrieve-later. VT-566 (the read-back leg) resolves the retrieval gate for
+this store: mig-154's ``retrieval_eligible`` IS the Phase-2 activation gate, and ``record_correction``
+now marks first-party owner/vtr verdicts ELIGIBLE at capture (recording ``authority`` from the
+ahead-of-consumer column). That is the clean read of "retrieve-later": the promotion seam is capture
+itself for the owner's OWN feedback — same-tenant, same-owner, PII-redacted, so the C3 contamination
+controls (whose concern is cross-tenant / authority MIXING, not first-party rows) are satisfied by
+construction. A non-first-party ``authority`` (e.g. ``'system'``) stays default-closed until an
+explicit promotion. ``get_recent_lessons`` then HONORS that gate (eligible + the optional
+``expires_at`` recency window) rather than reading around it — so the column the migration shipped as
+the gate actually gates. The dispatch-side ``MANAGER_MEMORY_RETRIEVAL`` env flag is the SECOND gate
+(default OFF): both must be true to steer a decision, exactly like the VTR-directive read-back.
 
 The write runs on the caller's resolution connection inside a SAVEPOINT so it is atomic with the
 batch-state transition WHEN it succeeds, yet a capture failure rolls back ONLY the savepoint and is
@@ -39,6 +49,16 @@ logger = logging.getLogger(__name__)
 # only in per-customer params, so the first N proposals are a faithful example — the TOTAL count + a
 # truncation flag are recorded either way.
 _SNAPSHOT_MAX_DRAFTS = 20
+
+# VT-566 — first-party human verdicts (owner / vtr) are retrieval-eligible AT CAPTURE. This is the
+# clean read of mig-154's "capture-now, retrieve-later": for the owner's OWN feedback the promotion
+# seam is capture itself (same-tenant, same-owner, PII-redacted — the C3 contamination controls
+# target cross-tenant / authority MIXING, not first-party rows). Any other authority stays
+# default-closed until an explicit promotion.
+_FIRST_PARTY_AUTHORITIES = frozenset({"owner", "vtr"})
+
+# VT-566 — the read-back cap. The manager reasons over a handful of recent lessons, not a corpus.
+_RECENT_LESSONS_LIMIT = 5
 
 
 def load_batch_draft_snapshot(
@@ -116,6 +136,7 @@ def record_correction(
     batch_id: UUID | str | None = None,
     proposal_snapshot: dict[str, Any] | None = None,
     corrected_snapshot: dict[str, Any] | None = None,
+    authority: str = "owner",
 ) -> None:
     """Append one correction row on the caller's conn (SAVEPOINT-isolated, fail-soft).
 
@@ -124,6 +145,12 @@ def record_correction(
     later. ``proposal_snapshot`` / ``corrected_snapshot`` are RAW structured snapshots (see
     ``load_batch_draft_snapshot``) — redacted HERE through the SAME pii_redactor, then stored JSONB,
     so a caller can never persist an un-redacted draft.
+
+    VT-566: ``authority`` records WHO the verdict came from (default ``'owner'`` — every current
+    capture site is an owner reply on a Pillar-7 draft). A first-party human authority (owner / vtr)
+    is written ``retrieval_eligible=true`` AT CAPTURE (the read-back promotion seam); any other
+    authority stays default-closed until an explicit promotion. This is the single choke point that
+    owns eligibility, mirroring how redaction happens here so no caller can forget.
     """
     try:
         with conn.transaction():  # nested ⇒ SAVEPOINT (caller in a txn) / a txn of its own (autocommit)
@@ -131,11 +158,14 @@ def record_correction(
 
             proposal = _redact_snapshot(proposal_snapshot)
             corrected = _redact_snapshot(corrected_snapshot)
+            authority = (authority or "owner").strip().lower()
+            eligible = authority in _FIRST_PARTY_AUTHORITIES
             conn.execute(
                 "INSERT INTO agent_corrections "
                 "(tenant_id, run_id, batch_id, agent, correction_kind, decision_verb, "
-                " correction_text, proposal_snapshot, corrected_snapshot) "
-                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                " correction_text, proposal_snapshot, corrected_snapshot, authority, "
+                " retrieval_eligible) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
                 (
                     str(tenant_id),
                     str(run_id) if run_id is not None else None,
@@ -146,10 +176,90 @@ def record_correction(
                     _redact_text(owner_feedback) if owner_feedback else None,
                     Jsonb(proposal) if proposal is not None else None,
                     Jsonb(corrected) if corrected is not None else None,
+                    authority,
+                    eligible,
                 ),
             )
     except Exception:  # noqa: BLE001 — capture is fail-soft; the approval resolution must not break
         logger.warning("VT-531 correction capture failed (fail-soft)", exc_info=True)
+
+
+def get_recent_lessons(
+    tenant_id: UUID | str,
+    *,
+    agent: str | None = None,
+    limit: int = _RECENT_LESSONS_LIMIT,
+    conn: Any = None,
+) -> list[dict[str, Any]]:
+    """VT-566 read-back leg — recent RETRIEVAL-ELIGIBLE corrections for this tenant, most-recent-first,
+    capped (~5). The manager reads these back into its decision context so a captured owner
+    correction/approval steers the NEXT run (subject to the dispatch-side ``MANAGER_MEMORY_RETRIEVAL``
+    config gate — the second of the double gate).
+
+    Honors mig-154's gate columns rather than reading around them: ``retrieval_eligible`` (which
+    ``record_correction`` sets at capture for first-party owner/vtr verdicts) + the optional
+    ``expires_at`` recency window. ``agent=None`` returns the owner's lessons across ALL lanes (the
+    manager holds the cross-functional context); a value scopes to that lane.
+
+    RLS-scoped: reads through ``tenant_connection`` (or a passed tenant ``conn``), so
+    ``app_current_tenant()`` bounds the read to this tenant — a correction is the subject's own data.
+    ``correction_text`` is already PII-redacted at capture; this returns it verbatim plus a compact
+    ``template_hint`` lifted from ``proposal_snapshot``. Fail-CLOSED on any read error: returns [] so
+    dispatch proceeds without the block (the caller logs presence only, never contents).
+    """
+    sql = (
+        "SELECT correction_kind, decision_verb, correction_text, proposal_snapshot, authority, "
+        "       created_at "
+        "FROM agent_corrections "
+        "WHERE retrieval_eligible "
+        "  AND tenant_id = app_current_tenant() "
+        "  AND (%s::text IS NULL OR agent = %s) "
+        "  AND (expires_at IS NULL OR expires_at > now()) "
+        "ORDER BY created_at DESC LIMIT %s"
+    )
+    params = (agent, agent, int(limit))
+    try:
+        rows = (
+            conn.execute(sql, params).fetchall()
+            if conn is not None
+            else _read_tenant(tenant_id, sql, params)
+        )
+    except Exception:  # noqa: BLE001 — read-back is best-effort; never break dispatch
+        logger.warning("VT-566 lesson read-back failed (fail-soft)", exc_info=True)
+        return []
+    return [
+        {
+            "kind": _v(r, "correction_kind", 0),
+            "verb": _v(r, "decision_verb", 1),
+            "correction_text": _v(r, "correction_text", 2),
+            "template_hint": _template_hint(_v(r, "proposal_snapshot", 3)),
+            "authority": _v(r, "authority", 4),
+            "created_at": _v(r, "created_at", 5),
+        }
+        for r in rows
+    ]
+
+
+def _v(row: Any, key: str, idx: int) -> Any:
+    return row[key] if isinstance(row, dict) else row[idx]
+
+
+def _template_hint(snapshot: Any) -> str | None:
+    """Lift the first draft's ``template_name`` from a proposal snapshot as a compact 'what was
+    proposed' hint (the snapshot shape is ``{"drafts": [{"template_name", "params"}], …}``)."""
+    if not isinstance(snapshot, dict):
+        return None
+    drafts = snapshot.get("drafts") or []
+    if drafts and isinstance(drafts[0], dict):
+        return drafts[0].get("template_name")
+    return None
+
+
+def _read_tenant(tenant_id: UUID | str, sql: str, params: tuple) -> list:
+    from orchestrator.db import tenant_connection
+
+    with tenant_connection(tenant_id) as c:
+        return c.execute(sql, params).fetchall()
 
 
 def _redact_text(text: str) -> str:
@@ -173,4 +283,4 @@ def _redact_snapshot(snapshot: dict[str, Any] | None) -> dict[str, Any] | None:
     return out if isinstance(out, dict) else {"redacted": out}
 
 
-__all__ = ["load_batch_draft_snapshot", "record_correction"]
+__all__ = ["get_recent_lessons", "load_batch_draft_snapshot", "record_correction"]
