@@ -136,3 +136,35 @@ def test_detector_opens_incident_for_silent_terminal_and_alerts(pool, monkeypatc
     before = opened
     again = detect_silent_terminal_runs(pool=pool)
     assert again <= before  # the already-incident run is excluded by NOT EXISTS
+
+
+def test_detector_honors_jsonb_final_outcome(pool, monkeypatch):
+    """Batch-review follow-up (VT-560): the mig-052 house pattern writes final_outcome into
+    terminal_state_metadata JSONB (rerun/coordinator) — the COLUMN has no live writer. A run
+    with ONLY the JSONB key is NOT a silent terminal."""
+    from uuid import uuid4
+
+    from psycopg.types.json import Jsonb
+
+    from orchestrator.alerts import dispatch as dispatch_mod
+    from orchestrator.orphan_reaper import detect_silent_terminal_runs
+
+    monkeypatch.setattr(dispatch_mod, "dispatch_alert", lambda t: None)
+
+    tid = _seed_tenant(pool)
+    jsonb_only = str(uuid4())
+    with pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO pipeline_runs (id, tenant_id, run_type, status, started_at, ended_at, "
+            "terminal_state_metadata) VALUES (%s, %s, 'webhook', 'completed', "
+            "now() - interval '2 hours', now() - make_interval(mins => 90), %s)",
+            (jsonb_only, tid, Jsonb({"final_outcome": "dispatched_async"})),
+        )
+
+    detect_silent_terminal_runs(pool=pool)
+    with pool.connection() as conn:
+        row = conn.execute(
+            "SELECT id FROM incidents WHERE run_id = %s AND incident_kind = 'silent_terminal'",
+            (jsonb_only,),
+        ).fetchone()
+    assert row is None, "a JSONB-outcome run must not be flagged silent"

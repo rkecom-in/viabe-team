@@ -174,11 +174,13 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     # fired; the >1h age floor keeps it clear of any live in-flight run. Best-effort: a reaper
     # failure must never block boot (reap_orphan_runs never raises, but guard the import too).
     #
-    # VT-560: these three are a STARTUP CATCH-UP only. The STEADY-STATE re-sweep now runs on
-    # the @DBOS.scheduled substrate (scheduled_triggers.py: stalled_task_sweep_scheduled +
-    # silent_terminal_sweep_scheduled every 10 min, orphan_run_reaper_scheduled hourly) — a
-    # long-lived process would otherwise never re-sweep, so the VT-557 retry ladder never
-    # progressed and the VT-552 detector never re-fired. Keep the boot calls for the first pass.
+    # VT-560: the two REAPERS are a startup catch-up only — their steady-state re-sweep runs
+    # on the @DBOS.scheduled substrate (scheduled_triggers.py: stalled_task_sweep_scheduled
+    # every 10 min, orphan_run_reaper_scheduled hourly); a long-lived process would otherwise
+    # never re-sweep and the VT-557 retry ladder never progressed. The VT-552 silent-terminal
+    # DETECTOR remains boot-only ON PURPOSE (batch-review finding): no live code writes the
+    # final_outcome it keys on, so scheduling it would open an incident + alert per completed
+    # run under traffic. Schedule it only after the close-path final_outcome writer lands.
     try:
         from orchestrator.orphan_reaper import (
             detect_silent_terminal_runs,
