@@ -1366,15 +1366,26 @@ def _flow_defer(tenant_id: UUID | str, recipient: str | None, message_sid: str |
 _SHOP_DOMAIN_RE = re.compile(r"\b([a-z0-9][a-z0-9-]*\.myshopify\.com)\b", re.IGNORECASE)
 
 
-def _recent_shop_domain(tenant_id: UUID | str) -> str | None:
+def _recent_shop_domain(tenant_id: UUID | str, current_body: str | None = None) -> str | None:
     """The most-recent Shopify store address the OWNER already sent. Record-and-move-on: never ask them
     to retype what they've said. None when nothing matches. Fail-soft.
 
-    VT-583 addendum (CL-2026-07-03): reads the UNIFIED lifetime log (conversation_log) FIRST — the store
-    URL is captured at the runner seam even when a silent/consumed path never appended to the journey
-    window — then falls back to journey.recent_turns. Reading ONE substrate is what kills the
-    3×-store-link re-ask (the substrate-fragmentation disease)."""
-    # PRIMARY: the unified conversation log (newest-first owner texts).
+    VT-586 follow-up (CL-2026-07-03): the CURRENT inbound is scanned FIRST — the owner who gives the URL
+    in the SAME message as the readiness affirm ("Yes connect. My store is x.myshopify.com") must have it
+    used, never re-asked. The lifetime-log lookback below is a fragile substrate (the current turn's
+    conversation_log row can be uncommitted/RLS-invisible within the same webhook run — the observed
+    re-ask), so the current body is the reliable source; the log is the fallback for a URL given earlier.
+
+    VT-583 addendum (CL-2026-07-03): reads the UNIFIED lifetime log (conversation_log) after the current
+    body — the store URL is captured at the runner seam even when a silent/consumed path never appended
+    to the journey window — then falls back to journey.recent_turns. Reading ONE substrate is what kills
+    the 3×-store-link re-ask (the substrate-fragmentation disease)."""
+    # PRIMARY: the CURRENT owner message (most reliable — no cross-transaction/RLS timing).
+    if current_body:
+        m = _SHOP_DOMAIN_RE.search(current_body)
+        if m:
+            return m.group(1).lower()
+    # SECONDARY: the unified conversation log (newest-first owner texts).
     try:
         from orchestrator.conversation_log import recent_owner_texts
 
@@ -1401,7 +1412,8 @@ def _recent_shop_domain(tenant_id: UUID | str) -> str | None:
 
 
 def _flow_offer_next_integration(
-    tenant_id: UUID | str, recipient: str | None, message_sid: str | None, lang: str
+    tenant_id: UUID | str, recipient: str | None, message_sid: str | None, lang: str,
+    *, body: str = "",
 ) -> dict[str, Any]:
     """Beat (c): offer the SINGLE best next integration — easiest-first, justified by an agent's data
     need, with plain 'where to find it' instructions from the VT-577 registry. For Shopify (the built
@@ -1429,7 +1441,7 @@ def _flow_offer_next_integration(
         # RECORD-AND-MOVE-ON (live-drill defect 2026-07-03): the owner may have ALREADY sent the store
         # address in the recent conversation (it can land on a different beat and get consumed as an
         # ack). Never ask them to retype it — pick it up from the window + feed the seam directly.
-        already = _recent_shop_domain(tenant_id)
+        already = _recent_shop_domain(tenant_id, current_body=body)
         if already:
             try:
                 from orchestrator.onboarding.shopify_onboarding import start_shopify_setup
@@ -1522,14 +1534,14 @@ def _maybe_handle_post_profile_flow(
         # every other verdict proceeds with the easiest connection — same beats as before, just fluid.
         if _resolve_readiness_intent(body) == "decline":
             return _flow_defer(tenant_id, recipient, message_sid, lang)
-        return _flow_offer_next_integration(tenant_id, recipient, message_sid, lang)
+        return _flow_offer_next_integration(tenant_id, recipient, message_sid, lang, body=body)
 
     if flow == _FLOW_DEFERRED:
         # Resumable: a clear connect/affirm re-engages (floor OR classifier); anything else falls
         # through to normal chat (the brain owns it). VT-583 widens the re-engage beyond the keyword
         # floor without hijacking ordinary messages.
         if _resolve_deferred_intent(body):
-            return _flow_offer_next_integration(tenant_id, recipient, message_sid, lang)
+            return _flow_offer_next_integration(tenant_id, recipient, message_sid, lang, body=body)
         return None
 
     if flow.startswith(_FLOW_INTEGRATION_PREFIX):
@@ -1547,7 +1559,7 @@ def _maybe_handle_post_profile_flow(
         # Re-offer the integration step (idempotent — the same easiest-first offer) so a reply is
         # GUARANTEED and the owner is never dropped mid-handoff.
         logger.info("journey flow: integration orphan re-offer (tenant=%s flow=%s)", tenant_id, flow)
-        return _flow_offer_next_integration(tenant_id, recipient, message_sid, lang)
+        return _flow_offer_next_integration(tenant_id, recipient, message_sid, lang, body=body)
 
     return None
 
