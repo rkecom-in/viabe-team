@@ -9,9 +9,16 @@ silent-drop class: send a message, watch whether a reply actually comes back.
         uv run --directory apps/team-orchestrator python canaries/convo_harness.py <cmd> ...
 
     setup     [--owner-inputs true|false] [--onboarded] [--name N] [--number N] [--phase P]
+              [--journey] [--draft-about A] [--draft-city C] [--draft-type T] [--flow BEAT]
     send      <tenant_id> "<message>" [--ingress-url URL] [--timeout S]
     script    <tenant_id> <scenario.json|.yaml> [--ingress-url URL] [--timeout S]
     teardown  <tenant_id>
+
+--journey replicates REAL signup's post-create state (a business_profile_draft + an ACTIVE
+onboarding_journey with a small deterministic queue) — synthetic tenants otherwise lack it, so
+onboarding scenarios never enter the journey path and every reply is the D1 fallback line. --flow
+(requires --onboarded) arms the paced post-profile-flow sentinel for flow-beat scenarios (readiness /
+integration-offer / deferred). See per-scenario "notes" for the exact setup invocation each expects.
 
 HOW OUTBOUND IS CAPTURED (no real send). Every owner-facing send funnels through
 utils/twilio_send._client(), which on dev is wrapped by the VT-476 dev_send_guard. The harness
@@ -123,22 +130,41 @@ def concat_assistant_text(turns: list[Turn]) -> str:
     return "\n".join(t.text for t in assistant_turns(turns))
 
 
+def reply_verdict(turns: list[Turn], run_status: str | None) -> str:
+    """'ok' / 'silent' / 'timeout' — the three-way outcome for the no-silent-drop check.
+
+    The run-23 calibration gap: a step was flagged "NO assistant reply (silent drop)" while
+    ``run_status == 'running'`` — the poll simply returned before the deployed LLM turn finished
+    (turns take 10-40s). That is a TIMEOUT, not evidence of a drop. A TRUE silent drop requires the
+    run to have reached a TERMINAL status (left 'running') with zero assistant replies.
+
+    'ok'      — ≥1 assistant reply captured (regardless of run_status).
+    'timeout' — the run was STILL 'running' when the poll deadline hit — inconclusive, not a drop.
+    'silent'  — every other zero-reply case (a terminal run_status with no reply, or no run to poll
+                at all — ``_drive_turn``'s no-run-reason branch) — the run-23 silent-drop class.
+    """
+    if assistant_turns(turns):
+        return "ok"
+    return "timeout" if run_status == _RUNNING else "silent"
+
+
 def evaluate_assertions(
     turns: list[Turn],
     *,
+    run_status: str | None = None,
     assert_no_silent: bool = True,
     assert_contains: list[str] | None = None,
     assert_not_contains: list[str] | None = None,
 ) -> list[str]:
     """Return a list of failure reasons (empty ⇒ all assertions held).
 
-    assert_no_silent (default ON): ≥1 assistant reply MUST exist — the run-23 silent-drop check.
-    assert_contains / assert_not_contains: case-insensitive substring checks over the concatenated
-    assistant text."""
+    assert_no_silent (default ON): fails ONLY on a true SILENT verdict (see ``reply_verdict``) — a
+    TIMEOUT verdict is reported as its own bucket by the caller (``cmd_script``), never folded into
+    this failure. assert_contains / assert_not_contains: case-insensitive substring checks over the
+    concatenated assistant text."""
     failures: list[str] = []
-    replies = assistant_turns(turns)
     haystack = concat_assistant_text(turns).lower()
-    if assert_no_silent and not replies:
+    if assert_no_silent and reply_verdict(turns, run_status) == "silent":
         failures.append("assert_no_silent: NO assistant reply was produced (silent drop)")
     for needle in assert_contains or []:
         if needle.lower() not in haystack:
@@ -367,6 +393,61 @@ def _print_transcript(transcript: list[Turn]) -> None:
 # --- subcommands -------------------------------------------------------------------------------
 
 
+_VALID_FLOW_PREFIXES = ("profile_previewed", "ready_asked", "deferred", "integration:", "plan_kicked")
+
+
+def _ensure_substrate(dsn: str) -> None:
+    """Lazily init the ``tenant_connection()`` substrate (a one-time pooled connection + a no-op
+    placeholder-graph compile — ``orchestrator.graph.init_substrate``, VT-3.1) so the REAL,
+    RLS-correct tenant writers (``write_draft`` / ``start_journey``) can be called from this
+    standalone script exactly as the deployed app would. Idempotent (init_substrate no-ops once
+    already compiled); cheap — no LLM calls, no dispatch-graph wiring at this substrate layer."""
+    from orchestrator.graph import init_substrate
+
+    init_substrate(dsn)
+
+
+def _seed_journey_state(
+    dsn: str, tenant_id: str, *, about: str, city: str, business_type: str, business_name: str
+) -> None:
+    """VT-582 calibration fix — replicate REAL signup's post-create state deterministically (NO LLM
+    calls), which synthetic harness tenants otherwise lack: signup writes a business_profile_draft
+    (async auto-discovery) + starts the onboarding_journey. Without this, a harness tenant's journey
+    never composes a queue and every reply is the D1 fallback line.
+
+    Writes via the REAL tenant-scoped functions (``write_draft`` / ``start_journey`` — the same
+    RLS-correct path production uses), not raw SQL, so this never drifts from the real schema.
+
+    The queue is a SMALL, HAND-BUILT 2-entry set mirroring the exact shape ``question_brain``
+    produces (confirm business_type, via the same ``_confirm_question`` helper — no LLM, it's a
+    taxonomy-label lookup) plus one deterministic GAP question ('about') standing in for a
+    genuinely-missing field — deliberately NOT run through the real LLM gap-composer, which would
+    make the harness's own setup non-deterministic and network-dependent."""
+    from orchestrator.onboarding.draft_profile import write_draft
+    from orchestrator.onboarding.journey import start_journey
+    from orchestrator.onboarding.question_brain import Question, _confirm_question
+
+    _ensure_substrate(dsn)
+    write_draft(
+        tenant_id,
+        {"business_name": business_name, "business_type": business_type, "city": city, "about": about},
+        source="gst",
+    )
+    confirm_q = _confirm_question("business_type", business_type)
+    gap_q = Question(
+        field="about",
+        kind="gap",
+        prompt_en="Could you tell us a little about your business — what you sell or do?",
+        prompt_hi="क्या आप अपने व्यापार के बारे में थोड़ा बता सकते हैं — आप क्या बेचते या करते हैं?",
+    )
+    queue = [
+        {"field": q.field, "kind": q.kind, "prompt_en": q.prompt_en, "prompt_hi": q.prompt_hi,
+         "draft_value": q.draft_value}
+        for q in (confirm_q, gap_q)
+    ]
+    start_journey(tenant_id, queue)
+
+
 def cmd_setup(args: argparse.Namespace) -> int:
     dsn = _dsn()
     name = args.name or f"{_HARNESS_NAME_PREFIX}{uuid.uuid4().hex[:8]}"
@@ -376,6 +457,12 @@ def cmd_setup(args: argparse.Namespace) -> int:
     if not number.startswith(_BOGUS_PREFIX):
         _die(f"--number must be a bogus non-allowlisted {_BOGUS_PREFIX}… test number")
     owner_inputs = str(args.owner_inputs).lower() in ("true", "1", "yes")
+    if args.journey and args.onboarded:
+        _die("--journey (active, pending queue) and --onboarded (complete) are mutually exclusive")
+    if args.flow and not args.onboarded:
+        _die("--flow requires --onboarded — the __flow__ sentinel is only read on a COMPLETE journey row")
+    if args.flow and not args.flow.startswith(_VALID_FLOW_PREFIXES):
+        _die(f"--flow {args.flow!r} is not one of {_VALID_FLOW_PREFIXES} (or 'integration:<name>')")
 
     with _connect(dsn) as conn:
         row = conn.execute(
@@ -394,10 +481,28 @@ def cmd_setup(args: argparse.Namespace) -> int:
                 "SET status = 'complete', completed_at = now()",
                 (tenant_id,),
             )
+            if args.flow:
+                # VT-582 calibration fix — arm the __flow__ sentinel (_maybe_handle_post_profile_flow)
+                # so a completed-journey scenario starts mid-paced-flow instead of falling straight
+                # through to the normal brain (flow unset == "no flow ever started").
+                from psycopg.types.json import Jsonb
+
+                conn.execute(
+                    "UPDATE onboarding_journey SET answers = jsonb_set("
+                    "coalesce(answers, '{}'::jsonb), '{__flow__}', %s) WHERE tenant_id = %s",
+                    (Jsonb(args.flow), tenant_id),
+                )
+
+    if args.journey:
+        _seed_journey_state(
+            dsn, tenant_id, about=args.draft_about, city=args.draft_city,
+            business_type=args.draft_type, business_name=name,
+        )
 
     print(f"tenant_id={tenant_id}")
     print(f"whatsapp_number={number}  (bogus, non-allowlisted → dev_send_guard mocks all sends)")
-    print(f"owner_inputs={owner_inputs}  phase={args.phase}  onboarded={bool(args.onboarded)}")
+    print(f"owner_inputs={owner_inputs}  phase={args.phase}  onboarded={bool(args.onboarded)}"
+          f"  journey={bool(args.journey)}  flow={args.flow!r}")
     return 0
 
 
@@ -416,7 +521,12 @@ def cmd_send(args: argparse.Namespace) -> int:
         for r in result.reasons:
             print(f"[send] !! {r}")
     if not replies:
-        print("[send] !! SILENT: no assistant reply was produced for this inbound")
+        verdict = reply_verdict(result.transcript, result.run_status)
+        if verdict == "timeout":
+            print(f"[send] !! TIMEOUT: run still 'running' after {args.timeout:.0f}s — the deployed "
+                  f"LLM turn hadn't finished (NOT a silent drop; raise --timeout or re-run)")
+        else:
+            print("[send] !! SILENT: no assistant reply was produced for this inbound")
     return 0 if result.ok else 1
 
 
@@ -442,15 +552,29 @@ def cmd_script(args: argparse.Namespace) -> int:
         # A send-guard breach (real SID) is a HARD failure regardless of expected_fail — never mask it.
         hard = list(turn.reasons)
         step_xfail = bool(step.get("expected_fail", scenario_xfail))
-        failures = evaluate_assertions(
-            turn.transcript,
-            assert_no_silent=bool(step.get("assert_no_silent", True)),
-            assert_contains=step.get("assert_contains"),
-            assert_not_contains=step.get("assert_not_contains"),
-        )
-        ok, xfail, label = classify_step(failures, expected_fail=step_xfail)
-        if hard:  # a real-send breach overrides any xfail leniency
-            ok, xfail, label, failures = False, False, "FAIL", hard + failures
+        assert_no_silent = bool(step.get("assert_no_silent", True))
+        verdict = reply_verdict(turn.transcript, turn.run_status)
+
+        if hard:
+            ok, xfail, label, failures = False, False, "FAIL", hard
+        elif assert_no_silent and verdict == "timeout":
+            # Its OWN bucket — NEVER folded into SILENT/FAIL. The run hadn't finished within
+            # --timeout; content assertions against a not-yet-arrived reply would be meaningless, so
+            # they are skipped for this step rather than reported as false content failures.
+            ok, xfail, label = False, False, "TIMEOUT"
+            failures = [
+                f"TIMEOUT: run still 'running' after {args.timeout:.0f}s — the deployed LLM turn "
+                f"hadn't finished (NOT a silent drop; raise --timeout or re-run)"
+            ]
+        else:
+            failures = evaluate_assertions(
+                turn.transcript,
+                run_status=turn.run_status,
+                assert_no_silent=assert_no_silent,
+                assert_contains=step.get("assert_contains"),
+                assert_not_contains=step.get("assert_not_contains"),
+            )
+            ok, xfail, label = classify_step(failures, expected_fail=step_xfail)
 
         print(f"\n  [step {i}] {label}  (run_status={turn.run_status}, reason={turn.ingress_reason})")
         if step.get("note"):
@@ -468,10 +592,15 @@ def cmd_script(args: argparse.Namespace) -> int:
     xfailed = sum(1 for r in results if r.label == "XFAIL")
     xpassed = sum(1 for r in results if r.label == "XPASS")
     failed = sum(1 for r in results if r.label == "FAIL")
-    print(f"\n=== summary: {passed} PASS, {xfailed} XFAIL (known gap), {xpassed} XPASS, {failed} FAIL ===")
+    timed_out = sum(1 for r in results if r.label == "TIMEOUT")
+    print(f"\n=== summary: {passed} PASS, {xfailed} XFAIL (known gap), {xpassed} XPASS, {failed} FAIL, "
+          f"{timed_out} TIMEOUT ===")
     if xpassed:
         print("    note: XPASS = a marked-gap step unexpectedly passed — the gap may have closed; re-check the mark.")
-    return 0 if failed == 0 else 1
+    if timed_out:
+        print("    note: TIMEOUT = the run hadn't completed within --timeout — NOT a silent drop; re-run "
+              "with a larger --timeout before treating this as a regression.")
+    return 0 if failed == 0 and timed_out == 0 else 1
 
 
 def cmd_teardown(args: argparse.Namespace) -> int:
@@ -548,6 +677,31 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--name", default=None, help="business_name (must start with 'convo-harness-')")
     s.add_argument("--number", default=None, help="bogus +15550… number (default: fresh random)")
     s.add_argument("--phase", default="trial", help="tenants.phase (default 'trial')")
+    s.add_argument(
+        "--journey", action="store_true",
+        help="replicate REAL signup's post-create state (VT-582 calibration fix): seed a "
+             "business_profile_draft + start an ACTIVE onboarding_journey with a small deterministic "
+             "2-entry queue (confirm business_type + gap 'about') — NO LLM calls. Mutually exclusive "
+             "with --onboarded (active vs complete). See --draft-about/--draft-city/--draft-type.",
+    )
+    s.add_argument(
+        "--draft-about", default="We serve traditional Indian sweets and snacks, made fresh daily.",
+        help="business_profile_draft 'about' attribute (--journey only)",
+    )
+    s.add_argument(
+        "--draft-city", default="Chennai", help="business_profile_draft 'city' attribute (--journey only)"
+    )
+    s.add_argument(
+        "--draft-type", default="sweets",
+        help="business_profile_draft 'business_type' attribute — a config/business_types.yaml key "
+             "(--journey only; default 'sweets')",
+    )
+    s.add_argument(
+        "--flow", default=None,
+        help="arm answers['__flow__'] on a COMPLETE journey (requires --onboarded) for flow-beat "
+             "scenarios: 'profile_previewed' | 'ready_asked' | 'deferred' | 'integration:<name>' "
+             "(e.g. 'integration:shopify') | 'plan_kicked'",
+    )
     s.set_defaults(func=cmd_setup)
 
     se = sub.add_parser("send", help="inject one inbound + capture the reply")

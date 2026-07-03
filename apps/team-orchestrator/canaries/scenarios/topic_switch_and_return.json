@@ -1,7 +1,7 @@
 {
   "name": "topic_switch_and_return",
   "expected_fail": false,
-  "notes": "Mid-flow topic switch: the owner asks an unrelated question, then returns. The flow must survive; the question must get a real answer; no context loss.",
+  "notes": "Mid-flow topic switch: the owner asks an unrelated question, then returns. The flow must survive; the question must get a real answer; no context loss. Setup: onboarded tenant with the paced post-profile flow at the readiness-ask beat — `setup --onboarded --flow ready_asked` (VT-582 calibration fix: without --flow the post-profile beats never engage, so 'Yes connect my data' would just fall through to the normal brain instead of exercising the flow-survives-a-detour path). Step 1's affirm resolves readiness into an integration offer; step 2 is the detour; step 3 checks resumption.",
   "steps": [
     { "message": "Yes connect my data", "assert_no_silent": true },
     {
