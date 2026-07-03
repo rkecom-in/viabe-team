@@ -948,15 +948,19 @@ def _reply_is_incomplete(terminal_state: dict[str, Any]) -> bool:
 # call). Kept inline (single source; not a template file) + concise.
 _COMPOSE_COMPLETION_SYSTEM = (
     "You are the Viabe Team-Manager writing the FINAL WhatsApp reply to the OWNER of a "
-    "small Indian business. Output ONLY the complete message you would send them — no "
-    "narration, no meta-commentary, no third person, never describe what you are doing. "
+    "small Indian business. You are given the conversation and the manager's DRAFT so far. "
+    "Output ONLY the complete message to send the owner — no narration, no meta-commentary, "
+    "no third person, never describe what you are doing. "
     'Write in second person ("you", "your store") and in the owner\'s language (match '
-    "the conversation). Your reply MUST be complete: never end on a dangling colon or a "
-    "half-sentence, and never stop at an intro that only promises an explanation — "
-    "actually give the full answer. If you lack a specific fact, say so honestly and "
-    "give the next step — NEVER invent a number, date, status, or detail. If an "
-    "onboarding-state block is present, answer the owner's message AND gently guide them "
-    "back to the pending step."
+    "the conversation). Your reply MUST be complete and self-contained: never end on a "
+    "dangling colon or a half-sentence, never stop at an intro that only promises an "
+    "explanation ('here's how it works:' / 'here's the short version.') — actually GIVE the "
+    "full answer in this message. If the owner asked a question, answer it in full. "
+    "If the draft already fully and correctly answers, keep its content and warmth — just "
+    "make sure it is whole; do not pad it. If you lack a specific fact, say so honestly and "
+    "give the useful next step — NEVER invent a number, price, date, status, or detail, and "
+    "NEVER claim an action was taken that wasn't. If an onboarding-state block is present, "
+    "answer the owner's message AND gently guide them back to the pending step."
 )
 
 
@@ -1053,11 +1057,13 @@ def _maybe_send_manager_reply(
     construction (the tool_guardrail invariant), so this owner send lives here in the
     deterministic dispatch seam rather than as a brain tool-call.
 
-    VT-591: the trailing reply sometimes truncates — the agent emits an "explainer
-    intro" ending in a dangling colon (or defers to a tool_call) as its complete turn
-    and stops. When ``_reply_is_incomplete`` fires, run ONE focused no-tools
-    compose-completion LLM call and send THAT instead; a COMPLETE reply skips the call
-    entirely (cost guard). Fail-soft chain: completed → raw trailing text → D1 net.
+    VT-591 → VT-593: the trailing reply frequently truncates — the agent emits an
+    "explainer intro" ("here's the short version." / dangling colon) or a bare
+    acknowledgment as its complete turn and stops, on both sonnet-4-6 and sonnet-5.
+    Heuristic detection couldn't reliably catch it, so we now ALWAYS finalize the reply
+    through the no-tools compose call (``_compose_completed_reply``): the brain DECIDES,
+    the compose WRITES the complete owner message (a good draft passes through, a
+    truncated one is finished). Fail-soft chain: finalized → raw trailing text → D1 net.
     Exactly ONE send.
     """
     recipient = getattr(event, "sender_phone", None)
@@ -1065,14 +1071,23 @@ def _maybe_send_manager_reply(
         return
 
     raw = _last_manager_reply_text(terminal_state)
-    # VT-591: complete an INCOMPLETE trailing reply; leave a complete one untouched
-    # (no extra LLM call). The compose call is itself fail-soft (returns None), so on
-    # its miss we fall back to the raw trailing text, then to runner.py's D1 net.
-    if _reply_is_incomplete(terminal_state):
-        completed = _compose_completed_reply(tenant_id, event, terminal_state)
-        body, path = (completed, "completed") if completed else (raw, "raw-fallback")
+    # VT-593: ALWAYS finalize a handle-directly reply through the no-tools compose call.
+    # The ReAct brain reliably DECIDES (handle vs spawn) but UNRELIABLY WRITES a complete
+    # final message — both sonnet-4-6 and sonnet-5 stop after an intro / acknowledgment on
+    # ~half of explainer turns ("here's the short version." then nothing), and four prompt
+    # passes + a model upgrade did not fix it. Heuristic incomplete-detection (VT-591)
+    # only caught dangling colons, not period-ended intros or bare acknowledgments. So the
+    # compose (NO tools bound → it MUST emit a full owner message) is now the canonical
+    # AUTHOR of the conversational reply: a complete draft passes through, an intro /
+    # dangling / empty draft gets finished. Fail-soft: compose miss → raw draft → D1 net.
+    finalized = _compose_completed_reply(tenant_id, event, terminal_state)
+    if finalized:
+        # _reply_is_incomplete only labels the log line now (observability: was the raw
+        # draft already whole, or did the compose rescue a truncated one?).
+        body = finalized
+        path = "finalized-rescued" if _reply_is_incomplete(terminal_state) else "finalized-passthrough"
     else:
-        body, path = raw, "raw"
+        body, path = raw, "raw-fallback"
 
     if not body:
         # Nothing transmittable — leave runner.py's D1 fallback (VT-583) as the net.
