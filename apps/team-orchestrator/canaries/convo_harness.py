@@ -10,6 +10,7 @@ silent-drop class: send a message, watch whether a reply actually comes back.
 
     setup     [--owner-inputs true|false] [--onboarded] [--name N] [--number N] [--phase P]
               [--journey] [--draft-about A] [--draft-city C] [--draft-type T] [--flow BEAT]
+              [--seed-lapsed-customers N] [--consent-version V]
     send      <tenant_id> "<message>" [--ingress-url URL] [--timeout S]
     script    <tenant_id> <scenario.json|.yaml> [--ingress-url URL] [--timeout S]
     teardown  <tenant_id>
@@ -19,6 +20,17 @@ onboarding_journey with a small deterministic queue) — synthetic tenants other
 onboarding scenarios never enter the journey path and every reply is the D1 fallback line. --flow
 (requires --onboarded) arms the paced post-profile-flow sentinel for flow-beat scenarios (readiness /
 integration-offer / deferred). See per-scenario "notes" for the exact setup invocation each expects.
+
+--seed-lapsed-customers N (requires --onboarded) additionally seeds N bogus customers (majority
+old-and-high-spend / a few recent-and-low-spend) + matching sale ledger rows + an active
+marketing-cleared consent row per customer + a connected data-source connector + the tenant's
+verification/ownership fields — the FULL sales_recovery activation-gate substrate
+(agents.activation_registry.REGISTRY / agents.onboarding_gate) — so a "which customers stopped
+buying / win them back" message can DELEGATE to the Sales-Recovery specialist and ground a real
+plan instead of the empty-ledger fallback. See --consent-version: the seeded
+consent_text_version MUST match a member of the dev Railway MARKETING_CONSENT_VERSIONS allowlist
+(VT-396 dev-test hook) or detect_lapsed_customers structurally returns zero candidates regardless
+of this seed.
 
 HOW OUTBOUND IS CAPTURED (no real send). Every owner-facing send funnels through
 utils/twilio_send._client(), which on dev is wrapped by the VT-476 dev_send_guard. The harness
@@ -53,6 +65,7 @@ import sys
 import time
 import uuid
 from dataclasses import dataclass
+from datetime import date, timedelta
 from typing import Any
 
 # --- constants ---------------------------------------------------------------------------------
@@ -448,6 +461,120 @@ def _seed_journey_state(
     start_journey(tenant_id, queue)
 
 
+# --- lapsed-customer seeding (delegation harness) -----------------------------------------------
+
+# A connector_id (tenant_connector_status, mig 034) that is ALSO a valid VT-54 acquired_via tag
+# (integrations.dedup_merge.ACQUIRED_VIA) — the seeded ledger rows' provenance matches the
+# "connected data source" the activation gate checks for.
+_SEED_CONNECTOR_ID = "google_sheet"
+
+_SEED_NAMES = (
+    "Priya Sharma", "Rahul Verma", "Anita Desai", "Vikram Rao", "Sunita Iyer",
+    "Arjun Nair", "Kavita Joshi", "Manoj Reddy", "Deepa Menon", "Sanjay Gupta",
+    "Neha Kapoor", "Ravi Pillai",
+)
+
+
+@dataclass
+class LapsedSeedResult:
+    n_customers: int
+    n_lapsed: int
+    n_recent: int
+    n_ledger_entries: int
+    connector_id: str
+
+
+def _lapsed_seed_rows(n: int) -> list[tuple[int, int]]:
+    """(days_since_last_sale, amount_paise) for ``n`` synthetic customers: a majority OLD +
+    high-spend and a minority RECENT + low-spend.
+
+    ``detect_lapsed_customers`` (sales_recovery_executor.py) gates on the tenant's OWN
+    recency-p75 / spend-p50 PERCENTILES, not a fixed day count — so only the upper slice of
+    the 'old' cluster actually clears both floors, never literally "most" of what's seeded.
+    Making the old cluster BOTH the oldest AND the highest-spending pushes as much of it as
+    possible above both percentile floors at once; the recent/low-spend minority is designed to
+    sit below both (correctly excluded — they haven't stopped buying)."""
+    n_recent = max(1, n // 4)
+    n_lapsed = n - n_recent
+    rows = [(120 + i * 25, 80_000 + i * 15_000) for i in range(n_lapsed)]  # ~120-270d, ₹800-2600+
+    rows += [(2 + i * 3, 10_000 + i * 2_000) for i in range(n_recent)]  # ~2-10d, ₹100-200
+    return rows
+
+
+def _seed_lapsed_customers(
+    dsn: str, tenant_id: str, *, n: int, consent_version: str
+) -> LapsedSeedResult:
+    """Seed a majority-lapsed / minority-recent bogus customer base + matching sale ledger rows +
+    an ACTIVE marketing-cleared consent row per customer + a connected data-source connector +
+    the remaining sales_recovery activation-gate prerequisites (tenants.verification_status /
+    ownership_verified — agents.activation_registry.REGISTRY), so a conversational win-back ask
+    can DELEGATE to the Sales-Recovery specialist and ground a real plan instead of falling
+    through to the empty-ledger reply. Writes via the REAL tenant-scoped writers
+    (CustomersWrapper.insert / record_ledger_entries / record_consent — the same RLS-correct,
+    idempotency/consent-tokenisation-correct paths production uses), same posture as
+    ``_seed_journey_state``. All bogus/synthetic (CL-422). Additive: re-running adds MORE
+    customers, it does not reset the tenant."""
+    from orchestrator.db.wrappers import CustomersWrapper
+    from orchestrator.integrations.ledger import LedgerEntryIn, record_ledger_entries
+    from orchestrator.privacy.consent import record_consent
+
+    _ensure_substrate(dsn)
+    customers = CustomersWrapper()
+    seed_rows = _lapsed_seed_rows(n)
+    n_recent = max(1, n // 4)
+    n_lapsed = n - n_recent
+    n_ledger_entries = 0
+
+    for i, (days_ago, amount_paise) in enumerate(seed_rows):
+        name = f"{_SEED_NAMES[i % len(_SEED_NAMES)]} ({i})"
+        phone = bogus_number()  # same non-allowlisted range the harness tenant itself uses
+        row = customers.insert(
+            tenant_id,
+            {
+                "display_name": name,
+                "phone_e164": phone,
+                "opt_out_status": "subscribed",
+                "source": "convo-harness-seed",
+            },
+        )
+        customer_id = str(row["id"])
+        record_consent(tenant_id, phone, consent_text_version=consent_version)
+        entry = LedgerEntryIn(
+            amount_paise=amount_paise,
+            entry_type="sale",
+            entry_date=date.today() - timedelta(days=days_ago),
+            confidence=0.95,
+            notes="convo-harness seed",
+        )
+        result = record_ledger_entries(
+            tenant_id, customer_id, [entry], acquired_via=_SEED_CONNECTOR_ID
+        )
+        n_ledger_entries += result.written
+
+    with _connect(dsn) as conn:
+        conn.execute(
+            "INSERT INTO tenant_connector_status "
+            "(tenant_id, connector_id, enabled, last_status, last_ingested_date, last_sync_at) "
+            "VALUES (%s, %s, TRUE, 'ok', CURRENT_DATE, now()) "
+            "ON CONFLICT (tenant_id, connector_id) DO UPDATE SET "
+            "enabled = TRUE, last_status = 'ok', last_ingested_date = CURRENT_DATE, last_sync_at = now()",
+            (tenant_id, _SEED_CONNECTOR_ID),
+        )
+        conn.execute(
+            "UPDATE tenants SET verification_status = 'gstin_verified', "
+            "verification_method = 'gstin_lookup', verified_at = now(), "
+            "ownership_verified = TRUE, ownership_status = 'verified', "
+            "ownership_reviewed_at = now(), ownership_reviewed_by = 'convo-harness-seed' "
+            "WHERE id = %s",
+            (tenant_id,),
+        )
+
+    return LapsedSeedResult(
+        n_customers=len(seed_rows), n_lapsed=n_lapsed, n_recent=n_recent,
+        n_ledger_entries=n_ledger_entries, connector_id=_SEED_CONNECTOR_ID,
+    )
+
+
 def cmd_setup(args: argparse.Namespace) -> int:
     dsn = _dsn()
     name = args.name or f"{_HARNESS_NAME_PREFIX}{uuid.uuid4().hex[:8]}"
@@ -463,6 +590,11 @@ def cmd_setup(args: argparse.Namespace) -> int:
         _die("--flow requires --onboarded — the __flow__ sentinel is only read on a COMPLETE journey row")
     if args.flow and not args.flow.startswith(_VALID_FLOW_PREFIXES):
         _die(f"--flow {args.flow!r} is not one of {_VALID_FLOW_PREFIXES} (or 'integration:<name>')")
+    if args.seed_lapsed_customers is not None:
+        if not args.onboarded:
+            _die("--seed-lapsed-customers requires --onboarded")
+        if args.seed_lapsed_customers < 1:
+            _die("--seed-lapsed-customers must be >= 1")
 
     with _connect(dsn) as conn:
         row = conn.execute(
@@ -499,10 +631,23 @@ def cmd_setup(args: argparse.Namespace) -> int:
             business_type=args.draft_type, business_name=name,
         )
 
+    seeded: LapsedSeedResult | None = None
+    if args.seed_lapsed_customers is not None:
+        seeded = _seed_lapsed_customers(
+            dsn, tenant_id, n=args.seed_lapsed_customers, consent_version=args.consent_version,
+        )
+
     print(f"tenant_id={tenant_id}")
     print(f"whatsapp_number={number}  (bogus, non-allowlisted → dev_send_guard mocks all sends)")
     print(f"owner_inputs={owner_inputs}  phase={args.phase}  onboarded={bool(args.onboarded)}"
           f"  journey={bool(args.journey)}  flow={args.flow!r}")
+    if seeded is not None:
+        print(f"seeded {seeded.n_customers} customers ({seeded.n_lapsed} lapsed / {seeded.n_recent} "
+              f"recent), {seeded.n_ledger_entries} sale-ledger rows, connector={seeded.connector_id!r} "
+              f"enabled, verification_status=gstin_verified, ownership_verified=true")
+        print(f"consent_version={args.consent_version!r} — MUST match a member of dev's Railway "
+              f"MARKETING_CONSENT_VERSIONS env var or detect_lapsed_customers returns ZERO candidates "
+              f"regardless of this seed (VT-396 dev-test hook; structurally fail-closed on prod)")
     return 0
 
 
@@ -701,6 +846,22 @@ def build_parser() -> argparse.ArgumentParser:
         help="arm answers['__flow__'] on a COMPLETE journey (requires --onboarded) for flow-beat "
              "scenarios: 'profile_previewed' | 'ready_asked' | 'deferred' | 'integration:<name>' "
              "(e.g. 'integration:shopify') | 'plan_kicked'",
+    )
+    s.add_argument(
+        "--seed-lapsed-customers", type=int, default=None, metavar="N",
+        help="requires --onboarded. AFTER the onboarded seed, insert N bogus customers (majority "
+             "old+high-spend / a few recent+low-spend) + matching sale-ledger rows + a marketing-"
+             "cleared consent row each + a connected data-source connector + verification/ownership "
+             "— the full sales_recovery activation-gate substrate — so a win-back ask can DELEGATE "
+             "to the Sales-Recovery specialist and ground a real plan. See --consent-version.",
+    )
+    s.add_argument(
+        "--consent-version", default="dev-test-v0",
+        help="record_of_consent.consent_text_version for --seed-lapsed-customers rows. MUST match "
+             "a member of dev's Railway MARKETING_CONSENT_VERSIONS allowlist (VT-396 dev-test hook) "
+             "or detection structurally returns zero candidates regardless of this seed (default "
+             "'dev-test-v0', the VT-396 plan's documented dev-test convention — confirm it against "
+             "the actual dev env var before relying on a non-empty cohort).",
     )
     s.set_defaults(func=cmd_setup)
 
