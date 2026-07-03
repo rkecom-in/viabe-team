@@ -298,6 +298,84 @@ def test_discovery_inbound_mints_authorize_url(substrate):
     assert "state=" in url and "client_id=" in url
 
 
+def test_discovery_domain_in_sentence_mints(substrate):
+    """VT-588: the owner replies to the address ask with a SENTENCE, not the bare host
+    ('here it is: vt425.myshopify.com'). The gate scans the whole body for a valid domain — so it
+    still mints the link (never a false 'that's not a store address')."""
+    from orchestrator.onboarding.shopify_onboarding import (
+        begin_shopify_onboarding,
+        maybe_resume_shopify_onboarding,
+    )
+
+    tenant = _new_tenant(substrate.dsn)
+    begin_shopify_onboarding(tenant, recipient=None)
+    result = maybe_resume_shopify_onboarding(
+        tenant, "sure, here it is: vt425.myshopify.com", "SID-disco-sentence", recipient=None
+    )
+    assert result is not None and result["routed"] == "shopify_setup_minted"
+
+
+def test_discovery_question_falls_through_to_brain(substrate):
+    """VT-588: a QUESTION mid-discovery ('what do you charge?') has no domain-shaped token → the gate
+    FALLS THROUGH (returns None) so the manager brain answers it — NOT the canned 'that's not a store
+    address' reprompt. The pending state stays live so the owner's next domain re-engages the gate."""
+    from orchestrator.onboarding.shopify_onboarding import (
+        begin_shopify_onboarding,
+        maybe_resume_shopify_onboarding,
+        read_integration_state,
+    )
+
+    tenant = _new_tenant(substrate.dsn)
+    begin_shopify_onboarding(tenant, recipient=None)
+    for msg in ("what do you charge?", "did you get my store address?",
+                "ok back to it, lets continue the setup", "actually how does this work",
+                "how do I use shopify?", "wait, what is Shopify exactly",  # bare 'shopify' word ≠ domain attempt
+                # Hinglish / mobile no-space-after-period chat — a dotted bigram is NOT a domain attempt
+                # (VT-588 adversarial-review finding). These MUST fall through, not canned-reprompt.
+                "haan.theek hai", "ok.thanks", "yes.done it", "sure.will do", "no i sell on amazon"):
+        result = maybe_resume_shopify_onboarding(tenant, msg, f"SID-q-{abs(hash(msg)) % 9999}", recipient=None)
+        assert result is None, f"off-script {msg!r} must fall through to the brain, not canned-reprompt"
+    # The connect state stays LIVE — the detour did not abandon the hand-off.
+    assert read_integration_state(tenant)["phase"] == "phase_1_discovery"
+
+
+def test_discovery_malformed_domain_attempt_still_reprompts(substrate, _capture_shopify_sends):
+    """VT-588: a genuine but MALFORMED domain attempt ('mystore.shopify.com' wrong TLD) IS a store-
+    address attempt → keep the specific reprompt (do NOT fall through — the brain has nothing better to
+    say than the exact 'yourstore.myshopify.com' correction)."""
+    from orchestrator.onboarding.shopify_onboarding import (
+        begin_shopify_onboarding,
+        maybe_resume_shopify_onboarding,
+    )
+
+    tenant = _new_tenant(substrate.dsn)
+    begin_shopify_onboarding(tenant, recipient=None)
+    result = maybe_resume_shopify_onboarding(
+        tenant, "mystore.shopify.com", "SID-malformed-1", recipient="+919000000123"
+    )
+    assert result is not None and result["routed"] == "shopify_discovery_retry"
+    assert _capture_shopify_sends and "myshopify.com" in _capture_shopify_sends[-1]
+
+
+def test_onboarding_state_block_surfaces_live_connect_to_brain(substrate):
+    """VT-588 (P1b-2): with a live Shopify discovery hand-off, dispatch_brain gets an onboarding-state
+    block that names the awaited step (store address) so it can field an off-script message + guide the
+    owner back. No integration in flight → no block (the brain isn't told it's onboarding)."""
+    from orchestrator.agent.dispatch import _build_onboarding_state_block
+    from orchestrator.onboarding.shopify_onboarding import begin_shopify_onboarding
+
+    fresh = _new_tenant(substrate.dsn)
+    assert _build_onboarding_state_block(fresh) is None, "no live connect → no onboarding block"
+
+    tenant = _new_tenant(substrate.dsn)
+    begin_shopify_onboarding(tenant, recipient=None)  # phase_1_discovery, awaiting store address
+    block = _build_onboarding_state_block(tenant)
+    assert block is not None
+    assert "store address" in block.lower()
+    assert "answer their actual message first" in block.lower()  # off-script guidance present
+    assert "never claim" in block.lower()  # no-fabrication rail present
+
+
 @_DB
 def test_resume_canary_not_connected_does_not_fabricate(substrate):
     """RESUME guard: 'done' with NO token row → stays phase_2_auth, NO ingest, NO fabrication."""

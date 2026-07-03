@@ -42,6 +42,7 @@ PII (BINDING — CL-104 / CL-390 / CL-426 / CL-422):
 from __future__ import annotations
 
 import logging
+import re
 from datetime import UTC, datetime
 from typing import Any, Callable
 from uuid import UUID
@@ -71,10 +72,57 @@ _DONE = {
 
 
 def _tokens(body: str) -> set[str]:
-    import re
-
     norm = (body or "").strip().casefold().replace("'", "")
     return {t for t in re.split(r"[\s,.!?;:।/\\-]+", norm) if t}
+
+
+# VT-588 — the DISCOVERY-phase off-script router. The owner who is asked for a store address may reply
+# with a domain (anywhere in the sentence), a malformed domain ATTEMPT, or something else entirely (a
+# question, a "later", ordinary chat). Only the first two are the resume gate's business; the third
+# must reach the manager brain, not a canned "that's not a store address" reprompt.
+def _scan_shop_domain(body: str) -> str | None:
+    """Return the FIRST whitespace token in ``body`` that validates as a Shopify store domain, else
+    None. Accepts a domain given ANYWHERE in a sentence ("here it is: mystore.myshopify.com"), not just
+    as the bare first token — the offer beat's VT-587 same-message pickup handles the affirm-plus-URL
+    case, but an owner still often replies to the address ask with a short sentence, not the bare host."""
+    from orchestrator.integrations.connectors.shopify import (
+        ShopDomainError,
+        validate_shop_domain,
+    )
+
+    for tok in (body or "").split():
+        candidate = tok.strip().strip(".,!?;:\"'()<>[]")
+        try:
+            validate_shop_domain(candidate)
+            return candidate
+        except ShopDomainError:
+            continue
+    return None
+
+
+# A domain-SHAPED token: a URL scheme, or a host whose LAST label is a RECOGNISED tld / a shopify label.
+# The tld gate is the discriminator (VT-588 adversarial review): a bare ``word.word2`` dotted bigram is
+# NOT a domain attempt — a Hinglish owner on mobile with no space after a period ("haan.theek hai",
+# "ok.thanks", "yes.done it") must FALL THROUGH to the brain, not earn the canned "that's not a store
+# address" reprompt. Only a genuine (if malformed) store address ("mystore.myshopify", "mystore.shopify.com",
+# "mystore.com", "www.store.in", "https://…") trips this. An exotic real TLD not listed simply falls
+# through to the brain (safe direction — under-reprompt beats over-reprompting ordinary chat).
+_DOMAIN_TLDS = (
+    "myshopify|shopify|com|net|org|in|co|io|store|shop|biz|info|xyz|online|site|app|dev"
+)
+_DOMAIN_SHAPED_RE = re.compile(
+    rf"(https?://|\b[a-z0-9][a-z0-9-]*\.(?:{_DOMAIN_TLDS})\b)", re.IGNORECASE
+)
+
+
+def _is_domain_attempt(body: str) -> bool:
+    """True when ``body`` carries a domain-shaped token (a URL, or a host ending in a recognised tld /
+    shopify label) that failed validation — a malformed store address ("mystore.shopify.com" wrong
+    subdomain, "mystore.myshopify" missing .com). Such an attempt earns the specific 'that's not a valid
+    address' reprompt; ANY message without such a token — a question, a proceed intent, ordinary chat, a
+    Hinglish "haan.theek hai", even one that merely says the word 'shopify' — is fallen through to the
+    manager brain by the caller (VT-588)."""
+    return bool(_DOMAIN_SHAPED_RE.search(body or ""))
 
 
 # VT-583 (CL-2026-07-03-conversing-surfaces-and-harness): the auth-phase INTENT classifier. The _DONE
@@ -521,22 +569,24 @@ def maybe_resume_shopify_onboarding(
 
         # --- discovery: capture the shop domain → mint the link-out -------------------------
         if phase == PHASE_DISCOVERY and awaiting == "connector_choice":
-            from orchestrator.integrations.connectors.shopify import (
-                ShopDomainError,
-                validate_shop_domain,
-            )
-
-            shop_candidate = (body or "").strip().split()[0] if (body or "").strip() else ""
-            try:
-                validate_shop_domain(shop_candidate)
-            except ShopDomainError:
-                _send(
-                    recipient,
-                    "That doesn't look like a Shopify store address. It should look like "
-                    "yourstore.myshopify.com — please reply with that.",
-                    tenant_id=tenant_id,
-                )
-                return {"done": False, "phase": phase, "routed": "shopify_discovery_retry"}
+            shop_candidate = _scan_shop_domain(body)
+            if shop_candidate is None:
+                # VT-588: no valid domain in the reply. A genuine but malformed domain ATTEMPT gets
+                # the specific reprompt; ANYTHING ELSE (a question, a proceed intent, ordinary chat)
+                # FALLS THROUGH to the manager brain (return None) — the brain answers off-script from
+                # the 24h window + the onboarding-state block, then re-nudges to the store-address ask.
+                # The flow state persists (pending_owner_input stays live), so the owner's NEXT domain
+                # re-engages this gate. Kills the canned-reprompt-to-a-question defect (topic_switch
+                # "what do you charge?" / context_retention "did you get my store address?").
+                if _is_domain_attempt(body):
+                    _send(
+                        recipient,
+                        "That doesn't look like a Shopify store address. It should look like "
+                        "yourstore.myshopify.com — please reply with that.",
+                        tenant_id=tenant_id,
+                    )
+                    return {"done": False, "phase": phase, "routed": "shopify_discovery_retry"}
+                return None  # off-script → manager brain (never a canned reprompt to a real question)
             result = start_shopify_setup(tenant_id, shop_candidate)
             _send(
                 recipient,

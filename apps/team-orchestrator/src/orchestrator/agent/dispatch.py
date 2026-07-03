@@ -296,6 +296,53 @@ def _build_manager_conversation_block(
     return "\n".join(lines)
 
 
+def _build_onboarding_state_block(tenant_id: UUID) -> str | None:
+    """VT-588 — surface the LIVE onboarding step so the Team-Manager knows it is mid-setup and can
+    field an OFF-SCRIPT owner message without losing the thread. The integration resume gate now falls
+    a question / topic-switch / chat (anything that isn't the awaited store-address or 'done') THROUGH
+    to this brain instead of a canned reprompt (shopify_onboarding VT-588); this block is what lets the
+    brain answer it AND guide the owner back to the connect step. Read-only, best-effort (a read miss →
+    no block). Inserted AFTER the cached prefix (a per-turn SystemMessage), so the VT-194 cache holds."""
+    try:
+        from orchestrator.onboarding.shopify_onboarding import (
+            PHASE_AUTH,
+            PHASE_DISCOVERY,
+            has_live_resume,
+            read_integration_state,
+        )
+
+        if not has_live_resume(tenant_id):
+            return None
+        state = read_integration_state(tenant_id) or {}
+        phase = state.get("phase")
+    except Exception:  # noqa: BLE001 — best-effort, like the L1/business/conversation blocks
+        logger.warning(
+            "dispatch: onboarding-state assembly failed (tenant=%s); proceeding without", tenant_id
+        )
+        return None
+
+    if phase == PHASE_DISCOVERY:
+        step = ("The owner is connecting their Shopify store and you are waiting for them to send their "
+                "store address (it looks like yourstore.myshopify.com — then you send a one-tap connect link).")
+    elif phase == PHASE_AUTH:
+        step = ("The owner is connecting their Shopify store — you already sent a one-tap connect link and "
+                "are waiting for them to approve it in the browser and reply 'done'.")
+    else:
+        step = "The owner is in the middle of connecting an integration."
+
+    return (
+        "## Onboarding in progress — you are mid-setup\n"
+        f"{step}\n"
+        "Their latest message reached you because it wasn't that exact next step. So:\n"
+        "- ANSWER their actual message first — directly, honestly, and helpfully (it may be a real "
+        "question, a change of mind, or a different topic).\n"
+        "- Then, in the SAME reply, gently guide them back to the step above.\n"
+        "- If they ALREADY gave a detail earlier in the conversation (e.g. their store address is in the "
+        "window above), do NOT ask for it again — acknowledge you have it and continue.\n"
+        "- NEVER claim the store is connected / the step is done until it actually is."
+    )
+
+
 def _resolve_model(model_id: str = _BRAIN_MODEL_OPUS) -> ChatAnthropic:
     # VT-480: ``model_id`` is the tier-selected brain model (see
     # select_brain_model). Defaults to Opus (the capable model) so any caller
@@ -497,6 +544,14 @@ def dispatch_brain(
     if conversation_block:
         _messages.insert(0, SystemMessage(content=conversation_block))
 
+    # VT-588: the ONBOARDING-STATE block — when an onboarding integration hand-off is live and the
+    # owner's message fell off-script (the resume gate passed it through, VT-588), tell the brain which
+    # step it is mid-way through so it answers the off-script message AND guides the owner back, instead
+    # of dropping the thread. Best-effort + per-turn SystemMessage (cache holds). None when not onboarding.
+    onboarding_state_block = _build_onboarding_state_block(tenant_id)
+    if onboarding_state_block:
+        _messages.insert(0, SystemMessage(content=onboarding_state_block))
+
     # VT-514 GETS — retrieval audit spine row: which context sources hit
     # (presence flags only; the redacted block CONTENT rides the KNOWS row).
     emit_tm_audit(
@@ -514,6 +569,8 @@ def dispatch_brain(
             "intent_present": bool(intent_block),
             # VT-579: whether the always-on conversation window (+summary) was present this turn.
             "conversation_present": bool(conversation_block),
+            # VT-588: whether the onboarding-state block was present (a live integration hand-off).
+            "onboarding_state_present": bool(onboarding_state_block),
             "intent_classification": _manager_intent.get("classification"),
         },
     )
