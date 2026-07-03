@@ -620,6 +620,114 @@ def _recompose_stale_confirms(tenant_id: UUID | str, g: dict[str, Any], business
         return False
 
 
+# --- CL-2026-07-03 populate-first: build the profile from public info; show, don't interrogate -------
+#
+# BINDING (CL-2026-07-03-populate-first-onboarding, Fazal live drill): when discovery is ANCHORED to the
+# owner's real identity (an entity-ACCEPTED GBP listing or an owner-LINKED website), the derivable
+# profile facts are AUTO-POPULATED — promoted to canonical + recorded into the journey answers so the
+# conductor STOPS queueing per-field confirms — and PRESENTED as ONE editable profile card. The
+# never-assert boundary becomes assert-with-visibility for these PROFILE facts only; every
+# correctness/effect gate (taxonomy validation, consent, sends, money, DSR) is UNCHANGED. Per-field
+# confirm questions for derivable facts are the double-ask defect class this kills (the live drill:
+# owner confirms the site-derived description → the NEXT turn re-asks the same substance as `about`).
+
+# The DERIVABLE profile facts (the question-brain's _CONFIRMABLE set + the website). Auto-populated and
+# kept owner-editable; NEVER interrogated field-by-field.
+_DERIVABLE_PROFILE_FIELDS = ("business_type", "category", "about", "city", "website")
+
+# A reserved key stored INSIDE the journey ``answers`` map holding {field: value} of what populate last
+# asserted from DISCOVERY. It is the single source of three invariants: (a) owner-stated wins — a real
+# answers value that DIFFERS from this sentinel is an owner edit and is never downgraded; (b) refresh — a
+# populate-owned field whose discovery value changed is re-promoted; (c) card-once — populate returns a
+# non-empty delta (→ present the card) ONLY when the populated set actually changed. Namespaced ``__`` so
+# it is never a real field / never a queued question / never surfaced to the owner (turn_brain strips it).
+_POPULATED_SENTINEL = "__populated__"
+
+
+def _is_identity_anchored(draft: dict[str, Any]) -> bool:
+    """True iff the draft is anchored to the owner's REAL identity — an ENTITY-ACCEPTED GBP listing or an
+    OWNER-LINKED (owner-stated) website — the trust bar for AUTO-POPULATING derivable facts (a weaker
+    public-guess draft stays confirm-gated). Reads the provenance / entity-resolution the discovery legs
+    already wrote; no network. Fail-closed: any unexpected shape → not anchored (keep the confirm path)."""
+    attrs = draft.get("attributes") or {}
+    prov = draft.get("provenance") or {}
+    er = attrs.get("entity_resolution")
+    if isinstance(er, dict) and er.get("decision") == "accept":
+        return True
+    wp = prov.get("website")
+    if isinstance(wp, dict) and wp.get("source") == "owner_stated":
+        return True
+    return False
+
+
+def _derivable_populate_fields(draft: dict[str, Any]) -> dict[str, Any]:
+    """The derivable profile facts to promote from ``draft``, mirroring the question-brain's confirmable
+    set: the RECONCILED ``business_type`` (only a VALID taxonomy key — never assert garbage; CL-390),
+    which SUPPRESSES the raw GBP ``category`` (VT-475 mis-category guard); ``category`` only when no
+    business_type resolves; plus ``about`` / ``city`` / ``website``. Empties dropped."""
+    from orchestrator.onboarding.business_type_reconcile import is_valid_business_type
+
+    attrs = dict((_draft_with_reconciled_type(draft).get("attributes")) or {})
+    out: dict[str, Any] = {}
+    bt = attrs.get("business_type")
+    if bt not in (None, "", []) and is_valid_business_type(str(bt)):
+        out["business_type"] = bt
+    cat = attrs.get("category")
+    if cat not in (None, "", []) and "business_type" not in out:
+        out["category"] = cat  # only when no reconciled business_type (VT-475 suppression parity)
+    for f in ("about", "city", "website"):
+        v = attrs.get(f)
+        if v not in (None, "", []):
+            out[f] = v
+    return out
+
+
+def populate_profile_from_draft(tenant_id: UUID | str) -> dict[str, Any]:
+    """Populate-first (CL-2026-07-03): in ONE shot, promote every DERIVABLE profile fact from an
+    IDENTITY-ANCHORED draft to the canonical business_profile AND record it into the journey answers (so
+    the conductor stops queueing per-field confirms). Returns the fields NEWLY populated or CHANGED this
+    call — the caller presents the profile card iff the return is non-empty (card-once).
+
+    Idempotent + conflict-safe via the ``__populated__`` sentinel: an owner-stated value is NEVER
+    downgraded to discovery; a populate-owned field whose discovery value changed is refreshed; an
+    unchanged populate returns {} (no re-card). No-op ({}) when the draft is absent / not
+    identity-anchored / has no derivable facts, or the journey is not active. Promotion goes through the
+    SAME never-assert gate (confirm_draft) the owner-confirm flow uses; business_type is taxonomy-gated."""
+    from orchestrator.onboarding.draft_profile import get_draft
+
+    draft = get_draft(tenant_id)
+    if not draft.get("attributes") or not _is_identity_anchored(draft):
+        return {}
+    discovered = _derivable_populate_fields(draft)
+    if not discovered:
+        return {}
+    g = get_journey(tenant_id)
+    if g is None or g.get("status") != "active":
+        return {}
+    answers = dict(g.get("answers") or {})
+    prev = dict(answers.get(_POPULATED_SENTINEL) or {})
+
+    changed: dict[str, Any] = {}
+    for f, disc_v in discovered.items():
+        if f in answers and answers.get(f) != prev.get(f):
+            continue  # owner-stated (or owner-edited) — never downgrade to discovery
+        if f in answers and prev.get(f) == disc_v:
+            continue  # already populated with this exact value — no change, no re-card
+        changed[f] = disc_v
+    if not changed:
+        return {}
+
+    merged = {**answers, **changed, _POPULATED_SENTINEL: {**prev, **changed}}
+    with tenant_connection(tenant_id) as conn:
+        conn.execute(
+            "UPDATE onboarding_journey SET answers = %s, updated_at = now() "
+            "WHERE tenant_id = %s AND status = 'active'",
+            (Jsonb(merged), str(tenant_id)),
+        )
+    _confirm(tenant_id, changed)  # promote to canonical (assert-with-visibility; taxonomy already gated)
+    return changed
+
+
 def _opener() -> dict[str, Any]:
     return {
         "prompt_en": "Hi! Give us a moment — we're setting up your assistant and will ask a couple of quick questions.",
@@ -755,6 +863,19 @@ def _apply_turn_plan(
             continue
         answers[fieldname] = v
         promote[fieldname] = v
+
+    # 3. Populate-first EDITS-FOREVER (CL-2026-07-03): a DERIVABLE profile fact the owner STATES or edits
+    #    this turn is a profile fact — assert it with visibility (re-promote to canonical NOW so the edit
+    #    sticks) without a per-field confirm. Re-promotion is a confirm_draft MERGE, so an already-
+    #    populated field is overwritten with the owner's value. business_type stays taxonomy-gated.
+    for fieldname in _DERIVABLE_PROFILE_FIELDS:
+        v = _coerce_answer((plan.extracted_answers or {}).get(fieldname))
+        if not v:
+            continue
+        if fieldname == "business_type" and not is_valid_business_type(v):
+            continue  # recorded as a free answer in step 1; never assert an off-taxonomy type
+        promote[fieldname] = v
+
     if promote:
         _confirm(tenant_id, promote)
     return answers, skipped
@@ -843,13 +964,18 @@ def _maybe_refresh_owner_website(
 
 
 def _handle_reply_with_turn_brain(
-    tenant_id: UUID | str, body: str, message_sid: str | None, *, lang: str = "en", is_start: bool = False
+    tenant_id: UUID | str, body: str, message_sid: str | None, *, lang: str = "en", is_start: bool = False,
+    profile_card: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """The LLM-driven per-reply path. Composes the SAY + interprets the reply via the turn-brain, then
     records extractions through the EXISTING deterministic recorders and advances the durable cursor.
     FAIL-SOFT: if the turn-brain returns None (LLM error/timeout/unparseable), fall back to the
     deterministic walker for THIS turn — onboarding never stalls. Idempotent on redelivery (same as the
-    walker): a redelivered sid re-presents without re-invoking the LLM or double-applying."""
+    walker): a redelivered sid re-presents without re-invoking the LLM or double-applying.
+
+    ``profile_card`` = a populate-first card the CALLER already computed (journey start). This path ALSO
+    runs a populate catch-up after any just-landed website refresh and MERGES the two — the union is the
+    card the brain renders this turn (CL-2026-07-03)."""
     g = get_journey(tenant_id)
     if g is None or g["status"] != "active":
         return {"reply_en": "", "reply_hi": "", "done": True}
@@ -872,10 +998,21 @@ def _handle_reply_with_turn_brain(
     # fires at most once per distinct URL (the draft merge makes the second detection a no-op check).
     _maybe_refresh_owner_website(tenant_id, body, draft_attrs)
 
+    # Populate-first catch-up (CL-2026-07-03): after any just-landed refresh, auto-populate every (newly)
+    # derivable profile fact + record it into answers. Its non-empty delta is a card event; union it with
+    # any card the caller computed at journey-start. Re-read the journey so the objective/cursor the brain
+    # composes against EXCLUDE the just-populated fields (kills the double-ask; the drill's next message
+    # gets the card, not the next interrogation).
+    populated = populate_profile_from_draft(tenant_id)
+    if populated:
+        g = get_journey(tenant_id) or g
+    card = {**(profile_card or {}), **populated}
+
     # VT-570 — pass tenant_id so the brain's tool belt (refresh_discovery / read_journey_history) has a
     # tenant context; its presence is also what engages the bounded agentic loop (see compose_turn).
     plan = turn_brain.compose_turn(
-        g, draft_attrs, body, locale=lang, provenance=provenance, is_start=is_start, tenant_id=tenant_id
+        g, draft_attrs, body, locale=lang, provenance=provenance, is_start=is_start, tenant_id=tenant_id,
+        profile_card=(card or None),
     )
     if plan is None:
         # Fail-soft: the deterministic walker owns this turn (and applies the VT-569a bare-no re-prompt).
@@ -889,18 +1026,23 @@ def _handle_reply_with_turn_brain(
     done = new_cursor >= len(g.get("question_queue") or [])
     if done:
         _complete(tenant_id)
-        completion = _completion_message()
-        reply = completion["reply_hi"] if lang == "hi" else completion["reply_en"]
+        if card:
+            # Populate-first: the CARD is the closing message (present the profile, invite edits) — never
+            # a generic closer stacked over it. The integration seam then continues the conversation.
+            reply = plan.reply_text
+            buttons = list(plan.buttons)
+        else:
+            completion = _completion_message()
+            reply = completion["reply_hi"] if lang == "hi" else completion["reply_en"]
+            buttons = []
         # VT-569 memory: persist this exchange so any later conversation sees it.
         _append_recent_turns(
             tenant_id, {"role": "owner", "text": body}, {"role": "bot", "text": reply}
         )
-        # On completion send the durable closer (not a possibly-questioning LLM line); the integration
-        # seam then continues the conversation, so the owner is never left on a dangling question.
         return {
             "turn_brain": True,
             "reply_text": reply,
-            "buttons": [],
+            "buttons": buttons,
             "done": True,
         }
     # VT-569 memory: the brain must see what IT said this turn — an owner affirmation next turn
@@ -929,12 +1071,15 @@ def _fire_integration_seam(tenant_id: UUID | str, recipient: str | None) -> None
 
 def _run_turn_brain_and_send(
     tenant_id: UUID | str, body: str, message_sid: str | None, recipient: str | None,
-    *, lang: str, is_start: bool,
+    *, lang: str, is_start: bool, profile_card: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Run the turn-brain reply path, SEND the result, and fire the completion seam. Sends the composed
     ``reply_text`` (+ any buttons) for a turn-brain result, or the deterministic reply for a fail-soft
-    walker fallback (which carries reply_en/reply_hi, not reply_text)."""
-    r = _handle_reply_with_turn_brain(tenant_id, body, message_sid, lang=lang, is_start=is_start)
+    walker fallback (which carries reply_en/reply_hi, not reply_text). ``profile_card`` = the populate-
+    first card the caller computed at journey-start (merged with any catch-up populate inside the path)."""
+    r = _handle_reply_with_turn_brain(
+        tenant_id, body, message_sid, lang=lang, is_start=is_start, profile_card=profile_card
+    )
     if not r.get("already_presented"):
         if r.get("turn_brain"):
             _send_turn(recipient, r.get("reply_text", ""), r.get("buttons") or [], lang)
@@ -972,32 +1117,48 @@ def maybe_handle_journey_reply(
             return None  # complete / abandoned → normal flow
         if not g["question_queue"]:
             # Pending lazy-start: the draft may have landed — try to fill the queue now.
+            # Populate-first (CL-2026-07-03): if the draft is identity-anchored, AUTO-POPULATE the
+            # derivable profile facts FIRST — they land in answers, so ``_compose_queue`` below composes
+            # to the remaining NECESSITIES only (never a per-field confirm), and the populated set drives
+            # the profile card the start turn presents. Runs regardless of the turn-brain gate (the
+            # walker then simply asks the necessities, without a card).
+            populated = populate_profile_from_draft(tenant_id)
             _, btype = _tenant_phase_and_type(tenant_id)
             queue = _compose_queue(tenant_id, btype)
             if queue:
                 set_queue_if_empty(tenant_id, queue)
-                # The first presented question is the head of the just-composed queue (the cursor at
-                # 0). VT-462: the QUEUE itself is conductor-composed (``_compose_queue`` orders it via
-                # the conductor's registry-grounded decision over the just-discovered draft), so the
-                # cursor head already reflects the conductor's dynamic pick — no separate per-reply
-                # conductor call (that would break the cursor/apply contract).
-                g = get_journey(tenant_id) or g
-                # VT-569 — the JOURNEY-START turn. With the turn-brain on, greet ONCE + open with the
-                # first question conversationally (no "Hi! {canned question}" prefix) and absorb any info
-                # the owner volunteered in their first message. Fail-soft: any turn-brain error falls
-                # back to the deterministic first-question send below.
-                if _turn_brain_enabled():
-                    try:
-                        return _run_turn_brain_and_send(
-                            tenant_id, body, message_sid, recipient, lang=lang, is_start=True
-                        )
-                    except Exception:  # noqa: BLE001 — start turn falls back to the deterministic opener
-                        logger.exception(
-                            "journey: turn-brain start turn failed tenant=%s — deterministic opener", tenant_id
-                        )
+            # The first presented question is the head of the just-composed queue (the cursor at 0).
+            # VT-462: the QUEUE itself is conductor-composed (``_compose_queue`` orders it via the
+            # conductor's registry-grounded decision over the just-discovered draft, now MINUS the
+            # populated derivable fields), so the cursor head already reflects the conductor's dynamic
+            # pick — no separate per-reply conductor call (that would break the cursor/apply contract).
+            g = get_journey(tenant_id) or g
+            # VT-569 — the JOURNEY-START turn. With the turn-brain on, greet ONCE, present the profile
+            # card (if populated) + batch the remaining necessities conversationally, absorbing anything
+            # the owner volunteered. On EMPTY necessities after populate the card sends and the turn
+            # completes + fires the seam (done handled inside the turn-brain path). Fail-soft: any
+            # turn-brain error falls back to the deterministic send below.
+            if _turn_brain_enabled() and (queue or populated):
+                try:
+                    return _run_turn_brain_and_send(
+                        tenant_id, body, message_sid, recipient, lang=lang, is_start=True,
+                        profile_card=(populated or None),
+                    )
+                except Exception:  # noqa: BLE001 — start turn falls back to the deterministic opener
+                    logger.exception(
+                        "journey: turn-brain start turn failed tenant=%s — deterministic opener", tenant_id
+                    )
+            # Deterministic fallback (turn-brain off / errored).
+            if queue:
                 _send(recipient, _current(g) or _opener(), lang)
-            else:
-                _send(recipient, _opener(), lang)  # still setting up
+                return {"done": False, "pending": True}
+            if populated:
+                # Fully-derivable profile, no necessities: the profile-collection spine is satisfied —
+                # complete + hand off (the walker has no card; the integration seam continues the chat).
+                _complete(tenant_id)
+                _fire_integration_seam(tenant_id, recipient)
+                return {"done": True, "pending": False}
+            _send(recipient, _opener(), lang)  # still setting up (nothing derivable, no queue yet)
             return {"done": False, "pending": True}
         # VT-478 — LAZY recompose of a STALE queue, BEFORE the current confirm question is presented.
         # VT-475 fixed forward composition but never recomposed EXISTING active queues, so a tenant
@@ -1052,5 +1213,5 @@ def maybe_handle_journey_reply(
 
 __all__ = [
     "start_journey", "set_queue_if_empty", "get_journey", "is_active", "handle_reply",
-    "maybe_handle_journey_reply", "_recompose_stale_confirms",
+    "maybe_handle_journey_reply", "_recompose_stale_confirms", "populate_profile_from_draft",
 ]
