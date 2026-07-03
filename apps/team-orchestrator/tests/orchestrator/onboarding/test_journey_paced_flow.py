@@ -531,3 +531,25 @@ def test_flow_beat_reply_recorded_to_conversation_log(substrate, _stub_sends, _m
 
     logged = _assistant_log_texts(substrate.dsn, tenant)
     assert logged, "flow-beat reply must be recorded to conversation_log (24h window + harness substrate)"
+
+
+# --- VT-586: the DETERMINISTIC walker _send threads tenant_id into the record choke ----------------
+
+
+def test_walker_send_threads_tenant_id_to_conversation_log(monkeypatch):
+    """VT-586: journey._send (the deterministic walker/opener path — used when the turn-brain is off or
+    errors) must pass tenant_id + surface='journey' into send_freeform_message, so its reply records to
+    the lifetime conversation_log. Before VT-586 the walker reply reached the owner but not the log —
+    re-fragmenting the 24h window (the disease VT-584 fixed only for the paced-flow beats)."""
+    from orchestrator.onboarding import journey
+    from orchestrator.utils import twilio_send
+
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(
+        twilio_send, "send_freeform_message",
+        lambda body, recipient, **kw: captured.update({"body": body, **kw}) or "SM0",
+    )
+    tid = uuid4()
+    journey._send("+919999005862", {"prompt_en": "next question?", "prompt_hi": ""}, "en", tenant_id=tid)
+    assert captured.get("tenant_id") == tid, "walker _send must thread tenant_id into the record choke"
+    assert captured.get("surface") == "journey"

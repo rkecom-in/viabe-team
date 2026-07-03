@@ -407,22 +407,28 @@ def begin_shopify_onboarding(tenant_id: UUID | str, recipient: str | None) -> No
         connector_id=_CONNECTOR_ID,
     )
     _write_state(tenant_id, phase=PHASE_DISCOVERY, connector_id=_CONNECTOR_ID, pending=pending)
-    _send(recipient, pending["prompt_text"])
+    _send(recipient, pending["prompt_text"], tenant_id=tenant_id)
     logger.info(
         "VT-425 begin_shopify_onboarding tenant=%s phase=%s (journey→integration seam)",
         tenant_id, PHASE_DISCOVERY,
     )
 
 
-def _send(recipient: str | None, text: str) -> None:
+def _send(recipient: str | None, text: str, *, tenant_id: UUID | str | None = None) -> None:
     """Best-effort owner send (WABA-gated/stubbed — never crash the pipeline). Mirrors
-    journey._send. The recipient phone is hashed inside the send util (CL-390)."""
+    journey._send. The recipient phone is hashed inside the send util (CL-390).
+
+    ``tenant_id`` (VT-586) — threaded into the send-choke so every resume-gate reply (shop-domain
+    retry, auth waiting line, not-connected re-prompt, connected confirm) records to the LIFETIME
+    conversation_log ('assistant' leg, surface='journey'). Before VT-586 these reached the owner's
+    phone but never hit conversation_log — the Team-Manager's 24h window lost the entire integration
+    hand-off, and the server harness read every resume reply as false 'silence'."""
     if not recipient or not text:
         return
     try:
         from orchestrator.utils.twilio_send import send_freeform_message
 
-        send_freeform_message(text, recipient)
+        send_freeform_message(text, recipient, tenant_id=tenant_id, surface="journey")
     except Exception:  # noqa: BLE001 — send is WABA-gated; state advances regardless
         logger.warning("VT-425: owner send failed (recipient hashed in send util) — state advanced")
 
@@ -454,6 +460,7 @@ def _remint_auth_link(
             recipient,
             "I don't have your store address on file — reply with it (it looks like "
             "yourstore.myshopify.com) and I'll send a fresh connect link.",
+            tenant_id=tenant_id,
         )
         return False
     try:
@@ -462,11 +469,12 @@ def _remint_auth_link(
             recipient,
             "Here's a fresh link to connect your Shopify store — tap it, approve the access, then "
             f"reply 'done':\n{result['authorize_url']}",
+            tenant_id=tenant_id,
         )
         return True
     except Exception:  # noqa: BLE001 — a re-mint failure still owes the owner an honest line, never silence
         logger.warning("VT-583: shopify link re-mint failed tenant=%s (fail-soft)", tenant_id)
-        _send(recipient, _auth_waiting_line(None))
+        _send(recipient, _auth_waiting_line(None), tenant_id=tenant_id)
         return False
 
 
@@ -526,6 +534,7 @@ def maybe_resume_shopify_onboarding(
                     recipient,
                     "That doesn't look like a Shopify store address. It should look like "
                     "yourstore.myshopify.com — please reply with that.",
+                    tenant_id=tenant_id,
                 )
                 return {"done": False, "phase": phase, "routed": "shopify_discovery_retry"}
             result = start_shopify_setup(tenant_id, shop_candidate)
@@ -533,6 +542,7 @@ def maybe_resume_shopify_onboarding(
                 recipient,
                 "Tap this link to connect your Shopify store, approve the access, then "
                 f"reply 'done' here:\n{result['authorize_url']}",
+                tenant_id=tenant_id,
             )
             return {"done": False, "phase": PHASE_AUTH, "routed": "shopify_setup_minted"}
 
@@ -558,7 +568,7 @@ def maybe_resume_shopify_onboarding(
                     }
                 else:
                     # question / other / classifier-unavailable → HONEST waiting line, ALWAYS sent.
-                    _send(recipient, _auth_waiting_line(walkthrough))
+                    _send(recipient, _auth_waiting_line(walkthrough), tenant_id=tenant_id)
                     return {"done": False, "phase": phase, "routed": "shopify_auth_waiting"}
             if not shopify_is_connected(tenant_id):
                 # Owner said done but the callback hasn't persisted a token yet — DO NOT
@@ -569,6 +579,7 @@ def maybe_resume_shopify_onboarding(
                     "I don't see the connection yet — please finish approving on the Shopify "
                     "page, then reply 'done'."
                     + (f"\n{walkthrough}" if walkthrough else ""),
+                    tenant_id=tenant_id,
                 )
                 return {"done": False, "phase": phase, "routed": "shopify_auth_not_connected"}
 
@@ -586,7 +597,7 @@ def maybe_resume_shopify_onboarding(
             _write_state(
                 tenant_id, phase=PHASE_CONFIRMED, connector_id=_CONNECTOR_ID, pending=done_pending
             )
-            _send(recipient, done_pending["prompt_text"])
+            _send(recipient, done_pending["prompt_text"], tenant_id=tenant_id)
             logger.info(
                 "VT-425 shopify onboarding CONFIRMED tenant=%s committed=%d (counts only)",
                 tenant_id, counts["committed"],
