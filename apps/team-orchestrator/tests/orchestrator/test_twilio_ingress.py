@@ -979,3 +979,56 @@ def test_whatsapp_prefixed_inbound_resolves_tenant_and_runs(ingress):
             "SELECT status FROM pipeline_runs WHERE id = %s", (result["run_id"],)
         ).fetchone()[0]
     assert status in ("completed", "escalated")
+
+
+# ---------------------------------------------------------------------------
+# VT-582 — the DEV-ONLY ingress secret (DEV_TEST_INGRESS_SECRET) the conversation
+# harness authenticates the deployed dev orchestrator with. Accepted ONLY on a
+# positively-dev env (EXPECTED_ENV in {dev,development}); on prod / unset it is
+# ignored (CL-431 prod gate). A dev-secret-authenticated request must behave
+# IDENTICALLY downstream to a prod-secret one (same tenant resolve + workflow start).
+# ---------------------------------------------------------------------------
+
+_DEV_INGRESS_SECRET = "vt-582-harness-dev-ingress-secret"
+
+
+def test_dev_ingress_secret_accepted_on_dev_starts_workflow(ingress, monkeypatch):
+    """EXPECTED_ENV=dev + the dev secret → the request authenticates and starts the SAME workflow a
+    prod-secret request would (behaves identically downstream)."""
+    monkeypatch.setenv("EXPECTED_ENV", "dev")
+    monkeypatch.setenv("DEV_TEST_INGRESS_SECRET", _DEV_INGRESS_SECRET)
+    phone = _phone()
+    _new_tenant(ingress.dsn, phone)
+    resp = _post(ingress, _fields(phone, Body="hello from the harness"), secret=_DEV_INGRESS_SECRET)
+    assert resp.status_code == 200
+    assert resp.json()["reason"] == "started"
+    result = _await_workflow(resp.json()["workflow_id"])
+    assert result["run_id"]
+
+
+def test_dev_ingress_secret_rejected_on_prod(ingress, monkeypatch):
+    """EXPECTED_ENV=prod → the dev secret is NOT accepted (403), even though it is configured."""
+    monkeypatch.setenv("EXPECTED_ENV", "prod")
+    monkeypatch.setenv("DEV_TEST_INGRESS_SECRET", _DEV_INGRESS_SECRET)
+    resp = _post(ingress, _fields(_phone()), secret=_DEV_INGRESS_SECRET)
+    assert resp.status_code == 403
+
+
+def test_dev_ingress_secret_rejected_when_env_unset(ingress, monkeypatch):
+    """No EXPECTED_ENV (fail-closed) → the dev secret is inert (403)."""
+    monkeypatch.delenv("EXPECTED_ENV", raising=False)
+    monkeypatch.setenv("DEV_TEST_INGRESS_SECRET", _DEV_INGRESS_SECRET)
+    resp = _post(ingress, _fields(_phone()), secret=_DEV_INGRESS_SECRET)
+    assert resp.status_code == 403
+
+
+def test_prod_secret_still_accepted_when_dev_ingress_enabled(ingress, monkeypatch):
+    """The prod INTERNAL_API_SECRET path is unchanged even on a dev env with the dev secret set."""
+    monkeypatch.setenv("EXPECTED_ENV", "dev")
+    monkeypatch.setenv("DEV_TEST_INGRESS_SECRET", _DEV_INGRESS_SECRET)
+    phone = _phone()
+    _new_tenant(ingress.dsn, phone)
+    resp = _post(ingress, _fields(phone, Body="hello"), secret=_SECRET)  # the prod secret
+    assert resp.status_code == 200
+    assert resp.json()["reason"] == "started"
+    _await_workflow(resp.json()["workflow_id"])

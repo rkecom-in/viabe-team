@@ -1,0 +1,23 @@
+{
+  "name": "consent_natural",
+  "expected_fail": true,
+  "notes": "Fresh UN-consented tenant (owner_inputs=false). A substantive message hits the VT-303 consent gate -> the deterministic consent_required_handler sends the 'reply ACTIVATE TEAM' enable prompt. A NATURAL 'yes go ahead' SHOULD grant consent, but current behavior only honors the EXACT enable keyword (pre_filter Rule a2) — so natural consent is ignored and the brain never engages. EXPECT FAIL until VT-583 lands. Run: setup (--owner-inputs false, no --onboarded) then `script <tenant> consent_natural.json`. NOTE: consent_required_handler sends freeform WITHOUT a tenant_id, so its enable-prompt reply is NOT recorded to conversation_log (a VT-579 completeness gap) — that is why steps 1-2 set assert_no_silent=false and lean on run_status; step 3 is the load-bearing assertion (a brain reply IS conversation_log-logged, so its ABSENCE is the real, honest silent signal of the VT-583 gap).",
+  "steps": [
+    {
+      "message": "I want to plan a Diwali campaign for my shop",
+      "assert_no_silent": false,
+      "note": "Un-consented substantive message -> consent_required_handler sends the enable prompt. run_status should be 'completed'. The prompt itself is not conversation_log-logged (VT-579 gap), so assert_no_silent is off here."
+    },
+    {
+      "message": "yes go ahead, please enable it",
+      "assert_no_silent": false,
+      "note": "The NATURAL consent grant. Under current behavior this does NOT match the exact 'ACTIVATE TEAM' keyword, so owner_inputs stays false and the tenant is re-prompted (again un-logged). This is the VT-583 gap in action."
+    },
+    {
+      "message": "great, now go plan that Diwali campaign",
+      "assert_no_silent": true,
+      "expected_fail": true,
+      "note": "If natural consent had been honored, the brain would engage and produce a conversation_log-logged manager reply. It does NOT (still gated) -> silent -> XFAIL. When VT-583 lands this flips to XPASS (flagged) — re-check the mark."
+    }
+  ]
+}

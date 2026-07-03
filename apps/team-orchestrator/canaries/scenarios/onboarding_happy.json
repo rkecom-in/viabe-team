@@ -1,0 +1,27 @@
+{
+  "name": "onboarding_happy",
+  "expected_fail": false,
+  "notes": "Fresh tenant (owner_inputs=true, NOT onboarded). Drives the onboarding journey: greet -> profile card -> ready -> integration offer. Journey replies are recorded to conversation_log (surface='journey'), so assert_no_silent is a real signal here. assert_contains is intentionally sparse — the exact copy is owned by the journey turn-brain and evolves; tighten these against the FIRST live transcript. Run: setup (owner_inputs=true, no --onboarded) then `script <tenant> onboarding_happy.json`.",
+  "steps": [
+    {
+      "message": "Complete Setup",
+      "assert_no_silent": true,
+      "note": "The COMPLETE_SETUP entry tap (VT-567 live-drill path). Expect a greeting / first onboarding question."
+    },
+    {
+      "message": "Sundaram Sweets, a sweet shop in Chennai",
+      "assert_no_silent": true,
+      "note": "Owner supplies the business profile. Expect the journey to acknowledge and either confirm or ask the next question."
+    },
+    {
+      "message": "yes that's right",
+      "assert_no_silent": true,
+      "note": "Confirm the profile card. Expect a 'ready' / next-step acknowledgement."
+    },
+    {
+      "message": "what can you do for me",
+      "assert_no_silent": true,
+      "note": "Expect the integration offer / capability surface (connect your sales, etc.)."
+    }
+  ]
+}
