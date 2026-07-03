@@ -911,41 +911,9 @@ def _last_manager_reply_text(terminal_state: dict[str, Any]) -> str | None:
     return None
 
 
-def _reply_is_incomplete(terminal_state: dict[str, Any]) -> bool:
-    """VT-591 — does the manager's trailing reply NEED a compose-completion pass?
-
-    True when the trailing message is NOT a complete owner reply — the signals we
-    can detect deterministically at the transmit seam:
-
-    - text is None/empty (nothing to send; ``_last_manager_reply_text`` already
-      returns None for a tool-calls-only trailing AIMessage), OR
-    - ``text.rstrip()`` ends with a colon — the "explainer intro" truncation the
-      ReAct loop leaves behind ("here's how it works end to end:") when the agent
-      emits an intro and stops with no tool call, OR
-    - the trailing AIMessage still carried a non-empty ``tool_calls`` (it DEFERRED
-      the real content to a call that never resolved into a final answer here).
-
-    Pure + cheap: this runs on EVERY no-spawn transmit turn, and a False result
-    means the caller SKIPS the extra LLM call entirely (the cost guard — a good
-    reply pays nothing). Unit-tested in test_manager_reply_complete.py.
-    """
-    text = _last_manager_reply_text(terminal_state)
-    if not text:
-        return True
-    if text.rstrip().endswith(":"):
-        return True
-    # The trailing AIMessage (same one _last_manager_reply_text evaluated) still
-    # holding tool_calls → it deferred; complete it. Reverse-scan to that first
-    # AIMessage, mirroring _last_manager_reply_text's scan.
-    for msg in reversed(terminal_state.get("messages") or []):
-        if isinstance(msg, AIMessage):
-            return bool(getattr(msg, "tool_calls", None))
-    return False
-
-
-# VT-591 — the compose-completion system prompt. Bound with NO tools, so the model
-# MUST emit a final message (it cannot defer into another dangling intro / tool
-# call). Kept inline (single source; not a template file) + concise.
+# VT-591 → VT-593 — the compose system prompt for the RARE empty-reply fallback (the
+# brain produced no transmittable text). Bound with NO tools, so the model MUST emit a
+# final message. Kept inline (single source; not a template file) + concise.
 _COMPOSE_COMPLETION_SYSTEM = (
     "You are the Viabe Team-Manager writing the FINAL WhatsApp reply to the OWNER of a "
     "small Indian business. You are given the conversation and the manager's DRAFT so far. "
@@ -967,16 +935,16 @@ _COMPOSE_COMPLETION_SYSTEM = (
 def _compose_completed_reply(
     tenant_id: UUID, event: WebhookEvent, terminal_state: dict[str, Any]
 ) -> str | None:
-    """VT-591 — ONE focused, no-tools LLM call that turns the manager's INCOMPLETE
-    trailing reply into the COMPLETE owner-facing WhatsApp message.
+    """VT-591 → VT-593 — ONE focused, no-tools LLM call that writes a COMPLETE
+    owner-facing WhatsApp message from context.
 
-    Called ONLY when ``_reply_is_incomplete`` fired (the cost guard: a complete
-    reply never reaches here). NO tools are bound, so the model MUST return final
-    text — it cannot defer into another dangling intro. Same model TIER as the
-    brain conversational hot path: this is a plain conversational rewrite, not a
-    reasoning task, so it uses ``_BRAIN_MODEL_SONNET`` (the SAME constant
-    ``select_brain_model`` returns for routine turns) via the SAME ``_resolve_model``
-    builder — deliberately NOT Opus.
+    Called ONLY in the RARE empty-reply case (the brain produced no transmittable
+    text — see ``_maybe_send_manager_reply``); a normal handle-directly turn already
+    carries a complete reply and transmits it as-is, so this pays NO per-turn cost.
+    NO tools are bound, so the model MUST return final text. Same model TIER as the
+    brain conversational hot path: a plain conversational write, not a reasoning task,
+    so it uses ``_BRAIN_MODEL_SONNET`` (the SAME constant ``select_brain_model``
+    returns for routine turns) via the SAME ``_resolve_model`` builder — NOT Opus.
 
     Compose context assembles (a) the recent conversation window (reused from the
     dispatch-side ``_build_manager_conversation_block``, current inbound excluded —
@@ -1029,12 +997,6 @@ def _compose_completed_reply(
             ).strip()
         else:
             text = ""
-        logger.warning(
-            "VT-593-DIAG compose tenant=%s draft=%r out=%r",
-            tenant_id,
-            draft[:70],
-            (text or "")[:70],
-        )
         return text or None
     except Exception:  # noqa: BLE001 — compose-completion is best-effort; never raise
         logger.warning(
@@ -1063,37 +1025,27 @@ def _maybe_send_manager_reply(
     construction (the tool_guardrail invariant), so this owner send lives here in the
     deterministic dispatch seam rather than as a brain tool-call.
 
-    VT-591 → VT-593: the trailing reply frequently truncates — the agent emits an
-    "explainer intro" ("here's the short version." / dangling colon) or a bare
-    acknowledgment as its complete turn and stops, on both sonnet-4-6 and sonnet-5.
-    Heuristic detection couldn't reliably catch it, so we now ALWAYS finalize the reply
-    through the no-tools compose call (``_compose_completed_reply``): the brain DECIDES,
-    the compose WRITES the complete owner message (a good draft passes through, a
-    truncated one is finished). Fail-soft chain: finalized → raw trailing text → D1 net.
-    Exactly ONE send.
+    VT-593 (cost-correct): a normal handle-directly turn already carries a COMPLETE
+    reply — the brain writes the whole owner message as its final AIMessage (the earlier
+    "truncation" was a validation-harness display artifact: a probe grep cut multi-line
+    replies at the first newline; the replies were whole on deployed dev). So we transmit
+    the brain's own text as-is — NO redundant per-turn compose call. Only when the brain
+    produced NO transmittable text (rare — e.g. it ended on a tool-call with empty
+    content) do we pay for a single no-tools compose from context, to avoid the generic
+    D1 fallback firing on a genuinely-silent turn. Fail-soft: raw → compose (empty only)
+    → D1 net. Exactly ONE send.
     """
     recipient = getattr(event, "sender_phone", None)
     if not recipient:
         return
 
-    raw = _last_manager_reply_text(terminal_state)
-    # VT-593: ALWAYS finalize a handle-directly reply through the no-tools compose call.
-    # The ReAct brain reliably DECIDES (handle vs spawn) but UNRELIABLY WRITES a complete
-    # final message — both sonnet-4-6 and sonnet-5 stop after an intro / acknowledgment on
-    # ~half of explainer turns ("here's the short version." then nothing), and four prompt
-    # passes + a model upgrade did not fix it. Heuristic incomplete-detection (VT-591)
-    # only caught dangling colons, not period-ended intros or bare acknowledgments. So the
-    # compose (NO tools bound → it MUST emit a full owner message) is now the canonical
-    # AUTHOR of the conversational reply: a complete draft passes through, an intro /
-    # dangling / empty draft gets finished. Fail-soft: compose miss → raw draft → D1 net.
-    finalized = _compose_completed_reply(tenant_id, event, terminal_state)
-    if finalized:
-        # _reply_is_incomplete only labels the log line now (observability: was the raw
-        # draft already whole, or did the compose rescue a truncated one?).
-        body = finalized
-        path = "finalized-rescued" if _reply_is_incomplete(terminal_state) else "finalized-passthrough"
-    else:
-        body, path = raw, "raw-fallback"
+    body = _last_manager_reply_text(terminal_state)
+    path = "raw"
+    if not body:
+        # RARE empty-reply case ONLY: compose a reply from the conversation context (no
+        # tools bound → it must emit text) instead of letting the D1 fallback fire.
+        body = _compose_completed_reply(tenant_id, event, terminal_state)
+        path = "composed-empty-fallback"
 
     if not body:
         # Nothing transmittable — leave runner.py's D1 fallback (VT-583) as the net.
@@ -1102,12 +1054,10 @@ def _maybe_send_manager_reply(
         from orchestrator.owner_surface.freeform_acks import send_freeform_ack
 
         send_freeform_ack(tenant_id, recipient, body)
-        logger.warning(
-            "VT-593-DIAG transmit tenant=%s path=%s raw=%r body=%r",
+        logger.info(
+            "VT-589/593: transmitted manager direct reply (tenant=%s path=%s)",
             tenant_id,
             path,
-            (raw or "")[:70],
-            (body or "")[:70],
         )
     except Exception:  # noqa: BLE001 — best-effort; the D1 fallback remains the net
         logger.warning(
