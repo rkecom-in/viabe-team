@@ -1,0 +1,18 @@
+{
+  "name": "topic_switch_and_return",
+  "expected_fail": false,
+  "notes": "Mid-flow topic switch: the owner asks an unrelated question, then returns. The flow must survive; the question must get a real answer; no context loss.",
+  "steps": [
+    { "message": "Yes connect my data", "assert_no_silent": true },
+    {
+      "message": "actually first tell me — what do you charge?",
+      "assert_no_silent": true,
+      "note": "Unrelated question mid-beat. Expect an answer (or honest deferral) — not a canned re-prompt of the integration ask."
+    },
+    {
+      "message": "ok back to it, lets continue the setup",
+      "assert_no_silent": true,
+      "note": "Resume intent. Expect the flow to pick up where it left off WITHOUT restarting."
+    }
+  ]
+}

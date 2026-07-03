@@ -1,0 +1,19 @@
+{
+  "name": "repeat_question_guard",
+  "expected_fail": false,
+  "notes": "The owner answers a question; the next turns must never re-ask the same substance (record-and-move-on). Setup: fresh onboarding tenant.",
+  "steps": [
+    { "message": "Hi", "assert_no_silent": true },
+    {
+      "message": "We are Probe Traders, a hardware shop in Pune",
+      "assert_no_silent": true,
+      "note": "Multi-field answer: name + type + city in one message."
+    },
+    {
+      "message": "ok what next",
+      "assert_no_silent": true,
+      "assert_not_contains": ["what kind of business", "which city", "what does Probe Traders do"],
+      "note": "NO re-asking any of the three facts just given."
+    }
+  ]
+}

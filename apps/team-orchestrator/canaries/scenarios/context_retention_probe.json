@@ -1,0 +1,19 @@
+{
+  "name": "context_retention_probe",
+  "expected_fail": false,
+  "notes": "THE canonical bar test (CL-2026-07-03-autonomous-capability-program): the owner states a fact once; NO later turn may ask for it again. Mirrors the live 3x-store-link failure. Setup: onboarded tenant, flow at readiness/integration.",
+  "steps": [
+    {
+      "message": "Yes lets connect. My store is probe-store-a.myshopify.com by the way",
+      "assert_no_silent": true,
+      "assert_not_contains": ["reply with your store address", "yourstore.myshopify.com — find it"],
+      "note": "Affirmation AND the store address in ONE message. The reply must USE the address (link or confirmation), never ask for it."
+    },
+    {
+      "message": "did you get my store address?",
+      "assert_no_silent": true,
+      "assert_not_contains": ["please reply with", "what is your store"],
+      "note": "The manager must confirm it HAS the address (probe-store-a), demonstrating retention."
+    }
+  ]
+}

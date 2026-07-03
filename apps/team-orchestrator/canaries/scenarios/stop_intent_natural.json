@@ -1,0 +1,13 @@
+{
+  "name": "stop_intent_natural",
+  "expected_fail": true,
+  "notes": "CL-2026-07-03-fluid-consent-and-control: natural stop phrasing must pause via the SAME audited path (keyword STOP remains the floor). expected_fail until VT-583 C lands + verifies.",
+  "steps": [
+    {
+      "message": "please stop messaging me for now",
+      "assert_no_silent": true,
+      "assert_contains_any": ["paused", "stopped", "won't message"],
+      "note": "Stop-intent in natural words. Expect an honest pause acknowledgment, not a canned demand for the literal keyword."
+    }
+  ]
+}
