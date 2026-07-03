@@ -1,7 +1,7 @@
 {
   "name": "silent_drop_probe",
   "expected_fail": true,
-  "notes": "The run-23 silent-drop reproduction. State: a tenant with a COMPLETE journey (setup --onboarded) + owner_inputs=true that enters the integration:shopify flow and then has its pending owner-input CLEARED — after which a bare URL inbound produces NO reply (the owner sends their store link into a void). The load-bearing step is the final bare-URL send with assert_no_silent. EXPECTED-FAIL until the drop is fixed; flips to XPASS when a reply is produced. Run: setup (--owner-inputs true --onboarded) then `script <tenant> silent_drop_probe.json`.",
+  "notes": "The run-23 silent-drop reproduction. State: a tenant with a COMPLETE journey + owner_inputs=true, paced post-profile flow already at the READINESS-ASK beat (__flow__='ready_asked') — VT-582 calibration fix: without an explicit --flow, a COMPLETE journey has NO __flow__ sentinel and _maybe_handle_post_profile_flow returns None immediately (falls straight to the normal brain pipeline), so step 1 never even reaches the integration beats being tested here. Step 1's affirm resolves the readiness ask -> offers the easiest integration (Shopify) -> sets __flow__='integration:shopify'; step 2 is the load-bearing bare-URL probe. EXPECTED-FAIL until the drop is fixed; flips to XPASS when a reply is produced. Run: `setup --owner-inputs true --onboarded --flow ready_asked` then `script <tenant> silent_drop_probe.json`.",
   "steps": [
     {
       "message": "I want to connect my Shopify store",

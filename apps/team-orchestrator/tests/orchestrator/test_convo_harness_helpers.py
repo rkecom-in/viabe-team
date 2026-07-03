@@ -2,9 +2,10 @@
 
 The harness module imports stdlib-only at top level, so it loads without dbos/psycopg/requests; the
 per-command paths import psycopg/requests lazily. These tests exercise the pure logic — bogus-number
-generation, the ingress-mirroring run_id derivation, the send-guard-breach detector, assertion
-evaluation, xfail classification — and _drive_turn's transcript assembly with _connect / _post_inbound
-/ _poll_run_status stubbed, so no DB or network is touched.
+generation, the ingress-mirroring run_id derivation, the send-guard-breach detector, the three-way
+reply-verdict (ok/timeout/silent) + assertion evaluation, xfail classification — and _drive_turn's
+transcript assembly with _connect / _post_inbound / _poll_run_status stubbed, so no DB or network is
+touched.
 """
 
 from __future__ import annotations
@@ -89,11 +90,41 @@ def test_is_real_twilio_sid(sid, is_real):
     assert ch.is_real_twilio_sid(sid) is is_real
 
 
-# --- assertion evaluation ---------------------------------------------------------------------
+# --- three-way reply verdict (ok / timeout / silent) ------------------------------------------
+#
+# The run-23 calibration gap: a step was flagged "NO assistant reply (silent drop)" while
+# run_status='running' — the poll returned before the deployed LLM turn finished (10-40s is normal).
+# reply_verdict must distinguish TIMEOUT (still running) from a TRUE SILENT (terminal, zero replies).
 
 
 def _t(role, text, sid=None):
     return ch.Turn(role=role, text=text, message_sid=sid)
+
+
+def test_reply_verdict_ok_when_assistant_turn_present_regardless_of_status():
+    turns = [_t("owner", "hi"), _t("assistant", "hello", "MKDEV1")]
+    assert ch.reply_verdict(turns, "running") == "ok"
+    assert ch.reply_verdict(turns, "completed") == "ok"
+    assert ch.reply_verdict(turns, None) == "ok"
+
+
+def test_reply_verdict_timeout_when_still_running_with_no_reply():
+    turns = [_t("owner", "hi")]
+    assert ch.reply_verdict(turns, "running") == "timeout"
+
+
+def test_reply_verdict_silent_when_terminal_status_with_no_reply():
+    turns = [_t("owner", "hi")]
+    assert ch.reply_verdict(turns, "completed") == "silent"
+
+
+def test_reply_verdict_silent_when_no_run_status_at_all():
+    # _drive_turn's no-run-reason branch (ingress rejected — nothing to poll): run_status=None.
+    turns = [_t("owner", "hi")]
+    assert ch.reply_verdict(turns, None) == "silent"
+
+
+# --- assertion evaluation ---------------------------------------------------------------------
 
 
 def test_assert_no_silent_fires_when_no_assistant_turn():
@@ -110,6 +141,20 @@ def test_assert_no_silent_satisfied_by_assistant_turn():
 def test_assert_no_silent_off_ignores_missing_reply():
     turns = [_t("owner", "hello")]
     assert ch.evaluate_assertions(turns, assert_no_silent=False) == []
+
+
+def test_assert_no_silent_does_not_fire_on_timeout():
+    # The calibration fix: run_status='running' + zero replies is a TIMEOUT, not a silent drop —
+    # evaluate_assertions must NOT raise assert_no_silent for it (cmd_script buckets TIMEOUT
+    # separately, checking reply_verdict itself BEFORE calling evaluate_assertions).
+    turns = [_t("owner", "hello")]
+    assert ch.evaluate_assertions(turns, run_status="running", assert_no_silent=True) == []
+
+
+def test_assert_no_silent_fires_on_terminal_status_with_no_reply():
+    turns = [_t("owner", "hello")]
+    failures = ch.evaluate_assertions(turns, run_status="completed", assert_no_silent=True)
+    assert any("silent drop" in f for f in failures)
 
 
 def test_assert_contains_case_insensitive_hit_and_miss():
@@ -259,4 +304,5 @@ def test_drive_turn_no_run_reason_skips_poll_and_is_silent(monkeypatch):
     assert res.run_status is None
     # only the injected owner turn; no assistant reply
     assert [t.role for t in res.transcript] == ["owner"]
-    assert ch.evaluate_assertions(res.transcript, assert_no_silent=True)  # non-empty → silent
+    assert ch.reply_verdict(res.transcript, res.run_status) == "silent"
+    assert ch.evaluate_assertions(res.transcript, run_status=res.run_status, assert_no_silent=True)  # non-empty → silent

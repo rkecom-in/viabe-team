@@ -1,7 +1,7 @@
 {
   "name": "context_retention_probe",
   "expected_fail": false,
-  "notes": "THE canonical bar test (CL-2026-07-03-autonomous-capability-program): the owner states a fact once; NO later turn may ask for it again. Mirrors the live 3x-store-link failure. Setup: onboarded tenant, flow at readiness/integration.",
+  "notes": "THE canonical bar test (CL-2026-07-03-autonomous-capability-program): the owner states a fact once; NO later turn may ask for it again. Mirrors the live 3x-store-link failure. Setup: onboarded tenant, flow at readiness/integration — i.e. a COMPLETE journey with __flow__='ready_asked' (VT-582 calibration fix: without --flow the post-profile beats never engage and this exercises the wrong code path entirely). Run: `setup --onboarded --flow ready_asked` then `script <tenant> context_retention_probe.json`. Step 1's affirm+store-URL resolves the readiness ask into the Shopify offer in one shot; step 2 checks retention against whatever got recorded.",
   "steps": [
     {
       "message": "Yes lets connect. My store is probe-store-a.myshopify.com by the way",
