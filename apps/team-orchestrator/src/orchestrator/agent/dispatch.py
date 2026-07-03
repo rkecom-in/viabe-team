@@ -63,7 +63,7 @@ from typing import Any, Literal, cast
 from uuid import UUID
 
 from langchain_anthropic import ChatAnthropic
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from orchestrator.agent.orchestrator_agent_driver import (
     HardLimitExceeded,
@@ -763,6 +763,17 @@ def dispatch_brain(
         )
         raise
 
+    # VT-589 — a no-spawn "handle-directly" turn: the manager brain wrote its
+    # answer as the final AIMessage, but nothing downstream transmits it, so the
+    # run completes silent and runner.py fires the generic D1 fallback instead of
+    # the real answer. Send it here. Terminal path ONLY — the specialist / collapse
+    # / escalated paths transmit their own owner-facing message, so gating on
+    # "terminal" avoids a double-send. send_freeform_ack records the assistant turn,
+    # which auto-suppresses the D1 completed-no-reply fallback (VT-583). Best-effort:
+    # _maybe_send_manager_reply never raises.
+    if terminal_path == "terminal" and final_status == "completed":
+        _maybe_send_manager_reply(tenant_id, event, terminal_state)
+
     # 2. compose_output envelope (Q2 Option A) — always emit, regardless
     # of terminal path. Empty/None ComposedOutput is acceptable when the
     # agent's intent didn't map to a template; the envelope still records
@@ -866,6 +877,75 @@ def _classify_terminal(
         },
     )
     return ("terminal", "completed", None, None)
+
+
+def _last_manager_reply_text(terminal_state: dict[str, Any]) -> str | None:
+    """VT-589 — the trailing AIMessage's OWN text, or None.
+
+    Scans ``terminal_state["messages"]`` in REVERSE and evaluates the FIRST
+    ``AIMessage`` it reaches (i.e. the manager's LAST turn). ToolMessage /
+    HumanMessage are skipped. Handles both content shapes: a plain ``str``, and
+    a list of content blocks (dicts with ``type == "text"`` → their ``"text"``
+    joined). The result is stripped; empty → ``None``.
+
+    Deliberately does NOT dig past that trailing AIMessage: if it holds only
+    ``tool_calls`` with empty text, we return ``None`` rather than surfacing an
+    earlier (stale) reasoning turn. Only the manager's own final answer transmits.
+    """
+    for msg in reversed(terminal_state.get("messages") or []):
+        if not isinstance(msg, AIMessage):
+            continue
+        content = getattr(msg, "content", None)
+        if isinstance(content, str):
+            return content.strip() or None
+        if isinstance(content, list):
+            text = "".join(
+                block.get("text", "")
+                for block in content
+                if isinstance(block, dict) and block.get("type") == "text"
+            ).strip()
+            return text or None
+        # Trailing AIMessage with a non-str/non-list (or None) content → no
+        # transmittable text; do NOT walk back into earlier reasoning.
+        return None
+    return None
+
+
+def _maybe_send_manager_reply(
+    tenant_id: UUID, event: WebhookEvent, terminal_state: dict[str, Any]
+) -> None:
+    """VT-589 — transmit the manager's conversational answer on a no-spawn,
+    handle-directly turn. Best-effort: MUST NEVER raise into ``dispatch_brain``.
+
+    The manager brain writes its reply as the final ``AIMessage.content``, but on a
+    ``terminated_without_spawn`` turn nothing downstream sends it. The run would then
+    complete SILENT and ``runner.py``'s D1 fallback (VT-583) would fire a generic
+    "on it" line INSTEAD of the real answer. This seam sends the actual text.
+
+    Called ONLY for ``terminal_path == "terminal"`` (see call site): the specialist /
+    collapse / escalated paths transmit their own owner-facing message elsewhere, so
+    gating on the terminal path is what prevents a double-send. We reuse
+    ``send_freeform_ack`` because it RECORDS the assistant turn into ``conversation_log``
+    — exactly what ``runner._brain_emitted_owner_reply`` reads — so recording here
+    AUTO-suppresses the D1 fallback (no double-send). The manager holds NO send tool by
+    construction (the tool_guardrail invariant), so this owner send lives here in the
+    deterministic dispatch seam rather than as a brain tool-call.
+    """
+    recipient = getattr(event, "sender_phone", None)
+    if not recipient:
+        return
+    text = _last_manager_reply_text(terminal_state)
+    if text is None:
+        return
+    try:
+        from orchestrator.owner_surface.freeform_acks import send_freeform_ack
+
+        send_freeform_ack(tenant_id, recipient, text)
+        logger.info("VT-589: transmitted manager direct reply (tenant=%s)", tenant_id)
+    except Exception:  # noqa: BLE001 — best-effort; the D1 fallback remains the net
+        logger.warning(
+            "VT-589: manager direct-reply send failed (fail-soft) tenant=%s", tenant_id
+        )
 
 
 def _write_dispatch_entry(
