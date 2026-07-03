@@ -35,13 +35,16 @@ def _names(tools):
 
 ORCHESTRATOR_EXPECTED = {
     "escalate_to_fazal",
-    "compose_owner_output_tool",
+    # VT-590: compose_owner_output_tool removed from the manager inventory (see
+    # orchestrator_agent.py) — the manager writes its owner reply as message text.
     "write_l0_fragment",
     "query_l0",
     # VT-466 — the manager's WRITE seam: tenant-scoped business objective record.
     # Composes over the L1 business_profile entity (MERGE-not-clobber); NOT a
     # send/ledger/accounts write (passes the VT-268 forbidden-capability guard).
     "record_business_objective",
+    # VT-579 — the manager's RETRIEVAL over the lifetime conversation log.
+    "search_conversation_history",
 }
 INTEGRATION_EXPECTED = {
     "list_connectors_tool",

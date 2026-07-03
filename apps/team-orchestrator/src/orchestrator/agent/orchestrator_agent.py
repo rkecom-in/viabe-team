@@ -45,7 +45,6 @@ from langchain_core.messages import SystemMessage, ToolMessage
 from langchain_core.tools import BaseTool, tool
 from langgraph.errors import GraphBubbleUp
 
-from orchestrator.agent.tools.compose_output import compose_owner_output_tool
 from orchestrator.observability.decorators import tool_step
 from orchestrator.observability.envelopes.l0_query import (
     L0QueryInput,
@@ -315,7 +314,13 @@ def search_conversation_history(query: str, limit: int = 10) -> dict[str, Any]:
 # specialist agents invoke it directly via the MCPTool framework.
 ORCHESTRATOR_AGENT_TOOLS: list[BaseTool] = [
     escalate_to_fazal,
-    compose_owner_output_tool,
+    # VT-590: compose_owner_output_tool REMOVED from the manager inventory. Its
+    # output (canned text keyed by a routing intent) is discarded — nothing sends
+    # it — so on a handle-directly turn the manager would write an opener + defer
+    # the body to this tool, and only the opener (its trailing message text) got
+    # transmitted (VT-589). The manager now writes the WHOLE reply as its final
+    # message text; that text IS what the owner receives. The function still exists
+    # for the deterministic composer paths — it is just no longer a manager tool.
     write_l0_fragment,
     query_l0,
     record_business_objective,  # VT-466 manager WRITE seam (tenant-scoped objective)
