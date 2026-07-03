@@ -61,6 +61,71 @@ def _is_bare_greeting(body: str) -> bool:
     return bool(toks) and toks <= _GREETING
 
 
+# --- VT-576 / CL-2026-07-03: the PACED post-profile flow -------------------------------------------
+#
+# After profile-confirm the journey does NOT dump a 4-message burst (card + Shopify pitch + summary +
+# a data-less month plan). Instead a namespaced sentinel in ``answers['__flow__']`` drives ONE beat per
+# owner message: the profile card is the ONLY immediate completion message; the owner's next message
+# gets a readiness ask; on yes we offer ONE integration (easiest-first, justified by an agent's data
+# need, with plain instructions); the business summary + month plan fire ONLY after the first data-
+# supplying integration LANDS (readiness(sales_recovery).can_plan). The sentinel lives IN answers (the
+# ``__``-prefixed bookkeeping idiom that turn_brain._visible_answers already strips from prompts).
+_FLOW_KEY = "__flow__"
+_FLOW_PREVIEWED = "profile_previewed"   # card shown; waiting for the owner to acknowledge
+_FLOW_READY_ASKED = "ready_asked"       # readiness ask sent; waiting for yes / later
+_FLOW_DEFERRED = "deferred"             # owner declined; paused but resumable on a clear "connect"
+_FLOW_INTEGRATION_PREFIX = "integration:"  # an integration handoff is in flight (e.g. integration:shopify)
+_FLOW_PLAN_KICKED = "plan_kicked"       # data landed + summary/plan fired → terminal (normal flow resumes)
+
+# Flow-beat token sets (EN + HI/Hinglish), token-exact — the readiness ask is a small yes/later choice.
+_FLOW_AFFIRM = {
+    "yes", "y", "yeah", "yep", "yup", "sure", "ok", "okay", "okey", "connect", "start", "go",
+    "ready", "set", "haan", "ha", "haa", "chalo", "karo", "kardo", "theek", "sahi", "done",
+    "हाँ", "हां", "ठीक", "करो", "चलो",
+}
+_FLOW_DECLINE = {
+    "no", "nope", "nah", "naa", "later", "skip", "pass", "baad", "nahi", "nahin", "abhi",
+    "नहीं", "नही", "बाद", "स्किप",
+}
+# Connect-intent tokens that RESUME a deferred flow (a clear "I'm ready now").
+_FLOW_CONNECT_INTENT = {
+    "connect", "setup", "start", "ready", "shopify", "sheet", "sheets", "upload", "link", "data",
+    "jodo", "judo", "shuru",
+}
+
+
+def _flow_of(g: dict[str, Any] | None) -> str | None:
+    return (g.get("answers") or {}).get(_FLOW_KEY) if g else None
+
+
+def _set_flow(tenant_id: UUID | str, flow: str, *, message_sid: str | None = None) -> None:
+    """Set the ``__flow__`` sentinel (and optionally the idempotency sid) on the completed journey row.
+    jsonb_set is used so the rest of ``answers`` is preserved; the row is 'complete', so this never
+    races the active question-walk."""
+    with tenant_connection(tenant_id) as conn:
+        conn.execute(
+            "UPDATE onboarding_journey "
+            "SET answers = jsonb_set(coalesce(answers, '{}'::jsonb), '{__flow__}', %s), "
+            "    last_message_sid = COALESCE(%s, last_message_sid), updated_at = now() "
+            "WHERE tenant_id = %s",
+            (Jsonb(flow), message_sid, str(tenant_id)),
+        )
+
+
+def _is_decline(body: str) -> bool:
+    toks = _tokens(body)
+    low = (body or "").strip().casefold()
+    return bool(toks & _FLOW_DECLINE) or "not now" in low or "not yet" in low or "not right now" in low
+
+
+def _is_affirm(body: str) -> bool:
+    return bool(_tokens(body) & _FLOW_AFFIRM)
+
+
+def _has_connect_intent(body: str) -> bool:
+    return _is_affirm(body) or bool(_tokens(body) & _FLOW_CONNECT_INTENT)
+
+
 def start_journey(tenant_id: UUID | str, question_queue: list[dict[str, Any]]) -> None:
     """Begin (or reset) the journey with the ordered question set (2b Question objects as dicts).
     Idempotent-ish: an existing row is replaced (re-start). ``question_queue`` may be empty if the
@@ -353,21 +418,28 @@ def _confirm(tenant_id, confirmed_fields: dict[str, Any]) -> None:
 
 
 def _complete(tenant_id) -> None:
+    # VT-576: profile-confirm completes the QUESTION phase and opens the PACED post-profile flow
+    # (``__flow__ = profile_previewed``). The card is the only immediate message; the readiness ask +
+    # one-integration-at-a-time beats + the business summary/month plan fire on LATER owner messages,
+    # NOT here. The summary/plan kickoff (``_kickoff_business_plan``) moved to the data-landed trigger
+    # (``_maybe_kickoff_plan_after_data``) — a plan composed with zero connected data is hollow
+    # (CL-2026-07-03). ``_emit_gap4_seam`` (observability only, no owner send) stays.
     with tenant_connection(tenant_id) as conn:
         conn.execute(
-            "UPDATE onboarding_journey SET status = 'complete', completed_at = now(), updated_at = now() "
+            "UPDATE onboarding_journey SET status = 'complete', completed_at = now(), updated_at = now(), "
+            "answers = jsonb_set(coalesce(answers, '{}'::jsonb), '{__flow__}', %s) "
             "WHERE tenant_id = %s AND status = 'active'",
-            (str(tenant_id),),
+            (Jsonb(_FLOW_PREVIEWED), str(tenant_id)),
         )
     _emit_gap4_seam(tenant_id)
-    _kickoff_business_plan(tenant_id)
 
 
 def _kickoff_business_plan(tenant_id) -> None:
     """VT-368: kick the business-plan generator (the Gap-4 spine) — non-blocking DBOS bg workflow,
     best-effort: a generator/kick failure must never block journey completion. Skipped cleanly if
-    DBOS isn't launched (tests / non-workflow contexts). The observability seam emit above stays —
-    this is the execution subscriber."""
+    DBOS isn't launched (tests / non-workflow contexts). VT-576: fired from the data-landed trigger
+    (after the first data-supplying integration lands), NOT at journey completion — the summary +
+    month plan must be grounded in connected data, never composed at profile-confirm."""
     try:
         from dbos import DBOS
 
@@ -1059,14 +1131,215 @@ def _handle_reply_with_turn_brain(
 
 
 def _fire_integration_seam(tenant_id: UUID | str, recipient: str | None) -> None:
-    """VT-425 — the journey → connector-onboarding handoff on profile-confirm completion. Best-effort +
-    fail-OPEN: a seam failure must never block the journey's own completion (already committed)."""
+    """VT-425 — the journey → connector-onboarding handoff. Writes the Shopify onboarding state and
+    (when a recipient is given) sends the opening nudge. VT-576: no longer fired at completion — the
+    paced flow calls this (recipient=None → state only, no send) when the owner picks Shopify, then
+    sends the registry-sourced why+instructions itself. Best-effort + fail-OPEN."""
     try:
         from orchestrator.onboarding.shopify_onboarding import begin_shopify_onboarding
 
         begin_shopify_onboarding(tenant_id, recipient)
     except Exception:  # noqa: BLE001 — seam is best-effort; journey completion already committed
         logger.exception("journey→integration seam (begin_shopify_onboarding) failed tenant=%s", tenant_id)
+
+
+# --- VT-576: the paced post-profile flow beats (readiness → one integration → data-landed plan) -----
+
+_READINESS_ASK = {
+    "en": (
+        "Want me to set up your data connections now so I can start finding sales to recover? "
+        "It takes just a few minutes and we'll do it one at a time. Or we can do this later — "
+        "just say 'later'."
+    ),
+    "hi": (
+        "Kya main abhi aapke data connections set up kar doon taaki main aapke liye sales recover "
+        "karna shuru kar sakoon? Sirf kuch minute lagenge, ek-ek karke. Ya baad mein bhi kar sakte "
+        "hain — bas 'later' bol dein."
+    ),
+}
+_DEFER_MSG = {
+    "en": (
+        "No problem — I'll hold off. {recap}To build your month-by-month action plan I'll need your "
+        "sales data. Whenever you're ready, just say 'connect' and we'll hook up Shopify, a Google "
+        "Sheet, or a file — one at a time."
+    ),
+    "hi": (
+        "Koi baat nahi — main ruk jaata hoon. {recap}Aapka mahine-dar-mahine action plan banane ke "
+        "liye mujhe aapka sales data chahiye hoga. Jab bhi ready hon, bas 'connect' bol dein aur hum "
+        "Shopify, Google Sheet ya file jod denge — ek-ek karke."
+    ),
+}
+_ALL_SET_MSG = {
+    "en": "You're all set for now — I've got what I need to get started. I'll keep working on your plan.",
+    "hi": "Abhi ke liye sab set hai — shuru karne ke liye jo chahiye tha mil gaya. Main aapke plan par kaam karta rahoonga.",
+}
+
+
+def _public_business_recap(tenant_id: UUID | str) -> str:
+    """A one-line, PUBLIC-info recap (business type + city, from the discovered draft) for the defer
+    message — the 'summary alone, grounded in public info' the owner is owed when they connect nothing.
+    Best-effort + fail-soft: any read failure → empty string (never fabricate; never block the send)."""
+    try:
+        from orchestrator.onboarding.draft_profile import get_draft
+
+        attrs = dict((get_draft(tenant_id).get("attributes") or {}))
+        btype = attrs.get("business_type") or attrs.get("category")
+        city = attrs.get("city")
+        if btype and city:
+            return f"Here's what I have so far: {btype} in {city}. "
+        if btype:
+            return f"Here's what I have so far: {btype}. "
+    except Exception:  # noqa: BLE001 — recap is a nicety; never block the defer send
+        logger.warning("journey flow: public recap read failed (fail-soft)", exc_info=True)
+    return ""
+
+
+def _connected_integrations(tenant_id: UUID | str) -> set[str]:
+    """The set of integration ids whose DATA HAS LANDED (reached phase_5_confirmed — rows ingested),
+    read via the shopify_onboarding seam. OAuth-connected-but-not-ingested does NOT count: the plan
+    trigger keys off data actually landing, not a token existing. Fail-soft → empty set."""
+    connected: set[str] = set()
+    try:
+        from orchestrator.onboarding.shopify_onboarding import PHASE_CONFIRMED, read_integration_state
+
+        state = read_integration_state(tenant_id)
+        if state and state.get("phase") == PHASE_CONFIRMED and state.get("current_connector_id"):
+            connected.add(str(state["current_connector_id"]))
+    except Exception:  # noqa: BLE001 — never block the hot path on a state read
+        logger.warning("journey flow: connected-integration read failed (fail-soft)", exc_info=True)
+    return connected
+
+
+def _flow_ask_readiness(tenant_id: UUID | str, recipient: str | None, message_sid: str | None, lang: str) -> dict[str, Any]:
+    """Beat (b): the owner acknowledged the profile card → ask ONCE whether to set up data
+    connections now (one at a time), or defer. Never steamroll."""
+    text = _READINESS_ASK["hi"] if lang == "hi" else _READINESS_ASK["en"]
+    _send_turn(recipient, text, [], lang)
+    _set_flow(tenant_id, _FLOW_READY_ASKED, message_sid=message_sid)
+    return {"done": False, "routed": "flow_readiness_ask", "flow": _FLOW_READY_ASKED}
+
+
+def _flow_defer(tenant_id: UUID | str, recipient: str | None, message_sid: str | None, lang: str) -> dict[str, Any]:
+    """Beat: the owner declined the integrations → offer the summary alone (public-info recap) and be
+    HONEST that the month plan needs data. The journey stays complete; a later 'connect' resumes."""
+    recap = _public_business_recap(tenant_id)
+    tmpl = _DEFER_MSG["hi"] if lang == "hi" else _DEFER_MSG["en"]
+    _send_turn(recipient, tmpl.format(recap=recap), [], lang)
+    _set_flow(tenant_id, _FLOW_DEFERRED, message_sid=message_sid)
+    return {"done": True, "routed": "flow_deferred", "flow": _FLOW_DEFERRED}
+
+
+def _flow_offer_next_integration(
+    tenant_id: UUID | str, recipient: str | None, message_sid: str | None, lang: str
+) -> dict[str, Any]:
+    """Beat (c): offer the SINGLE best next integration — easiest-first, justified by an agent's data
+    need, with plain 'where to find it' instructions from the VT-577 registry. For Shopify (the built
+    conversational connector) we also write the onboarding state so the downstream resume gate takes
+    the owner's next reply; other available connectors send instructions (the owner acts via the
+    upload / link path). If nothing is left to offer, kick the plan if data has landed, else close out."""
+    from orchestrator.onboarding import agent_data_needs as adn
+
+    connected = _connected_integrations(tenant_id)
+    suggestions = adn.next_best_integration(connected)
+    if not suggestions:
+        # Nothing available_today still adds needed data. If data already landed, fire the plan;
+        # otherwise honestly close the setup beat (the owner has what today's connectors can give).
+        if _connected_integrations(tenant_id) and adn.readiness(adn.SALES_RECOVERY, connected).can_plan:
+            return _kickoff_plan_and_close(tenant_id, recipient, message_sid, lang)
+        _send_turn(recipient, _ALL_SET_MSG["hi"] if lang == "hi" else _ALL_SET_MSG["en"], [], lang)
+        _set_flow(tenant_id, _FLOW_PLAN_KICKED, message_sid=message_sid)
+        return {"done": True, "routed": "flow_no_more_integrations", "flow": _FLOW_PLAN_KICKED}
+
+    top = suggestions[0]
+    if top.integration == adn.SHOPIFY:
+        # Write the Shopify onboarding state (recipient=None → no duplicate pitch send); the downstream
+        # resume gate then drives the owner's shop-domain reply.
+        _fire_integration_seam(tenant_id, None)
+    msg = f"{top.why}\n\n{top.instructions}"
+    _send_turn(recipient, msg, [], lang)
+    _set_flow(tenant_id, f"{_FLOW_INTEGRATION_PREFIX}{top.integration}", message_sid=message_sid)
+    return {
+        "done": False,
+        "routed": "flow_offer_integration",
+        "integration": top.integration,
+        "flow": f"{_FLOW_INTEGRATION_PREFIX}{top.integration}",
+    }
+
+
+def _kickoff_plan_and_close(
+    tenant_id: UUID | str, recipient: str | None, message_sid: str | None, lang: str
+) -> dict[str, Any]:
+    """Fire the (now data-grounded) business summary + month plan ONCE and mark the flow terminal.
+    The delivery is the response — we send nothing else here (the generator's delivery leg does)."""
+    _kickoff_business_plan(tenant_id)
+    _set_flow(tenant_id, _FLOW_PLAN_KICKED, message_sid=message_sid)
+    return {"done": True, "routed": "flow_plan_kicked", "flow": _FLOW_PLAN_KICKED}
+
+
+def _maybe_kickoff_plan_after_data(
+    tenant_id: UUID | str, recipient: str | None, message_sid: str | None, lang: str
+) -> dict[str, Any] | None:
+    """While an integration handoff is in flight: if the first data-supplying integration has LANDED
+    (readiness(sales_recovery).can_plan) and no plan exists yet, fire the deferred summary + month plan
+    and mark the flow terminal. Otherwise return None (data not landed yet → fall through to the
+    downstream integration resume gate, which drives the connect steps)."""
+    from orchestrator.onboarding import agent_data_needs as adn
+
+    try:
+        from orchestrator.business_plan import store as bp_store
+
+        if bp_store.plan_exists(tenant_id):
+            _set_flow(tenant_id, _FLOW_PLAN_KICKED)  # already generated → terminal, resume normal flow
+            return None
+    except Exception:  # noqa: BLE001 — a store read must never block owner inbound
+        logger.warning("journey flow: plan_exists read failed (fail-soft)", exc_info=True)
+
+    connected = _connected_integrations(tenant_id)
+    if not adn.readiness(adn.SALES_RECOVERY, connected).can_plan:
+        return None  # data hasn't landed yet → let the integration resume gate handle the connect step
+    return _kickoff_plan_and_close(tenant_id, recipient, message_sid, lang)
+
+
+def _maybe_handle_post_profile_flow(
+    tenant_id: UUID | str, g: dict[str, Any], body: str, message_sid: str | None,
+    recipient: str | None, *, lang: str,
+) -> dict[str, Any] | None:
+    """The paced post-profile flow gate (VT-576). Drives ONE beat per owner message off the
+    ``__flow__`` sentinel on the COMPLETED journey row. Returns a result dict if this message was
+    consumed as a flow beat, else None (fall through to the downstream integration gate / brain).
+    Opt-out/DSR is already short-circuited by the caller before this runs."""
+    if g["status"] != "complete":
+        return None  # abandoned / other → normal pipeline
+    flow = _flow_of(g)
+    if not flow or flow == _FLOW_PLAN_KICKED:
+        return None  # flow finished (or never started) → normal pipeline (brain owns the chat)
+
+    # Idempotency: a redelivered inbound (same sid) must not re-drive the beat.
+    if message_sid and message_sid == g.get("last_message_sid"):
+        return {"done": False, "already_presented": True, "routed": "flow_dup"}
+
+    if flow == _FLOW_PREVIEWED:
+        # The owner's first message after the card = an acknowledgement → ask readiness.
+        return _flow_ask_readiness(tenant_id, recipient, message_sid, lang)
+
+    if flow == _FLOW_READY_ASKED:
+        if _is_decline(body):
+            return _flow_defer(tenant_id, recipient, message_sid, lang)
+        # Any non-decline reply to "shall I set up your connections?" → proceed with the easiest one.
+        return _flow_offer_next_integration(tenant_id, recipient, message_sid, lang)
+
+    if flow == _FLOW_DEFERRED:
+        # Resumable: a clear "connect"/"yes" re-engages; anything else falls through to normal chat.
+        if _has_connect_intent(body):
+            return _flow_offer_next_integration(tenant_id, recipient, message_sid, lang)
+        return None
+
+    if flow.startswith(_FLOW_INTEGRATION_PREFIX):
+        # An integration handoff is in flight — the downstream resume gate (runner.py) owns the connect
+        # steps. First, if the data has now LANDED, fire the deferred summary + month plan once.
+        return _maybe_kickoff_plan_after_data(tenant_id, recipient, message_sid, lang)
+
+    return None
 
 
 def _run_turn_brain_and_send(
@@ -1085,8 +1358,9 @@ def _run_turn_brain_and_send(
             _send_turn(recipient, r.get("reply_text", ""), r.get("buttons") or [], lang)
         else:
             _send(recipient, {"prompt_en": r.get("reply_en", ""), "prompt_hi": r.get("reply_hi", "")}, lang)
-    if r.get("done"):
-        _fire_integration_seam(tenant_id, recipient)
+    # VT-576: NO integration seam fires here — the profile card is the completion's ONLY immediate
+    # message. ``_complete`` set ``__flow__ = profile_previewed``; the owner's NEXT message enters the
+    # paced flow (readiness ask → one integration → data-landed plan) via _maybe_handle_post_profile_flow.
     return r
 
 
@@ -1114,7 +1388,12 @@ def maybe_handle_journey_reply(
             # is what keeps owner-inbound for non-onboarding tenants untouched (no over-firing).
             return None
         if g["status"] != "active":
-            return None  # complete / abandoned → normal flow
+            # VT-576: a COMPLETED journey may still be in the paced post-profile flow (readiness ask →
+            # one integration → data-landed plan), tracked by the ``__flow__`` sentinel. Drive the next
+            # beat; a None return (no flow / terminal / abandoned) falls through to the normal pipeline.
+            return _maybe_handle_post_profile_flow(
+                tenant_id, g, body, message_sid, recipient, lang=lang
+            )
         if not g["question_queue"]:
             # Pending lazy-start: the draft may have landed — try to fill the queue now.
             # Populate-first (CL-2026-07-03): if the draft is identity-anchored, AUTO-POPULATE the
@@ -1154,9 +1433,9 @@ def maybe_handle_journey_reply(
                 return {"done": False, "pending": True}
             if populated:
                 # Fully-derivable profile, no necessities: the profile-collection spine is satisfied —
-                # complete + hand off (the walker has no card; the integration seam continues the chat).
+                # complete. VT-576: NO immediate integration seam — ``_complete`` sets the paced-flow
+                # sentinel; the owner's next message enters _maybe_handle_post_profile_flow.
                 _complete(tenant_id)
-                _fire_integration_seam(tenant_id, recipient)
                 return {"done": True, "pending": False}
             _send(recipient, _opener(), lang)  # still setting up (nothing derivable, no queue yet)
             return {"done": False, "pending": True}
@@ -1198,13 +1477,10 @@ def maybe_handle_journey_reply(
         # DO send.
         if not r.get("already_presented"):
             _send(recipient, {"prompt_en": r["reply_en"], "prompt_hi": r["reply_hi"]}, lang)
-        # VT-425 — the journey → integration SEAM (sequential handoff, CL-443 plan §8 option a).
-        # When the journey COMPLETES profile-confirm on THIS reply, hand off to connector
-        # onboarding so the owner isn't dropped into a cold brain between the two spines. The
-        # journey owns "confirm who you are"; the integration onboarding owns "connect your data".
-        # Best-effort + fail-OPEN: a seam failure must never block the journey's own completion.
-        if r.get("done"):
-            _fire_integration_seam(tenant_id, recipient)
+        # VT-576: the walker's completion sends its closer only — NO immediate integration seam.
+        # ``_complete`` (inside handle_reply) set ``__flow__ = profile_previewed``; the owner's next
+        # message enters the paced flow (readiness ask → one integration → data-landed plan). This kills
+        # the profile-confirm burst (card + Shopify pitch + data-less plan) the live drill surfaced.
         return r
     except Exception:  # noqa: BLE001 — owner-inbound HOT PATH: any failure falls through, never blocks
         logger.exception("maybe_handle_journey_reply failed tenant=%s — fall through", tenant_id)

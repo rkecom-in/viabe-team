@@ -240,13 +240,14 @@ def test_seam_journey_complete_begins_shopify_onboarding(substrate):
 
 
 @_DB
-def test_seam_fires_on_real_journey_completion(substrate):
-    """SEAM end-to-end: a real journey reply that COMPLETES the journey (via
-    maybe_handle_journey_reply) triggers begin_shopify_onboarding — the owner is handed straight
-    from profile-confirm into connector onboarding, never dropped into a cold brain."""
+def test_completion_does_not_burst_integration_seam(substrate):
+    """VT-576 / CL-2026-07-03: profile-confirm completion NO LONGER bursts the Shopify seam. It sets the
+    paced-flow sentinel (``__flow__ = profile_previewed``) and leaves the profile card as the ONLY
+    immediate message — the integration onboarding starts only after a later readiness ask + owner yes.
+    So there is NO tenant_integration_state right after completion (the old immediate-seam behaviour)."""
     import json
 
-    from orchestrator.onboarding.journey import maybe_handle_journey_reply
+    from orchestrator.onboarding.journey import get_journey, maybe_handle_journey_reply
     from orchestrator.onboarding.shopify_onboarding import read_integration_state
 
     tenant = _new_tenant(substrate.dsn)
@@ -264,10 +265,11 @@ def test_seam_fires_on_real_journey_completion(substrate):
     r = maybe_handle_journey_reply(tenant, "yes", "SID-seam-real-1", None)
     assert r is not None and r.get("done") is True  # journey completed on this reply
 
-    state = read_integration_state(tenant)
-    assert state is not None, "SEAM did not fire: no integration state after journey completion"
-    assert state["phase"] == "phase_1_discovery"
-    assert state["current_connector_id"] == "shopify"
+    g = get_journey(tenant)
+    assert g is not None and g["status"] == "complete"
+    assert g["answers"].get("__flow__") == "profile_previewed", "the paced-flow sentinel is set"
+    # The burst is dead: no integration onboarding state exists at completion.
+    assert read_integration_state(tenant) is None, "the integration seam must NOT fire on completion"
 
 
 @_DB

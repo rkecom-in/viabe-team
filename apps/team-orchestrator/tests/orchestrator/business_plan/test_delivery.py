@@ -190,6 +190,37 @@ def send_spy(monkeypatch):  # type: ignore[no-untyped-def]
 # --- Tests -------------------------------------------------------------------
 
 
+def test_compose_parts_strips_citation_markers_from_owner_render():
+    """VT-576/CL-2026-07-03: owner-facing render strips [F#] receipts from the summary headline,
+    every roadmap objective, and owner_action copy — the live drill leaked "... [F1][F5]" to the owner.
+    The strip is RENDER-only (compose_parts); the stored plan artifact keeps its citations for VTR."""
+    from orchestrator.business_plan import delivery, store
+
+    plan = store.BusinessPlan(
+        tenant_id=uuid4(),
+        version=1,
+        summary={"text": "Sales dipped 12% in May [F1]; reviews held at 4.2 stars [F5]."},
+        roadmap=[
+            _item(1, 1, "Reply to all pending reviews [F2]",
+                  owner_action="Share your Google review link [F3]"),
+            _item(2, 1, "Launch the weekend combo offer [F4][F5]"),
+        ],
+        fact_bundle=_BUNDLE,
+        generated_by="gap4_generator",
+        model_id="test-model",
+        delivered_parts=0,
+    )
+    parts = delivery.compose_parts(plan, "en")
+    blob = "\n".join(parts)
+    assert "[F" not in blob, f"citation markers leaked into owner render: {blob!r}"
+    # Content is preserved, just without the receipts (and no doubled spaces left behind).
+    assert "Sales dipped 12% in May; reviews held at 4.2 stars." in parts[0]
+    assert "Reply to all pending reviews" in blob and "Launch the weekend combo offer" in blob
+    assert "Share your Google review link" in blob
+    # The STORED artifact is untouched — the citations stay on the plan object the store persists.
+    assert "[F1]" in plan.summary["text"], "stored artifact must retain citation receipts"
+
+
 def test_full_delivery_en_order_pacing_bitmap(substrate, send_spy):  # type: ignore[no-untyped-def]
     """3 distinct months → 5 parts in order (summary, M1, M2, M4, hint), EN copy,
     seq-sorted objectives, owner_action prompt, 2.0s pacing between attempts,

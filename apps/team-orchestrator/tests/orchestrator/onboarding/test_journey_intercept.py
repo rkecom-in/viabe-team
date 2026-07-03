@@ -337,12 +337,13 @@ def test_fail_open_on_internal_error_returns_none(substrate, send_spy, monkeypat
 # --- (e) COMPLETE journey → fall through ------------------------------------
 
 
-def test_complete_journey_returns_none(substrate, send_spy):  # type: ignore[no-untyped-def]
-    """A COMPLETE journey (status != 'active') → the intercept returns None
-    (fall through). The completed onboarding owner now talks to the normal brain."""
+def test_complete_journey_drives_flow_then_falls_through(substrate, send_spy):  # type: ignore[no-untyped-def]
+    """VT-576/CL-2026-07-03: a COMPLETE journey no longer falls straight through — its next inbound
+    enters the PACED post-profile flow (readiness ask). Only once the flow reaches its TERMINAL beat
+    (``plan_kicked``) does the intercept return None, handing the owner to the normal brain."""
     from orchestrator.onboarding import journey
 
-    tenant = _new_tenant(substrate.dsn, name="complete falls through", phase="trial")
+    tenant = _new_tenant(substrate.dsn, name="complete drives flow", phase="trial")
     # Drive the journey to completion: a single-question queue + one answer.
     journey.start_journey(
         tenant,
@@ -359,14 +360,24 @@ def test_complete_journey_returns_none(substrate, send_spy):  # type: ignore[no-
     journey.handle_reply(tenant, "9 to 9", "SM-drive-complete")
     row = _journey_row(substrate.dsn, tenant)
     assert row is not None and row["status"] == "complete"
+    g = journey.get_journey(tenant)
+    assert g is not None and g["answers"].get("__flow__") == "profile_previewed", "completion opens the paced flow"
 
+    # The owner's next message enters the flow (readiness ask), NOT a fall-through.
     send_spy.clear()
     result = journey.maybe_handle_journey_reply(
-        tenant, "another inbound", "SM-complete-fallthrough", recipient="+919999000555"
+        tenant, "another inbound", "SM-complete-flow", recipient="+919999000555"
     )
+    assert result is not None and result.get("routed") == "flow_readiness_ask"
 
-    assert result is None, "a complete journey must fall through to the normal brain"
-    assert send_spy == [], "nothing should be sent on a complete-journey fall-through"
+    # Once the flow reaches its terminal beat, the intercept falls through to the brain.
+    journey._set_flow(tenant, journey._FLOW_PLAN_KICKED)
+    send_spy.clear()
+    terminal = journey.maybe_handle_journey_reply(
+        tenant, "hi again", "SM-complete-fallthrough", recipient="+919999000555"
+    )
+    assert terminal is None, "a terminal (plan_kicked) flow falls through to the normal brain"
+    assert send_spy == [], "nothing is sent on the terminal fall-through"
 
 
 # --- (f) OPT-OUT / DSR / STOP mid-journey ALWAYS wins (VT-329 / DPDP) --------
