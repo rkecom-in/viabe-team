@@ -21,7 +21,7 @@ FAIL-SOFT: ``compose_turn`` returns ``None`` on ANY failure (LLM error / timeout
 empty) — the caller then falls back to the deterministic walker for that turn, so onboarding never
 stalls on an LLM hiccup. Gated by ``ONBOARDING_TURN_BRAIN`` (read in ``journey``; default OFF).
 
-Model: the house CONVERSATIONAL tier (``claude-sonnet-4-6``, the dispatch brain's routine-turn model)
+Model: the house CONVERSATIONAL tier (``claude-sonnet-5``, the dispatch brain's routine-turn model)
 — Haiku (the question-brain gap model) is too weak for free conversation; Opus is reserved for the
 brain's complex reasoning and adds latency on this owner-inbound hot path. Sonnet is the right middle:
 the tier the product already uses to actually talk to owners.
@@ -48,7 +48,7 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-_TURN_MODEL = "claude-sonnet-4-6"  # house conversational tier (parity with dispatch _BRAIN_MODEL_SONNET)
+_TURN_MODEL = "claude-sonnet-5"  # house conversational tier (parity with dispatch _BRAIN_MODEL_SONNET)
 _MAX_TOKENS = 1024  # a short WhatsApp reply + a small JSON envelope — never a wall of text
 _TURN_TIMEOUT_S = 20.0  # bound the call — runs on the owner-inbound hot path (parity with question_brain)
 _MAX_BUTTONS = 3  # Meta quick-reply hard limit (WhatsApp in-session)

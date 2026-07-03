@@ -118,7 +118,7 @@ _DEFAULT_MAX_TOKENS = 4096
 #
 # SINGLE SOURCE OF TRUTH for the brain model IDs — every brain-model selection
 # reads these two constants (do NOT inline the strings elsewhere in this file).
-_BRAIN_MODEL_SONNET = "claude-sonnet-4-6"  # routine/simple turns — cheap, fast
+_BRAIN_MODEL_SONNET = "claude-sonnet-5"  # routine/simple turns — Sonnet 5 (Fazal 2026-07-04, quality)
 _BRAIN_MODEL_OPUS = "claude-opus-4-8"  # complex reasoning — the capable default
 
 # Classifications that are CLEARLY simple → route to Sonnet. CORRECTNESS-FIRST:
