@@ -88,7 +88,7 @@ class AgentNeed:
 AGENT_NEEDS: dict[str, AgentNeed] = {
     SALES_RECOVERY: AgentNeed(
         agent=SALES_RECOVERY,
-        why="recover revenue from customers who've stopped buying",
+        why="win back buyers who've gone quiet and recover lost revenue",
         # To COMPOSE a win-back plan I need to see who your customers are and their purchase
         # history (to compute who's lapsed). To EXECUTE it I additionally need a channel to send.
         plan_requires=frozenset({CUSTOMERS_CONTACTABLE, TRANSACTIONS_HISTORY}),
@@ -412,6 +412,7 @@ __all__ = [
     "Readiness",
     "supplied_classes",
     "readiness",
+    "plan_blocked_reason",
     "next_best_integration",
     # agent ids
     "SALES_RECOVERY",
