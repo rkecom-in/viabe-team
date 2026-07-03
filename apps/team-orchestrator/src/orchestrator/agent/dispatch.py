@@ -911,6 +911,128 @@ def _last_manager_reply_text(terminal_state: dict[str, Any]) -> str | None:
     return None
 
 
+def _reply_is_incomplete(terminal_state: dict[str, Any]) -> bool:
+    """VT-591 — does the manager's trailing reply NEED a compose-completion pass?
+
+    True when the trailing message is NOT a complete owner reply — the signals we
+    can detect deterministically at the transmit seam:
+
+    - text is None/empty (nothing to send; ``_last_manager_reply_text`` already
+      returns None for a tool-calls-only trailing AIMessage), OR
+    - ``text.rstrip()`` ends with a colon — the "explainer intro" truncation the
+      ReAct loop leaves behind ("here's how it works end to end:") when the agent
+      emits an intro and stops with no tool call, OR
+    - the trailing AIMessage still carried a non-empty ``tool_calls`` (it DEFERRED
+      the real content to a call that never resolved into a final answer here).
+
+    Pure + cheap: this runs on EVERY no-spawn transmit turn, and a False result
+    means the caller SKIPS the extra LLM call entirely (the cost guard — a good
+    reply pays nothing). Unit-tested in test_manager_reply_complete.py.
+    """
+    text = _last_manager_reply_text(terminal_state)
+    if not text:
+        return True
+    if text.rstrip().endswith(":"):
+        return True
+    # The trailing AIMessage (same one _last_manager_reply_text evaluated) still
+    # holding tool_calls → it deferred; complete it. Reverse-scan to that first
+    # AIMessage, mirroring _last_manager_reply_text's scan.
+    for msg in reversed(terminal_state.get("messages") or []):
+        if isinstance(msg, AIMessage):
+            return bool(getattr(msg, "tool_calls", None))
+    return False
+
+
+# VT-591 — the compose-completion system prompt. Bound with NO tools, so the model
+# MUST emit a final message (it cannot defer into another dangling intro / tool
+# call). Kept inline (single source; not a template file) + concise.
+_COMPOSE_COMPLETION_SYSTEM = (
+    "You are the Viabe Team-Manager writing the FINAL WhatsApp reply to the OWNER of a "
+    "small Indian business. Output ONLY the complete message you would send them — no "
+    "narration, no meta-commentary, no third person, never describe what you are doing. "
+    'Write in second person ("you", "your store") and in the owner\'s language (match '
+    "the conversation). Your reply MUST be complete: never end on a dangling colon or a "
+    "half-sentence, and never stop at an intro that only promises an explanation — "
+    "actually give the full answer. If you lack a specific fact, say so honestly and "
+    "give the next step — NEVER invent a number, date, status, or detail. If an "
+    "onboarding-state block is present, answer the owner's message AND gently guide them "
+    "back to the pending step."
+)
+
+
+def _compose_completed_reply(
+    tenant_id: UUID, event: WebhookEvent, terminal_state: dict[str, Any]
+) -> str | None:
+    """VT-591 — ONE focused, no-tools LLM call that turns the manager's INCOMPLETE
+    trailing reply into the COMPLETE owner-facing WhatsApp message.
+
+    Called ONLY when ``_reply_is_incomplete`` fired (the cost guard: a complete
+    reply never reaches here). NO tools are bound, so the model MUST return final
+    text — it cannot defer into another dangling intro. Same model TIER as the
+    brain conversational hot path: this is a plain conversational rewrite, not a
+    reasoning task, so it uses ``_BRAIN_MODEL_SONNET`` (the SAME constant
+    ``select_brain_model`` returns for routine turns) via the SAME ``_resolve_model``
+    builder — deliberately NOT Opus.
+
+    Compose context assembles (a) the recent conversation window (reused from the
+    dispatch-side ``_build_manager_conversation_block``, current inbound excluded —
+    it rides as its own labeled line), (b) the onboarding-state block if any (so the
+    completion answers AND guides back mid-onboarding), (c) the owner's latest
+    inbound text, (d) the manager's DRAFT so far to finish.
+
+    Fail-soft: returns the stripped completion, or ``None`` on empty / any exception
+    (the caller then falls back to the raw trailing text, then to the D1 net). MUST
+    NEVER raise into ``_maybe_send_manager_reply``.
+    """
+    try:
+        draft = _last_manager_reply_text(terminal_state) or ""
+        owner_text = event.body or ""
+        # Reuse the dispatch-side window so the completion keeps continuity (and does
+        # not re-ask). Exclude the current inbound — it rides as its own labeled line
+        # below (mirrors the dispatch-side exclude_message_sid, avoids doubling).
+        conversation_block = _build_manager_conversation_block(
+            tenant_id, exclude_message_sid=getattr(event, "twilio_message_sid", None)
+        )
+        onboarding_block = _build_onboarding_state_block(tenant_id)
+
+        human_parts: list[str] = []
+        if conversation_block:
+            human_parts.append(conversation_block)
+        if onboarding_block:
+            human_parts.append(onboarding_block)
+        human_parts.append(f"## The owner just messaged you\n{owner_text}")
+        human_parts.append(
+            "## Your draft so far — finish it into the complete message\n"
+            f"{draft}"
+        )
+        human_content = "\n\n".join(human_parts)
+
+        response = _resolve_model(_BRAIN_MODEL_SONNET).invoke(
+            [
+                SystemMessage(content=_COMPOSE_COMPLETION_SYSTEM),
+                HumanMessage(content=human_content),
+            ]
+        )
+        # Handle both content shapes (str + list-of-blocks), like _last_manager_reply_text.
+        raw = getattr(response, "content", None)
+        if isinstance(raw, str):
+            text = raw.strip()
+        elif isinstance(raw, list):
+            text = "".join(
+                block.get("text", "")
+                for block in raw
+                if isinstance(block, dict) and block.get("type") == "text"
+            ).strip()
+        else:
+            text = ""
+        return text or None
+    except Exception:  # noqa: BLE001 — compose-completion is best-effort; never raise
+        logger.warning(
+            "VT-591: compose-completion failed (fail-soft) tenant=%s", tenant_id
+        )
+        return None
+
+
 def _maybe_send_manager_reply(
     tenant_id: UUID, event: WebhookEvent, terminal_state: dict[str, Any]
 ) -> None:
@@ -930,18 +1052,40 @@ def _maybe_send_manager_reply(
     AUTO-suppresses the D1 fallback (no double-send). The manager holds NO send tool by
     construction (the tool_guardrail invariant), so this owner send lives here in the
     deterministic dispatch seam rather than as a brain tool-call.
+
+    VT-591: the trailing reply sometimes truncates — the agent emits an "explainer
+    intro" ending in a dangling colon (or defers to a tool_call) as its complete turn
+    and stops. When ``_reply_is_incomplete`` fires, run ONE focused no-tools
+    compose-completion LLM call and send THAT instead; a COMPLETE reply skips the call
+    entirely (cost guard). Fail-soft chain: completed → raw trailing text → D1 net.
+    Exactly ONE send.
     """
     recipient = getattr(event, "sender_phone", None)
     if not recipient:
         return
-    text = _last_manager_reply_text(terminal_state)
-    if text is None:
+
+    raw = _last_manager_reply_text(terminal_state)
+    # VT-591: complete an INCOMPLETE trailing reply; leave a complete one untouched
+    # (no extra LLM call). The compose call is itself fail-soft (returns None), so on
+    # its miss we fall back to the raw trailing text, then to runner.py's D1 net.
+    if _reply_is_incomplete(terminal_state):
+        completed = _compose_completed_reply(tenant_id, event, terminal_state)
+        body, path = (completed, "completed") if completed else (raw, "raw-fallback")
+    else:
+        body, path = raw, "raw"
+
+    if not body:
+        # Nothing transmittable — leave runner.py's D1 fallback (VT-583) as the net.
         return
     try:
         from orchestrator.owner_surface.freeform_acks import send_freeform_ack
 
-        send_freeform_ack(tenant_id, recipient, text)
-        logger.info("VT-589: transmitted manager direct reply (tenant=%s)", tenant_id)
+        send_freeform_ack(tenant_id, recipient, body)
+        logger.info(
+            "VT-589/591: transmitted manager direct reply (tenant=%s path=%s)",
+            tenant_id,
+            path,
+        )
     except Exception:  # noqa: BLE001 — best-effort; the D1 fallback remains the net
         logger.warning(
             "VT-589: manager direct-reply send failed (fail-soft) tenant=%s", tenant_id
