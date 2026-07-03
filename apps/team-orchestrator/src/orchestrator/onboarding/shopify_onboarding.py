@@ -77,6 +77,79 @@ def _tokens(body: str) -> set[str]:
     return {t for t in re.split(r"[\s,.!?;:।/\\-]+", norm) if t}
 
 
+# VT-583 (CL-2026-07-03-conversing-surfaces-and-harness): the auth-phase INTENT classifier. The _DONE
+# token floor above stays the FAST, DETERMINISTIC path (an unambiguous "done"/"ho gaya" short-circuits
+# to the DB re-check). Only a NON-floor reply reaches this classifier, which reads its intent as one of
+# done | link | other so the owner who says "its connected now" / "ho gaya install" advances (still
+# gated by the authoritative DB shopify_is_connected re-check), the owner who wants a fresh link ("send
+# again", "link nahi mila") gets it re-minted, and a question/other gets an HONEST status reply — never
+# the canned re-prompt and never silence. Fail-soft → None (caller then treats it as a non-done reply).
+_AUTH_INTENT_MODEL = "claude-haiku-4-5-20251001"  # cheap classifier tier (parity with question_brain)
+_AUTH_INTENT_TIMEOUT_S = 12.0
+_VALID_AUTH_INTENTS = frozenset({"done", "link", "other"})
+
+
+def _anthropic_key_present() -> bool:
+    """A usable (non-sentinel) Anthropic key is on the env — so a unit/CI run with no key never makes a
+    live call (the classifier degrades to None and the caller keeps the deterministic non-done path)."""
+    import os
+
+    key = (os.environ.get("ANTHROPIC_API_KEY") or "").strip()
+    return bool(key) and not key.lower().startswith(("test", "sentinel", "dummy", "sk-ant-test"))
+
+
+def _llm_classify_auth_intent(body: str) -> str | None:
+    """Classify a NON-floor auth-phase reply as done|link|other via Haiku. JSON-only, bounded,
+    fail-soft → None on any failure (no key / LLM error / timeout / unparseable / off-label)."""
+    if not _anthropic_key_present():
+        return None
+    try:
+        import json as _json
+
+        from anthropic import Anthropic
+
+        prompt = (
+            "A small Indian business owner was asked to tap a link, connect their Shopify store, and "
+            "reply when finished. Classify their reply's INTENT as exactly one of:\n"
+            "- done: they say the store is connected / they finished (e.g. 'done', 'ho gaya', "
+            "'its connected now', 'installed it')\n"
+            "- link: they can't find the link or want it resent (e.g. 'send the link again', "
+            "'link nahi mila', 'resend')\n"
+            "- other: a question, an unrelated message, or anything that is not a 'done' or a "
+            "link request\n"
+            "Judge the MEANING across Hindi / Hinglish / English.\n"
+            f'Reply: "{(body or "").strip()[:400]}"\n'
+            'Return ONLY a JSON object: {"intent": "done|link|other"}. No prose.'
+        )
+        resp = Anthropic().messages.create(
+            model=_AUTH_INTENT_MODEL,
+            max_tokens=60,
+            messages=[{"role": "user", "content": prompt}],
+            timeout=_AUTH_INTENT_TIMEOUT_S,
+        )
+        raw = resp.content[0].text if resp.content else ""
+        start, end = raw.find("{"), raw.rfind("}")
+        if start == -1 or end == -1 or end <= start:
+            return None
+        obj = _json.loads(raw[start : end + 1])
+        intent = str((obj or {}).get("intent") or "").strip().lower()
+        return intent if intent in _VALID_AUTH_INTENTS else None
+    except Exception as exc:  # noqa: BLE001 — best-effort; any failure → None (caller keeps deterministic path)
+        logger.warning("VT-583: shopify auth-intent classify failed (%s) — deterministic path", type(exc).__name__)
+        return None
+
+
+def classify_auth_intent(body: str, *, llm_fn: Callable[[str], str | None] | None = None) -> str | None:
+    """Classify a non-floor auth-phase reply as done|link|other, or None (→ caller's deterministic
+    non-done path). ``llm_fn`` is injectable so tests drive classification without a live call."""
+    fn = llm_fn or _llm_classify_auth_intent
+    try:
+        intent = fn(body)
+    except Exception:  # noqa: BLE001 — an injected/real classifier error → None (deterministic path)
+        return None
+    return intent if intent in _VALID_AUTH_INTENTS else None
+
+
 # --- PendingOwnerInput envelope helpers (shape gated by the Pydantic model) ----------------
 
 
@@ -223,6 +296,25 @@ def _iso(dt: datetime) -> str:
 # --- Connector status read (resume gate: "did the owner finish the OAuth?") -----------------
 
 
+def has_live_resume(tenant_id: UUID | str) -> bool:
+    """VT-583 D2 — True iff there is a LIVE connector-onboarding step waiting on the owner's next
+    reply: an integration state in a resumable phase (discovery / auth) with an unexpired
+    ``pending_owner_input``. The journey's integration-in-flight beat calls this to decide whether the
+    downstream resume gate will consume the message (→ let it) or the flow has been orphaned (→ re-offer
+    so the owner is never dropped to the cold brain). Fail-soft → False (treat as orphaned; re-offering
+    is the safe, no-silence direction)."""
+    try:
+        state = read_integration_state(tenant_id)
+        if not state:
+            return False
+        if state.get("phase") not in (PHASE_DISCOVERY, PHASE_AUTH):
+            return False
+        return _pending_is_unexpired(state.get("pending_owner_input"))
+    except Exception:  # noqa: BLE001 — a state read must never block owner inbound; assume orphaned
+        logger.warning("VT-583: has_live_resume read failed tenant=%s (fail-soft → False)", tenant_id)
+        return False
+
+
 def shopify_is_connected(tenant_id: UUID | str) -> bool:
     """True iff a Shopify OAuth/credential token row exists for the tenant — the durable,
     DB-truth signal that the owner completed the install (the callback persisted a
@@ -335,6 +427,49 @@ def _send(recipient: str | None, text: str) -> None:
         logger.warning("VT-425: owner send failed (recipient hashed in send util) — state advanced")
 
 
+# --- VT-583: auth-phase honest waiting line + link re-mint (never silence, never fabricate) --------
+
+
+def _auth_waiting_line(walkthrough: str | None) -> str:
+    """The HONEST auth-waiting reply — sent for EVERY non-done, non-link reply so the owner is never
+    dropped (VT-583 D3 fixes the :405 silent edge where an absent walkthrough_url sent nothing). Shows
+    the link when we have it; otherwise tells them how to get a fresh one."""
+    base = "Looks like your Shopify store isn't connected yet — tap the link I sent to finish, then reply 'done'."
+    if walkthrough:
+        return f"{base}\n{walkthrough}"
+    return f"{base} If you need the link again, just say 'link'."
+
+
+def _remint_auth_link(
+    tenant_id: UUID | str, pending: dict[str, Any] | None, recipient: str | None
+) -> bool:
+    """Re-mint a FRESH authorize link from the shop stored on the pending envelope (never fabricate a
+    domain). Returns True if a fresh link was sent, False if we had to ask for the store address. Either
+    way SOMETHING is sent (no silent path)."""
+    shop = None
+    if isinstance(pending, dict):
+        shop = (pending.get("metadata") or {}).get("shop")
+    if not shop:
+        _send(
+            recipient,
+            "I don't have your store address on file — reply with it (it looks like "
+            "yourstore.myshopify.com) and I'll send a fresh connect link.",
+        )
+        return False
+    try:
+        result = start_shopify_setup(tenant_id, str(shop))
+        _send(
+            recipient,
+            "Here's a fresh link to connect your Shopify store — tap it, approve the access, then "
+            f"reply 'done':\n{result['authorize_url']}",
+        )
+        return True
+    except Exception:  # noqa: BLE001 — a re-mint failure still owes the owner an honest line, never silence
+        logger.warning("VT-583: shopify link re-mint failed tenant=%s (fail-soft)", tenant_id)
+        _send(recipient, _auth_waiting_line(None))
+        return False
+
+
 # --- THE RESUME HOOK (closes the VT-267 chat-resume gap, plan §1a-bis) ----------------------
 
 
@@ -401,19 +536,30 @@ def maybe_resume_shopify_onboarding(
             )
             return {"done": False, "phase": PHASE_AUTH, "routed": "shopify_setup_minted"}
 
-        # --- auth: owner says "done" → re-check connector status (DB truth) ------------------
+        # --- auth: owner signals done → re-check connector status (DB truth) -----------------
         if phase == PHASE_AUTH and awaiting == "oauth_completion":
             toks = _tokens(body)
-            if not (toks & _DONE):
-                # Not a completion affirmation — re-send the link, stay put (no guessing).
-                walkthrough = pending.get("walkthrough_url") if isinstance(pending, dict) else None
-                if walkthrough:
-                    _send(
-                        recipient,
-                        "When you've connected Shopify, reply 'done'. Here's the link "
-                        f"again if you need it:\n{walkthrough}",
-                    )
-                return {"done": False, "phase": phase, "routed": "shopify_auth_waiting"}
+            walkthrough = pending.get("walkthrough_url") if isinstance(pending, dict) else None
+            # FAST FLOOR: an unambiguous token "done"/"ho gaya" short-circuits to the DB re-check.
+            is_done = bool(toks & _DONE)
+            if not is_done:
+                # VT-583: a NON-floor reply is intent-classified (done | link | other). The
+                # authoritative DB re-check below still gates any "done"; nothing here fabricates
+                # progress. Every branch SENDS (no silent path — the :405 edge is closed).
+                intent = classify_auth_intent(body)
+                if intent == "done":
+                    is_done = True  # a done-intent phrasing → fall through to the DB re-check
+                elif intent == "link":
+                    reminted = _remint_auth_link(tenant_id, pending, recipient)
+                    return {
+                        "done": False,
+                        "phase": phase,
+                        "routed": "shopify_auth_link_reminted" if reminted else "shopify_auth_link_need_shop",
+                    }
+                else:
+                    # question / other / classifier-unavailable → HONEST waiting line, ALWAYS sent.
+                    _send(recipient, _auth_waiting_line(walkthrough))
+                    return {"done": False, "phase": phase, "routed": "shopify_auth_waiting"}
             if not shopify_is_connected(tenant_id):
                 # Owner said done but the callback hasn't persisted a token yet — DO NOT
                 # fabricate progress. Re-prompt, stay in phase_2_auth.
@@ -498,6 +644,7 @@ __all__ = [
     "PHASE_MAPPING",
     "PHASE_CONFIRMED",
     "read_integration_state",
+    "has_live_resume",
     "shopify_is_connected",
     "start_shopify_setup",
     "pull_and_ingest_shopify",

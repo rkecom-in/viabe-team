@@ -50,7 +50,17 @@ def consent_required_handler(
     recipient = event.sender_phone or None
     if recipient is not None:
         try:
-            sid = send_freeform_message(_CONSENT_PROMPT, recipient)
+            # VT-583 — record this send into the lifetime log (surface='system'; the mig-164 CHECK allows
+            # journey|manager|system) so the runner's consent gate can recognise it: the prompt contains
+            # the enable phrase (_ENABLE_PHRASE), which uniquely marks the consent ASK. A plain
+            # affirmation on the NEXT inbound then routes to the same audited enable path. Pillar-1
+            # unchanged: still zero LLM.
+            sid = send_freeform_message(
+                _CONSENT_PROMPT,
+                recipient,
+                tenant_id=state["tenant_id"],
+                surface="system",
+            )
         except Exception as exc:  # noqa: BLE001 — honest send outcome, never crash the pipeline
             error = repr(exc)
     else:

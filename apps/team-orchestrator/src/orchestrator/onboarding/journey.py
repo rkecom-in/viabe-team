@@ -126,6 +126,45 @@ def _has_connect_intent(body: str) -> bool:
     return _is_affirm(body) or bool(_tokens(body) & _FLOW_CONNECT_INTENT)
 
 
+# --- VT-583 (CL-2026-07-03-conversing-surfaces-and-harness): floor-first, brain-mediated middle -----
+#
+# The paced-flow beats decide readiness (yes / later) and deferred-resume. The keyword sets above stay
+# the FAST FLOOR — an UNAMBIGUOUS hit short-circuits with zero LLM (cheap + deterministic). Only a reply
+# the floor can't clearly call (neither/both signals) is handed to the small turn-brain intent
+# classifier. 'other' + any classifier failure fall back to EXACTLY the pre-VT-583 branch for that beat
+# (fail-soft = today's behavior). This sharpens the ambiguous middle without ever overriding a clear
+# floor or a compliance path.
+
+
+def _resolve_readiness_intent(body: str) -> str:
+    """READY_ASKED decision → "decline" | "affirm". Deterministic floor first; the ambiguous middle
+    asks the classifier. Fail-soft to today's behavior: pre-VT-583 the beat was ``decline → defer, else
+    → offer`` (any non-decline offered), so an 'other'/error result maps to "affirm" (the offer path)."""
+    aff = _is_affirm(body)
+    dec = _is_decline(body)
+    if dec and not aff:
+        return "decline"  # unambiguous floor hit — short-circuit
+    if aff and not dec:
+        return "affirm"  # unambiguous floor hit — short-circuit
+    # Ambiguous (neither or both): let the intent classifier read it; a decline verdict defers, every
+    # other verdict (affirm/connect/other/error) keeps today's non-decline → offer behavior.
+    from orchestrator.onboarding.turn_brain import classify_flow_intent
+
+    return "decline" if classify_flow_intent(body) == "decline" else "affirm"
+
+
+def _resolve_deferred_intent(body: str) -> bool:
+    """DEFERRED decision → True iff the owner wants to CONNECT now (re-engage). Deterministic
+    connect-intent floor first; the ambiguous middle asks the classifier. Fail-soft to today's
+    behavior: pre-VT-583 the beat re-engaged only on ``_has_connect_intent`` and otherwise fell through
+    (None → brain), so an 'other'/error verdict keeps the fall-through (returns False)."""
+    if _has_connect_intent(body):
+        return True  # unambiguous floor hit — short-circuit
+    from orchestrator.onboarding.turn_brain import classify_flow_intent
+
+    return classify_flow_intent(body) in ("affirm", "connect")
+
+
 def start_journey(tenant_id: UUID | str, question_queue: list[dict[str, Any]]) -> None:
     """Begin (or reset) the journey with the ordered question set (2b Question objects as dicts).
     Idempotent-ish: an existing row is replaced (re-start). ``question_queue`` may be empty if the
@@ -219,10 +258,16 @@ def _fire_distill(
         logger.warning("journey: distill workflow start failed (fail-soft; evicted tail dropped)", exc_info=True)
 
 
-def _append_recent_turns(tenant_id: UUID | str, *entries: dict[str, Any]) -> None:
+def _append_recent_turns(
+    tenant_id: UUID | str, *entries: dict[str, Any], message_sid: str | None = None
+) -> None:
     """Append {role, text} entries to the journey's rolling window, capped. VT-571: on OVERFLOW the older
     head is not dropped — it is distilled (off the hot path) into ``conversation_summary`` so durable
-    facts survive past the cap-8 window. Fail-soft throughout — the transcript is memory, never a gate."""
+    facts survive past the cap-8 window. Fail-soft throughout — the transcript is memory, never a gate.
+
+    VT-583: ``message_sid`` (the current inbound sid) is stamped on the OWNER leg of the conversation_log
+    mirror so it dedups against the runner's early owner-inbound record (idempotent per (tenant, sid)) —
+    the owner turn lands in the lifetime log exactly ONCE regardless of which seam recorded it first."""
     try:
         cleaned = [
             {"role": e.get("role", ""), "text": str(e.get("text", ""))[:600]}
@@ -267,7 +312,13 @@ def _append_recent_turns(tenant_id: UUID | str, *entries: dict[str, Any]) -> Non
             r = e.get("role")
             log_role = "owner" if r == "owner" else "assistant" if r == "bot" else None
             if log_role:
-                record_turn(tenant_id, log_role, e.get("text", ""), surface="journey")
+                record_turn(
+                    tenant_id,
+                    log_role,
+                    e.get("text", ""),
+                    message_sid=(message_sid if log_role == "owner" else None),
+                    surface="journey",
+                )
         # The trimmed window is now committed. Fold the evicted head into the running summary OFF the hot
         # path — its own guarded fire so a DBOS-unavailable env degrades to drop-silently (never re-raises).
         if evicted:
@@ -1101,7 +1152,7 @@ def _handle_reply_with_turn_brain(
     )
     if plan is None:
         # Fail-soft: the deterministic walker owns this turn (and applies the VT-569a bare-no re-prompt).
-        _append_recent_turns(tenant_id, {"role": "owner", "text": body})
+        _append_recent_turns(tenant_id, {"role": "owner", "text": body}, message_sid=message_sid)
         return handle_reply(tenant_id, body, message_sid, lang=lang)
 
     answers, skipped = _apply_turn_plan(tenant_id, g, plan, draft_attrs)
@@ -1122,7 +1173,8 @@ def _handle_reply_with_turn_brain(
             buttons = []
         # VT-569 memory: persist this exchange so any later conversation sees it.
         _append_recent_turns(
-            tenant_id, {"role": "owner", "text": body}, {"role": "bot", "text": reply}
+            tenant_id, {"role": "owner", "text": body}, {"role": "bot", "text": reply},
+            message_sid=message_sid,
         )
         return {
             "turn_brain": True,
@@ -1133,7 +1185,8 @@ def _handle_reply_with_turn_brain(
     # VT-569 memory: the brain must see what IT said this turn — an owner affirmation next turn
     # ("Use that") carries THIS bot-proposed value (the live-drill amnesia fix).
     _append_recent_turns(
-        tenant_id, {"role": "owner", "text": body}, {"role": "bot", "text": plan.reply_text}
+        tenant_id, {"role": "owner", "text": body}, {"role": "bot", "text": plan.reply_text},
+        message_sid=message_sid,
     )
     return {
         "turn_brain": True,
@@ -1230,6 +1283,21 @@ def _connected_integrations(tenant_id: UUID | str) -> set[str]:
     return connected
 
 
+def _integration_resume_live(tenant_id: UUID | str) -> bool:
+    """VT-583 D2 — True iff the downstream connector resume gate has a LIVE step waiting on this owner's
+    next reply (an unexpired pending in a resumable phase). When True the journey's integration beat
+    returns None so that gate consumes the message; when False the handoff has been orphaned and the
+    beat re-offers instead of dropping the owner to the cold brain. Fail-soft → False (re-offer is the
+    no-silence direction)."""
+    try:
+        from orchestrator.onboarding.shopify_onboarding import has_live_resume
+
+        return has_live_resume(tenant_id)
+    except Exception:  # noqa: BLE001 — never block owner inbound on a state read; assume orphaned
+        logger.warning("journey flow: integration-resume-live check failed (fail-soft)", exc_info=True)
+        return False
+
+
 def _flow_ask_readiness(tenant_id: UUID | str, recipient: str | None, message_sid: str | None, lang: str) -> dict[str, Any]:
     """Beat (b): the owner acknowledged the profile card → ask ONCE whether to set up data
     connections now (one at a time), or defer. Never steamroll."""
@@ -1261,9 +1329,24 @@ _SHOP_DOMAIN_RE = re.compile(r"\b([a-z0-9][a-z0-9-]*\.myshopify\.com)\b", re.IGN
 
 
 def _recent_shop_domain(tenant_id: UUID | str) -> str | None:
-    """The most-recent Shopify store address the OWNER already sent (newest-first scan of the
-    conversation window + current answers). Record-and-move-on: never ask them to retype what
-    they've said. None when nothing matches. Fail-soft."""
+    """The most-recent Shopify store address the OWNER already sent. Record-and-move-on: never ask them
+    to retype what they've said. None when nothing matches. Fail-soft.
+
+    VT-583 addendum (CL-2026-07-03): reads the UNIFIED lifetime log (conversation_log) FIRST — the store
+    URL is captured at the runner seam even when a silent/consumed path never appended to the journey
+    window — then falls back to journey.recent_turns. Reading ONE substrate is what kills the
+    3×-store-link re-ask (the substrate-fragmentation disease)."""
+    # PRIMARY: the unified conversation log (newest-first owner texts).
+    try:
+        from orchestrator.conversation_log import recent_owner_texts
+
+        for text in recent_owner_texts(tenant_id):
+            m = _SHOP_DOMAIN_RE.search(text)
+            if m:
+                return m.group(1).lower()
+    except Exception:  # noqa: BLE001 — a courtesy lookup; never break the flow
+        logger.warning("journey: recent shop-domain scan (conversation_log) failed (fail-soft)", exc_info=True)
+    # FALLBACK: the journey-local window (older onboarding turns outside the 24h active window).
     try:
         g = get_journey(tenant_id)
         if not g:
@@ -1275,7 +1358,7 @@ def _recent_shop_domain(tenant_id: UUID | str) -> str | None:
             if m:
                 return m.group(1).lower()
     except Exception:  # noqa: BLE001 — a courtesy lookup; never break the flow
-        logger.warning("journey: recent shop-domain scan failed (fail-soft)", exc_info=True)
+        logger.warning("journey: recent shop-domain scan (journey window) failed (fail-soft)", exc_info=True)
     return None
 
 
@@ -1397,21 +1480,36 @@ def _maybe_handle_post_profile_flow(
         return _flow_ask_readiness(tenant_id, recipient, message_sid, lang)
 
     if flow == _FLOW_READY_ASKED:
-        if _is_decline(body):
+        # VT-583: floor-first, brain-mediated middle (see _resolve_readiness_intent). A decline defers;
+        # every other verdict proceeds with the easiest connection — same beats as before, just fluid.
+        if _resolve_readiness_intent(body) == "decline":
             return _flow_defer(tenant_id, recipient, message_sid, lang)
-        # Any non-decline reply to "shall I set up your connections?" → proceed with the easiest one.
         return _flow_offer_next_integration(tenant_id, recipient, message_sid, lang)
 
     if flow == _FLOW_DEFERRED:
-        # Resumable: a clear "connect"/"yes" re-engages; anything else falls through to normal chat.
-        if _has_connect_intent(body):
+        # Resumable: a clear connect/affirm re-engages (floor OR classifier); anything else falls
+        # through to normal chat (the brain owns it). VT-583 widens the re-engage beyond the keyword
+        # floor without hijacking ordinary messages.
+        if _resolve_deferred_intent(body):
             return _flow_offer_next_integration(tenant_id, recipient, message_sid, lang)
         return None
 
     if flow.startswith(_FLOW_INTEGRATION_PREFIX):
-        # An integration handoff is in flight — the downstream resume gate (runner.py) owns the connect
-        # steps. First, if the data has now LANDED, fire the deferred summary + month plan once.
-        return _maybe_kickoff_plan_after_data(tenant_id, recipient, message_sid, lang)
+        # An integration handoff is in flight. First: if the data has now LANDED, fire the deferred
+        # summary + month plan once.
+        kicked = _maybe_kickoff_plan_after_data(tenant_id, recipient, message_sid, lang)
+        if kicked is not None:
+            return kicked
+        # Data hasn't landed. If a LIVE connector resume step exists, let the downstream integration
+        # resume gate (runner.py) drive the connect step — return None so it takes this inbound.
+        if _integration_resume_live(tenant_id):
+            return None
+        # VT-583 D2 (live run 23 orphan): flow=integration:<x>, data NOT landed, and NO live resume step
+        # to consume this message — WITHOUT this branch the inbound falls to the cold brain silently.
+        # Re-offer the integration step (idempotent — the same easiest-first offer) so a reply is
+        # GUARANTEED and the owner is never dropped mid-handoff.
+        logger.info("journey flow: integration orphan re-offer (tenant=%s flow=%s)", tenant_id, flow)
+        return _flow_offer_next_integration(tenant_id, recipient, message_sid, lang)
 
     return None
 

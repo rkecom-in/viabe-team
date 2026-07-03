@@ -441,3 +441,172 @@ def test_opt_out_falls_through_not_consumed(substrate):
     assert maybe_resume_shopify_onboarding(
         tenant, "STOP", "SID-optout-1", recipient=None, connector_factory=_mock_factory
     ) is None
+
+
+# =============================================================================
+# VT-583 (CL-2026-07-03) — auth-phase converse: floor short-circuit, intent-mediated middle,
+# guaranteed reply (the :405-416 silent edge closed). Sends are captured via _send; the
+# auth-intent classifier is injected (no live LLM).
+# =============================================================================
+
+
+@pytest.fixture()
+def _capture_shopify_sends(monkeypatch):  # type: ignore[no-untyped-def]
+    from orchestrator.onboarding import shopify_onboarding
+
+    sent: list[str] = []
+    monkeypatch.setattr(shopify_onboarding, "_send", lambda recipient, text: sent.append(text or ""))
+    return sent
+
+
+def _mock_auth_intent(monkeypatch, intent):  # type: ignore[no-untyped-def]
+    from orchestrator.onboarding import shopify_onboarding
+
+    monkeypatch.setattr(shopify_onboarding, "_llm_classify_auth_intent", lambda _b: intent)
+
+
+@_DB
+def test_auth_floor_done_short_circuits_to_db_recheck(substrate, monkeypatch, _capture_shopify_sends):
+    """The unambiguous _DONE floor still wins with ZERO classifier call — it goes straight to the
+    authoritative DB re-check, which (no token) refuses to fabricate progress."""
+    from orchestrator.onboarding import shopify_onboarding
+    from orchestrator.onboarding.shopify_onboarding import (
+        maybe_resume_shopify_onboarding,
+        start_shopify_setup,
+    )
+
+    def _boom(_b):
+        raise AssertionError("the classifier must not run on an unambiguous _DONE floor hit")
+
+    monkeypatch.setattr(shopify_onboarding, "_llm_classify_auth_intent", _boom)
+    tenant = _new_tenant(substrate.dsn)
+    start_shopify_setup(tenant, "vt425.myshopify.com")  # phase_2_auth, no token yet
+    r = maybe_resume_shopify_onboarding(
+        tenant, "done", "SID-auth-floor-1", recipient="+919000000001", connector_factory=_mock_factory
+    )
+    assert r is not None and r["routed"] == "shopify_auth_not_connected"
+
+
+@_DB
+def test_auth_done_intent_non_floor_reaches_db_recheck(substrate, monkeypatch, _capture_shopify_sends):
+    """A NON-floor done-intent ('all set up on my store') is classified 'done' → the SAME authoritative
+    DB re-check (still refuses to fabricate when no token exists)."""
+    from orchestrator.onboarding.shopify_onboarding import (
+        maybe_resume_shopify_onboarding,
+        start_shopify_setup,
+    )
+
+    _mock_auth_intent(monkeypatch, "done")
+    tenant = _new_tenant(substrate.dsn)
+    start_shopify_setup(tenant, "vt425.myshopify.com")
+    r = maybe_resume_shopify_onboarding(
+        tenant, "all set up on my store", "SID-auth-done-1", recipient="+919000000002",
+        connector_factory=_mock_factory,
+    )
+    assert r is not None and r["routed"] == "shopify_auth_not_connected"
+
+
+@_DB
+def test_auth_done_intent_connected_ingests(substrate, monkeypatch, _capture_shopify_sends):
+    """A non-floor done-intent WITH a persisted token → the DB re-check passes → pull+ingest+confirm."""
+    from orchestrator.onboarding.shopify_onboarding import (
+        maybe_resume_shopify_onboarding,
+        start_shopify_setup,
+    )
+
+    _mock_auth_intent(monkeypatch, "done")
+    tenant = _new_tenant(substrate.dsn)
+    start_shopify_setup(tenant, "vt425.myshopify.com")
+    _seed_token(substrate.dsn, tenant)
+    r = maybe_resume_shopify_onboarding(
+        tenant, "yep finished it on the shopify page", "SID-auth-done-2", recipient="+919000000003",
+        connector_factory=_mock_factory,
+    )
+    assert r is not None and r["routed"] == "shopify_ingested" and r["done"] is True
+
+
+@_DB
+def test_auth_link_intent_remints_fresh_link(substrate, monkeypatch, _capture_shopify_sends):
+    """A non-floor 'link' intent re-mints a FRESH authorize link from the stored shop + sends it."""
+    from orchestrator.onboarding.shopify_onboarding import (
+        maybe_resume_shopify_onboarding,
+        start_shopify_setup,
+    )
+
+    _mock_auth_intent(monkeypatch, "link")
+    tenant = _new_tenant(substrate.dsn)
+    start_shopify_setup(tenant, "vt425.myshopify.com")  # writes metadata.shop
+    r = maybe_resume_shopify_onboarding(
+        tenant, "i cant find the link you sent", "SID-auth-link-1", recipient="+919000000004",
+        connector_factory=_mock_factory,
+    )
+    assert r is not None and r["routed"] == "shopify_auth_link_reminted"
+    assert _capture_shopify_sends and "myshopify.com" in _capture_shopify_sends[-1]
+
+
+@_DB
+def test_auth_other_intent_sends_honest_waiting_line(substrate, monkeypatch, _capture_shopify_sends):
+    """A non-floor question/other → an HONEST waiting line (with the link), never the canned re-prompt,
+    never silence."""
+    from orchestrator.onboarding.shopify_onboarding import (
+        maybe_resume_shopify_onboarding,
+        start_shopify_setup,
+    )
+
+    _mock_auth_intent(monkeypatch, "other")
+    tenant = _new_tenant(substrate.dsn)
+    start_shopify_setup(tenant, "vt425.myshopify.com")
+    r = maybe_resume_shopify_onboarding(
+        tenant, "how long does this usually take", "SID-auth-other-1", recipient="+919000000005",
+        connector_factory=_mock_factory,
+    )
+    assert r is not None and r["routed"] == "shopify_auth_waiting"
+    assert _capture_shopify_sends, "an other-intent reply must still send an honest line (no silence)"
+
+
+@_DB
+def test_auth_silent_edge_absent_walkthrough_still_sends(substrate, monkeypatch, _capture_shopify_sends):
+    """VT-583 D3 — the :405-416 silent edge: a non-done reply with NO walkthrough_url on the pending used
+    to send NOTHING. Now it ALWAYS sends an honest line (offering a fresh link)."""
+    from orchestrator.onboarding import shopify_onboarding
+    from orchestrator.onboarding.shopify_onboarding import (
+        PHASE_AUTH,
+        maybe_resume_shopify_onboarding,
+    )
+
+    _mock_auth_intent(monkeypatch, "other")
+    tenant = _new_tenant(substrate.dsn)
+    # A phase_2_auth pending WITHOUT a walkthrough_url (the silent-edge condition).
+    pending = shopify_onboarding._validated_pending(
+        awaiting="oauth_completion", prompt_text="connect your store", connector_id="shopify",
+    )
+    assert pending.get("walkthrough_url") is None
+    shopify_onboarding._write_state(tenant, phase=PHASE_AUTH, connector_id="shopify", pending=pending)
+
+    r = maybe_resume_shopify_onboarding(
+        tenant, "hmm not sure whats going on", "SID-auth-edge-1", recipient="+919000000006",
+        connector_factory=_mock_factory,
+    )
+    assert r is not None and r["routed"] == "shopify_auth_waiting"
+    assert _capture_shopify_sends, "the absent-walkthrough path MUST still send something (no silent drop)"
+    assert "link" in _capture_shopify_sends[-1].lower()
+
+
+@_DB
+def test_auth_classifier_unavailable_still_sends(substrate, monkeypatch, _capture_shopify_sends):
+    """Classifier unavailable (returns None, e.g. no live key) → the 'other' path → an honest line is
+    STILL sent. Fail-soft = a guaranteed reply, never silence."""
+    from orchestrator.onboarding.shopify_onboarding import (
+        maybe_resume_shopify_onboarding,
+        start_shopify_setup,
+    )
+
+    _mock_auth_intent(monkeypatch, None)  # classifier degrades to None (no key / error)
+    tenant = _new_tenant(substrate.dsn)
+    start_shopify_setup(tenant, "vt425.myshopify.com")
+    r = maybe_resume_shopify_onboarding(
+        tenant, "achha ji dekhta hoon", "SID-auth-nokey-1", recipient="+919000000007",
+        connector_factory=_mock_factory,
+    )
+    assert r is not None and r["routed"] == "shopify_auth_waiting"
+    assert _capture_shopify_sends, "fail-soft must still send an honest line (no silence)"

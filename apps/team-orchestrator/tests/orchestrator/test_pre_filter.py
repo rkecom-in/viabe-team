@@ -163,8 +163,11 @@ def test_consent_required_handler_sends_prompt_no_transmit(gate, monkeypatch):
     )
     sent: dict[str, str] = {}
 
-    def _capture(body: str, phone: str) -> str:
+    def _capture(body: str, phone: str, **kwargs: object) -> str:
+        # VT-583: the handler now passes tenant_id + surface='system' so the ask is recorded as the
+        # lifetime-log consent marker (the runner gate keys the follow-up affirm off it).
         sent["body"], sent["phone"] = body, phone
+        sent["surface"] = str(kwargs.get("surface"))
         return "SMfake"
 
     monkeypatch.setattr(h, "send_freeform_message", _capture)
@@ -174,6 +177,7 @@ def test_consent_required_handler_sends_prompt_no_transmit(gate, monkeypatch):
     assert outcome["consent_prompt_sent"] is True
     # The prompt tells the owner exactly which phrase enables data inputs.
     assert "ACTIVATE TEAM" in sent["body"]
+    assert sent["surface"] == "system"  # recorded as the consent-ask marker
 
 
 def test_brain_owner_inputs_ok_fail_closed_on_error(gate, monkeypatch):
@@ -275,10 +279,18 @@ def test_status_callback_failed_routes_to_template_error_handler(gate):
     assert result.handler_name == "template_error_handler"
 
 
-def test_status_ping_routes_to_status_ping_handler(gate):
-    # VT-464 D2: a genuine STATUS query routes to status_ping (a bare greeting
-    # like "hi" no longer does — it falls through to the brain; see
-    # test_bare_greeting_falls_through_to_brain below).
+def test_status_query_converses_via_brain_by_default(gate):
+    """VT-583 (CL-2026-07-03-conversing-surfaces): a genuine STATUS query now CONVERSES — it routes to
+    the brain (query tools + conversation window) instead of the canned status_ping template. Default ON."""
+    result = gate.pre_filter(_inbound(gate, "any update?"), _state(gate, uuid4()))
+    assert isinstance(result, gate.t.RouteToBrain)
+    assert "status_query" in (result.reason or "")
+
+
+def test_status_ping_falls_back_to_handler_when_converse_off(gate, monkeypatch):
+    """VT-583: with CONVERSE_STATUS_QUERIES turned off, the deterministic status_ping_handler is the
+    fail-soft fallback (unchanged truthful send). VT-464 D2: a genuine status query still matches Rule f."""
+    monkeypatch.setenv("CONVERSE_STATUS_QUERIES", "0")
     tenant_id = _new_tenant(gate.dsn)
     sub = _state(gate, tenant_id)
     result = gate.pre_filter(_inbound(gate, "any update?"), sub)
@@ -306,8 +318,20 @@ def test_bare_greeting_falls_through_to_brain(gate, greeting):
 @pytest.mark.parametrize(
     "query", ["any update?", "any updates", "what's the status", "kya hua"]
 )
-def test_status_query_still_routes_to_status_ping(gate, query):
-    """VT-464 D2: genuine status-intent phrases still route to status_ping."""
+def test_status_query_matches_rule_f_and_converses(gate, query):
+    """VT-464 D2 + VT-583: genuine status-intent phrases still match Rule f, and now converse via the
+    brain by default (CONVERSE_STATUS_QUERIES on)."""
+    result = gate.pre_filter(_inbound(gate, query), _state(gate, uuid4()))
+    assert isinstance(result, gate.t.RouteToBrain)
+    assert "status_query" in (result.reason or "")
+
+
+@pytest.mark.parametrize(
+    "query", ["any update?", "any updates", "what's the status", "kya hua"]
+)
+def test_status_query_falls_back_to_handler_when_converse_off(gate, monkeypatch, query):
+    """VT-583: the same phrases route to the deterministic status_ping_handler when converse is off."""
+    monkeypatch.setenv("CONVERSE_STATUS_QUERIES", "0")
     result = gate.pre_filter(_inbound(gate, query), _state(gate, uuid4()))
     assert isinstance(result, gate.t.RouteToDirectHandler)
     assert result.handler_name == "status_ping_handler"
