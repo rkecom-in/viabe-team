@@ -81,6 +81,12 @@ _SYSTEM_PROMPT = """You are the owner's Team Manager for Viabe — a warm, conci
 helping a small Indian business owner finish setting up. You are having a natural conversation, not \
 reading out a form.
 
+POPULATE-FIRST (the crux of this product): the owner's profile has ALREADY been built for them from \
+PUBLIC information (their own website / verified records). Your job is to SHOW them the profile we \
+prepared and ask only for the few things that genuinely could NOT be found — NEVER to interrogate them \
+field-by-field for facts we already have. Do not bother the owner with confirmations and approvals; \
+they can change anything at any time just by telling you.
+
 Hard rules you MUST follow:
 - Mirror the owner's language and register. If they write in Hindi or Hinglish, reply in Hinglish. \
 Default locale: {locale}.
@@ -97,9 +103,11 @@ that exact proposed text owner-approved; record it). Never fabricate or guess.
 for, put it in extracted_answers and NEVER ask about that field again — asking again after being \
 told is the single most annoying failure. If the owner already answered in RECENT CONVERSATION and \
 it somehow was not collected, record it NOW from there instead of re-asking.
-- PRESENT, DON'T ASK: when a STILL-NEEDED field carries a DISCOVERED value (from the owner's own \
-website or verified records), present that value for a one-tap confirmation in the business's own \
-words — NEVER ask the owner to type what their own site already says.
+- PRESENT, DON'T ASK: a DERIVABLE profile fact (what the business does, its category, description, \
+city, website) is ALREADY POPULATED — present it as part of the profile, never ask the owner to \
+confirm it field-by-field, and never ask them to type what their own site already says. If the owner \
+tells you a populated fact is wrong or gives a new value, put the corrected value in extracted_answers \
+for that field (the edit is applied immediately) and move on — do not re-ask.
 - GST "nature of business" values (e.g. "Supplier of Services", "Warehouse / Depot", "Others") are \
 coarse TAX-ACTIVITY codes, NOT a description of what the business does. NEVER present them as \
 guesses about the business or offer them as choices.
@@ -192,6 +200,23 @@ def _objective_from_state(journey_state: dict[str, Any]) -> tuple[dict[str, Any]
     return current, objective
 
 
+def _visible_answers(answers: dict[str, Any] | None) -> dict[str, Any]:
+    """Owner-facing collected answers only — strip reserved ``__``-prefixed bookkeeping keys the journey
+    stores IN ``answers`` (e.g. the populate-first ``__populated__`` sentinel), which are not owner-
+    supplied facts and must never leak into the prompt."""
+    return {k: v for k, v in (answers or {}).items() if not str(k).startswith("__")}
+
+
+def _fmt_profile_card(profile_card: dict[str, Any]) -> str:
+    """Human-labelled lines of the just-populated profile facts, for the card the brain renders."""
+    labels = {
+        "business_type": "what you do", "category": "category", "about": "about",
+        "city": "city", "website": "website",
+    }
+    lines = [f"- {labels.get(k, k)}: {v}" for k, v in profile_card.items() if v not in (None, "", [])]
+    return "\n".join(lines) if lines else "(nothing)"
+
+
 def _build_prompts(
     journey_state: dict[str, Any],
     draft_attrs: dict[str, Any],
@@ -200,6 +225,7 @@ def _build_prompts(
     locale: str,
     provenance: dict[str, Any] | None,
     is_start: bool,
+    profile_card: dict[str, Any] | None = None,
 ) -> tuple[str, str]:
     """Assemble (system, user) prompts. Pure — unit-testable without the LLM."""
     current, objective = _objective_from_state(journey_state)
@@ -233,6 +259,22 @@ def _build_prompts(
         if summary else ""
     )
 
+    # Populate-first (CL-2026-07-03): a non-empty ``profile_card`` means we JUST populated the owner's
+    # profile from public info — the brain presents it as ONE card THIS turn (once) + batches any
+    # necessities in the same message, never a per-field confirm. Rendered ABOVE STILL NEEDED so the two
+    # read together. Empty → no card block (a normal conversational turn).
+    card_block = ""
+    if profile_card:
+        card_block = (
+            "PROFILE JUST POPULATED FROM PUBLIC INFO — present this as ONE friendly profile card in THIS "
+            "reply. Do NOT ask the owner to confirm any of it field-by-field; SHOW it and invite changes:\n"
+            f"{_fmt_profile_card(profile_card)}\n"
+            "Phrase it like: \"Here's your profile as I've set it up — <business name>, <what you do>, "
+            "<city>, <website>. Want anything changed? Just tell me.\" Use the business name from "
+            "DISCOVERED above. You MAY add a single 'Looks good' quick-reply button and nothing else. If "
+            "anything is STILL NEEDED below, ask for it in the SAME message, batched naturally.\n\n"
+        )
+
     # ``.replace`` (not ``.format``) — the system prompt contains literal JSON braces ({} / {field: value}).
     system = _SYSTEM_PROMPT.replace("{locale}", locale or "en")
     user = (
@@ -241,12 +283,13 @@ def _build_prompts(
         f"{summary_block}"
         "RECENT CONVERSATION (oldest first — what was already said; NEVER re-ask or contradict it):\n"
         f"{convo}\n\n"
+        f"{card_block}"
         "STILL NEEDED (collect these, conversationally, at most one new ask per turn):\n"
         f"{_fmt_still_needed(objective, draft_attrs)}\n\n"
         "WHAT YOU LAST ASKED:\n"
         f"{asked}\n\n"
         "ALREADY COLLECTED (do not re-ask):\n"
-        f"{json.dumps(answers, ensure_ascii=False) if answers else '(nothing yet)'}\n\n"
+        f"{json.dumps(_visible_answers(answers), ensure_ascii=False) if _visible_answers(answers) else '(nothing yet)'}\n\n"
         "OWNER'S MESSAGE:\n"
         f"{(owner_message or '').strip() or '(empty)'}"
     )
@@ -445,7 +488,7 @@ def _read_journey_history_payload(
             }
     payload = {
         "recent_turns": list(js.get("recent_turns") or []),
-        "answers": dict(js.get("answers") or {}),
+        "answers": _visible_answers(js.get("answers")),  # strip the populate-first bookkeeping sentinel
         "skipped": list(js.get("skipped") or []),
         "draft_provenance": draft_provenance,
     }
@@ -607,6 +650,7 @@ def compose_turn(
     provenance: dict[str, Any] | None = None,
     is_start: bool = False,
     tenant_id: Any = None,
+    profile_card: dict[str, Any] | None = None,
 ) -> TurnPlan | None:
     """Compose ONE conversational onboarding turn. Returns a validated ``TurnPlan`` or ``None``.
 
@@ -624,7 +668,7 @@ def compose_turn(
     try:
         system, user = _build_prompts(
             journey_state, draft_attrs, owner_message,
-            locale=locale, provenance=provenance, is_start=is_start,
+            locale=locale, provenance=provenance, is_start=is_start, profile_card=profile_card,
         )
         if tenant_id is None:
             # Tools-absent turn (no tenant context) — the classic single call (unchanged from VT-569).
