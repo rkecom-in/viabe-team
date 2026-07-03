@@ -72,12 +72,42 @@ def _normalize_wa_fields(fields: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+# VT-582 (CL-2026-07-03-conversing-surfaces-and-harness): the DEV-ONLY ingress secret the
+# server-side conversation harness (canaries/convo_harness.py) drives the DEPLOYED dev orchestrator
+# with, so a fresh operator session can hold a full WhatsApp conversation without ever minting the
+# real INTERNAL_API_SECRET. Accepted ONLY on a POSITIVELY-dev env (EXPECTED_ENV in {dev,development},
+# the VT-362 sentinel mirrored from auth/prod_safety). On prod — or an unset/garbage EXPECTED_ENV —
+# it is IGNORED, fail-closed: the CL-431 prod gate, so DEV_TEST_INGRESS_SECRET can NEVER authenticate
+# a request in production. The prod INTERNAL_API_SECRET path is unchanged on every env.
+_DEV_ENV_VALUES = frozenset({"dev", "development"})
+
+
+def _dev_ingress_enabled() -> bool:
+    """True only when EXPECTED_ENV POSITIVELY reads a non-prod dev value (VT-362 sentinel).
+
+    Fail-closed exactly like ``auth/prod_safety._is_prod``: an unset/unknown/garbage EXPECTED_ENV
+    (including ``prod``) returns False, so the dev ingress secret is inert off dev."""
+    return os.environ.get("EXPECTED_ENV", "").strip().lower() in _DEV_ENV_VALUES
+
+
 def _verify_internal_secret(provided: str | None) -> bool:
-    """Constant-time compare against INTERNAL_API_SECRET (Pillar 8 — no bespoke crypto)."""
-    expected = os.environ.get("INTERNAL_API_SECRET", "")
-    if not expected or not provided:
+    """Constant-time compare against the accepted ingress secret(s) (Pillar 8 — no bespoke crypto).
+
+    Accepts the prod INTERNAL_API_SECRET on EVERY env; ADDITIONALLY — only on a positively-dev env
+    (VT-582) — the harness's DEV_TEST_INGRESS_SECRET. Both compares are constant-time
+    (``hmac.compare_digest``); neither secret is ever logged. A request that authenticates via the
+    dev secret is otherwise IDENTICAL downstream (same payload validation, tenant resolve, rate
+    limits) — this only widens WHO may open the door on dev, nothing beneath it."""
+    if not provided:
         return False
-    return hmac.compare_digest(provided, expected)
+    expected = os.environ.get("INTERNAL_API_SECRET", "")
+    if expected and hmac.compare_digest(provided, expected):
+        return True
+    if _dev_ingress_enabled():
+        dev_secret = os.environ.get("DEV_TEST_INGRESS_SECRET", "")
+        if dev_secret and hmac.compare_digest(provided, dev_secret):
+            return True
+    return False
 
 
 def _lookup_tenant(from_phone: str) -> str | None:

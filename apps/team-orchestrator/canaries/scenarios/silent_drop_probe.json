@@ -1,0 +1,18 @@
+{
+  "name": "silent_drop_probe",
+  "expected_fail": true,
+  "notes": "The run-23 silent-drop reproduction. State: a tenant with a COMPLETE journey (setup --onboarded) + owner_inputs=true that enters the integration:shopify flow and then has its pending owner-input CLEARED — after which a bare URL inbound produces NO reply (the owner sends their store link into a void). The load-bearing step is the final bare-URL send with assert_no_silent. EXPECTED-FAIL until the drop is fixed; flips to XPASS when a reply is produced. Run: setup (--owner-inputs true --onboarded) then `script <tenant> silent_drop_probe.json`.",
+  "steps": [
+    {
+      "message": "I want to connect my Shopify store",
+      "assert_no_silent": true,
+      "note": "Enter the integration:shopify flow. Expect the integration agent to ask for the store URL (a logged reply). May itself be silent depending on state — that is also informative."
+    },
+    {
+      "message": "https://sundaram-sweets.myshopify.com",
+      "assert_no_silent": true,
+      "expected_fail": true,
+      "note": "THE run-23 probe: a bare URL after the pending owner-input was cleared. Expect the store link to be picked up and acknowledged; the drop class produces NOTHING -> silent -> XFAIL. When fixed this flips to XPASS (flagged) — re-check the mark."
+    }
+  ]
+}
