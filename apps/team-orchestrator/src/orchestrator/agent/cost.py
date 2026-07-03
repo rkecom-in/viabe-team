@@ -63,8 +63,15 @@ RATES: dict[str, _Rate] = {
     ),
     # VT-480 — Sonnet 4.6, the tiered brain's ROUTINE path. $3 / M input,
     # $15 / M output. Same rationale: without this row, Sonnet brain runs
-    # report cost_paise=0 and never trip the hard limit.
+    # report cost_paise=0 and never trip the hard limit. Retained for
+    # historical/cost attribution of older runs.
     "claude-sonnet-4-6": _Rate(
+        input_paise_per_million=_paise_per_million(3.0),
+        output_paise_per_million=_paise_per_million(15.0),
+    ),
+    # Sonnet 5 — the routine/conversational tier as of 2026-07-04 (Fazal:
+    # upgrade for reasoning quality). $3 / M input, $15 / M output.
+    "claude-sonnet-5": _Rate(
         input_paise_per_million=_paise_per_million(3.0),
         output_paise_per_million=_paise_per_million(15.0),
     ),

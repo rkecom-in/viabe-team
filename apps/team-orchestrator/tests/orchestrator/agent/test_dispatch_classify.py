@@ -315,7 +315,7 @@ def test_select_brain_model_routine_intent_picks_sonnet():
 
     model_id, tier = select_brain_model({"classification": "approval", "confidence": 0.95})
 
-    assert model_id == _BRAIN_MODEL_SONNET == "claude-sonnet-4-6"
+    assert model_id == _BRAIN_MODEL_SONNET == "claude-sonnet-5"
     assert tier == "sonnet"
 
 
@@ -327,7 +327,7 @@ def test_select_brain_model_all_routine_intents_pick_sonnet(routine: str):
     from orchestrator.agent.dispatch import select_brain_model
 
     model_id, tier = select_brain_model({"classification": routine})
-    assert (model_id, tier) == ("claude-sonnet-4-6", "sonnet")
+    assert (model_id, tier) == ("claude-sonnet-5", "sonnet")
 
 
 def test_select_brain_model_business_action_picks_opus():
@@ -397,7 +397,7 @@ def test_brain_model_ids_are_the_single_source_of_truth():
         select_brain_model,
     )
 
-    assert _BRAIN_MODEL_SONNET == "claude-sonnet-4-6"
+    assert _BRAIN_MODEL_SONNET == "claude-sonnet-5"
     assert _BRAIN_MODEL_OPUS == "claude-opus-4-8"
     assert select_brain_model({"classification": "question"})[0] == _BRAIN_MODEL_SONNET
     assert select_brain_model({})[0] == _BRAIN_MODEL_OPUS
