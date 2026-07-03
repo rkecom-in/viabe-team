@@ -250,6 +250,53 @@ def record_business_objective(
     return {"status": "recorded", "objective": merged}
 
 
+# VT-579: the manager's brain-commanded RETRIEVAL over the LIFETIME conversation log. The always-on
+# window (agent/dispatch.py) carries the last ≤20 turns within 24h; THIS tool lets the manager reach
+# FURTHER BACK ("referred to whenever required", CL-2026-07-03) — a lexical search over the whole tenant
+# conversation. Read-only, k-capped, tenant-scoped: no forbidden capability (passes the VT-268 guardrail).
+# Plain @tool (no tool_step) ON PURPOSE — the results carry verbatim conversation text; NOT writing an
+# observability envelope keeps that text out of pipeline_steps (the "never app-log message text" rule).
+@tool
+def search_conversation_history(query: str, limit: int = 10) -> dict[str, Any]:
+    """Search this owner's ENTIRE past conversation — further back than the recent window already in your
+    context.
+
+    Use it when you need something said EARLIER than the last-24h window shows: a past decision, a number
+    the owner gave a while ago, an earlier stated preference. ``query`` is matched case-insensitively
+    against the message text; up to ``limit`` (max 50) matches return NEWEST-first. THIS owner only.
+
+    Returns ``{"status": "ok"|"error", "matches": [{"role", "text", "at"}]}``.
+    """
+    from orchestrator.observability.decorators import _observability_context
+
+    # Pillar 3 — the AUTHORITATIVE tenant is the ambient dispatch context, NOT a model-supplied arg (the
+    # brain hallucinates ids); mirrors record_business_objective. No context ⇒ honest error, never a raise.
+    ctx = _observability_context.get()
+    resolved_tenant: UUID | str | None = ctx.tenant_id if ctx is not None else None
+    if resolved_tenant is None:
+        return {
+            "status": "error",
+            "error": "search_conversation_history: no resolvable tenant context",
+            "matches": [],
+        }
+    from orchestrator.conversation_log import search_history
+
+    rows = search_history(resolved_tenant, query, limit=limit)
+    matches = [
+        {
+            "role": r.get("role"),
+            "text": r.get("text"),
+            "at": (
+                r["created_at"].isoformat()
+                if hasattr(r.get("created_at"), "isoformat")
+                else str(r.get("created_at"))
+            ),
+        }
+        for r in rows
+    ]
+    return {"status": "ok", "matches": matches}
+
+
 # VT-194 dropped 3 STUBs (send_whatsapp_template_stub /
 # get_subscriber_state_stub / query_pipeline_history_stub). Each carried
 # ~300 tokens of schema text in the agent's prompt (~900 tokens total)
@@ -272,6 +319,7 @@ ORCHESTRATOR_AGENT_TOOLS: list[BaseTool] = [
     write_l0_fragment,
     query_l0,
     record_business_objective,  # VT-466 manager WRITE seam (tenant-scoped objective)
+    search_conversation_history,  # VT-579 manager RETRIEVAL over the lifetime conversation log
 ]
 
 

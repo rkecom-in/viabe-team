@@ -26,12 +26,16 @@ def test_ack_body_bilingual_and_fallback() -> None:
 # ----------------------------- send_freeform_ack: best-effort, fail-safe -----------------
 def test_send_freeform_ack_sends(monkeypatch) -> None:
     seen: dict[str, str] = {}
+    # VT-579: send_freeform_ack now passes tenant_id + surface so the transport records the owner turn.
     monkeypatch.setattr(
         "orchestrator.utils.twilio_send.send_freeform_message",
-        lambda body, phone: (seen.update(body=body, phone=phone), "SM1")[1],
+        lambda body, phone, **kw: (seen.update(body=body, phone=phone, **kw), "SM1")[1],
     )
     assert fa.send_freeform_ack(uuid4(), "+919811111111", "hi there") is True
-    assert seen == {"body": "hi there", "phone": "+919811111111"}
+    assert seen["body"] == "hi there"
+    assert seen["phone"] == "+919811111111"
+    assert seen["surface"] == "manager"
+    assert "tenant_id" in seen
 
 
 def test_send_freeform_ack_no_phone_skips() -> None:

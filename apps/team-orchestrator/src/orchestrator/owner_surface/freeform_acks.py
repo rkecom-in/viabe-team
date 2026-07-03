@@ -93,7 +93,10 @@ def send_freeform_ack(
     try:
         from orchestrator.utils.twilio_send import send_freeform_message
 
-        send_freeform_message(body, recipient_phone)
+        # VT-579: this IS an owner-facing send (an in-window ack/reply from the manager surface). Pass
+        # tenant_id so the transport records it into the lifetime conversation log (the 'assistant' leg);
+        # the recording itself lives at the transport chokepoint (twilio_send), we only supply the scope.
+        send_freeform_message(body, recipient_phone, tenant_id=tenant_id, surface="manager")
         return True
     except Exception as exc:  # noqa: BLE001 — the ack must never crash the handler
         code = getattr(exc, "code", None)

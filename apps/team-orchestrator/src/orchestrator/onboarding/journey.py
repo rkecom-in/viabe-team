@@ -255,6 +255,19 @@ def _append_recent_turns(tenant_id: UUID | str, *entries: dict[str, Any]) -> Non
                 "WHERE tenant_id = %s",
                 (Jsonb(kept), str(tenant_id)),
             )
+        # VT-579: ALSO mirror these turns into the tenant-wide LIFETIME conversation_log (double-write
+        # during the transition — the journey ``recent_turns`` window column above stays fully functional).
+        # The shared log unifies the onboarding conversation with the Team-Manager's, so the manager's
+        # always-on window + lifetime search see the onboarding chat too. Map the journey's 'bot' → the
+        # log's 'assistant' vocabulary; surface='journey'. record_turn is fail-soft (imported lazily so
+        # journey stays dep-less), so this never affects the reply path.
+        from orchestrator.conversation_log import record_turn
+
+        for e in cleaned:
+            r = e.get("role")
+            log_role = "owner" if r == "owner" else "assistant" if r == "bot" else None
+            if log_role:
+                record_turn(tenant_id, log_role, e.get("text", ""), surface="journey")
         # The trimmed window is now committed. Fold the evicted head into the running summary OFF the hot
         # path — its own guarded fire so a DBOS-unavailable env degrades to drop-silently (never re-raises).
         if evicted:
