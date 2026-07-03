@@ -553,3 +553,18 @@ def test_walker_send_threads_tenant_id_to_conversation_log(monkeypatch):
     journey._send("+919999005862", {"prompt_en": "next question?", "prompt_hi": ""}, "en", tenant_id=tid)
     assert captured.get("tenant_id") == tid, "walker _send must thread tenant_id into the record choke"
     assert captured.get("surface") == "journey"
+
+
+# --- P1a (VT-587): the offer beat reads the store URL from the CURRENT message, never re-asks ---------
+
+
+def test_recent_shop_domain_reads_current_body_first() -> None:
+    """P1a: the owner who gives the store URL in the SAME message as the readiness affirm must have it
+    used — the current inbound is scanned before the (fragile, same-run-uncommitted) conversation_log
+    lookback. Pure: the current_body match returns before any DB call, so no substrate is needed."""
+    from orchestrator.onboarding.journey import _recent_shop_domain
+
+    tid = uuid4()
+    assert _recent_shop_domain(tid, current_body="Yes lets connect. My store is Probe-Store-A.myshopify.com by the way") == "probe-store-a.myshopify.com"
+    # No domain in the current body → falls through to the log lookback (None here, no seeded log).
+    assert _recent_shop_domain(tid, current_body="what do you charge?") is None
