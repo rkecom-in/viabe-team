@@ -24,8 +24,10 @@ Conversation ownership is FRAGMENTED across deterministic seams (journey walker,
 ## Standing constraints (unchanged by autonomy)
 Effect gates deterministic forever (sends/allowlist, consent recording, money, DSR); main = Fazal-only; allowlist-only real sends; no real sends from harness (bogus non-allowlisted tenants; send-guard asserts); prod untouched; every wave: tests + smoke + lint + pre-push green, deploy verified, Cowork signaled.
 
-## Model policy (this program)
-Manager turn brain: sonnet (conversational hot path) with opus escalation where judgment is consequential (plan validation, entity adjudication — already opus). Builders: opus. Judge: opus. Cheap classifiers/distillers: haiku.
+## Model policy (this program — Fazal cost directive 2026-07-03: never a higher model where a lower one suffices)
+- PRODUCT brains (deployed): as designed — sonnet conversational hot path, haiku classifiers/distillers/extractors, opus only for consequential judgment (entity adjudication, plan validation).
+- TEST EXECUTION: the harness itself is CODE (zero LLM); scenario runs cost only the deployed product tiers. Mechanical subagent work (scans, suite runs, file inventories, verify-reruns) = HAIKU. Simple/obvious code changes = SONNET.
+- HIGH-REASONING spend is reserved for: architecture/design builds (opus), adversarial review of consequential diffs (opus), and the transcript JUDGE (opus — but transcripts are BATCHED per judge call to amortize; hard asserts run first in code so the judge only sees survivors).
 
 ## Log (append per wave)
 - 2026-07-03: Program started. P0 builders in flight. Ledger entries: fluid-consent, conversing-surfaces+harness, conversation-memory, plan-governance, populate-first, paced-needs-driven, fleet-mandate, autonomous-program. Sweep inventory delivered (14 keyword surfaces / ~30 canned / 5 silent-drop paths).
