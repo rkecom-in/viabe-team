@@ -354,7 +354,9 @@ def test_midflight_catchup_presents_card_and_suppresses_double_ask(substrate, mo
 
 def test_empty_necessities_completes_after_card(substrate, monkeypatch, _stub_sends):
     """When populate resolves everything and NO necessity remains, the start turn presents the card and
-    the journey COMPLETES through the existing seam (card first)."""
+    the journey COMPLETES. VT-576/CL-2026-07-03: the card is the ONLY immediate message — the integration
+    seam does NOT burst on completion; the paced-flow sentinel is set and the readiness ask waits for
+    the owner's next message."""
     from orchestrator.onboarding import journey, question_brain, shopify_onboarding, turn_brain
 
     # No un-derivable gaps for this business (force the gap source empty so the queue is necessities-only).
@@ -383,7 +385,8 @@ def test_empty_necessities_completes_after_card(substrate, monkeypatch, _stub_se
 
     row = _journey_row(substrate.dsn, tenant)
     assert row is not None and row["status"] == "complete", "empty necessities → journey completes"
-    assert len(seam_calls) == 1, "the integration seam fires on completion"
+    assert len(seam_calls) == 0, "the integration seam must NOT fire on completion (no burst)"
+    assert row["answers"].get("__flow__") == "profile_previewed", "the paced-flow sentinel is set"
     assert _stub_sends and "profile" in _stub_sends[-1].lower(), "the card was sent as the closing message"
 
 

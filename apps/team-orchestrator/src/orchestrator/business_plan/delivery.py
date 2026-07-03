@@ -26,6 +26,7 @@ the recipient phone is never logged here (the send util logs only the hashed tok
 from __future__ import annotations
 
 import logging
+import re
 import time
 from collections.abc import Callable
 from typing import Any
@@ -36,6 +37,17 @@ from orchestrator.business_plan import store
 logger = logging.getLogger(__name__)
 
 PART_GAP_SECONDS = 2.0
+
+# VT-576: inline citation markers ([F1], [F12]) are GROUNDING RECEIPTS the generator prompt requires
+# and the stored artifact KEEPS (readers re-verify citations against the frozen fact bundle). They must
+# NEVER reach the owner's WhatsApp — the live drill leaked "... [F1][F5]" into the business summary. We
+# strip them at RENDER time only (here); ``store.write_new_version`` persists the cited text untouched.
+_CITATION_RE = re.compile(r"\s*\[\s*F\d+\s*\]")
+
+
+def _strip_citations(text: str) -> str:
+    """Remove ``[F#]`` receipts from owner-facing text, then tidy any doubled spaces the removal left."""
+    return re.sub(r"\s{2,}", " ", _CITATION_RE.sub("", text or "")).strip()
 
 _SUPPORTED = ("en", "hi")
 _FALLBACK_HEADLINE = {
@@ -64,7 +76,8 @@ def compose_parts(plan: store.BusinessPlan, locale: str) -> list[str]:
         or summary.get("text")
         or _FALLBACK_HEADLINE[lang]
     )
-    parts: list[str] = [str(headline)]
+    # VT-576: strip [F#] citation receipts from every owner-facing string (headline, objective, action).
+    parts: list[str] = [_strip_citations(str(headline))]
 
     items = [i for i in (plan.roadmap or []) if isinstance(i, dict)]
     months = sorted({int(i["month"]) for i in items if i.get("month")})
@@ -75,13 +88,13 @@ def compose_parts(plan: store.BusinessPlan, locale: str) -> list[str]:
             key=lambda i: int(i.get("seq", 0)),
         )
         for item in month_items:
-            lines.append(f"• {item.get('objective', '')}")
+            lines.append(f"• {_strip_citations(str(item.get('objective', '')))}")
             if item.get("owner_action_needed"):
                 action = (
                     item.get("owner_action_hi") if lang == "hi" else None
                 ) or item.get("owner_action")
                 if action:
-                    lines.append(f"→ {_ACTION_PREFIX[lang]}{action}")
+                    lines.append(f"→ {_ACTION_PREFIX[lang]}{_strip_citations(str(action))}")
         parts.append("\n".join(lines))
 
     parts.append(_ADJUST_HINT[lang])

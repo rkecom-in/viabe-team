@@ -13,7 +13,8 @@ recorders (never-assert promotion gate intact) and advances the cursor. These te
   - a turn-brain failure (compose_turn → None) falls back to the deterministic walker for that turn,
     including the VT-569a non-identical bare-"No" re-prompt;
   - gate OFF is the deterministic walker, byte-identical to pre-VT-569 (a confirm 'yes' promotes);
-  - the completion turn uses the durable closer + fires the integration seam.
+  - the completion turn uses the durable closer + sets the paced-flow sentinel WITHOUT bursting the
+    integration seam (VT-576/CL-2026-07-03 — the card is the only immediate completion message).
 
 Substrate mirrors ``test_journey.py`` (migrations once, DBOS launched, tenants seeded service-role).
 """
@@ -283,9 +284,11 @@ def test_gate_off_is_deterministic_walker(substrate, monkeypatch, _stub_sends):
     assert promoted is not None and promoted.get("business_type") == "services"
 
 
-def test_completion_uses_durable_closer_and_fires_seam(substrate, monkeypatch, _stub_sends):
+def test_completion_uses_durable_closer_and_does_not_burst_seam(substrate, monkeypatch, _stub_sends):
     """Gate ON: when the extraction resolves the LAST queue field, the journey completes with the
-    durable closer (not a dangling LLM question) and fires the integration seam."""
+    durable closer (not a dangling LLM question). VT-576/CL-2026-07-03: it NO LONGER bursts the
+    integration seam — the card/closer is the only immediate message and the paced-flow sentinel is
+    set (``__flow__ = profile_previewed``); the readiness ask waits for the owner's next message."""
     from orchestrator.onboarding import journey, shopify_onboarding, turn_brain
 
     seam_calls: list[Any] = []
@@ -305,7 +308,8 @@ def test_completion_uses_durable_closer_and_fires_seam(substrate, monkeypatch, _
 
     row = _journey_row(substrate.dsn, tenant)
     assert row is not None and row["status"] == "complete"
-    assert len(seam_calls) == 1, "the integration seam fires exactly once on completion"
+    assert len(seam_calls) == 0, "the integration seam must NOT fire on completion (no burst)"
+    assert row["answers"].get("__flow__") == "profile_previewed", "the paced-flow sentinel is set"
     assert "setting up your assistant" in _stub_sends[-1], "the durable completion closer is sent"
 
 
