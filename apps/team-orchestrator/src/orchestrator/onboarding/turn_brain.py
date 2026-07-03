@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import time
 from dataclasses import dataclass, field
@@ -744,4 +745,87 @@ def compose_turn(
         return None
 
 
-__all__ = ["TurnPlan", "compose_turn"]
+# --- VT-583 (CL-2026-07-03-conversing-surfaces-and-harness): the small INTENT-CLASSIFICATION seam ---
+#
+# The paced post-profile flow (journey._maybe_handle_post_profile_flow) decides readiness yes/later and
+# a deferred-resume off token sets. Those keyword sets stay the FAST FLOOR (an unambiguous hit
+# short-circuits — cheap, deterministic); anything the floor can't call goes HERE for one small
+# structured classification (affirm | decline | connect | other), mirroring question_brain's Haiku
+# idiom (bounded, JSON-only, fail-soft). 'other' + any failure map to None so the caller keeps today's
+# behavior exactly — this seam only sharpens the ambiguous middle, it never overrides a clear floor.
+_INTENT_MODEL = "claude-haiku-4-5-20251001"  # the cheap classifier tier (parity with question_brain)
+_INTENT_TIMEOUT_S = 12.0  # bound the call — runs on the owner-inbound hot path
+FlowIntent = str  # one of: "affirm" | "decline" | "connect" | "other"
+_VALID_FLOW_INTENTS = frozenset({"affirm", "decline", "connect", "other"})
+
+
+def _anthropic_key_present() -> bool:
+    """True iff a usable (non-sentinel) Anthropic key is on the env — mirrors dispatch's guard so a
+    unit/CI run with no key (or a test sentinel) never makes a live call; the classifier then degrades
+    to None and the caller keeps its deterministic behavior."""
+    key = (os.environ.get("ANTHROPIC_API_KEY") or "").strip()
+    return bool(key) and not key.lower().startswith(("test", "sentinel", "dummy", "sk-ant-test"))
+
+
+def _llm_classify_flow_intent(body: str) -> FlowIntent | None:
+    """Ask Haiku to classify a short owner reply to the readiness/connect ask into one of
+    affirm|decline|connect|other. JSON-only, bounded, fail-soft → None on ANY failure (no key, LLM
+    error, timeout, unparseable, off-label). Business-context only; the body is the owner's own short
+    reply (no third-party PII by construction — this fires on the paced-flow yes/later beat)."""
+    if not _anthropic_key_present():
+        return None
+    try:
+        import json as _json
+
+        from anthropic import Anthropic
+
+        prompt = (
+            "A small Indian business owner is being asked whether to set up their data connections now "
+            "(one at a time) or do it later. Classify their reply's INTENT as exactly one of:\n"
+            "- affirm: yes / go ahead / sure / start now (agreeing to proceed)\n"
+            "- decline: no / later / not now / maybe some other time (putting it off)\n"
+            "- connect: they explicitly want to connect a specific data source now "
+            "(e.g. 'connect shopify', 'let's link my store', 'upload karo')\n"
+            "- other: a question, an unrelated message, or anything that is not a yes/no to the ask\n"
+            "Reply in Hindi, Hinglish or English is possible — judge the MEANING, not the language.\n"
+            f'Reply: "{(body or "").strip()[:400]}"\n'
+            'Return ONLY a JSON object: {"intent": "affirm|decline|connect|other"}. No prose.'
+        )
+        resp = Anthropic().messages.create(
+            model=_INTENT_MODEL,
+            max_tokens=60,
+            messages=[{"role": "user", "content": prompt}],
+            timeout=_INTENT_TIMEOUT_S,
+        )
+        raw = resp.content[0].text if resp.content else ""
+        start, end = raw.find("{"), raw.rfind("}")
+        if start == -1 or end == -1 or end <= start:
+            return None
+        obj = _json.loads(raw[start : end + 1])
+        intent = str((obj or {}).get("intent") or "").strip().lower()
+        return intent if intent in _VALID_FLOW_INTENTS else None
+    except Exception as exc:  # noqa: BLE001 — classifier is best-effort; any failure → None (caller keeps today's behavior)
+        logger.warning("turn_brain: flow-intent classify failed (%s) — deterministic fallback", type(exc).__name__)
+        return None
+
+
+def classify_flow_intent(
+    body: str,
+    *,
+    llm_fn: Any | None = None,
+) -> FlowIntent | None:
+    """Classify an AMBIGUOUS paced-flow reply into affirm|decline|connect|other, or None.
+
+    The caller (journey) runs its deterministic keyword FLOOR first and only reaches here for replies
+    the floor can't call. Returns None on any failure OR when the intent is unusable — the caller then
+    keeps its exact pre-VT-583 behavior for that beat (fail-soft = today's behavior). ``llm_fn`` is
+    injectable so tests drive the classification without a live call."""
+    fn = llm_fn or _llm_classify_flow_intent
+    try:
+        intent = fn(body)
+    except Exception:  # noqa: BLE001 — an injected/real classifier error → None (today's behavior)
+        return None
+    return intent if intent in _VALID_FLOW_INTENTS else None
+
+
+__all__ = ["TurnPlan", "compose_turn", "classify_flow_intent"]

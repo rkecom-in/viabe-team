@@ -91,14 +91,25 @@ def _seed_integration_confirmed(dsn: str, tenant_id: UUID, connector: str = "sho
 
 
 def _seed_integration_auth(dsn: str, tenant_id: UUID, connector: str = "shopify") -> None:
-    """A connector mid-onboarding (phase_2_auth) — OAuth not yet ingested (data NOT landed)."""
+    """A connector mid-onboarding (phase_2_auth) — OAuth not yet ingested (data NOT landed). A real
+    phase_2_auth ALWAYS carries a live ``pending_owner_input`` (the oauth_completion the resume gate
+    waits on); VT-583's has_live_resume keys off exactly that, so the seed writes it."""
+    pending = json.dumps(
+        {
+            "awaiting": "oauth_completion",
+            "connector_id": connector,
+            "walkthrough_url": "https://vt576.myshopify.com/admin/oauth/authorize",
+        }
+    )
     with psycopg.connect(dsn, autocommit=True) as conn:
         conn.execute(
-            "INSERT INTO tenant_integration_state (tenant_id, phase, current_connector_id) "
-            "VALUES (%s, 'phase_2_auth', %s) "
+            "INSERT INTO tenant_integration_state "
+            "(tenant_id, phase, current_connector_id, pending_owner_input) "
+            "VALUES (%s, 'phase_2_auth', %s, %s::jsonb) "
             "ON CONFLICT (tenant_id) DO UPDATE SET phase = EXCLUDED.phase, "
-            "current_connector_id = EXCLUDED.current_connector_id",
-            (str(tenant_id), connector),
+            "current_connector_id = EXCLUDED.current_connector_id, "
+            "pending_owner_input = EXCLUDED.pending_owner_input",
+            (str(tenant_id), connector, pending),
         )
 
 
@@ -118,6 +129,139 @@ def _stub_sends(monkeypatch):  # type: ignore[no-untyped-def]
     monkeypatch.setattr(twilio_send, "send_freeform_message", lambda body, *a, **k: sent.append(body) or "SM0")
     monkeypatch.setattr(twilio_send, "send_interactive_message", lambda *a, **k: sent.append("<interactive>") or "SM0")
     return sent
+
+
+@pytest.fixture()
+def _mock_flow_intent(monkeypatch):  # type: ignore[no-untyped-def]
+    """Drive turn_brain.classify_flow_intent deterministically (no live LLM). Set ``holder['intent']``
+    per test; None simulates a classifier failure (→ the caller keeps today's deterministic behavior)."""
+    from orchestrator.onboarding import turn_brain
+
+    holder: dict[str, str | None] = {"intent": None}
+    monkeypatch.setattr(turn_brain, "_llm_classify_flow_intent", lambda _b: holder["intent"])
+    return holder
+
+
+# --- VT-583 A: paced-flow intent — floor short-circuits; the ambiguous middle asks the classifier ---
+
+
+def test_readiness_ambiguous_classified_decline_defers(substrate, _stub_sends, _mock_flow_intent):
+    """An ambiguous readiness reply the keyword floor can't call → the classifier; a 'decline' verdict
+    defers (honest summary-only), exactly as a floor 'later' would."""
+    from orchestrator.onboarding.journey import maybe_handle_journey_reply
+
+    _mock_flow_intent["intent"] = "decline"
+    tenant = _new_tenant(substrate.dsn, name="flow amb decline")
+    _seed_completed_journey(substrate.dsn, tenant, "ready_asked")
+
+    r = maybe_handle_journey_reply(tenant, "I might think about it", "SID-amb-1", "+919999003101")
+    assert r is not None and r.get("routed") == "flow_deferred"
+    assert _flow(substrate.dsn, tenant) == "deferred"
+
+
+def test_readiness_ambiguous_classified_affirm_offers(substrate, _stub_sends, _mock_flow_intent):
+    """An ambiguous readiness reply classified 'affirm' → proceed with the easiest integration."""
+    from orchestrator.onboarding.journey import maybe_handle_journey_reply
+
+    _mock_flow_intent["intent"] = "affirm"
+    tenant = _new_tenant(substrate.dsn, name="flow amb affirm")
+    _seed_completed_journey(substrate.dsn, tenant, "ready_asked")
+
+    r = maybe_handle_journey_reply(tenant, "matlab dekhna padega thoda", "SID-amb-2", "+919999003102")
+    assert r is not None and r.get("routed") == "flow_offer_integration"
+    assert _flow(substrate.dsn, tenant) == "integration:shopify"
+
+
+def test_readiness_ambiguous_classifier_failure_keeps_today_behavior(substrate, _stub_sends, _mock_flow_intent):
+    """Classifier failure (None) on an ambiguous readiness reply → today's non-decline behavior = offer.
+    Fail-soft = today's behavior, never a stall or a silent drop."""
+    from orchestrator.onboarding.journey import maybe_handle_journey_reply
+
+    _mock_flow_intent["intent"] = None  # classifier unavailable / errored
+    tenant = _new_tenant(substrate.dsn, name="flow amb failsoft")
+    _seed_completed_journey(substrate.dsn, tenant, "ready_asked")
+
+    r = maybe_handle_journey_reply(tenant, "kuch bhi karlo", "SID-amb-3", "+919999003103")
+    assert r is not None and r.get("routed") == "flow_offer_integration"
+
+
+def test_readiness_floor_still_short_circuits_without_classifier(substrate, _stub_sends, monkeypatch):
+    """An UNAMBIGUOUS floor hit ('later') must NOT call the classifier — the deterministic floor wins."""
+    from orchestrator.onboarding import journey, turn_brain
+
+    called = {"n": 0}
+
+    def _boom(_b):
+        called["n"] += 1
+        raise AssertionError("classifier must not be called on an unambiguous floor hit")
+
+    monkeypatch.setattr(turn_brain, "_llm_classify_flow_intent", _boom)
+    tenant = _new_tenant(substrate.dsn, name="flow floor short")
+    _seed_completed_journey(substrate.dsn, tenant, "ready_asked")
+
+    r = journey.maybe_handle_journey_reply(tenant, "later", "SID-floor-1", "+919999003104")
+    assert r is not None and r.get("routed") == "flow_deferred"
+    assert called["n"] == 0
+
+
+def test_deferred_ambiguous_connect_reengages(substrate, _stub_sends, _mock_flow_intent):
+    """A deferred flow re-engages on a classifier 'connect' verdict the keyword floor missed."""
+    from orchestrator.onboarding.journey import maybe_handle_journey_reply
+
+    _mock_flow_intent["intent"] = "connect"
+    tenant = _new_tenant(substrate.dsn, name="flow defer amb connect")
+    _seed_completed_journey(substrate.dsn, tenant, "deferred")
+
+    r = maybe_handle_journey_reply(tenant, "acha let us proceed with that now", "SID-def-amb-1", "+919999003105")
+    assert r is not None and r.get("routed") == "flow_offer_integration"
+
+
+def test_deferred_ambiguous_other_falls_through(substrate, _stub_sends, _mock_flow_intent):
+    """A deferred flow with a classifier 'other' verdict falls through (None) — today's behavior; the
+    brain owns ordinary chat, the flow never hijacks it."""
+    from orchestrator.onboarding.journey import maybe_handle_journey_reply
+
+    _mock_flow_intent["intent"] = "other"
+    tenant = _new_tenant(substrate.dsn, name="flow defer amb other")
+    _seed_completed_journey(substrate.dsn, tenant, "deferred")
+
+    r = maybe_handle_journey_reply(tenant, "do you have festive offers", "SID-def-amb-2", "+919999003106")
+    assert r is None
+    assert _flow(substrate.dsn, tenant) == "deferred"
+
+
+# --- VT-583 D2: integration-in-flight ORPHAN never falls to the cold brain silently ----------------
+
+
+def test_integration_orphan_reoffers_instead_of_silent_brain(substrate, _stub_sends):
+    """flow=integration:<x>, data NOT landed, and NO live connector resume step to consume the message
+    (live-run-23 orphan). The beat must RE-OFFER (guaranteed reply), never return None to the cold
+    brain. We seed the integration flow with NO tenant_integration_state row → has_live_resume False."""
+    from orchestrator.onboarding.journey import maybe_handle_journey_reply
+    from orchestrator.onboarding.shopify_onboarding import read_integration_state
+
+    tenant = _new_tenant(substrate.dsn, name="flow integ orphan")
+    _seed_completed_journey(substrate.dsn, tenant, "integration:shopify")
+    assert read_integration_state(tenant) is None  # no live resume step exists
+
+    r = maybe_handle_journey_reply(tenant, "sorry got busy earlier", "SID-orphan-1", "+919999003107")
+    assert r is not None and r.get("routed") == "flow_offer_integration", (
+        "an integration orphan must re-offer, never fall silently to the brain"
+    )
+    assert _stub_sends, "the orphan re-offer must send a reply (no silent drop)"
+
+
+def test_integration_live_resume_defers_to_gate(substrate, _stub_sends):
+    """flow=integration:shopify with a LIVE oauth pending → the journey beat returns None so the
+    downstream shopify resume gate drives the connect step (no double-handling, no premature re-offer)."""
+    from orchestrator.onboarding.journey import maybe_handle_journey_reply
+
+    tenant = _new_tenant(substrate.dsn, name="flow integ live")
+    _seed_completed_journey(substrate.dsn, tenant, "integration:shopify")
+    _seed_integration_auth(substrate.dsn, tenant, "shopify")  # live oauth_completion pending
+
+    r = maybe_handle_journey_reply(tenant, "some message", "SID-live-1", "+919999003108")
+    assert r is None, "a live resume step must let the downstream gate handle the inbound"
 
 
 # --- beat (b): ack → readiness ask -------------------------------------------------------------

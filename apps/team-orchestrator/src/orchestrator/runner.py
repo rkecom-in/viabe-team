@@ -57,6 +57,128 @@ def _brain_owner_inputs_ok(tenant_id: str) -> bool:
         return False
 
 
+def _record_owner_inbound_turn(tenant_id: str, event: WebhookEvent) -> None:
+    """VT-583 D2 — record the owner's inbound to the LIFETIME conversation_log EARLY, before any gate
+    (approval-resume / journey / integration-resume) can consume it. A gate that consumes-and-closes
+    used to leave the message OUT of the manager's lifetime log (the live-run-23 silent-drop class).
+    Idempotent per (tenant, message_sid) — the later brain-path record + the journey's own mirror both
+    collapse onto this row. Inbound messages only; fail-soft (memory never blocks the pipeline)."""
+    if event.message_type != "inbound_message":
+        return
+    if not (event.body or "").strip():
+        return
+    try:
+        from orchestrator.conversation_log import record_turn
+
+        record_turn(
+            tenant_id, "owner", event.body or "",
+            message_sid=event.twilio_message_sid, surface="manager",
+        )
+    except Exception:  # noqa: BLE001 — conversation memory is never a gate on the run
+        logger.warning("VT-583: early owner-inbound record failed (fail-soft) tenant=%s", tenant_id)
+
+
+# VT-583 — the consent ASK is uniquely identifiable in the lifetime log because it instructs the owner
+# to reply with the enable phrase (consent_required_handler._ENABLE_PHRASE == "ACTIVATE TEAM"). The
+# marker is content-based (the mig-164 surface CHECK only allows journey|manager|system, so we cannot
+# tag a bespoke 'consent_ask' surface) — robust because no other assistant send carries this phrase.
+_CONSENT_ASK_MARKER = "activate team"
+
+
+def _last_assistant_turn_was_consent_ask(tenant_id: str, *, within_h: int = 24) -> bool:
+    """True iff the MOST-RECENT assistant turn in the lifetime log (within ``within_h`` hours) is a
+    consent ASK — its text carries the enable phrase. The consent gate uses this to confirm we actually
+    just asked before treating an affirmation as a grant. Fail-soft → False (never grant on a bad read)."""
+    try:
+        with tenant_connection(tenant_id) as conn:
+            row = conn.execute(
+                "SELECT text FROM conversation_log WHERE tenant_id = %s AND role = 'assistant' "
+                "AND created_at > now() - %s::interval ORDER BY created_at DESC LIMIT 1",
+                (str(tenant_id), f"{int(within_h)} hours"),
+            ).fetchone()
+    except Exception:  # noqa: BLE001 — a read miss must never grant consent
+        logger.warning("VT-583: consent-ask marker read failed (fail-soft) tenant=%s", tenant_id)
+        return False
+    if row is None:
+        return False
+    text = (row["text"] if isinstance(row, dict) else row[0]) or ""
+    return _CONSENT_ASK_MARKER in text.lower()
+
+
+def _consent_affirm_after_ask(tenant_id: str, body: str) -> bool:
+    """VT-583 (CL-2026-07-03-fluid-consent) — True iff THIS reply is an unambiguous affirmation to a
+    consent ASK we just sent, so a plain "yes"/"haan"/"start" grants consent via the SAME audited enable
+    path the exact "ACTIVATE TEAM" floor uses. Both conditions are required (a grant never rides on a
+    guess): (1) a consent ASK was the most-recent thing we sent, and (2) the deterministic (ZERO-LLM —
+    the consent boundary forbids a brain transmit here) reply classifier reads an affirm. Fail-safe →
+    False (fall to the honest re-ask)."""
+    try:
+        from orchestrator.pre_filter_gate import classify_consent_intent
+
+        if classify_consent_intent(body) != "affirm":
+            return False
+        return _last_assistant_turn_was_consent_ask(tenant_id)
+    except Exception:  # noqa: BLE001 — any error → the normal consent_required flow (never auto-grant)
+        logger.warning("VT-583: consent affirm-after-ask check failed (fail-safe) tenant=%s", tenant_id)
+        return False
+
+
+def _brain_emitted_owner_reply(tenant_id: str, inbound_sid: str | None) -> bool:
+    """VT-583 D1 — True iff the brain produced an owner-facing outbound THIS run: an assistant turn in
+    the lifetime log at/after the owner's inbound turn (every owner-facing send records one at the
+    transport chokepoint). Used to detect a 'completed' run that told the owner NOTHING. Fail-soft →
+    True (assume a reply happened — never risk a spurious double-send on an uncertain read)."""
+    try:
+        with tenant_connection(tenant_id) as conn:
+            row = conn.execute(
+                """
+                SELECT EXISTS (
+                    SELECT 1 FROM conversation_log a
+                    WHERE a.tenant_id = %s AND a.role = 'assistant'
+                      AND a.created_at >= COALESCE(
+                          (SELECT o.created_at FROM conversation_log o
+                            WHERE o.tenant_id = %s AND o.message_sid = %s AND o.role = 'owner'
+                            ORDER BY o.created_at DESC LIMIT 1),
+                          now() - interval '30 seconds'
+                      )
+                ) AS replied
+                """,
+                (str(tenant_id), str(tenant_id), inbound_sid),
+            ).fetchone()
+    except Exception:  # noqa: BLE001 — never spam a fallback on an uncertain read
+        logger.warning("VT-583: brain-reply detection failed (fail-soft → assume replied) tenant=%s", tenant_id)
+        return True
+    if row is None:
+        return True
+    return bool(row["replied"] if isinstance(row, dict) else row[0])
+
+
+# VT-583 D1 — the honest, substance-railed fallback line (never fabricates specifics). Bilingual; the
+# owner's WhatsApp locale picks the register (freeform_acks.resolve_owner_locale).
+_COMPLETED_NO_REPLY_FALLBACK = {
+    "en": "Got it — I'm on it and I'll update you shortly.",
+    "hi": "समझ गया — मैं इस पर काम कर रहा हूँ और जल्द ही आपको अपडेट करूँगा।",
+}
+
+
+def _send_completed_no_reply_fallback(tenant_id: str, event: WebhookEvent) -> None:
+    """VT-583 D1 — a brain run that COMPLETED but produced no owner-facing send owes the owner ONE honest
+    acknowledgement (never silence, never a fabricated specific). Sends through the existing in-session
+    manager path (records its own assistant turn, so it can't loop). Best-effort — never breaks the run."""
+    recipient = event.sender_phone or None
+    if not recipient:
+        return
+    try:
+        from orchestrator.owner_surface.freeform_acks import resolve_owner_locale, send_freeform_ack
+
+        locale = resolve_owner_locale(tenant_id)
+        body = _COMPLETED_NO_REPLY_FALLBACK["hi" if locale == "hi" else "en"]
+        send_freeform_ack(tenant_id, recipient, body)
+        logger.info("VT-583 D1: completed-no-reply fallback sent (tenant=%s)", tenant_id)
+    except Exception:  # noqa: BLE001 — the safety-net send must never break the durable run
+        logger.warning("VT-583 D1: completed-no-reply fallback failed (fail-soft) tenant=%s", tenant_id)
+
+
 def _load_preferred_language(tenant_id: str) -> str | None:
     """VT-416 PR-3 wiring — read the tenant's WhatsApp language preference.
 
@@ -664,6 +786,13 @@ def webhook_pipeline_run(tenant_id: str, run_id: str, twilio_fields: dict) -> di
     open_webhook_run(tenant_id, run_id, tokenised)
     record_webhook_received(tenant_id, run_id, tokenised)
 
+    # VT-583 D2 — record the owner's inbound to the lifetime conversation_log EARLY (before any gate can
+    # consume-and-close), so a message consumed by the approval / journey / integration-resume gate is
+    # never lost from the manager's lifetime log (the live-run-23 silent-drop class). Idempotent per
+    # message_sid; fail-soft; inbound-only. The later brain-path record + journey's own mirror dedup onto
+    # this row. Placed after the run row exists so the tenant-scoped write has its RLS context.
+    _record_owner_inbound_turn(tenant_id, event)
+
     # VT-524 (B1) — owner-notification delivery ledger. Persist the async delivery truth
     # (delivered/failed) against the owner send, keyed by the outbound message_sid, for EVERY
     # status-callback state — runs BEFORE pre_filter (which Rejects 'delivered' as
@@ -858,9 +987,21 @@ def webhook_pipeline_run(tenant_id: str, run_id: str, twilio_fields: dict) -> di
         # NO transmit; send the conservative enable-prompt instead. The owner
         # turns it on via the enable keyword (data_inputs_enable_handler).
         if event.message_type == "inbound_message" and not _brain_owner_inputs_ok(tenant_id):
-            handler_name = "consent_required_handler"
-            routed = "consent_required"
-            HANDLERS[handler_name](event, state)
+            # VT-583 (CL-2026-07-03-fluid-consent) — fluid consent GRANT. The exact "ACTIVATE TEAM" floor
+            # (pre_filter Rule a2) still wins first + unchanged; here, an owner who replies to the consent
+            # ASK with a plain affirmation ("yes" / "haan" / "start") routes to the SAME audited enable
+            # path (data_inputs_enable_handler → owner_inputs=true + confirm). Gated hard: BOTH a
+            # consent_ask must be the last thing we sent AND a deterministic (zero-LLM — the consent
+            # boundary forbids a brain transmit here) affirm. Anything else → the honest re-ask. Additive
+            # + fail-safe: any uncertainty falls to consent_required (never an auto-grant on a guess).
+            if _consent_affirm_after_ask(tenant_id, event.body or ""):
+                handler_name = "data_inputs_enable_handler"
+                routed = "consent_granted_by_intent"
+                HANDLERS[handler_name](event, state)
+            else:
+                handler_name = "consent_required_handler"
+                routed = "consent_required"
+                HANDLERS[handler_name](event, state)
         else:
             # VT-374 N3/B2 — the webhook-path run-control boundary: PAUSE-ONLY (no
             # override ever matches dispatch_brain — registry allowed_keys=∅). Durable
@@ -944,6 +1085,20 @@ def webhook_pipeline_run(tenant_id: str, run_id: str, twilio_fields: dict) -> di
             from orchestrator.context_validator import audit_run_isolation
 
             audit_run_isolation(UUID(run_id), UUID(tenant_id))
+
+            # VT-583 D1 (THE biggest silent-drop): a brain run that COMPLETED but produced NO owner-facing
+            # send left the owner in silence. Detect it (no assistant turn in the lifetime log at/after
+            # this inbound) and send ONE honest, substance-railed acknowledgement through the in-session
+            # manager path. ONLY for a 'completed' inbound run — never for a status callback (not this
+            # branch), a reject (observability-only, dispatch didn't run), an escalation / hard-limit
+            # (final_status != completed; VT-88 support_bot already acks those), or a paused-by-design run
+            # (final_status == paused). Fail-soft throughout.
+            if (
+                final_status == "completed"
+                and event.message_type == "inbound_message"
+                and not _brain_emitted_owner_reply(tenant_id, event.twilio_message_sid)
+            ):
+                _send_completed_no_reply_fallback(tenant_id, event)
     # result.kind == "reject" → observability-only; the run ends clean (completed).
 
     close_webhook_run(tenant_id, run_id, final_status)

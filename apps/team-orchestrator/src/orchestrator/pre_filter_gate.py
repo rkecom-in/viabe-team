@@ -11,6 +11,7 @@ in doubt, route to the brain.
 
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
 
@@ -129,6 +130,16 @@ _INTEGRATION_INTENT_RE = re.compile(
 )
 
 
+def _converse_status_queries() -> bool:
+    """VT-583 (CL-2026-07-03-conversing-surfaces): route a status QUERY to the Team-Manager brain (which
+    has query tools + the always-on conversation window) instead of the canned status_ping_handler +
+    fixed SQL strings. Default ON — an explicit ``0``/``false``/``no`` restores the deterministic
+    handler (the fail-soft fallback). Read FRESH per call so an env flip takes effect without a restart.
+    This is DPDP-neutral ROUTING: it does NOT touch opt-out / DSR / consent rules (those still run and
+    win first); a status query from an un-consented tenant is still gated by the runner consent gate."""
+    return os.environ.get("CONVERSE_STATUS_QUERIES", "1").strip().lower() not in {"0", "false", "no", "off"}
+
+
 def _normalize(body: str) -> str:
     """Collapse whitespace, case-fold, NFC-normalize for exact keyword comparison (the enable
     gate). VT-329: NFC so a decomposed Devanagari body matches the canonical keyword form."""
@@ -153,6 +164,46 @@ def matches_kill_keyword(body: str) -> bool:
     first), so this never overlaps matches_opt_out_or_dsr."""
     nfc = _nfc(body)
     return any(p.search(nfc) for p in _L3_KILL_PATTERNS)
+
+
+# VT-583 (CL-2026-07-03-fluid-consent-and-control): consent-reply INTENT — DETERMINISTIC floor, ZERO
+# LLM (this file is the Pillar-1 deterministic subtree). The consent boundary itself forbids a brain
+# transmit for an un-consented tenant, so — unlike the paced-flow / shopify converse classifiers — the
+# consent reply is read by keyword floor ONLY. It is CONSERVATIVE (both-signals or neither → None →
+# re-ask): a consent GRANT must never ride on a guess. The exact-match "ACTIVATE TEAM" enable floor
+# (Rule a2) is UNCHANGED and still wins first; this only lets a plain "yes"/"haan"/"start" reply to the
+# consent ASK route to that SAME audited enable path (resolved in runner.webhook_pipeline_run).
+_CONSENT_AFFIRM = {
+    "yes", "y", "yeah", "yep", "yup", "ok", "okay", "okey", "sure", "start", "activate", "enable",
+    "go", "proceed", "haan", "ha", "haa", "theek", "thik", "sahi", "chalo", "karo", "kardo", "shuru",
+    "हाँ", "हां", "ठीक", "करो", "चलो", "शुरू", "जी",
+}
+_CONSENT_DECLINE = {
+    "no", "nope", "nah", "naa", "later", "cancel", "skip", "nahi", "nahin", "abhi", "baad",
+    "नहीं", "नही", "बाद", "अभी",
+}
+
+
+def classify_consent_intent(body: str) -> str | None:
+    """Deterministic consent-reply intent: "affirm" | "decline" | None. NFC + whitespace/punct split
+    (VT-329-safe, no Devanagari-dead ``\\b``). Conservative: a question, both signals, or neither → None
+    (the caller re-asks — a consent grant never rides on ambiguity). ZERO LLM (Pillar-1 subtree)."""
+    norm = _nfc((body or "").strip().casefold()).replace("'", "").replace("’", "")
+    if "?" in norm:
+        return None  # a question is not a decision
+    tokens = {t for t in re.split(r"[\s,.!?;:।/\\-]+", norm) if t}
+    has_affirm = bool(tokens & _CONSENT_AFFIRM)
+    has_decline = (
+        bool(tokens & _CONSENT_DECLINE)
+        or "not now" in norm
+        or "not yet" in norm
+        or "no thanks" in norm
+    )
+    if has_affirm and not has_decline:
+        return "affirm"
+    if has_decline and not has_affirm:
+        return "decline"
+    return None
 
 
 @DBOS.step()
@@ -242,8 +293,15 @@ def pre_filter(event: WebhookEvent, state: SubscriberState) -> PreFilterResult:
             handler_name="autonomy_enable_handler", payload={"matched": normalized}
         )
 
-    # Rule f — status ping (narrow whole-message regex).
+    # Rule f — status ping (narrow whole-message regex). VT-583: a status QUERY now CONVERSES — route it
+    # to the brain (query tools + conversation window) so the owner gets a real, current answer, not a
+    # canned template. The deterministic status_ping_handler stays wired as the fail-soft fallback when
+    # CONVERSE_STATUS_QUERIES is turned off. Ordered exactly as before (AFTER opt-out/DSR/consent/L3).
     if _STATUS_PING.match(event.body):
+        if _converse_status_queries():
+            return RouteToBrain(
+                reason="status_query — owner asks about their own state; converse via the brain"
+            )
         return RouteToDirectHandler(handler_name="status_ping_handler")
 
     # Rule g — integration intent (VT-206 Q4). Precise regex bias toward
