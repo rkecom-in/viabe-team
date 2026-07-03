@@ -460,3 +460,74 @@ def test_recent_shop_domain_ignores_bot_lines_and_absence(substrate) -> None:
         {"role": "owner", "text": "Lets do it now"},
     )
     assert _recent_shop_domain(tenant) is None  # the bot's example must never count
+
+
+# ---------------------------------------------------------------------------
+# VT-583 ADDENDUM (CL-2026-07-03): unify context reads onto conversation_log so a turn dropped by the
+# journey path — but captured at the runner seam (D2.2) — is STILL retrievable. This is the run-23
+# reproduction: the store URL must be found even when journey.recent_turns never got it. The two fixes
+# (D2.2 record-early + read-unified) are tested together; that is the invariant that kills the
+# 3×-store-link re-ask.
+# ---------------------------------------------------------------------------
+
+
+def test_recent_shop_domain_from_unified_log_when_journey_dropped_it(substrate) -> None:
+    """Run-23: the owner sent the store URL on a path that never appended to journey.recent_turns, but
+    the runner seam recorded it in the lifetime conversation_log. _recent_shop_domain MUST still find it
+    (reads conversation_log first) — so the owner is never asked to retype it."""
+    from orchestrator.conversation_log import record_turn
+    from orchestrator.onboarding.journey import _recent_shop_domain
+
+    tenant = _new_tenant(substrate.dsn, name="unified-pickup")
+    # A completed journey whose recent_turns is EMPTY (the journey path dropped the turn)…
+    _seed_completed_journey(substrate.dsn, tenant, "integration:shopify")
+    # …but the runner seam captured the owner's store URL in the unified lifetime log.
+    record_turn(tenant, "owner", "here it is: MyStore-01.myshopify.com", message_sid="SID-run23", surface="manager")
+
+    assert _recent_shop_domain(tenant) == "mystore-01.myshopify.com"
+
+
+def test_recent_owner_texts_helper_is_owner_only_newest_first(substrate) -> None:
+    """The shared helper returns OWNER texts only, newest-first — the single substrate every
+    'did the owner already tell us X' scan reads."""
+    from orchestrator.conversation_log import record_turn, recent_owner_texts
+
+    tenant = _new_tenant(substrate.dsn, name="unified-helper")
+    record_turn(tenant, "owner", "first owner msg", surface="manager")
+    record_turn(tenant, "assistant", "a bot reply in between", surface="manager")
+    record_turn(tenant, "owner", "second owner msg", surface="manager")
+
+    texts = recent_owner_texts(tenant)
+    assert "a bot reply in between" not in texts  # assistant turns excluded
+    assert texts[0] == "second owner msg"          # newest-first
+    assert "first owner msg" in texts
+
+
+# --- VT-584: paced-flow SENDS enter the lifetime conversation_log -----------------------------------
+
+
+def _assistant_log_texts(dsn: str, tenant_id: UUID) -> list[str]:
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        rows = conn.execute(
+            "SELECT text FROM conversation_log WHERE tenant_id = %s AND role = 'assistant' "
+            "AND surface = 'journey' ORDER BY created_at",
+            (str(tenant_id),),
+        ).fetchall()
+    return [str(r[0]) for r in rows]
+
+
+def test_flow_beat_reply_recorded_to_conversation_log(substrate, _stub_sends, _mock_flow_intent):
+    """VT-584: a paced-flow beat reply reached the owner's phone but (pre-fix) never hit
+    conversation_log — so the 24h manager window and the harness both lost it. The defer beat must now
+    persist its assistant line to the lifetime log (surface='journey'), closing the substrate gap."""
+    from orchestrator.onboarding.journey import maybe_handle_journey_reply
+
+    _mock_flow_intent["intent"] = "decline"
+    tenant = _new_tenant(substrate.dsn, name="vt584 flow-log")
+    _seed_completed_journey(substrate.dsn, tenant, "ready_asked")
+
+    r = maybe_handle_journey_reply(tenant, "not right now", "SID-vt584-1", "+919999005841")
+    assert r is not None and r.get("routed") == "flow_deferred"
+
+    logged = _assistant_log_texts(substrate.dsn, tenant)
+    assert logged, "flow-beat reply must be recorded to conversation_log (24h window + harness substrate)"
