@@ -1029,6 +1029,12 @@ def _compose_completed_reply(
             ).strip()
         else:
             text = ""
+        logger.warning(
+            "VT-593-DIAG compose tenant=%s draft=%r out=%r",
+            tenant_id,
+            draft[:70],
+            (text or "")[:70],
+        )
         return text or None
     except Exception:  # noqa: BLE001 — compose-completion is best-effort; never raise
         logger.warning(
@@ -1096,10 +1102,12 @@ def _maybe_send_manager_reply(
         from orchestrator.owner_surface.freeform_acks import send_freeform_ack
 
         send_freeform_ack(tenant_id, recipient, body)
-        logger.info(
-            "VT-589/591: transmitted manager direct reply (tenant=%s path=%s)",
+        logger.warning(
+            "VT-593-DIAG transmit tenant=%s path=%s raw=%r body=%r",
             tenant_id,
             path,
+            (raw or "")[:70],
+            (body or "")[:70],
         )
     except Exception:  # noqa: BLE001 — best-effort; the D1 fallback remains the net
         logger.warning(
