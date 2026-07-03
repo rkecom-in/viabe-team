@@ -932,14 +932,28 @@ def _is_confirm_button_set(buttons: list[str]) -> bool:
     return all(bool(_tokens(b)) and _tokens(b) <= allowed for b in buttons)
 
 
-def _send_turn(recipient: str | None, text: str, buttons: list[str], lang: str) -> None:
+def _send_turn(
+    recipient: str | None,
+    text: str,
+    buttons: list[str],
+    lang: str,
+    *,
+    tenant_id: UUID | str | None = None,
+) -> None:
     """Send a turn-brain reply: ``text`` free-form, with quick-reply buttons when they help. A Yes/No/
     Skip button set reuses the registered interactive Content object (parity with the confirm-question
     send). Any OTHER button set has no registered Content object (WhatsApp needs one per button set),
     so its options are appended inline as text — the owner can still reply with the option. Best-effort:
-    any transport failure degrades to plain free-form; the journey state has already advanced."""
+    any transport failure degrades to plain free-form; the journey state has already advanced.
+
+    ``tenant_id`` — when supplied, the sent line is recorded to the LIFETIME conversation_log (the
+    'assistant' leg). The PACED-FLOW beats pass it (they have no other record path — the fix for the
+    2026-07-03 harness finding: flow-beat replies reached the owner's phone but were absent from the
+    24h window, re-fragmenting the context substrate). The turn-brain reply path does NOT pass it —
+    it records via ``_append_recent_turns`` (which mirrors to conversation_log) — so no double-log."""
     if not recipient or not text:
         return
+    body = text
     if buttons and _is_confirm_button_set(buttons):
         try:
             from orchestrator.templates_registry import content_sid_for
@@ -948,18 +962,32 @@ def _send_turn(recipient: str | None, text: str, buttons: list[str], lang: str) 
             content_sid = content_sid_for(_CONFIRM_BUTTONS_TEMPLATE, "en")
             if content_sid:
                 send_interactive_message(content_sid, recipient, content_variables={"1": text})
+                _record_flow_turn(tenant_id, text)
                 return
         except Exception:  # noqa: BLE001 — buttons are an enhancement; fall through to plain text
             logger.warning("journey: turn-brain interactive confirm send failed — freeform fallback")
-    body = text
     if buttons and not _is_confirm_button_set(buttons):
         body = f"{text}\n\n({' / '.join(buttons[:3])})"
     try:
         from orchestrator.utils.twilio_send import send_freeform_message
 
         send_freeform_message(body, recipient)
+        _record_flow_turn(tenant_id, body)
     except Exception:  # noqa: BLE001 — send is WABA-gated; the journey state advances regardless
         logger.warning("journey: turn-brain owner send failed (recipient hashed) — state advanced")
+
+
+def _record_flow_turn(tenant_id: UUID | str | None, text: str) -> None:
+    """Record a paced-flow assistant send into the lifetime conversation_log. Fail-soft — memory is
+    never a gate on a send. No-op without a tenant (the turn-brain path records elsewhere)."""
+    if tenant_id is None or not text:
+        return
+    try:
+        from orchestrator.conversation_log import record_turn
+
+        record_turn(tenant_id, "assistant", text, surface="journey")
+    except Exception:  # noqa: BLE001 — conversation memory never blocks a send
+        logger.warning("journey: flow-turn conversation-log record failed (fail-soft)", exc_info=True)
 
 
 def _coerce_answer(value: Any) -> str:
@@ -1302,7 +1330,7 @@ def _flow_ask_readiness(tenant_id: UUID | str, recipient: str | None, message_si
     """Beat (b): the owner acknowledged the profile card → ask ONCE whether to set up data
     connections now (one at a time), or defer. Never steamroll."""
     text = _READINESS_ASK["hi"] if lang == "hi" else _READINESS_ASK["en"]
-    _send_turn(recipient, text, [], lang)
+    _send_turn(recipient, text, [], lang, tenant_id=tenant_id)
     _set_flow(tenant_id, _FLOW_READY_ASKED, message_sid=message_sid)
     return {"done": False, "routed": "flow_readiness_ask", "flow": _FLOW_READY_ASKED}
 
@@ -1320,7 +1348,7 @@ def _flow_defer(tenant_id: UUID | str, recipient: str | None, message_sid: str |
         _DEFER_FALLBACK["hi"] if lang == "hi" else _DEFER_FALLBACK["en"]
     )
     tmpl = _DEFER_MSG["hi"] if lang == "hi" else _DEFER_MSG["en"]
-    _send_turn(recipient, tmpl.format(recap=recap, blocked=blocked), [], lang)
+    _send_turn(recipient, tmpl.format(recap=recap, blocked=blocked), [], lang, tenant_id=tenant_id)
     _set_flow(tenant_id, _FLOW_DEFERRED, message_sid=message_sid)
     return {"done": True, "routed": "flow_deferred", "flow": _FLOW_DEFERRED}
 
@@ -1379,7 +1407,7 @@ def _flow_offer_next_integration(
         # otherwise honestly close the setup beat (the owner has what today's connectors can give).
         if _connected_integrations(tenant_id) and adn.readiness(adn.SALES_RECOVERY, connected).can_plan:
             return _kickoff_plan_and_close(tenant_id, recipient, message_sid, lang)
-        _send_turn(recipient, _ALL_SET_MSG["hi"] if lang == "hi" else _ALL_SET_MSG["en"], [], lang)
+        _send_turn(recipient, _ALL_SET_MSG["hi"] if lang == "hi" else _ALL_SET_MSG["en"], [], lang, tenant_id=tenant_id)
         _set_flow(tenant_id, _FLOW_PLAN_KICKED, message_sid=message_sid)
         return {"done": True, "routed": "flow_no_more_integrations", "flow": _FLOW_PLAN_KICKED}
 
@@ -1404,7 +1432,7 @@ def _flow_offer_next_integration(
                     f"Got your store address from earlier — {already}. "
                     f"Tap this secure link to connect (one tap, nothing to copy-paste): {link}"
                 )
-                _send_turn(recipient, pickup_msg, [], lang)
+                _send_turn(recipient, pickup_msg, [], lang, tenant_id=tenant_id)
                 _set_flow(tenant_id, f"{_FLOW_INTEGRATION_PREFIX}{top.integration}",
                           message_sid=message_sid)
                 logger.info("journey flow: shop domain picked up from recent turns (tenant=%s)", tenant_id)
@@ -1413,7 +1441,7 @@ def _flow_offer_next_integration(
             except Exception:  # noqa: BLE001 — pickup is a courtesy; fall back to asking
                 logger.warning("journey flow: recent shop-domain pickup failed (fail-soft)", exc_info=True)
     msg = f"{top.why}\n\n{top.instructions}"
-    _send_turn(recipient, msg, [], lang)
+    _send_turn(recipient, msg, [], lang, tenant_id=tenant_id)
     _set_flow(tenant_id, f"{_FLOW_INTEGRATION_PREFIX}{top.integration}", message_sid=message_sid)
     return {
         "done": False,
