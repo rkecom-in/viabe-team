@@ -336,6 +336,29 @@ def _positional_content_variables(
     return {str(i + 1): params[var] for i, var in enumerate(variables) if var in params}
 
 
+def _record_owner_conversation_turn(
+    tenant_id: UUID | str | None, text: str, *, message_sid: str | None, surface: str
+) -> None:
+    """VT-579 — record an OWNER-facing send into the lifetime conversation log (the 'assistant' leg of the
+    owner↔manager conversation).
+
+    This is the single OUTBOUND chokepoint: the transport is the one funnel every owner send passes
+    through, and the owner-vs-customer split is the existing is_customer_* flag the callers already set,
+    so "record owner sends only" is a branch on a signal that lives right here. NO-OP without a tenant:
+    ``send_template_message`` carries ``tenant_id`` natively; the tenant-blind freeform/interactive
+    transports record only when an owner-facing caller supplies it — and the onboarding journey
+    deliberately does NOT (it double-writes via ``_append_recent_turns``), so its turns are never
+    double-logged here. Fail-soft: a send must NEVER fail because the memory write failed."""
+    if tenant_id is None:
+        return
+    try:
+        from orchestrator.conversation_log import record_turn
+
+        record_turn(tenant_id, "assistant", text, message_sid=message_sid, surface=surface)
+    except Exception:  # noqa: BLE001 — conversation memory is never a gate on a send
+        logger.warning("twilio-send: conversation-log record failed (fail-soft)", exc_info=True)
+
+
 @DBOS.step()
 def send_template_message(
     tenant_id: UUID,
@@ -450,6 +473,15 @@ def send_template_message(
         recipient_token,
         message.sid,
     )
+    # VT-579: record the OWNER-facing template send (the 'assistant' leg). CUSTOMER sends
+    # (is_customer_send=True — the owner's own customers) are NOT this conversation; they live in
+    # owner_message_audit, so they are excluded. The template body renders Twilio-side (not available
+    # here), so record a compact, PII-safe marker — the template NAME only, never the params (which may
+    # carry the owner's name).
+    if not is_customer_send:
+        _record_owner_conversation_turn(
+            tenant_id, f"[template: {template_name}]", message_sid=message.sid, surface="system"
+        )
     return SendResult(
         success=True,
         message_sid=message.sid,
@@ -460,7 +492,12 @@ def send_template_message(
 
 
 def send_freeform_message(
-    body: str, recipient_phone: str, *, is_customer_session: bool = False
+    body: str,
+    recipient_phone: str,
+    *,
+    is_customer_session: bool = False,
+    tenant_id: UUID | str | None = None,
+    surface: str = "manager",
 ) -> str:
     """Send a free-form WhatsApp message via Twilio (VT-44).
 
@@ -505,6 +542,12 @@ def send_freeform_message(
         recipient_token,
         message.sid,
     )
+    # VT-579: record the OWNER freeform send (the 'assistant' leg) — verbatim body IS the conversation.
+    # Only when the caller supplies a tenant (freeform transport is tenant-blind); customer session sends
+    # (is_customer_session=True) are excluded. Journey passes NO tenant_id (it double-writes via
+    # _append_recent_turns), so its questions never double-log here.
+    if not is_customer_session:
+        _record_owner_conversation_turn(tenant_id, body, message_sid=message.sid, surface=surface)
     return message.sid
 
 
@@ -514,6 +557,8 @@ def send_interactive_message(
     *,
     content_variables: dict[str, Any] | None = None,
     is_customer_session: bool = False,
+    tenant_id: UUID | str | None = None,
+    surface: str = "manager",
 ) -> str:
     """Send an interactive WhatsApp message (quick-reply buttons / list-picker / card) IN-SESSION (VT-479).
 
@@ -558,4 +603,15 @@ def send_interactive_message(
         recipient_token,
         message.sid,
     )
+    # VT-579: record the OWNER interactive send (the 'assistant' leg). The visible prompt text rides in
+    # content_variables["1"] (the journey/owner-question pattern); record that. Only when a tenant is
+    # supplied + it is an owner send (is_customer_session=False). Journey passes NO tenant_id (double-
+    # writes via _append), so its interactive questions never double-log here.
+    if not is_customer_session:
+        _record_owner_conversation_turn(
+            tenant_id,
+            str((content_variables or {}).get("1") or ""),
+            message_sid=message.sid,
+            surface=surface,
+        )
     return message.sid

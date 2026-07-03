@@ -257,6 +257,45 @@ def _build_manager_lessons_block(tenant_id: UUID) -> str | None:
     return render_lessons_block(lessons, outcomes)
 
 
+def _build_manager_conversation_block(
+    tenant_id: UUID, *, exclude_message_sid: str | None = None
+) -> str | None:
+    """VT-579 — the ALWAYS-ON conversation memory block. Renders the running DISTILLED summary (older
+    turns folded, compact) ABOVE the last ≤20 turns within 24h (chronological, owner/assistant labeled)
+    as the ``## Conversation (last 24h)`` system block, so the Team-Manager ALWAYS has the recent
+    back-and-forth in context (Fazal, CL-2026-07-03: "always be part of the team-manager's LLM context").
+
+    NO env gate — unlike the VTR-directive / lessons blocks (learned memory, retrieval-gated), this is
+    CONVERSATION: it is always present. Best-effort: a read miss returns ``None`` and dispatch proceeds.
+    ``exclude_message_sid`` drops the CURRENT inbound turn — it already rides as the HumanMessage, so
+    surfacing it in the window too would double it."""
+    try:
+        from orchestrator.conversation_log import active_window, read_manager_summary
+
+        summary = read_manager_summary(tenant_id)
+        turns = active_window(tenant_id, exclude_message_sid=exclude_message_sid)
+    except Exception:  # noqa: BLE001 — conversation memory is best-effort, like the L1/business blocks
+        logger.warning(
+            "dispatch: conversation-window assembly failed (tenant=%s); proceeding without", tenant_id
+        )
+        return None
+    if not summary and not turns:
+        return None
+    lines = [
+        "## Conversation (last 24h)",
+        "The recent back-and-forth with this owner — your live memory of the chat. Oldest first; keep "
+        "continuity and do NOT re-ask what is already answered here.",
+    ]
+    if summary:
+        lines.append(f"Earlier (summarised): {summary}")
+    for t in turns:
+        who = "owner" if t.get("role") == "owner" else "assistant"
+        text = str(t.get("text") or "").strip()
+        if text:
+            lines.append(f"{who}: {text}")
+    return "\n".join(lines)
+
+
 def _resolve_model(model_id: str = _BRAIN_MODEL_OPUS) -> ChatAnthropic:
     # VT-480: ``model_id`` is the tier-selected brain model (see
     # select_brain_model). Defaults to Opus (the capable model) so any caller
@@ -446,6 +485,18 @@ def dispatch_brain(
     if intent_block:
         _messages.insert(0, SystemMessage(content=intent_block))
 
+    # VT-579: the ALWAYS-ON conversation memory — the running distilled summary + the last ≤20 turns
+    # within 24h (both directions), so the Team-Manager ALWAYS carries the recent chat in its context
+    # (Fazal: "always be part of the team-manager's LLM context"). NOT env-gated (this is conversation,
+    # not learned/VTR memory — those two blocks above ARE gated). Inserted AFTER the cached prefix (a
+    # per-turn SystemMessage), so the VT-194 cache still hits. The current inbound is excluded (it already
+    # rides as the HumanMessage) — the runner logged it to conversation_log just before this dispatch.
+    conversation_block = _build_manager_conversation_block(
+        tenant_id, exclude_message_sid=getattr(event, "twilio_message_sid", None)
+    )
+    if conversation_block:
+        _messages.insert(0, SystemMessage(content=conversation_block))
+
     # VT-514 GETS — retrieval audit spine row: which context sources hit
     # (presence flags only; the redacted block CONTENT rides the KNOWS row).
     emit_tm_audit(
@@ -461,6 +512,8 @@ def dispatch_brain(
             "directive_present": bool(directive_block),
             "lessons_present": bool(lessons_block),
             "intent_present": bool(intent_block),
+            # VT-579: whether the always-on conversation window (+summary) was present this turn.
+            "conversation_present": bool(conversation_block),
             "intent_classification": _manager_intent.get("classification"),
         },
     )
@@ -475,7 +528,14 @@ def dispatch_brain(
 
         _blocks_for_hash = "\n--\n".join(
             b
-            for b in (l1_block, business_block, directive_block, lessons_block, intent_block)
+            for b in (
+                l1_block,
+                business_block,
+                directive_block,
+                lessons_block,
+                intent_block,
+                conversation_block,  # VT-579: the window is part of the assembled context snapshot
+            )
             if b
         )
         _snapshot_id = hashlib.sha256(_blocks_for_hash.encode("utf-8")).hexdigest()

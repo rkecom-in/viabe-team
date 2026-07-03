@@ -829,6 +829,27 @@ def webhook_pipeline_run(tenant_id: str, run_id: str, twilio_fields: dict) -> di
         handler_name = result.handler_name
         HANDLERS[handler_name](event, state)
     elif result.kind == "brain":
+        # VT-579 — LIFETIME conversation log (inbound leg). pre_filter routed this owner message to the
+        # Team-Manager (real conversation), so record it as an 'owner' turn — the manager's always-on
+        # window (dispatch._build_manager_conversation_block) + the lifetime search both read this table.
+        # Placed HERE (post tenant-resolve + prefilter=brain, BEFORE the consent gate below) because this
+        # is STORAGE of the tenant's OWN message in a tenant-scoped RLS'd table, NOT a transmit to
+        # Anthropic — the consent gate governs the transmit, and the window is only READ inside
+        # dispatch_brain, which that same gate still guards. Inbound-message only (a status callback
+        # carries no body); idempotent per message_sid. Then fire the off-hot-path compaction guard. Both
+        # fail-soft internally — conversation memory never blocks the run. NOT reached for opt-out/DSR
+        # (those route to direct_handler above), nor for status callbacks / dupes.
+        if event.message_type == "inbound_message":
+            from orchestrator.conversation_log import maybe_compact, record_turn
+
+            record_turn(
+                tenant_id,
+                "owner",
+                event.body or "",
+                message_sid=event.twilio_message_sid,
+                surface="manager",
+            )
+            maybe_compact(tenant_id)
         # VT-303 / CL-425 — owner_inputs consent gate on the brain transmit
         # (Option B). The brain transmits the owner's inbound body (may carry
         # customer PII) to Anthropic; owner_inputs is the lawful basis. Scope

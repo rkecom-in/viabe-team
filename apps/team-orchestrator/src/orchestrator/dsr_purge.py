@@ -244,6 +244,12 @@ _PURGE_ORDER: tuple[str, ...] = (
     # VT-552 (B1 part-2b): incidents — durable incident records (run_id soft, no FK), tenant data,
     # erased on right-to-erasure.
     "incidents",
+    # VT-579: conversation_log — the LIFETIME owner↔system conversation (both directions). Leaf (FK
+    # tenants ON DELETE CASCADE, but the tenant row is anonymized NOT deleted on DSR, so the CASCADE
+    # never fires) → order-insensitive; MUST be swept here or the subject's own conversation survives
+    # erasure (the episodic_events/agent_memory lesson). Retention = lifetime-of-relationship, DSR-only
+    # deletion (CL-2026-07-03-conversation-memory-architecture). Hard-delete.
+    "conversation_log",
     "pipeline_steps",
     "pipeline_runs",
     "subscriber_states",
