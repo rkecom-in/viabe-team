@@ -118,3 +118,30 @@ def test_readiness_sheets_also_unlocks_planning():
 def test_supplied_classes_unions_and_ignores_unknown():
     got = adn.supplied_classes({adn.SHOPIFY, "not_a_real_integration"})
     assert adn.PRODUCT_CATALOG in got and adn.CUSTOMERS_CONTACTABLE in got
+
+
+# --- plan_blocked_reason (CL-2026-07-03-plan-governance) ----------------------------------------
+
+
+def test_plan_blocked_reason_names_missing_and_fix_when_no_data():
+    """No data → an owner-facing one-liner naming what's missing + how to fix it (never a hollow plan).
+    Importable outside onboarding for specialists + the Team Manager self-check."""
+    reason = adn.plan_blocked_reason(adn.SALES_RECOVERY, connected=set())
+    assert reason is not None
+    low = reason.lower()
+    assert "sales history" in low and "customer" in low
+    # names at least one available_today connect option (the easiest-first fix menu)
+    assert "shopify" in low
+    assert "[F" not in reason  # owner copy carries no citation receipts
+
+
+def test_plan_blocked_reason_none_when_can_plan():
+    """Once a data-supplying integration has landed, the plan is no longer blocked → None."""
+    assert adn.plan_blocked_reason(adn.SALES_RECOVERY, connected={adn.SHOPIFY}) is None
+
+
+def test_plan_blocked_reason_only_lists_available_today_fixers():
+    reason = adn.plan_blocked_reason(adn.SALES_RECOVERY, connected=set()) or ""
+    # coming_soon connectors are never offered as a fix
+    for coming_soon in ("Search Console", "Analytics", "Merchant", "Meta", "Instagram"):
+        assert coming_soon not in reason

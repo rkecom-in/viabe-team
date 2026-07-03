@@ -1157,17 +1157,24 @@ _READINESS_ASK = {
         "hain — bas 'later' bol dein."
     ),
 }
+# {recap} = optional public-info business recap; {blocked} = the registry's plan_blocked_reason (the
+# SINGLE SOURCE OF TRUTH for what's missing — CL-2026-07-03-plan-governance). The honest no-plan line
+# is NEVER hardcoded here.
 _DEFER_MSG = {
     "en": (
-        "No problem — I'll hold off. {recap}To build your month-by-month action plan I'll need your "
-        "sales data. Whenever you're ready, just say 'connect' and we'll hook up Shopify, a Google "
-        "Sheet, or a file — one at a time."
+        "No problem — I'll hold off. {recap}{blocked} Whenever you're ready, just say 'connect' and "
+        "we'll do it one at a time."
     ),
     "hi": (
-        "Koi baat nahi — main ruk jaata hoon. {recap}Aapka mahine-dar-mahine action plan banane ke "
-        "liye mujhe aapka sales data chahiye hoga. Jab bhi ready hon, bas 'connect' bol dein aur hum "
-        "Shopify, Google Sheet ya file jod denge — ek-ek karke."
+        "Koi baat nahi — main ruk jaata hoon. {recap}{blocked} Jab bhi ready hon, bas 'connect' bol "
+        "dein aur hum ek-ek karke kar lenge."
     ),
+}
+# Fallback when the plan is somehow already unblocked (nothing missing) — the owner declined but we
+# have enough to plan; be honest without a fabricated 'missing data' claim.
+_DEFER_FALLBACK = {
+    "en": "I've got what I need to start on your plan.",
+    "hi": "Aapke plan par shuru karne ke liye jo chahiye tha mil gaya hai.",
 }
 _ALL_SET_MSG = {
     "en": "You're all set for now — I've got what I need to get started. I'll keep working on your plan.",
@@ -1221,12 +1228,42 @@ def _flow_ask_readiness(tenant_id: UUID | str, recipient: str | None, message_si
 
 def _flow_defer(tenant_id: UUID | str, recipient: str | None, message_sid: str | None, lang: str) -> dict[str, Any]:
     """Beat: the owner declined the integrations → offer the summary alone (public-info recap) and be
-    HONEST that the month plan needs data. The journey stays complete; a later 'connect' resumes."""
+    HONEST that the month plan needs data. The 'what's missing' line comes from the registry's
+    ``plan_blocked_reason`` (single source of truth — CL-2026-07-03-plan-governance), NOT hardcoded.
+    The journey stays complete; a later 'connect' resumes."""
+    from orchestrator.onboarding import agent_data_needs as adn
+
     recap = _public_business_recap(tenant_id)
+    connected = _connected_integrations(tenant_id)
+    blocked = adn.plan_blocked_reason(adn.SALES_RECOVERY, connected) or (
+        _DEFER_FALLBACK["hi"] if lang == "hi" else _DEFER_FALLBACK["en"]
+    )
     tmpl = _DEFER_MSG["hi"] if lang == "hi" else _DEFER_MSG["en"]
-    _send_turn(recipient, tmpl.format(recap=recap), [], lang)
+    _send_turn(recipient, tmpl.format(recap=recap, blocked=blocked), [], lang)
     _set_flow(tenant_id, _FLOW_DEFERRED, message_sid=message_sid)
     return {"done": True, "routed": "flow_deferred", "flow": _FLOW_DEFERRED}
+
+
+_SHOP_DOMAIN_RE = re.compile(r"\b([a-z0-9][a-z0-9-]*\.myshopify\.com)\b", re.IGNORECASE)
+
+
+def _recent_shop_domain(tenant_id: UUID | str) -> str | None:
+    """The most-recent Shopify store address the OWNER already sent (newest-first scan of the
+    conversation window + current answers). Record-and-move-on: never ask them to retype what
+    they've said. None when nothing matches. Fail-soft."""
+    try:
+        g = get_journey(tenant_id)
+        if not g:
+            return None
+        for t in reversed(g.get("recent_turns") or []):
+            if t.get("role") != "owner":
+                continue
+            m = _SHOP_DOMAIN_RE.search(str(t.get("text") or ""))
+            if m:
+                return m.group(1).lower()
+    except Exception:  # noqa: BLE001 — a courtesy lookup; never break the flow
+        logger.warning("journey: recent shop-domain scan failed (fail-soft)", exc_info=True)
+    return None
 
 
 def _flow_offer_next_integration(
@@ -1255,6 +1292,30 @@ def _flow_offer_next_integration(
         # Write the Shopify onboarding state (recipient=None → no duplicate pitch send); the downstream
         # resume gate then drives the owner's shop-domain reply.
         _fire_integration_seam(tenant_id, None)
+        # RECORD-AND-MOVE-ON (live-drill defect 2026-07-03): the owner may have ALREADY sent the store
+        # address in the recent conversation (it can land on a different beat and get consumed as an
+        # ack). Never ask them to retype it — pick it up from the window + feed the seam directly.
+        already = _recent_shop_domain(tenant_id)
+        if already:
+            try:
+                from orchestrator.onboarding.shopify_onboarding import start_shopify_setup
+
+                result = start_shopify_setup(tenant_id, already)
+                link = result["authorize_url"]
+                pickup_msg = (
+                    f"आपका स्टोर एड्रेस मिल गया — {already}. जोड़ने के लिए बस यह सुरक्षित लिंक टैप करें: {link}"
+                    if lang == "hi" else
+                    f"Got your store address from earlier — {already}. "
+                    f"Tap this secure link to connect (one tap, nothing to copy-paste): {link}"
+                )
+                _send_turn(recipient, pickup_msg, [], lang)
+                _set_flow(tenant_id, f"{_FLOW_INTEGRATION_PREFIX}{top.integration}",
+                          message_sid=message_sid)
+                logger.info("journey flow: shop domain picked up from recent turns (tenant=%s)", tenant_id)
+                return {"done": False, "routed": "flow_integration_prefilled",
+                        "flow": f"{_FLOW_INTEGRATION_PREFIX}{top.integration}"}
+            except Exception:  # noqa: BLE001 — pickup is a courtesy; fall back to asking
+                logger.warning("journey flow: recent shop-domain pickup failed (fail-soft)", exc_info=True)
     msg = f"{top.why}\n\n{top.instructions}"
     _send_turn(recipient, msg, [], lang)
     _set_flow(tenant_id, f"{_FLOW_INTEGRATION_PREFIX}{top.integration}", message_sid=message_sid)
