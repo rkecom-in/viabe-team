@@ -878,7 +878,9 @@ def _opener() -> dict[str, Any]:
 _CONFIRM_BUTTONS_TEMPLATE = "onboarding_confirm_yesno"
 
 
-def _send(recipient: str | None, q: dict[str, Any], lang: str) -> None:
+def _send(
+    recipient: str | None, q: dict[str, Any], lang: str, *, tenant_id: UUID | str | None = None
+) -> None:
     """Best-effort owner send of one question (WABA-gated/stubbed — never crash the pipeline).
 
     VT-479: a CONFIRM question is sent as tappable Yes/No/Skip quick-reply BUTTONS (in-session
@@ -887,7 +889,12 @@ def _send(recipient: str | None, q: dict[str, Any], lang: str) -> None:
     needed; buttons just remove the brittle free-text "yes" reliance. Any failure (no SID resolved /
     WABA / transport) falls back to the plain freeform text — the journey never breaks on presentation.
     Non-confirm questions stay plain freeform text.
-    """
+
+    ``tenant_id`` (VT-586) — threaded into the send-choke so the sent line records to the LIFETIME
+    conversation_log ('assistant' leg, surface='journey', with the real message sid). This is the
+    DETERMINISTIC walker/opener path; before VT-586 it sent to the owner's phone but never hit
+    conversation_log — re-fragmenting the 24h manager window AND reading as harness 'silence'. Same
+    disease VT-584 fixed for the paced-flow beats, now closed for the walker path."""
     if not recipient:
         return
     text = q.get("prompt_hi") if lang == "hi" else q.get("prompt_en")
@@ -902,7 +909,10 @@ def _send(recipient: str | None, q: dict[str, Any], lang: str) -> None:
             content_sid = content_sid_for(_CONFIRM_BUTTONS_TEMPLATE, "en")
             if content_sid:
                 # {{1}} = the question text (the reconciled confirm prompt); buttons are fixed Yes/No/Skip.
-                send_interactive_message(content_sid, recipient, content_variables={"1": text})
+                send_interactive_message(
+                    content_sid, recipient, content_variables={"1": text},
+                    tenant_id=tenant_id, surface="journey",
+                )
                 return
         except Exception:  # noqa: BLE001 — buttons are an enhancement; fall through to plain text
             logger.warning(
@@ -911,7 +921,7 @@ def _send(recipient: str | None, q: dict[str, Any], lang: str) -> None:
     try:
         from orchestrator.utils.twilio_send import send_freeform_message
 
-        send_freeform_message(text, recipient)
+        send_freeform_message(text, recipient, tenant_id=tenant_id, surface="journey")
     except Exception:  # noqa: BLE001 — send is WABA-gated; the journey state advances regardless
         logger.warning("journey: owner send failed (recipient hashed in send util) — state advanced")
 
@@ -1557,7 +1567,7 @@ def _run_turn_brain_and_send(
         if r.get("turn_brain"):
             _send_turn(recipient, r.get("reply_text", ""), r.get("buttons") or [], lang)
         else:
-            _send(recipient, {"prompt_en": r.get("reply_en", ""), "prompt_hi": r.get("reply_hi", "")}, lang)
+            _send(recipient, {"prompt_en": r.get("reply_en", ""), "prompt_hi": r.get("reply_hi", "")}, lang, tenant_id=tenant_id)
     # VT-576: NO integration seam fires here — the profile card is the completion's ONLY immediate
     # message. ``_complete`` set ``__flow__ = profile_previewed``; the owner's NEXT message enters the
     # paced flow (readiness ask → one integration → data-landed plan) via _maybe_handle_post_profile_flow.
@@ -1629,7 +1639,7 @@ def maybe_handle_journey_reply(
                     )
             # Deterministic fallback (turn-brain off / errored).
             if queue:
-                _send(recipient, _current(g) or _opener(), lang)
+                _send(recipient, _current(g) or _opener(), lang, tenant_id=tenant_id)
                 return {"done": False, "pending": True}
             if populated:
                 # Fully-derivable profile, no necessities: the profile-collection spine is satisfied —
@@ -1637,7 +1647,7 @@ def maybe_handle_journey_reply(
                 # sentinel; the owner's next message enters _maybe_handle_post_profile_flow.
                 _complete(tenant_id)
                 return {"done": True, "pending": False}
-            _send(recipient, _opener(), lang)  # still setting up (nothing derivable, no queue yet)
+            _send(recipient, _opener(), lang, tenant_id=tenant_id)  # still setting up (nothing derivable, no queue yet)
             return {"done": False, "pending": True}
         # VT-478 — LAZY recompose of a STALE queue, BEFORE the current confirm question is presented.
         # VT-475 fixed forward composition but never recomposed EXISTING active queues, so a tenant
@@ -1676,7 +1686,7 @@ def maybe_handle_journey_reply(
         # advance, and a conversational re-present (``re_present`` — a bare greeting mid-question) all
         # DO send.
         if not r.get("already_presented"):
-            _send(recipient, {"prompt_en": r["reply_en"], "prompt_hi": r["reply_hi"]}, lang)
+            _send(recipient, {"prompt_en": r["reply_en"], "prompt_hi": r["reply_hi"]}, lang, tenant_id=tenant_id)
         # VT-576: the walker's completion sends its closer only — NO immediate integration seam.
         # ``_complete`` (inside handle_reply) set ``__flow__ = profile_previewed``; the owner's next
         # message enters the paced flow (readiness ask → one integration → data-landed plan). This kills

@@ -455,7 +455,7 @@ def _capture_shopify_sends(monkeypatch):  # type: ignore[no-untyped-def]
     from orchestrator.onboarding import shopify_onboarding
 
     sent: list[str] = []
-    monkeypatch.setattr(shopify_onboarding, "_send", lambda recipient, text: sent.append(text or ""))
+    monkeypatch.setattr(shopify_onboarding, "_send", lambda recipient, text, **_kw: sent.append(text or ""))
     return sent
 
 
@@ -610,3 +610,23 @@ def test_auth_classifier_unavailable_still_sends(substrate, monkeypatch, _captur
     )
     assert r is not None and r["routed"] == "shopify_auth_waiting"
     assert _capture_shopify_sends, "fail-soft must still send an honest line (no silence)"
+
+
+def test_resume_gate_send_threads_tenant_id_to_conversation_log(monkeypatch):
+    """VT-586: shopify_onboarding._send (every resume-gate reply — shop-domain retry, auth waiting line,
+    not-connected re-prompt, connected confirm) must pass tenant_id + surface='journey' into
+    send_freeform_message, so the integration hand-off is recorded to the lifetime conversation_log.
+    Before VT-586 these reached the owner's phone but the Team-Manager's 24h window lost the entire
+    hand-off, and the server harness read every resume reply as false 'silence'."""
+    from orchestrator.onboarding import shopify_onboarding
+    from orchestrator.utils import twilio_send
+
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        twilio_send, "send_freeform_message",
+        lambda body, recipient, **kw: captured.update({"body": body, **kw}) or "SM0",
+    )
+    tid = uuid4()
+    shopify_onboarding._send("+919000000099", "please finish approving, then reply 'done'", tenant_id=tid)
+    assert captured.get("tenant_id") == tid, "resume-gate _send must thread tenant_id into the record choke"
+    assert captured.get("surface") == "journey"
