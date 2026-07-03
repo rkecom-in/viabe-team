@@ -190,7 +190,10 @@ def test_defer_offers_honest_summary_only_and_is_resumable(substrate, _stub_send
     r = maybe_handle_journey_reply(tenant, "later", "SID-defer-1", "+919999003004")
     assert r is not None and r.get("routed") == "flow_deferred"
     assert _flow(substrate.dsn, tenant) == "deferred"
-    assert _stub_sends and "sales data" in _stub_sends[-1].lower()
+    # The honest 'what's missing' line comes from the registry plan_blocked_reason (single source of
+    # truth): it names the missing data + the connect options, and never presents a hollow plan.
+    last = _stub_sends[-1].lower()
+    assert "sales history" in last and "connect" in last
     assert read_integration_state(tenant) is None, "declining connects nothing"
 
     # Resumable: a clear connect-intent message later re-engages the integration offer.
@@ -277,3 +280,39 @@ def test_redelivered_flow_message_does_not_redrive(substrate, _stub_sends):
     assert r is not None and r.get("already_presented") is True
     assert _flow(substrate.dsn, tenant) == "profile_previewed", "state must not advance on redelivery"
     assert not _stub_sends, "a redelivery re-sends nothing"
+
+
+# ---------------------------------------------------------------------------
+# Live-drill defect: the owner had ALREADY sent the store address (consumed as
+# an ack on another beat) and the Shopify offer asked them to retype it.
+# Record-and-move-on: the offer picks it up from the conversation window.
+# ---------------------------------------------------------------------------
+
+def test_recent_shop_domain_found_and_normalized(substrate) -> None:
+    from orchestrator.onboarding.journey import (
+        _append_recent_turns, _recent_shop_domain, start_journey,
+    )
+
+    tenant = _new_tenant(substrate.dsn, name="pickup-found")
+    start_journey(tenant, [{"field": "about", "kind": "gap", "prompt_en": "x"}])
+    _append_recent_turns(
+        tenant,
+        {"role": "owner", "text": "KK4XVA-DI.myshopify.com"},
+        {"role": "bot", "text": "Want me to set up your data connections now?"},
+    )
+    assert _recent_shop_domain(tenant) == "kk4xva-di.myshopify.com"
+
+
+def test_recent_shop_domain_ignores_bot_lines_and_absence(substrate) -> None:
+    from orchestrator.onboarding.journey import (
+        _append_recent_turns, _recent_shop_domain, start_journey,
+    )
+
+    tenant = _new_tenant(substrate.dsn, name="pickup-absent")
+    start_journey(tenant, [{"field": "about", "kind": "gap", "prompt_en": "x"}])
+    _append_recent_turns(
+        tenant,
+        {"role": "bot", "text": "It should look like yourstore.myshopify.com"},
+        {"role": "owner", "text": "Lets do it now"},
+    )
+    assert _recent_shop_domain(tenant) is None  # the bot's example must never count
