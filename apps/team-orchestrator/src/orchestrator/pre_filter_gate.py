@@ -52,8 +52,44 @@ _OPT_OUT_PATTERNS = _boundary_patterns("opt_out_keywords.yaml")
 # the whole trimmed body, the inverse of opt-out. Routes to data_inputs_enable_handler.
 _ENABLE_KEYWORDS = {_nfc(kw.casefold()) for kw in _load_keywords("data_inputs_enable_keywords.yaml")}
 
-# DSR: boundary-safe containment (see _boundary_patterns).
-_DSR_PATTERNS = _boundary_patterns("dsr_keywords.yaml")
+# DSR (VT-585 — intent, not substring): dsr_keywords.yaml is now sectioned. A bare data noun no
+# longer fires on its own ("connect my data" / "मेरा डेटा कनेक्ट करो" must NOT be read as a deletion
+# request); the matcher (`_dsr_match`) requires either a standalone phrase OR a deletion verb AND a
+# data noun together. All three sections compile through the SAME boundary-safe containment helper as
+# opt-out, so the consent surfaces can't drift. See the yaml header for the intent-not-substring rule.
+def _dsr_section(section: str) -> list[str]:
+    data = yaml.safe_load((_CONFIG_DIR / "dsr_keywords.yaml").read_text())
+    return [str(keyword) for keyword in (data.get(section) or [])]
+
+
+_DSR_STANDALONE_PATTERNS = boundary_patterns(_dsr_section("standalone"))
+_DSR_DELETE_VERB_PATTERNS = boundary_patterns(_dsr_section("delete_verbs"))
+_DSR_DATA_NOUN_PATTERNS = boundary_patterns(_dsr_section("data_nouns"))
+
+
+def _dsr_match(nfc_body: str) -> str | None:
+    """VT-585: DSR fires on an ERASURE INTENT, not a bare data mention. ``nfc_body`` is the
+    already-NFC form. Returns a matched-pattern label (for the dsr_handler payload) or None. Two
+    independent fire paths, both boundary-safe containment (NFC, EN + Devanagari + Hinglish):
+
+      1. an UNAMBIGUOUS standalone phrase (gdpr / erasure / right to be forgotten / forget me /
+         data deletion / "मुझे हटा|डिलीट|मिटा" = delete-me), OR
+      2. a DELETION VERB **and** a DATA/INFO noun BOTH present, in any order — "delete my data",
+         "data delete karo", "मेरा डेटा हटाओ", "मेरा data delete karo".
+
+    A bare "my data" / "मेरा डेटा" with NO deletion verb ("connect my data", "yes connect my data",
+    "मेरा डेटा कनेक्ट करो") deliberately does NOT fire — that was the VT-585 defect (a store-wiring
+    owner falsely told their data-DELETION request was acknowledged). Failure direction stays
+    DPDP-conservative: an exotic phrasing the keywords miss falls through to the brain, not silence."""
+    for pattern in _DSR_STANDALONE_PATTERNS:
+        if pattern.search(nfc_body):
+            return pattern.pattern
+    verb = next((p for p in _DSR_DELETE_VERB_PATTERNS if p.search(nfc_body)), None)
+    if verb is not None:
+        noun = next((p for p in _DSR_DATA_NOUN_PATTERNS if p.search(nfc_body)), None)
+        if noun is not None:
+            return f"{verb.pattern} & {noun.pattern}"
+    return None
 
 # VT-384 (Gap-5 PR-3) — L3 autonomy keyword sets (config/l3_keywords.yaml), LOCKSTEP with the
 # CL-438 Meta-approved team_autonomy_offer body. BOTH rules are ordered strictly AFTER the
@@ -152,7 +188,7 @@ def matches_opt_out_or_dsr(body: str) -> bool:
     over any other interpretation (DPDP): a tenant who says "delete my data" / "बंद करो" /
     "band karo" must reach the dsr/opt-out handler regardless of phase."""
     nfc = _nfc(body)
-    return any(p.search(nfc) for p in _OPT_OUT_PATTERNS) or any(p.search(nfc) for p in _DSR_PATTERNS)
+    return any(p.search(nfc) for p in _OPT_OUT_PATTERNS) or _dsr_match(nfc) is not None
 
 
 def matches_kill_keyword(body: str) -> bool:
@@ -264,12 +300,15 @@ def pre_filter(event: WebhookEvent, state: SubscriberState) -> PreFilterResult:
             handler_name="data_inputs_enable_handler", payload={"matched": normalized}
         )
 
-    # Rule b — DSR keyword (VT-329: boundary-safe containment, NFC, EN + Devanagari + Hinglish).
-    for pattern in _DSR_PATTERNS:
-        if pattern.search(nfc_body):
-            return RouteToDirectHandler(
-                handler_name="dsr_handler", payload={"matched": pattern.pattern}
-            )
+    # Rule b — DSR keyword (VT-329 boundary-safe containment, NFC, EN + Devanagari + Hinglish;
+    # VT-585 intent-not-substring: a deletion VERB + data noun, or an unambiguous standalone phrase
+    # — a bare "my data" / "मेरा डेटा" no longer fires. See _dsr_match. Ordered exactly as before:
+    # AFTER opt-out (Rule a), BEFORE the L3 rules (the CL-438 floor + the RULE_ORDER pin).
+    dsr_matched = _dsr_match(nfc_body)
+    if dsr_matched is not None:
+        return RouteToDirectHandler(
+            handler_name="dsr_handler", payload={"matched": dsr_matched}
+        )
 
     # Rule b2 — VT-384 L3 autonomy KILL keyword (boundary-safe containment, NFC, EN + Devanagari
     # + Hinglish). Ordered AFTER opt-out + DSR (the CL-438 floor + RULE_ORDER pin): a phrase that
