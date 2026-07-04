@@ -60,6 +60,7 @@ from langchain_core.messages import SystemMessage
 from langchain_core.tools import BaseTool, tool
 from pydantic import BaseModel, ConfigDict, Field
 
+from orchestrator.agent.lane_tenant import lane_tenant_error, resolve_lane_tenant
 from orchestrator.types.trigger_reason import TriggerReason
 
 logger = logging.getLogger("orchestrator.agent.cost_opt_lane")
@@ -196,6 +197,11 @@ def analyze_tenant_spend(tenant_id: str, window_days: int = _DEFAULT_WINDOW_DAYS
     infra). Use it to spot the BIGGEST cost buckets + obvious waste. Returns
     ``{total_paise, by_category, event_count, window_days}`` — counts + paise ONLY, no PII.
     """
+    resolved = resolve_lane_tenant(tenant_id, tool_name="analyze_tenant_spend")
+    if resolved is None:
+        return lane_tenant_error("analyze_tenant_spend")
+    tenant_id = str(resolved)
+
     from orchestrator.observability.cost_dashboard import get_tenant_cost
 
     since, until = _window(window_days)
@@ -217,6 +223,11 @@ def analyze_unit_economics(tenant_id: str, window_days: int = _DEFAULT_WINDOW_DA
     < 1 means the tenant costs more to serve than the plan brings in — a strong wasteful-spend /
     recalibration signal. Returns ``{arrr_paise, cost_paise, ratio}``.
     """
+    resolved = resolve_lane_tenant(tenant_id, tool_name="analyze_unit_economics")
+    if resolved is None:
+        return lane_tenant_error("analyze_unit_economics")
+    tenant_id = str(resolved)
+
     from orchestrator.observability.cost_dashboard import get_tenant_unit_economics
 
     since, until = _window(window_days)
@@ -234,12 +245,16 @@ def identify_spend_anomaly(tenant_id: str) -> dict[str, Any]:
     one tenant; the lane narrows the workspace scan. Returns ``{anomaly: {...}|null,
     runaway: {...}|null}`` — a populated value is a strong wasteful/over-spend suggestion.
     """
+    resolved = resolve_lane_tenant(tenant_id, tool_name="identify_spend_anomaly")
+    if resolved is None:
+        return lane_tenant_error("identify_spend_anomaly")
+
     from orchestrator.observability.cost_dashboard import (
         detect_cost_anomalies,
         runaway_alert_candidates,
     )
 
-    tid = UUID(tenant_id)
+    tid = resolved
     anomaly = next(
         (
             {
@@ -283,6 +298,11 @@ def analyze_marketing_roi(
     ``{campaign_count, total_arrr_paise, total_transacting_count, per_campaign:[...]}`` — paise +
     counts ONLY, no PII (CL-390).
     """
+    resolved = resolve_lane_tenant(tenant_id, tool_name="analyze_marketing_roi")
+    if resolved is None:
+        return lane_tenant_error("analyze_marketing_roi")
+    tenant_id = str(resolved)
+
     from orchestrator.agent.tools.get_attribution_data import (
         GetAttributionDataInput,
         get_attribution_data,
@@ -324,6 +344,11 @@ def read_cost_context(tenant_id: str) -> dict[str, Any]:
     a suggestion against the owner's stated goal (e.g. "you're spending to grow — this ad campaign
     isn't converting"). Best-effort: a read miss yields ``{}``. No cross-tenant data.
     """
+    resolved = resolve_lane_tenant(tenant_id, tool_name="read_cost_context")
+    if resolved is None:
+        return lane_tenant_error("read_cost_context")
+    tenant_id = str(resolved)
+
     try:
         from orchestrator.knowledge.business_context import read_business_context
 
