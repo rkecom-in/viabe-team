@@ -58,6 +58,7 @@ from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import SystemMessage
 from langchain_core.tools import BaseTool, tool
 
+from orchestrator.agent.lane_tenant import lane_tenant_error, resolve_lane_tenant
 from orchestrator.types.trigger_reason import TriggerReason
 
 logger = logging.getLogger("orchestrator.agent.marketing")
@@ -101,6 +102,11 @@ def list_recent_campaigns(tenant_id: str, days_back: int = 90, limit: int = 20) 
     CL-390: NO per-recipient PII — no customer_id, no phone). Read-only; no side effect. Use this
     BEFORE proposing a new campaign/offer so a seasonal push doesn't collide with a recent one.
     """
+    resolved = resolve_lane_tenant(tenant_id, tool_name="list_recent_campaigns")
+    if resolved is None:
+        return lane_tenant_error("list_recent_campaigns")
+    tenant_id = str(resolved)
+
     from orchestrator.agent.tools.get_recent_campaigns import (
         GetRecentCampaignsInput,
         get_recent_campaigns,
@@ -153,6 +159,11 @@ def draft_campaign_plan(
     Returns the structured intent (``{kind: 'campaign_plan', ...}``). No PII (CL-390): a segment LABEL
     + free-text the OWNER reviews, never a customer phone/name/id.
     """
+    resolved = resolve_lane_tenant(tenant_id, tool_name="draft_campaign_plan")
+    if resolved is None:
+        return lane_tenant_error("draft_campaign_plan")
+    tenant_id = str(resolved)
+
     intent = {
         "kind": "campaign_plan",
         "tenant_id": tenant_id,
@@ -182,6 +193,11 @@ def draft_content(tenant_id: str, content_type: str, brief: str, draft: str) -> 
     Returns ``{kind: 'content_draft', ...}``. The draft is owner-reviewed copy, not a customer message
     in flight — it carries no recipient and triggers no send.
     """
+    resolved = resolve_lane_tenant(tenant_id, tool_name="draft_content")
+    if resolved is None:
+        return lane_tenant_error("draft_content")
+    tenant_id = str(resolved)
+
     intent = {
         "kind": "content_draft",
         "tenant_id": tenant_id,
@@ -224,6 +240,11 @@ def check_send_intent(
 
     Returns ``{in_policy, reason, action_class}`` — a reason CODE, never an instruction body (CL-390).
     """
+    resolved = resolve_lane_tenant(tenant_id, tool_name="check_send_intent")
+    if resolved is None:
+        return lane_tenant_error("check_send_intent")
+    tenant_id = str(resolved)
+
     from orchestrator.agents.business_policy import PolicyActionClass, assert_within_policy
 
     attrs: dict[str, Any] = {"segment": segment_label}
@@ -266,6 +287,11 @@ def check_ad_spend_intent(tenant_id: str, magnitude_minor: int, purpose: str) ->
     class + magnitude + a reason CODE only (CL-390); ``purpose`` is the specialist's own framing, not
     an owner secret.
     """
+    resolved = resolve_lane_tenant(tenant_id, tool_name="check_ad_spend_intent")
+    if resolved is None:
+        return lane_tenant_error("check_ad_spend_intent")
+    tenant_id = str(resolved)
+
     from orchestrator.agents.business_impact_choke import (
         BusinessActionDecision,
         BusinessImpactClass,

@@ -54,6 +54,7 @@ from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import SystemMessage
 from langchain_core.tools import BaseTool, tool
 
+from orchestrator.agent.lane_tenant import lane_tenant_error, resolve_lane_tenant
 from orchestrator.db import tenant_connection
 from orchestrator.types.trigger_reason import TriggerReason
 
@@ -113,7 +114,10 @@ def analyze_cash_flow(tenant_id: str) -> dict[str, Any]:
     transaction direction (the cash-movement signal). Best-effort: a read miss / absent
     table degrades to zeros (the specialist advises on what data exists, never crashes).
     """
-    tid = str(UUID(tenant_id))
+    resolved = resolve_lane_tenant(tenant_id, tool_name="analyze_cash_flow")
+    if resolved is None:
+        return lane_tenant_error("analyze_cash_flow")
+    tid = str(resolved)
     out: dict[str, Any] = {
         "inflow_paise": 0,
         "collected_paise": 0,
@@ -180,7 +184,10 @@ def analyze_receivables(tenant_id: str) -> dict[str, Any]:
     proposes a reminder for an overdue ``customer_id`` via ``propose_payment_reminder``;
     it never sends. Best-effort: a read miss degrades to an empty/zero result.
     """
-    tid = str(UUID(tenant_id))
+    resolved = resolve_lane_tenant(tenant_id, tool_name="analyze_receivables")
+    if resolved is None:
+        return lane_tenant_error("analyze_receivables")
+    tid = str(resolved)
     out: dict[str, Any] = {
         "overdue_count": 0,
         "total_outstanding_paise": 0,
@@ -240,6 +247,11 @@ def pricing_margin_input(tenant_id: str) -> dict[str, Any]:
     ``spend_paise`` ONLY (the wrapper's display_name/phone are dropped here — they never
     enter the specialist's reasoning). Best-effort: a read miss degrades to zeros.
     """
+    resolved = resolve_lane_tenant(tenant_id, tool_name="pricing_margin_input")
+    if resolved is None:
+        return lane_tenant_error("pricing_margin_input")
+    tenant_id = str(resolved)
+
     from orchestrator.db.wrappers import CustomersWrapper
 
     out: dict[str, Any] = {"customer_count": 0, "top_spend": []}
@@ -280,9 +292,13 @@ def propose_payment_reminder(
     ``customer_id`` from its ``overdue_customer_ids``). The proposal is advisory output:
     nothing reaches a customer until the rail sends it, gated.
     """
+    resolved = resolve_lane_tenant(tenant_id, tool_name="propose_payment_reminder")
+    if resolved is None:
+        return lane_tenant_error("propose_payment_reminder")
+
     proposal = {
         "kind": "payment_reminder_proposal",
-        "tenant_id": str(UUID(tenant_id)),
+        "tenant_id": str(resolved),
         "customer_id": str(UUID(customer_id)),
         "reason": reason,
         "reminder_text": reminder_text,

@@ -76,6 +76,7 @@ from langchain_core.messages import SystemMessage
 from langchain_core.tools import BaseTool, tool
 from pydantic import BaseModel, ConfigDict, Field
 
+from orchestrator.agent.lane_tenant import lane_tenant_error, resolve_lane_tenant
 from orchestrator.types.trigger_reason import TriggerReason
 
 logger = logging.getLogger("orchestrator.agent.tech_lane")
@@ -151,6 +152,11 @@ def read_integration_health(tenant_id: str) -> dict[str, Any]:
     last_status, a rising consecutive_fails, a long-ago last_sync_at, or a disabled connector).
     Returns ``{connectors: [...], count}`` — status codes + counts ONLY, no customer PII.
     """
+    resolved = resolve_lane_tenant(tenant_id, tool_name="read_integration_health")
+    if resolved is None:
+        return lane_tenant_error("read_integration_health")
+    tenant_id = str(resolved)
+
     from orchestrator.db.tenant_connection import tenant_connection
 
     connectors: list[dict[str, Any]] = []
@@ -218,6 +224,11 @@ def read_listing_health(tenant_id: str) -> dict[str, Any]:
     table, so this lane reads it through the typed wrapper (RLS-scoped + Pillar-8 tenant-validated),
     NOT a direct SELECT. Same pattern every migrated hot-table read uses.
     """
+    resolved = resolve_lane_tenant(tenant_id, tool_name="read_listing_health")
+    if resolved is None:
+        return lane_tenant_error("read_listing_health")
+    tenant_id = str(resolved)
+
     from orchestrator.db.wrappers import PlatformListingsWrapper
 
     now = datetime.now(timezone.utc)
@@ -295,6 +306,11 @@ def read_tech_context(tenant_id: str) -> dict[str, Any]:
     the Shopify sync has been broken 3 days"). Best-effort: a read miss yields ``{}``. No
     cross-tenant data.
     """
+    resolved = resolve_lane_tenant(tenant_id, tool_name="read_tech_context")
+    if resolved is None:
+        return lane_tenant_error("read_tech_context")
+    tenant_id = str(resolved)
+
     try:
         from orchestrator.knowledge.business_context import read_business_context
 
@@ -328,6 +344,11 @@ def propose_config_change(
 
     Returns the structured intent (``{kind: 'config_change', ...}``). No PII / no secret (CL-390).
     """
+    resolved = resolve_lane_tenant(tenant_id, tool_name="propose_config_change")
+    if resolved is None:
+        return lane_tenant_error("propose_config_change")
+    tenant_id = str(resolved)
+
     intent = {
         "kind": "config_change",
         "tenant_id": tenant_id,
@@ -368,6 +389,11 @@ def check_config_change_intent(tenant_id: str, target: str) -> dict[str, Any]:
     Returns ``{decision, reason, action_class, requires_owner_approval}`` — IDs + class + a reason
     CODE only (CL-390); ``target`` is the specialist's own framing, not an owner secret.
     """
+    resolved = resolve_lane_tenant(tenant_id, tool_name="check_config_change_intent")
+    if resolved is None:
+        return lane_tenant_error("check_config_change_intent")
+    tenant_id = str(resolved)
+
     from orchestrator.agents.business_impact_choke import (
         BusinessActionDecision,
         BusinessImpactClass,

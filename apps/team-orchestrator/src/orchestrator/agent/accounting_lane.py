@@ -66,6 +66,7 @@ from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import SystemMessage
 from langchain_core.tools import BaseTool, tool
 
+from orchestrator.agent.lane_tenant import lane_tenant_error, resolve_lane_tenant
 from orchestrator.types.trigger_reason import TriggerReason
 
 logger = logging.getLogger("orchestrator.agent.accounting")
@@ -153,6 +154,11 @@ def accounting_categorize_books(tenant_id: str) -> dict[str, Any]:
     ``{by_entry_type: {sale|payment: {count, total_inr, total_paise, first_date, last_date}},
     note}`` — a PREPARED summary, never a filed/finalized statement.
     """
+    resolved = resolve_lane_tenant(tenant_id, tool_name="accounting_categorize_books")
+    if resolved is None:
+        return lane_tenant_error("accounting_categorize_books")
+    tenant_id = str(resolved)
+
     summary = _read_ledger_summary(UUID(tenant_id))
     logger.info(
         "accounting_categorize_books tenant=%s entry_types=%d (read-only summary)",
@@ -178,6 +184,11 @@ def accounting_prepare_tax_summary(tenant_id: str) -> dict[str, Any]:
     owner FILES; this lane only PREPARES (the v1 PREPARE-only rail; filing is the FUTURE-gated
     seam below).
     """
+    resolved = resolve_lane_tenant(tenant_id, tool_name="accounting_prepare_tax_summary")
+    if resolved is None:
+        return lane_tenant_error("accounting_prepare_tax_summary")
+    tenant_id = str(resolved)
+
     from orchestrator.knowledge.business_context import read_business_context
 
     ctx = read_business_context(tenant_id)
@@ -225,6 +236,11 @@ def accounting_organize_invoices_expenses(tenant_id: str) -> dict[str, Any]:
     note}`` — each ``{count, total_inr, total_paise, first_date, last_date}`` — a PREPARED view
     the owner reconciles, never a committed/transacted action.
     """
+    resolved = resolve_lane_tenant(tenant_id, tool_name="accounting_organize_invoices_expenses")
+    if resolved is None:
+        return lane_tenant_error("accounting_organize_invoices_expenses")
+    tenant_id = str(resolved)
+
     from orchestrator.db.tenant_connection import tenant_connection
 
     with tenant_connection(UUID(tenant_id)) as conn:
@@ -285,6 +301,11 @@ def accounting_reconcile_transactions(tenant_id: str, lookback_days: int = 90) -
     ``{matched_count, unmatched_count, unmatched_reasons, lookback_days, note}`` — counts +
     reasons only (no PII / no raw rows to the LLM; CL-390).
     """
+    resolved = resolve_lane_tenant(tenant_id, tool_name="accounting_reconcile_transactions")
+    if resolved is None:
+        return lane_tenant_error("accounting_reconcile_transactions")
+    tenant_id = str(resolved)
+
     from datetime import timedelta
 
     from orchestrator.agent.tools.match_transactions import (
