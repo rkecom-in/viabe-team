@@ -32,11 +32,13 @@ landmine routing tests.
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any
 from uuid import UUID
 
 from langchain_anthropic import ChatAnthropic
 from langgraph.checkpoint.postgres import PostgresSaver
+from langgraph.errors import GraphBubbleUp
 from langgraph.graph import END, START, StateGraph
 from pydantic import ValidationError
 from team_shared.mcp import ToolContext
@@ -60,6 +62,8 @@ from orchestrator.routing import (
     route_after_orchestrator,
 )
 from orchestrator.state.agent_graph_state import AgentGraphState
+
+logger = logging.getLogger(__name__)
 
 
 # Per-run budgets sourced from VT-35's hard-limit constants. Matched to the
@@ -109,6 +113,95 @@ class SpecialistNoOutputError(RuntimeError):
             f"output (FailureRecord already routed if applicable; "
             f"run={run_id} tenant={tenant_id})"
         )
+
+
+class LaneNodeError(RuntimeError):
+    """VT-602 — a ROSTER lane node raised an exception that would otherwise escape
+    ``graph.invoke()`` (the structural gap the VT-598 live pack surfaced: none of the
+    six business lanes — marketing/sales/finance/accounting/tech/cost_opt — nor
+    integration/onboarding_conductor carry any error middleware; a live crash inside
+    a lane's ``create_agent`` build, e.g. the marketing-lane
+    "non-consecutive system messages" ValueError, escaped into ``dispatch_brain``'s
+    generic ``except Exception: raise`` -> DBOS retries forever -> the run never
+    terminates -> owner silence).
+
+    Raised by ``_wrap_lane_node_exceptions`` (below), which wraps EVERY ROSTER node
+    at ``build_supervisor_graph`` registration — the whole class of lane-node
+    exceptions is dead regardless of the specific exception type, and a future lane
+    appended to ROSTER inherits the net for free. ``dispatch_brain`` catches this
+    (mirroring the VT-492 ``SpecialistNoOutputError`` convert-don't-orphan pattern)
+    and maps it to a CLEAN ``escalated`` terminal.
+
+    PII-safe fields only: the lane name + the ORIGINAL exception's TYPE name (never
+    ``str(exc)``, which may carry the owner body / a specialist's draft — CL-390).
+    """
+
+    def __init__(self, *, lane: str, exc_type: str) -> None:
+        self.lane = lane
+        self.exc_type = exc_type
+        super().__init__(
+            f"lane node {lane!r} raised {exc_type} (see the preceding warning "
+            f"log line for the original exception)"
+        )
+
+
+def _wrap_lane_node_exceptions(node_callable: Any, *, lane: str) -> Any:
+    """VT-602 — wrap a ROSTER lane's node/sub-graph so ANY exception escaping it
+    converts to a ``LaneNodeError`` instead of propagating raw into
+    ``graph.invoke()`` (see ``LaneNodeError`` docstring for the defect this closes).
+
+    Handles BOTH node shapes ``build_supervisor_graph`` iterates over ROSTER:
+    a plain function (``spec.wrap_node=True`` — e.g. ``_sales_recovery_node``,
+    called directly) and a compiled sub-graph (``spec.wrap_node=False`` — e.g.
+    marketing/integration/onboarding_conductor, called via ``.invoke``;
+    ``CompiledStateGraph`` is not itself callable — verified empirically).
+
+    Deliberately a BARE closure — NOT ``functools.wraps``. ``with_state_transition_
+    hook`` (VT-183) cannot wrap a compiled sub-graph: ``functools.wraps`` copies
+    ``__wrapped__`` onto the wrapper, and ``inspect.signature`` follows that chain
+    into the ``CompiledStateGraph`` instance's own ``__call__`` descriptor, tripping
+    "descriptor '__call__' for 'type' objects doesn't apply to a CompiledStateGraph"
+    at ``add_node``/build time (the reason ``wrap_node=False`` skips ``with_state_
+    transition_hook`` entirely). A bare closure carries no ``__wrapped__`` — LangGraph
+    inspects only the wrapper's own ``(state, *args, **kwargs)`` signature and never
+    touches the wrapped sub-graph's type, sidestepping the trap (verified empirically:
+    a real compiled sub-graph wrapped this way builds, runs, and still propagates an
+    internal ``interrupt()`` through unchanged).
+
+    Two carve-outs re-raise UNCHANGED (checked before the catch-all, most specific
+    first):
+      - ``GraphBubbleUp`` (``GraphInterrupt``'s base + subgraph-control signals) —
+        mirrors the VT-484 tool-error middleware's own carve-out. NONE of the six
+        lanes / integration / onboarding_conductor call ``interrupt()`` today (only
+        the standalone ``request_owner_approval`` gate node does, and it is added
+        OUTSIDE the ROSTER loop precisely so it is never wrapped) — this is
+        defense-in-depth, not a live path.
+      - ``SpecialistNoOutputError`` — the EXISTING VT-492 typed signal
+        ``_sales_recovery_node`` raises. It is already a clean, structured signal
+        ``dispatch_brain`` converts via its OWN more specific ``except`` clause
+        (which reads ``.specialist`` / ``.status`` to build a precise reason); this
+        wrapper must not re-box it into a generic ``LaneNodeError`` and lose that
+        precision or change the VT-492 reason format.
+    """
+    invoke = getattr(node_callable, "invoke", node_callable)
+
+    def _lane_node_wrapper(state: Any, *args: Any, **kwargs: Any) -> Any:
+        try:
+            return invoke(state, *args, **kwargs)
+        except GraphBubbleUp:
+            raise
+        except SpecialistNoOutputError:
+            raise
+        except Exception as exc:  # noqa: BLE001 — the whole point: convert ANY lane exception
+            logger.warning(
+                "supervisor: lane node %r raised %s; converting to LaneNodeError "
+                "(VT-602 — preventing an unhandled lane exception from hanging the run)",
+                lane,
+                type(exc).__name__,
+            )
+            raise LaneNodeError(lane=lane, exc_type=type(exc).__name__) from exc
+
+    return _lane_node_wrapper
 
 
 def _sales_recovery_node(state: AgentGraphState) -> dict[str, Any]:
@@ -411,6 +504,13 @@ def build_supervisor_graph(
         node = spec.node_builder(model)
         if spec.wrap_node:
             node = with_state_transition_hook(node, node_name=spec.agent_name)
+        # VT-602 — the structural exception net: wrap AFTER the (optional)
+        # state-transition hook so a failed sales_recovery run still records its
+        # 'failed' pipeline_steps row (the hook's own except-log-reraise) before this
+        # converts the escaped exception to a clean LaneNodeError. Applies to EVERY
+        # roster node uniformly (function or compiled sub-graph) — a future lane
+        # appended to ROSTER inherits the net with no further wiring.
+        node = _wrap_lane_node_exceptions(node, lane=spec.name)
         graph.add_node(spec.agent_name, node)
 
     graph.add_node(

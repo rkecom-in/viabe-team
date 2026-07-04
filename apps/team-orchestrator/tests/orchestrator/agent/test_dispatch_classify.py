@@ -10,6 +10,7 @@ terminal markers (escalation wins; the rejection wins over a still-in-state
 from __future__ import annotations
 
 from types import SimpleNamespace
+from typing import Annotated
 
 import pytest
 
@@ -17,6 +18,16 @@ import pytest
 pytest.importorskip("langchain_anthropic")
 pytest.importorskip("langgraph")
 pytest.importorskip("pydantic")
+
+# VT-602 Part 2 tests build small ad-hoc StateGraphs with a local TypedDict state
+# schema. Because this module uses `from __future__ import annotations`, TypedDict
+# field annotations are lazily resolved via THIS module's globals (langgraph's
+# `get_type_hints` call) — not the enclosing test function's locals — so
+# `Annotated` / `add_messages` / `TypedDict` must be importable at MODULE level
+# even though the TypedDict classes themselves are defined inside the test
+# functions below.
+from langgraph.graph.message import add_messages  # noqa: E402 — after importorskip
+from typing_extensions import TypedDict  # noqa: E402 — langgraph dep; after importorskip
 
 
 def test_classify_terminal_cohort_rejected_is_clean_completed():
@@ -529,3 +540,343 @@ def test_specialist_no_output_terminal_is_unresolved_so_owner_gets_ack():
 
     assert "escalated" in get_args(FinalStatus)
     assert "escalated" in _UNRESOLVED
+
+
+# ---------------------------------------------------------------------------
+# VT-602 Part 1 — a LANE sub-graph node exception (marketing/sales/finance/
+# accounting/tech/cost_opt/integration/onboarding_conductor) must resolve to the
+# SAME clean 'escalated' terminal the VT-492 SpecialistNoOutputError path uses —
+# never a bare re-raise that lets DBOS retry forever (owner silence). The
+# structural net (supervisor._wrap_lane_node_exceptions, wrapped around every
+# ROSTER node) converts the raw exception into LaneNodeError; this pins
+# dispatch_brain's OWN conversion of THAT signal into a clean DispatchResult.
+# ---------------------------------------------------------------------------
+
+
+def test_dispatch_brain_lane_node_error_resolves_to_clean_escalated(monkeypatch):
+    """VT-602 — a LaneNodeError escaping graph.invoke() (the structural net's typed
+    signal for ANY lane-node exception) converts to a CLEAN 'escalated' terminal —
+    mirrors the VT-492 SpecialistNoOutputError test above byte-for-byte, but for the
+    lane-exception class the VT-598 live pack found had NO net at all."""
+    import contextlib
+    from uuid import uuid4
+
+    import orchestrator.agent.dispatch as dispatch_mod
+    import orchestrator.edge_cases_router as edge_mod
+    import orchestrator.graph as graph_mod
+    from orchestrator.agent.dispatch import dispatch_brain
+    from orchestrator.state import new_subscriber_state
+    from orchestrator.supervisor import LaneNodeError
+    from orchestrator.types import WebhookEvent
+
+    tenant_id = uuid4()
+    run_id = uuid4()
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-vt602-fake")
+    monkeypatch.setattr(edge_mod, "route_edge_case", lambda **kwargs: None)
+    monkeypatch.setattr(
+        dispatch_mod, "observability_context", lambda **kwargs: contextlib.nullcontext()
+    )
+    monkeypatch.setattr(graph_mod, "get_checkpointer", lambda: None)
+    monkeypatch.setattr(dispatch_mod, "_resolve_model", lambda *a, **k: object())
+
+    class _FakeGraph:
+        def invoke(self, *args, **kwargs):
+            raise LaneNodeError(lane="marketing_lane", exc_type="ValueError")
+
+    monkeypatch.setattr(
+        dispatch_mod, "build_supervisor_graph", lambda **kwargs: _FakeGraph()
+    )
+
+    event = WebhookEvent(
+        body="go plan that Diwali campaign",
+        sender_phone="+10000000000",
+        message_type="inbound_message",
+        twilio_message_sid="SMvt602test",
+    )
+    state = new_subscriber_state(tenant_id, run_id)
+
+    result = dispatch_brain(
+        event=event, state=state, run_id=run_id, tenant_id=tenant_id
+    )
+
+    # The run reaches a CLEAN terminal — NOT an unhandled re-raise (no DBOS-retry
+    # hang, no orphan at status='running').
+    assert result.final_status == "escalated"
+    assert result.terminal_path == "escalated"
+    # PII-safe reason: lane + exception TYPE only — never str(exc).
+    assert result.reason == "lane_exception:marketing_lane:ValueError"
+
+
+def test_dispatch_brain_generic_exception_still_reraises_for_dbos(monkeypatch):
+    """VT-602 — the structural net is SCOPED to lane-node exceptions (LaneNodeError /
+    SpecialistNoOutputError / HardLimitExceeded). Anything else escaping graph.invoke()
+    (a bug OUTSIDE the ROSTER lane surface — e.g. orchestrator/routing/collapse) must
+    still re-raise so DBOS's retry semantics are unchanged for that class — VT-602 does
+    NOT swallow every exception, only the lane-node class the live pack identified."""
+    import contextlib
+    from uuid import uuid4
+
+    import orchestrator.agent.dispatch as dispatch_mod
+    import orchestrator.edge_cases_router as edge_mod
+    import orchestrator.graph as graph_mod
+    from orchestrator.agent.dispatch import dispatch_brain
+    from orchestrator.state import new_subscriber_state
+    from orchestrator.types import WebhookEvent
+
+    tenant_id, run_id = uuid4(), uuid4()
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-vt602b-fake")
+    monkeypatch.setattr(edge_mod, "route_edge_case", lambda **kwargs: None)
+    monkeypatch.setattr(
+        dispatch_mod, "observability_context", lambda **kwargs: contextlib.nullcontext()
+    )
+    monkeypatch.setattr(graph_mod, "get_checkpointer", lambda: None)
+    monkeypatch.setattr(dispatch_mod, "_resolve_model", lambda *a, **k: object())
+
+    class _FakeGraph:
+        def invoke(self, *args, **kwargs):
+            raise RuntimeError("some unrelated framework bug, not a lane exception")
+
+    monkeypatch.setattr(
+        dispatch_mod, "build_supervisor_graph", lambda **kwargs: _FakeGraph()
+    )
+
+    event = WebhookEvent(
+        body="hello", sender_phone="+10000000000",
+        message_type="inbound_message", twilio_message_sid="SMvt602btest",
+    )
+    state = new_subscriber_state(tenant_id, run_id)
+
+    import pytest as _pytest
+
+    with _pytest.raises(RuntimeError, match="some unrelated framework bug"):
+        dispatch_brain(event=event, state=state, run_id=run_id, tenant_id=tenant_id)
+
+
+# ---------------------------------------------------------------------------
+# VT-602 Part 2 — the reported crash: `ValueError: Received multiple
+# non-consecutive system messages` in the marketing-lane agent invocation.
+#
+# ROOT CAUSE (confirmed by direct reproduction against a real LangGraph
+# checkpointer, NOT the marketing_lane build itself): dispatch_brain's
+# `graph.invoke(initial_state, config={"configurable": {"thread_id": str(run_id)}})`
+# reuses `thread_id == run_id` across every call for a run (VT-47 needs the same
+# thread for a pause/resume). LangGraph's `add_messages` reducer keys purely on
+# `BaseMessage.id`; a message built with none gets a FRESH random uuid at merge
+# time, so a DBOS retry of the whole `dispatch_brain` function (the module's own
+# `except Exception: raise` — ANY unhandled exception after at least one graph
+# superstep already checkpointed) rebuilds brand-new SystemMessage/HumanMessage
+# objects that do not match the checkpointed ones' ids. The reducer APPENDS them
+# after whatever the checkpoint already holds (e.g. the orchestrator's own prior
+# AIMessage/ToolMessage from spawning a lane) instead of replacing the initial
+# turn in place — producing a SECOND system-message island later in the list,
+# exactly what langchain_anthropic's `_format_messages` rejects. The fix
+# (`_initial_turn_msg_id`) scopes each initial-turn message's id to
+# `(run_id, slot)` so `add_messages` replaces it IN PLACE on every retry.
+# ---------------------------------------------------------------------------
+
+
+def test_initial_turn_msg_id_is_stable_per_run_and_slot():
+    """VT-602 — the id helper is deterministic per (run_id, slot): same inputs ->
+    same id (so a retry's freshly-built message replaces in place), different
+    slot/run_id -> different id (so distinct blocks never collide)."""
+    from uuid import uuid4
+
+    from orchestrator.agent.dispatch import _initial_turn_msg_id
+
+    run_a, run_b = uuid4(), uuid4()
+
+    assert _initial_turn_msg_id(run_a, "l1_block") == _initial_turn_msg_id(
+        run_a, "l1_block"
+    )
+    assert _initial_turn_msg_id(run_a, "l1_block") != _initial_turn_msg_id(
+        run_a, "business_block"
+    )
+    assert _initial_turn_msg_id(run_a, "l1_block") != _initial_turn_msg_id(
+        run_b, "l1_block"
+    )
+
+
+def _lane_messages_for_anthropic(state_messages: list) -> None:
+    """Mirrors create_agent's model_node (`messages = [system_message, *state["messages"]]`,
+    langchain/agents/factory.py) using the marketing lane's REAL cached system prompt, then
+    runs the messages through a REAL ``ChatAnthropic`` request-payload build — the exact
+    langchain_anthropic validation that raised VT-602's reported ValueError. No network call
+    (``_get_request_payload`` only assembles the request; it never calls the API), so this
+    needs no API key."""
+    from langchain_anthropic import ChatAnthropic
+
+    from orchestrator.agent.marketing_lane import MARKETING_LANE_SYSTEM_MESSAGE
+
+    messages = [MARKETING_LANE_SYSTEM_MESSAGE, *state_messages]
+    ChatAnthropic(model="claude-opus-4-7", max_tokens=16)._get_request_payload(  # type: ignore[call-arg]
+        messages
+    )
+
+
+def test_vt602_retry_without_stable_ids_reproduces_the_reported_crash():
+    """Control case — proves the harness actually exercises the real defect: WITHOUT
+    stable per-(run_id, slot) ids (the pre-fix shape — brand-new SystemMessage/HumanMessage
+    objects on every dispatch_brain call), a DBOS-style retry against the SAME checkpointed
+    thread reproduces the EXACT reported ValueError."""
+    from uuid import uuid4
+
+    import pytest as _pytest
+    from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+    from langgraph.checkpoint.memory import InMemorySaver
+    from langgraph.graph import END, START, StateGraph
+
+    class _State(TypedDict, total=False):
+        messages: Annotated[list, add_messages]
+
+    def _orchestrator_stub(state):
+        # Mirrors the orchestrator deciding to spawn marketing: an AIMessage with a
+        # tool_call + make_spawn_tool's handoff ToolMessage (handoffs.py `handoff()`).
+        return {
+            "messages": [
+                AIMessage(
+                    content="",
+                    tool_calls=[{"name": "spawn_marketing", "args": {}, "id": "tc1"}],
+                ),
+                ToolMessage(
+                    content="Handing off to marketing_lane",
+                    name="spawn_marketing",
+                    tool_call_id="tc1",
+                ),
+            ]
+        }
+
+    def _marketing_stub(state):
+        _lane_messages_for_anthropic(state["messages"])
+        return {"messages": [AIMessage(content="marketing ran")]}
+
+    graph = StateGraph(_State)
+    graph.add_node("orchestrator", _orchestrator_stub)
+    graph.add_node("marketing_lane", _marketing_stub)
+    graph.add_edge(START, "orchestrator")
+    graph.add_edge("orchestrator", "marketing_lane")
+    graph.add_edge("marketing_lane", END)
+
+    run_id = uuid4()
+    cfg = {"configurable": {"thread_id": str(run_id)}}
+
+    def _build_initial_no_stable_ids():
+        # The PRE-FIX shape: fresh SystemMessage/HumanMessage every call, no id=.
+        return {
+            "messages": [
+                SystemMessage(content="business ctx"),
+                HumanMessage(content="go plan that Diwali campaign"),
+            ]
+        }
+
+    # attempt 1: marketing_lane raises (simulating ANY failure post-orchestrator —
+    # the specific cause doesn't matter; only that at least one superstep checkpointed
+    # before the failure). The orchestrator's AI/Tool messages are now checkpointed.
+    def _marketing_stub_raises(state):
+        raise RuntimeError("attempt 1 fails for some unrelated reason")
+
+    compiled_first = StateGraph(_State)
+    compiled_first.add_node("orchestrator", _orchestrator_stub)
+    compiled_first.add_node("marketing_lane", _marketing_stub_raises)
+    compiled_first.add_edge(START, "orchestrator")
+    compiled_first.add_edge("orchestrator", "marketing_lane")
+    compiled_first.add_edge("marketing_lane", END)
+    cp = InMemorySaver()
+    g1 = compiled_first.compile(checkpointer=cp)
+    with _pytest.raises(RuntimeError, match="attempt 1 fails"):
+        g1.invoke(_build_initial_no_stable_ids(), config=cfg)
+
+    # attempt 2 (the DBOS retry): SAME thread_id, a FRESH initial state built the
+    # SAME (pre-fix) way. Reuse the SAME checkpointer so the retry sees attempt 1's
+    # checkpointed orchestrator messages.
+    g2 = graph.compile(checkpointer=cp)
+    with _pytest.raises(ValueError, match="non-consecutive system messages"):
+        g2.invoke(_build_initial_no_stable_ids(), config=cfg)
+
+
+def test_vt602_retry_with_stable_ids_does_not_crash():
+    """VT-602 fix — the SAME retry-against-a-progressed-checkpoint scenario as above,
+    but using the REAL `_initial_turn_msg_id` scheme dispatch.py now applies. The
+    marketing lane's REAL cached system prompt + the retried state must NOT trip
+    langchain_anthropic's non-consecutive-system-messages check — the lane runs."""
+    from uuid import uuid4
+
+    from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+    from langgraph.checkpoint.memory import InMemorySaver
+    from langgraph.graph import END, START, StateGraph
+
+    from orchestrator.agent.dispatch import _initial_turn_msg_id
+
+    class _State(TypedDict, total=False):
+        messages: Annotated[list, add_messages]
+
+    def _orchestrator_stub(state):
+        return {
+            "messages": [
+                AIMessage(
+                    content="",
+                    tool_calls=[{"name": "spawn_marketing", "args": {}, "id": "tc1"}],
+                ),
+                ToolMessage(
+                    content="Handing off to marketing_lane",
+                    name="spawn_marketing",
+                    tool_call_id="tc1",
+                ),
+            ]
+        }
+
+    ran_marketing: list[bool] = []
+
+    def _marketing_stub(state):
+        _lane_messages_for_anthropic(state["messages"])
+        ran_marketing.append(True)
+        return {"messages": [AIMessage(content="marketing ran")]}
+
+    def _marketing_stub_raises(state):
+        raise RuntimeError("attempt 1 fails for some unrelated reason")
+
+    run_id = uuid4()
+    cfg = {"configurable": {"thread_id": str(run_id)}}
+
+    def _build_initial_with_stable_ids():
+        # dispatch.py's REAL fix: each initial-turn message id-scoped to (run_id, slot).
+        return {
+            "messages": [
+                SystemMessage(
+                    content="business ctx",
+                    id=_initial_turn_msg_id(run_id, "business_block"),
+                ),
+                HumanMessage(
+                    content="go plan that Diwali campaign",
+                    id=_initial_turn_msg_id(run_id, "human_input"),
+                ),
+            ]
+        }
+
+    cp = InMemorySaver()
+
+    g1 = StateGraph(_State)
+    g1.add_node("orchestrator", _orchestrator_stub)
+    g1.add_node("marketing_lane", _marketing_stub_raises)
+    g1.add_edge(START, "orchestrator")
+    g1.add_edge("orchestrator", "marketing_lane")
+    g1.add_edge("marketing_lane", END)
+    compiled_1 = g1.compile(checkpointer=cp)
+
+    import pytest as _pytest
+
+    with _pytest.raises(RuntimeError, match="attempt 1 fails"):
+        compiled_1.invoke(_build_initial_with_stable_ids(), config=cfg)
+
+    g2 = StateGraph(_State)
+    g2.add_node("orchestrator", _orchestrator_stub)
+    g2.add_node("marketing_lane", _marketing_stub)
+    g2.add_edge(START, "orchestrator")
+    g2.add_edge("orchestrator", "marketing_lane")
+    g2.add_edge("marketing_lane", END)
+    compiled_2 = g2.compile(checkpointer=cp)
+
+    # Must NOT raise — the retry's stable ids replace the initial turn in place.
+    compiled_2.invoke(_build_initial_with_stable_ids(), config=cfg)
+
+    assert ran_marketing == [True], "marketing_lane must actually run (no crash swallowed it)"
