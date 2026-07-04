@@ -32,6 +32,7 @@ from langchain_core.messages import SystemMessage
 from langchain_core.tools import BaseTool, tool
 from pydantic import BaseModel, ConfigDict, Field
 
+from orchestrator.agent.lane_tenant import lane_tenant_error, resolve_lane_tenant
 from orchestrator.integrations import (
     list_connectors as _list_connectors_impl,
     render_connector_listing_markdown,
@@ -134,6 +135,11 @@ def start_connector_setup(connector_id: str, tenant_id: str, shop: str = "") -> 
     ``authorize_url`` (key is ``authorize_url``, NOT ``auth_url``). Other connectors are not
     yet wired in Phase A — they return a placeholder envelope.
     """
+    resolved = resolve_lane_tenant(tenant_id, tool_name="start_connector_setup")
+    if resolved is None:
+        return lane_tenant_error("start_connector_setup")
+    tenant_id = str(resolved)
+
     if connector_id == "shopify":
         if not shop:
             return {
@@ -166,6 +172,11 @@ def pull_sample(tenant_id: str, connector_id: str) -> dict[str, Any]:
     must never reach the LLM prompt, so the sample row CONTENT stays server-side; the agent only
     sees how many were found.
     """
+    resolved = resolve_lane_tenant(tenant_id, tool_name="pull_sample")
+    if resolved is None:
+        return lane_tenant_error("pull_sample")
+    tenant_id = str(resolved)
+
     if connector_id == "shopify":
         from orchestrator.integrations.connectors.shopify import ShopifyConnector
 
@@ -181,6 +192,11 @@ def propose_field_mapping_stub(
     tenant_id: str, connector_id: str, source_fields: list[str]
 ) -> dict[str, str]:
     """STUB — propose source→canonical field mapping. TODO(VT-209) reasoner."""
+    resolved = resolve_lane_tenant(tenant_id, tool_name="propose_field_mapping_stub")
+    if resolved is None:
+        return lane_tenant_error("propose_field_mapping_stub")
+    tenant_id = str(resolved)
+
     logger.info(
         "[VT-209 STUB] propose_field_mapping tenant=%s connector=%s",
         tenant_id, connector_id,
@@ -193,6 +209,11 @@ def confirm_field_mapping_stub(
     tenant_id: str, connector_id: str, mapping: dict[str, str]
 ) -> dict[str, str]:
     """STUB — persist owner-confirmed mapping. TODO(VT-209)."""
+    resolved = resolve_lane_tenant(tenant_id, tool_name="confirm_field_mapping_stub")
+    if resolved is None:
+        return lane_tenant_error("confirm_field_mapping_stub")
+    tenant_id = str(resolved)
+
     logger.info(
         "[VT-209 STUB] confirm_field_mapping tenant=%s connector=%s",
         tenant_id, connector_id,
@@ -212,15 +233,20 @@ def setup_recurring_ingestion_stub(
     rows. ``next_scheduled_run`` is computed from ``cadence`` at insert
     time; subsequent runs update it via the same parser.
     """
-    from uuid import UUID
+    resolved = resolve_lane_tenant(tenant_id, tool_name="setup_recurring_ingestion_stub")
+    if resolved is None:
+        return lane_tenant_error("setup_recurring_ingestion_stub")
+    tenant_id = str(resolved)
 
-    from orchestrator.graph import get_pool
+    from datetime import UTC, datetime
+
+    from orchestrator.db import tenant_connection
     from orchestrator.integrations.scheduler import _compute_next_run
-    from datetime import datetime, UTC
 
     next_run = _compute_next_run(cadence, datetime.now(UTC))
-    pool = get_pool()
-    with pool.connection() as conn:
+    # VT-603: RLS-scoped write keyed on the RESOLVED tenant — never the raw BYPASSRLS pool keyed
+    # on a model-supplied string (the live cross-tenant-write defect this closes).
+    with tenant_connection(resolved) as conn:
         conn.execute(
             """
             INSERT INTO tenant_connector_status (
@@ -233,7 +259,7 @@ def setup_recurring_ingestion_stub(
                 enabled = TRUE,
                 updated_at = now()
             """,
-            (str(UUID(tenant_id)), connector_id, cadence, next_run),
+            (tenant_id, connector_id, cadence, next_run),
         )
     logger.info(
         "setup_recurring_ingestion tenant=%s connector=%s cadence=%s next=%s",
