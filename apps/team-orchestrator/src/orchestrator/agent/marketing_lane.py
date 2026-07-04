@@ -1,5 +1,16 @@
 """VT-469 — the MARKETING specialist lane (Team-Manager rebuild, design §8 charter).
 
+VT-604 Package 1 UPDATE (2026-07-05): this lane is NOT a roster specialist. The
+verified Phase-1 runtime scope is exactly three specialists (sales_recovery /
+integration / onboarding_conductor); this module's ``SPECIALIST_SPEC`` (bottom of
+file) is no longer appended to ``agent/roster.py``'s ``ROSTER`` — there is no spawn
+tool, no graph node, no route for ``marketing_lane``. A curated subset of its
+``@tool`` functions is instead exposed DIRECTLY to the Manager as an advisory
+capability — see ``agent/advisory_registry.py`` for the exact subset + the
+classification rationale. The rest of this docstring describes the module's
+ORIGINAL design intent; it remains accurate for how the tools REASON, just not for
+how they are reached.
+
 The Marketing lane is one of the six manager specialists (design §7 "Division of intelligence",
 211500Z). The MANAGER reads the business situation + decides the desired OUTCOME ("re-engage the
 festival crowd", "drive repeat orders this Diwali") + hands off to THIS specialist; the SPECIALIST

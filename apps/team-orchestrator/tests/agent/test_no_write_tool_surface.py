@@ -64,16 +64,43 @@ HANDOFF_EXPECTED = {
     "spawn_sales_recovery",
     "spawn_integration",
     "spawn_onboarding_conductor",
-    # VT-465 central integration — the six specialist lanes (VT-468..473) now
-    # registered on ROSTER. Each spawn tool is a pure Command(goto, graph=PARENT)
-    # handoff (no send/write capability — the lanes hold no forbidden tool, pinned
-    # by their own per-lane allowlist tests), so they belong on this handoff pin.
-    "spawn_sales_lane",
-    "spawn_marketing",
-    "spawn_finance_lane",
-    "spawn_accounting",
-    "spawn_tech",
-    "spawn_cost_opt",
+    # VT-604 Package 1 — the six business-domain lanes (VT-468..473) are NO LONGER
+    # spawnable: they hold no spawn tool, no graph node, no route. Their tools are
+    # Manager-held ADVISORY capabilities instead (see ADVISORY_EXPECTED below +
+    # agent/advisory_registry.py). ROSTER is EXACTLY these three.
+}
+
+# VT-604 Package 1 — the Manager's ADVISORY tool surface (the curated subset of the
+# six lanes' own tools, exposed directly — no spawn, no handoff). Pinned EXACT so a
+# new/removed advisory tool forces review of the classification table in
+# agent/advisory_registry.py's module docstring.
+ADVISORY_EXPECTED = {
+    "recommend_sales_play",
+    "identify_repeat_upsell_opportunity",
+    "list_recent_campaigns",
+    "draft_campaign_plan",
+    "draft_content",
+    "check_send_intent",
+    "check_ad_spend_intent",
+    "analyze_cash_flow",
+    "analyze_receivables",
+    "pricing_margin_input",
+    "propose_payment_reminder",
+    "accounting_categorize_books",
+    "accounting_prepare_tax_summary",
+    "accounting_organize_invoices_expenses",
+    "accounting_reconcile_transactions",
+    "read_integration_health",
+    "read_listing_health",
+    "advise_integration_setup",
+    "read_tech_context",
+    "propose_config_change",
+    "check_config_change_intent",
+    "analyze_tenant_spend",
+    "analyze_unit_economics",
+    "identify_spend_anomaly",
+    "analyze_marketing_roi",
+    "read_cost_context",
 }
 
 # VT-462 — the onboarding-conductor specialist's tool surface (parity allowlist pin with the
@@ -101,11 +128,13 @@ def test_integration_tool_allowlist_pinned():
 
 
 def test_handoff_tools_pinned():
-    # VT-465 — the manager's handoff surface is the ROSTER's spawn tools (the
-    # registry drives it; ``roster_spawn_tools`` is what build_supervisor_graph
-    # binds as the manager's extra_tools). Pin the EXACT set — a NEW spawn tool
-    # (a new lane) fails this → forces a VT-268 review that the new handoff
-    # carries no send/write boundary breach.
+    # VT-604 Package 1 — the manager's handoff surface is the ROSTER's spawn tools
+    # (the registry drives it; ``roster_spawn_tools`` is what build_supervisor_graph
+    # binds as the manager's extra_tools) — EXACTLY the three roster specialists.
+    # Pin the EXACT set — a NEW spawn tool (a new lane made spawnable) fails this →
+    # forces a VT-268 + VT-604-scope review that the new handoff carries no
+    # send/write boundary breach AND is a deliberate roster addition, not a lane
+    # silently re-registering itself.
     from orchestrator.agent.roster import roster_spawn_tools
 
     assert _names(roster_spawn_tools()) == HANDOFF_EXPECTED
@@ -121,6 +150,30 @@ def test_handoff_tools_pinned():
     assert _names(
         [spawn_sales_recovery, spawn_integration, spawn_onboarding_conductor]
     ) <= HANDOFF_EXPECTED
+
+
+def test_advisory_tools_pinned():
+    """VT-604 Package 1 — the Manager's advisory tool surface (the six lanes' curated
+    subset) is pinned EXACT. A new/removed tool forces updating the classification
+    table in ``agent/advisory_registry.py``'s module docstring, not a silent drift."""
+    from orchestrator.agent.advisory_registry import ADVISORY_TOOLS
+
+    assert _names(ADVISORY_TOOLS) == ADVISORY_EXPECTED
+
+
+def test_advisory_tools_guard_passes_real_surface():
+    """The full manager tool surface (base + roster spawns + advisory tools) — the
+    EXACT set ``build_supervisor_graph`` assembles for ``build_orchestrator_agent`` —
+    passes the VT-268 fail-closed guard. No advisory tool sends/spends/writes."""
+    from orchestrator.agent.advisory_registry import ADVISORY_TOOLS
+    from orchestrator.agent.orchestrator_agent import ORCHESTRATOR_AGENT_TOOLS
+    from orchestrator.agent.roster import roster_spawn_tools
+    from orchestrator.agent.tool_guardrail import assert_agent_tools_safe
+
+    assert_agent_tools_safe(
+        [*ORCHESTRATOR_AGENT_TOOLS, *roster_spawn_tools(), *ADVISORY_TOOLS],
+        surface="orchestrator_agent",
+    )
 
 
 def test_onboarding_conductor_tool_allowlist_pinned():

@@ -34,7 +34,8 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from orchestrator.agent.lane_tenant import lane_tenant_error, resolve_lane_tenant
 from orchestrator.integrations import (
-    list_connectors as _list_connectors_impl,
+    OWNER_VISIBLE_CONNECTOR_IDS,
+    list_owner_visible_connectors,
     render_connector_listing_markdown,
 )
 from orchestrator.types.trigger_reason import TriggerReason
@@ -109,13 +110,17 @@ class PendingOwnerInput(BaseModel):
 
 @tool
 def list_connectors_tool(category: str = "") -> str:
-    """List available connectors (optionally filtered by category).
+    """List the connectors the owner can ACTUALLY connect today (optionally filtered by category).
 
-    Reads the VT-205 registry. Returns markdown-formatted listing the
-    agent can show the owner directly. Categories: digital / manual / scrape.
+    VT-604 Package 1: filtered to the OWNER-VISIBLE catalogue — Shopify + Google Sheets, the only
+    two with a real implementation. The full VT-205 registry carries additional placeholder
+    entries (Amazon Seller Central, GA4, WooCommerce, the manual VT-6 family, …); none of them are
+    listed here — they are unbuilt, so offering them as connectable would be dishonest. If the
+    owner names an unsupported platform by name, say plainly that it isn't supported yet; do not
+    promise a walkthrough or a future connection for it.
     """
     cat_arg = category if category in ("digital", "manual", "scrape") else None
-    items = _list_connectors_impl(category=cat_arg)  # type: ignore[arg-type]
+    items = list_owner_visible_connectors(category=cat_arg)  # type: ignore[arg-type]
     if not items:
         return "(no connectors in this category)"
     lines = [
@@ -132,13 +137,32 @@ def start_connector_setup(connector_id: str, tenant_id: str, shop: str = "") -> 
     returns) and writes the oauth_completion pending-state for the VT-267 resume.
 
     ``shop`` is the owner's ``*.myshopify.com`` domain (required for Shopify). Returns the
-    ``authorize_url`` (key is ``authorize_url``, NOT ``auth_url``). Other connectors are not
-    yet wired in Phase A — they return a placeholder envelope.
+    ``authorize_url`` (key is ``authorize_url``, NOT ``auth_url``).
+
+    VT-604 Package 1: a ``connector_id`` outside the OWNER-VISIBLE catalogue (Shopify + Google
+    Sheets — everything else in the VT-205 registry is a documented-but-unbuilt placeholder, e.g.
+    Amazon Seller Central) returns an honest ``status: unsupported`` envelope with NO promised
+    follow-up — never a "we'll show you a walkthrough" / "not wired yet" implication that a
+    connection is coming.
     """
     resolved = resolve_lane_tenant(tenant_id, tool_name="start_connector_setup")
     if resolved is None:
         return lane_tenant_error("start_connector_setup")
     tenant_id = str(resolved)
+
+    if connector_id not in OWNER_VISIBLE_CONNECTOR_IDS:
+        logger.info(
+            "start_connector_setup connector=%s tenant=%s (not owner-visible — reporting unsupported)",
+            connector_id, tenant_id,
+        )
+        return {
+            "connector_id": connector_id,
+            "status": "unsupported",
+            "message": (
+                "This connector isn't supported yet — Viabe Team currently connects "
+                "Shopify and Google Sheets."
+            ),
+        }
 
     if connector_id == "shopify":
         if not shop:
@@ -156,6 +180,9 @@ def start_connector_setup(connector_id: str, tenant_id: str, shop: str = "") -> 
             "next_action": "owner_completes_oauth_then_says_done",
             "authorize_url": result["authorize_url"],
         }
+    # google_sheet — owner-visible (real catalogue entry) but its OAuth flow is not yet wired
+    # onto this tool (Package 5 territory). Distinct from "unsupported": this connector IS one
+    # the owner can eventually connect; it just isn't live on this seam today.
     logger.info("start_connector_setup connector=%s tenant=%s (not wired in Phase A)", connector_id, tenant_id)
     return {
         "connector_id": connector_id,

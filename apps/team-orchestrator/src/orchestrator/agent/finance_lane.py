@@ -1,5 +1,15 @@
 """VT-470 — the Finance specialist lane (ADVISORY ALWAYS).
 
+VT-604 Package 1 UPDATE (2026-07-05): this lane is NOT a roster specialist. The
+verified Phase-1 runtime scope is exactly three specialists (sales_recovery /
+integration / onboarding_conductor); this module's ``SPECIALIST_SPEC`` (bottom of
+file) is no longer appended to ``agent/roster.py``'s ``ROSTER`` — there is no spawn
+tool, no graph node, no route for ``finance_lane``. A curated subset of its ``@tool``
+functions is instead exposed DIRECTLY to the Manager as an advisory capability — see
+``agent/advisory_registry.py`` for the exact subset + the classification rationale.
+This lane was ALREADY advisory-only by charter (below); the only change is WHO calls
+the tool (the Manager itself, not a spawned sub-graph).
+
 The Finance lane the Team-Manager hands a finance OUTCOME to (design §7/§8). Per the
 ratified charter (design §8, VT-470) Finance is **ADVISORY — and stays advisory even in
 future scope**: cash-flow analysis, receivables/payables, margin/pricing input, and

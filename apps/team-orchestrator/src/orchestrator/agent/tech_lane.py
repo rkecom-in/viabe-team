@@ -1,5 +1,15 @@
 """VT-472 — the TECH specialist lane (Team-Manager rebuild, design §8 charter).
 
+VT-604 Package 1 UPDATE (2026-07-05): this lane is NOT a roster specialist. The
+verified Phase-1 runtime scope is exactly three specialists (sales_recovery /
+integration / onboarding_conductor); this module's ``SPECIALIST_SPEC`` (bottom of
+file) is no longer appended to ``agent/roster.py``'s ``ROSTER`` — there is no spawn
+tool, no graph node, no route for ``tech_lane``. A curated subset of its ``@tool``
+functions is instead exposed DIRECTLY to the Manager as an advisory capability — see
+``agent/advisory_registry.py`` for the exact subset. ``advise_integration_setup``
+ALSO gained the VT-604 connector-catalogue filter (owner-visible = Shopify + Google
+Sheets only) — see that tool's own docstring.
+
 The Tech lane is one of the six manager specialists (design §7 "Division of intelligence",
 211500Z). The MANAGER reads the business situation + decides the desired OUTCOME ("keep the
 storefront + listings healthy", "the Shopify sync stopped — fix it", "their Google listing
@@ -269,18 +279,21 @@ def read_listing_health(tenant_id: str) -> dict[str, Any]:
 def advise_integration_setup(category: str = "") -> dict[str, Any]:
     """Advise WHICH connector fits + the next setup step — the integration-setup help charter.
 
-    REUSE (no rebuild): reads the EXISTING connector registry (``integrations.list_connectors``,
-    the same registry the Integration Agent uses) — optionally filtered by category
-    ('digital' | 'manual' | 'scrape'). Use it to recommend the right data source for the owner's
-    tools and explain the connect path. This is ADVICE: the ACTUAL auth/connect flow runs on the
-    Integration Agent + the deterministic connector path (this lane holds no connector auth/write
-    tool). Returns ``{connectors: [{connector_id, display_name, auth_flow, category, summary,
-    auth_walkthrough_url}], count}`` — registry facts, no PII.
+    REUSE (no rebuild): reads the OWNER-VISIBLE connector catalogue (``integrations.
+    list_owner_visible_connectors`` — VT-604 Package 1: Shopify + Google Sheets, the only two with
+    a real implementation) — optionally filtered by category ('digital' | 'manual' | 'scrape'). Use
+    it to recommend the right data source for the owner's tools and explain the connect path. This
+    is ADVICE: the ACTUAL auth/connect flow runs on the Integration Agent + the deterministic
+    connector path (this lane holds no connector auth/write tool). Anything outside this catalogue
+    (Amazon Seller Central, GA4, WooCommerce, …) is an unbuilt placeholder — never recommend it as
+    connectable; say plainly it isn't supported yet. Returns ``{connectors: [{connector_id,
+    display_name, auth_flow, category, summary, auth_walkthrough_url}], count}`` — registry facts,
+    no PII.
     """
-    from orchestrator.integrations import list_connectors
+    from orchestrator.integrations import list_owner_visible_connectors
 
     cat = category if category in ("digital", "manual", "scrape") else None
-    specs = list_connectors(category=cat)  # type: ignore[arg-type]
+    specs = list_owner_visible_connectors(category=cat)  # type: ignore[arg-type]
     items = [
         {
             "connector_id": s.connector_id,

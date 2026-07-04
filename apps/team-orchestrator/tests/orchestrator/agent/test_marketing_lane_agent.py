@@ -222,37 +222,45 @@ def test_check_ad_spend_intent_delegates_to_business_impact_gate(monkeypatch: py
     assert out["magnitude_minor"] == 50000
 
 
-# --- (5) conditional: once the COORDINATOR registers the lane, the supervisor graph wires it --------
+# --- (5) VT-604 Package 1: NOT a roster member — its tools are Manager advisory tools ---------
 
 
-def test_supervisor_graph_gains_marketing_node_when_registered() -> None:
-    """If the coordinator has registered the marketing SPECIALIST_SPEC in ROSTER, the supervisor graph
-    gains the marketing node + route — proving the manager can hand off. SKIPPED until the coordinator
-    registers it (this lane does NOT edit the shared roster.py — VT-469 builds the lane; the coordinator
-    wires it)."""
-    from orchestrator.agent.roster import ROSTER
+def test_marketing_lane_not_registered_in_roster() -> None:
+    """VT-604 Package 1 — the Phase-1 execution plan's binding runtime scope: the SIX business
+    lanes (marketing included) are NOT independent specialists. ``marketing`` must NOT appear on
+    ``ROSTER`` — no spawn tool, no graph node, no conditional-edge route. Supersedes the earlier
+    "SKIPPED until the coordinator registers it" placeholder (VT-469) — the coordinator's decision
+    is now final: marketing is a Manager-held advisory capability, not a lane to register."""
+    from orchestrator.agent.roster import ROSTER, spawn_tool_route_keys
 
-    if "marketing" not in {s.name for s in ROSTER}:
-        pytest.skip("marketing lane not yet registered in ROSTER by the coordinator")
+    assert "marketing" not in {s.name for s in ROSTER}
+    assert "spawn_marketing" not in spawn_tool_route_keys()
 
-    from orchestrator import routing
-    from orchestrator.agent.roster import get_spec
     from orchestrator.supervisor import build_supervisor_graph
-
-    spec = get_spec("marketing_lane")
-    assert spec.route_key == "spawn_marketing"
-    assert spec.wrap_node is False  # CompiledStateGraph — never function-wrapped
-    assert spec.edge_to is None  # -> END
 
     graph = build_supervisor_graph(model=_FakeModel())  # type: ignore[arg-type]
     nodes = set(graph.get_graph().nodes)
-    assert "marketing_lane" in nodes, sorted(nodes)
+    assert "marketing_lane" not in nodes, sorted(nodes)
 
-    from langchain_core.messages import AIMessage
 
-    state = {
-        "messages": [
-            AIMessage(content="", tool_calls=[{"name": "spawn_marketing", "args": {}, "id": "1"}])
-        ]
-    }
-    assert routing.route_after_orchestrator(state) == "spawn_marketing"
+def test_marketing_tools_are_manager_advisory_tools_instead() -> None:
+    """The lane's tools are NOT gone — they are exposed directly to the Manager as advisory
+    capabilities (``agent/advisory_registry.py``), reachable without any spawn/handoff."""
+    from orchestrator.agent.advisory_registry import ADVISORY_TOOLS
+    from orchestrator.agent.marketing_lane import (
+        check_ad_spend_intent,
+        check_send_intent,
+        draft_campaign_plan,
+        draft_content,
+        list_recent_campaigns,
+    )
+
+    advisory_names = {t.name for t in ADVISORY_TOOLS}
+    for tool in (
+        list_recent_campaigns,
+        draft_campaign_plan,
+        draft_content,
+        check_send_intent,
+        check_ad_spend_intent,
+    ):
+        assert tool.name in advisory_names
