@@ -28,18 +28,32 @@ logger = logging.getLogger(__name__)
 TASK_STATUSES = frozenset({
     "clarifying", "planned", "running", "waiting_owner", "blocked", "verifying",
     "completed", "failed", "cancelled", "dead_letter",
+    "queued",  # VT-605 (mig 165): a later objective while one is already active for the tenant.
 })
 # VT-557: dead_letter is a terminal (retry budget spent) — but an OPERATOR-REDRIVABLE one
 # (redrive_task resets it to 'planned'); the reaper never auto-retries a dead_letter row.
 TASK_TERMINAL = frozenset({"completed", "failed", "cancelled", "dead_letter"})
 TASK_NON_TERMINAL = TASK_STATUSES - TASK_TERMINAL
+# VT-605: the subset of TASK_NON_TERMINAL that counts as "active" for the per-tenant one-active-task
+# admission gate (mig 165's manager_tasks_one_active_per_tenant partial unique index) — 'queued'
+# deliberately excluded (many queued tasks may coexist per tenant; only ONE may be active).
+TASK_ACTIVE = TASK_NON_TERMINAL - {"queued"}
 
-STEP_KINDS = frozenset({"specialist_dispatch", "effect", "clarification", "verification"})
-STEP_STATUSES = frozenset({"pending", "running", "waiting", "done", "failed", "skipped"})
-STEP_TERMINAL = frozenset({"done", "failed", "skipped"})
+STEP_KINDS = frozenset({
+    "specialist_dispatch", "effect", "clarification", "verification",
+    "advisory_tool",  # VT-605 (mig 165): a Manager-held advisory tool call (agent/advisory_registry.py).
+})
+STEP_STATUSES = frozenset({
+    "pending", "running", "waiting", "done", "failed", "skipped",
+    "superseded",  # VT-605 (mig 165): orphaned by a revise_plan — no longer part of the current plan.
+})
+STEP_TERMINAL = frozenset({"done", "failed", "skipped", "superseded"})
 STEP_NON_TERMINAL = STEP_STATUSES - STEP_TERMINAL
 
-EVIDENCE_KINDS = frozenset({"campaign_plan", "agent_work_item", "pipeline_run"})
+EVIDENCE_KINDS = frozenset({
+    "campaign_plan", "agent_work_item", "pipeline_run",
+    "pipeline_step",  # VT-605 (mig 165): a single pipeline_steps row (finer than a whole pipeline_run).
+})
 
 
 def _uuid(row: Any) -> UUID:
@@ -161,7 +175,10 @@ def get_task(tenant_id: UUID | str, task_id: UUID | str) -> dict[str, Any] | Non
         row = conn.execute(
             "SELECT id, tenant_id, objective, acceptance_criteria, source_message_ref, "
             "assigned_function, policy_ref, status, current_step_id, evidence_refs, "
-            "idempotency_key, version, stall_metadata, created_at, updated_at, completed_at "
+            "idempotency_key, version, stall_metadata, created_at, updated_at, completed_at, "
+            # VT-605 (mig 165): plan_revision / terminal_outcome / owner_notification_status —
+            # plan_store.load_plan reads plan_revision to resolve the CURRENT step set.
+            "plan_revision, terminal_outcome, owner_notification_status "
             "FROM manager_tasks WHERE tenant_id = %s AND id = %s",
             (str(tenant_id), str(task_id)),
         ).fetchone()
@@ -178,6 +195,27 @@ def find_task_id(tenant_id: UUID | str, idempotency_key: str) -> UUID | None:
         row = conn.execute(
             "SELECT id FROM manager_tasks WHERE tenant_id = %s AND idempotency_key = %s",
             (str(tenant_id), idempotency_key),
+        ).fetchone()
+    return _uuid(row) if row is not None else None
+
+
+def find_task_by_source_ref(tenant_id: UUID | str, source_message_ref: str) -> UUID | None:
+    """VT-605 — resolve a task by its ``source_message_ref`` pointer (run_id or message SID), the
+    BROADER counterpart to ``find_task_id`` (which resolves by the narrower ``idempotency_key``).
+
+    Two producers may key a task's IDENTITY (``idempotency_key``) DIFFERENTLY — the legacy
+    ``task_producer`` keys on ``live_dispatch:{run_id}`` (VT-565); ``plan_store.create_plan`` keys
+    on the inbound source-message SID (Package 2) — while both are expected to ALSO record the
+    same human-meaningful pointer in ``source_message_ref``. Used as a CROSS-PRODUCER duplicate
+    guard: before minting, check whether ANY producer already created a task for this reference,
+    regardless of which idempotency scheme it used. Returns the OLDEST matching task (there should
+    only ever be one; ``ORDER BY created_at`` is a defensive tie-break, not a real ambiguity).
+    """
+    with tenant_connection(tenant_id) as conn:
+        row = conn.execute(
+            "SELECT id FROM manager_tasks WHERE tenant_id = %s AND source_message_ref = %s "
+            "ORDER BY created_at ASC LIMIT 1",
+            (str(tenant_id), source_message_ref),
         ).fetchone()
     return _uuid(row) if row is not None else None
 
@@ -257,6 +295,8 @@ def get_steps(tenant_id: UUID | str, task_id: UUID | str) -> list[dict[str, Any]
     with tenant_connection(tenant_id) as conn:
         rows = conn.execute(
             "SELECT id, step_seq, kind, evidence_kind, evidence_ref, status, detail, version, "
+            # VT-605 (mig 165): plan_revision / specialist.
+            "plan_revision, specialist, "
             "created_at, updated_at FROM manager_task_steps "
             "WHERE tenant_id = %s AND task_id = %s ORDER BY step_seq",
             (str(tenant_id), str(task_id)),
@@ -265,8 +305,8 @@ def get_steps(tenant_id: UUID | str, task_id: UUID | str) -> list[dict[str, Any]
 
 
 __all__ = [
-    "TASK_STATUSES", "TASK_TERMINAL", "TASK_NON_TERMINAL",
+    "TASK_STATUSES", "TASK_TERMINAL", "TASK_NON_TERMINAL", "TASK_ACTIVE",
     "STEP_KINDS", "STEP_STATUSES", "STEP_TERMINAL", "STEP_NON_TERMINAL", "EVIDENCE_KINDS",
-    "create_task", "set_task_status", "get_task", "find_task_id",
+    "create_task", "set_task_status", "get_task", "find_task_id", "find_task_by_source_ref",
     "add_step", "set_step_status", "get_steps",
 ]
