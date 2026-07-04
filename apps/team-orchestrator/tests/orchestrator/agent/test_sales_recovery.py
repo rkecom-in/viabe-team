@@ -499,6 +499,45 @@ def test_run_sales_recovery_agent_variant_discriminator_invalid_emits_failure(
     assert "variant discriminator" in failure.message
 
 
+def test_schema_rejection_corrective_retry_recovers(monkeypatch):
+    """VT-596 #3 — the live pack's intermittent Sonnet-5 failure: a draft
+    rejected on proposed.evidence_refs must get ONE corrective retry naming
+    the failing field paths; a corrected second emission proceeds (never the
+    owner-facing escalation). The correction prompt carries loc+type only."""
+    import json
+    from uuid import uuid4
+
+    from orchestrator.agent.self_evaluate import FakeSelfEvaluator
+
+    bad = _fake_response(text=json.dumps({"status": "proposed"}))
+    good = _fake_response(text=json.dumps({"status": "out_of_scope",
+                                           "out_of_scope_reason": "test-corrected emission"}))
+    fake = MagicMock()
+    fake.messages.create.side_effect = [bad, good]
+    monkeypatch.setenv("VIABE_ENV", "test")
+    monkeypatch.setattr("orchestrator.agent.sales_recovery.Anthropic", lambda: fake)
+    monkeypatch.setattr("orchestrator.agent.sales_recovery.route_failure", MagicMock())
+
+    evaluator = FakeSelfEvaluator(verdicts=[])
+    result = run_sales_recovery_agent(
+        SalesRecoveryContext(
+            tenant_id=uuid4(), run_id=uuid4(), user_request="Recover dormant customers"
+        ),
+        evaluator=evaluator,
+    )
+
+    assert fake.messages.create.call_count == 2
+    second_messages = fake.messages.create.call_args_list[1].kwargs["messages"]
+    correction = second_messages[-1]
+    assert correction["role"] == "user"
+    assert "failed schema validation" in correction["content"]
+    assert "proposed." in correction["content"]  # names the field paths
+    # The corrected emission parsed — the run is NOT 'invalid' (the out_of_scope
+    # variant proceeds down the gate path; whatever terminal it reaches, the
+    # schema-rejection escalation is gone).
+    assert result.status != "invalid"
+
+
 def test_run_sales_recovery_agent_schema_rejection_emits_failure(monkeypatch):
     """VT-4: model emits a JSON dict with a legal ``status`` discriminator
     but the post-coerce payload is rejected by ``parse_campaign_plan``
@@ -550,7 +589,11 @@ def test_run_sales_recovery_agent_schema_rejection_emits_failure(monkeypatch):
     # what the model emitted before the schema rejection.
     assert isinstance(result.output, dict)
     assert result.output.get("status") == "proposed"
-    assert router.call_count == 1
+    # VT-596 #3: the first rejection now triggers ONE corrective retry (the
+    # fake client re-emits the same bad payload), so TWO rejections are
+    # observable before the loop breaks invalid.
+    assert router.call_count == 2
+    assert fake_client.messages.create.call_count == 2
     failure = router.call_args.args[0]
     assert isinstance(failure, FailureRecord)
     assert failure.failure_type is FailureType.AGENT_INVALID_OUTPUT
