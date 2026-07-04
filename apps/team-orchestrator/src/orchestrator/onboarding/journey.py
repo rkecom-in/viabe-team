@@ -444,7 +444,35 @@ def handle_reply(
         if field and body.strip():
             answers[field] = body.strip()
 
+    # VT-601 (VT-598 opus-judge finding, repeat_question_guard): a DESCRIPTIVE
+    # business_type/category answer ("Probe Traders, a hardware shop in Pune")
+    # already carries the 'about' substance — cross-fill a still-pending 'about'
+    # gap from it so the very next turn doesn't ask "tell us about your
+    # business" for information the owner just gave (the objective's canonical
+    # re-ask failure). Narrow by design: ONLY type/category → 'about', ONLY a
+    # multi-token (≥4) descriptive body, ONLY when 'about' is unanswered.
+    if (
+        field in ("business_type", "category")
+        and "about" not in answers
+        and "about" not in skipped
+        and not is_skip
+        and len(body.split()) >= 4
+    ):
+        remaining_fields = {
+            entry.get("field") for entry in g["question_queue"][g["cursor"] + 1 :]
+        }
+        if "about" in remaining_fields:
+            answers["about"] = body.strip()
+
+    # VT-601 record-and-move-on invariant: NEVER present a queue entry whose
+    # field the owner has already answered (or skipped) — advance past them.
+    q_all = g["question_queue"]
     new_cursor = g["cursor"] + 1
+    while new_cursor < len(q_all) and (
+        q_all[new_cursor].get("field") in answers
+        or q_all[new_cursor].get("field") in skipped
+    ):
+        new_cursor += 1
     _advance(tenant_id, new_cursor, answers, skipped, message_sid)
 
     # CONTRACT (unchanged, pre-VT-462): the owner's reply applied to the PRESENTED question

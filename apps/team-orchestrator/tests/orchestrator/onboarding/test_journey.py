@@ -801,3 +801,63 @@ def test_vt477_redelivered_yes_does_not_double_advance(substrate):  # type: igno
     g3 = journey.get_journey(tenant)
     assert g3 is not None
     assert g3["cursor"] == 2, "a new sid after a redelivery still advances (not frozen)"
+
+
+def test_vt601_descriptive_type_correction_cross_fills_about_no_reask(substrate):  # type: ignore[no-untyped-def]
+    """VT-601 (VT-598 opus-judge finding, repeat_question_guard): the owner corrects the
+    business_type confirm with a DESCRIPTIVE sentence ('Probe Traders, a hardware shop in
+    Pune') — the pending 'about' gap must be cross-filled from it and NEVER presented
+    (the canonical 'what do you sell or do?' re-ask)."""
+    from orchestrator.onboarding import journey
+
+    tenant = _new_tenant(substrate.dsn)
+    journey.start_journey(
+        tenant, [_confirm_q("business_type", "sweets"), _gap_q("about"), _gap_q("city")]
+    )
+
+    r = journey.handle_reply(tenant, "Probe Traders, a hardware shop in Pune", "SM601a")
+
+    g = journey.get_journey(tenant)
+    assert g is not None
+    assert g["answers"]["business_type"] == "Probe Traders, a hardware shop in Pune"
+    assert g["answers"]["about"] == "Probe Traders, a hardware shop in Pune"
+    # The NEXT presented question is city — the 'about' entry was skipped past.
+    assert "city" in r["reply_en"]
+    assert g["cursor"] == 2
+
+
+def test_vt601_bare_yes_confirm_does_not_cross_fill(substrate):  # type: ignore[no-untyped-def]
+    """A bare 'yes' (or any short confirm) carries no 'about' substance — the gap
+    question must still be asked (no over-eager cross-fill)."""
+    from orchestrator.onboarding import journey
+
+    tenant = _new_tenant(substrate.dsn)
+    journey.start_journey(tenant, [_confirm_q("business_type", "sweets"), _gap_q("about")])
+
+    r = journey.handle_reply(tenant, "yes", "SM601b")
+
+    g = journey.get_journey(tenant)
+    assert g is not None
+    assert g["answers"]["business_type"] == "sweets"
+    assert "about" not in g["answers"]
+    assert "about" in r["reply_en"]
+
+
+def test_vt601_already_answered_field_entry_never_re_presents(substrate):  # type: ignore[no-untyped-def]
+    """VT-601 record-and-move-on invariant: a queue entry whose field is already in
+    answers is advanced past, never presented (even without the about cross-fill)."""
+    from orchestrator.onboarding import journey
+
+    tenant = _new_tenant(substrate.dsn)
+    # A composed queue that (through recomposition) carries a duplicate-field entry.
+    journey.start_journey(
+        tenant, [_gap_q("city"), _gap_q("city"), _gap_q("about")]
+    )
+
+    r = journey.handle_reply(tenant, "Pune", "SM601c")
+
+    g = journey.get_journey(tenant)
+    assert g is not None
+    assert g["answers"]["city"] == "Pune"
+    assert "about" in r["reply_en"], "the duplicate city entry must be skipped"
+    assert g["cursor"] == 2
