@@ -315,6 +315,30 @@ def test_discovery_domain_in_sentence_mints(substrate):
     assert result is not None and result["routed"] == "shopify_setup_minted"
 
 
+def test_discovery_full_url_paste_mints(substrate):
+    """VT-600 (VT-598 opus-judge finding, silent_drop_probe): an owner pasting the
+    store URL straight from the browser ('https://vt425.myshopify.com/') was
+    REJECTED as 'not a store address' — the scan now normalizes scheme + path,
+    so a fully valid pasted URL mints the link."""
+    from orchestrator.onboarding.shopify_onboarding import (
+        begin_shopify_onboarding,
+        maybe_resume_shopify_onboarding,
+    )
+
+    for i, paste in enumerate((
+        "https://vt425.myshopify.com",
+        "https://vt425.myshopify.com/",
+        "http://vt425.myshopify.com/admin?x=1",
+        "my store is https://vt425.myshopify.com, please connect",
+    )):
+        tenant = _new_tenant(substrate.dsn)
+        begin_shopify_onboarding(tenant, recipient=None)
+        result = maybe_resume_shopify_onboarding(
+            tenant, paste, f"SID-disco-url-{i}", recipient=None
+        )
+        assert result is not None and result["routed"] == "shopify_setup_minted", paste
+
+
 def test_discovery_question_falls_through_to_brain(substrate):
     """VT-588: a QUESTION mid-discovery ('what do you charge?') has no domain-shaped token → the gate
     FALLS THROUGH (returns None) so the manager brain answers it — NOT the canned 'that's not a store

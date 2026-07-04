@@ -92,6 +92,14 @@ def _scan_shop_domain(body: str) -> str | None:
 
     for tok in (body or "").split():
         candidate = tok.strip().strip(".,!?;:\"'()<>[]")
+        # VT-600 (VT-598 opus-judge finding): an owner pasting the URL straight
+        # from the browser sends "https://mystore.myshopify.com/" — the
+        # validator's contract is a BARE host (no scheme/path/port), so the
+        # un-normalized token failed validation and _is_domain_attempt's
+        # scheme match then earned a VALID address the malformed-reprompt.
+        # Normalize scheme + path/query here; the validator stays strict.
+        candidate = re.sub(r"^https?://", "", candidate, flags=re.IGNORECASE)
+        candidate = candidate.split("/")[0].split("?")[0]
         try:
             validate_shop_domain(candidate)
             return candidate
