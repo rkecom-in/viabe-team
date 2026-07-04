@@ -136,6 +136,52 @@ def test_mint_is_idempotent_per_run(pool):
     assert (n["c"] if isinstance(n, dict) else n[0]) == 1
 
 
+# --- VT-605 cross-producer duplicate guard: a plan-store task for the same event blocks the mint --
+
+
+def test_legacy_producer_skips_mint_when_plan_store_task_already_exists(pool):
+    """If ``state`` carries a ``source_message_sid`` AND a plan_store-created task already exists
+    for it, the legacy producer must NOT mint a second task for the SAME real-world event — the
+    plan-store task IS the durable task. (No live caller sets ``source_message_sid`` today; this
+    proves the guard itself, ready for VT-606 to wire the field through.)"""
+    from orchestrator.manager import plan_store
+    from orchestrator.manager import task_producer as tp
+    from orchestrator.manager import task_store as ts
+    from orchestrator.manager.plan_models import ManagerPlan, PlanStep
+
+    tid = _seed_tenant(pool)
+    sid = f"SM{uuid4().hex}"
+    plan = ManagerPlan(objective="x", steps=[PlanStep(step_seq=1, kind="effect")])
+    plan_task_id = plan_store.create_plan(tid, plan, source_message_sid=sid)
+
+    rid = str(uuid4())
+    state = {**_state(tid, rid), "source_message_sid": sid}
+    tp.on_route_decided(state, "spawn")
+
+    # The legacy producer's OWN idempotency key (live_dispatch:{rid}) minted NOTHING — it deferred
+    # to the plan-store task instead.
+    assert ts.find_task_id(tid, _idem(rid)) is None
+    # Exactly the ONE plan-store task exists for this tenant — no duplicate.
+    with pool.connection() as conn:
+        n = conn.execute(
+            "SELECT count(*) AS c FROM manager_tasks WHERE tenant_id = %s", (tid,)
+        ).fetchone()
+    assert (n["c"] if isinstance(n, dict) else n[0]) == 1
+    assert ts.get_task(tid, plan_task_id) is not None
+
+
+def test_legacy_producer_mints_normally_when_no_source_message_sid_in_state(pool):
+    """Absent ``source_message_sid`` (every caller today), behavior is BYTE-IDENTICAL to
+    pre-VT-605 — the guard is a no-op, not a behavior change, until VT-606 wires the field."""
+    from orchestrator.manager import task_producer as tp
+    from orchestrator.manager import task_store as ts
+
+    tid = _seed_tenant(pool)
+    rid = str(uuid4())
+    tp.on_route_decided(_state(tid, rid), "spawn")  # no source_message_sid key at all
+    assert ts.find_task_id(tid, _idem(rid)) is not None
+
+
 # --- successful terminal: the specialist return completes the step + the task -------------------
 
 

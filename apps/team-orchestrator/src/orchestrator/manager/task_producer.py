@@ -69,6 +69,26 @@ def on_route_decided(state: Any, route_key: str) -> None:
         trigger = state.get("trigger_reason")
         from orchestrator.manager import task_store
 
+        # VT-605 cross-producer duplicate guard: this legacy producer and the NEW plan store
+        # (manager/plan_store.create_plan) key a task's IDENTITY differently (this producer uses
+        # `live_dispatch:{run_id}`; the plan store uses the inbound source-message SID) but are
+        # expected to record the SAME `source_message_ref` pointer for the SAME real-world event.
+        # If state carries a `source_message_sid` (populated once VT-606 threads the plan store
+        # onto this same dispatch seam) AND a plan-store task already exists for it, this producer
+        # must NOT mint a second task for the same event — the plan-store task IS the durable task.
+        # `source_message_sid` is absent on every caller TODAY (no live create_plan caller yet), so
+        # this branch is a no-op in production until VT-606 wires it — but it is real, tested code,
+        # not a placeholder.
+        source_message_sid = state.get("source_message_sid")
+        if source_message_sid is not None:
+            existing_plan_task = task_store.find_task_by_source_ref(tenant_id, source_message_sid)
+            if existing_plan_task is not None:
+                logger.info(
+                    "VT-565 task producer: skipping mint — a plan-store task already exists "
+                    "for this event's source_message_sid (task=%s)", existing_plan_task,
+                )
+                return
+
         task_id = task_store.create_task(
             tenant_id,
             {"kind": "specialist_dispatch", "route_key": route_key, "trigger": trigger},

@@ -63,6 +63,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
+from uuid import UUID
 
 from langchain_core.tools import BaseTool
 
@@ -113,12 +114,36 @@ class SpecialistHandoff:
     All fields default to an empty/neutral value so a manager that has not yet
     been upgraded to populate situation/outcome still produces a valid (if
     sparse) envelope — backward-compat with the pre-VT-465 handoff.
+
+    VT-605 (execution-plan §2) additive extension — the durable-plan identity fields
+    a specialist dispatch carries once the manager_task/plan store (``manager/
+    plan_store.py``) is the live producer:
+
+      - ``task_id`` / ``step_id`` — which durable ``manager_tasks`` / ``manager_task_steps``
+                              row this dispatch corresponds to (None until VT-606 wires a
+                              live caller — this handoff is still valid with no plan behind it).
+      - ``plan_revision``   — the plan revision this dispatch belongs to (1 = no revision yet).
+      - ``attempt``         — which attempt at this step this is (1 = first try).
+      - ``acceptance_criteria`` — the step's own success criteria (tuple: hashable, matches the
+                              frozen dataclass's value-object discipline).
+      - ``policy_ref``      — the owner-policy version applied to this dispatch, if any.
+
+    All SIX fields default to None/1/() — purely additive, backward-compatible: an existing
+    caller that never sets them (every caller today) produces the EXACT same envelope shape it
+    did before this extension.
     """
 
     desired_outcome: str = ""
     situation: str = ""
     context_slice: dict[str, Any] = field(default_factory=dict)
     data: dict[str, Any] = field(default_factory=dict)
+    # VT-605 additive fields (default-neutral; unused until VT-606 wires a plan-store caller):
+    task_id: UUID | None = None
+    step_id: UUID | None = None
+    plan_revision: int = 1
+    attempt: int = 1
+    acceptance_criteria: tuple[str, ...] = ()
+    policy_ref: str | None = None
 
 
 @dataclass(frozen=True)
