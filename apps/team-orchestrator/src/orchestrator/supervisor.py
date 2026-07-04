@@ -117,13 +117,17 @@ class SpecialistNoOutputError(RuntimeError):
 
 class LaneNodeError(RuntimeError):
     """VT-602 — a ROSTER lane node raised an exception that would otherwise escape
-    ``graph.invoke()`` (the structural gap the VT-598 live pack surfaced: none of the
-    six business lanes — marketing/sales/finance/accounting/tech/cost_opt — nor
-    integration/onboarding_conductor carry any error middleware; a live crash inside
-    a lane's ``create_agent`` build, e.g. the marketing-lane
+    ``graph.invoke()`` (the structural gap the VT-598 live pack surfaced: at the time,
+    none of the six business lanes — marketing/sales/finance/accounting/tech/cost_opt —
+    nor integration/onboarding_conductor carried any error middleware; a live crash
+    inside a lane's ``create_agent`` build, e.g. the marketing-lane
     "non-consecutive system messages" ValueError, escaped into ``dispatch_brain``'s
     generic ``except Exception: raise`` -> DBOS retries forever -> the run never
-    terminates -> owner silence).
+    terminates -> owner silence). VT-604 Package 1: the six business lanes are no
+    longer ROSTER nodes (they are Manager-held advisory tools — no graph node to
+    crash), so today this net wraps the three remaining ROSTER specialists
+    (sales_recovery / integration / onboarding_conductor); kept generic so any FUTURE
+    roster addition inherits it for free.
 
     Raised by ``_wrap_lane_node_exceptions`` (below), which wraps EVERY ROSTER node
     at ``build_supervisor_graph`` registration — the whole class of lane-node
@@ -452,19 +456,20 @@ def build_supervisor_graph(
     """
     # VT-465 — the roster registry drives the manager's spawn-tool set + the
     # specialist nodes + their conditional-edge route map. Adding a future lane
-    # = ONE SpecialistSpec entry in agent/roster.py — no edit here. The two
-    # existing specialists (sales_recovery, integration) are roster entries that
-    # reproduce their pre-VT-465 wiring byte-for-byte.
-    from orchestrator.agent.roster import ROSTER, _register_lanes
-
-    # VT-465 central integration — ensure all six business specialist lanes are
-    # registered before iterating ROSTER. ``_register_lanes`` is idempotent +
-    # re-entrancy-safe; it backfills any lane deferred by the roster<->lane import
-    # cycle (so the graph always gains the full nine-lane node/route set).
-    _register_lanes()
+    # = ONE SpecialistSpec entry in agent/roster.py — no edit here. The three
+    # roster specialists (sales_recovery, integration, onboarding_conductor) are
+    # roster entries that reproduce their pre-VT-465 wiring byte-for-byte.
+    #
+    # VT-604 Package 1: ROSTER is now EXACTLY those three — the six business-domain
+    # lanes (sales/marketing/finance/accounting/tech/cost_opt) are no longer
+    # dynamically registered here; they are Manager-held ADVISORY tools instead
+    # (``ADVISORY_TOOLS``, below) — no spawn tool, no graph node, no conditional-edge
+    # route for any of the six.
+    from orchestrator.agent.advisory_registry import ADVISORY_TOOLS
+    from orchestrator.agent.roster import ROSTER
 
     orchestrator = build_orchestrator_agent(
-        model=model, extra_tools=roster_spawn_tools()
+        model=model, extra_tools=[*roster_spawn_tools(), *ADVISORY_TOOLS]
     )
 
     # VT-183 retrofit: 3 function-based supervisor StateGraph nodes wrapped

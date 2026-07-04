@@ -1,8 +1,13 @@
 """VT-465 — the specialist ROSTER registry + the standard handoff protocol.
 
-The spine the six specialist lanes plug into (design §7). It makes adding a
-specialist CHEAP: a sub-graph + ONE ``SpecialistSpec`` entry — not 4 edits
-across 3 files (handoffs + routing + graph node + graph edge).
+VT-604 Package 1 (2026-07-05): ``ROSTER`` is the RUNTIME SCOPE — exactly the three
+Phase-1 specialists (sales_recovery / integration / onboarding_conductor). It makes
+adding a FUTURE specialist CHEAP: a sub-graph + ONE ``SpecialistSpec`` entry — not 4
+edits across 3 files (handoffs + routing + graph node + graph edge) — but that is no
+longer done implicitly by importing a lane module. The six business-domain lane
+modules (sales/marketing/finance/accounting/tech/cost_opt) are NOT on this roster;
+their tools are Manager-held ADVISORY capabilities instead — see
+``agent/advisory_registry.py``.
 
 WHY A CODE REGISTRY (not a DB table) — same call as
 ``agents/activation_registry.py`` + ``integrations/registry.py``: the roster is
@@ -434,123 +439,35 @@ ROSTER: list[SpecialistSpec] = [
 
 
 # ---------------------------------------------------------------------------
-# VT-465 central integration — register the SIX specialist lanes (VT-468..473).
+# VT-604 Package 1 — the six business lanes are NOT dynamically registered here.
 # ---------------------------------------------------------------------------
 #
-# Each lane is a DISJOINT module that EXPORTS a ``SPECIALIST_SPEC`` (some as a
-# ``SpecialistSpec`` INSTANCE — finance / accounting / tech / cost_opt; some as a
-# dict — sales / marketing). The coordinator NORMALIZES both into a SpecialistSpec
-# and appends to ROSTER here, centrally — the lanes never edit roster.py.
+# History: VT-465 introduced ``_register_lanes()``, which imported six lane modules
+# (sales/marketing/finance/accounting/tech/cost_opt — VT-468..473) and appended their
+# exported ``SPECIALIST_SPEC`` onto ROSTER at import time, making all nine "specialists"
+# independently spawnable graph nodes. The verified Phase-1 baseline (2026-07-05,
+# ``.viabe/manager-loop-program.md``) found this was NEVER the intended runtime scope:
+# the six lanes hold no independent activation bar, no durable task/plan participation,
+# and no specialist-return handling of their own — they were reachable as full spawns
+# with none of the actual specialist machinery behind them.
 #
-# LAZY import (inside the function, not at module top): the lane modules import
-# ``SpecialistSpec`` FROM this module, so importing them at roster's top level
-# would be a cycle (roster -> lane -> roster, mid-import). Resolving them in a
-# function that runs AFTER ``SpecialistSpec`` / ``ROSTER`` are defined breaks the
-# cycle: by call time this module is fully initialised, so the lane's
-# ``from orchestrator.agent.roster import SpecialistSpec`` resolves cleanly.
-#
-# This is the VT-465 "cheap-add" property end-to-end: appending these six specs is
-# the SOLE central edit — ``build_supervisor_graph`` + ``route_after_orchestrator``
-# iterate ROSTER and gain all six nodes + routes + spawn tools with NO graph surgery.
-
-# The six lane modules, in exec order (VT-468 sales .. VT-473 cost_opt). Module
-# path -> nothing else; the spec is read off each module's ``SPECIALIST_SPEC``.
-_LANE_MODULES: tuple[str, ...] = (
-    "orchestrator.agent.sales_lane",       # VT-468 — dict (full)
-    "orchestrator.agent.marketing_lane",   # VT-469 — dict (sparse)
-    "orchestrator.agent.finance_lane",     # VT-470 — SpecialistSpec instance
-    "orchestrator.agent.accounting_lane",  # VT-471 — SpecialistSpec instance
-    "orchestrator.agent.tech_lane",        # VT-472 — SpecialistSpec instance
-    "orchestrator.agent.cost_opt_lane",    # VT-473 — SpecialistSpec instance
-)
-
-
-def _normalize_lane_spec(exported: Any) -> SpecialistSpec:
-    """Normalize a lane's exported ``SPECIALIST_SPEC`` into a ``SpecialistSpec``.
-
-    Two shapes ship across the six lanes (the builders were disjoint):
-      - an already-built ``SpecialistSpec`` INSTANCE → returned unchanged.
-      - a dict of the spec fields → constructed via ``SpecialistSpec(**dict)``. A
-        SPARSE dict (e.g. marketing omits ``spawn_tool_name`` / ``edge_to`` /
-        ``wrap_node`` / ``default_outcome``) is tolerated: the missing required
-        ``spawn_tool_name`` defaults to ``route_key`` (every lane uses the same
-        token for both — see the lane specs), and the optional fields fall back to
-        the ``SpecialistSpec`` dataclass defaults (``edge_to=None`` → END,
-        ``wrap_node=False`` compiled-sub-graph, ``update_builder=None``,
-        ``default_outcome=""``), which are exactly the reasoning-lane defaults.
-    """
-    if isinstance(exported, SpecialistSpec):
-        return exported
-    if isinstance(exported, dict):
-        fields = dict(exported)
-        # A sparse dict (marketing) omits spawn_tool_name; every lane uses the
-        # same token for the spawn tool name and the route key, so derive it.
-        fields.setdefault("spawn_tool_name", fields.get("route_key"))
-        return SpecialistSpec(**fields)
-    raise TypeError(
-        f"lane SPECIALIST_SPEC must be a SpecialistSpec or a dict, "
-        f"got {type(exported).__name__}"
-    )
-
-
-# Re-entrancy guard. A lane module imports ``SpecialistSpec`` FROM this module
-# DURING its own import (finance/accounting do it lazily; tech/cost_opt at module
-# top). If THAT import is what first loads roster, our registration would re-import
-# the in-flight lane mid-initialisation — before its ``SPECIALIST_SPEC`` exists.
-# The guard makes registration:
-#   - idempotent (a lane already on ROSTER by agent_name is skipped), and
-#   - re-entrancy-safe (an in-flight lane with no ``SPECIALIST_SPEC`` yet is
-#     DEFERRED, not crashed — the next ``_register_lanes()`` call, fired by any
-#     consumer once that lane's import has completed, backfills it).
-# So every consumer (``get_spec`` / ``spawn_tool_route_keys`` / ``roster_spawn_tools``
-# / ``build_supervisor_graph``) calls ``_register_lanes()`` first — registration
-# converges to all six regardless of which module imported roster first.
-_registering = False
-
-
-def _register_lanes() -> None:
-    """Append the six specialist lanes to ROSTER (idempotent + re-entrancy-safe).
-
-    Imports each lane module and normalizes its ``SPECIALIST_SPEC`` onto ROSTER.
-    A lane already present (by ``agent_name``) is skipped (idempotent). A lane
-    whose module is still mid-import (its ``SPECIALIST_SPEC`` not yet defined —
-    the roster<->lane cycle) is DEFERRED silently; a later call backfills it once
-    the lane finished importing. The ``_registering`` flag prevents a nested
-    re-entrant call (a lane import re-triggering this) from looping.
-    """
-    global _registering
-    if _registering:
-        return
-    import importlib
-
-    _registering = True
-    try:
-        present = {spec.agent_name for spec in ROSTER}
-        for module_path in _LANE_MODULES:
-            module = importlib.import_module(module_path)
-            exported = getattr(module, "SPECIALIST_SPEC", None)
-            if exported is None:
-                # The lane module is mid-import (cycle): its SPECIALIST_SPEC does
-                # not exist yet. Defer — a later consumer call backfills it.
-                continue
-            spec = _normalize_lane_spec(exported)
-            if spec.agent_name in present:
-                continue
-            ROSTER.append(spec)
-            present.add(spec.agent_name)
-    finally:
-        _registering = False
-
-
-# Best-effort prime at import. In the normal path (roster imported before any
-# lane) this fully registers all six. In the re-entrant path (a lane imported
-# first) it registers what it can; the consumers backfill the rest.
-_register_lanes()
+# THE FIX (execution plan Package 1): ``SPECIALIST_ROSTER`` (this ``ROSTER`` list) is
+# EXACTLY the three Phase-1 specialists above (sales_recovery / integration /
+# onboarding_conductor) — no dynamic append, no lane-module import here. The six lane
+# MODULES themselves are UNCHANGED and still exist on disk (their ``@tool`` functions,
+# ``SPECIALIST_SPEC`` exports, and per-lane tests all still work) — they are simply no
+# longer wired onto this roster. Their tools are exposed to the MANAGER directly as
+# ADVISORY capabilities instead: see ``agent/advisory_registry.py`` (VT-604), which
+# imports the six lane modules' tool objects (not their SPECIALIST_SPEC) and hands a
+# filtered subset straight to ``build_orchestrator_agent`` via ``supervisor.py``. A lane
+# module's ``SPECIALIST_SPEC`` therefore stays UNUSED-BUT-HARMLESS dead code on this
+# roster spine — kept only because each lane's own test suite still validates it is a
+# well-formed, constructible ``SpecialistSpec`` (a documented invariant for a future
+# row, should a lane ever graduate to a real specialist under Package 3+).
 
 
 def get_spec(agent_name: str) -> SpecialistSpec:
     """Look up a roster entry by its ``agent_name``. Raises ``KeyError`` if absent."""
-    _register_lanes()  # backfill any lane deferred by the import-cycle re-entrancy
     for spec in ROSTER:
         if spec.agent_name == agent_name:
             return spec
@@ -567,13 +484,11 @@ def spawn_tool_route_keys() -> dict[str, str]:
     from whichever spawn tool the manager's LLM fired — registry-driven, so a
     new lane needs no edit to the routing function.
     """
-    _register_lanes()  # backfill any lane deferred by the import-cycle re-entrancy
     return {spec.spawn_tool_name: spec.route_key for spec in ROSTER}
 
 
 def roster_spawn_tools() -> list[BaseTool]:
     """Build every roster member's handoff tool (passed as the manager's extra_tools)."""
-    _register_lanes()  # backfill any lane deferred by the import-cycle re-entrancy
     return [spec.make_spawn() for spec in ROSTER]
 
 

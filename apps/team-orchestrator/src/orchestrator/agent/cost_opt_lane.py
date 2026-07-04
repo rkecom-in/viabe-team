@@ -1,5 +1,15 @@
 """VT-473 — the Cost-Optimisation specialist lane (v1 ADVISE).
 
+VT-604 Package 1 UPDATE (2026-07-05): this lane is NOT a roster specialist. The
+verified Phase-1 runtime scope is exactly three specialists (sales_recovery /
+integration / onboarding_conductor); this module's ``SPECIALIST_SPEC`` (bottom of
+file) is no longer appended to ``agent/roster.py``'s ``ROSTER`` — there is no spawn
+tool, no graph node, no route for ``cost_opt_lane``. Its ``@tool`` functions are
+instead exposed DIRECTLY to the Manager as an advisory capability (ALL FIVE — see
+``agent/advisory_registry.py``). This lane was ALREADY advise-only by charter
+(below); the only change is WHO calls the tool (the Manager itself, not a spawned
+sub-graph).
+
 The sixth lane of the Team-Manager rebuild (design §8 ratified-charters table). The manager hands
 this lane a {situation, desired_outcome, context_slice, data} envelope; the lane reads the business's
 REAL cost/spend/ROI substrate and returns ADVICE — wasteful spend, redundant subscriptions/vendor

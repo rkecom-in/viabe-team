@@ -17,32 +17,33 @@ sorts by connector_id and every field comes from the Pydantic model.
 
 from __future__ import annotations
 
-from orchestrator.integrations.registry import list_connectors
+from orchestrator.integrations.registry import list_owner_visible_connectors
 
 
 def render_connector_listing_markdown() -> str:
-    """Render the registry as a markdown section for agent prompts.
+    """Render the OWNER-VISIBLE connector catalogue as a markdown section for agent prompts.
 
-    Output shape (one section per category):
+    VT-604 Package 1: filtered to ``list_owner_visible_connectors`` (Shopify + Google Sheets —
+    the two with a real, shipped implementation). The full registry carries 14 additional
+    placeholder entries (Amazon Seller Central, GA4, WooCommerce, the manual VT-6 family, …); none
+    of them belong in a prompt the agent reads to decide what it can offer the owner — advertising
+    an unbuilt connector is how "connect Amazon" turns into a promised follow-up that never lands.
+
+    Output shape (one section per category, only for categories with an owner-visible entry):
 
         ## Available connectors
 
-        ### Digital (8)
+        ### Digital (1)
+        - **shopify** (Shopify, oauth2) — Pull orders + customers…
+
+        ### Digital (1)
         - **google_sheet** (Google Sheets, oauth2) — Pull customer/order rows…
-        - …
-
-        ### Manual (7)
-        - **paper_book** (Paper book / register, manual_upload) — Owner photos…
-        - …
-
-        ### Scrape (1)
-        - **apify_scrape** (Public-data scrape (Apify), api_key) — Use Apify actors…
 
     Order within each category: sorted by connector_id.
     """
     lines: list[str] = ["## Available connectors", ""]
     for category in ("digital", "manual", "scrape"):
-        cat_items = list_connectors(category=category)
+        cat_items = list_owner_visible_connectors(category=category)
         if not cat_items:
             continue
         lines.append(f"### {category.title()} ({len(cat_items)})")

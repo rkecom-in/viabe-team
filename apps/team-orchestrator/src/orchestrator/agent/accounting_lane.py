@@ -1,5 +1,15 @@
 """VT-471 — the Accounting specialist lane (v1 PREPARE-ONLY).
 
+VT-604 Package 1 UPDATE (2026-07-05): this lane is NOT a roster specialist. The
+verified Phase-1 runtime scope is exactly three specialists (sales_recovery /
+integration / onboarding_conductor); this module's ``SPECIALIST_SPEC`` (bottom of
+file) is no longer appended to ``agent/roster.py``'s ``ROSTER`` — there is no spawn
+tool, no graph node, no route for ``accounting_lane``. A curated subset of its
+``@tool`` functions is instead exposed DIRECTLY to the Manager as an advisory
+capability — see ``agent/advisory_registry.py`` for the exact subset. This lane was
+ALREADY prepare-only by charter (below); the only change is WHO calls the tool (the
+Manager itself, not a spawned sub-graph).
+
 The fourth of the six business-manager lanes (design §8, ratified 2026-06-29). The
 manager hands an accounting-shaped {situation, desired_outcome, context_slice, data}
 envelope HERE; this specialist owns the ACTION using accounting domain expertise. Its

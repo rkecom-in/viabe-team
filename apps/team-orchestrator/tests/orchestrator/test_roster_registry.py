@@ -47,6 +47,19 @@ from orchestrator.agent.roster import (  # noqa: E402
 # --- The two existing specialists are registered UNCHANGED -------------------
 
 
+def test_roster_is_exactly_three_specialists() -> None:
+    """VT-604 Package 1 — the runtime roster is EXACTLY three specialists.
+
+    The six business-domain lanes (sales/marketing/finance/accounting/tech/cost_opt,
+    VT-468..473) are no longer dynamically registered here (VT-465's ``_register_lanes``
+    is gone) — their tools are Manager-held ADVISORY capabilities instead (see
+    ``agent/advisory_registry.py``). Pinned EXACT so a future accidental re-registration
+    (or a stray lane import re-appending to ROSTER) fails this test immediately.
+    """
+    assert {s.name for s in ROSTER} == {"sales_recovery", "integration", "onboarding_conductor"}
+    assert len(ROSTER) == 3
+
+
 def test_existing_specialists_registered_with_pre_vt465_wiring() -> None:
     """sales_recovery + integration keep their exact node/tool/route/edge keys.
 
@@ -55,9 +68,8 @@ def test_existing_specialists_registered_with_pre_vt465_wiring() -> None:
     """
     by_name = {s.name: s for s in ROSTER}
     # VT-462 — the onboarding-conductor lane joined the two pre-existing specialists.
-    # VT-465 central integration — the six business specialist lanes (VT-468..473)
-    # are now registered too. The three onboarding/recovery lanes below keep their
-    # exact pre-VT-465 wiring; this asserts they are PRESENT (not the only members).
+    # VT-604 Package 1 — ROSTER is now EXACTLY these three (the six business lanes are
+    # advisory tools, not roster members); this still asserts they are PRESENT.
     assert {"sales_recovery", "integration", "onboarding_conductor"} <= set(by_name)
 
     sr = by_name["sales_recovery"]
@@ -88,38 +100,27 @@ def test_existing_specialists_registered_with_pre_vt465_wiring() -> None:
 def test_spawn_tool_route_keys_maps_both_lanes() -> None:
     """The routing function reads this map; it must cover every roster member.
 
-    VT-465 central integration — the map now covers all NINE lanes (3 onboarding/
-    recovery + the 6 business specialists VT-468..473). Each spawn tool maps to its
-    route key; pinned EXACT so a new lane (or a route-key drift) is caught."""
+    VT-604 Package 1 — the map covers EXACTLY the three roster specialists (the six
+    business lanes are advisory tools now, not spawnable — no route key for any of
+    them). Pinned EXACT so a route-key drift, or an accidental lane re-registration,
+    is caught."""
     assert spawn_tool_route_keys() == {
         "spawn_sales_recovery": "spawn",
         "spawn_integration": "spawn_integration",
         "spawn_onboarding_conductor": "spawn_onboarding_conductor",  # VT-462
-        # VT-468..473 — the six business specialist lanes.
-        "spawn_sales_lane": "spawn_sales_lane",
-        "spawn_marketing": "spawn_marketing",
-        "spawn_finance_lane": "spawn_finance_lane",
-        "spawn_accounting": "spawn_accounting",
-        "spawn_tech": "spawn_tech",
-        "spawn_cost_opt": "spawn_cost_opt",
     }
 
 
 def test_roster_spawn_tools_have_expected_names() -> None:
     """The manager's extra_tools come from the roster; names are pinned (the
-    test_no_write_tool_surface HANDOFF_EXPECTED contract). VT-465 — all NINE lanes."""
+    test_no_write_tool_surface HANDOFF_EXPECTED contract). VT-604 Package 1 — EXACTLY
+    the three roster specialists; no spawn tool exists for any of the six business
+    lanes."""
     names = {t.name for t in roster_spawn_tools()}
     assert names == {
         "spawn_sales_recovery",
         "spawn_integration",
         "spawn_onboarding_conductor",  # VT-462
-        # VT-468..473 — the six business specialist lanes.
-        "spawn_sales_lane",
-        "spawn_marketing",
-        "spawn_finance_lane",
-        "spawn_accounting",
-        "spawn_tech",
-        "spawn_cost_opt",
     }
 
 
