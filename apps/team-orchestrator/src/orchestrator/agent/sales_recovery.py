@@ -159,7 +159,14 @@ _CODE_FENCE_RE = re.compile(
 # 80K run-level budget here also trips the SDK's non-streaming 10-minute
 # timeout guard). The placeholder canary response is ~10 tokens; 1024 is
 # generous headroom. Real-prompt tuning lands with the real prompt.
-_MAX_OUTPUT_TOKENS_PER_TURN = 1024
+# VT-596 follow-up (live pack finding, 2026-07-04): 1024 truncated Sonnet-5's
+# grounded CampaignPlanProposed mid-JSON (stop_reason=max_tokens at exactly 1024
+# out-tokens → agent_terminal_no_dict → SpecialistNoOutputError → the owner got
+# the VT-88 escalation ack instead of a plan). Sonnet 4.6 squeezed under; Sonnet 5
+# writes fuller plans. 4096 = parity with the manager brain's own per-response cap;
+# the cumulative VT-35 80K run ceiling still binds, and a plan that ever exceeds
+# THIS cap still lands on the honest VT-492 escalation net, never silence.
+_MAX_OUTPUT_TOKENS_PER_TURN = 4096
 
 # Run-level hard-limit ceiling. VT-35's token meter enforces a CUMULATIVE
 # 80K cap across every turn in one run. This constant lives here only as
