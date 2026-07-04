@@ -183,6 +183,34 @@ def test_router_status_query_regression_still_fast_paths(monkeypatch) -> None:
     assert out is not None and out.reason == "edge_case:status_query"
 
 
+def test_router_status_query_unknown_parse_falls_through_to_brain(monkeypatch) -> None:
+    """VT-600 (VT-598 opus-judge finding): the classifier tags a conversational
+    confirmation ('did you get my store address?') as status_query, but the
+    deterministic parse owns no such lookup — the router must fall through to
+    the brain (None), never send the old canned portal deflection."""
+    import orchestrator.edge_cases_router as r
+
+    sent: list = []
+    monkeypatch.setattr(r, "_send_edge_ack", lambda tid, phone, text: sent.append(text))
+    ev = SimpleNamespace(body="did you get my store address?", sender_phone="+910000000000")
+    out = r.route_edge_case(
+        tenant_id="t",
+        event=ev,
+        classify_fn=lambda b: SimpleNamespace(classification="status_query", confidence=0.9),
+    )
+    assert out is None  # falls through to the agent
+    assert sent == []  # nothing canned was sent
+
+
+def test_answer_status_query_unknown_returns_none() -> None:
+    """VT-600 — the parse's 'unknown' bucket returns None (no portal deflection)."""
+    from uuid import uuid4
+
+    from orchestrator.owner_inputs.status_query import answer_status_query
+
+    assert answer_status_query(uuid4(), "did you get my store address?") is None
+
+
 # ----------------------------- DB integration ------------------------------------------
 
 

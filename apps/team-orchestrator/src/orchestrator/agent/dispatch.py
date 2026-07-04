@@ -1164,19 +1164,26 @@ def _collapse_reply_body(
         }
 
     if isinstance(specialist_result, CampaignPlanInsufficientData):
-        items = specialist_result.missing_data
-        summary = (
-            "; ".join(_redact_agent_text(tenant_id, item.description) for item in items)
-            or "a few details"
+        # VT-600 register fix (VT-598 opus-judge finding): the agent-authored
+        # missing_data descriptions are ENGINEER prose ("dormant-cohort substrate
+        # not populated", "expected_arrr basis") — redaction strips PII, not
+        # register. The owner gets ONE deterministic, owner-comprehensible,
+        # honest body; the per-item detail already persists (redacted) in the
+        # VT-379 pipeline_steps rows for ops/VTR diagnosis.
+        en = (
+            "I looked into it, but I don't have enough customer data yet to "
+            "build that plan — usually this means your sales history isn't "
+            "connected or is still syncing. Connect your store or add your "
+            "customer sales, and I'll spot who's gone quiet and draft the "
+            "win-back plan."
         )
-        next_step = (
-            _redact_agent_text(tenant_id, items[0].suggested_remediation) if items else ""
+        hi = (
+            "मैंने देखा, लेकिन वह प्लान बनाने के लिए अभी पर्याप्त ग्राहक डेटा नहीं "
+            "है — आमतौर पर इसका मतलब है कि आपकी बिक्री का इतिहास जुड़ा नहीं है "
+            "या अभी सिंक हो रहा है। अपना स्टोर जोड़ें या ग्राहक बिक्री दर्ज करें, "
+            "और मैं पता लगाऊंगा कि कौन से ग्राहक शांत हो गए हैं और विन-बैक प्लान "
+            "तैयार करूँगा।"
         )
-        en = f"I don't have enough data yet to build that plan — {summary}."
-        hi = f"मेरे पास अभी वह प्लान बनाने के लिए पर्याप्त डेटा नहीं है — {summary}।"
-        if next_step:
-            en += f" Next step: {next_step}"
-            hi += f" अगला कदम: {next_step}"
         return {"en": en, "hi": hi}
 
     if isinstance(specialist_result, CampaignPlanProposed):

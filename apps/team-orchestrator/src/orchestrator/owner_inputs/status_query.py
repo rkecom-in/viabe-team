@@ -44,8 +44,18 @@ def classify_status_query(body: str) -> StatusQueryType:
     return "unknown"
 
 
-def answer_status_query(tenant_id: UUID | str, body: str) -> str:
-    """Return the templated answer text for the owner's status query (deterministic SQL)."""
+def answer_status_query(tenant_id: UUID | str, body: str) -> str | None:
+    """Return the templated answer text for the owner's status query (deterministic SQL).
+
+    VT-600 — returns ``None`` when the keyword parse can't name a query type it
+    genuinely answers ('unknown'). The old behavior deflected to the portal
+    ("For detailed answers, check your Viabe Team portal…"), which the VT-598
+    opus judge flagged live: the classifier tags conversational confirmations
+    ("did you get my store address?") as status_query, the parse finds no
+    count/campaign/billing token, and the owner got a canned deflection instead
+    of an answer. Per the VT-588 seam pattern: a fast-path handles ONLY what it
+    understands; everything else falls through to the manager brain (the router
+    returns None on None)."""
     from orchestrator.db.wrappers import CustomersWrapper
 
     qtype = classify_status_query(body)
@@ -79,4 +89,5 @@ def answer_status_query(tenant_id: UUID | str, body: str) -> str:
         # Phase/trial detail lives in the portal; keep this a pointer (Pillar-7 copy TBD).
         return f"Your trial/billing status is on your portal: {_DASHBOARD}"
 
-    return f"For detailed answers, check your Viabe Team portal at {_DASHBOARD}"
+    # 'unknown' — not a lookup this fast-path owns; the brain answers (VT-600).
+    return None
