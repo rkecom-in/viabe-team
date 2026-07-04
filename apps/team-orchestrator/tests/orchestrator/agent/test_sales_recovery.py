@@ -188,8 +188,9 @@ def test_run_sales_recovery_agent_uses_resolved_model_from_env(monkeypatch):
     run_sales_recovery_agent(SalesRecoveryContext(tenant_id="t1", run_id="r1", user_request="test request"))
     # VT-501: dev/test SR-draft now resolves to the capable model, never Haiku —
     # complex grounded reasoning must not fall to the cheap slot (misclassification fix).
+    # VT-596: capable tier bumped sonnet-4-6 → sonnet-5 (Fazal general upgrade).
     resolved = fake_client.messages.create.call_args.kwargs["model"]
-    assert resolved == "claude-sonnet-4-6"
+    assert resolved == "claude-sonnet-5"
     assert resolved != "claude-haiku-4-5"
 
 
