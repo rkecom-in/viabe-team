@@ -150,19 +150,28 @@ def test_resolve_ambiguous_falls_through_to_haiku() -> None:
 
 def test_build_approval_request_populates_template_params() -> None:
     """Gap #1 regression: the params are no longer EMPTY (the blank-message bug)."""
+    from datetime import UTC, datetime, timedelta
     from types import SimpleNamespace
     from uuid import uuid4
 
     collapse = pytest.importorskip("orchestrator.collapse")  # dep-less: skip
     _build_approval_request = collapse._build_approval_request
 
+    now = datetime.now(UTC)
     plan = SimpleNamespace(
         target_cohort=SimpleNamespace(cohort_label="60-90 day dormant", cohort_size=87),
         expected_arrr=SimpleNamespace(low_paise=1_500_000, high_paise=3_000_000),
+        # VT-594 (post-review restructure): _build_approval_request now also builds
+        # a chat_summary body, which reads campaign_window for the window dates.
+        campaign_window=SimpleNamespace(
+            start=now + timedelta(hours=1), end=now + timedelta(days=7)
+        ),
     )
-    req = _build_approval_request(plan=plan, campaign_id=uuid4())
+    req = _build_approval_request(plan=plan, campaign_id=uuid4(), tenant_id=uuid4())
     params = req["template_params"]
     assert params != {}  # NOT the old blank
+    # Delta-review Defect 1: the label passes the redactor first — a no-op on
+    # this legitimate categorical label (fail-soft pattern-only, no DB here).
     assert params["1"] == "60-90 day dormant"
     assert params["2"] == "recovery"
     assert params["3"] == "15,000–30,000"  # paise -> ₹ range

@@ -1073,15 +1073,61 @@ def _maybe_send_manager_reply(
         )
 
 
+def _registry_for_tenant(tenant_id: UUID) -> Any:
+    """Build the tenant's customer-name registry for write-time redaction.
+
+    Mirrors ``pipeline_observability._registry_for_tenant`` /
+    ``tm_audit._registry_for_tenant`` (each module keeps its own copy rather
+    than cross-importing a private helper — the established pattern here):
+    fail-soft to pattern-only redaction on any build error (customers read
+    error, pool unavailable, ...). A registry outage must never block an
+    owner-facing send.
+    """
+    try:
+        from orchestrator.privacy.customer_registry import make_name_registry
+
+        return make_name_registry(str(tenant_id))
+    except Exception:  # noqa: BLE001 — fail-soft by contract (see docstring)
+        logger.warning(
+            "dispatch: name-registry build failed; falling back to "
+            "pattern-only redaction tenant=%s",
+            tenant_id,
+        )
+        return None
+
+
+def _redact_agent_text(tenant_id: UUID, text: str) -> str:
+    """VT-594 review Blocker 2 — agent-authored free text (``out_of_scope_
+    reason``, ``missing_data`` descriptions) MUST be redacted before it
+    reaches WhatsApp / ``conversation_log``. VT-498 documents the SR model
+    baking literal customer names/phones into exactly these prose fields;
+    the SAME redaction primitive the VT-379 internal write path uses
+    (``write_redacted_step_row`` -> ``redact_for_log``) runs here so an
+    owner-facing send gets the same protection an internal audit row does.
+    """
+    from orchestrator.observability.pii import redact_for_log
+
+    registry = _registry_for_tenant(tenant_id)
+    out = redact_for_log(text, name_registry=registry)
+    return str(out) if out else ""
+
+
 # VT-594 — the six collapse-path completions that silently reached the owner
 # as nothing but runner.py's generic D1 "I'm on it" fallback (see module
 # docstring + .viabe/sprint/vt594-collapse-surfacing-plan.md). Bodies are
 # deterministic, built ONLY from the plan's own typed fields — no fabricated
 # specifics, counts/segment labels only, never customer ids (VT-241/CL-390).
+# Agent-authored free-text fields (out_of_scope_reason, missing_data
+# descriptions) are redacted (review Blocker 2) before they reach the body.
+# The proposed-variant cases are SELF-CONTAINED single messages (review
+# Blocker 3 + the false-promises finding): no case here claims automatic
+# future delivery ("I'll bring this one to you next" / "next sync") — the
+# only true affordance is "ask me again", since no live re-surfacing path
+# exists (run_weekly_cadence_body is a VT-176 stub).
 def _collapse_reply_body(
-    terminal_state: dict[str, Any], specialist_result: Any
+    tenant_id: UUID, terminal_state: dict[str, Any], specialist_result: Any
 ) -> dict[str, str] | None:
-    """Pure deterministic body-builder for the six silent collapse cases.
+    """Pure-ish deterministic body-builder for the six silent collapse cases.
 
     Returns ``{"en": ..., "hi": ...}`` or ``None`` when ``specialist_result``
     doesn't match one of the six documented shapes — defensive: no invented
@@ -1111,7 +1157,7 @@ def _collapse_reply_body(
         }
 
     if isinstance(specialist_result, CampaignPlanOutOfScope):
-        reason = specialist_result.out_of_scope_reason
+        reason = _redact_agent_text(tenant_id, specialist_result.out_of_scope_reason)
         return {
             "en": f"That's outside what I can do here: {reason}",
             "hi": f"यह उस दायरे से बाहर है जो मैं यहाँ कर सकता हूँ: {reason}",
@@ -1119,8 +1165,13 @@ def _collapse_reply_body(
 
     if isinstance(specialist_result, CampaignPlanInsufficientData):
         items = specialist_result.missing_data
-        summary = "; ".join(item.description for item in items) or "a few details"
-        next_step = items[0].suggested_remediation if items else ""
+        summary = (
+            "; ".join(_redact_agent_text(tenant_id, item.description) for item in items)
+            or "a few details"
+        )
+        next_step = (
+            _redact_agent_text(tenant_id, items[0].suggested_remediation) if items else ""
+        )
         en = f"I don't have enough data yet to build that plan — {summary}."
         hi = f"मेरे पास अभी वह प्लान बनाने के लिए पर्याप्त डेटा नहीं है — {summary}।"
         if next_step:
@@ -1129,48 +1180,76 @@ def _collapse_reply_body(
         return {"en": en, "hi": hi}
 
     if isinstance(specialist_result, CampaignPlanProposed):
-        cohort_size = specialist_result.target_cohort.cohort_size
+        cohort = specialist_result.target_cohort
+        cohort_size = cohort.cohort_size
+        # cohort_label is the SAME unconstrained agent-authored free-text class
+        # as selection_reason (schema enforces only min_length=1, nothing
+        # categorical) — redact like every other agent-written field here; a
+        # no-op on a legitimate segment label.
+        cohort_label = _redact_agent_text(tenant_id, cohort.cohort_label)
         decision = terminal_state.get("owner_decision")
         if decision == "queue_busy":
+            # NOTE (VT-369 §4.1 race-loser residual, request_owner_approval.
+            # arm_pause_request): 'queue_busy' covers TWO distinct refusals —
+            # the 0b per-tenant check (no summary/template went out for THIS
+            # plan) and the migration-128 UniqueViolation race-loser (the
+            # summary + template DID go out, moments ago, before the row lost
+            # the race). This body must not claim either way whether the owner
+            # has already seen this plan — it only recaps (harmless either
+            # way) + states the status.
             return {
                 "en": (
-                    f"I've drafted the plan for {cohort_size} customers and saved "
-                    "it — you already have another approval waiting, so let's "
-                    "settle that one first and I'll bring this one to you next."
+                    f"I've drafted a win-back plan for {cohort_size} customers "
+                    f"({cohort_label}) and saved it. You already have another "
+                    "approval waiting — settle that one first, then ask me "
+                    "and I'll bring this plan back."
                 ),
                 "hi": (
-                    f"मैंने {cohort_size} ग्राहकों के लिए प्लान तैयार करके सेव कर "
-                    "दिया है — आपके पास पहले से एक और अनुमोदन प्रतीक्षा में है, "
-                    "पहले उसे तय करते हैं, फिर मैं यह वाला लाऊंगा।"
+                    f"मैंने {cohort_size} ग्राहकों ({cohort_label}) के लिए एक "
+                    "विन-बैक प्लान तैयार करके सेव कर दिया है। आपके पास पहले से "
+                    "एक और अनुमोदन प्रतीक्षा में है — पहले उसे तय करें, फिर मुझसे "
+                    "पूछें और मैं यह प्लान वापस लाऊंगा।"
                 ),
             }
         if decision == "send_failed":
+            # The chat summary USUALLY precedes the template inside
+            # arm_pause_request, but it is best-effort AND skipped when no
+            # owner phone resolves — so this body must not assume the owner
+            # saw anything (delta-review Defect 2). Status only; no delivery
+            # claim.
             return {
                 "en": (
-                    f"I drafted the plan for {cohort_size} customers and saved "
-                    "it, but couldn't get the approval message to you just now "
-                    "— it'll come through at the next sync."
+                    "I couldn't get the approval message through for your "
+                    "win-back plan — it's saved. Ask me anytime and I'll "
+                    "bring it back."
                 ),
                 "hi": (
-                    f"मैंने {cohort_size} ग्राहकों के लिए प्लान तैयार करके सेव कर "
-                    "दिया, लेकिन अभी अनुमोदन संदेश आपको नहीं भेज सका — यह अगले "
-                    "सिंक में आ जाएगा।"
+                    "आपके विन-बैक प्लान के लिए अनुमोदन संदेश नहीं भेज सका — यह "
+                    "सेव है। कभी भी मुझसे पूछें और मैं इसे वापस लाऊंगा।"
                 ),
             }
         if decision is None:
-            # VT-334 weekly-budget skip: collapse_node returned {} — no
-            # owner_decision was ever set (request_owner_approval_node never ran).
+            # VT-334 weekly-budget skip: collapse_node returned {} BEFORE
+            # attaching pending_approval_request — request_owner_approval_node
+            # (and its chat-summary send) never ran. This is the owner's ONLY
+            # chance to see the plan, so the recap is full (adds the expected
+            # recovery range that queue_busy's recap omits).
+            low_rupees = specialist_result.expected_arrr.low_paise // 100
+            high_rupees = specialist_result.expected_arrr.high_paise // 100
             return {
                 "en": (
-                    f"I've drafted the plan for {cohort_size} customers and "
-                    "saved it. I'm holding the formal approval ask for now "
-                    "(you've already had a few this week) — it'll come with "
-                    "the weekly sync."
+                    f"I've drafted a win-back plan for {cohort_size} customers "
+                    f"({cohort_label}, expected recovery ₹{low_rupees:,}–"
+                    f"₹{high_rupees:,}) and saved it. You've had a few approval "
+                    "asks this week, so I'm holding the formal prompt — ask me "
+                    "whenever you want to act on it."
                 ),
                 "hi": (
-                    f"मैंने {cohort_size} ग्राहकों के लिए प्लान तैयार करके सेव कर "
-                    "दिया है। मैं अभी औपचारिक अनुमोदन अनुरोध रोक रहा हूँ (इस हफ्ते "
-                    "पहले ही कुछ हो चुके हैं) — यह साप्ताहिक सिंक के साथ आएगा।"
+                    f"मैंने {cohort_size} ग्राहकों ({cohort_label}, अनुमानित "
+                    f"वसूली ₹{low_rupees:,}–₹{high_rupees:,}) के लिए एक विन-बैक "
+                    "प्लान तैयार करके सेव कर दिया है। इस हफ्ते आपसे पहले ही कुछ "
+                    "अनुमोदन माँगे जा चुके हैं, इसलिए मैं औपचारिक अनुरोध रोक रहा "
+                    "हूँ — जब चाहें, मुझसे पूछें।"
                 ),
             }
         return None
@@ -1205,7 +1284,7 @@ def _maybe_send_collapse_reply(
     if not recipient:
         return
 
-    body = _collapse_reply_body(terminal_state, specialist_result)
+    body = _collapse_reply_body(tenant_id, terminal_state, specialist_result)
     if not body:
         return
 
