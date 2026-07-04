@@ -79,6 +79,7 @@ from orchestrator.observability.tm_audit import emit_tm_audit
 from orchestrator.output_composer import compose_owner_output
 from orchestrator.state import SubscriberState
 from orchestrator.supervisor import (
+    LaneNodeError,
     SpecialistNoOutputError,
     build_supervisor_graph,
 )
@@ -354,6 +355,36 @@ def _resolve_model(model_id: str = _BRAIN_MODEL_OPUS) -> ChatAnthropic:
     )
 
 
+def _initial_turn_msg_id(run_id: UUID, slot: str) -> str:
+    """VT-602 — a STABLE id for one of this run's INITIAL-turn messages (the
+    HumanMessage + the system context blocks dispatch_brain assembles below).
+
+    ``graph.invoke(initial_state, config={"configurable": {"thread_id": str(run_id)}})``
+    reuses ``thread_id == run_id`` across every call for this run (VT-47 needs the
+    SAME thread across a pause/resume). LangGraph's ``add_messages`` reducer
+    (``langgraph.graph.message.add_messages``) keys purely on ``BaseMessage.id``: a
+    message built with NO id is assigned a FRESH random uuid at merge time, so if
+    dispatch_brain is invoked again for the SAME run_id (a DBOS retry of the whole
+    function after ANY unhandled exception — see the module docstring point 6, and
+    the bare ``except Exception: raise`` below) after at least one graph superstep
+    already completed and checkpointed, the freshly-rebuilt HumanMessage/SystemMessage
+    objects DO NOT match the checkpointed ones' ids — the reducer APPENDS them after
+    whatever the checkpoint already holds (e.g. the orchestrator's own prior AIMessage/
+    ToolMessage from spawning a lane) instead of replacing the initial turn in place.
+    That produces a SECOND system-message island later in the list — exactly the
+    shape ``langchain_anthropic``'s ``_format_messages`` rejects as "Received multiple
+    non-consecutive system messages" (VT-602's reported crash; reproduced + confirmed
+    via a real langgraph checkpointer — a first-ever clean invoke never hits this,
+    only a retry against an already-progressed thread does). Scoping the id to
+    ``(run_id, slot)`` — not content — means the SAME logical block always replaces
+    itself in place (``add_messages`` merges by id at the EXISTING index; verified
+    against the langgraph source) on every retry, regardless of how many times DBOS
+    retries this run or whether a given block's content/presence varies between
+    attempts.
+    """
+    return f"dispatch_brain:{run_id}:{slot}"
+
+
 def dispatch_brain(
     *,
     event: WebhookEvent,
@@ -459,7 +490,12 @@ def dispatch_brain(
     # identical, so the VT-194 cache still HITs (verified structurally;
     # vt195_l1_phase2 canary asserts the live cache_read + that the model uses the
     # block). L1 is enrichment: a read failure must never break dispatch.
-    _messages: list[Any] = [HumanMessage(content=event.body or "")]
+    _messages: list[Any] = [
+        HumanMessage(
+            content=event.body or "",
+            id=_initial_turn_msg_id(run_id, "human_input"),
+        )
+    ]
     try:
         from orchestrator.knowledge import assemble_context_bundle
 
@@ -471,7 +507,10 @@ def dispatch_brain(
         )
         l1_block = None
     if l1_block:
-        _messages.insert(0, SystemMessage(content=l1_block))
+        _messages.insert(
+            0,
+            SystemMessage(content=l1_block, id=_initial_turn_msg_id(run_id, "l1_block")),
+        )
 
     # VT-466: the Team-Manager's business-context READ seam — surface the IDENTITY
     # anchor (verified business name + verification status + phase) + the manager-
@@ -499,7 +538,12 @@ def dispatch_brain(
         )
         business_block = None
     if business_block:
-        _messages.insert(0, SystemMessage(content=business_block))
+        _messages.insert(
+            0,
+            SystemMessage(
+                content=business_block, id=_initial_turn_msg_id(run_id, "business_block")
+            ),
+        )
 
     # VT-556: the VTR teach-loop retrieval seam — inject retrieval-eligible VTR strategy/
     # behavioural directives as a separate ``## VTR directives`` system block so the Team-Manager
@@ -510,7 +554,12 @@ def dispatch_brain(
     # SystemMessage), so the VT-194 cache still hits.
     directive_block = _build_manager_directive_block(tenant_id)
     if directive_block:
-        _messages.insert(0, SystemMessage(content=directive_block))
+        _messages.insert(
+            0,
+            SystemMessage(
+                content=directive_block, id=_initial_turn_msg_id(run_id, "directive_block")
+            ),
+        )
 
     # VT-566: the flywheel's read-back leg — inject this owner's captured lessons (their own
     # edit/reject/approve verdicts, authoritative) + weak outcome signals (tier-branched) as a
@@ -520,7 +569,12 @@ def dispatch_brain(
     # (a per-turn SystemMessage), so the VT-194 cache still hits.
     lessons_block = _build_manager_lessons_block(tenant_id)
     if lessons_block:
-        _messages.insert(0, SystemMessage(content=lessons_block))
+        _messages.insert(
+            0,
+            SystemMessage(
+                content=lessons_block, id=_initial_turn_msg_id(run_id, "lessons_block")
+            ),
+        )
 
     # VT-461: inject the Manager-intent signal as a separate system block so the
     # Team-Manager brain reads it as a prior (the prompt's "## Manager intent signal"
@@ -530,7 +584,10 @@ def dispatch_brain(
     # the VT-194 cache still hits. Absent/failed classify → no block; the brain still works.
     intent_block = _build_manager_intent_block(_manager_intent)
     if intent_block:
-        _messages.insert(0, SystemMessage(content=intent_block))
+        _messages.insert(
+            0,
+            SystemMessage(content=intent_block, id=_initial_turn_msg_id(run_id, "intent_block")),
+        )
 
     # VT-579: the ALWAYS-ON conversation memory — the running distilled summary + the last ≤20 turns
     # within 24h (both directions), so the Team-Manager ALWAYS carries the recent chat in its context
@@ -542,7 +599,12 @@ def dispatch_brain(
         tenant_id, exclude_message_sid=getattr(event, "twilio_message_sid", None)
     )
     if conversation_block:
-        _messages.insert(0, SystemMessage(content=conversation_block))
+        _messages.insert(
+            0,
+            SystemMessage(
+                content=conversation_block, id=_initial_turn_msg_id(run_id, "conversation_block")
+            ),
+        )
 
     # VT-588: the ONBOARDING-STATE block — when an onboarding integration hand-off is live and the
     # owner's message fell off-script (the resume gate passed it through, VT-588), tell the brain which
@@ -550,7 +612,13 @@ def dispatch_brain(
     # of dropping the thread. Best-effort + per-turn SystemMessage (cache holds). None when not onboarding.
     onboarding_state_block = _build_onboarding_state_block(tenant_id)
     if onboarding_state_block:
-        _messages.insert(0, SystemMessage(content=onboarding_state_block))
+        _messages.insert(
+            0,
+            SystemMessage(
+                content=onboarding_state_block,
+                id=_initial_turn_msg_id(run_id, "onboarding_state_block"),
+            ),
+        )
 
     # VT-514 GETS — retrieval audit spine row: which context sources hit
     # (presence flags only; the redacted block CONTENT rides the KNOWS row).
@@ -753,6 +821,40 @@ def dispatch_brain(
             final_status="escalated",
             terminal_path="escalated",
             reason=f"specialist_no_output:{snoe.specialist}:{snoe.status}",
+        )
+    except LaneNodeError as lne:
+        # VT-602 — a lane sub-graph node (marketing/sales/finance/accounting/tech/
+        # cost_opt/integration/onboarding_conductor) raised an exception that escaped
+        # its own graph node. supervisor._wrap_lane_node_exceptions (the structural
+        # net wrapped around EVERY ROSTER node) converted it to this typed signal
+        # instead of letting it propagate raw. Convert to the SAME clean 'escalated'
+        # terminal the VT-492 SpecialistNoOutputError branch above uses — a bare
+        # re-raise here would hit the generic `except Exception` below, which DBOS
+        # retries forever (the exact defect: none of the six business lanes carried
+        # any error middleware, so a live crash — e.g. the marketing-lane
+        # non-consecutive-system-messages ValueError — hung the run at
+        # status='running' with the owner getting silence). PII-safe: the reason
+        # carries the lane name + the ORIGINAL exception's TYPE only (never its
+        # message, which may carry the owner body / a specialist's draft).
+        logger.warning(
+            "dispatch_brain: lane node raised an unhandled exception; resolving "
+            "to a clean 'escalated' terminal (VT-602 — preventing an unhandled "
+            "lane exception from hanging the run)",
+            extra={
+                "run_id": str(run_id),
+                "tenant_id": str(tenant_id),
+                "lane": lne.lane,
+                "exception_type": lne.exc_type,
+            },
+        )
+        # VT-565 — the lane crashed with nothing usable; settle the task to 'failed'. Fail-soft.
+        from orchestrator.manager.task_producer import on_run_failed
+
+        on_run_failed(tenant_id, run_id, reason=f"lane_exception:{lne.lane}")
+        return DispatchResult(
+            final_status="escalated",
+            terminal_path="escalated",
+            reason=f"lane_exception:{lne.lane}:{lne.exc_type}",
         )
     except Exception:
         # Unhandled — re-raise to DBOS for retry. write_step happens via
