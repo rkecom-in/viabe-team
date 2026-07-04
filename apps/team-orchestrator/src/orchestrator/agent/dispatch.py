@@ -766,13 +766,20 @@ def dispatch_brain(
     # VT-589 — a no-spawn "handle-directly" turn: the manager brain wrote its
     # answer as the final AIMessage, but nothing downstream transmits it, so the
     # run completes silent and runner.py fires the generic D1 fallback instead of
-    # the real answer. Send it here. Terminal path ONLY — the specialist / collapse
-    # / escalated paths transmit their own owner-facing message, so gating on
-    # "terminal" avoids a double-send. send_freeform_ack records the assistant turn,
-    # which auto-suppresses the D1 completed-no-reply fallback (VT-583). Best-effort:
-    # _maybe_send_manager_reply never raises.
+    # the real answer. Send it here. Terminal path ONLY (disjoint from the
+    # "collapse" gate below) avoids a double-send. send_freeform_ack records the
+    # assistant turn, which auto-suppresses the D1 completed-no-reply fallback
+    # (VT-583). Best-effort: _maybe_send_manager_reply never raises.
     if terminal_path == "terminal" and final_status == "completed":
         _maybe_send_manager_reply(tenant_id, event, terminal_state)
+
+    # VT-594 — the collapse path (spawn -> specialist -> collapse_node) completes
+    # SIX distinct ways with NOTHING transmitting an owner message (the escalated
+    # path already acks via VT-88 support_bot; the paused/approval-armed path
+    # returned earlier on __interrupt__ and never reaches here — no double-send).
+    # Best-effort: _maybe_send_collapse_reply never raises.
+    if terminal_path == "collapse" and final_status == "completed":
+        _maybe_send_collapse_reply(tenant_id, event, terminal_state, specialist_result)
 
     # 2. compose_output envelope (Q2 Option A) — always emit, regardless
     # of terminal path. Empty/None ComposedOutput is acceptable when the
@@ -1062,6 +1069,161 @@ def _maybe_send_manager_reply(
     except Exception:  # noqa: BLE001 — best-effort; the D1 fallback remains the net
         logger.warning(
             "VT-589: manager direct-reply send failed (fail-soft) tenant=%s", tenant_id
+        )
+
+
+# VT-594 — the six collapse-path completions that silently reached the owner
+# as nothing but runner.py's generic D1 "I'm on it" fallback (see module
+# docstring + .viabe/sprint/vt594-collapse-surfacing-plan.md). Bodies are
+# deterministic, built ONLY from the plan's own typed fields — no fabricated
+# specifics, counts/segment labels only, never customer ids (VT-241/CL-390).
+def _collapse_reply_body(
+    terminal_state: dict[str, Any], specialist_result: Any
+) -> dict[str, str] | None:
+    """Pure deterministic body-builder for the six silent collapse cases.
+
+    Returns ``{"en": ..., "hi": ...}`` or ``None`` when ``specialist_result``
+    doesn't match one of the six documented shapes — defensive: no invented
+    case, no send. In particular a resolved ``owner_decision`` of
+    ``approved`` / ``rejected`` / ``needs_changes`` / ``timeout`` / ``defer``
+    never reaches ``dispatch_brain`` on the initial run (those resolve on the
+    SEPARATE resume path, ``approval_resume.resume_run``, which invokes the
+    graph directly) — ``None`` here is correct, not a gap.
+    """
+    from orchestrator.agent.schemas.campaign_plan import (
+        CampaignPlanInsufficientData,
+        CampaignPlanOutOfScope,
+        CampaignPlanProposed,
+    )
+
+    if isinstance(specialist_result, _CohortRejectedResult):
+        n = specialist_result.rejected_count
+        return {
+            "en": (
+                f"I couldn't verify {n} of the customers for this campaign, so "
+                "I didn't send anything — nothing has gone out to them."
+            ),
+            "hi": (
+                f"मैं इस अभियान के लिए {n} ग्राहकों को सत्यापित नहीं कर सका, इसलिए "
+                "मैंने कुछ नहीं भेजा — उन्हें कुछ नहीं गया।"
+            ),
+        }
+
+    if isinstance(specialist_result, CampaignPlanOutOfScope):
+        reason = specialist_result.out_of_scope_reason
+        return {
+            "en": f"That's outside what I can do here: {reason}",
+            "hi": f"यह उस दायरे से बाहर है जो मैं यहाँ कर सकता हूँ: {reason}",
+        }
+
+    if isinstance(specialist_result, CampaignPlanInsufficientData):
+        items = specialist_result.missing_data
+        summary = "; ".join(item.description for item in items) or "a few details"
+        next_step = items[0].suggested_remediation if items else ""
+        en = f"I don't have enough data yet to build that plan — {summary}."
+        hi = f"मेरे पास अभी वह प्लान बनाने के लिए पर्याप्त डेटा नहीं है — {summary}।"
+        if next_step:
+            en += f" Next step: {next_step}"
+            hi += f" अगला कदम: {next_step}"
+        return {"en": en, "hi": hi}
+
+    if isinstance(specialist_result, CampaignPlanProposed):
+        cohort_size = specialist_result.target_cohort.cohort_size
+        decision = terminal_state.get("owner_decision")
+        if decision == "queue_busy":
+            return {
+                "en": (
+                    f"I've drafted the plan for {cohort_size} customers and saved "
+                    "it — you already have another approval waiting, so let's "
+                    "settle that one first and I'll bring this one to you next."
+                ),
+                "hi": (
+                    f"मैंने {cohort_size} ग्राहकों के लिए प्लान तैयार करके सेव कर "
+                    "दिया है — आपके पास पहले से एक और अनुमोदन प्रतीक्षा में है, "
+                    "पहले उसे तय करते हैं, फिर मैं यह वाला लाऊंगा।"
+                ),
+            }
+        if decision == "send_failed":
+            return {
+                "en": (
+                    f"I drafted the plan for {cohort_size} customers and saved "
+                    "it, but couldn't get the approval message to you just now "
+                    "— it'll come through at the next sync."
+                ),
+                "hi": (
+                    f"मैंने {cohort_size} ग्राहकों के लिए प्लान तैयार करके सेव कर "
+                    "दिया, लेकिन अभी अनुमोदन संदेश आपको नहीं भेज सका — यह अगले "
+                    "सिंक में आ जाएगा।"
+                ),
+            }
+        if decision is None:
+            # VT-334 weekly-budget skip: collapse_node returned {} — no
+            # owner_decision was ever set (request_owner_approval_node never ran).
+            return {
+                "en": (
+                    f"I've drafted the plan for {cohort_size} customers and "
+                    "saved it. I'm holding the formal approval ask for now "
+                    "(you've already had a few this week) — it'll come with "
+                    "the weekly sync."
+                ),
+                "hi": (
+                    f"मैंने {cohort_size} ग्राहकों के लिए प्लान तैयार करके सेव कर "
+                    "दिया है। मैं अभी औपचारिक अनुमोदन अनुरोध रोक रहा हूँ (इस हफ्ते "
+                    "पहले ही कुछ हो चुके हैं) — यह साप्ताहिक सिंक के साथ आएगा।"
+                ),
+            }
+        return None
+
+    return None
+
+
+def _maybe_send_collapse_reply(
+    tenant_id: UUID,
+    event: WebhookEvent,
+    terminal_state: dict[str, Any],
+    specialist_result: Any,
+) -> None:
+    """VT-594 — transmit an honest owner-facing message on a completed
+    collapse run. Best-effort: MUST NEVER raise into ``dispatch_brain``.
+
+    Mirrors ``_maybe_send_manager_reply`` (VT-589): reuses ``send_freeform_ack``
+    because it RECORDS the assistant turn (``runner._brain_emitted_owner_reply``
+    reads it), auto-suppressing the D1 fallback — no double-send. Called ONLY
+    for ``terminal_path == "collapse"`` (see call site), which is disjoint from
+    the ``terminal_path == "terminal"`` gate ``_maybe_send_manager_reply`` uses.
+    A proposed-success run that armed the approval prompt never reaches here —
+    it returns early on the ``__interrupt__`` / 'paused' branch before
+    ``_classify_terminal`` even runs.
+
+    Fail-soft throughout: any error (locale resolution, send) is logged and
+    swallowed; the D1 fallback remains the net if nothing sends here.
+    """
+    if event.message_type != "inbound_message":
+        return
+    recipient = getattr(event, "sender_phone", None)
+    if not recipient:
+        return
+
+    body = _collapse_reply_body(terminal_state, specialist_result)
+    if not body:
+        return
+
+    try:
+        from orchestrator.owner_surface.freeform_acks import (
+            resolve_owner_locale,
+            send_freeform_ack,
+        )
+
+        locale = resolve_owner_locale(tenant_id)
+        text = body.get(locale) or body["en"]
+        send_freeform_ack(tenant_id, recipient, text)
+        logger.info(
+            "VT-594: transmitted collapse-path owner reply (tenant=%s)", tenant_id
+        )
+    except Exception:  # noqa: BLE001 — best-effort; the D1 fallback remains the net
+        logger.warning(
+            "VT-594: collapse-path owner reply send failed (fail-soft) tenant=%s",
+            tenant_id,
         )
 
 

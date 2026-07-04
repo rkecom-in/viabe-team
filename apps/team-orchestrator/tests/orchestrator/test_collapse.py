@@ -73,16 +73,35 @@ def rls_ctx():
         shutdown_dbos()
 
 
-def _new_tenant(dsn: str, *, phase: str = "paid_at_risk") -> str:
-    """Seed a tenant via a direct superuser connection (RLS bypassed)."""
+def _new_tenant(
+    dsn: str, *, phase: str = "paid_at_risk", whatsapp_number: str | None = None
+) -> str:
+    """Seed a tenant via a direct superuser connection (RLS bypassed).
+
+    ``whatsapp_number`` is None by default (existing call sites unaffected).
+    VT-594 summary-send tests pass a synthetic test number (mock-fixture
+    exempt — no real send path; every send in those tests is monkeypatched)
+    so ``_resolve_owner_phone_for_summary`` has a recipient to resolve.
+    """
     with psycopg.connect(dsn, autocommit=True) as conn:
         row = conn.execute(
-            "INSERT INTO tenants (business_name, plan_tier, phase) "
-            "VALUES (%s, 'founding', %s) RETURNING id",
-            ("collapse-test", phase),
+            "INSERT INTO tenants (business_name, plan_tier, phase, whatsapp_number) "
+            "VALUES (%s, 'founding', %s, %s) RETURNING id",
+            ("collapse-test", phase, whatsapp_number),
         ).fetchone()
     assert row is not None
     return str(row[0])
+
+
+def _fake_owner_phone() -> str:
+    """Synthetic per-call WhatsApp number for the VT-594 summary-send tests.
+
+    ``tenants.whatsapp_number`` has a UNIQUE constraint, so a fixed literal
+    collides across tenants seeded in the same test run — each call must be
+    unique. Mock-fixture only: every send in these tests is monkeypatched, so
+    no real send path ever sees this number.
+    """
+    return f"+1{uuid4().int % 10**9:09d}"
 
 
 def _new_run(dsn: str, tenant_id: str) -> str:
@@ -606,3 +625,200 @@ def test_collapse_node_fails_closed_atomic_on_mixed_cohort(rls_ctx):
     assert n_recipients == 0, (
         "atomicity: the RESOLVED recipient must roll back too — no partial leak"
     )
+
+
+# ---------------------------------------------------------------------------
+# VT-594 change C — the in-chat plan SUMMARY before the approval prompt.
+#
+# A PERSISTED proposed campaign previously told the owner NOTHING until the
+# separate team_weekly_approval template arrived (a blind approval ask). When
+# the owner explicitly asked for the plan (trigger_reason == 'owner_initiated'),
+# collapse_node now best-effort sends a deterministic summary BEFORE the gate
+# routes to request_owner_approval — cohort size, segment label, window,
+# expected recovery range, one-line selection reason. A weekly-cadence
+# proposal (no owner ask) keeps today's prompt-only behavior — no new
+# unsolicited sends. The send is fully try/except-wrapped: a failure must
+# never unwind the persist or block the gate.
+# ---------------------------------------------------------------------------
+
+
+def _seed_recent_campaign_approval(dsn: str, tenant_id: str, run_id: str) -> None:
+    """Seed one RESOLVED pending_approvals row within the VT-334 7-day budget
+    window, so the budget counter (which counts regardless of resolved state)
+    can be tripped without leaving an OPEN row (which would trigger a
+    DIFFERENT guard — the per-tenant queue-busy refusal in arm_pause_request,
+    not exercised by this test)."""
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute(
+            """
+            INSERT INTO pending_approvals
+                (tenant_id, run_id, approval_type, summary, status, decision,
+                 timeout_at, resolved_at)
+            VALUES (%s, %s, 'campaign_send', 'prior approval', 'approved',
+                    'approved', now() + interval '1 hour', now())
+            """,
+            (tenant_id, run_id),
+        )
+
+
+def test_collapse_node_owner_initiated_sends_plan_summary_before_approval_request(
+    rls_ctx, monkeypatch
+):
+    """trigger_reason == 'owner_initiated' -> the summary send fires BEFORE the
+    approval-request payload is built, and the normal proposed-success return
+    (pending_approval_request attached) is unaffected."""
+    import orchestrator.collapse as collapse_mod
+
+    tenant = _new_tenant(rls_ctx.dsn, whatsapp_number=_fake_owner_phone())
+    run_id = _new_run(rls_ctx.dsn, tenant)
+    plan = _plan(tenant, run_id, customer_id=_seed_customer(rls_ctx.dsn, tenant))
+
+    order: list[str] = []
+    real_send = collapse_mod._maybe_send_plan_summary
+    real_build = collapse_mod._build_approval_request
+
+    def _spy_send(tenant_id, plan_arg):
+        order.append("summary")
+        return real_send(tenant_id, plan_arg)
+
+    def _spy_build(*, plan, campaign_id):
+        order.append("approval_request_built")
+        return real_build(plan=plan, campaign_id=campaign_id)
+
+    sent: list[str] = []
+    monkeypatch.setattr(collapse_mod, "_maybe_send_plan_summary", _spy_send)
+    monkeypatch.setattr(collapse_mod, "_build_approval_request", _spy_build)
+    monkeypatch.setattr(
+        "orchestrator.owner_surface.freeform_acks.resolve_owner_locale",
+        lambda tenant_id: "en",
+    )
+    monkeypatch.setattr(
+        "orchestrator.owner_surface.freeform_acks.send_freeform_ack",
+        lambda tenant_id, recipient, body: sent.append(body) or True,
+    )
+
+    update = collapse_mod.collapse_node(
+        {
+            "tenant_id": UUID(tenant),
+            "run_id": UUID(run_id),
+            "campaign_plan": plan,
+            "trigger_reason": "owner_initiated",
+        }
+    )
+
+    assert order == ["summary", "approval_request_built"], (
+        "the plan summary must send BEFORE the approval-request payload is built"
+    )
+    assert len(sent) == 1
+    assert str(plan.target_cohort.cohort_size) in sent[0]
+    assert "pending_approval_request" in update
+
+
+def test_collapse_node_weekly_cadence_trigger_reason_sends_no_summary(
+    rls_ctx, monkeypatch
+):
+    """A weekly-cadence proposal (no explicit owner ask) keeps today's
+    prompt-only behavior — no new unsolicited summary send."""
+    import orchestrator.collapse as collapse_mod
+
+    tenant = _new_tenant(rls_ctx.dsn, whatsapp_number=_fake_owner_phone())
+    run_id = _new_run(rls_ctx.dsn, tenant)
+    plan = _plan(tenant, run_id, customer_id=_seed_customer(rls_ctx.dsn, tenant))
+
+    called = {"n": 0}
+    monkeypatch.setattr(
+        "orchestrator.owner_surface.freeform_acks.send_freeform_ack",
+        lambda *a, **k: called.__setitem__("n", called["n"] + 1) or True,
+    )
+
+    update = collapse_mod.collapse_node(
+        {
+            "tenant_id": UUID(tenant),
+            "run_id": UUID(run_id),
+            "campaign_plan": plan,
+            "trigger_reason": "weekly_cadence",
+        }
+    )
+
+    assert called["n"] == 0, "no summary send on a non-owner-initiated trigger"
+    assert "pending_approval_request" in update
+
+
+def test_collapse_node_summary_send_raise_does_not_block_approval_request(
+    rls_ctx, monkeypatch
+):
+    """A summary-send failure must never unwind the persist or block the gate
+    — collapse_node still returns pending_approval_request normally."""
+    import orchestrator.collapse as collapse_mod
+    from orchestrator.db import tenant_connection
+
+    tenant = _new_tenant(rls_ctx.dsn, whatsapp_number=_fake_owner_phone())
+    run_id = _new_run(rls_ctx.dsn, tenant)
+    plan = _plan(tenant, run_id, customer_id=_seed_customer(rls_ctx.dsn, tenant))
+
+    def _boom(*a, **k):
+        raise RuntimeError("send exploded")
+
+    monkeypatch.setattr(
+        "orchestrator.owner_surface.freeform_acks.resolve_owner_locale",
+        lambda tenant_id: "en",
+    )
+    monkeypatch.setattr(
+        "orchestrator.owner_surface.freeform_acks.send_freeform_ack", _boom
+    )
+
+    update = collapse_mod.collapse_node(
+        {
+            "tenant_id": UUID(tenant),
+            "run_id": UUID(run_id),
+            "campaign_plan": plan,
+            "trigger_reason": "owner_initiated",
+        }
+    )
+
+    assert "pending_approval_request" in update
+    with tenant_connection(tenant) as conn:
+        n_campaigns = conn.execute(
+            "SELECT count(*) AS n FROM campaigns WHERE run_id = %s", (run_id,)
+        ).fetchone()["n"]
+    assert n_campaigns == 1, "the persist must survive a summary-send failure"
+
+
+def test_collapse_node_budget_skip_path_unchanged_returns_empty_dict(
+    rls_ctx, monkeypatch
+):
+    """VT-334 budget-skip path is UNCHANGED by the VT-594 summary addition: the
+    campaign still persists, the return still degrades to {} (no approval
+    prompt this week) — the summary (gated only on trigger_reason) still fires
+    since it's a SEPARATE concern from the approval-ask cadence guard."""
+    import orchestrator.collapse as collapse_mod
+
+    tenant = _new_tenant(rls_ctx.dsn, whatsapp_number=_fake_owner_phone())
+    run_id = _new_run(rls_ctx.dsn, tenant)
+    plan = _plan(tenant, run_id, customer_id=_seed_customer(rls_ctx.dsn, tenant))
+
+    # Trip the VT-334 weekly budget (>= 2 recent campaign_send requests).
+    _seed_recent_campaign_approval(rls_ctx.dsn, tenant, _new_run(rls_ctx.dsn, tenant))
+    _seed_recent_campaign_approval(rls_ctx.dsn, tenant, _new_run(rls_ctx.dsn, tenant))
+
+    sent: list[str] = []
+    monkeypatch.setattr(
+        "orchestrator.owner_surface.freeform_acks.resolve_owner_locale",
+        lambda tenant_id: "en",
+    )
+    monkeypatch.setattr(
+        "orchestrator.owner_surface.freeform_acks.send_freeform_ack",
+        lambda tenant_id, recipient, body: sent.append(body) or True,
+    )
+
+    update = collapse_mod.collapse_node(
+        {
+            "tenant_id": UUID(tenant),
+            "run_id": UUID(run_id),
+            "campaign_plan": plan,
+            "trigger_reason": "owner_initiated",
+        }
+    )
+
+    assert update == {}, "budget-skip return contract is unchanged"
+    assert len(sent) == 1, "the plan summary still sends — gated on trigger_reason only"

@@ -250,7 +250,7 @@ def _enforce_no_arrr_overstatement(body: str, specialist_result: Any) -> tuple[s
     ``"approximately"`` (or ``"~"`` for shorter form).
     """
     notes: list[str] = []
-    out = (specialist_result.output if specialist_result else None) or {}
+    out = getattr(specialist_result, "output", None) or {}
     if not isinstance(out, dict):
         return body, notes
     if not out.get("attribution_uncertain"):
@@ -272,7 +272,7 @@ def _enforce_no_arrr_overstatement(body: str, specialist_result: Any) -> tuple[s
 def _enforce_no_certainty_claims(body: str, specialist_result: Any) -> tuple[str, list[str]]:
     """Honesty rule #4. Replace ``"customer wants X"`` → ``"pattern suggests X"``."""
     notes: list[str] = []
-    out = (specialist_result.output if specialist_result else None) or {}
+    out = getattr(specialist_result, "output", None) or {}
     is_inferred = isinstance(out, dict) and out.get("intent_inferred") is True
     if not is_inferred:
         return body, notes
@@ -470,7 +470,7 @@ def _derive_template_params(
 ) -> dict[str, str]:
     """Build the variable-substitution map for the template send."""
     params: dict[str, str] = {}
-    out = (specialist_result.output if specialist_result else None) or {}
+    out = getattr(specialist_result, "output", None) or {}
     if not isinstance(out, dict):
         out = {}
 
@@ -506,7 +506,7 @@ def _derive_free_form_body(
     free-form copy machinery (templates with slot substitution) ships
     downstream.
     """
-    out = (specialist_result.output if specialist_result else None) or {}
+    out = getattr(specialist_result, "output", None) or {}
     if isinstance(out, dict) and isinstance(out.get("message"), str):
         return out["message"]
     return f"[{intent_or_trigger}] no template applies; specialist provided no message"
@@ -525,7 +525,7 @@ def _derive_follow_up(
     intent_or_trigger: str, specialist_result: Any, state: Any
 ) -> tuple[bool, str | None]:
     """Heuristic follow-up routing. Conservative: only trigger when explicit."""
-    out = (specialist_result.output if specialist_result else None) or {}
+    out = getattr(specialist_result, "output", None) or {}
     if isinstance(out, dict) and out.get("follow_up_required"):
         return True, str(out.get("follow_up_intent") or "unspecified")
     return False, None
