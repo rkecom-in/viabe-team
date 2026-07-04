@@ -53,6 +53,16 @@ DB access: the dev DATABASE_URL role is the privileged pool role (bypasses RLS �
 the live-drill scripts rely on). conversation_log reads ALSO set the operator-JWT-claim GUC so the
 read passes its operator SELECT policy even under FORCE RLS. Ingress auth uses DEV_TEST_INGRESS_SECRET
 (VT-582 ingress gate) — accepted only on EXPECTED_ENV=dev.
+
+VT-598 additions (the P3 exhaustive validation pack + hard-asserts confirmation gate):
+  - ``assert_not_d1`` (per-step flag, default False): fails when the assistant reply is
+    (substantively) JUST the D1 completed-no-reply fallback line — see ``is_d1_fallback_only``.
+  - ``--json-report PATH`` on ``script``: appends a machine-readable transcript bundle (one entry
+    per scenario run) to PATH, for ``canaries/transcript_judge.py`` to rubric-score.
+  - ``assert_run_reason`` / ``assert_run_reason_not`` (per-step flags, optional str): INVESTIGATED
+    and found NOT SUPPORTED — see ``evaluate_assertions`` docstring. Wired as an explicit, always-
+    failing assertion (never a silent no-op) so a scenario that sets either flag fails LOUDLY
+    instead of quietly asserting nothing.
 """
 
 from __future__ import annotations
@@ -65,7 +75,7 @@ import sys
 import time
 import uuid
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 # --- constants ---------------------------------------------------------------------------------
@@ -86,6 +96,17 @@ _RUNNING = "running"
 _NO_RUN_REASONS = frozenset({"unknown_sender", "rate_limit_exceeded", "error_logged"})
 
 _HARNESS_NAME_PREFIX = "convo-harness-"
+
+# VT-598 — the two D1 completed-no-reply fallback lines (runner.py's single source of truth is
+# ``_COMPLETED_NO_REPLY_FALLBACK``; duplicated here VERBATIM rather than imported so this harness
+# stays import-clean of the app — see the module docstring). A step marked ``assert_not_d1`` fails
+# when the reply is substantively just this boilerplate standing in for a real answer.
+_D1_FALLBACK_EN = "Got it — I'm on it and I'll update you shortly."
+_D1_FALLBACK_HI = "समझ गया — मैं इस पर काम कर रहा हूँ और जल्द ही आपको अपडेट करूँगा।"
+# Below this many leftover characters (after stripping out the D1 line), the reply is judged to
+# carry NO real substance beyond the fallback — an arbitrary but generous floor (a genuine answer
+# runs well past a couple of words).
+_D1_SUBSTANTIVE_FLOOR = 20
 
 
 # --- pure helpers (unit-tested; import-clean, stdlib only) --------------------------------------
@@ -122,6 +143,9 @@ class Turn:
     text: str
     message_sid: str | None = None
     surface: str | None = None
+    # VT-598 — ISO-8601 string (or None for a not-yet-persisted injected owner turn); populated
+    # from conversation_log.created_at for the json-report bundle (never truncated, full text).
+    created_at: str | None = None
 
 
 @dataclass
@@ -161,6 +185,23 @@ def reply_verdict(turns: list[Turn], run_status: str | None) -> str:
     return "timeout" if run_status == _RUNNING else "silent"
 
 
+def is_d1_fallback_only(text: str) -> bool:
+    """VT-598 — True if ``text`` is (substantively) JUST the D1 completed-no-reply fallback line
+    (en or hi — see ``_D1_FALLBACK_EN`` / ``_D1_FALLBACK_HI``, mirroring runner.py's
+    ``_COMPLETED_NO_REPLY_FALLBACK``) standing in for a real answer.
+
+    Rule: the D1 line (en or hi) is a substring of ``text`` AND stripping it out leaves fewer than
+    ``_D1_SUBSTANTIVE_FLOOR`` characters of anything else. A reply that happens to mention the D1
+    phrase IN PASSING while also giving a real, longer answer is NOT flagged — only a reply whose
+    entire content is (close to) the boilerplate."""
+    for line in (_D1_FALLBACK_EN, _D1_FALLBACK_HI):
+        if line in text:
+            remainder = text.replace(line, "").strip()
+            if len(remainder) < _D1_SUBSTANTIVE_FLOOR:
+                return True
+    return False
+
+
 def evaluate_assertions(
     turns: list[Turn],
     *,
@@ -168,15 +209,35 @@ def evaluate_assertions(
     assert_no_silent: bool = True,
     assert_contains: list[str] | None = None,
     assert_not_contains: list[str] | None = None,
+    assert_not_d1: bool = False,
+    assert_run_reason: str | None = None,
+    assert_run_reason_not: str | None = None,
 ) -> list[str]:
     """Return a list of failure reasons (empty ⇒ all assertions held).
 
     assert_no_silent (default ON): fails ONLY on a true SILENT verdict (see ``reply_verdict``) — a
     TIMEOUT verdict is reported as its own bucket by the caller (``cmd_script``), never folded into
     this failure. assert_contains / assert_not_contains: case-insensitive substring checks over the
-    concatenated assistant text."""
+    concatenated assistant text. assert_not_d1 (VT-598, default OFF — set True on any step that is a
+    real question/ask): fails when the reply is substantively just the D1 fallback line (see
+    ``is_d1_fallback_only``) — a green run whose only reply is D1 boilerplate is a FAIL.
+
+    assert_run_reason / assert_run_reason_not (VT-598, default unset): INVESTIGATED and found NOT
+    SUPPORTED by the current schema. ``DispatchResult.reason`` (e.g. ``"edge_case:status_query"``,
+    the string this was meant to check) is fully in-process — for the edge-case fast-path,
+    ``dispatch_brain`` returns the DispatchResult BEFORE ``_write_compose_output`` ever runs (see
+    ``orchestrator/agent/dispatch.py`` around the ``route_edge_case`` early-return), so the reason
+    string never reaches ``pipeline_steps.input_envelope`` or ``pipeline_runs.final_outcome`` /
+    ``error_summary`` — nothing queryable carries it. Rather than silently no-op (a scenario that
+    sets this flag would then "pass" without ever having checked anything — the exact kind of lie
+    VT-598 exists to prevent), setting EITHER flag is an automatic, clearly-labeled failure. Use
+    assert_contains / assert_not_contains against the reply text as the working proxy instead (see
+    e.g. ``delegation_analytical_routing.json``'s ``assert_not_contains: ["you currently have"]``).
+    If a future migration adds a queryable reason column, wire the real check here and drop this
+    stub."""
     failures: list[str] = []
-    haystack = concat_assistant_text(turns).lower()
+    text = concat_assistant_text(turns)
+    haystack = text.lower()
     if assert_no_silent and reply_verdict(turns, run_status) == "silent":
         failures.append("assert_no_silent: NO assistant reply was produced (silent drop)")
     for needle in assert_contains or []:
@@ -185,6 +246,23 @@ def evaluate_assertions(
     for needle in assert_not_contains or []:
         if needle.lower() in haystack:
             failures.append(f"assert_not_contains: reply unexpectedly contains {needle!r}")
+    if assert_not_d1 and is_d1_fallback_only(text):
+        failures.append(
+            "assert_not_d1: reply is (substantively) just the D1 fallback line — no real answer "
+            "was given"
+        )
+    if assert_run_reason is not None:
+        failures.append(
+            f"assert_run_reason: NOT SUPPORTED — no pipeline_runs/pipeline_steps column carries "
+            f"DispatchResult.reason for this dispatch path (see evaluate_assertions docstring); "
+            f"wanted {assert_run_reason!r}"
+        )
+    if assert_run_reason_not is not None:
+        failures.append(
+            f"assert_run_reason_not: NOT SUPPORTED — no pipeline_runs/pipeline_steps column "
+            f"carries DispatchResult.reason for this dispatch path (see evaluate_assertions "
+            f"docstring); wanted-not {assert_run_reason_not!r}"
+        )
     return failures
 
 
@@ -264,10 +342,20 @@ def _conversation_ids(conn: Any, tenant_id: str) -> set[str]:
     return {str(r[0] if not isinstance(r, dict) else r["id"]) for r in rows}
 
 
+def _iso(value: Any) -> str | None:
+    """Best-effort ISO-8601 serialization for a DB timestamp value (datetime, str, or None) — the
+    json-report bundle must be plain-JSON-serializable, never a raw datetime object."""
+    if value is None:
+        return None
+    if hasattr(value, "isoformat"):
+        return str(value.isoformat())
+    return str(value)
+
+
 def _new_conversation_turns(conn: Any, tenant_id: str, before_ids: set[str]) -> list[Turn]:
     _set_operator_claim(conn)
     rows = conn.execute(
-        "SELECT id, role, text, message_sid, surface FROM conversation_log "
+        "SELECT id, role, text, message_sid, surface, created_at FROM conversation_log "
         "WHERE tenant_id = %s ORDER BY created_at ASC, id ASC",
         (tenant_id,),
     ).fetchall()
@@ -277,9 +365,15 @@ def _new_conversation_turns(conn: Any, tenant_id: str, before_ids: set[str]) -> 
         if rid in before_ids:
             continue
         if isinstance(r, dict):
-            out.append(Turn(role=r["role"], text=r["text"], message_sid=r["message_sid"], surface=r["surface"]))
+            out.append(Turn(
+                role=r["role"], text=r["text"], message_sid=r["message_sid"], surface=r["surface"],
+                created_at=_iso(r.get("created_at")),
+            ))
         else:
-            out.append(Turn(role=r[1], text=r[2], message_sid=r[3], surface=r[4]))
+            out.append(Turn(
+                role=r[1], text=r[2], message_sid=r[3], surface=r[4],
+                created_at=_iso(r[5] if len(r) > 5 else None),
+            ))
     return out
 
 
@@ -367,7 +461,10 @@ def _drive_turn(
 
     # Build the transcript: the operator's own inbound (echo-deduped against a brain-recorded owner
     # row for the same sid), then every new conversation_log row.
-    transcript: list[Turn] = [Turn(role="owner", text=message, message_sid=sid, surface="(injected)")]
+    transcript: list[Turn] = [Turn(
+        role="owner", text=message, message_sid=sid, surface="(injected)",
+        created_at=datetime.now(timezone.utc).isoformat(),
+    )]
     for t in new_turns:
         if t.role == "owner" and t.message_sid == sid:
             continue  # the brain-route recording of the SAME inbound — don't double-print
@@ -401,6 +498,82 @@ def _print_transcript(transcript: list[Turn]) -> None:
             meta.append(f"sid={t.message_sid}")
         suffix = f"   [{', '.join(meta)}]" if meta else ""
         print(f"    {arrow} {t.text}{suffix}")
+
+
+# --- VT-598 json-report bundle (for canaries/transcript_judge.py) --------------------------------
+
+
+def _turn_to_dict(t: Turn) -> dict[str, Any]:
+    """FULL multi-line text, never truncated (the 6-deploy-phantom lesson: never a first-line grep
+    anywhere in the toolchain)."""
+    return {
+        "role": t.role, "text": t.text, "surface": t.surface, "created_at": t.created_at,
+        "message_sid": t.message_sid,
+    }
+
+
+def _harness_git_sha() -> str | None:
+    """Best-effort provenance: the harness's own commit sha. None on any failure (not a git
+    checkout, detached weirdness, etc.) — never blocks report emission."""
+    try:
+        import subprocess
+
+        out = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=os.path.dirname(os.path.abspath(__file__)),
+            capture_output=True, text=True, timeout=5, check=False,
+        )
+        sha = out.stdout.strip()
+        return sha or None
+    except Exception:  # noqa: BLE001 — provenance only, never load-bearing
+        return None
+
+
+def _build_json_report(
+    scenario: dict[str, Any], scenario_path: str, tenant_id: str,
+    steps: list[dict[str, Any]], results: list[StepResult], summary: dict[str, int],
+) -> dict[str, Any]:
+    """One scenario's machine-readable transcript bundle (VT-598) — for
+    ``canaries/transcript_judge.py`` to rubric-score. ``steps`` (the scenario's raw step dicts) and
+    ``results`` (this run's ``StepResult`` per step, same order/length) are zipped together."""
+    return {
+        "scenario": scenario_path,
+        "name": scenario.get("name", scenario_path),
+        "tenant_id": tenant_id,
+        "harness_sha": _harness_git_sha(),
+        "steps": [
+            {
+                "message": step.get("message"),
+                "label": r.label,
+                "run_status": r.run_status,
+                "ingress_reason": r.ingress_reason,
+                "failures": r.reasons,
+                "transcript": [_turn_to_dict(t) for t in r.transcript],
+            }
+            for step, r in zip(steps, results)
+        ],
+        "summary": summary,
+    }
+
+
+def _append_json_report(path: str, entry: dict[str, Any]) -> None:
+    """Append-safe: load the existing bundle at ``path`` (a JSON list of scenario entries) if
+    present, append this scenario's entry, rewrite — so a PACK run (multiple `script` invocations
+    against the SAME --json-report path) accumulates ONE bundle across scenarios instead of
+    clobbering. A corrupt/foreign/missing file starts a fresh list rather than crashing the run."""
+    existing: list[dict[str, Any]] = []
+    if os.path.exists(path):
+        try:
+            with open(path, encoding="utf-8") as fh:
+                loaded = json.load(fh)
+            if isinstance(loaded, list):
+                existing = loaded
+        except Exception:  # noqa: BLE001 — a corrupt file starts fresh, never blocks the run
+            existing = []
+    existing.append(entry)
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(existing, fh, indent=2, ensure_ascii=False)
+        fh.write("\n")
 
 
 # --- subcommands -------------------------------------------------------------------------------
@@ -718,6 +891,9 @@ def cmd_script(args: argparse.Namespace) -> int:
                 assert_no_silent=assert_no_silent,
                 assert_contains=step.get("assert_contains"),
                 assert_not_contains=step.get("assert_not_contains"),
+                assert_not_d1=bool(step.get("assert_not_d1", False)),
+                assert_run_reason=step.get("assert_run_reason"),
+                assert_run_reason_not=step.get("assert_run_reason_not"),
             )
             ok, xfail, label = classify_step(failures, expected_fail=step_xfail)
 
@@ -745,6 +921,16 @@ def cmd_script(args: argparse.Namespace) -> int:
     if timed_out:
         print("    note: TIMEOUT = the run hadn't completed within --timeout — NOT a silent drop; re-run "
               "with a larger --timeout before treating this as a regression.")
+
+    if args.json_report:
+        summary = {
+            "passed": passed, "xfailed": xfailed, "xpassed": xpassed,
+            "failed": failed, "timed_out": timed_out,
+        }
+        entry = _build_json_report(scenario, args.file, args.tenant_id, steps, results, summary)
+        _append_json_report(args.json_report, entry)
+        print(f"    json-report: appended to {args.json_report}")
+
     return 0 if failed == 0 and timed_out == 0 else 1
 
 
@@ -877,6 +1063,13 @@ def build_parser() -> argparse.ArgumentParser:
     sc.add_argument("file")
     sc.add_argument("--ingress-url", default=None, help="deployed dev orchestrator base URL")
     sc.add_argument("--timeout", type=float, default=90.0, help="per-turn run-completion timeout (s)")
+    sc.add_argument(
+        "--json-report", default=None, metavar="PATH",
+        help="VT-598: append this scenario's machine-readable transcript bundle (FULL multi-line "
+             "replies, never truncated) to PATH — creates it if absent, accumulates across "
+             "scenarios if PATH is reused across multiple `script` invocations (a pack run). Feeds "
+             "canaries/transcript_judge.py.",
+    )
     sc.set_defaults(func=cmd_script)
 
     td = sub.add_parser("teardown", help="FK-sweep + delete a harness tenant")

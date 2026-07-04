@@ -1,0 +1,20 @@
+{
+  "name": "second_plan_queue_busy",
+  "expected_fail": false,
+  "notes": "Two consecutive win-back-campaign asks while the first is still pending approval. Step 2 expects a single queue-busy message referencing the outstanding approval (not a duplicate plan, not a false 'campaign sent' promise, not D1). DEPENDENCY: step 2's assertions only hold if step 1 actually armed a pending approval (Sales-Recovery delegated + produced an approval prompt) — if the seed/activation gate didn't clear for this run, step 1 falls to the honest insufficient-data reply instead and step 2 is really just 'ask again immediately', which may not exercise the queue-busy path at all. Marked expected_fail=false (not a known/documented gap) but this dependency is real — read step 1's transcript in the json-report before treating a step-2 FAIL as a confirmed regression. Setup: `setup --onboarded --seed-lapsed-customers 8 --name convo-harness-<id>` then `script <tenant> second_plan_queue_busy.json`.",
+  "steps": [
+    {
+      "message": "set up a win-back campaign for my lapsed customers",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "note": "First ask — expected to delegate to Sales-Recovery and arm a pending approval (the precondition step 2 depends on)."
+    },
+    {
+      "message": "set up a win-back campaign for my lapsed customers",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "assert_contains": ["approval"],
+      "note": "Second ask while one approval is (expected to be) pending. Expect a SINGLE queue-busy message referencing the outstanding approval — no duplicate plan, no false 'campaign is live' promise. See notes for the step-1 dependency before treating a FAIL here as a confirmed regression."
+    }
+  ]
+}
