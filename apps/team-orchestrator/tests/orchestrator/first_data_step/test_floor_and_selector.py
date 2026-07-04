@@ -94,9 +94,9 @@ def test_classify_has_new_intent_and_prompt():
         suggested_action="begin floor",
     )
     assert out.classification == "first_data_step_onboarding"
-    # externalised prompt loaded + carries the intent + version header (VT-84: now v3.0)
+    # externalised prompt loaded + carries the intent + version header (VT-595: now v4.0)
     assert "first_data_step_onboarding" in cm._SYSTEM_PROMPT
-    assert "version=3.0" in cm._SYSTEM_PROMPT
+    assert "version=4.0" in cm._SYSTEM_PROMPT
 
 
 # --- floor state machine (real PG) -------------------------------------------

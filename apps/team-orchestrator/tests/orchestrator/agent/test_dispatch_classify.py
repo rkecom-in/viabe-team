@@ -349,15 +349,34 @@ def test_select_brain_model_business_action_picks_opus():
 
 @pytest.mark.parametrize(
     "complex_intent",
-    ["feedback", "first_data_step_onboarding", "exclusion_request", "other"],
+    [
+        "feedback",
+        "first_data_step_onboarding",
+        "exclusion_request",
+        "other",
+        "business_analysis",
+    ],
 )
 def test_select_brain_model_complex_or_ambiguous_picks_opus(complex_intent: str):
     """Anything NOT in the routine allow-set — business signals, onboarding
-    spawns, ambiguous mutations, the 'other' catch-all — stays on Opus."""
+    spawns, ambiguous mutations, the 'other' catch-all — stays on Opus.
+
+    VT-595: business_analysis (an owner asking WHICH/WHY over their data) is
+    deliberately excluded from _ROUTINE_INTENTS — it needs the capable model,
+    not the cheap Sonnet path status_query gets."""
     from orchestrator.agent.dispatch import select_brain_model
 
     model_id, tier = select_brain_model({"classification": complex_intent})
     assert (model_id, tier) == ("claude-opus-4-8", "opus")
+
+
+def test_business_analysis_not_in_routine_intents():
+    """VT-595 pin: business_analysis must NEVER be added to _ROUTINE_INTENTS —
+    it is a non-routine, brain-owned analysis intent (Opus tier), unlike the
+    pure-fact status_query it was previously confused with."""
+    from orchestrator.agent.dispatch import _ROUTINE_INTENTS
+
+    assert "business_analysis" not in _ROUTINE_INTENTS
 
 
 def test_select_brain_model_missing_signal_fails_safe_to_opus():

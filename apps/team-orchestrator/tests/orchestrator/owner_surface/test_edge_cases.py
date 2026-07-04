@@ -116,12 +116,16 @@ def test_router_routes_status(monkeypatch) -> None:
     assert out is not None and out.reason == "edge_case:status_query"
 
 
-@pytest.mark.parametrize("intent", ["approval", "rejection", "question", "feedback", "other"])
+@pytest.mark.parametrize(
+    "intent", ["approval", "rejection", "question", "feedback", "other", "business_analysis"]
+)
 def test_router_falls_through(intent) -> None:
     import orchestrator.edge_cases_router as r
 
     # These intents fall through to the agent (None). adhoc -> "owner_initiated" marker +
     # template_error -> DispatchResult are PR-2 (tested in test_edge_cases_pr2.py).
+    # business_analysis (VT-595) is deliberately NOT fast-pathed here — it belongs to the
+    # Team-Manager brain, which owns delegating the analysis to the Sales-Recovery lane.
     ev = SimpleNamespace(body="x", sender_phone=None)
     assert (
         r.route_edge_case(
@@ -129,6 +133,54 @@ def test_router_falls_through(intent) -> None:
         )
         is None
     )
+
+
+def test_router_business_analysis_falls_through_not_status_query(monkeypatch) -> None:
+    """VT-595 regression: 'which of my customers have stopped buying?' classifies as
+    business_analysis, NOT status_query — it must fall through to the brain, never call
+    answer_status_query, and populate intent_sink so the brain sees it as its prior."""
+    import orchestrator.edge_cases_router as r
+
+    called: dict[str, object] = {}
+    monkeypatch.setattr(
+        "orchestrator.owner_inputs.status_query.answer_status_query",
+        lambda tid, body: called.setdefault("called", True),
+    )
+    sink: dict[str, object] = {}
+    ev = SimpleNamespace(body="which of my customers have stopped buying?", sender_phone=None)
+    out = r.route_edge_case(
+        tenant_id="t",
+        event=ev,
+        classify_fn=lambda b: SimpleNamespace(
+            classification="business_analysis",
+            confidence=0.9,
+            suggested_action="analyze lapsed customers via sales recovery",
+        ),
+        intent_sink=sink,
+    )
+    assert out is None  # falls through to the agent — no fast-path terminal
+    assert "called" not in called  # answer_status_query never invoked
+    assert sink["classification"] == "business_analysis"
+    assert sink["confidence"] == pytest.approx(0.9)
+
+
+def test_router_status_query_regression_still_fast_paths(monkeypatch) -> None:
+    """Regression guard: a genuine pure-count status_query still fast-paths (VT-595 must not
+    break the existing status_query short-circuit for real count asks)."""
+    import orchestrator.edge_cases_router as r
+
+    monkeypatch.setattr(r, "_send_edge_ack", lambda tid, phone, text: None)
+    monkeypatch.setattr(
+        "orchestrator.owner_inputs.status_query.answer_status_query",
+        lambda tid, body: "you have 8 customers",
+    )
+    ev = SimpleNamespace(body="how many customers do I have?", sender_phone="+910000000000")
+    out = r.route_edge_case(
+        tenant_id="t",
+        event=ev,
+        classify_fn=lambda b: SimpleNamespace(classification="status_query", confidence=0.92),
+    )
+    assert out is not None and out.reason == "edge_case:status_query"
 
 
 # ----------------------------- DB integration ------------------------------------------
