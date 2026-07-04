@@ -346,6 +346,14 @@ def collapse_node(state: AgentGraphState) -> dict[str, Any]:
         # is persisted as 'proposed' — it does NOT advance to 'sent' until the
         # resume path resolves an 'approved' decision (the send path is a
         # separate VT, structurally downstream of this gate).
+        # VT-594 change C: the owner asked for this plan explicitly — show them WHAT
+        # they're approving BEFORE the (separate) approval template arrives. A
+        # weekly-cadence proposal (no owner ask) keeps today's prompt-only behavior —
+        # no new unsolicited send. Best-effort: a summary-send failure must never
+        # unwind the persist above or block the gate below.
+        if state.get("trigger_reason") == "owner_initiated":
+            _maybe_send_plan_summary(tenant_id, plan)
+
         # VT-334 per-week budget: if the owner has already had _WEEKLY_APPROVAL_BUDGET
         # campaign_send requests in the last 7 days, SKIP a new prompt (owner-fatigue guard).
         # The campaign stays persisted as 'proposed' — the owner sees it next sync; we just
@@ -378,6 +386,86 @@ def collapse_node(state: AgentGraphState) -> dict[str, Any]:
         tenant_id=tenant_id, run_id=run_id, campaign_plan=plan
     )
     return {}
+
+
+def _resolve_owner_phone_for_summary(tenant_id: UUID) -> str | None:
+    """Fail-soft owner-phone lookup for the VT-594 in-chat plan summary send.
+
+    Mirrors ``request_owner_approval._resolve_owner_phone`` /
+    ``owner_surface.campaign_outcome._resolve_owner_phone``: prefers
+    ``tenants.owner_phone`` (migration 050), falls back to
+    ``whatsapp_number``. Any error -> None (the summary is skipped, never
+    crashes collapse).
+    """
+    try:
+        with tenant_connection(tenant_id) as conn:
+            row = conn.execute(
+                "SELECT owner_phone, whatsapp_number FROM tenants WHERE id = %s",
+                (str(tenant_id),),
+            ).fetchone()
+    except Exception:
+        logger.exception("VT-594: owner-phone resolve failed tenant=%s", tenant_id)
+        return None
+    if row is None:
+        return None
+    row = dict(row)
+    phone = row.get("owner_phone") or row.get("whatsapp_number")
+    return str(phone) if phone else None
+
+
+def _build_plan_summary_body(plan: CampaignPlanProposed) -> dict[str, str]:
+    """Deterministic plan-summary body (VT-594 change C): cohort size + segment
+    label, campaign window dates, expected recovery ₹ range, one-line
+    selection reason. Built ONLY from typed plan fields — no LLM, no
+    fabricated specifics."""
+    cohort = plan.target_cohort
+    window = plan.campaign_window
+    low_rupees = plan.expected_arrr.low_paise // 100
+    high_rupees = plan.expected_arrr.high_paise // 100
+    start = window.start.strftime("%d %b")
+    end = window.end.strftime("%d %b")
+    reason = cohort.selection_reason
+    en = (
+        f"I've drafted a campaign for {cohort.cohort_size} customers "
+        f"({cohort.cohort_label}), running {start}–{end}, with an expected "
+        f"recovery of ₹{low_rupees:,}–₹{high_rupees:,}. {reason} "
+        "I'll send you the formal approval ask next."
+    )
+    hi = (
+        f"मैंने {cohort.cohort_size} ग्राहकों ({cohort.cohort_label}) के लिए एक "
+        f"अभियान तैयार किया है, जो {start}–{end} तक चलेगा, जिसमें अनुमानित "
+        f"वसूली ₹{low_rupees:,}–₹{high_rupees:,} है। {reason} मैं "
+        "अगली बार आपको औपचारिक अनुमोदन अनुरोध भेजूंगा।"
+    )
+    return {"en": en, "hi": hi}
+
+
+def _maybe_send_plan_summary(tenant_id: UUID, plan: CampaignPlanProposed) -> None:
+    """VT-594 change C — best-effort in-chat plan summary sent BEFORE the
+    (separate) approval template. Caller gates this on
+    ``trigger_reason == 'owner_initiated'``. Fully wrapped: a summary-send
+    failure must NEVER unwind the persist or block the gate."""
+    try:
+        recipient = _resolve_owner_phone_for_summary(tenant_id)
+        if not recipient:
+            logger.info(
+                "VT-594: no owner phone for plan summary tenant=%s (skip)", tenant_id
+            )
+            return
+        from orchestrator.owner_surface.freeform_acks import (
+            resolve_owner_locale,
+            send_freeform_ack,
+        )
+
+        body = _build_plan_summary_body(plan)
+        locale = resolve_owner_locale(tenant_id)
+        text = body.get(locale) or body["en"]
+        send_freeform_ack(tenant_id, recipient, text)
+        logger.info("VT-594: sent in-chat plan summary tenant=%s", tenant_id)
+    except Exception:  # noqa: BLE001 — best-effort; must never block the gate
+        logger.exception(
+            "VT-594: plan-summary send failed (fail-soft) tenant=%s", tenant_id
+        )
 
 
 def _build_approval_request(

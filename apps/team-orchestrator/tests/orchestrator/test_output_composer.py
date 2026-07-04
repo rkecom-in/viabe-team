@@ -446,3 +446,139 @@ def test_campaign_not_sent_count_defaults_zero_when_absent() -> None:
     )
     assert out.template_name == "team_campaign_not_sent"
     assert out.template_params["unverified_count"] == "0"
+
+
+# ---------------------------------------------------------------------------
+# VT-594 — compose_owner_output must not raise on a RAW CampaignPlan variant.
+# The collapse path hands the composer the pydantic model itself (no `.output`
+# attribute), not an AgentResult-shaped specialist_result. Every bare
+# `specialist_result.output` read in this module previously raised
+# AttributeError, swallowed at dispatch.py:1127 into an empty envelope.
+# ---------------------------------------------------------------------------
+
+pytest.importorskip("pydantic")
+
+
+def _campaign_plan_proposed():
+    from uuid import uuid4
+
+    from orchestrator.agent.schemas.campaign_plan import (
+        CampaignPlanProposed,
+        CampaignWindow,
+        ConfidenceLevel,
+        EvidenceRef,
+        EvidenceSourceKind,
+        ExpectedARRR,
+        Language,
+        MessagePlan,
+        TargetCohort,
+    )
+
+    now = datetime.now(timezone.utc)
+    return CampaignPlanProposed(
+        tenant_id=uuid4(),
+        run_id=uuid4(),
+        generated_at=now,
+        campaign_window=CampaignWindow(
+            start=now + timedelta(hours=1), end=now + timedelta(days=7)
+        ),
+        target_cohort=TargetCohort(
+            customer_ids=[uuid4()],
+            cohort_label="60-90 day dormants",
+            cohort_size=1,
+            selection_reason="dormant cohort [E1].",
+        ),
+        expected_arrr=ExpectedARRR(
+            low_paise=10_000_00,
+            high_paise=30_000_00,
+            confidence=ConfidenceLevel.MEDIUM,
+            basis="prior winback yields [E1].",
+        ),
+        evidence_refs=[
+            EvidenceRef(
+                claim_id="E1",
+                source_kind=EvidenceSourceKind.TOOL_CALL,
+                source_id="test-evidence",
+            )
+        ],
+        message_plan=MessagePlan(
+            template_id="team_winback_v1",
+            template_params={"first_name": "Owner"},
+            language=Language.EN,
+            personalization="owner-first-name.",
+        ),
+    )
+
+
+def _campaign_plan_out_of_scope():
+    from uuid import uuid4
+
+    from orchestrator.agent.schemas.campaign_plan import (
+        CampaignPlanOutOfScope,
+        SuggestedSpecialist,
+    )
+
+    return CampaignPlanOutOfScope(
+        tenant_id=uuid4(),
+        run_id=uuid4(),
+        generated_at=datetime.now(timezone.utc),
+        out_of_scope_reason="Request concerns review-reputation handling.",
+        suggested_specialist=SuggestedSpecialist.REPUTATION,
+    )
+
+
+def _campaign_plan_insufficient_data():
+    from uuid import uuid4
+
+    from orchestrator.agent.schemas.campaign_plan import (
+        CampaignPlanInsufficientData,
+        MissingDataItem,
+    )
+
+    return CampaignPlanInsufficientData(
+        tenant_id=uuid4(),
+        run_id=uuid4(),
+        generated_at=datetime.now(timezone.utc),
+        missing_data=[
+            MissingDataItem(
+                category="cohort",
+                description="No dormant-customer rows surfaced.",
+                suggested_remediation="Seed customer ledger.",
+            )
+        ],
+    )
+
+
+@pytest.mark.parametrize(
+    "plan_factory",
+    [_campaign_plan_proposed, _campaign_plan_out_of_scope, _campaign_plan_insufficient_data],
+    ids=["proposed", "out_of_scope", "insufficient_data"],
+)
+def test_compose_owner_output_does_not_raise_on_raw_campaign_plan(plan_factory) -> None:
+    """VT-594: every CampaignPlan variant composes without raising when handed
+    to compose_owner_output as the raw specialist_result (no AgentResult
+    wrapper, no `.output` attribute). Inside the 24h window (the real collapse
+    scenario — the owner just messaged) with no template mapped for
+    "owner_substantive_message", the free-form path is exercised."""
+    now = datetime(2026, 5, 26, 12, 0, tzinfo=timezone.utc)
+    state = _state(last_owner_message_at=now - timedelta(hours=1))
+    plan = plan_factory()
+    out = compose_owner_output(plan, state, "owner_substantive_message", now=now)
+    assert isinstance(out.message_body, str)
+    assert out.message_type == "free_form_24h"
+
+
+def test_compose_owner_output_cohort_rejected_carrier_still_works_unchanged() -> None:
+    """Regression guard: the VT-248 count-only carrier (`_CohortRejectedResult`
+    shape, a real `.output` dict) must keep composing exactly as before — the
+    getattr fallback must not change behaviour for objects that DO have
+    `.output`."""
+    now = datetime(2026, 5, 26, 12, 0, tzinfo=timezone.utc)
+    state = _state(last_owner_message_at=now - timedelta(hours=48))
+    out = compose_owner_output(
+        SimpleNamespace(output={"rejected_count": 5}),
+        state,
+        "campaign_not_sent_invalid_cohort",
+        now=now,
+    )
+    assert out.template_params["unverified_count"] == "5"
