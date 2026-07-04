@@ -85,24 +85,26 @@ def test_missing_secret_rejected(monkeypatch):
 
 
 def test_dev_secret_rejected_on_prod(monkeypatch):
+    # Tightened 2026-07-04: off-dev the route answers 404 for EVERYTHING —
+    # indistinguishable from route-absent (no 403 oracle that a guard exists).
     monkeypatch.setenv("EXPECTED_ENV", "prod")
     with pytest.raises(HTTPException) as exc_info:
         ti.dev_test_consent_seed(_body(), x_internal_secret=_DEV_SECRET)
-    assert exc_info.value.status_code == 403
+    assert exc_info.value.status_code == 404
 
 
 def test_dev_secret_rejected_when_env_unset(monkeypatch):
     monkeypatch.delenv("EXPECTED_ENV", raising=False)
     with pytest.raises(HTTPException) as exc_info:
         ti.dev_test_consent_seed(_body(), x_internal_secret=_DEV_SECRET)
-    assert exc_info.value.status_code == 403
+    assert exc_info.value.status_code == 404
 
 
 def test_dev_secret_rejected_on_garbage_env(monkeypatch):
     monkeypatch.setenv("EXPECTED_ENV", "not-a-real-env")
     with pytest.raises(HTTPException) as exc_info:
         ti.dev_test_consent_seed(_body(), x_internal_secret=_DEV_SECRET)
-    assert exc_info.value.status_code == 403
+    assert exc_info.value.status_code == 404
 
 
 def test_dev_secret_rejected_on_development_typo_variant_is_still_accepted(monkeypatch):
@@ -115,7 +117,7 @@ def test_dev_secret_rejected_on_development_typo_variant_is_still_accepted(monke
     assert result.recorded is True
 
 
-# --- guard passes: dev secret + EXPECTED_ENV=dev, or the prod secret on any env -------------------
+# --- guard passes: ONLY on a positively-dev EXPECTED_ENV (tightened 2026-07-04) -------------------
 # record_consent is monkeypatched to a stub in every passing case — never touches a DB.
 
 
@@ -132,8 +134,23 @@ def test_dev_secret_accepted_on_dev_reaches_record_consent(monkeypatch):
     assert result.phone_token_prefix == "abcdef012345"  # first 12 chars only — never the full token
 
 
-def test_prod_secret_accepted_on_every_env(monkeypatch):
+def test_prod_secret_rejected_off_dev(monkeypatch):
+    # Tightened 2026-07-04 (review decision): unlike /consent/capture, even the prod
+    # INTERNAL_API_SECRET cannot open this route off-dev — a dev-test seeding surface
+    # has no legitimate prod use, so off-dev it does not exist (404).
     monkeypatch.delenv("EXPECTED_ENV", raising=False)  # no dev env at all
+    stub = MagicMock(return_value=_fake_record())
+    monkeypatch.setattr(ti, "record_consent", stub)
+
+    with pytest.raises(HTTPException) as exc_info:
+        ti.dev_test_consent_seed(_body(), x_internal_secret=_PROD_SECRET)
+
+    assert exc_info.value.status_code == 404
+    stub.assert_not_called()
+
+
+def test_prod_secret_accepted_on_dev(monkeypatch):
+    monkeypatch.setenv("EXPECTED_ENV", "dev")
     stub = MagicMock(return_value=_fake_record())
     monkeypatch.setattr(ti, "record_consent", stub)
 
