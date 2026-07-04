@@ -374,7 +374,15 @@ def dev_test_consent_seed(
     BYTE-IDENTICAL to what this same service computes for the same ``phone_e164`` anywhere else
     (the detection query included). This is the entire fix: move the tokenisation into the process
     that actually holds the real salt.
+
+    TIGHTER THAN /consent/capture (review decision 2026-07-04): this route refuses EVERYTHING —
+    including the prod ``INTERNAL_API_SECRET`` — unless ``EXPECTED_ENV`` positively reads dev
+    (``_dev_ingress_enabled``). A dev-test seeding surface has zero legitimate prod use, so off-dev
+    it answers 404 (indistinguishable from route-absent) rather than existing as a
+    capability-equivalent twin of /consent/capture.
     """
+    if not _dev_ingress_enabled():
+        raise HTTPException(status_code=404, detail="not found")
     if not _verify_internal_secret(x_internal_secret):
         raise HTTPException(status_code=403, detail="invalid internal secret")
     tenant_id = _parse_dev_test_tenant(body.tenant_id)

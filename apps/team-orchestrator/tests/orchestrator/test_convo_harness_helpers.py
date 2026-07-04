@@ -542,6 +542,8 @@ def test_consent_seed_uses_endpoint_requires_both_base_and_secret():
 def test_record_seed_consent_prefers_endpoint_when_url_given(monkeypatch):
     """The core VT-598 addendum assertion: given an ingress base + secret, the seeding path calls
     the endpoint (mocked HTTP — no real network, no DB), NEVER the local record_consent."""
+    # The patch TARGET (orchestrator.privacy.consent) imports psycopg — dep-less smoke trap.
+    pytest.importorskip("psycopg")
     post_stub = MagicMock()
     monkeypatch.setattr(ch, "_post_consent_seed", post_stub)
     record_consent_stub = MagicMock()
@@ -559,6 +561,7 @@ def test_record_seed_consent_prefers_endpoint_when_url_given(monkeypatch):
 
 
 def test_record_seed_consent_falls_back_to_local_when_no_url(monkeypatch):
+    pytest.importorskip("psycopg")  # patch target imports psycopg (dep-less smoke trap)
     post_stub = MagicMock()
     monkeypatch.setattr(ch, "_post_consent_seed", post_stub)
     record_consent_stub = MagicMock()
@@ -576,6 +579,7 @@ def test_record_seed_consent_falls_back_to_local_when_no_url(monkeypatch):
 
 def test_record_seed_consent_falls_back_when_only_secret_given(monkeypatch):
     # Both must be present — a secret with no base URL is not enough to use the endpoint.
+    pytest.importorskip("psycopg")  # patch target imports psycopg (dep-less smoke trap)
     post_stub = MagicMock()
     monkeypatch.setattr(ch, "_post_consent_seed", post_stub)
     record_consent_stub = MagicMock()
@@ -603,6 +607,7 @@ class _FakeResponse:
 
 
 def test_post_consent_seed_posts_expected_url_headers_and_body(monkeypatch):
+    pytest.importorskip("requests")  # patch target — absent in the isolated dep-less smoke
     captured = {}
 
     def _fake_post(url, json=None, headers=None, timeout=None):  # noqa: A002 - mirrors requests' kwarg name
@@ -627,6 +632,7 @@ def test_post_consent_seed_posts_expected_url_headers_and_body(monkeypatch):
 
 
 def test_post_consent_seed_dies_on_non_200(monkeypatch):
+    pytest.importorskip("requests")  # patch target — absent in the isolated dep-less smoke
     def _fake_post(url, json=None, headers=None, timeout=None):  # noqa: A002
         return _FakeResponse(403, text="invalid internal secret")
 
