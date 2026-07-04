@@ -35,6 +35,7 @@ from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import SystemMessage
 from langchain_core.tools import BaseTool, tool
 
+from orchestrator.agent.lane_tenant import lane_tenant_error, resolve_lane_tenant
 from orchestrator.types.trigger_reason import TriggerReason
 
 logger = logging.getLogger("orchestrator.agent.onboarding_conductor")
@@ -81,9 +82,14 @@ def onboarding_next_question(tenant_id: str) -> dict[str, Any]:
     ``{"done": true}`` when the registry-bounded set is satisfied (then call
     ``onboarding_profile_complete`` — the deterministic check OWNS "complete", not you).
     """
+    resolved = resolve_lane_tenant(tenant_id, tool_name="onboarding_next_question")
+    if resolved is None:
+        return lane_tenant_error("onboarding_next_question")
+    tenant_id = str(resolved)
+
     from orchestrator.onboarding.conductor import next_question_for_tenant
 
-    decision = next_question_for_tenant(UUID(tenant_id))
+    decision = next_question_for_tenant(resolved)
     q = decision.next_question
     if q is None:
         logger.info("onboarding_conductor: no registry-bounded question remains tenant=%s", tenant_id)
@@ -98,7 +104,7 @@ def onboarding_next_question(tenant_id: str) -> dict[str, Any]:
 
 
 @tool
-def onboarding_profile_complete(tenant_id: str) -> dict[str, bool]:
+def onboarding_profile_complete(tenant_id: str) -> dict[str, Any]:
     """The DETERMINISTIC profile-collection completion check — the conductor NEVER self-declares this.
 
     REUSE: delegates to ``onboarding.conductor.profile_collection_complete`` — true IFF NO
@@ -108,15 +114,20 @@ def onboarding_profile_complete(tenant_id: str) -> dict[str, bool]:
 
     Returns ``{"complete": <bool>}``.
     """
+    resolved = resolve_lane_tenant(tenant_id, tool_name="onboarding_profile_complete")
+    if resolved is None:
+        return lane_tenant_error("onboarding_profile_complete")
+    tenant_id = str(resolved)
+
     from orchestrator.onboarding.conductor import profile_collection_complete
     from orchestrator.onboarding.draft_profile import get_draft
     from orchestrator.onboarding.journey import _tenant_phase_and_type, get_journey
 
-    g = get_journey(UUID(tenant_id)) or {}
+    g = get_journey(resolved) or {}
     answers = dict(g.get("answers") or {})
     skipped = list(g.get("skipped") or [])
-    _, business_type = _tenant_phase_and_type(UUID(tenant_id))
-    draft = get_draft(UUID(tenant_id))
+    _, business_type = _tenant_phase_and_type(resolved)
+    draft = get_draft(resolved)
     complete = profile_collection_complete(
         business_type=business_type,
         draft=draft,
