@@ -168,6 +168,20 @@ _CODE_FENCE_RE = re.compile(
 # THIS cap still lands on the honest VT-492 escalation net, never silence.
 _MAX_OUTPUT_TOKENS_PER_TURN = 4096
 
+# VT-596 follow-up #2 (same pack, second escalation): Sonnet-5's draft length is
+# VARIABLE — one run fit in ~3k out-tokens, the next hit 4096 and truncated again.
+# Chasing the cap loses; the correct handling for stop_reason=max_tokens is a
+# bounded CONTINUATION: append the partial assistant turn + ask the model to
+# resume exactly where it stopped, stitching the text parts for the terminal
+# parse. Bounded by _MAX_CONTINUATION_TURNS per run (and, as always, the VT-35
+# cumulative token meter + wallclock + _MAX_TURNS_PER_RUN).
+_MAX_CONTINUATION_TURNS = 3
+_CONTINUE_PROMPT = (
+    "Your previous message was cut off by the output limit. Continue EXACTLY "
+    "where you stopped — no repetition, no preamble, no commentary; just the "
+    "remaining characters of the same output."
+)
+
 # Run-level hard-limit ceiling. VT-35's token meter enforces a CUMULATIVE
 # 80K cap across every turn in one run. This constant lives here only as
 # a documented reference for AgentResult semantics (CL-242); it is NOT
@@ -752,6 +766,10 @@ def run_sales_recovery_agent(
     tool_calls_made = 0
     status: str = "completed"
     output: dict[str, Any] | None = None
+    # VT-596 #2 — max_tokens continuation state: partial terminal text parts
+    # stitched (in order) with the final turn's text before the JSON parse.
+    continuation_turns = 0
+    terminal_text_parts: list[str] = []
 
     # VT-182/VT-514 — stage the per-turn reasoning input envelope so the
     # @with_reasoning_capture callback writes agent_reasoning_step rows (the
@@ -854,8 +872,27 @@ def run_sales_recovery_agent(
             raw_messages.append({"role": "user", "content": tool_results})
             continue
 
-        # No tool_use → terminal. Extract output.
-        text = _extract_text(content_blocks)
+        if stop_reason == "max_tokens" and continuation_turns < _MAX_CONTINUATION_TURNS:
+            # VT-596 #2 — the turn was cut mid-output. Bank the partial text and
+            # ask the model to resume; the terminal parse below stitches the
+            # parts. Exhausting the continuation budget falls through to the
+            # normal terminal handling (a still-broken stitch lands on the
+            # CL-287 invalid-output FailureRecord — observable, never silent).
+            continuation_turns += 1
+            terminal_text_parts.append(_extract_text(content_blocks))
+            messages.append(
+                {
+                    "role": "assistant",
+                    "content": [_block_to_dict(b) for b in content_blocks],
+                }
+            )
+            messages.append({"role": "user", "content": _CONTINUE_PROMPT})
+            raw_messages.append({"role": "user", "content": _CONTINUE_PROMPT})
+            continue
+
+        # No tool_use → terminal. Extract output (stitching any banked
+        # continuation parts — empty list on the normal single-turn path).
+        text = "".join([*terminal_text_parts, _extract_text(content_blocks)])
         output = _parse_placeholder_output(text)
         if output is not None and output.get("status") == "placeholder":
             status = "placeholder"
