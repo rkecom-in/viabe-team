@@ -346,14 +346,6 @@ def collapse_node(state: AgentGraphState) -> dict[str, Any]:
         # is persisted as 'proposed' — it does NOT advance to 'sent' until the
         # resume path resolves an 'approved' decision (the send path is a
         # separate VT, structurally downstream of this gate).
-        # VT-594 change C: the owner asked for this plan explicitly — show them WHAT
-        # they're approving BEFORE the (separate) approval template arrives. A
-        # weekly-cadence proposal (no owner ask) keeps today's prompt-only behavior —
-        # no new unsolicited send. Best-effort: a summary-send failure must never
-        # unwind the persist above or block the gate below.
-        if state.get("trigger_reason") == "owner_initiated":
-            _maybe_send_plan_summary(tenant_id, plan)
-
         # VT-334 per-week budget: if the owner has already had _WEEKLY_APPROVAL_BUDGET
         # campaign_send requests in the last 7 days, SKIP a new prompt (owner-fatigue guard).
         # The campaign stays persisted as 'proposed' — the owner sees it next sync; we just
@@ -378,7 +370,7 @@ def collapse_node(state: AgentGraphState) -> dict[str, Any]:
             return {}
         return {
             "pending_approval_request": _build_approval_request(
-                plan=plan, campaign_id=campaign_id,
+                plan=plan, campaign_id=campaign_id, tenant_id=tenant_id,
             )
         }
     # out_of_scope / insufficient_data — terminal-but-valid.
@@ -388,88 +380,83 @@ def collapse_node(state: AgentGraphState) -> dict[str, Any]:
     return {}
 
 
-def _resolve_owner_phone_for_summary(tenant_id: UUID) -> str | None:
-    """Fail-soft owner-phone lookup for the VT-594 in-chat plan summary send.
+def _redact_agent_label(tenant_id: UUID, text: str) -> str:
+    """Redact an agent-authored field before it reaches an owner surface.
 
-    Mirrors ``request_owner_approval._resolve_owner_phone`` /
-    ``owner_surface.campaign_outcome._resolve_owner_phone``: prefers
-    ``tenants.owner_phone`` (migration 050), falls back to
-    ``whatsapp_number``. Any error -> None (the summary is skipped, never
-    crashes collapse).
+    Per-module copy of the dispatch/tm_audit/pipeline_observability pattern
+    (each module keeps its own rather than cross-importing a private helper —
+    and importing from agent.dispatch here would be a cycle via supervisor).
+    ``cohort_label`` is schema-unconstrained free text (min_length=1 only), the
+    same class as ``selection_reason`` (delta-review Defect 1): the redaction
+    is a no-op on a legitimate categorical label and only fires on real PII.
+    Fail-soft to pattern-only redaction; a registry outage never blocks a send.
     """
     try:
-        with tenant_connection(tenant_id) as conn:
-            row = conn.execute(
-                "SELECT owner_phone, whatsapp_number FROM tenants WHERE id = %s",
-                (str(tenant_id),),
-            ).fetchone()
-    except Exception:
-        logger.exception("VT-594: owner-phone resolve failed tenant=%s", tenant_id)
-        return None
-    if row is None:
-        return None
-    row = dict(row)
-    phone = row.get("owner_phone") or row.get("whatsapp_number")
-    return str(phone) if phone else None
+        from orchestrator.observability.pii import redact_for_log
+        from orchestrator.privacy.customer_registry import make_name_registry
+
+        try:
+            registry = make_name_registry(str(tenant_id))
+        except Exception:  # noqa: BLE001 — fail-soft by contract
+            logger.warning(
+                "collapse: name-registry build failed; pattern-only redaction "
+                "tenant=%s", tenant_id,
+            )
+            registry = None
+        out = redact_for_log(text, name_registry=registry)
+        return str(out) if out else ""
+    except Exception:  # noqa: BLE001 — redaction must never block the arm path
+        logger.warning("collapse: label redaction failed tenant=%s", tenant_id)
+        return ""
 
 
-def _build_plan_summary_body(plan: CampaignPlanProposed) -> dict[str, str]:
-    """Deterministic plan-summary body (VT-594 change C): cohort size + segment
-    label, campaign window dates, expected recovery ₹ range, one-line
-    selection reason. Built ONLY from typed plan fields — no LLM, no
-    fabricated specifics."""
+def _build_chat_summary_body(
+    plan: CampaignPlanProposed, tenant_id: UUID
+) -> dict[str, str]:
+    """PII-safe plan-summary body (VT-594 change C, post-review restructure).
+
+    Sent by ``request_owner_approval.arm_pause_request`` BEFORE the approval
+    template, so the owner sees WHAT they're approving. Built ONLY from
+    TYPED plan fields that are structurally safe: cohort size, the cohort
+    label (REDACTED — the schema does not actually enforce the "short
+    categorical token" convention, so it gets the same treatment as every
+    other agent-authored field; delta-review Defect 1), campaign window
+    dates, expected recovery ₹ range.
+
+    Deliberately EXCLUDES ``target_cohort.selection_reason`` (review Blocker
+    1, CRITICAL): that field is agent-authored free prose, and VT-498's own
+    sales_recovery.py docstring documents the SR model baking literal
+    customer names into exactly this kind of field. ``_build_approval_request``
+    (CL-390) already carries no PII for the same reason — this summary must
+    not reintroduce it via a different field.
+    """
     cohort = plan.target_cohort
     window = plan.campaign_window
+    label = _redact_agent_label(tenant_id, cohort.cohort_label)
     low_rupees = plan.expected_arrr.low_paise // 100
     high_rupees = plan.expected_arrr.high_paise // 100
     start = window.start.strftime("%d %b")
     end = window.end.strftime("%d %b")
-    reason = cohort.selection_reason
     en = (
         f"I've drafted a campaign for {cohort.cohort_size} customers "
-        f"({cohort.cohort_label}), running {start}–{end}, with an expected "
-        f"recovery of ₹{low_rupees:,}–₹{high_rupees:,}. {reason} "
-        "I'll send you the formal approval ask next."
+        f"({label}), running {start}–{end}, with an expected "
+        f"recovery of ₹{low_rupees:,}–₹{high_rupees:,}. I'll send you the "
+        "formal approval ask next."
     )
+    # Hindi wrapper, English detail set off in its own clause after the colon —
+    # brain-composed per-language copy is the program end-state; this
+    # deterministic splice is the interim (VT-594 review MINOR note).
     hi = (
-        f"मैंने {cohort.cohort_size} ग्राहकों ({cohort.cohort_label}) के लिए एक "
-        f"अभियान तैयार किया है, जो {start}–{end} तक चलेगा, जिसमें अनुमानित "
-        f"वसूली ₹{low_rupees:,}–₹{high_rupees:,} है। {reason} मैं "
-        "अगली बार आपको औपचारिक अनुमोदन अनुरोध भेजूंगा।"
+        f"मैंने {cohort.cohort_size} ग्राहकों ({label}) के लिए एक "
+        f"अभियान तैयार किया है: {start}–{end}, अनुमानित वसूली "
+        f"₹{low_rupees:,}–₹{high_rupees:,}। मैं अगली बार आपको औपचारिक "
+        "अनुमोदन अनुरोध भेजूंगा।"
     )
     return {"en": en, "hi": hi}
 
 
-def _maybe_send_plan_summary(tenant_id: UUID, plan: CampaignPlanProposed) -> None:
-    """VT-594 change C — best-effort in-chat plan summary sent BEFORE the
-    (separate) approval template. Caller gates this on
-    ``trigger_reason == 'owner_initiated'``. Fully wrapped: a summary-send
-    failure must NEVER unwind the persist or block the gate."""
-    try:
-        recipient = _resolve_owner_phone_for_summary(tenant_id)
-        if not recipient:
-            logger.info(
-                "VT-594: no owner phone for plan summary tenant=%s (skip)", tenant_id
-            )
-            return
-        from orchestrator.owner_surface.freeform_acks import (
-            resolve_owner_locale,
-            send_freeform_ack,
-        )
-
-        body = _build_plan_summary_body(plan)
-        locale = resolve_owner_locale(tenant_id)
-        text = body.get(locale) or body["en"]
-        send_freeform_ack(tenant_id, recipient, text)
-        logger.info("VT-594: sent in-chat plan summary tenant=%s", tenant_id)
-    except Exception:  # noqa: BLE001 — best-effort; must never block the gate
-        logger.exception(
-            "VT-594: plan-summary send failed (fail-soft) tenant=%s", tenant_id
-        )
-
-
 def _build_approval_request(
-    *, plan: CampaignPlanProposed, campaign_id: UUID
+    *, plan: CampaignPlanProposed, campaign_id: UUID, tenant_id: UUID
 ) -> dict[str, Any]:
     """Build the ``pending_approval_request`` payload the gate node consumes.
 
@@ -478,6 +465,13 @@ def _build_approval_request(
     against the VT-163 registry; we pass a best-effort recovery figure when
     the plan exposes one, else an empty dict (the gate dry-runs the send in
     CI/canary regardless).
+
+    ``chat_summary`` (VT-594 change C, post-review restructure): the PII-safe
+    in-chat plan summary ``request_owner_approval.arm_pause_request`` sends
+    BEFORE the approval template. Threaded here (not sent from collapse.py
+    itself) because the gate node is the ONE place that knows whether the
+    send is actually about to happen (an idempotent resume re-execution or a
+    0b queue-busy refusal must NOT re-send it) — see arm_pause_request.
     """
     cohort = plan.target_cohort
     cohort_size = cohort.cohort_size
@@ -491,11 +485,15 @@ def _build_approval_request(
         # VT-83: populate the team_weekly_approval params — {{1}} cohort segment /
         # {{2}} campaign mode / {{3}} projected recovery ₹ range. Previously empty, which
         # rendered a BLANK approval message to the owner (the actual bug).
+        # {{1}} is agent-authored free text like every other label — redacted
+        # (delta-review Defect 1; same channel, template variant).
         "template_params": {
-            "1": cohort.cohort_label or str(cohort_size),
+            "1": _redact_agent_label(tenant_id, cohort.cohort_label)
+            or str(cohort_size),
             "2": "recovery",
             "3": f"{low_rupees:,}–{high_rupees:,}",
         },
         "language": "en",
         "timeout_hours": 48,
+        "chat_summary": _build_chat_summary_body(plan, tenant_id),
     }

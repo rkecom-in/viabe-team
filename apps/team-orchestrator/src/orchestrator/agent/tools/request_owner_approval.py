@@ -107,6 +107,11 @@ class RequestOwnerApprovalInput(BaseModel):
     # VT-369: the agent surface sends `team_agent_draft_approval` instead of the weekly
     # template. None -> APPROVAL_TEMPLATE_NAME (the legacy default, unchanged).
     template_name: str | None = None
+    # VT-594 (post-review restructure) — a PII-safe {"en": ..., "hi": ...} plan-summary
+    # body, sent BEST-EFFORT before the approval template (see arm_pause_request). None
+    # for every existing caller that doesn't build one (agent_customer_send,
+    # business_impact_choke, autonomy) — no behavior change for them.
+    chat_summary: dict[str, str] | None = None
 
 
 class RequestOwnerApprovalError(BaseModel):
@@ -251,6 +256,45 @@ def arm_pause_request(
             )
 
         owner_phone = _resolve_owner_phone(conn, tenant_id)
+
+        # VT-594 (post-review restructure) — best-effort PII-safe plan-summary
+        # send BEFORE the approval template, so the owner sees WHAT they're
+        # approving. Only reached past the step-0/0b checks above (an idempotent
+        # resume re-execution or a queue-busy refusal never re-sends / never
+        # sends). Skipped on dry_run (canary/CI) and when the caller didn't build
+        # one (every non-campaign approval type today). Fully try/except: a
+        # summary-send failure must NEVER block the arm — the approval template
+        # below is the load-bearing send.
+        #
+        # NOTE (VT-369 §4.1 race-loser residual): a concurrent armer can still win
+        # the migration-128 partial-unique-index race AFTER this point (see the
+        # UniqueViolation handler below) — this run's summary (and, moments later,
+        # its template) will have gone out for a plan whose approval row then loses
+        # the race. `_collapse_reply_body`'s queue_busy body is deliberately
+        # generic about whether a summary preceded it for exactly this reason.
+        #
+        # NOTE (future cadence): unconditional (not gated on trigger_reason) is
+        # correct TODAY because there is no live weekly-cadence producer
+        # (`run_weekly_cadence_body` is a VT-176 stub) — every campaign_send
+        # approval that reaches here is owner-inbound. Revisit if/when a real
+        # cadence caller lands.
+        if not dry_run and payload.chat_summary:
+            try:
+                from orchestrator.owner_surface.freeform_acks import (
+                    resolve_owner_locale,
+                    send_freeform_ack,
+                )
+
+                if owner_phone:
+                    locale = resolve_owner_locale(tenant_id)
+                    text = payload.chat_summary.get(locale) or payload.chat_summary.get("en")
+                    if text:
+                        send_freeform_ack(tenant_id, owner_phone, text)
+            except Exception:  # noqa: BLE001 — best-effort; must never block the arm
+                logger.warning(
+                    "request_owner_approval: chat-summary send failed (fail-soft) "
+                    "tenant=%s run=%s", tenant_id, run_id,
+                )
 
         # 1. Send the approval template to the owner.
         template_name = payload.template_name or APPROVAL_TEMPLATE_NAME
@@ -408,6 +452,7 @@ def request_owner_approval_node(state: AgentGraphState) -> dict[str, Any]:
         template_params=req.get("template_params", {}),
         language=req.get("language", "en"),
         timeout_hours=req.get("timeout_hours", _DEFAULT_TIMEOUT_HOURS),
+        chat_summary=req.get("chat_summary"),
     )
 
     # dry_run is carried on the request so the canary / CI exercise the full

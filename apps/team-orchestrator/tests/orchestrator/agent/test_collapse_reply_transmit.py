@@ -7,9 +7,16 @@ finding): the owner sees only runner.py's generic D1 "I'm on it" fallback.
 reply``) closes that seam with a deterministic, substance-railed reply built
 ONLY from the plan's own typed fields.
 
-Pure-function tests for ``_collapse_reply_body`` (no DB, no LLM, no network)
-+ mocked-send tests for ``_maybe_send_collapse_reply`` (patches
-``orchestrator.owner_surface.freeform_acks`` — never a real Twilio call).
+Post-review restructure (adversarial review, 2026-07-04): the proposed-variant
+bodies (queue_busy / send_failed / budget-skip) are now SELF-CONTAINED single
+messages with no automatic-resurfacing promise, and agent-authored free text
+(out_of_scope_reason / missing_data) is redacted before it reaches the body.
+
+Pure-function tests for ``_collapse_reply_body`` (no DB, no LLM, no network —
+the customer-name registry build is monkeypatched to None so every call takes
+the fast pattern-only-redaction path) + mocked-send tests for
+``_maybe_send_collapse_reply`` (patches ``orchestrator.owner_surface.
+freeform_acks`` — never a real Twilio call).
 """
 
 from __future__ import annotations
@@ -41,7 +48,20 @@ from orchestrator.agent.schemas.campaign_plan import (  # noqa: E402
 )
 
 
-def _proposed_plan(cohort_size: int = 6) -> CampaignPlanProposed:
+@pytest.fixture(autouse=True)
+def _no_registry_build(monkeypatch):
+    """Every test here exercises the redaction call path (out_of_scope /
+    insufficient_data cases) — short-circuit the customer-name registry build
+    to None (fail-soft pattern-only redaction) so tests run fast + DB-free
+    instead of eating a real connection-attempt per call."""
+    from orchestrator.agent import dispatch as dispatch_mod
+
+    monkeypatch.setattr(dispatch_mod, "_registry_for_tenant", lambda tenant_id: None)
+
+
+def _proposed_plan(
+    cohort_size: int = 6, cohort_label: str = "60-90 day dormants"
+) -> CampaignPlanProposed:
     now = datetime.now(UTC)
     return CampaignPlanProposed(
         tenant_id=uuid4(),
@@ -52,7 +72,7 @@ def _proposed_plan(cohort_size: int = 6) -> CampaignPlanProposed:
         ),
         target_cohort=TargetCohort(
             customer_ids=[uuid4() for _ in range(cohort_size)],
-            cohort_label="60-90 day dormants",
+            cohort_label=cohort_label,
             cohort_size=cohort_size,
             selection_reason="dormant cohort [E1].",
         ),
@@ -78,28 +98,36 @@ def _proposed_plan(cohort_size: int = 6) -> CampaignPlanProposed:
     )
 
 
-def _out_of_scope_plan() -> CampaignPlanOutOfScope:
+def _out_of_scope_plan(reason: str = "Request concerns review-reputation handling.") -> CampaignPlanOutOfScope:
     return CampaignPlanOutOfScope(
         tenant_id=uuid4(),
         run_id=uuid4(),
         generated_at=datetime.now(UTC),
-        out_of_scope_reason="Request concerns review-reputation handling.",
+        out_of_scope_reason=reason,
         suggested_specialist=SuggestedSpecialist.REPUTATION,
     )
 
 
-def _insufficient_data_plan() -> CampaignPlanInsufficientData:
+def _insufficient_data_plan(
+    *,
+    description: str = "No dormant-customer rows surfaced.",
+    remediation: str = "Seed the customer ledger.",
+    extra_items: list[tuple[str, str, str]] | None = None,
+) -> CampaignPlanInsufficientData:
+    items = [
+        MissingDataItem(
+            category="cohort", description=description, suggested_remediation=remediation
+        )
+    ]
+    for category, desc, rem in extra_items or []:
+        items.append(
+            MissingDataItem(category=category, description=desc, suggested_remediation=rem)
+        )
     return CampaignPlanInsufficientData(
         tenant_id=uuid4(),
         run_id=uuid4(),
         generated_at=datetime.now(UTC),
-        missing_data=[
-            MissingDataItem(
-                category="cohort",
-                description="No dormant-customer rows surfaced.",
-                suggested_remediation="Seed the customer ledger.",
-            )
-        ],
+        missing_data=items,
     )
 
 
@@ -111,7 +139,7 @@ def _insufficient_data_plan() -> CampaignPlanInsufficientData:
 def test_cohort_rejected_body_is_count_only_no_ids():
     from orchestrator.agent.dispatch import _CohortRejectedResult, _collapse_reply_body
 
-    body = _collapse_reply_body({}, _CohortRejectedResult(rejected_count=4))
+    body = _collapse_reply_body(uuid4(), {}, _CohortRejectedResult(rejected_count=4))
 
     assert body is not None
     assert "4" in body["en"]
@@ -125,7 +153,7 @@ def test_out_of_scope_body_carries_the_reason():
     from orchestrator.agent.dispatch import _collapse_reply_body
 
     plan = _out_of_scope_plan()
-    body = _collapse_reply_body({}, plan)
+    body = _collapse_reply_body(uuid4(), {}, plan)
 
     assert body is not None
     assert plan.out_of_scope_reason in body["en"]
@@ -136,46 +164,95 @@ def test_insufficient_data_body_carries_missing_data_and_remediation():
     from orchestrator.agent.dispatch import _collapse_reply_body
 
     plan = _insufficient_data_plan()
-    body = _collapse_reply_body({}, plan)
+    body = _collapse_reply_body(uuid4(), {}, plan)
 
     assert body is not None
     assert plan.missing_data[0].description in body["en"]
     assert plan.missing_data[0].suggested_remediation in body["en"]
 
 
-def test_proposed_queue_busy_body_says_plan_saved_and_another_open():
+def test_insufficient_data_multi_item_join_present_in_both_languages():
+    """VT-594 review test gap #5 — 2+ missing_data items must ALL appear
+    (joined), in both the en and hi bodies."""
+    from orchestrator.agent.dispatch import _collapse_reply_body
+
+    plan = _insufficient_data_plan(
+        description="No dormant-customer rows surfaced.",
+        remediation="Seed the customer ledger.",
+        extra_items=[
+            ("purchase_history", "No purchase-history rows in the last 90 days.", "Connect POS export."),
+        ],
+    )
+    body = _collapse_reply_body(uuid4(), {}, plan)
+
+    assert body is not None
+    assert plan.missing_data[0].description in body["en"]
+    assert plan.missing_data[1].description in body["en"]
+    assert plan.missing_data[0].description in body["hi"]
+    assert plan.missing_data[1].description in body["hi"]
+
+
+def test_proposed_queue_busy_body_recaps_cohort_and_says_another_open():
     from orchestrator.agent.dispatch import _collapse_reply_body
 
     plan = _proposed_plan(cohort_size=6)
-    body = _collapse_reply_body({"owner_decision": "queue_busy"}, plan)
+    body = _collapse_reply_body(uuid4(), {"owner_decision": "queue_busy"}, plan)
 
     assert body is not None
     assert "6" in body["en"]
-    assert "another" in body["en"].lower() or "waiting" in body["en"].lower()
+    assert plan.target_cohort.cohort_label in body["en"]
+    assert "another" in body["en"].lower()
+    assert "waiting" in body["en"].lower()
+    # Conditioned on the owner asking again — not an automatic promise.
+    assert "ask me" in body["en"].lower()
 
 
-def test_proposed_send_failed_body_says_plan_saved_and_will_arrive_next_sync():
+def test_proposed_send_failed_body_is_status_only_no_recap():
+    """Review Blocker 3 restructure: send_failed means the chat summary (sent
+    BEFORE the template inside arm_pause_request) already reached the owner —
+    this body must be status-only, no cohort-size/label recap."""
     from orchestrator.agent.dispatch import _collapse_reply_body
 
     plan = _proposed_plan(cohort_size=6)
-    body = _collapse_reply_body({"owner_decision": "send_failed"}, plan)
+    body = _collapse_reply_body(uuid4(), {"owner_decision": "send_failed"}, plan)
 
     assert body is not None
-    assert "6" in body["en"]
-    assert "sync" in body["en"].lower()
+    assert "6" not in body["en"], "send_failed must not recap cohort size"
+    assert plan.target_cohort.cohort_label not in body["en"]
+    assert "ask me" in body["en"].lower()
 
 
-def test_proposed_no_decision_budget_skip_body_says_holding_the_ask():
+def test_proposed_no_decision_budget_skip_body_recaps_full_plan():
     """Case 6 — the VT-334 weekly-budget skip returned {}: no owner_decision was
-    ever set (request_owner_approval_node never ran)."""
+    ever set (request_owner_approval_node never ran, so no chat summary went
+    out either) — this is the owner's ONLY chance to see the plan, so the
+    recap is full (cohort size + label + expected recovery range)."""
     from orchestrator.agent.dispatch import _collapse_reply_body
 
     plan = _proposed_plan(cohort_size=6)
-    body = _collapse_reply_body({}, plan)
+    body = _collapse_reply_body(uuid4(), {}, plan)
 
     assert body is not None
     assert "6" in body["en"]
+    assert plan.target_cohort.cohort_label in body["en"]
     assert "week" in body["en"].lower()
+    assert "10,000" in body["en"] or "₹10,000" in body["en"]  # low_paise=10_000_00 -> ₹10,000
+    assert "ask me" in body["en"].lower()
+
+
+def test_no_case_promises_automatic_resurfacing():
+    """MAJOR finding: no automatic-delivery promise anywhere — no live
+    re-surfacing path exists (run_weekly_cadence_body is a VT-176 stub). The
+    only true affordance is asking again."""
+    from orchestrator.agent.dispatch import _collapse_reply_body
+
+    plan = _proposed_plan(cohort_size=6)
+    for state in ({"owner_decision": "queue_busy"}, {"owner_decision": "send_failed"}, {}):
+        body = _collapse_reply_body(uuid4(), state, plan)
+        assert body is not None
+        for text in body.values():
+            assert "next sync" not in text.lower()
+            assert "weekly sync" not in text.lower()
 
 
 def test_proposed_body_never_claims_persisted_when_it_was_not():
@@ -188,7 +265,7 @@ def test_proposed_body_never_claims_persisted_when_it_was_not():
         _out_of_scope_plan(),
         _insufficient_data_plan(),
     ):
-        body = _collapse_reply_body({}, result)
+        body = _collapse_reply_body(uuid4(), {}, result)
         assert body is not None
         for text in body.values():
             assert "saved" not in text.lower()
@@ -203,14 +280,101 @@ def test_proposed_other_decision_returns_none_no_case():
 
     plan = _proposed_plan()
     for decision in ("approved", "rejected", "needs_changes", "timeout", "defer"):
-        assert _collapse_reply_body({"owner_decision": decision}, plan) is None
+        assert _collapse_reply_body(uuid4(), {"owner_decision": decision}, plan) is None
 
 
 def test_unrecognised_specialist_result_returns_none():
     from orchestrator.agent.dispatch import _collapse_reply_body
 
-    assert _collapse_reply_body({}, None) is None
-    assert _collapse_reply_body({}, object()) is None
+    assert _collapse_reply_body(uuid4(), {}, None) is None
+    assert _collapse_reply_body(uuid4(), {}, object()) is None
+
+
+# ---------------------------------------------------------------------------
+# Redaction — VT-594 review Blocker 2
+# ---------------------------------------------------------------------------
+
+
+def test_out_of_scope_reason_poison_phone_is_redacted():
+    from orchestrator.agent.dispatch import _collapse_reply_body
+
+    plan = _out_of_scope_plan(reason="Call Anita Sharma at 9876543210 about her order.")
+    body = _collapse_reply_body(uuid4(), {}, plan)
+
+    assert body is not None
+    for text in body.values():
+        assert "9876543210" not in text
+
+
+def test_insufficient_data_description_and_remediation_poison_phone_redacted():
+    from orchestrator.agent.dispatch import _collapse_reply_body
+
+    plan = _insufficient_data_plan(
+        description="Call Anita Sharma at 9876543210 for the missing cohort data.",
+        remediation="Ping 9123456780 to confirm the ledger export.",
+    )
+    body = _collapse_reply_body(uuid4(), {}, plan)
+
+    assert body is not None
+    for text in body.values():
+        assert "9876543210" not in text
+        assert "9123456780" not in text
+
+
+def test_registered_customer_name_is_redacted_from_owner_body(monkeypatch):
+    """Delta-review Defect 3 — the autouse fixture stubs the registry to None,
+    so only PATTERN redaction was ever exercised; a registered customer NAME in
+    agent prose (the primary VT-498 concern) was never asserted-scrubbed. Wire a
+    real exact-match predicate and assert the name never reaches the owner."""
+    from orchestrator.agent import dispatch as dispatch_mod
+    from orchestrator.agent.dispatch import _collapse_reply_body
+
+    registered = {"anita", "sharma"}
+    monkeypatch.setattr(
+        dispatch_mod,
+        "_registry_for_tenant",
+        lambda tenant_id: (lambda tok: tok.lower() in registered),
+    )
+    plan = _out_of_scope_plan(reason="Anita Sharma asked us to stop campaigns.")
+    body = _collapse_reply_body(uuid4(), {}, plan)
+
+    assert body is not None
+    for text in body.values():
+        assert "Anita" not in text
+        assert "Sharma" not in text
+
+
+def test_queue_busy_and_budget_skip_poison_cohort_label_is_redacted():
+    """Delta-review Defect 1 — cohort_label is the SAME unconstrained
+    agent-authored free-text class as selection_reason; it must pass the
+    redactor before reaching the queue_busy / budget-skip owner bodies."""
+    from orchestrator.agent.dispatch import _collapse_reply_body
+
+    plan = _proposed_plan(cohort_label="buyers who complained to 9876543210")
+
+    busy = _collapse_reply_body(uuid4(), {"owner_decision": "queue_busy"}, plan)
+    skip = _collapse_reply_body(uuid4(), {}, plan)
+
+    for body in (busy, skip):
+        assert body is not None
+        for text in body.values():
+            assert "9876543210" not in text
+
+
+def test_redaction_uses_registry_for_tenant_and_redact_for_log(monkeypatch):
+    """Wire-up check: the redaction call actually flows through
+    ``_registry_for_tenant`` (per-tenant, fail-soft) + the canonical
+    ``redact_for_log`` primitive — not a bespoke ad-hoc scrub."""
+    from orchestrator.agent import dispatch as dispatch_mod
+
+    calls: list[str] = []
+    monkeypatch.setattr(
+        dispatch_mod, "_registry_for_tenant", lambda tenant_id: calls.append("registry") or None
+    )
+    tenant_id = uuid4()
+    dispatch_mod._redact_agent_text(tenant_id, "Call 9876543210 please.")
+
+    assert calls == ["registry"]
 
 
 # ---------------------------------------------------------------------------
