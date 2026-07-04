@@ -1023,9 +1023,10 @@ def _maybe_send_manager_reply(
     complete SILENT and ``runner.py``'s D1 fallback (VT-583) would fire a generic
     "on it" line INSTEAD of the real answer. This seam sends the actual text.
 
-    Called ONLY for ``terminal_path == "terminal"`` (see call site): the specialist /
-    collapse / escalated paths transmit their own owner-facing message elsewhere, so
-    gating on the terminal path is what prevents a double-send. We reuse
+    Called ONLY for ``terminal_path == "terminal"`` (see call site) — disjoint from
+    the ``"collapse"`` gate ``_maybe_send_collapse_reply`` (VT-594) uses and the VT-88
+    escalated-path ack, so gating on the terminal path is what prevents a double-send.
+    We reuse
     ``send_freeform_ack`` because it RECORDS the assistant turn into ``conversation_log``
     — exactly what ``runner._brain_emitted_owner_reply`` reads — so recording here
     AUTO-suppresses the D1 fallback (no double-send). The manager holds NO send tool by
