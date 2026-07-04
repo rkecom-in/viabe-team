@@ -6,10 +6,15 @@ generation, the ingress-mirroring run_id derivation, the send-guard-breach detec
 reply-verdict (ok/timeout/silent) + assertion evaluation, xfail classification — and _drive_turn's
 transcript assembly with _connect / _post_inbound / _poll_run_status stubbed, so no DB or network is
 touched.
+
+VT-598 additions (below the VT-582 tests): assert_not_d1 (pass/fail/hi-variant), the json-report
+bundle builder's shape + round-trip (append-safe accumulation), the assert_run_reason(_not)
+not-supported wiring, and a scenario-file validation sweep over every canaries/scenarios/*.json.
 """
 
 from __future__ import annotations
 
+import json
 import re
 import sys
 import uuid
@@ -237,7 +242,7 @@ class _FakeConn:
             return _Result([(self._number, "convo-harness-abcd1234")])
         if "SELECT id FROM conversation_log" in s:
             return _Result([(i,) for i in self._before_ids])
-        if "SELECT id, role, text, message_sid, surface FROM conversation_log" in s:
+        if "SELECT id, role, text, message_sid, surface, created_at FROM conversation_log" in s:
             return _Result(self._after_rows)
         return _Result([])
 
@@ -306,3 +311,197 @@ def test_drive_turn_no_run_reason_skips_poll_and_is_silent(monkeypatch):
     assert [t.role for t in res.transcript] == ["owner"]
     assert ch.reply_verdict(res.transcript, res.run_status) == "silent"
     assert ch.evaluate_assertions(res.transcript, run_status=res.run_status, assert_no_silent=True)  # non-empty → silent
+
+
+# --- VT-598: assert_not_d1 (pass / fail / hi-variant) ------------------------------------------
+
+
+def test_is_d1_fallback_only_true_for_bare_en_line():
+    assert ch.is_d1_fallback_only(ch._D1_FALLBACK_EN) is True
+
+
+def test_is_d1_fallback_only_true_for_bare_hi_line():
+    assert ch.is_d1_fallback_only(ch._D1_FALLBACK_HI) is True
+
+
+def test_is_d1_fallback_only_true_with_trivial_padding():
+    # A few stray characters around the D1 line still count as "just D1" (under the substantive floor).
+    text = f"  {ch._D1_FALLBACK_EN}  ok"
+    assert ch.is_d1_fallback_only(text) is True
+
+
+def test_is_d1_fallback_only_false_with_real_substance():
+    text = (
+        f"{ch._D1_FALLBACK_EN} In the meantime here's what I found: your top 3 lapsed customers "
+        "are Priya, Rahul and Anita — want me to draft a message to them?"
+    )
+    assert ch.is_d1_fallback_only(text) is False
+
+
+def test_is_d1_fallback_only_false_when_d1_absent():
+    assert ch.is_d1_fallback_only("Sure — connect your Shopify store at yourstore.myshopify.com") is False
+
+
+def test_assert_not_d1_fires_when_reply_is_bare_d1():
+    turns = [_t("owner", "make me a plan"), _t("assistant", ch._D1_FALLBACK_EN, "MKDEV1")]
+    failures = ch.evaluate_assertions(turns, assert_not_d1=True)
+    assert any("assert_not_d1" in f for f in failures)
+
+
+def test_assert_not_d1_fires_on_hi_variant():
+    turns = [_t("owner", "plan banao"), _t("assistant", ch._D1_FALLBACK_HI, "MKDEV1")]
+    failures = ch.evaluate_assertions(turns, assert_not_d1=True)
+    assert any("assert_not_d1" in f for f in failures)
+
+
+def test_assert_not_d1_satisfied_by_a_real_answer():
+    turns = [_t("owner", "how does this work"), _t("assistant", "Here's exactly how it works: ...", "MKDEV1")]
+    assert ch.evaluate_assertions(turns, assert_not_d1=True) == []
+
+
+def test_assert_not_d1_off_ignores_bare_d1():
+    turns = [_t("owner", "make me a plan"), _t("assistant", ch._D1_FALLBACK_EN, "MKDEV1")]
+    assert ch.evaluate_assertions(turns, assert_not_d1=False) == []
+
+
+def test_assert_not_d1_does_not_fire_when_d1_mentioned_alongside_real_content():
+    # The D1 phrase appearing IN PASSING (with plenty of other substance) is not the failure mode.
+    turns = [_t("assistant", (
+        f"{ch._D1_FALLBACK_EN} Also, your Shopify store probe-store-a.myshopify.com is now connected "
+        "and syncing orders every 15 minutes."
+    ), "MKDEV1")]
+    assert ch.evaluate_assertions(turns, assert_not_d1=True) == []
+
+
+# --- VT-598: assert_run_reason / assert_run_reason_not — NOT SUPPORTED, wired as an explicit FAIL
+
+
+def test_assert_run_reason_is_not_supported_and_fails():
+    turns = [_t("owner", "hi"), _t("assistant", "a real answer", "MKDEV1")]
+    failures = ch.evaluate_assertions(turns, assert_run_reason="edge_case:status_query")
+    assert any("NOT SUPPORTED" in f and "assert_run_reason:" in f for f in failures)
+
+
+def test_assert_run_reason_not_is_not_supported_and_fails():
+    turns = [_t("owner", "hi"), _t("assistant", "a real answer", "MKDEV1")]
+    failures = ch.evaluate_assertions(turns, assert_run_reason_not="edge_case:status_query")
+    assert any("NOT SUPPORTED" in f and "assert_run_reason_not:" in f for f in failures)
+
+
+def test_assert_run_reason_unset_is_a_pure_no_op():
+    turns = [_t("owner", "hi"), _t("assistant", "a real answer", "MKDEV1")]
+    assert ch.evaluate_assertions(turns) == []
+
+
+# --- VT-598: _new_conversation_turns carries created_at (json-report needs it) ------------------
+
+
+def test_new_conversation_turns_reads_created_at_from_6_tuple(monkeypatch):
+    # (id, role, text, message_sid, surface, created_at) — the post-VT-598 SELECT shape.
+    rows = [(1, "assistant", "hi there", "MKDEV1", "manager", "2026-07-04T00:00:00+00:00")]
+    conn = _FakeConn(number="+15550123456", before_ids=set(), after_rows=rows)
+    turns = ch._new_conversation_turns(conn, "tenant-x", set())
+    assert turns[0].created_at == "2026-07-04T00:00:00+00:00"
+
+
+def test_new_conversation_turns_tolerates_missing_created_at_column():
+    # A 5-tuple (pre-VT-598 shape) must not raise — created_at falls back to None.
+    rows = [(1, "assistant", "hi there", "MKDEV1", "manager")]
+    conn = _FakeConn(number="+15550123456", before_ids=set(), after_rows=rows)
+    turns = ch._new_conversation_turns(conn, "tenant-x", set())
+    assert turns[0].created_at is None
+
+
+# --- VT-598: json-report bundle — shape + round-trip (append-safe) ------------------------------
+
+
+def _step_result(label, transcript):
+    return ch.StepResult(
+        ok=(label == "PASS"), xfail=False, label=label, reasons=[],
+        transcript=transcript, run_status="completed", ingress_reason="started",
+    )
+
+
+def test_turn_to_dict_shape():
+    turn = ch.Turn(role="assistant", text="hello", message_sid="MKDEV1", surface="manager",
+                    created_at="2026-07-04T00:00:00+00:00")
+    d = ch._turn_to_dict(turn)
+    assert d["role"] == "assistant"
+    assert d["text"] == "hello"
+    assert d["surface"] == "manager"
+    assert d["created_at"] == "2026-07-04T00:00:00+00:00"
+
+
+def test_build_json_report_shape():
+    scenario = {"name": "probe_scenario", "steps": [{"message": "hi"}]}
+    results = [_step_result("PASS", [ch.Turn(role="assistant", text="hello", message_sid="MKDEV1")])]
+    summary = {"passed": 1, "xfailed": 0, "xpassed": 0, "failed": 0, "timed_out": 0}
+    entry = ch._build_json_report(scenario, "canaries/scenarios/probe_scenario.json", "tenant-x",
+                                   scenario["steps"], results, summary)
+    assert entry["scenario"] == "canaries/scenarios/probe_scenario.json"
+    assert entry["name"] == "probe_scenario"
+    assert entry["tenant_id"] == "tenant-x"
+    assert "harness_sha" in entry  # may be None outside a git checkout — key must be present
+    assert entry["summary"] == summary
+    assert len(entry["steps"]) == 1
+    step = entry["steps"][0]
+    assert step["message"] == "hi"
+    assert step["label"] == "PASS"
+    assert step["transcript"][0]["text"] == "hello"
+    # round-trips through json.dumps/loads cleanly (no raw datetime/dataclass objects left)
+    json.loads(json.dumps(entry))
+
+
+def test_append_json_report_creates_and_accumulates(tmp_path):
+    path = str(tmp_path / "bundle.json")
+    scenario_a = {"name": "scenario_a", "steps": [{"message": "hi"}]}
+    scenario_b = {"name": "scenario_b", "steps": [{"message": "yo"}]}
+    results = [_step_result("PASS", [ch.Turn(role="assistant", text="ok", message_sid="MKDEV1")])]
+    summary = {"passed": 1, "xfailed": 0, "xpassed": 0, "failed": 0, "timed_out": 0}
+
+    entry_a = ch._build_json_report(scenario_a, "a.json", "tenant-a", scenario_a["steps"], results, summary)
+    ch._append_json_report(path, entry_a)
+
+    with open(path, encoding="utf-8") as fh:
+        loaded = json.load(fh)
+    assert isinstance(loaded, list)
+    assert len(loaded) == 1
+    assert loaded[0]["name"] == "scenario_a"
+
+    entry_b = ch._build_json_report(scenario_b, "b.json", "tenant-b", scenario_b["steps"], results, summary)
+    ch._append_json_report(path, entry_b)
+
+    with open(path, encoding="utf-8") as fh:
+        loaded = json.load(fh)
+    assert len(loaded) == 2  # accumulated, not clobbered
+    assert [e["name"] for e in loaded] == ["scenario_a", "scenario_b"]
+
+
+def test_append_json_report_starts_fresh_on_corrupt_file(tmp_path):
+    path = tmp_path / "bundle.json"
+    path.write_text("not valid json {{{", encoding="utf-8")
+    scenario = {"name": "scenario_a", "steps": [{"message": "hi"}]}
+    results = [_step_result("PASS", [ch.Turn(role="assistant", text="ok", message_sid="MKDEV1")])]
+    summary = {"passed": 1, "xfailed": 0, "xpassed": 0, "failed": 0, "timed_out": 0}
+    entry = ch._build_json_report(scenario, "a.json", "tenant-a", scenario["steps"], results, summary)
+    ch._append_json_report(str(path), entry)  # must not raise on the corrupt pre-existing file
+    loaded = json.loads(path.read_text(encoding="utf-8"))
+    assert len(loaded) == 1
+
+
+# --- VT-598: every new scenario JSON parses + has the required schema keys ---------------------
+
+
+_SCENARIOS_DIR = _CANARIES / "scenarios"
+
+
+@pytest.mark.parametrize("scenario_path", sorted(_SCENARIOS_DIR.glob("*.json")), ids=lambda p: p.name)
+def test_every_scenario_json_loads_and_has_required_keys(scenario_path):
+    scenario = ch._load_scenario(str(scenario_path))
+    assert isinstance(scenario, dict)
+    assert "name" in scenario, scenario_path
+    assert "steps" in scenario and isinstance(scenario["steps"], list) and scenario["steps"], scenario_path
+    for step in scenario["steps"]:
+        assert "message" in step and isinstance(step["message"], str) and step["message"], (
+            scenario_path, step,
+        )

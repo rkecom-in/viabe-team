@@ -1,0 +1,20 @@
+{
+  "name": "delegation_analytical_routing",
+  "expected_fail": false,
+  "notes": "VT-595 regression: an ANALYTICAL win-back-adjacent question ('which of my customers have stopped buying?') must NOT mis-route to the status_query raw-count fast-path (edge_case:status_query) — it should engage real analysis/delegation. assert_run_reason_not is deliberately NOT used here: VT-598 investigation found NO pipeline_runs/pipeline_steps column carries DispatchResult.reason for the edge_case fast-path (dispatch_brain returns before _write_compose_output ever runs for that branch), so assert_run_reason_not would be structurally unverifiable — convo_harness.py wires it as an explicit not-supported FAIL rather than a silent no-op, so it is intentionally omitted from this scenario rather than added and left permanently red. The working proxy is assert_not_contains against the status_query raw-count signature phrase. Setup: `setup --onboarded --seed-lapsed-customers 8 --name convo-harness-<id>` then `script <tenant> delegation_analytical_routing.json`.",
+  "steps": [
+    {
+      "message": "which of my customers have stopped buying?",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "assert_not_contains": ["you currently have"],
+      "note": "Analytical ask — must engage real analysis (delegation or a substantive answer), never the bare status_query raw-count signature reply, never D1."
+    },
+    {
+      "message": "how many customers do I have?",
+      "assert_no_silent": true,
+      "assert_contains": ["8"],
+      "note": "The pure count ask (genuinely status_query) still fast-paths to the raw number — this contrast is the point of the scenario."
+    }
+  ]
+}

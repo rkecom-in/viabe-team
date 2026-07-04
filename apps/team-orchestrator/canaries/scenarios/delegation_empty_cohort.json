@@ -1,0 +1,13 @@
+{
+  "name": "delegation_empty_cohort",
+  "expected_fail": false,
+  "notes": "NO seeded lapsed cohort (empty customer ledger) — a win-back plan ask must get an honest empty/insufficient-data reply, never a fabricated plan (no invented customer counts/amounts), never D1. assert_not_contains: [\"₹\"] would be too strict — a currency symbol alone doesn't prove fabrication (an honest reply might legitimately mention pricing in another context) — so this relies on assert_not_d1 + manual transcript review (json-report/judge) for 'did it fabricate specifics with no data behind it'. Setup: `setup --onboarded --name convo-harness-<id>` (deliberately WITHOUT --seed-lapsed-customers) then `script <tenant> delegation_empty_cohort.json`.",
+  "steps": [
+    {
+      "message": "make me a plan to win back my lapsed customers",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "note": "No customers/ledger data exists for this tenant. Expect an honest 'not enough data yet' / 'connect a data source first' class reply — never a fabricated plan, never D1. Manual review (json-report/judge transcript) verdicts fabrication quality."
+    }
+  ]
+}

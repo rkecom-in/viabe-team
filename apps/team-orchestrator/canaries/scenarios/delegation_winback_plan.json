@@ -1,0 +1,21 @@
+{
+  "name": "delegation_winback_plan",
+  "expected_fail": false,
+  "notes": "Sales-Recovery delegation: a seeded lapsed cohort + a win-back plan ask should DELEGATE to the Sales-Recovery specialist and surface an in-chat plan summary + approval prompt (VT-594). Setup: `setup --onboarded --seed-lapsed-customers 8 --name convo-harness-<id>` then `script <tenant> delegation_winback_plan.json`. Step 1 accepts EITHER honest outcome: (a) a real plan summary + approval prompt (cohort non-empty — the primary expectation given the seed), OR (b) an honest insufficient-data reply if the seed didn't clear the activation gate's percentile floors for this run. Both are asserted here only for 'not a D1 non-answer' and 'not the raw status_query count line' — the ORCHESTRATOR SESSION reading the full json-report/judge transcript makes the final quality call on which outcome occurred and whether it's acceptable. Step 2 confirms the pure customer-count ask still fast-paths to the raw number regardless of what step 1 produced.",
+  "steps": [
+    {
+      "message": "make me a plan to win back my lapsed customers this month",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "assert_contains": ["plan"],
+      "assert_not_contains": ["got it — i'm on it and i'll update you shortly", "i'm on it and i'll update you"],
+      "note": "Expect delegation to Sales-Recovery: an in-chat plan summary + approval prompt, OR an honest empty/insufficient-cohort reply — never a D1 non-answer, never silence. Manual review (json-report transcript) verdicts which outcome actually happened."
+    },
+    {
+      "message": "how many customers do I have?",
+      "assert_no_silent": true,
+      "assert_contains": ["8"],
+      "note": "Pure count ask still fast-paths via status_query regardless of the win-back plan outcome above."
+    }
+  ]
+}
