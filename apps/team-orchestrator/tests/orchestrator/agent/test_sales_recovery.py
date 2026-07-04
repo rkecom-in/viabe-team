@@ -129,6 +129,67 @@ def _patched_client(response: Any) -> Any:
     return fake
 
 
+def test_max_tokens_stop_continues_and_stitches_terminal_text(monkeypatch):
+    """VT-596 #2 — a stop_reason='max_tokens' turn is NOT terminal: the loop banks
+    the partial text, sends the continuation prompt, and stitches the parts for
+    the terminal parse. Proven live: Sonnet-5's draft length is variable; a
+    truncated JSON must not land on the invalid-output escalation when a
+    continuation completes it."""
+    from orchestrator.agent.sales_recovery import _CONTINUE_PROMPT
+
+    part1 = _fake_response(
+        text='{"status": "place', input_tokens=2000, output_tokens=4096,
+        stop_reason="max_tokens",
+    )
+    part2 = _fake_response(
+        text='holder"}', input_tokens=2100, output_tokens=20, stop_reason="end_turn"
+    )
+    fake = MagicMock()
+    fake.messages.create.side_effect = [part1, part2]
+
+    monkeypatch.setenv("VIABE_ENV", "test")
+    monkeypatch.setattr(
+        "orchestrator.agent.sales_recovery.Anthropic", lambda: fake
+    )
+    result = run_sales_recovery_agent(
+        SalesRecoveryContext(tenant_id="t1", run_id="r1", user_request="test request")
+    )
+
+    assert fake.messages.create.call_count == 2
+    # The 2nd call carries the banked partial assistant turn + the continue nudge.
+    second_messages = fake.messages.create.call_args_list[1].kwargs["messages"]
+    assert second_messages[-1] == {"role": "user", "content": _CONTINUE_PROMPT}
+    assert second_messages[-2]["role"] == "assistant"
+    # The stitched text parsed — the run is a clean placeholder terminal, NOT invalid.
+    assert result.status == "placeholder"
+    assert result.output == {"status": "placeholder"}
+
+
+def test_max_tokens_continuation_budget_exhausts_to_invalid_not_hang(monkeypatch):
+    """Exhausting _MAX_CONTINUATION_TURNS falls through to the normal terminal
+    handling: a still-unparseable stitch lands on status='invalid' (the CL-287
+    observable FailureRecord path), never an infinite continue loop."""
+    from orchestrator.agent.sales_recovery import _MAX_CONTINUATION_TURNS
+
+    truncated = _fake_response(
+        text='{"never": "closes', input_tokens=2000, output_tokens=4096,
+        stop_reason="max_tokens",
+    )
+    fake = MagicMock()
+    fake.messages.create.return_value = truncated  # every turn truncates
+
+    monkeypatch.setenv("VIABE_ENV", "test")
+    monkeypatch.setattr(
+        "orchestrator.agent.sales_recovery.Anthropic", lambda: fake
+    )
+    result = run_sales_recovery_agent(
+        SalesRecoveryContext(tenant_id="t1", run_id="r1", user_request="test request")
+    )
+
+    assert fake.messages.create.call_count == _MAX_CONTINUATION_TURNS + 1
+    assert result.status == "invalid"
+
+
 def test_run_sales_recovery_agent_placeholder_happy_path(monkeypatch):
     """Placeholder prompt → model returns the placeholder JSON →
     status='placeholder', output is the parsed dict, raw_messages
