@@ -115,6 +115,15 @@ def route_edge_case(
         from orchestrator.owner_inputs.status_query import answer_status_query
 
         text = answer_status_query(tenant_id, body)
+        if text is None:
+            # VT-600 — the classifier said status_query but the deterministic parse
+            # found no lookup it owns (e.g. "did you get my store address?"): fall
+            # through to the brain instead of the old portal deflection. The
+            # classification still rides intent_sink as the brain's prior.
+            logger.info(
+                "route_edge_case: status_query parse=unknown — falling through to the agent"
+            )
+            return None
         _send_edge_ack(tenant_id, sender_phone, text)
         return DispatchResult(
             final_status="completed", terminal_path="terminal", reason="edge_case:status_query"

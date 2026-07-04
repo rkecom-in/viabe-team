@@ -160,36 +160,31 @@ def test_out_of_scope_body_carries_the_reason():
     assert plan.out_of_scope_reason in body["hi"]
 
 
-def test_insufficient_data_body_carries_missing_data_and_remediation():
-    from orchestrator.agent.dispatch import _collapse_reply_body
-
-    plan = _insufficient_data_plan()
-    body = _collapse_reply_body(uuid4(), {}, plan)
-
-    assert body is not None
-    assert plan.missing_data[0].description in body["en"]
-    assert plan.missing_data[0].suggested_remediation in body["en"]
-
-
-def test_insufficient_data_multi_item_join_present_in_both_languages():
-    """VT-594 review test gap #5 — 2+ missing_data items must ALL appear
-    (joined), in both the en and hi bodies."""
+def test_insufficient_data_body_is_owner_register_never_agent_prose():
+    """VT-600 (VT-598 opus-judge finding): the agent's missing_data descriptions
+    are ENGINEER prose — they must NOT reach the owner body. The owner gets the
+    deterministic owner-register line (honest, actionable, jargon-free); the
+    per-item detail persists in the VT-379 observability rows instead."""
     from orchestrator.agent.dispatch import _collapse_reply_body
 
     plan = _insufficient_data_plan(
-        description="No dormant-customer rows surfaced.",
-        remediation="Seed the customer ledger.",
+        description="Dormant-cohort substrate not populated (target_cohort.customer_ids empty).",
+        remediation="Run customer-ledger ingest / dormant-cohort extraction.",
         extra_items=[
-            ("purchase_history", "No purchase-history rows in the last 90 days.", "Connect POS export."),
+            ("purchase_history", "No L4 skill-corpus rows for expected_arrr basis.", "Seed the ledger."),
         ],
     )
     body = _collapse_reply_body(uuid4(), {}, plan)
 
     assert body is not None
-    assert plan.missing_data[0].description in body["en"]
-    assert plan.missing_data[1].description in body["en"]
-    assert plan.missing_data[0].description in body["hi"]
-    assert plan.missing_data[1].description in body["hi"]
+    for text in body.values():
+        for item in plan.missing_data:
+            assert item.description not in text
+            assert item.suggested_remediation not in text
+        for jargon in ("substrate", "cohort", "expected_arrr", "customer_ids", "ingest", "L4"):
+            assert jargon not in text
+    assert "connect your store" in body["en"].lower()
+    assert "स्टोर" in body["hi"]
 
 
 def test_proposed_queue_busy_body_recaps_cohort_and_says_another_open():
