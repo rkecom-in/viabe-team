@@ -16,7 +16,7 @@ import logging
 import os
 from datetime import UTC, datetime
 from typing import Any
-from uuid import NAMESPACE_URL, uuid5
+from uuid import NAMESPACE_URL, UUID, uuid5
 
 from dbos import DBOS, SetWorkflowID
 from fastapi import APIRouter, Header, HTTPException
@@ -26,6 +26,7 @@ from orchestrator.error_router import route_failure
 from orchestrator.failures import FailureRecord, FailureType
 from orchestrator.graph import get_pool
 from orchestrator.integrations.customer_inbound import customer_inbound_run
+from orchestrator.privacy.consent import record_consent
 from orchestrator.runner import webhook_pipeline_run
 from orchestrator.utils.phone_token import hash_phone
 
@@ -309,3 +310,83 @@ def twilio_ingress(
         # Pillar 7: never 5xx for an application error.
         logger.exception("twilio-ingress: failed sid=%s", message_sid)
         return {"workflow_id": None, "reason": "error_logged"}
+
+
+# --- VT-598 addendum: dev-test consent seeding ---------------------------------------------------
+#
+# LIVE FINDING (2026-07): canaries/convo_harness.py's --seed-lapsed-customers writes
+# record_of_consent by calling orchestrator.privacy.consent.record_consent() DIRECTLY in the
+# harness's OWN process (via `railway run`, which does not inject the SEALED
+# TEAM_PHONE_HASH_SALT). That tokenises phone_e164 with a throwaway/default salt, while the
+# DEPLOYED service (this same module, running for real) computes phone_token with its real sealed
+# salt. The two tokens never match, so a locally-seeded consent row can never join against what the
+# deployed sales_recovery detection query (db/wrappers._LAPSED_CANDIDATES_SQL) computes server-side
+# — a seeded cohort silently reads as empty (proven live: 6 seeded lapsed customers -> "dormant
+# cohort count is 0"). The existing /api/orchestrator/consent/capture endpoint calls record_consent
+# SERVER-SIDE already (the correct fix shape) but is guarded by INTERNAL_API_SECRET only, which is
+# SEALED on Railway exactly like TEAM_PHONE_HASH_SALT — the harness (which only has
+# DEV_TEST_INGRESS_SECRET injected) cannot authenticate to it either.
+#
+# Fix: a DEV-ONLY sibling that does the SAME server-side record_consent() call, guarded by the
+# SAME _verify_internal_secret() this module already uses for /twilio-ingress — reused verbatim,
+# not reimplemented, so the CL-431 fail-closed prod gate (DEV_TEST_INGRESS_SECRET is INERT unless
+# EXPECTED_ENV positively reads dev/development) covers this endpoint identically. Note the prod
+# INTERNAL_API_SECRET ALSO authenticates here on every env, same as /consent/capture — this does
+# NOT add a new prod capability: whoever holds that secret can already write an arbitrary consent
+# record via /consent/capture today, so exposing the same record_consent() call under a second path
+# does not widen what a real INTERNAL_API_SECRET holder can already do in prod.
+
+
+class ConsentSeedBody(BaseModel):
+    tenant_id: str
+    phone_e164: str
+    consent_text_version: str
+
+
+class ConsentSeedResponse(BaseModel):
+    recorded: bool
+    active: bool
+    # First 12 chars only — this is a dev-test convenience echo (log/debug correlation), not a
+    # capability the caller needs the full token for; no reason to put more of it on the wire.
+    phone_token_prefix: str
+
+
+def _parse_dev_test_tenant(raw: str) -> UUID:
+    try:
+        return UUID(raw)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="invalid tenant_id") from exc
+
+
+@router.post("/api/orchestrator/dev-test/consent-seed")
+def dev_test_consent_seed(
+    body: ConsentSeedBody,
+    x_internal_secret: str | None = Header(default=None),
+) -> ConsentSeedResponse:
+    """VT-598 addendum — DEV-ONLY consent seeding for the conversation harness's
+    ``--seed-lapsed-customers`` path (see the module-level note above for the full finding).
+
+    Guarded by ``_verify_internal_secret`` — the SAME function ``/twilio-ingress`` uses, reused
+    verbatim: accepts the prod ``INTERNAL_API_SECRET`` on every env, ADDITIONALLY accepts
+    ``DEV_TEST_INGRESS_SECRET`` only on a positively-dev ``EXPECTED_ENV`` (CL-431 fail-closed — the
+    dev secret is inert on prod). Calls ``record_consent`` IN THIS PROCESS — i.e. with the deployed
+    service's own (sealed) ``TEAM_PHONE_HASH_SALT`` — so the ``phone_token`` this writes is
+    BYTE-IDENTICAL to what this same service computes for the same ``phone_e164`` anywhere else
+    (the detection query included). This is the entire fix: move the tokenisation into the process
+    that actually holds the real salt.
+    """
+    if not _verify_internal_secret(x_internal_secret):
+        raise HTTPException(status_code=403, detail="invalid internal secret")
+    tenant_id = _parse_dev_test_tenant(body.tenant_id)
+    rec = record_consent(
+        tenant_id,
+        body.phone_e164,
+        consent_text_version=body.consent_text_version,
+        consent_method="dev_test_seed",
+        source="convo-harness-seed",
+    )
+    return ConsentSeedResponse(
+        recorded=True,
+        active=rec.active,
+        phone_token_prefix=rec.phone_token[:12],
+    )
