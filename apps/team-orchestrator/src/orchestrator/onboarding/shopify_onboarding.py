@@ -605,19 +605,36 @@ def maybe_resume_shopify_onboarding(
             if not is_done:
                 # VT-583: a NON-floor reply is intent-classified (done | link | other). The
                 # authoritative DB re-check below still gates any "done"; nothing here fabricates
-                # progress. Every branch SENDS (no silent path — the :405 edge is closed).
+                # progress.
                 intent = classify_auth_intent(body)
                 if intent == "done":
                     is_done = True  # a done-intent phrasing → fall through to the DB re-check
                 elif intent == "link":
+                    # on-script (a resend ask): stays deterministic, unchanged by VT-597.
                     reminted = _remint_auth_link(tenant_id, pending, recipient)
                     return {
                         "done": False,
                         "phase": phase,
                         "routed": "shopify_auth_link_reminted" if reminted else "shopify_auth_link_need_shop",
                     }
+                elif intent == "other":
+                    # VT-597 (mirrors VT-588's discovery-gate conversion): the classifier POSITIVELY
+                    # identified this as a genuine off-script message (a question / topic-switch / chat)
+                    # — neither "done" nor "link". FALL THROUGH to the manager brain (return None)
+                    # rather than the canned honest-waiting line: dispatch_brain's
+                    # _build_onboarding_state_block already covers PHASE_AUTH, so the brain answers the
+                    # off-script message AND guides the owner back to tapping the link + replying
+                    # 'done'. This branch writes no state, so pending_owner_input stays live — the
+                    # owner's NEXT 'done'/'link' still re-engages this gate. Kills the AUTH-phase half
+                    # of the context_retention defect (topic_switch "what do you charge?" /
+                    # context_retention "did you get my store address?" mid-auth).
+                    return None
                 else:
-                    # question / other / classifier-unavailable → HONEST waiting line, ALWAYS sent.
+                    # intent is None: the classifier was UNAVAILABLE or failed (no key / timeout /
+                    # unparseable) — there is no POSITIVE "other" signal to discriminate an off-script
+                    # message from noise, so this preserves the current, safe, deterministic behavior:
+                    # an honest waiting line, ALWAYS sent (never silence, never an unclassified message
+                    # left to fall through ungated).
                     _send(recipient, _auth_waiting_line(walkthrough), tenant_id=tenant_id)
                     return {"done": False, "phase": phase, "routed": "shopify_auth_waiting"}
             if not shopify_is_connected(tenant_id):

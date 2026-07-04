@@ -623,36 +623,51 @@ def test_auth_link_intent_remints_fresh_link(substrate, monkeypatch, _capture_sh
 
 
 @_DB
-def test_auth_other_intent_sends_honest_waiting_line(substrate, monkeypatch, _capture_shopify_sends):
-    """A non-floor question/other → an HONEST waiting line (with the link), never the canned re-prompt,
-    never silence."""
+def test_auth_other_intent_falls_through_to_brain(substrate, monkeypatch, _capture_shopify_sends):
+    """VT-597 (mirrors VT-588's discovery-gate conversion): a non-floor question/other reply is a
+    genuine off-script message — the classifier POSITIVELY identified it as neither 'done' nor 'link'.
+    The gate FALLS THROUGH (returns None) so the manager brain answers it (it has
+    _build_onboarding_state_block's awaiting-auth text), instead of the canned honest-waiting line.
+    The pending state stays LIVE (oauth_completion, phase_2_auth) so the owner's next 'done' still
+    re-engages this gate — the detour does not abandon the hand-off."""
     from orchestrator.onboarding.shopify_onboarding import (
         maybe_resume_shopify_onboarding,
+        read_integration_state,
         start_shopify_setup,
     )
 
     _mock_auth_intent(monkeypatch, "other")
     tenant = _new_tenant(substrate.dsn)
     start_shopify_setup(tenant, "vt425.myshopify.com")
-    r = maybe_resume_shopify_onboarding(
-        tenant, "how long does this usually take", "SID-auth-other-1", recipient="+919000000005",
-        connector_factory=_mock_factory,
-    )
-    assert r is not None and r["routed"] == "shopify_auth_waiting"
-    assert _capture_shopify_sends, "an other-intent reply must still send an honest line (no silence)"
+    for msg in ("how long does this usually take", "did you get my store address?",
+                "what do you charge?", "actually can I use a different store"):
+        r = maybe_resume_shopify_onboarding(
+            tenant, msg, f"SID-auth-other-{abs(hash(msg)) % 9999}", recipient="+919000000005",
+            connector_factory=_mock_factory,
+        )
+        assert r is None, f"off-script {msg!r} must fall through to the brain, not the waiting line"
+    assert not _capture_shopify_sends, "a fall-through must not also send the gate's own waiting line"
+    state = read_integration_state(tenant)
+    assert state["phase"] == "phase_2_auth"
+    assert state["pending_owner_input"]["awaiting"] == "oauth_completion"
 
 
 @_DB
 def test_auth_silent_edge_absent_walkthrough_still_sends(substrate, monkeypatch, _capture_shopify_sends):
     """VT-583 D3 — the :405-416 silent edge: a non-done reply with NO walkthrough_url on the pending used
-    to send NOTHING. Now it ALWAYS sends an honest line (offering a fresh link)."""
+    to send NOTHING. Now it ALWAYS sends an honest line (offering a fresh link).
+
+    VT-597 moved the explicit 'other' intent off this path (it now falls through to the brain — see
+    ``test_auth_other_intent_falls_through_to_brain``), so this canary now drives the case that still
+    owns the honest-waiting-line send: the classifier UNAVAILABLE (None) — no positive signal to
+    discriminate, so the deterministic fail-soft reply is what must never go silent."""
     from orchestrator.onboarding import shopify_onboarding
     from orchestrator.onboarding.shopify_onboarding import (
         PHASE_AUTH,
         maybe_resume_shopify_onboarding,
     )
 
-    _mock_auth_intent(monkeypatch, "other")
+    _mock_auth_intent(monkeypatch, None)
     tenant = _new_tenant(substrate.dsn)
     # A phase_2_auth pending WITHOUT a walkthrough_url (the silent-edge condition).
     pending = shopify_onboarding._validated_pending(
@@ -672,8 +687,10 @@ def test_auth_silent_edge_absent_walkthrough_still_sends(substrate, monkeypatch,
 
 @_DB
 def test_auth_classifier_unavailable_still_sends(substrate, monkeypatch, _capture_shopify_sends):
-    """Classifier unavailable (returns None, e.g. no live key) → the 'other' path → an honest line is
-    STILL sent. Fail-soft = a guaranteed reply, never silence."""
+    """Classifier unavailable (returns None, e.g. no live key) → NO positive 'other' signal, so the
+    gate does NOT fall through blind — it keeps the deterministic honest-waiting line (VT-597: falling
+    through is reserved for a POSITIVE 'other' classification only). Fail-soft = a guaranteed reply,
+    never silence, never an unclassified message left to the brain unsupervised."""
     from orchestrator.onboarding.shopify_onboarding import (
         maybe_resume_shopify_onboarding,
         start_shopify_setup,
