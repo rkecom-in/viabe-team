@@ -9,7 +9,8 @@ touched.
 
 VT-598 additions (below the VT-582 tests): assert_not_d1 (pass/fail/hi-variant), the json-report
 bundle builder's shape + round-trip (append-safe accumulation), the assert_run_reason(_not)
-not-supported wiring, and a scenario-file validation sweep over every canaries/scenarios/*.json.
+not-supported wiring, a scenario-file validation sweep over every canaries/scenarios/*.json, and
+(VT-598 addendum) the dev-test consent-seed preference wiring (mocked HTTP, no DB).
 """
 
 from __future__ import annotations
@@ -19,6 +20,7 @@ import re
 import sys
 import uuid
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -505,3 +507,131 @@ def test_every_scenario_json_loads_and_has_required_keys(scenario_path):
         assert "message" in step and isinstance(step["message"], str) and step["message"], (
             scenario_path, step,
         )
+
+
+# --- VT-598 addendum: dev-test consent-seed wiring (salt-mismatch fix) --------------------------
+#
+# LIVE FINDING: --seed-lapsed-customers previously called record_consent() directly in the
+# harness's own process, tokenising with a throwaway salt that never matches the deployed
+# service's (sealed) TEAM_PHONE_HASH_SALT — a seeded cohort always read as empty on deployed dev.
+# The fix: prefer POSTing to the new dev-test consent-seed endpoint (server-side salt) whenever an
+# ingress base + secret are BOTH available.
+
+
+def test_optional_ingress_base_from_arg():
+    assert ch._optional_ingress_base("https://example.test/") == "https://example.test"
+
+
+def test_optional_ingress_base_from_env(monkeypatch):
+    monkeypatch.setenv("TEAM_ORCHESTRATOR_URL", "https://env.example.test/")
+    assert ch._optional_ingress_base(None) == "https://env.example.test"
+
+
+def test_optional_ingress_base_none_when_unconfigured(monkeypatch):
+    monkeypatch.delenv("TEAM_ORCHESTRATOR_URL", raising=False)
+    assert ch._optional_ingress_base(None) is None
+
+
+def test_consent_seed_uses_endpoint_requires_both_base_and_secret():
+    assert ch._consent_seed_uses_endpoint("https://x", "secret") is True
+    assert ch._consent_seed_uses_endpoint("https://x", None) is False
+    assert ch._consent_seed_uses_endpoint(None, "secret") is False
+    assert ch._consent_seed_uses_endpoint(None, None) is False
+
+
+def test_record_seed_consent_prefers_endpoint_when_url_given(monkeypatch):
+    """The core VT-598 addendum assertion: given an ingress base + secret, the seeding path calls
+    the endpoint (mocked HTTP — no real network, no DB), NEVER the local record_consent."""
+    post_stub = MagicMock()
+    monkeypatch.setattr(ch, "_post_consent_seed", post_stub)
+    record_consent_stub = MagicMock()
+    monkeypatch.setattr("orchestrator.privacy.consent.record_consent", record_consent_stub)
+
+    ch._record_seed_consent(
+        "tenant-x", "+15550123456", "dev-test-v0",
+        ingress_base="https://dev.example.test", ingress_secret="the-secret",
+    )
+
+    post_stub.assert_called_once_with(
+        "https://dev.example.test", "the-secret", "tenant-x", "+15550123456", "dev-test-v0",
+    )
+    record_consent_stub.assert_not_called()
+
+
+def test_record_seed_consent_falls_back_to_local_when_no_url(monkeypatch):
+    post_stub = MagicMock()
+    monkeypatch.setattr(ch, "_post_consent_seed", post_stub)
+    record_consent_stub = MagicMock()
+    monkeypatch.setattr("orchestrator.privacy.consent.record_consent", record_consent_stub)
+
+    ch._record_seed_consent(
+        "tenant-x", "+15550123456", "dev-test-v0", ingress_base=None, ingress_secret=None,
+    )
+
+    post_stub.assert_not_called()
+    record_consent_stub.assert_called_once_with(
+        "tenant-x", "+15550123456", consent_text_version="dev-test-v0",
+    )
+
+
+def test_record_seed_consent_falls_back_when_only_secret_given(monkeypatch):
+    # Both must be present — a secret with no base URL is not enough to use the endpoint.
+    post_stub = MagicMock()
+    monkeypatch.setattr(ch, "_post_consent_seed", post_stub)
+    record_consent_stub = MagicMock()
+    monkeypatch.setattr("orchestrator.privacy.consent.record_consent", record_consent_stub)
+
+    ch._record_seed_consent(
+        "tenant-x", "+15550123456", "dev-test-v0", ingress_base=None, ingress_secret="the-secret",
+    )
+
+    post_stub.assert_not_called()
+    record_consent_stub.assert_called_once()
+
+
+# --- _post_consent_seed: the actual HTTP call (mocked requests.post) ----------------------------
+
+
+class _FakeResponse:
+    def __init__(self, status_code, json_body=None, text=""):
+        self.status_code = status_code
+        self._json_body = json_body or {}
+        self.text = text
+
+    def json(self):
+        return self._json_body
+
+
+def test_post_consent_seed_posts_expected_url_headers_and_body(monkeypatch):
+    captured = {}
+
+    def _fake_post(url, json=None, headers=None, timeout=None):  # noqa: A002 - mirrors requests' kwarg name
+        captured["url"] = url
+        captured["json"] = json
+        captured["headers"] = headers
+        captured["timeout"] = timeout
+        return _FakeResponse(200, {"recorded": True, "active": True, "phone_token_prefix": "abc123456789"})
+
+    monkeypatch.setattr("requests.post", _fake_post)
+
+    result = ch._post_consent_seed(
+        "https://dev.example.test", "the-secret", "tenant-x", "+15550123456", "dev-test-v0",
+    )
+
+    assert captured["url"] == "https://dev.example.test/api/orchestrator/dev-test/consent-seed"
+    assert captured["json"] == {
+        "tenant_id": "tenant-x", "phone_e164": "+15550123456", "consent_text_version": "dev-test-v0",
+    }
+    assert captured["headers"]["X-Internal-Secret"] == "the-secret"
+    assert result["recorded"] is True
+
+
+def test_post_consent_seed_dies_on_non_200(monkeypatch):
+    def _fake_post(url, json=None, headers=None, timeout=None):  # noqa: A002
+        return _FakeResponse(403, text="invalid internal secret")
+
+    monkeypatch.setattr("requests.post", _fake_post)
+
+    with pytest.raises(SystemExit) as exc_info:
+        ch._post_consent_seed("https://dev.example.test", "wrong-secret", "tenant-x", "+15550123456", "v0")
+    assert exc_info.value.code == 2

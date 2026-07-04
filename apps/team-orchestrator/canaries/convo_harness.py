@@ -81,6 +81,10 @@ from typing import Any
 # --- constants ---------------------------------------------------------------------------------
 
 _INGRESS_PATH = "/api/orchestrator/twilio-ingress"
+# VT-598 addendum — the dev-only server-side consent-seed endpoint (twilio_ingress.py
+# dev_test_consent_seed), guarded identically to _INGRESS_PATH. See _post_consent_seed's docstring
+# for the salt-mismatch finding this exists to fix.
+_CONSENT_SEED_PATH = "/api/orchestrator/dev-test/consent-seed"
 # US 555-01xx directory-test range: obviously bogus, and NEVER in DEV_SEND_ALLOWLIST (the four +91
 # Fazal-provided numbers), so the dev_send_guard mocks every outbound to it.
 _BOGUS_PREFIX = "+15550"
@@ -300,6 +304,14 @@ def _ingress_base(arg_url: str | None) -> str:
     return base.rstrip("/")
 
 
+def _optional_ingress_base(arg_url: str | None) -> str | None:
+    """Like ``_ingress_base``, but returns None instead of dying when no ingress URL is configured
+    — for callers (``setup --seed-lapsed-customers``) that have a LOCAL-DB fallback path and don't
+    need to force an ingress URL to exist (VT-598 addendum)."""
+    base = arg_url or os.environ.get("TEAM_ORCHESTRATOR_URL")
+    return base.rstrip("/") if base else None
+
+
 def _dev_secret() -> str:
     # Preferred: env (a CLI arg lands in `ps`). Read here, used ONLY as a header, NEVER printed.
     secret = os.environ.get("DEV_TEST_INGRESS_SECRET", "")
@@ -420,6 +432,37 @@ def _post_inbound(base: str, secret: str, fields: dict[str, str]) -> dict[str, A
     )
     if resp.status_code != 200:
         return {"workflow_id": None, "reason": f"http_{resp.status_code}"}
+    return resp.json()
+
+
+def _post_consent_seed(
+    base: str, secret: str, tenant_id: str, phone_e164: str, consent_version: str
+) -> dict[str, Any]:
+    """VT-598 addendum — POST one customer's consent to the DEPLOYED service's dev-test
+    consent-seed endpoint, so ``record_consent`` runs SERVER-SIDE (the service's own, sealed
+    ``TEAM_PHONE_HASH_SALT``) instead of in the harness's own process.
+
+    LIVE FINDING this fixes: seeding consent by calling ``record_consent`` directly in the
+    harness's process (via `railway run`, which does not inject the sealed salt) tokenises
+    ``phone_e164`` with a DIFFERENT salt than the deployed service uses — the seeded consent row
+    can never join against what the service's own sales_recovery detection query computes, so a
+    seeded lapsed cohort silently reads as empty on deployed dev. Fail-not-skip: raises (via
+    ``_die``) on a non-200 rather than silently proceeding with a half-seeded cohort."""
+    import requests
+
+    resp = requests.post(
+        f"{base}{_CONSENT_SEED_PATH}",
+        json={
+            "tenant_id": tenant_id, "phone_e164": phone_e164, "consent_text_version": consent_version,
+        },
+        headers={"X-Internal-Secret": secret, "content-type": "application/json"},
+        timeout=30,
+    )
+    if resp.status_code != 200:
+        _die(
+            f"consent-seed endpoint returned {resp.status_code} for tenant={tenant_id}: "
+            f"{resp.text[:300]}"
+        )
     return resp.json()
 
 
@@ -655,6 +698,10 @@ class LapsedSeedResult:
     n_recent: int
     n_ledger_entries: int
     connector_id: str
+    # VT-598 addendum: "endpoint(server-salt)" (consent tokenised by the deployed service — the
+    # correct path) or "local(salt-mismatch-on-deployed-dev)" (the pre-fix fallback — see
+    # _post_consent_seed's docstring for why this never matches on deployed dev).
+    consent_via: str
 
 
 def _lapsed_seed_rows(n: int) -> list[tuple[int, int]]:
@@ -674,8 +721,34 @@ def _lapsed_seed_rows(n: int) -> list[tuple[int, int]]:
     return rows
 
 
+def _consent_seed_uses_endpoint(ingress_base: str | None, ingress_secret: str | None) -> bool:
+    """VT-598 addendum — the seeding path's preference rule: use the deployed service's dev-test
+    consent-seed endpoint (server-side salt) whenever BOTH an ingress base URL and its secret are
+    available; otherwise fall back to a local record_consent call."""
+    return bool(ingress_base and ingress_secret)
+
+
+def _record_seed_consent(
+    tenant_id: str, phone_e164: str, consent_version: str, *,
+    ingress_base: str | None, ingress_secret: str | None,
+) -> None:
+    """One seeded customer's consent write — VT-598: prefers ``_post_consent_seed`` (the deployed
+    service's dev-test endpoint, server-side salt) whenever ``_consent_seed_uses_endpoint`` says
+    yes; otherwise falls back to calling ``record_consent`` directly in THIS process (which will
+    NOT match on deployed dev — see ``_seed_lapsed_customers``'s docstring). Split out from the
+    seeding loop so the preference rule is independently unit-testable with mocked HTTP."""
+    if _consent_seed_uses_endpoint(ingress_base, ingress_secret):
+        assert ingress_base is not None and ingress_secret is not None  # narrows for mypy
+        _post_consent_seed(ingress_base, ingress_secret, tenant_id, phone_e164, consent_version)
+    else:
+        from orchestrator.privacy.consent import record_consent  # local-DB fallback only
+
+        record_consent(tenant_id, phone_e164, consent_text_version=consent_version)
+
+
 def _seed_lapsed_customers(
-    dsn: str, tenant_id: str, *, n: int, consent_version: str
+    dsn: str, tenant_id: str, *, n: int, consent_version: str,
+    ingress_base: str | None = None, ingress_secret: str | None = None,
 ) -> LapsedSeedResult:
     """Seed a majority-lapsed / minority-recent bogus customer base + matching sale ledger rows +
     an ACTIVE marketing-cleared consent row per customer + a connected data-source connector +
@@ -683,13 +756,25 @@ def _seed_lapsed_customers(
     ownership_verified — agents.activation_registry.REGISTRY), so a conversational win-back ask
     can DELEGATE to the Sales-Recovery specialist and ground a real plan instead of falling
     through to the empty-ledger reply. Writes via the REAL tenant-scoped writers
-    (CustomersWrapper.insert / record_ledger_entries / record_consent — the same RLS-correct,
-    idempotency/consent-tokenisation-correct paths production uses), same posture as
-    ``_seed_journey_state``. All bogus/synthetic (CL-422). Additive: re-running adds MORE
-    customers, it does not reset the tenant."""
+    (CustomersWrapper.insert / record_ledger_entries — the same RLS-correct, idempotency-correct
+    paths production uses), same posture as ``_seed_journey_state``. All bogus/synthetic (CL-422).
+    Additive: re-running adds MORE customers, it does not reset the tenant.
+
+    VT-598 addendum — consent tokenisation salt: when ``ingress_base`` + ``ingress_secret`` are
+    BOTH given, each customer's consent is recorded via the DEPLOYED service's dev-test
+    consent-seed endpoint (``_post_consent_seed``) — record_consent runs SERVER-SIDE, tokenised
+    with the service's own (sealed) ``TEAM_PHONE_HASH_SALT``. Otherwise it falls back to calling
+    ``record_consent`` directly in THIS process, which tokenises with whatever salt this process
+    resolves to (a throwaway/default one under `railway run`, since the real salt is sealed and
+    not injected) — a phone_token that will NEVER match what the deployed service computes for the
+    same phone_e164, so on deployed dev the seeded cohort reads as empty. The local path remains
+    for local-DB-only runs (e.g. a canary against a local Postgres with no deployed service to call
+    at all) — ``LapsedSeedResult.consent_via`` reports which path ran."""
     from orchestrator.db.wrappers import CustomersWrapper
     from orchestrator.integrations.ledger import LedgerEntryIn, record_ledger_entries
-    from orchestrator.privacy.consent import record_consent
+
+    use_endpoint = _consent_seed_uses_endpoint(ingress_base, ingress_secret)
+    consent_via = "endpoint(server-salt)" if use_endpoint else "local(salt-mismatch-on-deployed-dev)"
 
     _ensure_substrate(dsn)
     customers = CustomersWrapper()
@@ -711,7 +796,9 @@ def _seed_lapsed_customers(
             },
         )
         customer_id = str(row["id"])
-        record_consent(tenant_id, phone, consent_text_version=consent_version)
+        _record_seed_consent(
+            tenant_id, phone, consent_version, ingress_base=ingress_base, ingress_secret=ingress_secret,
+        )
         entry = LedgerEntryIn(
             amount_paise=amount_paise,
             entry_type="sale",
@@ -745,6 +832,7 @@ def _seed_lapsed_customers(
     return LapsedSeedResult(
         n_customers=len(seed_rows), n_lapsed=n_lapsed, n_recent=n_recent,
         n_ledger_entries=n_ledger_entries, connector_id=_SEED_CONNECTOR_ID,
+        consent_via=consent_via,
     )
 
 
@@ -806,8 +894,22 @@ def cmd_setup(args: argparse.Namespace) -> int:
 
     seeded: LapsedSeedResult | None = None
     if args.seed_lapsed_customers is not None:
+        # VT-598 addendum: prefer seeding consent via the deployed service's dev-test endpoint
+        # (server-side salt) whenever an ingress URL is configured; fall back to the local-DB path
+        # (which will NOT match on deployed dev — see _seed_lapsed_customers's docstring) only when
+        # no ingress URL is available at all.
+        ingress_base = _optional_ingress_base(args.ingress_url)
+        ingress_secret = os.environ.get("DEV_TEST_INGRESS_SECRET", "") if ingress_base else ""
+        if ingress_base and not ingress_secret:
+            _die(
+                "an ingress URL is configured (--ingress-url or TEAM_ORCHESTRATOR_URL) but "
+                "DEV_TEST_INGRESS_SECRET is not set in env — cannot use the server-side "
+                "consent-seed endpoint. Either set the secret, or omit the ingress URL to fall "
+                "back to the local (salt-mismatch-on-deployed-dev) path."
+            )
         seeded = _seed_lapsed_customers(
             dsn, tenant_id, n=args.seed_lapsed_customers, consent_version=args.consent_version,
+            ingress_base=ingress_base, ingress_secret=ingress_secret or None,
         )
 
     print(f"tenant_id={tenant_id}")
@@ -818,6 +920,16 @@ def cmd_setup(args: argparse.Namespace) -> int:
         print(f"seeded {seeded.n_customers} customers ({seeded.n_lapsed} lapsed / {seeded.n_recent} "
               f"recent), {seeded.n_ledger_entries} sale-ledger rows, connector={seeded.connector_id!r} "
               f"enabled, verification_status=gstin_verified, ownership_verified=true")
+        print(f"consent_via={seeded.consent_via}")
+        if seeded.consent_via.startswith("local"):
+            print(
+                "    WARNING (VT-598): consent seeded LOCALLY — the phone_token was computed with "
+                "THIS process's TEAM_PHONE_HASH_SALT, not the deployed service's (sealed) salt. On "
+                "deployed dev these will NOT match what detect_lapsed_customers computes "
+                "server-side, so the seeded cohort will read as EMPTY there. Pass --ingress-url "
+                "(or set TEAM_ORCHESTRATOR_URL) with DEV_TEST_INGRESS_SECRET set to seed consent "
+                "via the server-side endpoint instead."
+            )
         print(f"consent_version={args.consent_version!r} — MUST match a member of dev's Railway "
               f"MARKETING_CONSENT_VERSIONS env var or detect_lapsed_customers returns ZERO candidates "
               f"regardless of this seed (VT-396 dev-test hook; structurally fail-closed on prod)")
@@ -1048,6 +1160,15 @@ def build_parser() -> argparse.ArgumentParser:
              "or detection structurally returns zero candidates regardless of this seed (default "
              "'dev-test-v0', the VT-396 plan's documented dev-test convention — confirm it against "
              "the actual dev env var before relying on a non-empty cohort).",
+    )
+    s.add_argument(
+        "--ingress-url", default=None,
+        help="VT-598 addendum: deployed dev orchestrator base URL (or set TEAM_ORCHESTRATOR_URL). "
+             "When --seed-lapsed-customers is ALSO given and DEV_TEST_INGRESS_SECRET is set, "
+             "consent is seeded via the deployed service's dev-test consent-seed endpoint "
+             "(server-side salt — the correct path); omitted, seeding falls back to a LOCAL "
+             "record_consent call that will NOT match on deployed dev (see "
+             "_seed_lapsed_customers's docstring).",
     )
     s.set_defaults(func=cmd_setup)
 
