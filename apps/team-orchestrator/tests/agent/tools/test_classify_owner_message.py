@@ -84,6 +84,13 @@ SCENARIOS = [
         "other",
         id="other_greeting",
     ),
+    pytest.param(
+        "which of my customers have stopped buying?",
+        {"classification": "business_analysis", "confidence": 0.9,
+         "suggested_action": "analyze lapsed customers via sales recovery"},
+        "business_analysis",
+        id="business_analysis_lapsed_customers",
+    ),
 ]
 
 
@@ -192,6 +199,39 @@ def test_classify_owner_message_invalid_envelope_raises() -> None:
             ClassifyOwnerMessageInput(text="anything", tenant_id="11111111-1111-1111-1111-111111111111"), client=fake,
             consent_check=lambda _t: True,
         )
+
+
+# --- VT-595: business_analysis label + v4.0 prompt ---------------------------
+
+def test_business_analysis_in_classification_literal() -> None:
+    from orchestrator.agent.tools.classify_owner_message import Classification
+
+    assert "business_analysis" in Classification.__args__
+
+
+def test_envelope_accepts_business_analysis() -> None:
+    from orchestrator.agent.tools.classify_owner_message import (
+        ClassifyOwnerMessageOutput,
+    )
+
+    out = ClassifyOwnerMessageOutput(
+        classification="business_analysis",
+        confidence=0.9,
+        suggested_action="analyze lapsed customers via sales recovery",
+    )
+    assert out.classification == "business_analysis"
+
+
+def test_prompt_is_v4_and_carries_business_analysis_and_tightened_status_query() -> None:
+    """VT-595: the loaded prompt is v4.0, defines business_analysis, and no longer
+    defines status_query broadly enough to swallow a WHICH/WHY analysis question."""
+    from orchestrator.agent.tools.classify_owner_message import _SYSTEM_PROMPT
+
+    assert "version=4.0" in _SYSTEM_PROMPT
+    assert "business_analysis" in _SYSTEM_PROMPT
+    assert "which of my customers have stopped buying" in _SYSTEM_PROMPT.lower()
+    # the tightened status_query definition no longer claims to cover an analysis ask
+    assert "status_query vs business_analysis" in _SYSTEM_PROMPT
 
 
 @pytest.mark.skipif(

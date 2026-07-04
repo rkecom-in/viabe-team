@@ -12,6 +12,14 @@ ledger): added the ``first_data_step_onboarding`` intent (owner initiating the
 first onboarding data step) + externalised the system prompt to
 ``prompts/classify_owner_message_v2.md`` (versioned via its metadata header, same
 posture as self_evaluate + VT-63).
+
+VT-595 — prompt **v4.0**: added the ``business_analysis`` intent (owner asking
+WHICH/WHO customers or WHY, e.g. "which of my customers have stopped buying?" —
+an analysis question, not a fact lookup) and tightened ``status_query`` to pure
+count/fact lookups only. Fixes a defect where an analytical question keyed on
+the word "customers" and short-circuited to a raw count via the
+``edge_cases_router`` status_query fast-path instead of falling through to the
+Team-Manager brain, which owns delegating analysis to the Sales-Recovery lane.
 """
 
 from __future__ import annotations
@@ -41,6 +49,11 @@ Classification = Literal[
     "adhoc_campaign_request",
     "status_query",
     "template_error_followup",
+    # VT-595: an owner question that requires ANALYSIS over their data (WHICH/WHO/WHY),
+    # not a pure count/fact lookup. Deliberately NOT in edge_cases_router's fast-path
+    # branches and NOT in dispatch._ROUTINE_INTENTS — it falls through to the Opus-tier
+    # brain, which owns delegating to the analysis lane (e.g. spawn_sales_recovery).
+    "business_analysis",
     "other",
 ]
 
@@ -71,10 +84,12 @@ class ClassifyOwnerMessageOutput(BaseModel):
     skipped_reason: str | None = None
 
 
-# VT-267 PR-B: system prompt externalised + versioned (v2.0). The version string
-# lives in the file's metadata header (Type-1 governance change).
+# VT-267 PR-B: system prompt externalised + versioned (v2.0), bumped to v3.0 (VT-84,
+# first_data_step_onboarding) then v4.0 (VT-595, business_analysis label + status_query
+# tightened to pure count/fact lookups). The version string lives in the file's
+# metadata header (Type-1 governance change).
 _PROMPT_PATH = (
-    Path(__file__).resolve().parent / "prompts" / "classify_owner_message_v3.md"
+    Path(__file__).resolve().parent / "prompts" / "classify_owner_message_v4.md"
 )
 _SYSTEM_PROMPT = _PROMPT_PATH.read_text(encoding="utf-8")
 
