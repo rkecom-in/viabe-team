@@ -770,6 +770,9 @@ def run_sales_recovery_agent(
     # stitched (in order) with the final turn's text before the JSON parse.
     continuation_turns = 0
     terminal_text_parts: list[str] = []
+    # VT-596 #3 — one corrective retry when the terminal JSON fails the
+    # CampaignPlan schema (field-path feedback; see the parse except below).
+    schema_retry_used = False
 
     # VT-182/VT-514 — stage the per-turn reasoning input envelope so the
     # @with_reasoning_capture callback writes agent_reasoning_step rows (the
@@ -1025,6 +1028,32 @@ def run_sales_recovery_agent(
                 source="agent_schema_rejection",
                 schema_field_paths=field_paths,
             )
+            # VT-596 #3 (live pack finding, 2026-07-04): Sonnet-5 INTERMITTENTLY
+            # drops the grounding (observed: proposed.evidence_refs: too_short)
+            # — the draft is otherwise sound, so a single CORRECTIVE retry that
+            # names the failing schema paths (loc+type only — non-PII by the
+            # same VT-496 argument) recovers the run instead of escalating to
+            # the owner. ONE retry per run; a second rejection lands on the
+            # existing invalid/escalation net. Both attempts stay observable
+            # (the FailureRecord above fires for each rejection).
+            if not schema_retry_used and field_paths:
+                schema_retry_used = True
+                terminal_text_parts = []
+                messages.append(
+                    {"role": "assistant", "content": [{"type": "text", "text": text}]}
+                )
+                correction = (
+                    "Your CampaignPlan JSON failed schema validation on: "
+                    + "; ".join(field_paths)
+                    + ". Re-emit the COMPLETE corrected JSON object — same "
+                    "plan, fixing ONLY the failing fields. Every contract "
+                    "rule still applies (e.g. evidence_refs must be non-empty "
+                    "and every [En] marker must have a matching ref). Output "
+                    "ONLY the JSON — no commentary."
+                )
+                messages.append({"role": "user", "content": correction})
+                raw_messages.append({"role": "user", "content": correction})
+                continue
             status = "invalid"
             break
 
