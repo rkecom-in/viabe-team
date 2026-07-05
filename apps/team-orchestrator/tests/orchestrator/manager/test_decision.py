@@ -168,13 +168,18 @@ def test_record_revise_returns_step_to_pending(pool):
 
 
 @_DB
-def test_record_clarify_parks_on_owner(pool):
+def test_record_clarify_never_parks_on_owner_with_no_question_mechanism(pool):
+    """VT-607 residual (adversarial review): this module has NO owner_question mechanism anywhere
+    (ManagerDecision/SpecialistReturn carry no such field) — decide_next_action's CLARIFY branch
+    is reached purely via "no action, no pushback". Parking 'waiting_owner' here would be
+    permanent and unresolvable (nothing would ever ask/answer a question that was never surfaced).
+    record_decision must instead return the step to 'pending' (same as REVISE), never park it."""
     from orchestrator.manager import task_store as ts
 
     tid, task, step = _running_task_with_step(pool)
     d.record_decision(tid, task, step, d.ManagerDecision(d.ManagerDecisionKind.CLARIFY, "ask"))
-    assert ts.get_task(tid, task)["status"] == "waiting_owner"
-    assert ts.get_steps(tid, task)[0]["status"] == "waiting"
+    assert ts.get_steps(tid, task)[0]["status"] == "pending"
+    assert ts.get_task(tid, task)["status"] != "waiting_owner"
 
 
 @_DB
