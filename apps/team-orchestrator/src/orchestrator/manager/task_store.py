@@ -226,6 +226,26 @@ def has_active_task(tenant_id: UUID | str) -> bool:
     return row is not None
 
 
+def has_active_integration_step(tenant_id: UUID | str) -> bool:
+    """VT-608 ruling 1 — the runner-gate DEFER check: is there an active plan-store task whose
+    CURRENT step targets the integration_agent specialist? When True, the deterministic runner gate
+    (``runner.py``'s ``maybe_resume_shopify_onboarding`` call site) defers to the loop — the loop
+    owns this tenant's integration objective and reads the SAME ``tenant_integration_state`` truth,
+    so both paths write through the same phase-state functions and the defer check is what prevents
+    concurrent ownership (no dual-writer race). ``current_step_id`` (not just "any pending/running
+    step") is the deliberate join key — a task can have other non-current steps; only the step the
+    task is ACTUALLY on right now determines ownership."""
+    with tenant_connection(tenant_id) as conn:
+        row = conn.execute(
+            "SELECT 1 FROM manager_tasks t "
+            "JOIN manager_task_steps s ON s.id = t.current_step_id AND s.tenant_id = t.tenant_id "
+            "WHERE t.tenant_id = %s AND t.status = ANY(%s) AND s.specialist = 'integration_agent' "
+            "LIMIT 1",
+            (str(tenant_id), list(TASK_ACTIVE)),
+        ).fetchone()
+    return row is not None
+
+
 def find_task_id(tenant_id: UUID | str, idempotency_key: str) -> UUID | None:
     """Resolve a task's id from its ``(tenant, idempotency_key)`` — the live producer's run-keyed
     handle. A manager_task is minted at the delegation seam keyed on the run, so the later
@@ -350,5 +370,5 @@ __all__ = [
     "TERMINAL_OUTCOMES", "OWNER_NOTIFICATION_STATUSES",
     "STEP_KINDS", "STEP_STATUSES", "STEP_TERMINAL", "STEP_NON_TERMINAL", "EVIDENCE_KINDS",
     "create_task", "set_task_status", "get_task", "find_task_id", "find_task_by_source_ref",
-    "has_active_task", "add_step", "set_step_status", "get_steps",
+    "has_active_task", "has_active_integration_step", "add_step", "set_step_status", "get_steps",
 ]
