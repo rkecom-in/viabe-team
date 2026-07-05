@@ -160,6 +160,63 @@ def test_tenant_isolation(pool):
     assert ts.get_task(tid_b, task_a) is None
 
 
+# --- has_active_task (VT-606 round-3, used by the triage seam) ---------------------------------
+
+
+def test_has_active_task_false_when_no_tasks_at_all(pool):
+    from orchestrator.manager import task_store as ts
+
+    tid = _seed_tenant(pool)
+    assert ts.has_active_task(tid) is False
+
+
+def test_has_active_task_true_for_running(pool):
+    from orchestrator.manager import task_store as ts
+
+    tid = _seed_tenant(pool)
+    ts.create_task(tid, {"goal": "x"}, status="running")
+    assert ts.has_active_task(tid) is True
+
+
+def test_has_active_task_false_for_queued(pool):
+    """'queued' is deliberately excluded from TASK_ACTIVE — a queued sibling doesn't itself hold
+    the admission slot; the ACTIVE task ahead of it does."""
+    from orchestrator.manager import task_store as ts
+
+    tid = _seed_tenant(pool)
+    ts.create_task(tid, {"goal": "x"}, status="queued")
+    assert ts.has_active_task(tid) is False
+
+
+def test_has_active_task_false_for_shadow(pool):
+    """VT-606 round-3 fix: 'shadow' is excluded from TASK_ACTIVE — a shadow-mode plan must never
+    occupy the tenant's one-active-task admission slot."""
+    from orchestrator.manager import task_store as ts
+
+    tid = _seed_tenant(pool)
+    ts.create_task(tid, {"goal": "x"}, status="shadow")
+    assert ts.has_active_task(tid) is False
+
+
+def test_has_active_task_false_for_terminal_status(pool):
+    from orchestrator.manager import task_store as ts
+
+    tid = _seed_tenant(pool)
+    ts.create_task(tid, {"goal": "x"}, status="completed")
+    assert ts.has_active_task(tid) is False
+
+
+def test_has_active_task_tenant_isolation(pool):
+    from orchestrator.manager import task_store as ts
+
+    tid_a = _seed_tenant(pool)
+    tid_b = _seed_tenant(pool)
+    ts.create_task(tid_a, {"goal": "A's active task"}, status="running")
+
+    assert ts.has_active_task(tid_a) is True
+    assert ts.has_active_task(tid_b) is False
+
+
 def test_stalled_task_reaper(pool):
     from orchestrator.manager import task_store as ts
     from orchestrator.orphan_reaper import reap_stalled_manager_tasks
