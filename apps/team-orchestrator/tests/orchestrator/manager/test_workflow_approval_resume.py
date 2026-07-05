@@ -27,6 +27,14 @@ faked ONLY to avoid a live LLM call at graph-compile time (the resumed node neve
 
 Mirrors ``tests/orchestrator/test_e2e_sr_agent.py``'s substrate + seed/teardown pattern exactly
 (``_e2e_seed.seed`` / ``_e2e_plan.build_proposed_plan``, both siblings in ``tests/orchestrator/``).
+
+VT-607 update: the FK gap this suite originally worked around (``pending_approvals.run_id`` /
+``campaigns.run_id`` both reference ``pipeline_runs.id``, and ``manager_task_workflow`` never
+created that row for its own dispatches) is now FIXED at the source —
+``_dispatch_specialist_step`` mints its own ``pipeline_runs`` row before ``graph.invoke``. The
+positive test below no longer seeds one manually; the control test still does, since it drives a
+raw stand-in ``graph.invoke`` directly (bypassing ``_dispatch_specialist_step`` by design, to
+isolate the OLD thread_id/run_id mismatch) and so never goes through the fix.
 """
 
 from __future__ import annotations
@@ -83,10 +91,10 @@ def substrate() -> Any:
 
 def _seed_pipeline_run(dsn: str, tenant_id: str, run_id: Any) -> None:
     """Both ``pending_approvals.run_id`` and ``campaigns.run_id`` carry a FOREIGN KEY to
-    ``pipeline_runs.id`` (migrations 005 / 016) — a separate, pre-existing architectural gap from
-    the thread_id/state['run_id'] mismatch this suite's main fix addresses (flagged in the VT-606
-    round-3 completion report): manager_task_workflow never creates a pipeline_runs row for its own
-    dispatches. Seeded here so this test can cleanly prove the specific invariant under test."""
+    ``pipeline_runs.id`` (migrations 005 / 016). VT-607 fixed this at the source for the REAL
+    dispatch path (``_dispatch_specialist_step`` now mints its own row) — this helper is used ONLY
+    by the control test below, which drives a raw stand-in graph directly and so never goes
+    through that fix."""
     with psycopg.connect(dsn, autocommit=True) as conn:
         conn.execute(
             "INSERT INTO pipeline_runs (id, tenant_id, run_type, status) "
@@ -221,7 +229,10 @@ def test_approval_interrupt_through_real_loop_resumes_the_persisted_thread(
 
         monkeypatch.setattr(dispatch_mod, "_resolve_model", _fake_resolve_model)
 
-        # --- create + claim the step, seed the pipeline_runs FK target, dispatch for real ---
+        # --- create + claim the step, dispatch for real ---
+        # VT-607: no manual pipeline_runs seeding here anymore — _dispatch_specialist_step mints
+        # its own pipeline_runs row (id=loop_run_id) before graph.invoke, so the pending_approvals/
+        # campaigns FK is satisfied by the REAL code path, not a test-side workaround.
         task_id, step = _create_and_claim_step(str(t1.tenant_id))
         step_id = str(step["step_id"])
         attempt = 1
@@ -229,7 +240,6 @@ def test_approval_interrupt_through_real_loop_resumes_the_persisted_thread(
         from orchestrator.manager import message_ids
 
         expected_run_id = message_ids.loop_run_id(task_id, step_id, attempt)
-        _seed_pipeline_run(dsn, str(t1.tenant_id), expected_run_id)
 
         from orchestrator.manager.workflow import _dispatch_specialist_step
 
@@ -243,6 +253,29 @@ def test_approval_interrupt_through_real_loop_resumes_the_persisted_thread(
         # this graph.invoke returned — so the outcome the caller sees is the fail-safe default
         # (manager_review_outcome is never re-read after a mid-graph interrupt).
         assert outcome == "escalate"
+
+        # --- VT-607 adversarial proof: NO manual pipeline_runs seeding above, yet collapse's
+        # campaigns INSERT and request_owner_approval's pending_approvals INSERT BOTH satisfied
+        # their FK to pipeline_runs.id — because _dispatch_specialist_step minted that row itself.
+        # A dangling/missing row here would have raised psycopg.errors.ForeignKeyViolation before
+        # this line was ever reached; these assertions additionally confirm the row's own
+        # columns/status lifecycle (mirrors close_webhook_run_paused's 'paused' convention). ---
+        with psycopg.connect(dsn, autocommit=True) as conn:
+            run_row = conn.execute(
+                "SELECT tenant_id, run_type, status, ended_at FROM pipeline_runs WHERE id = %s",
+                (str(expected_run_id),),
+            ).fetchone()
+        assert run_row is not None, (
+            "_dispatch_specialist_step did not mint its own pipeline_runs row for loop_run_id"
+        )
+        run_tenant_id, run_type, run_status, ended_at = run_row
+        assert str(run_tenant_id) == str(t1.tenant_id)
+        assert run_type == "manager_dispatch"
+        assert run_status == "paused", (
+            f"a graph paused mid-invoke (the approval gate) must close pipeline_runs as 'paused' "
+            f"(close_webhook_run_paused's own convention), not silently left 'running'; got {run_status!r}"
+        )
+        assert ended_at is not None
 
         # --- THE invariant: pending_approvals.run_id == the loop-minted uuid5 thread id ---
         with psycopg.connect(dsn, autocommit=True) as conn:

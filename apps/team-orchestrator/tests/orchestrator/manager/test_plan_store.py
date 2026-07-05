@@ -480,6 +480,99 @@ def test_append_step_missing_task_raises(pool):
         )
 
 
+def test_replace_step_supersedes_old_and_carries_others_forward(pool):
+    """replace_step's happy path: old_step_id becomes real (superseded) history at its ORIGINAL
+    revision, every OTHER non-superseded step carries forward in place, and the ONE replacement
+    lands fresh as 'pending' at the bumped revision."""
+    from orchestrator.manager import plan_store
+    from orchestrator.manager.plan_models import PlanStep
+
+    tid = _seed_tenant(pool)
+    plan = _simple_plan(
+        steps=[
+            PlanStep(step_seq=1, kind="specialist_dispatch", specialist="sales_recovery_agent"),
+            PlanStep(step_seq=2, kind="verification"),
+        ]
+    )
+    task_id = plan_store.create_plan(tid, plan, source_message_sid=f"SM{uuid4().hex}")
+    step1 = plan_store.claim_next_step(tid, task_id)
+
+    replacement = PlanStep(
+        step_seq=1, kind="specialist_dispatch", specialist="sales_recovery_agent",
+        desired_outcome="a narrower, revised desired outcome",
+    )
+    new_plan = plan_store.replace_step(
+        tid, task_id, step1["step_id"], replacement, expected_plan_revision=1
+    )
+
+    assert new_plan is not None
+    assert new_plan.plan_revision == 2
+
+    with pool.connection() as conn:
+        rows = conn.execute(
+            "SELECT step_seq, status, plan_revision, detail FROM manager_task_steps "
+            "WHERE tenant_id = %s AND task_id = %s ORDER BY step_seq, created_at",
+            (tid, str(task_id)),
+        ).fetchall()
+    # step_seq=1's OLD row: superseded, stays at revision 1 (real history, never edited/deleted).
+    old_step1 = next(r for r in rows if r["status"] == "superseded")
+    assert old_step1["step_seq"] == 1
+    assert old_step1["plan_revision"] == 1
+    # step_seq=1's REPLACEMENT row: pending, at the bumped revision, carrying the revised text.
+    new_step1 = next(
+        r for r in rows if r["step_seq"] == 1 and r["status"] == "pending"
+    )
+    assert new_step1["plan_revision"] == 2
+    assert new_step1["detail"]["desired_outcome"] == "a narrower, revised desired outcome"
+    # step_seq=2 (untouched, non-superseded) carried forward in place — same row, new revision.
+    step2_row = next(r for r in rows if r["step_seq"] == 2)
+    assert step2_row["plan_revision"] == 2
+    assert step2_row["status"] == "pending"
+    assert len(rows) == 3  # old step1 (superseded) + new step1 (pending) + step2 (carried)
+
+
+def test_replace_step_raises_when_old_step_id_not_found_or_already_superseded(pool):
+    """VT-607 residual (adversarial review): replace_step's supersede UPDATE must be rowcount-
+    guarded exactly like claim_next_step's own task-level guard. Without it, a stale/wrong
+    old_step_id (not present at the expected plan_revision, or already superseded) would silently
+    supersede ZERO rows while the function proceeded to insert a replacement anyway — leaving the
+    OLD step still 'pending' alongside the new one, a duplicate-pending-step inconsistency the
+    plan_revision CAS above cannot catch on its own (it only guards the TASK, not this step row)."""
+    from orchestrator.manager import plan_store
+    from orchestrator.manager.plan_models import PlanStep
+
+    tid = _seed_tenant(pool)
+    plan = _simple_plan(
+        steps=[PlanStep(step_seq=1, kind="specialist_dispatch", specialist="sales_recovery_agent")]
+    )
+    task_id = plan_store.create_plan(tid, plan, source_message_sid=f"SM{uuid4().hex}")
+    plan_store.claim_next_step(tid, task_id)
+
+    bogus_step_id = uuid4()  # never existed for this task
+    with pytest.raises(RuntimeError, match="was not superseded"):
+        plan_store.replace_step(
+            tid, task_id, bogus_step_id,
+            PlanStep(step_seq=1, kind="specialist_dispatch", specialist="sales_recovery_agent"),
+            expected_plan_revision=1,
+        )
+
+    # The whole transaction rolled back — no replacement step was inserted, no revision bump.
+    with pool.connection() as conn:
+        rows = conn.execute(
+            "SELECT plan_revision, status FROM manager_task_steps "
+            "WHERE tenant_id = %s AND task_id = %s",
+            (tid, str(task_id)),
+        ).fetchall()
+    assert len(rows) == 1
+    assert rows[0]["status"] == "running"  # the original claimed step, untouched
+    with pool.connection() as conn:
+        task_row = conn.execute(
+            "SELECT plan_revision FROM manager_tasks WHERE tenant_id = %s AND id = %s",
+            (tid, str(task_id)),
+        ).fetchone()
+    assert task_row["plan_revision"] == 1  # never bumped
+
+
 # --- tenant isolation (RLS) still holds on the new plan-store surface --------------------------
 
 

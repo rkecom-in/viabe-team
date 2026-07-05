@@ -268,8 +268,11 @@ def manager_review(
     elif outcome == "revise_step":
         # The step returns to pending to re-run with the revised outcome (mirrors
         # decide_next_action/record_decision's REVISE handling) — the CALLER (manager_task_workflow)
-        # owns actually building + persisting the revised ManagerPlan via plan_store.revise_plan;
-        # this seam only marks the current step re-runnable and records the decision.
+        # owns actually building + persisting the replacement step via plan_store.replace_step
+        # (round-3 MAJOR #4 fix — supersedes this step with one carrying decision.revised_outcome,
+        # carrying every other non-superseded step forward; NOT plan_store.revise_plan, which would
+        # re-insert the WHOLE plan as pending); this seam only marks the current step re-runnable
+        # and records the decision.
         task_store.set_step_status(tenant_id, step_id, "pending", expected_from=("running",))
     elif outcome == "ask_owner":
         task_store.set_step_status(tenant_id, step_id, "waiting", expected_from=("running",))

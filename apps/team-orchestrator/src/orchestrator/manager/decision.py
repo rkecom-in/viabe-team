@@ -111,11 +111,16 @@ def record_decision(
             tenant_id, step_id, "pending", expected_from=("running", "waiting")
         )
     elif kind is ManagerDecisionKind.CLARIFY:
+        # VT-607 residual (adversarial review — the same pattern flagged live in
+        # manager.review.manager_review's round-3 MINOR fix): decide_next_action's CLARIFY branch
+        # here is reached via "the specialist returned no action and no pushback" — there is no
+        # owner_question mechanism ANYWHERE in this module's SpecialistReturn/ManagerDecision
+        # shape, so EVERY CLARIFY this dormant path reaches would park the task 'waiting_owner'
+        # with LITERALLY NOTHING ever asked (no pending_questions row, no notification of any
+        # kind) — permanently, since nothing exists to resolve it. Redirect to the SAME 'pending'
+        # re-dispatch REVISE already uses instead of a permanent, unresolvable park.
         task_store.set_step_status(
-            tenant_id, step_id, "waiting", expected_from=("pending", "running")
-        )
-        task_store.set_task_status(
-            tenant_id, task_id, "waiting_owner", expected_from=("running",)
+            tenant_id, step_id, "pending", expected_from=("running", "waiting")
         )
     elif kind is ManagerDecisionKind.ESCALATE:
         task_store.set_step_status(

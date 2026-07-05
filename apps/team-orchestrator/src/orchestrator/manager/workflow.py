@@ -195,6 +195,16 @@ def _dispatch_specialist_step(
     interrupt raised through this loop forever, since the resume would target a thread that was
     never checkpointed). ``manager_task_id`` (a SEPARATE, stable field) still carries the actual
     task id for the loop's own correlation — unaffected by this fix.
+
+    VT-607 fix (deferred from VT-606 round-3, blocking) — ``run_id``/``loop_run_id`` is now a REAL
+    ``pipeline_runs`` row, minted here before ``graph.invoke``. Both ``pending_approvals.run_id``
+    AND ``campaigns.run_id`` carry a foreign key to ``pipeline_runs.id`` (migrations 005/016) — the
+    round-3 tests worked around the gap by manually seeding a row; this closes it at the source, so
+    ANY loop dispatch that reaches the approval gate or collapse satisfies the FK itself, with no
+    test-side seeding needed. Mirrors ``runner.open_webhook_run``/``close_webhook_run``'s own
+    columns + status lifecycle (running -> paused|completed|escalated) so the reaper/ops views that
+    read ``pipeline_runs`` see loop dispatches the same way they see webhook-driven ones —
+    observability parity is the point here, not just satisfying the constraint.
     """
     from langchain_core.messages import HumanMessage, SystemMessage
 
@@ -231,6 +241,7 @@ def _dispatch_specialist_step(
         "manager_step_acceptance_criteria": acceptance_criteria,
         "manager_has_next_step": has_next_step,
     }
+    _open_dispatch_run(tenant_id, run_id)
     with observability_context(run_id=UUID(task_id), tenant_id=UUID(tenant_id)):
         graph = build_supervisor_graph(
             model=_resolve_model(_BRAIN_MODEL_OPUS),
@@ -242,7 +253,46 @@ def _dispatch_specialist_step(
         )
     outcome = str(terminal_state.get("manager_review_outcome") or "escalate")
     revised_outcome = terminal_state.get("manager_review_revised_outcome")
+    # A pending interrupt (the approval gate paused this invocation) leaves the run 'paused' —
+    # NOT 'completed' — exactly like close_webhook_run_paused's own convention (mig 052): the run
+    # genuinely has not finished, a later resume_run drains it. Everything else is a real terminal
+    # of THIS graph invocation; 'escalate' maps to the CHECK constraint's own distinct 'escalated'
+    # value (nothing else does — the manager's other five outcomes are all "this invocation ended
+    # cleanly", not incident-worthy at the pipeline_runs level).
+    if "__interrupt__" in terminal_state:
+        _close_dispatch_run(tenant_id, run_id, "paused")
+    elif outcome == "escalate":
+        _close_dispatch_run(tenant_id, run_id, "escalated")
+    else:
+        _close_dispatch_run(tenant_id, run_id, "completed")
     return outcome, (str(revised_outcome) if revised_outcome is not None else None)
+
+
+def _open_dispatch_run(tenant_id: str, run_id: UUID) -> None:
+    """Mint the ``pipeline_runs`` row this dispatch's ``run_id`` needs to satisfy the
+    ``pending_approvals``/``campaigns`` foreign keys — mirrors ``runner.open_webhook_run``'s own
+    INSERT shape (``ON CONFLICT (id) DO NOTHING``: idempotent under a DBOS retry of this same
+    step). Not its own ``@DBOS.step()`` — it brackets ``graph.invoke`` inside the SAME step
+    boundary as the rest of ``_dispatch_specialist_step``'s body, so a crash mid-dispatch replays
+    the whole thing atomically (open -> invoke -> close), never a dangling open with no close."""
+    with tenant_connection(tenant_id) as conn, conn.transaction():
+        conn.execute(
+            "INSERT INTO pipeline_runs (id, tenant_id, run_type, status) "
+            "VALUES (%s, %s, 'manager_dispatch', 'running') "
+            "ON CONFLICT (id) DO NOTHING",
+            (str(run_id), str(tenant_id)),
+        )
+
+
+def _close_dispatch_run(tenant_id: str, run_id: UUID, status: str) -> None:
+    """Close this dispatch's ``pipeline_runs`` row — mirrors ``runner.close_webhook_run``'s own
+    UPDATE shape. Idempotent (a re-run after a DBOS retry just re-applies the same terminal
+    status)."""
+    with tenant_connection(tenant_id) as conn:
+        conn.execute(
+            "UPDATE pipeline_runs SET status = %s, ended_at = now() WHERE id = %s",
+            (status, str(run_id)),
+        )
 
 
 @DBOS.step()

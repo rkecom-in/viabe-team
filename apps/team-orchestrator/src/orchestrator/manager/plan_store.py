@@ -456,13 +456,26 @@ def replace_step(
         new_revision = current_revision + 1
 
         # Supersede ONLY the old step — real history, never deleted/edited (stays at its ORIGINAL
-        # plan_revision, marked 'superseded').
-        conn.execute(
+        # plan_revision, marked 'superseded'). VT-607 residual: guard the rowcount exactly like
+        # claim_next_step's own task-level guard — WITHOUT this, a stale/wrong old_step_id (already
+        # superseded, or from a different plan_revision) would silently supersede ZERO rows while
+        # the function proceeds to insert a replacement anyway, leaving the OLD step still 'pending'
+        # alongside the new one (a duplicate-pending-step inconsistency the CAS above cannot catch,
+        # since it only guards the TASK's revision, not this specific step row). Raising here rolls
+        # back the whole transaction (supersede + carry-forward + insert) together.
+        old_step_cur = conn.execute(
             "UPDATE manager_task_steps SET status = 'superseded', version = version + 1, "
             "    updated_at = now() "
-            "WHERE tenant_id = %s AND task_id = %s AND id = %s AND plan_revision = %s",
+            "WHERE tenant_id = %s AND task_id = %s AND id = %s AND plan_revision = %s "
+            "    AND status != 'superseded'",
             (str(tenant_id), str(task_id), str(old_step_id), current_revision),
         )
+        if old_step_cur.rowcount == 0:
+            raise RuntimeError(
+                f"plan_store.replace_step: old_step_id {old_step_id!r} was not superseded "
+                f"(not found at plan_revision={current_revision}, or already superseded) — "
+                "refusing to insert a replacement for a step that was never actually replaced"
+            )
         # Carry every OTHER non-superseded step forward in place (the just-superseded old step is
         # already excluded by this same status filter — no separate id exclusion needed).
         conn.execute(
