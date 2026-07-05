@@ -48,7 +48,7 @@ from dbos import DBOS, SetWorkflowID
 
 from orchestrator.db import tenant_connection
 from orchestrator.manager import plan_store, queue_promotion, task_store
-from orchestrator.manager.message_ids import step_thread_id, step_turn_msg_id
+from orchestrator.manager.message_ids import loop_run_id, step_turn_msg_id
 from orchestrator.manager.review import ManagerReviewOutcome
 from orchestrator.observability.incident_store import create_incident, escalate_incident
 from orchestrator.observability.tm_audit import emit_tm_audit
@@ -167,13 +167,17 @@ def _dispatch_specialist_step(
     acceptance_criteria: list[str],
     specialist: str | None,
     has_next_step: bool,
-) -> str:
+) -> tuple[str, str | None]:
     """ONE graph invocation (enforce mode) for ONE specialist-dispatch attempt. ``manager_review``
     runs INSIDE this same ``graph.invoke`` as a node (supervisor.py) — by the time this returns,
     the step's plan_store effect + tm_audit + (escalate-only) incident are ALREADY persisted.
-    Returns the ``manager_review_outcome`` string (a plain str — DBOS-step-result-safe; the raw
-    LangChain terminal_state is deliberately NOT returned, mirroring ``runner.pipeline_run``'s own
-    convention of a step wrapping ``graph.invoke`` returning a simple, serializable value).
+    Returns ``(manager_review_outcome, manager_review_revised_outcome)`` — a plain
+    ``(str, str | None)`` tuple, DBOS-step-result-safe; the raw LangChain terminal_state is
+    deliberately NOT returned, mirroring ``runner.pipeline_run``'s own convention of a step wrapping
+    ``graph.invoke`` returning a simple, serializable value. The revised-outcome half is round-3's
+    MAJOR #4 fix — the reframed desired_outcome to actually apply on a revise_step decision (the
+    outer loop's revise_step branch calls ``plan_store.replace_step`` with it), never silently
+    discarded.
 
     Amendment A4 — thread_id + EVERY injected message id is scoped to ``(task_id, step_id,
     attempt)``: a revise_step re-dispatch increments ``attempt`` (see the workflow loop below), so
@@ -181,6 +185,16 @@ def _dispatch_specialist_step(
     of THIS SAME step (a mid-dispatch crash before this step's result committed) re-enters with the
     SAME attempt number, so the stable per-slot ids replace themselves in place at the checkpoint
     instead of appending a duplicate (see manager/message_ids.py).
+
+    VT-606 round-3 CRITICAL fix (adversarial review) — the approval-resume invariant: state's
+    ``run_id`` MUST equal the graph's checkpoint ``thread_id`` exactly, because
+    ``request_owner_approval_node`` persists ``state['run_id']`` into ``pending_approvals`` and
+    ``approval_resume.resume_run`` resumes with ``thread_id=str(run_id)`` read back out of that
+    row. Both now derive from the SAME ``message_ids.loop_run_id`` value — never ``UUID(task_id)``
+    for ``run_id`` while the thread uses a different string (that mismatch orphaned any approval
+    interrupt raised through this loop forever, since the resume would target a thread that was
+    never checkpointed). ``manager_task_id`` (a SEPARATE, stable field) still carries the actual
+    task id for the loop's own correlation — unaffected by this fix.
     """
     from langchain_core.messages import HumanMessage, SystemMessage
 
@@ -189,7 +203,8 @@ def _dispatch_specialist_step(
     from orchestrator.observability.decorators import observability_context
     from orchestrator.supervisor import build_supervisor_graph
 
-    thread_id = step_thread_id(task_id, step_id, attempt)
+    run_id = loop_run_id(task_id, step_id, attempt)
+    thread_id = str(run_id)
     specialist_hint = f" (targets the {specialist} specialist)" if specialist else ""
     messages = [
         SystemMessage(
@@ -208,7 +223,7 @@ def _dispatch_specialist_step(
     initial_state: dict[str, Any] = {
         "messages": messages,
         "tenant_id": UUID(tenant_id),
-        "run_id": UUID(task_id),
+        "run_id": run_id,
         "manager_task_id": UUID(task_id),
         "manager_step_id": UUID(step_id),
         "manager_step_situation": situation,
@@ -225,7 +240,9 @@ def _dispatch_specialist_step(
         terminal_state: dict[str, Any] = graph.invoke(
             initial_state, config={"configurable": {"thread_id": thread_id}}
         )
-    return str(terminal_state.get("manager_review_outcome") or "escalate")
+    outcome = str(terminal_state.get("manager_review_outcome") or "escalate")
+    revised_outcome = terminal_state.get("manager_review_revised_outcome")
+    return outcome, (str(revised_outcome) if revised_outcome is not None else None)
 
 
 @DBOS.step()
@@ -395,12 +412,15 @@ def _settle_verified_task(tenant_id: str, task_id: str) -> None:
 
 @DBOS.step()
 def _append_verification_retry_step(tenant_id: str, task_id: str, *, reason: str) -> bool:
-    """The 'one revise cycle' for a not_verified completion: appends ONE additional step (via
-    plan_store.revise_plan, NOT editing the existing done history — Package 2's own supersede-not-
-    edit discipline) framing the verification gap, then transitions the task back to 'running' so
-    the outer loop's claim_next_step picks it up. Returns False (no retry attempted) when the plan
-    is already at PlanStep's own 8-step ceiling — the caller treats that as budget-exhausted too."""
-    from orchestrator.manager.plan_models import ManagerPlan, PlanStep
+    """The 'one revise cycle' for a not_verified completion: appends ONE additional step via
+    ``plan_store.append_step`` (VT-606 round-3 fix — NOT ``revise_plan``, which re-INSERTS every
+    step of a full plan fresh as 'pending'; ``append_step`` carries the existing done history
+    forward UNTOUCHED and only inserts the ONE new step, so ``claim_next_step`` claims exactly that
+    step instead of re-running the whole plan from step 1), then transitions the task back to
+    'running' so the outer loop's claim_next_step picks it up. Returns False (no retry attempted)
+    when the plan is already at PlanStep's own 8-step ceiling — the caller treats that as
+    budget-exhausted too."""
+    from orchestrator.manager.plan_models import PlanStep
 
     plan = plan_store.load_plan(tenant_id, task_id)
     if plan is None or len(plan.steps) >= 8:
@@ -412,14 +432,59 @@ def _append_verification_retry_step(tenant_id: str, task_id: str, *, reason: str
         situation=f"Completion verification did not pass: {reason}",
         desired_outcome="Address the verification gap and re-confirm the objective is met.",
     )
-    new_plan = ManagerPlan(
-        objective=plan.objective,
-        acceptance_criteria=plan.acceptance_criteria,
-        steps=[*plan.steps, retry_step],
-        plan_revision=plan.plan_revision,
+    plan_store.append_step(
+        tenant_id, task_id, retry_step, expected_plan_revision=plan.plan_revision
     )
-    plan_store.revise_plan(tenant_id, task_id, new_plan, expected_plan_revision=plan.plan_revision)
     task_store.set_task_status(tenant_id, task_id, "running", expected_from=("verifying",))
+    return True
+
+
+@DBOS.step()
+def _apply_step_revision(
+    tenant_id: str, task_id: str, step: dict[str, Any], revised_outcome: str | None,
+) -> bool:
+    """VT-606 round-3 fix, MAJOR #4: a revise_step decision must actually APPLY the reframed
+    outcome (``ManagerDecision.revised_outcome``, surfaced via ``manager_review_revised_outcome``)
+    — the bug this closes: manager_review reset the step to 'pending' but the revised text was
+    never applied anywhere, so the re-dispatch used the STALE original desired_outcome.
+
+    Builds a replacement PlanStep (SAME step_seq/kind/specialist/acceptance_criteria/
+    allowed_effect_classes as the original — only desired_outcome changes to the reframed text;
+    situation, the underlying business context, is unchanged) and calls
+    ``plan_store.replace_step`` (supersedes the OLD step as real history, carries every OTHER
+    non-superseded step forward untouched, inserts the replacement fresh as 'pending' — never
+    re-runs the whole plan, the SAME class of fix as ``append_step``). The replacement gets a
+    BRAND NEW step_id, so its own attempt counter starts fresh (amendment A4: a revised
+    step is a genuinely new dispatch context — never reuses the old step's thread/messages).
+
+    Returns False (no revision applied — a defensive no-op, not a crash) when the graph produced
+    no revised_outcome text at all (should be structurally unreachable: decide_next_action only
+    reaches REVISE via a PUSHBACK carrying ``proposed_outcome`` — guarded anyway since a future
+    upstream change could regress it silently).
+    """
+    if not revised_outcome:
+        logger.warning(
+            "_apply_step_revision: revise_step outcome with no revised_outcome text for "
+            "task=%s step=%s — nothing to apply, treating as a no-op", task_id, step.get("step_id"),
+        )
+        return False
+
+    from orchestrator.manager.plan_models import PlanStep
+
+    task = task_store.get_task(tenant_id, task_id)
+    plan_revision = int(task["plan_revision"]) if task else 1
+    replacement = PlanStep(
+        step_seq=step["step_seq"],
+        kind=step["kind"],
+        specialist=step.get("specialist"),
+        situation=step.get("situation") or "",
+        desired_outcome=revised_outcome,
+        acceptance_criteria=step.get("acceptance_criteria") or [],
+        allowed_effect_classes=step.get("allowed_effect_classes") or [],
+    )
+    plan_store.replace_step(
+        tenant_id, task_id, step["step_id"], replacement, expected_plan_revision=plan_revision
+    )
     return True
 
 
@@ -437,7 +502,12 @@ def manager_task_workflow(tenant_id: str, task_id: str) -> str:
     non-deterministic state itself.
     """
     cycles = 0
-    revision_counts: dict[str, int] = {}
+    # Keyed by step_seq (NOT step_id): a revise_step application (round-3 MAJOR #4) replaces the
+    # step on a BRAND NEW step_id every time (the old one is superseded, real history) — step_seq
+    # is the stable identity of "the same conceptual step" across that chain of replacements.
+    # attempt_counts stays keyed by step_id on purpose: a replacement step is a genuinely fresh
+    # dispatch context (amendment A4), so its own attempt count correctly starts at 1.
+    revision_counts: dict[int, int] = {}
     attempt_counts: dict[str, int] = {}
     verification_attempts = 0
 
@@ -458,7 +528,7 @@ def manager_task_workflow(tenant_id: str, task_id: str) -> str:
         plan_revision = int(task_row["plan_revision"]) if task_row else 1
         has_next = _has_other_pending_steps(tenant_id, task_id, plan_revision, step_id)
 
-        outcome = _dispatch_specialist_step(
+        outcome, revised_outcome = _dispatch_specialist_step(
             tenant_id, task_id, step_id, attempt,
             step.get("situation") or "",
             step.get("desired_outcome") or "",
@@ -469,16 +539,22 @@ def manager_task_workflow(tenant_id: str, task_id: str) -> str:
         cycles += 1
 
         if outcome == "revise_step":
-            revision_counts[step_id] = revision_counts.get(step_id, 0) + 1
-            if revision_counts[step_id] > LIMIT_MAX_REVISIONS_PER_STEP:
+            step_seq = int(step["step_seq"])
+            revision_counts[step_seq] = revision_counts.get(step_seq, 0) + 1
+            if revision_counts[step_seq] > LIMIT_MAX_REVISIONS_PER_STEP:
                 _block_limit_exceeded(
                     tenant_id, task_id,
-                    limit=f"max_revisions_per_step:{step_id}",
-                    count=revision_counts[step_id],
+                    limit=f"max_revisions_per_step_seq:{step_seq}",
+                    count=revision_counts[step_seq],
                     threshold=LIMIT_MAX_REVISIONS_PER_STEP,
                 )
                 break
-            continue  # re-claim the SAME step (manager_review reset it to 'pending')
+            # Apply the reframed outcome (round-3 MAJOR #4) — replaces the OLD step (now
+            # superseded, real history) with a NEW one carrying the revised desired_outcome, so
+            # the re-claim below actually re-dispatches with the manager's ACTUAL revision rather
+            # than the stale original framing.
+            _apply_step_revision(tenant_id, task_id, step, revised_outcome)
+            continue  # re-claim — the replacement step is now the pending one
 
         if outcome == "ask_owner":
             reengaged = False

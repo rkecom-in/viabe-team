@@ -458,7 +458,11 @@ def _manager_review_node(state: AgentGraphState) -> dict[str, Any]:
     framing ``manager_task_workflow`` populated in the initial state, runs
     ``manager.review.manager_review`` (the ONE sonnet-5 structured-extraction call + the
     deterministic decision seam — persists the plan_store effect + tm_audit + incident itself), and
-    writes ONLY ``manager_review_outcome`` back so ``_route_after_manager_review`` can route.
+    writes ``manager_review_outcome`` so ``_route_after_manager_review`` can route, plus (round-3
+    adversarial-review fix, MAJOR #4) ``manager_review_revised_outcome`` — the reframed
+    desired_outcome ``decide_next_action`` computed on a revise_step decision, which the OLD code
+    silently discarded (the step was reset to 'pending' and re-dispatched with its STALE original
+    framing, never the actual revision). ``None`` for every other outcome.
     """
     from orchestrator.manager.review import manager_review
 
@@ -472,7 +476,7 @@ def _manager_review_node(state: AgentGraphState) -> dict[str, Any]:
             "_manager_review_node: missing manager_task_id/manager_step_id/tenant_id in state "
             "(enforce-mode graph invoked without the loop's own framing) — no-op, routes to END"
         )
-        return {"manager_review_outcome": "escalate"}
+        return {"manager_review_outcome": "escalate", "manager_review_revised_outcome": None}
 
     result = manager_review(
         tenant_id,
@@ -484,7 +488,10 @@ def _manager_review_node(state: AgentGraphState) -> dict[str, Any]:
         raw_output=_render_raw_specialist_output(state),
         has_next_step=bool(state.get("manager_has_next_step")),
     )
-    return {"manager_review_outcome": result.outcome}
+    return {
+        "manager_review_outcome": result.outcome,
+        "manager_review_revised_outcome": result.decision.revised_outcome,
+    }
 
 
 def _route_after_manager_review(state: AgentGraphState) -> str:

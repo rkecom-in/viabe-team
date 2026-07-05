@@ -15,35 +15,67 @@ risk this module closes is WITHIN one thread_id: if ``manager_task_workflow`` re
 step dispatch (a DBOS step retry replaying the same attempt after a mid-dispatch crash, NOT a new
 attempt), the freshly-rebuilt initial-turn messages must replace themselves in place rather than
 append — hence scoping every injected message's id to ``(task_id, step_id, attempt, slot)``.
+
+VT-606 round-3 CRITICAL fix (adversarial review) — the approval-resume invariant: ``loop_run_id``
+is the ONE canonical identity per dispatch attempt. It MUST be used as BOTH the graph's checkpoint
+``thread_id`` AND the graph state's own ``run_id`` field. Why: ``request_owner_approval_node``
+persists ``state['run_id']`` into ``pending_approvals`` (via ``arm_pause_request``), and
+``approval_resume.resume_run`` resumes the SUSPENDED checkpoint with
+``thread_id=str(run_id)`` — reading the persisted ``run_id`` back out. Before this fix,
+``_dispatch_specialist_step`` used ``step_thread_id(...)`` (a formatted string) as the checkpoint
+thread_id but ``UUID(task_id)`` as ``state['run_id']`` — two DIFFERENT values, so an approval
+interrupt raised through the loop would persist ``run_id=task_id`` while the ACTUAL checkpoint
+lived under a different thread key entirely; the later resume would target a thread that was never
+checkpointed, orphaning the approval forever. ``loop_run_id`` is deterministic (``uuid5``, not
+``uuid4``) so a DBOS step-retry of the SAME attempt recomputes the IDENTICAL id (replay-stable,
+amendment A4 intact) while a NEW attempt (a revise_step re-dispatch) gets a genuinely different one
+(never reused across attempts, the VT-602 class) — zero changes needed on the resume side.
 """
 
 from __future__ import annotations
 
-from uuid import UUID
+from uuid import NAMESPACE_DNS, UUID, uuid5
+
+# A fixed, deterministic namespace (uuid5 of a DNS name is itself reproducible — not a random
+# uuid4 — so this constant is stable across processes/deploys without being hand-picked).
+_NAMESPACE = uuid5(NAMESPACE_DNS, "manager-loop.viabe.ai")
+
+
+def loop_run_id(task_id: UUID | str, step_id: UUID | str, attempt: int) -> UUID:
+    """The loop's per-(task_id, step_id, attempt) run identity — THE single value used as both
+    the graph's checkpoint ``thread_id`` (via ``step_thread_id``) and the graph state's own
+    ``run_id`` field (set directly by ``workflow._dispatch_specialist_step``). See the module
+    docstring's CRITICAL-fix note for why these two MUST always be the same value.
+    """
+    return uuid5(_NAMESPACE, f"manager_task:{task_id}:{step_id}:{attempt}")
 
 
 def step_thread_id(task_id: UUID | str, step_id: UUID | str, attempt: int) -> str:
-    """The dedicated LangGraph ``thread_id`` for ONE specialist dispatch attempt.
+    """The dedicated LangGraph ``thread_id`` for ONE specialist dispatch attempt — always
+    ``str(loop_run_id(...))`` (never a different value; the approval-resume invariant depends on
+    this equality holding exactly).
 
     NEVER reused across attempts (VT-602 class): a revised/re-dispatched attempt increments
-    ``attempt``, which changes this string, so it always gets a FRESH checkpoint thread — a stale
-    attempt's checkpoint can never bleed into a new one.
+    ``attempt``, which changes ``loop_run_id``, so it always gets a FRESH checkpoint thread — a
+    stale attempt's checkpoint can never bleed into a new one.
     """
-    return f"manager_task:{task_id}:{step_id}:{attempt}"
+    return str(loop_run_id(task_id, step_id, attempt))
 
 
 def step_turn_msg_id(
     task_id: UUID | str, step_id: UUID | str, attempt: int, slot: str
 ) -> str:
     """A STABLE id for one of THIS step-attempt's initial-turn messages (the HumanMessage /
-    SystemMessage(s) manager_task_workflow assembles for a specialist dispatch).
+    SystemMessage(s) manager_task_workflow assembles for a specialist dispatch). Rekeyed off the
+    SAME ``loop_run_id`` as ``step_thread_id`` (not the raw tuple) so every identity derived from
+    one dispatch attempt traces back to ONE canonical id.
 
     Same ``(task_id, step_id, attempt, slot)`` -> same id, always — so a DBOS step retry that
     re-enters the SAME attempt's dispatch rebuilds messages that replace themselves in place at
     the checkpoint (``add_messages`` merges by id at the EXISTING index) instead of appending a
     second island. Different slot / different attempt -> a different id (never collides).
     """
-    return f"manager_task:{task_id}:{step_id}:{attempt}:{slot}"
+    return f"{loop_run_id(task_id, step_id, attempt)}:{slot}"
 
 
-__all__ = ["step_thread_id", "step_turn_msg_id"]
+__all__ = ["loop_run_id", "step_thread_id", "step_turn_msg_id"]

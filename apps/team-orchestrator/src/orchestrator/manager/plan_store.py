@@ -106,6 +106,7 @@ def create_plan(
     *,
     source_message_sid: str,
     assigned_function: str | None = None,
+    shadow: bool = False,
 ) -> UUID:
     """Create the task + persist the FULL plan atomically. Returns the task id.
 
@@ -116,13 +117,20 @@ def create_plan(
 
     Admission control (Package 2: "Admit one active objective-bearing task per tenant. Additional
     objectives become queued"): if the tenant already has an ACTIVE plan-store task
-    (``task_store.TASK_ACTIVE`` — anything non-terminal and non-queued), the new task is created
-    with status ``'queued'`` instead of ``'planned'``. Enforced at the APPLICATION level, under the
-    SAME ``tenants`` row ``FOR UPDATE`` lock ``task_store.create_task`` uses (race-free against
-    concurrent ``create_plan`` calls for the same tenant) — deliberately NOT a table-wide DB
+    (``task_store.TASK_ACTIVE`` — anything non-terminal and non-queued/non-shadow), the new task is
+    created with status ``'queued'`` instead of ``'planned'``. Enforced at the APPLICATION level,
+    under the SAME ``tenants`` row ``FOR UPDATE`` lock ``task_store.create_task`` uses (race-free
+    against concurrent ``create_plan`` calls for the same tenant) — deliberately NOT a table-wide DB
     constraint: the EXISTING legacy ``task_producer`` (VT-565) mints one ephemeral task PER RUN and
     legitimately has multiple concurrently-``running`` tasks per tenant (see mig 165's comment
     block). This is a NEW plan-store-level policy, not a retroactive system-wide invariant.
+
+    ``shadow=True`` (VT-606 round-3): the plan is recorded with status ``'shadow'`` UNCONDITIONALLY
+    — skips the active-task admission check entirely (a shadow plan never competes for the
+    one-active-task slot, never blocks a real turn's admission, and is never itself claimed/driven
+    — ``task_store.TASK_ACTIVE`` excludes ``'shadow'``). The PLAN CONTENT is still fully persisted
+    and queryable (not audit-only) — this is what the shadow-vs-legacy divergence review needs to
+    read back.
     """
     with tenant_connection(tenant_id) as conn, conn.transaction():
         conn.execute("SELECT id FROM tenants WHERE id = %s FOR UPDATE", (str(tenant_id),)).fetchone()
@@ -139,11 +147,14 @@ def create_plan(
             )
             return _uuid(existing)
 
-        active = conn.execute(
-            "SELECT 1 FROM manager_tasks WHERE tenant_id = %s AND status = ANY(%s) LIMIT 1",
-            (str(tenant_id), list(task_store.TASK_ACTIVE)),
-        ).fetchone()
-        status = "queued" if active is not None else "planned"
+        if shadow:
+            status = "shadow"
+        else:
+            active = conn.execute(
+                "SELECT 1 FROM manager_tasks WHERE tenant_id = %s AND status = ANY(%s) LIMIT 1",
+                (str(tenant_id), list(task_store.TASK_ACTIVE)),
+            ).fetchone()
+            status = "queued" if active is not None else "planned"
 
         task_row = conn.execute(
             "INSERT INTO manager_tasks "
@@ -321,6 +332,176 @@ def revise_plan(
     return new_plan.model_copy(update={"plan_revision": new_revision})
 
 
+# ── append_step ──────────────────────────────────────────────────────────────
+def append_step(
+    tenant_id: UUID | str,
+    task_id: UUID | str,
+    new_step: PlanStep,
+    *,
+    expected_plan_revision: int,
+) -> ManagerPlan | None:
+    """Append-ONLY revision (VT-606 round-3 adversarial-review fix). ``revise_plan`` is a FULL
+    plan replacement — every step of ``new_plan.steps`` is INSERTED FRESH ('pending') at the new
+    revision, which is correct for a real plan revision but WRONG for "just add one more step":
+    the completion-verification retry used ``revise_plan`` with ``load_plan``'s existing steps
+    (done ones included) re-appended, which re-INSERTED every already-'done' step as a NEW
+    'pending' row — ``claim_next_step`` then picked up step 1 again and re-ran the WHOLE plan from
+    the start instead of just the gap step.
+
+    This function instead CARRIES every existing non-superseded step (done history included)
+    FORWARD in place — an UPDATE of their ``plan_revision`` column, never a re-INSERT — so a 'done'
+    step stays 'done', on its ORIGINAL row, with its original evidence; only the ONE new step is
+    actually inserted, as 'pending', at the new revision. ``claim_next_step`` then finds exactly
+    that one step claimable.
+
+    CAS: same ``expected_plan_revision`` contract as ``revise_plan`` — raises
+    ``PlanRevisionConflict`` on a stale caller. Returns the reloaded, full effective plan (via
+    ``load_plan``) at the new revision, or ``None`` if the task no longer exists (defensive; should
+    be unreachable given the row lock below would have raised first).
+    """
+    with tenant_connection(tenant_id) as conn, conn.transaction():
+        task_row = conn.execute(
+            "SELECT plan_revision FROM manager_tasks WHERE tenant_id = %s AND id = %s FOR UPDATE",
+            (str(tenant_id), str(task_id)),
+        ).fetchone()
+        if task_row is None:
+            raise ValueError(f"append_step: no such task {task_id!r} for tenant {tenant_id!r}")
+        current_revision = task_row["plan_revision"] if isinstance(task_row, dict) else task_row[0]
+        if current_revision != expected_plan_revision:
+            raise PlanRevisionConflict(
+                task_id=task_id, expected=expected_plan_revision, actual=current_revision
+            )
+
+        new_revision = current_revision + 1
+
+        # Carry every non-superseded step forward IN PLACE — a plan_revision bump, NOT a re-INSERT.
+        # A 'done' step keeps its own row + evidence untouched; there should be no stray 'pending'
+        # steps in the completion-verification retry's use case (the retry only fires once every
+        # step has settled), but any that existed would carry forward unmodified too.
+        conn.execute(
+            "UPDATE manager_task_steps SET plan_revision = %s "
+            "WHERE tenant_id = %s AND task_id = %s AND plan_revision = %s AND status != 'superseded'",
+            (new_revision, str(tenant_id), str(task_id), current_revision),
+        )
+
+        appended_step_id = _insert_step(conn, tenant_id, task_id, new_revision, new_step)
+
+        conn.execute(
+            "UPDATE manager_tasks SET plan_revision = %s, current_step_id = %s, "
+            "    version = version + 1, updated_at = now() "
+            "WHERE tenant_id = %s AND id = %s",
+            (new_revision, str(appended_step_id), str(tenant_id), str(task_id)),
+        )
+
+        emit_tm_audit(
+            event_layer="decides",
+            event_kind="plan_step_appended",
+            actor="team_manager",
+            tenant_id=tenant_id,
+            summary=(
+                f"plan step appended: revision {current_revision} -> {new_revision}, "
+                f"step_seq={new_step.step_seq} (done history carried forward untouched)"
+            ),
+            decision={
+                "task_id": str(task_id),
+                "old_plan_revision": current_revision,
+                "new_plan_revision": new_revision,
+                "appended_step_seq": new_step.step_seq,
+            },
+            conn=conn,
+        )
+
+    return load_plan(tenant_id, task_id)
+
+
+# ── replace_step ─────────────────────────────────────────────────────────────
+def replace_step(
+    tenant_id: UUID | str,
+    task_id: UUID | str,
+    old_step_id: UUID | str,
+    new_step: PlanStep,
+    *,
+    expected_plan_revision: int,
+) -> ManagerPlan | None:
+    """Replace-ONE-step revision (VT-606 round-3 adversarial-review fix, MAJOR #4). A revise_step
+    decision means the manager wants to RE-DISPATCH the SAME logical step with a REFRAMED
+    desired_outcome/situation (``ManagerDecision.revised_outcome``) — the bug this closes:
+    ``manager_review`` reset the step to 'pending' but the revised text was never actually applied
+    anywhere, so the re-dispatch used the STALE original framing, never the manager's actual
+    revision.
+
+    Supersedes ONLY ``old_step_id`` (Package 2's "revisions never edit completed history" — the old
+    step becomes real, inspectable history, not deleted/edited in place); every OTHER
+    non-superseded step (done history included) carries FORWARD in place exactly like
+    ``append_step`` (never re-inserted 'pending' — the SAME class of bug ``append_step`` itself
+    fixes for the completion-verification retry); the ONE ``new_step`` is inserted fresh as
+    'pending' at the new revision, replacing ``old_step_id``.
+
+    CAS: same ``expected_plan_revision`` contract as ``revise_plan``/``append_step`` — raises
+    ``PlanRevisionConflict`` on a stale caller.
+    """
+    with tenant_connection(tenant_id) as conn, conn.transaction():
+        task_row = conn.execute(
+            "SELECT plan_revision FROM manager_tasks WHERE tenant_id = %s AND id = %s FOR UPDATE",
+            (str(tenant_id), str(task_id)),
+        ).fetchone()
+        if task_row is None:
+            raise ValueError(f"replace_step: no such task {task_id!r} for tenant {tenant_id!r}")
+        current_revision = task_row["plan_revision"] if isinstance(task_row, dict) else task_row[0]
+        if current_revision != expected_plan_revision:
+            raise PlanRevisionConflict(
+                task_id=task_id, expected=expected_plan_revision, actual=current_revision
+            )
+
+        new_revision = current_revision + 1
+
+        # Supersede ONLY the old step — real history, never deleted/edited (stays at its ORIGINAL
+        # plan_revision, marked 'superseded').
+        conn.execute(
+            "UPDATE manager_task_steps SET status = 'superseded', version = version + 1, "
+            "    updated_at = now() "
+            "WHERE tenant_id = %s AND task_id = %s AND id = %s AND plan_revision = %s",
+            (str(tenant_id), str(task_id), str(old_step_id), current_revision),
+        )
+        # Carry every OTHER non-superseded step forward in place (the just-superseded old step is
+        # already excluded by this same status filter — no separate id exclusion needed).
+        conn.execute(
+            "UPDATE manager_task_steps SET plan_revision = %s "
+            "WHERE tenant_id = %s AND task_id = %s AND plan_revision = %s AND status != 'superseded'",
+            (new_revision, str(tenant_id), str(task_id), current_revision),
+        )
+
+        replacement_step_id = _insert_step(conn, tenant_id, task_id, new_revision, new_step)
+
+        conn.execute(
+            "UPDATE manager_tasks SET plan_revision = %s, current_step_id = %s, "
+            "    version = version + 1, updated_at = now() "
+            "WHERE tenant_id = %s AND id = %s",
+            (new_revision, str(replacement_step_id), str(tenant_id), str(task_id)),
+        )
+
+        emit_tm_audit(
+            event_layer="decides",
+            event_kind="plan_step_replaced",
+            actor="team_manager",
+            tenant_id=tenant_id,
+            summary=(
+                f"plan step replaced: revision {current_revision} -> {new_revision}, "
+                f"step_seq={new_step.step_seq} reframed (done history carried forward untouched)"
+            ),
+            decision={
+                "task_id": str(task_id),
+                "old_step_id": str(old_step_id),
+                "old_plan_revision": current_revision,
+                "new_plan_revision": new_revision,
+                "replacement_step_seq": new_step.step_seq,
+            },
+            conn=conn,
+        )
+
+    return load_plan(tenant_id, task_id)
+
+
 # ── claim_next_step ──────────────────────────────────────────────────────────
 def claim_next_step(tenant_id: UUID | str, task_id: UUID | str) -> dict[str, Any] | None:
     """Atomically find + claim the task's next PENDING step (lowest ``step_seq`` in the CURRENT
@@ -364,12 +545,24 @@ def claim_next_step(tenant_id: UUID | str, task_id: UUID | str) -> dict[str, Any
             )
             return None
 
-        conn.execute(
+        # VT-606 round-3 (adversarial review): guard the task-level transition — WITHOUT this, a
+        # claim against a 'queued'/'shadow'/'blocked' task (a caller bug, never a legitimate path
+        # today) would silently force it to 'running', bypassing admission control entirely. Only
+        # 'planned' (the first claim) and 'running' (every subsequent claim in the same task) are
+        # valid predecessors; a rejected guard raises (inside this transaction, so BOTH the step
+        # claim above and this task update roll back together) rather than proceeding with an
+        # inconsistent step-running/task-not-running state.
+        task_cur = conn.execute(
             "UPDATE manager_tasks SET current_step_id = %s, status = 'running', "
             "    version = version + 1, updated_at = now() "
-            "WHERE tenant_id = %s AND id = %s",
-            (str(step_id), str(tenant_id), str(task_id)),
+            "WHERE tenant_id = %s AND id = %s AND status = ANY(%s)",
+            (str(step_id), str(tenant_id), str(task_id), ["planned", "running"]),
         )
+        if task_cur.rowcount == 0:
+            raise RuntimeError(
+                f"plan_store.claim_next_step: task {task_id!r} is not in a claimable state "
+                "(expected 'planned' or 'running') — refusing to silently force it to 'running'"
+            )
 
         emit_tm_audit(
             event_layer="does",
