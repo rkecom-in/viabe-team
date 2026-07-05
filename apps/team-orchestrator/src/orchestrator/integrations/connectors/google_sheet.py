@@ -24,7 +24,7 @@ from uuid import UUID
 
 import httpx
 
-from orchestrator.graph import get_pool
+from orchestrator.db import tenant_connection
 from orchestrator.integrations.connectors.base import ConnectorBase
 from orchestrator.integrations.registry import get_connector
 from orchestrator.integrations.schemas import ConnectorSpec
@@ -177,8 +177,9 @@ class GoogleSheetConnector(ConnectorBase):
         push_secret = secrets.token_urlsafe(32)
         expires_at = datetime.now(UTC) + timedelta(seconds=expires_in)
 
-        pool = get_pool()
-        with pool.connection() as conn:
+        # VT-608 raw-pool sweep (mirrors VT-603's own swap): RLS-scoped write keyed on the tenant
+        # this method was CALLED with — tenant_oauth_tokens has RLS enabled+forced (mig 033).
+        with tenant_connection(tenant_id) as conn:
             conn.execute(
                 """
                 INSERT INTO tenant_oauth_tokens (
@@ -205,14 +206,12 @@ class GoogleSheetConnector(ConnectorBase):
         }
 
     def _load_refresh_token(self, tenant_id: UUID) -> str:
-        pool = get_pool()
-        with pool.connection() as conn, conn.cursor() as cur:
-            cur.execute(
+        with tenant_connection(tenant_id) as conn:
+            raw = conn.execute(
                 "SELECT refresh_token_encrypted FROM tenant_oauth_tokens "
                 "WHERE tenant_id = %s AND connector_id = %s",
                 (str(tenant_id), self.connector_id),
-            )
-            raw = cur.fetchone()
+            ).fetchone()
         if raw is None:
             raise RuntimeError(
                 f"no OAuth token for tenant {tenant_id} / {self.connector_id}"
@@ -400,14 +399,12 @@ class GoogleSheetConnector(ConnectorBase):
             render_apps_script,
         )
 
-        pool = get_pool()
-        with pool.connection() as conn, conn.cursor() as cur:
-            cur.execute(
+        with tenant_connection(tenant_id) as conn:
+            raw = conn.execute(
                 "SELECT push_secret FROM tenant_oauth_tokens "
                 "WHERE tenant_id = %s AND connector_id = %s",
                 (str(tenant_id), self.connector_id),
-            )
-            raw = cur.fetchone()
+            ).fetchone()
         row = cast("dict[str, Any] | None", raw)
         if row is None or not row["push_secret"]:
             raise RuntimeError(
@@ -485,8 +482,8 @@ class GoogleSheetConnector(ConnectorBase):
                 int(resp_body["expiration"]) / 1000, tz=UTC
             )
 
-        pool = get_pool()
-        with pool.connection() as conn:
+        # tenant_drive_channels has RLS enabled (mig 040).
+        with tenant_connection(tenant_id) as conn:
             conn.execute(
                 """
                 INSERT INTO tenant_drive_channels
@@ -510,26 +507,18 @@ class GoogleSheetConnector(ConnectorBase):
         }
 
     def unregister_drive_push_channel(
-        self, channel_id: str, resource_id: str
+        self, tenant_id: UUID, channel_id: str, resource_id: str
     ) -> None:
         """Stop a Drive Push channel via Drive ``channels.stop``.
 
         Removes the matching row from ``tenant_drive_channels``.
         Idempotent: missing channel raises silently (already stopped).
+
+        VT-608 raw-pool sweep: ``tenant_id`` is now a REQUIRED param (its only caller,
+        ``renew_drive_push_channel``, already has it from the channel row it read) rather than
+        looking it up via a privileged pool read keyed on the opaque ``channel_id`` — every DB
+        touch here is now RLS-scoped to a tenant the caller already resolved.
         """
-        # Look up the tenant for token resolution
-        pool = get_pool()
-        with pool.connection() as conn, conn.cursor() as cur:
-            cur.execute(
-                "SELECT tenant_id FROM tenant_drive_channels WHERE channel_id = %s",
-                (channel_id,),
-            )
-            row = cur.fetchone()
-        if row is None:
-            return  # already stopped or never existed
-        tenant_id = UUID(
-            row["tenant_id"] if isinstance(row, dict) else row[0]
-        )
         access_token = self.get_access_token(tenant_id)
 
         resp = httpx.post(
@@ -550,10 +539,10 @@ class GoogleSheetConnector(ConnectorBase):
                 resp.text[:200],
             )
 
-        with pool.connection() as conn:
+        with tenant_connection(tenant_id) as conn:
             conn.execute(
-                "DELETE FROM tenant_drive_channels WHERE channel_id = %s",
-                (channel_id,),
+                "DELETE FROM tenant_drive_channels WHERE tenant_id = %s AND channel_id = %s",
+                (str(tenant_id), channel_id),
             )
 
     def renew_drive_push_channel(
@@ -572,7 +561,7 @@ class GoogleSheetConnector(ConnectorBase):
 
         new = self.register_drive_push_channel(tenant_id, spreadsheet_id)
         try:
-            self.unregister_drive_push_channel(old_channel_id, old_resource_id)
+            self.unregister_drive_push_channel(tenant_id, old_channel_id, old_resource_id)
         except Exception:  # noqa: BLE001 — never block renewal on stop failure
             logger.exception(
                 "Drive channel renewal: stopping old channel %s failed; "

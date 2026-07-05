@@ -699,13 +699,13 @@ def _schedule_recurring(tenant_id: UUID | str) -> None:
     try:
         from datetime import datetime as _dt
 
-        from orchestrator.graph import get_pool
         from orchestrator.integrations.scheduler import _compute_next_run
 
         cadence = "0 3 * * *"  # daily 03:00 — a Phase-1 cron expression
         next_run = _compute_next_run(cadence, _dt.now(UTC))
-        pool = get_pool()
-        with pool.connection() as conn:
+        # VT-608 raw-pool sweep (mirrors VT-603's own swap): RLS-scoped write keyed on the tenant
+        # this function was called with — tenant_connector_status has RLS enabled+forced (mig 034).
+        with tenant_connection(tenant_id) as conn:
             conn.execute(
                 """
                 INSERT INTO tenant_connector_status (

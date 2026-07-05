@@ -90,7 +90,7 @@ import httpx
 
 from orchestrator.integrations.ingest import CanonicalRow, SaleLine
 
-from orchestrator.graph import get_pool
+from orchestrator.db import tenant_connection
 from orchestrator.integrations.connectors.base import ConnectorBase
 from orchestrator.integrations.registry import get_connector
 from orchestrator.integrations.schemas import ConnectorSpec
@@ -589,8 +589,9 @@ class ShopifyConnector(ConnectorBase):
         )
         encrypted = encrypt_value(str(access_token))
         push_secret = secrets.token_urlsafe(32)
-        pool = get_pool()
-        with pool.connection() as conn:
+        # VT-608 raw-pool sweep (mirrors VT-603's own swap): RLS-scoped write keyed on the tenant
+        # this method was CALLED with — tenant_oauth_tokens has RLS enabled+forced (mig 033).
+        with tenant_connection(tenant_id) as conn:
             conn.execute(
                 """
                 INSERT INTO tenant_oauth_tokens (
@@ -646,8 +647,7 @@ class ShopifyConnector(ConnectorBase):
         encrypted = encrypt_value(str(access_token))
         expires_at = datetime.now(UTC) + timedelta(seconds=expires_in)
         push_secret = secrets.token_urlsafe(32)
-        pool = get_pool()
-        with pool.connection() as conn:
+        with tenant_connection(tenant_id) as conn:
             conn.execute(
                 """
                 INSERT INTO tenant_oauth_tokens (
@@ -696,14 +696,12 @@ class ShopifyConnector(ConnectorBase):
         return self._grant_and_store(tenant_id)
 
     def _read_token_row(self, tenant_id: UUID) -> dict[str, Any] | None:
-        pool = get_pool()
-        with pool.connection() as conn, conn.cursor() as cur:
-            cur.execute(
+        with tenant_connection(tenant_id) as conn:
+            raw = conn.execute(
                 "SELECT refresh_token_encrypted, shop_url, expires_at "
                 "FROM tenant_oauth_tokens WHERE tenant_id = %s AND connector_id = %s",
                 (str(tenant_id), self.connector_id),
-            )
-            raw = cur.fetchone()
+            ).fetchone()
         return cast("dict[str, Any] | None", raw)
 
     def get_access_token(self, tenant_id: UUID) -> tuple[str, str]:
@@ -863,14 +861,12 @@ class ShopifyConnector(ConnectorBase):
         Wired to fire on OAuth-install success (api/shopify_oauth.py callback, VT-422)
         so the webhooks actually register on install.
         """
-        pool = get_pool()
-        with pool.connection() as conn, conn.cursor() as cur:
-            cur.execute(
+        with tenant_connection(tenant_id) as conn:
+            raw = conn.execute(
                 "SELECT push_secret FROM tenant_oauth_tokens "
                 "WHERE tenant_id = %s AND connector_id = %s",
                 (str(tenant_id), self.connector_id),
-            )
-            raw = cur.fetchone()
+            ).fetchone()
         row = cast("dict[str, Any] | None", raw)
         if row is None or not row["push_secret"]:
             raise RuntimeError(
