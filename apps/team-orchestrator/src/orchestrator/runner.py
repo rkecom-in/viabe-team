@@ -1059,32 +1059,58 @@ def webhook_pipeline_run(tenant_id: str, run_id: str, twilio_fields: dict) -> di
                     paused_ms=paused_ms,
                     action="released",
                 )
+            # VT-606 (team-lead ruling round 2) — the triage seam, mode-gated at the read site.
+            # legacy: get_loop_mode() reads the env var and returns immediately — ZERO new LLM/DB
+            # calls, the hot path below is BYTE-IDENTICAL to pre-VT-606. shadow: triage classifies
+            # observationally (a new_task creates an inert plan row; the dispatch_brain call below
+            # STILL runs unconditionally — shadow never owns a reply/effect). enforce: triage may
+            # itself own this turn's routing (new_task/answer_pending), in which case
+            # skip_legacy_dispatch tells us to skip dispatch_brain below — untested-live until
+            # VT-611 gates enforce on anywhere. Scoped to real inbound messages only (a status
+            # callback carries no body — nothing to triage), mirroring the record_turn guard above.
+            skip_legacy_dispatch = False
+            if event.message_type == "inbound_message":
+                from orchestrator.manager.triage_seam import triage_seam
+
+                seam_result = triage_seam(
+                    UUID(tenant_id), event.body or "", event.twilio_message_sid or run_id,
+                )
+                skip_legacy_dispatch = seam_result.skip_legacy_dispatch
+
             # VT-193: brain wired into supervisor graph via dispatch_brain.
             # Replaces the VT-3.4 placeholder (record_brain_pending + 'escalated'
             # final status) that the 2026-05-27 E2E surfaced. Imported lazily
             # so non-brain webhook paths don't pay the langchain/langgraph
             # import cost.
-            from orchestrator.agent.dispatch import dispatch_brain
+            #
+            # VT-606: skip_legacy_dispatch (enforce mode only) means the triage seam already owns
+            # this turn's routing (new_task/answer_pending) — dispatch_brain is NOT a brain dispatch
+            # for this turn, so record_dispatch_terminal_episodic/audit_run_isolation (both scoped
+            # to "brain path only") are correctly skipped too; final_status stays at its "completed"
+            # default (set above) so close_webhook_run + the VT-88 fallback below still run exactly
+            # as they would for any other clean turn — no dangling run, no skipped cleanup.
+            if not skip_legacy_dispatch:
+                from orchestrator.agent.dispatch import dispatch_brain
 
-            dispatch_result = dispatch_brain(
-                event=event,
-                state=state,
-                run_id=UUID(run_id),
-                tenant_id=UUID(tenant_id),
-            )
-            final_status = dispatch_result.final_status
-            # VT-309: L2 agent-dispatch lifecycle event (completed/terminated).
-            # Brain path only — direct-handler/reject/consent runs are not agent
-            # dispatches. Skips 'paused' (resolves later on resume).
-            record_dispatch_terminal_episodic(
-                tenant_id, run_id, final_status, dispatch_result.terminal_path
-            )
-            # VT-73 POST-FLIGHT isolation audit: service-role scan of this run's
-            # pipeline_steps — assert no step was logged under another tenant
-            # (catches a leak that escaped pre/in-flight). Best-effort detect+alert.
-            from orchestrator.context_validator import audit_run_isolation
+                dispatch_result = dispatch_brain(
+                    event=event,
+                    state=state,
+                    run_id=UUID(run_id),
+                    tenant_id=UUID(tenant_id),
+                )
+                final_status = dispatch_result.final_status
+                # VT-309: L2 agent-dispatch lifecycle event (completed/terminated).
+                # Brain path only — direct-handler/reject/consent runs are not agent
+                # dispatches. Skips 'paused' (resolves later on resume).
+                record_dispatch_terminal_episodic(
+                    tenant_id, run_id, final_status, dispatch_result.terminal_path
+                )
+                # VT-73 POST-FLIGHT isolation audit: service-role scan of this run's
+                # pipeline_steps — assert no step was logged under another tenant
+                # (catches a leak that escaped pre/in-flight). Best-effort detect+alert.
+                from orchestrator.context_validator import audit_run_isolation
 
-            audit_run_isolation(UUID(run_id), UUID(tenant_id))
+                audit_run_isolation(UUID(run_id), UUID(tenant_id))
 
             # VT-583 D1 (THE biggest silent-drop): a brain run that COMPLETED but produced NO owner-facing
             # send left the owner in silence. Detect it (no assistant turn in the lifetime log at/after
@@ -1092,7 +1118,9 @@ def webhook_pipeline_run(tenant_id: str, run_id: str, twilio_fields: dict) -> di
             # manager path. ONLY for a 'completed' inbound run — never for a status callback (not this
             # branch), a reject (observability-only, dispatch didn't run), an escalation / hard-limit
             # (final_status != completed; VT-88 support_bot already acks those), or a paused-by-design run
-            # (final_status == paused). Fail-soft throughout.
+            # (final_status == paused). Fail-soft throughout. Also covers the enforce/skip_legacy_dispatch
+            # case (VT-606) — the triage seam's own routing doesn't necessarily reply either, so the
+            # owner must not be left in silence there either.
             if (
                 final_status == "completed"
                 and event.message_type == "inbound_message"
