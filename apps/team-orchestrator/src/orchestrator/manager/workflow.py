@@ -12,15 +12,19 @@ DBOS workflow keyed by ``(tenant_id, task_id)``:
         v
     consume structured result + Manager review decision
         |- accept_step/continue  -> loop: claim next step
-        |- complete              -> stop (task 'verifying'; a later verification pass owns the
-        |                           final owner-facing outcome — out of VT-606 scope, Package 3
-        |                           names it but does not spec its mechanics)
+        |- complete              -> VERIFY OBJECTIVE (opus checkpoint, team-lead ruling round 2):
+        |                           verified -> task 'completed' (a TRUE terminal status —
+        |                           terminal_outcome + owner_notification_status='pending' +
+        |                           queue promotion fires); not_verified -> one revise cycle
+        |                           (appends a step addressing the gap) if the verification budget
+        |                           allows, else blocked+incident
         |- revise_step            -> loop: re-claim the SAME step (now 'pending' again) — up to
         |                           LIMIT_MAX_REVISIONS_PER_STEP times, then blocked+incident
         |- ask_owner               -> durable wait (amendment A3: >24h since the owner's last
         |                           inbound re-engages via the approved template first)
         `- escalate                -> stop (already 'blocked' + a VTR incident — manager_review
-                                    raised it)
+                                    raised it; 'blocked' stays non-terminal by design — an operator
+                                    resolves the incident, a mechanism this row doesn't build)
 
 Mirrors ``runner.py``'s step/workflow discipline: every durable checkpoint is its own
 ``@DBOS.step()``; the ``@DBOS.workflow()`` body is the plain-Python control flow around them (DBOS
@@ -32,20 +36,6 @@ Directly callable + independently testable regardless of the global ``TEAM_MANAG
 this module never reads that flag itself; a caller decides WHETHER to start this workflow at all
 (``enforce`` mode only, in production — see ``supervisor.build_supervisor_graph``'s own mode gate
 for the graph SHAPE this workflow drives).
-
-SCOPE NOTE (found while testing, worth flagging loudly): NEITHER of this workflow's own reachable
-outcomes — 'complete' (-> 'verifying') nor 'escalate'/limit-exceeded (-> 'blocked') — lands the task
-on a TRUE ``task_store.TASK_TERMINAL`` status ({'completed','failed','cancelled','dead_letter'}).
-Both 'verifying' and 'blocked' are, by VT-605's own definition, ``TASK_NON_TERMINAL`` — correctly so:
-a verifying task still needs its outcome checked before the owner is told anything, and a blocked
-task needs an operator to resolve the incident, so BOTH correctly still occupy the tenant's
-one-active-task admission slot (a queued sibling must NOT be promoted just because the active task
-is merely verifying-or-blocked). Queue promotion (``_promote_next_queued`` at the end of this
-function) is consequently a NO-OP for every outcome this row itself produces — it is WIRED CORRECTLY
-and tested (a task that reaches TRUE terminal status by some later mechanism DOES promote its
-sibling — see ``test_workflow.py::test_terminal_task_promotes_oldest_queued``), but the "verification
-pass" and "blocked-task resolution" that would ever actually MOVE a task to a true terminal status
-are, per Package 3's own text, OUT OF VT-606'S SCOPE (a later row's job).
 """
 
 from __future__ import annotations
@@ -70,6 +60,10 @@ logger = logging.getLogger("orchestrator.manager.workflow")
 # further to check here. The other two ARE this workflow's job:
 LIMIT_MAX_REVISIONS_PER_STEP = 2
 LIMIT_MAX_CYCLES = 6
+
+# Team-lead ruling round 2: "not_verified -> one revise cycle if the revision budget allows, else
+# blocked+incident" — exactly one retry of the completion-verification checkpoint per task.
+LIMIT_MAX_VERIFICATION_ATTEMPTS = 1
 
 # The owner-answer wait cadence (ask_owner). Not a hot-path wait — an owner reply is not
 # time-critical to the second, unlike an ops-triggered run-control pause (runner.py's
@@ -358,6 +352,77 @@ def _promote_next_queued(tenant_id: str) -> UUID | None:
     return queue_promotion.promote_next_queued_task(tenant_id)
 
 
+@DBOS.step()
+def _verify_completion_step(tenant_id: str, task_id: str) -> tuple[str, str]:
+    """Package 3: ``complete -> verify objective``. Amendment A5's OTHER opus checkpoint (the first
+    is plan-validation at objective creation — see manager/plan_validation.py). Returns
+    ``(verdict, reason)`` — a plain tuple of strings, DBOS-step-result-safe."""
+    from orchestrator.manager.verification import verify_completion
+
+    result = verify_completion(tenant_id, task_id)
+    return result.verdict, result.reason
+
+
+@DBOS.step()
+def _settle_verified_task(tenant_id: str, task_id: str) -> None:
+    """A verified completion reaches a TRUE task_store.TASK_TERMINAL status for the first time in
+    this row's own outcomes (see the module scope note) — terminal_outcome resolves via the
+    evidence-presence proxy (verification.resolve_terminal_outcome), owner_notification_status
+    starts 'pending' (the VT-524 seam picks it up from there), and this is what finally makes
+    queue promotion (_promote_next_queued, called from the workflow's own tail) a real transition
+    instead of dead code."""
+    from orchestrator.manager.verification import resolve_terminal_outcome
+
+    task = task_store.get_task(tenant_id, task_id)
+    plan_revision = int(task["plan_revision"]) if task else 1
+    steps = [
+        s for s in task_store.get_steps(tenant_id, task_id) if s.get("plan_revision") == plan_revision
+    ]
+    outcome = resolve_terminal_outcome(steps)
+    task_store.set_task_status(
+        tenant_id, task_id, "completed", expected_from=("verifying",),
+        terminal_outcome=outcome, owner_notification_status="pending",
+    )
+    emit_tm_audit(
+        event_layer="does",
+        event_kind="task_verified_complete",
+        actor="team_manager",
+        tenant_id=tenant_id,
+        summary=f"task={task_id} verified complete: terminal_outcome={outcome}",
+        decision={"task_id": str(task_id), "terminal_outcome": outcome},
+    )
+
+
+@DBOS.step()
+def _append_verification_retry_step(tenant_id: str, task_id: str, *, reason: str) -> bool:
+    """The 'one revise cycle' for a not_verified completion: appends ONE additional step (via
+    plan_store.revise_plan, NOT editing the existing done history — Package 2's own supersede-not-
+    edit discipline) framing the verification gap, then transitions the task back to 'running' so
+    the outer loop's claim_next_step picks it up. Returns False (no retry attempted) when the plan
+    is already at PlanStep's own 8-step ceiling — the caller treats that as budget-exhausted too."""
+    from orchestrator.manager.plan_models import ManagerPlan, PlanStep
+
+    plan = plan_store.load_plan(tenant_id, task_id)
+    if plan is None or len(plan.steps) >= 8:
+        return False
+    next_seq = len(plan.steps) + 1
+    retry_step = PlanStep(
+        step_seq=next_seq,
+        kind="verification",
+        situation=f"Completion verification did not pass: {reason}",
+        desired_outcome="Address the verification gap and re-confirm the objective is met.",
+    )
+    new_plan = ManagerPlan(
+        objective=plan.objective,
+        acceptance_criteria=plan.acceptance_criteria,
+        steps=[*plan.steps, retry_step],
+        plan_revision=plan.plan_revision,
+    )
+    plan_store.revise_plan(tenant_id, task_id, new_plan, expected_plan_revision=plan.plan_revision)
+    task_store.set_task_status(tenant_id, task_id, "running", expected_from=("verifying",))
+    return True
+
+
 # ── the workflow itself ───────────────────────────────────────────────────────
 
 
@@ -374,6 +439,7 @@ def manager_task_workflow(tenant_id: str, task_id: str) -> str:
     cycles = 0
     revision_counts: dict[str, int] = {}
     attempt_counts: dict[str, int] = {}
+    verification_attempts = 0
 
     while cycles < LIMIT_MAX_CYCLES:
         step = _claim_step(tenant_id, task_id)
@@ -436,8 +502,30 @@ def manager_task_workflow(tenant_id: str, task_id: str) -> str:
             _resume_step_after_answer(tenant_id, task_id, step_id)
             continue  # loop back to claim the (now resumable) step
 
-        if outcome in ("complete", "escalate"):
-            break  # manager_review already settled the task terminal (verifying / blocked)
+        if outcome == "escalate":
+            break  # manager_review already settled the task blocked + a VTR incident
+
+        if outcome == "complete":
+            # Package 3: "complete -> verify objective" (team-lead ruling round 2) — manager_review
+            # settled the task 'verifying', but that is NOT yet a true terminal status. Run the
+            # opus completion-verification checkpoint before this loop claims the objective done.
+            verdict, reason = _verify_completion_step(tenant_id, task_id)
+            if verdict == "verified":
+                _settle_verified_task(tenant_id, task_id)
+                break
+            verification_attempts += 1
+            if (
+                verification_attempts <= LIMIT_MAX_VERIFICATION_ATTEMPTS
+                and _append_verification_retry_step(tenant_id, task_id, reason=reason)
+            ):
+                continue  # re-claim the freshly-appended verification-retry step
+            _block_limit_exceeded(
+                tenant_id, task_id,
+                limit="verification_attempts_exceeded",
+                count=verification_attempts,
+                threshold=LIMIT_MAX_VERIFICATION_ATTEMPTS,
+            )
+            break
 
         # outcome in {"continue", "accept_step"} — loop to claim the next step.
 
