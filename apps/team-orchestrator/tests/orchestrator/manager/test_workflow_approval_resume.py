@@ -280,6 +280,102 @@ def test_approval_interrupt_through_real_loop_resumes_the_persisted_thread(
         teardown(dsn, result)
 
 
+def _minimal_terminal_graph(manager_review_outcome: str):
+    """MINOR (VT-607 fix round): a minimal stand-in graph reaching a CLEAN terminal state (no
+    interrupt at all) with a fixed manager_review_outcome — for pinning _close_dispatch_run's OTHER
+    two lifecycle branches (only 'paused' was asserted before)."""
+    from langgraph.checkpoint.memory import InMemorySaver
+    from langgraph.graph import END, START, StateGraph
+
+    from orchestrator.state.agent_graph_state import AgentGraphState
+
+    def _node(state: dict[str, Any]) -> dict[str, Any]:
+        return {"manager_review_outcome": manager_review_outcome, "manager_review_revised_outcome": None}
+
+    def _build(model: Any, checkpointer: Any = None, *, mode: Any = None) -> Any:
+        g = StateGraph(AgentGraphState)
+        g.add_node("terminal_node", _node)
+        g.add_edge(START, "terminal_node")
+        g.add_edge("terminal_node", END)
+        return g.compile(checkpointer=InMemorySaver())
+
+    return _build
+
+
+def test_dispatch_closes_pipeline_run_completed_on_clean_terminal(
+    substrate: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """MINOR (VT-607 fix round, adversarial review): a clean (non-interrupted, non-escalate)
+    dispatch closes its pipeline_runs row 'completed' — only 'paused' was pinned before."""
+    dsn = substrate
+    tenant_id = str(uuid4())
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute(
+            "INSERT INTO tenants (id, business_name, plan_tier, phase, owner_phone) "
+            "VALUES (%s, %s, 'standard', 'trial', %s)",
+            (tenant_id, f"cdr-{tenant_id[:8]}", f"+9198{uuid4().int % 10**8:08d}"),
+        )
+    task_id, step = _create_and_claim_step(tenant_id)
+    step_id = str(step["step_id"])
+
+    monkeypatch.setattr(
+        "orchestrator.supervisor.build_supervisor_graph", _minimal_terminal_graph("complete")
+    )
+
+    from orchestrator.manager import message_ids
+    from orchestrator.manager.workflow import _dispatch_specialist_step
+
+    expected_run_id = message_ids.loop_run_id(task_id, step_id, 1)
+    outcome, _revised = _dispatch_specialist_step(
+        tenant_id, task_id, step_id, 1, "situation", "desired outcome", ["done"], None, False,
+    )
+    assert outcome == "complete"
+
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        row = conn.execute(
+            "SELECT status FROM pipeline_runs WHERE id = %s", (str(expected_run_id),)
+        ).fetchone()
+    assert row is not None
+    assert row[0] == "completed"
+
+
+def test_dispatch_closes_pipeline_run_escalated_on_escalate_outcome(
+    substrate: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """MINOR (VT-607 fix round, adversarial review): an escalate outcome closes its pipeline_runs
+    row 'escalated' (the CHECK constraint's own distinct value) — only 'paused' was pinned before."""
+    dsn = substrate
+    tenant_id = str(uuid4())
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute(
+            "INSERT INTO tenants (id, business_name, plan_tier, phase, owner_phone) "
+            "VALUES (%s, %s, 'standard', 'trial', %s)",
+            (tenant_id, f"cdr-{tenant_id[:8]}", f"+9198{uuid4().int % 10**8:08d}"),
+        )
+    task_id, step = _create_and_claim_step(tenant_id)
+    step_id = str(step["step_id"])
+
+    monkeypatch.setattr(
+        "orchestrator.supervisor.build_supervisor_graph", _minimal_terminal_graph("escalate")
+    )
+
+    from orchestrator.manager import message_ids
+    from orchestrator.manager.workflow import _dispatch_specialist_step
+
+    expected_run_id = message_ids.loop_run_id(task_id, step_id, 1)
+    outcome, _revised = _dispatch_specialist_step(
+        tenant_id, task_id, step_id, 1, "situation", "desired outcome", ["done"], None, False,
+    )
+    assert outcome == "escalate"
+
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        row = conn.execute(
+            "SELECT status FROM pipeline_runs WHERE id = %s", (str(expected_run_id),)
+        ).fetchone()
+    assert row is not None
+    assert row[0] == "escalated"
+
+
 def test_approval_interrupt_orphans_without_the_fix(
     substrate: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
