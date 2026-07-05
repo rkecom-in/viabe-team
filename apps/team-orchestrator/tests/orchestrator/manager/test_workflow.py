@@ -153,6 +153,72 @@ def test_validate_step_blocks_on_unmet_activation_prereqs(substrate, monkeypatch
     assert dispatch_calls == []  # never reached dispatch — the prereq gate caught it first
 
 
+def _grant_config_policy(tid: str) -> None:
+    """Permit the 'config' action type in tenant_business_policy — assert_within_policy runs
+    BEFORE assert_or_gate_business_action in _validate_step and is its own fail-closed check (no
+    policy row -> OUT_OF_POLICY for ANY effect class); these tests isolate the business-impact-choke
+    freeze behavior specifically, so the OUTER policy bound must already be satisfied."""
+    from orchestrator.agents.business_policy import grant_business_policy
+    from orchestrator.db import tenant_connection
+
+    with tenant_connection(tid) as conn:
+        grant_business_policy(tid, allowed_action_types=["config"], conn=conn)
+
+
+def test_validate_step_blocks_on_frozen_business_impact_class(substrate, monkeypatch: pytest.MonkeyPatch):
+    """Team-lead ruling: _validate_step must run business_impact_choke.assert_or_gate_business_action
+    for spend/commitment/config effect classes — a FROZEN class (an explicit owner kill-switch)
+    blocks the step BEFORE dispatch (never wastes a cycle working toward a frozen action), even
+    though the OUTER policy bound (assert_within_policy) is satisfied — isolating the freeze as the
+    actual blocker, not a missing policy grant."""
+    import orchestrator.manager.workflow as wf
+    from orchestrator.agents.business_impact_choke import BusinessImpactClass, freeze_business_class
+    from orchestrator.manager.plan_models import PlanStep
+
+    tid = _seed_tenant(substrate)
+    _grant_config_policy(tid)
+    with substrate.connection() as conn:
+        freeze_business_class(tid, BusinessImpactClass.CONFIG, True, reason="test-freeze", conn=conn)
+
+    task_id = str(_create_task(
+        tid, steps=[PlanStep(step_seq=1, kind="verification", allowed_effect_classes=["config"])],
+    ))
+
+    dispatch_calls = []
+    monkeypatch.setattr(
+        wf, "_dispatch_specialist_step", lambda *a, **k: dispatch_calls.append(1) or "complete"
+    )
+    status = wf.manager_task_workflow(tid, task_id)
+
+    assert status == "blocked"
+    assert dispatch_calls == []
+
+
+def test_validate_step_allows_unfrozen_business_impact_class(substrate, monkeypatch: pytest.MonkeyPatch):
+    """With the OUTER policy bound satisfied (a real 'config' grant) and NO freeze, a no-autonomy-
+    grant tenant (the fail-closed always_approve default) must still be DISPATCHED —
+    requires_owner_approval at pre-dispatch magnitude=0 is the expected default for a no-grant
+    tenant, not itself a block; the real gate re-runs at effect-proposal time with the actual
+    magnitude."""
+    import orchestrator.manager.workflow as wf
+    from orchestrator.manager.plan_models import PlanStep
+
+    tid = _seed_tenant(substrate)
+    _grant_config_policy(tid)
+    task_id = str(_create_task(
+        tid, steps=[PlanStep(step_seq=1, kind="verification", allowed_effect_classes=["config"])],
+    ))
+
+    def _dispatch(tenant_id, tid_, step_id, *a, **k):
+        _apply_outcome(tid, task_id, step_id, "complete")
+        return "complete"
+
+    monkeypatch.setattr(wf, "_dispatch_specialist_step", _dispatch)
+    status = wf.manager_task_workflow(tid, task_id)
+
+    assert status == "verifying"
+
+
 def test_continue_then_complete_across_two_steps(substrate, monkeypatch: pytest.MonkeyPatch):
     import orchestrator.manager.workflow as wf
     from orchestrator.manager.plan_models import PlanStep
@@ -231,6 +297,34 @@ def test_revision_limit_exceeded_blocks_with_incident(substrate, monkeypatch: py
     incident = get_incident(tid, incident_id)
     assert incident is not None
     assert incident["escalation_tier"] >= 2
+    # Team-lead ruling: a self-describing kind (migration 166), never overloaded onto 'other'.
+    assert incident["incident_kind"] == "limit_exhausted"
+
+
+def test_prereq_policy_block_uses_other_not_limit_exhausted(substrate, monkeypatch: pytest.MonkeyPatch):
+    """The prereq/policy validation failure is a DIFFERENT cause than limit exhaustion — it must
+    stay on 'other', not get relabeled 'limit_exhausted' (ops needs the two distinguishable)."""
+    import orchestrator.manager.workflow as wf
+    from orchestrator.manager.plan_models import PlanStep
+    from orchestrator.observability.incident_store import get_incident
+
+    tid = _seed_tenant(substrate)
+    task_id = str(_create_task(
+        tid, steps=[PlanStep(step_seq=1, kind="specialist_dispatch", specialist="sales_recovery_agent")]
+    ))
+    monkeypatch.setattr(wf, "_dispatch_specialist_step", lambda *a, **k: "complete")
+
+    status = wf.manager_task_workflow(tid, task_id)
+    assert status == "blocked"
+
+    with substrate.connection() as conn:
+        row = conn.execute(
+            "SELECT id FROM incidents WHERE tenant_id = %s AND run_id = %s", (tid, task_id)
+        ).fetchone()
+    assert row is not None
+    incident = get_incident(tid, row["id"] if isinstance(row, dict) else row[0])
+    assert incident is not None
+    assert incident["incident_kind"] == "other"
 
 
 # --- limits: cycles per run ----------------------------------------------------------------------

@@ -5,12 +5,21 @@ approved template (registry SID, never hard-coded), then resumes the exact task/
 
 WhatsApp's owner-care freeform window closes 24h after the owner's LAST inbound message; a
 freeform send outside it fails Twilio 63016. ``team_reengage`` (VT-486, Meta-approved UTILITY,
-``agent_selectable: false`` — system-invoked only) is the EXISTING approved template built for
-exactly this out-of-window owner re-engagement; ``owner_send.send_owner_template`` is the EXISTING
-thin, ledgered send seam (VT-393/VT-524) built reusable for "trial_sweep's owner notify" and any
-other owner-utility template send — this module is its second real caller. No new send mechanism,
-no hardcoded SID (the registry resolves it; an unconfigured/misapproved template fails closed to a
-VTR incident, never a freeform send that would 63016).
+routed ``reengage: any -> team_reengage`` in ``template_routing.yaml``, ``agent_selectable: false``
+— system-invoked only) is the EXISTING approved template built for exactly this out-of-window owner
+re-engagement.
+
+Team-lead ruling (VT-606 recon follow-up): reuse the SAME owner-facing send chokepoint
+``request_owner_approval.arm_pause_request`` uses for its approval template — registry resolve +
+``validate_params`` + ``twilio_send``'s template path — rather than inventing a parallel one. So:
+``output_composer.compose_owner_output(None, state, "reengage")`` derives the template name +
+params (the SAME deterministic composer every other owner-facing send goes through), the resolved
+signature is defensively re-checked via ``templates_registry.validate_params`` (mirroring
+``send_whatsapp_template.py``'s own discipline), and the actual dispatch is
+``owner_send.send_owner_template`` (VT-393/VT-524's ledgered owner-template seam ->
+``twilio_send.send_template_message`` -> registry resolve). No new send mechanism, no hardcoded SID;
+an unconfigured/misapproved template fails closed to a VTR incident, never a freeform send that
+would 63016.
 """
 
 from __future__ import annotations
@@ -22,17 +31,20 @@ from uuid import UUID
 from orchestrator.db import tenant_connection
 from orchestrator.observability.incident_store import create_incident, escalate_incident
 from orchestrator.observability.tm_audit import emit_tm_audit
+from orchestrator.output_composer import compose_owner_output
+from orchestrator.owner_surface.freeform_acks import resolve_owner_locale
 from orchestrator.owner_surface.owner_send import send_owner_template
 from orchestrator.templates_registry import (
     TemplateRegistryError,
     UnknownLanguageVariantError,
     UnknownTemplateError,
+    VariableSignatureMismatchError,
+    validate_params,
 )
 from orchestrator.utils.twilio_send import SendResult
 
 logger = logging.getLogger("orchestrator.manager.stale_resume")
 
-_REENGAGE_TEMPLATE_NAME = "team_reengage"
 _TWENTY_FOUR_HOURS = timedelta(hours=24)
 
 
@@ -66,28 +78,56 @@ def reengage_stale_task(
     *,
     owner_phone: str,
     owner_name: str = "",
-    language: str = "en",
 ) -> SendResult | None:
     """Send the approved ``team_reengage`` template to re-open the window before the loop resumes
-    the exact task/step. Returns the ``SendResult`` on a real send attempt (success OR a reported
-    failure — Pillar 7 honesty, never swallowed); returns ``None`` (and raises no exception) when
-    the template itself is not configured/approved — the caller must treat that as "emit the
-    pending_owner_notification state + a VTR incident," never fall back to a freeform send (which
-    would 63016 outside the window).
+    the exact task/step.
+
+    Composes via ``output_composer.compose_owner_output(None, state, "reengage")`` (the SAME
+    deterministic composer path, not a hand-built params dict) — ``template_routing.yaml``'s
+    ``reengage: any -> team_reengage`` entry means this ALWAYS resolves ``team_reengage``
+    regardless of tenant phase. Language comes from ``resolve_owner_locale`` (the owner's real
+    ``preferred_language``/``language_preference``, not a caller-guessed default). The resolved
+    params are re-checked via ``templates_registry.validate_params`` before dispatch (defensive —
+    ``_derive_template_params``'s "reengage" branch always emits exactly ``{"owner_name": ...}``,
+    matching the template's one-variable signature, but this is the same belt-and-suspenders check
+    the customer-send tool applies, never skipped for an owner send either).
+
+    Returns the ``SendResult`` on a real send attempt (success OR a reported failure — Pillar 7
+    honesty, never swallowed); returns ``None`` (and raises no exception) when the template itself
+    is not configured/approved/signature-mismatched — the caller must treat that as a VTR incident,
+    never fall back to a freeform send (which would 63016 outside the window).
     """
+    locale = resolve_owner_locale(tenant_id)
+    state = {"preferred_language": locale, "owner_name": owner_name}
+    composed = compose_owner_output(None, state, "reengage")
+    template_name = composed.template_name
+    if template_name is None:
+        # Structurally unreachable today (the routing table's "reengage: any" entry always
+        # resolves) — guarded anyway since a future routing-yaml edit could regress it silently.
+        logger.warning(
+            "stale_resume: compose_owner_output resolved no template for 'reengage' "
+            "(fail-closed, no send) tenant=%s task=%s", tenant_id, task_id,
+        )
+        _raise_stale_resume_incident(tenant_id, task_id, reason="no_template_resolved")
+        return None
+
     try:
+        validate_params(template_name, composed.preferred_language, composed.template_params)
         result = send_owner_template(
             UUID(str(tenant_id)),
-            _REENGAGE_TEMPLATE_NAME,
-            language,
-            {"owner_name": owner_name},
+            template_name,
+            composed.preferred_language,
+            composed.template_params,
             recipient_phone=owner_phone,
         )
-    except (UnknownTemplateError, UnknownLanguageVariantError, TemplateRegistryError) as exc:
+    except (
+        UnknownTemplateError, UnknownLanguageVariantError,
+        VariableSignatureMismatchError, TemplateRegistryError,
+    ) as exc:
         logger.warning(
-            "stale_resume: team_reengage not configured for language=%s (fail-closed, no send) "
+            "stale_resume: %s not configured for language=%s (fail-closed, no send) "
             "tenant=%s task=%s: %s",
-            language, tenant_id, task_id, exc,
+            template_name, composed.preferred_language, tenant_id, task_id, exc,
         )
         _raise_stale_resume_incident(tenant_id, task_id, reason=f"template_unconfigured:{exc}")
         return None
@@ -100,7 +140,7 @@ def reengage_stale_task(
         summary=f"stale-resume re-engagement sent for task={task_id} success={result.success}",
         decision={
             "task_id": str(task_id),
-            "template_name": _REENGAGE_TEMPLATE_NAME,
+            "template_name": template_name,
             "success": result.success,
         },
     )
