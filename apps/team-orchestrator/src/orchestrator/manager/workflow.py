@@ -25,11 +25,22 @@ DBOS workflow keyed by ``(tenant_id, task_id)``:
         |- paused_approval (VT-607, Loop Package 6) -> durable wait for the approval gate's
         |                           SEPARATE resume path (approval_resume.resume_run, driven by
         |                           the webhook path when the owner replies) to resolve
-        |                           pending_approvals, then continue from wherever manager_
-        |                           review's ALREADY-APPLIED decision left the task (e.g. re-enter
-        |                           the SAME verify-then-settle handling 'complete' uses, if that
-        |                           was the decision) — never a manager_review outcome itself,
-        |                           a workflow-loop-only signal for "the graph paused mid-invoke"
+        |                           pending_approvals, THEN ROUTE ON THE OWNER'S ACTUAL DECISION
+        |                           (VT-607 fix round — "no longer pending" is NOT "approved"):
+        |                             approved      -> re-enter the SAME verify-then-settle
+        |                                              handling 'complete' uses, if that was
+        |                                              manager_review's ALREADY-APPLIED decision
+        |                             rejected/defer -> task 'cancelled' (a TRUE terminal status),
+        |                                              terminal_outcome='cancelled' (the owner
+        |                                              notification must read a DECLINE, not a
+        |                                              success), step stays 'done'
+        |                             needs_changes  -> the revise_step path (supersede + a fresh
+        |                                              pending replacement), same per-step
+        |                                              revision budget; exhausted -> blocked+incident
+        |                             timeout        -> blocked+incident (owner_unreachable) —
+        |                                              never silence, never auto-success
+        |                           never a manager_review outcome itself — a workflow-loop-only
+        |                           signal for "the graph paused mid-invoke"
         `- escalate                -> stop (already 'blocked' + a VTR incident — manager_review
                                     raised it; 'blocked' stays non-terminal by design — an operator
                                     resolves the incident, a mechanism this row doesn't build)
@@ -569,6 +580,82 @@ def _approval_still_pending(tenant_id: str, task_id: str, step_id: str, attempt:
 
 
 @DBOS.step()
+def _approval_decision_for_run(tenant_id: str, task_id: str, step_id: str, attempt: int) -> str | None:
+    """VT-607 fix round (CRITICAL) — once ``_approval_still_pending`` reports resolved, read the
+    owner's ACTUAL decision verb (``approved`` | ``rejected`` | ``needs_changes`` | ``defer`` |
+    ``timeout``) so the loop can route on it. The bug this closes: the loop previously treated
+    "no longer pending" as synonymous with "approved" — a REJECTED or timed-out campaign would
+    unconditionally run the verification cycle and settle 'completed_with_effect' with a SUCCESS
+    notification, discarding the owner's Pillar-7-authoritative 'no' at the loop layer (collapse's
+    own campaign_execute path never even runs on a non-approved decision — the settle was simply
+    WRONG, not just premature)."""
+    from orchestrator.db.wrappers import PendingApprovalsWrapper
+
+    run_id = loop_run_id(task_id, step_id, attempt)
+    return PendingApprovalsWrapper().decision_for_run(tenant_id, run_id)
+
+
+@DBOS.step()
+def _settle_declined_approval(tenant_id: str, task_id: str) -> None:
+    """VT-607 fix round — the owner's REJECTED (or an exhausted-defer, which resolves the same
+    way per approval_resume._DECISION_TO_STATUS) decision. The step's own work stayed 'done' (it
+    genuinely ran — the owner declined the EFFECT, not the specialist's work); the task settles a
+    TRUE terminal ('cancelled', already a task_store.TASK_TERMINAL member) with
+    terminal_outcome='cancelled' so whatever composes the owner notification reads a decline, never
+    a success. owner_notification_status starts 'pending' — the SAME VT-524 seam that would have
+    picked up a verified completion picks this up too."""
+    task_store.set_task_status(
+        tenant_id, task_id, "cancelled", expected_from=("verifying",),
+        terminal_outcome="cancelled", owner_notification_status="pending",
+    )
+    emit_tm_audit(
+        event_layer="does",
+        event_kind="task_approval_declined",
+        actor="team_manager",
+        tenant_id=tenant_id,
+        summary=f"task={task_id} cancelled: owner declined the proposed effect",
+        decision={"task_id": str(task_id), "terminal_outcome": "cancelled"},
+    )
+
+
+@DBOS.step()
+def _resume_task_after_needs_changes(tenant_id: str, task_id: str) -> None:
+    """VT-607 fix round — a 'needs_changes' decision replaces the step (via _apply_step_revision,
+    called by the caller just before this) but manager_review's ORIGINAL 'complete' decision had
+    already moved the task to 'verifying' before the pause — claim_next_step's own task-level CAS
+    guard only accepts 'planned'/'running' predecessors, so WITHOUT this the outer loop's re-claim
+    would silently no-op forever on a task stuck 'verifying' with a freshly-pending replacement
+    step nothing would ever claim. Mirrors _resume_step_after_answer's own transition-back pattern
+    for the ask_owner branch."""
+    task_store.set_task_status(tenant_id, task_id, "running", expected_from=("verifying",))
+
+
+@DBOS.step()
+def _block_owner_unreachable(tenant_id: str, task_id: str) -> None:
+    """VT-607 fix round — the approval itself timed out (decision='timeout', the scheduled 48h
+    sweep resolved it — NOT this loop's own approval_resolution_timeout poll-exhaustion, a
+    DIFFERENT case already handled by _block_limit_exceeded above). 'other' + a VTR incident,
+    never silence, never an auto-success settle — an operator needs to re-engage the owner."""
+    task_store.set_task_status(
+        tenant_id, task_id, "blocked", expected_from=tuple(task_store.TASK_NON_TERMINAL)
+    )
+    detail = {"task_id": str(task_id), "reason": "owner_unreachable"}
+    iid = create_incident(
+        tenant_id, incident_kind="other", run_id=task_id, severity="warning", detail=detail,
+    )
+    if iid is not None:
+        escalate_incident(tenant_id, iid, to_tier=2)
+    emit_tm_audit(
+        event_layer="does",
+        event_kind="manager_task_owner_unreachable",
+        actor="team_manager",
+        tenant_id=tenant_id,
+        summary=f"task={task_id} blocked: approval timed out, owner unreachable",
+        decision=detail,
+    )
+
+
+@DBOS.step()
 def _apply_step_revision(
     tenant_id: str, task_id: str, step: dict[str, Any], revised_outcome: str | None,
 ) -> bool:
@@ -733,17 +820,56 @@ def manager_task_workflow(tenant_id: str, task_id: str) -> str:
                     limit="approval_resolution_timeout", count=polls, threshold=_OWNER_WAIT_MAX_POLLS,
                 )
                 break
-            task_now = _get_task(tenant_id, task_id)
-            if task_now is not None and task_now.get("status") == "verifying":
-                # The paused dispatch's decision was 'complete' (ACCEPT) — same verify-then-settle
-                # handling the 'complete' branch below runs, reused rather than duplicated.
-                action, verification_attempts = _run_verification_cycle(
-                    tenant_id, task_id, verification_attempts
+
+            # VT-607 fix round (CRITICAL) — route on the owner's ACTUAL decision, never on "no
+            # longer pending" alone (that treated ANY resolution — including a REJECTED or timed-
+            # out approval — as an implicit approve, settling 'completed_with_effect' with a
+            # success notification regardless of what the owner actually said. Pillar-7 forbids
+            # that at every OTHER layer; this closes the same gap at the loop layer).
+            decision = _approval_decision_for_run(tenant_id, task_id, step_id, attempt)
+
+            if decision == "approved":
+                task_now = _get_task(tenant_id, task_id)
+                if task_now is not None and task_now.get("status") == "verifying":
+                    # The paused dispatch's decision was 'complete' (ACCEPT) — same verify-then-
+                    # settle handling the 'complete' branch below runs, reused not duplicated.
+                    action, verification_attempts = _run_verification_cycle(
+                        tenant_id, task_id, verification_attempts
+                    )
+                    if action == "retry":
+                        continue
+                    break  # 'settled' or 'blocked'
+                continue  # any other status (e.g. still 'running' from a continue decision)
+
+            if decision in ("rejected", "defer"):
+                # 'defer' only reaches here once EXHAUSTED (approval_resume._MAX_DEFERS) — it
+                # resolves the same way a rejection does (status='rejected'); the audit truth of
+                # WHICH is preserved in pending_approvals.decision, not re-derived here.
+                _settle_declined_approval(tenant_id, task_id)
+                break
+
+            if decision == "needs_changes":
+                step_seq = int(step["step_seq"])
+                revision_counts[step_seq] = revision_counts.get(step_seq, 0) + 1
+                if revision_counts[step_seq] > LIMIT_MAX_REVISIONS_PER_STEP:
+                    _block_limit_exceeded(
+                        tenant_id, task_id,
+                        limit=f"max_revisions_per_step_seq:{step_seq}",
+                        count=revision_counts[step_seq], threshold=LIMIT_MAX_REVISIONS_PER_STEP,
+                    )
+                    break
+                _apply_step_revision(
+                    tenant_id, task_id, step,
+                    "The owner requested changes to the proposed campaign before approving — "
+                    "reconsider the approach and address their concern before proposing again.",
                 )
-                if action == "retry":
-                    continue
-                break  # 'settled' or 'blocked'
-            continue  # any other status (e.g. still 'running' from a continue decision) -> claim next
+                _resume_task_after_needs_changes(tenant_id, task_id)
+                continue  # re-claim — the replacement step is now the pending one
+
+            # decision == "timeout", or (defensively) an unrecognized/None value reached after a
+            # resolution was observed — never silence, never an auto-success settle.
+            _block_owner_unreachable(tenant_id, task_id)
+            break
 
         if outcome == "complete":
             action, verification_attempts = _run_verification_cycle(

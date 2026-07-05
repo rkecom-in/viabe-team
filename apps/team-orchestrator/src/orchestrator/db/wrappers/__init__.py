@@ -773,6 +773,26 @@ class PendingApprovalsWrapper(TenantScopedTable):
             return None
         return str(dict(row)["status"]) if isinstance(row, dict) else str(row[0])
 
+    def decision_for_run(
+        self, tenant_id: UUID | str, run_id: UUID | str, *, conn: Any = None
+    ) -> str | None:
+        """The approval row's ``decision`` for ``run_id`` (VT-607 fix round — the paused_approval
+        resolution MUST route on the owner's actual decision, not just "no longer pending";
+        ``status`` alone collapses ``needs_changes`` into ``rejected`` (mig 052), so reading
+        ``status`` here would silently discard the needs_changes/rejected distinction the loop
+        needs). None when no row exists, OR when the row is still unresolved (``decision`` is
+        NULL while pending — mig 052). Read-only; run_id uniquely identifies the row."""
+        tid = self._uuid(tenant_id)
+        with self._conn(tid, conn) as c:
+            row = c.execute(
+                "SELECT decision FROM pending_approvals WHERE tenant_id = %s AND run_id = %s",
+                (str(tid), str(run_id)),
+            ).fetchone()
+        if row is None:
+            return None
+        decision = dict(row)["decision"] if isinstance(row, dict) else row[0]
+        return str(decision) if decision is not None else None
+
     def has_open_for_tenant(self, tenant_id: UUID | str, *, conn: Any = None) -> bool:
         """True iff ANY unresolved approval exists for the tenant — the one-open-per-tenant
         collision probe (VT-384 demote C-c; mig-128 is the structural backstop)."""

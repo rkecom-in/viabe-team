@@ -83,6 +83,19 @@ class AgentGraphState(TypedDict, total=False):
     manager_step_desired_outcome: str | None
     manager_step_acceptance_criteria: list[str] | None
     manager_has_next_step: bool | None
+    # VT-607 fix round (adversarial review) — manager_review_node's PRIMARY output. Declared here
+    # (it was NOT — only manager_review_revised_outcome, below, was ever added) so LangGraph
+    # actually merges it as a real channel; every reader (_dispatch_specialist_step's
+    # terminal_state.get("manager_review_outcome"), the "escalate" fallback) was silently reading
+    # None back for ANY clean (non-interrupted) terminal, since an undeclared TypedDict key is
+    # dropped rather than merged — masked everywhere else because every dispatch this loop has
+    # actually exercised end-to-end so far paused on the approval gate first (paused_approval is
+    # computed from is_paused, never from this key) or was reached via a mocked
+    # _dispatch_specialist_step (bypassing the real graph merge entirely). Caught by a MINOR fix-
+    # round test asserting the pipeline_runs close-status for a CLEAN 'complete' terminal — the
+    # SAME string coincidentally being the "escalate" fallback's own value is what let this hide
+    # even in the sibling 'escalate' test.
+    manager_review_outcome: str | None
     # VT-606 round-3 (adversarial-review fix, MAJOR #4) — manager_review_node's OUTPUT: the
     # reframed desired_outcome to re-dispatch with on a revise_step decision (ManagerDecision.
     # revised_outcome). None for every other outcome. workflow.py reads this to actually APPLY the

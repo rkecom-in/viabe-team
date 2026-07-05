@@ -715,3 +715,263 @@ def test_blocked_outcome_does_not_promote_a_queued_sibling(substrate, monkeypatc
 
     assert final_status == "blocked"
     assert task_store.get_task(tid, queued_task)["status"] == "queued"  # unchanged — still waiting
+
+
+# --- paused_approval: decision-aware resolution (VT-607 fix round, adversarial review) ---------
+#
+# Mirrors the ask_owner tests' own mocking convention: _approval_still_pending / _approval_
+# decision_for_run are mocked (matching how _question_still_open is mocked above) so these prove
+# the OUTER LOOP's real poll/route control flow against real durable state — the REAL pending_
+# approvals row read path is proven separately (test_sr_loop_e2e.py, DB-backed end to end).
+
+
+def _paused_after_complete(tenant_id: str, task_id: str, step_id: str) -> str:
+    """The paused dispatch's manager_review decision was 'complete' (ACCEPT) — mirrors
+    _apply_outcome's own 'complete' branch, since that's the ONLY decision that reaches
+    'paused_approval' in production (collapse only runs on a produced campaign_plan, which
+    only follows an ACCEPT-shaped decision)."""
+    _apply_outcome(tenant_id, task_id, step_id, "complete")
+    return "paused_approval"
+
+
+def test_paused_approval_poll_polarity_pin(substrate, monkeypatch: pytest.MonkeyPatch):
+    """MAJOR (adversarial review, fault-injection-proven): an INVERTED _approval_still_pending
+    polarity must FAIL this test. The approval stays 'pending' for several polls (asserted via a
+    call-count on the mock) BEFORE resolving — proving the loop genuinely re-polls rather than
+    treating the first pending check as already-resolved (or vice-versa)."""
+    import orchestrator.manager.workflow as wf
+    from orchestrator.manager import task_store
+
+    tid = _seed_tenant(substrate)
+    task_id = str(_create_task(tid))
+    _mock_verified(monkeypatch, wf)
+
+    def _dispatch(tenant_id, tid_, step_id, *a, **k):
+        outcome = _paused_after_complete(tid, task_id, step_id)
+        return outcome, None
+
+    still_pending_calls = {"n": 0}
+
+    def _still_pending(tenant_id, tid_, step_id, attempt):
+        still_pending_calls["n"] += 1
+        return still_pending_calls["n"] <= 3  # pending for the first 3 polls, resolved on the 4th
+
+    monkeypatch.setattr(wf, "_dispatch_specialist_step", _dispatch)
+    monkeypatch.setattr(wf, "_approval_still_pending", _still_pending)
+    monkeypatch.setattr(wf, "_approval_decision_for_run", lambda *a, **k: "approved")
+    monkeypatch.setattr(wf, "_OWNER_WAIT_MAX_POLLS", 10)  # comfortably above the 3 pending polls
+
+    status = wf.manager_task_workflow(tid, task_id)
+
+    assert still_pending_calls["n"] == 4, (
+        "the loop did not poll the expected number of times — a polarity inversion would make "
+        "this pass on either the 1st call (treating pending as resolved) or never resolve at all"
+    )
+    assert status == "completed"
+    assert task_store.get_task(tid, task_id)["status"] == "completed"
+
+
+def test_paused_approval_resolution_timeout_blocks_with_incident(substrate, monkeypatch: pytest.MonkeyPatch):
+    """MAJOR (adversarial review, test adequacy): poll exhaustion (the approval NEVER resolves)
+    must hit _block_limit_exceeded — 'blocked' + a limit_exhausted incident, mirroring
+    test_ask_owner_timeout_blocks_with_incident's own pattern for the SAME class of durable wait."""
+    import orchestrator.manager.workflow as wf
+    from orchestrator.observability.incident_store import get_incident
+
+    tid = _seed_tenant(substrate)
+    task_id = str(_create_task(tid))
+
+    def _dispatch(tenant_id, tid_, step_id, *a, **k):
+        outcome = _paused_after_complete(tid, task_id, step_id)
+        return outcome, None
+
+    monkeypatch.setattr(wf, "_dispatch_specialist_step", _dispatch)
+    monkeypatch.setattr(wf, "_approval_still_pending", lambda *a, **k: True)  # never resolves
+    monkeypatch.setattr(wf, "_OWNER_WAIT_MAX_POLLS", 2)
+
+    status = wf.manager_task_workflow(tid, task_id)
+
+    assert status == "blocked"
+    with substrate.connection() as conn:
+        row = conn.execute(
+            "SELECT id FROM incidents WHERE tenant_id = %s AND run_id = %s", (tid, task_id)
+        ).fetchone()
+    assert row is not None
+    incident = get_incident(tid, row["id"] if isinstance(row, dict) else row[0])
+    assert incident is not None
+    assert incident["incident_kind"] == "limit_exhausted"
+
+
+def test_paused_approval_approved_settles_completed_with_effect(substrate, monkeypatch: pytest.MonkeyPatch):
+    """The 'approved' decision path: re-enters the SAME verify-then-settle handling 'complete'
+    uses — a TRUE terminal 'completed' with terminal_outcome='completed_with_effect' (the paused
+    step's own evidence, recorded by _apply_outcome's 'complete' branch via manager_review's real
+    plan_store effect elsewhere, is proxied here structurally the same way test_complete_with_
+    evidence_settles_completed_with_effect proves it)."""
+    import orchestrator.manager.workflow as wf
+    from orchestrator.manager import plan_store, task_store
+    from orchestrator.manager.plan_models import EvidenceRef
+
+    tid = _seed_tenant(substrate)
+    task_id = str(_create_task(tid))
+    _mock_verified(monkeypatch, wf)
+
+    def _dispatch(tenant_id, tid_, step_id, *a, **k):
+        plan_store.complete_step(
+            tid, step_id, "done",
+            evidence=EvidenceRef(kind="pipeline_run", ref="pr-approved-1"), expected_from=("running",),
+        )
+        task_store.set_task_status(tid, task_id, "verifying", expected_from=("running",))
+        return "paused_approval", None
+
+    monkeypatch.setattr(wf, "_dispatch_specialist_step", _dispatch)
+    monkeypatch.setattr(wf, "_approval_still_pending", lambda *a, **k: False)
+    monkeypatch.setattr(wf, "_approval_decision_for_run", lambda *a, **k: "approved")
+
+    status = wf.manager_task_workflow(tid, task_id)
+
+    assert status == "completed"
+    task = task_store.get_task(tid, task_id)
+    assert task["terminal_outcome"] == "completed_with_effect"
+    assert task["owner_notification_status"] == "pending"
+
+
+def test_paused_approval_rejected_settles_cancelled_and_promotes_queued(
+    substrate, monkeypatch: pytest.MonkeyPatch
+):
+    """CRITICAL fix's own proof: a REJECTED decision must NEVER settle 'completed_with_effect' —
+    it settles the TRUE terminal 'cancelled', terminal_outcome='cancelled' (the notification must
+    read a decline, never a success), the step's own 'done' status is UNTOUCHED (the work
+    genuinely happened — the owner declined the EFFECT), and promote-next fires (cancelled is
+    terminal) — the OTHER half of test_terminal_task_promotes_oldest_queued's own proof, now for
+    the rejected path specifically."""
+    import orchestrator.manager.workflow as wf
+    from orchestrator.manager import plan_store, task_store
+    from orchestrator.manager.plan_models import ManagerPlan, PlanStep
+
+    tid = _seed_tenant(substrate)
+    active_task = _create_task(tid)
+    second_plan = ManagerPlan(objective="second", steps=[PlanStep(step_seq=1, kind="verification")])
+    queued_task = plan_store.create_plan(tid, second_plan, source_message_sid=f"SM{uuid4().hex}")
+    assert task_store.get_task(tid, queued_task)["status"] == "queued"
+
+    def _dispatch(tenant_id, tid_, step_id, *a, **k):
+        outcome = _paused_after_complete(tid, str(active_task), step_id)
+        return outcome, None
+
+    monkeypatch.setattr(wf, "_dispatch_specialist_step", _dispatch)
+    monkeypatch.setattr(wf, "_approval_still_pending", lambda *a, **k: False)
+    monkeypatch.setattr(wf, "_approval_decision_for_run", lambda *a, **k: "rejected")
+
+    status = wf.manager_task_workflow(tid, str(active_task))
+
+    assert status == "cancelled"
+    task = task_store.get_task(tid, str(active_task))
+    assert task["terminal_outcome"] == "cancelled"
+    assert task["owner_notification_status"] == "pending"
+    steps = task_store.get_steps(tid, str(active_task))
+    assert steps[0]["status"] == "done"  # untouched — the work happened, the effect was declined
+    assert task_store.get_task(tid, queued_task)["status"] == "planned"  # promoted
+
+
+def test_paused_approval_needs_changes_revises_the_step(substrate, monkeypatch: pytest.MonkeyPatch):
+    """A 'needs_changes' decision supersedes the (already 'done') step and inserts a fresh
+    replacement carrying a revised framing, transitions the task back to 'running' (claim_next_step
+    only accepts 'planned'/'running' predecessors — a task stuck 'verifying' would strand the
+    replacement forever), and re-claims it — governed by the SAME per-step revision budget the
+    plain revise_step path already enforces."""
+    import orchestrator.manager.workflow as wf
+    from orchestrator.manager import task_store
+
+    tid = _seed_tenant(substrate)
+    task_id = str(_create_task(tid))
+    _mock_verified(monkeypatch, wf)
+
+    dispatch_calls = {"n": 0}
+
+    def _dispatch(tenant_id, tid_, step_id, *a, **k):
+        dispatch_calls["n"] += 1
+        if dispatch_calls["n"] == 1:
+            outcome = _paused_after_complete(tid, task_id, step_id)
+            return outcome, None
+        # second attempt (the replacement step, re-claimed) — end the test cleanly.
+        _apply_outcome(tid, task_id, step_id, "complete")
+        return "complete", None
+
+    decision_calls = {"n": 0}
+
+    def _decision(tenant_id, tid_, step_id, attempt):
+        decision_calls["n"] += 1
+        return "needs_changes"
+
+    monkeypatch.setattr(wf, "_dispatch_specialist_step", _dispatch)
+    monkeypatch.setattr(wf, "_approval_still_pending", lambda *a, **k: False)
+    monkeypatch.setattr(wf, "_approval_decision_for_run", _decision)
+
+    status = wf.manager_task_workflow(tid, task_id)
+
+    assert dispatch_calls["n"] == 2  # the original attempt + the re-claimed replacement
+    assert decision_calls["n"] == 1  # only the FIRST paused_approval reaches a decision read
+    assert status == "completed"  # the replacement's own 'complete' settled cleanly
+
+    steps = task_store.get_steps(tid, task_id)
+    assert len(steps) == 2
+    original, replacement = (s for s in sorted(steps, key=lambda s: s["created_at"]))
+    assert original["status"] == "superseded"
+    assert replacement["detail"]["desired_outcome"], "the replacement must carry a revised framing"
+
+
+def test_paused_approval_needs_changes_budget_exhausted_blocks(substrate, monkeypatch: pytest.MonkeyPatch):
+    """The needs_changes revision budget is the SAME LIMIT_MAX_REVISIONS_PER_STEP the plain
+    revise_step path enforces — exhausting it blocks + incidents rather than looping forever."""
+    import orchestrator.manager.workflow as wf
+
+    tid = _seed_tenant(substrate)
+    task_id = str(_create_task(tid))
+    _mock_verified(monkeypatch, wf)
+
+    def _dispatch(tenant_id, tid_, step_id, *a, **k):
+        outcome = _paused_after_complete(tid, task_id, step_id)
+        return outcome, None
+
+    monkeypatch.setattr(wf, "_dispatch_specialist_step", _dispatch)
+    monkeypatch.setattr(wf, "_approval_still_pending", lambda *a, **k: False)
+    monkeypatch.setattr(wf, "_approval_decision_for_run", lambda *a, **k: "needs_changes")
+    monkeypatch.setattr(wf, "LIMIT_MAX_REVISIONS_PER_STEP", 1)
+
+    status = wf.manager_task_workflow(tid, task_id)
+
+    assert status == "blocked"
+
+
+def test_paused_approval_timeout_blocks_with_incident(substrate, monkeypatch: pytest.MonkeyPatch):
+    """A 'timeout' decision (the approval itself timed out — the 48h scheduled sweep resolved it,
+    NOT this loop's own poll-exhaustion) must block + incident, never silence, never an
+    auto-success settle."""
+    import orchestrator.manager.workflow as wf
+    from orchestrator.observability.incident_store import get_incident
+
+    tid = _seed_tenant(substrate)
+    task_id = str(_create_task(tid))
+
+    def _dispatch(tenant_id, tid_, step_id, *a, **k):
+        outcome = _paused_after_complete(tid, task_id, step_id)
+        return outcome, None
+
+    monkeypatch.setattr(wf, "_dispatch_specialist_step", _dispatch)
+    monkeypatch.setattr(wf, "_approval_still_pending", lambda *a, **k: False)
+    monkeypatch.setattr(wf, "_approval_decision_for_run", lambda *a, **k: "timeout")
+
+    status = wf.manager_task_workflow(tid, task_id)
+
+    assert status == "blocked"
+    with substrate.connection() as conn:
+        row = conn.execute(
+            "SELECT id, detail FROM incidents WHERE tenant_id = %s AND run_id = %s", (tid, task_id)
+        ).fetchone()
+    assert row is not None
+    incident = get_incident(tid, row["id"] if isinstance(row, dict) else row[0])
+    assert incident is not None
+    assert incident["incident_kind"] == "other"
+    detail = row["detail"] if isinstance(row, dict) else row[1]
+    assert detail["reason"] == "owner_unreachable"
