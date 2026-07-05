@@ -86,6 +86,10 @@ _OWNER_WAIT_MAX_POLLS = 2016  # 2016 * 300s ≈ 7 days
 # scope (the loop MECHANICS), not something this row invents.
 _SPECIALIST_TO_ACTIVATION_KEY: dict[str, str] = {"sales_recovery_agent": "sales_recovery"}
 
+# The business_impact_choke.BusinessImpactClass values — customer_send is EXCLUDED (VT-460's own
+# separate harness, not business_impact_choke's).
+_BUSINESS_IMPACT_CLASSES = frozenset({"spend", "commitment", "config"})
+
 # Same six values manager_review decides between (review.py's own dispatch table) — reused here,
 # not redefined, so the two can never silently drift apart.
 StepOutcome = ManagerReviewOutcome
@@ -101,10 +105,31 @@ def _claim_step(tenant_id: str, task_id: str) -> dict[str, Any] | None:
 
 @DBOS.step()
 def _validate_step(tenant_id: str, step: dict[str, Any]) -> bool:
-    """"validate capability, prerequisites and policy" (Package 3's diagram). Fail-closed on the
-    prereq check for a specialist this codebase actually gates (sales_recovery); a step whose
-    ``allowed_effect_classes`` names something out of the tenant's policy also fails here — before
-    ANY dispatch, not after."""
+    """"validate capability, prerequisites and policy" (Package 3's diagram) — the LIVE rails the
+    advisory tools already ride, not the dead ``capability/registry.py`` (VT-528) scaffolding.
+    ``capability/registry.py`` is a genuinely separate, more elaborate capability-contract system
+    (mode/effect-class/verifier/rollback declarations) with no live caller today; wiring THIS diff
+    to it would be scope creep in the program's most consequential change (team-lead ruling). It
+    stays on the roster as a future consolidation target — a later row should decide whether
+    ``_validate_step`` migrates onto it once it has a real caller elsewhere.
+
+    Three checks, fail-closed, all BEFORE any dispatch:
+      1. ``onboarding_gate.is_agent_eligible`` — the specialist's activation prerequisites
+         (sales_recovery only has a real registry entry today; see the mapping below).
+      2. ``business_policy.assert_within_policy`` — the OUTER policy bound for every declared
+         effect class (customer_send/spend/commitment/config uniformly).
+      3. ``business_impact_choke.assert_or_gate_business_action`` for the three business-impact
+         classes (spend/commitment/config; customer_send is VT-460's separate harness). No REAL
+         magnitude is known pre-dispatch (a spend/commitment amount is only decided when the
+         specialist's OWN gated tool proposes one, e.g. ``marketing_lane.check_ad_spend_intent`` —
+         unaffected by VT-606), so this mirrors ``tech_lane.check_config_change_intent``'s own
+         magnitude-less convention (``magnitude_minor=0``) — it does NOT replace the specialist's
+         real-magnitude gate call at effect-proposal time. A ``requires_owner_approval`` result at
+         magnitude 0 is the EXPECTED default for a no-grant/threshold tenant (not itself a block —
+         the real gate re-runs with the actual magnitude later); only a ``frozen`` class (an
+         explicit owner kill-switch) blocks the step outright — dispatching a specialist to work
+         toward an action the owner has explicitly frozen would waste the cycle.
+    """
     specialist = step.get("specialist")
     if specialist is not None:
         activation_key = _SPECIALIST_TO_ACTIVATION_KEY.get(specialist)
@@ -117,12 +142,23 @@ def _validate_step(tenant_id: str, step: dict[str, Any]) -> bool:
 
     effect_classes = step.get("allowed_effect_classes") or []
     if effect_classes:
+        from orchestrator.agents.business_impact_choke import (
+            REASON_FROZEN,
+            BusinessImpactClass,
+            assert_or_gate_business_action,
+        )
         from orchestrator.agents.business_policy import PolicyActionClass, assert_within_policy
 
         for cls in effect_classes:
             check = assert_within_policy(tenant_id, PolicyActionClass(cls), {})
             if not check.in_policy:
                 return False
+            if cls in _BUSINESS_IMPACT_CLASSES:
+                gate = assert_or_gate_business_action(
+                    tenant_id, BusinessImpactClass(cls), 0, action_attrs={}
+                )
+                if gate.reason == REASON_FROZEN:
+                    return False
     return True
 
 
@@ -215,19 +251,18 @@ def _has_other_pending_steps(tenant_id: str, task_id: str, plan_revision: int, e
 
 
 @DBOS.step()
-def _block_limit_exceeded(tenant_id: str, task_id: str, *, reason: str) -> None:
-    """Package 3: "Limit exhaustion produces blocked plus a VTR incident, never silence." Mirrors
-    ``manager.review.manager_review``'s own escalate-incident shape (task_id as the soft
-    run_id correlation key)."""
+def _block_limit_exceeded(tenant_id: str, task_id: str, *, limit: str, count: int, threshold: int) -> None:
+    """Package 3: "Limit exhaustion produces blocked plus a VTR incident, never silence." Team-lead
+    ruling (VT-606 recon follow-up): a self-describing ``limit_exhausted`` incident kind (migration
+    166) — never overloaded onto ``other``/``failed_run``, so ops queries can tell "the plan hit a
+    budget cap" apart from every other blocked-task cause at a glance. ``detail``/the audit decision
+    carry the structured (task_id, limit, count, threshold) shape, not a free-text reason string."""
     task_store.set_task_status(
         tenant_id, task_id, "blocked", expected_from=tuple(task_store.TASK_NON_TERMINAL)
     )
+    detail = {"task_id": str(task_id), "limit": limit, "count": count, "threshold": threshold}
     iid = create_incident(
-        tenant_id,
-        incident_kind="other",
-        run_id=task_id,
-        severity="warning",
-        detail={"source": "manager_task_workflow", "task_id": str(task_id), "reason": reason},
+        tenant_id, incident_kind="limit_exhausted", run_id=task_id, severity="warning", detail=detail,
     )
     if iid is not None:
         escalate_incident(tenant_id, iid, to_tier=2)
@@ -236,8 +271,35 @@ def _block_limit_exceeded(tenant_id: str, task_id: str, *, reason: str) -> None:
         event_kind="manager_task_limit_exceeded",
         actor="team_manager",
         tenant_id=tenant_id,
-        summary=f"task={task_id} blocked: {reason}",
-        decision={"task_id": str(task_id), "reason": reason},
+        summary=f"task={task_id} blocked: {limit} exceeded ({count}/{threshold})",
+        decision=detail,
+    )
+
+
+@DBOS.step()
+def _block_prereq_or_policy_failed(tenant_id: str, task_id: str, *, step_id: str) -> None:
+    """A step's capability/prerequisite/policy validation failed BEFORE any dispatch — NOT a limit
+    exhaustion (kept off ``limit_exhausted`` so ops can tell the two causes apart); ``other`` + a
+    VTR incident, never silence."""
+    task_store.set_task_status(
+        tenant_id, task_id, "blocked", expected_from=tuple(task_store.TASK_NON_TERMINAL)
+    )
+    detail = {
+        "source": "manager_task_workflow", "task_id": str(task_id), "step_id": step_id,
+        "reason": "prereq_or_policy_failed",
+    }
+    iid = create_incident(
+        tenant_id, incident_kind="other", run_id=task_id, severity="warning", detail=detail,
+    )
+    if iid is not None:
+        escalate_incident(tenant_id, iid, to_tier=2)
+    emit_tm_audit(
+        event_layer="does",
+        event_kind="manager_task_limit_exceeded",
+        actor="team_manager",
+        tenant_id=tenant_id,
+        summary=f"task={task_id} blocked: prereq/policy validation failed for step={step_id}",
+        decision=detail,
     )
 
 
@@ -320,7 +382,7 @@ def manager_task_workflow(tenant_id: str, task_id: str) -> str:
 
         step_id = str(step["step_id"])
         if not _validate_step(tenant_id, step):
-            _block_limit_exceeded(tenant_id, task_id, reason=f"prereq_or_policy_failed:{step_id}")
+            _block_prereq_or_policy_failed(tenant_id, task_id, step_id=step_id)
             break
 
         attempt_counts[step_id] = attempt_counts.get(step_id, 0) + 1
@@ -344,7 +406,10 @@ def manager_task_workflow(tenant_id: str, task_id: str) -> str:
             revision_counts[step_id] = revision_counts.get(step_id, 0) + 1
             if revision_counts[step_id] > LIMIT_MAX_REVISIONS_PER_STEP:
                 _block_limit_exceeded(
-                    tenant_id, task_id, reason=f"max_revisions_exceeded:{step_id}"
+                    tenant_id, task_id,
+                    limit=f"max_revisions_per_step:{step_id}",
+                    count=revision_counts[step_id],
+                    threshold=LIMIT_MAX_REVISIONS_PER_STEP,
                 )
                 break
             continue  # re-claim the SAME step (manager_review reset it to 'pending')
@@ -360,7 +425,10 @@ def manager_task_workflow(tenant_id: str, task_id: str) -> str:
                 DBOS.sleep(_OWNER_WAIT_POLL_S)
                 polls += 1
             else:
-                _block_limit_exceeded(tenant_id, task_id, reason="owner_answer_timeout")
+                _block_limit_exceeded(
+                    tenant_id, task_id,
+                    limit="owner_answer_timeout", count=polls, threshold=_OWNER_WAIT_MAX_POLLS,
+                )
                 break
             # Answered: the step is still parked at 'waiting' (manager_review's ask_owner effect) —
             # claim_next_step only ever claims 'pending' steps, so transition it back before
@@ -374,7 +442,9 @@ def manager_task_workflow(tenant_id: str, task_id: str) -> str:
         # outcome in {"continue", "accept_step"} — loop to claim the next step.
 
     else:
-        _block_limit_exceeded(tenant_id, task_id, reason="max_cycles_exceeded")
+        _block_limit_exceeded(
+            tenant_id, task_id, limit="max_cycles", count=cycles, threshold=LIMIT_MAX_CYCLES
+        )
 
     final = _get_task(tenant_id, task_id)
     final_status = str(final["status"]) if final else "unknown"

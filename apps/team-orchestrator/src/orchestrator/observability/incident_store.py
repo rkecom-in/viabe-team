@@ -19,7 +19,9 @@ from orchestrator.privacy.pii_redactor import redact
 
 logger = logging.getLogger(__name__)
 
-INCIDENT_KINDS = frozenset({"silent_terminal", "failed_run", "owner_unreachable", "other"})
+INCIDENT_KINDS = frozenset(
+    {"silent_terminal", "failed_run", "owner_unreachable", "other", "limit_exhausted"}
+)
 
 
 def _id(row: Any) -> UUID:
