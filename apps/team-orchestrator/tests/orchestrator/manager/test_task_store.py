@@ -217,6 +217,96 @@ def test_has_active_task_tenant_isolation(pool):
     assert ts.has_active_task(tid_b) is False
 
 
+# --- has_active_integration_step (VT-608 ruling 1, the runner-gate DEFER check) -----------------
+
+
+def test_has_active_integration_step_false_when_no_tasks(pool):
+    from orchestrator.manager import task_store as ts
+
+    tid = _seed_tenant(pool)
+    assert ts.has_active_integration_step(tid) is False
+
+
+def test_has_active_integration_step_true_when_current_step_is_integration_agent(pool):
+    from orchestrator.manager import plan_store
+    from orchestrator.manager import task_store as ts
+    from orchestrator.manager.plan_models import ManagerPlan, PlanStep
+    from uuid import uuid4
+
+    tid = _seed_tenant(pool)
+    plan = ManagerPlan(
+        objective="connect a data source",
+        steps=[PlanStep(step_seq=1, kind="specialist_dispatch", specialist="integration_agent")],
+    )
+    task_id = plan_store.create_plan(tid, plan, source_message_sid=f"SM{uuid4().hex}")
+    plan_store.claim_next_step(tid, task_id)  # sets manager_tasks.current_step_id + status='running'
+
+    assert ts.has_active_integration_step(tid) is True
+
+
+def test_has_active_integration_step_false_for_a_different_specialists_current_step(pool):
+    """A running task whose CURRENT step targets a DIFFERENT specialist (e.g. sales_recovery_agent)
+    must not defer the runner gate — only integration_agent ownership does."""
+    from orchestrator.manager import plan_store
+    from orchestrator.manager import task_store as ts
+    from orchestrator.manager.plan_models import ManagerPlan, PlanStep
+    from uuid import uuid4
+
+    tid = _seed_tenant(pool)
+    plan = ManagerPlan(
+        objective="recover dormant customers",
+        steps=[PlanStep(step_seq=1, kind="specialist_dispatch", specialist="sales_recovery_agent")],
+    )
+    task_id = plan_store.create_plan(tid, plan, source_message_sid=f"SM{uuid4().hex}")
+    plan_store.claim_next_step(tid, task_id)
+
+    assert ts.has_active_integration_step(tid) is False
+
+
+def test_has_active_integration_step_false_when_task_is_queued(pool):
+    """A SECOND tenant task queued behind an active one, even if ITS current step targets
+    integration_agent, must not defer — 'queued' is excluded from TASK_ACTIVE (it isn't
+    RUNNING yet, so it doesn't actually own the tenant's phase-state writes)."""
+    from orchestrator.manager import plan_store
+    from orchestrator.manager import task_store as ts
+    from orchestrator.manager.plan_models import ManagerPlan, PlanStep
+    from uuid import uuid4
+
+    tid = _seed_tenant(pool)
+    active_plan = ManagerPlan(
+        objective="active", steps=[PlanStep(step_seq=1, kind="verification")]
+    )
+    plan_store.create_plan(tid, active_plan, source_message_sid=f"SM{uuid4().hex}")
+
+    queued_plan = ManagerPlan(
+        objective="connect a data source",
+        steps=[PlanStep(step_seq=1, kind="specialist_dispatch", specialist="integration_agent")],
+    )
+    queued_task_id = plan_store.create_plan(tid, queued_plan, source_message_sid=f"SM{uuid4().hex}")
+    assert ts.get_task(tid, queued_task_id)["status"] == "queued"
+
+    assert ts.has_active_integration_step(tid) is False
+
+
+def test_has_active_integration_step_tenant_isolation(pool):
+    from orchestrator.manager import plan_store
+    from orchestrator.manager import task_store as ts
+    from orchestrator.manager.plan_models import ManagerPlan, PlanStep
+    from uuid import uuid4
+
+    tid_a = _seed_tenant(pool)
+    tid_b = _seed_tenant(pool)
+    plan = ManagerPlan(
+        objective="connect a data source",
+        steps=[PlanStep(step_seq=1, kind="specialist_dispatch", specialist="integration_agent")],
+    )
+    task_id = plan_store.create_plan(tid_a, plan, source_message_sid=f"SM{uuid4().hex}")
+    plan_store.claim_next_step(tid_a, task_id)
+
+    assert ts.has_active_integration_step(tid_a) is True
+    assert ts.has_active_integration_step(tid_b) is False
+
+
 def test_stalled_task_reaper(pool):
     from orchestrator.manager import task_store as ts
     from orchestrator.orphan_reaper import reap_stalled_manager_tasks

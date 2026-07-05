@@ -900,7 +900,33 @@ def webhook_pipeline_run(tenant_id: str, run_id: str, twilio_fields: dict) -> di
     # DB-state driven off tenant_integration_state.pending_owner_input. Mirrors the journey gate:
     # runs BEFORE pre_filter, inbound + non-dupe only, FAIL-OPEN (any error → None → normal flow).
     # Opt-out / DSR is short-circuited inside the gate (returns None) so it never consumes a STOP.
+    #
+    # VT-608 ruling 1 — the DEFER check: in enforce mode the loop owns a tenant's integration
+    # objective once dispatched (its specialist reads/writes the SAME tenant_integration_state
+    # truth this legacy gate does). An active loop task currently ON an integration_agent step
+    # means the loop already owns this turn — the gate DEFERS (skips entirely, falls through to
+    # the normal brain/loop dispatch path) rather than racing the loop for the same phase-state
+    # writes. No active loop-owned integration step (the common case today, and the ONLY case
+    # in legacy/shadow mode) → gate behavior is BYTE-IDENTICAL to before this ruling. Fail-open:
+    # a defer-check failure must never block the legacy gate's own resume (falls through to it,
+    # not the reverse — this is a NEW check layered in front of an EXISTING fail-open gate).
+    integration_loop_owns_turn = False
     if event.message_type == "inbound_message" and not event.dupe_status:
+        try:
+            from orchestrator.manager.task_store import has_active_integration_step
+
+            integration_loop_owns_turn = has_active_integration_step(tenant_id)
+        except Exception:  # noqa: BLE001 — defer-check failure must never block the legacy gate
+            logger.warning(
+                "VT-608: has_active_integration_step check failed tenant=%s (fail-open -> legacy gate runs)",
+                tenant_id,
+            )
+
+    if (
+        event.message_type == "inbound_message"
+        and not event.dupe_status
+        and not integration_loop_owns_turn
+    ):
         from orchestrator.onboarding.shopify_onboarding import (
             maybe_resume_shopify_onboarding,
         )
