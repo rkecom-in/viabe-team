@@ -13,8 +13,11 @@ subject under test. This drives the loop through the REAL production seams:
     real seeded cohort);
   - the REAL ``manager_review`` node — ``manager_task_id``/``manager_step_id`` are seeded (via
     ``_dispatch_specialist_step`` itself, which always populates them) so it executes for real
-    rather than the no-op fallback; its own sonnet-5 structured-extraction call is the ONLY OTHER
-    faked LLM call (no live Anthropic key needed);
+    rather than the no-op fallback. VT-607 (Loop Package 6): a produced ``campaign_plan`` routes
+    manager_review through the DETERMINISTIC typed CampaignPlan->PlanSpecialistReturn adapter
+    (``adapt_campaign_plan_to_specialist_return``) — no sonnet-5 call at all for this step (the
+    adapter's own grounding check runs a REAL, read-only DB query confirming the cohort's
+    customer_ids resolve to real, tenant-scoped customers seeded by ``_e2e_seed.seed``);
   - the REAL ``request_owner_approval_node`` (dry_run via the package's autouse Twilio stub — no
     live Twilio call; a real ``pending_approvals`` INSERT);
   - all driven through the REAL, unmodified ``manager.workflow._dispatch_specialist_step`` in
@@ -39,7 +42,6 @@ isolate the OLD thread_id/run_id mismatch) and so never goes through the fix.
 
 from __future__ import annotations
 
-import json
 import os
 import sys
 from pathlib import Path
@@ -118,38 +120,6 @@ def _create_and_claim_step(tenant_id: str) -> tuple[str, dict]:
     return str(task_id), step
 
 
-class _FakeReviewTextBlock:
-    type = "text"
-
-    def __init__(self, text: str) -> None:
-        self.text = text
-
-
-class _FakeReviewResp:
-    def __init__(self, content: list) -> None:
-        self.content = content
-
-
-class _FakeReviewClient:
-    """Fakes manager_review's ``extract_specialist_return``'s ``Anthropic().messages.create``
-    call — mirrors test_manager_review_db.py's own ``_FakeClient`` pattern exactly, but wired in
-    via ``Anthropic`` class substitution (the graph node has no ``client=`` passthrough)."""
-
-    def __init__(self, payload: dict) -> None:
-        self._payload = payload
-
-    @property
-    def messages(self) -> Any:
-        payload = self._payload
-
-        class _M:
-            @staticmethod
-            def create(**kwargs: Any) -> _FakeReviewResp:
-                return _FakeReviewResp([_FakeReviewTextBlock(json.dumps(payload))])
-
-        return _M()
-
-
 def test_approval_interrupt_through_real_loop_resumes_the_persisted_thread(
     substrate: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -184,20 +154,9 @@ def test_approval_interrupt_through_real_loop_resumes_the_persisted_thread(
 
         monkeypatch.setattr(supervisor_mod, "_sales_recovery_node", _fake_sr_node)
 
-        # --- the OTHER faked LLM call: manager_review's structured-extraction classifier ---
-        import orchestrator.manager.review as review_mod
-
-        monkeypatch.setattr(
-            review_mod,
-            "Anthropic",
-            lambda: _FakeReviewClient(
-                {
-                    "status": "completed",
-                    "action_summary": "proposed a recovery campaign for owner approval",
-                    "outcome_summary": "campaign plan proposed, awaiting approval",
-                }
-            ),
-        )
+        # VT-607 (Loop Package 6): manager_review no longer needs a faked Anthropic client here —
+        # a produced campaign_plan routes it through the deterministic typed adapter
+        # (adapt_campaign_plan_to_specialist_return), never the sonnet-5 extraction call at all.
 
         # --- the orchestrator's own model: a real create_agent, driven by a canned tool call ---
         from langchain_core.language_models import LanguageModelInput
@@ -250,9 +209,10 @@ def test_approval_interrupt_through_real_loop_resumes_the_persisted_thread(
         )
         # manager_review DID run for real (status='completed' -> ACCEPT -> outcome='complete'),
         # but the graph continued past it to collapse -> the approval gate, which PAUSED before
-        # this graph.invoke returned — so the outcome the caller sees is the fail-safe default
-        # (manager_review_outcome is never re-read after a mid-graph interrupt).
-        assert outcome == "escalate"
+        # this graph.invoke returned. VT-607: _dispatch_specialist_step reports this distinct,
+        # workflow-loop-only signal (never the old "escalate" fallback, which would have made the
+        # outer loop wrongly treat a live, healthy pause as an already-blocked/incident task).
+        assert outcome == "paused_approval"
 
         # --- VT-607 adversarial proof: NO manual pipeline_runs seeding above, yet collapse's
         # campaigns INSERT and request_owner_approval's pending_approvals INSERT BOTH satisfied

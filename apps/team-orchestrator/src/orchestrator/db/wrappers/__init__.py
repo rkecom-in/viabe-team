@@ -242,6 +242,22 @@ class CustomersWrapper(TenantScopedTable):
             ).fetchone()
         return int(dict(row)["n"]) if row else 0
 
+    def count_existing(
+        self, tenant_id: UUID | str, customer_ids: list[str], *, conn: Any = None
+    ) -> int:
+        """How many of ``customer_ids`` are REAL, tenant-scoped customer rows (VT-607
+        manager-review cohort grounding — a hallucinated/foreign id simply doesn't count).
+        Read-only; the same existence test collapse's recipient resolution applies later."""
+        tid = self._uuid(tenant_id)
+        if not customer_ids:
+            return 0
+        with self._conn(tid, conn) as c:
+            row = c.execute(
+                "SELECT count(*) AS n FROM customers WHERE tenant_id = %s AND id = ANY(%s)",
+                (str(tid), customer_ids),
+            ).fetchone()
+        return int(dict(row)["n"]) if row else 0
+
     def count_by_opt_out_status(
         self, tenant_id: UUID | str, statuses: tuple[str, ...], *, conn: Any = None
     ) -> int:
@@ -741,6 +757,21 @@ class PendingApprovalsWrapper(TenantScopedTable):
                 (str(tid),),
             ).fetchone()
         return dict(row) if row is not None else None
+
+    def status_for_run(
+        self, tenant_id: UUID | str, run_id: UUID | str, *, conn: Any = None
+    ) -> str | None:
+        """The approval row's status for ``run_id`` (VT-607 paused_approval wait poll), else
+        None when no row exists. Read-only; run_id uniquely identifies the row (mig 052)."""
+        tid = self._uuid(tenant_id)
+        with self._conn(tid, conn) as c:
+            row = c.execute(
+                "SELECT status FROM pending_approvals WHERE tenant_id = %s AND run_id = %s",
+                (str(tid), str(run_id)),
+            ).fetchone()
+        if row is None:
+            return None
+        return str(dict(row)["status"]) if isinstance(row, dict) else str(row[0])
 
     def has_open_for_tenant(self, tenant_id: UUID | str, *, conn: Any = None) -> bool:
         """True iff ANY unresolved approval exists for the tenant — the one-open-per-tenant

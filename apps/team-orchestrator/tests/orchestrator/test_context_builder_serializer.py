@@ -226,6 +226,44 @@ def test_serializer_appends_user_request_last() -> None:
     assert rendered.rstrip().endswith("please send winback to dormant cohort")
 
 
+def test_serializer_omits_manager_framing_section_when_absent() -> None:
+    """VT-607 (Loop Package 6): a non-loop dispatch (manager_desired_outcome left at its
+    CL-190 safe-empty default) must render IDENTICALLY to before this feature existed — the
+    section is omitted entirely, not rendered empty."""
+    rendered = serialize_bundle_for_prompt(_seeded_context())
+    assert "Manager's desired outcome" not in rendered
+    assert "## Acceptance criteria" not in rendered
+
+
+def test_serializer_renders_manager_framing_when_present() -> None:
+    """VT-607 (Loop Package 6): when the manager loop supplies its own step framing, the
+    rendered block carries both the desired outcome and each acceptance criterion, ahead of the
+    owner request (still last)."""
+    ctx = _seeded_context()
+    ctx_with_framing = SalesRecoveryContext(
+        tenant_id=ctx.tenant_id,
+        run_id=ctx.run_id,
+        user_request=ctx.user_request,
+        trigger_reason=ctx.trigger_reason,
+        business_profile=ctx.business_profile,
+        customer_ledger_summary=ctx.customer_ledger_summary,
+        recent_campaigns=ctx.recent_campaigns,
+        attribution_snapshot=ctx.attribution_snapshot,
+        pending_owner_inputs=ctx.pending_owner_inputs,
+        manager_desired_outcome="win back the dormant cohort within budget",
+        manager_acceptance_criteria=["cohort grounded in real customers", "expected recovery cited"],
+        meta=ctx.meta,
+        data_completeness=ctx.data_completeness,
+    )
+    rendered = serialize_bundle_for_prompt(ctx_with_framing)
+    assert "## Manager's desired outcome for this step" in rendered
+    assert "win back the dormant cohort within budget" in rendered
+    assert "## Acceptance criteria" in rendered
+    assert "- cohort grounded in real customers" in rendered
+    assert "- expected recovery cited" in rendered
+    assert rendered.index("Manager's desired outcome") < rendered.index("## Owner request")
+
+
 def test_serializer_omits_identity_fields() -> None:
     """(g) — ``tenant_id`` / ``run_id`` are orchestrator state, not
     agent input. They must NOT reach the rendered block (the agent

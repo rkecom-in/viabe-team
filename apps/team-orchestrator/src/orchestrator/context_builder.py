@@ -245,6 +245,15 @@ class SalesRecoveryContext:
     pending_owner_inputs: list[OwnerInput] = field(default_factory=list)
     l3_priors: L3Priors = field(default_factory=L3Priors)
     l4_skills: L4Skills = field(default_factory=L4Skills)
+    # VT-607 (Loop Package 6) — the Manager's OWN framing for this dispatch (desired_outcome +
+    # acceptance_criteria from the durable plan step), threaded through from
+    # handoffs._build_sales_recovery_update's read of manager_step_desired_outcome /
+    # manager_step_acceptance_criteria (both already populated in graph state by
+    # manager.workflow._dispatch_specialist_step). Safe-empty default (CL-190) — a non-loop
+    # dispatch (legacy/shadow mode, or a caller outside the manager loop entirely) never sets
+    # these, so the specialist just sees one fewer section, never a crash.
+    manager_desired_outcome: str = ""
+    manager_acceptance_criteria: list[str] = field(default_factory=list)
     meta: ContextMeta = field(default_factory=_default_meta)
     # CL-190: True = real data; False = safe-empty fallback (substrate absent
     # or no rows for tenant). Keys are the five section names below.
@@ -679,6 +688,9 @@ def build_sales_recovery_context(
     run_id: UUID,
     trigger_reason: TriggerReason,
     user_request: str,
+    *,
+    manager_desired_outcome: str = "",
+    manager_acceptance_criteria: list[str] | None = None,
 ) -> SalesRecoveryContext:
     """Sole constructor for SalesRecoveryContext bundles.
 
@@ -690,6 +702,11 @@ def build_sales_recovery_context(
     ``user_request`` (Exec-6.85): the orchestrator-supplied owner message
     that triggered the dispatch. Required, must be non-empty — the
     specialist cannot be spawned without one.
+
+    ``manager_desired_outcome`` / ``manager_acceptance_criteria`` (VT-607, Loop Package 6):
+    the durable plan step's OWN framing, when this dispatch is running inside the manager loop
+    (``handoffs._build_sales_recovery_update`` reads them from graph state and passes them
+    through). Both default empty — a non-loop caller (legacy/shadow mode) never supplies them.
     """
     if not isinstance(user_request, str) or not user_request.strip():
         raise ValueError(
@@ -843,6 +860,8 @@ def build_sales_recovery_context(
         pending_owner_inputs=pending_owner_inputs,
         l3_priors=l3_priors,
         l4_skills=l4_skills,
+        manager_desired_outcome=manager_desired_outcome,
+        manager_acceptance_criteria=list(manager_acceptance_criteria or []),
         meta=meta,
         data_completeness=data_completeness,
         recovery_target_multiplier=recovery_target_multiplier,
@@ -1157,6 +1176,15 @@ def serialize_bundle_for_prompt(
     )
 
     parts.append(f"\n## Trigger reason\n- {context.trigger_reason}")
+
+    # VT-607 (Loop Package 6) — only rendered when the manager loop actually supplied a framing
+    # (non-loop dispatches leave both at their safe-empty default; omitting the section entirely
+    # rather than an empty stub keeps the prompt unchanged for every EXISTING non-loop call site).
+    if context.manager_desired_outcome.strip():
+        parts.append(f"\n## Manager's desired outcome for this step\n{context.manager_desired_outcome}")
+        if context.manager_acceptance_criteria:
+            criteria_lines = "\n".join(f"- {c}" for c in context.manager_acceptance_criteria)
+            parts.append(f"\n## Acceptance criteria\n{criteria_lines}")
 
     parts.append(f"\n## Owner request\n{context.user_request}")
 

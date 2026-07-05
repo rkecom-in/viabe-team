@@ -487,6 +487,10 @@ def _manager_review_node(state: AgentGraphState) -> dict[str, Any]:
         acceptance_criteria=state.get("manager_step_acceptance_criteria") or [],
         raw_output=_render_raw_specialist_output(state),
         has_next_step=bool(state.get("manager_has_next_step")),
+        # VT-607 (Loop Package 6): Sales Recovery's own structured CampaignPlan, when present,
+        # routes manager_review through the deterministic typed adapter (no sonnet-5 call) —
+        # see manager_review's own docstring for why.
+        campaign_plan=state.get("campaign_plan"),
     )
     return {
         "manager_review_outcome": result.outcome,
