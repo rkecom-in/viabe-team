@@ -55,3 +55,21 @@ production stays on legacy graph until the final promotion gate (Fazal-authorize
 
 ## Log (append per row)
 - 2026-07-05: Program authorized + rostered (VT-603..611). VT-603 dispatched immediately.
+- 2026-07-05 (exec 1-4 LANDED, all deployed dev): VT-603 security (BYPASSRLS write dead) @ bcb623b;
+  VT-604 scope (roster=3, 26 advisory tools, connector honesty) @ ea44249; VT-605 plan store
+  (migration 165, CAS APIs, queue) @ fd020db; **VT-606 THE LOOP** @ bd23512 (migrations 166/167) —
+  legacy default, shadow/enforce staged. The expert's core finding (no manager execution loop) is
+  structurally closed. Review economics note: the opus adversarial cycle on VT-606 confirmed 13
+  findings incl. 1 critical the full-green suite could not see; 6/6 fixes re-verified (3 by
+  revert-proof). FK gap (pending_approvals.run_id → pipeline_runs) deferred to VT-607 explicitly.
+  Sole builder chain: one warm sonnet-5 agent for VT-604/605/606 (three rows, zero context loss).
+- 2026-07-05 (exec 5 LANDED): **VT-607 SR through the loop** — the first specialist to run
+  plan→dispatch→review→verify end-to-end (DB-backed e2e green). Review economics again: focused
+  3-lens review found a Pillar-7-critical (owner rejection discarded → auto-success) with
+  fault-injection proof the tests couldn't see it; the fix round then self-caught a SECOND critical
+  (manager_review_outcome undeclared → silently dropped by LangGraph → every clean terminal read as
+  escalate). Both fixed + revert-proof-pinned. REMAINING SLICES (named): manager-task terminal →
+  owner notification composer (reads terminal_outcome; VT-611 first build item — 'truthful owner
+  outcome' is its gate); declare campaign_execution_blocked (dead-write, same silent-drop class).
+  New builder protocol after 4 finish-line stalls: builder commits on targeted-green + reports
+  immediately; the team lead runs the battery + lands.
