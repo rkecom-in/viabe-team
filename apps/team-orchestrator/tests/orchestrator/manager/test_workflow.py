@@ -106,15 +106,23 @@ def _no_real_sleep(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(wf.DBOS, "sleep", lambda _seconds: None)
 
 
+def _mock_verified(monkeypatch: pytest.MonkeyPatch, wf) -> None:
+    """These tests exercise OTHER loop behavior (dispatch outcomes, ask_owner wait, limits) — they
+    don't want to depend on the real completion-verification checkpoint's own logic (that has its
+    OWN dedicated tests below). Mock it to always verify cleanly."""
+    monkeypatch.setattr(wf, "_verify_completion_step", lambda tenant_id, task_id: ("verified", ""))
+
+
 # --- happy path: single step, 'complete' -------------------------------------------------------
 
 
-def test_single_step_complete_settles_task_verifying(substrate, monkeypatch: pytest.MonkeyPatch):
+def test_single_step_complete_verifies_and_settles_completed(substrate, monkeypatch: pytest.MonkeyPatch):
     import orchestrator.manager.workflow as wf
     from orchestrator.manager import task_store
 
     tid = _seed_tenant(substrate)
     task_id = str(_create_task(tid))
+    _mock_verified(monkeypatch, wf)
 
     def _dispatch(tenant_id, tid_, step_id, *a, **k):
         _apply_outcome(tid, task_id, step_id, "complete")
@@ -123,8 +131,125 @@ def test_single_step_complete_settles_task_verifying(substrate, monkeypatch: pyt
     monkeypatch.setattr(wf, "_dispatch_specialist_step", _dispatch)
     status = wf.manager_task_workflow(tid, task_id)
 
-    assert status == "verifying"
-    assert task_store.get_task(tid, task_id)["status"] == "verifying"
+    assert status == "completed"
+    task = task_store.get_task(tid, task_id)
+    assert task["status"] == "completed"
+    assert task["terminal_outcome"] == "completed_no_action"  # no step recorded evidence
+    assert task["owner_notification_status"] == "pending"
+
+
+def test_complete_with_evidence_settles_completed_with_effect(substrate, monkeypatch: pytest.MonkeyPatch):
+    import orchestrator.manager.workflow as wf
+    from orchestrator.manager import plan_store, task_store
+    from orchestrator.manager.plan_models import EvidenceRef
+
+    tid = _seed_tenant(substrate)
+    task_id = str(_create_task(tid))
+    _mock_verified(monkeypatch, wf)
+
+    def _dispatch(tenant_id, tid_, step_id, *a, **k):
+        plan_store.complete_step(
+            tid, step_id, "done",
+            evidence=EvidenceRef(kind="pipeline_run", ref="pr-1"), expected_from=("running",),
+        )
+        task_store.set_task_status(tid, task_id, "verifying", expected_from=("running",))
+        return "complete"
+
+    monkeypatch.setattr(wf, "_dispatch_specialist_step", _dispatch)
+    status = wf.manager_task_workflow(tid, task_id)
+
+    assert status == "completed"
+    assert task_store.get_task(tid, task_id)["terminal_outcome"] == "completed_with_effect"
+
+
+# --- verification: not_verified retry cycle -------------------------------------------------------
+
+
+def test_not_verified_retries_once_then_verifies(substrate, monkeypatch: pytest.MonkeyPatch):
+    """The 'one revise cycle' — a not_verified completion appends a retry step (via revise_plan)
+    and re-dispatches; if the SECOND attempt verifies, the task settles completed."""
+    import orchestrator.manager.workflow as wf
+    from orchestrator.manager import task_store
+
+    tid = _seed_tenant(substrate)
+    task_id = str(_create_task(tid))
+
+    verdicts = iter([("not_verified", "insufficient evidence"), ("verified", "")])
+    monkeypatch.setattr(wf, "_verify_completion_step", lambda tenant_id, tid_: next(verdicts))
+
+    dispatch_calls = []
+
+    def _dispatch(tenant_id, tid_, step_id, *a, **k):
+        dispatch_calls.append(step_id)
+        _apply_outcome(tid, task_id, step_id, "complete")
+        return "complete"
+
+    monkeypatch.setattr(wf, "_dispatch_specialist_step", _dispatch)
+    status = wf.manager_task_workflow(tid, task_id)
+
+    assert status == "completed"
+    assert len(dispatch_calls) == 2  # original step + the appended retry step
+    assert task_store.get_task(tid, task_id)["plan_revision"] == 2  # revise_plan bumped it
+
+
+def test_not_verified_exhausts_budget_blocks_with_incident(substrate, monkeypatch: pytest.MonkeyPatch):
+    """Two not_verified verdicts in a row (the original + the one allowed retry) exhaust the
+    verification budget -> blocked + a limit_exhausted incident, never an infinite loop."""
+    import orchestrator.manager.workflow as wf
+    from orchestrator.observability.incident_store import get_incident
+
+    tid = _seed_tenant(substrate)
+    task_id = str(_create_task(tid))
+
+    monkeypatch.setattr(
+        wf, "_verify_completion_step", lambda tenant_id, tid_: ("not_verified", "still missing X")
+    )
+
+    def _dispatch(tenant_id, tid_, step_id, *a, **k):
+        _apply_outcome(tid, task_id, step_id, "complete")
+        return "complete"
+
+    monkeypatch.setattr(wf, "_dispatch_specialist_step", _dispatch)
+    status = wf.manager_task_workflow(tid, task_id)
+
+    assert status == "blocked"
+    with substrate.connection() as conn:
+        row = conn.execute(
+            "SELECT id FROM incidents WHERE tenant_id = %s AND run_id = %s", (tid, task_id)
+        ).fetchone()
+    assert row is not None
+    incident = get_incident(tid, row["id"] if isinstance(row, dict) else row[0])
+    assert incident is not None
+    assert incident["incident_kind"] == "limit_exhausted"
+
+
+def test_not_verified_at_eight_step_ceiling_blocks_immediately(substrate, monkeypatch: pytest.MonkeyPatch):
+    """A plan already at PlanStep's 8-step ceiling can't append a retry step — budget-exhausted
+    treatment applies immediately (no retry attempted, no crash). 7 of the 8 steps are
+    pre-completed directly (not via the workflow) so reaching the ceiling doesn't itself burn
+    through the 6-cycle limit."""
+    import orchestrator.manager.workflow as wf
+    from orchestrator.manager import task_store
+    from orchestrator.manager.plan_models import PlanStep
+
+    tid = _seed_tenant(substrate)
+    steps = [PlanStep(step_seq=i, kind="verification") for i in range(1, 9)]
+    task_id = str(_create_task(tid, steps=steps))
+    for s in task_store.get_steps(tid, task_id)[:7]:
+        task_store.set_step_status(tid, s["id"], "done", expected_from=("pending",))
+
+    monkeypatch.setattr(
+        wf, "_verify_completion_step", lambda tenant_id, tid_: ("not_verified", "gap")
+    )
+
+    def _dispatch(tenant_id, tid_, step_id, attempt, situation, desired_outcome, acceptance_criteria, specialist, has_next):
+        _apply_outcome(tid, task_id, step_id, "complete")
+        return "complete"
+
+    monkeypatch.setattr(wf, "_dispatch_specialist_step", _dispatch)
+    status = wf.manager_task_workflow(tid, task_id)
+
+    assert status == "blocked"
 
 
 # --- validate: capability / prerequisites / policy ----------------------------------------------
@@ -208,6 +333,7 @@ def test_validate_step_allows_unfrozen_business_impact_class(substrate, monkeypa
     task_id = str(_create_task(
         tid, steps=[PlanStep(step_seq=1, kind="verification", allowed_effect_classes=["config"])],
     ))
+    _mock_verified(monkeypatch, wf)
 
     def _dispatch(tenant_id, tid_, step_id, *a, **k):
         _apply_outcome(tid, task_id, step_id, "complete")
@@ -216,7 +342,7 @@ def test_validate_step_allows_unfrozen_business_impact_class(substrate, monkeypa
     monkeypatch.setattr(wf, "_dispatch_specialist_step", _dispatch)
     status = wf.manager_task_workflow(tid, task_id)
 
-    assert status == "verifying"
+    assert status == "completed"
 
 
 def test_continue_then_complete_across_two_steps(substrate, monkeypatch: pytest.MonkeyPatch):
@@ -231,6 +357,7 @@ def test_continue_then_complete_across_two_steps(substrate, monkeypatch: pytest.
             PlanStep(step_seq=2, kind="verification"),
         ],
     ))
+    _mock_verified(monkeypatch, wf)
 
     def _dispatch(tenant_id, tid_, step_id, attempt, situation, desired_outcome, acceptance_criteria, specialist, has_next):
         outcome = "continue" if has_next else "complete"
@@ -239,7 +366,7 @@ def test_continue_then_complete_across_two_steps(substrate, monkeypatch: pytest.
 
     monkeypatch.setattr(wf, "_dispatch_specialist_step", _dispatch)
     status = wf.manager_task_workflow(tid, task_id)
-    assert status == "verifying"
+    assert status == "completed"
 
 
 # --- escalate: manager_review already settled the task blocked ---------------------------------
@@ -368,6 +495,7 @@ def test_ask_owner_waits_then_resumes_after_answer(substrate, monkeypatch: pytes
             PlanStep(step_seq=2, kind="verification"),
         ],
     ))
+    _mock_verified(monkeypatch, wf)
 
     call_state = {"asked": False}
 
@@ -401,7 +529,7 @@ def test_ask_owner_waits_then_resumes_after_answer(substrate, monkeypatch: pytes
     monkeypatch.setattr(wf, "_question_still_open", _still_open)
 
     status = wf.manager_task_workflow(tid, task_id)
-    assert status == "verifying"
+    assert status == "completed"
     assert pending_questions.get_open(tid, task_id=task_id) == []
 
 
@@ -429,14 +557,9 @@ def test_ask_owner_timeout_blocks_with_incident(substrate, monkeypatch: pytest.M
 
 
 def test_terminal_task_promotes_oldest_queued(substrate, monkeypatch: pytest.MonkeyPatch):
-    """Neither of THIS row's own outcomes reaches a TRUE ``task_store.TASK_TERMINAL`` status —
-    'complete' settles at 'verifying' (a later verification pass finishes it; out of VT-606 scope)
-    and 'escalate'/limit-exceeded settle at 'blocked' (an operator-resolution path, also out of
-    scope) — both are still task_store.TASK_NON_TERMINAL by design (a verifying/blocked task still
-    correctly occupies the tenant's one-active-task slot). This test proves the PROMOTION WIRING
-    itself: whenever a task genuinely IS terminal by the time the workflow's own final read runs
-    (simulated here as if some resolution mechanism settled it mid-cycle), the oldest queued
-    sibling is promoted."""
+    """A verified 'complete' now genuinely reaches task_store.TASK_TERMINAL ('completed') — this
+    test proves the PROMOTION WIRING fires off the back of that real transition: the oldest queued
+    sibling is promoted once the active task is genuinely done."""
     import orchestrator.manager.workflow as wf
     from orchestrator.manager import plan_store, task_store
     from orchestrator.manager.plan_models import ManagerPlan, PlanStep
@@ -446,10 +569,10 @@ def test_terminal_task_promotes_oldest_queued(substrate, monkeypatch: pytest.Mon
     second_plan = ManagerPlan(objective="second", steps=[PlanStep(step_seq=1, kind="verification")])
     queued_task = plan_store.create_plan(tid, second_plan, source_message_sid=f"SM{uuid4().hex}")
     assert task_store.get_task(tid, queued_task)["status"] == "queued"
+    _mock_verified(monkeypatch, wf)
 
     def _dispatch(tenant_id, tid_, step_id, *a, **k):
-        task_store.set_step_status(tid, step_id, "done", expected_from=("running",))
-        task_store.set_task_status(tid, str(active_task), "completed", expected_from=("running",))
+        _apply_outcome(tid, str(active_task), step_id, "complete")
         return "complete"
 
     monkeypatch.setattr(wf, "_dispatch_specialist_step", _dispatch)

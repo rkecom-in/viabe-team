@@ -39,6 +39,15 @@ TASK_NON_TERMINAL = TASK_STATUSES - TASK_TERMINAL
 # deliberately excluded (many queued tasks may coexist per tenant; only ONE may be active).
 TASK_ACTIVE = TASK_NON_TERMINAL - {"queued"}
 
+# VT-605 (mig 165) columns; VT-606 (team-lead ruling round 2) wires the SETTER — the columns existed
+# since mig 165 but nothing wrote them until the completion-verification checkpoint landed.
+TERMINAL_OUTCOMES = frozenset(
+    {"completed_with_effect", "completed_no_action", "failed", "escalated", "cancelled"}
+)
+OWNER_NOTIFICATION_STATUSES = frozenset(
+    {"not_required", "pending", "accepted", "delivered", "failed"}
+)
+
 STEP_KINDS = frozenset({
     "specialist_dispatch", "effect", "clarification", "verification",
     "advisory_tool",  # VT-605 (mig 165): a Manager-held advisory tool call (agent/advisory_registry.py).
@@ -115,22 +124,34 @@ def set_task_status(
     expected_from: tuple[str, ...] | None = None,
     current_step_id: UUID | str | None = None,
     evidence_entry: dict[str, Any] | None = None,
+    terminal_outcome: str | None = None,
+    owner_notification_status: str | None = None,
 ) -> bool:
     """Advance a task under the CAS guard. Returns True if the write applied, False on a
     CAS no-op (current state not in ``expected_from`` — a stale write, logged not raised).
     ``version`` bumps on every applied write; ``completed_at`` stamps on a terminal status;
-    ``evidence_entry`` (a ``{kind, ref}`` dict) is appended to ``evidence_refs``."""
+    ``evidence_entry`` (a ``{kind, ref}`` dict) is appended to ``evidence_refs``.
+
+    ``terminal_outcome`` / ``owner_notification_status`` (mig 165 columns; VT-606 wires the setter
+    — nothing wrote them before the completion-verification checkpoint landed) are COALESCE-applied
+    like ``current_step_id``: omitted (``None``) leaves the existing value untouched."""
     if status not in TASK_STATUSES:
         raise ValueError(f"unknown task status {status!r}")
     if expected_from is not None:
         unknown = set(expected_from) - TASK_STATUSES
         if unknown:
             raise ValueError(f"unknown expected_from statuses {sorted(unknown)!r}")
+    if terminal_outcome is not None and terminal_outcome not in TERMINAL_OUTCOMES:
+        raise ValueError(f"unknown terminal_outcome {terminal_outcome!r}")
+    if owner_notification_status is not None and owner_notification_status not in OWNER_NOTIFICATION_STATUSES:
+        raise ValueError(f"unknown owner_notification_status {owner_notification_status!r}")
     terminal = status in TASK_TERMINAL
     sql = [
         "UPDATE manager_tasks SET status = %s, version = version + 1, updated_at = now(),",
         "completed_at = CASE WHEN %s THEN now() ELSE completed_at END,",
         "current_step_id = COALESCE(%s, current_step_id),",
+        "terminal_outcome = COALESCE(%s, terminal_outcome),",
+        "owner_notification_status = COALESCE(%s, owner_notification_status),",
         "evidence_refs = CASE WHEN %s::jsonb IS NULL THEN evidence_refs",
         "                     ELSE evidence_refs || %s::jsonb END",
         "WHERE tenant_id = %s AND id = %s",
@@ -139,6 +160,8 @@ def set_task_status(
     params: list[Any] = [
         status, terminal,
         str(current_step_id) if current_step_id is not None else None,
+        terminal_outcome,
+        owner_notification_status,
         ev, ev,
         str(tenant_id), str(task_id),
     ]
@@ -183,6 +206,20 @@ def get_task(tenant_id: UUID | str, task_id: UUID | str) -> dict[str, Any] | Non
             (str(tenant_id), str(task_id)),
         ).fetchone()
     return dict(row) if row is not None else None
+
+
+def has_active_task(tenant_id: UUID | str) -> bool:
+    """VT-606 (triage seam) — does this tenant have ANY plan-store task in ``TASK_ACTIVE``. Mirrors
+    the SAME check ``plan_store.create_plan`` runs internally for admission control (reused, not
+    reimplemented, at the caller's own tenant-scoped read — no row lock needed here, this is an
+    observational read for triage's ``has_active_task`` classification input, not an admission
+    decision)."""
+    with tenant_connection(tenant_id) as conn:
+        row = conn.execute(
+            "SELECT 1 FROM manager_tasks WHERE tenant_id = %s AND status = ANY(%s) LIMIT 1",
+            (str(tenant_id), list(TASK_ACTIVE)),
+        ).fetchone()
+    return row is not None
 
 
 def find_task_id(tenant_id: UUID | str, idempotency_key: str) -> UUID | None:
@@ -306,7 +343,8 @@ def get_steps(tenant_id: UUID | str, task_id: UUID | str) -> list[dict[str, Any]
 
 __all__ = [
     "TASK_STATUSES", "TASK_TERMINAL", "TASK_NON_TERMINAL", "TASK_ACTIVE",
+    "TERMINAL_OUTCOMES", "OWNER_NOTIFICATION_STATUSES",
     "STEP_KINDS", "STEP_STATUSES", "STEP_TERMINAL", "STEP_NON_TERMINAL", "EVIDENCE_KINDS",
     "create_task", "set_task_status", "get_task", "find_task_id", "find_task_by_source_ref",
-    "add_step", "set_step_status", "get_steps",
+    "has_active_task", "add_step", "set_step_status", "get_steps",
 ]
