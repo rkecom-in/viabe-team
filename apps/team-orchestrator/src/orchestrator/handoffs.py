@@ -150,11 +150,20 @@ def _build_sales_recovery_update(state: dict[str, Any]) -> dict[str, Any]:
     # handoff site rather than re-extracting in the specialist node.
     user_request = _extract_user_request_from_state(state)
 
+    # VT-607 (Loop Package 6) — the durable plan step's own framing, when this dispatch is running
+    # inside the manager loop (manager.workflow._dispatch_specialist_step always populates both in
+    # its initial_state; a legacy/shadow-mode dispatch never sets them, so both read as the
+    # SalesRecoveryContext safe-empty defaults below).
+    manager_desired_outcome = state.get("manager_step_desired_outcome") or ""
+    manager_acceptance_criteria = state.get("manager_step_acceptance_criteria") or []
+
     bundle = build_sales_recovery_context(
         tenant_id=tenant_id,
         run_id=run_id,
         trigger_reason=trigger_reason,
         user_request=user_request,
+        manager_desired_outcome=manager_desired_outcome,
+        manager_acceptance_criteria=manager_acceptance_criteria,
     )
     return {"sales_recovery_context": bundle}
 

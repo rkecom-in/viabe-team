@@ -22,6 +22,14 @@ DBOS workflow keyed by ``(tenant_id, task_id)``:
         |                           LIMIT_MAX_REVISIONS_PER_STEP times, then blocked+incident
         |- ask_owner               -> durable wait (amendment A3: >24h since the owner's last
         |                           inbound re-engages via the approved template first)
+        |- paused_approval (VT-607, Loop Package 6) -> durable wait for the approval gate's
+        |                           SEPARATE resume path (approval_resume.resume_run, driven by
+        |                           the webhook path when the owner replies) to resolve
+        |                           pending_approvals, then continue from wherever manager_
+        |                           review's ALREADY-APPLIED decision left the task (e.g. re-enter
+        |                           the SAME verify-then-settle handling 'complete' uses, if that
+        |                           was the decision) — never a manager_review outcome itself,
+        |                           a workflow-loop-only signal for "the graph paused mid-invoke"
         `- escalate                -> stop (already 'blocked' + a VTR incident — manager_review
                                     raised it; 'blocked' stays non-terminal by design — an operator
                                     resolves the incident, a mechanism this row doesn't build)
@@ -251,15 +259,29 @@ def _dispatch_specialist_step(
         terminal_state: dict[str, Any] = graph.invoke(
             initial_state, config={"configurable": {"thread_id": thread_id}}
         )
-    outcome = str(terminal_state.get("manager_review_outcome") or "escalate")
     revised_outcome = terminal_state.get("manager_review_revised_outcome")
-    # A pending interrupt (the approval gate paused this invocation) leaves the run 'paused' —
-    # NOT 'completed' — exactly like close_webhook_run_paused's own convention (mig 052): the run
-    # genuinely has not finished, a later resume_run drains it. Everything else is a real terminal
-    # of THIS graph invocation; 'escalate' maps to the CHECK constraint's own distinct 'escalated'
-    # value (nothing else does — the manager's other five outcomes are all "this invocation ended
-    # cleanly", not incident-worthy at the pipeline_runs level).
-    if "__interrupt__" in terminal_state:
+    is_paused = "__interrupt__" in terminal_state
+    # VT-607 (Loop Package 6) — the outer-loop interrupt-composition fix: a pending interrupt (the
+    # approval gate paused this invocation, e.g. Sales Recovery's proposed campaign) is NOT a
+    # manager_review outcome at all — LangGraph's interrupted-invoke return does not carry
+    # manager_review_outcome (that node's own state update, applied BEFORE the pause, is not part
+    # of the narrower interrupt-return payload). Reporting the OLD fallback ("escalate") here would
+    # make the outer loop's `if outcome == "escalate": break` treat a live, healthy pause — the
+    # owner hasn't even answered yet — as manager_review having already blocked the task with an
+    # incident, which is FALSE: manager_review's decision (whatever it was) already applied its
+    # plan_store effect before collapse/the gate ever ran. "paused_approval" is a distinct,
+    # workflow-loop-only signal (never a manager_review outcome — ManagerReviewOutcome's own type
+    # deliberately does not include it) so the loop can durably wait for the SEPARATE resume path
+    # (approval_resume.resume_run, driven by the webhook path when the owner replies) to resolve,
+    # then continue from wherever the ALREADY-APPLIED decision left the task.
+    outcome = "paused_approval" if is_paused else str(terminal_state.get("manager_review_outcome") or "escalate")
+    # A pending interrupt leaves the run 'paused' — NOT 'completed' — exactly like
+    # close_webhook_run_paused's own convention (mig 052): the run genuinely has not finished, a
+    # later resume_run drains it. Everything else is a real terminal of THIS graph invocation;
+    # 'escalate' maps to the CHECK constraint's own distinct 'escalated' value (nothing else does —
+    # the manager's other five outcomes are all "this invocation ended cleanly", not incident-
+    # worthy at the pipeline_runs level).
+    if is_paused:
         _close_dispatch_run(tenant_id, run_id, "paused")
     elif outcome == "escalate":
         _close_dispatch_run(tenant_id, run_id, "escalated")
@@ -489,6 +511,63 @@ def _append_verification_retry_step(tenant_id: str, task_id: str, *, reason: str
     return True
 
 
+def _run_verification_cycle(tenant_id: str, task_id: str, verification_attempts: int) -> tuple[str, int]:
+    """Package 3: "complete -> verify objective" (team-lead ruling round 2) — manager_review
+    settled the task 'verifying', but that is NOT yet a true terminal status. Run the opus
+    completion-verification checkpoint.
+
+    VT-607 (Loop Package 6): shared by BOTH the 'complete' outcome branch AND the 'paused_approval'
+    resolution branch — an ACCEPT decision reached via either path lands the task at 'verifying'
+    the identical way (manager_review's OWN plan_store effect ran before the approval gate ever
+    paused anything), so both need the SAME verify-then-settle handling; extracted here rather than
+    duplicated.
+
+    Returns ``(action, updated_verification_attempts)`` where ``action`` is one of:
+      - 'settled' — verified; the caller should stop the loop (a true terminal status now).
+      - 'retry'   — a gap-addressing step was appended; the caller should continue (re-claim it).
+      - 'blocked' — the verification-attempt budget is exhausted; the caller should stop.
+    """
+    verdict, reason = _verify_completion_step(tenant_id, task_id)
+    if verdict == "verified":
+        _settle_verified_task(tenant_id, task_id)
+        return "settled", verification_attempts
+    verification_attempts += 1
+    if (
+        verification_attempts <= LIMIT_MAX_VERIFICATION_ATTEMPTS
+        and _append_verification_retry_step(tenant_id, task_id, reason=reason)
+    ):
+        return "retry", verification_attempts
+    _block_limit_exceeded(
+        tenant_id, task_id,
+        limit="verification_attempts_exceeded",
+        count=verification_attempts,
+        threshold=LIMIT_MAX_VERIFICATION_ATTEMPTS,
+    )
+    return "blocked", verification_attempts
+
+
+@DBOS.step()
+def _approval_still_pending(tenant_id: str, task_id: str, step_id: str, attempt: int) -> bool:
+    """VT-607 (Loop Package 6) — the 'paused_approval' wait target: is the interrupt's OWN
+    pending_approvals row still unresolved? Uses the SAME message_ids.loop_run_id the dispatch
+    minted as both its checkpoint thread_id and state['run_id'] (the round-3 CRITICAL fix) — the
+    durable link between a paused dispatch and the approval row it raised. ``task_id`` is accepted
+    for a consistent step signature (mirrors the other per-task steps) but not itself queried —
+    the run_id already uniquely identifies the row.
+    """
+    from orchestrator.db.wrappers import PendingApprovalsWrapper
+
+    run_id = loop_run_id(task_id, step_id, attempt)
+    # Wrapper-layer read (VT-72/306 no-direct-tenant-db-access gate).
+    status = PendingApprovalsWrapper().status_for_run(tenant_id, run_id)
+    if status is None:
+        # No approval row at all for this run_id — defensive; should not happen (the dispatch
+        # only reports 'paused_approval' when the graph itself raised the interrupt, which is
+        # exactly what arm_pause_request's INSERT is paired with). Nothing to wait for.
+        return False
+    return status == "pending"
+
+
 @DBOS.step()
 def _apply_step_revision(
     tenant_id: str, task_id: str, step: dict[str, Any], revised_outcome: str | None,
@@ -631,27 +710,48 @@ def manager_task_workflow(tenant_id: str, task_id: str) -> str:
         if outcome == "escalate":
             break  # manager_review already settled the task blocked + a VTR incident
 
-        if outcome == "complete":
-            # Package 3: "complete -> verify objective" (team-lead ruling round 2) — manager_review
-            # settled the task 'verifying', but that is NOT yet a true terminal status. Run the
-            # opus completion-verification checkpoint before this loop claims the objective done.
-            verdict, reason = _verify_completion_step(tenant_id, task_id)
-            if verdict == "verified":
-                _settle_verified_task(tenant_id, task_id)
+        if outcome == "paused_approval":
+            # VT-607 (Loop Package 6) — the interrupt-composition fix: the approval gate paused
+            # THIS dispatch (e.g. Sales Recovery's proposed campaign). manager_review's OWN
+            # decision already applied its plan_store effect BEFORE collapse/the gate ever ran —
+            # this loop does NOT resume the graph itself (that is approval_resume.resume_run's
+            # job, driven by a COMPLETELY SEPARATE code path — the webhook ingress, when the
+            # owner's WhatsApp reply arrives); it durably waits for THAT resolution the same way
+            # the ask_owner branch waits for an answer, then continues from wherever the already-
+            # applied decision left the task.
+            polls = 0
+            resolved = False
+            while polls < _OWNER_WAIT_MAX_POLLS:
+                if not _approval_still_pending(tenant_id, task_id, step_id, attempt):
+                    resolved = True
+                    break
+                DBOS.sleep(_OWNER_WAIT_POLL_S)
+                polls += 1
+            if not resolved:
+                _block_limit_exceeded(
+                    tenant_id, task_id,
+                    limit="approval_resolution_timeout", count=polls, threshold=_OWNER_WAIT_MAX_POLLS,
+                )
                 break
-            verification_attempts += 1
-            if (
-                verification_attempts <= LIMIT_MAX_VERIFICATION_ATTEMPTS
-                and _append_verification_retry_step(tenant_id, task_id, reason=reason)
-            ):
-                continue  # re-claim the freshly-appended verification-retry step
-            _block_limit_exceeded(
-                tenant_id, task_id,
-                limit="verification_attempts_exceeded",
-                count=verification_attempts,
-                threshold=LIMIT_MAX_VERIFICATION_ATTEMPTS,
+            task_now = _get_task(tenant_id, task_id)
+            if task_now is not None and task_now.get("status") == "verifying":
+                # The paused dispatch's decision was 'complete' (ACCEPT) — same verify-then-settle
+                # handling the 'complete' branch below runs, reused rather than duplicated.
+                action, verification_attempts = _run_verification_cycle(
+                    tenant_id, task_id, verification_attempts
+                )
+                if action == "retry":
+                    continue
+                break  # 'settled' or 'blocked'
+            continue  # any other status (e.g. still 'running' from a continue decision) -> claim next
+
+        if outcome == "complete":
+            action, verification_attempts = _run_verification_cycle(
+                tenant_id, task_id, verification_attempts
             )
-            break
+            if action == "retry":
+                continue  # re-claim the freshly-appended verification-retry step
+            break  # 'settled' or 'blocked'
 
         # outcome in {"continue", "accept_step"} — loop to claim the next step.
 

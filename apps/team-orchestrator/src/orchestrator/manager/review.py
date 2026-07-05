@@ -38,14 +38,16 @@ from uuid import UUID
 
 from anthropic import Anthropic
 
+from orchestrator.agent.schemas.campaign_plan import CampaignStatus
 from orchestrator.manager import plan_store, task_store
 from orchestrator.manager.decision import ManagerDecision, ManagerDecisionKind, decide_next_action
-from orchestrator.manager.plan_models import EvidenceRef, PlanSpecialistReturn
+from orchestrator.manager.plan_models import EffectIntent, EvidenceRef, PlanSpecialistReturn
 from orchestrator.observability.incident_store import create_incident, escalate_incident
 from orchestrator.observability.tm_audit import emit_tm_audit
 
 if TYPE_CHECKING:
     from orchestrator.agent.roster import SpecialistReturn
+    from orchestrator.agent.schemas.campaign_plan import CampaignPlan
 
 logger = logging.getLogger("orchestrator.manager.review")
 
@@ -145,6 +147,116 @@ def to_legacy_specialist_return(ret: PlanSpecialistReturn) -> "SpecialistReturn"
     )
 
 
+def _cohort_ids_are_grounded(tenant_id: UUID | str, customer_ids: list[UUID]) -> bool:
+    """VT-607 (Loop Package 6) grounding check: do EVERY one of the plan's cohort customer_ids
+    resolve to a REAL, tenant-scoped ``customers`` row? Schema validation (``CampaignPlanProposed``)
+    only guarantees the list is well-SHAPED (non-empty UUIDs, cohort_size matches len) — it cannot
+    catch a HALLUCINATED cohort (ids the model invented that don't exist for this tenant, or belong
+    to a different one). ``collapse_node``'s own ``resolve_cohort_recipients`` would catch this too,
+    but only AFTER manager_review has already decided to accept the step — this check runs the SAME
+    existence test, read-only (no campaign_recipients write — collapse hasn't run yet), BEFORE that
+    decision, so an ungrounded cohort never gets marked 'done' on a plan that was never going to
+    survive collapse."""
+    if not customer_ids:
+        return True
+    from orchestrator.db.wrappers import CustomersWrapper
+
+    unique_ids = {str(c) for c in customer_ids}
+    # Wrapper-layer read (VT-72/306 no-direct-tenant-db-access gate) — the count of
+    # REAL tenant-scoped rows must equal the number of distinct proposed ids.
+    n = CustomersWrapper().count_existing(tenant_id, list(unique_ids))
+    return n == len(unique_ids)
+
+
+def adapt_campaign_plan_to_specialist_return(
+    tenant_id: UUID | str, plan: "CampaignPlan"
+) -> PlanSpecialistReturn:
+    """VT-607 (Loop Package 6) — the typed CampaignPlan-variant -> PlanSpecialistReturn adapter,
+    feeding the SAME ``to_legacy_specialist_return`` bridge + ``decide_next_action`` decision seam
+    every OTHER specialist's sonnet-5-extracted return does. Sales Recovery already produces a
+    STRUCTURED, schema-validated artifact — asking an LLM to re-interpret it into ANOTHER structure
+    (``extract_specialist_return``'s job for free-text specialists) would be unnecessary latency,
+    cost and (mis-transcription) risk for zero benefit; this adapter is deterministic, no LLM call.
+
+    Grounding (fail-closed, deterministic, evaluated here — never silently skipped):
+      - PROPOSED: the cohort must be GROUNDED (``_cohort_ids_are_grounded`` — see its own
+        docstring); ungrounded -> ``blocked``, no ``proposed_outcome`` (escalate — an operator-
+        visible incident, never a silent drop or a step marked done on a plan collapse would have
+        rejected anyway). A grounded plan's OWN schema already guarantees a non-empty cohort has
+        non-empty evidence_refs + a populated expected_arrr (``CampaignPlanProposed``'s own
+        ``Field(..., min_length=1)`` / ``ge=1`` constraints) — asserted again here, explicitly and
+        defensively, rather than silently trusted, in case a future schema change ever loosens
+        them. The plan's own selection_reason/basis (also non-empty by schema) is what "the
+        requested outcome addressed" grounds on — the Manager's desired_outcome was threaded into
+        the SR context bundle (handoffs._build_sales_recovery_update) specifically so the
+        specialist has it to address in those prose fields.
+      - OUT_OF_SCOPE: no ``proposed_outcome`` -> ``blocked``/escalate (SR genuinely cannot act
+        in-lane on this ask; the Manager decides what happens next).
+      - INSUFFICIENT_DATA: ``proposed_outcome`` derived from the plan's OWN ``missing_data`` items
+        -> ``blocked``/revise (the Manager can reframe the ask or wait, governed by the EXISTING
+        per-step revision budget — workflow.py's LIMIT_MAX_REVISIONS_PER_STEP, unchanged).
+    """
+    if plan.status == CampaignStatus.PROPOSED:
+        cohort = plan.target_cohort
+        if not cohort.customer_ids or not _cohort_ids_are_grounded(tenant_id, cohort.customer_ids):
+            return PlanSpecialistReturn(
+                status="blocked",
+                outcome_summary=(
+                    f"proposed cohort of {cohort.cohort_size} customer(s) does not resolve to "
+                    "real, tenant-scoped customers — ungrounded"
+                ),
+                reason_code="ungrounded_cohort",
+            )
+        if not plan.evidence_refs or plan.expected_arrr is None:
+            # Structurally unreachable for a valid CampaignPlanProposed (schema-enforced) —
+            # defensive, explicit per the grounding spec, never silently trusted.
+            return PlanSpecialistReturn(
+                status="blocked",
+                outcome_summary="proposed plan missing evidence_refs or expected_arrr",
+                reason_code="ungrounded_plan",
+            )
+        evidence_refs = [
+            EvidenceRef(kind="campaign_plan", ref=ref.source_id) for ref in plan.evidence_refs
+        ]
+        effect_intents = [
+            EffectIntent(
+                effect_class="customer_send",
+                summary=(
+                    f"Propose a recovery campaign to {cohort.cohort_size} customer(s) "
+                    f"({cohort.cohort_label})"
+                ),
+                magnitude_minor=plan.expected_arrr.low_paise,
+            )
+        ]
+        return PlanSpecialistReturn(
+            status="completed",
+            action_summary=(
+                f"Proposed a recovery campaign for {cohort.cohort_size} customer(s): "
+                f"{cohort.selection_reason}"
+            ),
+            outcome_summary=plan.expected_arrr.basis,
+            evidence_refs=evidence_refs,
+            effect_intents=effect_intents,
+        )
+    if plan.status == CampaignStatus.OUT_OF_SCOPE:
+        return PlanSpecialistReturn(
+            status="blocked",
+            outcome_summary=plan.out_of_scope_reason,
+            reason_code="out_of_scope",
+        )
+    # INSUFFICIENT_DATA
+    gaps = "; ".join(
+        f"{item.category}: {item.description} (suggest: {item.suggested_remediation})"
+        for item in plan.missing_data
+    )
+    return PlanSpecialistReturn(
+        status="blocked",
+        outcome_summary=f"insufficient data to propose a campaign: {gaps}",
+        proposed_outcome=f"address the following before retrying: {gaps}",
+        reason_code="insufficient_data",
+    )
+
+
 # ManagerReviewOutcome — Package 3's SIX named branches, verbatim. This implementation only ever
 # PRODUCES {continue, complete, revise_step, ask_owner, escalate} — never a bare "accept_step" —
 # because decide_next_action already folds "persist this step's evidence" INTO whichever of
@@ -203,30 +315,42 @@ def manager_review(
     raw_output: str,
     has_next_step: bool,
     client: Anthropic | None = None,
+    campaign_plan: "CampaignPlan | None" = None,
 ) -> ManagerReviewResult:
     """The manager_review node (Package 3): extract -> decide -> persist the plan_store effect +
     tm_audit + (escalate only) a VTR incident. Never silent: an extraction failure itself is
     treated as a ``blocked``/escalate outcome (fail-closed), never swallowed.
+
+    ``campaign_plan`` (VT-607, Loop Package 6): when the just-dispatched step is Sales Recovery and
+    it produced a structured ``CampaignPlan``, the deterministic ``adapt_campaign_plan_to_
+    specialist_return`` grounding + adapter REPLACES the sonnet-5 ``extract_specialist_return``
+    call entirely for THIS step (no LLM re-interpretation of already-structured, already-validated
+    output — see that function's own docstring for the full grounding rationale). Every other
+    specialist (``campaign_plan is None``) is completely unaffected — the sonnet-5 extraction path
+    below runs exactly as before.
     """
-    try:
-        ret = extract_specialist_return(
-            situation=situation,
-            desired_outcome=desired_outcome,
-            acceptance_criteria=acceptance_criteria,
-            raw_output=raw_output,
-            client=client,
-        )
-    except ValueError as exc:
-        logger.warning(
-            "manager_review: structured extraction failed for step=%s (fail-closed -> escalate): %s",
-            step_id, exc,
-        )
-        ret = PlanSpecialistReturn(
-            status="failed",
-            action_summary="",
-            outcome_summary="manager_review could not extract a structured result",
-            reason_code="extraction_failed",
-        )
+    if campaign_plan is not None:
+        ret = adapt_campaign_plan_to_specialist_return(tenant_id, campaign_plan)
+    else:
+        try:
+            ret = extract_specialist_return(
+                situation=situation,
+                desired_outcome=desired_outcome,
+                acceptance_criteria=acceptance_criteria,
+                raw_output=raw_output,
+                client=client,
+            )
+        except ValueError as exc:
+            logger.warning(
+                "manager_review: structured extraction failed for step=%s (fail-closed -> escalate): %s",
+                step_id, exc,
+            )
+            ret = PlanSpecialistReturn(
+                status="failed",
+                action_summary="",
+                outcome_summary="manager_review could not extract a structured result",
+                reason_code="extraction_failed",
+            )
 
     legacy_ret = to_legacy_specialist_return(ret)
     decision = decide_next_action(legacy_ret, has_next_step=has_next_step)
