@@ -72,3 +72,14 @@ class AgentGraphState(TypedDict, total=False):
     #     (e.g. RuntimeError from a missing campaign row). Absent on success.
     campaign_execution_summary: dict[str, int] | None
     campaign_execution_error: str | None
+    # VT-606 (Loop Package 3, enforce-mode ONLY — absent/None in legacy/shadow) — the plan-store
+    # identifiers + step framing manager_task_workflow populates before invoking the graph for ONE
+    # specialist-dispatch attempt, and manager_review_node reads to run the review + persist its
+    # decision. additive + total=False: every pre-VT-606 caller (legacy/shadow mode) never sets
+    # these, so the graph shape and behavior for those modes is unaffected by their presence here.
+    manager_task_id: UUID | None
+    manager_step_id: UUID | None
+    manager_step_situation: str | None
+    manager_step_desired_outcome: str | None
+    manager_step_acceptance_criteria: list[str] | None
+    manager_has_next_step: bool | None

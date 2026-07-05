@@ -55,6 +55,7 @@ from orchestrator.agent.tools.self_evaluate import SelfEvaluateAdapter
 from orchestrator.agent.roster import roster_spawn_tools
 from orchestrator.collapse import collapse_node
 from orchestrator.db import tenant_connection
+from orchestrator.manager.loop_mode import LoopMode, get_loop_mode
 from orchestrator.routing import (
     orchestrator_terminal_node,
     route_after_approval,
@@ -426,9 +427,82 @@ def _campaign_execute_node(state: AgentGraphState) -> dict[str, Any]:
         return {"campaign_execution_error": type(exc).__name__}
 
 
+def _render_raw_specialist_output(state: AgentGraphState) -> str:
+    """VT-606 — a PII-conscious text rendering of what the just-dispatched specialist actually
+    produced, for ``manager_review``'s structured-extraction LLM call. Reuses the SAME fields
+    ``dispatch._classify_terminal`` already reads (campaign_plan / messages) — no new state, no new
+    redaction layer: the specialists' own existing PII discipline (CL-390 — e.g. CampaignPlan
+    carries segment LABELS never customer identities; advisory/lane tool outputs are counts-only)
+    is what this renders, unchanged. Bounded to the last few messages (cost; enough context)."""
+    parts: list[str] = []
+    campaign_plan = state.get("campaign_plan")
+    if campaign_plan is not None:
+        parts.append(f"campaign_plan: {campaign_plan!r}")
+    messages = state.get("messages") or []
+    for msg in messages[-6:]:
+        role = type(msg).__name__
+        content = getattr(msg, "content", "")
+        if isinstance(content, list):
+            content = " ".join(str(c) for c in content)
+        line = f"[{role}] {content}"
+        tool_calls = getattr(msg, "tool_calls", None)
+        if tool_calls:
+            line += f" tool_calls={tool_calls}"
+        parts.append(line)
+    return "\n".join(parts) if parts else "(no output)"
+
+
+def _manager_review_node(state: AgentGraphState) -> dict[str, Any]:
+    """VT-606 (Loop Package 3) — the manager_review graph node. ENFORCE-MODE ONLY (never added to
+    the legacy/shadow graph — see ``build_supervisor_graph``'s mode branch). Reads the plan-store
+    framing ``manager_task_workflow`` populated in the initial state, runs
+    ``manager.review.manager_review`` (the ONE sonnet-5 structured-extraction call + the
+    deterministic decision seam — persists the plan_store effect + tm_audit + incident itself), and
+    writes ONLY ``manager_review_outcome`` back so ``_route_after_manager_review`` can route.
+    """
+    from orchestrator.manager.review import manager_review
+
+    tenant_id = state.get("tenant_id")
+    task_id = state.get("manager_task_id")
+    step_id = state.get("manager_step_id")
+    if tenant_id is None or task_id is None or step_id is None:
+        # Cannot happen on a graph manager_task_workflow itself built and invoked (it always
+        # populates these) — fail closed rather than crash the graph on a malformed caller.
+        logger.warning(
+            "_manager_review_node: missing manager_task_id/manager_step_id/tenant_id in state "
+            "(enforce-mode graph invoked without the loop's own framing) — no-op, routes to END"
+        )
+        return {"manager_review_outcome": "escalate"}
+
+    result = manager_review(
+        tenant_id,
+        task_id,
+        step_id,
+        situation=state.get("manager_step_situation") or "",
+        desired_outcome=state.get("manager_step_desired_outcome") or "",
+        acceptance_criteria=state.get("manager_step_acceptance_criteria") or [],
+        raw_output=_render_raw_specialist_output(state),
+        has_next_step=bool(state.get("manager_has_next_step")),
+    )
+    return {"manager_review_outcome": result.outcome}
+
+
+def _route_after_manager_review(state: AgentGraphState) -> str:
+    """VT-606 — manager_review's own outgoing edge. A produced ``campaign_plan`` still needs
+    ``collapse`` + the approval rail (Package 3: "Preserve the approval interrupt and campaign
+    effect path") regardless of ``manager_review_outcome`` — collapse's own fail-closed guard
+    (CL-294) independently re-validates the plan variant. Every other case ends this graph
+    invocation; ``manager_task_workflow``'s outer loop decides what happens next."""
+    if state.get("campaign_plan") is not None:
+        return "collapse"
+    return "end"
+
+
 def build_supervisor_graph(
     model: ChatAnthropic,
     checkpointer: PostgresSaver | None = None,
+    *,
+    mode: LoopMode | None = None,
 ) -> Any:
     """Compose and compile the parent multi-agent graph.
 
@@ -453,7 +527,17 @@ def build_supervisor_graph(
 
     ``checkpointer`` (PR 2/3): when given, the graph compiles with Postgres
     checkpointing; PR 1/3 callers pass nothing and compile checkpoint-free.
+
+    ``mode`` (VT-606, Loop Package 3) — defaults to ``manager.loop_mode.get_loop_mode()`` when
+    omitted. ``legacy`` AND ``shadow`` build the EXACT graph shape described above (byte-identical
+    node/edge set — amendment A1: shadow's real dispatch must stay legacy-shaped so the
+    CampaignPlan -> collapse -> VT-594 owner-surfacing path is untouched until enforce). ONLY
+    ``enforce`` changes the shape: every roster specialist routes to a NEW ``manager_review`` node
+    instead of straight to its ``edge_to``/END target; only ``manager_review`` may then route to
+    ``collapse`` (a campaign_plan was produced) or END. See ``_manager_review_node`` /
+    ``_route_after_manager_review`` below.
     """
+    resolved_mode: LoopMode = mode if mode is not None else get_loop_mode()
     # VT-465 — the roster registry drives the manager's spawn-tool set + the
     # specialist nodes + their conditional-edge route map. Adding a future lane
     # = ONE SpecialistSpec entry in agent/roster.py — no edit here. The three
@@ -563,14 +647,37 @@ def build_supervisor_graph(
         _route_after_orchestrator_producing,
         orchestrator_route_map,
     )
-    # VT-465 — each lane's outgoing edge is declared by spec.edge_to:
-    #   - sales_recovery -> 'collapse' (its CampaignPlan needs persisting +
-    #     the approval rail).
-    #   - integration -> END (spec.edge_to=None): the integration_agent
-    #     sub-graph emits its own internal state transitions and produces no
-    #     campaign plan, so control returns straight to the supervisor's END.
-    for spec in ROSTER:
-        graph.add_edge(spec.agent_name, spec.edge_to if spec.edge_to is not None else END)
+    if resolved_mode == "enforce":
+        # VT-606 (Loop Package 3) — "Remove specialist-to-END edges. Route every specialist to
+        # manager_review. Only manager_review may advance or terminate a task." EVERY roster
+        # specialist's edge_to is ignored here (not read at all) — they all route to the ONE new
+        # node instead. legacy/shadow NEVER reach this branch (see resolved_mode check above),
+        # so their graph shape is provably unaffected by this node existing in the module.
+        graph.add_node(
+            "manager_review",
+            with_state_transition_hook(_manager_review_node, node_name="manager_review"),
+        )
+        for spec in ROSTER:
+            graph.add_edge(spec.agent_name, "manager_review")
+        # manager_review's OWN routing: a produced campaign_plan still needs collapse + the
+        # approval rail (Package 3: "Preserve the approval interrupt and campaign effect path") —
+        # every other outcome (continue/complete/revise_step/ask_owner/escalate) ends THIS graph
+        # invocation cleanly; manager_task_workflow's own outer loop decides what happens next
+        # (claim the next step / stop), never a second dispatch inside the SAME graph.invoke.
+        graph.add_conditional_edges(
+            "manager_review",
+            _route_after_manager_review,
+            {"collapse": "collapse", "end": END},
+        )
+    else:
+        # VT-465 — each lane's outgoing edge is declared by spec.edge_to:
+        #   - sales_recovery -> 'collapse' (its CampaignPlan needs persisting +
+        #     the approval rail).
+        #   - integration -> END (spec.edge_to=None): the integration_agent
+        #     sub-graph emits its own internal state transitions and produces no
+        #     campaign plan, so control returns straight to the supervisor's END.
+        for spec in ROSTER:
+            graph.add_edge(spec.agent_name, spec.edge_to if spec.edge_to is not None else END)
     # VT-47 — after collapse persists a PROPOSED campaign it attaches
     # pending_approval_request; route_after_collapse sends that to the
     # approval gate (which pauses via interrupt()). Every other collapse
