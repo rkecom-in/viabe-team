@@ -179,6 +179,42 @@ def test_manager_review_ask_owner_opens_pending_question(pool):
     assert open_qs[0]["question_text"] == "which cohort?" or "which cohort" in open_qs[0]["question_text"]
 
 
+def test_manager_review_clarify_without_question_text_redirects_to_revise_not_waiting(pool):
+    """VT-606 round-3 MINOR fix: decide_next_action reaches CLARIFY whenever the legacy
+    action_taken is empty — reachable NOT only via status='needs_owner_input' (which
+    PlanSpecialistReturn's OWN validator already requires owner_question for) but ALSO via
+    status='completed' with an empty action_summary (no such requirement there) — a real
+    specialist could plausibly report "nothing to show" without ever setting owner_question. That
+    combination must NEVER park the step/task waiting (nothing would ever answer a question that
+    was never asked) — redirected to revise_step instead (one more cycle), never a stuck
+    waiting_owner with no path to resume."""
+    from orchestrator.manager import pending_questions, task_store
+    from orchestrator.manager.review import manager_review
+
+    tid = _seed_tenant(pool)
+    task_id, step_id = _create_and_claim(pool, tid)
+
+    result = manager_review(
+        tid, task_id, step_id,
+        situation="s", desired_outcome="original framing", acceptance_criteria=["done"],
+        raw_output="the specialist reported nothing actionable, no question either",
+        has_next_step=True,
+        client=_FakeClient(
+            {"status": "completed", "action_summary": "", "outcome_summary": "nothing to report"}
+        ),
+    )
+
+    assert result.outcome == "revise_step"
+    assert result.decision.revised_outcome is not None
+    assert result.decision.revised_outcome != "original framing"
+    task = task_store.get_task(tid, task_id)
+    assert task["status"] == "running"  # NEVER 'waiting_owner'
+    steps = {s["step_seq"]: s for s in task_store.get_steps(tid, task_id)}
+    assert steps[1]["status"] == "pending"  # NEVER 'waiting'
+    # No pending question was ever opened — nothing to correlate against, so none should exist.
+    assert pending_questions.get_open(tid, task_id=task_id) == []
+
+
 def test_manager_review_escalate_blocks_task_and_creates_incident(pool):
     from orchestrator.manager import task_store
     from orchestrator.manager.review import manager_review

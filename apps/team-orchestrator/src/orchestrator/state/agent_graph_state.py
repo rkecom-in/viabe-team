@@ -83,3 +83,8 @@ class AgentGraphState(TypedDict, total=False):
     manager_step_desired_outcome: str | None
     manager_step_acceptance_criteria: list[str] | None
     manager_has_next_step: bool | None
+    # VT-606 round-3 (adversarial-review fix, MAJOR #4) — manager_review_node's OUTPUT: the
+    # reframed desired_outcome to re-dispatch with on a revise_step decision (ManagerDecision.
+    # revised_outcome). None for every other outcome. workflow.py reads this to actually APPLY the
+    # revision (build a replacement PlanStep) instead of silently re-claiming the stale original.
+    manager_review_revised_outcome: str | None

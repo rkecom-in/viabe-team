@@ -375,6 +375,111 @@ def test_revise_plan_missing_task_raises(pool):
         )
 
 
+# --- append_step (VT-606 round-3 adversarial-review fix) ---------------------------------------
+
+
+def test_append_step_carries_done_history_forward_without_re_running(pool):
+    """THE bug this API fixes: revise_plan re-INSERTS every step of a full plan fresh as 'pending'
+    — using it for a "just add one more step" retry re-ran the WHOLE plan from step 1. append_step
+    must carry the done step forward on its OWN row (never re-inserted 'pending') and claim_next_step
+    must find ONLY the newly appended step."""
+    from orchestrator.manager import plan_store
+    from orchestrator.manager.plan_models import EvidenceRef, PlanStep
+
+    tid = _seed_tenant(pool)
+    single_step_plan = _simple_plan(
+        steps=[PlanStep(step_seq=1, kind="specialist_dispatch", specialist="sales_recovery_agent")]
+    )
+    task_id = plan_store.create_plan(tid, single_step_plan, source_message_sid=f"SM{uuid4().hex}")
+
+    step1 = plan_store.claim_next_step(tid, task_id)
+    evidence_ref = str(uuid4())
+    plan_store.complete_step(
+        tid, step1["step_id"], "done", evidence=EvidenceRef(kind="pipeline_run", ref=evidence_ref)
+    )
+
+    retry_step = PlanStep(
+        step_seq=2, kind="verification",
+        situation="verification gap", desired_outcome="address the gap",
+    )
+    new_plan = plan_store.append_step(tid, task_id, retry_step, expected_plan_revision=1)
+
+    assert new_plan is not None
+    assert new_plan.plan_revision == 2
+
+    # THE fix: claim_next_step finds the APPENDED step, never re-claims step 1.
+    claimed = plan_store.claim_next_step(tid, task_id)
+    assert claimed["step_seq"] == 2
+    assert claimed["kind"] == "verification"
+
+    # step 1's row is UNTOUCHED — same status, same evidence, carried into the new revision
+    # in place (no duplicate row, no re-insertion as pending).
+    with pool.connection() as conn:
+        rows = conn.execute(
+            "SELECT step_seq, status, evidence_kind, evidence_ref, plan_revision "
+            "FROM manager_task_steps WHERE tenant_id = %s AND task_id = %s ORDER BY step_seq",
+            (tid, str(task_id)),
+        ).fetchall()
+    assert len(rows) == 2  # never duplicated — exactly step 1 (carried) + step 2 (appended)
+    step1_row = rows[0]
+    assert step1_row["status"] == "done"
+    assert step1_row["evidence_kind"] == "pipeline_run"
+    assert step1_row["evidence_ref"] == evidence_ref
+    assert step1_row["plan_revision"] == 2  # carried forward in place
+
+
+def test_append_step_preserves_objective_and_acceptance_criteria(pool):
+    """Unlike revise_plan (a full replacement), append_step does not touch the task's own
+    objective/acceptance_criteria — only the step set changes."""
+    from orchestrator.manager import plan_store
+    from orchestrator.manager.plan_models import PlanStep
+
+    tid = _seed_tenant(pool)
+    single_step_plan = _simple_plan(
+        objective="win back lapsed customers",
+        steps=[PlanStep(step_seq=1, kind="specialist_dispatch", specialist="sales_recovery_agent")],
+    )
+    task_id = plan_store.create_plan(tid, single_step_plan, source_message_sid=f"SM{uuid4().hex}")
+    plan_store.claim_next_step(tid, task_id)
+
+    retry_step = PlanStep(step_seq=2, kind="verification")
+    new_plan = plan_store.append_step(tid, task_id, retry_step, expected_plan_revision=1)
+
+    assert new_plan.objective == "win back lapsed customers"
+
+
+def test_append_step_cas_conflict_on_stale_expected_revision(pool):
+    from orchestrator.manager import plan_store
+    from orchestrator.manager.plan_models import PlanStep
+
+    tid = _seed_tenant(pool)
+    single_step_plan = _simple_plan(
+        steps=[PlanStep(step_seq=1, kind="specialist_dispatch", specialist="sales_recovery_agent")]
+    )
+    task_id = plan_store.create_plan(tid, single_step_plan, source_message_sid=f"SM{uuid4().hex}")
+    plan_store.append_step(
+        tid, task_id, PlanStep(step_seq=2, kind="verification"), expected_plan_revision=1
+    )  # -> revision 2
+
+    with pytest.raises(plan_store.PlanRevisionConflict) as exc_info:
+        plan_store.append_step(
+            tid, task_id, PlanStep(step_seq=3, kind="verification"), expected_plan_revision=1
+        )
+    assert exc_info.value.expected == 1
+    assert exc_info.value.actual == 2
+
+
+def test_append_step_missing_task_raises(pool):
+    from orchestrator.manager import plan_store
+    from orchestrator.manager.plan_models import PlanStep
+
+    tid = _seed_tenant(pool)
+    with pytest.raises(ValueError):
+        plan_store.append_step(
+            tid, uuid4(), PlanStep(step_seq=1, kind="verification"), expected_plan_revision=1
+        )
+
+
 # --- tenant isolation (RLS) still holds on the new plan-store surface --------------------------
 
 

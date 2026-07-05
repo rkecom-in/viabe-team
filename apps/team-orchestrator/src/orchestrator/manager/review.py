@@ -28,6 +28,7 @@ turn could not have reached a specialist dispatch without it already having pass
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import logging
 import re
@@ -229,6 +230,26 @@ def manager_review(
 
     legacy_ret = to_legacy_specialist_return(ret)
     decision = decide_next_action(legacy_ret, has_next_step=has_next_step)
+
+    # VT-606 round-3 MINOR fix (adversarial review): a CLARIFY decision with NO owner_question
+    # text must NEVER park the step 'waiting' — nothing would ever answer a question that was
+    # never actually asked (pending_questions.ask below is skipped when owner_question is empty),
+    # so the task would sit at 'waiting_owner' forever with no path to resume. Redirect to
+    # revise_step instead — governed by the SAME per-step revision budget workflow.py's own limit
+    # enforces (never a silent busy-spin/infinite loop; the budget check there naturally escalates
+    # once exhausted). dataclasses.replace (ManagerDecision is frozen) so ManagerReviewResult.decision
+    # accurately reflects the decision actually ACTED upon, not the pre-correction CLARIFY.
+    if decision.kind is ManagerDecisionKind.CLARIFY and not ret.owner_question:
+        decision = dataclasses.replace(
+            decision,
+            kind=ManagerDecisionKind.REVISE,
+            reason="clarify_with_no_question_text",
+            revised_outcome=(
+                f"{desired_outcome} — if you still cannot proceed without asking the owner, "
+                "state the EXACT question to ask this time."
+            ),
+        )
+
     outcome = _DECISION_TO_OUTCOME[decision.kind]
 
     incident_id: UUID | None = None
