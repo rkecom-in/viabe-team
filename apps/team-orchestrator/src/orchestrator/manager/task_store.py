@@ -29,6 +29,9 @@ TASK_STATUSES = frozenset({
     "clarifying", "planned", "running", "waiting_owner", "blocked", "verifying",
     "completed", "failed", "cancelled", "dead_letter",
     "queued",  # VT-605 (mig 165): a later objective while one is already active for the tenant.
+    "shadow",  # VT-606 round-3 (mig 167): a shadow-mode triage plan — content-recorded but NEVER
+               # admitted/claimed/driven; excluded from TASK_ACTIVE below so it can never occupy
+               # the tenant's one-active-task slot or block a real new_task's admission.
 })
 # VT-557: dead_letter is a terminal (retry budget spent) — but an OPERATOR-REDRIVABLE one
 # (redrive_task resets it to 'planned'); the reaper never auto-retries a dead_letter row.
@@ -36,8 +39,9 @@ TASK_TERMINAL = frozenset({"completed", "failed", "cancelled", "dead_letter"})
 TASK_NON_TERMINAL = TASK_STATUSES - TASK_TERMINAL
 # VT-605: the subset of TASK_NON_TERMINAL that counts as "active" for the per-tenant one-active-task
 # admission gate (mig 165's manager_tasks_one_active_per_tenant partial unique index) — 'queued'
-# deliberately excluded (many queued tasks may coexist per tenant; only ONE may be active).
-TASK_ACTIVE = TASK_NON_TERMINAL - {"queued"}
+# deliberately excluded (many queued tasks may coexist per tenant; only ONE may be active). 'shadow'
+# ALSO excluded (VT-606 round-3): a shadow-mode plan has no driver and must never occupy the slot.
+TASK_ACTIVE = TASK_NON_TERMINAL - {"queued", "shadow"}
 
 # VT-605 (mig 165) columns; VT-606 (team-lead ruling round 2) wires the SETTER — the columns existed
 # since mig 165 but nothing wrote them until the completion-verification checkpoint landed.

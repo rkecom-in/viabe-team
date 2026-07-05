@@ -1,20 +1,26 @@
-"""VT-606 (team-lead ruling round 2) — wires ``manager.triage`` into the live dispatch seam
-(``runner.webhook_pipeline_run``, immediately before its ``dispatch_brain`` call), mode-gated at
-the read site so each mode's behavior is exactly what the team-lead ruling specifies:
+"""VT-606 (team-lead ruling round 2, hardened round 3) — wires ``manager.triage`` into the live
+dispatch seam (``runner.webhook_pipeline_run``, immediately before its ``dispatch_brain`` call),
+mode-gated at the read site so each mode's behavior is exactly what the team-lead ruling specifies:
 
   legacy  -> ZERO new calls. The hot path is BYTE-IDENTICAL to pre-VT-606 — ``triage_seam`` returns
              immediately without even IMPORTING ``triage.triage_turn``, let alone calling it. Pinned
              by ``test_triage_seam.py::test_legacy_mode_never_calls_triage``.
   shadow  -> triage runs OBSERVATIONALLY: classify -> (new_task: opus-validate a minimal draft plan
-             -> create_plan, keyed on the inbound message SID per the VT-605 dedup convention:
-             source_message_sid == the same pointer other seams call source_message_ref) -> record
-             the decision via tm_audit. ``skip_legacy_dispatch`` is ALWAYS False here — the caller's
-             existing ``dispatch_brain`` call STILL runs, unconditionally, right after this; shadow
-             NEVER answers/sends/effects anything of its own (the plan-creation write is inert DB
-             state, not a reply). Tested: no send originates from the shadow path.
-  enforce -> triage OWNS routing for new_task (creates + STARTS the durable workflow) and
-             answer_pending (correlates the reply) — ``skip_legacy_dispatch=True`` for those, so the
-             caller skips its own ``dispatch_brain`` call. ``cancel_task``/``direct_reply``/
+             -> create_plan(shadow=True), keyed on the inbound message SID per the VT-605 dedup
+             convention) -> record the decision via tm_audit. ``skip_legacy_dispatch`` is ALWAYS
+             False here — the caller's existing ``dispatch_brain`` call STILL runs, unconditionally,
+             right after this; shadow NEVER answers/sends/effects anything of its own. A shadow plan
+             persists status='shadow' (round-3 fix — task_store.TASK_ACTIVE excludes it), so it
+             NEVER occupies the tenant's one-active-task admission slot and is NEVER claimed/driven
+             — the plan CONTENT stays queryable for the divergence review without the row ever
+             competing with a real turn.
+  enforce -> triage OWNS routing for new_task (creates the plan; STARTS the durable workflow ONLY
+             when create_plan actually admitted it as 'planned' — round-3 fix: a 'queued' result
+             behind an already-active task has nothing to start yet, so it falls through to the
+             legacy path rather than force-starting a workflow with no work to claim) and
+             answer_pending (correlates the reply to the SPECIFIC open question found — round-3
+             fix: bound to that question's own (task_id, question_id), never
+             correlate_reply's implicit tenant-latest fallback). ``cancel_task``/``direct_reply``/
              ``task_status`` fall through to the legacy path (this row wires the ROUTING decision
              only for those three — a real cancellation/status/direct-reply pipeline is a documented
              gap, a later row's job). UNTESTED-LIVE until VT-611 gates enforce on anywhere; this
@@ -28,7 +34,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 from orchestrator.manager.loop_mode import LoopMode, get_loop_mode
@@ -43,8 +49,9 @@ logger = logging.getLogger("orchestrator.manager.triage_seam")
 @dataclass(frozen=True, slots=True)
 class TriageSeamResult:
     """What the seam decided. ``skip_legacy_dispatch`` tells the CALLER (runner.py) whether to
-    still invoke ``dispatch_brain`` — only ever True in enforce mode for new_task/answer_pending;
-    legacy is ALWAYS False (untouched); shadow is ALWAYS False (never owns an effect)."""
+    still invoke ``dispatch_brain`` — only ever True in enforce mode for a new_task that was
+    actually admitted 'planned' and started, or an answer_pending correlated against a real open
+    question; legacy is ALWAYS False (untouched); shadow is ALWAYS False (never owns an effect)."""
 
     outcome: str | None
     task_id: UUID | None
@@ -80,11 +87,15 @@ def _build_draft_plan(message_text: str) -> ManagerPlan:
 
 
 def _create_plan_for_new_task(
-    tenant_id: UUID, message_text: str, message_sid: str
+    tenant_id: UUID, message_text: str, message_sid: str, *, shadow: bool,
 ) -> UUID | None:
     """opus plan-validation checkpoint (A5) BEFORE create_plan. A validation failure fails SOFT —
     returns None, no plan created, no exception — the caller treats a None task_id exactly like
-    "triage didn't classify this as new_task", falling back to the legacy dispatch."""
+    "triage didn't classify this as new_task", falling back to the legacy dispatch.
+
+    ``shadow`` passes straight through to ``plan_store.create_plan`` (round-3 fix: a shadow-mode
+    plan must persist status='shadow', never 'planned'/'queued', so it can never occupy the
+    tenant's one-active-task admission slot — see the module docstring)."""
     from orchestrator.manager import plan_store
     from orchestrator.manager.plan_validation import validate_plan_draft
 
@@ -109,7 +120,9 @@ def _create_plan_for_new_task(
         )
         return None
 
-    return plan_store.create_plan(tenant_id, draft, source_message_sid=message_sid)
+    return plan_store.create_plan(
+        tenant_id, draft, source_message_sid=message_sid, shadow=shadow
+    )
 
 
 def triage_seam(
@@ -125,7 +138,8 @@ def triage_seam(
     from orchestrator.manager import pending_questions, task_store
     from orchestrator.manager.triage import triage_turn
 
-    has_open_question = bool(pending_questions.get_open(tenant_id))
+    open_questions = pending_questions.get_open(tenant_id)
+    has_open_question = bool(open_questions)
     has_active_task = task_store.has_active_task(tenant_id)
     result = triage_turn(
         message_text=message_text,
@@ -138,8 +152,14 @@ def triage_seam(
         return _NO_OP
 
     task_id: UUID | None = None
+    task_status: str | None = None
     if result.outcome == "new_task":
-        task_id = _create_plan_for_new_task(tenant_id, message_text, message_sid)
+        task_id = _create_plan_for_new_task(
+            tenant_id, message_text, message_sid, shadow=(resolved_mode == "shadow")
+        )
+        if task_id is not None:
+            task_row = task_store.get_task(tenant_id, task_id)
+            task_status = str(task_row["status"]) if task_row is not None else None
 
     emit_tm_audit(
         event_layer="decides",
@@ -151,6 +171,7 @@ def triage_seam(
             "outcome": result.outcome,
             "mode": resolved_mode,
             "task_id": str(task_id) if task_id is not None else None,
+            "task_status": task_status,
             "message_sid": message_sid,
         },
     )
@@ -162,15 +183,32 @@ def triage_seam(
 
     # enforce
     if result.outcome == "new_task":
-        if task_id is not None:
+        if task_id is not None and task_status == "planned":
             from orchestrator.manager.workflow import start_manager_task_workflow
 
             start_manager_task_workflow(tenant_id, task_id)
             return TriageSeamResult(outcome=result.outcome, task_id=task_id, skip_legacy_dispatch=True)
-        return TriageSeamResult(outcome=result.outcome, task_id=None, skip_legacy_dispatch=False)
+        # 'queued' (an already-active task holds the slot) or plan-validation failed (task_id is
+        # None): nothing to start yet either way. Recorded above via tm_audit; fall through to the
+        # legacy path so the owner isn't left silent this turn — a dedicated "you're queued" reply
+        # is a documented gap (no reply-path built for that state in this row).
+        return TriageSeamResult(outcome=result.outcome, task_id=task_id, skip_legacy_dispatch=False)
     if result.outcome == "answer_pending":
-        pending_questions.correlate_reply(tenant_id, message_text, message_sid)
-        return TriageSeamResult(outcome=result.outcome, task_id=None, skip_legacy_dispatch=True)
+        if open_questions:
+            # Bound to the SPECIFIC open question found (oldest first, asked_at ASC) — never
+            # correlate_reply's own implicit "most-recent-for-tenant" fallback, which could
+            # resolve the wrong task's question if more than one happened to be open at once.
+            target: dict[str, Any] = open_questions[0]
+            pending_questions.correlate_reply(
+                tenant_id, message_text, message_sid,
+                question_id=target["id"], task_id=target["task_id"],
+            )
+            return TriageSeamResult(
+                outcome=result.outcome, task_id=target["task_id"], skip_legacy_dispatch=True
+            )
+        # No open question found (a race/staleness between the has_open_question read above and
+        # here) — nothing to correlate against; fall through rather than guessing.
+        return TriageSeamResult(outcome=result.outcome, task_id=None, skip_legacy_dispatch=False)
     # cancel_task / direct_reply / task_status: this row wires the ROUTING decision only — a real
     # cancellation/status/direct-reply pipeline for enforce mode is a documented gap (a later row's
     # job, per the VT-606 completion report). Fall through to the legacy path.

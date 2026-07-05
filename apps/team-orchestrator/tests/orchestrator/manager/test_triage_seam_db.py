@@ -84,7 +84,31 @@ def test_shadow_new_task_creates_plan_and_never_skips_legacy(pool, monkeypatch: 
     assert result.skip_legacy_dispatch is False  # shadow NEVER owns the reply/effect
     task = task_store.get_task(tid, result.task_id)
     assert task is not None
-    assert task["status"] in ("planned", "queued")  # an inert, unstarted plan row
+    # Round-3 fix: a shadow plan persists status='shadow' — never 'planned'/'queued', so it can
+    # never occupy the tenant's one-active-task admission slot.
+    assert task["status"] == "shadow"
+    assert task_store.has_active_task(tid) is False
+
+
+def test_shadow_task_never_blocks_a_real_new_task_admission(pool, monkeypatch: pytest.MonkeyPatch):
+    """The orphan-task bug this fix closes: a shadow plan must not occupy the admission slot, so a
+    REAL (enforce-mode) new_task right behind it still lands 'planned', not 'queued'."""
+    from orchestrator.manager import task_store
+    from orchestrator.manager import triage_seam as ts
+
+    tid = _seed_tenant(pool)
+    _mock_triage(monkeypatch, "new_task")
+    _mock_valid_plan(monkeypatch, valid=True)
+
+    shadow_result = ts.triage_seam(tid, "shadow ask", "SM110", mode="shadow")
+    assert task_store.get_task(tid, shadow_result.task_id)["status"] == "shadow"
+
+    monkeypatch.setattr(
+        "orchestrator.manager.workflow.start_manager_task_workflow", lambda *a, **k: None
+    )
+    real_result = ts.triage_seam(tid, "real ask", "SM111b", mode="enforce")
+
+    assert task_store.get_task(tid, real_result.task_id)["status"] == "planned"
 
 
 def test_shadow_plan_validation_failure_creates_no_plan(pool, monkeypatch: pytest.MonkeyPatch):
@@ -149,6 +173,40 @@ def test_enforce_new_task_starts_workflow_and_skips_legacy(pool, monkeypatch: py
     assert started["task_id"] == result.task_id
 
 
+def test_enforce_new_task_queued_behind_active_does_not_force_start(
+    pool, monkeypatch: pytest.MonkeyPatch
+):
+    """Round-3 fix: when create_plan admits the new_task as 'queued' (another task is already
+    active), the workflow must NOT be force-started — there's nothing pending to claim yet — and
+    the turn falls through to the legacy path rather than being silently skipped."""
+    from orchestrator.manager import plan_store, task_store
+    from orchestrator.manager import triage_seam as ts
+    from orchestrator.manager.plan_models import ManagerPlan, PlanStep
+
+    tid = _seed_tenant(pool)
+    plan_store.create_plan(
+        tid,
+        ManagerPlan(objective="already active", steps=[PlanStep(step_seq=1, kind="verification")]),
+        source_message_sid=f"SM{uuid4().hex}",
+    )
+    _mock_triage(monkeypatch, "new_task")
+    _mock_valid_plan(monkeypatch, valid=True)
+
+    started = {"called": False}
+    monkeypatch.setattr(
+        "orchestrator.manager.workflow.start_manager_task_workflow",
+        lambda *a, **k: started.__setitem__("called", True),
+    )
+
+    result = ts.triage_seam(tid, "a second ask", "SM556", mode="enforce")
+
+    assert result.outcome == "new_task"
+    assert result.task_id is not None
+    assert task_store.get_task(tid, result.task_id)["status"] == "queued"
+    assert started["called"] is False
+    assert result.skip_legacy_dispatch is False  # falls through — no dedicated queued-reply path
+
+
 def test_enforce_answer_pending_correlates_and_skips_legacy(pool, monkeypatch: pytest.MonkeyPatch):
     from orchestrator.manager import pending_questions
     from orchestrator.manager import triage_seam as ts
@@ -162,6 +220,47 @@ def test_enforce_answer_pending_correlates_and_skips_legacy(pool, monkeypatch: p
     assert result.outcome == "answer_pending"
     assert result.skip_legacy_dispatch is True
     assert pending_questions.get_open(tid) == []
+
+
+def test_enforce_answer_pending_binds_to_the_owning_task_not_tenant_latest(
+    pool, monkeypatch: pytest.MonkeyPatch
+):
+    """Round-3 fix: with TWO open questions across two different tasks, correlate_reply must
+    resolve against the SPECIFIC question found (oldest first), never an implicit
+    tenant-latest fallback that could answer the wrong task's question."""
+    from orchestrator.manager import pending_questions
+    from orchestrator.manager import triage_seam as ts
+
+    tid = _seed_tenant(pool)
+    older_task = str(uuid4())
+    newer_task = str(uuid4())
+    with pool.connection() as conn:
+        for t in (older_task, newer_task):
+            conn.execute(
+                "INSERT INTO manager_tasks (tenant_id, id, objective, acceptance_criteria, "
+                "source_message_ref, idempotency_key, status) "
+                "VALUES (%s, %s, '{}'::jsonb, '{}'::jsonb, %s, %s, 'waiting_owner')",
+                (tid, t, f"ref-{t}", f"idem-{t}"),
+            )
+    older_qid = pending_questions.ask(tid, "older question?", task_id=older_task)
+    pending_questions.ask(tid, "newer question?", task_id=newer_task)
+    _mock_triage(monkeypatch, "answer_pending")
+
+    result = ts.triage_seam(tid, "answering the FIRST one", "SM665", mode="enforce")
+
+    assert result.task_id is not None
+    assert str(result.task_id) == older_task
+    remaining_open = pending_questions.get_open(tid)
+    assert len(remaining_open) == 1
+    assert str(remaining_open[0]["task_id"]) == newer_task
+    older = pending_questions.get_open(tid, task_id=older_task)
+    assert older == []
+    # the older question is now answered, not open
+    with pool.connection() as conn:
+        row = conn.execute(
+            "SELECT status FROM pending_questions WHERE id = %s", (str(older_qid),)
+        ).fetchone()
+    assert (row["status"] if isinstance(row, dict) else row[0]) == "answered"
 
 
 def test_enforce_cancel_task_falls_through_to_legacy(pool, monkeypatch: pytest.MonkeyPatch):
@@ -209,3 +308,60 @@ def test_enforce_new_task_plan_validation_failure_falls_through_to_legacy(
     assert result.task_id is None
     assert result.skip_legacy_dispatch is False
     assert started["called"] is False
+
+
+def test_triage_turn_receives_the_real_has_active_task_and_has_open_question_kwargs(
+    pool, monkeypatch: pytest.MonkeyPatch
+):
+    """The seam must pass the ACTUAL, freshly-read DB state into triage_turn's classification
+    inputs — not a stale/hardcoded value. Seeds a real active task + a real open question and
+    asserts triage_turn was called with has_active_task=True, has_open_question=True."""
+    from orchestrator.manager import pending_questions, plan_store, triage_seam as ts
+    from orchestrator.manager.plan_models import ManagerPlan, PlanStep
+
+    tid = _seed_tenant(pool)
+    task_id = plan_store.create_plan(
+        tid,
+        ManagerPlan(objective="active", steps=[PlanStep(step_seq=1, kind="verification")]),
+        source_message_sid=f"SM{uuid4().hex}",
+    )
+    pending_questions.ask(tid, "which cohort?", task_id=task_id)
+
+    captured_kwargs = {}
+
+    def _capturing_triage_turn(**kwargs):
+        captured_kwargs.update(kwargs)
+        from orchestrator.manager.triage import TriageResult
+
+        return TriageResult(outcome="task_status", reasoning="test")
+
+    monkeypatch.setattr("orchestrator.manager.triage.triage_turn", _capturing_triage_turn)
+
+    ts.triage_seam(tid, "how's it going?", "SM1000", mode="shadow")
+
+    assert captured_kwargs["has_active_task"] is True
+    assert captured_kwargs["has_open_question"] is True
+    assert captured_kwargs["message_text"] == "how's it going?"
+
+
+def test_triage_turn_receives_false_kwargs_for_a_clean_tenant(pool, monkeypatch: pytest.MonkeyPatch):
+    """The OTHER half: a tenant with NO active task and NO open question must pass both flags as
+    False — never a stale True carried over from some other tenant/test."""
+    from orchestrator.manager import triage_seam as ts
+
+    tid = _seed_tenant(pool)
+
+    captured_kwargs = {}
+
+    def _capturing_triage_turn(**kwargs):
+        captured_kwargs.update(kwargs)
+        from orchestrator.manager.triage import TriageResult
+
+        return TriageResult(outcome="direct_reply", reasoning="test")
+
+    monkeypatch.setattr("orchestrator.manager.triage.triage_turn", _capturing_triage_turn)
+
+    ts.triage_seam(tid, "hi", "SM1001", mode="shadow")
+
+    assert captured_kwargs["has_active_task"] is False
+    assert captured_kwargs["has_open_question"] is False
