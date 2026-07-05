@@ -111,6 +111,20 @@ REGISTRY: dict[str, AgentPrerequisites] = {
         min_customers=1,
         requires_ownership_verified=True,
     ),
+    # VT-608 (the VT-606 review flagged its absence) — integration_agent is the SETUP mechanism
+    # for a customer-data source; requiring one already exist (SR's own bar) would be circular —
+    # this agent's job is to CREATE it. journey-complete + verification + ownership-verified stay
+    # the universal execution bar every agent inherits (mirrors sales_recovery's own shape for
+    # those three); requires_enabled_data_source / min_customers are deliberately the False/0
+    # defaults.
+    "integration_agent": AgentPrerequisites(
+        agent="integration_agent",
+        requires_journey_complete=True,
+        requires_verification=True,
+        requires_enabled_data_source=False,
+        min_customers=0,
+        requires_ownership_verified=True,
+    ),
 }
 
 
