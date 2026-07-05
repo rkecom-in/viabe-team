@@ -92,12 +92,17 @@ _OWNER_WAIT_POLL_S = 300.0
 _OWNER_WAIT_MAX_POLLS = 2016  # 2016 * 300s ≈ 7 days
 
 # manager_task_steps.specialist -> activation_registry key. Only sales_recovery has a REAL
-# activation_registry entry today (the program baseline's own finding); integration_agent /
-# onboarding_conductor have none — so there is NOTHING to validate against for them (treated as
-# "no prereq gate defined for this specialist" -> pass), not a fail-closed block. Building
-# activation_registry entries for the other two specialists is a product decision outside VT-606's
-# scope (the loop MECHANICS), not something this row invents.
-_SPECIALIST_TO_ACTIVATION_KEY: dict[str, str] = {"sales_recovery_agent": "sales_recovery"}
+# activation_registry entry today (the program baseline's own finding); onboarding_conductor still
+# has none — so there is NOTHING to validate against for it (treated as "no prereq gate defined for
+# this specialist" -> pass), not a fail-closed block. VT-608 adds integration_agent's own mapping
+# (the VT-606 review flagged its absence — a loop-dispatched integration_agent step previously
+# skipped the activation check entirely for the same reason); see activation_registry.REGISTRY's
+# integration_agent entry for the declared prerequisites. onboarding_conductor's own entry remains a
+# product decision outside this row's scope.
+_SPECIALIST_TO_ACTIVATION_KEY: dict[str, str] = {
+    "sales_recovery_agent": "sales_recovery",
+    "integration_agent": "integration_agent",
+}
 
 # The business_impact_choke.BusinessImpactClass values — customer_send is EXCLUDED (VT-460's own
 # separate harness, not business_impact_choke's).

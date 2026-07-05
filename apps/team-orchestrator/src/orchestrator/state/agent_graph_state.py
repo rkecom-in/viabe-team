@@ -70,8 +70,14 @@ class AgentGraphState(TypedDict, total=False):
     #     the fan-out runs. CL-390: counts only, no PII.
     #   campaign_execution_error: exception type name if the seam errors
     #     (e.g. RuntimeError from a missing campaign row). Absent on success.
+    #   campaign_execution_blocked: VT-608 re-verify residual — _campaign_execute_node has
+    #     returned this key since VT-328 (execute_approved_campaign's own dispatch_blocked
+    #     reflection), but it was NEVER declared here, the same undeclared-TypedDict-key class of
+    #     bug the VT-607 fix round found for manager_review_outcome — LangGraph silently dropped it
+    #     from the merged state instead of merging it as a channel. Declared now (purely additive).
     campaign_execution_summary: dict[str, int] | None
     campaign_execution_error: str | None
+    campaign_execution_blocked: dict[str, str] | None
     # VT-606 (Loop Package 3, enforce-mode ONLY — absent/None in legacy/shadow) — the plan-store
     # identifiers + step framing manager_task_workflow populates before invoking the graph for ONE
     # specialist-dispatch attempt, and manager_review_node reads to run the review + persist its

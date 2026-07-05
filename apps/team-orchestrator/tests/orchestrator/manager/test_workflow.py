@@ -358,6 +358,33 @@ def test_validate_step_blocks_on_unmet_activation_prereqs(substrate, monkeypatch
     assert dispatch_calls == []  # never reached dispatch — the prereq gate caught it first
 
 
+def test_validate_step_blocks_on_unmet_activation_prereqs_for_integration_agent(
+    substrate, monkeypatch: pytest.MonkeyPatch
+):
+    """VT-608: integration_agent now has its own _SPECIALIST_TO_ACTIVATION_KEY mapping + its own
+    activation_registry entry (previously absent — the VT-606 review's own finding — an unmapped
+    specialist here is 'no key configured' -> the check is SKIPPED, not enforced). A freshly-seeded
+    test tenant satisfies none of integration_agent's declared prereqs (journey-complete,
+    verification, ownership-verified) either, so this must ALSO block before any dispatch."""
+    import orchestrator.manager.workflow as wf
+    from orchestrator.manager.plan_models import PlanStep
+
+    tid = _seed_tenant(substrate)
+    task_id = str(_create_task(
+        tid, steps=[PlanStep(step_seq=1, kind="specialist_dispatch", specialist="integration_agent")]
+    ))
+
+    dispatch_calls = []
+    monkeypatch.setattr(
+        wf, "_dispatch_specialist_step",
+        lambda *a, **k: dispatch_calls.append(1) or ("complete", None),
+    )
+    status = wf.manager_task_workflow(tid, task_id)
+
+    assert status == "blocked"
+    assert dispatch_calls == []  # never reached dispatch — the prereq gate caught it first
+
+
 def _grant_config_policy(tid: str) -> None:
     """Permit the 'config' action type in tenant_business_policy — assert_within_policy runs
     BEFORE assert_or_gate_business_action in _validate_step and is its own fail-closed check (no
