@@ -222,8 +222,17 @@ def _apply_agent_glue(
     """VT-369 — apply the agent-batch consequence of a TRUE resolution (no-op for
     non-agent approval types; ``apply_agent_decision`` reads the row's
     ``approval_type``/``draft_batch_id`` on the caller's conn and returns None
-    unless it is an open-batch ``agent_customer_send``). Same txn as the resolve."""
+    unless it is an open-batch ``agent_customer_send``). Same txn as the resolve.
+
+    VT-609 fix round 2 (CRITICAL): dispatch is BY ``approval_type``, additively — each glue call
+    below self-guards on the row's own ``approval_type`` and no-ops for any other row, so adding a
+    new type's glue here can never change another type's behavior. ``apply_business_policy_decision``
+    is the ``business_policy_grant`` leg: it is what actually calls ``grant_business_policy`` on the
+    owner's clear yes (a specialist tool trying to do this from its own turn was never reliably
+    re-dispatched — see that function's docstring). Both calls run unconditionally; at most one is
+    ever non-no-op for a given row, since a row has exactly one ``approval_type``."""
     from orchestrator.agents.approval_glue import apply_agent_decision
+    from orchestrator.agents.business_policy import apply_business_policy_decision
 
     apply_agent_decision(
         conn,
@@ -232,6 +241,7 @@ def _apply_agent_glue(
         decision,
         owner_feedback=owner_feedback,
     )
+    apply_business_policy_decision(conn, tenant_id, approval_id, decision)
 
 
 def resume_run(run_id: UUID | str, decision: str) -> dict[str, Any]:

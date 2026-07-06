@@ -80,10 +80,12 @@ def test_supervisor_graph_gains_conductor_node_and_route() -> None:
 
 def test_conductor_holds_no_forbidden_capability_tool() -> None:
     """VT-609 — the conductor now legitimately holds WRITE tools (record_answer / record_skip /
-    apply_correction / propose_business_policy / resolve_business_policy_proposal): that is the
-    point of the conversion, not a guardrail regression. The invariant that still binds is the
-    NARROWER one VT-268 actually enforces — no customer-send / accounts-book-write / ledger-write
-    tool — which none of the onboarding-state/policy write tools below are."""
+    apply_correction / propose_business_policy): that is the point of the conversion, not a
+    guardrail regression. The invariant that still binds is the NARROWER one VT-268 actually
+    enforces — no customer-send / accounts-book-write / ledger-write tool — which none of the
+    onboarding-state/policy write tools below are. Fix round 2 (CRITICAL): the policy GRANT is
+    applied by the deterministic approval-glue on the owner's own reply, not a second specialist
+    tool (the first cut's resolve tool was never reliably re-dispatched — see business_policy.py)."""
     from orchestrator.agent.onboarding_conductor import ONBOARDING_CONDUCTOR_TOOLS
     from orchestrator.agent.tool_guardrail import find_forbidden_tools
 
@@ -99,7 +101,6 @@ def test_conductor_holds_no_forbidden_capability_tool() -> None:
         "profile_completion_check",
         "activation_check",
         "propose_business_policy",
-        "resolve_business_policy_proposal",
         "conductor_escalate_to_fazal",
     }
 

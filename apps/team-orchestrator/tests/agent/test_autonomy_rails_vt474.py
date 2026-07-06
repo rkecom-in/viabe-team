@@ -219,9 +219,12 @@ def test_B_decision_shape_two_terminal_states() -> None:
 
 pytest.importorskip("psycopg")
 pytest.importorskip("dbos")
+pytest.importorskip("langgraph")  # Section E drives runner.try_resume_pending_approval, which
+# pulls the approval/graph stack (mirrors test_optout_precedence.py's own guard)
 
 import psycopg  # noqa: E402 — after the dependency skip guards
 
+from orchestrator import runner  # noqa: E402
 from orchestrator.agents import business_impact_choke as choke  # noqa: E402
 from orchestrator.agents import business_policy as bp  # noqa: E402
 from orchestrator.agents.business_impact_sample import propose_spend  # noqa: E402
@@ -482,10 +485,18 @@ def test_D_send_checkpoint_frozen_is_checkpoint(substrate) -> None:  # type: ign
 
 
 # ===========================================================================
-# E — VT-609 fix round: the PROPOSE/RESOLVE arm-and-grant shape (CRITICAL — Pillar-7). The
+# E — VT-609 fix round 2: the PROPOSE/GRANT shape (CRITICAL — Pillar-7). The
 # onboarding-conductor's ``propose_business_policy`` tool must NEVER call ``grant_business_policy``
-# directly; only ``resolve_business_policy_grant``, reading the bounds off the durable approval
-# row, may. DB-backed end-to-end (RLS-real) — mirrors the D-layer's own real-gate proof shape.
+# directly; only the DETERMINISTIC approval-glue (``business_policy.apply_business_policy_decision``,
+# dispatched from ``approval_resume._apply_agent_glue``) may. DB-backed end-to-end (RLS-real) —
+# mirrors the D-layer's own real-gate proof shape.
+#
+# THE make-or-break tests below drive the REAL INBOUND PATH (``runner.try_resume_pending_approval``)
+# — not ``apply_business_policy_decision`` called directly — because that IS the bug the re-verify
+# caught: a first-cut design gave the specialist a SECOND tool to call once it recognized the
+# owner's yes, but ``try_resume_pending_approval`` consumes the inbound reply FIRST, on every
+# inbound, before the specialist is ever re-dispatched. Only a test that goes through that same
+# real entrypoint can prove the owner's clear "yes" actually lands a grant.
 # ===========================================================================
 
 
@@ -521,10 +532,13 @@ def test_E_propose_arms_a_durable_row_and_does_not_grant(substrate) -> None:  # 
 
 
 @requires_db
-def test_E_resolve_approved_grants_exactly_the_proposed_bounds_with_provenance(substrate) -> None:  # type: ignore[no-untyped-def]
-    """E — THE Pillar-7 provenance proof: resolving ``approved=True`` grants EXACTLY the bounds
-    that were proposed (never a fresh value), and ``granted_by`` is the approval-row id — the audit
-    trail the direct-grant design had none of."""
+def test_E_inbound_yes_grants_exactly_the_proposed_bounds_with_provenance(substrate) -> None:  # type: ignore[no-untyped-def]
+    """E — THE make-or-break Pillar-7 provenance proof, driven through the REAL inbound path
+    (``runner.try_resume_pending_approval`` — the SAME entrypoint every WhatsApp reply goes
+    through, not a direct call to the grant logic): the owner's clear "yes" grants EXACTLY the
+    bounds that were proposed (never a fresh value), and ``granted_by`` is the approval-row id —
+    the audit trail the original direct-grant design had none of, and the property the first-cut
+    resolve-TOOL design never actually delivered (it was never reliably re-dispatched)."""
     tenant = _new_tenant(substrate.dsn)
     with tenant_connection(tenant) as conn:
         proposed = bp.propose_business_policy_grant(
@@ -535,15 +549,18 @@ def test_E_resolve_approved_grants_exactly_the_proposed_bounds_with_provenance(s
             spend_ceiling_minor=50_000,
             conn=conn,
         )
-        approval_id = proposed["approval_id"]
-        result = bp.resolve_business_policy_grant(tenant, approved=True, conn=conn)
+    approval_id = proposed["approval_id"]
 
-        assert result["status"] == "granted"
-        assert result["allowed_action_types"] == ["customer_send", "spend"]
-        assert result["spend_ceiling_minor"] == 50_000
+    # The REAL inbound path — an owner WhatsApp reply, exactly as runner.webhook_pipeline_run
+    # drives it. "yes" is deterministic (classify_approval_reply's fast path) — no LLM call.
+    decision = runner.try_resume_pending_approval(str(tenant), "yes", None)
+    assert decision == "approved"
 
+    with tenant_connection(tenant) as conn:
         policy = bp.get_business_policy(tenant, conn=conn)
         assert policy.allowed_action_types == frozenset({"customer_send", "spend"})
+        assert policy.spend_ceiling_minor == 50_000
+        # A clear yes actually lifted the tenant OFF the deny-all default.
         assert bp.assert_within_policy(
             tenant, bp.PolicyActionClass.SPEND, {"magnitude_minor": 50_000}, conn=conn
         ).in_policy
@@ -554,9 +571,10 @@ def test_E_resolve_approved_grants_exactly_the_proposed_bounds_with_provenance(s
         assert row is not None
         assert str(row["granted_by"]) == str(approval_id)
 
-        # The approval row itself is now resolved.
+        # The approval row itself is now resolved — AND the minimal proposal run closed (VT-609
+        # fix round 2's runner.py branch), not left dangling 'running' forever.
         arow = conn.execute(
-            "SELECT status, decision, resolved_at FROM pending_approvals WHERE id = %s",
+            "SELECT status, decision, resolved_at, run_id FROM pending_approvals WHERE id = %s",
             (approval_id,),
         ).fetchone()
         assert arow is not None
@@ -564,10 +582,17 @@ def test_E_resolve_approved_grants_exactly_the_proposed_bounds_with_provenance(s
         assert arow["decision"] == "approved"
         assert arow["resolved_at"] is not None
 
+        run_row = conn.execute(
+            "SELECT status FROM pipeline_runs WHERE id = %s", (arow["run_id"],),
+        ).fetchone()
+        assert run_row is not None
+        assert run_row["status"] == "completed"
+
 
 @requires_db
-def test_E_resolve_rejected_does_not_grant(substrate) -> None:  # type: ignore[no-untyped-def]
-    """E — a rejected resolution leaves the deny-all default in force + marks the row rejected."""
+def test_E_inbound_no_does_not_grant(substrate) -> None:  # type: ignore[no-untyped-def]
+    """E — the REAL inbound path on a clear "no": deny-all stands, the row resolves rejected,
+    ``tenant_business_policy`` is never touched."""
     tenant = _new_tenant(substrate.dsn)
     with tenant_connection(tenant) as conn:
         bp.propose_business_policy_grant(
@@ -578,21 +603,110 @@ def test_E_resolve_rejected_does_not_grant(substrate) -> None:  # type: ignore[n
             spend_ceiling_minor=0,
             conn=conn,
         )
-        result = bp.resolve_business_policy_grant(tenant, approved=False, conn=conn)
-        assert result["status"] == "rejected"
 
+    decision = runner.try_resume_pending_approval(str(tenant), "no", None)
+    assert decision == "rejected"
+
+    with tenant_connection(tenant) as conn:
         policy = bp.get_business_policy(tenant, conn=conn)
         assert policy.allowed_action_types == frozenset()
 
+        row = conn.execute(
+            "SELECT status, decision FROM pending_approvals WHERE tenant_id = %s "
+            "AND approval_type = %s",
+            (str(tenant), bp.APPROVAL_TYPE_POLICY_GRANT),
+        ).fetchone()
+        assert row is not None
+        assert row["status"] == "rejected"
+        assert row["decision"] == "rejected"
+
+        # No row in tenant_business_policy at all — a reject never even upserts a deny-all row;
+        # the fail-closed default (no row) is what governs.
+        no_row = conn.execute(
+            "SELECT 1 FROM tenant_business_policy WHERE tenant_id = %s", (str(tenant),),
+        ).fetchone()
+        assert no_row is None
+
 
 @requires_db
-def test_E_resolve_with_nothing_open_is_a_clean_noop(substrate) -> None:  # type: ignore[no-untyped-def]
-    """E — idempotency: a resolve with no open proposal (never proposed, or already resolved, or
-    swept as timed-out) is a clean no-op — never a raise, never a phantom grant."""
+def test_E_timeout_sweep_does_not_grant(substrate) -> None:  # type: ignore[no-untyped-def]
+    """E — an owner who never replies: the 30-min timeout sweep resolves the proposal as
+    decision='timeout' through the SAME deterministic glue (mark_approval_resolved ->
+    _apply_agent_glue -> apply_business_policy_decision) — no grant, deny-all stands. Proves the
+    timeout leg is fail-closed too, not just the inbound-reply legs."""
+    from datetime import UTC, datetime as _dt
+
+    from orchestrator.scheduled_triggers import run_approval_timeout_sweep_body
+
     tenant = _new_tenant(substrate.dsn)
     with tenant_connection(tenant) as conn:
-        result = bp.resolve_business_policy_grant(tenant, approved=True, conn=conn)
-        assert result == {"status": "no_pending_proposal"}
+        proposed = bp.propose_business_policy_grant(
+            tenant,
+            allowed_action_types=["customer_send"],
+            allowed_segments=["lapsed"],
+            frequency_caps={},
+            spend_ceiling_minor=0,
+            conn=conn,
+        )
+        # Backdate the proposal's timeout so the sweep picks it up now, without waiting 48h.
+        conn.execute(
+            "UPDATE pending_approvals SET timeout_at = now() - interval '1 hour' WHERE id = %s",
+            (proposed["approval_id"],),
+        )
+
+    resolved_ids = run_approval_timeout_sweep_body(now=_dt.now(UTC))
+    assert UUID(proposed["approval_id"]) in resolved_ids
+
+    with tenant_connection(tenant) as conn:
+        policy = bp.get_business_policy(tenant, conn=conn)
+        assert policy.allowed_action_types == frozenset()
+
+        row = conn.execute(
+            "SELECT status, decision FROM pending_approvals WHERE id = %s",
+            (proposed["approval_id"],),
+        ).fetchone()
+        assert row is not None
+        assert row["status"] == "timed_out"
+        assert row["decision"] == "timeout"
+
+
+@requires_db
+def test_E_apply_business_policy_decision_is_a_noop_for_other_approval_types(substrate) -> None:  # type: ignore[no-untyped-def]
+    """E — additive, not a replacement: ``apply_business_policy_decision`` self-guards on its
+    OWN approval_type and no-ops for anything else (e.g. an ``agent_customer_send`` row), so
+    wiring it into ``_apply_agent_glue`` alongside ``apply_agent_decision`` can never change that
+    OTHER type's resolution behavior."""
+    tenant = _new_tenant(substrate.dsn)
+    with tenant_connection(tenant) as conn:
+        run_row = conn.execute(
+            "INSERT INTO pipeline_runs (tenant_id, run_type, status) "
+            "VALUES (%s, 'orchestrator', 'running') RETURNING id",
+            (str(tenant),),
+        ).fetchone()
+        approval_row = conn.execute(
+            "INSERT INTO pending_approvals (tenant_id, run_id, approval_type, summary, status, "
+            "timeout_at) VALUES (%s, %s, 'campaign_send', 'approve?', 'pending', "
+            "now() + interval '2 days') RETURNING id",
+            (str(tenant), str(run_row["id"])),
+        ).fetchone()
+
+        out = bp.apply_business_policy_decision(conn, tenant, approval_row["id"], "approved")
+        assert out is None
+
+        no_row = conn.execute(
+            "SELECT 1 FROM tenant_business_policy WHERE tenant_id = %s", (str(tenant),),
+        ).fetchone()
+        assert no_row is None
+
+
+@requires_db
+def test_E_apply_business_policy_decision_unknown_approval_id_is_noop(substrate) -> None:  # type: ignore[no-untyped-def]
+    """E — idempotency at the glue layer itself: an unknown/nonexistent approval id is a clean
+    no-op — never a raise, never a phantom grant (mirrors the propose/resolve idempotency ethos)."""
+    tenant = _new_tenant(substrate.dsn)
+    with tenant_connection(tenant) as conn:
+        out = bp.apply_business_policy_decision(conn, tenant, uuid4(), "approved")
+        assert out is None
 
 
 @requires_db
