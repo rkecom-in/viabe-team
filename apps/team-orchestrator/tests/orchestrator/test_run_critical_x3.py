@@ -308,6 +308,53 @@ def test_main_exit_1_when_a_run_fails(monkeypatch, tmp_path, _stub_infra):
     assert rc == 1
 
 
+# --- build_run_summary / --summary-json ------------------------------------------------------------
+
+
+def test_build_run_summary_clean_and_consistent():
+    runs = [_obs("s", 1), _obs("s", 2), _obs("s", 3)]
+    summary = rx3.build_run_summary("s", runs)
+    assert summary["scenario"] == "s"
+    assert summary["consistent"] is True
+    assert summary["consistency_failures"] == []
+    assert len(summary["runs"]) == 3
+    assert all(r["clean"] for r in summary["runs"])
+    assert summary["runs"][0] == {
+        "run_index": 1, "tenant_id": "tenant-1", "route": "sales_recovery", "grounded_count": 8,
+        "terminal_outcome": "completed", "transcript_hash": "h", "clean": True, "block_reasons": [],
+    }
+
+
+def test_build_run_summary_flags_a_dirty_run_and_divergence():
+    dirty = rx3.RunObservation(
+        scenario_name="s", run_index=2, tenant_id="tenant-2", results=[_sr("FAIL")],
+        route="none", grounded_count=None, terminal_outcome="completed", transcript_hash="h",
+    )
+    runs = [_obs("s", 1), dirty, _obs("s", 3)]
+    summary = rx3.build_run_summary("s", runs)
+    assert summary["consistent"] is False
+    assert summary["consistency_failures"]  # route diverged (sales_recovery vs none)
+    assert summary["runs"][1]["clean"] is False
+    assert "FAIL" in summary["runs"][1]["block_reasons"][0]
+
+
+def test_main_writes_summary_json(monkeypatch, tmp_path, _stub_infra):
+    (tmp_path / "s1.json").write_text(json.dumps({
+        "name": "s1", "critical": True, "steps": [{"message": "hi"}],
+    }))
+    monkeypatch.setattr(ch, "run_scenario_steps", lambda *a, **k: [_sr("PASS", run_id=None)])
+    monkeypatch.setattr(rx3, "observe_route_and_grounded_count", lambda conn, tid, rid: ("none", None))
+
+    summary_path = tmp_path / "summary.json"
+    rc = rx3.main(["--scenarios-dir", str(tmp_path), "--summary-json", str(summary_path)])
+    assert rc == 0
+    written = json.loads(summary_path.read_text())
+    assert len(written) == 1
+    assert written[0]["scenario"] == "s1"
+    assert len(written[0]["runs"]) == 3
+    assert written[0]["consistent"] is True
+
+
 def test_main_exit_1_on_cross_run_route_divergence(monkeypatch, tmp_path, _stub_infra):
     (tmp_path / "s1.json").write_text(json.dumps({
         "name": "s1", "critical": True, "steps": [{"message": "hi"}],

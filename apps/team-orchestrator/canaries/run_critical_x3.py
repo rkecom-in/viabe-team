@@ -138,6 +138,33 @@ def check_cross_run_consistency(observations: list[RunObservation]) -> list[str]
     return failures
 
 
+def build_run_summary(scenario_name: str, observations: list[RunObservation]) -> dict[str, Any]:
+    """One scenario's ×3 result, JSON-serializable — persists what ``main()`` previously only
+    PRINTED (route/grounded_count/terminal_outcome/transcript_hash per run + the cross-run
+    consistency verdict). Needed for the VT-611 evidence manifest to cite the actual ×3 results,
+    not just this tool's exit code — a manifest can't quote stdout."""
+    runs = []
+    for o in observations:
+        bad = check_all_3_clean(o.results)
+        runs.append({
+            "run_index": o.run_index,
+            "tenant_id": o.tenant_id,
+            "route": o.route,
+            "grounded_count": o.grounded_count,
+            "terminal_outcome": o.terminal_outcome,
+            "transcript_hash": o.transcript_hash,
+            "clean": not bad,
+            "block_reasons": bad,
+        })
+    consistency_failures = check_cross_run_consistency(observations)
+    return {
+        "scenario": scenario_name,
+        "runs": runs,
+        "consistent": not consistency_failures,
+        "consistency_failures": consistency_failures,
+    }
+
+
 def observe_route_and_grounded_count(
     conn: Any, tenant_id: str, run_id: str | None
 ) -> tuple[str, int | None]:
@@ -250,6 +277,12 @@ def main(argv: list[str] | None = None) -> int:
         help="skip teardown (debug — inspect the synthetic tenants after the run)",
     )
     p.add_argument("--json-report", default=None, help="bundle path for transcript_judge.py")
+    p.add_argument(
+        "--summary-json", default=None,
+        help="write the persisted per-run route/grounded_count/terminal_outcome/transcript_hash + "
+             "cross-run-consistency verdict (JSON list, one entry per scenario) — for the VT-611 "
+             "evidence manifest, which can't quote this tool's stdout",
+    )
     args = p.parse_args(argv)
 
     scenarios_dir = Path(args.scenarios_dir)
@@ -263,6 +296,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"=== VT-611 Package C: {len(pairs)} critical scenario(s), ×3 each ===")
 
     blocked: list[str] = []
+    summaries: list[dict[str, Any]] = []
     for path, scenario in pairs:
         name = str(scenario.get("name", path.stem))
         print(f"\n--- {name} ---")
@@ -287,12 +321,18 @@ def main(argv: list[str] | None = None) -> int:
         for f in consistency_failures:
             blocked.append(f)
             print(f"    CROSS-RUN DIVERGENCE: {f}")
+        summaries.append(build_run_summary(name, obs))
 
     print(f"\n=== summary: {len(pairs)} critical scenario(s), {len(blocked)} block(s) ===")
     for b in blocked:
         print(f"  - {b}")
     if args.json_report:
         print(f"    json-report: appended to {args.json_report} — feed into transcript_judge.py next")
+    if args.summary_json:
+        with open(args.summary_json, "w", encoding="utf-8") as fh:
+            json.dump(summaries, fh, indent=2, ensure_ascii=False)
+            fh.write("\n")
+        print(f"    summary-json: wrote {args.summary_json} — for the evidence manifest")
 
     return 0 if not blocked else 1
 
