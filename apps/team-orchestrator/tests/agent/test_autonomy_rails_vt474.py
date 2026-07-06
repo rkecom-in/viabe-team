@@ -710,6 +710,110 @@ def test_E_apply_business_policy_decision_unknown_approval_id_is_noop(substrate)
 
 
 @requires_db
+def test_E_grant_once_rejected_then_racing_approved_does_not_grant(substrate) -> None:  # type: ignore[no-untyped-def]
+    """E — re-verify hardening: the GRANT is authoritative on the ROW's stored decision, not the
+    racing caller's passed decision. Simulates the real production race with the REAL
+    ``mark_approval_resolved`` choke point called TWICE sequentially on ONE row — exactly what two
+    distinct-SID owner replies racing on the same approval produce: the first ("no") commits the
+    row 'rejected'; the second ("yes") loses the ``WHERE resolved_at IS NULL`` race (0 rows
+    updated) but ``mark_approval_resolved`` still invokes the glue with its OWN passed
+    decision="approved" regardless. Before this hardening, ``apply_business_policy_decision``
+    trusted that passed value and granted despite the row being authoritatively rejected."""
+    from orchestrator.agent.approval_resume import mark_approval_resolved
+
+    tenant = _new_tenant(substrate.dsn)
+    with tenant_connection(tenant) as conn:
+        proposed = bp.propose_business_policy_grant(
+            tenant,
+            allowed_action_types=["customer_send"],
+            allowed_segments=["lapsed"],
+            frequency_caps={},
+            spend_ceiling_minor=0,
+            conn=conn,
+        )
+    approval_id = proposed["approval_id"]
+
+    with tenant_connection(tenant) as conn, conn.transaction():
+        # The winning racer: a real "no" resolves the row 'rejected'.
+        resolved_first = mark_approval_resolved(conn, tenant, approval_id, "rejected")
+    assert resolved_first is True
+
+    with tenant_connection(tenant) as conn, conn.transaction():
+        # The losing racer: a real "yes" arrives after the row is already resolved. Its own
+        # UPDATE (WHERE resolved_at IS NULL) affects 0 rows, but mark_approval_resolved does not
+        # check that — it still calls the glue with decision="approved".
+        resolved_second = mark_approval_resolved(conn, tenant, approval_id, "approved")
+    assert resolved_second is True  # unchanged pre-existing return contract; the grant is what matters
+
+    with tenant_connection(tenant) as conn:
+        policy = bp.get_business_policy(tenant, conn=conn)
+        assert policy.allowed_action_types == frozenset(), (
+            "the losing racer's passed approved must NOT grant — the row's stored "
+            "decision (rejected) is authoritative"
+        )
+        no_row = conn.execute(
+            "SELECT 1 FROM tenant_business_policy WHERE tenant_id = %s", (str(tenant),),
+        ).fetchone()
+        assert no_row is None
+
+        row = conn.execute(
+            "SELECT decision, status FROM pending_approvals WHERE id = %s", (approval_id,),
+        ).fetchone()
+        assert row is not None
+        assert row["decision"] == "rejected"  # the second call's own UPDATE was a real no-op
+
+
+@requires_db
+def test_E_grant_once_approved_then_stale_replay_grants_exactly_once(substrate) -> None:  # type: ignore[no-untyped-def]
+    """E — the flip side: once the row is authoritatively 'approved', a STALE replay of the glue
+    (a redelivered signal / the timeout sweep racing after the owner already replied) passing some
+    OTHER decision must NOT un-grant or corrupt the policy — the row's stored 'approved' still
+    governs, so the bounds land exactly once and stay stable."""
+    from orchestrator.agent.approval_resume import mark_approval_resolved
+
+    tenant = _new_tenant(substrate.dsn)
+    with tenant_connection(tenant) as conn:
+        proposed = bp.propose_business_policy_grant(
+            tenant,
+            allowed_action_types=["customer_send", "spend"],
+            allowed_segments=["lapsed"],
+            frequency_caps={},
+            spend_ceiling_minor=25_000,
+            conn=conn,
+        )
+    approval_id = proposed["approval_id"]
+
+    with tenant_connection(tenant) as conn, conn.transaction():
+        resolved_first = mark_approval_resolved(conn, tenant, approval_id, "approved")
+    assert resolved_first is True
+
+    with tenant_connection(tenant) as conn:
+        policy = bp.get_business_policy(tenant, conn=conn)
+        assert policy.allowed_action_types == frozenset({"customer_send", "spend"})
+        assert policy.spend_ceiling_minor == 25_000
+
+    with tenant_connection(tenant) as conn, conn.transaction():
+        # A stale replay (already-resolved row) with a DIFFERENT passed decision — its own UPDATE
+        # is a no-op (resolved_at no longer NULL), but the pre-hardening code would have still
+        # called the glue with "timeout" here.
+        resolved_second = mark_approval_resolved(conn, tenant, approval_id, "timeout")
+    assert resolved_second is True
+
+    with tenant_connection(tenant) as conn:
+        policy = bp.get_business_policy(tenant, conn=conn)
+        # Unchanged — the row's stored decision is still 'approved', so the stale "timeout" replay
+        # is a safe idempotent re-grant of the SAME bounds, never a downgrade to deny-all.
+        assert policy.allowed_action_types == frozenset({"customer_send", "spend"})
+        assert policy.spend_ceiling_minor == 25_000
+
+        row = conn.execute(
+            "SELECT decision, status FROM pending_approvals WHERE id = %s", (approval_id,),
+        ).fetchone()
+        assert row is not None
+        assert row["decision"] == "approved"  # the stale replay's own UPDATE was a real no-op too
+
+
+@requires_db
 def test_E_propose_refuses_when_another_approval_is_already_open(substrate) -> None:  # type: ignore[no-untyped-def]
     """E — the structural one-open-approval-per-tenant rule (migration 128) binds the policy
     proposal too: a second propose while the first is still unresolved is refused, never a second
