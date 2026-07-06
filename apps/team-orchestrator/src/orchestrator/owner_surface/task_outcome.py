@@ -40,14 +40,28 @@ under the label ``task_outcome_report``, keyed by the outbound message_sid — s
 async-callback delivery-tracking every other owner notification gets. ``manager_tasks.
 owner_notification_status`` is a SEPARATE, narrower flag (mig 165's own comment: "the manager_task's
 OWN view", not a duplicate store) — flips synchronously to 'delivered' the moment the send is
-accepted by Twilio (this module's own idempotency key: a re-run only ever finds 'pending' once).
+accepted by Twilio.
+
+Crash/replay dedup (VT-611 fix round) — the ``owner_notification_status`` gate above is NOT the
+only dedup. The Twilio send and the delivered-flip are two separate writes; if the process dies
+after Twilio accepts but before the flip commits, a DBOS step-replay re-enters this function with
+the column STILL 'pending' and would otherwise re-send the same message to a real owner. A
+deterministic ``uuid5(task_id, outcome)`` key, checked against the same ``send_idempotency_keys``
+ledger the rest of the send stack uses (house convention — ``send_whatsapp_message.py``'s
+``_check_idempotency``/``_write_ledger``), closes the window: a replay finds its own prior 'sent'
+row, skips the re-send, and just completes the flip the earlier attempt never finished.
+
+Fail-soft is now enforced end-to-end, not just around the send: BOTH post-send status flips
+(delivered on success, failed on a definitive send error) are individually wrapped — a DB error on
+either write is caught, logged, and alerted, but never propagates out of this function. The settle
+this function reports on has already committed; nothing here may unwind it.
 """
 
 from __future__ import annotations
 
 import logging
 from typing import Any
-from uuid import UUID
+from uuid import NAMESPACE_DNS, UUID, uuid5
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +71,56 @@ _LEDGER_LABEL = "task_outcome_report"
 
 # 24h-window-closed Twilio error (mirrors owner_surface.freeform_acks._WINDOW_CLOSED_CODE).
 _WINDOW_CLOSED_CODE = 63016
+
+# VT-611 fix round — crash/replay dedup key namespace. See module docstring for the full story.
+_NAMESPACE = uuid5(NAMESPACE_DNS, "task-outcome.viabe.ai")
+
+
+def _outcome_idempotency_key(task_id: UUID | str, outcome: str) -> str:
+    return str(uuid5(_NAMESPACE, f"task_outcome:{task_id}:{outcome}"))
+
+
+def _check_send_idempotency_hit(tenant_id: UUID | str, idempotency_key: str) -> bool:
+    """True if this exact (task, outcome) already has a recorded 'sent' row within 24h — the
+    crash/replay dedup check, run BEFORE the Twilio call. Fail-soft: a check failure (DB hiccup)
+    returns False (no known hit) so the caller proceeds to attempt the send rather than silently
+    deferring forever — the worst case is a rare double-send on two consecutive faults, not a lost
+    notification."""
+    from orchestrator.db import tenant_connection
+
+    try:
+        with tenant_connection(tenant_id) as conn:
+            row = conn.execute(
+                "SELECT id FROM send_idempotency_keys WHERE tenant_id = %s AND idempotency_key = %s "
+                "AND created_at > now() - interval '24 hours' LIMIT 1",
+                (str(tenant_id), idempotency_key),
+            ).fetchone()
+        return row is not None
+    except Exception:
+        logger.exception(
+            "VT-611 task-outcome: idempotency check failed (fail-soft, proceeding with send) "
+            "tenant=%s", tenant_id,
+        )
+        return False
+
+
+def _write_send_idempotency_record(
+    tenant_id: UUID | str, idempotency_key: str, message_sid: str
+) -> None:
+    """Record the send under its deterministic key — ``ON CONFLICT DO NOTHING`` (safe to call
+    twice; mirrors ``send_whatsapp_message.py::_write_ledger``). Runs AFTER the Twilio call
+    succeeds, BEFORE the delivered-flip, so a crash between the two leaves this row for the next
+    replay to find."""
+    from orchestrator.db import tenant_connection
+
+    with tenant_connection(tenant_id) as conn:
+        conn.execute(
+            "INSERT INTO send_idempotency_keys (tenant_id, idempotency_key, message_sid, "
+            "send_status) VALUES (%s, %s, %s, 'sent') ON CONFLICT (tenant_id, idempotency_key) "
+            "DO NOTHING",
+            (str(tenant_id), idempotency_key, message_sid),
+        )
+
 
 # The three terminal_outcome values the loop's own settle steps write 'pending' for today
 # (workflow.py's _settle_verified_task / _settle_declined_approval). 'failed'/'escalated' land the
@@ -153,16 +217,18 @@ def maybe_notify_owner_of_task_outcome(
 ) -> bool:
     """Send the owner the terminal-outcome notification for ``task_id``, if one is due.
 
-    IDEMPOTENT: only sends when ``manager_tasks.owner_notification_status == 'pending'`` — that
-    check IS the dedup, no separate message-id scheme needed (a re-run against an already-
-    'delivered'/'failed' row is a clean no-op). Flips 'pending' -> 'delivered' on a successful
-    dispatch, -> 'failed' on a definitive send error; leaves 'pending' UNCHANGED (deferred) when the
-    24h window is closed (see module docstring) or the owner has no resolvable phone — both cases
-    log a warning, neither raises. FAIL-SOFT throughout: this function never raises, because it runs
-    immediately after the settle it is reporting on and must never unwind it (mirrors
+    IDEMPOTENT, two layers deep: (1) only sends when ``manager_tasks.owner_notification_status ==
+    'pending'`` (a re-run against an already-'delivered'/'failed' row is a clean no-op); (2) even
+    when 'pending', a deterministic ``send_idempotency_keys`` check (VT-611 fix round) catches the
+    crash/replay window BETWEEN the send and the flip — see module docstring. Flips 'pending' ->
+    'delivered' on a successful dispatch, -> 'failed' on a definitive send error; leaves 'pending'
+    UNCHANGED (deferred) when the 24h window is closed (see module docstring) or the owner has no
+    resolvable phone — both cases log a warning, neither raises. FAIL-SOFT throughout, including
+    both status-flip writes themselves: this function never raises, because it runs immediately
+    after the settle it is reporting on and must never unwind it (mirrors
     ``maybe_report_campaign_outcome``'s own binding fail-soft contract).
 
-    Returns True only when a message was actually dispatched to Twilio.
+    Returns True only when a message was actually dispatched to Twilio THIS call.
     """
     from orchestrator.manager import task_store
 
@@ -185,6 +251,29 @@ def maybe_notify_owner_of_task_outcome(
             outcome, tenant_id, task_id,
         )
         return False
+
+    idempotency_key = _outcome_idempotency_key(task_id, outcome)
+    if _check_send_idempotency_hit(tenant_id, idempotency_key):
+        # Crash/replay dedup: a prior attempt's Twilio send already succeeded and recorded this
+        # key, but crashed/failed before the delivered-flip committed — a DBOS replay lands here
+        # again with the column still 'pending'. Skip the re-send; just complete the flip the
+        # earlier attempt never finished.
+        logger.info(
+            "VT-611 task-outcome: idempotent_hit (crash/replay) tenant=%s task=%s outcome=%s — "
+            "skipping re-send, completing the delivered-flip",
+            tenant_id, task_id, outcome,
+        )
+        try:
+            task_store.set_owner_notification_status(
+                tenant_id, task_id, "delivered", expected_from=("pending",)
+            )
+        except Exception:  # noqa: BLE001 — fail-soft: never unwind the settle over a flip error
+            logger.exception(
+                "VT-611 task-outcome: delivered-flip failed on idempotent-hit replay (fail-soft) "
+                "tenant=%s task=%s", tenant_id, task_id,
+            )
+            _alert_notify_send_failure(tenant_id, task_id)
+        return False  # no NEW dispatch this call — the send already happened in the crashed attempt
 
     recipient = recipient_phone or _resolve_owner_phone(tenant_id)
     if not recipient:
@@ -219,17 +308,44 @@ def maybe_notify_owner_of_task_outcome(
         logger.exception(
             "VT-611 task-outcome: send failed tenant=%s task=%s code=%s", tenant_id, task_id, code,
         )
-        task_store.set_owner_notification_status(
-            tenant_id, task_id, "failed", expected_from=("pending",)
-        )
+        try:
+            task_store.set_owner_notification_status(
+                tenant_id, task_id, "failed", expected_from=("pending",)
+            )
+        except Exception:  # noqa: BLE001 — fail-soft: never unwind the settle over a flip error
+            logger.exception(
+                "VT-611 task-outcome: failed-flip failed (fail-soft) tenant=%s task=%s",
+                tenant_id, task_id,
+            )
         _alert_notify_send_failure(tenant_id, task_id)
         return False
 
+    # Record the send under its idempotency key BEFORE the flip (not after) — this is what a
+    # crash-replay checks; writing it first means a crash between here and the flip still leaves
+    # the next replay a row to find (best-effort: a failure here only risks a rare duplicate send
+    # on a FUTURE crash, never owner-facing harm now — must not block the flip below).
+    try:
+        _write_send_idempotency_record(tenant_id, idempotency_key, message_sid)
+    except Exception:  # noqa: BLE001 — fail-soft, see above
+        logger.exception(
+            "VT-611 task-outcome: idempotency-ledger insert failed (fail-soft) tenant=%s task=%s",
+            tenant_id, task_id,
+        )
+
     # Synchronous flip: the manager_task's OWN view of "has the owner been told" (mig 165 comment
     # — distinct from the VT-524 ledger's own accepted->delivered/failed async lifecycle below).
-    task_store.set_owner_notification_status(
-        tenant_id, task_id, "delivered", expected_from=("pending",)
-    )
+    # This write happens AFTER an irreversible send — a DB error here must be caught + alerted,
+    # never propagate out of this fail-soft step (the settle it reports on already committed).
+    try:
+        task_store.set_owner_notification_status(
+            tenant_id, task_id, "delivered", expected_from=("pending",)
+        )
+    except Exception:  # noqa: BLE001 — fail-soft: never unwind the settle over a flip error
+        logger.exception(
+            "VT-611 task-outcome: delivered-flip failed (fail-soft) tenant=%s task=%s",
+            tenant_id, task_id,
+        )
+        _alert_notify_send_failure(tenant_id, task_id)
 
     from orchestrator.owner_surface.owner_notification import record_owner_notification
 
