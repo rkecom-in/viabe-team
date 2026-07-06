@@ -264,3 +264,51 @@ def test_shadow_mode_shadow_eval_failure_never_propagates(monkeypatch):
     # Reaching here (no raised RuntimeError) IS the proof — the real turn's own result is intact.
     assert result.final_status == "completed"
     assert result.terminal_path == "collapse"
+
+
+def test_is_shadow_itself_raising_never_propagates(monkeypatch):
+    """The team-lead's hardening ask: the mode CHECK is inside the fail-soft try too — not just
+    ``evaluate_turn_shadow``. Monkeypatch ``is_shadow`` itself to raise (default/legacy env, no
+    TEAM_MANAGER_LOOP_MODE needed — the check runs on EVERY turn regardless of mode) and confirm
+    dispatch_brain still returns its normal DispatchResult, structurally, not by argument."""
+    import orchestrator.agent.dispatch as dispatch_mod
+    import orchestrator.edge_cases_router as edge_mod
+    import orchestrator.graph as graph_mod
+    import orchestrator.manager.loop_mode as loop_mode_mod
+    from orchestrator.agent.dispatch import dispatch_brain
+    from orchestrator.state import new_subscriber_state
+    from orchestrator.types import WebhookEvent
+
+    monkeypatch.delenv("TEAM_MANAGER_LOOP_MODE", raising=False)
+
+    def _boom():
+        raise RuntimeError("loop_mode blew up")
+
+    tenant_id, run_id = uuid4(), uuid4()
+    state, _plan = _collapse_state()
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-vt611-wiring-fake")
+    monkeypatch.setattr(edge_mod, "route_edge_case", lambda **kwargs: None)
+    monkeypatch.setattr(
+        dispatch_mod, "observability_context", lambda **kwargs: contextlib.nullcontext()
+    )
+    monkeypatch.setattr(graph_mod, "get_checkpointer", lambda: None)
+    monkeypatch.setattr(dispatch_mod, "_resolve_model", lambda *a, **k: object())
+    monkeypatch.setattr(dispatch_mod, "_maybe_send_collapse_reply", lambda *a, **k: None)
+    monkeypatch.setattr(dispatch_mod, "_maybe_send_manager_reply", lambda *a, **k: None)
+    monkeypatch.setattr(loop_mode_mod, "is_shadow", _boom)
+
+    class _FakeGraph:
+        def invoke(self, *args, **kwargs):
+            return state
+
+    monkeypatch.setattr(dispatch_mod, "build_supervisor_graph", lambda **kwargs: _FakeGraph())
+    event = WebhookEvent(
+        body="hi", sender_phone="+10000000000",
+        message_type="inbound_message", twilio_message_sid="SMvt611modefailsoft",
+    )
+    result = dispatch_brain(
+        event=event, state=new_subscriber_state(tenant_id, run_id), run_id=run_id, tenant_id=tenant_id
+    )
+    # Reaching here (no raised RuntimeError) IS the proof.
+    assert result.final_status == "completed"
+    assert result.terminal_path == "collapse"
