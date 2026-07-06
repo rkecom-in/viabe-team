@@ -170,7 +170,10 @@ def run_canary() -> int:  # noqa: PLR0915 — a linear canary walk, splitting hu
         finally:
             shopify_mod.ShopifyConnector = real_shopify_cls  # type: ignore[misc]
 
-        with observability_context(run_id=uuid4(), tenant_id=tenant_shopify):
+        # VT-608 fix round MAJOR 1 — commit_ingestion arms the proposal with THIS turn's
+        # ObservabilityContext.run_id; the executor call below must pass the SAME identity.
+        shopify_turn_id = uuid4()
+        with observability_context(run_id=shopify_turn_id, tenant_id=tenant_shopify):
             proposal = commit_ingestion.func(  # type: ignore[attr-defined]
                 tenant_id=tenant_shopify, connector_id="shopify"
             )
@@ -182,11 +185,13 @@ def run_canary() -> int:  # noqa: PLR0915 — a linear canary walk, splitting hu
         real_pull_and_ingest = shopify_onboarding_mod.pull_and_ingest_shopify
 
         def _fake_pull_and_ingest(tenant_id: Any, **kwargs: Any) -> dict[str, int]:
-            return {"orders_pulled": 2, "mapped": 2, "committed": 2, "sales_written": 2}
+            return {"orders_pulled": 2, "mapped": 2, "committed": 2, "sales_written": 2, "new_customers": 2}
 
         shopify_onboarding_mod.pull_and_ingest_shopify = _fake_pull_and_ingest  # type: ignore[assignment]
         try:
-            exec_result = execute_pending_ingestion_commit(tenant_shopify)
+            exec_result = execute_pending_ingestion_commit(
+                tenant_shopify, current_turn_id=str(shopify_turn_id)
+            )
         finally:
             shopify_onboarding_mod.pull_and_ingest_shopify = real_pull_and_ingest  # type: ignore[assignment]
 
@@ -251,7 +256,10 @@ def run_canary() -> int:  # noqa: PLR0915 — a linear canary walk, splitting hu
         finally:
             GoogleSheetConnector.pull_sample = real_pull_sample  # type: ignore[method-assign]
 
-        with observability_context(run_id=uuid4(), tenant_id=tenant_sheets):
+        # VT-608 fix round MAJOR 1 — same-turn arming: capture this turn's identity for the
+        # executor call below.
+        sheets_turn_id = uuid4()
+        with observability_context(run_id=sheets_turn_id, tenant_id=tenant_sheets):
             confirm_out = confirm_mapping.func(  # type: ignore[attr-defined]
                 tenant_id=tenant_sheets, connector_id="google_sheet",
                 mapping={"Mobile": "phone", "Name": "customer_name"},
@@ -272,7 +280,9 @@ def run_canary() -> int:  # noqa: PLR0915 — a linear canary walk, splitting hu
 
         GoogleSheetConnector.pull_full = _fake_pull_full  # type: ignore[method-assign]
         try:
-            sheets_exec_result = execute_pending_ingestion_commit(tenant_sheets)
+            sheets_exec_result = execute_pending_ingestion_commit(
+                tenant_sheets, current_turn_id=str(sheets_turn_id)
+            )
         finally:
             GoogleSheetConnector.pull_full = real_pull_full  # type: ignore[method-assign]
 
@@ -373,7 +383,9 @@ def run_canary() -> int:  # noqa: PLR0915 — a linear canary walk, splitting hu
         )
 
         # === A8 — re-entry safety ================================================================
-        reentry_result = execute_pending_ingestion_commit(tenant_shopify)
+        reentry_result = execute_pending_ingestion_commit(
+            tenant_shopify, current_turn_id=str(shopify_turn_id)
+        )
         pass_8 = reentry_result is None
         assertion(
             8, "Re-entry after success is a safe no-op (never double-ingests)",
