@@ -64,6 +64,10 @@ class AutonomyState:
     frozen: bool
     l3_granted_at: Any = None
     l3_grant_approval_id: str | None = None
+    # VT-610 — the FORCED provenance pair, independent of the earned pair above (both nullable; a
+    # forced-only tenant shows l3_force_granted_at set + l3_granted_at NULL).
+    l3_force_granted_at: Any = None
+    l3_force_granted_by_vtr: str | None = None
     last_regression_kind: str | None = None
     # VT-384: the owner-disengagement counter (mig-129) — surfaced so callers can read it back
     # through get_autonomy (the silent-notice acceptance leg) without a second raw query.
@@ -76,8 +80,9 @@ def _row_to_state(tenant_id: UUID, agent: str, row: Any) -> AutonomyState:
     g = dict(row) if isinstance(row, dict) else None
     if g is None:
         cols = ("level", "clean_approval_streak", "lifetime_approvals", "lifetime_rejections",
-                "frozen", "l3_granted_at", "l3_grant_approval_id", "last_regression_kind",
-                "consecutive_silent_l3_notices")
+                "frozen", "l3_granted_at", "l3_grant_approval_id",
+                "l3_force_granted_at", "l3_force_granted_by_vtr",
+                "last_regression_kind", "consecutive_silent_l3_notices")
         g = dict(zip(cols, row, strict=False))
     return AutonomyState(
         tenant_id=tenant_id, agent=agent, level=g["level"],
@@ -87,6 +92,8 @@ def _row_to_state(tenant_id: UUID, agent: str, row: Any) -> AutonomyState:
         frozen=bool(g["frozen"]),
         l3_granted_at=g.get("l3_granted_at"),
         l3_grant_approval_id=str(g["l3_grant_approval_id"]) if g.get("l3_grant_approval_id") else None,
+        l3_force_granted_at=g.get("l3_force_granted_at"),
+        l3_force_granted_by_vtr=g.get("l3_force_granted_by_vtr"),
         last_regression_kind=g.get("last_regression_kind"),
         consecutive_silent_l3_notices=int(g.get("consecutive_silent_l3_notices") or 0),
     )
@@ -94,7 +101,8 @@ def _row_to_state(tenant_id: UUID, agent: str, row: Any) -> AutonomyState:
 
 _SELECT = (
     "SELECT level, clean_approval_streak, lifetime_approvals, lifetime_rejections, frozen, "
-    "l3_granted_at, l3_grant_approval_id, last_regression_kind, consecutive_silent_l3_notices "
+    "l3_granted_at, l3_grant_approval_id, l3_force_granted_at, l3_force_granted_by_vtr, "
+    "last_regression_kind, consecutive_silent_l3_notices "
     "FROM tenant_agent_autonomy WHERE tenant_id = %s AND agent = %s"
 )
 
@@ -267,6 +275,66 @@ def grant_l3(
             conn=conn,
         )
         _emit(tid, "agent_autonomy_granted", {"agent": agent, "approval_id": str(approval_id)})
+    return get_autonomy(tenant_id, agent, conn=conn)
+
+
+def force_l3(
+    tenant_id: UUID | str, agent: str, *, vtr_id: str, reason: str, conn: Any
+) -> AutonomyState:
+    """VT-610 — the VTR force_l3 override. Grants L3 LEVEL ONLY, bypassing ONLY the two things
+    ``grant_l3`` normally requires: the earning threshold (``clean_approval_streak``) and owner
+    opt-in (there is no ``approval_id`` here — ``vtr_id`` + a scrubbed ``reason`` are the
+    provenance instead, mirroring ``vtr_autonomy_override``'s existing shape for freeze/revoke).
+
+    Mirrors ``grant_l3``'s in-txn UPDATE...WHERE...RETURNING shape, but the WHERE clause DROPS the
+    streak check (the bypass) and keeps ``frozen = false`` (NOT bypassed — a VTR must unfreeze
+    first; forcing trust onto a live-frozen agent is a confused operator action this refuses, same
+    as a stale ``grant_l3`` no-ops). Idempotent regardless of CURRENT level (a SET, not an
+    earn-transition): forcing an already-L3 agent (earned or forced) just re-stamps the forced
+    provenance — never an error, never a double-audit-of-nothing.
+
+    NO batch cancellation (unlike demote/freeze/revoke_l3) — force_l3 only ever WIDENS trust, so
+    there is nothing in-flight that needs killing; a batch already awaiting the owner's approval
+    stays exactly as it was.
+
+    Grants NOTHING beyond the ``level`` column: policy (business_policy.assert_within_policy),
+    per-recipient consent/opt-out/complaint/caps (customer_send.agent_send_draft's gate stack),
+    Gate-0 activation (onboarding_gate.is_agent_eligible), the always-confirm floor
+    (is_always_confirm, above — re-derived per batch, never reads ``level`` at all), and the
+    business-impact gates (business_impact_choke + the SEPARATE ``tenant_business_autonomy``
+    table this function never touches) are all unconditional and untouched. A FUTURE regression
+    freezes/revokes a forced-L3 agent through the EXACT SAME ``record_regression_event`` path as
+    an earned one — force grants level, never immunity to a regression.
+
+    ``emit_tm_audit`` runs on the caller's ``conn`` (fail-closed emit-or-rollback, mirroring every
+    sibling here): an audit-insert failure raises and rolls back the level change with it — a
+    force can never land without its audit trail."""
+    from orchestrator.observability.tm_audit import emit_tm_audit
+    tid = str(tenant_id)
+    _ensure_row(conn, tid, agent)
+    row = conn.execute(
+        "UPDATE tenant_agent_autonomy SET level = 'L3', l3_force_granted_at = now(), "
+        "l3_force_granted_by_vtr = %s, updated_at = now() "
+        "WHERE tenant_id = %s AND agent = %s AND frozen = false RETURNING level",
+        (vtr_id, tid, agent),
+    ).fetchone()
+    if row is None:
+        logger.warning(
+            "force_l3: refused (frozen) tenant=%s agent=%s vtr=%s", tid, agent, vtr_id
+        )
+    else:
+        emit_tm_audit(
+            event_layer="does",
+            event_kind="autonomy_change",
+            actor="team_manager",
+            tenant_id=tenant_id,
+            run_id=None,
+            action={"agent": agent, "vtr_id": vtr_id, "reason": reason, "new_level": "L3",
+                    "forced": True},
+            summary=f"autonomy FORCE-granted L3 by VTR: agent={agent}",
+            conn=conn,
+        )
+        _emit(tid, "agent_autonomy_force_granted", {"agent": agent, "vtr_id": vtr_id})
     return get_autonomy(tenant_id, agent, conn=conn)
 
 
@@ -499,13 +567,15 @@ def set_frozen(tenant_id: UUID | str, agent: str, frozen: bool, *, reason: str, 
 
 def vtr_autonomy_override(
     tenant_id: UUID | str, agent: str,
-    action: Literal["freeze", "unfreeze", "demote", "revoke_l3"],
+    action: Literal["freeze", "unfreeze", "demote", "revoke_l3", "force_l3"],
     *, reason: str, vtr_id: str, conn: Any,
 ) -> AutonomyState:
     """The Gap-6 seam: a VTR corrects/halts an agent. Thin provenance wrapper over the primitives
     (every action carries the vtr id in the reason; Gap-6 wires the VTR surface onto this).
     ``unfreeze`` (VT-370) dispatches to ``set_frozen(False)`` — without it the freeze button is
-    one-way and recovery is psql; unfreezing cancels nothing (work re-enters via the next sweep)."""
+    one-way and recovery is psql; unfreezing cancels nothing (work re-enters via the next sweep).
+    ``force_l3`` (VT-610) dispatches to ``force_l3`` — the ONLY action here that WIDENS trust
+    rather than tightening/halting it; see that function's docstring for the bypass boundary."""
     tagged = f"vtr:{vtr_id}:{reason}"
     if action == "freeze":
         return set_frozen(tenant_id, agent, True, reason=tagged, conn=conn)
@@ -513,6 +583,10 @@ def vtr_autonomy_override(
         return set_frozen(tenant_id, agent, False, reason=tagged, conn=conn)
     if action == "revoke_l3":
         return revoke_l3(tenant_id, agent, reason=tagged, conn=conn)
+    if action == "force_l3":
+        # force_l3 wants vtr_id and reason SEPARATELY (vtr_id is a durable column value, not a
+        # tagged-into-reason string like the tighten/halt actions above use for revoke_reason).
+        return force_l3(tenant_id, agent, vtr_id=vtr_id, reason=reason, conn=conn)
     # demote: revoke without freezing (back to L2, batches cancelled, owner can re-earn)
     return revoke_l3(tenant_id, agent, reason=f"demote:{tagged}", conn=conn)
 
