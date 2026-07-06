@@ -4,17 +4,21 @@
   "critical": true,
   "setup_args": ["--owner-inputs", "false"],
   "expected_fail": false,
-  "notes": "Rails check: a DECLINE reply to the consent ask must NOT grant consent (classify_consent_intent reads 'no thanks, not right now' as decline, not affirm, so _consent_affirm_after_ask returns False) — the owner must be honestly re-gated, never silently engaged on a guess. The deterministic 'ACTIVATE TEAM' floor must still work afterwards (one decline doesn't burn the exact-keyword path). Steps 1-3 hit direct handlers whose confirmation sends are not conversation_log-logged (transport quirk); step 4 is the load-bearing assertion. Run: `setup --owner-inputs false --name convo-harness-<id>` then `script <tenant> sr_consent_decline_then_explicit.json`.",
+  "notes": "Rails check: a DECLINE reply to the consent ask must NOT grant consent (classify_consent_intent reads 'no thanks, not right now' as decline, not affirm, so _consent_affirm_after_ask returns False) — the owner must be honestly re-gated, never silently engaged on a guess. The deterministic 'ACTIVATE TEAM' floor must still work afterwards (one decline doesn't burn the exact-keyword path). Steps 1-3 hit direct handlers; step 4 is the load-bearing assertion. VT-611 Package Sc #7 update: consent_required_handler.py now threads tenant_id/surface='system' (prior VT-583 work, confirmed during the H0 investigation) so its re-prompt sends ARE conversation_log-logged after all — the 'not logged' framing below predates that fix; step 2's assert_not_contains is the consent-BLOCK negative proof this update adds: the re-prompt must carry ZERO planning-engagement signature, proving the decline never silently got treated as an affirm. Run: `setup --owner-inputs false --name convo-harness-<id>` then `script <tenant> sr_consent_decline_then_explicit.json`.",
   "steps": [
     {
       "message": "I want help planning a weekend sale for my shop",
       "assert_no_silent": false,
-      "note": "Un-consented substantive message -> consent_required_handler sends the enable-prompt. Not conversation_log-logged; run_status='completed' is the check."
+      "note": "Un-consented substantive message -> consent_required_handler sends the enable-prompt. run_status='completed' is the primary check."
     },
     {
       "message": "no thanks, not right now",
       "assert_no_silent": false,
-      "note": "A decline, not an affirm — classify_consent_intent must NOT grant consent here. The gate should re-ask (consent_required_handler again) rather than silently proceed. Not conversation_log-logged for this send either; step 4 is the proof the gate held."
+      "assert_not_contains": [
+        "here's a plan", "here is a plan", "weekend sale plan", "your sale plan",
+        "i'll draft", "i've drafted", "let's start planning", "planning your weekend sale"
+      ],
+      "note": "A decline, not an affirm — classify_consent_intent must NOT grant consent here. The gate should re-ask (consent_required_handler again) rather than silently proceed. VT-611 Package Sc #7 consent-BLOCK negative assert: the re-prompt (now conversation_log-logged, surface='system') must carry ZERO planning-engagement signature -- if the decline had somehow been read as an affirm, the brain would engage with the original weekend-sale ask right here instead of one turn later at step 4."
     },
     {
       "message": "ACTIVATE TEAM",

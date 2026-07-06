@@ -388,6 +388,37 @@ def test_evaluate_db_asserts_merges_failures_from_every_present_key(monkeypatch)
     assert failures == ["route bad", "effects bad"]
 
 
+def test_evaluate_db_asserts_tenant_wide_flag_is_never_forwarded_to_the_assert_function(monkeypatch):
+    """tenant_wide is a scoping directive for _evaluate_db_asserts itself (the multi-turn
+    draft-then-approve case — see _campaign_id_for_run's docstring) — it must be POPPED, never
+    passed through as a kwarg the assert_* function doesn't understand."""
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(ch, "_connect", lambda dsn: MagicMock())
+    monkeypatch.setattr(
+        ch, "assert_side_effects",
+        lambda conn, tid, rid, **kw: (captured.update(rid=rid, kw=kw), [])[1],
+    )
+    step = {
+        "message": "hi",
+        "assert_side_effects": {"tenant_wide": True, "expect_sent_count": 2},
+    }
+    failures = ch._evaluate_db_asserts("dsn", "tenant-x", "run-N+1", step)
+    assert failures == []
+    assert captured["rid"] is None  # resolved to tenant-wide
+    assert captured["kw"] == {"expect_sent_count": 2}  # tenant_wide never leaked into the call
+
+
+def test_evaluate_db_asserts_without_tenant_wide_still_scopes_to_the_turn(monkeypatch):
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(ch, "_connect", lambda dsn: MagicMock())
+    monkeypatch.setattr(
+        ch, "assert_route", lambda conn, tid, rid, **kw: (captured.update(rid=rid), [])[1],
+    )
+    step = {"message": "hi", "assert_route": {"expect_sr_delegation": True}}
+    ch._evaluate_db_asserts("dsn", "tenant-x", "run-1", step)
+    assert captured["rid"] == "run-1"
+
+
 # --- VT-598: assert_not_d1 (pass / fail / hi-variant) ------------------------------------------
 
 

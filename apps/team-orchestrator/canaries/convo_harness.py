@@ -434,31 +434,50 @@ def _set_operator_claim(conn: Any) -> None:
 # here (fixing it touches the send path, a risk row).
 
 
-def _campaign_id_for_run(conn: Any, tenant_id: str, run_id: str) -> str | None:
-    """The ``campaigns.id`` this turn's run_id produced, or None. Scenarios are single-campaign per
-    run in practice; ORDER BY + LIMIT 1 is defensive, not a claim of multiplicity. Presence/absence
-    (never a COUNT) so a stub/fake connection that returns zero rows for an unmatched query behaves
-    exactly like a real "no match" — ``fetchone()`` is None either way."""
-    row = conn.execute(
-        "SELECT id FROM campaigns WHERE tenant_id = %s AND run_id = %s "
-        "ORDER BY created_at DESC LIMIT 1",
-        (tenant_id, run_id),
-    ).fetchone()
+def _campaign_id_for_run(conn: Any, tenant_id: str, run_id: str | None) -> str | None:
+    """The ``campaigns.id`` this turn's run_id produced, or None.
+
+    ``run_id=None`` means TENANT-WIDE — the tenant's MOST RECENT campaign, any run. This is for a
+    multi-turn flow (draft on turn N, "haan bhej do" approval on turn N+1): ``campaigns.run_id`` is
+    set ONCE at INSERT (turn N's run_id, the ORIGINAL dispatch) and is NEVER updated, so a
+    DB-state assert on the LATER approval turn — which has its OWN, DIFFERENT run_id (a fresh
+    inbound message gets its own ``pipeline_runs`` row even when it resumes an earlier suspended
+    graph) — would never find the campaign if scoped to that later turn's run_id. Pass
+    ``tenant_wide: true`` in the scenario JSON's assert dict to select this (see
+    ``_evaluate_db_asserts``). Scenarios are single-campaign per tenant in practice; ORDER BY +
+    LIMIT 1 is defensive, not a claim of multiplicity. Presence/absence (never a COUNT) so a
+    stub/fake connection that returns zero rows for an unmatched query behaves exactly like a real
+    "no match" — ``fetchone()`` is None either way."""
+    if run_id is None:
+        row = conn.execute(
+            "SELECT id FROM campaigns WHERE tenant_id = %s ORDER BY created_at DESC LIMIT 1",
+            (tenant_id,),
+        ).fetchone()
+    else:
+        row = conn.execute(
+            "SELECT id FROM campaigns WHERE tenant_id = %s AND run_id = %s "
+            "ORDER BY created_at DESC LIMIT 1",
+            (tenant_id, run_id),
+        ).fetchone()
     if row is None:
         return None
     return str(row[0] if not isinstance(row, dict) else row["id"])
 
 
-def _observed_route(conn: Any, tenant_id: str, run_id: str) -> str:
+def _observed_route(conn: Any, tenant_id: str, run_id: str | None) -> str:
     """The DB-observed ROUTE for one turn: ``"sales_recovery"`` if a ``campaigns`` row was created
-    for this SPECIFIC run_id, else ``"none"``. See the module-level Package H1 note above for why
-    campaigns-row existence is (today) a clean proxy for "delegated to Sales-Recovery"."""
+    for this SPECIFIC run_id (or tenant-wide when ``run_id=None`` — see ``_campaign_id_for_run``),
+    else ``"none"``. See the module-level Package H1 note above for why campaigns-row existence is
+    (today) a clean proxy for "delegated to Sales-Recovery"."""
     return "sales_recovery" if _campaign_id_for_run(conn, tenant_id, run_id) is not None else "none"
 
 
-def assert_route(conn: Any, tenant_id: str, run_id: str, *, expect_sr_delegation: bool) -> list[str]:
+def assert_route(
+    conn: Any, tenant_id: str, run_id: str | None, *, expect_sr_delegation: bool
+) -> list[str]:
     """DB-state proof of ROUTING (Package H1, facet d) — did THIS turn delegate to Sales-Recovery?
-    See the module-level Package H1 note for the campaigns-row-existence proxy + its fragility."""
+    ``run_id=None`` checks tenant-wide instead (see ``_campaign_id_for_run``). See the module-level
+    Package H1 note for the campaigns-row-existence proxy + its fragility."""
     route = _observed_route(conn, tenant_id, run_id)
     delegated = route == "sales_recovery"
     if delegated != expect_sr_delegation:
@@ -473,24 +492,30 @@ def assert_route(conn: Any, tenant_id: str, run_id: str, *, expect_sr_delegation
 def assert_side_effects(
     conn: Any,
     tenant_id: str,
-    run_id: str,
+    run_id: str | None,
     *,
     expect_campaign: bool | None = None,
     expect_approval_decision: str | None = None,
     expect_sent_count: int | None = None,
+    expect_sent_count_at_least: int | None = None,
 ) -> list[str]:
     """DB-state proof of side effects (Package H1, facet f) for THIS turn's run_id — the reply text
     is never trusted; every check here reads the tables the real send path actually writes. Every
-    kwarg is optional; only the ones passed are checked.
+    kwarg is optional; only the ones passed are checked. ``run_id=None`` checks tenant-wide instead
+    (see ``_campaign_id_for_run`` — the multi-turn draft-then-approve case).
 
     ``expect_campaign``: True/False — a ``campaigns`` row exists for this run_id.
     ``expect_approval_decision``: the ``pending_approvals.decision`` for the campaign this run
         produced — one of 'approved'/'rejected'/'needs_changes'/'timeout', or the sentinel
         ``"pending"`` meaning "a row exists but decision is still NULL".
-    ``expect_sent_count``: exact count of ``campaign_messages`` rows with ``send_status='sent'``
+    ``expect_sent_count``: EXACT count of ``campaign_messages`` rows with ``send_status='sent'``
         for the campaign this run produced (0 proves "no send happened yet" — the direct DB proof
         for a hold-off scenario; correlated via the idempotency_key campaign_id prefix — see the
         module-level Package H1 note on the missing campaign_messages.campaign_id column).
+    ``expect_sent_count_at_least``: a floor instead of an exact match — for an approved-send
+        scenario where the seeded cohort may not ALL clear the activation gate's own percentile
+        floors (see ``delegation_winback_plan.json``'s notes on this same non-determinism), ">0
+        actually sent" is the honest, robust claim, not a brittle exact count.
     """
     failures: list[str] = []
     campaign_id = _campaign_id_for_run(conn, tenant_id, run_id)
@@ -525,7 +550,7 @@ def assert_side_effects(
                     f"{expect_approval_decision!r}, found {decision!r}"
                 )
 
-    if expect_sent_count is not None:
+    if expect_sent_count is not None or expect_sent_count_at_least is not None:
         n = 0
         if campaign_id is not None:
             row = conn.execute(
@@ -534,30 +559,42 @@ def assert_side_effects(
                 (tenant_id, f"{campaign_id}:%"),
             ).fetchone()
             n = int(row[0] if not isinstance(row, dict) else row["count"])
-        if n != expect_sent_count:
+        if expect_sent_count is not None and n != expect_sent_count:
             failures.append(
                 f"assert_side_effects: expected {expect_sent_count} sent campaign_messages, "
                 f"found {n}"
             )
+        if expect_sent_count_at_least is not None and n < expect_sent_count_at_least:
+            failures.append(
+                f"assert_side_effects: expected >= {expect_sent_count_at_least} sent "
+                f"campaign_messages, found {n}"
+            )
     return failures
 
 
-def assert_grounded_count(conn: Any, tenant_id: str, run_id: str, *, expected_count: int) -> list[str]:
+def assert_grounded_count(
+    conn: Any, tenant_id: str, run_id: str | None, *, expected_count: int
+) -> list[str]:
     """DB-state proof of a GROUNDED count (Package H1, facet b/honesty) — reads the cohort_size the
     manager's OWN campaign plan actually persisted (``campaigns.plan_json -> target_cohort ->
-    cohort_size``) for THIS run, and compares it to ``expected_count`` (the harness's OWN seeded N —
-    thread the scenario's ``--seed-lapsed-customers`` value here; never trust the reply text for
-    the expectation). Catches a manager that FABRICATES a different cohort count than what was
-    actually planned. No campaigns row for this run -> its own failure (nothing to check)."""
+    cohort_size``) for THIS run (or tenant-wide when ``run_id=None`` — see ``_campaign_id_for_run``),
+    and compares it to ``expected_count`` (the harness's OWN seeded N — thread the scenario's
+    ``--seed-lapsed-customers`` value here; never trust the reply text for the expectation).
+    Catches a manager that FABRICATES a different cohort count than what was actually planned. No
+    matching campaigns row -> its own failure (nothing to check)."""
+    campaign_id = _campaign_id_for_run(conn, tenant_id, run_id)
+    if campaign_id is None:
+        return [
+            f"assert_grounded_count: no campaigns row found — nothing to check against "
+            f"expected_count={expected_count}"
+        ]
     row = conn.execute(
-        "SELECT plan_json FROM campaigns WHERE tenant_id = %s AND run_id = %s "
-        "ORDER BY created_at DESC LIMIT 1",
-        (tenant_id, run_id),
+        "SELECT plan_json FROM campaigns WHERE tenant_id = %s AND id = %s", (tenant_id, campaign_id)
     ).fetchone()
     if row is None:
         return [
-            f"assert_grounded_count: no campaigns row for this turn — nothing to check against "
-            f"expected_count={expected_count}"
+            f"assert_grounded_count: campaign {campaign_id} vanished between lookup and read — "
+            f"nothing to check against expected_count={expected_count}"
         ]
     plan_json = row[0] if not isinstance(row, dict) else row["plan_json"]
     cohort_size = (plan_json or {}).get("target_cohort", {}).get("cohort_size")
@@ -1176,11 +1213,23 @@ def cmd_send(args: argparse.Namespace) -> int:
     return 0 if result.ok else 1
 
 
+def _resolve_assert_scope(turn_run_id: str, kwargs: dict[str, Any]) -> str | None:
+    """Pop the ``tenant_wide`` key (never passed through to the assert_* function itself) — when
+    True, the DB-state assert scopes tenant-wide instead of to THIS turn's run_id. For a multi-turn
+    flow (draft on turn N, "haan bhej do" approval on turn N+1): the campaign's own ``run_id`` is
+    set ONCE at INSERT (turn N's), so a check on turn N+1 must look tenant-wide to find it — see
+    ``_campaign_id_for_run``'s docstring."""
+    if kwargs.pop("tenant_wide", False):
+        return None
+    return turn_run_id
+
+
 def _evaluate_db_asserts(dsn: str, tenant_id: str, run_id: str | None, step: dict[str, Any]) -> list[str]:
     """VT-611 Package H1 — run the step's DB-state asserts (as opposed to ``evaluate_assertions``'s
     reply-text-only checks). A step opts in per-key: ``assert_route`` / ``assert_side_effects`` /
-    ``assert_grounded_count``, each a dict of kwargs for the matching function above. Absent keys
-    run nothing (zero DB round-trips when a step doesn't use any of these). ``run_id=None`` (no real
+    ``assert_grounded_count``, each a dict of kwargs for the matching function above (plus the
+    optional ``tenant_wide: true`` scope flag — see ``_resolve_assert_scope``). Absent keys run
+    nothing (zero DB round-trips when a step doesn't use any of these). ``run_id=None`` (no real
     turn was driven) reports each requested assert as its own failure rather than silently skipping
     — a scenario that asks for a DB-state proof must get one, never a silent no-op."""
     route_kwargs = step.get("assert_route")
@@ -1195,11 +1244,14 @@ def _evaluate_db_asserts(dsn: str, tenant_id: str, run_id: str | None, step: dic
     failures: list[str] = []
     with _connect(dsn) as conn:
         if route_kwargs is not None:
-            failures += assert_route(conn, tenant_id, run_id, **route_kwargs)
+            kw = dict(route_kwargs)
+            failures += assert_route(conn, tenant_id, _resolve_assert_scope(run_id, kw), **kw)
         if effects_kwargs is not None:
-            failures += assert_side_effects(conn, tenant_id, run_id, **effects_kwargs)
+            kw = dict(effects_kwargs)
+            failures += assert_side_effects(conn, tenant_id, _resolve_assert_scope(run_id, kw), **kw)
         if grounded_kwargs is not None:
-            failures += assert_grounded_count(conn, tenant_id, run_id, **grounded_kwargs)
+            kw = dict(grounded_kwargs)
+            failures += assert_grounded_count(conn, tenant_id, _resolve_assert_scope(run_id, kw), **kw)
     return failures
 
 

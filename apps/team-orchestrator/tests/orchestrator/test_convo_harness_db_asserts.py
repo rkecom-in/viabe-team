@@ -174,6 +174,44 @@ def test_assert_route_passes_when_expected_delegation_happened(dsn):
         assert ch.assert_route(conn, tenant, run_id, expect_sr_delegation=True) == []
 
 
+# --- tenant-wide scoping (run_id=None) — the multi-turn draft-then-approve case --------------------
+
+
+def test_campaign_id_for_run_none_scope_finds_the_tenants_most_recent_campaign(dsn):
+    """The exact gap this closes: the APPROVAL turn (turn N+1) has its OWN fresh run_id (a new
+    inbound message gets its own pipeline_runs row even when it resumes an earlier suspended
+    graph) — campaigns.run_id stays turn N's forever. Scoping by tenant (run_id=None) is how a
+    later turn's assert finds turn N's campaign."""
+    tenant = _new_tenant(dsn)
+    draft_turn_run_id = _new_run(dsn, tenant)
+    campaign_id = _new_campaign(dsn, tenant, draft_turn_run_id)
+    approval_turn_run_id = _new_run(dsn, tenant)  # a DIFFERENT run_id for the later reply
+
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        # scoped to the APPROVAL turn's own run_id -> nothing (campaigns.run_id is the draft turn's).
+        assert ch._campaign_id_for_run(conn, tenant, approval_turn_run_id) is None
+        # tenant-wide -> finds it.
+        assert ch._campaign_id_for_run(conn, tenant, None) == campaign_id
+
+
+def test_assert_side_effects_tenant_wide_checks_the_approved_send_from_an_earlier_turn(dsn):
+    tenant = _new_tenant(dsn)
+    draft_run = _new_run(dsn, tenant)
+    campaign_id = _new_campaign(dsn, tenant, draft_run, cohort_size=2)
+    _new_pending_approval(dsn, tenant, draft_run, campaign_id, decision="approved")
+    _new_campaign_message(dsn, tenant, campaign_id, str(uuid4()), send_status="sent")
+    _new_campaign_message(dsn, tenant, campaign_id, str(uuid4()), send_status="sent")
+    approval_run = _new_run(dsn, tenant)  # the LATER turn that triggered the send
+
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        # scoped to the approval turn's OWN run_id -> can't see the draft-turn campaign at all.
+        assert ch.assert_side_effects(conn, tenant, approval_run, expect_campaign=True) != []
+        # tenant-wide -> the real check the scenario actually wants.
+        assert ch.assert_side_effects(
+            conn, tenant, None, expect_approval_decision="approved", expect_sent_count=2,
+        ) == []
+
+
 # --- assert_grounded_count ------------------------------------------------------------------------
 
 
@@ -276,6 +314,21 @@ def test_assert_side_effects_expect_sent_count_matches_after_approved_send(dsn):
     with psycopg.connect(dsn, autocommit=True) as conn:
         assert ch.assert_side_effects(conn, tenant, run_id, expect_sent_count=2) == []
         assert ch.assert_side_effects(conn, tenant, run_id, expect_sent_count=0) != []
+
+
+def test_assert_side_effects_expect_sent_count_at_least_is_a_floor_not_an_exact_match(dsn):
+    """The activation gate's own percentile floors may not clear the FULL seeded cohort (see
+    delegation_winback_plan.json's notes on this same non-determinism) — ">0 actually sent" is the
+    honest, robust claim for an approved-send scenario, not a brittle exact count."""
+    tenant = _new_tenant(dsn)
+    run_id = _new_run(dsn, tenant)
+    campaign_id = _new_campaign(dsn, tenant, run_id, cohort_size=4)
+    _new_campaign_message(dsn, tenant, campaign_id, str(uuid4()), send_status="sent")
+
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        assert ch.assert_side_effects(conn, tenant, run_id, expect_sent_count_at_least=1) == []
+        failures = ch.assert_side_effects(conn, tenant, run_id, expect_sent_count_at_least=2)
+    assert failures and ">= 2" in failures[0]
 
 
 # --- assert_no_unapproved_effect (the safety-net default) -----------------------------------------
