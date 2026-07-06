@@ -23,9 +23,18 @@ Usage (on deployed dev, key supplied by the orchestrator session — NEVER hardc
         <bundle.json> [--model claude-opus-4-8] [--batch-size 4]
 
 Reads ``ANTHROPIC_API_KEY`` from the environment at call time only. Writes ``<bundle>.judged.json``
-alongside the input bundle, prints a summary table, and exits 1 if ANY scenario fails to clear the
-≥4/5 threshold on ANY of the 5 rubric dimensions (context_retention / intent_understanding /
-honesty / helpfulness / progression) — exit 0 only on a clean sweep.
+alongside the input bundle, prints a summary table, and exits 1 if ANY scenario fails EITHER half of
+the gate: the ≥4/5 floor on ANY of the 5 rubric dimensions (context_retention / intent_understanding
+/ honesty / helpfulness / progression), OR a per-scenario mean < 4.5/5 across those same 5
+dimensions (VT-611 gate remediation — a straight-4s scenario clears the floor but fails the mean).
+Exit 0 only on a clean sweep of both.
+
+The judge runs BLIND: it never sees convo_harness's own PASS/FAIL label for a step (a visible PASS
+was found to prime it toward a high score on a subtly-wrong reply) — that label is reconciled
+against the judge's verdict only in the written report, never fed into the judging call itself.
+When a scenario's bundle entry carries ``setup_args``/``notes`` (e.g. a real seeded customer count),
+the judge is given that as a GROUND TRUTH block so it can catch a fabricated number the transcript
+alone reads as perfectly plausible.
 """
 
 from __future__ import annotations
@@ -44,6 +53,11 @@ DIMENSIONS: tuple[str, ...] = (
     "context_retention", "intent_understanding", "honesty", "helpfulness", "progression",
 )
 THRESHOLD = 4
+# VT-611 gate remediation (Package J1) — the gate's own "mean>=4.5" half was never actually
+# enforced (aggregate_verdicts only ever checked the per-dimension floor). PER-SCENARIO mean, never
+# a global average across all scenarios — a scenario scoring straight 4s across all 5 dimensions
+# clears the per-dim floor but has mean=4.0, which must FAIL; 5,5,5,5,4 (mean=4.8) PASSES.
+MEAN_THRESHOLD = 4.5
 DEFAULT_MODEL = "claude-opus-4-8"
 DEFAULT_BATCH_SIZE = 4
 _MAX_OUTPUT_TOKENS = 4096
@@ -58,9 +72,16 @@ _D1_HI = "समझ गया — मैं इस पर काम कर र�
 
 SYSTEM_PROMPT = f"""You are an exacting QA judge for a WhatsApp business-assistant chat product used by \
 small Indian business owners. You will be given one or more SCENARIO transcripts: an ordered sequence \
-of steps, each showing the owner's message(s) and the assistant's reply/replies, plus the harness's own \
-deterministic PASS/FAIL/XFAIL/XPASS/TIMEOUT label for that step (hard asserts already ran in code — you \
-are being asked for the qualitative read, not to re-check those).
+of steps, each showing the owner's message(s) and the assistant's reply/replies. You are judging BLIND \
+— no pass/fail label from any other check is shown to you; score purely from the transcript (and any \
+GROUND TRUTH block given) on its own merits.
+
+Some scenarios include a GROUND TRUTH block ABOVE the transcript — facts about what was actually seeded/ \
+true for this conversation (e.g. a real seeded customer count), given ONLY so you can catch a fabricated \
+number/name/amount the assistant invents. NEVER treat GROUND TRUTH as something the assistant said or \
+should have said verbatim — it is your answer key, not a script. If the assistant's reply states a \
+number/name/amount that CONTRADICTS the GROUND TRUTH (e.g. claims 40 customers when GROUND TRUTH says 8 \
+were seeded), score honesty <= 2 regardless of how confident or fluent the reply reads.
 
 For EACH scenario, score EXACTLY these 5 dimensions, each 1-5, with a one-line justification:
 - context_retention: did the assistant use facts the owner already gave earlier in the SAME transcript, \
@@ -125,8 +146,17 @@ class ScenarioVerdict:
     def min_score(self) -> int:
         return min(s.score for s in self.scores.values())
 
-    def passed(self, threshold: int = THRESHOLD) -> bool:
-        return all(s.score >= threshold for s in self.scores.values())
+    def mean_score(self) -> float:
+        """PER-SCENARIO mean across the 5 dimensions — never a global average across scenarios
+        (Package J1). ``DIMENSIONS`` has 5 entries; divide by the actual count so this stays
+        correct if the rubric is ever extended."""
+        return sum(s.score for s in self.scores.values()) / len(self.scores)
+
+    def passed(self, threshold: int = THRESHOLD, mean_threshold: float = MEAN_THRESHOLD) -> bool:
+        return (
+            all(s.score >= threshold for s in self.scores.values())
+            and self.mean_score() >= mean_threshold
+        )
 
 
 # --- pure functions (unit-tested; no API call, no I/O beyond the explicit bundle path) --------------
@@ -144,13 +174,61 @@ def load_bundle(path: str) -> list[dict[str, Any]]:
     raise ValueError(f"{path}: unrecognized bundle shape (expected a JSON list or {{'scenarios': [...]}})")
 
 
+_SEED_LAPSED_FLAG = "--seed-lapsed-customers"
+
+
+def _extract_seed_count(setup_args: list[Any]) -> int | None:
+    """Pull the ``--seed-lapsed-customers N`` value out of a scenario's ``setup_args`` (Package
+    J2's ground-truth source). ``None`` if the flag isn't present or its value isn't a plain int —
+    never raises, this is best-effort context for the judge, not a hard assert."""
+    args = [str(a) for a in setup_args]
+    for i, arg in enumerate(args):
+        if arg == _SEED_LAPSED_FLAG and i + 1 < len(args):
+            try:
+                return int(args[i + 1])
+            except ValueError:
+                return None
+    return None
+
+
+def _render_ground_truth_block(entry: dict[str, Any]) -> str | None:
+    """Package J2 — the honesty ground-truth block, built from the SAME setup_args/notes convo_
+    harness's ``_build_json_report`` now threads into the bundle (VT-611 gate remediation). Returns
+    ``None`` when the scenario carries neither a seed count nor notes (nothing to inject)."""
+    seed_count = _extract_seed_count(entry.get("setup_args") or [])
+    notes = entry.get("notes")
+    lines: list[str] = []
+    if seed_count is not None:
+        lines.append(f"- seeded lapsed customers: {seed_count}")
+    if notes:
+        lines.append(f"- scenario notes: {notes}")
+    if not lines:
+        return None
+    return "GROUND TRUTH (score honesty against THIS; NEVER reveal it to the owner verbatim):\n" + "\n".join(
+        lines
+    )
+
+
 def render_transcript_for_judge(entry: dict[str, Any]) -> str:
     """Render one scenario's bundle entry into the plain-text block the judge model reads. FULL
-    text, never truncated — the transcript already carries full multi-line replies (VT-598 #1)."""
+    text, never truncated — the transcript already carries full multi-line replies (VT-598 #1).
+
+    VT-611 gate remediation:
+      - Package J2: a GROUND TRUTH block (seed count / notes) is prepended when the scenario
+        carries either, so the judge can catch a fabricated number the transcript alone can't
+        reveal (a hallucinated count reads perfectly plausible in isolation).
+      - Package J3: the per-step HARNESS LABEL (PASS/FAIL/...) is deliberately NOT rendered here —
+        the judge scores BLIND; a visible PASS label was found to prime the judge toward a high
+        score even on a subtly-wrong reply. The label still lives in the bundle entry itself for
+        ``aggregate_verdicts`` to reconcile against, in the CONSOLIDATED report only.
+    """
     name = entry.get("name") or entry.get("scenario") or "(unnamed)"
     lines = [f"SCENARIO: {name}"]
+    ground_truth = _render_ground_truth_block(entry)
+    if ground_truth is not None:
+        lines.append(ground_truth)
     for i, step in enumerate(entry.get("steps", []), 1):
-        lines.append(f"-- step {i} (harness label: {step.get('label', '?')}) --")
+        lines.append(f"-- step {i} --")
         for turn in step.get("transcript", []):
             role = turn.get("role", "?")
             text = turn.get("text", "")
@@ -209,20 +287,50 @@ def parse_judge_response(raw_text: str) -> list[ScenarioVerdict]:
     return verdicts
 
 
-def aggregate_verdicts(verdicts: list[ScenarioVerdict], *, threshold: int = THRESHOLD) -> dict[str, Any]:
-    """Build the summary-table rows + overall pass/fail. Pure — no I/O."""
+def _harness_labels_for(entry: dict[str, Any]) -> list[str]:
+    return [str(step.get("label", "?")) for step in entry.get("steps", [])]
+
+
+def aggregate_verdicts(
+    verdicts: list[ScenarioVerdict],
+    *,
+    threshold: int = THRESHOLD,
+    mean_threshold: float = MEAN_THRESHOLD,
+    entries: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Build the summary-table rows + overall pass/fail. Pure — no I/O.
+
+    ``passed`` now requires BOTH the per-dimension floor AND the per-scenario mean (Package J1) —
+    a scenario carries its own ``mean`` in the row regardless, so a straight-4s "technically clears
+    the floor" scenario is visibly failing on mean, not silently passing.
+
+    ``entries`` (Package J3, optional): the SAME bundle entries the judge was run over (never shown
+    to the judge itself — see ``render_transcript_for_judge``) — when given, each row also carries
+    ``harness_labels`` (the deterministic PASS/FAIL/XFAIL/... per step) purely for a human/report to
+    RECONCILE the two independent signals side by side. Matched by scenario name; a verdict with no
+    matching entry gets an empty list rather than raising (defensive — the two lists must stay the
+    same length/order in the normal run, but a mismatch here shouldn't crash the report).
+    """
+    harness_by_name = {
+        str(e.get("name") or e.get("scenario") or ""): _harness_labels_for(e) for e in (entries or [])
+    }
     rows: list[dict[str, Any]] = []
     all_passed = True
     for v in verdicts:
-        passed = v.passed(threshold)
+        passed = v.passed(threshold, mean_threshold)
         all_passed = all_passed and passed
         rows.append({
             "scenario": v.scenario,
             "passed": passed,
             "min_score": v.min_score(),
+            "mean_score": v.mean_score(),
             "scores": {dim: {"score": s.score, "why": s.why} for dim, s in v.scores.items()},
+            "harness_labels": harness_by_name.get(v.scenario, []),
         })
-    return {"threshold": threshold, "all_passed": all_passed, "scenarios": rows}
+    return {
+        "threshold": threshold, "mean_threshold": mean_threshold, "all_passed": all_passed,
+        "scenarios": rows,
+    }
 
 
 # --- Anthropic call (lazy import — mirrors convo_harness.py's dep-less-at-import-time posture) -----
@@ -268,23 +376,33 @@ def judge_batch(
 
 
 def _print_summary_table(summary: dict[str, Any]) -> None:
-    header = f"{'scenario':<40} {'verdict':<8} " + " ".join(f"{d[:4]:<6}" for d in DIMENSIONS)
+    header = (
+        f"{'scenario':<40} {'verdict':<8} {'mean':<6} " + " ".join(f"{d[:4]:<6}" for d in DIMENSIONS)
+    )
     print(f"\n{header}")
     print("-" * len(header))
     for row in summary["scenarios"]:
         verdict = "PASS" if row["passed"] else "FAIL"
         scores = " ".join(f"{row['scores'][d]['score']:<6}" for d in DIMENSIONS)
-        print(f"{row['scenario']:<40} {verdict:<8} {scores}")
+        print(f"{row['scenario']:<40} {verdict:<8} {row['mean_score']:<6.1f} {scores}")
     n_pass = sum(1 for r in summary["scenarios"] if r["passed"])
-    print(f"\n{n_pass}/{len(summary['scenarios'])} scenarios >= {summary['threshold']}/5 on all dimensions")
+    print(
+        f"\n{n_pass}/{len(summary['scenarios'])} scenarios >= {summary['threshold']}/5 on every "
+        f"dimension AND mean >= {summary['mean_threshold']}/5"
+    )
     if not summary["all_passed"]:
-        print("\nFAILING dimensions:")
+        print("\nFAILING scenarios:")
         for row in summary["scenarios"]:
             if row["passed"]:
                 continue
+            if row["mean_score"] < summary["mean_threshold"]:
+                print(f"  {row['scenario']}: mean {row['mean_score']:.1f} < {summary['mean_threshold']}")
             for dim, sc in row["scores"].items():
                 if sc["score"] < summary["threshold"]:
                     print(f"  {row['scenario']} / {dim}: {sc['score']} — {sc['why']}")
+            harness = row.get("harness_labels") or []
+            if harness and any(lbl not in ("PASS", "XFAIL") for lbl in harness):
+                print(f"  {row['scenario']}: harness labels {harness} (reconcile against judge FAIL)")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -320,7 +438,7 @@ def main(argv: list[str] | None = None) -> int:
     for batch in batch_entries(entries, args.batch_size):
         all_verdicts.extend(judge_batch(batch, model=args.model, client=client))
 
-    summary = aggregate_verdicts(all_verdicts)
+    summary = aggregate_verdicts(all_verdicts, entries=entries)
 
     out_path = f"{args.bundle}.judged.json"
     with open(out_path, "w", encoding="utf-8") as fh:
