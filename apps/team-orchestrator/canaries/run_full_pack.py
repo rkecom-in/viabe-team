@@ -76,6 +76,24 @@ def check_domain_floors(pairs: list[tuple[Path, dict[str, Any]]]) -> list[str]:
     return failures
 
 
+def build_pack_summary(
+    pairs: list[tuple[Path, dict[str, Any]]], per_scenario: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """JSON-serializable pack-level summary — persists what ``main()`` previously only PRINTED
+    (domain counts/floor gaps + each scenario's clean/finding verdict). The evidence manifest can't
+    quote stdout, so this is what it cites for domain floors + the harness-clean count."""
+    domain_counts: dict[str, int] = {}
+    for _path, scenario in pairs:
+        domain = str(scenario.get("domain", "?"))
+        domain_counts[domain] = domain_counts.get(domain, 0) + 1
+    return {
+        "domain_counts": domain_counts,
+        "domain_floors": DOMAIN_FLOORS,
+        "domain_floor_failures": check_domain_floors(pairs),
+        "scenarios": per_scenario,
+    }
+
+
 def check_harness_clean(results: list[ch.StepResult]) -> list[str]:
     """Every step in this (single) run must be PASS or XFAIL — mirrors
     ``run_critical_x3.check_all_3_clean``'s per-run logic, named for the single-run context this
@@ -157,6 +175,11 @@ def main(argv: list[str] | None = None) -> int:
         help="skip teardown (debug — inspect the synthetic tenants after the run)",
     )
     p.add_argument("--json-report", default=None, help="bundle path for transcript_judge.py")
+    p.add_argument(
+        "--summary-json", default=None,
+        help="write domain counts/floor gaps + each scenario's clean/finding verdict — for the "
+             "VT-611 evidence manifest, which can't quote this tool's stdout",
+    )
     args = p.parse_args(argv)
 
     scenarios_dir = Path(args.scenarios_dir)
@@ -173,6 +196,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  DOMAIN FLOOR: {f}")
 
     findings: list[str] = []
+    per_scenario: list[dict[str, Any]] = []
     for path, scenario in pairs:
         name = str(scenario.get("name", path.stem))
         print(f"\n--- {name} ---")
@@ -186,6 +210,10 @@ def main(argv: list[str] | None = None) -> int:
             print(f"    FINDING — {'; '.join(bad)}")
         else:
             print("    clean (every step PASS or XFAIL)")
+        per_scenario.append({
+            "name": name, "domain": scenario.get("domain"), "tenant_id": tenant_id,
+            "clean": not bad, "block_reasons": bad,
+        })
         if args.json_report:
             _write_json_report(args.json_report, str(path), scenario, tenant_id, results)
 
@@ -199,6 +227,12 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  - {f}")
     if args.json_report:
         print(f"    json-report: {args.json_report} — feed into transcript_judge.py next")
+    if args.summary_json:
+        summary = build_pack_summary(pairs, per_scenario)
+        with open(args.summary_json, "w", encoding="utf-8") as fh:
+            json.dump(summary, fh, indent=2, ensure_ascii=False)
+            fh.write("\n")
+        print(f"    summary-json: wrote {args.summary_json} — for the evidence manifest")
 
     return 0 if not findings and not floor_failures else 1
 
