@@ -479,3 +479,145 @@ def test_D_send_checkpoint_frozen_is_checkpoint(substrate) -> None:  # type: ign
             money_bearing=False, conn=conn,
         )
     assert d.checkpoint and d.reason == REASON_FROZEN
+
+
+# ===========================================================================
+# E — VT-609 fix round: the PROPOSE/RESOLVE arm-and-grant shape (CRITICAL — Pillar-7). The
+# onboarding-conductor's ``propose_business_policy`` tool must NEVER call ``grant_business_policy``
+# directly; only ``resolve_business_policy_grant``, reading the bounds off the durable approval
+# row, may. DB-backed end-to-end (RLS-real) — mirrors the D-layer's own real-gate proof shape.
+# ===========================================================================
+
+
+@requires_db
+def test_E_propose_arms_a_durable_row_and_does_not_grant(substrate) -> None:  # type: ignore[no-untyped-def]
+    """E — ``propose_business_policy_grant`` ARMS a durable ``pending_approvals`` row carrying the
+    proposed bounds and does NOT touch ``tenant_business_policy`` at all — the deny-all default
+    stands until an explicit resolve."""
+    tenant = _new_tenant(substrate.dsn)
+    with tenant_connection(tenant) as conn:
+        result = bp.propose_business_policy_grant(
+            tenant,
+            allowed_action_types=["customer_send"],
+            allowed_segments=["lapsed"],
+            frequency_caps={"customer_send_per_month": 2},
+            spend_ceiling_minor=50_000,
+            conn=conn,
+        )
+        assert result["status"] == "pending_owner_approval"
+        assert result["allowed_action_types"] == ["customer_send"]
+        # Deny-all still stands — proposing is not granting.
+        policy = bp.get_business_policy(tenant, conn=conn)
+        assert policy.allowed_action_types == frozenset()
+
+        row = conn.execute(
+            "SELECT approval_type, status, decision FROM pending_approvals "
+            "WHERE id = %s", (result["approval_id"],),
+        ).fetchone()
+        assert row is not None
+        assert row["approval_type"] == bp.APPROVAL_TYPE_POLICY_GRANT
+        assert row["status"] == "pending"
+        assert row["decision"] is None
+
+
+@requires_db
+def test_E_resolve_approved_grants_exactly_the_proposed_bounds_with_provenance(substrate) -> None:  # type: ignore[no-untyped-def]
+    """E — THE Pillar-7 provenance proof: resolving ``approved=True`` grants EXACTLY the bounds
+    that were proposed (never a fresh value), and ``granted_by`` is the approval-row id — the audit
+    trail the direct-grant design had none of."""
+    tenant = _new_tenant(substrate.dsn)
+    with tenant_connection(tenant) as conn:
+        proposed = bp.propose_business_policy_grant(
+            tenant,
+            allowed_action_types=["customer_send", "spend"],
+            allowed_segments=["lapsed"],
+            frequency_caps={"customer_send_per_month": 2},
+            spend_ceiling_minor=50_000,
+            conn=conn,
+        )
+        approval_id = proposed["approval_id"]
+        result = bp.resolve_business_policy_grant(tenant, approved=True, conn=conn)
+
+        assert result["status"] == "granted"
+        assert result["allowed_action_types"] == ["customer_send", "spend"]
+        assert result["spend_ceiling_minor"] == 50_000
+
+        policy = bp.get_business_policy(tenant, conn=conn)
+        assert policy.allowed_action_types == frozenset({"customer_send", "spend"})
+        assert bp.assert_within_policy(
+            tenant, bp.PolicyActionClass.SPEND, {"magnitude_minor": 50_000}, conn=conn
+        ).in_policy
+
+        row = conn.execute(
+            "SELECT granted_by FROM tenant_business_policy WHERE tenant_id = %s", (str(tenant),),
+        ).fetchone()
+        assert row is not None
+        assert str(row["granted_by"]) == str(approval_id)
+
+        # The approval row itself is now resolved.
+        arow = conn.execute(
+            "SELECT status, decision, resolved_at FROM pending_approvals WHERE id = %s",
+            (approval_id,),
+        ).fetchone()
+        assert arow is not None
+        assert arow["status"] == "approved"
+        assert arow["decision"] == "approved"
+        assert arow["resolved_at"] is not None
+
+
+@requires_db
+def test_E_resolve_rejected_does_not_grant(substrate) -> None:  # type: ignore[no-untyped-def]
+    """E — a rejected resolution leaves the deny-all default in force + marks the row rejected."""
+    tenant = _new_tenant(substrate.dsn)
+    with tenant_connection(tenant) as conn:
+        bp.propose_business_policy_grant(
+            tenant,
+            allowed_action_types=["customer_send"],
+            allowed_segments=["lapsed"],
+            frequency_caps={},
+            spend_ceiling_minor=0,
+            conn=conn,
+        )
+        result = bp.resolve_business_policy_grant(tenant, approved=False, conn=conn)
+        assert result["status"] == "rejected"
+
+        policy = bp.get_business_policy(tenant, conn=conn)
+        assert policy.allowed_action_types == frozenset()
+
+
+@requires_db
+def test_E_resolve_with_nothing_open_is_a_clean_noop(substrate) -> None:  # type: ignore[no-untyped-def]
+    """E — idempotency: a resolve with no open proposal (never proposed, or already resolved, or
+    swept as timed-out) is a clean no-op — never a raise, never a phantom grant."""
+    tenant = _new_tenant(substrate.dsn)
+    with tenant_connection(tenant) as conn:
+        result = bp.resolve_business_policy_grant(tenant, approved=True, conn=conn)
+        assert result == {"status": "no_pending_proposal"}
+
+
+@requires_db
+def test_E_propose_refuses_when_another_approval_is_already_open(substrate) -> None:  # type: ignore[no-untyped-def]
+    """E — the structural one-open-approval-per-tenant rule (migration 128) binds the policy
+    proposal too: a second propose while the first is still unresolved is refused, never a second
+    live row."""
+    tenant = _new_tenant(substrate.dsn)
+    with tenant_connection(tenant) as conn:
+        first = bp.propose_business_policy_grant(
+            tenant,
+            allowed_action_types=["customer_send"],
+            allowed_segments=["lapsed"],
+            frequency_caps={},
+            spend_ceiling_minor=0,
+            conn=conn,
+        )
+        assert first["status"] == "pending_owner_approval"
+
+        second = bp.propose_business_policy_grant(
+            tenant,
+            allowed_action_types=["spend"],
+            allowed_segments=["all"],
+            frequency_caps={},
+            spend_ceiling_minor=100,
+            conn=conn,
+        )
+        assert second == {"status": "refused", "reason": "approval_queue_busy"}

@@ -111,10 +111,13 @@ ADVISORY_EXPECTED = {
 # VT-462 / VT-609 — the onboarding-conductor specialist's tool surface (parity allowlist pin with
 # the orchestrator + integration surfaces). VT-609: the conductor now legitimately holds
 # onboarding-state/policy WRITE tools (record_answer / record_skip / apply_correction /
-# confirm_business_policy) — that is the point of the real-specialist conversion, not a boundary
-# breach. None of them touch a customer send, the owner's accounts-book Sheet, or the customer
-# ledger (the ONLY capabilities this guard forbids); "complete"/"activated" stay the DETERMINISTIC
-# checks (profile_completion_check / activation_check) the conductor can never self-assert.
+# propose_business_policy / resolve_business_policy_proposal) — that is the point of the
+# real-specialist conversion, not a boundary breach. None of them touch a customer send, the
+# owner's accounts-book Sheet, or the customer ledger (the ONLY capabilities this guard forbids);
+# "complete"/"activated" stay the DETERMINISTIC checks (profile_completion_check /
+# activation_check) the conductor can never self-assert. The policy GRANT itself is a SEPARATE
+# Pillar-7 propose/resolve split (VT-609 fix round) — the model can only propose; a durable
+# owner-approval row (never a model-supplied value at resolution time) is what actually grants.
 ONBOARDING_CONDUCTOR_EXPECTED = {
     "read_onboarding_state",
     "extract_owner_answer",
@@ -124,9 +127,14 @@ ONBOARDING_CONDUCTOR_EXPECTED = {
     "next_required_question",
     "profile_completion_check",
     "activation_check",
-    "confirm_business_policy",
+    "propose_business_policy",
+    "resolve_business_policy_proposal",
     "conductor_escalate_to_fazal",
 }
+
+# VT-609 fix round (MAJOR — mode-gating): legacy/shadow get EXACTLY the pre-PR read-only toolset
+# (no write tool, no policy tool) — a legacy fall-through dispatch must never reach them.
+LEGACY_ONBOARDING_CONDUCTOR_EXPECTED = {"next_required_question", "profile_completion_check"}
 
 
 def test_orchestrator_tool_allowlist_pinned():
@@ -201,6 +209,14 @@ def test_onboarding_conductor_tool_allowlist_pinned():
     assert _names(ONBOARDING_CONDUCTOR_TOOLS) == ONBOARDING_CONDUCTOR_EXPECTED
 
 
+def test_onboarding_conductor_legacy_tool_allowlist_pinned():
+    """VT-609 fix round (MAJOR — mode-gating): legacy/shadow's toolset is pinned separately —
+    exactly the pre-PR read-only pair, no write/policy tool reachable outside enforce mode."""
+    from orchestrator.agent.onboarding_conductor import LEGACY_ONBOARDING_CONDUCTOR_TOOLS
+
+    assert _names(LEGACY_ONBOARDING_CONDUCTOR_TOOLS) == LEGACY_ONBOARDING_CONDUCTOR_EXPECTED
+
+
 def test_dangerous_standalone_functions_are_not_agent_tools():
     """The 1:1 send tools + the ledger writer must NOT appear on any agent surface."""
     from orchestrator.agent.integration_agent import INTEGRATION_AGENT_TOOLS
@@ -230,9 +246,13 @@ def test_guard_passes_real_surfaces():
     assert_agent_tools_safe(INTEGRATION_AGENT_TOOLS, surface="integration_agent")
 
     # VT-462 — the onboarding-conductor surface is also safe (no send/write tool).
-    from orchestrator.agent.onboarding_conductor import ONBOARDING_CONDUCTOR_TOOLS
+    from orchestrator.agent.onboarding_conductor import (
+        LEGACY_ONBOARDING_CONDUCTOR_TOOLS,
+        ONBOARDING_CONDUCTOR_TOOLS,
+    )
 
     assert_agent_tools_safe(ONBOARDING_CONDUCTOR_TOOLS, surface="onboarding_conductor")
+    assert_agent_tools_safe(LEGACY_ONBOARDING_CONDUCTOR_TOOLS, surface="onboarding_conductor")
 
 
 @pytest.mark.parametrize(

@@ -80,10 +80,10 @@ def test_supervisor_graph_gains_conductor_node_and_route() -> None:
 
 def test_conductor_holds_no_forbidden_capability_tool() -> None:
     """VT-609 — the conductor now legitimately holds WRITE tools (record_answer / record_skip /
-    apply_correction / confirm_business_policy): that is the point of the conversion, not a
-    guardrail regression. The invariant that still binds is the NARROWER one VT-268 actually
-    enforces — no customer-send / accounts-book-write / ledger-write tool — which none of the
-    onboarding-state/policy write tools below are."""
+    apply_correction / propose_business_policy / resolve_business_policy_proposal): that is the
+    point of the conversion, not a guardrail regression. The invariant that still binds is the
+    NARROWER one VT-268 actually enforces — no customer-send / accounts-book-write / ledger-write
+    tool — which none of the onboarding-state/policy write tools below are."""
     from orchestrator.agent.onboarding_conductor import ONBOARDING_CONDUCTOR_TOOLS
     from orchestrator.agent.tool_guardrail import find_forbidden_tools
 
@@ -98,8 +98,48 @@ def test_conductor_holds_no_forbidden_capability_tool() -> None:
         "next_required_question",
         "profile_completion_check",
         "activation_check",
-        "confirm_business_policy",
+        "propose_business_policy",
+        "resolve_business_policy_proposal",
         "conductor_escalate_to_fazal",
+    }
+
+
+def test_legacy_toolset_is_the_pre_pr_two_read_tools_only() -> None:
+    """VT-609 fix round (MAJOR — mode-gating): legacy/shadow get EXACTLY the pre-PR read-only
+    toolset — no write tool, no policy tool — so a legacy fall-through dispatch (the journey gate
+    returned None; the Manager still spawned this node) can never perform a real onboarding write
+    or policy grant outside the byte-identical legacy contract."""
+    from orchestrator.agent.onboarding_conductor import LEGACY_ONBOARDING_CONDUCTOR_TOOLS
+    from orchestrator.agent.tool_guardrail import find_forbidden_tools
+
+    assert find_forbidden_tools(LEGACY_ONBOARDING_CONDUCTOR_TOOLS) == []
+    names = {t.name for t in LEGACY_ONBOARDING_CONDUCTOR_TOOLS}
+    assert names == {"next_required_question", "profile_completion_check"}
+
+
+def test_build_conductor_selects_toolset_by_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``tools_mode`` actually selects which tool list reaches ``create_agent`` — legacy gets
+    exactly the pre-PR read-only set, enforce (the default) gets the full surface."""
+    from typing import Any as _Any
+
+    import orchestrator.agent.onboarding_conductor as conductor_mod
+
+    captured: dict[str, _Any] = {}
+
+    def _fake_create_agent(**kwargs: _Any) -> str:
+        captured["tools"] = kwargs["tools"]
+        return "graph"
+
+    monkeypatch.setattr(conductor_mod, "create_agent", _fake_create_agent)
+
+    conductor_mod.build_onboarding_conductor_agent(conductor_mod._MODEL, tools_mode="legacy")
+    assert {t.name for t in captured["tools"]} == {
+        t.name for t in conductor_mod.LEGACY_ONBOARDING_CONDUCTOR_TOOLS
+    }
+
+    conductor_mod.build_onboarding_conductor_agent(conductor_mod._MODEL, tools_mode="enforce")
+    assert {t.name for t in captured["tools"]} == {
+        t.name for t in conductor_mod.ONBOARDING_CONDUCTOR_TOOLS
     }
 
 

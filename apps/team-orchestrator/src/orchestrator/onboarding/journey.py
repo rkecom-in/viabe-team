@@ -556,6 +556,26 @@ def _is_bare_rejection_value(value: str) -> bool:
     return bool(toks) and (toks <= _NO or toks <= _GREETING or toks <= _YES)
 
 
+def _is_reserved_field(field: str) -> bool:
+    """VT-609 fix round (MINOR) — reject a bookkeeping-sentinel-SHAPED field name before it ever
+    reaches a write. ``__``-prefixed names are RESERVED (the populate-first / paced-flow sentinels,
+    e.g. ``__populated__`` / ``__flow__``) — a caller passing one (e.g.
+    ``confirm_field_answer(tenant, "__populated__", "x")``) would corrupt journey bookkeeping AND
+    crash a LATER ``populate_profile_from_draft`` call (its own merge assumes ``__populated__``'s
+    stored value is a per-field dict; overwriting it with a plain string raises there).
+
+    Deliberately does NOT also gate on "is this a field the registry currently recognizes" — gap
+    fields are LLM-reasoned per business type (``question_brain.compose_onboarding_questions``),
+    so there is no static global gap-field enum to check against, and the product design
+    explicitly requires accepting a VOLUNTEERED/out-of-order field the registry hasn't presented as
+    a question yet (a live candidate-set check would also make this write path's availability
+    depend on the gap-composer's own LLM call succeeding — an Anthropic hiccup would then reject
+    every gap-fill write, a materially worse outage than the sentinel-corruption bug this guards
+    against). The ``__`` prefix is the only namespace this module reserves for itself; everything
+    else is the owner's business-context vocabulary."""
+    return not field or field.startswith("__")
+
+
 def _maybe_complete_from_specialist(tenant_id: UUID | str) -> bool:
     """VT-609 — the DETERMINISTIC completion transition, run as a side effect of EVERY specialist
     write (record_extracted_answer / record_field_skip / confirm_field_answer). Mirrors the old
@@ -621,6 +641,8 @@ def record_extracted_answer(tenant_id: UUID | str, field: str, value: str) -> di
     g = get_journey(tenant_id)
     if g is None or g.get("status") != "active":
         return {"recorded": False}
+    if _is_reserved_field(field):
+        return {"recorded": False}
     answers = dict(g.get("answers") or {})
     answers[field] = value
     _write_answers_skipped(tenant_id, answers, list(g.get("skipped") or []))
@@ -639,6 +661,8 @@ def record_field_skip(tenant_id: UUID | str, field: str) -> dict[str, Any]:
         return {"recorded": False}
     g = get_journey(tenant_id)
     if g is None or g.get("status") != "active":
+        return {"recorded": False}
+    if _is_reserved_field(field):
         return {"recorded": False}
     skipped = list(g.get("skipped") or [])
     if field not in skipped:
@@ -665,6 +689,8 @@ def confirm_field_answer(tenant_id: UUID | str, field: str, value: str) -> dict[
         return {"recorded": False, "promoted": False}
     g = get_journey(tenant_id)
     if g is None or g.get("status") != "active":
+        return {"recorded": False, "promoted": False}
+    if _is_reserved_field(field):
         return {"recorded": False, "promoted": False}
     answers = dict(g.get("answers") or {})
     answers[field] = value

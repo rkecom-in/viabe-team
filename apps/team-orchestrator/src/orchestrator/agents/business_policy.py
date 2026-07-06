@@ -40,7 +40,7 @@ import logging
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 logger = logging.getLogger(__name__)
 
@@ -387,6 +387,170 @@ def grant_business_policy(
     return get_business_policy(tenant_id, conn=conn)
 
 
+
+# ===========================================================================
+# PROPOSE + RESOLVE (VT-609 fix round) — the Pillar-7 arm/resolve pattern this module's OWN
+# docstring above always promised ("a specialist can PROPOSE a policy... but only the owner's
+# resolution calls this") but had ZERO callers until the onboarding-conductor specialist tried to
+# call ``grant_business_policy`` DIRECTLY from its own tool-call turn — a Pillar-7 violation (no
+# owner-approval provenance, no bounds validation, ``granted_by`` NULL). This mirrors
+# ``business_impact_choke``'s decaying-HITL arm/resolve shape (``dispatch_autonomy_offer`` ->
+# ``resolve_and_grant_l3``): a tool call ARMS a durable, resolvable ``pending_approvals`` row
+# carrying the EXACT proposed bounds; only a SEPARATE resolution call — triggered by the owner's
+# own explicit yes/no, recognized by the conversational specialist but never invented by it — reads
+# those SAME stored bounds back and calls ``grant_business_policy``, tying the grant to the
+# approval-row id as provenance. The model can PROPOSE; it structurally cannot GRANT.
+#
+# Deliberately does NOT route through ``agent.tools.request_owner_approval.arm_pause_request``
+# (the mechanism ``autonomy_upgrade``/``business_impact_action`` use): that primitive's step 1
+# unconditionally sends a REGISTERED WhatsApp approval TEMPLATE, and no such template exists (or is
+# authorized — ``.viabe/templates.md`` is the canonical registry, hard-coded SIDs are never
+# allowed) for a policy-bounds ask. The onboarding-conductor is ALREADY mid-conversation with the
+# owner when it proposes bounds — its own composed reply IS the ask; a second templated message
+# would be a confusing duplicate. So this arms the durable ``pending_approvals`` row directly
+# (same row shape, same one-open-approval-per-tenant structural rule, migration 128's partial
+# unique index) without the template send.
+# ===========================================================================
+
+APPROVAL_TYPE_POLICY_GRANT = "business_policy_grant"
+_PROPOSAL_TIMEOUT_HOURS = 48  # mirrors request_owner_approval._DEFAULT_TIMEOUT_HOURS
+
+
+def propose_business_policy_grant(
+    tenant_id: UUID | str,
+    *,
+    allowed_action_types: list[str],
+    allowed_segments: list[str],
+    frequency_caps: dict[str, int],
+    spend_ceiling_minor: int,
+    conn: Any,
+) -> dict[str, Any]:
+    """ARM a durable owner-approval row carrying the PROPOSED bounds. The caller (the
+    ``propose_business_policy`` tool) has already validated/clamped these — this function trusts
+    its own inputs are sane; it does not re-validate business rules, only normalizes shape.
+
+    Refuses (never raises) if another approval is already open for the tenant — the structural
+    one-open-approval-per-tenant rule every approval surface in this codebase shares (migration
+    128's partial unique index is the race-loser backstop). Mirrors
+    ``business_impact_choke.dispatch_autonomy_offer``'s own minimal-provenance-run pattern
+    (``pending_approvals.run_id`` FKs ``pipeline_runs`` NOT NULL; the proposal has no agent run of
+    its own, so a minimal one is opened to hang the approval off).
+
+    Returns ``{"status": "pending_owner_approval", "approval_id": ..., **the stored bounds}`` on
+    success, or ``{"status": "refused", "reason": "approval_queue_busy"}`` when another approval is
+    already open (the caller should tell the owner to finish that first)."""
+    from datetime import UTC, datetime, timedelta
+
+    from psycopg.errors import UniqueViolation
+    from psycopg.types.json import Jsonb
+
+    from orchestrator.db.wrappers import PendingApprovalsWrapper
+
+    tid = str(tenant_id)
+    wrapper = PendingApprovalsWrapper()
+    if wrapper.has_open_for_tenant(tid, conn=conn):
+        return {"status": "refused", "reason": "approval_queue_busy"}
+
+    bounds: dict[str, Any] = {
+        "allowed_action_types": sorted({str(x) for x in allowed_action_types}),
+        "allowed_segments": sorted({str(x) for x in allowed_segments}),
+        "frequency_caps": {str(k): int(v) for k, v in (frequency_caps or {}).items()},
+        "spend_ceiling_minor": int(spend_ceiling_minor),
+    }
+
+    run_id = uuid4()
+    conn.execute(
+        "INSERT INTO pipeline_runs (id, tenant_id, run_type, status) "
+        "VALUES (%s, %s, 'business_policy_proposal', 'running') ON CONFLICT (id) DO NOTHING",
+        (str(run_id), tid),
+    )
+    approval_id = uuid4()
+    timeout_at = datetime.now(UTC) + timedelta(hours=_PROPOSAL_TIMEOUT_HOURS)
+    row: dict[str, Any] = {
+        "id": str(approval_id),
+        "run_id": str(run_id),
+        "approval_type": APPROVAL_TYPE_POLICY_GRANT,
+        "summary": "Owner business-policy bounds proposal",
+        "details": Jsonb(bounds),
+        "status": "pending",
+        "decision": None,
+        "timeout_at": timeout_at,
+    }
+    try:
+        wrapper.insert(tid, row, conn=conn)
+    except UniqueViolation:
+        # Race-loser: a concurrent armer won the one-open-per-tenant index between the check above
+        # and this INSERT. Same refusal as the pre-check (VT-369 §4.1 shape).
+        try:
+            conn.rollback()
+        except Exception:  # noqa: BLE001 — autocommit conn: nothing pending
+            pass
+        return {"status": "refused", "reason": "approval_queue_busy"}
+
+    logger.info(
+        "business_policy: proposal armed tenant=%s approval=%s action_types=%s",
+        tid, approval_id, bounds["allowed_action_types"],
+    )
+    return {"status": "pending_owner_approval", "approval_id": str(approval_id), **bounds}
+
+
+def resolve_business_policy_grant(
+    tenant_id: UUID | str, *, approved: bool, conn: Any
+) -> dict[str, Any]:
+    """Resolve the tenant's latest OPEN ``business_policy_grant`` approval — the ONLY path that may
+    call ``grant_business_policy``. Reads the bounds OFF THE APPROVAL ROW (the exact bounds the
+    owner was shown when the proposal was armed) — NEVER a fresh model-supplied value at resolution
+    time, so a model recognizing "sure, go ahead" can never smuggle in a broader/different grant
+    than what was actually proposed and shown to the owner.
+
+    Idempotent: no open proposal -> a clean no-op (``{"status": "no_pending_proposal"}``) — a
+    duplicate/late resolve after the grant already landed (or after the 48h sweep expired it, see
+    ``scheduled_triggers.run_approval_timeout_sweep_body``) finds nothing open and does nothing."""
+    from orchestrator.db.wrappers import PendingApprovalsWrapper
+
+    tid = str(tenant_id)
+    wrapper = PendingApprovalsWrapper()
+    open_row = wrapper.latest_open_of_type(tid, APPROVAL_TYPE_POLICY_GRANT, conn=conn)
+    if open_row is None:
+        return {"status": "no_pending_proposal"}
+
+    approval_id = open_row["id"]
+    details = open_row.get("details") or {}
+    if not isinstance(details, dict):
+        import json as _json
+
+        try:
+            details = _json.loads(details)
+        except (TypeError, ValueError):
+            details = {}
+
+    decision = "approved" if approved else "rejected"
+    wrapper.mark_resolved(tid, approval_id, decision=decision, status=decision, conn=conn)
+
+    if not approved:
+        logger.info("business_policy: proposal rejected tenant=%s approval=%s", tid, approval_id)
+        return {"status": "rejected", "approval_id": approval_id}
+
+    policy = grant_business_policy(
+        tid,
+        allowed_action_types=list(details.get("allowed_action_types") or []),
+        allowed_segments=list(details.get("allowed_segments") or []),
+        frequency_caps=dict(details.get("frequency_caps") or {}),
+        spend_ceiling_minor=int(details.get("spend_ceiling_minor") or 0),
+        granted_by=approval_id,
+        conn=conn,
+    )
+    logger.info("business_policy: proposal approved+granted tenant=%s approval=%s", tid, approval_id)
+    return {
+        "status": "granted",
+        "approval_id": approval_id,
+        "allowed_action_types": sorted(policy.allowed_action_types),
+        "allowed_segments": sorted(policy.allowed_segments),
+        "frequency_caps": dict(policy.frequency_caps),
+        "spend_ceiling_minor": policy.spend_ceiling_minor,
+    }
+
+
 __all__ = [
     "PolicyActionClass",
     "PolicyDecision",
@@ -403,4 +567,7 @@ __all__ = [
     "decide_within_policy",
     "assert_within_policy",
     "grant_business_policy",
+    "APPROVAL_TYPE_POLICY_GRANT",
+    "propose_business_policy_grant",
+    "resolve_business_policy_grant",
 ]

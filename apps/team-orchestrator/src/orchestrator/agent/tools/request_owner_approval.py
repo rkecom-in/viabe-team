@@ -79,6 +79,14 @@ ApprovalType = Literal[
     # keeps the DB CHECK in exact sync (added in both, same PR). The business-impact gate routes its
     # owner-approval ask through the SAME arm_pause_request path agent_customer_send uses.
     "business_impact_action",
+    # VT-609 fix round — the onboarding-conductor's business-policy PROPOSAL (the specialist can
+    # PROPOSE machine-enforceable bounds; only the owner's resolution grants them). CL-428:
+    # migration 169 keeps the DB CHECK in exact sync (added in both, same PR). Does NOT route
+    # through arm_pause_request (no registered WhatsApp template for this ask exists/is authorized
+    # yet — the specialist's own conversational reply carries the ask); armed via
+    # ``business_policy.propose_business_policy_grant`` instead. See that module for the full
+    # arm/resolve shape (mirrors business_impact_choke.dispatch_autonomy_offer/resolve_and_grant_l3).
+    "business_policy_grant",
 ]
 # The raw owner decision verb recorded on pending_approvals.decision. CL-428: this Literal is
 # the source of truth — migration 110 keeps the DB CHECK in exact sync ('defer' added in both,
