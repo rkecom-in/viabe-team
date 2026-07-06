@@ -197,6 +197,41 @@ def redrive_task(tenant_id: UUID | str, task_id: UUID | str, *, conn: Any) -> bo
     return cur.rowcount > 0
 
 
+def set_owner_notification_status(
+    tenant_id: UUID | str,
+    task_id: UUID | str,
+    owner_notification_status: str,
+    *,
+    expected_from: tuple[str, ...] | None = None,
+) -> bool:
+    """VT-611: the owner-notification composer's send-result flip (pending -> delivered/failed) —
+    a NARROW CAS-guarded write of ONLY this column, deliberately NOT ``set_task_status``. That
+    function stamps ``completed_at = now()`` whenever the passed ``status`` is terminal, INCLUDING
+    a same-status repeat write — reusing it here to flip just the notification column would
+    silently re-stamp an already-terminal task's completion time on every notify attempt. Returns
+    True if the write applied, False on a CAS no-op (current state not in ``expected_from``)."""
+    if owner_notification_status not in OWNER_NOTIFICATION_STATUSES:
+        raise ValueError(f"unknown owner_notification_status {owner_notification_status!r}")
+    sql = [
+        "UPDATE manager_tasks SET owner_notification_status = %s, version = version + 1,",
+        "updated_at = now() WHERE tenant_id = %s AND id = %s",
+    ]
+    params: list[Any] = [owner_notification_status, str(tenant_id), str(task_id)]
+    if expected_from is not None:
+        sql.append("AND owner_notification_status = ANY(%s)")
+        params.append(list(expected_from))
+    with tenant_connection(tenant_id) as conn:
+        cur = conn.execute(" ".join(sql), params)
+        if cur.rowcount == 0:
+            logger.warning(
+                "manager_task owner_notification_status CAS no-op (task=%s -> %r; current state "
+                "not in expected_from=%r) — stale write suppressed",
+                task_id, owner_notification_status, expected_from,
+            )
+            return False
+    return True
+
+
 def get_task(tenant_id: UUID | str, task_id: UUID | str) -> dict[str, Any] | None:
     with tenant_connection(tenant_id) as conn:
         row = conn.execute(
@@ -369,6 +404,7 @@ __all__ = [
     "TASK_STATUSES", "TASK_TERMINAL", "TASK_NON_TERMINAL", "TASK_ACTIVE",
     "TERMINAL_OUTCOMES", "OWNER_NOTIFICATION_STATUSES",
     "STEP_KINDS", "STEP_STATUSES", "STEP_TERMINAL", "STEP_NON_TERMINAL", "EVIDENCE_KINDS",
-    "create_task", "set_task_status", "get_task", "find_task_id", "find_task_by_source_ref",
-    "has_active_task", "has_active_integration_step", "add_step", "set_step_status", "get_steps",
+    "create_task", "set_task_status", "set_owner_notification_status", "get_task", "find_task_id",
+    "find_task_by_source_ref", "has_active_task", "has_active_integration_step",
+    "add_step", "set_step_status", "get_steps",
 ]

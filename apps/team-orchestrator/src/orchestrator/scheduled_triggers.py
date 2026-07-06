@@ -913,6 +913,12 @@ def run_approval_timeout_sweep_body(now: datetime | None = None) -> list[UUID]:
     (its ``run_id`` is a minimal ``pipeline_runs`` row) — it skips ``resume_run`` and closes that
     run directly instead (same durable-state shape ``runner.try_resume_pending_approval`` uses).
 
+    VT-611 pre-work #7: an ``agent_customer_send`` approval ALSO has no LangGraph checkpoint
+    (a real dispatch run, but not a graph-invoke one) — it skips BOTH ``resume_run`` AND the
+    pipeline_runs close (that run belongs to the agent dispatch workflow, not this approval;
+    mirrors ``runner.try_resume_pending_approval``'s own agent_customer_send branch, which also
+    never closes it).
+
     Callable directly with an injected ``now`` (mirrors the other bodies)
     so the canary can drive a past-timeout row without waiting for the cron.
 
@@ -948,6 +954,23 @@ def run_approval_timeout_sweep_body(now: datetime | None = None) -> list[UUID]:
                         "WHERE id = %s",
                         (run_id,),
                     )
+            elif approval_type == "agent_customer_send":
+                # VT-611 pre-work #7 (the SAME class VT-609 fixed for business_policy_grant, but
+                # pre-existing/unrelated to VT-609): an agent_customer_send approval's run_id IS a
+                # REAL pipeline_runs row (l3_hold._resolve_batch_run_id resolves the agent
+                # dispatch's own deterministic run id — no fabricated FK-satisfying stub), but it
+                # has NO LangGraph checkpoint under that thread_id: "the agent dispatch workflow
+                # owns its own run lifecycle and picks the batch status up on its next
+                # deterministic step" (runner.try_resume_pending_approval's OWN agent_customer_send
+                # branch, which likewise never calls resume_run). Calling resume_run here would
+                # just raise (a guaranteed checkpoint-miss), get swallowed by this loop's own
+                # try/except below, and skip the close-update entirely — leaving the run stuck
+                # 'running' forever AND logging a false "resume failed". The owner-decision side
+                # (batch -> 'cancelled' on a timeout) already landed inside mark_approval_resolved's
+                # transaction above (approval_glue's shared resolution choke point) — there is
+                # nothing left to resume, and this run is NOT this approval's to close (mirrors
+                # runner.py's branch: no resume_run, no pipeline_runs UPDATE, just log + continue).
+                pass
             else:
                 # Resume the suspended run with the timeout decision, then close
                 # the original paused run.

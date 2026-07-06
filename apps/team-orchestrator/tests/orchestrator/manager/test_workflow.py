@@ -641,6 +641,81 @@ def test_ask_owner_waits_then_resumes_after_answer(substrate, monkeypatch: pytes
     assert pending_questions.get_open(tid, task_id=task_id) == []
 
 
+def test_ask_owner_answer_is_threaded_into_the_redispatch_situation(
+    substrate, monkeypatch: pytest.MonkeyPatch
+):
+    """VT-611 pre-work #6 — the answer-threading fix's own proof. Before this fix, the resumed
+    dispatch's ``situation`` was the step's ORIGINAL stored text, unchanged — the specialist had no
+    idea the owner had just answered its own question and would re-ask it. Captures the ACTUAL
+    ``situation`` argument _dispatch_specialist_step receives on the post-answer redispatch and
+    asserts it contains both the question and the owner's answer text."""
+    import orchestrator.manager.workflow as wf
+    from orchestrator.manager import pending_questions
+    from orchestrator.manager.plan_models import PlanStep
+
+    tid = _seed_tenant(substrate)
+    task_id = str(_create_task(
+        tid,
+        steps=[PlanStep(step_seq=1, kind="clarification", situation="original stored situation")],
+    ))
+    _mock_verified(monkeypatch, wf)
+
+    seen_situations: list[str] = []
+    call_state = {"asked": False}
+
+    def _dispatch(tenant_id, tid_, step_id, attempt, situation, desired_outcome, acceptance_criteria, specialist, has_next):
+        seen_situations.append(situation)
+        if not call_state["asked"]:
+            call_state["asked"] = True
+            _apply_outcome(tid, task_id, step_id, "ask_owner")
+            pending_questions.ask(tid, "which cohort should we target?", task_id=task_id)
+            return "ask_owner", None
+        _apply_outcome(tid, task_id, step_id, "complete")
+        return "complete", None
+
+    monkeypatch.setattr(wf, "_dispatch_specialist_step", _dispatch)
+
+    poll_calls = {"n": 0}
+    real_still_open = wf._question_still_open
+
+    def _still_open(tenant_id, tid_):
+        poll_calls["n"] += 1
+        if poll_calls["n"] >= 2:
+            pending_questions.correlate_reply(tid, "the VIP cohort, please", None, task_id=task_id)
+            return False
+        return real_still_open(tenant_id, tid_)
+
+    monkeypatch.setattr(wf, "_question_still_open", _still_open)
+
+    status = wf.manager_task_workflow(tid, task_id)
+    assert status == "completed"
+
+    # The FIRST dispatch (pre-ask) got the original, un-augmented situation.
+    assert seen_situations[0] == "original stored situation"
+    # The SECOND dispatch (post-answer) is the fix's whole point: the owner's question AND answer
+    # are both threaded in, on top of the original situation — never silently dropped.
+    assert len(seen_situations) == 2
+    resumed = seen_situations[1]
+    assert "original stored situation" in resumed
+    assert "which cohort should we target?" in resumed
+    assert "the VIP cohort, please" in resumed
+
+
+def test_ask_owner_no_answer_leaves_situation_unaugmented(substrate, monkeypatch: pytest.MonkeyPatch):
+    """The threading state is scoped to an ACTUAL answered question — a defensive pin: if
+    manager_review somehow reaches ask_owner again without ever recording an answer (e.g. the
+    owner reply raced/never landed), the loop must not fabricate stale or empty Q&A text."""
+    import orchestrator.manager.workflow as wf
+    from orchestrator.manager.plan_models import PlanStep
+
+    tid = _seed_tenant(substrate)
+    task_id = str(_create_task(
+        tid, steps=[PlanStep(step_seq=1, kind="clarification", situation="s0")],
+    ))
+
+    assert wf._get_latest_answered_question(tid, task_id) is None
+
+
 def test_ask_owner_timeout_blocks_with_incident(substrate, monkeypatch: pytest.MonkeyPatch):
     import orchestrator.manager.workflow as wf
 

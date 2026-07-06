@@ -356,6 +356,48 @@ def test_approval_timeout_sweep_business_policy_grant_skips_resume_run(monkeypat
     assert sweep_conn.updates, "the minimal run must still close to 'completed'"
 
 
+def test_approval_timeout_sweep_agent_customer_send_skips_resume_run_and_close(monkeypatch) -> None:
+    """VT-611 pre-work #7 — the SAME class VT-609 fixed for business_policy_grant, but pre-
+    existing/unrelated to VT-609. An agent_customer_send approval's run_id is a REAL dispatch
+    pipeline_runs row (l3_hold._resolve_batch_run_id's deterministic run id — not a fabricated
+    FK stub), but it has NO LangGraph checkpoint (the agent dispatch workflow owns its own run
+    lifecycle, not a graph-invoke one) — resume_run must NOT be called for it (that would raise:
+    a guaranteed checkpoint-miss). Unlike business_policy_grant, this run is also NOT this
+    approval's to close (mirrors runner.try_resume_pending_approval's own agent_customer_send
+    branch, which never closes it either) — so NO pipeline_runs UPDATE at all, only the
+    resolve (the batch -> 'cancelled' flip already lands inside mark_approval_resolved)."""
+    tid, rid, aid = str(uuid4()), str(uuid4()), str(uuid4())
+    monkeypatch.setattr(
+        st, "_scan_timed_out_approvals",
+        lambda now: [
+            {"id": aid, "tenant_id": tid, "run_id": rid, "approval_type": "agent_customer_send"}
+        ],
+    )
+    sweep_conn = _SweepConn()
+    monkeypatch.setattr("orchestrator.db.tenant_connection", lambda t: sweep_conn)
+    marked: list[tuple] = []
+    monkeypatch.setattr(
+        "orchestrator.agent.approval_resume.mark_approval_resolved",
+        lambda conn, tenant_id, approval_id, decision, **kw: marked.append((approval_id, decision)),
+    )
+
+    def _resume_must_not_be_called(run_id, decision):
+        raise AssertionError("resume_run must not be called for agent_customer_send")
+
+    monkeypatch.setattr(
+        "orchestrator.agent.approval_resume.resume_run", _resume_must_not_be_called
+    )
+
+    out = st.run_approval_timeout_sweep_body(
+        now=datetime(2026, 5, 31, 12, 0, tzinfo=timezone.utc)
+    )
+
+    assert out == [UUID(aid)]
+    assert marked == [(aid, "timeout")]
+    # Nothing closes this run — it belongs to the agent dispatch workflow, not this approval.
+    assert sweep_conn.updates == []
+
+
 # ---------------------------------------------------------------------------
 # VT-432 — implicit attribution sweep handler (18th trigger)
 # ---------------------------------------------------------------------------
