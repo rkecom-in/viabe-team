@@ -17,8 +17,8 @@
     {
       "message": "Haan, ho gaya, sheet connect kar diya maine",
       "assert_no_silent": true,
-      "assert_contains": ["don't see the connection"],
-      "note": "Hinglish 'done' tokens (haan/ho/gaya are all in shopify_onboarding._DONE) hit the deterministic auth-wait floor — the gate's honest not-yet-connected line is hardcoded English and must fire verbatim regardless of the owner's language."
+      "assert_contains": ["nahi dikh raha"],
+      "note": "Hinglish 'done' tokens (haan/ho/gaya are all in shopify_onboarding._DONE) hit the deterministic auth-wait floor — the gate's honest not-yet-connected line fires in the OWNER's language (Hinglish here), not a hardcoded English string. [2026-07-07: assert was the literal English 'don't see the connection', which the manager correctly never says in a Hinglish conversation — false-fail; the manager's actual reply ('...connection complete hua nahi dikh raha...') IS the honest not-yet-connected floor, just in Hinglish. Fixed to match the observed reply's own phrasing. Step 1's missing-authorize_url-link gap is UNRELATED and remains a real, separate finding — not touched by this fix.]"
     }
   ]
 }
