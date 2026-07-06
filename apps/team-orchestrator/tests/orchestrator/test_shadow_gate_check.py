@@ -69,9 +69,17 @@ def test_parse_since_accepts_bare_z_suffix():
 
 @pytest.fixture(scope="module")
 def dsn():
+    # Skip (not error) when psycopg/DATABASE_URL are absent — the dep-less CI smoke job (no
+    # psycopg) and a plain local run (no DATABASE_URL) both hit this fixture; a bare
+    # `import apply_migrations` / `os.environ["DATABASE_URL"]` blew up as an ERROR in both cases,
+    # which fails the pre-push dep-less smoke stage. The PURE tests above (check_preflight/
+    # check_gate/_parse_since) need neither and must keep running regardless — so the guard lives
+    # here, not as a module-level pytestmark/importorskip that would also skip those.
+    pytest.importorskip("psycopg")
+    url = os.environ.get("DATABASE_URL")
+    if not url:
+        pytest.skip("DATABASE_URL not set — shadow_gate_check realdb tests skipped")
     import apply_migrations
-
-    url = os.environ["DATABASE_URL"]
     r = apply_migrations.apply(dsn=url)
     assert not r["failed"], r["failed"]
     return url
