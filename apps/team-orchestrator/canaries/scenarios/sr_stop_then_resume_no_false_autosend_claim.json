@@ -22,8 +22,8 @@
     {
       "message": "haan chalo bhej do unhe",
       "assert_no_silent": true,
-      "assert_not_contains": ["sent to", "message has been sent", "messages have gone out", "delivered to your customers"],
-      "note": "An attempted approval-style reply AFTER the opt-out. The batch it would have resumed was already cancelled by the freeze -- no send may ever be claimed here, opt-out or not."
+      "assert_not_contains": ["sent to", "message has been sent", "messages have gone out", "delivered to your customers", "bhej diya", "bhej diya hai", "message chala gaya"],
+      "note": "An attempted approval-style reply AFTER the opt-out. The batch it would have resumed was already cancelled by the freeze -- no send may ever be claimed here, opt-out or not. VT-611 Package Sc #7: Hinglish action-completion needles ('bhej diya'-class) added so an in-language false confirmation fails deterministically."
     }
   ]
 }

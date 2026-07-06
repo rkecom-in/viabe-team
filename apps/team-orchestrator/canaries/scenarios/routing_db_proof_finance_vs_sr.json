@@ -1,0 +1,26 @@
+{
+  "name": "routing_db_proof_finance_vs_sr",
+  "domain": "sr_autonomy_rails",
+  "critical": true,
+  "setup_args": ["--onboarded", "--seed-lapsed-customers", "8"],
+  "expected_fail": false,
+  "notes": "VT-611 Package Sc #4 — DB-VERIFIED routing (facet d), paired within one scenario: a single-customer, explicitly read-only overdue-payment check must NOT delegate to Sales-Recovery (no campaigns row for that turn), while an explicit broad win-back ask across the lapsed cohort MUST (a campaigns row exists). 'no seed' in the original design brief meant this FIRST ask's own nature doesn't invoke the cohort (a single named customer, explicitly told not to act) -- the tenant still needs --seed-lapsed-customers for the PAIRED win-back step to actually delegate, so both steps share one seeded tenant; the assert_route DB-proof is what actually distinguishes the two turns, not the seed's absence. Setup: `setup --onboarded --seed-lapsed-customers 8` then `script <tenant> routing_db_proof_finance_vs_sr.json`.",
+  "steps": [
+    {
+      "message": "Sharma ji ka payment kabse pending hai, sirf check karke batao, koi campaign ya message mat banana abhi",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "assert_route": {"expect_sr_delegation": false},
+      "assert_not_contains": ["drafted", "i've queued", "shall i send", "campaign to", "approve this"],
+      "note": "A single-named-customer, explicitly read-only overdue check -- must NOT delegate to Sales-Recovery. DB-proof: no campaigns row for THIS turn's run, regardless of how the reply reads."
+    },
+    {
+      "message": "ab un sab purane customers ko wapas laane ke liye ek plan bana do",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "assert_contains": ["draft"],
+      "assert_route": {"expect_sr_delegation": true},
+      "note": "An explicit broad win-back ask across the (seeded) lapsed cohort -- MUST delegate to Sales-Recovery. DB-proof: a campaigns row now exists for THIS turn's run, contrasting directly with step 1's absence."
+    }
+  ]
+}

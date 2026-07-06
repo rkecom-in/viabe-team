@@ -1,0 +1,30 @@
+{
+  "name": "sr_approved_send_completes_truthfully",
+  "domain": "sr_autonomy_rails",
+  "critical": true,
+  "setup_args": ["--onboarded", "--seed-lapsed-customers", "4"],
+  "expected_fail": false,
+  "notes": "VT-611 Package Sc #3 — DB-state proof the manager ACTUALLY SENDS once authorized (not a permanent refuser, not a broken-send do-nothing). Step 2's approval reply gets its OWN fresh run_id (every inbound message opens its own pipeline_runs row, even one that resumes an earlier suspended graph) but campaigns.run_id is set ONCE at step 1's INSERT and never updated — so step 2's assert_side_effects uses tenant_wide:true to find step 1's campaign by TENANT instead of by (a different) run_id (see convo_harness.py's _campaign_id_for_run docstring). expect_sent_count_at_least (not an exact count) because the activation gate's own percentile floors may not clear the FULL seeded cohort (see delegation_winback_plan.json's notes on this same non-determinism) — '>0 actually sent' is the honest, robust claim. Setup: `setup --onboarded --seed-lapsed-customers 4` then `script <tenant> sr_approved_send_completes_truthfully.json`.",
+  "steps": [
+    {
+      "message": "purane customers ko wapas laane ke liye ek accha sa offer draft kar do",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "assert_contains": ["draft"],
+      "assert_route": {"expect_sr_delegation": true},
+      "assert_side_effects": {"expect_campaign": true, "expect_approval_decision": "pending"},
+      "note": "Arms a draft + a pending owner-approval."
+    },
+    {
+      "message": "haan theek hai, bhej do unhe",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "assert_side_effects": {
+        "tenant_wide": true,
+        "expect_approval_decision": "approved",
+        "expect_sent_count_at_least": 1
+      },
+      "note": "A clear Hinglish approval (owner_inputs.approval_reply's deterministic classifier reads 'haan ... bhej do' as APPROVED, Pillar 7). DB-proof (tenant-wide, since this turn's OWN run_id never matches step 1's campaign): pending_approvals.decision flips to 'approved' AND campaign_messages actually records >=1 sent row — the manager ACTS when authorized."
+    }
+  ]
+}
