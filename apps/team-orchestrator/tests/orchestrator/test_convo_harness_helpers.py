@@ -273,11 +273,18 @@ def test_drive_turn_builds_transcript_and_dedups_owner_echo(monkeypatch):
     res = ch._drive_turn("dsn", "http://orch", "secret", "tenant-x", "plan a campaign", timeout=1.0)
     assert res.run_status == "completed"
     assert res.ingress_reason == "started"
-    # The transcript: the injected owner turn (once), then the assistant reply. The brain-recorded
-    # owner echo (same sid) is NOT double-printed.
+    # The transcript: the injected owner turn (once), then the assistant reply, then the VT-611
+    # Package H1 observed-route marker. The brain-recorded owner echo (same sid) is NOT double-printed.
     roles = [(t.role, t.text) for t in res.transcript]
-    assert roles == [("owner", "plan a campaign"), ("assistant", "on it — here is the plan")]
+    assert roles == [
+        ("owner", "plan a campaign"),
+        ("assistant", "on it — here is the plan"),
+        ("system", "[internal route: none]"),  # the FakeConn has no campaigns row for this run_id
+    ]
     assert res.ok is True and res.reasons == []
+    # VT-611 Package H1 — the deterministic run_id is threaded onto the result so a caller's
+    # DB-state assert can scope its query to THIS turn.
+    assert res.run_id == ch.run_id_for_sid("SMharnessFIXED")
 
 
 def test_drive_turn_flags_send_guard_breach_on_real_sid(monkeypatch):
@@ -309,10 +316,76 @@ def test_drive_turn_no_run_reason_skips_poll_and_is_silent(monkeypatch):
     res = ch._drive_turn("dsn", "http://orch", "secret", "tenant-x", "hi", timeout=1.0)
     assert called["polled"] is False
     assert res.run_status is None
-    # only the injected owner turn; no assistant reply
-    assert [t.role for t in res.transcript] == ["owner"]
+    # only the injected owner turn + the observed-route marker; no assistant reply
+    assert [t.role for t in res.transcript] == ["owner", "system"]
     assert ch.reply_verdict(res.transcript, res.run_status) == "silent"
     assert ch.evaluate_assertions(res.transcript, run_status=res.run_status, assert_no_silent=True)  # non-empty → silent
+
+
+# --- VT-611 Package H1: _evaluate_db_asserts dispatch (mocked — the DB-hitting asserts themselves
+# are realdb-tested in test_convo_harness_db_asserts.py) ----------------------------------------
+
+
+def test_evaluate_db_asserts_no_keys_is_a_noop(monkeypatch):
+    """A step with none of assert_route/assert_side_effects/assert_grounded_count triggers ZERO DB
+    round-trips (no _connect call at all) — the common case (most steps don't use these)."""
+    def _boom(dsn):
+        raise AssertionError("must not connect when no DB-state assert key is present")
+
+    monkeypatch.setattr(ch, "_connect", _boom)
+    assert ch._evaluate_db_asserts("dsn", "tenant-x", "run-1", {"message": "hi"}) == []
+
+
+def test_evaluate_db_asserts_run_id_none_fails_loud_not_silent():
+    """A step that DOES request a DB-state assert but has no run_id (no real turn was driven) must
+    report a failure — never silently skip (the same fail-not-skip discipline as assert_run_reason)."""
+    failures = ch._evaluate_db_asserts(
+        "dsn", "tenant-x", None, {"message": "hi", "assert_route": {"expect_sr_delegation": True}}
+    )
+    assert failures and "no run_id is available" in failures[0]
+
+
+def test_evaluate_db_asserts_dispatches_each_present_key(monkeypatch):
+    """Each present step key calls its matching assert_* function with the step's own kwargs, and
+    only those present are called."""
+    calls: list[str] = []
+    monkeypatch.setattr(ch, "_connect", lambda dsn: MagicMock())
+    monkeypatch.setattr(
+        ch, "assert_route",
+        lambda conn, tid, rid, **kw: (calls.append(("route", tid, rid, kw)), [])[1],
+    )
+    monkeypatch.setattr(
+        ch, "assert_side_effects",
+        lambda conn, tid, rid, **kw: (calls.append(("effects", tid, rid, kw)), [])[1],
+    )
+    monkeypatch.setattr(
+        ch, "assert_grounded_count",
+        lambda conn, tid, rid, **kw: (calls.append(("grounded", tid, rid, kw)), [])[1],
+    )
+    step = {
+        "message": "hi",
+        "assert_route": {"expect_sr_delegation": True},
+        "assert_grounded_count": {"expected_count": 8},
+    }
+    failures = ch._evaluate_db_asserts("dsn", "tenant-x", "run-1", step)
+    assert failures == []
+    kinds = [c[0] for c in calls]
+    assert kinds == ["route", "grounded"]  # assert_side_effects key absent -> not called
+    assert calls[0] == ("route", "tenant-x", "run-1", {"expect_sr_delegation": True})
+    assert calls[1] == ("grounded", "tenant-x", "run-1", {"expected_count": 8})
+
+
+def test_evaluate_db_asserts_merges_failures_from_every_present_key(monkeypatch):
+    monkeypatch.setattr(ch, "_connect", lambda dsn: MagicMock())
+    monkeypatch.setattr(ch, "assert_route", lambda conn, tid, rid, **kw: ["route bad"])
+    monkeypatch.setattr(ch, "assert_side_effects", lambda conn, tid, rid, **kw: ["effects bad"])
+    step = {
+        "message": "hi",
+        "assert_route": {"expect_sr_delegation": True},
+        "assert_side_effects": {"expect_campaign": True},
+    }
+    failures = ch._evaluate_db_asserts("dsn", "tenant-x", "run-1", step)
+    assert failures == ["route bad", "effects bad"]
 
 
 # --- VT-598: assert_not_d1 (pass / fail / hi-variant) ------------------------------------------
