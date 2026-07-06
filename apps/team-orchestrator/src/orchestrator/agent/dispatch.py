@@ -324,7 +324,9 @@ def _build_onboarding_state_block(tenant_id: UUID) -> str | None:
 
     if phase == PHASE_DISCOVERY:
         step = ("The owner is connecting their Shopify store and you are waiting for them to send their "
-                "store address (it looks like yourstore.myshopify.com — then you send a one-tap connect link).")
+                "store address (a Shopify address has the FORM <store-name>.myshopify.com — this is only the "
+                "format; never state a specific domain yourself, wait for the owner to send theirs — then you "
+                "send a one-tap connect link).")
     elif phase == PHASE_AUTH:
         step = ("The owner is connecting their Shopify store — you already sent a one-tap connect link and "
                 "are waiting for them to approve it in the browser and reply 'done'.")
