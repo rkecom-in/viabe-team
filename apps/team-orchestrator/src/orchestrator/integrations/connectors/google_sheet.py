@@ -50,6 +50,7 @@ _SCOPE = f"{_SCOPE_SHEETS} {_SCOPE_DRIVE_METADATA}"
 
 _DRIVE_WATCH_URL = "https://www.googleapis.com/drive/v3/files/{file_id}/watch"
 _DRIVE_STOP_URL = "https://www.googleapis.com/drive/v3/channels/stop"
+_DRIVE_FILES_LIST_URL = "https://www.googleapis.com/drive/v3/files"  # VT-608 picker discovery
 _DRIVE_CHANNEL_TTL = timedelta(days=7)  # Drive max
 _DRIVE_RENEW_WINDOW = timedelta(hours=48)
 
@@ -244,6 +245,49 @@ class GoogleSheetConnector(ConnectorBase):
             raise RuntimeError("Google OAuth refresh response missing access_token")
         return str(access_token)
 
+    # ---------- DISCOVERY (VT-608, the Sheets picker's own backend) ----------
+
+    def list_spreadsheets(self, tenant_id: UUID, *, limit: int = 25) -> list[dict[str, str]]:
+        """List the owner's Google Sheets spreadsheets (Drive ``files.list``, scoped to
+        ``mimeType='application/vnd.google-apps.spreadsheet'`` — the ``drive.metadata.readonly``
+        scope already granted covers this). Returns ``[{"id": ..., "name": ...}, ...]`` — the
+        team-web picker page's own data source; no sheet CONTENT is read here."""
+        access_token = self.get_access_token(tenant_id)
+        resp = httpx.get(
+            _DRIVE_FILES_LIST_URL,
+            headers={"Authorization": f"Bearer {access_token}"},
+            params={
+                "q": "mimeType='application/vnd.google-apps.spreadsheet' and trashed=false",
+                "fields": "files(id,name)",
+                "pageSize": limit,
+                "orderBy": "modifiedTime desc",
+            },
+            timeout=15.0,
+        )
+        if resp.status_code != 200:
+            raise RuntimeError(
+                f"Drive files.list failed: HTTP {resp.status_code} body={resp.text[:200]}"
+            )
+        files = resp.json().get("files", [])
+        return [{"id": str(f["id"]), "name": str(f.get("name", ""))} for f in files]
+
+    def list_tabs(self, tenant_id: UUID, spreadsheet_id: str) -> list[str]:
+        """List a spreadsheet's tab (sheet) names via Sheets ``spreadsheets.get`` — metadata only
+        (``fields=sheets.properties.title``), never cell content."""
+        access_token = self.get_access_token(tenant_id)
+        resp = httpx.get(
+            f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}",
+            headers={"Authorization": f"Bearer {access_token}"},
+            params={"fields": "sheets.properties.title"},
+            timeout=15.0,
+        )
+        if resp.status_code != 200:
+            raise RuntimeError(
+                f"Sheets spreadsheets.get failed: HTTP {resp.status_code} body={resp.text[:200]}"
+            )
+        sheets = resp.json().get("sheets", [])
+        return [str(s["properties"]["title"]) for s in sheets if s.get("properties", {}).get("title")]
+
     # ---------- PULL ----------
 
     def pull_sample(
@@ -251,14 +295,23 @@ class GoogleSheetConnector(ConnectorBase):
         tenant_id: UUID,
         spreadsheet_id: str = "",
         range_a1: str = "A1:Z50",
+        *,
+        tab_name: str = "",
     ) -> list[dict[str, Any]]:
-        """Fetch first ~50 rows for field-mapping."""
+        """Fetch first ~50 rows for field-mapping.
+
+        VT-608 — ``tab_name`` (the owner's picker selection, RULING 2) scopes the range to a
+        SPECIFIC sheet tab (``'{tab_name}'!A1:Z50``); omitted (the pre-VT-608 default) reads
+        whichever tab Sheets' bare-range notation resolves to (its first/active sheet) —
+        every existing caller that never passed a tab keeps that exact behavior.
+        """
         if not spreadsheet_id:
             raise ValueError("pull_sample: spreadsheet_id required")
         access_token = self.get_access_token(tenant_id)
+        effective_range = f"'{tab_name}'!{range_a1}" if tab_name else range_a1
         url = (
             f"https://sheets.googleapis.com/v4/spreadsheets/"
-            f"{spreadsheet_id}/values/{range_a1}"
+            f"{spreadsheet_id}/values/{effective_range}"
         )
         resp = httpx.get(
             url,
@@ -289,6 +342,7 @@ class GoogleSheetConnector(ConnectorBase):
         since_row_index: int = 0,
         *,
         since: datetime | None = None,  # base-contract alias; ignored (row-index cursor)
+        tab_name: str = "",
     ) -> list[dict[str, Any]]:
         """Incremental pull from ``since_row_index`` to end.
 
@@ -306,14 +360,19 @@ class GoogleSheetConnector(ConnectorBase):
         time (the scheduler's google_sheet path is a known gap: it has no
         spreadsheet_id / row-index cursor — the Drive poll path carries the
         resource_id and is the real sheet-pull driver).
+
+        VT-608 — ``tab_name`` (the owner's picker selection, RULING 2) scopes both the header
+        fetch and the data range to that SPECIFIC tab; omitted (every pre-VT-608 caller) keeps
+        the exact prior bare-range behavior.
         """
         if not spreadsheet_id:
             raise ValueError("pull_full: spreadsheet_id required")
         access_token = self.get_access_token(tenant_id)
+        tab_prefix = f"'{tab_name}'!" if tab_name else ""
         # Header (row 1) is needed to label cells — pull_full's old range
         # (A{start}:Z) skipped it, leaving rows un-labellable.
         header_resp = httpx.get(
-            f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}/values/A1:Z1",
+            f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}/values/{tab_prefix}A1:Z1",
             headers={"Authorization": f"Bearer {access_token}"},
             timeout=30.0,
         )
@@ -325,7 +384,7 @@ class GoogleSheetConnector(ConnectorBase):
         headers = [str(h) for h in header_values[0]] if header_values else []
 
         start_row = max(2, since_row_index + 1)
-        range_a1 = f"A{start_row}:Z"
+        range_a1 = f"{tab_prefix}A{start_row}:Z"
         url = (
             f"https://sheets.googleapis.com/v4/spreadsheets/"
             f"{spreadsheet_id}/values/{range_a1}"

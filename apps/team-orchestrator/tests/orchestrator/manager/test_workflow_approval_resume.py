@@ -339,6 +339,38 @@ def test_dispatch_closes_pipeline_run_completed_on_clean_terminal(
     assert row[0] == "completed"
 
 
+def test_campaign_execution_blocked_key_actually_merges_into_graph_state() -> None:
+    """VT-608 — sibling of ``test_dispatch_closes_pipeline_run_completed_on_clean_terminal`` above:
+    the SAME undeclared-TypedDict-key bug class (an un-declared key is silently DROPPED by
+    LangGraph rather than merged as a channel) already bit ``manager_review_outcome`` once (the
+    fix round pinned above). ``campaign_execution_blocked`` is ``_campaign_execute_node``'s own
+    return key (``supervisor.py``, since VT-328) — it was NEVER declared on ``AgentGraphState``
+    until VT-608 (see ``state/agent_graph_state.py``'s own docstring for that fix). This is the
+    one-assert pin the report flagged as unpinned: a bare LangGraph invoke (no DB, no
+    ``_dispatch_specialist_step`` — this bug is ENTIRELY about the state schema declaration, not
+    the node's business logic) proving the key now actually reaches the terminal state instead of
+    vanishing."""
+    from langgraph.checkpoint.memory import InMemorySaver
+    from langgraph.graph import END, START, StateGraph
+
+    from orchestrator.state.agent_graph_state import AgentGraphState
+
+    def _node(state: dict[str, Any]) -> dict[str, Any]:
+        return {"campaign_execution_blocked": {"reason": "tenant_phase_terminal"}}
+
+    graph = StateGraph(AgentGraphState)
+    graph.add_node("campaign_execute", _node)
+    graph.add_edge(START, "campaign_execute")
+    graph.add_edge("campaign_execute", END)
+    compiled = graph.compile(checkpointer=InMemorySaver())
+
+    result = compiled.invoke(
+        {"messages": []}, config={"configurable": {"thread_id": str(uuid4())}}
+    )
+
+    assert result.get("campaign_execution_blocked") == {"reason": "tenant_phase_terminal"}
+
+
 def test_dispatch_closes_pipeline_run_escalated_on_escalate_outcome(
     substrate: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:

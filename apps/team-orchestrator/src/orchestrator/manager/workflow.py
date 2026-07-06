@@ -275,6 +275,27 @@ def _dispatch_specialist_step(
         terminal_state: dict[str, Any] = graph.invoke(
             initial_state, config={"configurable": {"thread_id": thread_id}}
         )
+
+    # VT-608 RULING 3 — the enforce-mode twin of runner.py's post-dispatch ingestion-commit
+    # executor. integration_agent's own commit_ingestion TOOL never writes the customer/ledger
+    # substrate (VT-268) — it only proposes (tenant_integration_state phase='ingestion_commit_
+    # pending'). This is the deterministic, non-agent code path that performs the actual write,
+    # gated on this dispatch having targeted integration_agent (a cheap no-op read for every other
+    # specialist's step). Both this hook and runner.py's call the SAME function against the SAME
+    # tenant_integration_state truth — no dual-writer race (RULING 1). Fail-soft: an executor
+    # failure must never fail this DBOS step; the phase stays observably 'ingestion_commit_pending'
+    # rather than a fabricated success.
+    if specialist == "integration_agent":
+        try:
+            from orchestrator.integrations.commit import execute_pending_ingestion_commit
+
+            execute_pending_ingestion_commit(tenant_id)
+        except Exception:  # noqa: BLE001 — never fail the dispatch step over a commit-executor bug
+            logger.exception(
+                "VT-608: execute_pending_ingestion_commit failed tenant=%s task=%s step=%s",
+                tenant_id, task_id, step_id,
+            )
+
     revised_outcome = terminal_state.get("manager_review_revised_outcome")
     is_paused = "__interrupt__" in terminal_state
     # VT-607 (Loop Package 6) — the outer-loop interrupt-composition fix: a pending interrupt (the

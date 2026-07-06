@@ -47,17 +47,22 @@ ORCHESTRATOR_EXPECTED = {
     "search_conversation_history",
 }
 INTEGRATION_EXPECTED = {
-    "list_connectors_tool",
-    # VT-425 Phase A — de-stubbed (real Shopify): renamed out of `_stub`. pull_sample returns
-    # COUNTS ONLY (no raw PII to the LLM). The connector COMMIT is NOT here — it runs server-side
-    # (shopify_onboarding.pull_and_ingest_shopify), never as an agent tool (VT-268 fail-closed).
-    "start_connector_setup",
+    # VT-608 (Loop Package 5) — the ten context-scoped tools replacing the VT-206/425 stub
+    # inventory, real for both Shopify + Google Sheets. pull_sample returns COUNTS ONLY (+ column
+    # NAMES for google_sheet — CL-104 sanctions field-name-only exposure). commit_ingestion
+    # returns a TYPED PROPOSAL only — the actual write runs server-side
+    # (integrations.commit.execute_pending_ingestion_commit), never as an agent tool (VT-268
+    # fail-closed) — mirrors the pre-existing shopify_onboarding.pull_and_ingest_shopify pattern.
+    "list_supported_connectors",
+    "read_integration_state",
+    "start_oauth",
+    "check_oauth_status",
     "pull_sample",
-    # Field-mapping stubs kept for Phase C (Sheets/CSV); Phase A Shopify uses fixed-schema auto-map.
-    "propose_field_mapping_stub",
-    "confirm_field_mapping_stub",
-    "setup_recurring_ingestion_stub",
-    # dedupe_against_existing_stub DELETED (plan §3 "delete the concept") — commit is server-side.
+    "propose_mapping",
+    "confirm_mapping",
+    "commit_ingestion",
+    "schedule_recurring_pull",
+    "verify_connector",
     "integration_escalate_to_fazal",
 }
 HANDOFF_EXPECTED = {
