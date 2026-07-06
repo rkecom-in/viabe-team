@@ -24,7 +24,11 @@ DBOS workflow keyed by ``(tenant_id, task_id)``:
         |- revise_step            -> loop: re-claim the SAME step (now 'pending' again) — up to
         |                           LIMIT_MAX_REVISIONS_PER_STEP times, then blocked+incident
         |- ask_owner               -> durable wait (amendment A3: >24h since the owner's last
-        |                           inbound re-engages via the approved template first)
+        |                           inbound re-engages via the approved template first); once
+        |                           answered, the reply is THREADED into the very next redispatch
+        |                           of the same step (VT-611 pre-work #6 —
+        |                           _augment_situation_with_answer — the resumed specialist sees
+        |                           the owner's answer instead of re-asking the same question)
         |- paused_approval (VT-607, Loop Package 6) -> durable wait for the approval gate's
         |                           SEPARATE resume path (approval_resume.resume_run, driven by
         |                           the webhook path when the owner replies) to resolve
@@ -489,6 +493,34 @@ def _resume_step_after_answer(tenant_id: str, task_id: str, step_id: str) -> Non
 
 
 @DBOS.step()
+def _get_latest_answered_question(tenant_id: str, task_id: str) -> dict[str, Any] | None:
+    """VT-611 pre-work #6 — the answer-threading fix's own read. Called right after
+    ``_resume_step_after_answer`` so the workflow loop can carry the owner's just-recorded answer
+    into the VERY NEXT dispatch of this same step (see ``_augment_situation_with_answer`` +
+    its call site in ``manager_task_workflow`` below)."""
+    from orchestrator.manager import pending_questions
+
+    return pending_questions.get_latest_answered(tenant_id, task_id)
+
+
+def _augment_situation_with_answer(situation: str, question_text: str, answer_text: str) -> str:
+    """VT-611 pre-work #6 — thread the owner's answer into the resumed specialist's context.
+
+    The bug this closes: ``_dispatch_specialist_step`` builds its messages from ONLY the step's
+    ORIGINALLY STORED ``situation``/``desired_outcome`` — before this fix, an ask_owner-resume
+    redispatch used that same stale text, with zero mention of the question the owner had just
+    answered. The resumed specialist had no way to know its own question had been addressed, so it
+    re-asked. Generic (not specialist-specific): every roster specialist's ask_owner flow re-enters
+    through this exact loop hop. Pure + deterministic — no DB/network here, the caller already read
+    the answer via ``_get_latest_answered_question``."""
+    return (
+        f"{situation}\n\n"
+        f"The owner was asked: {question_text}\n"
+        f"The owner answered: {answer_text}"
+    )
+
+
+@DBOS.step()
 def _promote_next_queued(tenant_id: str) -> UUID | None:
     return queue_promotion.promote_next_queued_task(tenant_id)
 
@@ -782,6 +814,13 @@ def manager_task_workflow(tenant_id: str, task_id: str) -> str:
     revision_counts: dict[int, int] = {}
     attempt_counts: dict[str, int] = {}
     verification_attempts = 0
+    # VT-611 pre-work #6 (answer-threading): set by the ask_owner branch right after an owner
+    # reply resumes a step; consumed EXACTLY ONCE, on the very next dispatch of that SAME step_id,
+    # then cleared — never leaks into a later revise_step/ask_owner cycle for the same step.
+    # Replay-safe like every other local counter here: DBOS re-derives it deterministically by
+    # re-walking the same committed step results.
+    pending_answer_step_id: str | None = None
+    pending_answer_situation: str | None = None
 
     while cycles < LIMIT_MAX_CYCLES:
         step = _claim_step(tenant_id, task_id)
@@ -800,9 +839,17 @@ def manager_task_workflow(tenant_id: str, task_id: str) -> str:
         plan_revision = int(task_row["plan_revision"]) if task_row else 1
         has_next = _has_other_pending_steps(tenant_id, task_id, plan_revision, step_id)
 
+        situation = step.get("situation") or ""
+        if pending_answer_step_id == step_id:
+            # The answer-threading fix's consume point: this is the FIRST re-claim of the step an
+            # owner reply just resumed — carry the Q&A into THIS dispatch, then never again.
+            situation = pending_answer_situation or situation
+            pending_answer_step_id = None
+            pending_answer_situation = None
+
         outcome, revised_outcome = _dispatch_specialist_step(
             tenant_id, task_id, step_id, attempt,
-            step.get("situation") or "",
+            situation,
             step.get("desired_outcome") or "",
             step.get("acceptance_criteria") or [],
             step.get("specialist"),
@@ -848,6 +895,18 @@ def manager_task_workflow(tenant_id: str, task_id: str) -> str:
             # claim_next_step only ever claims 'pending' steps, so transition it back before
             # looping, or the answered step would sit forever un-reclaimable.
             _resume_step_after_answer(tenant_id, task_id, step_id)
+            # VT-611 pre-work #6 — thread the owner's answer into the VERY NEXT dispatch of this
+            # same step (consumed once, at the top of the loop, then cleared). Without this the
+            # resumed specialist redispatches with only the step's ORIGINAL stored situation and
+            # has no idea the owner just answered its own question — it re-asks.
+            answered = _get_latest_answered_question(tenant_id, task_id)
+            if answered is not None:
+                pending_answer_step_id = step_id
+                pending_answer_situation = _augment_situation_with_answer(
+                    step.get("situation") or "",
+                    str(answered.get("question_text") or ""),
+                    str(answered.get("answer_text") or ""),
+                )
             continue  # loop back to claim the (now resumable) step
 
         if outcome == "escalate":
