@@ -93,7 +93,10 @@ class VtrAutonomyOverrideBody(BaseModel):
     operator_id: str
     tenant_id: str
     agent: str
-    action: Literal["freeze", "unfreeze", "demote", "revoke_l3"]
+    # VT-610: "force_l3" bypasses ONLY the earning threshold + owner opt-in (autonomy.force_l3) —
+    # never a policy/consent/opt-out/caps/ownership/activation/effect rail. The ONLY action here
+    # that widens trust rather than tightening/halting it.
+    action: Literal["freeze", "unfreeze", "demote", "revoke_l3", "force_l3"]
     reason: str = ""
 
 
@@ -325,7 +328,11 @@ def vtr_agent_state(
     x_operator_jwt: str | None = Header(default=None, alias="X-Operator-Jwt"),
 ) -> dict[str, Any]:
     """Per-agent autonomy rows for the tenant — EXACTLY the vtr_agent_autonomy view columns
-    (NO revoke_reason — excluded at the view, plan §2). A missing row = L2 default (UI renders)."""
+    (NO revoke_reason — excluded at the view, plan §2). A missing row = L2 default (UI renders).
+
+    VT-610: ``l3_force_granted_at``/``l3_force_granted_by_vtr`` are the FORCED-provenance pair —
+    the UI reads earned (``l3_granted_at`` set) vs forced (``l3_force_granted_at`` set) from these
+    two columns alongside the existing earned pair, no second query."""
     _require_uuid(body.tenant_id, "tenant_id")
     operator = _gate(
         x_internal_secret=x_internal_secret,
@@ -338,7 +345,8 @@ def vtr_agent_state(
         cur.execute(
             "SELECT tenant_id, tenant_name, agent, level, clean_approval_streak, "
             "lifetime_approvals, lifetime_rejections, frozen, last_regression_at, "
-            "last_regression_kind, l3_granted_at, l3_revoked_at, updated_at "
+            "last_regression_kind, l3_granted_at, l3_revoked_at, "
+            "l3_force_granted_at, l3_force_granted_by_vtr, updated_at "
             "FROM vtr_agent_autonomy WHERE tenant_id = %s ORDER BY agent",
             (body.tenant_id,),
         )
@@ -574,9 +582,10 @@ def vtr_autonomy_override_action(
     x_internal_secret: str | None = Header(default=None, alias="X-Internal-Secret"),
     x_operator_jwt: str | None = Header(default=None, alias="X-Operator-Jwt"),
 ) -> dict[str, Any]:
-    """Freeze / unfreeze / demote / revoke_l3 one (tenant, agent) via the Gap-6 seam. The mutation +
-    its ops_audit row commit in ONE service-pool txn; freeze/demote/revoke cancel open batches
-    atomically inside the seam (the binding kill-switch rule); unfreeze cancels nothing."""
+    """Freeze / unfreeze / demote / revoke_l3 / force_l3 one (tenant, agent) via the Gap-6 seam.
+    The mutation + its ops_audit row commit in ONE service-pool txn; freeze/demote/revoke cancel
+    open batches atomically inside the seam (the binding kill-switch rule); unfreeze AND force_l3
+    cancel nothing (force_l3 only ever WIDENS trust — there is nothing in-flight to kill)."""
     _require_uuid(body.tenant_id, "tenant_id")
     if body.agent not in OWNING_AGENTS:
         raise HTTPException(
@@ -599,8 +608,10 @@ def vtr_autonomy_override_action(
         with conn.transaction():
             # Pre-count the open batches the seam is about to cancel (the seam returns state, not
             # the count; same-txn read so the audit metadata matches what the UPDATEs hit).
+            # unfreeze and force_l3 cancel nothing by design (VT-610: force_l3 only ever widens
+            # trust — there is nothing armed to kill).
             batches_cancelled = 0
-            if body.action != "unfreeze":  # unfreeze cancels nothing by design
+            if body.action not in ("unfreeze", "force_l3"):
                 row = conn.execute(
                     "SELECT count(*) AS n FROM agent_draft_batches "
                     "WHERE tenant_id = %s AND agent = %s AND status = ANY(%s)",

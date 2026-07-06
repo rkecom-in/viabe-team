@@ -833,6 +833,87 @@ def test_vtr_override_unfreeze_cancels_nothing(substrate) -> None:
     assert _batch_row(dsn, tenant, batch)["status"] == "awaiting_approval"  # nothing cancelled
 
 
+def test_vtr_override_force_l3_grants_level_no_batch_cancel(substrate) -> None:
+    """VT-610: force_l3 through the SAME Gap-6 dispatcher — grants level, cancels nothing (unlike
+    freeze/demote/revoke_l3, it only ever WIDENS trust)."""
+    dsn = substrate.dsn
+    tenant = _new_tenant(dsn)
+    _seed_autonomy_row(dsn, tenant)
+    batch = _seed_batch(dsn, tenant)
+
+    with tenant_connection(tenant) as conn:
+        st = vtr_autonomy_override(
+            tenant, AGENT, "force_l3", reason="ops verified manually", vtr_id="v1", conn=conn
+        )
+    assert st.level == "L3"
+    assert _batch_row(dsn, tenant, batch)["status"] == "awaiting_approval"  # nothing cancelled
+
+
+# ---------------------------------------------------------------------------
+# 8. vtr-autonomy-override — the ENDPOINT (gate + no-batch-cancel + audit, at the HTTP layer)
+# ---------------------------------------------------------------------------
+
+
+def _override(
+    op: str, tenant: UUID, agent: str, action: str, *, jwt_for: str | None = None, reason: str = "ops"
+) -> dict[str, Any]:
+    return console.vtr_autonomy_override_action(
+        console.VtrAutonomyOverrideBody(
+            operator_id=op, tenant_id=str(tenant), agent=agent, action=action, reason=reason,
+        ),
+        x_internal_secret=_TEST_INTERNAL_SECRET,
+        x_operator_jwt=_op_jwt(jwt_for or op),
+    )
+
+
+def test_vtr_autonomy_override_endpoint_force_l3_success_no_cancel_and_audited(
+    substrate, monkeypatch
+) -> None:
+    _env(monkeypatch)
+    dsn = substrate.dsn
+    op = str(uuid4())
+    tenant = _new_tenant(dsn)
+    _assign(dsn, op, tenant)
+    batch = _seed_batch(dsn, tenant)
+
+    out = _override(op, tenant, AGENT, "force_l3", reason="verified via support call")
+
+    assert out["ok"] is True
+    assert out["state"]["level"] == "L3"
+    assert out["batches_cancelled"] == 0
+    assert _batch_row(dsn, tenant, batch)["status"] == "awaiting_approval"  # untouched
+
+    rows = _audit_rows(dsn, "autonomy_override", op)
+    assert rows
+    assert "action=force_l3" in rows[-1]["detail"]
+    assert "batches_cancelled=0" in rows[-1]["detail"]
+
+
+def test_vtr_autonomy_override_endpoint_force_l3_foreign_tenant_403_and_deny_audited(
+    substrate, monkeypatch
+) -> None:
+    """The operator↔tenant assignment gate binds force_l3 exactly like every other action here —
+    an unassigned operator is refused BEFORE any autonomy row is ever touched."""
+    _env(monkeypatch)
+    dsn = substrate.dsn
+    op = str(uuid4())
+    tenant_a = _new_tenant(dsn)
+    tenant_b = _new_tenant(dsn)
+    _assign(dsn, op, tenant_a)  # assigned to A only
+    _seed_autonomy_row(dsn, tenant_b)
+
+    with pytest.raises(HTTPException) as exc:
+        _override(op, tenant_b, AGENT, "force_l3")
+    assert exc.value.status_code == 403
+    rows = _audit_rows(dsn, "override_denied", op)
+    assert rows and str(rows[-1]["tenant_id"]) == str(tenant_b)
+    # The autonomy row was never touched — the deny happened before any mutation.
+    with tenant_connection(tenant_b) as conn:
+        from orchestrator.agents.autonomy import get_autonomy
+
+        assert get_autonomy(tenant_b, AGENT, conn=conn).level == "L2"
+
+
 def test_edit_roadmap_item_stale_version_raises(substrate) -> None:
     tenant = _new_tenant(substrate.dsn)
     _seed_plan(tenant)

@@ -42,6 +42,7 @@ from orchestrator.agents.autonomy import (  # noqa: E402
     L3_CLEAN_STREAK_THRESHOLD,
     AutonomyState,
     cancel_open_batches,
+    force_l3,
     get_autonomy,
     grant_l3,
     is_always_confirm,
@@ -182,7 +183,8 @@ def _autonomy_row(dsn: str, tenant: UUID, agent: str = AGENT) -> dict[str, Any]:
     with psycopg.connect(dsn, autocommit=True) as conn:
         row = conn.execute(
             "SELECT level, clean_approval_streak, frozen, l3_revoked_at, revoke_reason, "
-            "last_regression_kind FROM tenant_agent_autonomy "
+            "last_regression_kind, l3_force_granted_at, l3_force_granted_by_vtr "
+            "FROM tenant_agent_autonomy "
             "WHERE tenant_id = %s AND agent = %s",
             (str(tenant), agent),
         ).fetchone()
@@ -190,6 +192,7 @@ def _autonomy_row(dsn: str, tenant: UUID, agent: str = AGENT) -> dict[str, Any]:
     return {
         "level": row[0], "clean_approval_streak": row[1], "frozen": row[2],
         "l3_revoked_at": row[3], "revoke_reason": row[4], "last_regression_kind": row[5],
+        "l3_force_granted_at": row[6], "l3_force_granted_by_vtr": row[7],
     }
 
 
@@ -382,6 +385,99 @@ def test_grant_l3_frozen_is_noop(substrate) -> None:
         st = grant_l3(tenant, AGENT, uuid4(), conn=conn)
     assert st.level == "L2"
     assert st.l3_grant_approval_id is None
+
+
+# ---------------------------------------------------------------------------
+# 6b. force_l3 (VT-610): bypasses the streak + opt-in, NEVER frozen; no batch cancel; the
+# provenance columns are independent of the earned pair (grant_l3's l3_granted_at/approval_id).
+# ---------------------------------------------------------------------------
+
+
+def test_force_l3_bypasses_streak_sets_provenance_no_batch_cancel(substrate) -> None:
+    dsn = substrate.dsn
+    tenant = _new_tenant(dsn)
+    _seed_autonomy_row(dsn, tenant, streak=0)  # WAY below the 20-clean earning threshold
+    batch = _seed_batch(dsn, tenant, status="awaiting_approval")  # nothing in-flight gets killed
+    vtr = str(uuid4())
+
+    assert l3_proposal_eligible(get_autonomy(tenant, AGENT)) is False  # would refuse grant_l3
+
+    with tenant_connection(tenant) as conn:
+        st = force_l3(tenant, AGENT, vtr_id=vtr, reason="ops verified manually", conn=conn)
+
+    assert st.level == "L3"  # the streak bypass
+    assert st.l3_force_granted_at is not None
+    assert st.l3_force_granted_by_vtr == vtr
+    # The EARNED provenance pair stays untouched — force and earn are independent markers.
+    assert st.l3_granted_at is None
+    assert st.l3_grant_approval_id is None
+    # NO batch cancellation (unlike demote/freeze/revoke_l3) — force only ever widens trust.
+    assert _batch_row(dsn, tenant, batch)["status"] == "awaiting_approval"
+
+
+def test_force_l3_refuses_when_frozen(substrate) -> None:
+    """The one thing force_l3 does NOT bypass, mirroring grant_l3_frozen_is_noop: a live-frozen
+    agent refuses the force (a VTR must unfreeze first) — same in-txn revalidation shape."""
+    dsn = substrate.dsn
+    tenant = _new_tenant(dsn)
+    _seed_autonomy_row(dsn, tenant, frozen=True)
+
+    with tenant_connection(tenant) as conn:
+        st = force_l3(tenant, AGENT, vtr_id=str(uuid4()), reason="x", conn=conn)
+
+    assert st.level == "L2"
+    assert st.l3_force_granted_at is None
+    row = _autonomy_row(dsn, tenant)
+    assert row["l3_force_granted_by_vtr"] is None
+
+
+def test_force_l3_idempotent_on_already_l3_agent(substrate) -> None:
+    """A SET, not an earn-transition: forcing an already-L3 (earned OR forced) agent just
+    re-stamps the forced provenance — never an error, never a double-grant artifact."""
+    dsn = substrate.dsn
+    tenant = _new_tenant(dsn)
+    _seed_autonomy_row(dsn, tenant, level="L3", streak=0)  # already L3 (earned, per the fixture)
+    vtr = str(uuid4())
+
+    with tenant_connection(tenant) as conn:
+        st = force_l3(tenant, AGENT, vtr_id=vtr, reason="re-affirm", conn=conn)
+
+    assert st.level == "L3"
+    assert st.l3_force_granted_at is not None
+    assert st.l3_force_granted_by_vtr == vtr
+
+
+def test_force_l3_does_not_leak_cross_tenant(substrate) -> None:
+    """Tenant-scoped by an explicit WHERE tenant_id — a force on tenant A must never touch
+    tenant B's row (the RLS-scoping-not-bypassed proof at the primitive level; the endpoint's own
+    operator-assignment gate is the OTHER half, tested in test_ops_vtr_console.py)."""
+    dsn = substrate.dsn
+    tenant_a = _new_tenant(dsn)
+    tenant_b = _new_tenant(dsn)
+    _seed_autonomy_row(dsn, tenant_a, streak=0)
+    _seed_autonomy_row(dsn, tenant_b, streak=0)
+
+    with tenant_connection(tenant_a) as conn:
+        force_l3(tenant_a, AGENT, vtr_id=str(uuid4()), reason="x", conn=conn)
+
+    row_b = _autonomy_row(dsn, tenant_b)
+    assert row_b["level"] == "L2"
+    assert row_b["l3_force_granted_at"] is None
+
+
+def test_vtr_override_dispatches_force_l3(substrate) -> None:
+    """The Gap-6 seam routes 'force_l3' to the new primitive — proven through the SAME dispatcher
+    freeze/unfreeze/revoke_l3 already use, not a parallel call path."""
+    dsn = substrate.dsn
+    tenant = _new_tenant(dsn)
+    _seed_autonomy_row(dsn, tenant, streak=0)
+
+    with tenant_connection(tenant) as conn:
+        st = vtr_autonomy_override(
+            tenant, AGENT, "force_l3", reason="ops verified", vtr_id="v1", conn=conn
+        )
+    assert st.level == "L3"
+    assert st.l3_force_granted_by_vtr == "v1"
 
 
 # ---------------------------------------------------------------------------
