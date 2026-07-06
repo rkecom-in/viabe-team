@@ -55,6 +55,12 @@ HONESTY_CAVEATS: tuple[str, ...] = (
     "\"Delegation\" DB-proof = SR-spawn only: Sales Recovery is the only spawnable specialist "
     "today; Marketing/Accounting are advisory tool-lanes (inline tool-use, not a delegated "
     "sub-agent) — their routing is judge-scored, never DB-asserted, by design.",
+    "Shadow gate observes handle-directly-terminal turns only — paused-consequential and "
+    "fast-path turns are excluded BY DESIGN (the pause IS the safety gate; evaluating a "
+    "not-yet-approved campaign would be evaluating a non-effect). Shadow proves shadow-mode "
+    "runs clean on benign terminals; consequential-path safety (paused SR campaigns) is proven "
+    "separately by the campaign's own DB-asserts (assert_no_unapproved_effect) + the B1 "
+    "deterministic rails, not by this shadow leg.",
 )
 
 
@@ -145,22 +151,32 @@ def build_manifest(
     pack_summary: dict[str, Any] | None, pack_judged: dict[str, Any] | None,
     critical_summary: list[dict[str, Any]] | None, critical_judged: dict[str, Any] | None,
     shadow_evidence: dict[str, Any] | None,
-    teardown_confirmed: bool, zero_real_send_confirmed: bool,
+    teardown_confirmed: bool, zero_real_send_confirmed: bool, real_send_count: int | None = None,
     generated_at: str | None = None,
 ) -> dict[str, Any]:
     """Pure assembly — every input is an already-loaded dict (or None if that leg wasn't run yet),
     so this is fully unit-testable without any file I/O. A missing leg is reported as an explicit
-    open gap in the manifest, never silently dropped or treated as a pass."""
+    open gap in the manifest, never silently dropped or treated as a pass.
+
+    ``real_send_count`` (team-lead's zero-real-send guard, 2026-07-06): the actual count of
+    non-MKDEV (real Twilio-shaped) send SIDs observed during the run — cited as EVIDENCE, not
+    just a bare ``--zero-real-send-confirmed`` claim. A non-zero count is a contradiction the
+    manifest surfaces as a hard fail regardless of the confirmed flag (a human/script asserting
+    "confirmed" while the count says otherwise is exactly the silent-failure class this guards
+    against)."""
     pack = _pack_section(pack_summary, pack_judged)
     critical = _critical_section(critical_summary, critical_judged)
     shadow = _shadow_section(shadow_evidence)
+
+    send_contradiction = real_send_count is not None and real_send_count != 0
+    zero_real_send_ok = zero_real_send_confirmed and not send_contradiction
 
     legs_available = [pack["available"], critical["available"], shadow["available"]]
     legs_passed = [
         pack.get("passed", False), critical.get("passed", False), shadow.get("passed", False),
     ]
     overall_gate_passed = (
-        all(legs_available) and all(legs_passed) and teardown_confirmed and zero_real_send_confirmed
+        all(legs_available) and all(legs_passed) and teardown_confirmed and zero_real_send_ok
     )
 
     return {
@@ -173,6 +189,8 @@ def build_manifest(
         "shadow": shadow,
         "teardown_confirmed": teardown_confirmed,
         "zero_real_send_confirmed": zero_real_send_confirmed,
+        "real_send_count": real_send_count,
+        "zero_real_send_evidence_ok": zero_real_send_ok,
         "honesty_caveats": list(HONESTY_CAVEATS),
         "overall_gate_passed": overall_gate_passed,
     }
@@ -212,7 +230,9 @@ def _print_summary(manifest: dict[str, Any]) -> None:
         )
 
     print(f"teardown_confirmed={manifest['teardown_confirmed']} "
-          f"zero_real_send_confirmed={manifest['zero_real_send_confirmed']}")
+          f"zero_real_send_confirmed={manifest['zero_real_send_confirmed']} "
+          f"real_send_count={manifest['real_send_count']} "
+          f"zero_real_send_evidence_ok={manifest['zero_real_send_evidence_ok']}")
     print("\nHONESTY CAVEATS (cite these, never omit):")
     for c in manifest["honesty_caveats"]:
         print(f"  - {c}")
@@ -231,6 +251,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--shadow-json", default=None)
     p.add_argument("--teardown-confirmed", action="store_true")
     p.add_argument("--zero-real-send-confirmed", action="store_true")
+    p.add_argument(
+        "--real-send-count", type=int, default=None,
+        help="actual count of non-MKDEV (real Twilio-shaped) send SIDs observed — cited as "
+             "evidence; a non-zero value fails the gate regardless of --zero-real-send-confirmed",
+    )
     p.add_argument("--out", required=True)
     return p
 
@@ -244,6 +269,7 @@ def main(argv: list[str] | None = None) -> int:
         critical_summary=_load_json(args.critical_summary_json), critical_judged=_load_json(args.critical_judged),
         shadow_evidence=_load_json(args.shadow_json),
         teardown_confirmed=args.teardown_confirmed, zero_real_send_confirmed=args.zero_real_send_confirmed,
+        real_send_count=args.real_send_count,
     )
 
     with open(args.out, "w", encoding="utf-8") as fh:

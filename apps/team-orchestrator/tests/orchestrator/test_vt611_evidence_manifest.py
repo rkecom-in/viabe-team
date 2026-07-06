@@ -75,7 +75,9 @@ def test_build_manifest_all_clean_passes_overall():
     assert manifest["critical_x3"]["passed"] is True
     assert manifest["shadow"]["passed"] is True
     assert manifest["deploy_sha"] == "db36202"
-    assert len(manifest["honesty_caveats"]) == 2
+    assert len(manifest["honesty_caveats"]) == 3
+    assert manifest["real_send_count"] is None
+    assert manifest["zero_real_send_evidence_ok"] is True
 
 
 # --- missing legs are explicit gaps, never a silent pass --------------------------------------------
@@ -135,6 +137,30 @@ def test_build_manifest_false_zero_real_send_confirmed_fails_overall():
     assert manifest["overall_gate_passed"] is False
 
 
+# --- real_send_count: cited evidence, contradicts a bare confirmed flag -----------------------------
+
+
+def test_build_manifest_zero_real_send_count_matches_confirmed_flag():
+    kwargs = _full_clean_kwargs()
+    kwargs["real_send_count"] = 0
+    manifest = vem.build_manifest(**kwargs)
+    assert manifest["real_send_count"] == 0
+    assert manifest["zero_real_send_evidence_ok"] is True
+    assert manifest["overall_gate_passed"] is True
+
+
+def test_build_manifest_nonzero_real_send_count_fails_overall_even_if_confirmed_flag_is_true():
+    """team-lead's hard-stop guard: a human/script claiming --zero-real-send-confirmed while the
+    actual count is non-zero is exactly the silent-failure class this exists to catch — the count
+    overrides the bare claim."""
+    kwargs = _full_clean_kwargs()
+    kwargs["zero_real_send_confirmed"] = True
+    kwargs["real_send_count"] = 3
+    manifest = vem.build_manifest(**kwargs)
+    assert manifest["zero_real_send_evidence_ok"] is False
+    assert manifest["overall_gate_passed"] is False
+
+
 # --- a real failure surfaces in the right section, not silently ------------------------------------
 
 
@@ -191,6 +217,7 @@ def test_honesty_caveats_always_present_regardless_of_pass_fail():
     joined = " ".join(manifest["honesty_caveats"])
     assert "SR-only" in joined
     assert "SR-spawn" in joined
+    assert "handle-directly-terminal" in joined
 
 
 # --- main() — real file I/O smoke test --------------------------------------------------------------
