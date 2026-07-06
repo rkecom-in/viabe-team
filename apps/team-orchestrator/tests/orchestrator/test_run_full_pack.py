@@ -244,3 +244,37 @@ def test_main_writes_json_report(monkeypatch, tmp_path):
     bundle = json.loads(report_path.read_text())
     assert len(bundle) == 1
     assert bundle[0]["name"] == "s1"
+
+
+# --- build_pack_summary / --summary-json ------------------------------------------------------------
+
+
+def test_build_pack_summary_counts_domains_and_carries_per_scenario_verdicts():
+    pairs = [_pair("manager"), _pair("manager"), _pair("onboarding")]
+    per_scenario = [
+        {"name": "s1", "domain": "manager", "tenant_id": "t1", "clean": True, "block_reasons": []},
+        {"name": "s2", "domain": "onboarding", "tenant_id": "t2", "clean": False, "block_reasons": ["x"]},
+    ]
+    summary = rfp.build_pack_summary(pairs, per_scenario)
+    assert summary["domain_counts"] == {"manager": 2, "onboarding": 1}
+    assert summary["domain_floors"] == rfp.DOMAIN_FLOORS
+    assert any("manager" in f for f in summary["domain_floor_failures"])
+    assert summary["scenarios"] == per_scenario
+
+
+def test_main_writes_summary_json(monkeypatch, tmp_path):
+    _stub_infra(monkeypatch)
+    (tmp_path / "s1.json").write_text(json.dumps({
+        "name": "s1", "domain": "manager", "steps": [{"message": "hi"}],
+    }))
+    monkeypatch.setattr(ch, "run_scenario_steps", lambda *a, **k: [_sr("PASS", run_id=None)])
+    monkeypatch.setattr(rfp, "DOMAIN_FLOORS", {"manager": 1})
+
+    summary_path = tmp_path / "pack_summary.json"
+    rc = rfp.main(["--scenarios-dir", str(tmp_path), "--summary-json", str(summary_path)])
+    assert rc == 0
+    written = json.loads(summary_path.read_text())
+    assert written["domain_counts"] == {"manager": 1}
+    assert written["domain_floor_failures"] == []
+    assert len(written["scenarios"]) == 1
+    assert written["scenarios"][0]["clean"] is True
