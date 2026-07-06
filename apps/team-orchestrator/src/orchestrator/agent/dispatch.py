@@ -883,6 +883,61 @@ def dispatch_brain(
     if terminal_path == "collapse" and final_status == "completed":
         _maybe_send_collapse_reply(tenant_id, event, terminal_state, specialist_result)
 
+    # VT-611 (Phase B2, Finding A) — the shadow-mode OBSERVATIONAL manager_review pass
+    # (manager/shadow_eval.py). Runs AFTER legacy's own real reply/effect above (loop_mode.py's own
+    # docstring: "AFTER the legacy dispatch already produced its real reply/effect"). FAIL-SOFT,
+    # STRUCTURALLY: the mode read itself is INSIDE the try — this is the byte-identical-legacy
+    # file, so "nothing in this shadow-only addition can ever touch the real turn" is a guarantee
+    # the try/except enforces, never an argument that is_shadow() happens not to raise today. Same
+    # shape as VT-73's audit_run_isolation / VT-608's execute_pending_ingestion_commit calls
+    # already layered onto this hot path.
+    try:
+        # Lazy — even the mode check, so legacy/enforce never pay ANY import cost here (loop_mode
+        # is cheap; shadow_eval.py pulls in anthropic/review.py's own deps) and a failure importing
+        # either logs-and-skips rather than propagating.
+        from orchestrator.manager.loop_mode import is_shadow
+
+        if is_shadow():
+            from orchestrator.manager.shadow_eval import evaluate_turn_shadow
+            from orchestrator.privacy.pii_redactor import redact
+            from orchestrator.state.agent_graph_state import AgentGraphState
+            from orchestrator.supervisor import _render_raw_specialist_output
+
+            # "collapse" with a reason set is the VT-241 fail-closed cohort-rejection variant
+            # (_CohortRejectedResult, not a real CampaignPlan) — legacy's OWN rail already rejected
+            # it; nothing new for the observational pass to catch. Every other non-{collapse,
+            # terminal} path (escalated via the tool call; paused already returned earlier)
+            # produced no specialist output worth evaluating.
+            cohort_rejected = terminal_path == "collapse" and reason is not None
+            if terminal_path in ("collapse", "terminal") and not cohort_rejected:
+                owner_ask = redact(event.body or "") or (event.body or "")
+                evaluate_turn_shadow(
+                    tenant_id,
+                    turn_ref=event.twilio_message_sid or str(run_id),
+                    # No real manager-step framing exists for a legacy/shadow turn (no plan was
+                    # ever driven) — synthesized the SAME way triage_seam._build_draft_plan frames
+                    # a new_task: the owner's own inbound ask, redacted.
+                    situation=str(owner_ask)[:500],
+                    desired_outcome="Understand and act on the owner's request.",
+                    acceptance_criteria=["the owner confirms the ask was addressed"],
+                    # SAME renderer the REAL enforce-mode manager_review node uses
+                    # (supervisor._manager_review_node) — identical PII posture, no new redaction
+                    # surface, unconditionally computed to mirror that established call exactly.
+                    # terminal_state is graph.invoke's own return — the SAME dict this file already
+                    # threads through _maybe_send_manager_reply/_maybe_send_collapse_reply/
+                    # _write_compose_output as dict[str, Any]; cast, not a copy, matches its real
+                    # runtime shape for this one call (AgentGraphState is total=False).
+                    raw_output=_render_raw_specialist_output(cast(AgentGraphState, terminal_state)),
+                    campaign_plan=specialist_result if terminal_path == "collapse" else None,
+                    legacy_final_status=final_status,
+                    run_id=run_id,
+                )
+    except Exception:  # noqa: BLE001 — OBSERVATIONAL ONLY; must never affect the real turn
+        logger.exception(
+            "dispatch_brain: shadow_eval observational pass failed (fail-soft, no effect on "
+            "the real turn) run=%s tenant=%s", str(run_id), str(tenant_id),
+        )
+
     # 2. compose_output envelope (Q2 Option A) — always emit, regardless
     # of terminal path. Empty/None ComposedOutput is acceptable when the
     # agent's intent didn't map to a template; the envelope still records
