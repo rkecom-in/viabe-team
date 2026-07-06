@@ -15,9 +15,12 @@ DBOS workflow keyed by ``(tenant_id, task_id)``:
         |- complete              -> VERIFY OBJECTIVE (opus checkpoint, team-lead ruling round 2):
         |                           verified -> task 'completed' (a TRUE terminal status —
         |                           terminal_outcome + owner_notification_status='pending' +
-        |                           queue promotion fires); not_verified -> one revise cycle
-        |                           (appends a step addressing the gap) if the verification budget
-        |                           allows, else blocked+incident
+        |                           queue promotion fires), then _notify_owner_of_terminal (VT-611
+        |                           pre-work #1: the owner-notification composer — closes the
+        |                           "truthful owner outcome" gap; fail-soft, never unwinds the
+        |                           settle); not_verified -> one revise cycle (appends a step
+        |                           addressing the gap) if the verification budget allows, else
+        |                           blocked+incident
         |- revise_step            -> loop: re-claim the SAME step (now 'pending' again) — up to
         |                           LIMIT_MAX_REVISIONS_PER_STEP times, then blocked+incident
         |- ask_owner               -> durable wait (amendment A3: >24h since the owner's last
@@ -33,7 +36,8 @@ DBOS workflow keyed by ``(tenant_id, task_id)``:
         |                             rejected/defer -> task 'cancelled' (a TRUE terminal status),
         |                                              terminal_outcome='cancelled' (the owner
         |                                              notification must read a DECLINE, not a
-        |                                              success), step stays 'done'
+        |                                              success) + _notify_owner_of_terminal, step
+        |                                              stays 'done'
         |                             needs_changes  -> the revise_step path (supersede + a fresh
         |                                              pending replacement), same per-step
         |                                              revision budget; exhausted -> blocked+incident
@@ -578,6 +582,7 @@ def _run_verification_cycle(tenant_id: str, task_id: str, verification_attempts:
     verdict, reason = _verify_completion_step(tenant_id, task_id)
     if verdict == "verified":
         _settle_verified_task(tenant_id, task_id)
+        _notify_owner_of_terminal(tenant_id, task_id)
         return "settled", verification_attempts
     verification_attempts += 1
     if (
@@ -653,6 +658,20 @@ def _settle_declined_approval(tenant_id: str, task_id: str) -> None:
         summary=f"task={task_id} cancelled: owner declined the proposed effect",
         decision={"task_id": str(task_id), "terminal_outcome": "cancelled"},
     )
+
+
+@DBOS.step()
+def _notify_owner_of_terminal(tenant_id: str, task_id: str) -> None:
+    """VT-611 pre-work #1 — the owner-notification composer's own DBOS checkpoint. Called right
+    after EITHER settle path above lands (_settle_verified_task via _run_verification_cycle;
+    _settle_declined_approval directly) so a completed/cancelled task actually tells the owner
+    something, closing the "truthful owner outcome" gap (terminal_outcome +
+    owner_notification_status='pending' were recorded since mig 165, but nothing sent until this).
+    Fail-soft by construction (owner_surface.task_outcome never raises) — a notification-send
+    failure must never unwind the settle that already committed."""
+    from orchestrator.owner_surface.task_outcome import maybe_notify_owner_of_task_outcome
+
+    maybe_notify_owner_of_task_outcome(tenant_id, task_id)
 
 
 @DBOS.step()
@@ -883,6 +902,7 @@ def manager_task_workflow(tenant_id: str, task_id: str) -> str:
                 # resolves the same way a rejection does (status='rejected'); the audit truth of
                 # WHICH is preserved in pending_approvals.decision, not re-derived here.
                 _settle_declined_approval(tenant_id, task_id)
+                _notify_owner_of_terminal(tenant_id, task_id)
                 break
 
             if decision == "needs_changes":
