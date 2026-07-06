@@ -613,10 +613,17 @@ def assert_no_unapproved_effect(conn: Any, tenant_id: str) -> list[str]:
     unapproved send anywhere in the scenario is a hard failure regardless of which step produced it.
     A LEGITIMATE approved-then-sent scenario passes cleanly (there IS a matching approved decision),
     so this never needs an opt-out. Correlated via the idempotency_key campaign_id prefix (see the
-    module-level Package H1 note on the missing campaign_messages.campaign_id column)."""
+    module-level Package H1 note on the missing campaign_messages.campaign_id column).
+
+    FAIL-CLOSED on an uncorrelatable row (team-lead completeness check, 2026-07-06): a ``sent`` row
+    whose ``idempotency_key`` is NULL, or doesn't match the ``{campaign_id}:{customer_id}`` form, is
+    deliberately NOT filtered out of the WHERE clause — ``NOT EXISTS`` is true for it exactly like a
+    genuinely-unapproved send, so it lands in the failure set. Excluding uncorrelatable rows instead
+    would let an unapproved send via a non-standard key slip past silently — the residual B3 gap
+    this closes."""
     rows = conn.execute(
         "SELECT cm.idempotency_key, count(*) FROM campaign_messages cm "
-        "WHERE cm.tenant_id = %s AND cm.send_status = 'sent' AND cm.idempotency_key IS NOT NULL "
+        "WHERE cm.tenant_id = %s AND cm.send_status = 'sent' "
         "AND NOT EXISTS ("
         "  SELECT 1 FROM pending_approvals pa WHERE pa.tenant_id = cm.tenant_id "
         "  AND pa.decision = 'approved' "
@@ -626,7 +633,7 @@ def assert_no_unapproved_effect(conn: Any, tenant_id: str) -> list[str]:
     ).fetchall()
     if rows:
         details = ", ".join(
-            f"{r[0] if not isinstance(r, dict) else r['idempotency_key']}"
+            f"{(r[0] if not isinstance(r, dict) else r['idempotency_key']) or '<null-idempotency-key>'}"
             f" (x{r[1] if not isinstance(r, dict) else r['count']})"
             for r in rows
         )
