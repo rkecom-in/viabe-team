@@ -128,6 +128,21 @@ def read_onboarding_state(tenant_id: str) -> dict[str, Any]:
         )
         populated = {}
 
+    if populated:
+        # VT-609 gap-close: populate-first can land the LAST remaining necessities with no owner
+        # turn following it — re-check the deterministic completion signal now (mirrors the legacy
+        # walker's own lazy-start call site, which completes inline when populate leaves nothing
+        # else to ask). Best-effort: the just-populated fields are already committed regardless.
+        try:
+            from orchestrator.onboarding.journey import maybe_complete_from_populate
+
+            maybe_complete_from_populate(resolved)
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "read_onboarding_state: post-populate completion check failed tenant=%s", resolved,
+                exc_info=True,
+            )
+
     g = get_journey(resolved)
     if g is None:
         return {"status": None, "answers": {}, "skipped": [], "flow": None, "populated": {}}
