@@ -73,3 +73,10 @@ production stays on legacy graph until the final promotion gate (Fazal-authorize
   outcome' is its gate); declare campaign_execution_blocked (dead-write, same silent-drop class).
   New builder protocol after 4 finish-line stalls: builder commits on targeted-green + reports
   immediately; the team lead runs the battery + lands.
+- 2026-07-06 (exec 6 LANDED): **VT-608 integration specialist real** (migration 168). Review found
+  9/9 incl. two criticals a green suite hid (Sheets resume dead-end/cross-fire; owner-confirmed
+  mapping decorative) + the stale-pending unrequested-ingestion class (killed via arming-identity +
+  expiry). Named follow-ups: team-web Sheets picker PAGE row; test_vt384_l3 ordering flake fix +
+  the three CRITICAL-2 coverage residuals → VT-611 pre-work; live Rule-15 canaries pending on
+  deployed dev. Model discipline holding: all builders sonnet-5; opus = 1 lens/gate + critical
+  re-verify + judge only; severity-tiered skeptics now active.
