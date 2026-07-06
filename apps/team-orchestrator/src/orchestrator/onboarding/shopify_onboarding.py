@@ -443,6 +443,9 @@ def pull_and_ingest_shopify(
         "sales_written": summary.sales_written,
         "sales_skipped_duplicate": summary.sales_skipped_duplicate,
         "skipped_non_inr": skipped_non_inr,
+        # VT-608 fix round MINOR 1 — the NEW-customer count, distinct from committed (which also
+        # counts rows that matched an EXISTING customer) — see IngestSummary's own docstring.
+        "new_customers": summary.new_customers,
     }
 
 

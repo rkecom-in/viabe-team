@@ -927,11 +927,12 @@ def webhook_pipeline_run(tenant_id: str, run_id: str, twilio_fields: dict) -> di
         and not event.dupe_status
         and not integration_loop_owns_turn
     ):
-        from orchestrator.onboarding.shopify_onboarding import (
-            maybe_resume_shopify_onboarding,
-        )
+        # VT-608 fix round CRITICAL 1 — route on the tenant's actual connector (tenant_
+        # integration_state has ONE row per tenant; a Sheets-flow tenant must never be
+        # intercepted by the Shopify-only hook). See onboarding.connector_resume's own docstring.
+        from orchestrator.onboarding.connector_resume import maybe_resume_connector_onboarding
 
-        resume_result = maybe_resume_shopify_onboarding(
+        resume_result = maybe_resume_connector_onboarding(
             tenant_id, event.body or "", event.twilio_message_sid, event.sender_phone
         )
         if resume_result is not None:
@@ -1154,7 +1155,11 @@ def webhook_pipeline_run(tenant_id: str, run_id: str, twilio_fields: dict) -> di
                 try:
                     from orchestrator.integrations.commit import execute_pending_ingestion_commit
 
-                    execute_pending_ingestion_commit(tenant_id)
+                    # VT-608 fix round MAJOR 1 — this webhook run's own run_id is the SAME value
+                    # dispatch_brain's observability_context set as ctx.run_id, so it matches
+                    # whatever commit_ingestion armed the proposal with THIS turn (never a stale
+                    # proposal from an earlier, unrelated turn).
+                    execute_pending_ingestion_commit(tenant_id, current_turn_id=run_id)
                 except Exception:  # noqa: BLE001 — never block the webhook run's own close
                     logger.exception(
                         "VT-608: execute_pending_ingestion_commit failed tenant=%s run=%s",

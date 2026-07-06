@@ -55,6 +55,16 @@ _DRIVE_CHANNEL_TTL = timedelta(days=7)  # Drive max
 _DRIVE_RENEW_WINDOW = timedelta(hours=48)
 
 
+def _escape_a1_sheet_name(name: str) -> str:
+    """VT-608 fix round MINOR 3 — quote a sheet-tab name for A1-range notation per Google's own
+    grammar: a name embedded in single quotes must have any LITERAL single quote DOUBLED
+    (``Bob's Data`` -> ``'Bob''s Data'``). Without this, a tab name containing an apostrophe (or
+    an adversarially-crafted value) breaks — or manipulates — the range Google's Sheets API
+    actually parses. Only ever called with an already-quoted wrapper (``f"'{_escape_a1_sheet_name(name)}'!..."``,
+    used at both call sites below) — this function itself only escapes, never adds the quotes."""
+    return name.replace("'", "''")
+
+
 @dataclass(frozen=True)
 class SamplePayload:
     """Result of ``pull_sample``."""
@@ -308,7 +318,7 @@ class GoogleSheetConnector(ConnectorBase):
         if not spreadsheet_id:
             raise ValueError("pull_sample: spreadsheet_id required")
         access_token = self.get_access_token(tenant_id)
-        effective_range = f"'{tab_name}'!{range_a1}" if tab_name else range_a1
+        effective_range = f"'{_escape_a1_sheet_name(tab_name)}'!{range_a1}" if tab_name else range_a1
         url = (
             f"https://sheets.googleapis.com/v4/spreadsheets/"
             f"{spreadsheet_id}/values/{effective_range}"
@@ -368,7 +378,7 @@ class GoogleSheetConnector(ConnectorBase):
         if not spreadsheet_id:
             raise ValueError("pull_full: spreadsheet_id required")
         access_token = self.get_access_token(tenant_id)
-        tab_prefix = f"'{tab_name}'!" if tab_name else ""
+        tab_prefix = f"'{_escape_a1_sheet_name(tab_name)}'!" if tab_name else ""
         # Header (row 1) is needed to label cells — pull_full's old range
         # (A{start}:Z) skipped it, leaving rows un-labellable.
         header_resp = httpx.get(

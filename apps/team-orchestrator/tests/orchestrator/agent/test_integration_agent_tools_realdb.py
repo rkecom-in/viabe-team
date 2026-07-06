@@ -131,6 +131,89 @@ def test_check_oauth_status_false_then_true(substrate):
     assert after == {"connector_id": "google_sheet", "connected": True}
 
 
+# --- pull_sample (google_sheet branch) — MINOR 5 full coverage -------------------------------
+
+
+def test_pull_sample_google_sheet_awaiting_picker_selection(substrate):
+    """No spreadsheet_id on file yet (the owner hasn't finished the picker) — an honest
+    incomplete-input state, never a failure."""
+    from orchestrator.agent.integration_agent import pull_sample
+
+    tid = _seed_tenant(substrate)
+    with _ctx(uuid4(), tid):
+        out = pull_sample.func(tenant_id=tid, connector_id="google_sheet")  # type: ignore[attr-defined]
+    assert out == {"connector_id": "google_sheet", "status": "awaiting_picker_selection", "row_count": 0}
+
+
+def test_pull_sample_google_sheet_success_advances_phase_and_persists_columns(substrate, monkeypatch):
+    from orchestrator.agent.integration_agent import pull_sample, read_integration_state
+    from orchestrator.integrations.connectors.google_sheet import GoogleSheetConnector
+    from orchestrator.onboarding.shopify_onboarding import PHASE_SAMPLE, _validated_pending, _write_state
+
+    tid = _seed_tenant(substrate)
+    # Mirrors what the picker's own POST /select would have already persisted.
+    picker_pending = _validated_pending(
+        awaiting="sample_pull_pending",
+        prompt_text="x",
+        connector_id="google_sheet",
+        metadata={"spreadsheet_id": "sheet-x", "tab_name": "Sheet1"},
+    )
+    _write_state(tid, phase=PHASE_SAMPLE, connector_id="google_sheet", pending=picker_pending)
+
+    def _fake_pull_sample(self, tenant_id, spreadsheet_id, *, tab_name=""):
+        assert spreadsheet_id == "sheet-x"
+        assert tab_name == "Sheet1"
+        return [{"Mobile": "9876500055", "Name": "Ravi K"}]
+
+    monkeypatch.setattr(GoogleSheetConnector, "pull_sample", _fake_pull_sample)
+
+    with _ctx(uuid4(), tid):
+        out = pull_sample.func(tenant_id=tid, connector_id="google_sheet")  # type: ignore[attr-defined]
+    assert out["row_count"] == 1
+    assert sorted(out["column_names"]) == ["Mobile", "Name"]
+
+    # A LATER, independent call sees the phase advanced + columns persisted (resume proof).
+    with _ctx(uuid4(), tid):
+        state = read_integration_state.func(tenant_id=tid)  # type: ignore[attr-defined]
+    assert state["phase"] == "phase_4_field_mapping"
+    metadata = state["pending_owner_input"]["metadata"]
+    assert sorted(metadata["column_names"]) == ["Mobile", "Name"]
+    # spreadsheet_id/tab_name carried forward, not clobbered.
+    assert metadata["spreadsheet_id"] == "sheet-x"
+    assert metadata["tab_name"] == "Sheet1"
+
+
+def test_pull_sample_google_sheet_connector_error_never_advances_phase(substrate, monkeypatch):
+    from orchestrator.agent.integration_agent import pull_sample
+    from orchestrator.integrations.connectors.google_sheet import GoogleSheetConnector
+    from orchestrator.onboarding.shopify_onboarding import PHASE_SAMPLE, _validated_pending, _write_state
+
+    tid = _seed_tenant(substrate)
+    picker_pending = _validated_pending(
+        awaiting="sample_pull_pending",
+        prompt_text="x",
+        connector_id="google_sheet",
+        metadata={"spreadsheet_id": "sheet-x", "tab_name": "Sheet1"},
+    )
+    _write_state(tid, phase=PHASE_SAMPLE, connector_id="google_sheet", pending=picker_pending)
+
+    def _broken_pull_sample(self, tenant_id, spreadsheet_id, *, tab_name=""):
+        raise RuntimeError("Sheets API unavailable")
+
+    monkeypatch.setattr(GoogleSheetConnector, "pull_sample", _broken_pull_sample)
+
+    with _ctx(uuid4(), tid):
+        out = pull_sample.func(tenant_id=tid, connector_id="google_sheet")  # type: ignore[attr-defined]
+    assert out["connector_id"] == "google_sheet"
+    assert out["status"] == "error"  # a connector failure, never needs_owner_input
+
+    with psycopg.connect(substrate, autocommit=True) as conn:
+        row = conn.execute(
+            "SELECT phase FROM tenant_integration_state WHERE tenant_id = %s", (tid,)
+        ).fetchone()
+    assert row[0] == "phase_3_sample_pull"  # unchanged — never fabricated progress
+
+
 # --- confirm_mapping ---------------------------------------------------------------------
 
 

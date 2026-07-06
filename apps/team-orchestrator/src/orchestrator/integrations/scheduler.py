@@ -94,13 +94,18 @@ def _compute_next_run(pull_cadence: str, after: datetime) -> datetime:
 
 
 def _ingest_pulled_rows(
-    tenant_id: UUID, connector_id: str, pulled: list
+    tenant_id: UUID, connector_id: str, pulled: list, *, field_mapping: dict[str, str] | None = None
 ) -> int:
     """Map a connector's ``pull_full`` rows → ``CanonicalRow`` and land them via
     ``ingest_customer_rows``. Returns the committed-customer count.
 
     Connector-aware mapping (the pull shapes differ):
       * ``google_sheet`` — rows are ``{column -> cell}`` dicts → ``sheet_row_to_canonical``.
+        ``field_mapping`` (VT-608 fix round CRITICAL 2) — the owner-CONFIRMED mapping persisted in
+        ``tenant_connector_status.field_mapping`` (migration 168) — is threaded through so a
+        RECURRING pull honours the SAME confirmed mapping the initial commit used, not just the
+        alias-guess fallback. ``None`` (no mapping confirmed, or a non-Sheets connector) keeps the
+        exact pre-existing alias-table behavior.
       * ``shopify`` — ``pull_full`` returns CUSTOMER dicts (identity only; NO orders/
         sales — the order-of-record substrate arrives via the webhook + ``backfill_orders``).
         We land identity (phone/email/name); no sale is fabricated from a customer row.
@@ -120,7 +125,8 @@ def _ingest_pulled_rows(
         rows = [
             c
             for r in pulled
-            if isinstance(r, dict) and (c := sheet_row_to_canonical(r)) is not None
+            if isinstance(r, dict)
+            and (c := sheet_row_to_canonical(r, mapping=field_mapping)) is not None
         ]
         acquired_via = "google_sheet"
     elif connector_id == "shopify":
@@ -187,7 +193,7 @@ def ingest_one_connector(tenant_id: UUID, connector_id: str) -> dict[str, object
     with pool.connection() as conn, conn.cursor() as cur:
         cur.execute(
             "SELECT pull_cadence, last_sync_at, consecutive_fails, "
-            "rows_ingested_today, last_ingested_date "
+            "rows_ingested_today, last_ingested_date, field_mapping "
             "FROM tenant_connector_status "
             "WHERE tenant_id = %s AND connector_id = %s",
             (str(tenant_id), connector_id),
@@ -205,7 +211,7 @@ def ingest_one_connector(tenant_id: UUID, connector_id: str) -> dict[str, object
         row = raw
     else:
         cols = ["pull_cadence", "last_sync_at", "consecutive_fails",
-                "rows_ingested_today", "last_ingested_date"]
+                "rows_ingested_today", "last_ingested_date", "field_mapping"]
         row = dict(zip(cols, raw, strict=True))
 
     # VT-374 (ingestion, connector_pull) seam — defense-in-depth with the fan-out check
@@ -236,7 +242,9 @@ def ingest_one_connector(tenant_id: UUID, connector_id: str) -> dict[str, object
         # Map each connector-pull row → CanonicalRow (connector-aware) → real
         # customers + sale ledger via ingest_customer_rows. tenant_id is the
         # scheduler's server-derived argument (P3), never from a row.
-        rows_committed = _ingest_pulled_rows(tenant_id, connector_id, pulled or [])
+        rows_committed = _ingest_pulled_rows(
+            tenant_id, connector_id, pulled or [], field_mapping=row.get("field_mapping")
+        )
     except Exception as exc:  # noqa: BLE001 — scheduler must not crash
         error_message = repr(exc)[:200]
         logger.exception(

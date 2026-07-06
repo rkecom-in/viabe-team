@@ -403,17 +403,59 @@ def confirm_mapping(tenant_id: str, connector_id: str, mapping: dict[str, str]) 
     return {"connector_id": connector_id, "confirmed": True, "field_count": len(mapping)}
 
 
+def _current_turn_id() -> str | None:
+    """VT-608 fix round MAJOR 1 — the ambient dispatch's own identity (the SAME ``run_id`` the
+    two commit-executor call sites have in their own local scope: the webhook ``run_id`` in
+    runner.py's legacy/shadow path, ``task_id`` in workflow.py's enforce-mode path — both set
+    ``observability_context(run_id=..., ...)`` to exactly that value before invoking the graph).
+    Used to ARM a commit proposal with the turn that proposed it, so a LATER, unrelated turn's
+    executor call never re-fires a stale proposal (see ``execute_pending_ingestion_commit``)."""
+    from orchestrator.observability.decorators import _observability_context
+
+    ctx = _observability_context.get()
+    return str(ctx.run_id) if ctx is not None else None
+
+
+def _persist_confirmed_mapping(tenant_id: str, connector_id: str, mapping: dict[str, Any]) -> None:
+    """VT-608 fix round CRITICAL 2 — durably persist the owner-confirmed mapping into
+    ``tenant_connector_status.field_mapping`` (migration 168) so BOTH this commit AND every later
+    recurring-pull sweep (``integrations/scheduler.py``) read the SAME confirmed mapping — the
+    ephemeral ``tenant_integration_state.pending_owner_input`` envelope this mapping ALSO travels
+    through gets overwritten by later phase transitions and cannot be the durable home."""
+    from psycopg.types.json import Jsonb
+
+    from orchestrator.db import tenant_connection
+
+    with tenant_connection(tenant_id) as conn:
+        conn.execute(
+            """
+            INSERT INTO tenant_connector_status (tenant_id, connector_id, field_mapping)
+            VALUES (%s, %s, %s)
+            ON CONFLICT (tenant_id, connector_id) DO UPDATE SET
+                field_mapping = EXCLUDED.field_mapping,
+                updated_at = now()
+            """,
+            (tenant_id, connector_id, Jsonb(mapping)),
+        )
+
+
 @tool
 def commit_ingestion(tenant_id: str, connector_id: str) -> dict[str, Any]:
     """Propose committing the pulled sample into Viabe's customer substrate. RETURNS A PROPOSAL
     ONLY — you hold no write/commit tool (VT-268: never fabricate that data has landed). The
     actual ingestion runs SERVER-SIDE, deterministically, right after this turn ends; a
     subsequent ``verify_connector`` call (on your NEXT turn) will show it as completed.
+
+    The proposal is armed with THIS turn's identity (VT-608 fix round MAJOR 1) — the executor
+    only ever fires for the SAME turn that proposed it; a stale/failed proposal from an earlier
+    turn is never silently re-executed later.
     """
     resolved = resolve_lane_tenant(tenant_id, tool_name="commit_ingestion")
     if resolved is None:
         return lane_tenant_error("commit_ingestion")
     tenant_id = str(resolved)
+
+    from datetime import UTC, datetime, timedelta
 
     from orchestrator.onboarding.shopify_onboarding import (
         PHASE_MAPPING,
@@ -430,11 +472,25 @@ def commit_ingestion(tenant_id: str, connector_id: str) -> dict[str, Any]:
             "status": "error",
             "error": "no spreadsheet/tab on file — call pull_sample first",
         }
+
+    confirmed_mapping = existing_metadata.get("confirmed_mapping")
+    if connector_id == "google_sheet" and confirmed_mapping:
+        _persist_confirmed_mapping(tenant_id, connector_id, confirmed_mapping)
+
+    armed_metadata = {
+        **existing_metadata,
+        "armed_turn_id": _current_turn_id(),
+        "armed_at": datetime.now(UTC).isoformat(),
+    }
+    # A short, same-turn TTL — the executor is expected to run immediately after THIS turn's
+    # dispatch ends; belt-and-braces alongside the arming-identity check itself.
+    expires_at = (datetime.now(UTC) + timedelta(minutes=10)).isoformat()
     pending = _validated_pending(
         awaiting="ingestion_commit_pending",
         prompt_text="Committing your data now.",
         connector_id=connector_id,
-        metadata=existing_metadata,
+        metadata=armed_metadata,
+        expires_at=expires_at,
     )
     _write_state(tenant_id, phase=PHASE_MAPPING, connector_id=connector_id, pending=pending)
     logger.info("VT-608 commit_ingestion PROPOSED tenant=%s connector=%s", tenant_id, connector_id)

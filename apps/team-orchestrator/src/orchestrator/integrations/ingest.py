@@ -99,7 +99,14 @@ class CanonicalRow(BaseModel):
 class IngestSummary:
     """Counts only — NO PII (CL-390). Mirrors ``_image_adapter.IngestionSummary``.
 
-    ``committed`` — rows that resolved/created a customer.
+    ``committed`` — rows that resolved/created a customer (``new_customers + matched_customers``).
+    ``new_customers`` / ``matched_customers`` (VT-608 fix round MINOR 1) — the ``committed``
+    breakdown by ``dedup_and_merge``'s own ``MergeResult.kind``: ``inserted`` (a genuinely NEW
+    customer) vs ``merged`` (the row matched an EXISTING customer). Callers reporting "found N
+    customers" to an owner should use ``new_customers``, not ``committed`` — a RE-RUN over
+    already-ingested rows (a recurring pull, or a retried commit) reports every row as
+    ``committed`` again even though most already existed, silently OVER-COUNTING "found N
+    customers" on each re-run.
     ``ambiguous`` — rows whose identity matched >1 existing customer (parked in
         ``pending_dedup_resolution`` by ``dedup_and_merge``; NO ledger written).
     ``dropped``   — rows with no identity anchor.
@@ -113,6 +120,8 @@ class IngestSummary:
     dropped: int
     sales_written: int
     sales_skipped_duplicate: int
+    new_customers: int = 0
+    matched_customers: int = 0
 
 
 def ingest_customer_rows(
@@ -144,6 +153,7 @@ def ingest_customer_rows(
     now = now or datetime.now(UTC)
     committed = ambiguous = dropped = 0
     sales_written = sales_skipped = 0
+    new_customers = matched_customers = 0
 
     for row in rows:
         if not row.has_anchor():
@@ -163,6 +173,10 @@ def ingest_customer_rows(
             ambiguous += 1
             continue
         committed += 1
+        if merge.kind == "inserted":
+            new_customers += 1
+        else:  # "merged" — matched an existing customer
+            matched_customers += 1
 
         if row.sales:
             entries = [
@@ -201,6 +215,8 @@ def ingest_customer_rows(
         dropped=dropped,
         sales_written=sales_written,
         sales_skipped_duplicate=sales_skipped,
+        new_customers=new_customers,
+        matched_customers=matched_customers,
     )
     logger.info(
         "ingest_customer_rows: tenant=%s acquired_via=%s rows=%d committed=%d "
@@ -321,22 +337,42 @@ def _sheet_date(raw: Any) -> date | None:
     return None
 
 
+def _norm_key(s: str) -> str:
+    """Case/space/underscore/hyphen-insensitive column-name key, shared by the alias table AND
+    (VT-608 fix round) the owner-confirmed-mapping resolver below."""
+    return re.sub(r"[\s_\-]", "", str(s).strip().lower())
+
+
 def _first_by_alias(row: dict[str, Any], aliases: tuple[str, ...]) -> Any:
     """Return the first non-empty cell whose column name (case/space/underscore-
     insensitive) matches one of ``aliases``. None if no match."""
-    norm = {
-        re.sub(r"[\s_\-]", "", str(k).strip().lower()): v
-        for k, v in row.items()
-    }
+    norm = {_norm_key(k): v for k, v in row.items()}
     for alias in aliases:
-        key = re.sub(r"[\s_\-]", "", alias)
-        val = norm.get(key)
+        val = norm.get(_norm_key(alias))
         if val is not None and str(val).strip() != "":
             return val
     return None
 
 
-def sheet_row_to_canonical(row: dict[str, Any]) -> CanonicalRow | None:
+def _first_by_mapping(row: dict[str, Any], mapping: dict[str, str], canonical_field: str) -> Any:
+    """VT-608 fix round CRITICAL 2 — return the first non-empty cell whose SOURCE column the
+    owner-confirmed ``mapping`` ({source_column: canonical_field}) maps to ``canonical_field``.
+    Column-name matching is the SAME case/space/underscore-insensitive comparison
+    ``_first_by_alias`` uses (defensive — the header read at commit time should match the header
+    read at sample time exactly, but this tolerates incidental whitespace/casing drift)."""
+    norm_row = {_norm_key(k): v for k, v in row.items()}
+    for source_col, target in mapping.items():
+        if target != canonical_field:
+            continue
+        val = norm_row.get(_norm_key(source_col))
+        if val is not None and str(val).strip() != "":
+            return val
+    return None
+
+
+def sheet_row_to_canonical(
+    row: dict[str, Any], *, mapping: dict[str, str] | None = None
+) -> CanonicalRow | None:
     """Map an arbitrary owner-sheet row → ``CanonicalRow`` (or None if no anchor).
 
     Identity = phone(E.164) / email / name. Sale = amount + date columns when BOTH
@@ -348,7 +384,40 @@ def sheet_row_to_canonical(row: dict[str, Any]) -> CanonicalRow | None:
 
     PII boundary (§3): only phone / email / name + the one sale magnitude/date are
     read; every other column (address, GST, notes, line items) is dropped here.
+
+    ``mapping`` (VT-608 fix round, CRITICAL 2): an owner-CONFIRMED ``{source_column:
+    canonical_field}`` map (``propose_mapping``/``confirm_mapping``'s own output) — when given, it
+    DRIVES the transform instead of the alias table below, closing the defect where a confirmed
+    mapping that overrides an alias (e.g. a column named "mob" the owner confirmed means "phone")
+    had zero effect on ingestion. Canonical fields with no ``CanonicalRow`` slot
+    (last_seen/address/tags) are accepted in the mapping but simply have nowhere to land — dropped,
+    same as an unmapped column always was. Omitted (every pre-VT-608 caller, and every connector
+    with no reasoner — Shopify) keeps the EXACT alias-table behavior, byte-for-byte.
     """
+    if mapping:
+        phone_e164 = _normalize_e164(_first_by_mapping(row, mapping, "phone"))
+        email_raw = _first_by_mapping(row, mapping, "email")
+        email = (
+            str(email_raw).strip().lower()
+            if email_raw is not None and str(email_raw).strip()
+            else None
+        )
+        name_raw = _first_by_mapping(row, mapping, "customer_name")
+        display_name = (
+            str(name_raw).strip() if name_raw is not None and str(name_raw).strip() else None
+        )
+        if not (phone_e164 or email or display_name):
+            return None
+        sales = ()  # type: tuple[SaleLine, ...]
+        paise = _amount_to_paise(_first_by_mapping(row, mapping, "order_amount"))
+        entry_date = _sheet_date(_first_by_mapping(row, mapping, "order_date"))
+        if paise is not None and entry_date is not None:
+            sales = (SaleLine(amount_paise=paise, entry_date=entry_date, confidence=1.0),)
+        return CanonicalRow(
+            phone_e164=phone_e164, email=email, display_name=display_name,
+            sales=sales, consent=None,
+        )
+
     phone_e164 = _normalize_e164(_first_by_alias(row, _PHONE_KEYS))
     email_raw = _first_by_alias(row, _EMAIL_KEYS)
     email = (
@@ -364,17 +433,17 @@ def sheet_row_to_canonical(row: dict[str, Any]) -> CanonicalRow | None:
     if not (phone_e164 or email or display_name):
         return None
 
-    sales: tuple[SaleLine, ...] = ()
-    paise = _amount_to_paise(_first_by_alias(row, _AMOUNT_KEYS))
-    entry_date = _sheet_date(_first_by_alias(row, _DATE_KEYS))
-    if paise is not None and entry_date is not None:
-        sales = (SaleLine(amount_paise=paise, entry_date=entry_date, confidence=1.0),)
+    sales2: tuple[SaleLine, ...] = ()
+    paise2 = _amount_to_paise(_first_by_alias(row, _AMOUNT_KEYS))
+    entry_date2 = _sheet_date(_first_by_alias(row, _DATE_KEYS))
+    if paise2 is not None and entry_date2 is not None:
+        sales2 = (SaleLine(amount_paise=paise2, entry_date=entry_date2, confidence=1.0),)
 
     return CanonicalRow(
         phone_e164=phone_e164,
         email=email,
         display_name=display_name,
-        sales=sales,
+        sales=sales2,
         consent=None,  # sheets carry no lawful WhatsApp consent (option-A analog)
     )
 

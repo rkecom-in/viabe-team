@@ -14,6 +14,7 @@ own job, COUNTS-only to the LLM).
 from __future__ import annotations
 
 import logging
+import re
 from uuid import UUID
 
 from fastapi import APIRouter, Header, HTTPException
@@ -22,15 +23,42 @@ from pydantic import BaseModel
 from orchestrator.api.oauth_callback import _verify_internal_secret
 from orchestrator.integrations.connectors.google_sheet import GoogleSheetConnector
 from orchestrator.onboarding.shopify_onboarding import (
+    PHASE_AUTH,
+    PHASE_DISCOVERY,
     PHASE_SAMPLE,
     _validated_pending,
     _write_state,
+    read_integration_state,
 )
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
 _CONNECTOR_ID = "google_sheet"
+
+# VT-608 fix round MINOR 3 — a Drive file id is alphanumeric plus '-'/'_' (Google has used a few
+# lengths historically; this is deliberately permissive on length, strict on character set —
+# rejects path separators / quotes / control characters that could otherwise reach the Sheets API
+# URL path or an A1-range value unescaped).
+_SPREADSHEET_ID_RE = re.compile(r"^[A-Za-z0-9_-]{10,100}$")
+# A Sheets tab name: Google forbids [ ] : * ? / \ and caps length at 100.
+_TAB_NAME_FORBIDDEN_RE = re.compile(r"[\[\]:*?/\\]")
+_TAB_NAME_MAX_LEN = 100
+
+# Phases at or before "picking a sheet" — a select POST may freely (re-)write these. Anything
+# LATER (phase_4_field_mapping, phase_5_confirmed) must NOT be regressed by a duplicate/
+# out-of-order POST (MINOR 4) — the owner has already moved past the picker step.
+_PHASE_ORDER = {PHASE_DISCOVERY: 0, PHASE_AUTH: 1, PHASE_SAMPLE: 2}
+
+
+def _validate_spreadsheet_id(spreadsheet_id: str) -> None:
+    if not _SPREADSHEET_ID_RE.match(spreadsheet_id):
+        raise HTTPException(status_code=400, detail="spreadsheet_id is not a valid Drive file id")
+
+
+def _validate_tab_name(tab_name: str) -> None:
+    if not tab_name or len(tab_name) > _TAB_NAME_MAX_LEN or _TAB_NAME_FORBIDDEN_RE.search(tab_name):
+        raise HTTPException(status_code=400, detail="tab_name is not a valid Sheets tab name")
 
 
 class SpreadsheetListResponse(BaseModel):
@@ -90,6 +118,7 @@ def list_tabs(
     if not _verify_internal_secret(x_internal_secret):
         raise HTTPException(status_code=401, detail="unauthorized")
     tenant_uuid = _require_tenant(tenant_id)
+    _validate_spreadsheet_id(spreadsheet_id)
     try:
         tabs = GoogleSheetConnector().list_tabs(tenant_uuid, spreadsheet_id)
     except Exception as exc:  # noqa: BLE001
@@ -113,6 +142,24 @@ def select_spreadsheet(
     tenant_uuid = _require_tenant(body.tenant_id)
     if not body.spreadsheet_id or not body.tab_name:
         raise HTTPException(status_code=400, detail="spreadsheet_id and tab_name are required")
+    _validate_spreadsheet_id(body.spreadsheet_id)
+    _validate_tab_name(body.tab_name)
+
+    # VT-608 fix round MINOR 4 — phase-guard the UPSERT: a duplicate/out-of-order POST (a
+    # double-tap, a retried request, or one that simply arrives late) must never REGRESS a tenant
+    # who has already moved past the picker step (phase_4_field_mapping / phase_5_confirmed) back
+    # to phase_3_sample_pull — that would silently discard a confirmed mapping or an already-
+    # landed commit's terminal state. Phases at or before the picker step (discovery/auth/already
+    # phase_3) are freely (re-)writable — an owner picking a DIFFERENT sheet on a retry still works.
+    existing = read_integration_state(tenant_uuid)
+    existing_phase = (existing or {}).get("phase")
+    if existing_phase is not None and existing_phase not in _PHASE_ORDER:
+        logger.info(
+            "VT-608 sheet selection IGNORED (tenant already past the picker step) "
+            "tenant=%s existing_phase=%s",
+            tenant_uuid, existing_phase,
+        )
+        return SheetSelectionResponse(accepted=False, phase=str(existing_phase))
 
     pending = _validated_pending(
         awaiting="sample_pull_pending",  # VT-608 — a machine waypoint, not an owner question

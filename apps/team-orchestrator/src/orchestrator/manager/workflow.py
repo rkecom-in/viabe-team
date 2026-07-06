@@ -276,26 +276,6 @@ def _dispatch_specialist_step(
             initial_state, config={"configurable": {"thread_id": thread_id}}
         )
 
-    # VT-608 RULING 3 — the enforce-mode twin of runner.py's post-dispatch ingestion-commit
-    # executor. integration_agent's own commit_ingestion TOOL never writes the customer/ledger
-    # substrate (VT-268) — it only proposes (tenant_integration_state phase='ingestion_commit_
-    # pending'). This is the deterministic, non-agent code path that performs the actual write,
-    # gated on this dispatch having targeted integration_agent (a cheap no-op read for every other
-    # specialist's step). Both this hook and runner.py's call the SAME function against the SAME
-    # tenant_integration_state truth — no dual-writer race (RULING 1). Fail-soft: an executor
-    # failure must never fail this DBOS step; the phase stays observably 'ingestion_commit_pending'
-    # rather than a fabricated success.
-    if specialist == "integration_agent":
-        try:
-            from orchestrator.integrations.commit import execute_pending_ingestion_commit
-
-            execute_pending_ingestion_commit(tenant_id)
-        except Exception:  # noqa: BLE001 — never fail the dispatch step over a commit-executor bug
-            logger.exception(
-                "VT-608: execute_pending_ingestion_commit failed tenant=%s task=%s step=%s",
-                tenant_id, task_id, step_id,
-            )
-
     revised_outcome = terminal_state.get("manager_review_revised_outcome")
     is_paused = "__interrupt__" in terminal_state
     # VT-607 (Loop Package 6) — the outer-loop interrupt-composition fix: a pending interrupt (the
@@ -324,6 +304,37 @@ def _dispatch_specialist_step(
         _close_dispatch_run(tenant_id, run_id, "escalated")
     else:
         _close_dispatch_run(tenant_id, run_id, "completed")
+
+    # VT-608 RULING 3 — the enforce-mode twin of runner.py's post-dispatch ingestion-commit
+    # executor. integration_agent's own commit_ingestion TOOL never writes the customer/ledger
+    # substrate (VT-268) — it only proposes (tenant_integration_state phase='ingestion_commit_
+    # pending'). This is the deterministic, non-agent code path that performs the actual write.
+    #
+    # VT-608 fix round MAJOR 2 — moved to AFTER outcome/is_paused are resolved (it used to run
+    # unconditionally right after graph.invoke, BEFORE manager_review's decision was even read —
+    # a revise_step/escalate/paused_approval outcome could not veto a write that had already
+    # happened). Now gated on manager_review having ACCEPTED the step: only 'continue' (accept +
+    # more steps left) or 'complete' (accept + objective done) fire the executor; 'revise_step'
+    # (the specialist's claim wasn't accepted as-is), 'ask_owner'/'escalate' (no acceptance at
+    # all), and 'paused_approval' (nothing decided yet — the interrupt hasn't even resolved) never
+    # do. Both this hook and runner.py's call the SAME function against the SAME
+    # tenant_integration_state truth — no dual-writer race (RULING 1). Fail-soft: an executor
+    # failure must never fail this DBOS step; the phase stays observably 'ingestion_commit_pending'
+    # rather than a fabricated success.
+    if specialist == "integration_agent" and outcome in ("continue", "complete"):
+        try:
+            from orchestrator.integrations.commit import execute_pending_ingestion_commit
+
+            # MAJOR 1 — task_id is the SAME value this dispatch's own observability_context set
+            # as ctx.run_id (see the with-block above), so it matches whatever commit_ingestion
+            # armed the proposal with THIS turn.
+            execute_pending_ingestion_commit(tenant_id, current_turn_id=task_id)
+        except Exception:  # noqa: BLE001 — never fail the dispatch step over a commit-executor bug
+            logger.exception(
+                "VT-608: execute_pending_ingestion_commit failed tenant=%s task=%s step=%s",
+                tenant_id, task_id, step_id,
+            )
+
     return outcome, (str(revised_outcome) if revised_outcome is not None else None)
 
 
