@@ -11,6 +11,7 @@ langgraph is a heavy dep; importorskip guards the dep-less smoke job.
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 from uuid import uuid4
 
 import pytest
@@ -53,6 +54,13 @@ class _FakeConn:
             self.inserts.append((sql, params))
             return _FakeCursorResult(None)
         return _FakeCursorResult(None)
+
+    def cursor(self):
+        # VT-514 emit_tm_audit's fail-closed insert uses `with conn.cursor() as
+        # cur: cur.execute(...)` (real psycopg style), distinct from this fake's
+        # direct `conn.execute(...)` callers above — a real psycopg.Connection
+        # supports both. nullcontext(self) makes `cur` == this conn.
+        return nullcontext(self)
 
 
 class _ConnFactory:

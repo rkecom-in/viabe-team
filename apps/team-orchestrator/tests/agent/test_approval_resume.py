@@ -7,6 +7,7 @@ shape. No live DB, no live Anthropic (classify_fn is stubbed).
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -70,6 +71,14 @@ class _CaptureConn:
         # apply_agent_decision no-ops (not an agent approval).
         return SimpleNamespace(rowcount=1, fetchone=lambda: None)
 
+    def cursor(self):
+        # VT-514 emit_tm_audit's fail-closed insert uses `with conn.cursor() as
+        # cur: cur.execute(...)` (real psycopg style) rather than the wrapper's
+        # direct `conn.execute(...)` — a real psycopg.Connection supports both.
+        # nullcontext(self) makes `cur` == this conn, so cur.execute() reuses
+        # the same recording/skip logic above.
+        return nullcontext(self)
+
 
 def test_mark_resolved_sets_decision_status_and_guards_unresolved():
     conn = _CaptureConn()
@@ -124,6 +133,10 @@ class _DeferConn:
                 fetchone=lambda: {"defer_count": self._dc}, rowcount=1
             )
         return SimpleNamespace(fetchone=lambda: None, rowcount=1)
+
+    def cursor(self):
+        # See _CaptureConn.cursor — same VT-514 emit_tm_audit gap.
+        return nullcontext(self)
 
 
 def test_defer_first_time_extends_and_does_not_resolve():
