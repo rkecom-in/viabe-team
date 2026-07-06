@@ -373,11 +373,34 @@ def confirm_mapping(tenant_id: str, connector_id: str, mapping: dict[str, str]) 
     can find them. Does NOT ingest anything — the actual row transform reuses the same proven
     alias-based mapper the recurring-pull scheduler already uses; this mapping is the
     owner-facing confirmation + audit record, not the literal ingest transform.
+
+    VT-611 pre-work #3(c): every value MUST be a real ``CanonicalField`` literal —
+    ``propose_mapping``'s own output always is, but a model-fabricated value (never a real
+    connector.column drift, but the model IS the caller here) would otherwise silently no-op that
+    column at read time (``sheet_row_to_canonical``'s ``target != canonical_field`` check just
+    never matches, dropping the column with no error anywhere). Fail closed here instead: reject
+    the WHOLE call, write nothing, name the bad value(s) — never persist a mapping we already know
+    part of will never work.
     """
     resolved = resolve_lane_tenant(tenant_id, tool_name="confirm_mapping")
     if resolved is None:
         return lane_tenant_error("confirm_mapping")
     tenant_id = str(resolved)
+
+    from orchestrator.integrations.canonical_fields import GLOBAL_FIELD_HINTS
+
+    invalid = sorted({v for v in mapping.values() if v not in GLOBAL_FIELD_HINTS})
+    if invalid:
+        logger.warning(
+            "VT-611 confirm_mapping rejected — invalid canonical_field value(s) tenant=%s "
+            "connector=%s invalid=%s",
+            tenant_id, connector_id, invalid,
+        )
+        return {
+            "connector_id": connector_id,
+            "confirmed": False,
+            "error": f"invalid canonical_field value(s): {invalid}",
+        }
 
     from orchestrator.onboarding.shopify_onboarding import (
         PHASE_MAPPING,

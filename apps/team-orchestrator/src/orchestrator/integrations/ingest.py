@@ -370,6 +370,24 @@ def _first_by_mapping(row: dict[str, Any], mapping: dict[str, str], canonical_fi
     return None
 
 
+def _first_by_mapping_or_alias(
+    row: dict[str, Any], mapping: dict[str, str], canonical_field: str, alias_keys: tuple[str, ...]
+) -> Any:
+    """VT-611 pre-work #3(b) — the partial-mapping sharp edge: a confirmed mapping that covers
+    SOME canonical fields but not others must not silently drop identity coverage for the ones
+    it doesn't mention. ``_first_by_mapping`` alone had this gap — a mapping confirming ONLY
+    ``phone`` meant ``email``/``customer_name`` got NO alias-table lookup at all, even when the
+    row carries an obviously-aliased column (e.g. literally named "email") the alias table would
+    have caught with no mapping present. The owner-confirmed mapping is authoritative for what it
+    covers (tried first); anything it doesn't cover — or maps to an empty cell — falls back to the
+    SAME alias table the no-mapping path always used, so a confirmed mapping can only ADD coverage
+    over the alias-only baseline, never remove it."""
+    val = _first_by_mapping(row, mapping, canonical_field)
+    if val is not None:
+        return val
+    return _first_by_alias(row, alias_keys)
+
+
 def sheet_row_to_canonical(
     row: dict[str, Any], *, mapping: dict[str, str] | None = None
 ) -> CanonicalRow | None:
@@ -393,24 +411,30 @@ def sheet_row_to_canonical(
     (last_seen/address/tags) are accepted in the mapping but simply have nowhere to land — dropped,
     same as an unmapped column always was. Omitted (every pre-VT-608 caller, and every connector
     with no reasoner — Shopify) keeps the EXACT alias-table behavior, byte-for-byte.
+
+    VT-611 pre-work #3(b) — a PARTIAL mapping (confirms some canonical fields, silent on others)
+    ADDS coverage over the alias-only baseline, never subtracts from it: each field tries the
+    mapping first, then falls back to the SAME alias table the no-mapping path uses
+    (``_first_by_mapping_or_alias``). A confirmed mapping can only make identity detection better,
+    never worse, than running with no mapping at all.
     """
     if mapping:
-        phone_e164 = _normalize_e164(_first_by_mapping(row, mapping, "phone"))
-        email_raw = _first_by_mapping(row, mapping, "email")
+        phone_e164 = _normalize_e164(_first_by_mapping_or_alias(row, mapping, "phone", _PHONE_KEYS))
+        email_raw = _first_by_mapping_or_alias(row, mapping, "email", _EMAIL_KEYS)
         email = (
             str(email_raw).strip().lower()
             if email_raw is not None and str(email_raw).strip()
             else None
         )
-        name_raw = _first_by_mapping(row, mapping, "customer_name")
+        name_raw = _first_by_mapping_or_alias(row, mapping, "customer_name", _NAME_KEYS)
         display_name = (
             str(name_raw).strip() if name_raw is not None and str(name_raw).strip() else None
         )
         if not (phone_e164 or email or display_name):
             return None
         sales = ()  # type: tuple[SaleLine, ...]
-        paise = _amount_to_paise(_first_by_mapping(row, mapping, "order_amount"))
-        entry_date = _sheet_date(_first_by_mapping(row, mapping, "order_date"))
+        paise = _amount_to_paise(_first_by_mapping_or_alias(row, mapping, "order_amount", _AMOUNT_KEYS))
+        entry_date = _sheet_date(_first_by_mapping_or_alias(row, mapping, "order_date", _DATE_KEYS))
         if paise is not None and entry_date is not None:
             sales = (SaleLine(amount_paise=paise, entry_date=entry_date, confidence=1.0),)
         return CanonicalRow(
