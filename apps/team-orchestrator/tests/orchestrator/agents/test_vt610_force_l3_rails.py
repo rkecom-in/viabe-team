@@ -9,7 +9,10 @@ INDISTINGUISHABLE, to every OTHER gate in the system, from an un-forced one:
      tenants.verification_status / tenant_connector_status / customers; NEVER tenant_agent_autonomy.
   2. Per-recipient consent/opt-out/complaint/caps (customer_send.agent_send_draft's gate stack) —
      the SAME code path runs for a forced-L3 send as an earned one; ``autonomy_level="L3"`` is a
-     caller-supplied ROUTING parameter, never a provenance-aware bypass.
+     caller-supplied ROUTING parameter, never a provenance-aware bypass. Two proofs: an opted-out
+     customer trips Gate-3 (SKIP_OPT_OUT); a subscribed-but-unconsented one reaches past Gate-3 and
+     is refused at Gate-4, the marketing-consent C2 allowlist (SKIP_CONSENT) — the on-point proof
+     that a forced-L3 agent still cannot send to a customer who never consented.
   3. Policy boundary        (business_policy.assert_within_policy) — a SEPARATE table
      (tenant_business_policy) force_l3 never writes.
   4. Always-confirm floor   (autonomy.is_always_confirm) — re-derived PER BATCH; the function has
@@ -48,7 +51,11 @@ from orchestrator.agents.autonomy import (  # noqa: E402
     is_always_confirm,
     record_regression_event,
 )
-from orchestrator.agents.customer_send import SKIP_OPT_OUT, agent_send_draft  # noqa: E402
+from orchestrator.agents.customer_send import (  # noqa: E402
+    SKIP_CONSENT,
+    SKIP_OPT_OUT,
+    agent_send_draft,
+)
 from orchestrator.agents.onboarding_gate import is_agent_eligible  # noqa: E402
 from orchestrator.db import tenant_connection  # noqa: E402
 
@@ -223,6 +230,31 @@ def test_force_l3_does_not_bypass_customer_send_opt_out_gate(substrate) -> None:
 
     assert result.status == "skipped"
     assert result.skip_reason == SKIP_OPT_OUT
+
+
+def test_force_l3_does_not_bypass_marketing_consent_gate(substrate) -> None:
+    """The on-point proof: an opted-out customer trips Gate-3 BEFORE the send stack ever reaches
+    Gate-4, so the OPT-OUT test above never exercises the marketing-consent gate at all. Here the
+    customer is SUBSCRIBED (Gate-3 passes) but carries NO ``record_of_consent`` row — the real
+    production hard-stop C2 allowlist (customer_send.py Gate-4, ``has_marketing_consent_for_phone``,
+    fail-closed on an empty/no-match allowlist) must still refuse the send under a FORCED L3, exactly
+    as it would for an earned one. This is the row's whole safety claim: a forced-L3 agent still
+    cannot send to a customer who never consented."""
+    dsn = substrate.dsn
+    tenant = _new_tenant(dsn, onboarded=True)
+    _seed_autonomy_row(dsn, tenant)
+    _force(tenant)
+
+    customer, _phone = _seed_customer(dsn, tenant)  # default: subscribed, no consent row seeded
+    work_item = _seed_work_item(dsn, tenant)
+    batch = _seed_batch(dsn, tenant, work_item, status="auto_send_pending")
+    draft = _seed_draft(dsn, tenant, batch, customer)
+
+    with tenant_connection(tenant) as conn:
+        result = agent_send_draft(tenant, draft, autonomy_level="L3", conn=conn)
+
+    assert result.status == "skipped"
+    assert result.skip_reason == SKIP_CONSENT
 
 
 # ---------------------------------------------------------------------------
