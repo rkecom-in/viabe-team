@@ -49,7 +49,11 @@ def data_inputs_enable_handler(
     recipient = event.sender_phone or None
     if recipient is not None:
         try:
-            sid = send_freeform_message(_CONFIRM, recipient)
+            # VT-611 Package H0 — thread tenant_id/surface so this confirm lands in the lifetime
+            # conversation_log (was bare -> _record_owner_conversation_turn no-op'd).
+            sid = send_freeform_message(
+                _CONFIRM, recipient, tenant_id=state["tenant_id"], surface="system"
+            )
         except Exception as exc:  # noqa: BLE001 — honest send outcome, never crash the pipeline
             error = repr(exc)
     else:

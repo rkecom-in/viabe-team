@@ -154,7 +154,9 @@ def deliver_plan(
             try:
                 from orchestrator.utils.twilio_send import send_freeform_message
 
-                send_freeform_message(body, recipient)
+                # VT-611 Package H0 — thread tenant_id so each delivered part lands in the lifetime
+                # conversation_log (was bare -> _record_owner_conversation_turn no-op'd).
+                send_freeform_message(body, recipient, tenant_id=tenant_id, surface="manager")
             except Exception:  # noqa: BLE001 — best-effort per part; bit stays 0 for replay
                 logger.warning(
                     "VT-368 delivery: part %d/%d failed tenant=%s v%s — continuing "

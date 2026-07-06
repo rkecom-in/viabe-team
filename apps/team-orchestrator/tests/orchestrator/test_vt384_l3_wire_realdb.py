@@ -1541,6 +1541,85 @@ def test_enable_keyword_through_runner_dispatch_grants_l3(substrate):  # type: i
     assert st.l3_grant_approval_id is not None
 
 
+def test_kill_keyword_confirm_records_conversation_log_system_surface(substrate):  # type: ignore[no-untyped-def]
+    """VT-611 Package H0: autonomy_kill_handler's confirm send was bare (no tenant_id) —
+    _record_owner_conversation_turn no-op'd, so the owner-facing 'automatic sending is off' confirm
+    never hit the lifetime conversation_log. No send_freeform_message mock here — only the package's
+    autouse Twilio-client stub — so the REAL send path (incl. the real DB write) runs."""
+    from orchestrator.direct_handlers import HANDLERS
+    from orchestrator.pre_filter_gate import pre_filter
+    from orchestrator.state import new_subscriber_state
+    from orchestrator.types import WebhookEvent
+
+    tenant = _new_tenant(substrate.dsn)
+    _grant_l3(substrate.dsn, tenant)
+
+    event = WebhookEvent(
+        body="please turn off automatic sending", sender_phone="+919812345678",
+        message_type="inbound_message", twilio_message_sid="SM" + uuid4().hex[:30],
+        dupe_status=False, num_media=0,
+    )
+    state = new_subscriber_state(tenant, uuid4())
+    result = pre_filter(event, state)
+    assert result.handler_name == "autonomy_kill_handler"
+    out = HANDLERS[result.handler_name](event, state)
+    assert out.get("autonomy_killed") is True
+
+    with psycopg.connect(substrate.dsn, autocommit=True) as conn:
+        rows = conn.execute(
+            "SELECT text, surface, role FROM conversation_log WHERE tenant_id = %s",
+            (str(tenant),),
+        ).fetchall()
+    assert len(rows) == 1, rows
+    assert rows[0][1] == "system" and rows[0][2] == "assistant"
+    assert "automatic sending is off" in rows[0][0]
+
+
+def test_enable_keyword_confirm_records_conversation_log_system_surface(substrate):  # type: ignore[no-untyped-def]
+    """VT-611 Package H0: autonomy_enable_handler's confirm send was bare (no tenant_id) — same gap
+    as the kill-side sibling above, for the grant confirm."""
+    from orchestrator.direct_handlers import HANDLERS
+    from orchestrator.pre_filter_gate import pre_filter
+    from orchestrator.state import new_subscriber_state
+    from orchestrator.types import WebhookEvent
+
+    tenant = _new_tenant(substrate.dsn)
+    with psycopg.connect(substrate.dsn, autocommit=True) as conn:
+        conn.execute(
+            "INSERT INTO tenant_agent_autonomy (tenant_id, agent, level, clean_approval_streak) "
+            "VALUES (%s, %s, 'L2', %s)",
+            (str(tenant), _AGENT, autonomy_mod.L3_CLEAN_STREAK_THRESHOLD),
+        )
+        run = conn.execute(
+            "INSERT INTO pipeline_runs (tenant_id, status) VALUES (%s, 'running') RETURNING id",
+            (str(tenant),),
+        ).fetchone()[0]
+        conn.execute(
+            "INSERT INTO pending_approvals (tenant_id, run_id, approval_type, summary, details, "
+            "timeout_at) VALUES (%s, %s, 'autonomy_upgrade', %s, %s, now() + interval '1 hour')",
+            (str(tenant), str(run), "Enable automatic sending?", Jsonb({"agent": _AGENT})),
+        )
+
+    event = WebhookEvent(
+        body="ENABLE", sender_phone="+919812345678", message_type="inbound_message",
+        twilio_message_sid="SM" + uuid4().hex[:30], dupe_status=False, num_media=0,
+    )
+    state = new_subscriber_state(tenant, uuid4())
+    result = pre_filter(event, state)
+    assert result.handler_name == "autonomy_enable_handler"
+    out = HANDLERS[result.handler_name](event, state)
+    assert out.get("l3_granted") is True
+
+    with psycopg.connect(substrate.dsn, autocommit=True) as conn:
+        rows = conn.execute(
+            "SELECT text, surface, role FROM conversation_log WHERE tenant_id = %s",
+            (str(tenant),),
+        ).fetchall()
+    assert len(rows) == 1, rows
+    assert rows[0][1] == "system" and rows[0][2] == "assistant"
+    assert "automatic sending is on" in rows[0][0]
+
+
 # ===========================================================================
 # L3 ARM WIRED INTO execute_item (verifier BLOCKER) — an L3-granted tenant's
 # execute_item lands the batch in auto_send_pending (presend notice sent); an
