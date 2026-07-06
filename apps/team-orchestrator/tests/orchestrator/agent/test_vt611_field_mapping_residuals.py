@@ -177,18 +177,22 @@ def test_partial_mapping_falls_back_to_alias_for_unmapped_identity_fields(substr
     assert result.display_name == "Priya Sharma"
 
 
-def test_partial_mapping_covers_sale_fields_too(substrate):  # type: ignore[no-untyped-def]
-    """The fallback applies uniformly to order_amount/order_date, not just the three identity
-    fields — a mapping confirming only 'phone' must still let an aliased amount/date column
-    produce a SaleLine."""
+def test_partial_mapping_never_fabricates_a_sale_from_an_unmapped_alias_column(substrate):  # type: ignore[no-untyped-def]
+    """VT-611 fix round (correcting the earlier ruling this test enshrined): the alias fallback
+    applies ONLY to the three IDENTITY fields, NEVER to order_amount/order_date. A mapping
+    confirming only 'phone' and staying silent on amount/date is a DELIBERATE "no orders here"
+    signal — an aliased 'amount'/'date' column (which might be a store-credit balance or a signup
+    date, not a sale) must NOT be read into a fabricated SaleLine. Identity alias-fallback (email)
+    still works alongside this."""
     from orchestrator.integrations.ingest import sheet_row_to_canonical
 
-    row = {"Mobile": "9876543210", "amount": "499", "date": "2026-01-15"}
+    row = {"Mobile": "9876543210", "email": "priya@example.com", "amount": "499", "date": "2026-01-15"}
     result = sheet_row_to_canonical(row, mapping={"Mobile": "phone"})
 
     assert result is not None
-    assert len(result.sales) == 1
-    assert result.sales[0].amount_paise == 49900
+    assert result.phone_e164 == "+919876543210"
+    assert result.email == "priya@example.com"  # identity alias-fallback still works
+    assert result.sales == (), "an unmapped amount/date column must never fabricate a sale"
 
 
 def test_mapping_covers_a_field_its_value_wins_over_a_conflicting_alias(substrate):  # type: ignore[no-untyped-def]
@@ -201,6 +205,26 @@ def test_mapping_covers_a_field_its_value_wins_over_a_conflicting_alias(substrat
     result = sheet_row_to_canonical(row, mapping={"mob": "phone"})
     assert result is not None
     assert result.phone_e164 == "+919123456789"
+
+
+def test_mapping_consumed_column_excluded_from_other_fields_alias_scan(substrate):  # type: ignore[no-untyped-def]
+    """VT-611 fix round — a column the mapping already claims for ONE canonical field must not be
+    cross-read by a DIFFERENT field's alias fallback. A mapping of {"amount_column": "phone"}
+    means amount_column IS the phone source — order_amount's alias scan (if it ran one; it
+    doesn't, per the sale-field ruling above) must never also read amount_column as a rupee
+    figure. This exercises the ``consumed`` exclusion directly via a case where it WOULD matter:
+    email's alias fallback must not treat a mapping-consumed column as its own match even if that
+    column's name happens to alias-match 'email'."""
+    from orchestrator.integrations.ingest import sheet_row_to_canonical
+
+    # "mail" aliases to email — but the mapping already claims that exact column for 'phone'.
+    row = {"mail": "9123456789", "name": "Asha Rao"}
+    result = sheet_row_to_canonical(row, mapping={"mail": "phone"})
+
+    assert result is not None
+    assert result.phone_e164 == "+919123456789"  # the mapping's own claim
+    assert result.email is None, "a column the mapping already claims for phone must not ALSO feed email's alias fallback"
+    assert result.display_name == "Asha Rao"  # unrelated identity field, unaffected
 
 
 # ---------------------------------------------------------------------------
