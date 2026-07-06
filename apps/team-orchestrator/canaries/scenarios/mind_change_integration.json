@@ -1,5 +1,12 @@
 {
   "name": "mind_change_integration",
+  "domain": "integration",
+  "critical": true,
+  "setup_args": [
+    "--onboarded",
+    "--flow",
+    "ready_asked"
+  ],
   "expected_fail": false,
   "notes": "Owner reverses a platform assumption mid-integration-offer: after the readiness ask resolves into the Shopify offer, the owner says they're actually on Amazon, not Shopify. The manager must give an honest capability answer (Amazon is not a wired connector today — VT-465 roster-expansion gap) and must NOT fabricate an Amazon flow or claim a connection was made. Setup: `setup --onboarded --flow ready_asked` then `script <tenant> mind_change_integration.json`.",
   "steps": [
@@ -12,7 +19,12 @@
       "message": "actually I don't use Shopify, I sell on Amazon",
       "assert_no_silent": true,
       "assert_not_d1": true,
-      "assert_not_contains": ["your amazon store is connected", "connected your amazon", "amazon integration is ready", "i've connected your amazon"],
+      "assert_not_contains": [
+        "your amazon store is connected",
+        "connected your amazon",
+        "amazon integration is ready",
+        "i've connected your amazon"
+      ],
       "note": "Mind-change away from the offered platform. Expect an honest answer about Amazon support (not fabricated) and no re-ask of the correction just given."
     }
   ]

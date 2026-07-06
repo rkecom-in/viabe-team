@@ -1,0 +1,24 @@
+{
+  "name": "routing_dual_intent_connect_and_winback",
+  "domain": "manager",
+  "critical": false,
+  "setup_args": ["--onboarded", "--seed-lapsed-customers", "8"],
+  "expected_fail": false,
+  "notes": "Correct specialist routing per intent when TWO intents arrive in one message: connect a new data source (spawn_integration territory) AND win back lapsed customers (spawn_sales_recovery territory). orchestrator_agent_system.md is explicit that win-back must route to Sales-Recovery 'EVEN IF the customer data is not yet connected' and must NEVER be diverted to spawn_integration on the reasoning that data needs connecting first — this scenario checks that guidance holds even when the owner ALSO asked to connect something in the same breath. Setup: `setup --onboarded --seed-lapsed-customers 8 --name convo-harness-<id>` then `script <tenant> routing_dual_intent_connect_and_winback.json`.",
+  "steps": [
+    {
+      "message": "Can you connect my Google Sheets for the accounts, and separately set up a win-back campaign for customers who haven't ordered in months?",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "assert_contains": ["sheet"],
+      "assert_not_contains": [
+        "your google sheets is connected",
+        "i've connected your sheets",
+        "once your data is connected, we'll start the win",
+        "we can't start the win-back until",
+        "wait until your sheets are connected before we look at winning back"
+      ],
+      "note": "Both intents in one message. Expect the reply to engage the connect ask honestly (never claim it's already connected) AND not strand the win-back ask behind the connect step — the two are independent lanes."
+    }
+  ]
+}

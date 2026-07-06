@@ -1,0 +1,34 @@
+{
+  "name": "efficient_collection_incremental_no_reask",
+  "domain": "onboarding",
+  "critical": true,
+  "setup_args": ["--owner-inputs", "true", "--journey", "--draft-type", "hardware", "--draft-city", "Surat"],
+  "expected_fail": false,
+  "notes": "Facts land INCREMENTALLY across separate turns (confirm business_type answered tersely, then the 'about' gap answered separately) rather than all in one message — each fact, once given, must never be re-asked in a later turn. Setup: `setup --owner-inputs true --journey --draft-type hardware --draft-city Surat` then `script <tenant> efficient_collection_incremental_no_reask.json`.",
+  "steps": [
+    {
+      "message": "Complete Setup",
+      "assert_no_silent": true,
+      "note": "Entry tap against the pre-seeded business_type confirm."
+    },
+    {
+      "message": "haan sahi hai",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "note": "Terse hinglish confirm ('yes that's right') for business_type='hardware'. Expect the flow to advance to the next gap (about), not repeat the confirm."
+    },
+    {
+      "message": "hum construction aur home hardware ke tools bechte hain, karib 12 saal se",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "note": "Separately answers the 'about' gap (what the business does + how long). Expect this to be recorded and the flow to move on."
+    },
+    {
+      "message": "ab bas ho gaya kya sab kuch?",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "assert_not_contains": ["what kind of business", "kis tarah ka business", "tell us about your business", "hamare baare mein bataiye", "which city"],
+      "note": "Neither fact given across the two prior separate turns (business type, about) may be re-asked here."
+    }
+  ]
+}

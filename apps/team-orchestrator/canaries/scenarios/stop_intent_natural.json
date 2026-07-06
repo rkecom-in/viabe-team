@@ -1,12 +1,21 @@
 {
   "name": "stop_intent_natural",
+  "domain": "sr_autonomy_rails",
+  "critical": true,
+  "setup_args": [
+    "--onboarded"
+  ],
   "expected_fail": true,
   "notes": "CL-2026-07-03-fluid-consent-and-control: natural stop phrasing must pause via the SAME audited path (keyword STOP remains the floor). expected_fail until VT-583 C lands + verifies. Opt-out/DSR is short-circuited ahead of the journey gate (matches_opt_out_or_dsr), so this is independent of onboarding state — run against a plain onboarded, no-active-flow tenant: `setup --onboarded` (no --journey, no --flow) then `script <tenant> stop_intent_natural.json`.",
   "steps": [
     {
       "message": "please stop messaging me for now",
       "assert_no_silent": true,
-      "assert_contains_any": ["paused", "stopped", "won't message"],
+      "assert_contains_any": [
+        "paused",
+        "stopped",
+        "won't message"
+      ],
       "note": "Stop-intent in natural words. Expect an honest pause acknowledgment, not a canned demand for the literal keyword."
     }
   ]

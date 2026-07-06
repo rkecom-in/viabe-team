@@ -1,0 +1,23 @@
+{
+  "name": "ambiguous_intent_clarify_once",
+  "domain": "manager",
+  "critical": false,
+  "setup_args": ["--onboarded"],
+  "expected_fail": false,
+  "notes": "Ambiguous-intent clarification, goal-ambiguity flavor: the owner's ask could span marketing/sales/finance/cost-cutting ('grow my business'). Turn 1 may reasonably ask ONE clarifying question. Turn 2 the owner stays vague ('whatever you think is best') — the manager must NOT just repeat the identical clarifying demand (a stall loop) but instead use its own judgment (bias-to-act per orchestrator_agent_system.md) to propose something concrete, or ask a genuinely DIFFERENT, narrower question. Setup: `setup --onboarded --name convo-harness-<id>` then `script <tenant> ambiguous_intent_clarify_once.json`.",
+  "steps": [
+    {
+      "message": "I want to do something to grow my business this month",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "note": "Genuinely ambiguous — could be marketing, sales, finance, or cost work. Expect either one sharp clarifying question or a reasonable manager-judgment suggestion; never silence, never D1."
+    },
+    {
+      "message": "honestly whatever you think is best, just try something",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "assert_not_contains": ["i already asked", "as i asked before", "you still haven't told me", "i need you to tell me first", "please answer my question"],
+      "note": "Owner stays vague on purpose. Expect the manager to move forward with a concrete suggestion or a genuinely different next question — NOT scold the owner or repeat the identical clarifying demand verbatim (ask ONCE, not in a loop)."
+    }
+  ]
+}

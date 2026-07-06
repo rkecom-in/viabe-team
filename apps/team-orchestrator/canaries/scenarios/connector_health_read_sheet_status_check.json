@@ -1,0 +1,24 @@
+{
+  "name": "connector_health_read_sheet_status_check",
+  "domain": "integration",
+  "critical": true,
+  "setup_args": ["--onboarded", "--flow", "plan_kicked"],
+  "expected_fail": false,
+  "notes": "Grounds in verify_connector (agent/integration_agent.py) — reads REAL DB state (connected, phase, pending_awaiting, cadence, last_status, consecutive_fails, rows_ingested_today), 'every field None/False when absent ... never fabricated'. This scripted tenant never actually completed a Google Sheets OAuth (no tenant_oauth_tokens row), so is_connector_connected is genuinely False — the honest answer to a health-check ask is 'not connected yet', never an invented 'yes, syncing fine'. Setup: `setup --onboarded --flow plan_kicked` then `script <tenant> connector_health_read_sheet_status_check.json`.",
+  "steps": [
+    {
+      "message": "I haven't seen my Google Sheet numbers update in a few days, is that thing even still connected?",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "assert_contains": ["sheet"],
+      "assert_not_contains": ["yes, it's connected and syncing fine", "everything is up to date and syncing", "no issues, it's working perfectly", "yes it's connected and updating"],
+      "note": "Plain health-check ask. Since no Sheets OAuth was ever actually completed for this tenant, expect an honest 'not connected yet / needs setup' answer grounded in the real DB read — never an invented healthy-sync claim."
+    },
+    {
+      "message": "wait, so it was never actually connected in the first place?",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "note": "Owner confirms understanding. Expect the assistant to consistently affirm the real (not-connected) state rather than contradict its own prior honest answer."
+    }
+  ]
+}

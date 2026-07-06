@@ -1,0 +1,23 @@
+{
+  "name": "onboarding_defer_field_explicit_skip",
+  "domain": "onboarding",
+  "critical": true,
+  "setup_args": ["--owner-inputs", "true", "--journey"],
+  "expected_fail": false,
+  "notes": "Owner explicitly defers a still-needed field with the literal token 'skip' (recognized by the deterministic _SKIP set in journey.py, and echoed as a BUTTONS option — 'Yes / No / Skip' — in the turn-brain system prompt). A deferred field must never be re-pressed the very next turn (VT-609 record-and-move-on). Setup: `setup --owner-inputs true --journey` (ACTIVE journey, 2-entry queue: confirm business_type='sweets' + gap 'about') then `script <tenant> onboarding_defer_field_explicit_skip.json`.",
+  "steps": [
+    {
+      "message": "skip",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "note": "Explicit skip of the pending business_type confirm. Expect the manager to acknowledge and move to the next outstanding item (or proceed with the discovered guess) — never a silent drop, never a hard stop."
+    },
+    {
+      "message": "what else do you need from me",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "assert_not_contains": ["is that right?", "sweets business — is that", "confirm your business type"],
+      "note": "The skipped business_type confirm must NOT be re-presented — expect the conversation to move to whatever is genuinely still outstanding (e.g. the 'about' gap), not a repeat of the just-skipped confirm."
+    }
+  ]
+}

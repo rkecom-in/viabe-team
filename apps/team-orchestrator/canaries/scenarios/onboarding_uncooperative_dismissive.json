@@ -1,0 +1,29 @@
+{
+  "name": "onboarding_uncooperative_dismissive",
+  "domain": "onboarding",
+  "critical": false,
+  "setup_args": ["--owner-inputs", "true", "--journey"],
+  "expected_fail": false,
+  "notes": "Uncooperative-but-not-hostile owner: dismissive, minimal-effort answers during active field collection ('whatever', 'you figure it out') rather than the trust/scam challenge already covered by onboarding_hostile.json. Setup: `setup --owner-inputs true --journey` (pre-seeds an ACTIVE journey with a 2-entry queue: confirm business_type='sweets' + gap 'about' — VT-582 calibration fix, without --journey there is no onboarding_journey row and every reply is the D1 fallback) then `script <tenant> onboarding_uncooperative_dismissive.json`.",
+  "steps": [
+    {
+      "message": "Hi",
+      "assert_no_silent": true,
+      "note": "Bare greeting with the queue already non-empty — presents the pending business_type confirm conversationally (no answer recorded yet)."
+    },
+    {
+      "message": "I dunno, whatever, you're the AI just sort it out",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "assert_not_contains": ["you must answer", "please respond properly", "i need a real answer"],
+      "note": "Dismissive non-answer to the pending confirm. Expect a real, non-pushy reply (e.g. proceeding with the discovered guess or asking plainly again) — never coercive language demanding compliance."
+    },
+    {
+      "message": "seriously just do whatever you think, I don't care",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "assert_not_contains": ["you must answer", "hurry up", "i need you to respond"],
+      "note": "Repeated dismissal. Expect the manager to move the conversation forward gracefully (e.g. proceed with the best available info, or ask one plain follow-up) without badgering or repeating the identical confirm verbatim a third time."
+    }
+  ]
+}

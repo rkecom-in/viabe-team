@@ -1,5 +1,12 @@
 {
   "name": "onboarding_happy",
+  "domain": "onboarding",
+  "critical": false,
+  "setup_args": [
+    "--owner-inputs",
+    "true",
+    "--journey"
+  ],
   "expected_fail": false,
   "notes": "Fresh tenant (owner_inputs=true, NOT onboarded), journey ACTIVE with a pre-seeded 2-entry queue (confirm business_type='sweets' + gap 'about') — see VT-582 calibration fix: a synthetic tenant has no business_profile_draft/onboarding_journey unless `setup --journey` seeds them (real signup's post-create state), so WITHOUT it every reply here is the D1 fallback line, not a journey turn. Because the queue is already non-empty, step 1's text is treated as the ANSWER to the pre-seeded business_type confirm (NOT a bare 'entry tap' — there is no lazy-start greet when the queue isn't empty); the walker then advances to the 'about' gap, and step 3/4 continue against whatever the live turn-brain does next. assert_contains is intentionally sparse — the exact copy is owned by the journey turn-brain and evolves; tighten these against the FIRST live transcript. Run: `setup --owner-inputs true --journey --name convo-harness-<id>` (defaults: draft-type=sweets, draft-city=Chennai, draft-about a sweets-shop blurb) then `script <tenant> onboarding_happy.json`.",
   "steps": [

@@ -1,0 +1,24 @@
+{
+  "name": "i_sheets_partial_identity_sale_not_fabricated",
+  "domain": "integration",
+  "critical": true,
+  "setup_args": ["--onboarded"],
+  "expected_fail": false,
+  "notes": "Grounds VT-209's canonical-field set (canonical_fields.py: customer_name/phone are identity fields with rich GLOBAL_FIELD_HINTS aliases; order_amount/order_date are separate sale fields) at the conversational layer: when the owner explicitly states their sheet carries ONLY identity columns, the agent must not later claim to have pulled/mapped sale data that was never described. Setup: `setup --onboarded` then `script <tenant> i_sheets_partial_identity_sale_not_fabricated.json`.",
+  "steps": [
+    {
+      "message": "My Google Sheet only has two columns — Customer Name and Mobile Number. No order amounts or order dates in it at all.",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "assert_not_contains": ["your sales data", "your order history is set", "i can see your orders", "your transaction history is ready"],
+      "note": "Owner states an identity-only sheet (name+phone map cleanly to customer_name/phone). No sale fields exist — the agent must not assume/fabricate their presence."
+    },
+    {
+      "message": "Can you also pull in my order amounts and order dates from that same sheet as well?",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "assert_not_contains": ["order amount is now mapped", "order date is mapped", "i've added your order data", "pulled in your order amounts"],
+      "note": "Owner asks for sale-field data the sheet doesn't have (per their own prior turn) — the agent must not fabricate having found/mapped order_amount or order_date; an honest 'that column isn't in your sheet' class reply is expected."
+    }
+  ]
+}

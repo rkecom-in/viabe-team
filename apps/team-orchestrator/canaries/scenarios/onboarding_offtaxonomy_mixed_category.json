@@ -1,0 +1,22 @@
+{
+  "name": "onboarding_offtaxonomy_mixed_category",
+  "domain": "onboarding",
+  "critical": false,
+  "setup_args": ["--owner-inputs", "true", "--journey"],
+  "expected_fail": false,
+  "notes": "The seeded draft guessed 'sweets' but the owner corrects it with a description that genuinely spans several categories at once (general/mixed store) — a value that does not map cleanly onto any single config/business_types.yaml key. is_valid_business_type range-checks the raw value against the fixed taxonomy KEY set (an exact match, not free text), so a multi-category free-text correction is recorded as a plain answer but never asserted as a single confident (and likely wrong) canonical category. Setup: `setup --owner-inputs true --journey` (ACTIVE journey, pending business_type confirm seeded 'sweets') then `script <tenant> onboarding_offtaxonomy_mixed_category.json`.",
+  "steps": [
+    {
+      "message": "nahi hum sirf mithai wale nahi hain, hum ek hi dukaan mein kirana, mobile recharge, cosmetics aur dawaiyan sab bechte hain, alag alag category nahi hai",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "note": "Rejects the seeded 'sweets' guess with a genuinely mixed-category business (groceries + mobile recharge + cosmetics + medicines, all one shop). Expect the manager to handle this without stalling — either accept a general/mixed classification or ask one plain clarifying question — never silently drop the turn, never just re-assert the wrong 'sweets' guess."
+    },
+    {
+      "message": "haan bas aisa hi hai, ab aage batao",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "note": "Confirms the mixed nature and asks to proceed. Expect the conversation to move forward without looping back to re-demand a single clean category."
+    }
+  ]
+}

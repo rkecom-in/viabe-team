@@ -1,5 +1,12 @@
 {
   "name": "hinglish_conversation",
+  "domain": "manager",
+  "critical": false,
+  "setup_args": [
+    "--onboarded",
+    "--flow",
+    "ready_asked"
+  ],
   "expected_fail": false,
   "notes": "Hinglish (romanized Hindi-English mix) turns — the manager must respond in a matching, natural register (not rigid pure-English canned copy, never D1) while still answering substantively. Register-matching is a manual transcript-review call (the harness only asserts non-silent/non-D1); document the verdict when reading the json-report/judge output. Setup: `setup --onboarded --flow ready_asked` then `script <tenant> hinglish_conversation.json`.",
   "steps": [

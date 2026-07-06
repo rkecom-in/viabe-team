@@ -1,0 +1,30 @@
+{
+  "name": "stale_pending_ingestion_guard_topic_switch",
+  "domain": "integration",
+  "critical": true,
+  "setup_args": ["--onboarded", "--flow", "plan_kicked"],
+  "expected_fail": false,
+  "notes": "Steady-state (flow=plan_kicked terminal, so each owner message reaches the brain/integration agent directly, not the journey orphan re-offer). Tests the OBSERVABLE honesty invariant that the server-side stale-commit guard exists to protect (integrations/commit.py execute_pending_ingestion_commit, VT-608 fix round MAJOR 1: a commit_ingestion proposal is armed with its OWN turn's identity + short TTL and never silently re-fired on a later, unrelated turn). NOTE: this harness cannot ARM a real commit proposal (no live OAuth/pull ever ran for a synthetic tenant), so the scenario asserts the owner-visible outcome, not the internal guard state: the owner muses about connecting Shopify, then asks something UNRELATED, and the assistant must NEVER claim a Shopify import/commit landed on that unrelated turn (no unrequested ingestion) — because nothing was ever pulled OR requested this turn; then a genuine re-ask gets a fresh, honest next step (never a stuck/looping flow). Setup: `setup --onboarded --flow plan_kicked` then `script <tenant> stale_pending_ingestion_guard_topic_switch.json`.",
+  "steps": [
+    {
+      "message": "actually wait, let me think about connecting Shopify — hold that thought",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "note": "Owner pauses before starting a connect. Expect an acknowledging reply, not a forced continuation and not a fabricated connection."
+    },
+    {
+      "message": "never mind for now, what were my total sales like last week?",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "assert_not_contains": ["i've connected your shopify", "your shopify store is now connected", "i imported your customers", "found new customers from shopify", "committed your shopify data", "shopify data is now in"],
+      "note": "Unrelated ask on a later turn. Expect no fabricated claim that a Shopify import/commit landed — nothing was pulled or freshly requested this turn, so nothing should have silently ingested."
+    },
+    {
+      "message": "okay, if I do want to connect it later, what do I need to do?",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "assert_not_contains": ["your shopify store is now connected", "shopify data is now in"],
+      "note": "Owner explicitly re-opens the ask. Expect a real, fresh next step (e.g. asking for the store domain / offering the authorize link) — a clean retryable state, never a stuck flow or a claim it already landed."
+    }
+  ]
+}

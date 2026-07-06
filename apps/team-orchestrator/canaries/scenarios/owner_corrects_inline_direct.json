@@ -1,0 +1,23 @@
+{
+  "name": "owner_corrects_inline_direct",
+  "domain": "onboarding",
+  "critical": true,
+  "setup_args": ["--owner-inputs", "true", "--journey", "--draft-type", "footwear", "--draft-city", "Agra"],
+  "expected_fail": false,
+  "notes": "Owner corrects the pre-seeded business_type confirm ('footwear') INLINE, in a single non-bare message (journey.py handle_reply: a confirm reply that is not a bare 'yes'/'no' token set is treated directly as a correction — the body IS the new value, no reprompt round-trip needed). The corrected value must then never be re-asked. Setup: `setup --owner-inputs true --journey --draft-type footwear --draft-city Agra` then `script <tenant> owner_corrects_inline_direct.json`.",
+  "steps": [
+    {
+      "message": "Nahi bhai, hum footwear nahi bechte, hum leather bags aur accessories bechte hain Agra mein",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "note": "Inline correction in ONE message (not a bare no) — footwear is wrong, the real business is leather bags/accessories. Expect this to be recorded directly without a separate 'what's the correct type' round trip."
+    },
+    {
+      "message": "kitna time lagega setup complete karne mein",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "assert_not_contains": ["footwear shop", "is that right", "what kind of business", "kis tarah ka business"],
+      "note": "Unrelated follow-up. The corrected business type must not be re-asked, and the wrong original guess must not resurface as a live question."
+    }
+  ]
+}
