@@ -32,3 +32,14 @@
    latency = poll interval. Event-driven wake = a future optimization row, not Phase 1.
 5. **google_sheet.py raw pools:** IN SCOPE — same defect class, fix in the same sweep as the
    Shopify sites.
+
+## VT-608 LIVE CANARY RESULT (2026-07-06, on deployed dev DB @ 01224c7)
+7/8 PASS on real Postgres + DBOS: Shopify e2e (propose→execute→verify, no premature write),
+VT-268 fail-closed, OAuth replay fail-closed, cross-tenant isolation, restart-resume identical,
+recurring-pull auto-scheduled both connectors, re-entry no-op. [2] Sheets e2e FAILED on ONE clause:
+`"authorize_url" in sheets_oauth`. Root cause: build_auth_url needs GOOGLE_OAUTH_CLIENT_ID +
+REDIRECT_URI (google_sheet.py:123); UNSET in local shell (sealed Railway vars, not in
+supabase-dev.env) → mint fail-closed with honest {status,error} (CORRECT, not a defect). Sheets
+LOGIC path all passed (sample→confirm→commit→execute: committed 2, new_customers 2). Migration 168
+applied clean to dev DB during the run. FOLLOW-UP (dev-env config): verify GOOGLE_OAUTH_* on Railway
+dev before the real owner Sheets flow (sealed → verify by USE / re-run canary ON deployed dev).
