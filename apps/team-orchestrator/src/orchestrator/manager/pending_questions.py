@@ -131,6 +131,26 @@ def _select_open_question(
     return _uuid(row) if row is not None else None
 
 
+def get_latest_answered(tenant_id: UUID | str, task_id: UUID | str) -> dict[str, Any] | None:
+    """VT-611 pre-work #6 — the most-recently-ANSWERED question for this task, or None.
+
+    ``get_open`` cannot serve this: ``correlate_reply`` already flipped the row's status away
+    from 'open' the moment the owner answered. This is the read the resumed-dispatch caller needs
+    to thread the owner's ``answer_text`` (+ the question it answered) into the re-dispatch
+    context — without it, ``manager_task_workflow``'s ask_owner-resume path only had the step's
+    ORIGINAL stored situation/desired_outcome to redispatch with, so the specialist never saw what
+    the owner just said and re-asked the same thing. ``ORDER BY answered_at DESC LIMIT 1`` picks
+    the LATEST answer if a task asked (and got answered) more than once across its lifetime."""
+    with tenant_connection(tenant_id) as conn:
+        row = conn.execute(
+            "SELECT id, question_text, answer_text, answered_at FROM pending_questions "
+            "WHERE tenant_id = %s AND task_id = %s AND status = 'answered' "
+            "ORDER BY answered_at DESC LIMIT 1",
+            (str(tenant_id), str(task_id)),
+        ).fetchone()
+    return dict(row) if row is not None else None
+
+
 def get_open(tenant_id: UUID | str, *, task_id: UUID | str | None = None) -> list[dict[str, Any]]:
     with tenant_connection(tenant_id) as conn:
         if task_id is not None:
@@ -178,4 +198,4 @@ def _redact_text(text: str) -> str:
     return out if isinstance(out, str) else str(out)
 
 
-__all__ = ["QUESTION_KINDS", "ask", "correlate_reply", "get_open", "expire_stale"]
+__all__ = ["QUESTION_KINDS", "ask", "correlate_reply", "get_open", "get_latest_answered", "expire_stale"]
