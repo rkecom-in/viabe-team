@@ -66,6 +66,10 @@ def test_read_onboarding_state_business_name_from_model_uses_context_tenant(
         return {"status": "active", "answers": {"city": "Pune", "__flow__": "profile_previewed"}, "skipped": ["hours"]}
 
     monkeypatch.setattr(journey_mod, "get_journey", _fake_get_journey)
+    # populate_profile_from_draft touches the DB (get_draft) — stub it so this stays a pure unit
+    # test (no DATABASE_URL needed) and so its own no-op doesn't emit an unrelated log line that
+    # would pollute the mismatch-count assertion below.
+    monkeypatch.setattr(journey_mod, "populate_profile_from_draft", lambda tid: {})
 
     run_id, tenant_id = uuid4(), uuid4()
     with observability_context(run_id=run_id, tenant_id=tenant_id):
@@ -78,7 +82,63 @@ def test_read_onboarding_state_business_name_from_model_uses_context_tenant(
     assert out["answers"] == {"city": "Pune"}  # __flow__ sentinel stripped
     assert out["skipped"] == ["hours"]
     assert out["flow"] == "profile_previewed"
+    assert out["populated"] == {}
     assert seen["tenant_id"] == tenant_id
+
+
+def test_read_onboarding_state_runs_populate_first_and_surfaces_delta(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """VT-609 gap fix: read_onboarding_state must run the SAME populate-first pass the interceptor
+    ran eagerly at its lazy-start seam (CL-2026-07-03) — otherwise a fresh enforce-mode dispatch
+    would interrogate the owner for facts public discovery already found. Every call re-checks it
+    (idempotent + card-once); the delta is surfaced as ``populated`` so the specialist can present
+    a card instead of asking one-by-one."""
+    import orchestrator.onboarding.journey as journey_mod
+    from orchestrator.agent.onboarding_conductor import read_onboarding_state
+
+    seen: dict[str, Any] = {}
+
+    def _fake_populate(tid: Any) -> dict[str, Any]:
+        seen["populate_tenant_id"] = tid
+        return {"business_type": "restaurant", "city": "Pune"}
+
+    monkeypatch.setattr(journey_mod, "populate_profile_from_draft", _fake_populate)
+    monkeypatch.setattr(
+        journey_mod,
+        "get_journey",
+        lambda tid: {"status": "active", "answers": {"business_type": "restaurant", "city": "Pune"}, "skipped": []},
+    )
+
+    tenant_id = uuid4()
+    with observability_context(run_id=uuid4(), tenant_id=tenant_id):
+        out = read_onboarding_state.func(tenant_id=str(tenant_id))  # type: ignore[attr-defined]
+
+    assert out["populated"] == {"business_type": "restaurant", "city": "Pune"}
+    assert seen["populate_tenant_id"] == tenant_id
+
+
+def test_read_onboarding_state_populate_first_failure_is_fail_soft(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A populate-first read failure (e.g. a transient DB error) must NEVER raise out of the tool —
+    the state read still succeeds with populated={}."""
+    import orchestrator.onboarding.journey as journey_mod
+    from orchestrator.agent.onboarding_conductor import read_onboarding_state
+
+    def _boom(tid: Any) -> dict[str, Any]:
+        raise RuntimeError("simulated populate-first failure")
+
+    monkeypatch.setattr(journey_mod, "populate_profile_from_draft", _boom)
+    monkeypatch.setattr(
+        journey_mod, "get_journey", lambda tid: {"status": "active", "answers": {}, "skipped": []}
+    )
+
+    with observability_context(run_id=uuid4(), tenant_id=uuid4()):
+        out = read_onboarding_state.func(tenant_id="whatever")  # type: ignore[attr-defined]
+
+    assert out["status"] == "active"
+    assert out["populated"] == {}
 
 
 def test_read_onboarding_state_no_context_garbage_value_returns_tool_error() -> None:

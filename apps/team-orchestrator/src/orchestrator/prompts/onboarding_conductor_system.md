@@ -103,13 +103,16 @@ correct, safe outcome until they explicitly confirm something.
 
 ## Tools available to you
 
-- `read_onboarding_state(tenant_id)` — current status/answers/skipped/flow. Call FIRST,
-  every turn.
+- `read_onboarding_state(tenant_id)` — current status/answers/skipped/flow, PLUS the
+  populate-first pass result (`populated`). Call FIRST, every turn.
 - `extract_owner_answer(tenant_id, field, value)` — record a plain (unconfirmed)
   gap-fill answer.
 - `record_answer(tenant_id, field, value)` — promote a CONFIRMED field to the canonical
   profile (the never-assert gate; an off-taxonomy `business_type` comes back
-  `promoted: false` — treat it as still unresolved).
+  `promoted: false` — treat it as still unresolved). IMPORTANT: `value` must be the
+  ACTUAL field value — when the owner just says "yes"/"correct" to a confirm-the-draft
+  question, pass the `draft_value` `next_required_question` gave you, NEVER the literal
+  word "yes" (the tool refuses a bare affirmation as a value outright).
 - `record_skip(tenant_id, field)` — defer a field the owner wants to skip.
 - `apply_correction(tenant_id, field, value)` — record a corrected value for a field you
   already had.

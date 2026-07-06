@@ -92,27 +92,52 @@ def read_onboarding_state(tenant_id: str) -> dict[str, Any]:
     fresh thread — this is how you resume where you left off and see what the owner already told
     you, including anything volunteered out of order or in a prior turn).
 
+    Also runs the DETERMINISTIC populate-first pass (CL-2026-07-03): derivable profile facts from
+    an identity-anchored discovery draft (business_type/category/about/city/website) are
+    auto-promoted + recorded here EVERY call, before you reason about what to ask — so you never
+    interrogate the owner for a fact public discovery already found. ``populated`` names any field
+    this exact call just (re-)populated (empty on a normal call — it is idempotent + card-once); if
+    non-empty, present those facts to the owner as a quick confirmable card rather than asking for
+    them one-by-one.
+
     Returns ``{"status": "active"|"complete"|"abandoned"|None, "answers": {field: value, ...},
-    "skipped": [field, ...], "flow": <post-profile paced-flow marker, or None>}``. ``status`` is
-    ``None`` when no journey row exists yet. NEVER ask for a field already present in ``answers`` —
-    use ``record_answer`` / ``apply_correction`` instead.
+    "skipped": [field, ...], "flow": <post-profile paced-flow marker, or None>, "populated": {...}}``.
+    ``status`` is ``None`` when no journey row exists yet. NEVER ask for a field already present in
+    ``answers`` — use ``record_answer`` / ``apply_correction`` instead.
     """
     resolved = resolve_lane_tenant(tenant_id, tool_name="read_onboarding_state")
     if resolved is None:
         return lane_tenant_error("read_onboarding_state")
 
-    from orchestrator.onboarding.journey import get_journey
+    from orchestrator.onboarding.journey import get_journey, populate_profile_from_draft
     from orchestrator.onboarding.turn_brain import _visible_answers
+
+    # CL-2026-07-03 populate-first: run BEFORE the state read so the answers below already reflect
+    # any derivable fact discovery just found — idempotent + card-once (returns {} when nothing
+    # changed), so this is safe to run on every call (mirrors the interceptor's own eager call at
+    # its lazy-start seam). No-op when there is no active journey / no identity-anchored draft.
+    # Best-effort (VT-484 tool invariant: a tool must never raise) — populate_profile_from_draft
+    # itself carries no try/except of its own (unlike the interceptor's blanket fail-open wrapper).
+    try:
+        populated = populate_profile_from_draft(resolved)
+    except Exception:  # noqa: BLE001 — populate-first is enrichment; a read failure must never
+        # break the state read itself (the specialist still gets answers/skipped/status below).
+        logger.warning(
+            "read_onboarding_state: populate-first pass failed tenant=%s (fail-soft)", resolved,
+            exc_info=True,
+        )
+        populated = {}
 
     g = get_journey(resolved)
     if g is None:
-        return {"status": None, "answers": {}, "skipped": [], "flow": None}
+        return {"status": None, "answers": {}, "skipped": [], "flow": None, "populated": {}}
     raw_answers = dict(g.get("answers") or {})
     return {
         "status": g.get("status"),
         "answers": _visible_answers(raw_answers),
         "skipped": list(g.get("skipped") or []),
         "flow": raw_answers.get("__flow__"),
+        "populated": populated,
     }
 
 
