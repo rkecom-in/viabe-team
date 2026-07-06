@@ -1,7 +1,7 @@
 """VT-603 — onboarding_conductor tools derive tenant from the run context, never the model.
 
 Same defect class as ``integration_agent`` (VT-599 follow-on, CC-verified): both
-``onboarding_next_question`` and ``onboarding_profile_complete`` declared ``tenant_id: str`` as a
+``next_required_question`` and ``profile_completion_check`` declared ``tenant_id: str`` as a
 MODEL-FILLABLE parameter and passed it STRAIGHT to ``UUID(tenant_id)`` before routing into
 ``onboarding.conductor`` / ``onboarding.journey`` / ``onboarding.draft_profile`` — all of which are
 tenant-scoped via ``tenant_connection`` (RLS keyed by whatever tenant they're handed). A
@@ -50,14 +50,14 @@ def _assert_context_wins_no_raise(
     return result
 
 
-# --- (1) onboarding_next_question ----------------------------------------------------------------
+# --- (1) next_required_question ----------------------------------------------------------------
 
 
-def test_onboarding_next_question_business_name_from_model_uses_context_tenant(
+def test_next_required_question_business_name_from_model_uses_context_tenant(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     import orchestrator.onboarding.conductor as conductor_mod
-    from orchestrator.agent.onboarding_conductor import onboarding_next_question
+    from orchestrator.agent.onboarding_conductor import next_required_question
     from orchestrator.onboarding.conductor import ConductorDecision
     from orchestrator.onboarding.question_brain import Question
 
@@ -74,20 +74,20 @@ def test_onboarding_next_question_business_name_from_model_uses_context_tenant(
     with observability_context(run_id=run_id, tenant_id=tenant_id):
         out = _assert_context_wins_no_raise(
             caplog,
-            call=lambda: onboarding_next_question.func(  # type: ignore[attr-defined]
+            call=lambda: next_required_question.func(  # type: ignore[attr-defined]
                 tenant_id="Sundaram Stores"
             ),
-            tool_name="onboarding_next_question",
+            tool_name="next_required_question",
         )
     assert out["field"] == "city"
     assert seen["tenant_id"] == tenant_id
 
 
-def test_onboarding_next_question_foreign_uuid_from_model_overridden(
+def test_next_required_question_foreign_uuid_from_model_overridden(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     import orchestrator.onboarding.conductor as conductor_mod
-    from orchestrator.agent.onboarding_conductor import onboarding_next_question
+    from orchestrator.agent.onboarding_conductor import next_required_question
     from orchestrator.onboarding.conductor import ConductorDecision
 
     seen: dict[str, Any] = {}
@@ -102,38 +102,38 @@ def test_onboarding_next_question_foreign_uuid_from_model_overridden(
     with observability_context(run_id=run_id, tenant_id=tenant_id):
         out = _assert_context_wins_no_raise(
             caplog,
-            call=lambda: onboarding_next_question.func(  # type: ignore[attr-defined]
+            call=lambda: next_required_question.func(  # type: ignore[attr-defined]
                 tenant_id=str(foreign)
             ),
-            tool_name="onboarding_next_question",
+            tool_name="next_required_question",
         )
     assert out == {"done": True}
     assert seen["tenant_id"] == tenant_id
     assert seen["tenant_id"] != foreign
 
 
-def test_onboarding_next_question_no_context_garbage_value_returns_tool_error() -> None:
-    from orchestrator.agent.onboarding_conductor import onboarding_next_question
+def test_next_required_question_no_context_garbage_value_returns_tool_error() -> None:
+    from orchestrator.agent.onboarding_conductor import next_required_question
 
-    out = onboarding_next_question.func(  # type: ignore[attr-defined]
+    out = next_required_question.func(  # type: ignore[attr-defined]
         tenant_id="Sundaram Stores"
     )
     assert out == {
         "status": "error",
-        "error": "onboarding_next_question: no resolvable tenant context",
+        "error": "next_required_question: no resolvable tenant context",
     }
 
 
-# --- (2) onboarding_profile_complete --------------------------------------------------------------
+# --- (2) profile_completion_check --------------------------------------------------------------
 
 
-def test_onboarding_profile_complete_business_name_from_model_uses_context_tenant(
+def test_profile_completion_check_business_name_from_model_uses_context_tenant(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     import orchestrator.onboarding.conductor as conductor_mod
     import orchestrator.onboarding.draft_profile as draft_profile_mod
     import orchestrator.onboarding.journey as journey_mod
-    from orchestrator.agent.onboarding_conductor import onboarding_profile_complete
+    from orchestrator.agent.onboarding_conductor import profile_completion_check
 
     seen: dict[str, Any] = {}
 
@@ -161,10 +161,10 @@ def test_onboarding_profile_complete_business_name_from_model_uses_context_tenan
     with observability_context(run_id=run_id, tenant_id=tenant_id):
         out = _assert_context_wins_no_raise(
             caplog,
-            call=lambda: onboarding_profile_complete.func(  # type: ignore[attr-defined]
+            call=lambda: profile_completion_check.func(  # type: ignore[attr-defined]
                 tenant_id="Sundaram Stores"
             ),
-            tool_name="onboarding_profile_complete",
+            tool_name="profile_completion_check",
         )
     assert out == {"complete": True}
     assert seen["get_journey_tenant"] == tenant_id
@@ -172,13 +172,13 @@ def test_onboarding_profile_complete_business_name_from_model_uses_context_tenan
     assert seen["draft_tenant"] == tenant_id
 
 
-def test_onboarding_profile_complete_foreign_uuid_from_model_overridden(
+def test_profile_completion_check_foreign_uuid_from_model_overridden(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     import orchestrator.onboarding.conductor as conductor_mod
     import orchestrator.onboarding.draft_profile as draft_profile_mod
     import orchestrator.onboarding.journey as journey_mod
-    from orchestrator.agent.onboarding_conductor import onboarding_profile_complete
+    from orchestrator.agent.onboarding_conductor import profile_completion_check
 
     seen: dict[str, Any] = {}
 
@@ -204,23 +204,23 @@ def test_onboarding_profile_complete_foreign_uuid_from_model_overridden(
     with observability_context(run_id=run_id, tenant_id=tenant_id):
         out = _assert_context_wins_no_raise(
             caplog,
-            call=lambda: onboarding_profile_complete.func(  # type: ignore[attr-defined]
+            call=lambda: profile_completion_check.func(  # type: ignore[attr-defined]
                 tenant_id=str(foreign)
             ),
-            tool_name="onboarding_profile_complete",
+            tool_name="profile_completion_check",
         )
     assert out == {"complete": False}
     assert seen["get_journey_tenant"] == tenant_id
     assert seen["get_journey_tenant"] != foreign
 
 
-def test_onboarding_profile_complete_no_context_garbage_value_returns_tool_error() -> None:
-    from orchestrator.agent.onboarding_conductor import onboarding_profile_complete
+def test_profile_completion_check_no_context_garbage_value_returns_tool_error() -> None:
+    from orchestrator.agent.onboarding_conductor import profile_completion_check
 
-    out = onboarding_profile_complete.func(  # type: ignore[attr-defined]
+    out = profile_completion_check.func(  # type: ignore[attr-defined]
         tenant_id="not-a-uuid"
     )
     assert out == {
         "status": "error",
-        "error": "onboarding_profile_complete: no resolvable tenant context",
+        "error": "profile_completion_check: no resolvable tenant context",
     }

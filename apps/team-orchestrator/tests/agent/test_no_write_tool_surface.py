@@ -108,12 +108,23 @@ ADVISORY_EXPECTED = {
     "read_cost_context",
 }
 
-# VT-462 — the onboarding-conductor specialist's tool surface (parity allowlist pin with the
-# orchestrator + integration surfaces). No send/write tool — it reasons about WHAT to ask; the
-# deterministic journey reply path owns the side-effects.
+# VT-462 / VT-609 — the onboarding-conductor specialist's tool surface (parity allowlist pin with
+# the orchestrator + integration surfaces). VT-609: the conductor now legitimately holds
+# onboarding-state/policy WRITE tools (record_answer / record_skip / apply_correction /
+# confirm_business_policy) — that is the point of the real-specialist conversion, not a boundary
+# breach. None of them touch a customer send, the owner's accounts-book Sheet, or the customer
+# ledger (the ONLY capabilities this guard forbids); "complete"/"activated" stay the DETERMINISTIC
+# checks (profile_completion_check / activation_check) the conductor can never self-assert.
 ONBOARDING_CONDUCTOR_EXPECTED = {
-    "onboarding_next_question",
-    "onboarding_profile_complete",
+    "read_onboarding_state",
+    "extract_owner_answer",
+    "record_answer",
+    "record_skip",
+    "apply_correction",
+    "next_required_question",
+    "profile_completion_check",
+    "activation_check",
+    "confirm_business_policy",
     "conductor_escalate_to_fazal",
 }
 
@@ -184,8 +195,9 @@ def test_advisory_tools_guard_passes_real_surface():
 def test_onboarding_conductor_tool_allowlist_pinned():
     from orchestrator.agent.onboarding_conductor import ONBOARDING_CONDUCTOR_TOOLS
 
-    # VT-462 — exact match: a NEW tool fails → forces VT-268 review that the new capability is not a
-    # send/write boundary breach. The conductor reasons; it holds no send/write tool.
+    # VT-609 — exact match: a NEW tool fails → forces VT-268 review that the new capability is not
+    # a customer-send / accounts-book-write / ledger-write boundary breach. The conductor DOES hold
+    # onboarding-state/policy write tools now (deliberate, VT-609) — none of them cross that line.
     assert _names(ONBOARDING_CONDUCTOR_TOOLS) == ONBOARDING_CONDUCTOR_EXPECTED
 
 

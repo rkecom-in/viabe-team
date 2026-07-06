@@ -6,6 +6,15 @@ then 2b's reasoned gaps), resumable across days. State lives in ``onboarding_jou
 here BEFORE the generic brain while a journey is active — deterministic-first, fail-OPEN, idempotent
 on WhatsApp redelivery. A draft-confirm promotes ONLY the confirmed field via 2a ``confirm_draft``
 (the never-assert boundary). On completion the named Gap-4 seam fires (business summary + 6-mo plan).
+
+VT-609 (Loop Package 4): this module's INTERCEPT is mode-gated (``runner.py``) — legacy/shadow keep
+routing here byte-identically; ``enforce`` mode instead lets an ordinary owner message fall through
+to the Manager, which spawns the real ``onboarding_conductor`` SPECIALIST (agent/onboarding_
+conductor.py). That specialist's write tools call this module's ``record_extracted_answer`` /
+``record_field_skip`` / ``confirm_field_answer`` (new, below) — the SAME state + the SAME promotion
+gate this walker uses, just without the cursor/question_queue (the specialist recomputes "what's
+next" fresh every turn via ``conductor.next_question_for_tenant`` rather than walking a frozen
+queue). The journey ROW stays the resumable substrate for BOTH paths.
 """
 
 from __future__ import annotations
@@ -507,6 +516,105 @@ def _confirm(tenant_id, confirmed_fields: dict[str, Any]) -> None:
         confirm_draft(tenant_id, confirmed_fields)
     except Exception:  # noqa: BLE001
         logger.exception("journey: confirm_draft failed tenant=%s fields=%s", tenant_id, list(confirmed_fields))
+
+
+# --- VT-609 specialist-tool write helpers -------------------------------------------------------
+#
+# The onboarding_conductor SPECIALIST (agent/onboarding_conductor.py) reasons over the full
+# conversation itself — it does not walk a frozen cursor/question_queue the way the deterministic
+# interceptor above does. These helpers are the WRITE half of that specialist's tool surface: they
+# persist answers/skipped exactly like handle_reply's branches do, but WITHOUT touching cursor/
+# question_queue (the specialist recomputes "what's next" fresh every call via
+# ``conductor.next_question_for_tenant`` — there is no queue to walk). REUSE: the promotion gate is
+# the SAME ``_confirm``/``confirm_draft`` (CL-390 never-assert) every other seam uses.
+
+
+def _write_answers_skipped(tenant_id: UUID | str, answers: dict[str, Any], skipped: list[str]) -> None:
+    """Persist ``answers``/``skipped`` for an ACTIVE journey row only — mirrors ``_advance``'s own
+    WHERE guard, minus the cursor/question_queue/last_message_sid columns (the specialist path does
+    not use them)."""
+    with tenant_connection(tenant_id) as conn:
+        conn.execute(
+            "UPDATE onboarding_journey SET answers = %s, skipped = %s, updated_at = now() "
+            "WHERE tenant_id = %s AND status = 'active'",
+            (Jsonb(answers), Jsonb(skipped), str(tenant_id)),
+        )
+
+
+def _is_bare_rejection_value(value: str) -> bool:
+    """Defense-in-depth (never-assert): a value that is ITSELF nothing but a bare negative/greeting
+    token set (e.g. the owner's "no" / "nope" / "hi") is not a real answer — mirrors the walker's own
+    ``is_bare_no_confirm`` / ``_is_bare_greeting`` guards. The specialist reasons over the FULL
+    conversation and should never pass such a value in the first place; this is the belt-and-braces
+    floor so a mis-called tool can never assert one as fact."""
+    toks = _tokens(value)
+    return bool(toks) and (toks <= _NO or toks <= _GREETING)
+
+
+def record_extracted_answer(tenant_id: UUID | str, field: str, value: str) -> dict[str, Any]:
+    """VT-609 — record a RAW (gap-style, unconfirmed) answer. Mirrors ``handle_reply``'s gap-question
+    branch + ``_apply_turn_plan``'s step 1 (record every extracted answer). Does NOT promote to
+    canonical (see ``confirm_field_answer`` for the promotion gate). No-op (``recorded: False``) on a
+    missing/inactive journey, an empty field/value, or a bare-rejection value — fail-soft; the caller
+    (the specialist tool) already knows the journey is active via ``read_onboarding_state``."""
+    field = (field or "").strip()
+    value = (value or "").strip()
+    if not field or not value or _is_bare_rejection_value(value):
+        return {"recorded": False}
+    g = get_journey(tenant_id)
+    if g is None or g.get("status") != "active":
+        return {"recorded": False}
+    answers = dict(g.get("answers") or {})
+    answers[field] = value
+    _write_answers_skipped(tenant_id, answers, list(g.get("skipped") or []))
+    return {"recorded": True, "field": field}
+
+
+def record_field_skip(tenant_id: UUID | str, field: str) -> dict[str, Any]:
+    """VT-609 — defer ``field`` (mirrors ``handle_reply``'s skip path). A deferred field is excluded
+    from ``conductor.next_question_for_tenant``'s candidate set unless a final ``revisit_skipped``
+    pass asks for it — never re-pressed every turn."""
+    field = (field or "").strip()
+    if not field:
+        return {"recorded": False}
+    g = get_journey(tenant_id)
+    if g is None or g.get("status") != "active":
+        return {"recorded": False}
+    skipped = list(g.get("skipped") or [])
+    if field not in skipped:
+        skipped.append(field)
+    _write_answers_skipped(tenant_id, dict(g.get("answers") or {}), skipped)
+    return {"recorded": True, "field": field}
+
+
+def confirm_field_answer(tenant_id: UUID | str, field: str, value: str) -> dict[str, Any]:
+    """VT-609 — THE promotion gate the specialist's ``record_answer``/``apply_correction`` tools call.
+    Mirrors ``handle_reply``'s confirm branch + ``_apply_turn_plan``'s steps 2/3: records the value
+    into journey ``answers`` (the resumability substrate) AND promotes it to canonical via
+    ``_confirm``/``confirm_draft`` — UNLESS ``field == "business_type"`` and ``value`` fails the
+    taxonomy check (``is_valid_business_type``), in which case it is recorded as a plain answer but
+    NEVER asserted as fact (CL-390 never-assert; the SAME guard ``_apply_turn_plan`` applies).
+    ``apply_correction`` reuses this exact function — a correction is just a fresh confirm for a
+    field that already has a value; ``confirm_draft``'s own merge-upsert overwrites it (the
+    populate-first "owner edits forever" invariant)."""
+    field = (field or "").strip()
+    value = (value or "").strip()
+    if not field or not value or _is_bare_rejection_value(value):
+        return {"recorded": False, "promoted": False}
+    g = get_journey(tenant_id)
+    if g is None or g.get("status") != "active":
+        return {"recorded": False, "promoted": False}
+    answers = dict(g.get("answers") or {})
+    answers[field] = value
+    promoted = True
+    if field == "business_type":
+        from orchestrator.onboarding.business_type_reconcile import is_valid_business_type
+
+        promoted = is_valid_business_type(value)
+    _write_answers_skipped(tenant_id, answers, list(g.get("skipped") or []))
+    if promoted:
+        _confirm(tenant_id, {field: value})
+    return {"recorded": True, "promoted": promoted, "field": field}
 
 
 def _complete(tenant_id) -> None:
@@ -1740,4 +1848,6 @@ def maybe_handle_journey_reply(
 __all__ = [
     "start_journey", "set_queue_if_empty", "get_journey", "is_active", "handle_reply",
     "maybe_handle_journey_reply", "_recompose_stale_confirms", "populate_profile_from_draft",
+    # VT-609 — the onboarding_conductor specialist's write-tool helpers.
+    "record_extracted_answer", "record_field_skip", "confirm_field_answer",
 ]

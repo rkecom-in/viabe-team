@@ -877,7 +877,17 @@ def webhook_pipeline_run(tenant_id: str, run_id: str, twilio_fields: dict) -> di
     # inbound is never blocked by a journey-check failure). Only inbound, non-dupe (idempotency is
     # double-guarded: the VT-149 message_sid UNIQUE seam above + handle_reply's last_message_sid).
     # Lazily imported so non-journey paths don't pay the import cost.
-    if event.message_type == "inbound_message" and not event.dupe_status:
+    #
+    # VT-609 (Loop Package 4) — mode-gated exactly like VT-606 gated the graph shape: legacy/shadow
+    # keep this gate byte-identical (this branch runs unconditionally, same as before this row).
+    # ONLY in enforce mode does an ordinary owner message stop being consumed here — the real
+    # onboarding_conductor SPECIALIST (agent/onboarding_conductor.py) now conducts the conversation,
+    # spawned by the Manager the same way any other roster member is. is_enforce() is read fresh
+    # per call (parity with every other mode-gated read site) so a mode flip never changes behavior
+    # mid-run.
+    from orchestrator.manager.loop_mode import is_enforce
+
+    if event.message_type == "inbound_message" and not event.dupe_status and not is_enforce():
         from orchestrator.onboarding.journey import maybe_handle_journey_reply
 
         journey_result = maybe_handle_journey_reply(
