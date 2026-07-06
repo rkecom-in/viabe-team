@@ -166,3 +166,32 @@ def test_manager_task_workflow_survives_sigkill_mid_dispatch_and_replays() -> No
     from orchestrator.manager.task_store import TASK_STATUSES
 
     assert status[0] in TASK_STATUSES, f"corrupted/unknown post-replay status: {status[0]}"
+
+    # VT-611 Phase B1 #3 (amendment A4 restart proof) — the gap this test left open: the crash
+    # window is INSIDE _dispatch_specialist_step, which brackets graph.invoke with a REAL
+    # _open_dispatch_run/_close_dispatch_run (only build_supervisor_graph is swapped — see the
+    # worker's own docstring). So BOTH the crash attempt and the replay genuinely re-execute
+    # _open_dispatch_run's "INSERT INTO pipeline_runs ... ON CONFLICT (id) DO NOTHING" for the
+    # SAME (task_id, step_id, attempt) — attempt is always 1 here (a replay re-derives
+    # attempt_counts from an empty dict by re-walking the same memoized _claim_step result, per
+    # the workflow's own replay-safety docstring), so loop_run_id computes the IDENTICAL run_id
+    # both times. This was previously untested: the ON CONFLICT clause is designed-idempotent but
+    # nothing proved it actually held under a REAL crash+replay, not just read as correct.
+    from orchestrator.manager.message_ids import loop_run_id
+
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        step_id = conn.execute(
+            "SELECT id FROM manager_task_steps WHERE tenant_id = %s AND task_id = %s "
+            "AND step_seq = 1",
+            (tenant_id, task_id),
+        ).fetchone()[0]
+    dispatch_run_id = loop_run_id(task_id, str(step_id), 1)
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        run_count = conn.execute(
+            "SELECT count(*) FROM pipeline_runs WHERE id = %s", (str(dispatch_run_id),)
+        ).fetchone()[0]
+    assert run_count == 1, (
+        f"expected exactly ONE pipeline_runs row for the dispatch's run_id after crash+replay, "
+        f"got {run_count} — _open_dispatch_run's ON CONFLICT DO NOTHING would have prevented a "
+        f"duplicate; {run_count} != 1 means either it never ran (0) or the idempotent guard failed (2+)"
+    )
