@@ -319,6 +319,43 @@ def test_approval_timeout_sweep_one_failure_does_not_halt(monkeypatch) -> None:
     assert out == [UUID(a2)]
 
 
+def test_approval_timeout_sweep_business_policy_grant_skips_resume_run(monkeypatch) -> None:
+    """VT-609 fix round 2 — a business_policy_grant proposal's run_id is a MINIMAL
+    pipeline_runs row (no LangGraph checkpoint), so the sweep must NOT call resume_run for it
+    (that would raise — no checkpoint to resume). mark_approval_resolved still runs (the
+    grant/no-grant decision for a timeout is always "no grant" — see business_policy.
+    apply_business_policy_decision); the sweep closes the minimal run directly instead."""
+    tid, rid, aid = str(uuid4()), str(uuid4()), str(uuid4())
+    monkeypatch.setattr(
+        st, "_scan_timed_out_approvals",
+        lambda now: [
+            {"id": aid, "tenant_id": tid, "run_id": rid, "approval_type": "business_policy_grant"}
+        ],
+    )
+    sweep_conn = _SweepConn()
+    monkeypatch.setattr("orchestrator.db.tenant_connection", lambda t: sweep_conn)
+    marked: list[tuple] = []
+    monkeypatch.setattr(
+        "orchestrator.agent.approval_resume.mark_approval_resolved",
+        lambda conn, tenant_id, approval_id, decision, **kw: marked.append((approval_id, decision)),
+    )
+
+    def _resume_must_not_be_called(run_id, decision):
+        raise AssertionError("resume_run must not be called for business_policy_grant")
+
+    monkeypatch.setattr(
+        "orchestrator.agent.approval_resume.resume_run", _resume_must_not_be_called
+    )
+
+    out = st.run_approval_timeout_sweep_body(
+        now=datetime(2026, 5, 31, 12, 0, tzinfo=timezone.utc)
+    )
+
+    assert out == [UUID(aid)]
+    assert marked == [(aid, "timeout")]
+    assert sweep_conn.updates, "the minimal run must still close to 'completed'"
+
+
 # ---------------------------------------------------------------------------
 # VT-432 — implicit attribution sweep handler (18th trigger)
 # ---------------------------------------------------------------------------

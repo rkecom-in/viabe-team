@@ -680,6 +680,24 @@ def try_resume_pending_approval(tenant_id: str, body: str, message_sid: str | No
         )
         return decision
 
+    # VT-609 fix round 2 (CRITICAL): a business-policy proposal has NO supervisor-graph checkpoint
+    # to resume either — ``propose_business_policy_grant`` opens only a MINIMAL ``pipeline_runs`` row
+    # to satisfy the FK (mirroring ``business_impact_choke.dispatch_autonomy_offer``'s own
+    # minimal-provenance-run pattern), never a paused LangGraph run. Without this branch the generic
+    # fallback below would call ``resume_run`` against a thread_id with no checkpoint at all — a
+    # guaranteed error, and the FIRST bug this specific approval_type would hit even after the grant
+    # itself (applied inside ``mark_approval_resolved``'s transaction above, via ``_apply_agent_glue``
+    # -> ``apply_business_policy_decision``) already landed. Close the minimal run so it doesn't sit
+    # 'running' forever, then return — same durable-state shape as ``agent_customer_send`` above.
+    if approval.get("approval_type") == "business_policy_grant":
+        close_webhook_run(tenant_id, approval["run_id"], "completed")
+        logger.info(
+            "approval-resume: resolved (business_policy_grant, durable-state) tenant=%s "
+            "approval=%s decision=%s",
+            tenant_id, approval["id"], decision,
+        )
+        return decision
+
     # Resume the suspended graph (re-enters the interrupting node; the node's
     # arm_pause_request is a no-op now the row is resolved). Then close the
     # original paused run.

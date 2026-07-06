@@ -3,7 +3,10 @@ the model. Same defect class VT-603 closed for the original two tools (``next_re
 / ``profile_completion_check`` — tested in ``test_onboarding_conductor_tenant_scope.py``), extended
 here to the NEW read/write/policy tools this row adds: ``read_onboarding_state``,
 ``extract_owner_answer``, ``record_answer``, ``record_skip``, ``apply_correction``,
-``activation_check``, ``propose_business_policy``, ``resolve_business_policy_proposal``.
+``activation_check``, ``propose_business_policy``. (The original ``resolve_business_policy_proposal``
+tool was DELETED in the VT-609 fix round 2 CRITICAL redesign — it was never reliably re-dispatched
+on the owner's clear yes; the grant is now applied by the deterministic approval-glue, tested in
+``test_autonomy_rails_vt474.py``'s Section E, not here.)
 
 Mirrors the existing pattern exactly: the ambient dispatch ``ObservabilityContext`` is ALWAYS
 authoritative; a disagreeing model-supplied value (a business name, a foreign UUID) is observed +
@@ -551,6 +554,7 @@ def test_propose_business_policy_drops_unrecognized_action_types_and_clamps_ceil
     import orchestrator.agents.business_policy as policy_mod
     import orchestrator.db as db_mod
     from orchestrator.agent.onboarding_conductor import propose_business_policy
+    from orchestrator.agents.business_policy import MAX_SANE_SPEND_CEILING_MINOR
 
     monkeypatch.setattr(conductor_mod, "_profile_is_complete", lambda tid: True)
     monkeypatch.setattr(db_mod, "tenant_connection", _fake_tenant_connection_with_txn)
@@ -572,7 +576,7 @@ def test_propose_business_policy_drops_unrecognized_action_types_and_clamps_ceil
             spend_ceiling_minor=999_999_999,
         )
     assert captured["allowed_action_types"] == ["customer_send"]
-    assert captured["spend_ceiling_minor"] == conductor_mod._MAX_SANE_SPEND_CEILING_MINOR
+    assert captured["spend_ceiling_minor"] == MAX_SANE_SPEND_CEILING_MINOR
     assert out["status"] == "pending_owner_approval"
 
 
@@ -595,55 +599,12 @@ def test_propose_business_policy_refuses_when_no_valid_action_types(
         )
     assert out == {"status": "error", "error": "no_valid_action_types"}
 
-
-# --- (8) resolve_business_policy_proposal --------------------------------------------------------
-
-
-def test_resolve_business_policy_proposal_business_name_from_model_uses_context_tenant(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
-    import orchestrator.agents.business_policy as policy_mod
-    import orchestrator.db as db_mod
-    from orchestrator.agent.onboarding_conductor import resolve_business_policy_proposal
-
-    seen: dict[str, Any] = {}
-
-    def _fake_resolve(tid: Any, *, approved: bool, conn: Any) -> dict[str, Any]:
-        seen["tenant_id"] = tid
-        seen["approved"] = approved
-        return {
-            "status": "granted",
-            "approval_id": "approval-1",
-            "allowed_action_types": ["customer_send"],
-            "allowed_segments": ["lapsed"],
-            "frequency_caps": {"customer_send_per_month": 2},
-            "spend_ceiling_minor": 50000,
-        }
-
-    monkeypatch.setattr(db_mod, "tenant_connection", _fake_tenant_connection_with_txn)
-    monkeypatch.setattr(policy_mod, "resolve_business_policy_grant", _fake_resolve)
-
-    run_id, tenant_id = uuid4(), uuid4()
-    with observability_context(run_id=run_id, tenant_id=tenant_id):
-        out = _assert_context_wins_no_raise(
-            caplog,
-            call=lambda: resolve_business_policy_proposal.func(  # type: ignore[attr-defined]
-                tenant_id="Sundaram Stores", approved=True
-            ),
-            tool_name="resolve_business_policy_proposal",
-        )
-    assert out["status"] == "granted"
-    assert seen["tenant_id"] == tenant_id
-    assert seen["approved"] is True
-
-
-def test_resolve_business_policy_proposal_no_context_garbage_value_returns_tool_error() -> None:
-    from orchestrator.agent.onboarding_conductor import resolve_business_policy_proposal
-
-    out = resolve_business_policy_proposal.func(  # type: ignore[attr-defined]
-        tenant_id="not-a-uuid", approved=True
-    )
-    assert out == {
-        "status": "error",
-        "error": "resolve_business_policy_proposal: no resolvable tenant context",
-    }
+# NOTE (VT-609 fix round 2, CRITICAL): section (8) used to test ``resolve_business_policy_proposal``
+# here — that tool was DELETED. An inbound owner reply is consumed by
+# ``runner.try_resume_pending_approval`` BEFORE the conductor is ever re-dispatched, so a specialist
+# resolve tool built to fire on the owner's clear yes was, structurally, only ever reachable on an
+# AMBIGUOUS reply (the one case it must NOT grant) — a resolved-but-never-granted row, permanently
+# stuck deny-all. The grant now runs through the deterministic approval-glue
+# (``business_policy.apply_business_policy_decision``, dispatched from
+# ``approval_resume._apply_agent_glue``) on the SAME choke point every other approval type resolves
+# through. See ``test_autonomy_rails_vt474.py``'s Section E for the DB-backed inbound-path proof.

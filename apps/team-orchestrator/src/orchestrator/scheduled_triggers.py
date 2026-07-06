@@ -890,7 +890,7 @@ def _scan_timed_out_approvals(now: datetime) -> list[dict[str, Any]]:
         cur.execute(
             """
             SELECT id::text AS id, tenant_id::text AS tenant_id,
-                   run_id::text AS run_id
+                   run_id::text AS run_id, approval_type
             FROM pending_approvals
             WHERE resolved_at IS NULL AND timeout_at <= %s
             ORDER BY timeout_at ASC
@@ -909,6 +909,10 @@ def run_approval_timeout_sweep_body(now: datetime | None = None) -> list[UUID]:
     'timeout'; the campaign does NOT send — Pillar 7). Returns the list of
     resolved approval ids for canary inspection.
 
+    VT-609 fix round 2: a ``business_policy_grant`` approval has no LangGraph checkpoint to resume
+    (its ``run_id`` is a minimal ``pipeline_runs`` row) — it skips ``resume_run`` and closes that
+    run directly instead (same durable-state shape ``runner.try_resume_pending_approval`` uses).
+
     Callable directly with an injected ``now`` (mirrors the other bodies)
     so the canary can drive a past-timeout row without waiting for the cron.
 
@@ -925,18 +929,35 @@ def run_approval_timeout_sweep_body(now: datetime | None = None) -> list[UUID]:
         approval_id = approval["id"]
         tenant_id = approval["tenant_id"]
         run_id = approval["run_id"]
+        approval_type = approval.get("approval_type")
         try:
             # Set the tenant GUC for the resolve write (RLS).
             with tenant_connection(tenant_id) as conn:
                 mark_approval_resolved(conn, tenant_id, approval_id, "timeout")
-            # Resume the suspended run with the timeout decision, then close
-            # the original paused run.
-            resume_run(run_id, "timeout")
-            with tenant_connection(tenant_id) as conn:
-                conn.execute(
-                    "UPDATE pipeline_runs SET status = 'completed', ended_at = now() WHERE id = %s",
-                    (run_id,),
-                )
+            # VT-609 fix round 2: a business_policy_grant proposal's run_id is a MINIMAL
+            # pipeline_runs row (propose_business_policy_grant opens it only to satisfy the FK) —
+            # never a paused LangGraph run, so there is NO checkpoint for resume_run to resume
+            # (same shape as runner.try_resume_pending_approval's own business_policy_grant
+            # branch). The grant/no-grant decision already landed inside mark_approval_resolved's
+            # transaction above; calling resume_run here would just raise. Close the minimal run
+            # directly instead.
+            if approval_type == "business_policy_grant":
+                with tenant_connection(tenant_id) as conn:
+                    conn.execute(
+                        "UPDATE pipeline_runs SET status = 'completed', ended_at = now() "
+                        "WHERE id = %s",
+                        (run_id,),
+                    )
+            else:
+                # Resume the suspended run with the timeout decision, then close
+                # the original paused run.
+                resume_run(run_id, "timeout")
+                with tenant_connection(tenant_id) as conn:
+                    conn.execute(
+                        "UPDATE pipeline_runs SET status = 'completed', ended_at = now() "
+                        "WHERE id = %s",
+                        (run_id,),
+                    )
             log_event(
                 event_type=APPROVAL_TIMED_OUT_EVENT,
                 run_id=UUID(run_id),

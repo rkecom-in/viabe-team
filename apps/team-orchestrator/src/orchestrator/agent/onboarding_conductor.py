@@ -18,12 +18,11 @@ ignored, never trusted. Every tool returns a structured ``{"status": "error", ..
 unresolvable tenant (VT-484 invariant) — NEVER raises.
 
 The agent now HOLDS write tools (``record_answer`` / ``record_skip`` / ``apply_correction`` /
-``propose_business_policy`` / ``resolve_business_policy_proposal``) — this is the point of the
-conversion, not a guardrail regression: none of these touch a customer send, the owner's
-accounts-book Sheet, or the customer ledger (the ONLY capabilities
-``tool_guardrail.assert_agent_tools_safe`` forbids an agent from holding directly); they write the
-tenant's OWN onboarding-journey/business-profile/policy state, the same state the deterministic
-interceptor wrote before this row.
+``propose_business_policy``) — this is the point of the conversion, not a guardrail regression:
+none of these touch a customer send, the owner's accounts-book Sheet, or the customer ledger (the
+ONLY capabilities ``tool_guardrail.assert_agent_tools_safe`` forbids an agent from holding
+directly); they write the tenant's OWN onboarding-journey/business-profile/policy state, the same
+state the deterministic interceptor wrote before this row.
 
 Completion and full activation stay DETERMINISTIC and un-assertable by the model:
 ``profile_completion_check`` delegates to ``conductor.profile_collection_complete`` (a pure function
@@ -33,13 +32,14 @@ checks OWN "done".
 
 The business-policy GRANT itself is a SEPARATE Pillar-7 fix-round redesign (a money-bearing write —
 the deterministic guard every autonomous customer_send/spend action reads): the model can only
-PROPOSE (validated + clamped bounds, arming a durable owner-approval row); a SEPARATE resolution
-tool call — triggered only by the specialist recognizing the owner's own explicit yes/no to that
-SAME proposal — reads the bounds back off the approval row and grants them, tied to the approval id
-as provenance (``business_policy.propose_business_policy_grant`` /
-``resolve_business_policy_grant``, mirroring ``business_impact_choke``'s
-``dispatch_autonomy_offer``/``resolve_and_grant_l3`` shape). The model never supplies bounds at
-grant time.
+PROPOSE (validated + clamped bounds, arming a durable owner-approval row shown to the owner in the
+specialist's own reply). The GRANT is applied by the DETERMINISTIC approval-glue
+(``business_policy.apply_business_policy_decision``) when the owner's own explicit yes/no resolves
+that row — NOT by a second tool call. (Fix round 2, CRITICAL: a first cut gave the specialist a
+resolve tool, but an inbound owner reply is consumed by ``runner.try_resume_pending_approval``
+BEFORE the specialist is ever re-dispatched, so that tool was never reliably reached on a clear
+yes — see ``business_policy.py``'s module docstring.) The model never supplies bounds at grant
+time; it structurally cannot grant anything itself.
 
 Mode-gating (VT-609 fix round, MAJOR): the Manager routes to this specialist UNCONDITIONALLY across
 modes, so a legacy/shadow fall-through dispatch (the journey gate returned None; the Manager still
@@ -70,7 +70,7 @@ from langchain_core.tools import BaseTool, tool
 from langgraph.errors import GraphBubbleUp
 
 from orchestrator.agent.lane_tenant import lane_tenant_error, resolve_lane_tenant
-from orchestrator.agents.business_policy import PolicyActionClass
+from orchestrator.agents.business_policy import MAX_SANE_SPEND_CEILING_MINOR, PolicyActionClass
 from orchestrator.types.trigger_reason import TriggerReason
 
 logger = logging.getLogger("orchestrator.agent.onboarding_conductor")
@@ -350,15 +350,16 @@ def activation_check(tenant_id: str, agent: str = "sales_recovery") -> dict[str,
 # to call it DIRECTLY from the specialist's own turn, on prompt-instruction alone — no owner-
 # approval provenance, no bounds validation, ``granted_by`` NULL. Redesigned: the specialist can
 # only PROPOSE (validated, clamped, arms a durable approval row showing the owner the SPECIFIC
-# bounds); a SEPARATE resolution tool — called only once the specialist recognizes the owner's own
-# explicit yes/no to that SAME proposal — reads the bounds back OFF THE APPROVAL ROW and grants
-# EXACTLY those, tied to the approval id. The model never supplies bounds at grant time; it cannot
-# turn "sure, message my customers" into a broader grant than what was actually shown.
+# bounds). The GRANT is applied by the deterministic approval-glue when the owner's own explicit
+# yes/no resolves that row (fix round 2 — see ``business_policy.apply_business_policy_decision``
+# and its module docstring for why a second SPECIALIST TOOL to do this was scrapped: it was never
+# reliably reached). The model never supplies bounds at grant time; it cannot turn "sure, message
+# my customers" into a broader grant than what was actually shown.
 
+# ``_VALID_POLICY_ACTION_TYPES`` + the spend ceiling clamp are read off ``business_policy`` — the
+# SAME constants ``grant_business_policy`` re-applies at the true chokepoint (fix round 2, MINOR-3:
+# belt-and-braces means the SAME rule enforced twice, not two magic numbers that happen to agree).
 _VALID_POLICY_ACTION_TYPES = frozenset(e.value for e in PolicyActionClass)
-_MAX_SANE_SPEND_CEILING_MINOR = 10_000_00  # ₹10,000 in paise — a DEFENSIVE sanity ceiling, not a
-# product-tuned SMB figure (no such figure exists in this codebase); guards a money-bearing grant
-# against a garbage/malformed value, pending real product guidance on spend norms.
 _MAX_SEGMENT_LABEL_LEN = 64  # a segment is a free-form label (e.g. "lapsed_60d") — no fixed
 # taxonomy exists anywhere in this codebase (marketing_lane.draft_campaign_plan's own docstring
 # confirms this) — so validation here is STRUCTURAL sanity, not a whitelist lookup.
@@ -388,7 +389,7 @@ def _validate_policy_bounds(
         except (TypeError, ValueError):
             continue
     try:
-        ceiling = max(0, min(int(spend_ceiling_minor), _MAX_SANE_SPEND_CEILING_MINOR))
+        ceiling = max(0, min(int(spend_ceiling_minor), MAX_SANE_SPEND_CEILING_MINOR))
     except (TypeError, ValueError):
         ceiling = 0
 
@@ -414,9 +415,9 @@ def propose_business_policy(
     SPECIFIC bounds in conversation (e.g. "yes, message lapsed customers up to twice a month,
     nothing over 500 rupees"). This does NOT grant anything — it VALIDATES + CLAMPS the bounds and
     arms a durable proposal you must show the owner back in your own reply (the SPECIFIC numbers,
-    not a vague "ok, set up"), then wait for their real yes/no. Call
-    ``resolve_business_policy_proposal`` once they answer — that is the ONLY thing that actually
-    changes the policy.
+    not a vague "ok, set up"), then wait for their real yes/no. Their reply IS the answer — you do
+    NOT call another tool to apply it; the owner's own yes/no resolves the proposal automatically
+    and that is the ONLY thing that actually changes the policy. Just acknowledge what they said.
 
     Requires the profile to be deterministically complete first (refuses otherwise —
     ``profile_completion_check`` is the gate, not your own sense of the conversation).
@@ -456,29 +457,6 @@ def propose_business_policy(
 
 
 @tool
-def resolve_business_policy_proposal(tenant_id: str, approved: bool) -> dict[str, Any]:
-    """Resolve the tenant's open business-policy proposal — call this ONLY once the owner has
-    given a real yes/no to the SPECIFIC bounds ``propose_business_policy`` showed them. This is the
-    ONLY tool that actually changes the policy: it reads the bounds off the durable proposal row
-    (never a value you supply here) and, on ``approved=True``, grants EXACTLY those bounds. There
-    is no path for you to grant a broader/different policy than what was proposed and shown.
-
-    Returns ``{"status": "granted", ...}`` / ``{"status": "rejected", ...}`` /
-    ``{"status": "no_pending_proposal"}`` (nothing open — e.g. it already timed out; propose again).
-    """
-    resolved = resolve_lane_tenant(tenant_id, tool_name="resolve_business_policy_proposal")
-    if resolved is None:
-        return lane_tenant_error("resolve_business_policy_proposal")
-
-    from orchestrator.agents.business_policy import resolve_business_policy_grant
-    from orchestrator.db import tenant_connection
-
-    with tenant_connection(resolved) as conn, conn.transaction():
-        result = resolve_business_policy_grant(resolved, approved=approved, conn=conn)
-    return result
-
-
-@tool
 def conductor_escalate_to_fazal(run_id: str, reason: str, owner_stuck_at: str) -> str:
     """Escalate to Fazal when the owner is stuck in profile setup. Log + return ack (last-resort)."""
     logger.warning(
@@ -498,7 +476,6 @@ ONBOARDING_CONDUCTOR_TOOLS: list[BaseTool] = [
     profile_completion_check,
     activation_check,
     propose_business_policy,
-    resolve_business_policy_proposal,
     conductor_escalate_to_fazal,
 ]
 

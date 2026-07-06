@@ -75,6 +75,17 @@ class PolicyActionClass(str, Enum):
     CONFIG = "config"
 
 
+# The canonical action-type whitelist + spend sanity ceiling — read by BOTH ``grant_business_policy``
+# (the true chokepoint) and ``onboarding_conductor.propose_business_policy`` (the earlier UX-facing
+# validation), so the two independent enforcement points can never drift apart on WHAT they clamp to
+# (VT-609 fix round 2, MINOR-3: belt-and-braces means the SAME rule applied twice, not two magic
+# numbers that happen to agree today).
+_VALID_POLICY_ACTION_TYPES = frozenset(e.value for e in PolicyActionClass)
+MAX_SANE_SPEND_CEILING_MINOR = 10_000_00  # ₹10,000 in paise — a DEFENSIVE sanity ceiling, not a
+# product-tuned SMB figure (no such figure exists in this codebase); guards a money-bearing grant
+# against a garbage/malformed value, pending real product guidance on spend norms.
+
+
 class PolicyDecision(str, Enum):
     """The deterministic policy outcome. Exactly two terminal decisions — no third 'maybe'."""
 
@@ -347,16 +358,22 @@ def grant_business_policy(
     """The owner GRANTS / updates the machine-enforceable policy (the onboarding grant or an owner
     approval resolution). DETERMINISTIC: stores the bounds the guard reads. This is an explicit OWNER
     act, never the brain's choice — a specialist can PROPOSE a policy (an owner approval) but only the
-    owner's resolution calls this. Upsert on tenant_id. MUST run on the caller's RLS-scoped ``conn``.
+    deterministic approval-glue's resolution of that owner's yes calls this
+    (``apply_business_policy_decision``). Upsert on tenant_id. MUST run on the caller's RLS-scoped
+    ``conn``.
 
-    Stores ONLY the recognized fields (an unrecognized key never enters the policy), each normalized
-    to its safe form, so a grant can never inject a field the guard does not understand.
+    THE true grant chokepoint (VT-609 fix round 2, MINOR-3 — defense in depth): re-applies the SAME
+    action-type whitelist + ₹10k sanity clamp ``propose_business_policy`` already applies at the UX
+    layer. Callers upstream of this function may validate too, but this function trusts NOTHING it
+    is handed — an unrecognized action type is dropped (never stored, never enters
+    ``allows_action_type``'s allowlist) and a spend ceiling above the sanity bound is clamped down,
+    regardless of what any caller (a future direct caller, a bug upstream) passes.
     """
     from psycopg.types.json import Jsonb
 
     tid = str(tenant_id)
     try:
-        ceiling = max(0, int(spend_ceiling_minor))
+        ceiling = max(0, min(int(spend_ceiling_minor), MAX_SANE_SPEND_CEILING_MINOR))
     except (TypeError, ValueError):
         ceiling = 0
     caps: dict[str, int] = {}
@@ -365,8 +382,11 @@ def grant_business_policy(
             caps[str(k)] = max(0, int(v))
         except (TypeError, ValueError):
             caps[str(k)] = 0
+    valid_types = sorted(
+        {str(x) for x in (allowed_action_types or []) if str(x) in _VALID_POLICY_ACTION_TYPES}
+    )
     policy_doc: dict[str, Any] = {
-        "allowed_action_types": sorted({str(x) for x in (allowed_action_types or [])}),
+        "allowed_action_types": valid_types,
         "allowed_segments": sorted({str(x) for x in (allowed_segments or [])}),
         "frequency_caps": caps,
         "spend_ceiling_minor": ceiling,
@@ -396,10 +416,25 @@ def grant_business_policy(
 # owner-approval provenance, no bounds validation, ``granted_by`` NULL). This mirrors
 # ``business_impact_choke``'s decaying-HITL arm/resolve shape (``dispatch_autonomy_offer`` ->
 # ``resolve_and_grant_l3``): a tool call ARMS a durable, resolvable ``pending_approvals`` row
-# carrying the EXACT proposed bounds; only a SEPARATE resolution call — triggered by the owner's
-# own explicit yes/no, recognized by the conversational specialist but never invented by it — reads
-# those SAME stored bounds back and calls ``grant_business_policy``, tying the grant to the
-# approval-row id as provenance. The model can PROPOSE; it structurally cannot GRANT.
+# carrying the EXACT proposed bounds; the grant itself is applied by the DETERMINISTIC
+# approval-glue (``apply_business_policy_decision``, below) when the owner's own explicit yes/no
+# resolves that row — never invented, never a fresh model-supplied value. The model can PROPOSE;
+# it structurally cannot GRANT.
+#
+# VT-609 fix round 2 (CRITICAL, re-verify): the FIRST cut of this redesign gave the specialist a
+# SECOND tool (``resolve_business_policy_proposal``) to call once it recognized the owner's yes —
+# but an inbound owner reply is consumed by ``runner.try_resume_pending_approval`` FIRST, on EVERY
+# inbound, with no mode guard: it finds this approval row (sole-open, migration 128), classifies a
+# clear "yes" -> approved, and resolves it via ``approval_resume.mark_approval_resolved`` — all
+# BEFORE the specialist is ever re-dispatched. The specialist's resolve tool was therefore reachable
+# ONLY on an ambiguous reply (the one case it must NOT grant), never on the clear yes it was built
+# for — a resolved-but-never-granted row, permanently unrecoverable (a resolved row is no longer
+# "open" for the tool's own lookup), i.e. a tenant stuck deny-all forever. Fix: DELETE that tool.
+# ``apply_business_policy_decision`` is called from ``approval_resume._apply_agent_glue`` instead —
+# the SAME deterministic choke point every other approval type (``agent_customer_send``) resolves
+# through, additively (self-guarded on its own ``approval_type``, a no-op for any other row). Zero
+# LLM in the resolution path: the owner's yes flows classify_approval_reply -> mark_approval_resolved
+# -> grant, with no specialist turn in between to be skipped.
 #
 # Deliberately does NOT route through ``agent.tools.request_owner_approval.arm_pause_request``
 # (the mechanism ``autonomy_upgrade``/``business_impact_action`` use): that primitive's step 1
@@ -409,7 +444,8 @@ def grant_business_policy(
 # owner when it proposes bounds — its own composed reply IS the ask; a second templated message
 # would be a confusing duplicate. So this arms the durable ``pending_approvals`` row directly
 # (same row shape, same one-open-approval-per-tenant structural rule, migration 128's partial
-# unique index) without the template send.
+# unique index) without the template send — the row still resolves through the SAME
+# classify_approval_reply -> mark_approval_resolved choke point every templated approval uses.
 # ===========================================================================
 
 APPROVAL_TYPE_POLICY_GRANT = "business_policy_grant"
@@ -494,28 +530,45 @@ def propose_business_policy_grant(
     return {"status": "pending_owner_approval", "approval_id": str(approval_id), **bounds}
 
 
-def resolve_business_policy_grant(
-    tenant_id: UUID | str, *, approved: bool, conn: Any
-) -> dict[str, Any]:
-    """Resolve the tenant's latest OPEN ``business_policy_grant`` approval — the ONLY path that may
-    call ``grant_business_policy``. Reads the bounds OFF THE APPROVAL ROW (the exact bounds the
-    owner was shown when the proposal was armed) — NEVER a fresh model-supplied value at resolution
-    time, so a model recognizing "sure, go ahead" can never smuggle in a broader/different grant
-    than what was actually proposed and shown to the owner.
+def apply_business_policy_decision(
+    conn: Any,
+    tenant_id: UUID | str,
+    approval_id: UUID | str,
+    decision: str,
+) -> dict[str, Any] | None:
+    """VT-609 fix round 2 (CRITICAL) — the DETERMINISTIC glue leg for a ``business_policy_grant``
+    approval, called from ``approval_resume._apply_agent_glue`` on the SAME connection/transaction
+    as ``mark_approval_resolved`` (the single resolution choke point: owner-reply path AND the
+    30-min timeout sweep). This is what REPLACED the specialist-tool design — see the module
+    docstring above for why that design's resolve tool was never reliably reached.
 
-    Idempotent: no open proposal -> a clean no-op (``{"status": "no_pending_proposal"}``) — a
-    duplicate/late resolve after the grant already landed (or after the 48h sweep expired it, see
-    ``scheduled_triggers.run_approval_timeout_sweep_body``) finds nothing open and does nothing."""
+    Self-guarded, mirroring ``approval_glue.apply_agent_decision``: re-reads the row BY ID (never
+    trusts caller memory) and no-ops (returns ``None``) for any row that is not a
+    ``business_policy_grant`` proposal — additive to the ``agent_customer_send`` glue, safe to call
+    unconditionally on every resolution, never a replacement for it. The row is ALREADY resolved
+    (``mark_resolved`` ran first) by the time this runs, so it looks up by id — not "latest open".
+
+    The bounds granted are READ OFF THIS ROW's ``details`` — the EXACT bounds shown to the owner at
+    propose time — never a fresh value, so a model recognizing "sure, go ahead" can never smuggle in
+    a broader/different grant than what was actually proposed and shown.
+
+    ``decision == "approved"`` -> ``grant_business_policy`` (bounds + ``granted_by=approval_id``).
+    Anything else (rejected / needs_changes / timeout / defer) -> NO grant (fail-closed) —
+    ``tenant_business_policy`` is never touched."""
     from orchestrator.db.wrappers import PendingApprovalsWrapper
 
-    tid = str(tenant_id)
-    wrapper = PendingApprovalsWrapper()
-    open_row = wrapper.latest_open_of_type(tid, APPROVAL_TYPE_POLICY_GRANT, conn=conn)
-    if open_row is None:
-        return {"status": "no_pending_proposal"}
+    row = PendingApprovalsWrapper().find_by_id(tenant_id, approval_id, conn=conn)
+    if row is None or row.get("approval_type") != APPROVAL_TYPE_POLICY_GRANT:
+        return None
 
-    approval_id = open_row["id"]
-    details = open_row.get("details") or {}
+    if decision != "approved":
+        logger.info(
+            "business_policy: proposal resolved no-grant tenant=%s approval=%s decision=%s",
+            tenant_id, approval_id, decision,
+        )
+        return {"status": "rejected", "approval_id": str(approval_id)}
+
+    details = row.get("details") or {}
     if not isinstance(details, dict):
         import json as _json
 
@@ -524,15 +577,8 @@ def resolve_business_policy_grant(
         except (TypeError, ValueError):
             details = {}
 
-    decision = "approved" if approved else "rejected"
-    wrapper.mark_resolved(tid, approval_id, decision=decision, status=decision, conn=conn)
-
-    if not approved:
-        logger.info("business_policy: proposal rejected tenant=%s approval=%s", tid, approval_id)
-        return {"status": "rejected", "approval_id": approval_id}
-
     policy = grant_business_policy(
-        tid,
+        tenant_id,
         allowed_action_types=list(details.get("allowed_action_types") or []),
         allowed_segments=list(details.get("allowed_segments") or []),
         frequency_caps=dict(details.get("frequency_caps") or {}),
@@ -540,10 +586,12 @@ def resolve_business_policy_grant(
         granted_by=approval_id,
         conn=conn,
     )
-    logger.info("business_policy: proposal approved+granted tenant=%s approval=%s", tid, approval_id)
+    logger.info(
+        "business_policy: proposal approved+granted tenant=%s approval=%s", tenant_id, approval_id,
+    )
     return {
         "status": "granted",
-        "approval_id": approval_id,
+        "approval_id": str(approval_id),
         "allowed_action_types": sorted(policy.allowed_action_types),
         "allowed_segments": sorted(policy.allowed_segments),
         "frequency_caps": dict(policy.frequency_caps),
@@ -567,7 +615,8 @@ __all__ = [
     "decide_within_policy",
     "assert_within_policy",
     "grant_business_policy",
+    "MAX_SANE_SPEND_CEILING_MINOR",
     "APPROVAL_TYPE_POLICY_GRANT",
     "propose_business_policy_grant",
-    "resolve_business_policy_grant",
+    "apply_business_policy_decision",
 ]

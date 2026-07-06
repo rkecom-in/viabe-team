@@ -111,13 +111,14 @@ ADVISORY_EXPECTED = {
 # VT-462 / VT-609 — the onboarding-conductor specialist's tool surface (parity allowlist pin with
 # the orchestrator + integration surfaces). VT-609: the conductor now legitimately holds
 # onboarding-state/policy WRITE tools (record_answer / record_skip / apply_correction /
-# propose_business_policy / resolve_business_policy_proposal) — that is the point of the
-# real-specialist conversion, not a boundary breach. None of them touch a customer send, the
-# owner's accounts-book Sheet, or the customer ledger (the ONLY capabilities this guard forbids);
-# "complete"/"activated" stay the DETERMINISTIC checks (profile_completion_check /
-# activation_check) the conductor can never self-assert. The policy GRANT itself is a SEPARATE
-# Pillar-7 propose/resolve split (VT-609 fix round) — the model can only propose; a durable
-# owner-approval row (never a model-supplied value at resolution time) is what actually grants.
+# propose_business_policy) — that is the point of the real-specialist conversion, not a boundary
+# breach. None of them touch a customer send, the owner's accounts-book Sheet, or the customer
+# ledger (the ONLY capabilities this guard forbids); "complete"/"activated" stay the DETERMINISTIC
+# checks (profile_completion_check / activation_check) the conductor can never self-assert. The
+# policy GRANT itself is a SEPARATE Pillar-7 propose/resolve split (VT-609 fix round 2) — the model
+# can only propose; the DETERMINISTIC approval-glue (not a second specialist tool — a fix-round-2
+# CRITICAL redesign: the first-cut resolve tool was never reliably re-dispatched) applies the owner's
+# own yes/no, reading the bounds off the durable proposal row, never a model-supplied value.
 ONBOARDING_CONDUCTOR_EXPECTED = {
     "read_onboarding_state",
     "extract_owner_answer",
@@ -128,7 +129,6 @@ ONBOARDING_CONDUCTOR_EXPECTED = {
     "profile_completion_check",
     "activation_check",
     "propose_business_policy",
-    "resolve_business_policy_proposal",
     "conductor_escalate_to_fazal",
 }
 
