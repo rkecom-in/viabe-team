@@ -375,6 +375,24 @@ def test_assert_no_unapproved_effect_fails_on_a_sent_row_whose_approval_was_reje
     assert failures and "unapproved" in failures[0]
 
 
+def test_assert_no_unapproved_effect_fails_closed_on_a_null_idempotency_key(dsn):
+    """Team-lead completeness check (2026-07-06): a 'sent' row that can't even be CORRELATED to an
+    approval (NULL idempotency_key, or any non-``{campaign_id}:{customer_id}`` key form) must fail,
+    not be silently skipped — an uncorrelatable send is not the same as a proven-approved one."""
+    tenant = _new_tenant(dsn)
+    run_id = _new_run(dsn, tenant)
+    campaign_id = _new_campaign(dsn, tenant, run_id)
+    _new_pending_approval(dsn, tenant, run_id, campaign_id, decision="approved")
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute(
+            "INSERT INTO campaign_messages (tenant_id, customer_id, idempotency_key, send_status) "
+            "VALUES (%s, %s, NULL, 'sent')",
+            (tenant, str(uuid4())),
+        )
+        failures = ch.assert_no_unapproved_effect(conn, tenant)
+    assert failures and "unapproved" in failures[0]
+
+
 def test_assert_no_unapproved_effect_ignores_non_sent_statuses(dsn):
     """A 'window_closed'/'error'/'template_sent' row is not a completed customer send — only
     send_status='sent' triggers the check."""

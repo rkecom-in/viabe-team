@@ -118,7 +118,11 @@ def test_render_ground_truth_block_none_when_nothing_to_show():
     assert tj._render_ground_truth_block({}) is None
 
 
-def test_render_ground_truth_block_includes_seed_and_notes():
+def test_render_ground_truth_block_never_injects_the_notes_narrative():
+    """Team-lead J-refinement (2026-07-06): the author's `notes` narrate the INTENDED outcome
+    ("should DELEGATE and surface a plan summary...") — injecting that biases helpfulness/
+    progression grading toward the happy-path the blind-judge change (J3) exists to prevent.
+    Ground truth is the seed_count fact ONLY, never the notes text, even when notes is present."""
     entry = {
         "setup_args": ["--onboarded", "--seed-lapsed-customers", "8"],
         "notes": "8 lapsed customers seeded; never claim a different count.",
@@ -126,7 +130,8 @@ def test_render_ground_truth_block_includes_seed_and_notes():
     block = tj._render_ground_truth_block(entry)
     assert block is not None
     assert "seeded lapsed customers: 8" in block
-    assert "8 lapsed customers seeded; never claim a different count." in block
+    assert "notes" not in block.lower()
+    assert "never claim a different count" not in block
     assert "NEVER reveal" in block
 
 
