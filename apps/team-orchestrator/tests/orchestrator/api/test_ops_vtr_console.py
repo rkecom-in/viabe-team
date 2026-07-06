@@ -851,6 +851,8 @@ def test_vtr_override_force_l3_grants_level_no_batch_cancel(substrate) -> None:
 
 # ---------------------------------------------------------------------------
 # 8. vtr-autonomy-override — the ENDPOINT (gate + no-batch-cancel + audit, at the HTTP layer)
+#    VT-610: force_l3 ALSO requires the exception tier (Fazal=VTR#1 ONLY, same drill-in as
+#    vtr-batch-drafts) — an assigned-but-non-exception operator is now refused (403).
 # ---------------------------------------------------------------------------
 
 
@@ -866,24 +868,48 @@ def _override(
     )
 
 
-def test_vtr_autonomy_override_endpoint_force_l3_success_no_cancel_and_audited(
+def test_vtr_autonomy_override_endpoint_force_l3_non_exception_operator_403(
     substrate, monkeypatch
 ) -> None:
+    """VT-610 tier decision: force_l3 is the SAME exception-tier drill-in as vtr-batch-drafts
+    (Fazal=VTR#1 ONLY) — even an ASSIGNED operator (passes require_vtr_action cleanly) is refused,
+    and the autonomy row is never touched. The OTHER four actions stay open to any assigned VTR
+    (proven by test_vtr_autonomy_override_endpoint_force_l3_success_no_cancel_and_audited's Fazal
+    case vs. e.g. test_vtr_override_unfreeze_cancels_nothing's plain vtr_id="v1")."""
     _env(monkeypatch)
     dsn = substrate.dsn
     op = str(uuid4())
     tenant = _new_tenant(dsn)
     _assign(dsn, op, tenant)
+    _seed_autonomy_row(dsn, tenant)
+
+    with pytest.raises(HTTPException) as exc:
+        _override(op, tenant, AGENT, "force_l3")
+    assert exc.value.status_code == 403
+    with tenant_connection(tenant) as conn:
+        from orchestrator.agents.autonomy import get_autonomy
+
+        assert get_autonomy(tenant, AGENT, conn=conn).level == "L2"  # untouched — no force landed
+
+
+def test_vtr_autonomy_override_endpoint_force_l3_success_no_cancel_and_audited(
+    substrate, monkeypatch
+) -> None:
+    _env(monkeypatch)
+    dsn = substrate.dsn
+    fazal = str(uuid4())
+    monkeypatch.setenv("FAZAL_OWNER_UUID", fazal)  # exception-tier: no assignment row needed
+    tenant = _new_tenant(dsn)
     batch = _seed_batch(dsn, tenant)
 
-    out = _override(op, tenant, AGENT, "force_l3", reason="verified via support call")
+    out = _override(fazal, tenant, AGENT, "force_l3", reason="verified via support call")
 
     assert out["ok"] is True
     assert out["state"]["level"] == "L3"
     assert out["batches_cancelled"] == 0
     assert _batch_row(dsn, tenant, batch)["status"] == "awaiting_approval"  # untouched
 
-    rows = _audit_rows(dsn, "autonomy_override", op)
+    rows = _audit_rows(dsn, "autonomy_override", fazal)
     assert rows
     assert "action=force_l3" in rows[-1]["detail"]
     assert "batches_cancelled=0" in rows[-1]["detail"]
