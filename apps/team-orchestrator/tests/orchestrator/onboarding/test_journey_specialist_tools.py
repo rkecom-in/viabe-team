@@ -30,6 +30,20 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+@pytest.fixture(autouse=True)
+def _default_not_yet_complete(monkeypatch: pytest.MonkeyPatch):  # type: ignore[no-untyped-def]
+    """VT-609's ``_maybe_complete_from_specialist`` re-checks ``conductor.profile_collection_complete``
+    on every write — which, with NO real Anthropic key in this test env, degrades to "no gap
+    candidates" (question_brain's own gap-source fails soft) and would otherwise complete the
+    profile after the FIRST write in every test here, silently transitioning status to 'complete'
+    and breaking every multi-write test's "still active" assumption. Default every test to "not yet
+    complete" (a per-test monkeypatch inside a completion-specific test still overrides this)."""
+    import orchestrator.onboarding.conductor as conductor_mod
+
+    monkeypatch.setattr(conductor_mod, "profile_collection_complete", lambda **kwargs: False)
+    yield
+
+
 @pytest.fixture(scope="module")
 def substrate():  # type: ignore[no-untyped-def]
     import apply_migrations
@@ -101,7 +115,8 @@ def test_record_extracted_answer_records_without_promoting(substrate):  # type: 
     _start_active_journey(substrate.dsn, tenant)
 
     out = record_extracted_answer(tenant, "hours", "9am-9pm")
-    assert out == {"recorded": True, "field": "hours"}
+    assert out["recorded"] is True
+    assert out["field"] == "hours"
 
     row = _journey_row(substrate.dsn, tenant)
     assert row is not None
@@ -126,6 +141,36 @@ def test_record_extracted_answer_rejects_bare_negative_value(substrate):  # type
     assert "hours" not in row["answers"]
 
 
+def test_record_extracted_answer_rejects_bare_greeting_value(substrate):  # type: ignore[no-untyped-def]
+    """The live 'Hi -> category' bug's class: a bare greeting passed AS the value (a mis-sequencing
+    tool call) is never recorded as fact either — mirrors the walker's own _is_bare_greeting guard."""
+    from orchestrator.onboarding.journey import record_extracted_answer
+
+    tenant = _new_tenant(substrate.dsn, name="VT-609 extract bare-greeting")
+    _start_active_journey(substrate.dsn, tenant)
+
+    out = record_extracted_answer(tenant, "hours", "namaste")
+    assert out == {"recorded": False}
+    row = _journey_row(substrate.dsn, tenant)
+    assert row is not None
+    assert "hours" not in row["answers"]
+
+
+def test_record_extracted_answer_records_greeting_mixed_with_substance(substrate):  # type: ignore[no-untyped-def]
+    """A greeting MIXED with substantive content is NOT a bare greeting — only a value that is
+    ENTIRELY greeting/rejection tokens is rejected (mirrors the walker's own mixed-content carve-out)."""
+    from orchestrator.onboarding.journey import record_extracted_answer
+
+    tenant = _new_tenant(substrate.dsn, name="VT-609 extract greeting mixed")
+    _start_active_journey(substrate.dsn, tenant)
+
+    out = record_extracted_answer(tenant, "hours", "hi 9am to 11pm")
+    assert out["recorded"] is True
+    row = _journey_row(substrate.dsn, tenant)
+    assert row is not None
+    assert row["answers"]["hours"] == "hi 9am to 11pm"
+
+
 def test_record_extracted_answer_no_op_on_inactive_journey(substrate):  # type: ignore[no-untyped-def]
     from orchestrator.onboarding.journey import record_extracted_answer
 
@@ -145,14 +190,16 @@ def test_record_field_skip_defers_field(substrate):  # type: ignore[no-untyped-d
     _start_active_journey(substrate.dsn, tenant)
 
     out = record_field_skip(tenant, "website")
-    assert out == {"recorded": True, "field": "website"}
+    assert out["recorded"] is True
+    assert out["field"] == "website"
     row = _journey_row(substrate.dsn, tenant)
     assert row is not None
     assert row["skipped"] == ["website"]
 
     # Idempotent — skipping the same field twice does not duplicate the entry.
     out2 = record_field_skip(tenant, "website")
-    assert out2 == {"recorded": True, "field": "website"}
+    assert out2["recorded"] is True
+    assert out2["field"] == "website"
     row2 = _journey_row(substrate.dsn, tenant)
     assert row2 is not None
     assert row2["skipped"] == ["website"]
@@ -168,7 +215,9 @@ def test_confirm_field_answer_promotes_valid_business_type(substrate):  # type: 
     _start_active_journey(substrate.dsn, tenant)
 
     out = confirm_field_answer(tenant, "city", "Pune")
-    assert out == {"recorded": True, "promoted": True, "field": "city"}
+    assert out["recorded"] is True
+    assert out["promoted"] is True
+    assert out["field"] == "city"
 
     row = _journey_row(substrate.dsn, tenant)
     assert row is not None
@@ -211,6 +260,40 @@ def test_confirm_field_answer_rejects_bare_negative_value(substrate):  # type: i
     assert "city" not in row["answers"]
 
 
+def test_confirm_field_answer_rejects_bare_greeting_value(substrate):  # type: ignore[no-untyped-def]
+    """VT-569a's class at the promotion gate: a bare greeting is never confirmed/promoted as a
+    field value either."""
+    from orchestrator.onboarding.journey import confirm_field_answer
+
+    tenant = _new_tenant(substrate.dsn, name="VT-609 confirm bare-greeting")
+    _start_active_journey(substrate.dsn, tenant)
+
+    out = confirm_field_answer(tenant, "city", "hello")
+    assert out == {"recorded": False, "promoted": False}
+    row = _journey_row(substrate.dsn, tenant)
+    assert row is not None
+    assert "city" not in row["answers"]
+    assert _canonical_profile_attributes(substrate.dsn, tenant) is None
+
+
+def test_confirm_field_answer_rejects_bare_affirmation_value(substrate):  # type: ignore[no-untyped-def]
+    """VT-477's class: a bare "yes"/"correct" must never itself be recorded as the field's value —
+    the walker substitutes ``draft_value`` for a confirm-"yes"; a tool call has no draft_value slot
+    to substitute from, so the caller (the specialist) MUST pass the actual value — a bare
+    affirmation is refused outright rather than asserted as fact."""
+    from orchestrator.onboarding.journey import confirm_field_answer
+
+    tenant = _new_tenant(substrate.dsn, name="VT-609 confirm bare-yes")
+    _start_active_journey(substrate.dsn, tenant)
+
+    out = confirm_field_answer(tenant, "city", "yes")
+    assert out == {"recorded": False, "promoted": False}
+    row = _journey_row(substrate.dsn, tenant)
+    assert row is not None
+    assert "city" not in row["answers"]
+    assert _canonical_profile_attributes(substrate.dsn, tenant) is None
+
+
 def test_confirm_field_answer_correction_overwrites_prior_value(substrate):  # type: ignore[no-untyped-def]
     """apply_correction (the agent tool) calls this exact function — an owner correction always
     overwrites a prior (confirmed or populated) value, mirroring populate-first's "edits-forever"
@@ -222,7 +305,9 @@ def test_confirm_field_answer_correction_overwrites_prior_value(substrate):  # t
 
     confirm_field_answer(tenant, "city", "Mumbai")
     out = confirm_field_answer(tenant, "city", "Pune")
-    assert out == {"recorded": True, "promoted": True, "field": "city"}
+    assert out["recorded"] is True
+    assert out["promoted"] is True
+    assert out["field"] == "city"
 
     row = _journey_row(substrate.dsn, tenant)
     assert row is not None
@@ -230,3 +315,72 @@ def test_confirm_field_answer_correction_overwrites_prior_value(substrate):  # t
     attrs = _canonical_profile_attributes(substrate.dsn, tenant)
     assert attrs is not None
     assert attrs["city"] == "Pune"
+
+
+# --- VT-609 ruling: the deterministic completion transition -------------------------------------
+# The specialist has no "finish" tool to forget — completion is a SIDE EFFECT of every successful
+# write, driven by the SAME pure conductor.profile_collection_complete check profile_completion_check
+# reads. Mirrors test_journey.py::test_handle_reply_completion_fires_gap4_seam's own invariant
+# (queue exhaustion -> status='complete' + the Gap-4 seam) for the specialist's write path.
+
+
+def test_confirm_field_answer_completes_profile_and_fires_gap4_seam(substrate, monkeypatch):  # type: ignore[no-untyped-def]
+    import orchestrator.onboarding.conductor as conductor_mod
+    from orchestrator.observability import log as obs_log
+    from orchestrator.onboarding.journey import confirm_field_answer, get_journey
+
+    calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(obs_log, "log_event", lambda **kwargs: calls.append(kwargs))
+    # Deterministically force "this was the last field" — the pure check itself is conductor.py's
+    # own job (unit-tested in test_conductor.py); this test proves the SPECIALIST WRITE PATH acts
+    # on it, not that the check's own logic is correct.
+    monkeypatch.setattr(conductor_mod, "profile_collection_complete", lambda **kwargs: True)
+
+    tenant = _new_tenant(substrate.dsn, name="VT-609 specialist completion")
+    _start_active_journey(substrate.dsn, tenant)
+
+    out = confirm_field_answer(tenant, "city", "Pune")
+    assert out["profile_completed"] is True
+
+    g = get_journey(tenant)
+    assert g is not None
+    assert g["status"] == "complete", "the specialist write path must transition status on completion"
+
+    completed = [c for c in calls if c.get("event_type") == "onboarding_journey_completed"]
+    assert len(completed) == 1
+    assert str(completed[0].get("tenant_id")) == str(tenant)
+
+
+def test_confirm_field_answer_does_not_complete_when_check_says_no(substrate, monkeypatch):  # type: ignore[no-untyped-def]
+    import orchestrator.onboarding.conductor as conductor_mod
+    from orchestrator.onboarding.journey import confirm_field_answer, get_journey
+
+    monkeypatch.setattr(conductor_mod, "profile_collection_complete", lambda **kwargs: False)
+
+    tenant = _new_tenant(substrate.dsn, name="VT-609 specialist not-yet-complete")
+    _start_active_journey(substrate.dsn, tenant)
+
+    out = confirm_field_answer(tenant, "city", "Pune")
+    assert out["profile_completed"] is False
+
+    g = get_journey(tenant)
+    assert g is not None
+    assert g["status"] == "active"
+
+
+def test_record_field_skip_can_itself_complete_the_profile(substrate, monkeypatch):  # type: ignore[no-untyped-def]
+    """A skip can be the LAST thing needed — a skipped field counts as resolved."""
+    import orchestrator.onboarding.conductor as conductor_mod
+    from orchestrator.onboarding.journey import get_journey, record_field_skip
+
+    monkeypatch.setattr(conductor_mod, "profile_collection_complete", lambda **kwargs: True)
+
+    tenant = _new_tenant(substrate.dsn, name="VT-609 skip completes")
+    _start_active_journey(substrate.dsn, tenant)
+
+    out = record_field_skip(tenant, "website")
+    assert out["profile_completed"] is True
+
+    g = get_journey(tenant)
+    assert g is not None
+    assert g["status"] == "complete"

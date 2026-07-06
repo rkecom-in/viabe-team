@@ -542,13 +542,51 @@ def _write_answers_skipped(tenant_id: UUID | str, answers: dict[str, Any], skipp
 
 
 def _is_bare_rejection_value(value: str) -> bool:
-    """Defense-in-depth (never-assert): a value that is ITSELF nothing but a bare negative/greeting
-    token set (e.g. the owner's "no" / "nope" / "hi") is not a real answer — mirrors the walker's own
-    ``is_bare_no_confirm`` / ``_is_bare_greeting`` guards. The specialist reasons over the FULL
-    conversation and should never pass such a value in the first place; this is the belt-and-braces
-    floor so a mis-called tool can never assert one as fact."""
+    """Defense-in-depth (never-assert): a value that is ITSELF nothing but a bare negative/greeting/
+    bare-affirmation token set (e.g. "no" / "nope" / "hi" / "yes" / "correct") is not a real answer —
+    mirrors the walker's own ``is_bare_no_confirm`` / ``_is_bare_greeting`` guards PLUS the VT-477
+    invariant that a confirm-"yes" is never itself the recorded value (the walker substitutes
+    ``draft_value``; a tool call has no draft_value slot to substitute FROM, so the correct floor
+    here is to refuse a bare affirmation as a value outright — the caller must pass the actual
+    discovered/stated value, e.g. from ``next_required_question``'s ``draft_value`` or the owner's
+    own words, never the literal "yes"). The specialist reasons over the FULL conversation and
+    should never pass such a value in the first place; this is the belt-and-braces floor so a
+    mis-called tool can never assert one as fact."""
     toks = _tokens(value)
-    return bool(toks) and (toks <= _NO or toks <= _GREETING)
+    return bool(toks) and (toks <= _NO or toks <= _GREETING or toks <= _YES)
+
+
+def _maybe_complete_from_specialist(tenant_id: UUID | str) -> bool:
+    """VT-609 — the DETERMINISTIC completion transition, run as a side effect of EVERY specialist
+    write (record_extracted_answer / record_field_skip / confirm_field_answer). Mirrors the old
+    walker's own invariant: ``_advance`` always leaves the cursor pointing either at a real question
+    or past the end, and the NEXT read (``_current(g2) is None``) transitions to 'complete' —
+    completion was never a separate step the walker could forget to take. The specialist has no
+    cursor to exhaust, so this re-derives the SAME signal from ``conductor.profile_collection_complete``
+    (the pure, deterministic check — the ONLY thing that decides "done", never the model) against the
+    JUST-WRITTEN state, and transitions via the EXISTING ``_complete`` (status='complete' + the Gap-4
+    seam + the paced post-profile ``__flow__`` sentinel) the moment it holds. This is what makes
+    "the specialist can never leave a satisfied profile stuck 'active' because it forgot to call a
+    finish tool" true BY CONSTRUCTION — there is no finish tool; completion is not a model choice.
+    Returns True iff this call performed the transition (no-op / already complete -> False)."""
+    g = get_journey(tenant_id)
+    if g is None or g.get("status") != "active":
+        return False
+    from orchestrator.onboarding.conductor import profile_collection_complete
+    from orchestrator.onboarding.draft_profile import get_draft
+
+    _, business_type = _tenant_phase_and_type(tenant_id)
+    draft = get_draft(tenant_id)
+    complete = profile_collection_complete(
+        business_type=business_type,
+        draft=draft,
+        answered=list((g.get("answers") or {}).keys()),
+        skipped=list(g.get("skipped") or []),
+    )
+    if not complete:
+        return False
+    _complete(tenant_id)
+    return True
 
 
 def record_extracted_answer(tenant_id: UUID | str, field: str, value: str) -> dict[str, Any]:
@@ -556,7 +594,11 @@ def record_extracted_answer(tenant_id: UUID | str, field: str, value: str) -> di
     branch + ``_apply_turn_plan``'s step 1 (record every extracted answer). Does NOT promote to
     canonical (see ``confirm_field_answer`` for the promotion gate). No-op (``recorded: False``) on a
     missing/inactive journey, an empty field/value, or a bare-rejection value — fail-soft; the caller
-    (the specialist tool) already knows the journey is active via ``read_onboarding_state``."""
+    (the specialist tool) already knows the journey is active via ``read_onboarding_state``.
+
+    Every successful write re-checks the DETERMINISTIC completion signal (``_maybe_complete_from_
+    specialist``) and transitions the journey to 'complete' the moment it holds — the specialist
+    cannot leave a satisfied profile stuck 'active'; there is no separate "finish" tool to forget."""
     field = (field or "").strip()
     value = (value or "").strip()
     if not field or not value or _is_bare_rejection_value(value):
@@ -567,13 +609,16 @@ def record_extracted_answer(tenant_id: UUID | str, field: str, value: str) -> di
     answers = dict(g.get("answers") or {})
     answers[field] = value
     _write_answers_skipped(tenant_id, answers, list(g.get("skipped") or []))
-    return {"recorded": True, "field": field}
+    completed = _maybe_complete_from_specialist(tenant_id)
+    return {"recorded": True, "field": field, "profile_completed": completed}
 
 
 def record_field_skip(tenant_id: UUID | str, field: str) -> dict[str, Any]:
     """VT-609 — defer ``field`` (mirrors ``handle_reply``'s skip path). A deferred field is excluded
     from ``conductor.next_question_for_tenant``'s candidate set unless a final ``revisit_skipped``
-    pass asks for it — never re-pressed every turn."""
+    pass asks for it — never re-pressed every turn. A skip can itself be the LAST thing needed
+    (a skipped field counts as resolved, per ``profile_collection_complete``) — see
+    ``_maybe_complete_from_specialist``."""
     field = (field or "").strip()
     if not field:
         return {"recorded": False}
@@ -584,7 +629,8 @@ def record_field_skip(tenant_id: UUID | str, field: str) -> dict[str, Any]:
     if field not in skipped:
         skipped.append(field)
     _write_answers_skipped(tenant_id, dict(g.get("answers") or {}), skipped)
-    return {"recorded": True, "field": field}
+    completed = _maybe_complete_from_specialist(tenant_id)
+    return {"recorded": True, "field": field, "profile_completed": completed}
 
 
 def confirm_field_answer(tenant_id: UUID | str, field: str, value: str) -> dict[str, Any]:
@@ -596,7 +642,8 @@ def confirm_field_answer(tenant_id: UUID | str, field: str, value: str) -> dict[
     NEVER asserted as fact (CL-390 never-assert; the SAME guard ``_apply_turn_plan`` applies).
     ``apply_correction`` reuses this exact function — a correction is just a fresh confirm for a
     field that already has a value; ``confirm_draft``'s own merge-upsert overwrites it (the
-    populate-first "owner edits forever" invariant)."""
+    populate-first "owner edits forever" invariant). See ``_maybe_complete_from_specialist`` for the
+    deterministic completion transition every successful write re-checks."""
     field = (field or "").strip()
     value = (value or "").strip()
     if not field or not value or _is_bare_rejection_value(value):
@@ -614,7 +661,8 @@ def confirm_field_answer(tenant_id: UUID | str, field: str, value: str) -> dict[
     _write_answers_skipped(tenant_id, answers, list(g.get("skipped") or []))
     if promoted:
         _confirm(tenant_id, {field: value})
-    return {"recorded": True, "promoted": promoted, "field": field}
+    completed = _maybe_complete_from_specialist(tenant_id)
+    return {"recorded": True, "promoted": promoted, "field": field, "profile_completed": completed}
 
 
 def _complete(tenant_id) -> None:
