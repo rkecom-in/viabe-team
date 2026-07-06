@@ -4,7 +4,8 @@ end-to-end acceptance test driving the REAL, unmodified ``manager_task_workflow`
 that half) through Package 6's exact acceptance chain: seeded cohort -> loop task -> SR step ->
 grounded plan -> manager review accepts -> approval pause (real ``pending_approvals`` via the REAL
 FK path, VT-607 (a)) -> resume approved -> campaign advances -> verification -> terminal
-'completed' with terminal_outcome='completed_with_effect' -> owner_notification_status='pending'.
+'completed' with terminal_outcome='completed_with_effect' -> owner_notification_status='pending'
+-> 'delivered' (VT-611 pre-work #1's owner-notification composer fires in-window, mocked send).
 
 This test is ALSO the empirical proof for a gap discovered while building it: the outer workflow
 loop, before this fix, could not correctly resume after ANY approval-gate interrupt (it treated a
@@ -235,7 +236,12 @@ def test_sr_through_the_loop_full_acceptance(substrate: Any, monkeypatch: pytest
         assert task_row is not None
         assert task_row["status"] == "completed"
         assert task_row["terminal_outcome"] == "completed_with_effect"
-        assert task_row["owner_notification_status"] == "pending"
+        # VT-611 pre-work #1: the owner-notification composer now actually fires right after the
+        # settle (workflow.py's _notify_owner_of_terminal) — 'pending' flips synchronously to
+        # 'delivered' on the mocked send's success, closing the "truthful owner outcome" gap this
+        # test's own docstring used to describe as the terminal state (nothing consumed 'pending'
+        # before this row; see owner_surface/task_outcome.py for the composer + its own unit tests).
+        assert task_row["owner_notification_status"] == "delivered"
 
         with psycopg.connect(dsn, autocommit=True) as conn:
             campaign_status = conn.execute(
