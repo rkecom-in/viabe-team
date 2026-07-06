@@ -73,6 +73,14 @@ production stays on legacy graph until the final promotion gate (Fazal-authorize
   outcome' is its gate); declare campaign_execution_blocked (dead-write, same silent-drop class).
   New builder protocol after 4 finish-line stalls: builder commits on targeted-green + reports
   immediately; the team lead runs the battery + lands.
+- 2026-07-06 (exec 7 LANDED): **VT-609 onboarding real specialist** (migration 169) — the highest-
+  regression-risk row. 85-behavior regression contract honored as a tool-boundary guard PROOF (not
+  legacy-green alone): mapping table sorts all 85 into safety-deterministic / structural /
+  quality→VT-611. THREE review rounds on the money-bearing policy grant: caught (1) grant-on-LLM-
+  judgment Pillar-7 violation, (2) its half-wired replacement (resolve never fires — a clear yes
+  intercepted by the approval-glue that no-oped for the new type), (3) a concurrent-reply grant-once
+  race — all before touching prod. Final: deterministic owner-approved grant, zero LLM in the grant
+  path. Spawned VT-612 + 2 VT-611 pre-work items. Battery 3,600/0.
 - 2026-07-06 (exec 6 LANDED): **VT-608 integration specialist real** (migration 168). Review found
   9/9 incl. two criticals a green suite hid (Sheets resume dead-end/cross-fire; owner-confirmed
   mapping decorative) + the stale-pending unrequested-ingestion class (killed via arming-identity +
