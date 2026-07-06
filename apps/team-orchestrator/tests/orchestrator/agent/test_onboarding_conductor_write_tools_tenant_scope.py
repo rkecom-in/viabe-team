@@ -118,6 +118,71 @@ def test_read_onboarding_state_runs_populate_first_and_surfaces_delta(
     assert seen["populate_tenant_id"] == tenant_id
 
 
+def test_read_onboarding_state_populate_delta_triggers_completion_recheck(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """VT-609 gap fix (mapping-table audit): unlike the legacy walker (which only ever runs
+    populate-first ONCE, at journey-start, and completes inline right there when nothing else
+    remains), read_onboarding_state runs populate-first on EVERY call — so populate-first can land
+    the tenant's LAST remaining necessities with no write-tool call following it in the same turn.
+    ``populate_profile_from_draft`` itself never transitions completion (the caller always has),
+    so this tool must re-check + transition it itself when ``populated`` is non-empty — otherwise
+    the journey row stays 'active' forever and ``activation_check`` can never admit the tenant."""
+    import orchestrator.onboarding.journey as journey_mod
+    from orchestrator.agent.onboarding_conductor import read_onboarding_state
+
+    seen: dict[str, Any] = {}
+
+    monkeypatch.setattr(
+        journey_mod, "populate_profile_from_draft", lambda tid: {"business_type": "restaurant"}
+    )
+    monkeypatch.setattr(
+        journey_mod,
+        "get_journey",
+        lambda tid: {"status": "active", "answers": {"business_type": "restaurant"}, "skipped": []},
+    )
+
+    def _fake_complete(tid: Any) -> bool:
+        seen["completed_tenant_id"] = tid
+        return True
+
+    monkeypatch.setattr(journey_mod, "maybe_complete_from_populate", _fake_complete)
+
+    tenant_id = uuid4()
+    with observability_context(run_id=uuid4(), tenant_id=tenant_id):
+        read_onboarding_state.func(tenant_id=str(tenant_id))  # type: ignore[attr-defined]
+
+    assert seen["completed_tenant_id"] == tenant_id
+
+
+def test_read_onboarding_state_empty_populate_delta_skips_completion_recheck(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The completion re-check only needs to run when populate-first actually changed something —
+    a no-op populate (the common case, every turn after the first) must not pay for an extra
+    completion-derivation round trip."""
+    import orchestrator.onboarding.journey as journey_mod
+    from orchestrator.agent.onboarding_conductor import read_onboarding_state
+
+    called = {"count": 0}
+
+    monkeypatch.setattr(journey_mod, "populate_profile_from_draft", lambda tid: {})
+    monkeypatch.setattr(
+        journey_mod, "get_journey", lambda tid: {"status": "active", "answers": {}, "skipped": []}
+    )
+
+    def _fake_complete(tid: Any) -> bool:
+        called["count"] += 1
+        return False
+
+    monkeypatch.setattr(journey_mod, "maybe_complete_from_populate", _fake_complete)
+
+    with observability_context(run_id=uuid4(), tenant_id=uuid4()):
+        read_onboarding_state.func(tenant_id="whatever")  # type: ignore[attr-defined]
+
+    assert called["count"] == 0
+
+
 def test_read_onboarding_state_populate_first_failure_is_fail_soft(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -139,6 +204,36 @@ def test_read_onboarding_state_populate_first_failure_is_fail_soft(
 
     assert out["status"] == "active"
     assert out["populated"] == {}
+
+
+def test_read_onboarding_state_completion_recheck_failure_is_fail_soft(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failure in the post-populate completion re-check (e.g. a transient DB error deriving
+    ``profile_collection_complete``) must NEVER raise out of the tool — the just-committed
+    ``populated`` delta is still surfaced to the caller."""
+    import orchestrator.onboarding.journey as journey_mod
+    from orchestrator.agent.onboarding_conductor import read_onboarding_state
+
+    monkeypatch.setattr(
+        journey_mod, "populate_profile_from_draft", lambda tid: {"business_type": "restaurant"}
+    )
+    monkeypatch.setattr(
+        journey_mod,
+        "get_journey",
+        lambda tid: {"status": "active", "answers": {"business_type": "restaurant"}, "skipped": []},
+    )
+
+    def _boom(tid: Any) -> bool:
+        raise RuntimeError("simulated completion-check failure")
+
+    monkeypatch.setattr(journey_mod, "maybe_complete_from_populate", _boom)
+
+    with observability_context(run_id=uuid4(), tenant_id=uuid4()):
+        out = read_onboarding_state.func(tenant_id="whatever")  # type: ignore[attr-defined]
+
+    assert out["status"] == "active"
+    assert out["populated"] == {"business_type": "restaurant"}
 
 
 def test_read_onboarding_state_no_context_garbage_value_returns_tool_error() -> None:

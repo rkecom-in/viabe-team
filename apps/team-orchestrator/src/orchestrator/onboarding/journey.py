@@ -589,6 +589,21 @@ def _maybe_complete_from_specialist(tenant_id: UUID | str) -> bool:
     return True
 
 
+def maybe_complete_from_populate(tenant_id: UUID | str) -> bool:
+    """VT-609 gap-close (mapping-table audit) — the specialist's ``read_onboarding_state`` runs
+    ``populate_profile_from_draft`` on EVERY call (not just journey-start, unlike the legacy
+    walker), so populate-first can land the LAST remaining necessities with no owner turn / write
+    tool call following it at all (``test_empty_necessities_completes_after_card``'s specialist
+    analog). Unlike the walker (which explicitly completes inline at its own lazy-start call site
+    when ``populated`` is truthy and no queue remains), populate_profile_from_draft itself never
+    transitions completion — so without this, the journey row would stay 'active' forever, and
+    ``onboarding_gate.is_agent_eligible`` (which hard-requires ``status='complete'``) would never
+    admit the tenant. Public alias for ``_maybe_complete_from_specialist`` so the conductor tool
+    module never reaches across a private (underscore) boundary. Returns True iff this call
+    performed the transition."""
+    return _maybe_complete_from_specialist(tenant_id)
+
+
 def record_extracted_answer(tenant_id: UUID | str, field: str, value: str) -> dict[str, Any]:
     """VT-609 — record a RAW (gap-style, unconfirmed) answer. Mirrors ``handle_reply``'s gap-question
     branch + ``_apply_turn_plan``'s step 1 (record every extracted answer). Does NOT promote to
@@ -1898,4 +1913,5 @@ __all__ = [
     "maybe_handle_journey_reply", "_recompose_stale_confirms", "populate_profile_from_draft",
     # VT-609 — the onboarding_conductor specialist's write-tool helpers.
     "record_extracted_answer", "record_field_skip", "confirm_field_answer",
+    "maybe_complete_from_populate",
 ]
