@@ -125,6 +125,65 @@ def _fresh_caches():
         l3_hold._invalidate_config_cache()
 
 
+# Tables THIS file's ``_new_tenant`` seeds directly that do NOT cascade from ``tenants`` (a bare
+# ``REFERENCES tenants(id)`` with no ``ON DELETE CASCADE``) — must be cleared BEFORE the tenant
+# row itself, or the teardown delete below hits a foreign-key violation. Every OTHER table this
+# file writes to (customers, agent_work_items, agent_draft_batches, agent_drafts,
+# tenant_agent_autonomy, agent_customer_contacts, pending_approvals, and customer_ledger_entries/
+# record_of_consent transitively via customers) DOES cascade from tenants and needs no entry here.
+_NON_CASCADING_TENANT_CHILD_TABLES = (
+    "pipeline_runs",              # migrations/005 — tenant_id REFERENCES tenants(id), no cascade
+    "tenant_connector_status",    # migrations/034 — same, no cascade
+    "onboarding_journey",         # migrations/123 — same (PK IS tenant_id), no cascade
+    "tenant_whatsapp_accounts",   # migrations/069 — same (PK IS tenant_id), no cascade
+)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_tenants(monkeypatch: pytest.MonkeyPatch):
+    """VT-611 pre-work #2 — make the fixture self-isolating (own tenant, teardown).
+
+    Closes the recurring cross-file full-suite-ordering flake (VT-392/VT-608, 4th occurrence):
+    every test in this file already seeds a FRESH uuid4 tenant via ``_new_tenant``, but nothing
+    ever deleted it — a shared throwaway Postgres across the WHOLE pytest session means every
+    row this file has EVER created stays live for every test that runs after it, for the rest of
+    the run. Wraps ``_new_tenant`` (patched by bare module-global name — every test in this file
+    calls it unqualified) to record each tenant id minted during the test, then deletes it (and
+    therefore every cascading child row: batches, drafts, autonomy, contacts, approvals, consent,
+    ledger entries) at teardown. The four tables that do NOT cascade from ``tenants`` are cleared
+    explicitly first (FK-safe order) — see ``_NON_CASCADING_TENANT_CHILD_TABLES``.
+
+    Best-effort (mirrors ``_e2e_seed.teardown``'s own discipline): a teardown failure is logged,
+    never raised — this must not mask whatever the test itself already proved or failed on."""
+    created: list[UUID] = []
+    real_new_tenant = _new_tenant
+
+    def _tracked(dsn: str) -> UUID:
+        tid = real_new_tenant(dsn)
+        created.append(tid)
+        return tid
+
+    monkeypatch.setattr(sys.modules[__name__], "_new_tenant", _tracked)
+    yield
+    if not created:
+        return
+    dsn = os.environ.get("DATABASE_URL")
+    if not dsn:
+        return
+    ids = [str(t) for t in created]
+    try:
+        with psycopg.connect(dsn, autocommit=True) as conn:
+            for table in _NON_CASCADING_TENANT_CHILD_TABLES:
+                conn.execute(f"DELETE FROM {table} WHERE tenant_id = ANY(%s)", (ids,))  # noqa: S608
+            conn.execute("DELETE FROM tenants WHERE id = ANY(%s)", (ids,))
+    except Exception:  # noqa: BLE001 — best-effort teardown, never masks the test's own result
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "VT-611 pre-work #2: tenant teardown failed for %s (best-effort)", ids, exc_info=True,
+        )
+
+
 @pytest.fixture()
 def armed_registry(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     """Real yaml + one fully-sendable customer_marketing entry on the (customer_name,
@@ -209,7 +268,19 @@ def _new_tenant(dsn: str) -> UUID:
             "business_type, owner_inputs, verification_status, whatsapp_number, ownership_verified) "
             "VALUES (%s, 'founding', 'paid_active', now(), 'restaurant', true, 'gstin_verified', %s, %s) "
             "RETURNING id",
-            (f"VT384 {uuid4().hex[:8]}", f"+9198{uuid4().int % 10**8:08d}", True),
+            # VT-611 pre-work #2 — the actual root cause of the "ordering flake" (proven via
+            # instrumented repro, NOT a leaked row/role across tests): the OLD business_name
+            # ``f"VT384 {uuid4().hex[:8]}"`` occasionally drew a hex slice with no letters (or one
+            # whose leading digits chained onto "VT384"'s own trailing "384"), producing an
+            # 8+ consecutive-digit run. ``sales_recovery_executor._looks_like_phone`` (the PII
+            # guard `validate_draft_params` checks BEFORE grounding — "phone-shaped values fail
+            # REGARDLESS of grounding") strips whitespace/dashes/parens then matches ``\+?\d{8,}``,
+            # so that draw correctly (by design) got dropped 'dropped_ungrounded' — a REAL grounding
+            # gate firing on unlucky test data, not a leaked test-isolation bug. The leading "x"
+            # here is load-bearing: it caps any digit run at 7 on EITHER side (max("384", 7-hex-
+            # chars) = 7 < 8) regardless of the random draw, structurally eliminating the
+            # collision rather than reducing its odds.
+            (f"VT384 x{uuid4().hex[:7]}", f"+9198{uuid4().int % 10**8:08d}", True),
         ).fetchone()
         assert row is not None
         tenant = UUID(str(row[0]))
