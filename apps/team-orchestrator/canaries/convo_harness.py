@@ -1123,6 +1123,11 @@ def cmd_setup(args: argparse.Namespace) -> int:
             ingress_base=ingress_base, ingress_secret=ingress_secret or None,
         )
 
+    # VT-611 Package C — stash the new tenant_id back onto the Namespace (mutable) so an in-process
+    # caller (run_critical_x3.py) that built this same Namespace can read it back after the call,
+    # without a subprocess round-trip or scraping stdout. No existing "setup" option is named
+    # tenant_id, so this is a pure addition.
+    args.tenant_id = tenant_id
     print(f"tenant_id={tenant_id}")
     print(f"whatsapp_number={number}  (bogus, non-allowlisted → dev_send_guard mocks all sends)")
     print(f"owner_inputs={owner_inputs}  phase={args.phase}  onboarded={bool(args.onboarded)}"
@@ -1198,25 +1203,19 @@ def _evaluate_db_asserts(dsn: str, tenant_id: str, run_id: str | None, step: dic
     return failures
 
 
-def cmd_script(args: argparse.Namespace) -> int:
-    dsn = _dsn()
-    base = _ingress_base(args.ingress_url)
-    secret = _dev_secret()
-    scenario = _load_scenario(args.file)
-    scenario_xfail = bool(scenario.get("expected_fail", False))
-    steps = scenario.get("steps", [])
-    if not steps:
-        _die(f"scenario {args.file} has no steps")
-
-    print(f"\n=== scenario: {scenario.get('name', args.file)} "
-          f"({'EXPECTED-FAIL' if scenario_xfail else 'expect-pass'}) ===")
-    if scenario.get("notes"):
-        print(f"    note: {scenario['notes']}")
-
+def run_scenario_steps(
+    dsn: str, base: str, secret: str, tenant_id: str, steps: list[dict[str, Any]],
+    *, timeout: float, scenario_xfail: bool = False, verbose: bool = True,
+) -> list[StepResult]:
+    """The scenario step-loop, factored out of ``cmd_script`` (VT-611 Package C) so
+    ``run_critical_x3.py`` can drive the SAME logic 3x per critical scenario without duplicating
+    it — a single source of truth for "how a scenario actually runs" shared by the interactive CLI
+    and the ×3 tool. Includes the scenario-level ``assert_no_unapproved_effect`` safety net (folded
+    into the LAST step's result, same as ``cmd_script``'s prior inline behaviour)."""
     results: list[StepResult] = []
     for i, step in enumerate(steps, 1):
         message = step["message"]
-        turn = _drive_turn(dsn, base, secret, args.tenant_id, message, timeout=args.timeout)
+        turn = _drive_turn(dsn, base, secret, tenant_id, message, timeout=timeout)
         # A send-guard breach (real SID) is a HARD failure regardless of expected_fail — never mask it.
         hard = list(turn.reasons)
         step_xfail = bool(step.get("expected_fail", scenario_xfail))
@@ -1231,7 +1230,7 @@ def cmd_script(args: argparse.Namespace) -> int:
             # they are skipped for this step rather than reported as false content failures.
             ok, xfail, label = False, False, "TIMEOUT"
             failures = [
-                f"TIMEOUT: run still 'running' after {args.timeout:.0f}s — the deployed LLM turn "
+                f"TIMEOUT: run still 'running' after {timeout:.0f}s — the deployed LLM turn "
                 f"hadn't finished (NOT a silent drop; raise --timeout or re-run)"
             ]
         else:
@@ -1248,15 +1247,16 @@ def cmd_script(args: argparse.Namespace) -> int:
             # VT-611 Package H1 — DB-state proof (route/side-effects/grounded-count), never just the
             # reply text. Merged into the SAME failure list before classify_step so an expected_fail
             # step's DB-state gap XFAILs identically to a text-assertion gap.
-            failures = failures + _evaluate_db_asserts(dsn, args.tenant_id, turn.run_id, step)
+            failures = failures + _evaluate_db_asserts(dsn, tenant_id, turn.run_id, step)
             ok, xfail, label = classify_step(failures, expected_fail=step_xfail)
 
-        print(f"\n  [step {i}] {label}  (run_status={turn.run_status}, reason={turn.ingress_reason})")
-        if step.get("note"):
-            print(f"      note: {step['note']}")
-        _print_transcript(turn.transcript)
-        for f in failures:
-            print(f"      - {f}")
+        if verbose:
+            print(f"\n  [step {i}] {label}  (run_status={turn.run_status}, reason={turn.ingress_reason})")
+            if step.get("note"):
+                print(f"      note: {step['note']}")
+            _print_transcript(turn.transcript)
+            for f in failures:
+                print(f"      - {f}")
 
         results.append(StepResult(
             ok=ok, xfail=xfail, label=label, reasons=failures,
@@ -1269,17 +1269,39 @@ def cmd_script(args: argparse.Namespace) -> int:
     # this scenario's run. Evaluated once, tenant-wide, after all steps (an unapproved send could be
     # a delayed side effect of an earlier step, not necessarily the step that triggered it).
     with _connect(dsn) as conn:
-        unapproved = assert_no_unapproved_effect(conn, args.tenant_id)
+        unapproved = assert_no_unapproved_effect(conn, tenant_id)
     if unapproved:
-        print("\n  [scenario-level] FAIL — assert_no_unapproved_effect")
-        for f in unapproved:
-            print(f"      - {f}")
+        if verbose:
+            print("\n  [scenario-level] FAIL — assert_no_unapproved_effect")
+            for f in unapproved:
+                print(f"      - {f}")
         if results:
             results[-1] = StepResult(
                 ok=False, xfail=False, label="FAIL", reasons=results[-1].reasons + unapproved,
                 transcript=results[-1].transcript, run_status=results[-1].run_status,
                 ingress_reason=results[-1].ingress_reason, run_id=results[-1].run_id,
             )
+    return results
+
+
+def cmd_script(args: argparse.Namespace) -> int:
+    dsn = _dsn()
+    base = _ingress_base(args.ingress_url)
+    secret = _dev_secret()
+    scenario = _load_scenario(args.file)
+    scenario_xfail = bool(scenario.get("expected_fail", False))
+    steps = scenario.get("steps", [])
+    if not steps:
+        _die(f"scenario {args.file} has no steps")
+
+    print(f"\n=== scenario: {scenario.get('name', args.file)} "
+          f"({'EXPECTED-FAIL' if scenario_xfail else 'expect-pass'}) ===")
+    if scenario.get("notes"):
+        print(f"    note: {scenario['notes']}")
+
+    results = run_scenario_steps(
+        dsn, base, secret, args.tenant_id, steps, timeout=args.timeout, scenario_xfail=scenario_xfail,
+    )
 
     passed = sum(1 for r in results if r.label == "PASS")
     xfailed = sum(1 for r in results if r.label == "XFAIL")
