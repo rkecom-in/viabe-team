@@ -5,8 +5,8 @@
   "setup_args": [
     "--onboarded"
   ],
-  "expected_fail": true,
-  "notes": "CL-2026-07-03-fluid-consent-and-control: natural stop phrasing must pause via the SAME audited path (keyword STOP remains the floor). expected_fail until VT-583 C lands + verifies. Opt-out/DSR is short-circuited ahead of the journey gate (matches_opt_out_or_dsr), so this is independent of onboarding state — run against a plain onboarded, no-active-flow tenant: `setup --onboarded` (no --journey, no --flow) then `script <tenant> stop_intent_natural.json`.",
+  "expected_fail": false,
+  "notes": "CL-2026-07-03-fluid-consent-and-control: natural stop phrasing must pause via the SAME audited path (keyword STOP remains the floor). Flipped false 2026-07-07 (VT-611 RUN phase) — XPASSed cleanly in the 128-pack, confirming VT-583 C landed. Opt-out/DSR is short-circuited ahead of the journey gate (matches_opt_out_or_dsr), so this is independent of onboarding state — run against a plain onboarded, no-active-flow tenant: `setup --onboarded` (no --journey, no --flow) then `script <tenant> stop_intent_natural.json`.",
   "steps": [
     {
       "message": "please stop messaging me for now",
