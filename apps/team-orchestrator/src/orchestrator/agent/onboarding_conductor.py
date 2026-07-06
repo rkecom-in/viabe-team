@@ -18,17 +18,34 @@ ignored, never trusted. Every tool returns a structured ``{"status": "error", ..
 unresolvable tenant (VT-484 invariant) — NEVER raises.
 
 The agent now HOLDS write tools (``record_answer`` / ``record_skip`` / ``apply_correction`` /
-``confirm_business_policy``) — this is the point of the conversion, not a guardrail regression: none
-of these touch a customer send, the owner's accounts-book Sheet, or the customer ledger (the ONLY
-capabilities ``tool_guardrail.assert_agent_tools_safe`` forbids an agent from holding directly); they
-write the tenant's OWN onboarding-journey/business-profile/policy state, the same state the
-deterministic interceptor wrote before this row.
+``propose_business_policy`` / ``resolve_business_policy_proposal``) — this is the point of the
+conversion, not a guardrail regression: none of these touch a customer send, the owner's
+accounts-book Sheet, or the customer ledger (the ONLY capabilities
+``tool_guardrail.assert_agent_tools_safe`` forbids an agent from holding directly); they write the
+tenant's OWN onboarding-journey/business-profile/policy state, the same state the deterministic
+interceptor wrote before this row.
 
 Completion and full activation stay DETERMINISTIC and un-assertable by the model:
 ``profile_completion_check`` delegates to ``conductor.profile_collection_complete`` (a pure function
 of state); ``activation_check`` delegates to ``onboarding_gate.is_agent_eligible`` (the full,
 multi-prerequisite activation bar). The conductor reasons about WHAT to ask / record; these two
 checks OWN "done".
+
+The business-policy GRANT itself is a SEPARATE Pillar-7 fix-round redesign (a money-bearing write —
+the deterministic guard every autonomous customer_send/spend action reads): the model can only
+PROPOSE (validated + clamped bounds, arming a durable owner-approval row); a SEPARATE resolution
+tool call — triggered only by the specialist recognizing the owner's own explicit yes/no to that
+SAME proposal — reads the bounds back off the approval row and grants them, tied to the approval id
+as provenance (``business_policy.propose_business_policy_grant`` /
+``resolve_business_policy_grant``, mirroring ``business_impact_choke``'s
+``dispatch_autonomy_offer``/``resolve_and_grant_l3`` shape). The model never supplies bounds at
+grant time.
+
+Mode-gating (VT-609 fix round, MAJOR): the Manager routes to this specialist UNCONDITIONALLY across
+modes, so a legacy/shadow fall-through dispatch (the journey gate returned None; the Manager still
+spawned this node) must NOT reach the write/policy surface — ``build_onboarding_conductor_node``
+selects ``ONBOARDING_CONDUCTOR_TOOLS`` (enforce) vs ``LEGACY_ONBOARDING_CONDUCTOR_TOOLS`` (legacy/
+shadow — the pre-PR 2-read-tool set) via ``is_enforce()``, checked fresh every dispatch.
 
 The deterministic LLM-down floor (amendment A2, VT-597 shape) RELOCATES here from journey.py's old
 ``turn_brain None -> handle_reply`` fallback: ``build_onboarding_conductor_node`` wraps the compiled
@@ -44,7 +61,7 @@ import logging
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from langchain.agents import AgentState, create_agent
 from langchain_anthropic import ChatAnthropic
@@ -53,6 +70,7 @@ from langchain_core.tools import BaseTool, tool
 from langgraph.errors import GraphBubbleUp
 
 from orchestrator.agent.lane_tenant import lane_tenant_error, resolve_lane_tenant
+from orchestrator.agents.business_policy import PolicyActionClass
 from orchestrator.types.trigger_reason import TriggerReason
 
 logger = logging.getLogger("orchestrator.agent.onboarding_conductor")
@@ -259,6 +277,29 @@ def next_required_question(tenant_id: str) -> dict[str, Any]:
     }
 
 
+def _profile_is_complete(tenant_id: UUID) -> bool:
+    """The DETERMINISTIC profile-collection completeness check, factored out of the
+    ``profile_completion_check`` tool so ``propose_business_policy`` can enforce the SAME gate IN
+    CODE (VT-609 fix round — the ordering MAJOR: the model must not be able to reach the
+    policy-proposal tool before the profile is actually done, regardless of what it believes or
+    what order it called tools in)."""
+    from orchestrator.onboarding.conductor import profile_collection_complete
+    from orchestrator.onboarding.draft_profile import get_draft
+    from orchestrator.onboarding.journey import _tenant_phase_and_type, get_journey
+
+    g = get_journey(tenant_id) or {}
+    answers = dict(g.get("answers") or {})
+    skipped = list(g.get("skipped") or [])
+    _, business_type = _tenant_phase_and_type(tenant_id)
+    draft = get_draft(tenant_id)
+    return profile_collection_complete(
+        business_type=business_type,
+        draft=draft,
+        answered=list(answers.keys()),
+        skipped=skipped,
+    )
+
+
 @tool
 def profile_completion_check(tenant_id: str) -> dict[str, Any]:
     """The DETERMINISTIC profile-collection completion check — the conductor NEVER self-declares
@@ -274,24 +315,9 @@ def profile_completion_check(tenant_id: str) -> dict[str, Any]:
     resolved = resolve_lane_tenant(tenant_id, tool_name="profile_completion_check")
     if resolved is None:
         return lane_tenant_error("profile_completion_check")
-    tenant_id = str(resolved)
 
-    from orchestrator.onboarding.conductor import profile_collection_complete
-    from orchestrator.onboarding.draft_profile import get_draft
-    from orchestrator.onboarding.journey import _tenant_phase_and_type, get_journey
-
-    g = get_journey(resolved) or {}
-    answers = dict(g.get("answers") or {})
-    skipped = list(g.get("skipped") or [])
-    _, business_type = _tenant_phase_and_type(resolved)
-    draft = get_draft(resolved)
-    complete = profile_collection_complete(
-        business_type=business_type,
-        draft=draft,
-        answered=list(answers.keys()),
-        skipped=skipped,
-    )
-    logger.info("onboarding_conductor: profile_complete tenant=%s -> %s", tenant_id, complete)
+    complete = _profile_is_complete(resolved)
+    logger.info("onboarding_conductor: profile_complete tenant=%s -> %s", resolved, complete)
     return {"complete": complete}
 
 
@@ -317,52 +343,139 @@ def activation_check(tenant_id: str, agent: str = "sales_recovery") -> dict[str,
     return {"agent": agent, "eligible": eligible}
 
 
+# --- VT-609 fix round (CRITICAL — Pillar-7) -----------------------------------------------------
+#
+# ``business_policy.grant_business_policy`` is a MONEY-BEARING write: it sets the machine-
+# enforceable bounds EVERY autonomous customer_send/spend action is checked against. The tool used
+# to call it DIRECTLY from the specialist's own turn, on prompt-instruction alone — no owner-
+# approval provenance, no bounds validation, ``granted_by`` NULL. Redesigned: the specialist can
+# only PROPOSE (validated, clamped, arms a durable approval row showing the owner the SPECIFIC
+# bounds); a SEPARATE resolution tool — called only once the specialist recognizes the owner's own
+# explicit yes/no to that SAME proposal — reads the bounds back OFF THE APPROVAL ROW and grants
+# EXACTLY those, tied to the approval id. The model never supplies bounds at grant time; it cannot
+# turn "sure, message my customers" into a broader grant than what was actually shown.
+
+_VALID_POLICY_ACTION_TYPES = frozenset(e.value for e in PolicyActionClass)
+_MAX_SANE_SPEND_CEILING_MINOR = 10_000_00  # ₹10,000 in paise — a DEFENSIVE sanity ceiling, not a
+# product-tuned SMB figure (no such figure exists in this codebase); guards a money-bearing grant
+# against a garbage/malformed value, pending real product guidance on spend norms.
+_MAX_SEGMENT_LABEL_LEN = 64  # a segment is a free-form label (e.g. "lapsed_60d") — no fixed
+# taxonomy exists anywhere in this codebase (marketing_lane.draft_campaign_plan's own docstring
+# confirms this) — so validation here is STRUCTURAL sanity, not a whitelist lookup.
+
+
+def _validate_policy_bounds(
+    allowed_action_types: list[str],
+    allowed_segments: list[str],
+    frequency_caps: dict[str, int],
+    spend_ceiling_minor: int,
+) -> dict[str, Any] | None:
+    """Validate + clamp the owner's confirmed bounds before they ever reach a proposal row.
+    Returns the normalized bounds dict, or ``None`` if nothing survives validation (e.g. every
+    action type was unrecognized) — the caller refuses the propose in that case rather than arming
+    an empty/meaningless proposal."""
+    valid_types = sorted({t for t in (allowed_action_types or []) if t in _VALID_POLICY_ACTION_TYPES})
+    valid_segments = sorted(
+        {
+            s.strip() for s in (allowed_segments or [])
+            if isinstance(s, str) and s.strip() and len(s.strip()) <= _MAX_SEGMENT_LABEL_LEN
+        }
+    )
+    caps: dict[str, int] = {}
+    for k, v in (frequency_caps or {}).items():
+        try:
+            caps[str(k)] = max(0, int(v))
+        except (TypeError, ValueError):
+            continue
+    try:
+        ceiling = max(0, min(int(spend_ceiling_minor), _MAX_SANE_SPEND_CEILING_MINOR))
+    except (TypeError, ValueError):
+        ceiling = 0
+
+    if not valid_types:
+        return None
+    return {
+        "allowed_action_types": valid_types,
+        "allowed_segments": valid_segments,
+        "frequency_caps": caps,
+        "spend_ceiling_minor": ceiling,
+    }
+
+
 @tool
-def confirm_business_policy(
+def propose_business_policy(
     tenant_id: str,
     allowed_action_types: list[str],
     allowed_segments: list[str],
     frequency_caps: dict[str, int],
     spend_ceiling_minor: int = 0,
 ) -> dict[str, Any]:
-    """Record the owner's CONFIRMED machine-enforceable action bounds
-    (``business_policy.grant_business_policy``) — call this ONLY after the owner has explicitly
-    agreed to SPECIFIC bounds in conversation (e.g. "yes, message lapsed customers up to twice a
-    month, nothing over 500 rupees"). This is an explicit OWNER act, never your own choice.
+    """PROPOSE machine-enforceable action bounds — call this ONLY after the owner has stated
+    SPECIFIC bounds in conversation (e.g. "yes, message lapsed customers up to twice a month,
+    nothing over 500 rupees"). This does NOT grant anything — it VALIDATES + CLAMPS the bounds and
+    arms a durable proposal you must show the owner back in your own reply (the SPECIFIC numbers,
+    not a vague "ok, set up"), then wait for their real yes/no. Call
+    ``resolve_business_policy_proposal`` once they answer — that is the ONLY thing that actually
+    changes the policy.
+
+    Requires the profile to be deterministically complete first (refuses otherwise —
+    ``profile_completion_check`` is the gate, not your own sense of the conversation).
 
     ``allowed_action_types`` — a subset of ``customer_send`` / ``spend`` / ``commitment`` /
-    ``config``. ``allowed_segments`` — which customer segments may be targeted (``"all"`` is a
-    wildcard the owner can grant). ``frequency_caps`` — ``{cap_key: max_in_period}`` (e.g.
-    ``{"customer_send_per_month": 2}``). ``spend_ceiling_minor`` — the max single-action spend, in
-    paise.
+    ``config`` (an unrecognized value is silently dropped). ``allowed_segments`` — which customer
+    segments may be targeted (``"all"`` is a wildcard the owner can grant; free-form labels like
+    "lapsed_60d" — there is no fixed segment list). ``frequency_caps`` —
+    ``{cap_key: max_in_period}``. ``spend_ceiling_minor`` — max single-action spend, in paise
+    (clamped to a defensive sanity ceiling).
 
-    Missing/unconfirmed policy stays DENY-ALL (every autonomous business action is blocked) — this
-    tool is the ONLY way that changes. Never claim a policy is in place without actually calling
-    this.
+    Returns ``{"status": "pending_owner_approval", "approval_id": ..., **the CLAMPED bounds}`` —
+    phrase your reply from these returned values (they may differ from what you passed in, if
+    anything was clamped/dropped). ``{"status": "error", ...}`` if the profile isn't complete yet
+    or nothing valid survived validation. ``{"status": "refused", "reason": "approval_queue_busy"}``
+    if another approval is already open for this tenant.
     """
-    resolved = resolve_lane_tenant(tenant_id, tool_name="confirm_business_policy")
+    resolved = resolve_lane_tenant(tenant_id, tool_name="propose_business_policy")
     if resolved is None:
-        return lane_tenant_error("confirm_business_policy")
+        return lane_tenant_error("propose_business_policy")
 
-    from orchestrator.agents.business_policy import grant_business_policy
+    if not _profile_is_complete(resolved):
+        return {"status": "error", "error": "profile_setup_incomplete"}
+
+    validated = _validate_policy_bounds(
+        allowed_action_types, allowed_segments, frequency_caps, spend_ceiling_minor
+    )
+    if validated is None:
+        return {"status": "error", "error": "no_valid_action_types"}
+
+    from orchestrator.agents.business_policy import propose_business_policy_grant
     from orchestrator.db import tenant_connection
 
-    with tenant_connection(resolved) as conn:
-        policy = grant_business_policy(
-            resolved,
-            allowed_action_types=allowed_action_types,
-            allowed_segments=allowed_segments,
-            frequency_caps=frequency_caps,
-            spend_ceiling_minor=spend_ceiling_minor,
-            conn=conn,
-        )
-    return {
-        "granted": True,
-        "allowed_action_types": sorted(policy.allowed_action_types),
-        "allowed_segments": sorted(policy.allowed_segments),
-        "frequency_caps": dict(policy.frequency_caps),
-        "spend_ceiling_minor": policy.spend_ceiling_minor,
-    }
+    with tenant_connection(resolved) as conn, conn.transaction():
+        result = propose_business_policy_grant(resolved, **validated, conn=conn)
+    return result
+
+
+@tool
+def resolve_business_policy_proposal(tenant_id: str, approved: bool) -> dict[str, Any]:
+    """Resolve the tenant's open business-policy proposal — call this ONLY once the owner has
+    given a real yes/no to the SPECIFIC bounds ``propose_business_policy`` showed them. This is the
+    ONLY tool that actually changes the policy: it reads the bounds off the durable proposal row
+    (never a value you supply here) and, on ``approved=True``, grants EXACTLY those bounds. There
+    is no path for you to grant a broader/different policy than what was proposed and shown.
+
+    Returns ``{"status": "granted", ...}`` / ``{"status": "rejected", ...}`` /
+    ``{"status": "no_pending_proposal"}`` (nothing open — e.g. it already timed out; propose again).
+    """
+    resolved = resolve_lane_tenant(tenant_id, tool_name="resolve_business_policy_proposal")
+    if resolved is None:
+        return lane_tenant_error("resolve_business_policy_proposal")
+
+    from orchestrator.agents.business_policy import resolve_business_policy_grant
+    from orchestrator.db import tenant_connection
+
+    with tenant_connection(resolved) as conn, conn.transaction():
+        result = resolve_business_policy_grant(resolved, approved=approved, conn=conn)
+    return result
 
 
 @tool
@@ -384,8 +497,25 @@ ONBOARDING_CONDUCTOR_TOOLS: list[BaseTool] = [
     next_required_question,
     profile_completion_check,
     activation_check,
-    confirm_business_policy,
+    propose_business_policy,
+    resolve_business_policy_proposal,
     conductor_escalate_to_fazal,
+]
+
+# VT-609 fix round (MAJOR — mode-gating): the Manager routes to onboarding_conductor
+# UNCONDITIONALLY across modes (the roster has no mode branch), so a fall-through case in
+# LEGACY/SHADOW (post-profile-flow concluded, bare-greeting-mid-onboarding — the journey gate
+# returns None and the Manager still spawns this specialist) can still reach this node in
+# production-default legacy. Before this row the specialist held only 2 READ tools there —
+# harmless. Now it holds write + policy tools too, so a legacy fall-through could perform a REAL
+# onboarding write / policy grant outside the byte-identical legacy contract. Fix: legacy/shadow
+# get EXACTLY the pre-PR read-only toolset; only ``enforce`` gets the full write+policy surface.
+# Selected in ``build_onboarding_conductor_node`` via ``is_enforce()``, checked fresh every turn
+# (the whole supervisor graph — and every specialist's own sub-graph — is already rebuilt fresh on
+# every dispatch; this adds no new per-turn cost class).
+LEGACY_ONBOARDING_CONDUCTOR_TOOLS: list[BaseTool] = [
+    next_required_question,
+    profile_completion_check,
 ]
 
 
@@ -405,16 +535,23 @@ class OnboardingConductorState(AgentState, total=False):
 def build_onboarding_conductor_agent(
     model: ChatAnthropic = _MODEL,
     *,
+    tools_mode: str = "enforce",
     extra_tools: Sequence[BaseTool] = (),
 ) -> Any:
     """Build the Onboarding-Conductor specialist sub-graph (mirrors ``build_integration_agent``).
+
+    ``tools_mode`` (VT-609 fix round, MAJOR — mode-gating): ``"enforce"`` (default) gets the full
+    read/write/policy surface; ``"legacy"`` gets EXACTLY the pre-PR read-only toolset
+    (``LEGACY_ONBOARDING_CONDUCTOR_TOOLS``) so a legacy/shadow fall-through dispatch can never
+    perform a real onboarding write or policy grant outside the byte-identical legacy contract.
 
     VT-268 fail-CLOSED guardrail: the conductor must never hold a direct customer-send /
     accounts-book-write / ledger-write tool (raises at build if it does) — see the module
     docstring for why the tools above (which DO write onboarding/business-profile/policy state)
     correctly pass this guard.
     """
-    tools = [*ONBOARDING_CONDUCTOR_TOOLS, *extra_tools]
+    base_tools = ONBOARDING_CONDUCTOR_TOOLS if tools_mode == "enforce" else LEGACY_ONBOARDING_CONDUCTOR_TOOLS
+    tools = [*base_tools, *extra_tools]
     from orchestrator.agent.tool_guardrail import assert_agent_tools_safe
 
     assert_agent_tools_safe(tools, surface="onboarding_conductor")
@@ -442,6 +579,33 @@ _FLOOR_FALLBACK_HI = (
 )
 _FLOOR_ALL_SET_EN = "Thanks — I've got everything I need for your profile for now."
 _FLOOR_ALL_SET_HI = "धन्यवाद — फ़िलहाल आपकी प्रोफ़ाइल के लिए जो चाहिए था मिल गया।"
+# VT-609 fix round (MINOR — the floor must reflect the policy-confirmation stage too, not just
+# profile completeness; telling the owner they're "all set" while the deny-all default is still in
+# force is misleading).
+_FLOOR_POLICY_PENDING_EN = (
+    "Thanks — your profile's all set. One more thing before I can act on your behalf: tell me what "
+    "I'm allowed to do automatically (which customers, how often, what spend limit) and I'll set "
+    "that up."
+)
+_FLOOR_POLICY_PENDING_HI = (
+    "धन्यवाद — आपकी प्रोफ़ाइल तैयार है। एक और बात: बताइए मैं अपने आप क्या कर सकता हूँ (किन ग्राहकों को, "
+    "कितनी बार, कितना खर्च) ताकि मैं वह सेट कर सकूँ।"
+)
+
+
+def _policy_confirmed(tenant_id: UUID) -> bool:
+    """Has the owner confirmed ANY business-policy bounds yet (vs the fail-closed deny-all
+    default)? Read-only, reuses ``business_policy.get_business_policy`` — no parallel notion of
+    policy-completeness. Fail-soft -> False: telling the owner policy confirmation is still
+    pending is never WRONG even if this read itself failed (deny-all is the active policy either
+    way), whereas the reverse (claiming "all set" on a read failure) could be."""
+    try:
+        from orchestrator.agents.business_policy import get_business_policy
+
+        policy = get_business_policy(tenant_id)
+        return bool(policy.allowed_action_types)
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def _floor_language(tenant_id: UUID) -> str:
@@ -484,6 +648,10 @@ def _deterministic_floor_reply(state: dict[str, Any]) -> dict[str, Any]:
             q = decision.next_question
             if q is not None:
                 text = q.prompt_hi if lang == "hi" else q.prompt_en
+            elif not _policy_confirmed(tenant_id):
+                # VT-609 fix round (MINOR): the profile is done, but the deny-all default is still
+                # in force — "all set" would be misleading here.
+                text = _FLOOR_POLICY_PENDING_HI if lang == "hi" else _FLOOR_POLICY_PENDING_EN
             else:
                 text = _FLOOR_ALL_SET_HI if lang == "hi" else _FLOOR_ALL_SET_EN
         except Exception:  # noqa: BLE001 — the floor's own floor; fall through to the generic line
@@ -496,6 +664,35 @@ def _deterministic_floor_reply(state: dict[str, Any]) -> dict[str, Any]:
     return {"messages": [AIMessage(content=text)]}
 
 
+def _emit_floor_engaged_seam(state: dict[str, Any], exc: Exception) -> None:
+    """VT-609 fix round (MAJOR — the floor must not swallow failures INVISIBLY). The deterministic
+    floor's whole point is that ``_node`` returns a NORMAL dict on a specialist failure (so the
+    owner conversation keeps moving) — but that means ``with_state_transition_hook`` (VT-183, which
+    wraps this node at the roster level) sees a successful return and records
+    ``status='completed'``. Without a separate signal, a genuine outage (Anthropic down, a DB
+    error inside the tool-calling loop) reads as a normal success to observability. This emits a
+    discrete, queryable event an outage dashboard/alert can key on — separate from (not instead of)
+    the honest scripted reply the floor still composes. Best-effort: an observability failure must
+    never re-break the floor it's reporting on."""
+    try:
+        from orchestrator.observability.log import log_event
+
+        raw_tenant = state.get("tenant_id")
+        raw_run = state.get("run_id")
+        tenant_id = raw_tenant if isinstance(raw_tenant, UUID) else (UUID(str(raw_tenant)) if raw_tenant else None)
+        run_id = raw_run if isinstance(raw_run, UUID) else (UUID(str(raw_run)) if raw_run else uuid4())
+        log_event(
+            event_type="onboarding_conductor_floor_engaged",
+            run_id=run_id,
+            tenant_id=tenant_id,
+            severity="error",
+            component="onboarding_conductor",
+            payload={"exception_type": type(exc).__name__},
+        )
+    except Exception:  # noqa: BLE001
+        logger.warning("onboarding_conductor: floor-engaged seam emit failed", exc_info=True)
+
+
 def build_onboarding_conductor_node(model: ChatAnthropic = _MODEL) -> Any:
     """VT-609 — the onboarding_conductor GRAPH NODE, wrapping the compiled specialist sub-graph
     with the deterministic LLM-down floor. Builds the sub-graph ONCE (matching the prior
@@ -504,6 +701,12 @@ def build_onboarding_conductor_node(model: ChatAnthropic = _MODEL) -> Any:
     ``_deterministic_floor_reply`` instead of letting the exception propagate — never silence,
     never a generic escalation ack when an honest, on-topic scripted question is possible.
 
+    VT-609 fix round (MAJOR — mode-gating): the tool surface is selected ONCE here via
+    ``is_enforce()``, checked fresh EVERY call (the whole supervisor graph — hence every
+    specialist's own sub-graph — is already rebuilt fresh on every dispatch; see
+    ``dispatch_brain``, so this adds no new per-turn cost class). ``enforce`` gets the full
+    read/write/policy surface; legacy/shadow get EXACTLY the pre-PR read-only toolset.
+
     ``GraphBubbleUp`` (interrupt/subgraph-control signals) re-raises unchanged — the conductor
     calls no ``interrupt()`` today, but this is the same defense-in-depth carve-out
     ``supervisor._wrap_lane_node_exceptions`` uses. Returning a plain function (rather than the raw
@@ -511,19 +714,24 @@ def build_onboarding_conductor_node(model: ChatAnthropic = _MODEL) -> Any:
     state-transition observability hook (``spec.wrap_node=True``) — a compiled sub-graph cannot be
     function-wrapped, but this plain closure can.
     """
-    sub_graph = build_onboarding_conductor_agent(model=model)
+    from orchestrator.manager.loop_mode import is_enforce
+
+    tools_mode = "enforce" if is_enforce() else "legacy"
+    sub_graph = build_onboarding_conductor_agent(model=model, tools_mode=tools_mode)
 
     def _node(state: dict[str, Any]) -> Any:
         try:
             return sub_graph.invoke(state)
         except GraphBubbleUp:
             raise
-        except Exception:  # noqa: BLE001 — the deterministic floor: the whole point is to catch ANY
-            # specialist reasoning failure here, before it ever reaches the generic LaneNodeError net.
+        except Exception as exc:  # noqa: BLE001 — the deterministic floor: the whole point is to
+            # catch ANY specialist reasoning failure here, before it ever reaches the generic
+            # LaneNodeError net.
             logger.warning(
                 "onboarding_conductor: specialist invocation failed — deterministic floor engaged",
                 exc_info=True,
             )
+            _emit_floor_engaged_seam(state, exc)
             return _deterministic_floor_reply(state)
 
     return _node
@@ -533,6 +741,7 @@ __all__ = [
     "ONBOARDING_CONDUCTOR_SYSTEM_MESSAGE",
     "ONBOARDING_CONDUCTOR_SYSTEM_PROMPT",
     "ONBOARDING_CONDUCTOR_TOOLS",
+    "LEGACY_ONBOARDING_CONDUCTOR_TOOLS",
     "OnboardingConductorState",
     "build_onboarding_conductor_agent",
     "build_onboarding_conductor_node",

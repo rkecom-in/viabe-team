@@ -3,7 +3,7 @@ the model. Same defect class VT-603 closed for the original two tools (``next_re
 / ``profile_completion_check`` — tested in ``test_onboarding_conductor_tenant_scope.py``), extended
 here to the NEW read/write/policy tools this row adds: ``read_onboarding_state``,
 ``extract_owner_answer``, ``record_answer``, ``record_skip``, ``apply_correction``,
-``activation_check``, ``confirm_business_policy``.
+``activation_check``, ``propose_business_policy``, ``resolve_business_policy_proposal``.
 
 Mirrors the existing pattern exactly: the ambient dispatch ``ObservabilityContext`` is ALWAYS
 authoritative; a disagreeing model-supplied value (a business name, a foreign UUID) is observed +
@@ -48,6 +48,21 @@ def _assert_context_wins_no_raise(
 @contextmanager
 def _fake_tenant_connection(tenant_id: Any):
     yield object()
+
+
+class _FakeTransactionConn:
+    """A fake conn supporting ``.transaction()`` — for the propose/resolve business-policy tools,
+    which wrap their (mocked) grant/arm calls in an explicit ``conn.transaction()`` block (atomicity
+    across the pipeline_runs + pending_approvals inserts)."""
+
+    @contextmanager
+    def transaction(self) -> Any:
+        yield
+
+
+@contextmanager
+def _fake_tenant_connection_with_txn(tenant_id: Any):
+    yield _FakeTransactionConn()
 
 
 # --- (1) read_onboarding_state -----------------------------------------------------------------
@@ -440,58 +455,59 @@ def test_activation_check_no_context_garbage_value_returns_tool_error() -> None:
     assert out == {"status": "error", "error": "activation_check: no resolvable tenant context"}
 
 
-# --- (7) confirm_business_policy -----------------------------------------------------------------
+# --- (7) propose_business_policy ----------------------------------------------------------------
 
 
-def test_confirm_business_policy_business_name_from_model_uses_context_tenant(
+def test_propose_business_policy_business_name_from_model_uses_context_tenant(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
+    import orchestrator.agent.onboarding_conductor as conductor_mod
     import orchestrator.agents.business_policy as policy_mod
     import orchestrator.db as db_mod
-    from orchestrator.agent.onboarding_conductor import confirm_business_policy
-    from orchestrator.agents.business_policy import BusinessPolicy
+    from orchestrator.agent.onboarding_conductor import propose_business_policy
 
     seen: dict[str, Any] = {}
 
-    def _fake_grant_business_policy(tid: Any, **kwargs: Any) -> BusinessPolicy:
-        seen["tenant_id"] = tid
-        return BusinessPolicy(
-            allowed_action_types=frozenset({"customer_send"}),
-            allowed_segments=frozenset({"lapsed"}),
-            frequency_caps={"customer_send_per_month": 2},
-            spend_ceiling_minor=50000,
-        )
+    # The profile-completeness gate is a SEPARATE concern (see the fix-round tests below) — bypass
+    # it here so this test isolates the tenant-scope property.
+    monkeypatch.setattr(conductor_mod, "_profile_is_complete", lambda tid: True)
 
-    monkeypatch.setattr(db_mod, "tenant_connection", _fake_tenant_connection)
-    monkeypatch.setattr(policy_mod, "grant_business_policy", _fake_grant_business_policy)
+    def _fake_propose(tid: Any, **kwargs: Any) -> dict[str, Any]:
+        seen["tenant_id"] = tid
+        return {
+            "status": "pending_owner_approval",
+            "approval_id": "approval-1",
+            "allowed_action_types": ["customer_send"],
+            "allowed_segments": ["lapsed"],
+            "frequency_caps": {"customer_send_per_month": 2},
+            "spend_ceiling_minor": 50000,
+        }
+
+    monkeypatch.setattr(db_mod, "tenant_connection", _fake_tenant_connection_with_txn)
+    monkeypatch.setattr(policy_mod, "propose_business_policy_grant", _fake_propose)
 
     run_id, tenant_id = uuid4(), uuid4()
     with observability_context(run_id=run_id, tenant_id=tenant_id):
         out = _assert_context_wins_no_raise(
             caplog,
-            call=lambda: confirm_business_policy.func(  # type: ignore[attr-defined]
+            call=lambda: propose_business_policy.func(  # type: ignore[attr-defined]
                 tenant_id="Sundaram Stores",
                 allowed_action_types=["customer_send"],
                 allowed_segments=["lapsed"],
                 frequency_caps={"customer_send_per_month": 2},
                 spend_ceiling_minor=50000,
             ),
-            tool_name="confirm_business_policy",
+            tool_name="propose_business_policy",
         )
-    assert out == {
-        "granted": True,
-        "allowed_action_types": ["customer_send"],
-        "allowed_segments": ["lapsed"],
-        "frequency_caps": {"customer_send_per_month": 2},
-        "spend_ceiling_minor": 50000,
-    }
+    assert out["status"] == "pending_owner_approval"
+    assert out["allowed_action_types"] == ["customer_send"]
     assert seen["tenant_id"] == tenant_id
 
 
-def test_confirm_business_policy_no_context_garbage_value_returns_tool_error() -> None:
-    from orchestrator.agent.onboarding_conductor import confirm_business_policy
+def test_propose_business_policy_no_context_garbage_value_returns_tool_error() -> None:
+    from orchestrator.agent.onboarding_conductor import propose_business_policy
 
-    out = confirm_business_policy.func(  # type: ignore[attr-defined]
+    out = propose_business_policy.func(  # type: ignore[attr-defined]
         tenant_id="not-a-uuid",
         allowed_action_types=["customer_send"],
         allowed_segments=["lapsed"],
@@ -500,5 +516,134 @@ def test_confirm_business_policy_no_context_garbage_value_returns_tool_error() -
     )
     assert out == {
         "status": "error",
-        "error": "confirm_business_policy: no resolvable tenant context",
+        "error": "propose_business_policy: no resolvable tenant context",
+    }
+
+
+def test_propose_business_policy_refuses_when_profile_incomplete(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """VT-609 fix round (CRITICAL — the ordering MAJOR folded in): the profile-completeness gate
+    is enforced IN CODE, not left to the model's own sense of the conversation."""
+    import orchestrator.agent.onboarding_conductor as conductor_mod
+    from orchestrator.agent.onboarding_conductor import propose_business_policy
+
+    monkeypatch.setattr(conductor_mod, "_profile_is_complete", lambda tid: False)
+
+    with observability_context(run_id=uuid4(), tenant_id=uuid4()):
+        out = propose_business_policy.func(  # type: ignore[attr-defined]
+            tenant_id="whatever",
+            allowed_action_types=["customer_send"],
+            allowed_segments=["lapsed"],
+            frequency_caps={},
+            spend_ceiling_minor=0,
+        )
+    assert out == {"status": "error", "error": "profile_setup_incomplete"}
+
+
+def test_propose_business_policy_drops_unrecognized_action_types_and_clamps_ceiling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """VT-609 fix round (CRITICAL) — bounds validation: an unrecognized action type is dropped
+    (never silently passed through to a money-bearing proposal), and the spend ceiling is clamped
+    to the defensive sanity ceiling rather than accepting an absurd value verbatim."""
+    import orchestrator.agent.onboarding_conductor as conductor_mod
+    import orchestrator.agents.business_policy as policy_mod
+    import orchestrator.db as db_mod
+    from orchestrator.agent.onboarding_conductor import propose_business_policy
+
+    monkeypatch.setattr(conductor_mod, "_profile_is_complete", lambda tid: True)
+    monkeypatch.setattr(db_mod, "tenant_connection", _fake_tenant_connection_with_txn)
+
+    captured: dict[str, Any] = {}
+
+    def _fake_propose(tid: Any, **kwargs: Any) -> dict[str, Any]:
+        captured.update(kwargs)
+        return {"status": "pending_owner_approval", "approval_id": "approval-1", **kwargs}
+
+    monkeypatch.setattr(policy_mod, "propose_business_policy_grant", _fake_propose)
+
+    with observability_context(run_id=uuid4(), tenant_id=uuid4()):
+        out = propose_business_policy.func(  # type: ignore[attr-defined]
+            tenant_id="whatever",
+            allowed_action_types=["customer_send", "not_a_real_type"],
+            allowed_segments=["lapsed"],
+            frequency_caps={"customer_send_per_month": 2},
+            spend_ceiling_minor=999_999_999,
+        )
+    assert captured["allowed_action_types"] == ["customer_send"]
+    assert captured["spend_ceiling_minor"] == conductor_mod._MAX_SANE_SPEND_CEILING_MINOR
+    assert out["status"] == "pending_owner_approval"
+
+
+def test_propose_business_policy_refuses_when_no_valid_action_types(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Nothing valid survives validation -> refuse rather than arm an empty/meaningless proposal."""
+    import orchestrator.agent.onboarding_conductor as conductor_mod
+    from orchestrator.agent.onboarding_conductor import propose_business_policy
+
+    monkeypatch.setattr(conductor_mod, "_profile_is_complete", lambda tid: True)
+
+    with observability_context(run_id=uuid4(), tenant_id=uuid4()):
+        out = propose_business_policy.func(  # type: ignore[attr-defined]
+            tenant_id="whatever",
+            allowed_action_types=["not_a_real_type"],
+            allowed_segments=["lapsed"],
+            frequency_caps={},
+            spend_ceiling_minor=0,
+        )
+    assert out == {"status": "error", "error": "no_valid_action_types"}
+
+
+# --- (8) resolve_business_policy_proposal --------------------------------------------------------
+
+
+def test_resolve_business_policy_proposal_business_name_from_model_uses_context_tenant(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    import orchestrator.agents.business_policy as policy_mod
+    import orchestrator.db as db_mod
+    from orchestrator.agent.onboarding_conductor import resolve_business_policy_proposal
+
+    seen: dict[str, Any] = {}
+
+    def _fake_resolve(tid: Any, *, approved: bool, conn: Any) -> dict[str, Any]:
+        seen["tenant_id"] = tid
+        seen["approved"] = approved
+        return {
+            "status": "granted",
+            "approval_id": "approval-1",
+            "allowed_action_types": ["customer_send"],
+            "allowed_segments": ["lapsed"],
+            "frequency_caps": {"customer_send_per_month": 2},
+            "spend_ceiling_minor": 50000,
+        }
+
+    monkeypatch.setattr(db_mod, "tenant_connection", _fake_tenant_connection_with_txn)
+    monkeypatch.setattr(policy_mod, "resolve_business_policy_grant", _fake_resolve)
+
+    run_id, tenant_id = uuid4(), uuid4()
+    with observability_context(run_id=run_id, tenant_id=tenant_id):
+        out = _assert_context_wins_no_raise(
+            caplog,
+            call=lambda: resolve_business_policy_proposal.func(  # type: ignore[attr-defined]
+                tenant_id="Sundaram Stores", approved=True
+            ),
+            tool_name="resolve_business_policy_proposal",
+        )
+    assert out["status"] == "granted"
+    assert seen["tenant_id"] == tenant_id
+    assert seen["approved"] is True
+
+
+def test_resolve_business_policy_proposal_no_context_garbage_value_returns_tool_error() -> None:
+    from orchestrator.agent.onboarding_conductor import resolve_business_policy_proposal
+
+    out = resolve_business_policy_proposal.func(  # type: ignore[attr-defined]
+        tenant_id="not-a-uuid", approved=True
+    )
+    assert out == {
+        "status": "error",
+        "error": "resolve_business_policy_proposal: no resolvable tenant context",
     }

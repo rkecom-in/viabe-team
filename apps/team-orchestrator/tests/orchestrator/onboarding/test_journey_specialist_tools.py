@@ -180,6 +180,41 @@ def test_record_extracted_answer_no_op_on_inactive_journey(substrate):  # type: 
     assert out == {"recorded": False}
 
 
+def test_record_extracted_answer_rejects_dunder_prefixed_field(substrate):  # type: ignore[no-untyped-def]
+    """VT-609 fix round (MINOR) — a ``__``-prefixed field name is RESERVED bookkeeping (the
+    populate-first / paced-flow sentinels). Writing one directly would corrupt journey state and
+    crash a later ``populate_profile_from_draft`` call (its merge assumes ``__populated__``'s
+    stored value is a per-field dict)."""
+    from orchestrator.onboarding.journey import record_extracted_answer
+
+    tenant = _new_tenant(substrate.dsn, name="VT-609 extract dunder")
+    _start_active_journey(substrate.dsn, tenant)
+
+    out = record_extracted_answer(tenant, "__populated__", "not-a-dict")
+    assert out == {"recorded": False}
+    row = _journey_row(substrate.dsn, tenant)
+    assert row is not None
+    assert "__populated__" not in row["answers"]
+
+
+def test_record_extracted_answer_still_accepts_a_volunteered_out_of_order_field(substrate):  # type: ignore[no-untyped-def]
+    """The dunder-prefix guard must NOT over-reach into rejecting a legitimate, ordinary business-
+    context field the registry hasn't presented as a question yet — the product design explicitly
+    requires accepting a volunteered/out-of-order answer (and gap fields are LLM-reasoned per
+    business type; there is no static enum to check a field name against without making this
+    write's availability depend on a live LLM call)."""
+    from orchestrator.onboarding.journey import record_extracted_answer
+
+    tenant = _new_tenant(substrate.dsn, name="VT-609 extract volunteered")
+    _start_active_journey(substrate.dsn, tenant)
+
+    out = record_extracted_answer(tenant, "a_field_never_asked_about", "some value")
+    assert out["recorded"] is True
+    row = _journey_row(substrate.dsn, tenant)
+    assert row is not None
+    assert row["answers"]["a_field_never_asked_about"] == "some value"
+
+
 # --- record_field_skip --------------------------------------------------------------------------
 
 
@@ -203,6 +238,20 @@ def test_record_field_skip_defers_field(substrate):  # type: ignore[no-untyped-d
     row2 = _journey_row(substrate.dsn, tenant)
     assert row2 is not None
     assert row2["skipped"] == ["website"]
+
+
+def test_record_field_skip_rejects_dunder_prefixed_field(substrate):  # type: ignore[no-untyped-def]
+    """VT-609 fix round (MINOR) — same reserved-namespace guard as record_extracted_answer."""
+    from orchestrator.onboarding.journey import record_field_skip
+
+    tenant = _new_tenant(substrate.dsn, name="VT-609 skip dunder")
+    _start_active_journey(substrate.dsn, tenant)
+
+    out = record_field_skip(tenant, "__flow__")
+    assert out == {"recorded": False}
+    row = _journey_row(substrate.dsn, tenant)
+    assert row is not None
+    assert "__flow__" not in row["skipped"]
 
 
 # --- confirm_field_answer -----------------------------------------------------------------------
@@ -315,6 +364,24 @@ def test_confirm_field_answer_correction_overwrites_prior_value(substrate):  # t
     attrs = _canonical_profile_attributes(substrate.dsn, tenant)
     assert attrs is not None
     assert attrs["city"] == "Pune"
+
+
+def test_confirm_field_answer_rejects_dunder_prefixed_field(substrate):  # type: ignore[no-untyped-def]
+    """VT-609 fix round (CRITICAL/MINOR audit finding) — the exact bug cited: a caller passing the
+    reserved ``__populated__`` sentinel AS a field name must never reach the promotion gate (it
+    would both corrupt journey bookkeeping and be promoted to canonical, asserting a bookkeeping
+    blob as a real business-profile field)."""
+    from orchestrator.onboarding.journey import confirm_field_answer
+
+    tenant = _new_tenant(substrate.dsn, name="VT-609 confirm dunder")
+    _start_active_journey(substrate.dsn, tenant)
+
+    out = confirm_field_answer(tenant, "__populated__", "not-a-dict")
+    assert out == {"recorded": False, "promoted": False}
+    row = _journey_row(substrate.dsn, tenant)
+    assert row is not None
+    assert "__populated__" not in row["answers"]
+    assert _canonical_profile_attributes(substrate.dsn, tenant) is None
 
 
 # --- VT-609 ruling: the deterministic completion transition -------------------------------------
