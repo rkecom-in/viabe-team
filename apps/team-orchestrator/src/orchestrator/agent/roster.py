@@ -383,14 +383,15 @@ def _build_integration_node(model: Any) -> Any:
 
 
 def _build_onboarding_conductor_node(model: Any) -> Any:
-    """Return the onboarding_conductor sub-graph (a CompiledStateGraph).
-
-    REUSE: ``build_onboarding_conductor_agent`` unchanged (VT-462). ``spec.wrap_node=False`` —
-    a compiled sub-graph must NOT be function-wrapped (VT-183 / VT-206), same as integration.
+    """Return the onboarding_conductor node — a PLAIN function (VT-609), not a raw
+    CompiledStateGraph: ``build_onboarding_conductor_node`` wraps the compiled specialist
+    sub-graph with the deterministic LLM-down floor (amendment A2). ``spec.wrap_node=True`` —
+    unlike integration's raw sub-graph, this plain function CAN (and now does) get the VT-183
+    state-transition observability hook, matching sales_recovery's own treatment.
     """
-    from orchestrator.agent.onboarding_conductor import build_onboarding_conductor_agent
+    from orchestrator.agent.onboarding_conductor import build_onboarding_conductor_node
 
-    return build_onboarding_conductor_agent(model=model)
+    return build_onboarding_conductor_node(model=model)
 
 
 # === The roster — one entry per specialist =================================
@@ -435,11 +436,16 @@ ROSTER: list[SpecialistSpec] = [
         wrap_node=False,
         default_outcome="connect the owner's data source",
     ),
-    # VT-462 — the onboarding-conductor: dynamic, brain-conducted PROFILE-SETUP. The manager routes
-    # an onboarding-incomplete owner HERE for the profile-collection conversation (confirm the
+    # VT-462 (VT-609 real specialist, Loop Package 4) — the onboarding-conductor: dynamic,
+    # brain-conducted PROFILE-SETUP with a REAL tool surface (read/record/skip/correct + the
+    # deterministic completion/activation checks + policy-confirmation). The manager routes an
+    # onboarding-incomplete owner HERE for the profile-collection conversation (confirm the
     # discovered draft + fill business-context gaps), BOUNDED by the prereq registry; the connect/
-    # integration specialist above is the SUBSEQUENT step after the profile is collected. Mirrors the
-    # integration entry: a CompiledStateGraph sub-graph (wrap_node=False), edge_to=None (-> END).
+    # integration specialist above is the SUBSEQUENT step after the profile is collected.
+    # wrap_node=True (VT-609): the node is now a plain function (the deterministic-floor wrapper
+    # around the compiled sub-graph, not the raw CompiledStateGraph) — it gains the VT-183
+    # state-transition hook, matching sales_recovery's own treatment. edge_to=None (-> END): the
+    # sub-graph emits no campaign plan to collapse.
     SpecialistSpec(
         name="onboarding_conductor",
         agent_name="onboarding_conductor",
@@ -449,15 +455,16 @@ ROSTER: list[SpecialistSpec] = [
         description=(
             "Hand off to the Onboarding-Conductor for the owner's PROFILE-SETUP "
             "conversation (confirming the discovered business profile + collecting "
-            "the missing business-context fields). Use when the owner is new or "
-            "mid-onboarding and the next step is setting up their business profile "
-            "— BEFORE connecting a data source. Connecting Shopify/Sheets is the "
-            "separate Integration Agent, used AFTER the profile is collected."
+            "the missing business-context fields, then confirming the owner's "
+            "business-policy bounds). Use when the owner is new or mid-onboarding "
+            "and the next step is setting up their business profile — BEFORE "
+            "connecting a data source. Connecting Shopify/Sheets is the separate "
+            "Integration Agent, used AFTER the profile is collected."
         ),
         update_builder=_build_onboarding_conductor_update,
         prereq=None,
         edge_to=None,  # END — the sub-graph emits no campaign plan to collapse.
-        wrap_node=False,
+        wrap_node=True,
         default_outcome="collect the owner's business profile",
     ),
 ]

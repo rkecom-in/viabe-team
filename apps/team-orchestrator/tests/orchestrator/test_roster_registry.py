@@ -87,14 +87,16 @@ def test_existing_specialists_registered_with_pre_vt465_wiring() -> None:
     assert integ.edge_to is None  # -> END (no campaign plan to persist)
     assert integ.wrap_node is False  # CompiledStateGraph — never wrapped
 
-    # VT-462 — the onboarding-conductor: dynamic profile-setup specialist, mirrors integration's
-    # CompiledStateGraph wiring (wrap_node=False, edge_to=None -> END).
+    # VT-462 / VT-609 — the onboarding-conductor: dynamic profile-setup specialist, edge_to=None
+    # -> END (no campaign plan to persist). VT-609: the node is now the deterministic-floor-wrapped
+    # PLAIN function (not the raw CompiledStateGraph) — wrap_node=True, mirroring sales_recovery's
+    # own treatment (it CAN be, and now is, function-wrapped with the state-transition hook).
     cond = by_name["onboarding_conductor"]
     assert cond.agent_name == "onboarding_conductor"
     assert cond.spawn_tool_name == "spawn_onboarding_conductor"
     assert cond.route_key == "spawn_onboarding_conductor"
     assert cond.edge_to is None  # -> END (no campaign plan to persist)
-    assert cond.wrap_node is False  # CompiledStateGraph — never wrapped
+    assert cond.wrap_node is True  # plain function (deterministic-floor wrapper) -> state-transition hook
 
 
 def test_spawn_tool_route_keys_maps_both_lanes() -> None:
