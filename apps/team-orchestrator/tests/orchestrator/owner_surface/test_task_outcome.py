@@ -9,6 +9,7 @@ module happens after a real settle, on real durable state).
 
 from __future__ import annotations
 
+from typing import Any
 from uuid import uuid4
 
 import pytest
@@ -90,9 +91,18 @@ def test_extract_objective_text_defensive_on_unexpected_shapes(objective) -> Non
 # ----------------------------- wiring: maybe_notify_owner_of_task_outcome ----------------
 def _patch(monkeypatch, *, task: dict, send_result="SM_OUT", send_raises: Exception | None = None):
     """Patch every seam maybe_notify_owner_of_task_outcome touches; return a captures dict."""
-    seen: dict = {"ledger": [], "flips": [], "alerts": []}
+    seen: dict = {"ledger": [], "flips": [], "alerts": [], "idempotency_writes": []}
 
     monkeypatch.setattr("orchestrator.manager.task_store.get_task", lambda tid, taskid: dict(task))
+    # VT-611 fix round: the crash/replay idempotency check + write are DB-touching seams (own
+    # tenant_connection) — no live DB in this file (mocked-seam tests only, per the module
+    # docstring). Default: no prior hit (every test here is a "first attempt" unless it overrides
+    # this itself), and the write is captured, not persisted.
+    monkeypatch.setattr(to, "_check_send_idempotency_hit", lambda tid, key: False)
+    monkeypatch.setattr(
+        to, "_write_send_idempotency_record",
+        lambda tid, key, sid: seen["idempotency_writes"].append((key, sid)),
+    )
 
     def _flip(tid, taskid, status, *, expected_from=None):
         seen["flips"].append((status, expected_from))
@@ -251,3 +261,126 @@ def test_notify_task_not_found_is_a_no_op(monkeypatch) -> None:
         lambda *a, **kw: pytest.fail("must not send when the task cannot be loaded"),
     )
     assert to.maybe_notify_owner_of_task_outcome(uuid4(), uuid4(), recipient_phone="+91981") is False
+
+
+# ----------------------- fix round: crash/replay idempotency + fail-soft flips -----------------
+def test_notify_idempotent_hit_skips_resend_completes_delivered_flip(monkeypatch) -> None:
+    """A known ``send_idempotency_keys`` hit for this (task, outcome) means a PRIOR attempt's
+    Twilio send already succeeded — only the flip (which never landed, per the crash window) never
+    completed. This call must NOT re-send; it only completes the flip."""
+    task = _pending_task("completed_with_effect")
+    seen = _patch(monkeypatch, task=task)
+    monkeypatch.setattr(to, "_check_send_idempotency_hit", lambda tid, key: True)
+    monkeypatch.setattr(
+        "orchestrator.utils.twilio_send.send_freeform_message",
+        lambda *a, **kw: pytest.fail("must not re-send on an idempotency hit (crash/replay dedup)"),
+    )
+
+    sent = to.maybe_notify_owner_of_task_outcome(uuid4(), uuid4(), recipient_phone="+919811111111")
+
+    assert sent is False  # no NEW dispatch this call — the send already happened pre-crash
+    assert seen["flips"] == [("delivered", ("pending",))]
+    assert seen["ledger"] == []  # no NEW ledger row either — this call made no send
+    assert seen["idempotency_writes"] == []
+
+
+def test_notify_replay_after_crash_before_flip_sends_once_then_skips(monkeypatch) -> None:
+    """Literal crash/replay simulation: call the notify step TWICE against a task that STAYS
+    'pending' both times (the delivered-flip is forced to no-op — simulating that it crashed
+    before commit). Twilio must fire exactly ONCE; the second call finds the idempotency row the
+    first call wrote and skips straight to (re-attempting) the flip."""
+    task = _pending_task("completed_with_effect", "handle it")
+    _patch(monkeypatch, task=task)  # default seams (locale/ledger/alerts); overridden below
+    send_calls: list[str] = []
+
+    def _send_and_record(body, phone, **kw):
+        send_calls.append(body)
+        return "SM_REPLAY"
+
+    monkeypatch.setattr("orchestrator.utils.twilio_send.send_freeform_message", _send_and_record)
+
+    # Stand in for the send_idempotency_keys ledger with a plain dict (keyed by idempotency_key).
+    ledger: dict[str, str] = {}
+    monkeypatch.setattr(
+        to, "_write_send_idempotency_record",
+        lambda tid, key, sid: ledger.__setitem__(key, sid),
+    )
+    monkeypatch.setattr(to, "_check_send_idempotency_hit", lambda tid, key: key in ledger)
+    # The crash simulation: the flip NEVER actually commits (owner_notification_status stays
+    # 'pending' for the replay to observe) — record the attempt, but don't mutate task state.
+    flip_attempts: list[tuple[str, Any]] = []
+    monkeypatch.setattr(
+        "orchestrator.manager.task_store.set_owner_notification_status",
+        lambda tid, taskid, status, *, expected_from=None: flip_attempts.append(
+            (status, expected_from)
+        ),
+    )
+
+    tenant_id, task_id = uuid4(), uuid4()
+    first = to.maybe_notify_owner_of_task_outcome(tenant_id, task_id, recipient_phone="+919811111111")
+    second = to.maybe_notify_owner_of_task_outcome(tenant_id, task_id, recipient_phone="+919811111111")
+
+    assert first is True
+    assert second is False  # the idempotent-hit path on replay — no NEW dispatch
+    assert len(send_calls) == 1  # exactly ONE Twilio call across both attempts
+    assert flip_attempts == [
+        ("delivered", ("pending",)), ("delivered", ("pending",)),
+    ]  # both calls attempt (and both "crash before commit") the same flip
+
+
+def test_notify_delivered_flip_raises_is_fail_soft_never_propagates(monkeypatch) -> None:
+    """The delivered-flip write happens AFTER a successful, irreversible send. A DB error on THAT
+    write must be caught + alerted, never propagate out of the notify step — the settle it reports
+    on already committed; nothing here may unwind it."""
+    task = _pending_task("completed_with_effect")
+    seen = _patch(monkeypatch, task=task)
+
+    def _flip_raises(tid, taskid, status, *, expected_from=None):
+        raise RuntimeError("db connection reset")
+
+    monkeypatch.setattr("orchestrator.manager.task_store.set_owner_notification_status", _flip_raises)
+
+    sent = to.maybe_notify_owner_of_task_outcome(uuid4(), uuid4(), recipient_phone="+919811111111")
+
+    assert sent is True  # the message WAS dispatched — that's the truth this returns
+    assert len(seen["alerts"]) == 1
+    assert seen["alerts"][0].trigger_kind == "outbound_failure"
+
+
+def test_notify_failed_flip_raises_is_fail_soft_never_propagates(monkeypatch) -> None:
+    """Mirrors the above for the DEFINITIVE-send-failure branch's own flip (to 'failed', nested
+    inside the send-failure except) — a DB error on that write must also never propagate; the
+    outbound_failure alert still fires."""
+    exc = RuntimeError("twilio 500")
+    exc.code = 20500  # type: ignore[attr-defined]  # NOT the window-closed code
+    task = _pending_task("completed_with_effect")
+    seen = _patch(monkeypatch, task=task, send_raises=exc)
+
+    def _flip_raises(tid, taskid, status, *, expected_from=None):
+        raise RuntimeError("db connection reset")
+
+    monkeypatch.setattr("orchestrator.manager.task_store.set_owner_notification_status", _flip_raises)
+
+    sent = to.maybe_notify_owner_of_task_outcome(uuid4(), uuid4(), recipient_phone="+919811111111")
+
+    assert sent is False
+    assert len(seen["alerts"]) == 1
+    assert seen["alerts"][0].trigger_kind == "outbound_failure"
+
+
+def test_notify_idempotency_ledger_insert_failure_does_not_block_delivered_flip(monkeypatch) -> None:
+    """The idempotency-ledger INSERT is best-effort — a failure there (e.g. a DB hiccup right after
+    the send) must not prevent the delivered-flip from being attempted; the notification still
+    completes normally from the owner's perspective."""
+    task = _pending_task("completed_with_effect")
+    seen = _patch(monkeypatch, task=task)
+
+    def _write_raises(tid, key, sid):
+        raise RuntimeError("db connection reset")
+
+    monkeypatch.setattr(to, "_write_send_idempotency_record", _write_raises)
+
+    sent = to.maybe_notify_owner_of_task_outcome(uuid4(), uuid4(), recipient_phone="+919811111111")
+
+    assert sent is True
+    assert seen["flips"] == [("delivered", ("pending",))]
