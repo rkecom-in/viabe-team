@@ -183,7 +183,8 @@ def _autonomy_row(dsn: str, tenant: UUID, agent: str = AGENT) -> dict[str, Any]:
     with psycopg.connect(dsn, autocommit=True) as conn:
         row = conn.execute(
             "SELECT level, clean_approval_streak, frozen, l3_revoked_at, revoke_reason, "
-            "last_regression_kind, l3_force_granted_at, l3_force_granted_by_vtr "
+            "last_regression_kind, l3_force_granted_at, l3_force_granted_by_vtr, "
+            "l3_granted_at, l3_grant_approval_id "
             "FROM tenant_agent_autonomy "
             "WHERE tenant_id = %s AND agent = %s",
             (str(tenant), agent),
@@ -193,6 +194,7 @@ def _autonomy_row(dsn: str, tenant: UUID, agent: str = AGENT) -> dict[str, Any]:
         "level": row[0], "clean_approval_streak": row[1], "frozen": row[2],
         "l3_revoked_at": row[3], "revoke_reason": row[4], "last_regression_kind": row[5],
         "l3_force_granted_at": row[6], "l3_force_granted_by_vtr": row[7],
+        "l3_granted_at": row[8], "l3_grant_approval_id": row[9],
     }
 
 
@@ -433,10 +435,19 @@ def test_force_l3_refuses_when_frozen(substrate) -> None:
 
 def test_force_l3_idempotent_on_already_l3_agent(substrate) -> None:
     """A SET, not an earn-transition: forcing an already-L3 (earned OR forced) agent just
-    re-stamps the forced provenance — never an error, never a double-grant artifact."""
+    re-stamps the forced provenance — never an error, never a double-grant artifact. This one is
+    seeded via a REAL grant_l3 (not the level='L3' shortcut) so it carries genuine earned-consent
+    evidence (l3_granted_at + l3_grant_approval_id) — proving force_l3's UPDATE column list can't
+    stomp that evidence, since the earned pair is independent of the forced pair."""
     dsn = substrate.dsn
     tenant = _new_tenant(dsn)
-    _seed_autonomy_row(dsn, tenant, level="L3", streak=0)  # already L3 (earned, per the fixture)
+    _seed_autonomy_row(dsn, tenant, streak=L3_CLEAN_STREAK_THRESHOLD)
+    approval_id = uuid4()
+    with tenant_connection(tenant) as conn:
+        grant_l3(tenant, AGENT, approval_id, conn=conn)
+    earned = _autonomy_row(dsn, tenant)
+    assert earned["l3_granted_at"] is not None
+    assert str(earned["l3_grant_approval_id"]) == str(approval_id)
     vtr = str(uuid4())
 
     with tenant_connection(tenant) as conn:
@@ -445,6 +456,10 @@ def test_force_l3_idempotent_on_already_l3_agent(substrate) -> None:
     assert st.level == "L3"
     assert st.l3_force_granted_at is not None
     assert st.l3_force_granted_by_vtr == vtr
+    # The earned-consent evidence survives the force untouched — force can't stomp real consent.
+    after = _autonomy_row(dsn, tenant)
+    assert after["l3_granted_at"] == earned["l3_granted_at"]
+    assert str(after["l3_grant_approval_id"]) == str(earned["l3_grant_approval_id"])
 
 
 def test_force_l3_does_not_leak_cross_tenant(substrate) -> None:
