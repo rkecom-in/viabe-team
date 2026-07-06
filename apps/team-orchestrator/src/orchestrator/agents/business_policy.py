@@ -552,7 +552,18 @@ def apply_business_policy_decision(
     propose time — never a fresh value, so a model recognizing "sure, go ahead" can never smuggle in
     a broader/different grant than what was actually proposed and shown.
 
-    ``decision == "approved"`` -> ``grant_business_policy`` (bounds + ``granted_by=approval_id``).
+    VT-609 fix round 2 (re-verify hardening): the grant is authoritative on the ROW's OWN STORED
+    ``decision`` column — NOT the ``decision`` argument the caller passed. ``mark_approval_resolved``
+    calls this glue unconditionally with its passed ``decision``, even when its own UPDATE affected
+    ZERO rows (``PendingApprovalsWrapper.mark_resolved``'s ``WHERE resolved_at IS NULL`` guard is the
+    grant-once race-loser backstop — two distinct-SID owner replies racing on the SAME approval: a
+    "no" commits first, resolving the row 'rejected'; a racing "yes" second updates 0 rows, but
+    WOULD still be passed decision="approved" here). Reading ``row["decision"]`` instead means the
+    grant defers to whichever reply actually WON the row — the committed truth — regardless of what
+    the losing caller believed it was resolving. A caller-decision that disagrees with the row is
+    logged (should only ever happen on that race) but never trusted.
+
+    ``row["decision"] == "approved"`` -> ``grant_business_policy`` (bounds + ``granted_by=approval_id``).
     Anything else (rejected / needs_changes / timeout / defer) -> NO grant (fail-closed) —
     ``tenant_business_policy`` is never touched."""
     from orchestrator.db.wrappers import PendingApprovalsWrapper
@@ -561,10 +572,21 @@ def apply_business_policy_decision(
     if row is None or row.get("approval_type") != APPROVAL_TYPE_POLICY_GRANT:
         return None
 
-    if decision != "approved":
+    stored_decision = row.get("decision")
+    if stored_decision != decision:
+        # Only reachable on the grant-once race described above (a losing racer's UPDATE affected
+        # 0 rows, so mark_approval_resolved's passed `decision` diverges from what actually
+        # committed) — surfaced for observability; the row's stored value is what governs below.
+        logger.warning(
+            "business_policy: resolution decision mismatch (grant-once race) tenant=%s "
+            "approval=%s passed_decision=%s stored_decision=%s — stored value governs",
+            tenant_id, approval_id, decision, stored_decision,
+        )
+
+    if stored_decision != "approved":
         logger.info(
             "business_policy: proposal resolved no-grant tenant=%s approval=%s decision=%s",
-            tenant_id, approval_id, decision,
+            tenant_id, approval_id, stored_decision,
         )
         return {"status": "rejected", "approval_id": str(approval_id)}
 
