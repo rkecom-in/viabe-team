@@ -15,7 +15,9 @@ gate (which stays, as do the single-tenant WHERE clauses). FAZAL break-glass rou
 role (all tenants via the mig-134 role leg). The exception-tier
 drill-in (``vtr-batch-drafts``, Fazal=VTR#1) additionally passes ``require_exception_tier`` and
 reads via ``SET LOCAL ROLE app_vtr_admin_role`` with the ``draft_params_reveal`` audit row INSERTed
-BEFORE the read in the SAME txn (no silent break-glass).
+BEFORE the read in the SAME txn (no silent break-glass). VT-610: ``vtr-autonomy-override``'s
+``force_l3`` action is the SAME exception-tier drill-in (Fazal=VTR#1 ONLY) — the other four
+actions (freeze/unfreeze/demote/revoke_l3) stay open to any assigned VTR.
 
 FLAGGED double-leg IDOR defense on ``vtr-plan-edit`` (plan §3 — do NOT drop either leg in a
 refactor): leg 1 is ``require_vtr_action`` (operator↔tenant assignment); leg 2 is the seam's
@@ -585,7 +587,12 @@ def vtr_autonomy_override_action(
     """Freeze / unfreeze / demote / revoke_l3 / force_l3 one (tenant, agent) via the Gap-6 seam.
     The mutation + its ops_audit row commit in ONE service-pool txn; freeze/demote/revoke cancel
     open batches atomically inside the seam (the binding kill-switch rule); unfreeze AND force_l3
-    cancel nothing (force_l3 only ever WIDENS trust — there is nothing in-flight to kill)."""
+    cancel nothing (force_l3 only ever WIDENS trust — there is nothing in-flight to kill).
+
+    ``force_l3`` additionally requires the exception tier (Fazal=VTR#1 ONLY, same drill-in as
+    vtr-batch-drafts): ``require_exception_tier`` runs AFTER ``require_vtr_action`` and ON TOP of
+    it — an ADDITIONAL restriction, never a substitute for the internal-secret/JWT/assignment
+    checks. freeze/unfreeze/demote/revoke_l3 are unchanged: any assigned VTR may call them."""
     _require_uuid(body.tenant_id, "tenant_id")
     if body.agent not in OWNING_AGENTS:
         raise HTTPException(
@@ -605,6 +612,8 @@ def vtr_autonomy_override_action(
                 tenant_id=body.tenant_id,
                 deny_action="override_denied",
             )
+        if body.action == "force_l3":
+            require_exception_tier(operator)
         with conn.transaction():
             # Pre-count the open batches the seam is about to cancel (the seam returns state, not
             # the count; same-txn read so the audit metadata matches what the UPDATEs hit).
