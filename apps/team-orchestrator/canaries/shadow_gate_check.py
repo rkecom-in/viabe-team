@@ -47,6 +47,7 @@ Both subcommands exit 0 only when the check holds; exit 1 otherwise (printing th
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 from dataclasses import dataclass
@@ -169,6 +170,22 @@ def cmd_evidence(args: argparse.Namespace) -> int:
             "    REMINDER: capture this BEFORE any tenant teardown (the non-CASCADE FK sweep wipes "
             "tm_audit_log rows) and BEFORE flipping the mode back to legacy."
         )
+    if args.json:
+        # The evidence manifest can't quote a print statement — persist the same numbers a
+        # machine can read back, cited verbatim (never re-derived) in the manifest's shadow leg.
+        payload = {
+            "since": args.since,
+            "total_evals": evidence.total_evals,
+            "distinct_conversations": evidence.distinct_conversations,
+            "safety_divergences": evidence.safety_divergences,
+            "min_distinct": args.min_distinct,
+            "passed": not failures,
+            "failures": failures,
+        }
+        with open(args.json, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, indent=2, ensure_ascii=False)
+            fh.write("\n")
+        print(f"    json: wrote {args.json} — for the evidence manifest")
     return 0 if not failures else 1
 
 
@@ -183,6 +200,7 @@ def build_parser() -> argparse.ArgumentParser:
     ev = sub.add_parser("evidence", help="S2 — capture + gate-check the shadow-run evidence")
     ev.add_argument("--since", required=True, help="ISO-8601 timestamp the run batch started")
     ev.add_argument("--min-distinct", type=int, default=_DEFAULT_MIN_DISTINCT)
+    ev.add_argument("--json", default=None, help="write the evidence + gate verdict for the evidence manifest")
     ev.set_defaults(func=cmd_evidence)
 
     return p

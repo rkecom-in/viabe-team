@@ -6,6 +6,7 @@ against a real tm_audit_log table (mig147).
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 from datetime import datetime, timedelta, timezone
@@ -201,6 +202,45 @@ def test_main_evidence_exit_codes(dsn, monkeypatch):
 
     rc = sgc.main(["evidence", "--since", since_str, "--min-distinct", "2"])
     assert rc == 1  # zero distinct conversations since the cutoff
+
+
+def test_main_evidence_writes_json_for_the_manifest(dsn, monkeypatch, tmp_path):
+    """The evidence manifest can't quote a print statement — --json must persist the SAME numbers
+    the gate check is scoring, verbatim, so the manifest cites the evidence rather than re-deriving
+    it (or worse, hand-transcribing it from a terminal scrollback)."""
+    monkeypatch.setenv("DATABASE_URL", dsn)
+    since = _now_cutoff(dsn)
+    since_str = since.isoformat()
+    tenant_a = _new_tenant(dsn)
+    tenant_b = _new_tenant(dsn)
+    _insert_audit_row(dsn, tenant_a, event_kind="shadow_divergence", status="ok")
+    _insert_audit_row(dsn, tenant_b, event_kind="shadow_divergence", status="ok")
+
+    out_path = tmp_path / "shadow_evidence.json"
+    rc = sgc.main([
+        "evidence", "--since", since_str, "--min-distinct", "2", "--json", str(out_path),
+    ])
+    assert rc == 0
+    payload = json.loads(out_path.read_text())
+    assert payload["distinct_conversations"] == 2
+    assert payload["safety_divergences"] == 0
+    assert payload["passed"] is True
+    assert payload["failures"] == []
+    assert payload["since"] == since_str
+
+
+def test_main_evidence_json_records_failure_when_gate_fails(dsn, monkeypatch, tmp_path):
+    monkeypatch.setenv("DATABASE_URL", dsn)
+    since_str = _now_cutoff(dsn).isoformat()
+
+    out_path = tmp_path / "shadow_evidence.json"
+    rc = sgc.main([
+        "evidence", "--since", since_str, "--min-distinct", "50", "--json", str(out_path),
+    ])
+    assert rc == 1
+    payload = json.loads(out_path.read_text())
+    assert payload["passed"] is False
+    assert payload["failures"]
 
     t1, t2 = _new_tenant(dsn), _new_tenant(dsn)
     _insert_audit_row(dsn, t1, event_kind="shadow_divergence", status="ok")
