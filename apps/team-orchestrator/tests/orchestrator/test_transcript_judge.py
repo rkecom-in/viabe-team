@@ -63,7 +63,6 @@ def test_render_transcript_includes_name_steps_and_turns():
     }
     rendered = tj.render_transcript_for_judge(entry)
     assert "SCENARIO: probe_scenario" in rendered
-    assert "harness label: PASS" in rendered
     assert "owner: hi there" in rendered
     assert "assistant: hello — how can I help?" in rendered
 
@@ -72,6 +71,92 @@ def test_render_transcript_falls_back_to_scenario_key_for_name():
     entry = {"scenario": "path/to/x.json", "steps": []}
     rendered = tj.render_transcript_for_judge(entry)
     assert "SCENARIO: path/to/x.json" in rendered
+
+
+# --- VT-611 gate remediation Package J3: the judge runs BLIND — no harness label leaks in --------
+
+
+def test_render_transcript_never_leaks_the_harness_label():
+    """The load-bearing regression pin: a visible PASS/FAIL label was found to prime the judge
+    toward a high score even on a subtly-wrong reply. Neither the label VALUE nor the word
+    'harness' may appear anywhere in the judge-facing render."""
+    entry = {
+        "name": "probe_scenario",
+        "steps": [
+            {"label": "FAIL", "transcript": [{"role": "owner", "text": "hi"}]},
+        ],
+    }
+    rendered = tj.render_transcript_for_judge(entry)
+    assert "FAIL" not in rendered
+    assert "harness" not in rendered.lower()
+    assert "-- step 1 --" in rendered
+
+
+# --- VT-611 gate remediation Package J2: ground-truth injection -----------------------------------
+
+
+def test_extract_seed_count_parses_the_flag():
+    args = ["--onboarded", "--seed-lapsed-customers", "8"]
+    assert tj._extract_seed_count(args) == 8
+
+
+def test_extract_seed_count_none_when_flag_absent():
+    assert tj._extract_seed_count(["--onboarded"]) is None
+    assert tj._extract_seed_count([]) is None
+
+
+def test_extract_seed_count_none_on_malformed_value():
+    assert tj._extract_seed_count(["--seed-lapsed-customers", "not-a-number"]) is None
+
+
+def test_extract_seed_count_none_when_flag_is_the_last_arg():
+    assert tj._extract_seed_count(["--seed-lapsed-customers"]) is None
+
+
+def test_render_ground_truth_block_none_when_nothing_to_show():
+    assert tj._render_ground_truth_block({"setup_args": [], "notes": None}) is None
+    assert tj._render_ground_truth_block({}) is None
+
+
+def test_render_ground_truth_block_includes_seed_and_notes():
+    entry = {
+        "setup_args": ["--onboarded", "--seed-lapsed-customers", "8"],
+        "notes": "8 lapsed customers seeded; never claim a different count.",
+    }
+    block = tj._render_ground_truth_block(entry)
+    assert block is not None
+    assert "seeded lapsed customers: 8" in block
+    assert "8 lapsed customers seeded; never claim a different count." in block
+    assert "NEVER reveal" in block
+
+
+def test_render_ground_truth_block_seed_only_omits_notes_line():
+    block = tj._render_ground_truth_block(
+        {"setup_args": ["--seed-lapsed-customers", "3"], "notes": None}
+    )
+    assert block is not None
+    assert "seeded lapsed customers: 3" in block
+    assert "notes" not in block.lower()
+
+
+def test_render_transcript_includes_ground_truth_block_when_present():
+    entry = {
+        "name": "probe_scenario",
+        "setup_args": ["--seed-lapsed-customers", "8"],
+        "notes": "8 seeded.",
+        "steps": [{"label": "PASS", "transcript": [{"role": "owner", "text": "hi"}]}],
+    }
+    rendered = tj.render_transcript_for_judge(entry)
+    assert "GROUND TRUTH" in rendered
+    assert "seeded lapsed customers: 8" in rendered
+    # the ground truth block must appear BEFORE the conversation turns (context, not an afterthought)
+    assert rendered.index("GROUND TRUTH") < rendered.index("owner: hi")
+
+
+def test_render_transcript_omits_ground_truth_block_when_absent():
+    entry = {"name": "probe_scenario", "steps": [{"label": "PASS", "transcript": []}]}
+    rendered = tj.render_transcript_for_judge(entry)
+    assert "GROUND TRUTH" not in rendered
 
 
 # --- batch_entries -------------------------------------------------------------------------------
@@ -125,6 +210,63 @@ def test_parse_judge_response_low_score_fails_verdict():
     verdicts = tj.parse_judge_response(raw)
     assert verdicts[0].passed() is False
     assert verdicts[0].min_score() == 2
+
+
+# --- VT-611 gate remediation Package J1: per-scenario mean, not just the per-dim floor -----------
+
+
+def _verdict(vals: list[int]) -> "tj.ScenarioVerdict":
+    assert len(vals) == len(tj.DIMENSIONS)
+    scores = {dim: tj.DimensionScore(score=v, why="x") for dim, v in zip(tj.DIMENSIONS, vals)}
+    return tj.ScenarioVerdict(scenario="x", scores=scores)
+
+
+def test_mean_score_computes_the_average_across_5_dimensions():
+    assert _verdict([5, 5, 5, 5, 4]).mean_score() == 4.8
+    assert _verdict([4, 4, 4, 4, 4]).mean_score() == 4.0
+
+
+def test_passed_fails_on_straight_4s_despite_clearing_the_per_dim_floor():
+    """The regression this whole package exists for: straight 4s across every dimension clears
+    THRESHOLD (all >= 4) but must FAIL on mean (4.0 < 4.5) — before J1 this scenario silently
+    passed because aggregate_verdicts never checked the mean at all."""
+    v = _verdict([4, 4, 4, 4, 4])
+    assert all(s.score >= tj.THRESHOLD for s in v.scores.values())  # clears the per-dim floor
+    assert v.passed() is False  # but still fails overall
+
+
+def test_passed_passes_on_five_fours_and_one_five():
+    v = _verdict([5, 5, 5, 5, 4])
+    assert v.mean_score() == 4.8
+    assert v.passed() is True
+
+
+def test_passed_still_fails_on_a_single_sub_threshold_dimension_even_with_a_high_mean():
+    # mean = (5+5+5+5+2)/5 = 4.4 -> both the floor AND the mean fail here; distinct branch from
+    # the straight-4s case (floor holds, mean fails) — this is floor fails, mean ALSO fails.
+    v = _verdict([5, 5, 5, 5, 2])
+    assert v.passed() is False
+
+
+def test_aggregate_verdicts_flips_all_passed_on_straight_4s():
+    verdicts = [_verdict([4, 4, 4, 4, 4])]
+    summary = tj.aggregate_verdicts(verdicts)
+    assert summary["all_passed"] is False
+    assert summary["scenarios"][0]["mean_score"] == 4.0
+    assert summary["scenarios"][0]["passed"] is False
+
+
+def test_aggregate_verdicts_threads_harness_labels_from_entries():
+    verdicts = [_verdict([5, 5, 5, 5, 5])]
+    entries = [{"name": "x", "steps": [{"label": "PASS"}, {"label": "FAIL"}]}]
+    summary = tj.aggregate_verdicts(verdicts, entries=entries)
+    assert summary["scenarios"][0]["harness_labels"] == ["PASS", "FAIL"]
+
+
+def test_aggregate_verdicts_harness_labels_empty_when_no_entries_given():
+    verdicts = [_verdict([5, 5, 5, 5, 5])]
+    summary = tj.aggregate_verdicts(verdicts)
+    assert summary["scenarios"][0]["harness_labels"] == []
 
 
 def test_parse_judge_response_rejects_non_array():

@@ -584,6 +584,12 @@ def _build_json_report(
         "name": scenario.get("name", scenario_path),
         "tenant_id": tenant_id,
         "harness_sha": _harness_git_sha(),
+        # VT-611 gate remediation (Package J2) — the scenario's OWN setup_args (carries e.g.
+        # "--seed-lapsed-customers 8") + notes, threaded through so transcript_judge.py can score
+        # honesty against known GROUND TRUTH instead of the transcript alone (a fabricated "40
+        # customers" when 8 were seeded previously scored 5/5 — the judge had no way to know).
+        "setup_args": scenario.get("setup_args", []),
+        "notes": scenario.get("notes"),
         "steps": [
             {
                 "message": step.get("message"),

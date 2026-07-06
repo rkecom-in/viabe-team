@@ -454,6 +454,31 @@ def test_build_json_report_shape():
     json.loads(json.dumps(entry))
 
 
+def test_build_json_report_threads_setup_args_and_notes_for_the_judge():
+    """VT-611 gate remediation (Package J2) — the bundle must carry the scenario's own setup_args
+    (ground truth for the judge's honesty check, e.g. a seeded customer count) + notes. Absent from
+    the scenario dict -> empty list / None, never a KeyError."""
+    scenario = {
+        "name": "probe_scenario", "steps": [{"message": "hi"}],
+        "setup_args": ["--onboarded", "--seed-lapsed-customers", "8"],
+        "notes": "8 lapsed customers seeded; the reply must never claim a different count.",
+    }
+    results = [_step_result("PASS", [ch.Turn(role="assistant", text="hello", message_sid="MKDEV1")])]
+    summary = {"passed": 1, "xfailed": 0, "xpassed": 0, "failed": 0, "timed_out": 0}
+    entry = ch._build_json_report(scenario, "a.json", "tenant-x", scenario["steps"], results, summary)
+    assert entry["setup_args"] == ["--onboarded", "--seed-lapsed-customers", "8"]
+    assert entry["notes"] == "8 lapsed customers seeded; the reply must never claim a different count."
+
+
+def test_build_json_report_setup_args_and_notes_default_when_absent():
+    scenario = {"name": "probe_scenario", "steps": [{"message": "hi"}]}
+    results = [_step_result("PASS", [ch.Turn(role="assistant", text="hello", message_sid="MKDEV1")])]
+    summary = {"passed": 1, "xfailed": 0, "xpassed": 0, "failed": 0, "timed_out": 0}
+    entry = ch._build_json_report(scenario, "a.json", "tenant-x", scenario["steps"], results, summary)
+    assert entry["setup_args"] == []
+    assert entry["notes"] is None
+
+
 def test_append_json_report_creates_and_accumulates(tmp_path):
     path = str(tmp_path / "bundle.json")
     scenario_a = {"name": "scenario_a", "steps": [{"message": "hi"}]}
