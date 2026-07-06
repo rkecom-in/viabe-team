@@ -4,13 +4,17 @@ Placeholder connectors in the VT-205 registry (Amazon Seller Central, GA4, WooCo
 the manual VT-6 family, …) must never be presented as something the owner can actually
 connect today. Three presentation surfaces are covered:
 
-  1. ``list_connectors_tool`` (integration_agent) — the owner-facing connector listing.
+  1. ``list_supported_connectors`` (integration_agent) — the owner-facing connector listing.
   2. ``render_connector_listing_markdown`` — the Integration Agent's own system-prompt
      catalogue block (so the model never even SEES a placeholder as "available").
-  3. ``start_connector_setup`` — "Connect Amazon" must produce an honest ``unsupported``
+  3. ``start_oauth`` — "Connect Amazon" must produce an honest ``unsupported``
      response with NO promised follow-up action (no walkthrough, no "coming soon").
   4. ``advise_integration_setup`` (tech_lane) — the Tech advisory tool's setup-advice
      surface.
+
+VT-608 (Loop Package 5) renamed the underlying tools (list_connectors_tool -> list_supported_
+connectors; start_connector_setup -> start_oauth) — this file follows that rename; the
+acceptance criteria it proves are unchanged.
 """
 
 from __future__ import annotations
@@ -33,9 +37,9 @@ def test_owner_visible_connector_ids_is_shopify_and_google_sheet_only() -> None:
 
 
 def test_list_connectors_tool_never_lists_a_placeholder() -> None:
-    from orchestrator.agent.integration_agent import list_connectors_tool
+    from orchestrator.agent.integration_agent import list_supported_connectors
 
-    out = list_connectors_tool.func()  # type: ignore[attr-defined]
+    out = list_supported_connectors.func()  # type: ignore[attr-defined]
     assert "shopify" in out
     assert "google_sheet" in out
     for placeholder in ("amazon_seller_central", "google_analytics_4", "woocommerce", "razorpay"):
@@ -63,11 +67,11 @@ def test_system_prompt_connector_block_never_advertises_a_placeholder() -> None:
 def test_connect_amazon_produces_honest_unsupported_response_no_promised_followup() -> None:
     """The acceptance criterion, verbatim: 'Connect Amazon' produces an honest unsupported
     response with no promised follow-up action."""
-    from orchestrator.agent.integration_agent import start_connector_setup
+    from orchestrator.agent.integration_agent import start_oauth
 
     run_id, tenant_id = uuid4(), uuid4()
     with observability_context(run_id=run_id, tenant_id=tenant_id):
-        out = start_connector_setup.func(  # type: ignore[attr-defined]
+        out = start_oauth.func(  # type: ignore[attr-defined]
             connector_id="amazon_seller_central", tenant_id=str(tenant_id)
         )
 
@@ -82,11 +86,11 @@ def test_connect_amazon_produces_honest_unsupported_response_no_promised_followu
 
 def test_start_connector_setup_still_wires_shopify() -> None:
     """The filter must not regress the ONE real, live connector path."""
-    from orchestrator.agent.integration_agent import start_connector_setup
+    from orchestrator.agent.integration_agent import start_oauth
 
     run_id, tenant_id = uuid4(), uuid4()
     with observability_context(run_id=run_id, tenant_id=tenant_id):
-        out = start_connector_setup.func(  # type: ignore[attr-defined]
+        out = start_oauth.func(  # type: ignore[attr-defined]
             connector_id="shopify", tenant_id=str(tenant_id)
         )
 

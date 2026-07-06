@@ -1138,6 +1138,29 @@ def webhook_pipeline_run(tenant_id: str, run_id: str, twilio_fields: dict) -> di
 
                 audit_run_isolation(UUID(run_id), UUID(tenant_id))
 
+                # VT-608 RULING 3 — the deterministic ingestion-commit executor. The integration
+                # agent's own commit_ingestion TOOL never writes the customer/ledger substrate
+                # (VT-268); this is the non-agent, server-side code path that actually performs it,
+                # mirroring the campaign effect rail's propose-then-execute shape. A cheap no-op
+                # for every tenant/turn EXCEPT one whose just-dispatched turn left
+                # tenant_integration_state at 'ingestion_commit_pending' (this legacy/shadow
+                # dispatch path is the ONLY place a Sheets/Shopify commit proposed via the agent's
+                # tool surface — as opposed to the Shopify-specific deterministic resume hook above,
+                # which calls pull_and_ingest_shopify directly and never goes through this — gets
+                # executed today; enforce mode's own hook lives in
+                # manager.workflow._dispatch_specialist_step). Fail-soft: an executor failure must
+                # never crash the webhook run; it leaves the phase at ingestion_commit_pending
+                # (observable via verify_connector) rather than fabricating success.
+                try:
+                    from orchestrator.integrations.commit import execute_pending_ingestion_commit
+
+                    execute_pending_ingestion_commit(tenant_id)
+                except Exception:  # noqa: BLE001 — never block the webhook run's own close
+                    logger.exception(
+                        "VT-608: execute_pending_ingestion_commit failed tenant=%s run=%s",
+                        tenant_id, run_id,
+                    )
+
             # VT-583 D1 (THE biggest silent-drop): a brain run that COMPLETED but produced NO owner-facing
             # send left the owner in silence. Detect it (no assistant turn in the lifetime log at/after
             # this inbound) and send ONE honest, substance-railed acknowledgement through the in-session

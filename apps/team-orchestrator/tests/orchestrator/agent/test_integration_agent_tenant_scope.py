@@ -1,21 +1,24 @@
 """VT-603 — integration_agent tools derive tenant from the run context, never the model.
 
-THE LIVE DEFECT this closes (CC-verified, VT-599 pack follow-on): every ``tenant_id``-taking
-``@tool`` on the integration agent's surface trusted the MODEL-supplied value directly —
-``start_connector_setup`` / ``pull_sample`` / ``propose_field_mapping_stub`` /
-``confirm_field_mapping_stub`` / ``setup_recurring_ingestion_stub``. THE WORST:
-``setup_recurring_ingestion_stub`` wrote ``tenant_connector_status`` via the raw ``get_pool()``
-BYPASSRLS pool, keyed purely on the model's string — a genuine cross-tenant WRITE with zero RLS
-backstop (the VT-293/294 IDOR class, but a WRITE instead of a read).
+VT-608 (Loop Package 5) update: the tool surface was replaced (start_connector_setup ->
+start_oauth; propose_field_mapping_stub/confirm_field_mapping_stub -> propose_mapping/
+confirm_mapping (de-stubbed, real VT-209 reasoner); setup_recurring_ingestion_stub ->
+schedule_recurring_pull). This file re-proves the SAME VT-603 tenancy invariant against the new
+names for every tool that can be exercised without a real Postgres connection (no DB, no live
+Anthropic key needed for the heuristic path). The DB-touching tools
+(read_integration_state/check_oauth_status/confirm_mapping/commit_ingestion/verify_connector,
+which route through ``onboarding.shopify_onboarding``'s module-top-bound ``tenant_connection``)
+get their tenancy + persistence proof in ``test_integration_agent_tools_realdb.py`` instead,
+mirroring the codebase's own established mock-vs-real-DB test split.
 
-Mirrors ``test_marketing_lane_tenant_scope.py`` (VT-599): every tool now calls
+Mirrors ``test_marketing_lane_tenant_scope.py`` (VT-599): every tool calls
 ``resolve_lane_tenant`` first — the ambient dispatch ``ObservabilityContext`` is ALWAYS
 authoritative; a model value that disagrees (a business name, a foreign UUID) is observed +
 logged (mismatch WARNING) but never trusted; no context + an unparseable model value returns the
-structured ``lane_tenant_error`` dict, never a raise. ``setup_recurring_ingestion_stub`` gets an
+structured ``lane_tenant_error`` dict, never a raise. ``schedule_recurring_pull`` gets an
 ADDITIONAL adversarial test proving the write lands on the CONTEXT tenant via the RLS-scoped
 ``tenant_connection`` seam — never on a model-supplied foreign tenant, and never through the raw
-``get_pool()`` bypass.
+``get_pool()`` bypass (the same WRITE this suite has always guarded, VT-268/VT-603 unchanged).
 """
 
 from __future__ import annotations
@@ -55,33 +58,33 @@ def _assert_context_wins_no_raise(
     return result
 
 
-# --- (1) start_connector_setup ------------------------------------------------------------------
+# --- (1) start_oauth ---------------------------------------------------------------------------
 
 
-def test_start_connector_setup_business_name_from_model_uses_context_tenant(
+def test_start_oauth_business_name_from_model_uses_context_tenant(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    from orchestrator.agent.integration_agent import start_connector_setup
+    from orchestrator.agent.integration_agent import start_oauth
 
     run_id, tenant_id = uuid4(), uuid4()
     with observability_context(run_id=run_id, tenant_id=tenant_id):
         out = _assert_context_wins_no_raise(
             caplog,
-            call=lambda: start_connector_setup.func(  # type: ignore[attr-defined]
-                connector_id="google_sheets", tenant_id="Sundaram Stores"
+            call=lambda: start_oauth.func(  # type: ignore[attr-defined]
+                connector_id="unsupported_platform", tenant_id="Sundaram Stores"
             ),
-            tool_name="start_connector_setup",
+            tool_name="start_oauth",
         )
-    assert out["connector_id"] == "google_sheets"
+    assert out["status"] == "unsupported"
 
 
-def test_start_connector_setup_foreign_uuid_from_model_overridden(
+def test_start_oauth_foreign_uuid_from_model_overridden(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     """A syntactically-valid but WRONG tenant UUID is overridden — proven via the Shopify path
     (the one branch that forwards ``tenant_id`` to a downstream call we can observe)."""
     import orchestrator.onboarding.shopify_onboarding as shopify_onboarding_mod
-    from orchestrator.agent.integration_agent import start_connector_setup
+    from orchestrator.agent.integration_agent import start_oauth
 
     seen: dict[str, Any] = {}
 
@@ -95,25 +98,25 @@ def test_start_connector_setup_foreign_uuid_from_model_overridden(
     with observability_context(run_id=run_id, tenant_id=tenant_id):
         out = _assert_context_wins_no_raise(
             caplog,
-            call=lambda: start_connector_setup.func(  # type: ignore[attr-defined]
+            call=lambda: start_oauth.func(  # type: ignore[attr-defined]
                 connector_id="shopify", tenant_id=str(foreign), shop="teststore.myshopify.com"
             ),
-            tool_name="start_connector_setup",
+            tool_name="start_oauth",
         )
     assert out["authorize_url"] == "https://example.test/authorize"
     assert seen["tenant_id"] == str(tenant_id)
     assert seen["tenant_id"] != str(foreign)
 
 
-def test_start_connector_setup_no_context_garbage_value_returns_tool_error() -> None:
-    from orchestrator.agent.integration_agent import start_connector_setup
+def test_start_oauth_no_context_garbage_value_returns_tool_error() -> None:
+    from orchestrator.agent.integration_agent import start_oauth
 
-    out = start_connector_setup.func(  # type: ignore[attr-defined]
-        connector_id="google_sheets", tenant_id="Sundaram Stores"
+    out = start_oauth.func(  # type: ignore[attr-defined]
+        connector_id="unsupported_platform", tenant_id="Sundaram Stores"
     )
     assert out == {
         "status": "error",
-        "error": "start_connector_setup: no resolvable tenant context",
+        "error": "start_oauth: no resolvable tenant context",
     }
 
 
@@ -130,11 +133,11 @@ def test_pull_sample_business_name_from_model_uses_context_tenant(
         out = _assert_context_wins_no_raise(
             caplog,
             call=lambda: pull_sample.func(  # type: ignore[attr-defined]
-                tenant_id="Sundaram Stores", connector_id="google_sheets"
+                tenant_id="Sundaram Stores", connector_id="unsupported_platform"
             ),
             tool_name="pull_sample",
         )
-    assert out["not_wired_phase_a"] == "true"
+    assert out["status"] == "unsupported"
 
 
 def test_pull_sample_foreign_uuid_from_model_overridden(
@@ -172,73 +175,53 @@ def test_pull_sample_no_context_garbage_value_returns_tool_error() -> None:
     from orchestrator.agent.integration_agent import pull_sample
 
     out = pull_sample.func(  # type: ignore[attr-defined]
-        tenant_id="Sundaram Stores", connector_id="google_sheets"
+        tenant_id="Sundaram Stores", connector_id="unsupported_platform"
     )
     assert out == {"status": "error", "error": "pull_sample: no resolvable tenant context"}
 
 
-# --- (3) propose_field_mapping_stub / confirm_field_mapping_stub — stub tools, no DB ----------
+# --- (3) propose_mapping — the real VT-209 reasoner, heuristic-only path, no DB ----------------
 
 
-def test_propose_field_mapping_stub_business_name_from_model_uses_context_tenant(
+def test_propose_mapping_business_name_from_model_uses_context_tenant(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    from orchestrator.agent.integration_agent import propose_field_mapping_stub
+    from orchestrator.agent.integration_agent import propose_mapping
 
     run_id, tenant_id = uuid4(), uuid4()
     with observability_context(run_id=run_id, tenant_id=tenant_id):
         out = _assert_context_wins_no_raise(
             caplog,
-            call=lambda: propose_field_mapping_stub.func(  # type: ignore[attr-defined]
-                tenant_id="Sundaram Stores", connector_id="google_sheets", source_fields=["phone"]
+            call=lambda: propose_mapping.func(  # type: ignore[attr-defined]
+                tenant_id="Sundaram Stores", connector_id="google_sheet", source_fields=["phone"]
             ),
-            tool_name="propose_field_mapping_stub",
+            tool_name="propose_mapping",
         )
-    assert out["stub"] == "true"
+    # "phone" exact-matches a GLOBAL_FIELD_HINT alias — confidence 1.0, no LLM fallback reached.
+    assert out["proposals"] == [
+        {
+            "source_field": "phone",
+            "canonical_field": "phone",
+            "confidence": 1.0,
+            "decided_by": "heuristic",
+            "routing": "commit_silently",
+        }
+    ]
 
 
-def test_propose_field_mapping_stub_no_context_garbage_value_returns_tool_error() -> None:
-    from orchestrator.agent.integration_agent import propose_field_mapping_stub
+def test_propose_mapping_no_context_garbage_value_returns_tool_error() -> None:
+    from orchestrator.agent.integration_agent import propose_mapping
 
-    out = propose_field_mapping_stub.func(  # type: ignore[attr-defined]
-        tenant_id="Sundaram Stores", connector_id="google_sheets", source_fields=["phone"]
+    out = propose_mapping.func(  # type: ignore[attr-defined]
+        tenant_id="Sundaram Stores", connector_id="google_sheet", source_fields=["phone"]
     )
     assert out == {
         "status": "error",
-        "error": "propose_field_mapping_stub: no resolvable tenant context",
+        "error": "propose_mapping: no resolvable tenant context",
     }
 
 
-def test_confirm_field_mapping_stub_foreign_uuid_from_model_overridden(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    from orchestrator.agent.integration_agent import confirm_field_mapping_stub
-
-    run_id, tenant_id, foreign = uuid4(), uuid4(), uuid4()
-    with observability_context(run_id=run_id, tenant_id=tenant_id):
-        out = _assert_context_wins_no_raise(
-            caplog,
-            call=lambda: confirm_field_mapping_stub.func(  # type: ignore[attr-defined]
-                tenant_id=str(foreign), connector_id="google_sheets", mapping={"phone": "phone"}
-            ),
-            tool_name="confirm_field_mapping_stub",
-        )
-    assert out["confirmed"] == "true"
-
-
-def test_confirm_field_mapping_stub_no_context_garbage_value_returns_tool_error() -> None:
-    from orchestrator.agent.integration_agent import confirm_field_mapping_stub
-
-    out = confirm_field_mapping_stub.func(  # type: ignore[attr-defined]
-        tenant_id="not-a-uuid", connector_id="google_sheets", mapping={}
-    )
-    assert out == {
-        "status": "error",
-        "error": "confirm_field_mapping_stub: no resolvable tenant context",
-    }
-
-
-# --- (4) setup_recurring_ingestion_stub — THE WORST offender: the write itself -----------------
+# --- (4) schedule_recurring_pull — THE WORST offender's rename: the write itself ---------------
 
 
 def _fake_tenant_connection_factory(seen: dict[str, Any]) -> Any:
@@ -255,11 +238,11 @@ def _fake_tenant_connection_factory(seen: dict[str, Any]) -> Any:
     return _fake_tenant_connection
 
 
-def test_setup_recurring_ingestion_business_name_from_model_uses_context_tenant(
+def test_schedule_recurring_pull_business_name_from_model_uses_context_tenant(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     import orchestrator.db as db_mod
-    from orchestrator.agent.integration_agent import setup_recurring_ingestion_stub
+    from orchestrator.agent.integration_agent import schedule_recurring_pull
 
     seen: dict[str, Any] = {}
     monkeypatch.setattr(db_mod, "tenant_connection", _fake_tenant_connection_factory(seen))
@@ -268,38 +251,38 @@ def test_setup_recurring_ingestion_business_name_from_model_uses_context_tenant(
     with observability_context(run_id=run_id, tenant_id=tenant_id):
         out = _assert_context_wins_no_raise(
             caplog,
-            call=lambda: setup_recurring_ingestion_stub.func(  # type: ignore[attr-defined]
+            call=lambda: schedule_recurring_pull.func(  # type: ignore[attr-defined]
                 tenant_id="Sundaram Stores", connector_id="shopify", cadence="0 9 * * *"
             ),
-            tool_name="setup_recurring_ingestion_stub",
+            tool_name="schedule_recurring_pull",
         )
     assert out["scheduled"] == "true"
     assert seen["tenant_arg"] == tenant_id
     assert seen["insert_params"][0] == str(tenant_id)
 
 
-def test_setup_recurring_ingestion_no_context_garbage_value_returns_tool_error(
+def test_schedule_recurring_pull_no_context_garbage_value_returns_tool_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """No context + a garbage model value -> structured error; the DB seam is NEVER touched."""
     import orchestrator.db as db_mod
-    from orchestrator.agent.integration_agent import setup_recurring_ingestion_stub
+    from orchestrator.agent.integration_agent import schedule_recurring_pull
 
     def _forbidden_tenant_connection(*args: Any, **kwargs: Any) -> Any:
         raise AssertionError("tenant_connection must not be reached with no resolvable tenant")
 
     monkeypatch.setattr(db_mod, "tenant_connection", _forbidden_tenant_connection)
 
-    out = setup_recurring_ingestion_stub.func(  # type: ignore[attr-defined]
+    out = schedule_recurring_pull.func(  # type: ignore[attr-defined]
         tenant_id="Sundaram Stores", connector_id="shopify", cadence="0 9 * * *"
     )
     assert out == {
         "status": "error",
-        "error": "setup_recurring_ingestion_stub: no resolvable tenant context",
+        "error": "schedule_recurring_pull: no resolvable tenant context",
     }
 
 
-def test_setup_recurring_ingestion_adversarial_write_never_lands_on_foreign_tenant(
+def test_schedule_recurring_pull_adversarial_write_never_lands_on_foreign_tenant(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     """THE adversarial test: ambient context tenant A; the MODEL supplies a foreign (syntactically
@@ -307,14 +290,14 @@ def test_setup_recurring_ingestion_adversarial_write_never_lands_on_foreign_tena
     ``tenant_connection`` seam, never the raw BYPASSRLS pool (``orchestrator.graph.get_pool``)."""
     import orchestrator.db as db_mod
     import orchestrator.graph as graph_mod
-    from orchestrator.agent.integration_agent import setup_recurring_ingestion_stub
+    from orchestrator.agent.integration_agent import schedule_recurring_pull
 
     seen: dict[str, Any] = {}
     monkeypatch.setattr(db_mod, "tenant_connection", _fake_tenant_connection_factory(seen))
 
     def _forbidden_get_pool() -> Any:
         raise AssertionError(
-            "setup_recurring_ingestion_stub must never use the raw BYPASSRLS pool"
+            "schedule_recurring_pull must never use the raw BYPASSRLS pool"
         )
 
     monkeypatch.setattr(graph_mod, "get_pool", _forbidden_get_pool)
@@ -323,10 +306,10 @@ def test_setup_recurring_ingestion_adversarial_write_never_lands_on_foreign_tena
     with observability_context(run_id=run_id, tenant_id=tenant_a):
         out = _assert_context_wins_no_raise(
             caplog,
-            call=lambda: setup_recurring_ingestion_stub.func(  # type: ignore[attr-defined]
+            call=lambda: schedule_recurring_pull.func(  # type: ignore[attr-defined]
                 tenant_id=str(tenant_b), connector_id="shopify", cadence="0 9 * * *"
             ),
-            tool_name="setup_recurring_ingestion_stub",
+            tool_name="schedule_recurring_pull",
         )
     assert out["scheduled"] == "true"
     # the RLS-scoped connection was opened for the CONTEXT tenant, never the foreign one
