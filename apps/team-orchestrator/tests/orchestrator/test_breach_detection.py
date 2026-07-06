@@ -162,18 +162,22 @@ def test_notify_owner_sends(pool, monkeypatch):
     sent = {}
     monkeypatch.setattr(
         bn, "send_freeform_message",
-        lambda body, phone: sent.update(body=body, phone=phone) or "SMfake",
+        lambda body, phone, **kw: sent.update(body=body, phone=phone, **kw) or "SMfake",
     )
     tid = _tenant(pool)
     result = bn.notify_owner(tid, "P1", "test breach summary")
     assert result["sent"] is True
     assert result["sid"] == "SMfake"
+    # VT-611 Package H0: tenant_id/surface must reach send_freeform_message so this notice lands
+    # in the lifetime conversation_log (was bare -> _record_owner_conversation_turn no-op'd).
+    assert sent["tenant_id"] == tid
+    assert sent["surface"] == "system"
 
 
 def test_notify_owner_no_phone(pool, monkeypatch):
     import orchestrator.alerts.breach_notification as bn
 
-    monkeypatch.setattr(bn, "send_freeform_message", lambda body, phone: "x")
+    monkeypatch.setattr(bn, "send_freeform_message", lambda body, phone, **kw: "x")
     tid = str(uuid4())
     with pool.connection() as conn:
         conn.execute(

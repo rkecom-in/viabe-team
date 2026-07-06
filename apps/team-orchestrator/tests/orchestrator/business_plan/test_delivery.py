@@ -179,8 +179,8 @@ def send_spy(monkeypatch):  # type: ignore[no-untyped-def]
 
     calls: list[dict[str, str]] = []
 
-    def _spy(body: str, recipient_phone: str) -> str:
-        calls.append({"body": body, "recipient": recipient_phone})
+    def _spy(body: str, recipient_phone: str, **kw: Any) -> str:
+        calls.append({"body": body, "recipient": recipient_phone, **kw})
         return f"SM-spy-{len(calls)}"
 
     monkeypatch.setattr(twilio_send, "send_freeform_message", _spy)
@@ -235,6 +235,9 @@ def test_full_delivery_en_order_pacing_bitmap(substrate, send_spy):  # type: ign
 
     assert len(send_spy) == 5, "1 summary + 3 distinct months + 1 hint"
     assert all(c["recipient"] == whatsapp for c in send_spy)
+    # VT-611 Package H0: tenant_id/surface threaded on every part (was bare -> conversation_log gap).
+    assert all(c.get("tenant_id") == tenant for c in send_spy)
+    assert all(c.get("surface") == "manager" for c in send_spy)
 
     bodies = [c["body"] for c in send_spy]
     assert bodies[0] == _SUMMARY["text"]
@@ -251,6 +254,48 @@ def test_full_delivery_en_order_pacing_bitmap(substrate, send_spy):  # type: ign
     state = _delivery_state(substrate.dsn, tenant, version)
     assert state["delivered_parts"] == 0b11111
     assert state["delivered_at"] is not None, "final part stamps delivered_at"
+
+
+def test_delivery_records_every_part_to_conversation_log(substrate, monkeypatch):  # type: ignore[no-untyped-def]
+    """VT-611 Package H0: deliver_plan's send_freeform_message call was bare (no tenant_id) —
+    _record_owner_conversation_turn no-op'd, so a delivered plan never hit the lifetime
+    conversation_log. Runs the REAL send_freeform_message (only the Twilio wire-level client is
+    stubbed — no send_freeform_message mock here) so _record_owner_conversation_turn actually
+    persists, then reads conversation_log back for real (proves the row LANDS, not just that the
+    kwarg was threaded). The package's autouse Twilio stub returns a FIXED sid for every call
+    (fine for other tests, which don't care), but conversation_log's (tenant_id, message_sid)
+    unique index would collapse all 5 parts to 1 row on a fixed sid — so this test gives each
+    call its own sid, matching how the real Twilio API behaves."""
+    from unittest.mock import MagicMock
+
+    from orchestrator.business_plan import delivery
+    from orchestrator.utils import twilio_send
+
+    sid_counter = iter(range(1, 1000))
+
+    def _fake_client():
+        client = MagicMock()
+        client.messages.create = MagicMock(
+            side_effect=lambda **kw: MagicMock(sid=f"SM{next(sid_counter):032d}")
+        )
+        return client
+
+    monkeypatch.setattr(twilio_send, "_client", _fake_client)
+
+    tenant, _ = _new_tenant(substrate.dsn, name="conversation-log proof")
+    version = _seed_plan(tenant, _three_month_roadmap())
+
+    delivery.deliver_plan(tenant, version, sleep_fn=lambda _s: None)
+
+    with psycopg.connect(substrate.dsn, autocommit=True) as conn:
+        rows = conn.execute(
+            "SELECT text, surface, role FROM conversation_log WHERE tenant_id = %s "
+            "ORDER BY created_at ASC, id ASC",
+            (str(tenant),),
+        ).fetchall()
+    assert len(rows) == 5, "1 summary + 3 distinct months + 1 hint, every part logged"
+    assert all(r[1] == "manager" and r[2] == "assistant" for r in rows), rows
+    assert rows[0][0] == _SUMMARY["text"]
 
 
 def test_full_delivery_hi_variant(substrate, send_spy):  # type: ignore[no-untyped-def]
@@ -316,7 +361,7 @@ def test_failing_middle_part_continues_and_replays(substrate, monkeypatch):  # t
 
     calls: list[str] = []
 
-    def _flaky(body: str, recipient_phone: str) -> str:
+    def _flaky(body: str, recipient_phone: str, **kw: Any) -> str:
         calls.append(body)
         if body.startswith("Month 1"):
             raise RuntimeError("Twilio 5xx (simulated)")
@@ -332,7 +377,8 @@ def test_failing_middle_part_continues_and_replays(substrate, monkeypatch):  # t
 
     sent: list[str] = []
     monkeypatch.setattr(
-        twilio_send, "send_freeform_message", lambda body, recipient_phone: sent.append(body)
+        twilio_send, "send_freeform_message",
+        lambda body, recipient_phone, **kw: sent.append(body),
     )
     delivery.deliver_plan(tenant, version, sleep_fn=lambda _s: None)
 

@@ -202,7 +202,10 @@ def maybe_report_campaign_outcome(
     try:
         from orchestrator.utils.twilio_send import send_freeform_message
 
-        message_sid = send_freeform_message(body, recipient)
+        # VT-611 Package H0 — thread tenant_id so this owner-facing outcome report lands in the
+        # lifetime conversation_log (was bare -> _record_owner_conversation_turn no-op'd, invisible
+        # to the loop's own memory + any transcript-based assert/judge).
+        message_sid = send_freeform_message(body, recipient, tenant_id=tenant_id, surface="manager")
     except Exception as exc:  # noqa: BLE001 — the campaign sent; the report must never crash the resume
         code = getattr(exc, "code", None)
         logger.exception(

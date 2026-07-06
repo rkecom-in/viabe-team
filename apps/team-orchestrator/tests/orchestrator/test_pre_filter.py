@@ -143,7 +143,16 @@ def test_data_inputs_enable_handler_sets_owner_inputs_true(gate, monkeypatch):
     h = importlib.import_module(
         "orchestrator.direct_handlers.data_inputs_enable_handler"
     )
-    monkeypatch.setattr(h, "send_freeform_message", lambda body, phone: "SMfake")
+    sent: dict[str, object] = {}
+
+    def _capture(body: str, phone: str, **kwargs: object) -> str:
+        # VT-611 Package H0: the handler now passes tenant_id + surface='system' so this confirm
+        # lands in the lifetime conversation_log (was bare -> no-op'd).
+        sent["body"], sent["phone"] = body, phone
+        sent["tenant_id"], sent["surface"] = kwargs.get("tenant_id"), kwargs.get("surface")
+        return "SMfake"
+
+    monkeypatch.setattr(h, "send_freeform_message", _capture)
     tenant_id = _new_tenant(gate.dsn)
     sub = _state(gate, tenant_id)
     outcome = h.data_inputs_enable_handler(_inbound(gate, "ACTIVATE TEAM"), sub)
@@ -153,6 +162,8 @@ def test_data_inputs_enable_handler_sets_owner_inputs_true(gate, monkeypatch):
             "SELECT owner_inputs FROM tenants WHERE id = %s", (tenant_id,)
         ).fetchone()
     assert row == (True,)
+    assert sent["tenant_id"] == UUID(tenant_id)
+    assert sent["surface"] == "system"
 
 
 def test_consent_required_handler_sends_prompt_no_transmit(gate, monkeypatch):
@@ -199,7 +210,7 @@ def test_brain_owner_inputs_ok_true_after_enable(gate, monkeypatch):
     h = importlib.import_module(
         "orchestrator.direct_handlers.data_inputs_enable_handler"
     )
-    monkeypatch.setattr(h, "send_freeform_message", lambda body, phone: "SMfake")
+    monkeypatch.setattr(h, "send_freeform_message", lambda body, phone, **kw: "SMfake")
     tenant_id = _new_tenant(gate.dsn)
     # Default owner_inputs is FALSE -> gate would divert to consent_required.
     assert runner_mod._brain_owner_inputs_ok(tenant_id) is False

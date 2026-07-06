@@ -55,7 +55,9 @@ def notify_owner(tenant_id: UUID | str, severity: str, summary: str) -> dict[str
         _OWNER_NOTICE.format(severity=severity, summary=summary)
     )
     try:
-        sid = send_freeform_message(body, recipient)
+        # VT-611 Package H0 — thread tenant_id so this notice lands in the lifetime conversation_log
+        # (was bare -> _record_owner_conversation_turn no-op'd).
+        sid = send_freeform_message(body, recipient, tenant_id=tenant_id, surface="system")
         return {"sent": True, "sid": sid, "error": None}
     except Exception as exc:  # noqa: BLE001 — honest outcome, never crash
         logger.warning("VT-79 notify_owner send failed (tenant=%s)", tenant_id)

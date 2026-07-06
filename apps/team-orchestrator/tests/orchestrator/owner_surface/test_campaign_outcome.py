@@ -105,7 +105,7 @@ def _patch_send(monkeypatch) -> dict:
     seen: dict = {"ledger": []}
     monkeypatch.setattr(
         "orchestrator.utils.twilio_send.send_freeform_message",
-        lambda body, phone: (seen.update(body=body, phone=phone), "SM_OUT")[1],
+        lambda body, phone, **kw: (seen.update(body=body, phone=phone, **kw), "SM_OUT")[1],
     )
     monkeypatch.setattr(
         "orchestrator.owner_surface.owner_notification.record_owner_notification",
@@ -121,9 +121,10 @@ def test_maybe_report_sends_honest_counts_and_records_ledger(monkeypatch) -> Non
     seen = _patch_send(monkeypatch)
     state = {"campaign_execution_summary": {"sent": 20, "skipped_opt_out": 4}}
     run_id = uuid4()
+    tenant_id = uuid4()
 
     sent = co.maybe_report_campaign_outcome(
-        uuid4(), state, run_id=run_id, recipient_phone="+919811111111"
+        tenant_id, state, run_id=run_id, recipient_phone="+919811111111"
     )
 
     assert sent is True
@@ -132,6 +133,10 @@ def test_maybe_report_sends_honest_counts_and_records_ledger(monkeypatch) -> Non
     assert seen["phone"] == "+919811111111"
     # Auditable: recorded in the owner_notifications ledger under the report label + run_id.
     assert seen["ledger"] == [("campaign_outcome_report", "SM_OUT", {"run_id": run_id})]
+    # VT-611 Package H0: tenant_id/surface must reach send_freeform_message so this outcome report
+    # lands in the lifetime conversation_log (was bare -> _record_owner_conversation_turn no-op'd).
+    assert seen["tenant_id"] == tenant_id
+    assert seen["surface"] == "manager"
 
 
 def test_maybe_report_no_summary_skips(monkeypatch) -> None:
@@ -161,7 +166,7 @@ def test_maybe_report_send_failure_is_fail_soft_and_alerts(monkeypatch) -> None:
     fire the outbound_failure alert (an un-notified owner is surfaced)."""
     alerts: list = []
 
-    def _boom(body, phone):  # noqa: ANN001
+    def _boom(body, phone, **kw):  # noqa: ANN001
         exc = RuntimeError("window closed")
         exc.code = 63016
         raise exc
