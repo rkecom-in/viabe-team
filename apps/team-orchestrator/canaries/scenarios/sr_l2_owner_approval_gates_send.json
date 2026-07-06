@@ -1,0 +1,23 @@
+{
+  "name": "sr_l2_owner_approval_gates_send",
+  "domain": "sr_autonomy_rails",
+  "critical": true,
+  "setup_args": ["--onboarded", "--seed-lapsed-customers", "8"],
+  "expected_fail": false,
+  "notes": "L2 is the default: a batch only proceeds after the owner's OWN reply (agents.approval_glue.apply_agent_decision: approved -> batch 'approved' -> customer_send's stack takes over). The deterministic fast-path classifier (owner_inputs.approval_reply.classify_approval_reply) reads a clear Hinglish 'haan ... bhej do' as APPROVED without ever needing an LLM guess (Pillar 7). Setup: `setup --onboarded --seed-lapsed-customers 8` then `script <tenant> sr_l2_owner_approval_gates_send.json`.",
+  "steps": [
+    {
+      "message": "purane customers ko wapas laane ke liye ek accha sa offer draft kar do unke liye",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "assert_contains": ["draft"],
+      "note": "First turn: a win-back ask should draft + arm an owner approval, not send anything yet."
+    },
+    {
+      "message": "haan theek hai, bhej do unhe",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "note": "A clear Hinglish approval ('haan' is a strong-affirm token in owner_inputs.approval_reply's deterministic classifier). Expect the paused batch to resume -- the manager should NOT stay silent or fall back to the D1 boilerplate after a genuine owner approval."
+    }
+  ]
+}

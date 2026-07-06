@@ -1,0 +1,23 @@
+{
+  "name": "profile_preview_then_confirm",
+  "domain": "onboarding",
+  "critical": false,
+  "setup_args": ["--onboarded", "--flow", "profile_previewed"],
+  "expected_fail": false,
+  "notes": "Journey COMPLETE with the paced post-profile-flow sentinel armed to 'profile_previewed' (the profile card was just shown, per journey.py _FLOW_PREVIEWED — any owner reply after the card is treated as an acknowledgement and the flow moves to the readiness ask, VERBATIM deterministic template text, not turn-brain-rewritten). Setup: `setup --onboarded --flow profile_previewed` then `script <tenant> profile_preview_then_confirm.json`.",
+  "steps": [
+    {
+      "message": "haan bilkul, yehi sahi hai",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "assert_contains": ["one at a time"],
+      "note": "Owner acknowledges the profile card. Expect the paced flow to advance to the readiness ask (the deterministic 'set up your data connections... one at a time' template), not a re-presentation of the card."
+    },
+    {
+      "message": "acha thik hai",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "note": "A second, ambiguous acknowledgement at the readiness-ask beat. Expect the flow to keep moving (proceed or note it can wait later) rather than stall or silently drop."
+    }
+  ]
+}

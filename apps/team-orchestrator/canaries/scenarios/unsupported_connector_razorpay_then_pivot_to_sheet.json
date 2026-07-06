@@ -1,0 +1,26 @@
+{
+  "name": "unsupported_connector_razorpay_then_pivot_to_sheet",
+  "domain": "integration",
+  "critical": true,
+  "setup_args": ["--onboarded", "--flow", "plan_kicked"],
+  "expected_fail": false,
+  "notes": "Steady-state (flow=plan_kicked is terminal — the paced post-profile beats are done, so an owner-initiated connector request reaches the integration agent directly rather than the journey orphan re-offer, which would pitch Shopify and never name the connector actually asked for). The owner asks to connect Razorpay — a VT-205 registry placeholder OUTSIDE OWNER_VISIBLE_CONNECTOR_IDS ({shopify, google_sheet}). integration_agent.start_oauth returns a fail-closed status:'unsupported' envelope ('This connector isn't supported yet — Viabe Team currently connects Shopify and Google Sheets') and the system prompt says to report an unbuilt connector plainly, never promising a walkthrough. Step 1 must name Razorpay honestly as not-yet-supported (no fabricated link/connection); step 2 the owner pivots to a REAL connector (Google Sheets) and the agent proceeds with that honestly, carrying no leftover Razorpay 'connected' claim. Distinct from unsupported_connector_woocommerce_direct.json (whose second beat enumerates 'what CAN you connect') — this one exercises the PIVOT to a supported connector after the unsupported ask. Setup: `setup --onboarded --flow plan_kicked` then `script <tenant> unsupported_connector_razorpay_mid_sheets_flow.json`.",
+  "steps": [
+    {
+      "message": "while we're at it, can you also hook up Razorpay so you can see my payment settlements?",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "assert_contains": ["razorpay"],
+      "assert_not_contains": ["razorpay is connected", "connected your razorpay", "i've linked razorpay", "razorpay account is now linked", "razorpay is now set up"],
+      "note": "Ask for an unbuilt connector by name. Expect an honest 'not supported yet' that names Razorpay — no fabricated link, no silent drop."
+    },
+    {
+      "message": "okay no worries — then just connect my Google Sheet instead, that's where my customer list is",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "assert_contains": ["sheet"],
+      "assert_not_contains": ["razorpay is connected", "i've also connected razorpay", "razorpay is now set up"],
+      "note": "Owner pivots to a REAL, supported connector. Expect the agent to engage the Google Sheets connect (offer / authorize link / picker guidance) — never a leftover fabricated Razorpay claim."
+    }
+  ]
+}

@@ -1,0 +1,25 @@
+{
+  "name": "routing_specialist_integration_vs_profile",
+  "domain": "manager",
+  "critical": false,
+  "setup_args": ["--onboarded"],
+  "expected_fail": false,
+  "notes": "Correct specialist routing per intent: an ALREADY-onboarded owner explicitly asking to connect a data source must route to spawn_integration (Phase-1 discovery/OAuth framing), NOT back into a business-profile question (that's onboarding_conductor's job and the profile is already done here) and NOT into sales-recovery language. Grounded in orchestrator_agent_system.md's roster split ('Connect / add a data source -> spawn_integration ... the SUBSEQUENT step, AFTER the profile is collected') and integration_agent_system.md's Phase-2 shop-address ask. Setup: `setup --onboarded --name convo-harness-<id>` then `script <tenant> routing_specialist_integration_vs_profile.json`.",
+  "steps": [
+    {
+      "message": "I want to connect my Shopify store to Viabe",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "assert_contains": ["shopify"],
+      "assert_not_contains": ["what is your business name", "what kind of business", "which city is", "win back", "lapsed customers"],
+      "note": "Explicit connect ask, profile already complete. Expect an integration-flavored reply (e.g. asking for the store address) — never a re-ask of profile fields, never win-back framing."
+    },
+    {
+      "message": "it's connect-widget-test.myshopify.com",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "assert_not_contains": ["what is your store address", "reply with your store", "what is your business name", "which city"],
+      "note": "Owner supplies the store address in the very next turn. Expect the integration flow to USE it (proceed toward OAuth) — never re-ask for the address, never fall back to a profile question."
+    }
+  ]
+}

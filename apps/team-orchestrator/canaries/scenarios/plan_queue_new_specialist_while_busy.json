@@ -1,0 +1,24 @@
+{
+  "name": "plan_queue_new_specialist_while_busy",
+  "domain": "manager",
+  "critical": false,
+  "setup_args": ["--onboarded", "--seed-lapsed-customers", "8"],
+  "expected_fail": false,
+  "notes": "Plan-queue-busy variation: while a win-back approval is pending, the owner asks for a COMPLETELY UNRELATED new task (connect Google Sheets). Unlike second_plan_queue_busy.json's same-ask duplicate, this checks the manager doesn't over-generalise 'busy' into blocking every new ask — an unrelated specialist lane should proceed independently of the pending campaign approval. DEPENDENCY: step 2 is meaningful regardless of whether step 1 actually armed a pending approval or fell to an honest insufficient-data reply, since step 2's own ask (connect Sheets) does not depend on step 1's outcome. Setup: `setup --onboarded --seed-lapsed-customers 8 --name convo-harness-<id>` then `script <tenant> plan_queue_new_specialist_while_busy.json`.",
+  "steps": [
+    {
+      "message": "set up a win-back campaign for my lapsed customers",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "note": "First ask — expected to delegate to Sales-Recovery and (likely) arm a pending approval."
+    },
+    {
+      "message": "separately, can you also connect my Google Sheets for the accounts?",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "assert_contains": ["sheet"],
+      "assert_not_contains": ["you already have a pending campaign, please wait", "let's finish the campaign first before connecting anything", "once the campaign is approved we can look at connecting"],
+      "note": "An unrelated NEW specialist ask (integration) while a different task (win-back) is pending approval. Expect the manager to engage the connect ask on its own lane — not gate it behind the unrelated pending campaign."
+    }
+  ]
+}

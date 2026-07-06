@@ -1,0 +1,26 @@
+{
+  "name": "sr_consent_natural_grant",
+  "domain": "sr_autonomy_rails",
+  "critical": true,
+  "setup_args": ["--owner-inputs", "false"],
+  "expected_fail": false,
+  "notes": "CL-2026-07-03-fluid-consent (VT-583; runner.py `_consent_affirm_after_ask` + `classify_consent_intent`): a fresh un-consented tenant gets the deterministic owner_inputs consent ASK (naming the ACTIVATE TEAM keyword); a plain NATURAL affirmation ('haan theek hai, chalo shuru karo') sent as the VERY NEXT reply is honored via the SAME audited enable path as the exact keyword — gated on (a) the last thing we sent being the consent ask and (b) a zero-LLM deterministic affirm classification (both required; never a grant on a guess). Steps 1-2 hit direct handlers whose confirmation sends are transport-quirk NOT conversation_log-logged (consent_required_handler / data_inputs_enable_handler), so assert_no_silent is off there; step 3 is the load-bearing assertion — only a GRANTED consent lets the brain engage and produce a conversation_log-logged reply. Run: `setup --owner-inputs false --name convo-harness-<id>` (no --onboarded — the consent gate runs before the journey is ever consulted) then `script <tenant> sr_consent_natural_grant.json`.",
+  "steps": [
+    {
+      "message": "I want to plan a festive-season offer for my regular customers",
+      "assert_no_silent": false,
+      "note": "Un-consented substantive message -> consent_required_handler sends the deterministic enable-prompt naming ACTIVATE TEAM. Not conversation_log-logged, so run_status='completed' is the check here, not assert_no_silent."
+    },
+    {
+      "message": "haan theek hai, chalo shuru karo",
+      "assert_no_silent": false,
+      "note": "Natural-language affirmation immediately after the consent ask. classify_consent_intent reads this as 'affirm' and the last assistant turn carries the ask marker, so data_inputs_enable_handler fires (owner_inputs -> true). Its confirm send is also not conversation_log-logged, so assert_no_silent stays off; the real proof is step 3."
+    },
+    {
+      "message": "great, go ahead and plan that festive-season offer",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "note": "Load-bearing assertion: consent should now be granted, so the brain engages and produces a real, conversation_log-logged reply — never a re-ask of the consent prompt, never D1, never silence."
+    }
+  ]
+}

@@ -1,0 +1,25 @@
+{
+  "name": "unsupported_connector_woocommerce_direct",
+  "domain": "integration",
+  "critical": true,
+  "setup_args": ["--onboarded", "--flow", "plan_kicked"],
+  "expected_fail": false,
+  "notes": "Owner directly names an unsupported connector (WooCommerce — a documented-but-unbuilt VT-205 registry placeholder; OWNER_VISIBLE_CONNECTOR_IDS is only {shopify, google_sheet}) during normal steady-state operation (flow=plan_kicked is terminal, so this is outside the paced post-profile beats). integration_agent.start_oauth/list_supported_connectors both hard-filter to the owner-visible catalogue and the system prompt says to report an unbuilt connector 'plainly, never promise a walkthrough'. Expect a clear, honest unsupported answer — no silent drop, no fabricated connection. Setup: `setup --onboarded --flow plan_kicked` then `script <tenant> unsupported_connector_woocommerce_direct.json`.",
+  "steps": [
+    {
+      "message": "Hi, I run my shop through WooCommerce on my website — can you connect to that and start pulling my orders in?",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "assert_contains": ["woocommerce"],
+      "assert_not_contains": ["i've connected your woocommerce", "connected to woocommerce", "woocommerce is now connected", "your woocommerce store is connected", "woocommerce is linked"],
+      "note": "Direct ask for an unbuilt connector. Expect a plain, honest 'not supported yet' answer that names WooCommerce — not a silent drop, and never a fabricated connection."
+    },
+    {
+      "message": "oh okay, so what can you actually connect right now?",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "assert_contains": ["shopify"],
+      "note": "Follow-up asking for the real, live list. Expect Shopify (+ Google Sheets) named as what's actually connectable today."
+    }
+  ]
+}

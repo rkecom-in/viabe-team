@@ -1,0 +1,24 @@
+{
+  "name": "platform_listing_ingestion_status_check",
+  "domain": "integration",
+  "critical": true,
+  "setup_args": ["--onboarded"],
+  "expected_fail": false,
+  "notes": "Owner asks the system to acknowledge/report on platform-listing ingestion (GBP/food-platform) status — the VT-325 platform_listings substrate that tech_lane.py's read_listing_health reads (rating, staleness, permanently_closed, category — CL-390 structured-attributes-only, no review text/PII). A fresh convo-harness tenant has ZERO platform_listings rows (no seed flag populates this table; apify_gbp/apify_food only ever ran for a real signup with a real business to scrape), so the ONLY truthful answer is 'no listing data on file yet' — any specific rating/hours/open-status claim would be fabricated. Marked critical — this is the truthful-owner-outcome closer for listing-health reporting (read_listing_health's own docstring: 'stale'/'permanently_closed' are read state, 'never fabricated'). Setup: `setup --onboarded` then `script <tenant> platform_listing_ingestion_status_check.json`.",
+  "steps": [
+    {
+      "message": "Is my business still showing correctly on Google — are we marked open, and what's our rating there?",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "assert_not_contains": ["your rating is 4", "you have a 4-star", "you're marked as open on google", "yes you are marked open", "your rating is 5"],
+      "note": "No platform_listings row exists for this harness tenant — expect an honest 'nothing on file yet' answer, never a fabricated rating or open/closed status."
+    },
+    {
+      "message": "please actually check right now and tell me if it's accurate",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "assert_not_contains": ["your rating is 4", "you have a 4-star", "confirmed accurate", "yes it's accurate", "your rating is 5"],
+      "note": "Owner presses for a real, immediate check — expect a genuine read (empty) reported honestly, never a fabricated confirmation that data exists and is accurate."
+    }
+  ]
+}

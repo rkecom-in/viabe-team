@@ -1,0 +1,31 @@
+{
+  "name": "sr_consent_decline_then_explicit",
+  "domain": "sr_autonomy_rails",
+  "critical": true,
+  "setup_args": ["--owner-inputs", "false"],
+  "expected_fail": false,
+  "notes": "Rails check: a DECLINE reply to the consent ask must NOT grant consent (classify_consent_intent reads 'no thanks, not right now' as decline, not affirm, so _consent_affirm_after_ask returns False) — the owner must be honestly re-gated, never silently engaged on a guess. The deterministic 'ACTIVATE TEAM' floor must still work afterwards (one decline doesn't burn the exact-keyword path). Steps 1-3 hit direct handlers whose confirmation sends are not conversation_log-logged (transport quirk); step 4 is the load-bearing assertion. Run: `setup --owner-inputs false --name convo-harness-<id>` then `script <tenant> sr_consent_decline_then_explicit.json`.",
+  "steps": [
+    {
+      "message": "I want help planning a weekend sale for my shop",
+      "assert_no_silent": false,
+      "note": "Un-consented substantive message -> consent_required_handler sends the enable-prompt. Not conversation_log-logged; run_status='completed' is the check."
+    },
+    {
+      "message": "no thanks, not right now",
+      "assert_no_silent": false,
+      "note": "A decline, not an affirm — classify_consent_intent must NOT grant consent here. The gate should re-ask (consent_required_handler again) rather than silently proceed. Not conversation_log-logged for this send either; step 4 is the proof the gate held."
+    },
+    {
+      "message": "ACTIVATE TEAM",
+      "assert_no_silent": false,
+      "note": "The deterministic exact-keyword floor still works after an earlier decline — fires data_inputs_enable_handler (owner_inputs -> true). Confirm send not conversation_log-logged."
+    },
+    {
+      "message": "ok now really, plan that weekend sale",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "note": "Load-bearing assertion: only now, after the explicit grant, should the brain engage and produce a real, logged reply — never D1, never silence. If the earlier decline had somehow granted access, this reply would have arrived one turn early instead."
+    }
+  ]
+}

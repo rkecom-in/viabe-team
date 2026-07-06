@@ -1,0 +1,24 @@
+{
+  "name": "gbp_connect_honest_capability",
+  "domain": "integration",
+  "critical": false,
+  "setup_args": ["--onboarded"],
+  "expected_fail": false,
+  "notes": "Owner asks to CONNECT their Google Business Profile as if it were an owner-authorizable integration like Shopify. Grounded in integrations/registry.py's OWNER_VISIBLE_CONNECTOR_IDS = {shopify, google_sheet} and agent/integration_agent.py's list_supported_connectors/start_oauth docstrings ('If the owner names an unsupported platform by name, say plainly it isn't supported yet; do not promise a walkthrough or a future connection for it') — GBP context is actually gathered automatically via the apify_gbp method (VT-62), never an owner-initiated OAuth connect. Expect an honest capability answer (not supported as a connect-it-yourself integration today; only Shopify + Google Sheets are), never a fabricated 'connected' claim. Bare --onboarded (no active paced-flow beat) so the message reaches normal chat routing (Manager / Integration Agent), not a deterministic resume gate. Setup: `setup --onboarded` then `script <tenant> gbp_connect_honest_capability.json`.",
+  "steps": [
+    {
+      "message": "Can you connect my Google Business Profile listing so my ratings and reviews show up here?",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "assert_not_contains": ["i've connected your google business profile", "i have connected your google business profile", "google business profile is now connected", "connected your gbp"],
+      "note": "GBP isn't an owner-connectable integration (only Shopify + Google Sheets are) — expect an honest capability statement, never a fabricated connect."
+    },
+    {
+      "message": "ok then how do I see my Google rating here",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "assert_not_contains": ["your rating is 4", "you have a 4-star rating", "your rating is 5"],
+      "note": "Follow-up ask for the same unsupported surface — expect either a real read of whatever listing data exists (likely none for a fresh harness tenant) or an honest capability answer, never a fabricated star rating."
+    }
+  ]
+}

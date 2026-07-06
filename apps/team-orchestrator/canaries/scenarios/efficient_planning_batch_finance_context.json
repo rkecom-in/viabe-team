@@ -1,0 +1,23 @@
+{
+  "name": "efficient_planning_batch_finance_context",
+  "domain": "manager",
+  "critical": false,
+  "setup_args": ["--onboarded"],
+  "expected_fail": false,
+  "notes": "Efficient planning, Finance-advisory flavor: ONE message packs the relevant facts (how long cash flow's been tight, roughly how many unpaid invoices, which clients) AND the compound ask (check cash flow + draft reminders) at once. The manager should use analyze_cash_flow / propose_payment_reminder against the given facts rather than re-collecting them turn by turn. Setup: `setup --onboarded --name convo-harness-<id>` then `script <tenant> efficient_planning_batch_finance_context.json`.",
+  "steps": [
+    {
+      "message": "My cash flow's been tight the last two months — I've got around 12 unpaid invoices sitting there, mostly from two big regular clients. Can you check what's going on and draft reminders for the worst ones?",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "assert_not_contains": [
+        "how many invoices are unpaid",
+        "how many unpaid invoices do you have",
+        "which clients owe you",
+        "how long has your cash flow been tight",
+        "how many months has this been going on"
+      ],
+      "note": "Facts (timeframe, invoice count, client concentration) AND the ask, all in one message. Expect the manager to engage the finance read + reminder draft using what was given — never re-ask for facts already stated."
+    }
+  ]
+}

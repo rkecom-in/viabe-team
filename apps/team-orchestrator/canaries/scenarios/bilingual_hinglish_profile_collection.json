@@ -1,0 +1,28 @@
+{
+  "name": "bilingual_hinglish_profile_collection",
+  "domain": "onboarding",
+  "critical": false,
+  "setup_args": ["--owner-inputs", "true", "--journey", "--draft-type", "sweets", "--draft-city", "Delhi"],
+  "expected_fail": false,
+  "notes": "Owner runs the whole profile-collection conversation in Hinglish (romanized Hindi-English mix). The journey must respond in a natural, register-matched way (never rigid pure-English canned copy, never the D1 fallback) while still substantively collecting/confirming the profile. Register-matching is a manual transcript-review call; the harness only asserts non-silent/non-D1. Setup: `setup --owner-inputs true --journey --draft-type sweets --draft-city Delhi` then `script <tenant> bilingual_hinglish_profile_collection.json`.",
+  "steps": [
+    {
+      "message": "namaste, humara sweet shop hai Delhi mein, naam hai Kumar Mithai Bhandar",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "note": "Hinglish opener supplying name + type + city together. Expect a real, register-appropriate acknowledgement."
+    },
+    {
+      "message": "aur kya jaanna hai aapko",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "note": "Hinglish 'what else do you need to know'. Expect a substantive, honest answer in a matching register, not a deflection."
+    },
+    {
+      "message": "theek hai, aage badho",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "note": "Hinglish 'ok, go ahead'. Expect the flow to move forward, not a canned re-greet or a re-ask of anything already given."
+    }
+  ]
+}

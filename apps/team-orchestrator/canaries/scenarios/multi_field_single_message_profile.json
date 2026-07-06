@@ -1,0 +1,23 @@
+{
+  "name": "multi_field_single_message_profile",
+  "domain": "onboarding",
+  "critical": true,
+  "setup_args": ["--owner-inputs", "true", "--journey", "--draft-type", "kirana", "--draft-city", "Nagpur"],
+  "expected_fail": false,
+  "notes": "One message carries name + business type + city + a years-in-business detail all at once, answering the pre-seeded business_type confirm AND (per VT-601 cross-fill: a descriptive >=4-word business_type answer fills a still-pending 'about' gap) the 'about' gap in the same turn. No later turn may re-ask any of those facts individually. Setup: `setup --owner-inputs true --journey --draft-type kirana --draft-city Nagpur` then `script <tenant> multi_field_single_message_profile.json`.",
+  "steps": [
+    {
+      "message": "We are Om Kirana Store, a grocery and daily needs shop in Nagpur — been running for 8 years now",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "note": "Name + business type + city + tenure, all in ONE message, as the answer to the pre-seeded business_type confirm. Expect the reply to move the conversation forward rather than asking for any of these facts individually."
+    },
+    {
+      "message": "kar liya sab note?",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "assert_not_contains": ["what kind of business", "what type of business", "which city", "what is your business name", "what's your business name", "tell us about your business", "what does Om Kirana"],
+      "note": "Retention check: NONE of the facts just given (name / type / city / tenure) may be re-asked."
+    }
+  ]
+}

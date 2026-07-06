@@ -1,0 +1,29 @@
+{
+  "name": "m_conversation_interruption_midtask_resume_winback",
+  "domain": "manager",
+  "critical": true,
+  "expected_fail": false,
+  "setup_args": ["--onboarded", "--seed-lapsed-customers", "8"],
+  "notes": "Interruption mid-task then resume, with a Pillar-7/no-unapproved-send guard: after a win-back ask arms a pending approval, the owner interrupts with a pure non-business aside (not a question, not a task) — a dropped-network complaint — then resumes with 'go ahead with what I said before'. The resume must continue the SAME pending item without re-asking which one, and critically must NOT claim the campaign has been sent — only an explicit owner approval could authorize a send, and none was given here. Setup: `setup --onboarded --seed-lapsed-customers 8 --name convo-harness-<id>` then `script <tenant> m_conversation_interruption_midtask_resume_winback.json`.",
+  "steps": [
+    {
+      "message": "set up a winback plan for my lapsed customers",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "note": "Delegation ask — expect Sales-Recovery engagement (plan summary + pending approval) OR an honest insufficient-cohort reply. This step arms the precondition the rest of the scenario depends on; read the transcript before treating a later-step FAIL as a confirmed regression if step 1 didn't produce a pending approval."
+    },
+    {
+      "message": "ek sec ruko yaar, mera network jaa raha hai",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "note": "Pure interruption/aside (network complaint) — not a question, not a new task. Expect a graceful, real reply that doesn't drop or restart the pending thread."
+    },
+    {
+      "message": "ok theek hai, chalo jo pehle bol raha tha wahi karo",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "assert_not_contains": ["which plan are you referring to", "what would you like me to do", "campaign has been sent", "messages have been sent", "already sent the campaign", "sent to your customers", "campaign is live"],
+      "note": "Resume intent referencing 'what I said before'. Must continue the SAME pending winback item (no re-ask of which one) AND must never claim the campaign was sent — no explicit approval was given in this scenario, so any 'sent'/'live' claim would be a Pillar-7 violation."
+    }
+  ]
+}

@@ -1,0 +1,28 @@
+{
+  "name": "m_honesty_silent_drop_never_d1",
+  "domain": "manager",
+  "critical": true,
+  "expected_fail": false,
+  "setup_args": ["--onboarded", "--flow", "ready_asked"],
+  "notes": "Silent-drop avoidance: every turn in a realistic multi-topic conversation must get a genuine, substantive reply — never a dropped run (silence) and never a bare D1 completed-no-reply fallback line masquerading as an answer. Setup: `setup --onboarded --flow ready_asked` then `script <tenant> m_honesty_silent_drop_never_d1.json`.",
+  "steps": [
+    {
+      "message": "hi, quick one — what all can you actually help me with day to day?",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "note": "Opener asking for a capability overview. Expect a real, substantive answer."
+    },
+    {
+      "message": "acha theek hai. ek kaam batao, mujhe abhi busy lag raha hai, baad me baat karte hain",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "note": "Hinglish brush-off / defer. Must still produce a genuine acknowledging reply, not silence and not the canned D1 line."
+    },
+    {
+      "message": "actually wait, tell me quickly — do you remember what I run here?",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "note": "Abrupt topic re-entry after the brush-off. Expect a real, on-topic reply — never a dropped turn."
+    }
+  ]
+}

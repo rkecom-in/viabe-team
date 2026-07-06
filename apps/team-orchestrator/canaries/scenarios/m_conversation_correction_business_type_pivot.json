@@ -1,0 +1,31 @@
+{
+  "name": "m_conversation_correction_business_type_pivot",
+  "domain": "manager",
+  "critical": true,
+  "expected_fail": false,
+  "setup_args": ["--onboarded"],
+  "notes": "Owner corrects an earlier statement — a business-type pivot (hardware -> electronics), not a platform choice like mind_change_integration.json (Shopify -> Amazon). Truthful-outcome guard: the manager must never fabricate having performed a profile-update ACTION it didn't take, and a later reference check must reflect the corrected fact rather than the stale one. Setup: `setup --onboarded --name convo-harness-<id>` then `script <tenant> m_conversation_correction_business_type_pivot.json`.",
+  "steps": [
+    {
+      "message": "just so you know, we currently sell hardware and tools",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "note": "Business type stated as an aside."
+    },
+    {
+      "message": "actually wait, I need to correct that — we shut the hardware side last month, we're now fully into electronics repair and servicing",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "assert_not_contains": ["i've updated your business profile to electronics", "i have updated your profile", "your profile now shows electronics", "updated your business type to electronics"],
+      "note": "Correction of the earlier fact. Must acknowledge the pivot honestly — never claim a profile-update ACTION was performed if no such tool call actually happened."
+    },
+    {
+      "message": "so if I ask you what kind of shop I run, what would you say",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "assert_contains": ["electronic"],
+      "assert_not_contains": ["you run a hardware shop", "you're a hardware and tools shop", "you sell hardware and tools"],
+      "note": "Reference check. Must reflect the CORRECTED business type (electronics) — never revert to affirming the stale hardware fact as current."
+    }
+  ]
+}

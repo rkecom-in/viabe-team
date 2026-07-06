@@ -1,0 +1,29 @@
+{
+  "name": "m_conversation_topic_switch_winback_detour",
+  "domain": "manager",
+  "critical": false,
+  "expected_fail": false,
+  "setup_args": ["--onboarded", "--seed-lapsed-customers", "8"],
+  "notes": "Topic-switch-then-return around a REAL delegated task (not a flow beat): the owner asks for a win-back plan (Sales-Recovery delegation), detours into an unrelated FAQ, then returns asking for the STATUS of the same campaign. Distinct from the existing topic_switch_and_return.json (which detours around the integration-readiness flow beat with no seeded data) — this exercises new_task delegation + task_status classification surviving a detour. Setup: `setup --onboarded --seed-lapsed-customers 8 --name convo-harness-<id>` then `script <tenant> m_conversation_topic_switch_winback_detour.json`.",
+  "steps": [
+    {
+      "message": "please draft a winback campaign for my customers who haven't ordered in a while",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "note": "New-task ask. Expect delegation to Sales-Recovery (plan summary + approval) OR an honest insufficient-cohort reply — either way, never silent, never D1."
+    },
+    {
+      "message": "hold on — quick question, does Viabe work on both Android and iPhone?",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "note": "Unrelated FAQ detour mid-task. Expect a real answer without dropping the pending campaign thread."
+    },
+    {
+      "message": "ok cool, so what's happening with that customer campaign then?",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "assert_not_contains": ["which campaign", "what campaign are you referring to", "can you clarify which campaign", "what campaign is that"],
+      "note": "Return-and-resume via a task_status ask. Must report on the SAME winback item from turn 1 — never lose track or ask which campaign is meant."
+    }
+  ]
+}

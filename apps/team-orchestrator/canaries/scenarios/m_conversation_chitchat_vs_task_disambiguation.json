@@ -1,0 +1,28 @@
+{
+  "name": "m_conversation_chitchat_vs_task_disambiguation",
+  "domain": "manager",
+  "critical": false,
+  "expected_fail": false,
+  "setup_args": ["--onboarded", "--seed-lapsed-customers", "8"],
+  "notes": "Grounded in manager_triage.md's direct_reply-vs-new_task split: pure greetings/small talk must classify direct_reply (creates NO task) while a genuine business ask on the same seeded cohort must engage real task machinery. Two chitchat turns first (no task language should appear), then a genuine new_task ask contrastively. Setup: `setup --onboarded --seed-lapsed-customers 8 --name convo-harness-<id>` then `script <tenant> m_conversation_chitchat_vs_task_disambiguation.json`.",
+  "steps": [
+    {
+      "message": "Good morning!",
+      "assert_no_silent": true,
+      "assert_not_contains": ["drafted", "approval needed", "pending approval", "campaign plan"],
+      "note": "Pure greeting. Expect a friendly direct reply — no task/plan/approval machinery should fire off a bare greeting."
+    },
+    {
+      "message": "haha all good, just checking in, how's your day going",
+      "assert_no_silent": true,
+      "assert_not_contains": ["drafted", "approval needed", "pending approval", "campaign plan"],
+      "note": "Continued small talk. Same guard — still no task should spin up from chitchat."
+    },
+    {
+      "message": "ok actually — can you set up a proper plan to win back my lapsed customers",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "note": "Genuine new_task ask, contrastively different from turns 1-2. Expect real engagement (delegation/plan summary or honest insufficient-data) — never a D1 non-answer."
+    }
+  ]
+}

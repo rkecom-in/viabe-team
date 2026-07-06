@@ -1,0 +1,24 @@
+{
+  "name": "i_sheets_hinglish_connect_and_resume",
+  "domain": "integration",
+  "critical": false,
+  "setup_args": ["--onboarded"],
+  "expected_fail": false,
+  "notes": "Hinglish-voice variant of the same real mint + auth-wait-gate pair (sheets_oauth.start_sheets_oauth / sheets_resume.maybe_resume_sheets_onboarding) — proves the connect flow and the honest not-yet-connected floor both work off a natural Hinglish phrasing, not just English. Setup: `setup --onboarded` then `script <tenant> i_sheets_hinglish_connect_and_resume.json`.",
+  "steps": [
+    {
+      "message": "Bhaiya mera customer aur sales ka sara data Google Sheet mein hai. Kaise jodu isse Viabe se?",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "assert_contains": ["http"],
+      "assert_not_contains": ["already connected", "connected successfully"],
+      "note": "Hinglish connect-ask — expect the same real authorize_url mint despite the non-English phrasing."
+    },
+    {
+      "message": "Haan, ho gaya, sheet connect kar diya maine",
+      "assert_no_silent": true,
+      "assert_contains": ["don't see the connection"],
+      "note": "Hinglish 'done' tokens (haan/ho/gaya are all in shopify_onboarding._DONE) hit the deterministic auth-wait floor — the gate's honest not-yet-connected line is hardcoded English and must fire verbatim regardless of the owner's language."
+    }
+  ]
+}

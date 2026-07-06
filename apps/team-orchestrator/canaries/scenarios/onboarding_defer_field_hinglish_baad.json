@@ -1,0 +1,23 @@
+{
+  "name": "onboarding_defer_field_hinglish_baad",
+  "domain": "onboarding",
+  "critical": true,
+  "setup_args": ["--owner-inputs", "true", "--journey"],
+  "expected_fail": false,
+  "notes": "Same defer/no-loop invariant as onboarding_defer_field_explicit_skip.json but phrased naturally in Hinglish ('baad mein bataunga') instead of the literal 'skip' token — 'baad' is itself in the deterministic _SKIP set (journey.py), so this exercises the same floor via natural language. Setup: `setup --owner-inputs true --journey` (ACTIVE journey, 2-entry queue: confirm business_type='sweets' + gap 'about') then `script <tenant> onboarding_defer_field_hinglish_baad.json`.",
+  "steps": [
+    {
+      "message": "abhi chodo yaar, baad mein bataunga",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "note": "Hinglish defer of the pending business_type confirm ('leave it for now, I'll tell you later'). Expect a graceful acknowledgement and forward movement, not a stall."
+    },
+    {
+      "message": "aur kuch chahiye kya mujhse",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "assert_not_contains": ["is that right?", "sweets business — is that", "confirm your business type"],
+      "note": "Hinglish follow-up ('do you need anything else from me'). The just-deferred business_type confirm must NOT be re-asked verbatim."
+    }
+  ]
+}

@@ -1,0 +1,17 @@
+{
+  "name": "delegation_intent_paraphrase_hinglish",
+  "domain": "manager",
+  "critical": false,
+  "setup_args": ["--onboarded", "--seed-lapsed-customers", "8"],
+  "expected_fail": false,
+  "notes": "Delegation-intent recognition: the owner describes the classic win-back need in a natural HINGLISH paraphrase, never using the literal words 'win back' or 'lapsed customers'. The manager must still recognise this as the sales_recovery lane and delegate/plan against it — and, per orchestrator_agent_system.md's explicit anti-pattern warning, must NEVER redirect it to 'connect your data first' (spawn_integration) reasoning. Setup: `setup --onboarded --seed-lapsed-customers 8 --name convo-harness-<id>` then `script <tenant> delegation_intent_paraphrase_hinglish.json`.",
+  "steps": [
+    {
+      "message": "bhai, mere bahut se purane customers gayab ho gaye hain, kuch karo unhe wapas laane ke liye",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "assert_not_contains": ["connect your data first", "connect a data source first", "once you connect your", "add a data source before we", "please connect your store before"],
+      "note": "Paraphrased (no literal 'win back'/'lapsed') Hinglish ask that old customers disappeared, please bring some back. Expect real engagement with the win-back intent (delegation or a substantive plan-adjacent reply) — never a redirect to connect a data source first, never D1, never silence."
+    }
+  ]
+}

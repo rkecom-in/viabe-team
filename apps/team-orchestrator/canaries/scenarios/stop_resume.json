@@ -1,5 +1,12 @@
 {
   "name": "stop_resume",
+  "domain": "sr_autonomy_rails",
+  "critical": true,
+  "setup_args": [
+    "--onboarded",
+    "--flow",
+    "ready_asked"
+  ],
   "expected_fail": false,
   "notes": "Natural-language stop ('mat bhejo' — NOT the literal STOP/UNSUBSCRIBE/बंद करो/band-karo/roko keyword list in config/opt_out_keywords.yaml, so this does NOT hit the deterministic opt-out gate) followed by a natural resume. Distinct from the DOCUMENTED gap in stop_intent_natural.json (that scenario probes the literal word 'stop', marked expected_fail pending VT-583 'C' landing) — this exact Hinglish phrasing is untested territory, not a confirmed known gap, so this scenario is expect-pass with manual-verdict notes rather than a pre-marked xfail. Setup: `setup --onboarded --flow ready_asked` then `script <tenant> stop_resume.json`.",
   "steps": [
@@ -13,7 +20,12 @@
       "message": "ok restart karo",
       "assert_no_silent": true,
       "assert_not_d1": true,
-      "assert_not_contains": ["what is your business name", "what do you sell", "which city", "tell us a little about your business"],
+      "assert_not_contains": [
+        "what is your business name",
+        "what do you sell",
+        "which city",
+        "tell us a little about your business"
+      ],
       "note": "Natural resume. Expect the flow to pick back up WITHOUT re-running onboarding from scratch (no re-ask of business name/type/city — already on file for this onboarded tenant)."
     }
   ]
