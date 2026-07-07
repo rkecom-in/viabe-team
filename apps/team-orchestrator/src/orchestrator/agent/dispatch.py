@@ -110,15 +110,6 @@ class DispatchResult:
 # callback covers the cost dimension).
 _DEFAULT_MAX_TOKENS = 4096
 
-# VT-616: the brain ran at the Anthropic API DEFAULT temperature (1.0 — temperature was never set),
-# which produced high run-to-run VARIANCE in the owner reply: the SAME conversation would sometimes
-# advance decisively and sometimes linger / re-ask (the inconsistency the VT-611 gate surfaced — a
-# ±1.6 mean-score swing on identical code across two runs). A business task-agent that follows a fixed
-# system prompt + non-bypassable safety rails wants DECISIVE, consistent output, not creative sampling.
-# Drop to 0.3 — tighter + more rule-adherent, still not fully greedy. Applies to every brain turn
-# (opus + sonnet, all via _resolve_model), i.e. the ~90% route:none surface that governs quality.
-_BRAIN_TEMPERATURE = 0.3
-
 # VT-480 — brain model tiering. Fazal CHOSE this over raising the ₹5 cost cap
 # (ORCHESTRATOR_COST_HARD_LIMIT_PAISE=500): a multi-turn Opus run on routine
 # chatter exceeded the cap → HardLimitExceeded → reply truncated to
@@ -407,7 +398,7 @@ def _resolve_model(model_id: str = _BRAIN_MODEL_OPUS) -> ChatAnthropic:
     # call-arg ignore because ChatAnthropic's pydantic kwargs aren't expanded
     # without the pydantic mypy plugin (parity with orchestrator_agent.py:_MODEL).
     return ChatAnthropic(  # type: ignore[call-arg]
-        model=model_id, max_tokens=_DEFAULT_MAX_TOKENS, temperature=_BRAIN_TEMPERATURE
+        model=model_id, max_tokens=_DEFAULT_MAX_TOKENS
     )
 
 
