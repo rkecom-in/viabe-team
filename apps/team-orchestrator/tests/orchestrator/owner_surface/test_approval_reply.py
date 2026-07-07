@@ -31,6 +31,13 @@ from orchestrator.owner_inputs.approval_reply import classify_approval_reply
         ("haan", "approved"),
         ("theek hai", "approved"),
         ("bhejo", "approved"),
+        # --- VT-615: "bhej do" send-imperatives (the resume classifier missed these; only
+        #     "haan bhej do" resolved before, via _STRONG_APPROVE) ---
+        ("bhej do", "approved"),
+        ("bas is baar seedha bhej do", "approved"),
+        ("seedha bhej do unhe", "approved"),
+        ("bhejdo", "approved"),
+        ("भेज दो", "approved"),
         # --- clear REJECT (EN) ---
         ("no", "rejected"),
         ("reject", "rejected"),
@@ -51,6 +58,10 @@ from orchestrator.owner_inputs.approval_reply import classify_approval_reply
         ("मत भेजो", "rejected"),
         ("nahi", "rejected"),
         ("mat bhejo", "rejected"),
+        # --- VT-615: NEGATED "bhej do" must still REJECT (negation wins over the new stem) ---
+        ("mat bhej do", "rejected"),
+        ("nahi bhejna", "rejected"),
+        ("मत भेज दो", "rejected"),
         # --- ambiguous / not-a-decision -> None (Haiku fallback) ---
         ("can you change the message?", None),
         ("yes but don't make it too pushy", None),  # genuine two-clause (contrast) -> Haiku
