@@ -465,7 +465,7 @@ def test_approval_interrupt_orphans_without_the_fix(
 
     # Reproduce the OLD (broken) shape directly: thread_id is a formatted string, run_id is the
     # task_id — deliberately NOT loop_run_id, to prove the mismatch is what breaks the resume.
-    from orchestrator.agent.dispatch import _BRAIN_MODEL_OPUS, _resolve_model
+    from orchestrator.agent.dispatch import _BRAIN_MODEL_SONNET, _resolve_model
 
     broken_thread_id = f"manager_task:{task_id}:{step_id}:1"
     initial_state = {
@@ -473,7 +473,7 @@ def test_approval_interrupt_orphans_without_the_fix(
         "tenant_id": UUID(tenant_id),
         "run_id": UUID(task_id),  # the OLD bug: run_id != thread_id
     }
-    graph = _minimal_graph(model=_resolve_model(_BRAIN_MODEL_OPUS))
+    graph = _minimal_graph(model=_resolve_model(_BRAIN_MODEL_SONNET))
     graph.invoke(initial_state, config={"configurable": {"thread_id": broken_thread_id}})
 
     with psycopg.connect(dsn, autocommit=True) as conn:
