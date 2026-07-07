@@ -91,9 +91,7 @@ ORCHESTRATOR_AGENT_SYSTEM_MESSAGE = SystemMessage(
 # ChatAnthropic's pydantic fields into __init__ kwargs without the pydantic
 # plugin; the call is valid at runtime (smoke-tested) and a repo-wide mypy
 # plugin change is out of scope for this PR.
-# VT-616: temperature 0.3 (was the API default 1.0) — decisive, consistent output for a rule-following
-# task-agent; parity with dispatch._resolve_model (_BRAIN_TEMPERATURE).
-_MODEL = ChatAnthropic(model="claude-opus-4-7", max_tokens=4096, temperature=0.3)  # type: ignore[call-arg]
+_MODEL = ChatAnthropic(model="claude-opus-4-7", max_tokens=4096)  # type: ignore[call-arg]
 
 
 # ---------------------------------------------------------------------------
