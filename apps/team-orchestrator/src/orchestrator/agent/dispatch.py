@@ -56,6 +56,7 @@ break the caller's flow.
 
 from __future__ import annotations
 
+import difflib
 import logging
 import os
 from dataclasses import dataclass
@@ -1241,6 +1242,130 @@ def _compose_completed_reply(
         return None
 
 
+# VT-616 — DETERMINISTIC near-duplicate backstop. The advisory anti-repeat prompt rule
+# (orchestrator_agent_system.md) + the in-flight-state block reduce repeats, but the model — the
+# haiku conversational hot tier especially — STILL re-emits a near-verbatim prior reply under
+# repeat/deflection pressure (impatient_repeat, ask_owner_resume: byte-identical re-sends observed
+# on deployed dev WITH those advisories live). Soft rules do not beat the LLM's prior to re-produce
+# the same completion. This is the HARD backstop: if the composed reply is a near-duplicate of a
+# recent assistant turn, recompose ONCE with a forceful progression instruction before transmitting.
+_NEAR_DUP_RATIO = 0.90  # SequenceMatcher ratio at/above which two replies are "the same beat"
+_NEAR_DUP_MIN_LEN = 40  # never guard short acks — a brief "haan, ho gaya" can legitimately recur
+
+_COMPOSE_ANTIREPEAT_SYSTEM = (
+    "You are the Viabe Team-Manager writing the NEXT WhatsApp reply to the OWNER of a small Indian "
+    "business. Your PREVIOUS reply (given below) is what you JUST sent — the owner has ALREADY SEEN "
+    "IT and is following up. Re-sending it, or a lightly reworded version, reads as a broken loop and "
+    "destroys trust. You MUST reply DIFFERENTLY and MOVE THE CONVERSATION FORWARD: acknowledge their "
+    "follow-up, then either (a) go one level deeper / more concrete than before, (b) proceed with a "
+    "sensible default and say so, or (c) ask ONE specific, shorter, DIFFERENT question. Never restate "
+    "your previous reply. Output ONLY the message to send the owner — second person, the owner's "
+    "language (match the conversation), complete and self-contained, no narration or meta-commentary. "
+    "Never invent a number, price, date, or status, and never claim an action you did not take."
+)
+
+
+def _normalize_reply(text: str) -> str:
+    """Lowercase + whitespace-collapse for a content-similarity compare (VT-616)."""
+    return " ".join(text.lower().split())
+
+
+def _reply_repeats_recent(
+    tenant_id: UUID,
+    candidate: str,
+    *,
+    exclude_message_sid: str | None = None,
+    limit: int = 3,
+) -> bool:
+    """True when ``candidate`` is a near-verbatim repeat of a recent assistant turn (VT-616).
+
+    Best-effort: any read error → ``False`` (never block a reply on a metering blip). A reply shorter
+    than ``_NEAR_DUP_MIN_LEN`` is never flagged (a brief ack can legitimately recur). Compares the
+    normalized candidate against the recent ASSISTANT turns in ``conversation_log`` (the candidate is
+    not recorded until ``send_freeform_ack`` runs, so the window holds only PRIOR replies).
+    """
+    try:
+        norm_cand = _normalize_reply(candidate)
+        if len(norm_cand) < _NEAR_DUP_MIN_LEN:
+            return False
+        from orchestrator.conversation_log import active_window
+
+        for turn in active_window(
+            tenant_id, max_turns=limit * 2, exclude_message_sid=exclude_message_sid
+        ):
+            if turn.get("role") != "assistant":
+                continue
+            prior = str(turn.get("text") or "")
+            if not prior:
+                continue
+            ratio = difflib.SequenceMatcher(
+                None, norm_cand, _normalize_reply(prior)
+            ).ratio()
+            if ratio >= _NEAR_DUP_RATIO:
+                return True
+        return False
+    except Exception:  # noqa: BLE001 — best-effort; a read miss must never block the reply
+        return False
+
+
+def _compose_progression_reply(
+    tenant_id: UUID,
+    event: WebhookEvent,
+    terminal_state: dict[str, Any],
+    *,
+    prior_reply: str,
+) -> str | None:
+    """VT-616 — recompose a reply that MOVES FORWARD when the brain's own reply near-duplicates a
+    recent turn. One no-tools call (same sonnet tier as ``_compose_completed_reply``); ``prior_reply``
+    (the ACTUAL reply being guarded — passed in, not re-read, so it is never empty on the
+    composed-empty-fallback path) is injected as "do NOT repeat this". Injects the onboarding +
+    in-flight state blocks (like ``_compose_completed_reply``) so the forced "move forward"
+    divergence stays anchored to the real pending step and cannot drift off it. Fail-soft: ``None``
+    on empty / any exception (the caller then keeps the original body — never worse than today)."""
+    try:
+        owner_text = event.body or ""
+        conversation_block = _build_manager_conversation_block(
+            tenant_id, exclude_message_sid=getattr(event, "twilio_message_sid", None)
+        )
+        onboarding_block = _build_onboarding_state_block(tenant_id)
+        inflight_block = _build_inflight_state_block(tenant_id)
+        human_parts: list[str] = []
+        if conversation_block:
+            human_parts.append(conversation_block)
+        if onboarding_block:
+            human_parts.append(onboarding_block)
+        if inflight_block:
+            human_parts.append(inflight_block)
+        human_parts.append(f"## The owner just messaged you\n{owner_text}")
+        human_parts.append(
+            "## Your PREVIOUS reply — the owner has already seen this; do NOT repeat it\n"
+            f"{prior_reply}"
+        )
+        response = _resolve_model(_BRAIN_MODEL_SONNET).invoke(
+            [
+                SystemMessage(content=_COMPOSE_ANTIREPEAT_SYSTEM),
+                HumanMessage(content="\n\n".join(human_parts)),
+            ]
+        )
+        raw = getattr(response, "content", None)
+        if isinstance(raw, str):
+            text = raw.strip()
+        elif isinstance(raw, list):
+            text = "".join(
+                block.get("text", "")
+                for block in raw
+                if isinstance(block, dict) and block.get("type") == "text"
+            ).strip()
+        else:
+            text = ""
+        return text or None
+    except Exception:  # noqa: BLE001 — anti-repeat recompose is best-effort; never raise
+        logger.warning(
+            "VT-616: anti-repeat recompose failed (fail-soft) tenant=%s", tenant_id
+        )
+        return None
+
+
 def _maybe_send_manager_reply(
     tenant_id: UUID, event: WebhookEvent, terminal_state: dict[str, Any]
 ) -> None:
@@ -1287,6 +1412,27 @@ def _maybe_send_manager_reply(
     if not body:
         # Nothing transmittable — leave runner.py's D1 fallback (VT-583) as the net.
         return
+
+    # VT-616 — near-duplicate backstop: if the brain re-emitted a (near-)verbatim prior reply,
+    # recompose ONCE with a forceful progression instruction. Fires ONLY on a detected dup (rare),
+    # so normal traffic pays no extra cost. Fail-safe: any miss keeps the original body.
+    _sid = getattr(event, "twilio_message_sid", None)
+    if _reply_repeats_recent(tenant_id, body, exclude_message_sid=_sid):
+        regen = _compose_progression_reply(
+            tenant_id, event, terminal_state, prior_reply=body
+        )
+        if regen and not _reply_repeats_recent(tenant_id, regen, exclude_message_sid=_sid):
+            body, path = regen, "regen-antirepeat"
+        else:
+            # Still (near-)dup or empty after the recompose — ship the best available (the regen if
+            # any, else the original) and flag it. Shipping a reply that at least ATTEMPTED to diverge
+            # beats a silent verbatim loop; the flag surfaces the stubborn case for follow-up.
+            body = regen or body
+            path = "regen-antirepeat-weak"
+            logger.warning(
+                "VT-616: anti-repeat recompose still near-duplicate (tenant=%s)", tenant_id
+            )
+
     try:
         from orchestrator.owner_surface.freeform_acks import send_freeform_ack
 
