@@ -29,7 +29,15 @@ ApprovalDecision = Literal["approved", "rejected", "defer"]
 # (-> ambiguous -> Haiku), not a reject.
 _STRONG_APPROVE = {"yes", "approve", "approved", "ok", "okay", "sure", "haan", "हाँ", "जी"}
 # Negatable approve verbs — "send it" approves, "don't send" / "मत भेजो" rejects.
-_APPROVE_VERB = {"send", "go", "proceed", "bhejo", "भेजो", "theek", "ठीक", "thik"}
+# VT-615: the resume classifier missed bare "bhej do" / "seedha bhej do" (only "haan bhej do"
+# resolved, via _STRONG_APPROVE) — "bhejo"/"भेजो" is the "send!" imperative but the very common
+# "bhej do" / "भेज दो" ("send it") tokenizes to {"bhej","do"} and matched nothing. Add the "bhej"
+# stem + one-word forms. A NEGATED send ("mat bhej do", "मत भेज दो", "nahi bhejna") still REJECTS:
+# _NEGATION wins at the has_neg branch below BEFORE this set is consulted (Pillar-7 asymmetry holds).
+_APPROVE_VERB = {
+    "send", "go", "proceed", "theek", "ठीक", "thik",
+    "bhejo", "भेजो", "bhej", "भेज", "bhejdo", "bhejde", "bhejdena",
+}
 # Explicit rejections (non-negation words).
 _REJECT_KW = {"reject", "skip", "stop", "cancel"}
 # VT-334 — owner asks to decide LATER (extends the window 48h, max 2, then rejected). EN +
