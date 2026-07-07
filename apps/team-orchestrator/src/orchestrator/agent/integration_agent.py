@@ -677,6 +677,11 @@ def build_integration_agent(
         system_prompt=INTEGRATION_AGENT_SYSTEM_MESSAGE,
         name="integration_agent",
         state_schema=IntegrationAgentState,
+        # VT-618: same latent bug as the onboarding_conductor — a create_agent sub-graph under the
+        # parent supervisor's PostgresSaver persists a nested checkpoint that a mid-loop hard-limit
+        # abort can leave holding an orphaned tool_use → retry 400. This agent also calls no
+        # interrupt() and rebuilds per-turn, so it needs no checkpoint continuity.
+        checkpointer=False,
     )
 
 

@@ -94,7 +94,11 @@ ONBOARDING_CONDUCTOR_SYSTEM_MESSAGE = SystemMessage(
 
 # mypy --strict needs the call-arg ignore for ChatAnthropic's pydantic kwargs (parity with the
 # orchestrator/integration agents).
-_MODEL = ChatAnthropic(model="claude-opus-4-7", max_tokens=4096)  # type: ignore[call-arg]
+_MODEL = ChatAnthropic(model="claude-opus-4-8", max_tokens=4096)  # type: ignore[call-arg]
+# VT-617/cost: opus-4-8 is the declared capable default (dispatch _BRAIN_MODEL_OPUS) and ~1/3 the
+# token cost of legacy 4-7. A registry-grounded, scripted-conducted profile conductor does not need
+# the pricier legacy model; this cuts the per-turn cost so a multi-field onboarding save fits under
+# the ₹5 (500 paise) hard limit instead of aborting mid-loop. Sets no temperature (opus rejects it).
 
 
 # -----------------------------------------------------------------
@@ -538,6 +542,14 @@ def build_onboarding_conductor_agent(
         system_prompt=ONBOARDING_CONDUCTOR_SYSTEM_MESSAGE,
         name="onboarding_conductor",
         state_schema=OnboardingConductorState,
+        # VT-618: do NOT inherit the parent supervisor's PostgresSaver. A hard-limit abort
+        # (cost/tool_calls) mid-ReAct-loop would otherwise persist an orphaned tool_use in a
+        # NESTED checkpoint under the parent run thread; the DBOS retry of dispatch_brain then
+        # resumes that broken checkpoint and re-sends the orphan to Anthropic → 400 (`tool_use`
+        # without following `tool_result`) → deterministic floor → the owner saw a fake "snag
+        # saving". The conductor calls no interrupt() and rebuilds onboarding state from the DB
+        # each turn (read_onboarding_state), so it needs no cross-superstep checkpoint continuity.
+        checkpointer=False,
     )
 
 
