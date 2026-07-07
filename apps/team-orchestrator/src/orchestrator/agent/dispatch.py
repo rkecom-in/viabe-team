@@ -346,6 +346,51 @@ def _build_onboarding_state_block(tenant_id: UUID) -> str | None:
     )
 
 
+def _build_inflight_state_block(tenant_id: UUID) -> str | None:
+    """VT-616 — surface durable in-flight state the conversational brain is otherwise BLIND to, so a
+    ``route: none`` turn ADVANCES instead of re-deriving the same reply. dispatch_brain re-composes each
+    turn from a thin window (l1 / business / onboarding / last-N messages); it does NOT see the
+    ``pending_approvals`` row it armed nor an active manager task, so on a follow-up ("bhej do",
+    "ok what next?", "did you get that?") it re-emits the SAME approval template / re-drafts the SAME
+    plan / re-asks the SAME question — the stuck-loop the VT-611 gate flagged (repeat_question_guard,
+    sr_always_confirm, multi_field). This block hands it that state + a do-not-repeat rule. Read-only,
+    best-effort (any miss -> no block), inserted after the cached prefix like the L1 / business /
+    onboarding blocks so the VT-194 cache holds."""
+    parts: list[str] = []
+    try:
+        from orchestrator.agent.approval_resume import find_open_approval_for_tenant
+        from orchestrator.db import tenant_connection
+
+        with tenant_connection(str(tenant_id)) as conn:
+            approval = find_open_approval_for_tenant(conn, str(tenant_id))
+        if approval:
+            atype = str(approval.get("approval_type") or "an action")
+            parts.append(
+                f"- An approval is ALREADY pending with this owner (type: {atype}) — you already sent "
+                "the approval request. Do NOT re-draft it or re-post the approval template. If the "
+                "owner's message is a yes / 'bhej do' / 'send it' (or a no, or a change), the approval "
+                "path consumes it — you need not re-issue anything. If it reached you, the reply read as "
+                "ambiguous: ask ONE short confirm ('Shall I send it now — yes or no?'), never repost the "
+                "whole draft."
+            )
+    except Exception:  # noqa: BLE001 — best-effort, like the other context blocks
+        logger.warning("dispatch: in-flight approval read failed (tenant=%s); skipping", tenant_id)
+    try:
+        from orchestrator.manager import task_store
+
+        if task_store.has_active_task(tenant_id):
+            parts.append(
+                "- You already have a task in-flight for this owner — do NOT start a duplicate or "
+                "re-draft the same plan. Report its status or take the next real step."
+            )
+    except Exception:  # noqa: BLE001 — best-effort
+        logger.warning("dispatch: in-flight task read failed (tenant=%s); skipping", tenant_id)
+
+    if not parts:
+        return None
+    return "## In-flight state — do not repeat yourself\n" + "\n".join(parts)
+
+
 def _resolve_model(model_id: str = _BRAIN_MODEL_OPUS) -> ChatAnthropic:
     # VT-480: ``model_id`` is the tier-selected brain model (see
     # select_brain_model). Defaults to Opus (the capable model) so any caller
@@ -622,6 +667,20 @@ def dispatch_brain(
             ),
         )
 
+    # VT-616: the IN-FLIGHT-STATE block — open approval / active task the brain armed but cannot see
+    # in its window. Without it a follow-up ('bhej do', 'ok what next?') re-derives from unchanged
+    # context and re-emits the same reply (the stuck-loop the VT-611 gate flagged). Best-effort +
+    # per-turn SystemMessage (cache holds). None when nothing is in-flight.
+    inflight_state_block = _build_inflight_state_block(tenant_id)
+    if inflight_state_block:
+        _messages.insert(
+            0,
+            SystemMessage(
+                content=inflight_state_block,
+                id=_initial_turn_msg_id(run_id, "inflight_state_block"),
+            ),
+        )
+
     # VT-514 GETS — retrieval audit spine row: which context sources hit
     # (presence flags only; the redacted block CONTENT rides the KNOWS row).
     emit_tm_audit(
@@ -641,6 +700,8 @@ def dispatch_brain(
             "conversation_present": bool(conversation_block),
             # VT-588: whether the onboarding-state block was present (a live integration hand-off).
             "onboarding_state_present": bool(onboarding_state_block),
+            # VT-616: whether the in-flight-state block (open approval / active task) was present.
+            "inflight_state_present": bool(inflight_state_block),
             "intent_classification": _manager_intent.get("classification"),
         },
     )
