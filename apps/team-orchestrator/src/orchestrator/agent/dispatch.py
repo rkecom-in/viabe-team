@@ -122,19 +122,24 @@ _DEFAULT_MAX_TOKENS = 4096
 # specialist spawns, cross-lane decisions, anything ambiguous).
 #
 # SINGLE SOURCE OF TRUTH for the brain model IDs — every brain-model selection
-# reads these two constants (do NOT inline the strings elsewhere in this file).
-_BRAIN_MODEL_SONNET = "claude-sonnet-5"  # routine/simple turns — Sonnet 5 (Fazal 2026-07-04, quality)
-_BRAIN_MODEL_OPUS = "claude-opus-4-8"  # complex reasoning — the capable default
+# reads these constants (do NOT inline the strings elsewhere in this file).
+#
+# VT-619 cost policy (Fazal 2026-07-07): haiku-4-5 is the DEFAULT brain workhorse; sonnet-5 handles
+# COMPLEX/extensive-reasoning turns; OPUS DROPPED. Rates: haiku $1/M in, sonnet $2/M in (vs opus
+# $5/M). Classification still runs on haiku (classify_owner_message). NOTE: quality on the cheaper
+# tier is EXPECTED to drop — re-measured on the VT-611 gate before this is trusted.
+_BRAIN_MODEL_HAIKU = "claude-haiku-4-5"  # routine/default workhorse
+_BRAIN_MODEL_SONNET = "claude-sonnet-5"  # complex/extensive-reasoning — the capable fail-safe
 
-# Classifications that are CLEARLY simple → route to Sonnet. CORRECTNESS-FIRST:
+# Classifications that are CLEARLY simple → route to Haiku. CORRECTNESS-FIRST:
 # anything NOT in this allow-set (incl. an absent/failed classify) falls back to
-# Opus — under-powering a business decision is worse than the cost. Each entry
+# Sonnet — under-powering a business decision is worse than the cost. Each entry
 # is a low-stakes, typically single-step turn that does not drive a specialist
 # spawn or a customer-facing send:
 #   - approval / rejection      : a one-step ack of a pending owner decision
 #   - question                  : a simple FAQ / factual "what's my plan" read
 #   - status_query              : read-only state lookup (also edge-fast-pathed)
-# Everything else stays on Opus by design:
+# Everything else stays on Sonnet by design:
 #   - feedback                  : may carry a business signal → reason hard
 #   - first_data_step_onboarding: can drive an onboarding-conductor spawn
 #   - adhoc_campaign_request    : a SEND / business action (owner_initiated)
@@ -155,16 +160,16 @@ def select_brain_model(intent: dict[str, Any]) -> tuple[str, str]:
     skipped or failed. This REUSES that classification — it does NOT make a
     second classify / LLM call.
 
-    Returns ``(model_id, tier)`` where ``tier`` is ``"sonnet"`` | ``"opus"`` (a
+    Returns ``(model_id, tier)`` where ``tier`` is ``"haiku"`` | ``"sonnet"`` (a
     PII-safe label for observability — never the owner body). CORRECTNESS-FIRST:
-    a routine classification in ``_ROUTINE_INTENTS`` → Sonnet; ANY other value,
-    including a missing/empty signal, fails safe to Opus (the capable model).
+    a routine classification in ``_ROUTINE_INTENTS`` → Haiku; ANY other value,
+    including a missing/empty signal, fails safe to Sonnet (the capable model).
     """
     classification = intent.get("classification")
     if isinstance(classification, str) and classification in _ROUTINE_INTENTS:
-        return (_BRAIN_MODEL_SONNET, "sonnet")
+        return (_BRAIN_MODEL_HAIKU, "haiku")
     # Complex, ambiguous, or signal-absent → the capable model (fail-safe).
-    return (_BRAIN_MODEL_OPUS, "opus")
+    return (_BRAIN_MODEL_SONNET, "sonnet")
 
 
 def _build_manager_intent_block(intent: dict[str, Any]) -> str | None:
@@ -395,7 +400,7 @@ def _build_inflight_state_block(tenant_id: UUID) -> str | None:
     return "## In-flight state — do not repeat yourself\n" + "\n".join(parts)
 
 
-def _resolve_model(model_id: str = _BRAIN_MODEL_OPUS) -> ChatAnthropic:
+def _resolve_model(model_id: str = _BRAIN_MODEL_SONNET) -> ChatAnthropic:
     # VT-480: ``model_id`` is the tier-selected brain model (see
     # select_brain_model). Defaults to Opus (the capable model) so any caller
     # that doesn't pass a selection still fails safe. mypy --strict needs the

@@ -240,7 +240,7 @@ def _dispatch_specialist_step(
     """
     from langchain_core.messages import HumanMessage, SystemMessage
 
-    from orchestrator.agent.dispatch import _BRAIN_MODEL_OPUS, _resolve_model
+    from orchestrator.agent.dispatch import _BRAIN_MODEL_SONNET, _resolve_model
     from orchestrator.graph import get_checkpointer
     from orchestrator.observability.decorators import observability_context
     from orchestrator.supervisor import build_supervisor_graph
@@ -276,7 +276,7 @@ def _dispatch_specialist_step(
     _open_dispatch_run(tenant_id, run_id)
     with observability_context(run_id=UUID(task_id), tenant_id=UUID(tenant_id)):
         graph = build_supervisor_graph(
-            model=_resolve_model(_BRAIN_MODEL_OPUS),
+            model=_resolve_model(_BRAIN_MODEL_SONNET),
             checkpointer=get_checkpointer(),
             mode="enforce",
         )
