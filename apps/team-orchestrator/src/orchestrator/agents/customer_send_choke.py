@@ -59,6 +59,7 @@ class CustomerSendClass(str, Enum):
 SKIP_NOT_ONBOARDED = "skipped_not_onboarded"   # onboarded/activation bar not crossed (Gate-0)
 SKIP_WABA_NOT_LIVE = "skipped_waba_not_live"   # WABA not Meta-verified 'live' (universal pre-gate)
 SKIP_OUT_OF_POLICY = "skipped_out_of_policy"   # VT-474 A2: the send is outside the owner's policy bound
+SKIP_BUDGET_EXHAUSTED = "SKIP_BUDGET_EXHAUSTED"  # VT-619: agent hit its hard token/api-call cap
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,10 +108,25 @@ def assert_customer_send_allowed(
     ``CustomerSendGate(allowed=True)``. This is the pre-gate ONLY — the per-recipient
     consent/opt-out/complaint/caps gates run in the caller's existing stack.
     """
+    from orchestrator.agent.usage_meter import budget_status
     from orchestrator.agents.onboarding_gate import is_agent_eligible
     from orchestrator.integrations.whatsapp_account import wa_send_allowed
 
     tid = str(tenant_id)
+
+    # VT-619 budget gate — the OUTERMOST bound: an agent that hit its HARD token/api-call cap must
+    # not perform a customer SEND action (its conversational turn still answers — that gate is at
+    # the routing seam, supervisor.py). ADDITIVE + first: it never reorders the compliance gates
+    # below. budget_status FAILS OPEN on a read error (over_hard=False), so a metering blip never
+    # turns into a send outage. Emits the once-per-period HARD incident on the first block.
+    budget = budget_status(tid, agent, conn=conn)
+    if budget.get("over_hard"):
+        _emit_hard_incident_once(tid, agent=agent, conn=conn)
+        logger.info(
+            "customer_send_choke: pre-gate blocked tenant=%s agent=%s reason=%s",
+            tid, agent, SKIP_BUDGET_EXHAUSTED,
+        )
+        return CustomerSendGate(allowed=False, reason=SKIP_BUDGET_EXHAUSTED)
 
     # Gate-0: onboarded / activation (reused — the SAME predicate agent_send_draft Gate-0 calls).
     if not is_agent_eligible(tid, agent, conn=conn):
@@ -174,6 +190,40 @@ def assert_customer_send_allowed(
     return CustomerSendGate(allowed=True)
 
 
+def _emit_hard_incident_once(tid: str, *, agent: str, conn: Any) -> None:
+    """VT-619 — emit the ONE hard-exhaustion incident for this (tenant, agent, period).
+
+    Atomic once-guard: the ``hard_notified_at`` stamp UPDATE (``WHERE hard_notified_at IS NULL
+    RETURNING``) returns a row only for the first caller in the period, so exactly one incident is
+    created no matter how many blocked sends follow. Fully fail-soft — the block already returned;
+    a notify failure must never touch the send decision. Runs on the caller's RLS-scoped ``conn``.
+    """
+    try:
+        stamped = conn.execute(
+            "UPDATE tenant_agent_usage SET hard_notified_at = now() "
+            "WHERE tenant_id = %s AND agent = %s "
+            "  AND period_month = date_trunc('month', now())::date "
+            "  AND hard_notified_at IS NULL RETURNING agent",
+            (tid, agent),
+        ).fetchone()
+        if stamped is None:
+            return  # already notified this period (or no usage row) — nothing to emit
+        from orchestrator.observability.incident_store import create_incident
+
+        create_incident(
+            tid,
+            incident_kind="limit_exhausted",
+            severity="critical",
+            detail={"agent": agent, "phase": "hard"},
+            conn=conn,
+        )
+    except Exception:  # noqa: BLE001 — notify is best-effort; the send block already stands
+        logger.warning(
+            "customer_send_choke: hard-exhaustion incident emit failed (fail-soft) tenant=%s", tid,
+            exc_info=True,
+        )
+
+
 def _record_policy_shadow(tid: str, *, agent: str, reason: str | None, conn: Any) -> None:
     """OC1 — record a would-be policy block as an observe-only tm_audit row (``decides`` layer)."""
     from orchestrator.observability.decorators import _observability_context
@@ -203,5 +253,6 @@ __all__ = [
     "SKIP_NOT_ONBOARDED",
     "SKIP_WABA_NOT_LIVE",
     "SKIP_OUT_OF_POLICY",
+    "SKIP_BUDGET_EXHAUSTED",
     "assert_customer_send_allowed",
 ]

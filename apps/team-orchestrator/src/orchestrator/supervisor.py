@@ -651,6 +651,31 @@ def build_supervisor_graph(
         from orchestrator.manager.task_producer import on_route_decided
 
         on_route_decided(state, route)
+
+        # VT-619 — budget hard-pause at the delegation seam. If the manager routed to a specialist
+        # whose BILLED agent has hit its HARD cap, DON'T spawn (don't do the paid work): override
+        # to the orchestrator terminal so the manager answers the owner conversationally instead.
+        # Meters on RAW counts; budget_status fails OPEN, and any error here keeps the ORIGINAL
+        # route (fail-open) — a metering blip never breaks routing.
+        try:
+            from orchestrator.agent.usage_meter import billed_agent_for_node, budget_status
+
+            billed = billed_agent_for_node(orchestrator_route_map.get(route))
+            tenant_id = state.get("tenant_id")
+            if (
+                billed is not None
+                and tenant_id
+                and budget_status(tenant_id, billed).get("over_hard")
+            ):
+                # TODO(VT-619): compose an owner-facing top-up OFFER in orchestrator_terminal_node
+                # keyed off ``budget_paused_agent`` (do NOT fabricate customer copy here). Making
+                # this flag durable requires registering it as a state channel + a sanctioned state
+                # update; set best-effort for now. The LOAD-BEARING behavior is the route override
+                # (no paid specialist spawn once hard-capped).
+                state["budget_paused_agent"] = billed
+                return "terminal"
+        except Exception:  # noqa: BLE001 — fail-open: a metering blip never changes routing
+            logger.warning("VT-619 budget-pause route check swallowed", exc_info=True)
         return route
 
     graph.add_conditional_edges(

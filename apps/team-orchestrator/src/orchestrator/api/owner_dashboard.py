@@ -82,6 +82,26 @@ def dashboard_summary(
     }
 
 
+@router.get("/api/orchestrator/owner/agent-usage")
+def agent_usage(
+    tenant_id: str = Query(...),
+    x_internal_secret: str | None = Header(default=None, alias="X-Internal-Secret"),
+) -> dict[str, Any]:
+    """VT-619 — per-agent current-month token/API-call usage vs caps for the ops surface. Tracked-
+    UNBILLED agents (billed=false — setup agents integration/onboarding_conductor) come through so
+    the page can show them separately. Read-only, tenant-scoped (RLS via tenant_connection); the
+    counters are aggregate meters (no customer PII), so no masking needed."""
+    if not _verify_internal_secret(x_internal_secret):
+        raise HTTPException(status_code=403, detail="X-Internal-Secret mismatch")
+    try:
+        from orchestrator.agent.usage_meter import get_agent_usage_breakdown
+
+        agents = get_agent_usage_breakdown(tenant_id)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail="agent-usage read failed") from exc
+    return {"agents": agents}
+
+
 _MAX_PAGE_SIZE = 100
 
 
