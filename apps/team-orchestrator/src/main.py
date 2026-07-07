@@ -187,6 +187,7 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
             reap_orphan_runs,
             reap_stalled_manager_tasks,
         )
+        from orchestrator.test_tenant_reaper import reap_test_tenants
 
         reap_orphan_runs()
         # VT-525 (B2): surface manager_tasks stranded active with no runnable step (same
@@ -195,6 +196,10 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         # VT-552 (B1 part-2b): open incidents for runs that completed with no final_outcome
         # (silent terminals — the owner never heard), same best-effort startup discipline.
         detect_silent_terminal_runs()
+        # VT-620: GC leaked convo-harness test tenants (>1h old) so they stop paging ops as
+        # noise. STRICT convo-harness-% scope; best-effort (never raises). Steady-state re-sweep
+        # runs hourly on the @DBOS.scheduled substrate (test_tenant_reaper_scheduled).
+        reap_test_tenants()
     except Exception:
         logging.getLogger(__name__).exception(
             "VT-481 orphan-reaper failed at startup (best-effort)"

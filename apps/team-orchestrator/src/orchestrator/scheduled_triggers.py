@@ -724,6 +724,7 @@ def dead_letter_retry_sweep_scheduled(
 # final_outcome writer lands (rostered follow-up).
 STALLED_TASK_SWEEP_CRON = "*/10 * * * *"  # every 10 min — VT-557 retry-ladder progression
 ORPHAN_RUN_REAPER_CRON = "0 * * * *"  # hourly — VT-481 stranded-'running' run reaper
+TEST_TENANT_REAPER_CRON = "15 * * * *"  # hourly (offset 15m) — VT-620 leaked convo-harness tenant GC
 
 
 def stalled_task_sweep_scheduled(
@@ -757,6 +758,23 @@ def orphan_run_reaper_scheduled(
         reap_orphan_runs()
     except Exception:  # noqa: BLE001 — reaper is best-effort; next run retries
         logger.exception("VT-560 orphan-run reaper scheduled run failed")
+
+
+def test_tenant_reaper_scheduled(
+    scheduled_time: datetime,
+    actual_time: datetime,
+) -> None:
+    """DBOS scheduled handler — hourly (VT-620). Runs the test-tenant reaper: FK-safely deletes
+    leaked ``convo-harness-…`` tenants (+ their runs/steps) past the >1h floor so they stop
+    flowing into the alert detectors as ops noise. STRICT scope: only the convo-harness name
+    pattern. NO LLM; the body is best-effort (never raises). Best-effort: a reaper failure must
+    not crash the scheduler."""
+    from orchestrator.test_tenant_reaper import reap_test_tenants
+
+    try:
+        reap_test_tenants()
+    except Exception:  # noqa: BLE001 — reaper is best-effort; next run retries
+        logger.exception("VT-620 test-tenant reaper scheduled run failed")
 
 
 # ---------------------------------------------------------------------------
@@ -1141,6 +1159,9 @@ def register_scheduled_triggers() -> None:
     # scheduling it would storm an incident/alert per completed run).
     _register_scheduled(STALLED_TASK_SWEEP_CRON, stalled_task_sweep_scheduled)
     _register_scheduled(ORPHAN_RUN_REAPER_CRON, orphan_run_reaper_scheduled)
+    # VT-620: hourly GC of leaked convo-harness test tenants (offset 15m from the orphan reaper).
+    # Pure SQL FK-safe delete, NO LLM, STRICT convo-harness-% scope. EXTENDS this surface.
+    _register_scheduled(TEST_TENANT_REAPER_CRON, test_tenant_reaper_scheduled)
     _registered = True
 
 
@@ -1162,6 +1183,7 @@ __all__ = [
     "OVERRIDE_EXPIRY_SWEEP_CRON",
     "SHELL_STATUS",
     "STALLED_TASK_SWEEP_CRON",
+    "TEST_TENANT_REAPER_CRON",
     "WEEKLY_CADENCE_CRON",
     "WEEKLY_CADENCE_EVENT",
     "approval_timeout_sweep_scheduled",
@@ -1186,6 +1208,7 @@ __all__ = [
     "reconstitution_sweep_scheduled",
     "register_scheduled_triggers",
     "stalled_task_sweep_scheduled",
+    "test_tenant_reaper_scheduled",
     "run_approval_timeout_sweep_body",
     "run_attribution_close_body",
     "run_monthly_impact_body",

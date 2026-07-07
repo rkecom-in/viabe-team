@@ -944,12 +944,14 @@ def test_register_scheduled_triggers_idempotent(monkeypatch) -> None:
     # orphan_run_reaper — the boot-only reapers promoted to steady-state
     # @DBOS.scheduled sweeps; the silent-terminal detector deliberately stays
     # boot-only — no final_outcome writer yet, batch-review finding): 20 → 22.
-    assert first == 22, "expected 22 triggers registered on first call"
-    assert second == 22, "second call must short-circuit (idempotent)"
+    # VT-620 added one (test_tenant_reaper — hourly GC of leaked convo-harness
+    # test tenants so they stop paging ops as noise): 22 → 23.
+    assert first == 23, "expected 23 triggers registered on first call"
+    assert second == 23, "second call must short-circuit (idempotent)"
     # VT-464 D3: every scheduled handler MUST also be registered as a workflow
     # (one DBOS.workflow() wrap per DBOS.scheduled() call) — otherwise the cron
     # fire raises DBOSWorkflowFunctionNotFoundError.
-    assert first_wf == 22, "expected 22 handlers wrapped as @DBOS.workflow"
+    assert first_wf == 23, "expected 23 handlers wrapped as @DBOS.workflow"
     st._registered = False
 
 
