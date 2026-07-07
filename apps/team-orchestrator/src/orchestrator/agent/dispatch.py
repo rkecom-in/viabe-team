@@ -945,6 +945,10 @@ def dispatch_brain(
     # "collapse" gate below) avoids a double-send. send_freeform_ack records the
     # assistant turn, which auto-suppresses the D1 completed-no-reply fallback
     # (VT-583). Best-effort: _maybe_send_manager_reply never raises.
+    logger.warning(  # VT-616-DIAG (temp, remove after): which terminal path handles this turn
+        "VT-616-DIAG: terminal_path=%s final_status=%s tenant=%s",
+        terminal_path, final_status, tenant_id,
+    )
     if terminal_path == "terminal" and final_status == "completed":
         _maybe_send_manager_reply(tenant_id, event, terminal_state)
 
@@ -1417,7 +1421,12 @@ def _maybe_send_manager_reply(
     # recompose ONCE with a forceful progression instruction. Fires ONLY on a detected dup (rare),
     # so normal traffic pays no extra cost. Fail-safe: any miss keeps the original body.
     _sid = getattr(event, "twilio_message_sid", None)
-    if _reply_repeats_recent(tenant_id, body, exclude_message_sid=_sid):
+    _dup = _reply_repeats_recent(tenant_id, body, exclude_message_sid=_sid)
+    logger.warning(  # VT-616-DIAG (temp, remove after): guard reached + dup decision
+        "VT-616-DIAG: guard reached body_len=%s dup=%s path=%s tenant=%s",
+        len(body), _dup, path, tenant_id,
+    )
+    if _dup:
         regen = _compose_progression_reply(
             tenant_id, event, terminal_state, prior_reply=body
         )
