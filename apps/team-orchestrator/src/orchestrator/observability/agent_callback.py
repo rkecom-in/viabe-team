@@ -208,6 +208,25 @@ def _record_step(
         tokens_output=out_tokens,
     )
 
+    # VT-619 — meter this LLM call for per-agent enforcement. This decorator is SR-SPECIFIC: it
+    # wraps ONLY sales_recovery's ``_messages_create`` (the Anthropic Messages-SDK seam;
+    # verified — no other caller uses with_reasoning_capture). sales_recovery does NOT use
+    # ChatAnthropic, so its execution turns never reach the langchain seam (langchain_callback) —
+    # metering here is therefore EXACTLY-ONCE per SR LLM call (no double-count). Guarded +
+    # best-effort (CL-122): metering never breaks the SR turn.
+    try:
+        from orchestrator.agent.usage_meter import meter_llm_call
+
+        if ctx is not None and getattr(ctx, "tenant_id", None):
+            meter_llm_call(
+                tenant_id=ctx.tenant_id,
+                agent="sales_recovery",
+                tokens_in=in_tokens,
+                tokens_out=out_tokens,
+            )
+    except Exception as exc:  # noqa: BLE001 — CL-122: metering never breaks a turn
+        logger.warning("VT-619 SR-seam meter swallowed", extra={"exc": repr(exc)})
+
 
 def _first_text_block(response: Any) -> str | None:
     content = getattr(response, "content", None)

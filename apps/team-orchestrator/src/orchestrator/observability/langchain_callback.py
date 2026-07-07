@@ -79,8 +79,33 @@ class OrchestratorReasoningCallback(BaseCallbackHandler):
         self.usage = usage
         self.run_id = run_id
         self.tenant_id = tenant_id
+        # VT-619: per-LLM-run (langgraph_node, checkpoint_ns) stash, keyed by the PER-LLM run_id
+        # (NOT self.run_id, which is the pipeline run). on_(chat_model|llm)_start stashes;
+        # on_llm_end pops it to attribute the call to the graph node (specialist) that served it.
+        # The ns is stashed too because a specialist SUB-GRAPH reports the inner node name in
+        # langgraph_node but its agent_name only in the checkpoint namespace.
+        self._node_by_run: dict[Any, tuple[str | None, str | None]] = {}
 
     # -- llm boundary ------------------------------------------------
+
+    def _stash_node(self, **kwargs: Any) -> None:
+        """Record this LLM run's (langgraph_node, checkpoint_ns) for on_llm_end billing."""
+        md = kwargs.get("metadata") or {}
+        rid = kwargs.get("run_id")
+        if rid is not None:
+            self._node_by_run[rid] = (
+                md.get("langgraph_node"),
+                md.get("langgraph_checkpoint_ns"),
+            )
+
+    def _on_start_common(self, **kwargs: Any) -> None:
+        # Mid-invocation pre-LLM check (catches the case where prior
+        # boundary pushed us over a limit; we cancel before incurring
+        # another LLM cost) + stash this run's graph node for VT-619 billing.
+        self.driver.check_mid_invocation(
+            self.usage, run_id=self.run_id, tenant_id=self.tenant_id
+        )
+        self._stash_node(**kwargs)
 
     def on_llm_start(
         self,
@@ -88,12 +113,18 @@ class OrchestratorReasoningCallback(BaseCallbackHandler):
         prompts: list[str],
         **kwargs: Any,
     ) -> None:
-        # Mid-invocation pre-LLM check (catches the case where prior
-        # boundary pushed us over a limit; we cancel before incurring
-        # another LLM cost).
-        self.driver.check_mid_invocation(
-            self.usage, run_id=self.run_id, tenant_id=self.tenant_id
-        )
+        self._on_start_common(**kwargs)
+
+    def on_chat_model_start(
+        self,
+        serialized: dict[str, Any],
+        messages: list[Any],
+        **kwargs: Any,
+    ) -> None:
+        # ChatAnthropic is a CHAT model — langchain fires on_chat_model_start (not on_llm_start),
+        # so this is the seam that actually runs for the orchestrator agent. Same body as
+        # on_llm_start: mid-invocation check + node stash.
+        self._on_start_common(**kwargs)
 
     def on_llm_end(self, response: Any, **kwargs: Any) -> None:
         usage_data = self._extract_usage(response)
@@ -131,6 +162,28 @@ class OrchestratorReasoningCallback(BaseCallbackHandler):
                     )
 
         self._write_reasoning_step(response, usage_data, status="completed")
+
+        # VT-619 — per-tenant × per-agent metering (guarded, best-effort; NEVER breaks a turn).
+        # Attribute THIS LLM call to the agent it serves: the graph node stashed at start (a
+        # specialist execution turn) else the route target scanned from this turn's tool_calls (a
+        # manager turn routing to a specialist) else the tenant's primary billed agent. The stash
+        # key is the PER-LLM run_id from kwargs (langchain passes run_id to on_llm_end), NOT
+        # self.run_id (the pipeline run).
+        try:
+            node, checkpoint_ns = self._node_by_run.pop(kwargs.get("run_id"), (None, None))
+            from orchestrator.agent.usage_meter import meter_llm_call, resolve_billed_agent
+
+            agent = resolve_billed_agent(
+                node, response, self.tenant_id, checkpoint_ns=checkpoint_ns
+            )
+            meter_llm_call(
+                tenant_id=self.tenant_id,
+                agent=agent,
+                tokens_in=usage_data.get("input_tokens", 0),
+                tokens_out=usage_data.get("output_tokens", 0),
+            )
+        except Exception:  # noqa: BLE001 — CL-122: metering never breaks a turn
+            logger.warning("VT-619 langchain-seam meter swallowed", exc_info=True)
 
         # Post-LLM mid-invocation check (catches token/cost overshoot
         # from the call we just completed).
