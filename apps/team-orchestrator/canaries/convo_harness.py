@@ -1403,36 +1403,25 @@ def cmd_teardown(args: argparse.Namespace) -> int:
                 f"refusing to teardown tenant {args.tenant_id}: business_name {name!r} is not a "
                 f"{_HARNESS_NAME_PREFIX!r} harness tenant"
             )
-        # Dynamic non-cascade FK sweep (drill_stage_check pattern): every table FK-referencing
-        # tenants WITHOUT ON DELETE CASCADE must be cleared first; catalog-derived so it tracks new
-        # tables automatically.
-        noncascade = conn.execute(
-            "SELECT DISTINCT cl.relname AS tbl, att.attname AS col "
-            "FROM pg_constraint con "
-            "JOIN pg_class cl ON cl.oid = con.conrelid "
-            "JOIN pg_attribute att ON att.attrelid = con.conrelid "
-            "     AND att.attnum = ANY(con.conkey) "
-            "WHERE con.contype = 'f' AND con.confrelid = 'public.tenants'::regclass "
-            "  AND con.confdeltype <> 'c'",
-        ).fetchall()
-        swept = 0
-        for _pass in (1, 2):  # a non-cascading table may itself be referenced by another
-            for rec in noncascade:
-                tbl = rec[0] if not isinstance(rec, dict) else rec["tbl"]
-                col = rec[1] if not isinstance(rec, dict) else rec["col"]
-                try:
-                    conn.execute(f'DELETE FROM "{tbl}" WHERE "{col}" = %s', (args.tenant_id,))  # noqa: S608 — catalog-derived
-                    swept += 1
-                except Exception:  # noqa: BLE001 — retried on pass 2 / surfaced by the final delete
-                    pass
-        conn.execute("DELETE FROM tenants WHERE id = %s", (args.tenant_id,))
+        # VT-620: FK-safe delete via the shared helper (also used by the test-tenant reaper).
+        # Root cause of the old leak: pipeline_steps (non-cascade FKs to BOTH pipeline_runs AND
+        # tenants) was never deleted before pipeline_runs, so the fixed 2-pass sweep left residual
+        # rows AND the try/except swallowed the failure — the tenant delete silently no-op'd. The
+        # shared helper deletes pipeline_steps first, FK-orders the rest, and REPORTS the residual
+        # (does NOT swallow it). conn is autocommit, so a per-table FK failure can't poison the txn.
+        from orchestrator.test_tenant_reaper import fk_safe_delete_tenant
+
+        blocked = fk_safe_delete_tenant(conn, args.tenant_id)
         left = conn.execute(
             "SELECT count(*) FROM tenants WHERE id = %s", (args.tenant_id,)
         ).fetchone()
         remaining = int(left[0] if not isinstance(left, dict) else left["count"])
-    print(f"[teardown] tenant {args.tenant_id} ({name}): {len(noncascade)} non-cascade tables swept; "
-          f"tenant rows left = {remaining}")
-    return 0 if remaining == 0 else 1
+    if blocked:
+        print(f"[teardown] tenant {args.tenant_id} ({name}): NOT fully deleted — still blocked by "
+              f"{blocked}; tenant rows left = {remaining}")
+    else:
+        print(f"[teardown] tenant {args.tenant_id} ({name}): deleted; tenant rows left = {remaining}")
+    return 0 if (remaining == 0 and not blocked) else 1
 
 
 # --- scenario loading --------------------------------------------------------------------------

@@ -5,7 +5,7 @@ compares against ``tenant_alert_baselines``; returns a list of
 Trigger objects describing what should fire.
 
 Trigger kinds (8 per VT-202 brief):
-- hard_limit             critical: status='aborted_hard_limit' lands
+- hard_limit             warning : status='aborted_hard_limit' lands (VT-620: budget gate, designed)
 - escalation             critical: status='escalated' lands
 - error_envelope         critical: any error_envelope step_kind
 - cost_anomaly           warning : single-run cost > 2× p95
@@ -60,7 +60,11 @@ Severity = Literal["critical", "warning"]
 
 # Severity per trigger kind (Cowork brief locks).
 _SEVERITY_BY_KIND: dict[TriggerKind, Severity] = {
-    "hard_limit": "critical",
+    # VT-620: a hard-limit abort is a budget/quality GATE working as designed (the run hit
+    # its ₹/token/tool-call ceiling and stopped) — not a crash. At most a warning, never a page.
+    "hard_limit": "warning",
+    # VT-620: LEFT critical on purpose — a genuine human-operator escalation may warrant a page
+    # (Fazal policy call). Revisit if escalation volume proves this too noisy.
     "escalation": "critical",
     "error_envelope": "critical",
     "privacy_audit_event": "critical",
@@ -83,6 +87,25 @@ _SEVERITY_BY_KIND: dict[TriggerKind, Severity] = {
     # VT-557 — a dead-lettered task is stuck until an operator redrives → ops-actionable warning.
     "dead_letter_task": "warning",
 }
+
+# VT-620 — error-envelope subtypes that are a correctness/quality GATE working as designed
+# (agent rejected its own bad draft / hit a budget ceiling / asked for clarification). At most
+# 'warning', never a page. Anything NOT listed stays 'critical'. Values = _failure_code() step_name
+# strings (error_router.py:70-94 + failures.py FailureType).
+_ERROR_SUBTYPE_WARNING = frozenset({
+    "self_eval_rejected", "schema_rejection", "invalid_output_no_json",
+    "invalid_variant_discriminator", "self_evaluate_seam_error", "agent_invalid_output",
+    "model_output_conflict", "agent_hard_limit_breach", "agent_refusal",
+    "owner_clarification_required",
+})
+
+
+def _error_envelope_severity(step_name: str | None) -> Severity:
+    """VT-620 — downgrade a 'designed gate' error envelope to 'warning'; everything else stays
+    'critical' (a genuine crash / DB / data error must still page). ``step_name`` = the row's
+    ``_failure_code()`` value already SELECTed on the error row."""
+    return "warning" if (step_name or "") in _ERROR_SUBTYPE_WARNING else "critical"
+
 
 # VT-79 Detector-3: DSR request-rate threshold (Phase-1 fixed value; cohort
 # baselines need real traffic — flagged for tuning, gate-live posture).
@@ -114,11 +137,14 @@ def _make_trigger(
     *,
     run_id: UUID | None = None,
     payload: dict[str, Any] | None = None,
+    severity: Severity | None = None,
 ) -> Trigger:
+    # VT-620: an explicit ``severity`` override (e.g. per-error-envelope subtype) wins;
+    # otherwise fall back to the per-kind default. Every existing call omits it → unchanged.
     return Trigger(
         tenant_id=tenant_id,
         trigger_kind=kind,
-        severity=_SEVERITY_BY_KIND[kind],
+        severity=severity or _SEVERITY_BY_KIND[kind],
         message_text=message,
         run_id=run_id,
         payload=payload or {},
@@ -185,6 +211,28 @@ def _volume_is_mock_only(tenant_id: UUID) -> bool:
     return mock_sends > 0 and real_sends == 0
 
 
+# VT-620 — synthetic convo-harness tenants (the e2e/canary harness names every tenant it creates
+# ``convo-harness-…``). Their runs/steps are test artifacts, so alerts on them are pure ops noise.
+_TEST_TENANT_NAME_PREFIX = "convo-harness-"  # the harness enforces this on every tenant it creates
+
+
+def _is_test_tenant(tenant_id: UUID, *, conn: Any = None) -> bool:
+    """True for a synthetic convo-harness tenant (VT-620). FAIL-SAFE: False on any read error."""
+    def _q(c) -> bool:
+        with c.cursor() as cur:
+            cur.execute("SELECT 1 FROM tenants WHERE id = %s AND business_name LIKE %s LIMIT 1",
+                        (str(tenant_id), f"{_TEST_TENANT_NAME_PREFIX}%"))
+            return cur.fetchone() is not None
+    try:
+        if conn is not None:
+            return _q(conn)
+        with get_pool().connection() as c:
+            return _q(c)
+    except Exception:  # noqa: BLE001 — fail-safe: never suppress a real alert on a read error
+        logger.warning("VT-620: _is_test_tenant check failed for %s; NOT suppressing", tenant_id, exc_info=True)
+        return False
+
+
 def detect_critical_for_run(run_id: UUID) -> list[Trigger]:
     """Write-hook entry — examine a single just-closed run for critical triggers.
 
@@ -204,6 +252,10 @@ def detect_critical_for_run(run_id: UUID) -> list[Trigger]:
         return []
     row = dict(raw) if not isinstance(raw, dict) else raw
     tenant_id = UUID(str(row["tenant_id"]))
+    # VT-620: never alert on a synthetic convo-harness tenant (test artifact = ops noise).
+    # Detector is unwired today but gate it anyway. FAIL-SAFE: a read error returns False → alert.
+    if _is_test_tenant(tenant_id):
+        return []
     status = row["status"]
     triggers: list[Trigger] = []
     if status == "aborted_hard_limit":
@@ -229,6 +281,10 @@ def detect_slow_triggers(tenant_id: UUID) -> list[Trigger]:
     Called by the 5-min DBOS scheduler. Returns the slow-trigger set
     (cost / latency / volume / privacy / error_envelope).
     """
+    # VT-620: a synthetic convo-harness tenant produces only test-artifact runs/steps — its
+    # whole slow-trigger set is ops noise. FAIL-SAFE: a read error returns False → we still sweep.
+    if _is_test_tenant(tenant_id):
+        return []
     pool = get_pool()
     triggers: list[Trigger] = []
 
@@ -340,11 +396,16 @@ def detect_slow_triggers(tenant_id: UUID) -> list[Trigger]:
     for r in errors:
         rd = dict(r) if not isinstance(r, dict) else r
         run_id = UUID(str(rd["run_id"]))
+        # VT-620: the actionable subtype lives in step_name (=_failure_code). A 'designed gate'
+        # subtype (self-eval reject / budget ceiling / clarification) downgrades to 'warning';
+        # anything unrecognised stays 'critical' so a genuine crash/DB error still pages.
+        step_name = rd.get("step_name")
         triggers.append(_make_trigger(
             tenant_id, "error_envelope",
-            f"Error envelope on run {run_id}: {rd.get('step_name') or 'unknown'}",
+            f"Error envelope on run {run_id}: {step_name or 'unknown'}",
             run_id=run_id,
-            payload={"step_name": rd.get("step_name")},
+            payload={"step_name": step_name},
+            severity=_error_envelope_severity(step_name),
         ))
 
     # VT-79 Detector-1 — tenant-isolation breach (P0). The RLS guard
@@ -462,9 +523,14 @@ def all_active_tenant_ids() -> list[UUID]:
     """Tenants with at least one terminal pipeline_run in last 30 days."""
     pool = get_pool()
     with pool.connection() as conn, conn.cursor() as cur:
+        # VT-620: skip synthetic convo-harness tenants up-front (efficiency — the per-detector
+        # _is_test_tenant check stays as the fail-safe backstop if a harness tenant slips through).
         cur.execute(
             "SELECT DISTINCT tenant_id FROM pipeline_runs "
-            "WHERE started_at > now() - interval '30 days'"
+            "WHERE started_at > now() - interval '30 days' "
+            "  AND NOT EXISTS (SELECT 1 FROM tenants t "
+            "                  WHERE t.id = pipeline_runs.tenant_id "
+            "                    AND t.business_name LIKE 'convo-harness-%')"
         )
         rows = cur.fetchall()
     out: list[UUID] = []
