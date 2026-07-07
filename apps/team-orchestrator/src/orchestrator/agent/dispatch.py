@@ -66,6 +66,10 @@ from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from orchestrator.agent.orchestrator_agent_driver import (
+    ORCHESTRATOR_COST_HARD_LIMIT_PAISE,
+    ORCHESTRATOR_TOKEN_HARD_LIMIT,
+    ORCHESTRATOR_TOOL_CALL_HARD_LIMIT,
+    ORCHESTRATOR_WALL_CLOCK_HARD_LIMIT_S,
     HardLimitExceeded,
     OrchestratorAgentDriver,
     OrchestratorUsage,
@@ -1669,18 +1673,23 @@ class _NullDriver:
     the driver would use.
     """
 
-    # VT-125 limits — module constants, not env-tunable.
+    # VT-617: default to the module constants (single source of truth) so the
+    # driver-side limit and this brain-path stand-in can never diverge again.
+    # Env vars still override for ops. A hardcoded "5" lived here and silently
+    # SHADOWED the raised ORCHESTRATOR_TOOL_CALL_HARD_LIMIT=10 — dispatch_brain
+    # (the route:none primary surface) truncated multi-tool turns at 5, so a
+    # multi-field onboarding save was cut mid-run and the owner saw a fake "snag".
     tool_call_limit: int = int(os.environ.get(
-        "ORCHESTRATOR_TOOL_CALL_HARD_LIMIT", "5"
+        "ORCHESTRATOR_TOOL_CALL_HARD_LIMIT", str(ORCHESTRATOR_TOOL_CALL_HARD_LIMIT)
     ))
     token_limit: int = int(os.environ.get(
-        "ORCHESTRATOR_TOKEN_HARD_LIMIT", "10000"
+        "ORCHESTRATOR_TOKEN_HARD_LIMIT", str(ORCHESTRATOR_TOKEN_HARD_LIMIT)
     ))
     wall_clock_limit_s: float = float(os.environ.get(
-        "ORCHESTRATOR_WALL_CLOCK_HARD_LIMIT_S", "120.0"
+        "ORCHESTRATOR_WALL_CLOCK_HARD_LIMIT_S", str(ORCHESTRATOR_WALL_CLOCK_HARD_LIMIT_S)
     ))
     cost_limit_paise: int = int(os.environ.get(
-        "ORCHESTRATOR_COST_HARD_LIMIT_PAISE", "500"
+        "ORCHESTRATOR_COST_HARD_LIMIT_PAISE", str(ORCHESTRATOR_COST_HARD_LIMIT_PAISE)
     ))
 
     def check_mid_invocation(
