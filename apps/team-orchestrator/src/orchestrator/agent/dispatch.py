@@ -1578,14 +1578,12 @@ def _collapse_reply_body(
         cohort_label = _redact_agent_text(tenant_id, cohort.cohort_label)
         decision = terminal_state.get("owner_decision")
         if decision == "queue_busy":
-            # NOTE (VT-369 §4.1 race-loser residual, request_owner_approval.
-            # arm_pause_request): 'queue_busy' covers TWO distinct refusals —
-            # the 0b per-tenant check (no summary/template went out for THIS
-            # plan) and the migration-128 UniqueViolation race-loser (the
-            # summary + template DID go out, moments ago, before the row lost
-            # the race). This body must not claim either way whether the owner
-            # has already seen this plan — it only recaps (harmless either
-            # way) + states the status.
+            # NOTE (request_owner_approval.arm_pause_request): 'queue_busy' covers
+            # BOTH the 0b per-tenant check and the migration-128 UniqueViolation
+            # race-loser. Post-VT-615 (arm-then-send) NEITHER sends a summary or
+            # template for THIS plan — both refusals are now pre-send (INSERT is
+            # first; a race-loser refuses before any send). This body only recaps
+            # + states the status; it makes no delivery claim (harmless either way).
             return {
                 "en": (
                     f"I've drafted a win-back plan for {cohort_size} customers "
