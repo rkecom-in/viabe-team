@@ -1107,11 +1107,10 @@ def _classify_terminal(
     # Fall-through: graph returned without a recognised terminal marker.
     # Treat as completed but log so future investigation can spot it.
     logger.warning(
-        "dispatch_brain: unrecognised terminal state; defaulting to completed",
-        extra={
-            "state_keys": list(terminal_state.keys()),
-            "message_count": len(messages),
-        },
+        "dispatch_brain: unrecognised terminal state; defaulting to completed "
+        "(state_keys=%s msg_count=%s)",
+        list(terminal_state.keys()),
+        len(messages),
     )
     return ("terminal", "completed", None, None)
 
