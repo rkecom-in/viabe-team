@@ -52,13 +52,14 @@ def test_case_whitespace_variant_is_flagged(monkeypatch):
 
 
 def test_long_reply_vs_truncated_prior_is_flagged(monkeypatch):
-    # VT-621: record_turn caps stored turns at _TEXT_CAP (~1000 chars), but the candidate here is the
-    # FULL untruncated reply. A byte-identical repeat whose STORED copy was truncated must still be
+    # VT-621: record_turn caps stored turns at _TEXT_CAP (4096 chars since VT-625), but the candidate here
+    # is the FULL untruncated reply. A byte-identical repeat whose STORED copy was truncated must still be
     # flagged. Pre-fix, difflib compared full-vs-truncated → ratio fell below 0.90 for any reply past
     # the cap (measured on dev: 1592 vs 995 = 0.77), so long verbatim repeats slipped through and the
-    # manager shipped dupes. The common-prefix comparison catches it.
-    full = (_LONG + " ") * 8  # ~2100 chars, well over the 1000-char storage cap
-    truncated_prior = full[:1000]  # what record_turn actually persisted
+    # manager shipped dupes. The common-prefix comparison catches it. Fixture exceeds 4096 so the
+    # truncation path is still exercised at the current cap.
+    full = (_LONG + " ") * 20  # ~5200 chars, over the 4096-char storage cap
+    truncated_prior = full[:4096]  # what record_turn actually persists
     _patch_window(monkeypatch, [{"role": "assistant", "text": truncated_prior}])
     assert dispatch._reply_repeats_recent(_TID, full) is True
 

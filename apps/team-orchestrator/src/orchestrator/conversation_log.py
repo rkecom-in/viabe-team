@@ -39,7 +39,12 @@ logger = logging.getLogger(__name__)
 # The active window Fazal specified: last ≤20 turns, none older than 24h — ALWAYS in the manager context.
 _ACTIVE_MAX_TURNS = 20
 _ACTIVE_MAX_AGE_H = 24
-_TEXT_CAP = 1000  # per-turn text cap; a runaway body is truncated, never a wall of text in context.
+_TEXT_CAP = 4096  # per-turn text cap = one WhatsApp message's max. VT-625: was 1000, which truncated
+# NORMAL detailed replies (measured: happy_path + hinglish replies hit exactly 1000 mid-word). That copy
+# is what active_window() feeds the brain AND what the eval harness judges — so a 1000 cap made the manager
+# see its OWN prior reply cut mid-sentence (a real progression/repeat contributor, ties VT-621) and made the
+# judge penalise a "truncated" reply the owner actually received in full. 4096 never truncates a single
+# WhatsApp message; a genuine runaway past one message is still bounded.
 
 # Compaction trigger: once MORE than this many turns have scrolled OUT of the active window without being
 # summarised, fold them into the durable summary. Deliberately generous — the log is permanent + the
