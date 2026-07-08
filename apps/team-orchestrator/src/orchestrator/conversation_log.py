@@ -27,6 +27,7 @@ read miss must never break dispatch. The lifetime log is retention = lifetime-of
 from __future__ import annotations
 
 import logging
+import time
 from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
@@ -105,30 +106,44 @@ def active_window(
     This is the always-on Team-Manager context window. ``exclude_message_sid`` drops the CURRENT inbound
     turn (which dispatch also carries as the HumanMessage) so it is not duplicated. Returns [{role, text,
     created_at, surface}]. Fail-soft: any error → [] (dispatch proceeds without the block)."""
-    try:
-        from orchestrator.db import tenant_connection
+    from orchestrator.db import tenant_connection
 
-        params: list[Any] = [str(tenant_id), f"{int(max_age_h)} hours"]
-        sid_clause = ""
-        if exclude_message_sid:
-            sid_clause = "AND (message_sid IS NULL OR message_sid <> %s) "
-            params.append(exclude_message_sid)
-        params.append(int(max_turns))
-        with tenant_connection(tenant_id) as conn:
-            rows = conn.execute(
-                "SELECT role, text, created_at, surface FROM conversation_log "
-                "WHERE tenant_id = %s AND created_at > now() - %s::interval "
-                f"{sid_clause}"
-                "ORDER BY created_at DESC LIMIT %s",
-                tuple(params),
-            ).fetchall()
-        # Fetched newest-first (so LIMIT keeps the most-recent); reverse to chronological for the block.
-        turns = [_row_to_turn(r) for r in rows]
-        turns.reverse()
-        return turns
-    except Exception:  # noqa: BLE001 — a window-read miss must never break dispatch
-        logger.warning("conversation_log: active_window read failed (fail-soft) tenant=%s", tenant_id, exc_info=True)
-        return []
+    params: list[Any] = [str(tenant_id), f"{int(max_age_h)} hours"]
+    sid_clause = ""
+    if exclude_message_sid:
+        sid_clause = "AND (message_sid IS NULL OR message_sid <> %s) "
+        params.append(exclude_message_sid)
+    params.append(int(max_turns))
+    sql = (
+        "SELECT role, text, created_at, surface FROM conversation_log "
+        "WHERE tenant_id = %s AND created_at > now() - %s::interval "
+        f"{sid_clause}"
+        "ORDER BY created_at DESC LIMIT %s"
+    )
+    # VT-621: this read shares ONE ConnectionPool with the LangGraph checkpointer; under checkpointer
+    # contention a tenant_connection checkout can transiently raise, and fail-softing straight to []
+    # made the brain lose its own prior turns (verbatim repeat) AND blinded the VT-616 anti-repeat
+    # guard (proven on the audit spine: the guard's decision read returned 0 while a µs-later read saw
+    # the prior turn). Retry a TRANSIENT error briefly before giving up. A genuine empty window (no
+    # rows, no error) returns on the first attempt — no retry, no added latency on the happy path.
+    for attempt in range(3):
+        try:
+            with tenant_connection(tenant_id) as conn:
+                rows = conn.execute(sql, tuple(params)).fetchall()
+            # Fetched newest-first (so LIMIT keeps the most-recent); reverse to chronological.
+            turns = [_row_to_turn(r) for r in rows]
+            turns.reverse()
+            return turns
+        except Exception:  # noqa: BLE001 — a window-read miss must never break dispatch
+            if attempt == 2:
+                logger.warning(
+                    "conversation_log: active_window read failed after 3 attempts (fail-soft) tenant=%s",
+                    tenant_id,
+                    exc_info=True,
+                )
+                return []
+            time.sleep(0.04 * (attempt + 1))
+    return []
 
 
 def search_history(
