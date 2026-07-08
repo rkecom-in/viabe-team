@@ -669,6 +669,7 @@ def build_integration_agent(
     # ledger-write / direct-send tool (raises at build if it does). The accounts book (owner's
     # Google Sheet) is read-only; ingestion writes go through the non-agent service path.
     from orchestrator.agent.tool_guardrail import assert_agent_tools_safe
+    from orchestrator.agent.tool_pairing import repair_tool_pairs_before_model
 
     assert_agent_tools_safe(tools, surface="integration_agent")
     return create_agent(
@@ -677,6 +678,10 @@ def build_integration_agent(
         system_prompt=INTEGRATION_AGENT_SYSTEM_MESSAGE,
         name="integration_agent",
         state_schema=IntegrationAgentState,
+        # VT-622: a dual-spawn (this lane + another in one orchestrator turn) orphans this
+        # lane's tool_use when the sibling handoff's Command routes first → replayed history
+        # 400s ('tool_use without tool_result'). Repair the model input so it never 400s.
+        middleware=[repair_tool_pairs_before_model],
         # VT-618: same latent bug as the onboarding_conductor — a create_agent sub-graph under the
         # parent supervisor's PostgresSaver persists a nested checkpoint that a mid-loop hard-limit
         # abort can leave holding an orphaned tool_use → retry 400. This agent also calls no
