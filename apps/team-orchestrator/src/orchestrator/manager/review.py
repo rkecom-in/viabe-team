@@ -39,6 +39,7 @@ from uuid import UUID
 from anthropic import Anthropic
 
 from orchestrator.agent.schemas.campaign_plan import CampaignStatus
+from orchestrator.llm_config import sampling_kwargs
 from orchestrator.manager import plan_store, task_store
 from orchestrator.manager.decision import ManagerDecision, ManagerDecisionKind, decide_next_action
 from orchestrator.manager.plan_models import EffectIntent, EvidenceRef, PlanSpecialistReturn
@@ -96,7 +97,9 @@ def extract_specialist_return(
     resp = client.messages.create(
         model=_REVIEW_MODEL,
         max_tokens=_MAX_TOKENS,
-        temperature=0.0,  # VT-628 — deterministic (sonnet accepts temperature; opus would 400)
+        # VT-628 — pin temp=0 only where accepted (haiku). _REVIEW_MODEL is sonnet-5, which
+        # DEPRECATES temperature (400), so this resolves to {} for it.
+        **sampling_kwargs(_REVIEW_MODEL),
         system=_EXTRACTION_SYSTEM_PROMPT,
         messages=[{"role": "user", "content": user_content}],
     )

@@ -33,6 +33,8 @@ from typing import Literal
 from uuid import UUID
 
 from anthropic import Anthropic
+
+from orchestrator.llm_config import sampling_kwargs
 from pydantic import BaseModel, ConfigDict, Field
 
 logger = logging.getLogger(__name__)
@@ -182,7 +184,9 @@ def classify_owner_message(
     resp = client.messages.create(
         model=_MODEL,
         max_tokens=200,
-        temperature=0.0,  # VT-628 — deterministic tier/intent signal (haiku accepts temperature)
+        # VT-628 — deterministic tier/intent signal. _MODEL is haiku, which accepts temperature,
+        # so this resolves to temperature=0 (kills the tier-flip non-determinism).
+        **sampling_kwargs(_MODEL),
         system=_SYSTEM_PROMPT,
         messages=[{"role": "user", "content": input.text}],
     )
