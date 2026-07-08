@@ -200,9 +200,10 @@ def _wrap_lane_node_exceptions(node_callable: Any, *, lane: str) -> Any:
         except Exception as exc:  # noqa: BLE001 — the whole point: convert ANY lane exception
             logger.warning(
                 "supervisor: lane node %r raised %s; converting to LaneNodeError "
-                "(VT-602 — preventing an unhandled lane exception from hanging the run)",
+                "(VT-602 — preventing an unhandled lane exception from hanging the run): %s",
                 lane,
                 type(exc).__name__,
+                str(exc)[:600],
             )
             raise LaneNodeError(lane=lane, exc_type=type(exc).__name__) from exc
 
