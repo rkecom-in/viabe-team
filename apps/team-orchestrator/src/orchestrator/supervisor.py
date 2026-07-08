@@ -44,6 +44,7 @@ from pydantic import ValidationError
 from team_shared.mcp import ToolContext
 
 from orchestrator._tenant_guard import TenantIsolationError
+from orchestrator.auth.prod_safety import _is_prod
 from orchestrator.agent.limits.wallclock_timer import WALL_CLOCK_HARD_LIMIT_S
 from orchestrator.agent.orchestrator_agent import build_orchestrator_agent
 from orchestrator.agent.sales_recovery import run_sales_recovery_agent
@@ -198,12 +199,20 @@ def _wrap_lane_node_exceptions(node_callable: Any, *, lane: str) -> Any:
         except SpecialistNoOutputError:
             raise
         except Exception as exc:  # noqa: BLE001 — the whole point: convert ANY lane exception
+            # Structural detail (HTTP status) is non-PII and logged everywhere; the FULL
+            # exception message is dev-only. An Anthropic 400 message can echo request
+            # content (owner text → PII), so it must never reach prod logs. Dev carries
+            # only synthetic data (CL-422), so the full message is safe there.
+            status = getattr(exc, "status_code", None)
+            detail = f"status={status}" if status is not None else ""
+            if not _is_prod():
+                detail = f"{detail} {str(exc)[:600]}".strip()
             logger.warning(
                 "supervisor: lane node %r raised %s; converting to LaneNodeError "
                 "(VT-602 — preventing an unhandled lane exception from hanging the run): %s",
                 lane,
                 type(exc).__name__,
-                str(exc)[:600],
+                detail,
             )
             raise LaneNodeError(lane=lane, exc_type=type(exc).__name__) from exc
 
