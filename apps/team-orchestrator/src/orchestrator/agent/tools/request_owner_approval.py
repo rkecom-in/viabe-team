@@ -132,10 +132,11 @@ class RequestOwnerApprovalError(BaseModel):
 class PauseRequestResult(BaseModel):
     """Outcome of the pause-request side effects (before the interrupt).
 
-    status='armed'   -> template sent (or dry-run) + pending_approvals row
-                        present; the caller should now interrupt().
-    status='error'   -> template send failed; NO pending_approvals row written;
-                        the caller must NOT interrupt (Pillar 7: no orphan pause).
+    status='armed'   -> pending_approvals row INSERTed then template sent (or
+                        dry-run); the caller should now interrupt().
+    status='error'   -> template send failed; the armed row is DELETEd (VT-615
+                        arm-then-send rollback) so NO open row remains; the caller
+                        must NOT interrupt (Pillar 7: no orphan pause).
     status='refused' -> VT-369 §4.1 (F5): ANOTHER approval is already open for this
                         tenant — the approval queue is serialized per tenant so two
                         open rows can never race one owner "yes" onto the wrong
@@ -204,11 +205,15 @@ def arm_pause_request(
           blind to approval_type). The migration-128 partial unique index
           (one open row per tenant) is the structural backstop — its
           IntegrityError at step 2 is the race-loser path, same refusal.
-      1.  Send the approval template to the OWNER. On error -> return error
-          envelope and write NO pending_approvals row (so the caller will NOT
-          interrupt; the run terminates as a normal error, not a stuck pause).
-      2.  INSERT pending_approvals (decision NULL, status='pending',
-          timeout_at = now + timeout_hours).
+      1.  INSERT pending_approvals (decision NULL, status='pending', timeout_at =
+          now + timeout_hours) — the DURABLE row FIRST (VT-615 arm-then-send). A
+          migration-128 one-open-per-tenant unique race is lost HERE
+          (UniqueViolation) BEFORE any send: status='refused', no template out, no
+          dropped campaign.
+      2.  Send the plan summary (best-effort) then the approval template to the
+          OWNER. On send error -> DELETE the row just armed (restores "error -> no
+          open row") and return the error envelope; the caller will NOT interrupt,
+          the run terminates as a normal error, not a stuck pause.
 
     ``conn_factory`` defaults to orchestrator.db.tenant_connection.
     ``send_fn`` defaults to twilio_send.send_template_message.
@@ -265,27 +270,82 @@ def arm_pause_request(
 
         owner_phone = _resolve_owner_phone(conn, tenant_id)
 
-        # VT-594 (post-review restructure) — best-effort PII-safe plan-summary
-        # send BEFORE the approval template, so the owner sees WHAT they're
-        # approving. Only reached past the step-0/0b checks above (an idempotent
-        # resume re-execution or a queue-busy refusal never re-sends / never
-        # sends). Skipped on dry_run (canary/CI) and when the caller didn't build
-        # one (every non-campaign approval type today). Fully try/except: a
-        # summary-send failure must NEVER block the arm — the approval template
-        # below is the load-bearing send.
-        #
-        # NOTE (VT-369 §4.1 race-loser residual): a concurrent armer can still win
-        # the migration-128 partial-unique-index race AFTER this point (see the
-        # UniqueViolation handler below) — this run's summary (and, moments later,
-        # its template) will have gone out for a plan whose approval row then loses
-        # the race. `_collapse_reply_body`'s queue_busy body is deliberately
-        # generic about whether a summary preceded it for exactly this reason.
-        #
-        # NOTE (future cadence): unconditional (not gated on trigger_reason) is
-        # correct TODAY because there is no live weekly-cadence producer
-        # (`run_weekly_cadence_body` is a VT-176 stub) — every campaign_send
-        # approval that reaches here is owner-inbound. Revisit if/when a real
-        # cadence caller lands.
+        # VT-615 (A) — ARM-THEN-SEND (was send-then-INSERT). The pending_approvals row is the durable
+        # source of truth for the owner's eventual "haan bhej do"; it MUST exist BEFORE any owner-facing
+        # send. The prior order sent the summary + approval template FIRST and INSERTed second, so a lost
+        # migration-128 one-open-per-tenant unique race (or any INSERT failure) left a template already in
+        # the owner's hand with NO row to resolve — the owner approves, find_open returns None, the reply
+        # falls through to dispatch_brain, and the campaign NEVER SENDS (the old "accepted residual"). Now:
+        # INSERT first (a race-loser refuses BEFORE any send — no phantom template, no dropped campaign);
+        # the sends happen only once the row is durable; a send failure DELETEs the row (autocommit conn —
+        # no implicit rollback; the pending_approvals_delete RLS policy permits the tenant-scoped delete) so
+        # no orphan blocks the tenant's one-open queue and the "error -> no open row" contract still holds.
+        approval_id = uuid4()
+        timeout_at = datetime.now(UTC) + timedelta(hours=payload.timeout_hours)
+        from psycopg.errors import UniqueViolation
+        from psycopg.types.json import Jsonb
+
+        row: dict[str, Any] = {
+            "id": str(approval_id),
+            "run_id": str(run_id),
+            "campaign_id": str(payload.campaign_id) if payload.campaign_id else None,
+            "approval_type": payload.approval_type,
+            "summary": payload.summary,
+            "details": Jsonb(dict(payload.details)),
+            "status": "pending",
+            "decision": None,
+            "owner_message_sid": None,  # set after the template send succeeds (step 2c)
+            "timeout_at": timeout_at,
+        }
+        if payload.draft_batch_id is not None:
+            row["draft_batch_id"] = str(payload.draft_batch_id)
+
+        # 1. INSERT the durable row FIRST. A migration-128 race-loser refuses HERE, before any send —
+        #    no phantom template reaches the owner, so no campaign is silently dropped.
+        try:
+            PendingApprovalsWrapper().insert(tenant_id, row, conn=conn)
+        except UniqueViolation:
+            try:
+                conn.rollback()
+            except Exception:  # noqa: BLE001 — autocommit conn: nothing pending
+                pass
+            logger.info(
+                "request_owner_approval: refused (one-open-per-tenant race lost, PRE-send) "
+                "tenant=%s run=%s type=%s",
+                tenant_id, run_id, payload.approval_type,
+            )
+            return PauseRequestResult(
+                status="refused",
+                error=RequestOwnerApprovalError(
+                    code="approval_queue_busy",
+                    message=(
+                        "Lost the one-open-approval-per-tenant race (unique index, "
+                        "migration 128). Retry on the next cycle/sweep."
+                    ),
+                ),
+            )
+
+        # A send failure past this point must remove the row we just armed (autocommit already committed
+        # it), else the orphan blocks the tenant's one-open queue until the timeout sweep reaps it.
+        def _rollback_arm() -> None:
+            try:
+                conn.execute(
+                    "DELETE FROM pending_approvals WHERE tenant_id = %s AND id = %s",
+                    (str(tenant_id), str(approval_id)),
+                )
+            except Exception:  # noqa: BLE001 — best-effort; the timeout sweep is the backstop
+                # ERROR (not warning): a swallowed rollback leaves a committed open row that blocks THIS
+                # tenant's one-open approval queue until the timeout sweep reaps it (up to timeout_hours,
+                # default 48h). Rare — needs an independent DB-conn death between INSERT and rollback (the
+                # template fails over HTTP, so the conn is normally healthy) — but must not be silent.
+                logger.error(
+                    "request_owner_approval: arm rollback DELETE FAILED — tenant approval queue blocked "
+                    "until timeout sweep (up to %sh) tenant=%s run=%s approval=%s",
+                    payload.timeout_hours, tenant_id, run_id, approval_id,
+                )
+
+        # 2a. Best-effort PII-safe plan-summary send BEFORE the approval template (VT-594), so the owner
+        #     sees WHAT they're approving. A summary-send failure must NEVER block the arm.
         if not dry_run and payload.chat_summary:
             try:
                 from orchestrator.owner_surface.freeform_acks import (
@@ -304,7 +364,8 @@ def arm_pause_request(
                     "tenant=%s run=%s", tenant_id, run_id,
                 )
 
-        # 1. Send the approval template to the owner.
+        # 2b. Send the approval template (the load-bearing send). On failure, roll back the arm row so the
+        #     owner never holds a template with no resolvable row.
         template_name = payload.template_name or APPROVAL_TEMPLATE_NAME
         if not dry_run:
             try:
@@ -320,6 +381,7 @@ def arm_pause_request(
                     "tenant=%s run=%s type=%s err=%s",
                     tenant_id, run_id, payload.approval_type, type(exc).__name__,
                 )
+                _rollback_arm()
                 return PauseRequestResult(
                     status="error",
                     error=RequestOwnerApprovalError(
@@ -333,6 +395,7 @@ def arm_pause_request(
                     tenant_id, run_id, payload.approval_type,
                     getattr(result, "error_code", None),
                 )
+                _rollback_arm()
                 return PauseRequestResult(
                     status="error",
                     error=RequestOwnerApprovalError(
@@ -341,60 +404,19 @@ def arm_pause_request(
                     ),
                 )
             owner_message_sid = getattr(result, "message_sid", None)
-        else:
-            owner_message_sid = None
-
-        # 2. INSERT the pending_approvals row (decision NULL).
-        approval_id = uuid4()
-        timeout_at = datetime.now(UTC) + timedelta(hours=payload.timeout_hours)
-        from psycopg.errors import UniqueViolation
-        from psycopg.types.json import Jsonb
-
-        row: dict[str, Any] = {
-            "id": str(approval_id),
-            "run_id": str(run_id),
-            "campaign_id": str(payload.campaign_id) if payload.campaign_id else None,
-            "approval_type": payload.approval_type,
-            "summary": payload.summary,
-            "details": Jsonb(dict(payload.details)),
-            "status": "pending",
-            "decision": None,
-            "owner_message_sid": owner_message_sid,
-            "timeout_at": timeout_at,
-        }
-        if payload.draft_batch_id is not None:
-            row["draft_batch_id"] = str(payload.draft_batch_id)
-
-        # VT-306: insert through the typed wrapper on the caller's conn (atomic
-        # with the surrounding arm-pause txn; tenant_id forced to the scope).
-        try:
-            PendingApprovalsWrapper().insert(tenant_id, row, conn=conn)
-        except UniqueViolation:
-            # VT-369 §4.1 race-loser path: a concurrent armer won between the
-            # step-0b check and this INSERT — the migration-128 partial unique
-            # index (one open row per tenant) rejected ours. Same refusal as 0b.
-            # (Accepted residual: the owner template above already went out; the
-            # owner's reply resolves the WINNER's row — Pillar-7-safe, no orphan
-            # pause because no row of ours exists.)
-            try:
-                conn.rollback()
-            except Exception:  # noqa: BLE001 — autocommit conn: nothing pending
-                pass
-            logger.info(
-                "request_owner_approval: refused (one-open-per-tenant race lost) "
-                "tenant=%s run=%s type=%s",
-                tenant_id, run_id, payload.approval_type,
-            )
-            return PauseRequestResult(
-                status="refused",
-                error=RequestOwnerApprovalError(
-                    code="approval_queue_busy",
-                    message=(
-                        "Lost the one-open-approval-per-tenant race (unique index, "
-                        "migration 128). Retry on the next cycle/sweep."
-                    ),
-                ),
-            )
+            # 2c. Record which owner message carried the template (metadata; resolve COALESCEs it).
+            if owner_message_sid:
+                try:
+                    conn.execute(
+                        "UPDATE pending_approvals SET owner_message_sid = %s "
+                        "WHERE tenant_id = %s AND id = %s",
+                        (owner_message_sid, str(tenant_id), str(approval_id)),
+                    )
+                except Exception:  # noqa: BLE001 — metadata only; never fail the arm on it
+                    logger.warning(
+                        "request_owner_approval: owner_message_sid UPDATE failed (non-critical) "
+                        "tenant=%s run=%s approval=%s", tenant_id, run_id, approval_id,
+                    )
 
         emit_tm_audit(
             event_layer="does",
