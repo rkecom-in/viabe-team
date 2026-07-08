@@ -1050,17 +1050,28 @@ def serialize_bundle_for_prompt(
         for m in dc:
             name = m.display_name or "(unknown)"
             biz = m.business_name or "(unknown)"
-            for text_field in (name, biz):
-                if _PHONE_SHAPE_RE.search(text_field):
-                    raise ValueError(
-                        "VT-490 redaction backstop: a phone-shaped value was blocked "
-                        "from the dormant-cohort prompt section (CL-390)"
-                    )
+            # CL-390 backstop: a phone-shaped value must NEVER reach the prompt. This historically
+            # RAISED — which crashed the ENTIRE SR lane (VT-602 -> human escalation) whenever a single
+            # customer's name/business field carried an 8+ digit run. That is common in real AND
+            # seeded data, so the manager's PRIMARY delegation (win-back campaign) failed
+            # intermittently: ~1/N runs a random dormant name tripped the shape and the owner got a
+            # human-escalation instead of a plan. Redact the run IN PLACE instead — the phone never
+            # reaches the LLM (security intact, still fail-closed on the value) and the customer stays
+            # targetable by id/spend/recency (SR selects by customer_id, never by name). Warn so a
+            # genuine PII leak upstream is still visible in logs.
+            red_name = _PHONE_SHAPE_RE.sub("[redacted]", name)
+            red_biz = _PHONE_SHAPE_RE.sub("[redacted]", biz)
+            if red_name != name or red_biz != biz:
+                logger.warning(
+                    "context_builder: VT-490 redacted a phone-shaped value from a dormant-cohort "
+                    "name field (CL-390) tenant=%s",
+                    getattr(context, "tenant_id", "?"),
+                )
             cohort_lines.append(
-                f"  - customer_id={m.customer_id} display_name={name} "
+                f"  - customer_id={m.customer_id} display_name={red_name} "
                 f"days_since_last_sale={m.days_since_last_sale} "
                 f"lifetime_spend_paise={m.lifetime_spend_paise} "
-                f"business_name={biz}"
+                f"business_name={red_biz}"
             )
         parts.append(
             f"- count: {len(dc)}\n" + "\n".join(cohort_lines) + "\n"

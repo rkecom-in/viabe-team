@@ -225,13 +225,24 @@ def test_serialize_renders_only_five_allowed_fields() -> None:
     assert _PHONE_SHAPE_RE.search(block) is None
 
 
-def test_serialize_phone_shape_backstop_blocks_a_phone_in_display_name() -> None:
-    """If a phone-shaped value ever reached a free-text field, the
-    ``_PHONE_SHAPE_RE`` backstop raises rather than letting it into the prompt
-    (defence-in-depth — CustomerFactBundle carries no phone by construction)."""
-    poisoned = _bundle(name="+919321553267")
-    with pytest.raises(ValueError, match="redaction backstop"):
-        serialize_bundle_for_prompt(_ctx_with_cohort([poisoned]))
+def test_serialize_phone_shape_in_name_is_redacted_not_raised() -> None:
+    """A phone-shaped value in a free-text name field is REDACTED in place, never raised.
+    Raising crashed the ENTIRE SR lane (VT-602 -> human escalation) whenever a real or seeded
+    customer name carried an 8+ digit run, so the primary win-back delegation failed
+    intermittently. Redaction keeps the phone out of the prompt (CL-390 fail-closed on the value)
+    while the customer stays targetable by id."""
+    # letters-only id so the ONLY phone-shape candidate in the block is the poisoned name.
+    poisoned = _bundle(
+        name="+919321553267",
+        customer_id=UUID("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"),
+    )
+    rendered = serialize_bundle_for_prompt(_ctx_with_cohort([poisoned]))  # must NOT raise
+    block = rendered.split("## Dormant cohort", 1)[1].split("\n## ", 1)[0]
+    # the phone never reaches the prompt (redacted), yet the customer row survives.
+    assert "919321553267" not in block
+    assert _PHONE_SHAPE_RE.search(block) is None
+    assert f"customer_id={poisoned.customer_id}" in block
+    assert "display_name=[redacted]" in block
 
 
 def test_serialize_dormant_cohort_empty_renders_count_zero() -> None:
