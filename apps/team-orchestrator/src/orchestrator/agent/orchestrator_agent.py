@@ -540,3 +540,7 @@ def build_orchestrator_agent(
 # Default module-level instance — base tools only. The VT-3.4 supervisor builds
 # its own instance with the spawn_sales_recovery handoff tool added.
 orchestrator_agent = build_orchestrator_agent(_MODEL)
+
+# VT-632-DIAG (temp, remove after confirming): boot-time visibility of the reply-tool flag on the
+# deployed process — a WARNING so it can't be filtered/out-of-window like the INFO fire log was.
+logger.warning("VT-632-DIAG-BOOT: reply_to_owner flag enabled=%s", _reply_to_owner_enabled())
