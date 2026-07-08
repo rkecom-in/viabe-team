@@ -108,3 +108,20 @@ good.** So the entire gap is the **11 trust-breakers** — a finite, concrete do
 - 2 fabrication + 1 impossible-promise → a **capability-grounding rail**: no invented pricing/domain (source
   pricing from config), no promising a connect the platform can't do. Deterministic, count=0.
 Two fixes clear the whole list. Delta measured on re-run after each lands (not guessed).
+
+### 6.1 Decision-quality re-score (2026-07-09, after §2.6/§3 upgrade) — Fazal's concern CONFIRMED
+Re-scored the same 53 on decision/tool/plan judgment ONLY. Found a wrong-call class the conversation rubric
+scored "acceptable": **OVER-ACTING**. 3 clearly-wrong; **2 were in the previously-"acceptable" 41**:
+- **delegation_analytical_routing** [NEW breaker]: owner asked "WHICH customers stopped buying?" (a question) →
+  manager drafted a campaign + fired the approval template, never answered which/how many. Over-act.
+- **m_conversation_followup_referencing_lapsed_customers** [NEW breaker]: owner asked a COUNT → manager drafted
+  + armed a campaign instead of answering "2 of your 8". Over-act.
+- **m_conversation_topic_switch_winback_detour** [already a loop breaker]: explicit "draft a winback" → manager
+  UNDER-acted (stalled "I'm on it", no delegation). The mirror failure.
+**Impact: fully-acceptable 41→39 (77.4%→73.6%).** The manager acts, but sometimes acts WRONGLY — a chatbot-that-
+acts, not yet an operator. Decision/action breakers (~4 of the now-13): the 2 over-acts + gbp_connect (wrong
+tool) + topic_switch (under-act). This is a DISTINCT third fix:
+- **Speech-act gate** (stocktake step 3, now data-backed): a question / count / status turn gets ANSWERED, at
+  most an OFFER to draft — NEVER silently draft+arm a campaign. Fixes the over-act class.
+Updated fix map (3 fixes for the trust-breakers): emission rewrite (~9 loop/stall+under-act) + capability
+grounding VT-630 (3 fabrication/impossible) + speech-act gate (2-3 over-act).
