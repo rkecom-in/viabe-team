@@ -122,25 +122,6 @@ def active_window(
                 "ORDER BY created_at DESC LIMIT %s",
                 tuple(params),
             ).fetchall()
-            if not rows:
-                # VT-621-DIAG (temp, remove after): an EMPTY window is the repeat-cluster
-                # driver. Prove the mechanism on THIS connection: is app.current_tenant the
-                # GUC we set (RLS applied) and how many conversation_log rows are RLS-visible?
-                # guc != tenant / count 0 → the session GUC didn't govern the SELECT (pool/DBOS
-                # concurrency). guc == tenant / count > 0 → rows exist but the time-window/sid
-                # filter excluded them (a different bug). Read-only, same conn.
-                try:
-                    _g = conn.execute(
-                        "SELECT current_setting('app.current_tenant', true), current_user, "
-                        "(SELECT count(*) FROM conversation_log)"
-                    ).fetchone()
-                    logger.warning(
-                        "VT-621-DIAG active_window EMPTY: app.current_tenant=%r current_user=%r "
-                        "rls_visible_rows=%s expected_tenant=%s",
-                        _g[0], _g[1], _g[2], tenant_id,
-                    )
-                except Exception:  # noqa: BLE001 — diagnostic only, never break the read
-                    pass
         # Fetched newest-first (so LIMIT keeps the most-recent); reverse to chronological for the block.
         turns = [_row_to_turn(r) for r in rows]
         turns.reverse()
