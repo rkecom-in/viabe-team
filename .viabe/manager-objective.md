@@ -23,6 +23,12 @@ One occurrence and the owner loses trust; no average smooths it over. A trust-br
    campaign; a correction gets a stall; a count/status ask gets a non-answer).
 5. **Promising the impossible** — committing to something the platform cannot do (e.g. "I'll post to your
    Instagram" when it can't; a Zomato/Swiggy action it can't perform).
+6. **Clearly-wrong action or tool** — took a business action / picked a specialist / proposed a next-step-set
+   that is CLEARLY wrong for the situation when a correct one was obvious (routed a finance question to the
+   sales lane; drafted+armed a campaign when the owner only asked a question; executed when it should have
+   advised, or advised when it should have executed). BOUND: **clearly-wrong**, not merely-suboptimal — a
+   defensible-but-not-optimal call is NOT a trust-breaker (it lands in the Tier-2 quality band). This is the
+   decision-judgment breaker: a well-worded reply that makes the WRONG operational call still breaks trust.
 **Target: 0 scenarios with any trust-breaker. Measured per-transcript, not from an average.**
 
 ### Tier 2 — QUALITY ACCEPTANCE ≥ 90%
@@ -40,6 +46,15 @@ straight-5 is still trustworthy.
 | **Delegation-and-surfacing** | Delegated work's RESULT reaches the owner | no "I'm on it" → silence |
 | **Honest / grounded** | No fabrication; honest "I don't have X" + a next step | honesty; capability-grounding |
 | **In-register** | Mirrors the owner's language (Hinglish→Hinglish) | language match |
+| **Decision correctness** | Given the situation + owner goal, chose a SOUND business decision/strategy | judged vs what a competent operator would do (needs a right-call ground truth) |
+| **Right tool / action** | Routed to the CORRECT specialist + picked the CORRECT action; didn't over-act (draft/send when it should ask) or under-act (advise when it should execute) | correct specialist + act-vs-advise choice |
+| **Next-action-set quality** | The proposed next actions are the RIGHT and EFFICIENT set for the goal — not just "a next step exists" | plan QUALITY, not existence |
+
+**The decision-quality group (last 3 rows) is the "business OPERATOR vs well-behaved chatbot" line.** It is
+the HARDEST to measure — it needs each scenario to define the right-vs-wrong operational call as ground truth.
+The current 53 lean conversational and UNDER-TEST it; a clearly-wrong call in an "acceptable" transcript is a
+Tier-1 breaker (§2.6), but merely-suboptimal judgment on an under-specified scenario is NOT penalised (would be
+noise). Proper decision-quality measurement requires authored JUDGMENT scenarios (§4).
 
 ## 4. Overfitting guard — the 53 eval is the THERMOMETER, not the objective
 The objective is **generalization to unseen real owner conversations.** The 53-scenario pack only ESTIMATES it.
@@ -50,6 +65,11 @@ Guards, binding on every manager change:
 - **Hold-out + fresh scenarios**: keep a rotating held-out subset the manager is not tuned against; add new
   real-shaped scenarios periodically; a lift that appears only on the tuned set and not the held-out set is
   overfitting, not progress.
+- **Judgment scenarios (BUILD NEEDED)**: decision-quality (§3 last 3 rows) can only be measured on scenarios
+  that DEFINE the right-vs-wrong operational call as ground truth. The current 53 lean conversational and
+  under-test it — author JUDGMENT scenarios (a clear right call + tempting wrong calls: a finance question that
+  must NOT go to sales; a "just asking" that must NOT trigger a send; a situation that DEMANDS execution not
+  advice) where a well-worded WRONG decision MUST score as a fail. Hold these out too.
 - **Reality check**: if the eval number rises while real conversations don't improve, the metric is being gamed —
   distrust it.
 
