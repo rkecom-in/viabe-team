@@ -773,6 +773,7 @@ def run_sales_recovery_agent(
     # VT-596 #3 — one corrective retry when the terminal JSON fails the
     # CampaignPlan schema (field-path feedback; see the parse except below).
     schema_retry_used = False
+    output_retry_used = False
 
     # VT-182/VT-514 — stage the per-turn reasoning input envelope so the
     # @with_reasoning_capture callback writes agent_reasoning_step rows (the
@@ -904,12 +905,35 @@ def run_sales_recovery_agent(
             status = "refused"
             break
         if output is None:
-            # CL-287: emit a FailureRecord BEFORE breaking so the run
-            # is observable in pipeline_steps / error router. Previous
-            # Path A was silent — a CL-238 violation. Best-effort, must
-            # not re-raise into the loop. Snapshot the model's terminal
-            # text (capped) for diagnosis without leaking unbounded
-            # payload into the error router.
+            # VT-623 Head 2: Sonnet-5 intermittently wraps the terminal CampaignPlan JSON in a
+            # preamble / trailing note / unanchored code fence (stop_reason=end_turn, so the VT-596 #2
+            # max_tokens continuation never fires) → _parse_placeholder_output returns None on an
+            # otherwise-sound plan. This was the ONE terminal path with no recovery (every other
+            # failure mode retries or server-heals), so ~1/6 win-back delegations escalated / D1'd
+            # instead of drafting. ONE corrective retry for a BARE JSON object recovers most runs. Only
+            # on the SECOND miss do we route the FailureRecord + go invalid, so a RECOVERED run stays
+            # clean (no false failure to the error router / alerts). No loose brace-extraction — the
+            # model re-emits and downstream validation is untouched. Gate on stop_reason=="end_turn":
+            # a COMPLETE-but-prose-wrapped emit is what re-prompting fixes; a max_tokens truncation is
+            # already handled by the VT-596 #2 continuation and must NOT retry here (re-emitting would
+            # just truncate again).
+            if not output_retry_used and stop_reason == "end_turn":
+                output_retry_used = True
+                terminal_text_parts = []
+                messages.append(
+                    {"role": "assistant", "content": [{"type": "text", "text": text}]}
+                )
+                correction = (
+                    "Your previous message did not parse as a single JSON object. Re-emit ONLY "
+                    "the CampaignPlan JSON — no prose, no markdown code fence, no commentary "
+                    "before or after. The output must start with { and end with }."
+                )
+                messages.append({"role": "user", "content": correction})
+                raw_messages.append({"role": "user", "content": correction})
+                continue
+            # CL-287: emit a FailureRecord BEFORE breaking so the run is observable in
+            # pipeline_steps / error router (best-effort, must not re-raise). Snapshot the model's
+            # terminal text (capped) for diagnosis without leaking unbounded payload.
             _emit_invalid_output(
                 context=context,
                 reason=(
