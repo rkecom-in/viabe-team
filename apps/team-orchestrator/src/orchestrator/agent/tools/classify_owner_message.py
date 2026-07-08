@@ -182,6 +182,7 @@ def classify_owner_message(
     resp = client.messages.create(
         model=_MODEL,
         max_tokens=200,
+        temperature=0.0,  # VT-628 — deterministic tier/intent signal (haiku accepts temperature)
         system=_SYSTEM_PROMPT,
         messages=[{"role": "user", "content": input.text}],
     )

@@ -80,6 +80,7 @@ from orchestrator.observability.langchain_callback import (
     OrchestratorReasoningCallback,
 )
 from orchestrator.observability.pipeline_observability import write_step
+from orchestrator.llm_config import sampling_kwargs
 from orchestrator.observability.tm_audit import emit_tm_audit
 from orchestrator.output_composer import compose_owner_output
 from orchestrator.state import SubscriberState
@@ -408,7 +409,7 @@ def _resolve_model(model_id: str = _BRAIN_MODEL_SONNET) -> ChatAnthropic:
     # call-arg ignore because ChatAnthropic's pydantic kwargs aren't expanded
     # without the pydantic mypy plugin (parity with orchestrator_agent.py:_MODEL).
     return ChatAnthropic(  # type: ignore[call-arg]
-        model=model_id, max_tokens=_DEFAULT_MAX_TOKENS
+        model=model_id, max_tokens=_DEFAULT_MAX_TOKENS, **sampling_kwargs(model_id)
     )
 
 
