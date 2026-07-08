@@ -58,13 +58,13 @@ THRESHOLD = 4
 # a global average across all scenarios — a scenario scoring straight 4s across all 5 dimensions
 # clears the per-dim floor but has mean=4.0, which must FAIL; 5,5,5,5,4 (mean=4.8) PASSES.
 MEAN_THRESHOLD = 4.5
-# VT-628 — the judge is the RULER: it must be DETERMINISTIC or a quality floor can't be
-# measured (a temp-1.0 judge adds ±1-2 pts of ruler-noise to an identical transcript). opus
-# (4-7 AND 4-8) 400s on temperature, so the judge runs on sonnet-5 at temperature=0 — a stable,
-# capable ruler. Trade: sonnet is a touch less discerning than opus, but a fixed ruler beats a
-# sharper wobbling one for a go/no-go floor. NOTE: this rebaselines the gate number vs any prior
-# opus-judged run (the old ~43% was opus-4-8-at-temp-1.0 and is not comparable).
-DEFAULT_MODEL = "claude-sonnet-5"
+# VT-628 — the judge is the RULER; ideally deterministic so a quality floor can be measured.
+# BUT temperature is DEPRECATED (400) on every capable model — sonnet-5 AND opus-4-7/4-8 — verified
+# live 2026-07-08. Only haiku accepts it, and haiku is too weak a rubric-scorer to trust as the
+# ruler. So the judge stays opus-4-8 (the most discerning), and ruler STABILITY is measured
+# empirically (score one fixed transcript N times) rather than forced via temperature; if residual
+# noise is material, switch to N-sample-median, NOT a weaker deterministic model.
+DEFAULT_MODEL = "claude-opus-4-8"
 DEFAULT_BATCH_SIZE = 4
 _MAX_OUTPUT_TOKENS = 4096
 
@@ -375,9 +375,9 @@ def judge_batch(
     response = client.messages.create(
         model=model,
         max_tokens=_MAX_OUTPUT_TOKENS,
-        # VT-628 — deterministic ruler. Family-gated: opus 400s on temperature, so omit it there
-        # (a non-sonnet override loses determinism by design); sonnet/haiku pin to 0.
-        **({} if "opus" in model.lower() else {"temperature": 0.0}),
+        # VT-628 — temperature is deprecated on every capable model (sonnet-5/opus 400); only
+        # haiku accepts it. Gate to haiku so the default opus judge omits the param (no 400).
+        **({"temperature": 0.0} if "haiku" in model.lower() else {}),
         system=SYSTEM_PROMPT,
         messages=[{"role": "user", "content": user_content}],
     )

@@ -29,6 +29,8 @@ from pathlib import Path
 from typing import Literal
 
 from anthropic import Anthropic
+
+from orchestrator.llm_config import sampling_kwargs
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 logger = logging.getLogger("orchestrator.manager.triage")
@@ -83,7 +85,9 @@ def triage_turn(
         resp = client.messages.create(
             model=_TRIAGE_MODEL,
             max_tokens=_MAX_TOKENS,
-            temperature=0.0,  # VT-628 — deterministic (sonnet accepts temperature; opus would 400)
+            # VT-628 — pin temp=0 only where the model accepts it (haiku). _TRIAGE_MODEL is
+            # sonnet-5, which DEPRECATES temperature (400), so this resolves to {} for it.
+            **sampling_kwargs(_TRIAGE_MODEL),
             system=_TRIAGE_SYSTEM_PROMPT,
             messages=[{"role": "user", "content": user_content}],
         )
