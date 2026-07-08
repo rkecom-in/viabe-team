@@ -200,6 +200,49 @@ def test_advisory_tools_guard_passes_real_surface():
     )
 
 
+def test_reply_to_owner_is_permitted_owner_send_and_binds_when_enabled(monkeypatch):
+    """VT-632 owner-reply carve-out (the risk-row's VT-268 review). reply_to_owner SENDS, but only
+    to the OWNER (recipient resolved server-side; the model supplies no number), so it is a
+    PERMITTED capability: its name carries no forbidden substring and the fail-closed guard passes
+    it by construction. With MANAGER_REPLY_TOOL on, build_orchestrator_agent binds it and the
+    augmented surface still passes the guard (no customer-send / write capability slips in)."""
+    from orchestrator.agent.tool_guardrail import (
+        assert_agent_tools_safe,
+        find_forbidden_tools,
+    )
+    from orchestrator.agent.tools.reply_to_owner import reply_to_owner
+
+    # Not a forbidden capability — its name matches no FORBIDDEN_CAPABILITY_SUBSTRING.
+    assert find_forbidden_tools([reply_to_owner]) == []
+    assert_agent_tools_safe([reply_to_owner], surface="test")  # no raise
+
+    # It is NOT in the flag-off base inventory (so test_orchestrator_tool_allowlist_pinned stays the
+    # review gate); it is bound only when the flag is on.
+    from orchestrator.agent.orchestrator_agent import ORCHESTRATOR_AGENT_TOOLS
+
+    assert "reply_to_owner" not in _names(ORCHESTRATOR_AGENT_TOOLS)
+
+    monkeypatch.setenv("MANAGER_REPLY_TOOL", "on")
+    from orchestrator.agent.orchestrator_agent import (
+        _MODEL,
+        _reply_to_owner_enabled,
+        build_orchestrator_agent,
+    )
+
+    assert _reply_to_owner_enabled() is True
+    build_orchestrator_agent(_MODEL)  # must NOT raise ToolGuardrailViolation
+
+
+def test_reply_to_owner_takes_no_recipient_argument():
+    """VT-632 structural mitigation: the tool exposes NO phone/recipient/customer parameter — the
+    recipient is resolved server-side, so the model can never target a number."""
+    from orchestrator.agent.tools.reply_to_owner import reply_to_owner
+
+    arg_names = set(reply_to_owner.args.keys())
+    for forbidden in ("recipient", "recipient_phone", "phone", "to", "number", "customer_id"):
+        assert forbidden not in arg_names, f"reply_to_owner must not accept {forbidden!r}"
+
+
 def test_onboarding_conductor_tool_allowlist_pinned():
     from orchestrator.agent.onboarding_conductor import ONBOARDING_CONDUCTOR_TOOLS
 

@@ -38,6 +38,14 @@ class ToolGuardrailViolation(RuntimeError):
 #   - accounts-book / ledger writes: the agent must never write the owner's Sheet or the ledger.
 # Deliberately SPECIFIC (not a bare "write") so benign tools — write_l0_fragment (L0 memory),
 # compose_owner_output_tool (composes, does not send) — are NOT false-flagged.
+# VT-632 owner-reply carve-out: ``reply_to_owner`` is the manager's PERMITTED owner-reply-authoring
+# tool. It DOES send a WhatsApp message, but ONLY to the business owner — the recipient is resolved
+# SERVER-SIDE from ``tenants.owner_phone`` and the model never supplies a number, so it can never
+# target a customer. It is therefore NOT a forbidden capability: its name intentionally contains no
+# substring below, so this guard passes it by construction. CUSTOMER sends remain forbidden (the
+# ``send_*`` / ``send_to_customer`` substrings below), still routed only through the Pillar-7
+# campaign approval gate. Do NOT add a ``send_freeform``-named owner tool — that WOULD trip the guard;
+# ``reply_to_owner`` is the sanctioned name. (Pinned in tests/agent/test_no_write_tool_surface.py.)
 FORBIDDEN_CAPABILITY_SUBSTRINGS: tuple[str, ...] = (
     # direct customer-send capabilities (must go via the approval-gated campaign path)
     "send_whatsapp_message",

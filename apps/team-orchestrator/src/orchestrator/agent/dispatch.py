@@ -947,7 +947,14 @@ def dispatch_brain(
     # assistant turn, which auto-suppresses the D1 completed-no-reply fallback
     # (VT-583). Best-effort: _maybe_send_manager_reply never raises.
     if terminal_path == "terminal" and final_status == "completed":
-        _maybe_send_manager_reply(tenant_id, event, terminal_state)
+        # VT-632 (Step 1) — when the brain AUTHORS its owner message by CALLING reply_to_owner, skip
+        # the scrape ladder to avoid a double-send. The skip decision is a fail-CLOSED IN-PROCESS
+        # fact (a reply_to_owner "sent" ToolMessage in terminal_state), NOT a fail-soft DB read — so
+        # a transient DB failure can never suppress BOTH this scrape and the D1 net into silence
+        # (adversarial-verify finding). Uncertain ⇒ scrape runs ⇒ the owner still gets a reply. A
+        # pre-VT-632 / flag-off run has no such ToolMessage ⇒ the scrape fires exactly as before.
+        if not _reply_tool_already_sent(terminal_state):
+            _maybe_send_manager_reply(tenant_id, event, terminal_state)
 
     # VT-594 — the collapse path (spawn -> specialist -> collapse_node) completes
     # SIX distinct ways with NOTHING transmitting an owner message (the escalated
@@ -955,7 +962,11 @@ def dispatch_brain(
     # returned earlier on __interrupt__ and never reaches here — no double-send).
     # Best-effort: _maybe_send_collapse_reply never raises.
     if terminal_path == "collapse" and final_status == "completed":
-        _maybe_send_collapse_reply(tenant_id, event, terminal_state, specialist_result)
+        # VT-632 — same fail-closed skip: if reply_to_owner already delivered this run (the brain
+        # narrated to the owner AND a plan collapsed in the same run), don't ALSO send the
+        # deterministic collapse body (adversarial-verify: the collapse branch had no skip).
+        if not _reply_tool_already_sent(terminal_state):
+            _maybe_send_collapse_reply(tenant_id, event, terminal_state, specialist_result)
 
     # VT-611 (Phase B2, Finding A) — the shadow-mode OBSERVATIONAL manager_review pass
     # (manager/shadow_eval.py). Runs AFTER legacy's own real reply/effect above (loop_mode.py's own
@@ -1372,6 +1383,23 @@ def _compose_progression_reply(
             "VT-616: anti-repeat recompose failed (fail-soft) tenant=%s", tenant_id
         )
         return None
+
+
+def _reply_tool_already_sent(terminal_state: dict[str, Any]) -> bool:
+    """VT-632 — True iff the ``reply_to_owner`` tool provably DELIVERED an owner message this run,
+    read from the in-process ``terminal_state`` messages (a "sent" ToolMessage). This is a fail-
+    CLOSED fact: no DB read, so a transient DB failure can never suppress the scrape / D1 net into
+    silence (unlike ``_brain_emitted_owner_reply``, whose fail-soft→True is correct only for the
+    redundant D1 net). A pre-VT-632 / flag-off run has no such ToolMessage ⇒ False ⇒ the scrape
+    fires unconditionally, byte-identical to before. Any error ⇒ False (fire the scrape → the owner
+    still gets a reply)."""
+    try:
+        from orchestrator.agent.tools.reply_to_owner import _count_prior_sends
+
+        return _count_prior_sends(terminal_state.get("messages", []) or []) > 0
+    except Exception:  # noqa: BLE001 — uncertain ⇒ do NOT skip the scrape (bias toward sending)
+        logger.debug("VT-632: reply-tool send check failed (fail-soft → not sent)", exc_info=True)
+        return False
 
 
 def _maybe_send_manager_reply(

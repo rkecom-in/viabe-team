@@ -179,8 +179,14 @@ def _is_luhn_valid(digits: str) -> bool:
 # String-level pass — pattern substitutions, ordered to avoid collisions.
 # ---------------------------------------------------------------------------
 
-def _redact_str(value: str) -> str:
+def _redact_str(value: str, *, hash_long_body: bool = True) -> str:
     """Apply pattern regexes in collision-safe order. Idempotent.
+
+    ``hash_long_body`` (VT-632): when True (default — every existing caller), a string over
+    ``_LONG_BODY_THRESHOLD`` chars is replaced WHOLESALE with a ``<body:hash:…>`` token (that rule
+    bounds LOG / span size). Owner-facing sends pass False: a real manager reply routinely exceeds
+    200 chars and must reach the owner as its redacted text, not a hash token — the pattern +
+    registry substitutions above are the PII protection there, not the whole-body hash.
 
     Order: PAN → IFSC → GSTIN → email → CC (Luhn-validated) → Aadhaar →
     E.164 phone → Indian-10-digit phone → long-body. The order is the
@@ -241,7 +247,8 @@ def _redact_str(value: str) -> str:
 
     # 8. Long raw-string body — only after all pattern subs above so we
     # don't hash the substituted output spuriously. Threshold per brief §1.
-    if len(value) > _LONG_BODY_THRESHOLD and not _is_already_redacted(value):
+    # VT-632: owner-facing sends opt OUT (hash_long_body=False) — see the docstring.
+    if hash_long_body and len(value) > _LONG_BODY_THRESHOLD and not _is_already_redacted(value):
         return _hash_raw_body(value)
 
     return value
@@ -332,6 +339,8 @@ def redact(
     depth: int = 0,
     max_depth: int = DEFAULT_MAX_DEPTH,
     name_registry: Callable[[str], bool] | None = None,
+    *,
+    hash_long_body: bool = True,
 ) -> Any:
     """Return a PII-safe copy of ``value``.
 
@@ -360,7 +369,7 @@ def redact(
         return "<redaction_truncated>"
 
     if isinstance(value, str):
-        out = _redact_str(value)
+        out = _redact_str(value, hash_long_body=hash_long_body)
         # Customer-name registry exact-match scan inside the raw string —
         # only when caller provided a registry and the value isn't already
         # a token. Keeps cost low for the no-registry case.
@@ -377,15 +386,21 @@ def redact(
             elif key_str in _BANK_KEYS:
                 result[k] = _redact_bank_value(v)
             else:
-                result[k] = redact(v, depth + 1, max_depth, name_registry)
+                result[k] = redact(
+                    v, depth + 1, max_depth, name_registry, hash_long_body=hash_long_body
+                )
         return result
 
     if isinstance(value, list):
-        return [redact(item, depth + 1, max_depth, name_registry) for item in value]
+        return [
+            redact(item, depth + 1, max_depth, name_registry, hash_long_body=hash_long_body)
+            for item in value
+        ]
 
     if isinstance(value, tuple):
         return tuple(
-            redact(item, depth + 1, max_depth, name_registry) for item in value
+            redact(item, depth + 1, max_depth, name_registry, hash_long_body=hash_long_body)
+            for item in value
         )
 
     return value
