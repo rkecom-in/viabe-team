@@ -973,6 +973,29 @@ def webhook_pipeline_run(tenant_id: str, run_id: str, twilio_fields: dict) -> di
                 "onboarding_done": resume_result.get("done"),
             }
 
+        # VT-626 — deterministic FIRST-CONTACT connect route. The resume gate above only fires on an
+        # EXISTING connector state; a first "connect my Sheet/Shopify" ask had no deterministic net and
+        # relied on the LLM emitting spawn_integration (intermittent D1 stall / fake handoff — same
+        # LLM-gated-handoff class as VT-623). This mints the OAuth link-out (sheets) / kicks off discovery
+        # (shopify) deterministically. Shares this block's inbound + non-dupe + not-loop-owned guard;
+        # FAIL-OPEN inside. Runs AFTER resume (a live flow is handled above) and BEFORE the brain.
+        from orchestrator.onboarding.connector_first_contact import (
+            maybe_start_connector_onboarding,
+        )
+
+        first_contact_result = maybe_start_connector_onboarding(
+            tenant_id, event.body or "", event.twilio_message_sid, event.sender_phone
+        )
+        if first_contact_result is not None:
+            close_webhook_run(tenant_id, run_id, "completed")
+            return {
+                "run_id": run_id,
+                "tenant_id": tenant_id,
+                "routed": "integration_first_contact",
+                "handler": None,
+                "onboarding_done": first_contact_result.get("done"),
+            }
+
     # VT-384 — the demote CAS leg (plan-ack §2). A substantive owner inbound during an L3 hold
     # demotes the auto_send_pending batch to awaiting_approval (the owner wants eyes on it; the
     # batch re-enters the normal approval path — nothing is lost). The demote runs BEFORE pre_filter
