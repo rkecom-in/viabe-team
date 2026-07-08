@@ -1297,9 +1297,17 @@ def _reply_repeats_recent(
             prior = str(turn.get("text") or "")
             if not prior:
                 continue
-            ratio = difflib.SequenceMatcher(
-                None, norm_cand, _normalize_reply(prior)
-            ).ratio()
+            norm_prior = _normalize_reply(prior)
+            # VT-621: stored conversation_log turns are capped at _TEXT_CAP (record_turn), but the
+            # candidate here is the FULL untruncated reply. Comparing full-vs-truncated drops difflib's
+            # ratio below the threshold for any reply longer than the cap (measured on dev: a 1592-char
+            # candidate vs its 995-char stored copy = 0.77; a 2406-char one = 0.58 — both < 0.90), so
+            # byte-identical LONG repeats slipped through and the guard never fired. Compare on the
+            # common-length prefix so a truncated prior still matches the full reply it was cut from.
+            n = min(len(norm_cand), len(norm_prior))
+            if n < _NEAR_DUP_MIN_LEN:
+                continue
+            ratio = difflib.SequenceMatcher(None, norm_cand[:n], norm_prior[:n]).ratio()
             if ratio >= _NEAR_DUP_RATIO:
                 return True
         return False

@@ -51,6 +51,18 @@ def test_case_whitespace_variant_is_flagged(monkeypatch):
     assert dispatch._reply_repeats_recent(_TID, variant) is True
 
 
+def test_long_reply_vs_truncated_prior_is_flagged(monkeypatch):
+    # VT-621: record_turn caps stored turns at _TEXT_CAP (~1000 chars), but the candidate here is the
+    # FULL untruncated reply. A byte-identical repeat whose STORED copy was truncated must still be
+    # flagged. Pre-fix, difflib compared full-vs-truncated → ratio fell below 0.90 for any reply past
+    # the cap (measured on dev: 1592 vs 995 = 0.77), so long verbatim repeats slipped through and the
+    # manager shipped dupes. The common-prefix comparison catches it.
+    full = (_LONG + " ") * 8  # ~2100 chars, well over the 1000-char storage cap
+    truncated_prior = full[:1000]  # what record_turn actually persisted
+    _patch_window(monkeypatch, [{"role": "assistant", "text": truncated_prior}])
+    assert dispatch._reply_repeats_recent(_TID, full) is True
+
+
 def test_genuinely_different_reply_not_flagged(monkeypatch):
     _patch_window(monkeypatch, [{"role": "assistant", "text": _LONG}])
     other = "Sure — what city is your business in? We have Surat on file, is that right?"
