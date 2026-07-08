@@ -104,10 +104,18 @@ def init_substrate(database_url: str) -> None:
     global _pool, _compiled, _saver
     if _compiled is not None:
         return
+    # VT-621: this ONE pool is shared between the LangGraph PostgresSaver checkpointer (holds
+    # connections for checkpoint I/O across every graph superstep) AND all tenant_connection reads
+    # (~8 per dispatch turn: l1/business/directive/lessons/intent/conversation/onboarding/inflight,
+    # + the VT-616 anti-repeat guard). max_size=4 starved it: under checkpointer contention a
+    # tenant read intermittently fail-softed to [] (the guard then saw no prior turn → the manager
+    # shipped a verbatim repeat; the brain's context block could drop the same way). Local repro
+    # with a DEDICATED pool was 40/40 clean — the shared-pool contention was the missing variable.
+    # min_size=2 keeps warm connections; max_size=10 gives headroom well under Supabase dev limits.
     _pool = ConnectionPool(
         database_url,
-        min_size=1,
-        max_size=4,
+        min_size=2,
+        max_size=10,
         kwargs={"autocommit": True, "row_factory": dict_row},
         reset=_reset_connection,
         open=True,
