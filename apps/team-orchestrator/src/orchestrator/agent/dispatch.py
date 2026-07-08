@@ -1424,31 +1424,7 @@ def _maybe_send_manager_reply(
     # recompose ONCE with a forceful progression instruction. Fires ONLY on a detected dup (rare),
     # so normal traffic pays no extra cost. Fail-safe: any miss keeps the original body.
     _sid = getattr(event, "twilio_message_sid", None)
-    _dup = _reply_repeats_recent(tenant_id, body, exclude_message_sid=_sid)
-    try:  # VT-621-AUDIT (temp, remove after): capture the guard's RUNTIME window visibility on the
-        # audit spine (reliable, unlike railway logs). guard_assistant_turns=0 on a repeat turn ⇒ the
-        # runtime read missed the prior assistant turn (the real mechanism); >0 with dup=False ⇒ a
-        # comparison issue. Correlate with the byte-identical repeats per tenant.
-        from orchestrator.conversation_log import active_window as _aw
-
-        _gw = _aw(tenant_id, max_turns=6, exclude_message_sid=_sid)
-        emit_tm_audit(
-            event_layer="does",
-            event_kind="antirepeat_guard_diag",
-            actor="team_manager",
-            tenant_id=tenant_id,
-            run_id=terminal_state.get("run_id"),
-            summary="VT-621 guard runtime window visibility",
-            result={
-                "dup": _dup,
-                "guard_assistant_turns": sum(1 for t in _gw if t.get("role") == "assistant"),
-                "guard_total_turns": len(_gw),
-                "cand_len": len(_normalize_reply(body)),
-            },
-        )
-    except Exception:  # noqa: BLE001 — diagnostic only, never break the transmit
-        pass
-    if _dup:
+    if _reply_repeats_recent(tenant_id, body, exclude_message_sid=_sid):
         regen = _compose_progression_reply(
             tenant_id, event, terminal_state, prior_reply=body
         )
