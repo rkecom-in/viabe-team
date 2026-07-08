@@ -33,6 +33,7 @@ attach the callback per invocation via the driver.
 from __future__ import annotations
 
 import logging
+import os
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, cast
@@ -84,6 +85,46 @@ ORCHESTRATOR_AGENT_SYSTEM_MESSAGE = SystemMessage(
         }
     ]
 )
+
+# VT-632 (Step 1) — the owner-reply-tool directive, appended to the system prompt ONLY when the
+# reply_to_owner tool is bound (flag-gated). Kept as a build-time append (not in the static .md) so
+# the instruction and the tool are turned on together: telling the model to call a tool it doesn't
+# hold would just confuse it. See build_orchestrator_agent + tools/reply_to_owner.py.
+_REPLY_TOOL_DIRECTIVE = (
+    "\n\n## Replying to the owner (REQUIRED)\n"
+    "You have a tool, `reply_to_owner`, and it is the ONLY channel that reaches the owner. END "
+    "EVERY handle-directly turn by calling `reply_to_owner` with the COMPLETE message you want the "
+    "owner to read, in their language. Text you write but do NOT pass to the tool is never "
+    "delivered. You never pass a phone number — the runtime sends it to the owner.\n"
+    "- After you delegate and read the result, call `reply_to_owner` to tell the owner what "
+    "happened — do not stop at an intention.\n"
+    "- NEVER claim you did something (\"done\", \"sent\", \"I've connected it\") unless a tool "
+    "actually did it this turn. If you only intend to act, take the action, THEN report it.\n"
+    "- Do NOT repeat a message you already sent. If you have nothing new, give the next concrete "
+    "step, delegate the work, or ask ONE specific question."
+)
+
+
+def _reply_to_owner_enabled() -> bool:
+    """VT-632 flag gate. reply_to_owner (+ its directive + the dispatch scrape-skip) is active ONLY
+    when ``MANAGER_REPLY_TOOL`` is truthy. Dev-first rollout; the production cutover is Fazal-only.
+    Default OFF ⇒ the emission path is byte-identical to pre-VT-632."""
+    return os.getenv("MANAGER_REPLY_TOOL", "").strip().lower() in {"1", "true", "on", "yes"}
+
+
+def _system_message_with_reply_directive() -> SystemMessage:
+    """The base system prompt plus the reply_to_owner directive (VT-632). The base text keeps its
+    ephemeral cache_control; the short directive rides as a second, uncached block."""
+    return SystemMessage(
+        content=[
+            {
+                "type": "text",
+                "text": ORCHESTRATOR_AGENT_SYSTEM_PROMPT,
+                "cache_control": {"type": "ephemeral"},
+            },
+            {"type": "text", "text": _REPLY_TOOL_DIRECTIVE},
+        ]
+    )
 
 # Pinned exactly in pyproject (langgraph / langchain-* == ): the agent's model
 # behaviour is version-sensitive, so model + library bumps are Type 2 changes.
@@ -468,6 +509,16 @@ def build_orchestrator_agent(
     observability. The agent itself is a plain runnable.
     """
     tools = [*ORCHESTRATOR_AGENT_TOOLS, *extra_tools]
+    # VT-632 (Step 1) — flag-gated: bind the owner-reply-authoring tool + append its directive.
+    # reply_to_owner SENDS to the owner, but the recipient is resolved SERVER-SIDE (the model never
+    # supplies a number) so the VT-268 boundary holds — its name carries no forbidden capability, so
+    # the guardrail below passes it by construction (the carve-out is documented in tool_guardrail).
+    system_message = ORCHESTRATOR_AGENT_SYSTEM_MESSAGE
+    if _reply_to_owner_enabled():
+        from orchestrator.agent.tools.reply_to_owner import reply_to_owner
+
+        tools.append(reply_to_owner)
+        system_message = _system_message_with_reply_directive()
     # VT-268: fail-CLOSED guardrail — the agent must never hold a direct
     # send-to-customer / accounts-book-write / ledger-write tool (raises at build if it does).
     from orchestrator.agent.tool_guardrail import assert_agent_tools_safe
@@ -476,7 +527,7 @@ def build_orchestrator_agent(
     return create_agent(
         model=model,
         tools=tools,
-        system_prompt=ORCHESTRATOR_AGENT_SYSTEM_MESSAGE,
+        system_prompt=system_message,
         name="orchestrator_agent",
         state_schema=OrchestratorAgentState,
         # VT-484: a raised tool/spawn must STILL emit a tool_result (error) so the
