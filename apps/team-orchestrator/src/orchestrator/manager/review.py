@@ -96,6 +96,7 @@ def extract_specialist_return(
     resp = client.messages.create(
         model=_REVIEW_MODEL,
         max_tokens=_MAX_TOKENS,
+        temperature=0.0,  # VT-628 — deterministic (sonnet accepts temperature; opus would 400)
         system=_EXTRACTION_SYSTEM_PROMPT,
         messages=[{"role": "user", "content": user_content}],
     )

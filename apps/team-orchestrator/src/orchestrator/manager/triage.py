@@ -83,6 +83,7 @@ def triage_turn(
         resp = client.messages.create(
             model=_TRIAGE_MODEL,
             max_tokens=_MAX_TOKENS,
+            temperature=0.0,  # VT-628 — deterministic (sonnet accepts temperature; opus would 400)
             system=_TRIAGE_SYSTEM_PROMPT,
             messages=[{"role": "user", "content": user_content}],
         )
