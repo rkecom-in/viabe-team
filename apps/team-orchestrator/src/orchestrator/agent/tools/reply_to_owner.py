@@ -179,7 +179,8 @@ def reply_to_owner(text: str, state: Annotated[dict[str, Any], InjectedState]) -
             "closed). Do not retry blindly."
         )
 
-    logger.info("VT-632: reply_to_owner delivered (tenant=%s len=%d)", tenant_id, len(body))
+    # VT-632-DIAG (temp, remove after confirming): WARNING so the fire is unmissable in railway logs.
+    logger.warning("VT-632-DIAG-FIRE: reply_to_owner delivered (tenant=%s len=%d)", tenant_id, len(body))
     return "sent"
 
 
