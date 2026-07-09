@@ -541,6 +541,5 @@ def build_orchestrator_agent(
 # its own instance with the spawn_sales_recovery handoff tool added.
 orchestrator_agent = build_orchestrator_agent(_MODEL)
 
-# VT-632-DIAG (temp, remove after confirming): boot-time visibility of the reply-tool flag on the
-# deployed process — a WARNING so it can't be filtered/out-of-window like the INFO fire log was.
-logger.warning("VT-632-DIAG-BOOT: reply_to_owner flag enabled=%s", _reply_to_owner_enabled())
+# VT-632: once-per-boot visibility of the reply-tool flag state (low-noise; aids deploy confirmation).
+logger.info("VT-632: reply_to_owner flag enabled=%s", _reply_to_owner_enabled())
