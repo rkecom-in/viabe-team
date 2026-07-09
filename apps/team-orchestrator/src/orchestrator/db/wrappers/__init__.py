@@ -965,6 +965,41 @@ class PendingApprovalsWrapper(TenantScopedTable):
             return 0
         return int(row["defer_count"] if isinstance(row, dict) else row[0])
 
+    def delete_by_id(
+        self, tenant_id: UUID | str, approval_id: UUID | str, *, conn: Any = None
+    ) -> int:
+        """VT-615 arm-then-send compensation: remove a just-armed (committed) pending row
+        when the subsequent template send fails, so the orphan doesn't block the tenant's
+        one-open queue until the timeout sweep reaps it. Tenant-predicated by-PK (never
+        cross-tenant). Returns rows deleted."""
+        tid = self._uuid(tenant_id)
+        with self._conn(tid, conn) as c:
+            cur = c.execute(
+                "DELETE FROM pending_approvals WHERE tenant_id = %s AND id = %s",
+                (str(tid), str(approval_id)),
+            )
+            return cur.rowcount if cur.rowcount is not None else 0
+
+    def set_owner_message_sid(
+        self,
+        tenant_id: UUID | str,
+        approval_id: UUID | str,
+        owner_message_sid: str,
+        *,
+        conn: Any = None,
+    ) -> int:
+        """VT-615 step 2c: record which owner message carried the approval template
+        (metadata only; ``mark_resolved`` COALESCEs it on resolve). Tenant-predicated
+        by-PK. Returns rows updated."""
+        tid = self._uuid(tenant_id)
+        with self._conn(tid, conn) as c:
+            cur = c.execute(
+                "UPDATE pending_approvals SET owner_message_sid = %s "
+                "WHERE tenant_id = %s AND id = %s",
+                (owner_message_sid, str(tid), str(approval_id)),
+            )
+            return cur.rowcount if cur.rowcount is not None else 0
+
     def count_recent_campaign_requests(
         self, tenant_id: UUID | str, *, days: int = 7, conn: Any = None
     ) -> int:

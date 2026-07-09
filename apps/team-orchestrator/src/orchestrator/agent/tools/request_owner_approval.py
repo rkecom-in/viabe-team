@@ -329,10 +329,7 @@ def arm_pause_request(
         # it), else the orphan blocks the tenant's one-open queue until the timeout sweep reaps it.
         def _rollback_arm() -> None:
             try:
-                conn.execute(
-                    "DELETE FROM pending_approvals WHERE tenant_id = %s AND id = %s",
-                    (str(tenant_id), str(approval_id)),
-                )
+                PendingApprovalsWrapper().delete_by_id(tenant_id, approval_id, conn=conn)
             except Exception:  # noqa: BLE001 — best-effort; the timeout sweep is the backstop
                 # ERROR (not warning): a swallowed rollback leaves a committed open row that blocks THIS
                 # tenant's one-open approval queue until the timeout sweep reaps it (up to timeout_hours,
@@ -407,10 +404,8 @@ def arm_pause_request(
             # 2c. Record which owner message carried the template (metadata; resolve COALESCEs it).
             if owner_message_sid:
                 try:
-                    conn.execute(
-                        "UPDATE pending_approvals SET owner_message_sid = %s "
-                        "WHERE tenant_id = %s AND id = %s",
-                        (owner_message_sid, str(tenant_id), str(approval_id)),
+                    PendingApprovalsWrapper().set_owner_message_sid(
+                        tenant_id, approval_id, owner_message_sid, conn=conn
                     )
                 except Exception:  # noqa: BLE001 — metadata only; never fail the arm on it
                     logger.warning(
