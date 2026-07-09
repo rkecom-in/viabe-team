@@ -15,8 +15,8 @@
     {
       "message": "and how many lapsed customers do I have in total?",
       "assert_no_silent": true,
-      "assert_contains": ["10"],
-      "note": "Pure count ask fast-paths to the raw seeded number, confirming the cohort discussion in step 1 is grounded in real data rather than an improvised figure."
+      "assert_contains": ["8"],
+      "note": "VT-632 (Fazal 2026-07-09: lapsed = no purchase in 45d): the LAPSED count is the dormant subset, NOT the total seeded. The seeder makes n_lapsed = n - n//4 = 10 - 2 = 8 customers ~120-295d dormant (the other 2 are recent, ~2-10d). Corrected from the old ['10'] which encoded the TOTAL (customer_count) — the opus judge flagged it as answering total-vs-lapsed. Now fast-paths to lapsed_count (deterministic, 45d)."
     }
   ]
 }

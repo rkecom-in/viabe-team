@@ -15,9 +15,18 @@ import unicodedata
 from typing import Literal
 from uuid import UUID
 
-StatusQueryType = Literal["customer_count", "last_campaign", "opt_out_count", "billing", "unknown"]
+StatusQueryType = Literal[
+    "customer_count", "lapsed_count", "last_campaign", "opt_out_count", "billing", "unknown"
+]
 
 _DASHBOARD = "https://viabe.ai/team/dashboard"
+
+# VT-632 — Fazal's canonical customer-facing definition (2026-07-09, via Cowork): a LAPSED /
+# dormant customer is one with NO purchase in the last 45 days. SINGLE SOURCE OF TRUTH — the only
+# runtime lapsed-window constant; reference it, never re-literal 45. (The Sales-Recovery SENDABLE
+# cohort is a DIFFERENT thing: percentile-gated in detect_lapsed_customers, and the cosmetic
+# "dormant-60d" label in sales_recovery_v1.md is an SR-side label, not this count metric.)
+LAPSED_WINDOW_DAYS = 45
 
 # VT-632 — a cash-flow / receivables / finance READ is NOT a status_query this deterministic parse
 # owns (there is no such qtype); it belongs to the brain's finance advisory tools (analyze_cash_flow).
@@ -50,6 +59,13 @@ def classify_status_query(body: str) -> StatusQueryType:
         or "opt out" in norm
     ):
         return "opt_out_count"
+    # VT-632 lapsed_count — checked BEFORE customer_count so "how many LAPSED customers" answers the
+    # dormant count (45d), not the total ledger count (the sr_cohort defect: "10 total" for a lapsed
+    # ask whose true answer is the dormant subset). Keyed on the explicit "lapsed"/"dormant" TOKEN
+    # (Cowork 202500Z) — NOT behavioural phrases like "haven't bought" (those stay with the brain's
+    # speech-act guard, and a DO like "win back my lapsed customers" never classifies status_query).
+    if {"lapsed", "dormant"} & tokens:
+        return "lapsed_count"
     if {"campaign", "campaigns"} & tokens:
         return "last_campaign"
     if {"customer", "customers", "ग्राहक", "ग्राहकों"} & tokens:
@@ -78,6 +94,19 @@ def answer_status_query(tenant_id: UUID | str, body: str) -> str | None:
     if qtype == "customer_count":
         n = CustomersWrapper().count_all(tenant_id)
         return f"You currently have {n} customers in your ledger."
+
+    if qtype == "lapsed_count":
+        # Fazal's 45d definition: bought before, no sale in the last LAPSED_WINDOW_DAYS.
+        n = CustomersWrapper().count_lapsed(tenant_id, days=LAPSED_WINDOW_DAYS)
+        if n == 0:
+            return (
+                "None of your customers are lapsed — everyone with a purchase history has bought "
+                f"within the last {LAPSED_WINDOW_DAYS} days."
+            )
+        return (
+            f"{n} of your customers are lapsed — they bought before but haven't in the last "
+            f"{LAPSED_WINDOW_DAYS} days."
+        )
 
     if qtype == "opt_out_count":
         # opted_out (consumer) + owner_excluded (owner) are both skipped by campaign sends.
