@@ -272,6 +272,32 @@ class CustomersWrapper(TenantScopedTable):
             ).fetchone()
         return int(dict(row)["n"]) if row else 0
 
+    def count_lapsed(
+        self, tenant_id: UUID | str, *, days: int, conn: Any = None
+    ) -> int:
+        """VT-632 — COUNT lapsed customers for the owner's "how many lapsed/dormant" status query.
+        Fazal's canonical definition (2026-07-09): a LAPSED customer is one who USED to buy but has
+        had NO sale in the last ``days`` (45 = ``LAPSED_WINDOW_DAYS``). So: has >=1 'sale' ledger
+        entry (was active) AND no 'sale' within ``days`` (went quiet). Purchase-behaviour fact —
+        NOT filtered by opt_out (that is a sendability filter, not the lapsed definition); this is
+        distinct from ``lapsed_candidates`` (the percentile-gated SENDABLE win-back cohort, a
+        subset). Tenant-predicated (RLS + explicit WHERE)."""
+        tid = self._uuid(tenant_id)
+        with self._conn(tid, conn) as c:
+            row = c.execute(
+                "SELECT count(*) AS n FROM customers c "
+                "WHERE c.tenant_id = %(tid)s "
+                "  AND EXISTS (SELECT 1 FROM customer_ledger_entries e "
+                "              WHERE e.tenant_id = c.tenant_id AND e.customer_id = c.id "
+                "                AND e.entry_type = 'sale') "
+                "  AND NOT EXISTS (SELECT 1 FROM customer_ledger_entries e "
+                "                  WHERE e.tenant_id = c.tenant_id AND e.customer_id = c.id "
+                "                    AND e.entry_type = 'sale' "
+                "                    AND e.entry_date > CURRENT_DATE - make_interval(days => %(days)s))",
+                {"tid": str(tid), "days": days},
+            ).fetchone()
+        return int(dict(row)["n"]) if row else 0
+
     def top_customers_by_spend(
         self, tenant_id: UUID | str, *, limit: int, conn: Any = None
     ) -> list[dict[str, Any]]:
