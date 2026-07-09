@@ -498,6 +498,13 @@ def test_escalate_outcome_ends_loop_without_further_dispatch(substrate, monkeypa
 
     assert status == "blocked"
     assert len(calls) == 1  # escalate must NOT trigger a further dispatch
+    # VT-632 Step 5 — an escalate must arm the honest owner closure, never leave silence after the
+    # interim ack (the seeded tenant has no owner_phone, so the notify itself defers and leaves the
+    # status 'pending' — what we pin here is that the terminal_outcome + pending flag were SET).
+    from orchestrator.manager import task_store as _ts
+    _task = _ts.get_task(tid, task_id)
+    assert _task["terminal_outcome"] == "escalated"
+    assert _task["owner_notification_status"] == "pending"
 
 
 # --- limits: revisions per step -----------------------------------------------------------------
@@ -534,6 +541,12 @@ def test_revision_limit_exceeded_blocks_with_incident(substrate, monkeypatch: py
     assert incident["escalation_tier"] >= 2
     # Team-lead ruling: a self-describing kind (migration 166), never overloaded onto 'other'.
     assert incident["incident_kind"] == "limit_exhausted"
+    # VT-632 Step 5 — a limit block also arms the honest owner closure (terminal_outcome +
+    # owner_notification_status='pending'), so a blocked task can never end in owner silence.
+    from orchestrator.manager import task_store as _ts
+    _task = _ts.get_task(tid, task_id)
+    assert _task["terminal_outcome"] == "escalated"
+    assert _task["owner_notification_status"] == "pending"
 
 
 def test_prereq_policy_block_uses_other_not_limit_exhausted(substrate, monkeypatch: pytest.MonkeyPatch):
