@@ -4,10 +4,17 @@ Closes the "truthful owner outcome" gap: ``manager/workflow.py``'s ``_settle_ver
 ``_settle_declined_approval`` (mig 165, VT-605/606) have recorded ``terminal_outcome`` +
 ``owner_notification_status='pending'`` since the completion-verification checkpoint landed, but
 NOTHING ever sent the owner anything — a completed/cancelled task settled silently. This module is
-that send, scoped to the three outcomes the loop actually writes 'pending' for today:
-``completed_with_effect`` / ``completed_no_action`` / ``cancelled`` (``failed``/``escalated`` land
-the task at the NON-terminal 'blocked' status with a VTR incident — that is the operator's surface,
-never 'pending', out of scope here).
+that send, scoped to the outcomes the loop writes 'pending' for:
+``completed_with_effect`` / ``completed_no_action`` / ``cancelled`` — and, since VT-632 Step 5,
+``escalated`` too. Before Step 5 a task that hit a limit / prereq-failure / owner-unreachable / an
+explicit ``escalate`` review outcome settled 'blocked' with a VTR incident and left the owner in
+SILENCE after the interim "I'm on it" ack (the async-notify gap — the dominant Tier-1 trust-breaker
+in the manager gate). Step 5 makes those ``_block_*`` paths ALSO write ``terminal_outcome=
+'escalated'`` + ``owner_notification_status='pending'``, so this module now closes that silence with
+an HONEST "I couldn't finish it on my own — I've flagged it for my team and I'll follow up" message
+(never a false success; consistent with a later operator follow-up). The task itself stays at the
+NON-terminal 'blocked' status — the operator surface (the VTR incident) is unchanged; Step 5 only
+adds the owner-facing closure that was missing.
 
 Pattern: mirrors ``owner_surface/campaign_outcome.py::maybe_report_campaign_outcome`` byte-for-byte
 in shape — a DETERMINISTIC bilingual (en/hi) composer (Pillar 1: no LLM, same inputs -> same text),
@@ -122,11 +129,15 @@ def _write_send_idempotency_record(
         )
 
 
-# The three terminal_outcome values the loop's own settle steps write 'pending' for today
-# (workflow.py's _settle_verified_task / _settle_declined_approval). 'failed'/'escalated' land the
-# task at the non-terminal 'blocked' status with a VTR incident instead — never 'pending', so this
-# module never sees them; listed here only as the explicit scope fence, checked defensively.
-_HANDLED_OUTCOMES = frozenset({"completed_with_effect", "completed_no_action", "cancelled"})
+# The terminal_outcome values the loop writes 'pending' for. The first three come from the settle
+# steps (workflow.py's _settle_verified_task / _settle_declined_approval); 'escalated' is VT-632
+# Step 5 — every _block_* path (limit / prereq / owner-unreachable) and the manager_review
+# 'escalate' outcome now write terminal_outcome='escalated' + owner_notification_status='pending'
+# on the (still non-terminal) 'blocked' task, so a blocked task can never end in owner silence.
+# 'failed' stays out of scope (no path writes it 'pending' today) — checked defensively below.
+_HANDLED_OUTCOMES = frozenset(
+    {"completed_with_effect", "completed_no_action", "cancelled", "escalated"}
+)
 
 
 def _extract_objective_text(task: dict[str, Any]) -> str:
@@ -173,6 +184,25 @@ def compose_task_outcome_message(
         return (
             f"I looked into it — {obj} — and found no action was needed." if obj else
             "I looked into your request and found no action was needed."
+        )
+
+    if outcome == "escalated":
+        # VT-632 Step 5 — a blocked/escalated terminal. MUST be honest: the manager could NOT
+        # complete it on its own, it is NOT done, and it has been handed to the team to follow up.
+        # Never a false success; never a permanent-failure dead end (an operator may still resolve
+        # it — the copy stays consistent with a later follow-up).
+        if hi:
+            return (
+                f"मैंने {obj} पर काम किया, लेकिन इसे अकेले पूरा नहीं कर पाया — मैंने इसे अपनी team को भेज दिया है "
+                "और मैं आपको update दूँगा।" if obj else
+                "मैंने आपकी request पर काम किया, लेकिन इसे अकेले पूरा नहीं कर पाया — मैंने इसे अपनी team को भेज "
+                "दिया है और मैं आपको update दूँगा।"
+            )
+        return (
+            f"I looked into {obj}, but I couldn't finish it on my own — I've flagged it for my team "
+            "and I'll follow up with you." if obj else
+            "I looked into your request, but I couldn't finish it on my own — I've flagged it for "
+            "my team and I'll follow up with you."
         )
 
     # completed_with_effect: states plainly that the ask was carried out.

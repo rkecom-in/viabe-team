@@ -53,6 +53,34 @@ def test_compose_cancelled_no_objective_still_declines_en() -> None:
     assert "declined" in body.lower()
 
 
+def test_compose_escalated_is_honest_never_a_false_success_en() -> None:
+    """VT-632 Step 5 — a blocked/escalated terminal MUST read as "couldn't finish, flagged, will
+    follow up": never "Done"/success, never "declined" (the owner did NOT decline it), never
+    "no action was needed" (action WAS needed and attempted). Consistent with a later follow-up."""
+    body = to.compose_task_outcome_message("escalated", "re-engage the lapsed customers", locale="en")
+    assert "re-engage the lapsed customers" in body
+    assert "couldn't finish" in body.lower()
+    assert "flagged" in body.lower() and "follow up" in body.lower()
+    assert "done" not in body.lower()          # never a false success
+    assert "declined" not in body.lower()       # the owner did not decline
+    assert "no action was needed" not in body   # action WAS needed
+
+
+def test_compose_escalated_no_objective_degrades_gracefully_en() -> None:
+    body = to.compose_task_outcome_message("escalated", "", locale="en")
+    assert "couldn't finish" in body.lower()
+    assert "None" not in body
+    assert "done" not in body.lower()
+
+
+def test_compose_escalated_hi_is_honest_no_false_success() -> None:
+    body = to.compose_task_outcome_message("escalated", "ग्राहकों से दोबारा जुड़ें", locale="hi")
+    assert "ग्राहकों से दोबारा जुड़ें" in body
+    assert "team" in body                       # flagged for the team
+    assert "हो गया" not in body                  # never the completed_with_effect "done"
+    assert "अस्वीकृत" not in body                 # never the cancelled "declined"
+
+
 # ----------------------------- pure: composer (HI) --------------------------------------
 def test_compose_cancelled_hi_says_declined() -> None:
     body = to.compose_task_outcome_message("cancelled", "बिक्री अभियान", locale="hi")
@@ -179,6 +207,24 @@ def test_notify_completed_no_action_message_class_never_claims_effect(monkeypatc
     assert "Done" not in seen["body"]
 
 
+def test_notify_escalated_sends_honest_flagged_message_flips_delivered(monkeypatch) -> None:
+    """VT-632 Step 5 — 'escalated' is now a HANDLED outcome (a blocked _block_* / review-escalate
+    path writes it 'pending'): it SENDS the honest "couldn't finish, flagged, will follow up"
+    closure and flips delivered — no longer the pre-Step-5 silent skip."""
+    task = _pending_task("escalated", "re-engage the lapsed customers")
+    seen = _patch(monkeypatch, task=task)
+    tenant_id, task_id = uuid4(), uuid4()
+
+    sent = to.maybe_notify_owner_of_task_outcome(tenant_id, task_id, recipient_phone="+919811111111")
+
+    assert sent is True
+    assert "couldn't finish" in seen["body"].lower()
+    assert "flagged" in seen["body"].lower()
+    assert "Done" not in seen["body"] and "declined" not in seen["body"].lower()
+    assert seen["flips"] == [("delivered", ("pending",))]
+    assert seen["ledger"] == [("task_outcome_report", "SM_OUT", {"run_id": task_id})]
+
+
 def test_notify_is_idempotent_already_delivered_no_op(monkeypatch) -> None:
     """The dedup: owner_notification_status != 'pending' is a clean no-op — no send attempted,
     no second flip, no double-ledger row (a re-run of the same DBOS step on replay/retry)."""
@@ -195,8 +241,9 @@ def test_notify_is_idempotent_already_delivered_no_op(monkeypatch) -> None:
 
 
 def test_notify_unhandled_terminal_outcome_is_out_of_scope_no_send(monkeypatch) -> None:
-    """'failed'/'escalated' never actually reach 'pending' in production (they settle 'blocked'
-    instead) — this is the defensive scope fence, never exercised for real, still pinned."""
+    """'failed' has no path that writes it 'pending' today (VT-632 Step 5 wired 'escalated', not
+    'failed') — this is the defensive scope fence for the still-unhandled value: skip, no send, no
+    flip. ('escalated' is now HANDLED — see test_notify_escalated_* below.)"""
     task = _pending_task("failed")
     seen = _patch(monkeypatch, task=task)
 

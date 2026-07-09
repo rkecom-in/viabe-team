@@ -395,9 +395,16 @@ def _block_limit_exceeded(tenant_id: str, task_id: str, *, limit: str, count: in
     ruling (VT-606 recon follow-up): a self-describing ``limit_exhausted`` incident kind (migration
     166) — never overloaded onto ``other``/``failed_run``, so ops queries can tell "the plan hit a
     budget cap" apart from every other blocked-task cause at a glance. ``detail``/the audit decision
-    carry the structured (task_id, limit, count, threshold) shape, not a free-text reason string."""
+    carry the structured (task_id, limit, count, threshold) shape, not a free-text reason string.
+
+    VT-632 Step 5: 'never silence' now means to the OWNER too, not just the ops incident surface — this
+    ARMS terminal_outcome='escalated' + owner_notification_status='pending'; the honest owner notify
+    itself fires once at the workflow tail (a SEPARATE memoized step from this arming — mirrors the
+    VT-611 settle/notify split, so a notify-replay never re-forces 'pending' and the delivered-flip
+    stays a real second backstop against a double-send)."""
     task_store.set_task_status(
-        tenant_id, task_id, "blocked", expected_from=tuple(task_store.TASK_NON_TERMINAL)
+        tenant_id, task_id, "blocked", expected_from=tuple(task_store.TASK_NON_TERMINAL),
+        terminal_outcome="escalated", owner_notification_status="pending",
     )
     detail = {"task_id": str(task_id), "limit": limit, "count": count, "threshold": threshold}
     iid = create_incident(
@@ -419,9 +426,12 @@ def _block_limit_exceeded(tenant_id: str, task_id: str, *, limit: str, count: in
 def _block_prereq_or_policy_failed(tenant_id: str, task_id: str, *, step_id: str) -> None:
     """A step's capability/prerequisite/policy validation failed BEFORE any dispatch — NOT a limit
     exhaustion (kept off ``limit_exhausted`` so ops can tell the two causes apart); ``other`` + a
-    VTR incident, never silence."""
+    VTR incident, never silence. VT-632 Step 5: also ARMS the honest owner closure (terminal_outcome=
+    'escalated' + owner_notification_status='pending'); the notify itself fires at the workflow tail
+    (separate memoized step — see _block_limit_exceeded's note)."""
     task_store.set_task_status(
-        tenant_id, task_id, "blocked", expected_from=tuple(task_store.TASK_NON_TERMINAL)
+        tenant_id, task_id, "blocked", expected_from=tuple(task_store.TASK_NON_TERMINAL),
+        terminal_outcome="escalated", owner_notification_status="pending",
     )
     detail = {
         "source": "manager_task_workflow", "task_id": str(task_id), "step_id": step_id,
@@ -695,15 +705,36 @@ def _settle_declined_approval(tenant_id: str, task_id: str) -> None:
 @DBOS.step()
 def _notify_owner_of_terminal(tenant_id: str, task_id: str) -> None:
     """VT-611 pre-work #1 — the owner-notification composer's own DBOS checkpoint. Called right
-    after EITHER settle path above lands (_settle_verified_task via _run_verification_cycle;
+    after EITHER settle path lands (_settle_verified_task via _run_verification_cycle;
     _settle_declined_approval directly) so a completed/cancelled task actually tells the owner
     something, closing the "truthful owner outcome" gap (terminal_outcome +
     owner_notification_status='pending' were recorded since mig 165, but nothing sent until this).
+    VT-632 Step 5 REUSES this SAME step at the workflow tail for a 'blocked'/escalated terminal
+    (armed by the _block_* steps / _arm_escalation_for_notify) — deliberately a SEPARATE memoized
+    step from the arming so a notify-replay never re-forces owner_notification_status back to
+    'pending', keeping the delivered-flip a real second backstop against a double-send.
     Fail-soft by construction (owner_surface.task_outcome never raises) — a notification-send
-    failure must never unwind the settle that already committed."""
+    failure must never unwind the settle/block that already committed. Idempotent: maybe_notify
+    only sends while owner_notification_status=='pending' (a re-call on a delivered/failed/
+    not_required row is a clean no-op)."""
     from orchestrator.owner_surface.task_outcome import maybe_notify_owner_of_task_outcome
 
     maybe_notify_owner_of_task_outcome(tenant_id, task_id)
+
+
+@DBOS.step()
+def _arm_escalation_for_notify(tenant_id: str, task_id: str) -> None:
+    """VT-632 Step 5 — the manager_review 'escalate' outcome already settled the task 'blocked' + a
+    VTR incident inside manager_review's OWN module, so (unlike the _block_* paths) it never passed
+    through a step that ARMED the owner notify. Record terminal_outcome='escalated' +
+    owner_notification_status='pending' on the already-'blocked' task (idempotent CAS — 'blocked' is
+    a member of TASK_NON_TERMINAL, so the re-set is accepted and simply stamps the two columns).
+    ARM-ONLY: the honest owner closure itself fires once at the workflow tail via
+    _notify_owner_of_terminal — a separate memoized step from this arming (see that step's note)."""
+    task_store.set_task_status(
+        tenant_id, task_id, "blocked", expected_from=tuple(task_store.TASK_NON_TERMINAL),
+        terminal_outcome="escalated", owner_notification_status="pending",
+    )
 
 
 @DBOS.step()
@@ -723,9 +754,13 @@ def _block_owner_unreachable(tenant_id: str, task_id: str) -> None:
     """VT-607 fix round — the approval itself timed out (decision='timeout', the scheduled 48h
     sweep resolved it — NOT this loop's own approval_resolution_timeout poll-exhaustion, a
     DIFFERENT case already handled by _block_limit_exceeded above). 'other' + a VTR incident,
-    never silence, never an auto-success settle — an operator needs to re-engage the owner."""
+    never silence, never an auto-success settle — an operator needs to re-engage the owner. VT-632
+    Step 5: also ARMS the honest owner closure (terminal_outcome='escalated' +
+    owner_notification_status='pending'); the notify fires at the workflow tail (separate memoized
+    step — see _block_limit_exceeded's note)."""
     task_store.set_task_status(
-        tenant_id, task_id, "blocked", expected_from=tuple(task_store.TASK_NON_TERMINAL)
+        tenant_id, task_id, "blocked", expected_from=tuple(task_store.TASK_NON_TERMINAL),
+        terminal_outcome="escalated", owner_notification_status="pending",
     )
     detail = {"task_id": str(task_id), "reason": "owner_unreachable"}
     iid = create_incident(
@@ -910,7 +945,11 @@ def manager_task_workflow(tenant_id: str, task_id: str) -> str:
             continue  # loop back to claim the (now resumable) step
 
         if outcome == "escalate":
-            break  # manager_review already settled the task blocked + a VTR incident
+            # manager_review already settled the task blocked + a VTR incident; VT-632 Step 5 ARMS
+            # the honest owner closure here (the notify itself fires at the tail) so an escalate
+            # never lands as silence after the interim ack.
+            _arm_escalation_for_notify(tenant_id, task_id)
+            break
 
         if outcome == "paused_approval":
             # VT-607 (Loop Package 6) — the interrupt-composition fix: the approval gate paused
@@ -1004,6 +1043,16 @@ def manager_task_workflow(tenant_id: str, task_id: str) -> str:
 
     final = _get_task(tenant_id, task_id)
     final_status = str(final["status"]) if final else "unknown"
+    if final_status == "blocked":
+        # VT-632 Step 5 — every terminal BLOCK (limit / prereq / owner-unreachable / escalate) armed
+        # terminal_outcome='escalated' + owner_notification_status='pending' in its OWN memoized step
+        # above; fire the honest owner closure HERE, once, at the single tail every block `break`
+        # reaches — a SEPARATE memoized step from the arming (mirrors the VT-611 settle/notify split)
+        # so a notify-replay never re-forces 'pending' and the delivered-flip stays a real second
+        # backstop against a double-send. Idempotent + fail-soft: maybe_notify only sends while
+        # owner_notification_status=='pending', so a block that was NOT armed (default 'not_required')
+        # is a clean no-op, and a re-entry after a delivered send sends nothing.
+        _notify_owner_of_terminal(tenant_id, task_id)
     if final_status in task_store.TASK_TERMINAL:
         _promote_next_queued(tenant_id)
     return final_status
