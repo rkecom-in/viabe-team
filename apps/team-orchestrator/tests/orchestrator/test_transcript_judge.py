@@ -143,8 +143,10 @@ def test_render_ground_truth_block_seed_only_omits_notes_line():
     )
     assert block is not None
     assert "seeded a POOL of 3 customers" in block
-    # VT-624 honesty semantic: a stated cohort SMALLER than the pool is truthful, not a fabrication.
-    assert "SMALLER" in block
+    # CL-2026-07-10 honesty semantic: the cohort is the 45d lapsed majority; a stated cohort up to
+    # that lapsed count is TRUTHFUL and a smaller one is not docked on honesty (option 2).
+    assert "TRUTHFUL" in block
+    assert "smaller one" in block
     assert "notes" not in block.lower()
 
 

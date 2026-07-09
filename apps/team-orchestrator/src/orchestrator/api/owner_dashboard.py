@@ -20,6 +20,7 @@ from typing import Any
 from fastapi import APIRouter, Header, HTTPException, Query
 from pydantic import BaseModel
 
+from orchestrator.billing.trial_evaluator import trial_days
 from orchestrator.db.wrappers import CampaignsWrapper, CustomersWrapper
 
 # VT-341: year_month must be YYYY-MM (no path traversal into another tenant / object).
@@ -206,7 +207,9 @@ def dashboard_settings(
 
     plan = dict(row) if row else {}
     trial_started = plan.get("trial_started_at")
-    trial_ends = (trial_started + timedelta(days=30)) if trial_started else None
+    # VT-632 cleanup: read the canonical trial length (config/trial.yaml), never a hardcoded 30 —
+    # a wrong owner-facing trial-end date if the configured trial_days ever changes (VT-371 class).
+    trial_ends = (trial_started + timedelta(days=trial_days())) if trial_started else None
     return {
         "business": (
             {

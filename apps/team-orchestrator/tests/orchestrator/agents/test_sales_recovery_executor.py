@@ -7,9 +7,10 @@ Covered behaviours:
   - the shipped ``MARKETING_CONSENT_VERSIONS`` allowlist is EMPTY and detection is structurally
     fail-closed: zero candidates ALWAYS, even over a fully eligible seeded customer base
     (plan §2.1 / C2; risk #5 — the empty set is deliberate);
-  - with the allowlist monkeypatched to a test version: p75-recency + p50-spend thresholds
-    honoured; opted-out, complaint-open, consent-missing, consent-opted-out, wrong-consent-
-    version, and recently-agent-contacted customers excluded; richest-first ordering + limit;
+  - with the allowlist monkeypatched to a test version: the CL-2026-07-10 45-day lapsed window
+    honoured (no percentile / no spend floor); opted-out, complaint-open, consent-missing,
+    consent-opted-out, wrong-consent-version, and recently-agent-contacted customers excluded;
+    richest-first ordering + limit; owner count == SR cohort size for an all-sendable base;
   - the in-SQL phone-token expression matches ``utils.phone_token.hash_phone`` byte-for-byte
     (the drift pin for the consent join);
   - the fact-bundle numbers are computed in Python from raw ledger rows;
@@ -195,13 +196,12 @@ def _phone(i: int) -> str:
 
 
 def _seed_lapsed_scenario(dsn: str) -> SimpleNamespace:
-    """One tenant, ten customers — exactly TWO eligible candidates once the consent allowlist
-    admits ``_TEST_CONSENT_VERSION``.
-
-    Population metrics (all ten have sales, so all ten shape the percentiles):
-      recency sorted [5, 100×8, 150] → p75 = 100; spend sorted [1000, 50000×8, 80000] → p50 =
-      50000. Eligible: a2 (150d, 80000) and a (100d, 50000). Every other customer fails exactly
-      one gate."""
+    """One tenant, ten customers. Under the CL-2026-07-10 option-2 45-day window (no spend floor),
+    exactly THREE are eligible once the consent allowlist admits ``_TEST_CONSENT_VERSION``:
+    a2 (150d, ₹80000), a (100d, ₹50000), and low_spend (100d, ₹1000 — INCLUDED now the value floor
+    is gone; the number the owner hears must equal the set targeted). ``recent`` (5d < 45d) is not
+    lapsed; every other customer fails exactly one SENDABILITY gate (opt-out, complaint, 30d agent
+    contact, missing/opted-out/wrong-version consent)."""
     t = _new_tenant(dsn, name="VT-369 sre detection")
     mk = _seed_customer
 
@@ -210,9 +210,9 @@ def _seed_lapsed_scenario(dsn: str) -> SimpleNamespace:
     a = mk(dsn, t, display_name="Vikram", phone=_phone(2))
     _seed_sales(dsn, t, a, [(100, 50000)])
     recent = mk(dsn, t, display_name="Recent", phone=_phone(3))
-    _seed_sales(dsn, t, recent, [(5, 50000)])  # fails p75 recency
+    _seed_sales(dsn, t, recent, [(5, 50000)])  # 5d < 45d window → not lapsed
     low_spend = mk(dsn, t, display_name="LowSpend", phone=_phone(4))
-    _seed_sales(dsn, t, low_spend, [(100, 1000)])  # fails p50 spend
+    _seed_sales(dsn, t, low_spend, [(100, 1000)])  # 100d lapsed, low spend → ELIGIBLE (no value floor)
     opted_out = mk(dsn, t, display_name="OptedOut", phone=_phone(5), opt_out_status="opted_out")
     _seed_sales(dsn, t, opted_out, [(100, 50000)])
     complaint = mk(dsn, t, display_name="Complaint", phone=_phone(6), complaint_status="open")
@@ -234,9 +234,10 @@ def _seed_lapsed_scenario(dsn: str) -> SimpleNamespace:
         ).fetchall():
             phones[UUID(str(row[0]))] = str(row[1])
 
-    # Consent: the eligible pair + the per-gate exclusion fixtures. ``opted_out``/``complaint``/
-    # ``contacted`` hold VALID consent so each exclusion is attributable to its own gate.
-    for cid in (a2, a, opted_out, complaint, contacted, consent_optout):
+    # Consent: the eligible trio + the per-gate exclusion fixtures. ``recent``/``opted_out``/
+    # ``complaint``/``contacted`` hold VALID consent so each exclusion is attributable to its own
+    # gate (``recent`` is excluded PURELY by the 45d recency window, not by a missing consent).
+    for cid in (a2, a, low_spend, recent, opted_out, complaint, contacted, consent_optout):
         _seed_consent(t, phones[cid], _TEST_CONSENT_VERSION)
     _seed_consent(t, phones[wrong_version], _WRONG_CONSENT_VERSION)
 
@@ -248,7 +249,8 @@ def _seed_lapsed_scenario(dsn: str) -> SimpleNamespace:
         tenant=t,
         a2=a2,
         a=a,
-        excluded=[recent, low_spend, opted_out, complaint, contacted, no_consent,
+        low_spend=low_spend,
+        excluded=[recent, opted_out, complaint, contacted, no_consent,
                   wrong_version, consent_optout],
     )
 
@@ -346,18 +348,21 @@ def test_empty_allowlist_zero_candidates_over_eligible_base(substrate):  # type:
 
 
 @requires_db
-def test_detection_thresholds_exclusions_and_ordering(substrate, monkeypatch):  # type: ignore[no-untyped-def]
-    """Eligible = exactly [a2, a], richest-first; every exclusion gate (recency p75, spend p50,
-    opt-out, complaint, 30d agent contact, no consent, wrong consent version, consent opted out)
-    removes exactly its fixture; candidate metrics are correct."""
+def test_detection_45d_window_exclusions_and_ordering(substrate, monkeypatch):  # type: ignore[no-untyped-def]
+    """CL-2026-07-10 option 2: eligible = exactly [a2, a, low_spend], richest-first. The dormancy
+    gate is the fixed 45d window (``recent`` at 5d is excluded); the OLD p50 spend floor is gone so
+    ``low_spend`` (₹1000) is now INCLUDED. Every SENDABILITY gate (opt-out, complaint, 30d agent
+    contact, no consent, wrong consent version, consent opted out) still removes exactly its
+    fixture; candidate metrics are correct."""
     monkeypatch.setattr(sre, "MARKETING_CONSENT_VERSIONS", frozenset({_TEST_CONSENT_VERSION}))
     scenario = _seed_lapsed_scenario(substrate.dsn)
 
     with tenant_connection(scenario.tenant) as conn:
         candidates = sre.detect_lapsed_customers(scenario.tenant, conn=conn)
 
-    assert [c.customer_id for c in candidates] == [scenario.a2, scenario.a], (
-        "expected exactly [a2, a] ordered by lifetime spend DESC"
+    assert [c.customer_id for c in candidates] == [scenario.a2, scenario.a, scenario.low_spend], (
+        "expected exactly [a2, a, low_spend] ordered by lifetime spend DESC — low_spend is in "
+        "because the value floor was removed (option 2: no >=45d-dormant customer is dropped)"
     )
     a2 = candidates[0]
     assert a2.days_since_last_sale == 150
@@ -366,8 +371,55 @@ def test_detection_thresholds_exclusions_and_ordering(substrate, monkeypatch):  
     a = candidates[1]
     assert a.days_since_last_sale == 100
     assert a.lifetime_spend_paise == 50000
+    low = candidates[2]
+    assert low.days_since_last_sale == 100
+    assert low.lifetime_spend_paise == 1000, "the value floor is gone — low spend is not excluded"
     excluded_hits = {c.customer_id for c in candidates} & set(scenario.excluded)
     assert not excluded_hits, f"excluded customers leaked into detection: {excluded_hits}"
+
+
+@requires_db
+def test_cohort_equals_count_lapsed_for_sendable_base(substrate, monkeypatch):  # type: ignore[no-untyped-def]
+    """CL-2026-07-10 COHERENCE PROOF (option 2): the owner-facing lapsed COUNT equals the SR send
+    cohort SIZE for an all-sendable base — the number the owner hears IS the set targeted. Seed a
+    tenant where every customer is sendable (subscribed, complaint-clear, valid consent, no recent
+    agent contact): N lapsed (>=45d) + a couple recent (<45d, in neither set). Assert
+    count_lapsed(45) == len(detect_lapsed_customers) == N, and no <45d customer leaks in."""
+    from orchestrator.db.wrappers import LAPSED_WINDOW_DAYS, CustomersWrapper
+
+    monkeypatch.setattr(sre, "MARKETING_CONSENT_VERSIONS", frozenset({_TEST_CONSENT_VERSION}))
+    t = _new_tenant(dsn := substrate.dsn, name="VT-632 coherence")
+
+    lapsed_ids: list[UUID] = []
+    for i, days in enumerate((46, 60, 100, 200, 45)):  # 45 is the boundary → LAPSED (>= window)
+        cid = _seed_customer(dsn, t, display_name=f"Lapsed{i}", phone=_phone(20 + i))
+        _seed_sales(dsn, t, cid, [(days, 5000 + i)])  # varied spend — value floor must not filter
+        lapsed_ids.append(cid)
+    recent_ids: list[UUID] = []
+    for i, days in enumerate((1, 44)):  # 44 < 45 → NOT lapsed (boundary just inside the window)
+        cid = _seed_customer(dsn, t, display_name=f"Recent{i}", phone=_phone(40 + i))
+        _seed_sales(dsn, t, cid, [(days, 9000)])
+        recent_ids.append(cid)
+
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        phone_by_id = {
+            UUID(str(r[0])): str(r[1])
+            for r in conn.execute(
+                "SELECT id, phone_e164 FROM customers WHERE tenant_id = %s", (str(t),)
+            ).fetchall()
+        }
+    for cid in lapsed_ids + recent_ids:
+        _seed_consent(t, phone_by_id[cid], _TEST_CONSENT_VERSION)
+
+    with tenant_connection(t) as conn:
+        candidates = sre.detect_lapsed_customers(t, conn=conn)
+        count = CustomersWrapper().count_lapsed(t, days=LAPSED_WINDOW_DAYS, conn=conn)
+
+    cohort_ids = {c.customer_id for c in candidates}
+    assert count == len(lapsed_ids), f"count_lapsed={count}, expected {len(lapsed_ids)}"
+    assert cohort_ids == set(lapsed_ids), "cohort must equal the lapsed set exactly"
+    assert count == len(cohort_ids), "COHERENCE: owner-told count == SR cohort size"
+    assert not (cohort_ids & set(recent_ids)), "no <45d customer may enter the cohort"
 
 
 @requires_db
@@ -488,8 +540,10 @@ def test_execute_item_persists_drafts_and_arms(substrate, monkeypatch):  # type:
     result = agent.execute_item(ctx)
 
     assert result.work_item_status == "awaiting_approval"
-    assert result.counters == {"drafted": 1, "dropped_ungrounded": 1}
-    assert len(llm.calls) == 2
+    # CL-2026-07-10: the 45d window includes low_spend now (no value floor) → 3 candidates
+    # (a2, a, low_spend); call #2 (Vikram/a) is corrupted+dropped, so 2 grounded drafts persist.
+    assert result.counters == {"drafted": 2, "dropped_ungrounded": 1}
+    assert len(llm.calls) == 3
     assert llm.calls[0][1] == "claude-haiku-4-5", "non-production env must resolve the test slot"
 
     batches = _read_batches(substrate.dsn, scenario.tenant)
@@ -501,21 +555,27 @@ def test_execute_item_persists_drafts_and_arms(substrate, monkeypatch):  # type:
     assert batch["agent"] == "sales_recovery"
 
     drafts = _read_drafts(substrate.dsn, scenario.tenant, batch["id"])
-    assert len(drafts) == 1, "the ungrounded draft must be dropped, not persisted"
-    draft = drafts[0]
-    assert draft["customer_id"] == scenario.a2
-    assert draft["template_name"] == sre.WINBACK_TEMPLATE_NAME
-    assert draft["status"] == "drafted"
+    assert len(drafts) == 2, "the ungrounded draft (Vikram) is dropped; the 2 grounded persist"
+    by_cust = {d["customer_id"]: d for d in drafts}
+    assert set(by_cust) == {scenario.a2, scenario.low_spend}, (
+        "the dropped one is Vikram (ungrounded); a2 + low_spend (now in-window) persist"
+    )
+    for d in drafts:
+        assert d["template_name"] == sre.WINBACK_TEMPLATE_NAME
+        assert d["status"] == "drafted"
     # VT-384 (registry-as-canon): params now (customer_name, business_name) — business_name is the
     # tenant's business_name (_seed_lapsed_scenario seeds name="VT-369 sre detection").
-    assert draft["params"] == {"customer_name": "Asha", "business_name": "VT-369 sre detection"}
+    assert by_cust[scenario.a2]["params"] == {
+        "customer_name": "Asha", "business_name": "VT-369 sre detection"}
+    assert by_cust[scenario.low_spend]["params"] == {
+        "customer_name": "LowSpend", "business_name": "VT-369 sre detection"}
 
     assert arm.calls == [
         (
             str(scenario.tenant),
             ctx.run_id,
             result.batch_id,
-            {"drafted": 1, "dropped_ungrounded": 1},
+            {"drafted": 2, "dropped_ungrounded": 1},
         )
     ]
 
@@ -595,8 +655,9 @@ def test_execute_item_arm_refusal_cancels_batch(substrate, monkeypatch):  # type
     result = agent.execute_item(ctx)
 
     assert result.work_item_status == "cancelled"
+    # CL-2026-07-10: 3 candidates now (a2, a, low_spend — no value floor), all grounded.
     assert result.counters == {
-        "drafted": 2,
+        "drafted": 3,
         "dropped_ungrounded": 0,
         "approval_arm_failed": 1,
     }

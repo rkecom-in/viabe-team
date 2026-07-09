@@ -160,7 +160,7 @@ def draft_campaign_plan(
 
     Args:
       objective — the business outcome the campaign serves (e.g. "re-engage festival crowd").
-      segment_label — the human label of the customer segment this targets (e.g. "lapsed_60d",
+      segment_label — the human label of the customer segment this targets (e.g. "lapsed_45d",
         "diwali_buyers"). The DETERMINISTIC segment bound is checked by ``check_send_intent``; this is
         the specialist's intended target, NOT an authorization.
       offer_summary — the seasonal/festival offer (e.g. "15% off, Diwali week").

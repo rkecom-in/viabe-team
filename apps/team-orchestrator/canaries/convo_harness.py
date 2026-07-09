@@ -513,8 +513,9 @@ def assert_side_effects(
         for a hold-off scenario; correlated via the idempotency_key campaign_id prefix — see the
         module-level Package H1 note on the missing campaign_messages.campaign_id column).
     ``expect_sent_count_at_least``: a floor instead of an exact match — for an approved-send
-        scenario where the seeded cohort may not ALL clear the activation gate's own percentile
-        floors (see ``delegation_winback_plan.json``'s notes on this same non-determinism), ">0
+        scenario where not every seeded cohort member necessarily results in a sent message (a
+        draft whose params fail grounding is dropped; the cohort itself is now the deterministic
+        45-day lapsed set — CL-2026-07-10, no percentile — but drafting still may drop some), ">0
         actually sent" is the honest, robust claim, not a brittle exact count.
     """
     failures: list[str] = []
@@ -960,19 +961,19 @@ class LapsedSeedResult:
 
 
 def _lapsed_seed_rows(n: int) -> list[tuple[int, int]]:
-    """(days_since_last_sale, amount_paise) for ``n`` synthetic customers: a majority OLD +
-    high-spend and a minority RECENT + low-spend.
+    """(days_since_last_sale, amount_paise) for ``n`` synthetic customers: a majority OLD (well
+    past the 45-day window) and a minority RECENT (bought in the last ~10 days).
 
-    ``detect_lapsed_customers`` (sales_recovery_executor.py) gates on the tenant's OWN
-    recency-p75 / spend-p50 PERCENTILES, not a fixed day count — so only the upper slice of
-    the 'old' cluster actually clears both floors, never literally "most" of what's seeded.
-    Making the old cluster BOTH the oldest AND the highest-spending pushes as much of it as
-    possible above both percentile floors at once; the recent/low-spend minority is designed to
-    sit below both (correctly excluded — they haven't stopped buying)."""
+    Since CL-2026-07-10 (option 2) ``detect_lapsed_customers`` gates on the FIXED 45-day lapsed
+    window (no percentile, no value floor) — the SAME window as the owner-facing ``count_lapsed``
+    metric. So ALL ``n_lapsed`` old customers clear (given consent + subscribed + no recent
+    contact, which the seeder provides): the cohort is deterministically ``n_lapsed``. The recent
+    minority (<45d) is correctly excluded — they haven't stopped buying. Spend now only affects
+    richest-first ORDERING, never membership."""
     n_recent = max(1, n // 4)
     n_lapsed = n - n_recent
-    rows = [(120 + i * 25, 80_000 + i * 15_000) for i in range(n_lapsed)]  # ~120-270d, ₹800-2600+
-    rows += [(2 + i * 3, 10_000 + i * 2_000) for i in range(n_recent)]  # ~2-10d, ₹100-200
+    rows = [(120 + i * 25, 80_000 + i * 15_000) for i in range(n_lapsed)]  # all >45d → all lapsed
+    rows += [(2 + i * 3, 10_000 + i * 2_000) for i in range(n_recent)]  # ~2-10d → correctly excluded
     return rows
 
 

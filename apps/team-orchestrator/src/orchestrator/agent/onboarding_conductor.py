@@ -364,7 +364,7 @@ def activation_check(tenant_id: str, agent: str = "sales_recovery") -> dict[str,
 # SAME constants ``grant_business_policy`` re-applies at the true chokepoint (fix round 2, MINOR-3:
 # belt-and-braces means the SAME rule enforced twice, not two magic numbers that happen to agree).
 _VALID_POLICY_ACTION_TYPES = frozenset(e.value for e in PolicyActionClass)
-_MAX_SEGMENT_LABEL_LEN = 64  # a segment is a free-form label (e.g. "lapsed_60d") — no fixed
+_MAX_SEGMENT_LABEL_LEN = 64  # a segment is a free-form label (e.g. "lapsed_45d") — no fixed
 # taxonomy exists anywhere in this codebase (marketing_lane.draft_campaign_plan's own docstring
 # confirms this) — so validation here is STRUCTURAL sanity, not a whitelist lookup.
 
@@ -429,7 +429,7 @@ def propose_business_policy(
     ``allowed_action_types`` — a subset of ``customer_send`` / ``spend`` / ``commitment`` /
     ``config`` (an unrecognized value is silently dropped). ``allowed_segments`` — which customer
     segments may be targeted (``"all"`` is a wildcard the owner can grant; free-form labels like
-    "lapsed_60d" — there is no fixed segment list). ``frequency_caps`` —
+    "lapsed_45d" — there is no fixed segment list). ``frequency_caps`` —
     ``{cap_key: max_in_period}``. ``spend_ceiling_minor`` — max single-action spend, in paise
     (clamped to a defensive sanity ceiling).
 
