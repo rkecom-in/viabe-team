@@ -102,9 +102,9 @@ not matter.
   },
   "target_cohort": {
     "customer_ids": ["b6f3b6c4-3a90-4f86-9a16-7c1ab2a4f1e2"],
-    "cohort_label": "dormant-60d",
+    "cohort_label": "lapsed-45d",
     "cohort_size": 1,
-    "selection_reason": "Inactive >=60d, opted-in for promos [E1]."
+    "selection_reason": "No purchase in >=45d, opted-in for promos [E1]."
   },
   "expected_arrr": {
     "low_paise": 100000,

@@ -45,6 +45,13 @@ def _config() -> dict[str, Any]:
     return yaml.safe_load(_CONFIG.read_text(encoding="utf-8"))
 
 
+def trial_days() -> int:
+    """The canonical free-trial length (``config/trial.yaml``). The SINGLE SOURCE for the trial
+    window — owner-facing surfaces (e.g. the dashboard's ``trial_ends``) MUST read this, never a
+    hardcoded 30 (VT-371 drift class: signup already drifted once on a hardcoded trial length)."""
+    return int(_config()["trial_days"])
+
+
 def evaluate_trial(tenant_id: UUID | str, now: datetime | None = None) -> TrialVerdict:
     """Deterministic trial decision for one tenant. NO LLM."""
     now = now or datetime.now(timezone.utc)

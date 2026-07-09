@@ -134,16 +134,19 @@ def _parse_marketing_consent_versions() -> frozenset[str]:
 # safety assertion above therefore runs at import: a bad prod value = the process fails to boot.
 MARKETING_CONSENT_VERSIONS: frozenset[str] = _parse_marketing_consent_versions()
 
-# Detection thresholds (plan §2.1): recency at-or-above the tenant's p75 days-since-last-sale,
-# lifetime spend at-or-above the tenant's p50 — computed over the tenant's customers WITH sales.
-DETECTION_RECENCY_PERCENTILE = 0.75
-DETECTION_SPEND_PERCENTILE = 0.50
+# Detection window (CL-2026-07-10, Fazal option 2): a candidate is LAPSED iff no 'sale' in the last
+# ``LAPSED_WINDOW_DAYS`` days — the SAME fixed window as the owner-facing ``count_lapsed`` metric, so
+# the number the owner hears IS the set a campaign targets. This SUPERSEDES the VT-312 tenant-relative
+# p75-recency / p50-spend percentile targeting (removed): no value floor, no percentile. The single
+# constant lives in ``db.wrappers`` (imported at call time in ``detect_lapsed_customers``).
 DEFAULT_DETECTION_LIMIT = 50
 
-# Cheap detection-time pre-filter (plan §2.3). The BINDING 30d/90d suppression is re-enforced at
-# SEND time inside customer_send.check_agent_send_caps (builder 3) — this constant only keeps
-# obviously-suppressed customers out of drafting.
-RECONTACT_SUPPRESSION_DAYS = 30
+# Detection-time recontact pre-filter. VT-632 cleanup: this used to be a SECOND, independent
+# ``RECONTACT_SUPPRESSION_DAYS = 30`` declaration (silent-drift risk on a SEND path); it is now the
+# ONE binding constant, ``customer_send.RECONTACT_SUPPRESSION_DAYS`` (where the 30d/90d suppression
+# is re-enforced at SEND time). It is imported LAZILY at the detection call site — a top-level import
+# of ``customer_send`` would pull the outbound-send stack into this module at import, breaking the
+# CRITICAL-2 fresh-import no-sender posture (pinned in test_sales_recovery_executor).
 
 # The ONLY template this executor may emit in PR-1. Registry/SID resolution + the
 # category='customer_marketing' check happen at SEND time (fail-closed TemplateNotConfigured
@@ -248,11 +251,13 @@ def _phone_hash_salt() -> str:
 def detect_lapsed_customers(
     tenant_id: UUID | str, *, conn: Any, limit: int = DEFAULT_DETECTION_LIMIT
 ) -> list[LapsedCandidate]:
-    """Deterministic lapsed-customer detection (plan §2.1). Candidates are customers who are
-    ``subscribed`` (not opted out), complaint-clear, hold an ACTIVE marketing-cleared consent row
-    (``opted_out_at IS NULL`` AND ``consent_text_version`` in the C2 allowlist), sit at/above the
-    tenant's p75 days-since-last-sale AND p50 lifetime spend, and have NO agent contact within
-    the last ``RECONTACT_SUPPRESSION_DAYS`` — richest-first, capped at ``limit``.
+    """Deterministic lapsed-customer detection. Candidates are customers who are ``subscribed``
+    (not opted out), complaint-clear, hold an ACTIVE marketing-cleared consent row
+    (``opted_out_at IS NULL`` AND ``consent_text_version`` in the C2 allowlist), are LAPSED (no
+    'sale' in the last ``LAPSED_WINDOW_DAYS`` days — the SAME window as the owner-facing
+    ``count_lapsed`` metric, CL-2026-07-10 option 2; NOT the old VT-312 percentile), and have NO
+    agent contact within the last ``RECONTACT_SUPPRESSION_DAYS`` — richest-first, capped at
+    ``limit``. So this cohort is exactly ``count_lapsed`` intersected with the sendability gates.
 
     STRUCTURALLY FAIL-CLOSED: an empty ``MARKETING_CONSENT_VERSIONS`` returns ``[]`` before any
     SQL runs (and the SQL's ``= ANY(list)`` matches nothing either way). ``conn`` must be a
@@ -263,12 +268,12 @@ def detect_lapsed_customers(
     versions = sorted(MARKETING_CONSENT_VERSIONS)
     if not versions:
         return []
-    from orchestrator.db.wrappers import CustomersWrapper
+    from orchestrator.agents.customer_send import RECONTACT_SUPPRESSION_DAYS
+    from orchestrator.db.wrappers import LAPSED_WINDOW_DAYS, CustomersWrapper
 
     rows = CustomersWrapper().lapsed_candidates(
         tenant_id,
-        recency_pct=DETECTION_RECENCY_PERCENTILE,
-        spend_pct=DETECTION_SPEND_PERCENTILE,
+        lapsed_days=LAPSED_WINDOW_DAYS,
         salt=_phone_hash_salt(),
         versions=versions,
         suppression_days=RECONTACT_SUPPRESSION_DAYS,
@@ -840,11 +845,8 @@ __all__ = [
     "AGENT_NAME",
     "AGENT_TOOLS",
     "DEFAULT_DETECTION_LIMIT",
-    "DETECTION_RECENCY_PERCENTILE",
-    "DETECTION_SPEND_PERCENTILE",
     "MARKETING_CONSENT_VERSIONS",
     "MarketingConsentProdSafetyError",
-    "RECONTACT_SUPPRESSION_DAYS",
     "WINBACK_TEMPLATE_NAME",
     "WINBACK_TEMPLATE_PARAMS",
     "CustomerFactBundle",

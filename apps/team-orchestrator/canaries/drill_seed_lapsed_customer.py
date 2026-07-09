@@ -10,8 +10,8 @@ numbers (never fabricated; dev send-guard passes it through, everything else sta
 
 Seeds exactly what CustomersWrapper.lapsed_candidates requires:
   - customers row: subscribed, no open complaint, phone_e164 set.
-  - customer_ledger_entries 'sale' rows: a purchase history whose MAX(entry_date) is ~45d ago
-    (dormant) with real lifetime spend (single-customer percentiles = own values ⇒ passes floors).
+  - customer_ledger_entries 'sale' rows: a purchase history whose MAX(entry_date) is exactly 45d
+    ago (days_since_last_sale == LAPSED_WINDOW_DAYS ⇒ at the inclusive lapsed boundary, surfaces).
   - record_of_consent: phone_token = hash_phone(phone) (TEAM_PHONE_HASH_SALT from the injected env),
     consent_text_version = first of MARKETING_CONSENT_VERSIONS, opted_out_at NULL.
   - no recent agent_customer_contacts (fresh tenant ⇒ none).

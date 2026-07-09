@@ -30,10 +30,22 @@ from orchestrator.db.base import TenantScopedTable
 # every wrapper read that validates MUST return tenant_id.
 _CUSTOMER_DEDUP_COLS = "id, tenant_id, display_name, phone_e164, email, acquired_via"
 
+# VT-632 (CL-2026-07-10, Fazal): the ONE lapsed/dormant definition. A customer is LAPSED iff they
+# have >=1 'sale' and NO 'sale' in the last ``LAPSED_WINDOW_DAYS`` days. This constant is the SINGLE
+# SOURCE OF TRUTH shared by BOTH the owner-facing count metric (``count_lapsed``) AND the Sales-
+# Recovery SEND cohort (``lapsed_candidates`` below) — so "the number the owner hears == the set a
+# campaign targets" (option 2). It SUPERSEDES the VT-312 tenant-relative percentile targeting: the
+# cohort no longer uses a recency/spend percentile, it uses this fixed window. status_query.py +
+# sales_recovery_executor.py both import it from here; never re-literal 45.
+LAPSED_WINDOW_DAYS = 45
+
 # VT-369 Sales-Recovery detection (CustomersWrapper.lapsed_candidates). phone_token derivation MUST
 # stay byte-identical to privacy.hash_phone ('phone_tok_' + sha256(salt:phone) hex) — if the VT-122
 # tokenisation ever changes this drifts FAIL-CLOSED (no token match → no candidates) and the
 # executor's pin test fails loudly.
+# VT-632 option 2: the dormancy predicate below (``days_since_last_sale >= %(lapsed_days)s``) is
+# BYTE-EQUIVALENT to count_lapsed's "no sale in the last N days" — so the sendable cohort is exactly
+# the sendability-filtered subset of the owner-facing lapsed set (NOT a percentile-gated superset).
 _LAPSED_CANDIDATES_SQL = """
 WITH sales AS (
     SELECT customer_id,
@@ -43,14 +55,6 @@ WITH sales AS (
     FROM customer_ledger_entries
     WHERE tenant_id = %(tenant_id)s AND entry_type = 'sale'
     GROUP BY customer_id
-),
-thresholds AS (
-    SELECT
-        percentile_cont(%(recency_pct)s) WITHIN GROUP
-            (ORDER BY days_since_last_sale::double precision) AS recency_floor_days,
-        percentile_cont(%(spend_pct)s) WITHIN GROUP
-            (ORDER BY lifetime_spend_paise::double precision) AS spend_floor_paise
-    FROM sales
 )
 SELECT c.id AS customer_id,
        s.last_sale_date,
@@ -58,13 +62,11 @@ SELECT c.id AS customer_id,
        s.lifetime_spend_paise
 FROM customers c
 JOIN sales s ON s.customer_id = c.id
-CROSS JOIN thresholds t
 WHERE c.tenant_id = %(tenant_id)s
   AND c.opt_out_status = 'subscribed'
   AND c.complaint_status != 'open'
   AND c.phone_e164 IS NOT NULL
-  AND s.days_since_last_sale >= t.recency_floor_days
-  AND s.lifetime_spend_paise >= t.spend_floor_paise
+  AND s.days_since_last_sale >= %(lapsed_days)s
   AND EXISTS (
       SELECT 1
       FROM record_of_consent roc
@@ -279,9 +281,11 @@ class CustomersWrapper(TenantScopedTable):
         Fazal's canonical definition (2026-07-09): a LAPSED customer is one who USED to buy but has
         had NO sale in the last ``days`` (45 = ``LAPSED_WINDOW_DAYS``). So: has >=1 'sale' ledger
         entry (was active) AND no 'sale' within ``days`` (went quiet). Purchase-behaviour fact —
-        NOT filtered by opt_out (that is a sendability filter, not the lapsed definition); this is
-        distinct from ``lapsed_candidates`` (the percentile-gated SENDABLE win-back cohort, a
-        subset). Tenant-predicated (RLS + explicit WHERE)."""
+        NOT filtered by opt_out (that is a sendability filter, not the lapsed definition). Since
+        CL-2026-07-10 (option 2) ``lapsed_candidates`` uses this SAME window, so the SR send cohort
+        is exactly this set intersected with the sendability gates (subscribed / consent /
+        suppression) — the number the owner hears IS the set a campaign targets. Tenant-predicated
+        (RLS + explicit WHERE)."""
         tid = self._uuid(tenant_id)
         with self._conn(tid, conn) as c:
             row = c.execute(
@@ -542,30 +546,35 @@ class CustomersWrapper(TenantScopedTable):
         self,
         tenant_id: UUID | str,
         *,
-        recency_pct: float,
-        spend_pct: float,
+        lapsed_days: int,
         salt: str,
         versions: list[str],
         suppression_days: int,
         limit: int,
         conn: Any = None,
     ) -> list[dict[str, Any]]:
-        """VT-369 Sales-Recovery detection (plan §2.1) — the ONE analytic read over
-        customers: subscribed + complaint-clear + an ACTIVE marketing-cleared consent
-        row (consent_text_version = ANY(versions) — the C2 allowlist, list-param,
-        never literal IN ()) + at/above the tenant's recency/spend percentile floors
-        + no agent contact within suppression_days; richest-first, capped. Empty
-        ``versions`` matches nothing (structurally fail-closed). Lives HERE because
-        per-tenant customers SQL belongs to the wrapper layer (the
-        no-direct-tenant-db-access lint)."""
+        """VT-369 Sales-Recovery detection — the ONE analytic read over customers:
+        subscribed + complaint-clear + an ACTIVE marketing-cleared consent row
+        (consent_text_version = ANY(versions) — the C2 allowlist, list-param, never
+        literal IN ()) + LAPSED (no 'sale' in the last ``lapsed_days`` days — the SAME
+        window as the owner-facing ``count_lapsed`` metric, CL-2026-07-10 option 2) + no
+        agent contact within suppression_days; richest-first, capped. The ``lapsed_days``
+        recency predicate is byte-equivalent to count_lapsed, so this cohort is exactly
+        count_lapsed's sendability-filtered subset (NOT the old VT-312 percentile
+        superset). CAVEAT (batch-safety cap): the result is ``ORDER BY spend DESC LIMIT
+        limit`` — so "owner count == cohort size" holds only while the sendable-lapsed set
+        is <= ``limit`` (``DEFAULT_DETECTION_LIMIT`` = 50). Above that, ONE campaign sweep
+        targets the richest ``limit``; the owner count stays the TRUE total (later sweeps
+        pick up the rest as suppression clears). Empty ``versions`` matches nothing
+        (structurally fail-closed). Lives HERE because per-tenant customers SQL belongs to
+        the wrapper layer (the no-direct-tenant-db-access lint)."""
         tid = self._uuid(tenant_id)
         with self._conn(tid, conn) as c:
             rows = c.execute(
                 _LAPSED_CANDIDATES_SQL,
                 {
                     "tenant_id": str(tid),
-                    "recency_pct": recency_pct,
-                    "spend_pct": spend_pct,
+                    "lapsed_days": lapsed_days,
                     "salt": salt,
                     "versions": versions,
                     "suppression_days": suppression_days,

@@ -69,10 +69,15 @@ from orchestrator.utils.phone_token import hash_phone
 logger = logging.getLogger(__name__)
 
 # --- caps (plan §3e; F3 confirms thresholds — these are the proposed defaults) ---
+# SEND-FREQUENCY guards — a DISTINCT axis from the customer-purchase-lapsed DORMANCY definition
+# (``LAPSED_WINDOW_DAYS`` in db.wrappers). These bound HOW OFTEN we may contact a customer; they say
+# nothing about WHO is dormant. Never conflate the two: a 45d-lapsed customer can still be
+# suppressed by the 30d recontact guard. This is the canonical home of ``RECONTACT_SUPPRESSION_DAYS``
+# (the detector imports it — VT-632 dedup).
 AGENT_SEND_DAILY_TENANT_CAP = 200    # agent sends / tenant / 24h
 AGENT_SEND_CUSTOMER_WEEKLY_CAP = 1   # agent sends / customer / 7d
-RECONTACT_SUPPRESSION_DAYS = 30      # any agent contact <= 30d ago -> skip
-MAX_AGENT_CONTACTS_PER_90D = 2       # lifetime-ish ceiling per rolling 90d
+RECONTACT_SUPPRESSION_DAYS = 30      # any agent contact <= 30d ago -> skip (send-frequency, NOT dormancy)
+MAX_AGENT_CONTACTS_PER_90D = 2       # lifetime-ish ceiling per rolling 90d (send-frequency, NOT dormancy)
 L3_DAILY_AUTO_SEND_CAP = 50          # defined NOW, ENFORCED in PR-3 (L3 auto-send)
 
 # The only category the agent customer-send gate accepts (plan gate #2).

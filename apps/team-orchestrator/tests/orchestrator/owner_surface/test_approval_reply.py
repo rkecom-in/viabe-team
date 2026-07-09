@@ -170,7 +170,7 @@ def test_build_approval_request_populates_template_params() -> None:
 
     now = datetime.now(UTC)
     plan = SimpleNamespace(
-        target_cohort=SimpleNamespace(cohort_label="60-90 day dormant", cohort_size=87),
+        target_cohort=SimpleNamespace(cohort_label="45-day lapsed", cohort_size=87),
         expected_arrr=SimpleNamespace(low_paise=1_500_000, high_paise=3_000_000),
         # VT-594 (post-review restructure): _build_approval_request now also builds
         # a chat_summary body, which reads campaign_window for the window dates.
@@ -183,6 +183,6 @@ def test_build_approval_request_populates_template_params() -> None:
     assert params != {}  # NOT the old blank
     # Delta-review Defect 1: the label passes the redactor first — a no-op on
     # this legitimate categorical label (fail-soft pattern-only, no DB here).
-    assert params["1"] == "60-90 day dormant"
+    assert params["1"] == "45-day lapsed"
     assert params["2"] == "recovery"
     assert params["3"] == "15,000–30,000"  # paise -> ₹ range

@@ -15,18 +15,20 @@ import unicodedata
 from typing import Literal
 from uuid import UUID
 
+from orchestrator.db.wrappers import LAPSED_WINDOW_DAYS
+
 StatusQueryType = Literal[
     "customer_count", "lapsed_count", "last_campaign", "opt_out_count", "billing", "unknown"
 ]
 
 _DASHBOARD = "https://viabe.ai/team/dashboard"
 
-# VT-632 — Fazal's canonical customer-facing definition (2026-07-09, via Cowork): a LAPSED /
-# dormant customer is one with NO purchase in the last 45 days. SINGLE SOURCE OF TRUTH — the only
-# runtime lapsed-window constant; reference it, never re-literal 45. (The Sales-Recovery SENDABLE
-# cohort is a DIFFERENT thing: percentile-gated in detect_lapsed_customers, and the cosmetic
-# "dormant-60d" label in sales_recovery_v1.md is an SR-side label, not this count metric.)
-LAPSED_WINDOW_DAYS = 45
+# VT-632 — Fazal's canonical customer-facing definition (2026-07-09; unified CL-2026-07-10): a
+# LAPSED / dormant customer is one with NO purchase in the last ``LAPSED_WINDOW_DAYS`` days. The
+# constant is defined in ``db.wrappers`` (imported above) as the SINGLE SOURCE OF TRUTH — the only
+# runtime lapsed-window value; reference it, never re-literal 45. Since CL-2026-07-10 (option 2) the
+# Sales-Recovery SEND cohort uses this SAME window (no longer the VT-312 percentile), so the number
+# the owner hears here IS the exact set a win-back campaign targets.
 
 # VT-632 — a cash-flow / receivables / finance READ is NOT a status_query this deterministic parse
 # owns (there is no such qtype); it belongs to the brain's finance advisory tools (analyze_cash_flow).

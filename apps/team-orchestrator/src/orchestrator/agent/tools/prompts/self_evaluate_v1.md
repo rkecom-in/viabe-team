@@ -51,7 +51,7 @@ Examples that flag:
 
 Examples that flag:
 
-- draft targets a 90-180 day dormant cohort but
+- draft targets the 45-day lapsed cohort but
   `context_summary.attribution_snapshot` shows zero customers in that
   bucket
 - `expected_arrr.high_paise` is implausibly large for
