@@ -16,10 +16,12 @@ Classify into EXACTLY one of:
   from what it knows or its read-tools: a number, a count, a status, a cash-flow / receivables /
   sales / customer read ("how is my cash flow", "how many lapsed customers do I have", "how many
   haven't bought in a while", "how many are dormant / gone quiet", "what did I sell this week", "is
-  my store connected"). A "HOW MANY …" question about ANY customer subset (lapsed, dormant, quiet)
-  is a COUNT to REPORT — answer the number; do NOT propose or launch a win-back for it. If the owner
-  just wants to be TOLD something — even an analysis or breakdown of their OWN data, reported back —
-  it is `direct_reply`. Creates NO task.
+  my store connected"). A bare "HOW MANY …" COUNT question about a customer subset (lapsed, dormant,
+  gone quiet) — with NO verb asking you to DO anything — is `direct_reply`: just answer the number.
+  (The trigger is the VERB, not the mention of lapsed customers: "DRAFT / RUN / SEND a win-back
+  campaign for [those] customers" is an explicit DO → `new_task`, even though it names the same
+  lapsed customers.) If the owner just wants to be TOLD something — even an analysis or breakdown of
+  their OWN data, reported back — it is `direct_reply`. Creates NO task.
 - `answer_pending` — this message is answering the open question (`has_open_question` must be
   true). Resumes the exact task/step waiting on it.
 - `new_task` — the owner wants a NEW multi-step business OBJECTIVE that requires EFFECTING something
