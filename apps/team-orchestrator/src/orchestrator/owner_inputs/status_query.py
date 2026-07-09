@@ -19,12 +19,27 @@ StatusQueryType = Literal["customer_count", "last_campaign", "opt_out_count", "b
 
 _DASHBOARD = "https://viabe.ai/team/dashboard"
 
+# VT-632 — a cash-flow / receivables / finance READ is NOT a status_query this deterministic parse
+# owns (there is no such qtype); it belongs to the brain's finance advisory tools (analyze_cash_flow).
+# Guarded FIRST (below) so a NEGATED or stray 'campaigns'/'customers' token in the SAME message
+# ("...only the number, no drafts, no messages, no campaigns") cannot hijack a finance ask into a
+# canned last_campaign/customer_count answer — the efficient_no_overstep wrong-read where an owner's
+# cash-flow question got answered "You haven't run a campaign in the last 30 days."
+_FINANCE_READ_TOKENS = frozenset({
+    "cash", "cashflow", "receivable", "receivables", "revenue", "profit", "margin",
+    "turnover", "collections", "collection", "outstanding", "dues", "income",
+})
+
 
 def classify_status_query(body: str) -> StatusQueryType:
     """Keyword-route the query type. Opt-out is checked first (so 'how many opted-out
-    customers' is an opt_out_count, not a customer_count)."""
+    customers' is an opt_out_count, not a customer_count). VT-632: a finance/cash-flow read is
+    guarded out FIRST (returns 'unknown' -> falls through to the brain) so a negated 'campaigns'
+    token in the same message can't hijack it."""
     norm = unicodedata.normalize("NFC", (body or "").strip().casefold())
     tokens = {t for t in re.split(r"[\s,.!?;:।/\\-]+", norm) if t}
+    if (_FINANCE_READ_TOKENS & tokens) or "cash flow" in norm:
+        return "unknown"
     if (
         "opted" in tokens
         or "optout" in tokens
