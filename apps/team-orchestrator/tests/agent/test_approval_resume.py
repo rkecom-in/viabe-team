@@ -36,9 +36,21 @@ def test_rejection_maps_to_rejected():
     assert resolve_decision_from_reply("nahi", tenant_id="t-vt270", classify_fn=_classify("rejection")) == "rejected"
 
 
-def test_question_and_feedback_map_to_needs_changes():
-    assert resolve_decision_from_reply("?", tenant_id="t-vt270", classify_fn=_classify("question")) == "needs_changes"
-    assert resolve_decision_from_reply("hmm", tenant_id="t-vt270", classify_fn=_classify("feedback")) == "needs_changes"
+def test_feedback_maps_to_needs_changes():
+    """An EXPLICIT change request resumes the run for a re-draft."""
+    assert resolve_decision_from_reply("make it 20% off", tenant_id="t-vt270", classify_fn=_classify("feedback")) == "needs_changes"
+
+
+def test_question_is_not_a_decision_no_resume():
+    """VT-632: a QUESTION is not a decision — it must NOT resolve/reject the pending approval. Mapping
+    'question' -> needs_changes let an UNRELATED owner FAQ / topic-switch during a pending campaign
+    approval REJECT + re-arm + re-send the approval ask verbatim instead of being answered. Now it
+    returns None -> the message falls through to normal dispatch (the brain answers it) and the
+    approval stays PENDING. Aligns with classify_approval_reply's own 'any ? -> None' rule."""
+    assert resolve_decision_from_reply(
+        "does Viabe work on both Android and iPhone?",
+        tenant_id="t-vt270", classify_fn=_classify("question"),
+    ) is None
 
 
 def test_other_does_not_resume():
