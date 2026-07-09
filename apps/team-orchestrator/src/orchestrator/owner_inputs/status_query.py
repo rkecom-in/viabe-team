@@ -97,7 +97,17 @@ def answer_status_query(tenant_id: UUID | str, body: str) -> str | None:
 
     if qtype == "lapsed_count":
         # Fazal's 45d definition: bought before, no sale in the last LAPSED_WINDOW_DAYS.
-        n = CustomersWrapper().count_lapsed(tenant_id, days=LAPSED_WINDOW_DAYS)
+        cw = CustomersWrapper()
+        # EMPTY-LEDGER honesty (sr_empty_cohort_honesty): a lapsed count of 0 is AMBIGUOUS — it means
+        # either "all bought recently" OR "no sales data at all". Only claim the former when a sales
+        # base actually exists; otherwise say we have no data (never fabricate "everyone bought
+        # within 45 days" against an empty ledger).
+        if cw.count_with_sales(tenant_id) == 0:
+            return (
+                "I don't have any sales history for your customers yet — connect a data source and "
+                "I'll show you exactly who's gone quiet."
+            )
+        n = cw.count_lapsed(tenant_id, days=LAPSED_WINDOW_DAYS)
         if n == 0:
             return (
                 "None of your customers are lapsed — everyone with a purchase history has bought "

@@ -317,6 +317,12 @@ def test_status_counts(_dbpool) -> None:
     assert "3 customers" in answer_status_query(tid, "how many customers")
     # opt_out_count = opted_out + owner_excluded = 2
     assert "2 customers are excluded" in answer_status_query(tid, "how many opt-outs?")
+    # VT-632 lapsed_count empty-ledger honesty: 3 customers seeded but NO sales -> count_with_sales=0
+    # -> honest "no sales history yet", NEVER a fabricated "everyone bought within 45 days"
+    # (the sr_empty_cohort_honesty regression: a 0 lapsed count must not assert a positive claim).
+    _lapsed = answer_status_query(tid, "how many lapsed customers?").lower()
+    assert "sales history" in _lapsed  # honest no-data path
+    assert "45 days" not in _lapsed  # NOT the fabricated "everyone bought within 45 days" claim
 
 
 @pytest.mark.integration
