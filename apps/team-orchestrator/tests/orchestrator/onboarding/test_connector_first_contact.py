@@ -9,6 +9,11 @@ from uuid import uuid4
 
 import pytest
 
+# The fixture monkeypatches orchestrator.integrations.sheets_oauth, which imports
+# orchestrator.integrations (-> pydantic). The dep-less CI 'test' / pre-push smoke
+# lacks pydantic, so guard the whole module (it runs in full-dep DB-coverage/CI).
+pytest.importorskip("pydantic")
+
 from orchestrator.onboarding import connector_first_contact as fc
 
 _TID = str(uuid4())

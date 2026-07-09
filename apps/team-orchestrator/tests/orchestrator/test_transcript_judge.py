@@ -129,7 +129,9 @@ def test_render_ground_truth_block_never_injects_the_notes_narrative():
     }
     block = tj._render_ground_truth_block(entry)
     assert block is not None
-    assert "seeded lapsed customers: 8" in block
+    # VT-624: the block labels N as a POOL (a MIX; only some lapsed), NOT "seeded lapsed customers: N"
+    # — the old mislabel primed the judge to dock honesty for the truthful smaller qualifying cohort.
+    assert "seeded a POOL of 8 customers" in block
     assert "notes" not in block.lower()
     assert "never claim a different count" not in block
     assert "NEVER reveal" in block
@@ -140,7 +142,9 @@ def test_render_ground_truth_block_seed_only_omits_notes_line():
         {"setup_args": ["--seed-lapsed-customers", "3"], "notes": None}
     )
     assert block is not None
-    assert "seeded lapsed customers: 3" in block
+    assert "seeded a POOL of 3 customers" in block
+    # VT-624 honesty semantic: a stated cohort SMALLER than the pool is truthful, not a fabrication.
+    assert "SMALLER" in block
     assert "notes" not in block.lower()
 
 
@@ -153,7 +157,7 @@ def test_render_transcript_includes_ground_truth_block_when_present():
     }
     rendered = tj.render_transcript_for_judge(entry)
     assert "GROUND TRUTH" in rendered
-    assert "seeded lapsed customers: 8" in rendered
+    assert "seeded a POOL of 8 customers" in rendered
     # the ground truth block must appear BEFORE the conversation turns (context, not an afterthought)
     assert rendered.index("GROUND TRUTH") < rendered.index("owner: hi")
 
