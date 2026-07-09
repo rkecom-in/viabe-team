@@ -298,6 +298,23 @@ class CustomersWrapper(TenantScopedTable):
             ).fetchone()
         return int(dict(row)["n"]) if row else 0
 
+    def count_with_sales(self, tenant_id: UUID | str, *, conn: Any = None) -> int:
+        """VT-632 — how many customers have ANY 'sale' ledger entry (the active base). Distinguishes
+        an EMPTY ledger (no sales data at all -> a lapsed_count of 0 must NOT claim "everyone bought
+        recently", which fabricates against a tenant with no data) from a real "0 lapsed of N".
+        Tenant-predicated."""
+        tid = self._uuid(tenant_id)
+        with self._conn(tid, conn) as c:
+            row = c.execute(
+                "SELECT count(DISTINCT c.id) AS n FROM customers c "
+                "WHERE c.tenant_id = %(tid)s "
+                "  AND EXISTS (SELECT 1 FROM customer_ledger_entries e "
+                "              WHERE e.tenant_id = c.tenant_id AND e.customer_id = c.id "
+                "                AND e.entry_type = 'sale')",
+                {"tid": str(tid)},
+            ).fetchone()
+        return int(dict(row)["n"]) if row else 0
+
     def top_customers_by_spend(
         self, tenant_id: UUID | str, *, limit: int, conn: Any = None
     ) -> list[dict[str, Any]]:
