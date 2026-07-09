@@ -13,7 +13,15 @@ transport). The ingress endpoint must not classify (Pillar 1).
 Pillar 7: the owner's decision is AUTHORITATIVE. The classifier maps:
   approval            -> approved      (the only verb that lets a send proceed)
   rejection           -> rejected
-  question | feedback -> needs_changes (resumes; the agent decides next step)
+  feedback            -> needs_changes (an explicit change request; resume + re-draft)
+  question            -> NO resume (VT-632: a QUESTION IS NOT A DECISION — answer it and leave the
+                         approval PENDING; do NOT resolve/reject/re-draft the campaign just because
+                         the owner asked something. This aligns the Haiku layer with the module's
+                         OWN deterministic fast-path, which already treats any '?' as None. The bug
+                         this closes: an UNRELATED owner question during a pending approval (e.g. a
+                         product FAQ, a topic switch) was classified 'question' -> needs_changes,
+                         which REJECTED + re-armed + re-sent the same approval ask verbatim instead
+                         of answering — the dominant conversational trust-breaker.)
   other / low-conf    -> NO resume (re-prompt is a Phase-2 loop; we do not
                          guess a decision — Pillar 7 forbids inventing approval)
 
@@ -35,8 +43,12 @@ logger = logging.getLogger(__name__)
 _CLASSIFICATION_TO_DECISION: dict[str, str] = {
     "approval": "approved",
     "rejection": "rejected",
-    "question": "needs_changes",
-    "feedback": "needs_changes",
+    "feedback": "needs_changes",  # an EXPLICIT change request -> resume + re-draft
+    # VT-632: 'question' deliberately absent -> None -> NO resume. A question is not a decision;
+    # it falls through to normal dispatch (the brain ANSWERS it) and the approval stays PENDING.
+    # Mapping it to needs_changes let an unrelated FAQ / topic-switch REJECT + re-arm + re-send the
+    # approval ask verbatim (the conversational trust-breaker). Consistent with classify_approval_
+    # reply's own 'any ? -> None' rule (owner_inputs/approval_reply.py).
     # 'other' deliberately absent -> no resume (do not guess; Pillar 7).
 }
 
