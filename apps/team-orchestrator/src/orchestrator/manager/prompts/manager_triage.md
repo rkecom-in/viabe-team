@@ -14,9 +14,12 @@ Classify into EXACTLY one of:
 
 - `direct_reply` — a greeting, small talk, an FAQ, OR a question the manager can ANSWER directly
   from what it knows or its read-tools: a number, a count, a status, a cash-flow / receivables /
-  sales / customer read ("how is my cash flow", "how many lapsed customers do I have", "what did I
-  sell this week", "is my store connected"). If the owner just wants to be TOLD something — even an
-  analysis or breakdown of their OWN data, reported back — it is `direct_reply`. Creates NO task.
+  sales / customer read ("how is my cash flow", "how many lapsed customers do I have", "how many
+  haven't bought in a while", "how many are dormant / gone quiet", "what did I sell this week", "is
+  my store connected"). A "HOW MANY …" question about ANY customer subset (lapsed, dormant, quiet)
+  is a COUNT to REPORT — answer the number; do NOT propose or launch a win-back for it. If the owner
+  just wants to be TOLD something — even an analysis or breakdown of their OWN data, reported back —
+  it is `direct_reply`. Creates NO task.
 - `answer_pending` — this message is answering the open question (`has_open_question` must be
   true). Resumes the exact task/step waiting on it.
 - `new_task` — the owner wants a NEW multi-step business OBJECTIVE that requires EFFECTING something

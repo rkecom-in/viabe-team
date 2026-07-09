@@ -31,6 +31,15 @@ from orchestrator.owner_inputs.status_query import classify_status_query
         ("what was the last campaign result?", "last_campaign"),
         ("what's my trial status?", "billing"),
         ("good morning", "unknown"),
+        # VT-632 finance guard: a cash-flow read falls through to the brain (not a status_query
+        # qtype) — and a NEGATED 'campaigns' token in the same message must NOT hijack it.
+        (
+            "Just tell me roughly how my cash flow is looking this week — "
+            "no drafts, no messages, no campaigns. Only the number.",
+            "unknown",
+        ),
+        ("how is my cash flow this month?", "unknown"),
+        ("what's my revenue looking like", "unknown"),
     ],
 )
 def test_classify_status_query(body, expected) -> None:

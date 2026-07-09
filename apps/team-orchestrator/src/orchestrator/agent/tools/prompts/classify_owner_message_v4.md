@@ -97,13 +97,16 @@ Input: "stop messaging Rajesh, he keeps complaining"
 Output: {"classification": "exclusion_request", "confidence": 0.88, "suggested_action": "resolve + exclude the named customer"}
 
 Input: "which of my customers have stopped buying?"
-Output: {"classification": "business_analysis", "confidence": 0.9, "suggested_action": "analyze lapsed customers via sales recovery"}
+Output: {"classification": "business_analysis", "confidence": 0.9, "suggested_action": "summarize which customers have lapsed for the owner"}
 
 Input: "who's gone quiet lately?"
-Output: {"classification": "business_analysis", "confidence": 0.85, "suggested_action": "analyze lapsed customers via sales recovery"}
+Output: {"classification": "business_analysis", "confidence": 0.85, "suggested_action": "summarize which customers have gone quiet for the owner"}
 
 Input: "kaun se customer wapas nahi aa rahe?"
-Output: {"classification": "business_analysis", "confidence": 0.85, "suggested_action": "analyze lapsed customers via sales recovery"}
+Output: {"classification": "business_analysis", "confidence": 0.85, "suggested_action": "summarize which customers have lapsed for the owner"}
+
+Input: "and out of those, how many haven't bought in a while?"
+Output: {"classification": "business_analysis", "confidence": 0.88, "suggested_action": "report the COUNT of lapsed/dormant customers — answer the number, do not propose a campaign"}
 
 Input: "why are sales down this month?"
 Output: {"classification": "business_analysis", "confidence": 0.8, "suggested_action": "analyze sales trend + diagnose cause"}
