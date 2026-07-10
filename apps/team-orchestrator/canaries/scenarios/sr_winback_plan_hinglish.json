@@ -2,7 +2,11 @@
   "name": "sr_winback_plan_hinglish",
   "domain": "sr_autonomy_rails",
   "critical": false,
-  "setup_args": ["--onboarded", "--seed-lapsed-customers", "5"],
+  "setup_args": [
+    "--onboarded",
+    "--seed-lapsed-customers",
+    "5"
+  ],
   "expected_fail": false,
   "notes": "Variation on the base win-back delegation case, phrased in realistic Hinglish, proving the routing isn't keyed to a specific English template. Run: `setup --onboarded --seed-lapsed-customers 5 --name convo-harness-<id>` then `script <tenant> sr_winback_plan_hinglish.json`.",
   "steps": [
@@ -10,13 +14,30 @@
       "message": "bhai mere purane customers wapas nahi aa rahe, unko wapas laane ka ek plan bana do",
       "assert_no_silent": true,
       "assert_not_d1": true,
-      "assert_not_contains": ["got it — i'm on it and i'll update you shortly", "i'm on it and i'll update you"],
+      "assert_not_contains": [
+        "got it — i'm on it and i'll update you shortly",
+        "i'm on it and i'll update you"
+      ],
+      "assert_route": {
+        "expect_sr_delegation": true,
+        "tenant_wide": true
+      },
+      "assert_side_effects": {
+        "expect_campaign": true,
+        "expect_approval_decision": "pending",
+        "tenant_wide": true
+      },
       "note": "Hinglish win-back ask ('bring my old customers back'). Expect the same real Sales-Recovery delegation as the English phrasing — a grounded plan/approval ask, never the D1 filler, never silence."
     },
     {
       "message": "how many customers do I have in total?",
       "assert_no_silent": true,
-      "assert_contains": ["5"],
+      "assert_contains": [
+        "5"
+      ],
+      "assert_route": {
+        "expect_sr_delegation": false
+      },
       "note": "Pure count ask still fast-paths to the raw seeded number."
     }
   ]

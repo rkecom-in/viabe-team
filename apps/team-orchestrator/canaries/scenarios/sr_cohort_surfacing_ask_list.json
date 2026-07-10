@@ -2,7 +2,11 @@
   "name": "sr_cohort_surfacing_ask_list",
   "domain": "sr_autonomy_rails",
   "critical": true,
-  "setup_args": ["--onboarded", "--seed-lapsed-customers", "10"],
+  "setup_args": [
+    "--onboarded",
+    "--seed-lapsed-customers",
+    "10"
+  ],
   "expected_fail": false,
   "notes": "VT-490 cohort-surfacing (Done): build_sales_recovery_context now supplies the per-customer dormant-cohort rows (customer_id/display_name/days_since_last_sale — CL-390/CL-425-gated, minimum-necessary fields only, no phone/email) to the brain, so a direct 'who exactly are they' ask should get a grounded, substantive answer drawn from the real seeded cohort — never an 'insufficient_data' non-answer (the pre-VT-490 gap), never a fabricated list beyond what was actually seeded, never silence. Run: `setup --onboarded --seed-lapsed-customers 10 --name convo-harness-<id>` then `script <tenant> sr_cohort_surfacing_ask_list.json`.",
   "steps": [
@@ -15,7 +19,13 @@
     {
       "message": "and how many lapsed customers do I have in total?",
       "assert_no_silent": true,
-      "assert_contains": ["8"],
+      "assert_contains": [
+        "8"
+      ],
+      "assert_route": {
+        "expect_sr_delegation": false,
+        "tenant_wide": true
+      },
       "note": "VT-632 (Fazal 2026-07-09: lapsed = no purchase in 45d): the LAPSED count is the dormant subset, NOT the total seeded. The seeder makes n_lapsed = n - n//4 = 10 - 2 = 8 customers ~120-295d dormant (the other 2 are recent, ~2-10d). Corrected from the old ['10'] which encoded the TOTAL (customer_count) — the opus judge flagged it as answering total-vs-lapsed. Now fast-paths to lapsed_count (deterministic, 45d)."
     }
   ]

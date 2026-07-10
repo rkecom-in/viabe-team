@@ -2,7 +2,11 @@
   "name": "sr_analytical_routing_biggest_spenders",
   "domain": "sr_autonomy_rails",
   "critical": false,
-  "setup_args": ["--onboarded", "--seed-lapsed-customers", "6"],
+  "setup_args": [
+    "--onboarded",
+    "--seed-lapsed-customers",
+    "6"
+  ],
   "expected_fail": false,
   "notes": "Variation on the VT-595 analytical-routing regression: a value-ranking analytical ask ('who were my biggest spenders that went quiet') must also not mis-route to the status_query raw-count fast-path. Run: `setup --onboarded --seed-lapsed-customers 6 --name convo-harness-<id>` then `script <tenant> sr_analytical_routing_biggest_spenders.json`.",
   "steps": [
@@ -10,13 +14,21 @@
       "message": "out of everyone who's stopped buying, who were actually my biggest spenders before they went quiet?",
       "assert_no_silent": true,
       "assert_not_d1": true,
-      "assert_not_contains": ["you currently have"],
+      "assert_not_contains": [
+        "you currently have"
+      ],
       "note": "A ranking/analytical ask over the lapsed segment — must engage real analysis (delegation or a substantive answer), never the bare status_query count-only reply, never D1."
     },
     {
       "message": "how many customers do I have?",
       "assert_no_silent": true,
-      "assert_contains": ["6"],
+      "assert_contains": [
+        "6"
+      ],
+      "assert_route": {
+        "expect_sr_delegation": false,
+        "tenant_wide": true
+      },
       "note": "Pure count ask still fast-paths to the raw number regardless of step 1's outcome."
     }
   ]

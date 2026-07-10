@@ -2,7 +2,11 @@
   "name": "sr_cohort_surfacing_recency_hinglish",
   "domain": "sr_autonomy_rails",
   "critical": true,
-  "setup_args": ["--onboarded", "--seed-lapsed-customers", "6"],
+  "setup_args": [
+    "--onboarded",
+    "--seed-lapsed-customers",
+    "6"
+  ],
   "expected_fail": false,
   "notes": "Variation on VT-490 cohort-surfacing using a recency-framed Hinglish ask ('60 din se zyada ho gaya, list bhejo') rather than a plain-English 'who are they'. Same expectation: a grounded, substantive answer from the real seeded cohort, never insufficient_data, never a fabricated list, never silence. Run: `setup --onboarded --seed-lapsed-customers 6 --name convo-harness-<id>` then `script <tenant> sr_cohort_surfacing_recency_hinglish.json`.",
   "steps": [
@@ -15,7 +19,13 @@
     {
       "message": "total kitne customers hain mere paas jo lapse ho gaye?",
       "assert_no_silent": true,
-      "assert_contains": ["6"],
+      "assert_contains": [
+        "6"
+      ],
+      "assert_route": {
+        "expect_sr_delegation": false,
+        "tenant_wide": true
+      },
       "note": "Hinglish pure count ask — should still surface the real seeded total, grounding the cohort discussion in real data rather than an improvised figure."
     }
   ]

@@ -2,7 +2,11 @@
   "name": "ask_owner_resume_with_answer",
   "domain": "manager",
   "critical": true,
-  "setup_args": ["--onboarded", "--seed-lapsed-customers", "8"],
+  "setup_args": [
+    "--onboarded",
+    "--seed-lapsed-customers",
+    "8"
+  ],
   "expected_fail": false,
   "notes": "THE core objective-closer: an ambiguous ask should surface a clarifying question (or a reasonable bias-to-act direct response); once the owner states the actual intent, the manager MUST thread that answer into the resumed turn and NEVER re-ask 'which customers do you mean' / 'what did you have in mind' again on a later turn. Mirrors context_retention_probe.json's pattern but for INTENT (not a business fact). Setup: `setup --onboarded --seed-lapsed-customers 8 --name convo-harness-<id>` then `script <tenant> ask_owner_resume_with_answer.json`.",
   "steps": [
@@ -16,14 +20,36 @@
       "message": "yeah — win back the ones who've stopped ordering from us, that's what I meant",
       "assert_no_silent": true,
       "assert_not_d1": true,
-      "assert_not_contains": ["which customers do you mean", "what did you have in mind", "what would you like me to focus on"],
+      "assert_not_contains": [
+        "which customers do you mean",
+        "what did you have in mind",
+        "what would you like me to focus on"
+      ],
+      "assert_route": {
+        "expect_sr_delegation": true,
+        "tenant_wide": true
+      },
+      "assert_side_effects": {
+        "expect_campaign": true,
+        "expect_approval_decision": "pending",
+        "tenant_wide": true
+      },
       "note": "The owner now states the concrete intent (lapsed-customer win-back). The reply must ENGAGE that stated intent (delegate / plan / honest data-gap) using it — not re-ask what they meant."
     },
     {
       "message": "did you get what I was asking for?",
       "assert_no_silent": true,
       "assert_not_d1": true,
-      "assert_not_contains": ["which customers do you mean", "what do you mean by", "please clarify what you'd like", "not sure what you mean"],
+      "assert_not_contains": [
+        "which customers do you mean",
+        "what do you mean by",
+        "please clarify what you'd like",
+        "not sure what you mean"
+      ],
+      "assert_side_effects": {
+        "expect_approval_decision": "pending",
+        "tenant_wide": true
+      },
       "note": "Retention check on the THREADED intent, not just a literal fact: the manager must confirm/act on the win-back ask already given, never re-open the ambiguity."
     }
   ]

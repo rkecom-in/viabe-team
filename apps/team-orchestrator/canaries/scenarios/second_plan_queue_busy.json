@@ -23,6 +23,10 @@
       "assert_contains": [
         "approval"
       ],
+      "assert_side_effects": {
+        "expect_approval_decision": "pending",
+        "tenant_wide": true
+      },
       "note": "Second ask while one approval is (expected to be) pending. Expect a SINGLE queue-busy message referencing the outstanding approval — no duplicate plan, no false 'campaign is live' promise. See notes for the step-1 dependency before treating a FAIL here as a confirmed regression."
     }
   ]
