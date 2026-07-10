@@ -13,15 +13,10 @@
     {
       "message": "make me a plan to win back my lapsed customers this month",
       "assert_no_silent": true,
-      "assert_not_d1": true,
       "assert_contains": [
         "drafted"
       ],
-      "assert_not_contains": [
-        "got it — i'm on it and i'll update you shortly",
-        "i'm on it and i'll update you"
-      ],
-      "note": "Expect delegation to Sales-Recovery: an in-chat plan summary + approval prompt, OR an honest empty/insufficient-cohort reply — never a D1 non-answer, never silence. Manual review (json-report transcript) verdicts which outcome actually happened. [2026-07-04: assert loosened plan->drafted — the live summary says 'drafted a campaign', behavior correct, assert was too literal.]"
+      "note": "Expect delegation to Sales-Recovery: an in-chat plan summary + approval prompt, OR an honest empty/insufficient-cohort reply — never a D1 non-answer, never silence. Manual review (json-report transcript) verdicts which outcome actually happened. [2026-07-04: assert loosened plan->drafted — the live summary says 'drafted a campaign', behavior correct, assert was too literal.] [VT-633: interim ack allowed; draft asserted against the settled transcript + tenant-wide DB truth.]"
     },
     {
       "message": "how many customers do I have?",
