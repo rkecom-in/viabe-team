@@ -21,6 +21,13 @@ Mirrors ``connector_resume`` exactly: opt-out/DSR wins first, defers when the in
 loop owns the turn (runner-level guard), never re-mints a live flow (idempotency), and is
 FAIL-OPEN (any error -> None -> the normal pipeline runs). It runs BEFORE the consent gate
 like the resume gate: a deterministic mint never transmits to the LLM, so no consent check.
+
+STATUS vs IMPERATIVE split (dominant Tier-1 loop_stall fix, 2026-07-10): the connect signal
+is now TWO regexes. ``_CONNECT_IMPERATIVE_RE`` = base/imperative verbs ("connect my sheet") ->
+the MINT branch. ``_CONNECT_STATE_RE`` = past-participle/state references ("is it connected?",
+"was it never connected?") -> a STATUS-ANSWER branch that reads the durable connection state
+from the DB and replies HONESTLY (never re-dumps the OAuth URL). Previously the single regex
+matched "connect(ed)" so a pure status QUESTION dumped the link and looped on push-back.
 """
 
 from __future__ import annotations
@@ -32,16 +39,25 @@ from uuid import UUID
 
 logger = logging.getLogger(__name__)
 
-# Deterministic connect signal. NOTE: the shared pre_filter_gate._INTEGRATION_INTENT_RE is too
-# narrow for the REAL first-contact phrasings — it requires the provider noun immediately after
-# "my/the", so it MISSES "connect my GOOGLE sheet", "can we get this connected?", and the Hinglish
-# "Google Sheet ... kaise jodu" (verified against the i_sheets scenarios). Those are exactly the
-# asks that stall on the LLM. So this route uses its own connect-VERB + provider detector (still
-# fully deterministic, no LLM): fire only when a connect verb co-occurs with a single unambiguous
-# provider. Empirically catches the real English + Hinglish asks with no false-fire on non-connect
-# messages ("my google sheet has 500 rows", "send a message to my shopify customers").
-_CONNECT_VERB_RE = re.compile(
-    r"\b(connect(ed|ing)?|link(ed|ing)?|integrate|sync|set\s*up|setup|hook\s*up|jod(o|u|na|iye)?|jud)\b",
+# Deterministic connect signal — split into IMPERATIVE vs STATE (2026-07-10). NOTE: the shared
+# pre_filter_gate._INTEGRATION_INTENT_RE is too narrow for the REAL first-contact phrasings — it
+# requires the provider noun immediately after "my/the", so it MISSES "connect my GOOGLE sheet",
+# "can we get this connected?", and the Hinglish "Google Sheet ... kaise jodu" (verified against
+# the i_sheets scenarios). Those are exactly the asks that stall on the LLM. So this route uses its
+# own connect-VERB + provider detector (still fully deterministic, no LLM). The entry gate is WIDE
+# (either regex fires the route); the branch inside then distinguishes a request-to-connect from a
+# connection-STATUS question so a pure status ask is ANSWERED, not answered-with-a-URL-dump.
+#
+# _CONNECT_IMPERATIVE_RE — base/imperative verbs only (the owner wants to connect NOW). The (ed|ing)
+# state suffixes are deliberately REMOVED from connect/link so "connected"/"linked" do NOT fire it.
+_CONNECT_IMPERATIVE_RE = re.compile(
+    r"\b(connect|link|integrate|sync|set\s*up|setup|hook\s*up|jod(o|u|na|iye)?|jud)\b",
+    re.IGNORECASE,
+)
+# _CONNECT_STATE_RE — connection STATE/status references (usually a status question, e.g.
+# "is it connected?", "was it never connected?"). Answered from the DB; never re-dumps the URL.
+_CONNECT_STATE_RE = re.compile(
+    r"\b(connect(ed|ion)|linked|synced|hooked\s*up)\b",
     re.IGNORECASE,
 )
 _SHEETS_RE = re.compile(r"\b(google\s*sheet|sheets?|spreadsheet)\b", re.IGNORECASE)
@@ -74,8 +90,11 @@ def maybe_start_connector_onboarding(
         text = body or ""
         if matches_opt_out_or_dsr(text):
             return None  # DPDP opt-out / DSR always wins (mirror the resume gate)
-        if not _CONNECT_VERB_RE.search(text):
-            return None  # no connect verb -> not a connect ask -> normal pipeline
+
+        is_imperative = bool(_CONNECT_IMPERATIVE_RE.search(text))
+        is_state = bool(_CONNECT_STATE_RE.search(text))
+        if not (is_imperative or is_state):
+            return None  # no connect verb/state -> not a connect ask -> normal pipeline
 
         provider = _detect_provider(text)
         if provider is None:
@@ -83,16 +102,44 @@ def maybe_start_connector_onboarding(
 
         from orchestrator.onboarding.shopify_onboarding import (
             _pending_is_unexpired,
+            _send,
             read_integration_state,
         )
 
         state = read_integration_state(tenant_id)
-        if state is not None and _pending_is_unexpired(state.get("pending_owner_input")):
+        live_flow = state is not None and _pending_is_unexpired(state.get("pending_owner_input"))
+        label = "Google Sheet" if provider == "google_sheet" else "Shopify"
+
+        # STATUS-QUESTION branch — a connection-state reference with NO imperative. Answer HONESTLY
+        # from the DB; NEVER mint/dump a URL (dumping-then-repeating the link on push-back was the
+        # dominant Tier-1 loop_stall / ignored_speech_act trust-breaker).
+        if is_state and not is_imperative:
+            from orchestrator.integrations.commit import is_connector_connected
+
+            if is_connector_connected(tenant_id, provider):
+                answer = f"Yes — your {label} is connected."
+            elif live_flow:
+                answer = (
+                    f"Not yet — the connection isn't finished. Once you've approved on the "
+                    f"{label} page, reply 'done' and I'll confirm."
+                )
+            else:
+                answer = f"No — your {label} isn't connected yet. Want me to set it up?"
+            _send(recipient, answer, tenant_id=tenant_id)
+            logger.info(
+                "connector_first_contact: answered connection-status question (deterministic, no URL) "
+                "provider=%s tenant=%s",
+                provider,
+                tenant_id,
+            )
+            return {"done": False, "phase": "status_answer", "routed": "connector_status_answered"}
+
+        # MINT branch (imperative present) — the EXISTING behavior, unchanged.
+        if live_flow:
             return None  # a LIVE connector flow is in progress -> NOT first contact (no double-mint)
 
         if provider == "google_sheet":
             from orchestrator.integrations.sheets_oauth import start_sheets_oauth
-            from orchestrator.onboarding.shopify_onboarding import _send
 
             result = start_sheets_oauth(tenant_id)  # mints URL + arms phase_2_auth
             _send(
