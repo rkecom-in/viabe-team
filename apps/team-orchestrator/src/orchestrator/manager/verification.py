@@ -164,6 +164,30 @@ def verify_completion(
     if not floor_ok:
         return CompletionVerification(verdict="not_verified", reason=floor_reason)
 
+    # VT-633 #51 — the NO-EFFECT fast path: a completed dispatch whose terminal outcome resolves
+    # to 'completed_no_action' (no effect evidence, no campaign — e.g. an honest empty-cohort /
+    # insufficient-data conclusion) has NOTHING effectful for the opus checkpoint to second-guess,
+    # and the checkpoint could not pass anyway: the acceptance criterion "an owner-visible reply
+    # is recorded" is satisfied BY the settle→notify that runs AFTER this verdict — a chicken-and-
+    # egg the live pack surfaced as 2/3 empty-cohort runs leaving the owner in silence for minutes
+    # (verify fails on the missing reply → retry churn → the honest "no action was needed" closure
+    # only fires after the churn exhausts). Settle deterministically; the honest owner closure
+    # then fires within seconds. Symmetric with the upward floor below: DB facts (here: the
+    # ABSENCE of any effect) outrank LLM judgment.
+    try:
+        if resolve_terminal_outcome(tenant_id, task_id, steps) == "completed_no_action":
+            return CompletionVerification(
+                verdict="verified",
+                reason="no-effect fast path: the dispatch concluded honestly with no business "
+                       "effect (no campaign, no effect evidence) — nothing to verify beyond the "
+                       "settle-notify this verdict releases",
+            )
+    except Exception as exc:  # noqa: BLE001 — fall through to the opus checkpoint, never crash
+        logger.warning(
+            "verify_completion: no-effect fast path failed for task=%s "
+            "(falling through to the LLM checkpoint): %s", task_id, exc,
+        )
+
     # VT-633 #52 — the deterministic UPWARD floor: a task whose own dispatch EXECUTED its
     # approved campaign (campaigns.status='sent' + real campaign_messages rows, DB-proven) is
     # VERIFIED — the opus judgment call is skipped entirely. Live defect this closes: the LLM
