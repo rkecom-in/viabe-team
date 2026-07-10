@@ -13,7 +13,6 @@
     {
       "message": "purane customers ko wapas laane ke liye ek accha sa offer draft kar do",
       "assert_no_silent": true,
-      "assert_not_d1": true,
       "assert_contains": [
         "draft"
       ],
@@ -26,7 +25,7 @@
         "expect_approval_decision": "pending",
         "tenant_wide": true
       },
-      "note": "Arms a draft + a pending owner-approval."
+      "note": "Arms a draft + a pending owner-approval. [VT-633: interim ack allowed; draft asserted against the settled transcript + tenant-wide DB truth.]"
     },
     {
       "message": "haan theek hai, bhej do unhe",
