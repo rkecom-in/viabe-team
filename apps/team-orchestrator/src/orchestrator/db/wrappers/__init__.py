@@ -561,11 +561,13 @@ class CustomersWrapper(TenantScopedTable):
         agent contact within suppression_days; richest-first, capped. The ``lapsed_days``
         recency predicate is byte-equivalent to count_lapsed, so this cohort is exactly
         count_lapsed's sendability-filtered subset (NOT the old VT-312 percentile
-        superset). CAVEAT (batch-safety cap): the result is ``ORDER BY spend DESC LIMIT
-        limit`` — so "owner count == cohort size" holds only while the sendable-lapsed set
-        is <= ``limit`` (``DEFAULT_DETECTION_LIMIT`` = 50). Above that, ONE campaign sweep
-        targets the richest ``limit``; the owner count stays the TRUE total (later sweeps
-        pick up the rest as suppression clears). Empty ``versions`` matches nothing
+        superset). Per-sweep cap: the result is ``ORDER BY spend DESC LIMIT limit``
+        (``DEFAULT_DETECTION_LIMIT`` = 200, aligned to the daily send cap — CL-2026-07-10),
+        so "owner count == cohort size" holds for the full realistic SMB range (≤200
+        sendable-lapsed). For a rare >200-lapsed tenant one sweep targets the richest 200;
+        the count stays the TRUE total and the tail batches across sweeps as the daily-send
+        + 30d recontact-suppression caps clear (the VT-619 budget gate bounds cost). Empty
+        ``versions`` matches nothing
         (structurally fail-closed). Lives HERE because per-tenant customers SQL belongs to
         the wrapper layer (the no-direct-tenant-db-access lint)."""
         tid = self._uuid(tenant_id)

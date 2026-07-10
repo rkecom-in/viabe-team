@@ -139,7 +139,16 @@ MARKETING_CONSENT_VERSIONS: frozenset[str] = _parse_marketing_consent_versions()
 # the number the owner hears IS the set a campaign targets. This SUPERSEDES the VT-312 tenant-relative
 # p75-recency / p50-spend percentile targeting (removed): no value floor, no percentile. The single
 # constant lives in ``db.wrappers`` (imported at call time in ``detect_lapsed_customers``).
-DEFAULT_DETECTION_LIMIT = 50
+#
+# CL-2026-07-10 coherence (CC decision, Cowork 051500Z full-autonomy): the per-sweep detection cap is
+# raised 50 -> 200 to align with ``customer_send.AGENT_SEND_DAILY_TENANT_CAP`` (200/tenant/24h) so the
+# win-back cohort == the FULL lapsed set for realistic SMB tenants (the owner-count == the targeted set
+# holds up to 200 sendable-lapsed, not 50). The 50 was a conservative early cutoff; the REAL cost/volume
+# rails are the VT-619 per-tenant×agent budget metering (SKIP_BUDGET_EXHAUSTED hard-gate) + the daily
+# send cap + the per-customer frequency caps — all still apply. 200 stays a sane per-sweep safety ceiling
+# (drafting is Haiku/Sonnet-tier + budget-gated); the rare >200-lapsed tenant batches naturally across
+# sweeps as the daily-send cap + 30d recontact-suppression clear. No value floor, no percentile.
+DEFAULT_DETECTION_LIMIT = 200
 
 # Detection-time recontact pre-filter. VT-632 cleanup: this used to be a SECOND, independent
 # ``RECONTACT_SUPPRESSION_DAYS = 30`` declaration (silent-drift risk on a SEND path); it is now the
