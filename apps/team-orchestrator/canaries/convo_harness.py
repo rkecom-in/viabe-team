@@ -1542,6 +1542,31 @@ def cmd_teardown(args: argparse.Namespace) -> int:
                 f"refusing to teardown tenant {args.tenant_id}: business_name {name!r} is not a "
                 f"{_HARNESS_NAME_PREFIX!r} harness tenant"
             )
+        # VT-633 #53 — CANCEL the tenant's durable manager_task workflows BEFORE deleting the
+        # tenant. Teardown-mid-workflow left orphans that DBOS recovery re-ran after every
+        # redeploy, crashing on tenant FKs (dbos.workflow_status: ForeignKeyViolation "Key is
+        # not present in table tenants" on incidents/pipeline_runs) and churning dispatch
+        # capacity during measurement packs. Direct system-DB status flip (the harness runs
+        # outside the DBOS app process, so the client cancel API isn't available here); DBOS
+        # recovery skips CANCELLED workflows. Fail-soft: an unreachable system DB must never
+        # block the teardown itself.
+        try:
+            import re as _re
+
+            _sysdsn = _re.sub(r"/([^/?]+)(\?|$)", r"/postgres_dbos_sys\2", dsn, count=1)
+            import psycopg as _psycopg
+
+            with _psycopg.connect(_sysdsn, autocommit=True, connect_timeout=10) as _sc:
+                _n = _sc.execute(
+                    "UPDATE dbos.workflow_status SET status = 'CANCELLED' "
+                    "WHERE workflow_uuid LIKE %s AND status IN ('PENDING', 'ENQUEUED')",
+                    (f"manager_task:{args.tenant_id}:%",),
+                ).rowcount
+            if _n:
+                print(f"[teardown] cancelled {_n} in-flight manager_task workflow(s)")
+        except Exception as _exc:  # noqa: BLE001 — teardown must proceed regardless
+            print(f"[teardown] workflow-cancel skipped ({type(_exc).__name__})")
+
         # VT-620: FK-safe delete via the shared helper (also used by the test-tenant reaper).
         # Root cause of the old leak: pipeline_steps (non-cascade FKs to BOTH pipeline_runs AND
         # tenants) was never deleted before pipeline_runs, so the fixed 2-pass sweep left residual
