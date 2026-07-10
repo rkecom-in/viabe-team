@@ -176,3 +176,28 @@ def classify_approval_reply(body: str) -> ApprovalDecision | None:
     if has_strong or has_verb:
         return "approved"
     return None
+
+
+def is_resume_cue(body: str) -> bool:
+    """T8 — True iff the reply is a bare "proceed / do what you were saying / continue" cue with NO
+    explicit send verb, negation, reject, or question.
+
+    This is the SAME condition ``classify_approval_reply`` treats as a vague resume (it returns
+    None there, for money-safety — T5): an EXPLICIT send verb ("chalo bhej do") is an approval, a
+    negation/reject is a stop, a "?" is a question — none of those are a resume cue. The runner
+    (T8) uses this to RE-SURFACE an already-armed approval instead of letting the turn fall through
+    to new_task and spawn a COMPETING plan. Kept in lockstep with the classifier's normalization +
+    guards above so the two never diverge."""
+    normalized = (
+        unicodedata.normalize("NFC", (body or "").strip().casefold())
+        .replace("'", "")
+        .replace("’", "")
+    )
+    if "?" in normalized:
+        return False
+    tokens = {t for t in re.split(r"[\s,.!?;:।/\\-]+", normalized) if t}
+    if tokens & _NEGATION or tokens & _REJECT_KW:
+        return False
+    has_resume = bool(tokens & _VAGUE_RESUME) or any(p in normalized for p in _RESUME_BACKREF)
+    has_explicit_send = bool(tokens & _EXPLICIT_SEND)
+    return has_resume and not has_explicit_send
