@@ -160,7 +160,7 @@ def test_settle_verified_task_commits_from_verifying(substrate, monkeypatch: pyt
     _force_task_status(pool, tid, task_id, "verifying")
     monkeypatch.setattr(
         "orchestrator.manager.verification.resolve_terminal_outcome",
-        lambda steps: "completed_no_action",
+        lambda tenant_id, task_id, steps: "completed_no_action",
     )
 
     wf._settle_verified_task(tid, task_id)
@@ -186,7 +186,7 @@ def test_settle_verified_task_rejected_when_task_is_not_verifying(
     _force_task_status(pool, tid, task_id, "blocked")
     monkeypatch.setattr(
         "orchestrator.manager.verification.resolve_terminal_outcome",
-        lambda steps: "completed_no_action",
+        lambda tenant_id, task_id, steps: "completed_no_action",
     )
 
     wf._settle_verified_task(tid, task_id)

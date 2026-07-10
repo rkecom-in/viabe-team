@@ -765,6 +765,37 @@ def try_resume_pending_approval(tenant_id: str, body: str, message_sid: str | No
         )
         return decision
 
+    # VT-633 F-1 — a MANAGER-LOOP-armed approval (its run was minted by workflow.py's
+    # _dispatch_specialist_step: pipeline_runs.run_type='manager_dispatch') must NOT graph-resume.
+    # The legacy resume re-enters request_owner_approval_node whose arm-idempotency guard only
+    # matches an OPEN row — the just-RESOLVED row misses it, so the node re-armed a SECOND
+    # approval + re-sent the summary/template (the duplicate-emission disease, observed live),
+    # while the actual execution never ran. For a loop dispatch the LOOP is the single reactor:
+    # its _approval_still_pending poll sees the resolution within seconds and its approved-branch
+    # owns the campaign execution (F-2). Resolving the row above is this path's whole job.
+    try:
+        with tenant_connection(tenant_id) as conn:
+            _rt_row = conn.execute(
+                "SELECT run_type FROM pipeline_runs WHERE id = %s",
+                (str(approval["run_id"]),),
+            ).fetchone()
+        _run_type = (
+            (_rt_row.get("run_type") if isinstance(_rt_row, dict) else _rt_row[0])
+            if _rt_row is not None else None
+        )
+    except Exception:  # noqa: BLE001 — fail-soft: an unreadable run_type takes the legacy path
+        logger.warning(
+            "approval-resume: run_type read failed (tenant=%s); assuming legacy path", tenant_id
+        )
+        _run_type = None
+    if _run_type == "manager_dispatch":
+        logger.info(
+            "approval-resume: resolved loop-armed approval (tenant=%s approval=%s decision=%s) — "
+            "no graph resume; the manager loop reacts",
+            tenant_id, approval["id"], decision,
+        )
+        return decision
+
     # Resume the suspended graph (re-enters the interrupting node; the node's
     # arm_pause_request is a no-op now the row is resolved). Then close the
     # original paused run.
