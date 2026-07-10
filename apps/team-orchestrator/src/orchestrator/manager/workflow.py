@@ -1112,6 +1112,16 @@ def manager_task_workflow(tenant_id: str, task_id: str) -> str:
                 # 'completed_with_effect' off the PROPOSAL step's own evidence_kind — the VT-633
                 # defect (a false "Done — I've taken care of it").
                 exec_result = _execute_approved_campaign(tenant_id, task_id, step_id, attempt)
+                # VT-633 — persist the execution outcome to the audit spine UNCONDITIONALLY.
+                # Tonight's live debugging went blind twice because the step's no-op/summary
+                # reasons lived only in its return value; every approved-branch execution now
+                # leaves a durable trace (counts only — no PII).
+                emit_tm_audit(
+                    event_layer="does", event_kind="campaign_execution_result",
+                    actor="team_manager", tenant_id=tenant_id,
+                    summary=f"approved-campaign execution: executed={exec_result.get('executed')}",
+                    decision={k: v for k, v in exec_result.items() if k in ("executed", "reason", "summary")},
+                )
                 if exec_result.get("executed"):
                     # Tell the owner what actually happened, from the REAL summary — its own
                     # memoized step (see _report_campaign_outcome_to_owner's docstring for why an
