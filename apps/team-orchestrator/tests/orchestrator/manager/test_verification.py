@@ -184,3 +184,23 @@ def test_upward_floor_read_error_falls_through_to_llm(monkeypatch):
     monkeypatch.setattr(CampaignsWrapper, "executed_campaign_exists_for_runs", _boom)
     v = verification.verify_completion(tid, kid, client=None)
     assert v.verdict != "verified" or "executed-effect floor" not in v.reason
+
+
+def test_no_effect_fast_path_verifies_without_llm(monkeypatch):
+    """VT-633 #51 — a completed_no_action terminal (honest empty-cohort conclusion) verifies
+    deterministically; the opus call must never run (client=None crashes if reached). Closes the
+    chicken-and-egg where the 'owner-visible reply' criterion could only be satisfied by the
+    settle-notify that runs AFTER this verdict."""
+    from uuid import uuid4
+
+    from orchestrator.manager import task_store, verification
+
+    tid, kid = uuid4(), uuid4()
+    monkeypatch.setattr(task_store, "get_task", lambda t, k: {"plan_revision": 1, "objective": {}})
+    monkeypatch.setattr(
+        verification, "_current_steps",
+        lambda t, k, r: [{"id": uuid4(), "step_seq": 1, "status": "done", "evidence_kind": None, "detail": {}}],
+    )
+    v = verification.verify_completion(tid, kid, client=None)
+    assert v.verdict == "verified"
+    assert "no-effect fast path" in v.reason
