@@ -62,6 +62,13 @@ def on_route_decided(state: Any, route_key: str) -> None:
     try:
         if route_key == _TERMINAL_ROUTE:
             return  # no objective-bearing dispatch this turn — the manager answered directly
+        # VT-633 D-D — a manager-LOOP dispatch (workflow.py threads manager_task_id into state)
+        # already HAS its durable task; minting a second `live_dispatch:{run_id}` row here left a
+        # permanent orphan 'running' task per loop dispatch (live canary: two running tasks after
+        # one draft ask), polluting has_active_task → later new_tasks admitted 'queued' not
+        # 'planned'. The legacy (non-loop) dispatch path still mints exactly as before.
+        if state.get("manager_task_id") is not None:
+            return
         tenant_id = state.get("tenant_id")
         run_id = state.get("run_id")
         if tenant_id is None or run_id is None:

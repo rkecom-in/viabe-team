@@ -68,6 +68,11 @@ from orchestrator.owner_inputs.approval_reply import classify_approval_reply
         ("yes but don't send the discount one", None),  # Cowork's two-clause example -> Haiku
         ("maybe ok", None),  # hedge -> not authoritative -> Haiku fallback (the regression)
         ("perhaps send it later", None),  # hedge
+        # --- VT-633: LATIN-script Hinglish hedges were missing — "shayad theek hai" classified
+        # APPROVED off the bare "theek" verb (a hedged non-decision one step from a send) ---
+        ("shayad theek hai", None),
+        ("hmm dekhte hain, shayad theek rahega", None),
+        ("dekhte hain", None),
         ("what is this campaign?", None),
         ("make it more festive", None),
         ("", None),

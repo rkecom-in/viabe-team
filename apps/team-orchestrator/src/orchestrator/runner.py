@@ -170,6 +170,51 @@ _D1_INTURN_WAIT_POLL_S = 1.0
 _D1_INTURN_WAIT_MAX_POLLS = 15  # ≈15s head-start — bounded so a stuck task never hangs the turn
 
 
+# VT-633 D-A (approval-arm wait): a CLEAR owner decision that lands while the manager loop is
+# still composing/arming its approval must WAIT for the arm (bounded), not be dropped. Budget
+# covers the observed spawn→SR→collapse→arm latency (~1 min) with headroom; strictly bounded so
+# a stuck loop never hangs the turn (the reply then falls through to the normal path, as today).
+_APPROVAL_ARM_WAIT_POLL_S = 4.0
+_APPROVAL_ARM_WAIT_MAX_POLLS = 24  # ≈96s
+
+
+@DBOS.step()
+def _open_approval_exists_step(tenant_id: str) -> bool:
+    """VT-633 D-A — CHECKPOINTED poll condition for the approval-arm wait (mirrors
+    _brain_emitted_owner_reply_step; see that step's replay-determinism note). Never raises:
+    a read error reports False (keep waiting / eventually fall through) — failing SOFT here can
+    only delay a resolution, never fabricate one."""
+    try:
+        from orchestrator.agent.approval_resume import find_open_approval_for_tenant
+
+        with tenant_connection(tenant_id) as conn:
+            return find_open_approval_for_tenant(conn, tenant_id) is not None
+    except Exception:  # noqa: BLE001 — a control-read outage must not kill a live inbound run
+        logger.warning("VT-633: open-approval poll read failed (fail-soft) tenant=%s", tenant_id)
+        return False
+
+
+@DBOS.step()
+def _should_wait_for_approval_arm(tenant_id: str, body: str) -> bool:
+    """VT-633 D-A — CHECKPOINTED gate for the approval-arm wait: True iff the reply is a CLEAR
+    deterministic decision (classify_approval_reply — never the LLM classifier pre-arm; an
+    ambiguous reply must not wait at all) AND a manager task is actively in flight (the only
+    situation in which an arm can still be coming). A @DBOS.step because has_active_task is a
+    LIVE read: left un-memoized, a replay could re-evaluate it differently and skip/enter the
+    sleep loop with a different step count (the same divergence class the poll step guards).
+    Fail-soft False: an error here just means the reply falls through as it always did."""
+    try:
+        from orchestrator.manager import task_store
+        from orchestrator.owner_inputs.approval_reply import classify_approval_reply
+
+        if classify_approval_reply(body or "") is None:
+            return False
+        return task_store.has_active_task(tenant_id)
+    except Exception:  # noqa: BLE001 — gating must never kill a live inbound run
+        logger.warning("VT-633: arm-wait gate read failed (fail-soft) tenant=%s", tenant_id)
+        return False
+
+
 @DBOS.step()
 def _brain_emitted_owner_reply_step(tenant_id: str, inbound_sid: str | None) -> bool:
     """VT-623 Head3 — the CHECKPOINTED form of :func:`_brain_emitted_owner_reply`, used ONLY as the D1
@@ -900,6 +945,29 @@ def webhook_pipeline_run(tenant_id: str, run_id: str, twilio_fields: dict) -> di
         resumed_decision = try_resume_pending_approval(
             tenant_id, event.body or "", event.twilio_message_sid
         )
+        if resumed_decision is None and _should_wait_for_approval_arm(
+            tenant_id, event.body or ""
+        ):
+            # VT-633 D-A — the owner's CLEAR decision can PRECEDE the manager loop's approval
+            # arm by seconds (live canary: reply at :30, arm at :47 — a 17s gap; the loop's
+            # spawn → SR → collapse → arm chain runs ~1 min behind the draft ask). Dropping the
+            # reply lost the decision forever: the armed approval then waited its full window
+            # with nobody left to resolve it — a dropped money action. Give the arm a bounded
+            # head-start and re-run the resume once it lands. Ambiguous replies and no-task
+            # turns never wait (the gate step above); the opt-out/DSR guard runs FIRST inside
+            # try_resume_pending_approval, and it re-runs on the post-arm attempt, so a STOP is
+            # never consumed as a decision here. DBOS-replay: gate + poll condition are both
+            # @DBOS.step (memoized) — replay re-walks the identical sleep count (the VT-623 B1
+            # pattern; see _brain_emitted_owner_reply_step's note).
+            _polls = 0
+            while _polls < _APPROVAL_ARM_WAIT_MAX_POLLS:
+                if _open_approval_exists_step(tenant_id):
+                    resumed_decision = try_resume_pending_approval(
+                        tenant_id, event.body or "", event.twilio_message_sid
+                    )
+                    break
+                DBOS.sleep(_APPROVAL_ARM_WAIT_POLL_S)
+                _polls += 1
         if resumed_decision is not None:
             close_webhook_run(tenant_id, run_id, "completed")
             return {
