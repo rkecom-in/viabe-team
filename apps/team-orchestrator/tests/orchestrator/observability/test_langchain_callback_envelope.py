@@ -105,3 +105,42 @@ def test_live_reasoning_step_prompt_token_defaults_zero_when_usage_empty(
     input_env = captured["input_envelope"]
     assert input_env["prompt_token_count"] == 0
     AgentReasoningStepInput.model_validate(input_env)  # no ValidationError
+
+
+# --- §7D — reasoning_ref carries the EXACT step_id write_step returned -------
+
+
+def test_reasoning_ref_carries_the_written_step_id(monkeypatch) -> None:
+    """The reasoning_turn audit row's reasoning_ref must reference the EXACT pipeline_steps.id
+    write_step just returned — a precise join, not just the coarser (run_id, step_name) pair."""
+    written_id = uuid4()
+    monkeypatch.setattr(cb_mod, "write_step", lambda **kw: written_id)
+
+    captured_audit: dict[str, object] = {}
+    monkeypatch.setattr(cb_mod, "emit_tm_audit", lambda **kw: captured_audit.update(kw))
+
+    cb = _make_callback()
+    ctx_run_id = uuid4()
+    with observability_context(run_id=ctx_run_id, tenant_id=uuid4()):
+        cb._write_reasoning_step(_fake_response(), {}, status="completed")
+
+    assert captured_audit["reasoning_ref"] == {
+        "run_id": str(ctx_run_id),
+        "step_id": str(written_id),
+        "step_name": "orchestrator_agent_turn",
+    }
+
+
+def test_reasoning_ref_step_id_is_none_when_write_step_buffers(monkeypatch) -> None:
+    """When write_step falls back to the local SQLite buffer (returns None — no real row id yet),
+    reasoning_ref.step_id must be None, never a stale/fabricated value."""
+    monkeypatch.setattr(cb_mod, "write_step", lambda **kw: None)
+
+    captured_audit: dict[str, object] = {}
+    monkeypatch.setattr(cb_mod, "emit_tm_audit", lambda **kw: captured_audit.update(kw))
+
+    cb = _make_callback()
+    with observability_context(run_id=uuid4(), tenant_id=uuid4()):
+        cb._write_reasoning_step(_fake_response(), {}, status="completed")
+
+    assert captured_audit["reasoning_ref"]["step_id"] is None

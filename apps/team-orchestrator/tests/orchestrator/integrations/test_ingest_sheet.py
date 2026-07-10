@@ -26,6 +26,7 @@ pytest.importorskip("pydantic")
 
 from orchestrator.integrations.dedup_merge import ACQUIRED_VIA  # noqa: E402
 from orchestrator.integrations.ingest import (  # noqa: E402
+    _normalize_e164,
     sheet_row_to_canonical,
 )
 
@@ -57,6 +58,38 @@ def test_mapper_no_anchor_returns_none():
     # Columns the writers don't persist → no identity → dropped at the mapper.
     assert sheet_row_to_canonical({"GST": "29ABCDE1234F1Z5", "City": "Pune"}) is None
     assert sheet_row_to_canonical({}) is None
+
+
+# --- VT-487: a numeric sheet cell read as a FLOAT must not corrupt into a bad number -------------
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "9.98886e+11",   # str-form scientific notation (openpyxl/gspread numericized a cell)
+        9.98886e11,      # an actual float cell value
+        998886123456.0,  # float with .0
+        "+91998886.0",   # decimal artifact
+    ],
+)
+def test_normalize_e164_rejects_float_corruption(raw):
+    """The old digit-strip glued a scientific-notation mantissa+exponent into a plausible-but-WRONG
+    number (the Twilio 21211 breach). It must now reject (None) so email/name anchor instead."""
+    assert _normalize_e164(raw) is None
+
+
+def test_sheet_float_phone_cell_does_not_corrupt():
+    """A sheet row whose phone cell came in as a float (numeric column) yields phone_e164=None
+    rather than a corrupted number — the row still anchors on name."""
+    r = sheet_row_to_canonical({"Phone": 9.98886e11, "Name": "Asha"})
+    assert r is not None
+    assert r.phone_e164 is None  # corrupted float NOT coerced into a bad number
+    assert r.display_name == "Asha"
+
+
+def test_normalize_e164_coerces_clean_int():
+    """A clean int cell coerces to str and normalizes — proves the coerce path, not just reject."""
+    assert _normalize_e164(9876500001) == "+919876500001"
 
 
 def test_mapper_email_only_anchor_no_phone():

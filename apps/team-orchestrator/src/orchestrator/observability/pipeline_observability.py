@@ -164,7 +164,7 @@ def write_step(
     override_id: UUID | None = None,
     paused_ms: int | None = None,
     name_registry: Callable[[str], bool] | None = None,
-) -> None:
+) -> UUID | None:
     """Write one pipeline_steps row + atomically update pipeline_runs cumulatives.
 
     VT-374: ``override_id`` / ``paused_ms`` are structural run-control columns
@@ -184,6 +184,11 @@ def write_step(
     leave ``None`` and it is built lazily from ``tenant_id`` (fail-soft
     to pattern-only; see ``_registry_for_tenant``).
     Per CL-416: NO delete / expire / aggregate-drop paths.
+
+    Returns the inserted ``pipeline_steps.id`` on a real DB write, or ``None``
+    when the write fell back to the local SQLite buffer (§7D — no real row id
+    exists yet in that case; the flush later inserts it, but this call has no
+    way to hand that future id back to its caller).
 
     Raises ``EnvelopeNotRegistered`` (from VT-179) if ``step_kind`` has no
     registered envelope — the caller has a bug.
@@ -260,7 +265,7 @@ def write_step(
 
     # 4. Atomic write: try prod DB; on connection failure, buffer locally
     try:
-        _do_db_write(
+        return _do_db_write(
             step_kind=step_kind,
             run_id=run_id,
             tenant_id=tenant_id,
@@ -307,6 +312,7 @@ def write_step(
                 "exc": repr(exc),
             },
         )
+        return None
 
 
 def record_intervention(
@@ -467,7 +473,7 @@ def _do_db_write(
     tokens_output: int | None,
     override_id: UUID | None = None,
     paused_ms: int | None = None,
-) -> None:
+) -> UUID:
     """Single-transaction INSERT pipeline_steps + UPDATE pipeline_runs.
 
     Concurrency strategy: lock the pipeline_runs row FOR UPDATE first,
@@ -476,6 +482,10 @@ def _do_db_write(
     query with aggregate functions, so we cannot lock the steps query
     itself). This gives a strict total order over writes per run while
     keeping inter-run writes parallel.
+
+    Returns the inserted row's ``id`` (§7D — callers thread it into
+    ``reasoning_ref`` so a DECIDES-layer audit row can point at the
+    EXACT reasoning step, not just its (run_id, step_name)).
     """
     with tenant_connection(tenant_id) as conn, conn.transaction():
         conn.execute(
@@ -489,7 +499,7 @@ def _do_db_write(
         ).fetchone()
         next_seq = int(cast("dict[str, Any]", raw)["next"])
 
-        conn.execute(
+        inserted = conn.execute(
             """
             INSERT INTO pipeline_steps (
               run_id, tenant_id, step_seq, step_kind, step_name,
@@ -501,6 +511,7 @@ def _do_db_write(
               %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
               %s, %s, %s, %s, %s, now()
             )
+            RETURNING id
             """,
             (
                 str(run_id),
@@ -522,7 +533,7 @@ def _do_db_write(
                 str(override_id) if override_id else None,
                 paused_ms,
             ),
-        )
+        ).fetchone()
 
         conn.execute(
             """
@@ -533,6 +544,9 @@ def _do_db_write(
             """,
             (cost_paise, str(run_id)),
         )
+
+        raw_id = cast("dict[str, Any]", inserted)["id"]
+        return raw_id if isinstance(raw_id, UUID) else UUID(str(raw_id))
 
 
 def _append_to_buffer(

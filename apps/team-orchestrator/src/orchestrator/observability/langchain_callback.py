@@ -332,8 +332,9 @@ class OrchestratorReasoningCallback(BaseCallbackHandler):
             if isinstance(redacted, dict):
                 think_text_redacted = redacted.get("text")
 
+        written_step_id: UUID | None = None
         try:
-            write_step(
+            written_step_id = write_step(
                 step_kind="agent_reasoning_step",
                 run_id=ctx.run_id,
                 tenant_id=ctx.tenant_id,
@@ -392,6 +393,9 @@ class OrchestratorReasoningCallback(BaseCallbackHandler):
         # VT-514 DECIDES — reasoning_turn spine row (fail-soft, conn=None).
         # References the pipeline_steps reasoning row written above via
         # reasoning_ref; carries model + redacted think_text, never raw context.
+        # §7D: reasoning_ref now carries the EXACT step_id write_step just
+        # returned (None when that write fell back to the local buffer —
+        # step_name stays as the (run_id, step_name) fallback join key).
         emit_tm_audit(
             event_layer="decides",
             event_kind="reasoning_turn",
@@ -408,6 +412,7 @@ class OrchestratorReasoningCallback(BaseCallbackHandler):
             },
             reasoning_ref={
                 "run_id": str(ctx.run_id),
+                "step_id": str(written_step_id) if written_step_id is not None else None,
                 "step_name": "orchestrator_agent_turn",
             },
         )

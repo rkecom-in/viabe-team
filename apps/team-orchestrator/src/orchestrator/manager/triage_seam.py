@@ -186,6 +186,8 @@ def triage_seam(
             "task_id": str(task_id) if task_id is not None else None,
             "task_status": task_status,
             "message_sid": message_sid,
+            # §7D — the classifier's own stated WHY, not just the WHAT.
+            "reasoning": result.reasoning,
         },
     )
 
