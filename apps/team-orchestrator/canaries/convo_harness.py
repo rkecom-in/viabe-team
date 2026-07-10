@@ -1301,8 +1301,10 @@ def _sweep_late_replies(
     transcripts as captured."""
     try:
         def _key(t: Any) -> tuple[str, str]:
+            # role+text only — created_at string forms differ between captured Turn objects
+            # (raw datetime) and fresh reads (driver-dependent), which double-added rows.
             get = t.get if isinstance(t, dict) else lambda k, d=None: getattr(t, k, d)
-            return (str(get("created_at")), str(get("text"))[:120])
+            return (str(get("role")), str(get("text"))[:160])
 
         captured = {_key(t) for r in results for t in r.transcript}
         stable_polls = 0
