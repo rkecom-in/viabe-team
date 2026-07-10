@@ -111,18 +111,25 @@ def test_shadow_task_never_blocks_a_real_new_task_admission(pool, monkeypatch: p
     assert task_store.get_task(tid, real_result.task_id)["status"] == "planned"
 
 
-def test_shadow_plan_validation_failure_creates_no_plan(pool, monkeypatch: pytest.MonkeyPatch):
+def test_template_draft_never_consults_the_llm_validator(pool, monkeypatch: pytest.MonkeyPatch):
+    """VT-633 — the minimal TEMPLATE draft is validated by construction: the per-turn opus call is
+    GONE for it (it was a coin flip that intermittently rejected the constant as 'unfalsifiable'
+    and silently rerouted the turn to legacy). A raising validator proves it is never consulted;
+    the plan is still created."""
     from orchestrator.manager import triage_seam as ts
 
     tid = _seed_tenant(pool)
     _mock_triage(monkeypatch, "new_task")
-    _mock_valid_plan(monkeypatch, valid=False)
+    monkeypatch.setattr(
+        "orchestrator.manager.plan_validation.validate_plan_draft",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("validator must not be called")),
+    )
 
     result = ts.triage_seam(tid, "some ask", "SM222", mode="shadow")
 
     assert result.outcome == "new_task"
-    assert result.task_id is None
-    assert result.skip_legacy_dispatch is False
+    assert result.task_id is not None  # plan created deterministically — no LLM in the path
+    assert result.skip_legacy_dispatch is False  # shadow still never owns the turn
 
 
 def test_shadow_direct_reply_records_decision_without_a_plan(pool, monkeypatch: pytest.MonkeyPatch):
@@ -287,14 +294,21 @@ def test_enforce_task_status_falls_through_to_legacy(pool, monkeypatch: pytest.M
     assert result.skip_legacy_dispatch is False
 
 
-def test_enforce_new_task_plan_validation_failure_falls_through_to_legacy(
+def test_enforce_new_task_routing_is_deterministic_no_validator_coin_flip(
     pool, monkeypatch: pytest.MonkeyPatch
 ):
+    """VT-633 — enforce mode: a new_task ALWAYS creates the plan and starts the durable loop, even
+    with the LLM validator raising (it is not in the path for the template draft). The old
+    behavior — validator rejection silently falling through to legacy dispatch — was the root of
+    the delegation-lane variance (same ask: enforce on one run, legacy diseases on the next)."""
     from orchestrator.manager import triage_seam as ts
 
     tid = _seed_tenant(pool)
     _mock_triage(monkeypatch, "new_task")
-    _mock_valid_plan(monkeypatch, valid=False)
+    monkeypatch.setattr(
+        "orchestrator.manager.plan_validation.validate_plan_draft",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("validator must not be called")),
+    )
 
     started = {"called": False}
     monkeypatch.setattr(
@@ -305,9 +319,9 @@ def test_enforce_new_task_plan_validation_failure_falls_through_to_legacy(
     result = ts.triage_seam(tid, "some ask", "SM999", mode="enforce")
 
     assert result.outcome == "new_task"
-    assert result.task_id is None
-    assert result.skip_legacy_dispatch is False
-    assert started["called"] is False
+    assert result.task_id is not None
+    assert result.skip_legacy_dispatch is True  # the loop owns the turn — deterministically
+    assert started["called"] is True
 
 
 def test_triage_turn_receives_the_real_has_active_task_and_has_open_question_kwargs(
@@ -365,3 +379,16 @@ def test_triage_turn_receives_false_kwargs_for_a_clean_tenant(pool, monkeypatch:
 
     assert captured_kwargs["has_active_task"] is False
     assert captured_kwargs["has_open_question"] is False
+
+
+def test_template_draft_criteria_are_structurally_falsifiable():
+    """VT-633 — the template's acceptance criteria must be CHECKABLE facts (a log row, a DB
+    record), never a subjective judgment ('owner confirms the ask was addressed'), so the
+    verification cycle has something real to verify and no LLM can call them unfalsifiable."""
+    from orchestrator.manager.triage_seam import _build_draft_plan
+
+    draft = _build_draft_plan("win back my lapsed customers")
+    joined = " | ".join(draft.acceptance_criteria).lower()
+    assert "conversation log" in joined
+    assert "db record" in joined
+    assert "owner confirms" not in joined  # the old unfalsifiable criterion is gone

@@ -74,7 +74,16 @@ def _build_draft_plan(message_text: str) -> ManagerPlan:
     safe_text = redact(message_text) or message_text
     return ManagerPlan(
         objective=str(safe_text)[:500],
-        acceptance_criteria=["the owner confirms the ask was addressed"],
+        # VT-633 — structurally FALSIFIABLE constants (a log row / a DB record — checkable by the
+        # verification cycle), replacing "the owner confirms the ask was addressed", which the
+        # per-turn opus validator intermittently rejected as unfalsifiable (see the checkpoint
+        # note in _create_plan_for_new_task).
+        acceptance_criteria=[
+            "an owner-visible reply addressing this ask is recorded in the conversation log "
+            "for this task",
+            "any business effect claimed to the owner (campaign, send, approval) has a "
+            "matching DB record",
+        ],
         steps=[
             PlanStep(
                 step_seq=1,
@@ -95,31 +104,27 @@ def _create_plan_for_new_task(
 
     ``shadow`` passes straight through to ``plan_store.create_plan`` (round-3 fix: a shadow-mode
     plan must persist status='shadow', never 'planned'/'queued', so it can never occupy the
-    tenant's one-active-task admission slot — see the module docstring)."""
+    tenant's one-active-task admission slot — see the module docstring).
+
+    VT-633 — the MINIMAL TEMPLATE draft is validated BY CONSTRUCTION, not per turn. This function
+    only ever builds the one fixed template (_build_draft_plan: constant falsifiable criteria +
+    a single clarification step; the only variance is the redacted owner text in objective/
+    situation, which the checkpoint was never judging for safety — consent/approval gates live
+    elsewhere). Per-turn opus judgment of that CONSTANT was a coin flip in the hot path: the same
+    template drew valid=true on one run and "unfalsifiable" on the next (tm_audit 2026-07-10
+    02:23:06, against the validator prompt's own "an owner confirmation" example), silently
+    routing the SAME owner ask to enforce on one run and legacy dispatch on the next — the
+    variance at the root of the delegation-lane failures. The opus checkpoint (A5) REMAINS the
+    gate for any future non-template drafted plan; it is simply not re-asked about a constant."""
     from orchestrator.manager import plan_store
-    from orchestrator.manager.plan_validation import validate_plan_draft
 
     draft = _build_draft_plan(message_text)
-    try:
-        validation = validate_plan_draft(draft)
-    except Exception:  # noqa: BLE001 — fail-soft, never drop the turn over a validation crash
-        logger.warning("triage_seam: plan-validation call raised (fail-soft, no plan created)")
-        emit_tm_audit(
-            event_layer="decides", event_kind="triage_plan_validation_error", actor="team_manager",
-            tenant_id=tenant_id, summary="plan-validation call raised; falling back to legacy dispatch",
-            decision={"message_sid": message_sid},
-        )
-        return None
-
-    if not validation.valid:
-        emit_tm_audit(
-            event_layer="decides", event_kind="triage_plan_validation_failed", actor="team_manager",
-            tenant_id=tenant_id,
-            summary=f"draft plan rejected: {validation.reason}",
-            decision={"message_sid": message_sid, "reason": validation.reason},
-        )
-        return None
-
+    emit_tm_audit(
+        event_layer="decides", event_kind="triage_plan_template_prevalidated", actor="team_manager",
+        tenant_id=tenant_id,
+        summary="minimal template draft — validated by construction (VT-633), no per-turn LLM call",
+        decision={"message_sid": message_sid},
+    )
     return plan_store.create_plan(
         tenant_id, draft, source_message_sid=message_sid, shadow=shadow
     )
@@ -148,7 +153,15 @@ def triage_seam(
     )
     if result is None:
         # triage.py's own fail-soft contract — classify failure falls back to the legacy dispatch
-        # behavior for THIS turn, exactly as if the mode were legacy.
+        # behavior for THIS turn, exactly as if the mode were legacy. VT-633: emit the audit row —
+        # this fallback was INVISIBLE (the 02:24:39 approval turn rode legacy with no trace),
+        # and an unaudited routing flip is exactly what made the delegation lane un-debuggable.
+        emit_tm_audit(
+            event_layer="decides", event_kind="triage_classify_failed", actor="team_manager",
+            tenant_id=tenant_id,
+            summary="triage classify failed (fail-soft) — this turn falls back to legacy dispatch",
+            decision={"message_sid": message_sid, "mode": resolved_mode},
+        )
         return _NO_OP
 
     task_id: UUID | None = None
