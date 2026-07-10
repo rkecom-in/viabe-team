@@ -245,3 +245,121 @@ def test_send_fact_read_error_still_yields_honest_replacement(monkeypatch):
 
     out = mod.apply_emission_gate("I sent it already.", TENANT)
     assert out == mod._REPLACEMENT_COPY["generic"]["en"]
+
+
+# ── #58 (T7) contains_phantom_promise truth table ──────────────────────────────────────────
+
+
+def test_phantom_promise_en_matches():
+    assert mod.contains_phantom_promise("I don't have that — I'll follow up shortly.")
+    assert mod.contains_phantom_promise("Let me have the team confirm the exact details.")
+    assert mod.contains_phantom_promise("Good question — I'll get back to you on that.")
+    assert mod.contains_phantom_promise("I'll circle back once I know more.")
+    assert mod.contains_phantom_promise("The team will confirm and let you know.")
+    assert mod.contains_phantom_promise("I'll have the team look into it.")
+
+
+def test_phantom_promise_hinglish_matches():
+    assert mod.contains_phantom_promise("Main pata karke bataunga.")
+    assert mod.contains_phantom_promise("Team se confirm karke follow up karunga.")
+    assert mod.contains_phantom_promise("Baad me bataunga aapko.")
+
+
+def test_phantom_promise_false_positive_guards():
+    # A bare follow-up QUESTION offer is not a promissory deferral.
+    assert not mod.contains_phantom_promise("Any follow-up questions? Happy to help.")
+    # Immediate action (no deferral) must pass clean.
+    assert not mod.contains_phantom_promise("I'll send you the connect link right now.")
+    assert not mod.contains_phantom_promise("Want me to set it up now?")
+    # "the team" alone (no promissory verb) is fine — the specialist agents are colloquially a team.
+    assert not mod.contains_phantom_promise("Your Sales Recovery agent is on the team.")
+    assert not mod.contains_phantom_promise("")
+    assert not mod.contains_phantom_promise(None)  # type: ignore[arg-type]
+
+
+# ── #58 (T7) apply_emission_gate — phantom-promise sentence strip ───────────────────────────
+
+
+def _patch_no_completion_claim_path(monkeypatch, *, locale: str = "en"):
+    """Neutralize layer-1 (no completion claim / fact irrelevant) and capture strip audits."""
+    monkeypatch.setattr(mod, "send_fact_exists", lambda t: True)  # layer-1 never fires
+    monkeypatch.setattr(mod, "_has_open_approval", lambda t: False)
+    monkeypatch.setattr(
+        "orchestrator.owner_surface.freeform_acks.resolve_owner_locale", lambda t: locale
+    )
+    audits: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        mod,
+        "_emit_blocked_audit",
+        lambda t, text, event_kind="emission_claim_blocked": audits.append((event_kind, text)),
+    )
+    return audits
+
+
+def test_phantom_promise_trailing_clause_is_stripped_keeping_honest_remainder(monkeypatch):
+    audits = _patch_no_completion_claim_path(monkeypatch)
+    text = (
+        "I don't have the exact GST filing date for your state. "
+        "The full details are on the portal at viabe.ai/team. "
+        "I'll have the team confirm and follow up."
+    )
+    out = mod.apply_emission_gate(text, TENANT)
+    assert "follow up" not in out.lower()
+    assert "the team" not in out.lower()
+    assert "GST filing date" in out
+    assert "viabe.ai/team" in out
+    assert audits and audits[0][0] == "emission_phantom_promise_stripped"
+
+
+def test_phantom_promise_whole_message_falls_back_to_generic(monkeypatch):
+    audits = _patch_no_completion_claim_path(monkeypatch, locale="en")
+    out = mod.apply_emission_gate("I'll have the team confirm and get back to you.", TENANT)
+    assert out == mod._REPLACEMENT_COPY["generic"]["en"]
+    assert audits and audits[0][0] == "emission_phantom_promise_stripped"
+
+
+def test_phantom_promise_whole_message_generic_hi(monkeypatch):
+    _patch_no_completion_claim_path(monkeypatch, locale="hi")
+    out = mod.apply_emission_gate("Main pata karke bataunga.", TENANT)
+    assert out == mod._REPLACEMENT_COPY["generic"]["hi"]
+
+
+def test_no_phantom_promise_passes_through_unchanged(monkeypatch):
+    _patch_no_completion_claim_path(monkeypatch)
+    text = "Your Google Sheet isn't connected yet. Want me to set it up now?"
+    assert mod.apply_emission_gate(text, TENANT) == text
+
+
+def test_completion_claim_layer_precedes_phantom_strip(monkeypatch):
+    # A fabricated "sent" claim + a phantom clause: layer-1 fires first (no fact) and swaps the
+    # WHOLE message, so we never reach the strip.
+    monkeypatch.setattr(mod, "send_fact_exists", lambda t: False)
+    monkeypatch.setattr(mod, "_has_open_approval", lambda t: False)
+    monkeypatch.setattr(
+        "orchestrator.owner_surface.freeform_acks.resolve_owner_locale", lambda t: "en"
+    )
+    monkeypatch.setattr(mod, "_emit_blocked_audit", lambda *a, **k: None)
+    out = mod.apply_emission_gate("I sent it. I'll follow up shortly.", TENANT)
+    assert out == mod._REPLACEMENT_COPY["generic"]["en"]
+
+
+def test_true_send_claim_still_strips_trailing_phantom_promise(monkeypatch):
+    # A REAL send (fact exists) with a trailing phantom promise: layer-1 passes, layer-2 strips
+    # only the phantom sentence, keeping the true claim.
+    audits = _patch_no_completion_claim_path(monkeypatch)  # send_fact_exists -> True
+    out = mod.apply_emission_gate("Sent to 45 customers. I'll follow up with you soon.", TENANT)
+    assert "Sent to 45 customers" in out
+    assert "follow up" not in out.lower()
+    assert audits and audits[0][0] == "emission_phantom_promise_stripped"
+
+
+def test_phantom_strip_never_raises_falls_back_to_original(monkeypatch):
+    monkeypatch.setattr(mod, "send_fact_exists", lambda t: True)  # skip layer-1
+
+    def _boom(*a, **k):
+        raise RuntimeError("strip blew up")
+
+    monkeypatch.setattr(mod, "_split_sentences", _boom)
+    text = "I'll follow up shortly."
+    # the strip path raises -> the gate's outer guard ships the ORIGINAL text, never breaks.
+    assert mod.apply_emission_gate(text, TENANT) == text
