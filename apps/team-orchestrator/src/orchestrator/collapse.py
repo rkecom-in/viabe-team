@@ -59,6 +59,76 @@ logger = logging.getLogger(__name__)
 _WEEKLY_APPROVAL_BUDGET = 2
 
 
+def _complete_message_plan(conn: Any, tenant_id: UUID, plan_dict: dict[str, Any]) -> None:
+    """VT-633 — make ``plan_dict['message_plan']`` satisfy its template's registry signature
+    IN PLACE, deterministically, before the plan is persisted/armed/approved.
+
+    Repairs (all deterministic, no LLM):
+      - a param whose value is a literal angle-bracket placeholder ("<customer_name>") is
+        treated as MISSING (the send path substitutes nothing — it would render verbatim);
+      - ``business_name``  ← the tenant's real ``tenants.business_name``;
+      - ``offer_description`` ← the plan's own ``personalization`` copy (the specialist's
+        approved text), length-capped;
+      - ``customer_name`` ← the register-neutral "ji" (V1 — real per-recipient personalization
+        needs VT-45 per-recipient params; a follow-up row);
+      - any OTHER missing registry var ← "" (rare; logged);
+      - params the registry does NOT accept are dropped (extra_template_params is as fatal at
+        execution as missing).
+
+    Fail-soft end to end: an unknown template/language or ANY internal error leaves the plan
+    untouched (the execution envelope still guards) — repairing must never break a proposal."""
+    try:
+        from orchestrator.templates_registry import resolve
+
+        mp = plan_dict.get("message_plan")
+        if not isinstance(mp, dict) or not mp.get("template_id"):
+            return
+        entry = resolve(str(mp["template_id"]), str(mp.get("language") or "en"))
+        expected = tuple(entry.variables)
+        params = {k: str(v) for k, v in (mp.get("template_params") or {}).items()}
+        # Placeholder values are as unsendable as absent ones.
+        params = {
+            k: v for k, v in params.items()
+            if not (v.startswith("<") and v.endswith(">"))
+        }
+        business_name = ""
+        if "business_name" in expected and not params.get("business_name"):
+            row = conn.execute(
+                "SELECT business_name FROM tenants WHERE id = %s", (str(tenant_id),)
+            ).fetchone()
+            business_name = str(
+                (row.get("business_name") if isinstance(row, dict) else row[0]) or ""
+            ) if row is not None else ""
+        fills = {
+            "business_name": business_name,
+            "offer_description": str(mp.get("personalization") or "")[:512],
+            "customer_name": "ji",
+        }
+        repaired = {}
+        for var in expected:
+            if params.get(var):
+                repaired[var] = params[var]
+            else:
+                repaired[var] = fills.get(var, "")
+                if var not in fills:
+                    logger.info(
+                        "collapse: message_plan var %r had no deterministic fill (tenant=%s)",
+                        var, tenant_id,
+                    )
+        dropped = sorted(set(params) - set(expected))
+        if dropped:
+            logger.info(
+                "collapse: dropped non-registry message_plan params %s (tenant=%s)",
+                dropped, tenant_id,
+            )
+        mp["template_params"] = repaired
+    except Exception:  # noqa: BLE001 — repair must never break a proposal
+        logger.warning(
+            "collapse: message_plan repair failed (fail-soft, plan unchanged) tenant=%s",
+            tenant_id, exc_info=True,
+        )
+
+
 def collapse_campaign_plan(
     tenant_id: UUID,
     run_id: UUID,
@@ -100,6 +170,14 @@ def collapse_campaign_plan(
         # The full v1.0 plan lands in plan_json; downstream consumers
         # read structured fields via JSONB operators.
         plan_dict = campaign_plan.model_dump(mode="json")
+        # VT-633 — deterministic message_plan REPAIR before persist: the owner must only ever
+        # approve a SENDABLE plan. The specialist's LLM-authored message_plan routinely under-
+        # fills the template's registry signature (live: team_winback_offer requires
+        # (customer_name, business_name, offer_description); the plan carried only customer_name
+        # — and as the literal placeholder "<customer_name>") — every recipient then failed at
+        # execution with missing_template_params AFTER the owner had already approved. Repair is
+        # registry-driven and fail-soft (see _complete_message_plan).
+        _complete_message_plan(conn, tenant_id, plan_dict)
         # VT-306: insert through the typed wrapper on the open transaction's conn
         # (atomic with the campaign-proposed emit). status starts at the
         # lifecycle-initial 'proposed' (progression proposed → approved/rejected →
