@@ -2,7 +2,11 @@
   "name": "sr_approved_send_completes_truthfully",
   "domain": "sr_autonomy_rails",
   "critical": true,
-  "setup_args": ["--onboarded", "--seed-lapsed-customers", "4"],
+  "setup_args": [
+    "--onboarded",
+    "--seed-lapsed-customers",
+    "4"
+  ],
   "expected_fail": false,
   "notes": "VT-611 Package Sc #3 — DB-state proof the manager ACTUALLY SENDS once authorized (not a permanent refuser, not a broken-send do-nothing). Step 2's approval reply gets its OWN fresh run_id (every inbound message opens its own pipeline_runs row, even one that resumes an earlier suspended graph) but campaigns.run_id is set ONCE at step 1's INSERT and never updated — so step 2's assert_side_effects uses tenant_wide:true to find step 1's campaign by TENANT instead of by (a different) run_id (see convo_harness.py's _campaign_id_for_run docstring). expect_sent_count_at_least (not an exact count) because a draft whose params fail grounding is dropped, so not every cohort member necessarily yields a sent message (the cohort is now the deterministic CL-2026-07-10 45d lapsed set, no percentile) — '>0 actually sent' is the honest, robust claim. Setup: `setup --onboarded --seed-lapsed-customers 4` then `script <tenant> sr_approved_send_completes_truthfully.json`.",
   "steps": [
@@ -10,9 +14,18 @@
       "message": "purane customers ko wapas laane ke liye ek accha sa offer draft kar do",
       "assert_no_silent": true,
       "assert_not_d1": true,
-      "assert_contains": ["draft"],
-      "assert_route": {"expect_sr_delegation": true},
-      "assert_side_effects": {"expect_campaign": true, "expect_approval_decision": "pending"},
+      "assert_contains": [
+        "draft"
+      ],
+      "assert_route": {
+        "expect_sr_delegation": true,
+        "tenant_wide": true
+      },
+      "assert_side_effects": {
+        "expect_campaign": true,
+        "expect_approval_decision": "pending",
+        "tenant_wide": true
+      },
       "note": "Arms a draft + a pending owner-approval."
     },
     {

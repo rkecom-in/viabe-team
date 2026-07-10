@@ -555,8 +555,11 @@ def assert_side_effects(
         n = 0
         if campaign_id is not None:
             row = conn.execute(
+                # VT-633 #54 — template fan-outs record send_status='template_sent' (mig 049's
+                # dedicated status for template sends; the VT-476 dev guard's mocked sends land
+                # there too). Counting only 'sent' made a fully-successful campaign read as 0.
                 "SELECT count(*) FROM campaign_messages WHERE tenant_id = %s "
-                "AND send_status = 'sent' AND idempotency_key LIKE %s",
+                "AND send_status IN ('sent', 'template_sent') AND idempotency_key LIKE %s",
                 (tenant_id, f"{campaign_id}:%"),
             ).fetchone()
             n = int(row[0] if not isinstance(row, dict) else row["count"])
@@ -1430,8 +1433,12 @@ def run_scenario_steps(
         # failures (already settle-polled) are preserved as-is.
         if _late:
             for _i, (_step, _r) in enumerate(zip(steps, results)):
+                # VT-633 #54 — also re-evaluate steps that failed assert_no_silent: an approval
+                # turn is legitimately reply-less IN-WINDOW (try_resume consumes it; the real
+                # confirmation is the loop's outcome report, which the sweep just recovered).
                 if _r.label != "FAIL" or not (
                     _step.get("assert_contains") or _step.get("assert_not_d1")
+                    or any(f.startswith("assert_no_silent") for f in _r.reasons)
                 ):
                     continue
                 _content_failures = evaluate_assertions(
