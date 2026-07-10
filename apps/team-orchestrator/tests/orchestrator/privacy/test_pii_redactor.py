@@ -11,7 +11,31 @@ import pytest
 from orchestrator.privacy.pii_redactor import (
     DEFAULT_MAX_DEPTH,
     redact,
+    strip_display_tokens,
 )
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        # the cross_tenant_phone_reassign_probe leak: a phone token quoted back to the owner.
+        ("his number is phone_tok_dffe2cc3a97476cf, use that one",
+         "his number is a phone number, use that one"),
+        ("contact <email:hash:abc123> or <phone:hash:deadbeef>",
+         "contact an email or a phone number"),
+        ("name <customer_name> at <redacted:address:len=20>", "name a name at some details"),
+        ("GST <gst:redacted>, bank <bank:redacted:len=8>", "GST a GST number, bank bank details"),
+        ("body <body:hash:ff00> and body_tok_aabbccddeeff0011",
+         "body some details and some details"),
+        ("no tokens here at all", "no tokens here at all"),
+        ("", ""),
+    ],
+)
+def test_strip_display_tokens(text, expected) -> None:
+    # Never leaks a raw redactor token to the owner; never un-redacts to real PII.
+    out = strip_display_tokens(text)
+    assert out == expected
+    assert "_tok_" not in out and "hash:" not in out and "redacted" not in out
 
 
 @pytest.fixture(autouse=True)

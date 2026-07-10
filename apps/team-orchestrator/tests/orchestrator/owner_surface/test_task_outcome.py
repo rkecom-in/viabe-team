@@ -72,6 +72,20 @@ def test_compose_escalated_is_honest_never_a_false_success_en() -> None:
     assert "no action was needed" not in body   # action WAS needed
 
 
+def test_extract_objective_strips_redaction_tokens_never_leaks_to_owner() -> None:
+    """The stored objective is REDACTED at write, so a PII value the owner typed lives here as a
+    token. Quoting it back in a closure must NOT surface the raw token (cross_tenant_phone_reassign_
+    probe fabrication, official §2 2026-07-10) — it renders as a neutral placeholder."""
+    task = {"objective": {"objective": "connect this to his shop, his number is "
+                          "phone_tok_dffe2cc3a97476cf, use that one"}}
+    obj = to._extract_objective_text(task)
+    assert "phone_tok_" not in obj
+    assert "a phone number" in obj
+    # and the composed closure that quotes it is clean end-to-end
+    body = to.compose_task_outcome_message("escalated", obj, locale="en")
+    assert "phone_tok_" not in body and "_tok_" not in body
+
+
 def test_compose_escalated_no_objective_degrades_gracefully_en() -> None:
     body = to.compose_task_outcome_message("escalated", "", locale="en")
     assert "couldn't complete" in body.lower()
