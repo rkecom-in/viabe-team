@@ -1287,7 +1287,7 @@ _LATE_REPLY_SWEEP_POLL_S = 10.0
 
 def _sweep_late_replies(
     dsn: str, tenant_id: str, results: list[StepResult], *, verbose: bool,
-) -> None:
+) -> list[Any]:
     """VT-633 — pull OUT-OF-BAND assistant replies into the judged transcript. The enforce loop
     emits the real plan summary / approval template / outcome report from its own durable
     workflow, often AFTER the triggering turn's capture window closed — the judge then scores
@@ -1323,9 +1323,11 @@ def _sweep_late_replies(
                 run_status=results[-1].run_status, ingress_reason=results[-1].ingress_reason,
                 run_id=results[-1].run_id,
             )
+        return late
     except Exception as exc:  # noqa: BLE001 — the sweep must never fail a scenario
         if verbose:
             print(f"  [late-reply sweep] skipped (error: {type(exc).__name__})")
+        return []
 
 
 def run_scenario_steps(
@@ -1420,7 +1422,45 @@ def run_scenario_steps(
     if any(s.get("assert_side_effects") or s.get("assert_grounded_count") for s in steps) or any(
         _d1_only(r) for r in results
     ):
-        _sweep_late_replies(dsn, tenant_id, results, verbose=verbose)
+        _late = _sweep_late_replies(dsn, tenant_id, results, verbose=verbose)
+        # VT-633 #52 — content asserts get the same settle treatment as DB asserts: a step whose
+        # assert_contains / assert_not_d1 judged only the in-window D1 ack is RE-EVALUATED against
+        # its transcript plus the swept out-of-band replies (the conversation the owner actually
+        # had). Only failing steps that declared content asserts are re-checked; DB-assert
+        # failures (already settle-polled) are preserved as-is.
+        if _late:
+            for _i, (_step, _r) in enumerate(zip(steps, results)):
+                if _r.label != "FAIL" or not (
+                    _step.get("assert_contains") or _step.get("assert_not_d1")
+                ):
+                    continue
+                _content_failures = evaluate_assertions(
+                    list(_r.transcript) + _late,
+                    run_status=_r.run_status,
+                    assert_no_silent=bool(_step.get("assert_no_silent", True)),
+                    assert_contains=_step.get("assert_contains"),
+                    assert_not_contains=_step.get("assert_not_contains"),
+                    assert_not_d1=bool(_step.get("assert_not_d1", False)),
+                    assert_run_reason=_step.get("assert_run_reason"),
+                    assert_run_reason_not=_step.get("assert_run_reason_not"),
+                )
+                _db_failures = [
+                    f for f in _r.reasons
+                    if f.startswith("assert_side_effects") or f.startswith("assert_route")
+                    or f.startswith("assert_grounded") or f.startswith("DB-state assert")
+                ]
+                _new = _content_failures + _db_failures
+                if not _new:
+                    if verbose:
+                        print(f"  [late-reply re-eval] step {_i + 1}: content asserts now PASS "
+                              "against the settled transcript")
+                    _ok, _xf, _label = classify_step([], expected_fail=bool(
+                        _step.get("expected_fail", scenario_xfail)))
+                    results[_i] = StepResult(
+                        ok=_ok, xfail=_xf, label=_label, reasons=[],
+                        transcript=_r.transcript, run_status=_r.run_status,
+                        ingress_reason=_r.ingress_reason, run_id=_r.run_id,
+                    )
 
     # VT-611 Package H1 — the safety-net check, ON BY DEFAULT for every scenario (not a per-step
     # opt-in): no customer send may have gone out without a matching approved decision, ANYWHERE in
