@@ -166,8 +166,18 @@ _COMPLETED_NO_REPLY_FALLBACK = {
 # land IN-TURN before the generic "I'm on it" fallback fires, so a fast async task replies in ONE beat
 # instead of "I'm on it" + a delayed real reply (the delegation/approval D1 race). A genuinely-slow
 # task still gets the honest ack after the budget. Tunable; measured via the SR/delegate before/after x3.
-_D1_INTURN_WAIT_POLL_S = 1.0
-_D1_INTURN_WAIT_MAX_POLLS = 15  # ≈15s head-start — bounded so a stuck task never hangs the turn
+# T9 inc-3: budget raised 15s→≈96s to cover the observed spawn→SR→collapse→arm chain (~30-60s) — the
+# same measured latency the VT-633 D-A approval-arm wait below already budgets for. At 15s the async
+# draft nearly ALWAYS missed the turn: D1 fired "I'm on it", the draft landed on the owner's NEXT turn
+# (the cross-turn pile-on the §2 judge reads as loop_stall + ignored_speech_act). The loop SHAPE
+# (checkpointed poll + DBOS.sleep per iteration) is unchanged — no double-send / no dropped approval
+# on replay. Narrow mid-DEPLOY residual (adversarial-verified): a run that exhausted the OLD 15-poll
+# budget, recorded a post-loop step, then recovers under the new constant replays a 16th poll where
+# close_webhook_run was recorded → DBOSUnexpectedStepError → that single run terminal-fails (its
+# "I'm on it" ack already sent; the arm lives in the separate manager_task workflow — unaffected).
+# Same risk class as the D-A loop's own introduction at 24 polls.
+_D1_INTURN_WAIT_POLL_S = 4.0
+_D1_INTURN_WAIT_MAX_POLLS = 24  # ≈96s — bounded so a stuck task never hangs the turn
 
 
 # VT-633 D-A (approval-arm wait): a CLEAR owner decision that lands while the manager loop is

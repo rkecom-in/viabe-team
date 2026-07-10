@@ -120,6 +120,13 @@ class RequestOwnerApprovalInput(BaseModel):
     # for every existing caller that doesn't build one (agent_customer_send,
     # business_impact_choke, autonomy) — no behavior change for them.
     chat_summary: dict[str, str] | None = None
+    # T9 inc-3 — the manager task this approval settles (enforce path only; the node
+    # threads it from graph state). Anchors the stale-turn check: if the owner has sent
+    # a NEWER inbound since the turn that spawned this task (manager_tasks.
+    # source_message_ref), the chat_summary gets the reconciled "earlier request"
+    # framing so the late delivery reads as a promised follow-through, not a pile-on
+    # onto an unrelated later turn. None (legacy/weekly callers) → no check, unchanged.
+    manager_task_id: UUID | None = None
 
 
 class RequestOwnerApprovalError(BaseModel):
@@ -181,6 +188,51 @@ def _find_open_approval(conn: Any, tenant_id: UUID, run_id: UUID) -> dict[str, A
     """Return the most-recent UNRESOLVED approval row for this tenant/run, else None.
     VT-306: reads through the typed wrapper on the caller's conn."""
     return PendingApprovalsWrapper().find_open_for_run(tenant_id, run_id, conn=conn)
+
+
+# T9 inc-3 — the reconciled framing for a STALE settle (the owner sent a newer message while the
+# async task was still drafting). Prefixed to the chat_summary so the late delivery reads as the
+# promised follow-through on the EARLIER request, not a non-sequitur pile-on onto whatever turn is
+# current. Locale-keyed; the resolved-locale text gets the matching prefix (en fallback).
+_STALE_DRAFT_PREFIX = {
+    "en": "About your earlier campaign request — here's the draft, ready for your review.\n\n",
+    "hi": "आपके पहले वाले कैंपेन अनुरोध की बात — ड्राफ़्ट तैयार है, आपकी समीक्षा के लिए।\n\n",
+}
+
+
+def _owner_sent_newer_message(conn: Any, tenant_id: UUID, manager_task_id: UUID) -> bool:
+    """T9 inc-3 — True iff the owner sent a NEWER inbound after the turn that spawned this manager
+    task. The anchor is manager_tasks.source_message_ref (the spawning inbound's Twilio sid, written
+    by plan_store.create_plan), joined to its conversation_log owner row; the role-flipped twin of
+    runner._brain_emitted_owner_reply. A missing anchor (NULL ref / no matching log row) compares
+    NULL → EXISTS false → NOT stale. Fail-soft False: a read error must only ever fall back to
+    today's framing — it never touches the arm or the template send (Pillar 7 untouched)."""
+    try:
+        row = conn.execute(
+            """
+            SELECT EXISTS (
+                SELECT 1 FROM conversation_log o
+                WHERE o.tenant_id = %s AND o.role = 'owner'
+                  AND o.created_at > (
+                      SELECT s.created_at FROM conversation_log s
+                      JOIN manager_tasks mt
+                        ON mt.tenant_id = s.tenant_id AND mt.source_message_ref = s.message_sid
+                      WHERE mt.id = %s AND s.tenant_id = %s AND s.role = 'owner'
+                      ORDER BY s.created_at DESC LIMIT 1
+                  )
+            ) AS stale
+            """,
+            (str(tenant_id), str(manager_task_id), str(tenant_id)),
+        ).fetchone()
+    except Exception:  # noqa: BLE001 — framing-only read; never block the arm on it
+        logger.warning(
+            "request_owner_approval: stale-turn check failed (fail-soft → default framing) "
+            "tenant=%s task=%s", tenant_id, manager_task_id,
+        )
+        return False
+    if row is None:
+        return False
+    return bool(row["stale"] if isinstance(row, dict) else row[0])
 
 
 def arm_pause_request(
@@ -353,6 +405,20 @@ def arm_pause_request(
                 if owner_phone:
                     locale = resolve_owner_locale(tenant_id)
                     text = payload.chat_summary.get(locale) or payload.chat_summary.get("en")
+                    # T9 inc-3 — stale settle (owner moved on to a newer turn while the async task
+                    # drafted): reframe as the promised follow-through on the EARLIER request.
+                    # TEXT-ONLY: the arm row above and the template send below are untouched.
+                    if (
+                        text
+                        and payload.manager_task_id is not None
+                        and _owner_sent_newer_message(conn, tenant_id, payload.manager_task_id)
+                    ):
+                        text = (_STALE_DRAFT_PREFIX.get(locale) or _STALE_DRAFT_PREFIX["en"]) + text
+                        logger.info(
+                            "request_owner_approval: stale-turn reconcile framing applied "
+                            "tenant=%s run=%s task=%s",
+                            tenant_id, run_id, payload.manager_task_id,
+                        )
                     if text:
                         send_freeform_ack(tenant_id, owner_phone, text)
             except Exception:  # noqa: BLE001 — best-effort; must never block the arm
@@ -478,6 +544,9 @@ def request_owner_approval_node(state: AgentGraphState) -> dict[str, Any]:
         language=req.get("language", "en"),
         timeout_hours=req.get("timeout_hours", _DEFAULT_TIMEOUT_HOURS),
         chat_summary=req.get("chat_summary"),
+        # T9 inc-3 — enforce path only (legacy/weekly graphs carry no manager_task_id → None →
+        # no stale-turn check). Anchors the reconciled framing for a late async settle.
+        manager_task_id=state.get("manager_task_id"),
     )
 
     # dry_run is carried on the request so the canary / CI exercise the full

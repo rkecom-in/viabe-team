@@ -239,6 +239,165 @@ def test_arm_still_succeeds_when_summary_send_raises(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# T9 inc-3 — stale-turn reconcile framing (async settle after the owner moved on)
+# ---------------------------------------------------------------------------
+
+
+class _StaleCheckConn(_FakeConn):
+    """Conn whose ``execute`` answers the stale-turn EXISTS query (or raises on it).
+    Other incidental queries (e.g. the non-critical owner_message_sid UPDATE, which
+    is not monkeypatched away) get an inert result — only the conversation_log
+    staleness read is counted/steered."""
+
+    def __init__(self, stale: bool | None = False, raises: Exception | None = None):
+        self._stale = stale
+        self._raises = raises
+        self.stale_queries = 0
+
+    def execute(self, sql, *a, **k):
+        if "conversation_log" not in sql:
+            return SimpleNamespace(fetchone=lambda: None)
+        self.stale_queries += 1
+        if self._raises is not None:
+            raise self._raises
+        return SimpleNamespace(fetchone=lambda: {"stale": self._stale})
+
+
+def _stale_conn_factory(conn):
+    @contextlib.contextmanager
+    def _factory(_tenant_id):
+        yield conn
+
+    return _factory
+
+
+def _capture_summary(monkeypatch, locale: str = "en") -> list[str]:
+    sent: list[str] = []
+    monkeypatch.setattr(
+        "orchestrator.owner_surface.freeform_acks.resolve_owner_locale",
+        lambda tenant_id: locale,
+    )
+    monkeypatch.setattr(
+        "orchestrator.owner_surface.freeform_acks.send_freeform_ack",
+        lambda tenant_id, recipient, body: sent.append(body) or True,
+    )
+    return sent
+
+
+def test_stale_settle_prefixes_reconciled_framing(monkeypatch):
+    sent = _capture_summary(monkeypatch)
+    _patch_common(monkeypatch)
+    conn = _StaleCheckConn(stale=True)
+
+    result = roa.arm_pause_request(
+        _payload(manager_task_id=uuid4()),
+        conn_factory=_stale_conn_factory(conn),
+        send_fn=_ok_send_fn([]),
+    )
+
+    assert result.status == "armed"
+    assert sent == [roa._STALE_DRAFT_PREFIX["en"] + "plan summary en"]
+    assert conn.stale_queries == 1
+
+
+def test_stale_settle_hindi_locale_gets_hindi_prefix(monkeypatch):
+    sent = _capture_summary(monkeypatch, locale="hi")
+    _patch_common(monkeypatch)
+
+    roa.arm_pause_request(
+        _payload(manager_task_id=uuid4()),
+        conn_factory=_stale_conn_factory(_StaleCheckConn(stale=True)),
+        send_fn=_ok_send_fn([]),
+    )
+
+    assert sent == [roa._STALE_DRAFT_PREFIX["hi"] + "plan summary hi"]
+
+
+def test_not_stale_sends_summary_unchanged(monkeypatch):
+    sent = _capture_summary(monkeypatch)
+    _patch_common(monkeypatch)
+
+    roa.arm_pause_request(
+        _payload(manager_task_id=uuid4()),
+        conn_factory=_stale_conn_factory(_StaleCheckConn(stale=False)),
+        send_fn=_ok_send_fn([]),
+    )
+
+    assert sent == ["plan summary en"]
+
+
+def test_no_manager_task_id_never_queries_staleness(monkeypatch):
+    """Legacy/weekly callers (no manager_task_id) must see ZERO new behavior —
+    not even the read."""
+    sent = _capture_summary(monkeypatch)
+    _patch_common(monkeypatch)
+    conn = _StaleCheckConn(raises=AssertionError("staleness query must not run"))
+
+    result = roa.arm_pause_request(
+        _payload(),  # manager_task_id defaults to None
+        conn_factory=_stale_conn_factory(conn),
+        send_fn=_ok_send_fn([]),
+    )
+
+    assert result.status == "armed"
+    assert sent == ["plan summary en"]
+    assert conn.stale_queries == 0
+
+
+def test_stale_check_read_error_fails_soft_to_default_framing(monkeypatch):
+    """A control-read outage degrades to today's framing — the arm and the
+    load-bearing template send are untouched (Pillar 7)."""
+    sent = _capture_summary(monkeypatch)
+    _patch_common(monkeypatch)
+    order: list[str] = []
+
+    result = roa.arm_pause_request(
+        _payload(manager_task_id=uuid4()),
+        conn_factory=_stale_conn_factory(_StaleCheckConn(raises=RuntimeError("db down"))),
+        send_fn=_ok_send_fn(order),
+    )
+
+    assert result.status == "armed"
+    assert sent == ["plan summary en"]
+    assert order == ["template"]
+
+
+def test_node_threads_manager_task_id_from_state(monkeypatch):
+    """The enforce path's graph state carries manager_task_id (manager/workflow.py
+    initial_state) — the node must thread it into the payload."""
+    captured: dict = {}
+
+    def _fake_arm(payload, *, dry_run=False):
+        captured["payload"] = payload
+        return roa.PauseRequestResult(status="armed", approval_id=uuid4())
+
+    monkeypatch.setattr(roa, "arm_pause_request", _fake_arm)
+    monkeypatch.setattr(roa, "interrupt", lambda value: {"decision": "approved"})
+
+    task_id = uuid4()
+    state = {
+        "pending_approval_request": {"approval_type": "campaign_send", "summary": "s"},
+        "tenant_id": uuid4(),
+        "run_id": uuid4(),
+        "manager_task_id": task_id,
+    }
+    out = roa.request_owner_approval_node(state)
+
+    assert captured["payload"].manager_task_id == task_id
+    assert out["owner_decision"] == "approved"
+
+
+def test_stale_prefix_survives_phantom_promise_gate():
+    """The reconciled framing is a FULFILLMENT ('here's the draft'), not a deferred
+    promise — the T7 emission-gate layer-2 strip must not eat it."""
+    pytest.importorskip("langchain_core")
+    from orchestrator.agent.emission_gate import contains_phantom_promise
+
+    for locale in ("en", "hi"):
+        assert not contains_phantom_promise(roa._STALE_DRAFT_PREFIX[locale])
+
+
+# ---------------------------------------------------------------------------
 # _resolve_owner_phone — priority order (VT-594 review test gap #4)
 # ---------------------------------------------------------------------------
 
