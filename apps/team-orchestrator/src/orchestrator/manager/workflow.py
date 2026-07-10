@@ -34,7 +34,13 @@ DBOS workflow keyed by ``(tenant_id, task_id)``:
         |                           the webhook path when the owner replies) to resolve
         |                           pending_approvals, THEN ROUTE ON THE OWNER'S ACTUAL DECISION
         |                           (VT-607 fix round — "no longer pending" is NOT "approved"):
-        |                             approved      -> re-enter the SAME verify-then-settle
+        |                             approved      -> VT-633 F-2: EXECUTE the approved
+        |                                              campaign_send (_execute_approved_campaign —
+        |                                              the loop's OWN execution owner now that F-1
+        |                                              stops the legacy graph-resume path from
+        |                                              touching a loop-armed approval) + report the
+        |                                              REAL sent/skipped/failed counts to the owner,
+        |                                              THEN re-enter the SAME verify-then-settle
         |                                              handling 'complete' uses, if that was
         |                                              manager_review's ALREADY-APPLIED decision
         |                             rejected/defer -> task 'cancelled' (a TRUE terminal status),
@@ -550,10 +556,11 @@ def _verify_completion_step(tenant_id: str, task_id: str) -> tuple[str, str]:
 def _settle_verified_task(tenant_id: str, task_id: str) -> None:
     """A verified completion reaches a TRUE task_store.TASK_TERMINAL status for the first time in
     this row's own outcomes (see the module scope note) — terminal_outcome resolves via the
-    evidence-presence proxy (verification.resolve_terminal_outcome), owner_notification_status
-    starts 'pending' (the VT-524 seam picks it up from there), and this is what finally makes
-    queue promotion (_promote_next_queued, called from the workflow's own tail) a real transition
-    instead of dead code."""
+    evidence-presence proxy PLUS the VT-633 F-3 deterministic executed-effect floor
+    (verification.resolve_terminal_outcome), owner_notification_status starts 'pending' (the
+    VT-524 seam picks it up from there), and this is what finally makes queue promotion
+    (_promote_next_queued, called from the workflow's own tail) a real transition instead of dead
+    code."""
     from orchestrator.manager.verification import resolve_terminal_outcome
 
     task = task_store.get_task(tenant_id, task_id)
@@ -561,7 +568,7 @@ def _settle_verified_task(tenant_id: str, task_id: str) -> None:
     steps = [
         s for s in task_store.get_steps(tenant_id, task_id) if s.get("plan_revision") == plan_revision
     ]
-    outcome = resolve_terminal_outcome(steps)
+    outcome = resolve_terminal_outcome(tenant_id, task_id, steps)
     task_store.set_task_status(
         tenant_id, task_id, "completed", expected_from=("verifying",),
         terminal_outcome=outcome, owner_notification_status="pending",
@@ -677,6 +684,107 @@ def _approval_decision_for_run(tenant_id: str, task_id: str, step_id: str, attem
 
     run_id = loop_run_id(task_id, step_id, attempt)
     return PendingApprovalsWrapper().decision_for_run(tenant_id, run_id)
+
+
+@DBOS.step()
+def _execute_approved_campaign(tenant_id: str, task_id: str, step_id: str, attempt: int) -> dict[str, Any]:
+    """VT-633 F-2 — the loop's OWN execution owner for an approved ``campaign_send``.
+
+    The defect this closes: once ``_approval_decision_for_run`` reads ``decision == 'approved'``,
+    the loop re-entered the verify-then-settle handling and settled the task 'completed_with_effect'
+    — but NOTHING had actually sent the campaign. The legacy graph-resume path
+    (``runner.try_resume_pending_approval`` -> ``supervisor._campaign_execute_node``) was the only
+    real execution owner; F-1 (built separately) stops ``try_resume`` from graph-resuming a
+    loop-armed approval (``run_type == 'manager_dispatch'``), so after F-1 this loop is the ONLY
+    reactor left — without this step a real customer campaign never fires and the owner hears a
+    fabricated "Done — I've taken care of it" off the PROPOSAL step's own evidence_kind (written
+    before approval, not after execution).
+
+    Loads the SAME run's approval row ``_approval_decision_for_run`` just read 'approved' off
+    (``PendingApprovalsWrapper.approval_for_run`` — VT-72/306: wrapper-layer read, never raw SQL on
+    ``pending_approvals``) and, only when it is a resolved ``campaign_send`` approval carrying a
+    ``campaign_id``, executes it. Any other shape (a ``sensitive_data_access``/``cohort_size_
+    exceeded`` approval, a missing row, a missing campaign_id) is a clean no-op — nothing to send.
+
+    Idempotency (a DBOS retry of this step after a completed execution must NOT double-send): the
+    campaign's own ``status`` is read via ``CampaignsWrapper.get_status`` BEFORE calling in — only
+    'proposed'/'approved' proceed. ``campaign.execute.execute_approved_campaign`` advances the
+    campaign to 'sent' inside its own atomic status+``CAMPAIGN_SENT``-emit transaction (gated on
+    ``killed == 0``; see its own module docstring D2 + the VT-558 true-kill guards) — once THAT
+    commits, a replayed call to this step reads a non-'proposed'/'approved' status and short-
+    circuits here, before ever re-entering the fan-out loop. This step's own guard is what makes
+    the retry safe; ``execute_approved_campaign`` is not re-derived or duplicated.
+
+    Mirrors ``supervisor._campaign_execute_node``'s wrapping (the SAME function, the SAME
+    ordering): the VT-374 run-control hold check for (tenant, 'campaign_send') runs BEFORE any
+    send — if held, this returns without calling in. Never raises: every non-executing path (no-op
+    / held / error) returns ``{"executed": False, "reason": ...}``; the caller only reports the
+    outcome to the owner when ``executed`` is True.
+    """
+    from orchestrator.db.wrappers import CampaignsWrapper, PendingApprovalsWrapper
+
+    run_id = loop_run_id(task_id, step_id, attempt)
+    approval = PendingApprovalsWrapper().approval_for_run(tenant_id, run_id)
+    if approval is None:
+        return {"executed": False, "reason": "no_approval_row"}
+    if approval.get("decision") != "approved" or approval.get("approval_type") != "campaign_send":
+        return {
+            "executed": False,
+            "reason": f"not_a_campaign_send_approval:{approval.get('approval_type')}",
+        }
+    campaign_id = approval.get("campaign_id")
+    if not campaign_id:
+        return {"executed": False, "reason": "no_campaign_id"}
+
+    status = CampaignsWrapper().get_status(tenant_id, campaign_id)
+    if status not in ("proposed", "approved"):
+        # Idempotency guard (see docstring above): execute_approved_campaign's OWN status-advance
+        # to 'sent' (or an ops true-kill to 'cancelled') already ran — a replayed call must not
+        # re-enter the fan-out and re-send every recipient.
+        return {"executed": False, "reason": f"campaign_not_pending_execution:{status}"}
+
+    from orchestrator.run_control import check_pause
+
+    if check_pause(tenant_id, "campaign_send"):
+        logger.info(
+            "_execute_approved_campaign: HELD by run-control pause tenant=%s campaign=%s",
+            tenant_id, campaign_id,
+        )
+        return {"executed": False, "reason": "run_control_hold"}
+
+    try:
+        from orchestrator.campaign.execute import execute_approved_campaign
+
+        with tenant_connection(tenant_id) as conn:
+            summary = execute_approved_campaign(tenant_id, campaign_id, conn=conn)
+    except Exception as exc:  # noqa: BLE001 — never raise out of the loop over a send-execution bug
+        logger.exception(
+            "_execute_approved_campaign: error tenant=%s task=%s campaign=%s",
+            tenant_id, task_id, campaign_id,
+        )
+        return {"executed": False, "reason": f"error:{type(exc).__name__}"}
+
+    return {"executed": True, "summary": summary}
+
+
+@DBOS.step()
+def _report_campaign_outcome_to_owner(tenant_id: str, run_id: UUID, summary: dict[str, Any]) -> None:
+    """VT-633 F-2 — the honest owner-facing counterpart to ``_execute_approved_campaign``: reports
+    the REAL sent/skipped/failed counts via ``owner_surface.campaign_outcome`` (the same composer
+    the legacy graph-resume path used before F-1's redirect), so the owner hears what actually
+    happened instead of the VT-633 fabricated "Done".
+
+    Its OWN memoized step — deliberately NOT an un-stepped call from the workflow body.
+    ``maybe_report_campaign_outcome`` has NO internal idempotency guard (unlike
+    ``_notify_owner_of_terminal``'s ``maybe_notify_owner_of_task_outcome``, which no-ops once
+    ``owner_notification_status`` leaves 'pending'): a DBOS replay hitting an un-stepped call here
+    would re-send the WhatsApp outcome report to the owner every time the workflow re-executes past
+    this point. Fail-soft by the callee's own contract (never raises); a no-activity/no-phone
+    summary is a clean no-op inside it.
+    """
+    from orchestrator.owner_surface.campaign_outcome import maybe_report_campaign_outcome
+
+    maybe_report_campaign_outcome(tenant_id, {"campaign_execution_summary": summary}, run_id=run_id)
 
 
 @DBOS.step()
@@ -983,6 +1091,22 @@ def manager_task_workflow(tenant_id: str, task_id: str) -> str:
             decision = _approval_decision_for_run(tenant_id, task_id, step_id, attempt)
 
             if decision == "approved":
+                # VT-633 F-2 — the loop's OWN execution owner: unconditional single step call
+                # (DBOS replay-determinism — never behind a live conditional read); the campaign
+                # send itself is idempotent under a retry (see _execute_approved_campaign's own
+                # docstring for the guard). Without this the campaign stayed 'proposed' with 0
+                # campaign_messages while the verify-then-settle handling below settled
+                # 'completed_with_effect' off the PROPOSAL step's own evidence_kind — the VT-633
+                # defect (a false "Done — I've taken care of it").
+                exec_result = _execute_approved_campaign(tenant_id, task_id, step_id, attempt)
+                if exec_result.get("executed"):
+                    # Tell the owner what actually happened, from the REAL summary — its own
+                    # memoized step (see _report_campaign_outcome_to_owner's docstring for why an
+                    # un-stepped call here would be replay-unsafe).
+                    _report_campaign_outcome_to_owner(
+                        tenant_id, loop_run_id(task_id, step_id, attempt),
+                        exec_result.get("summary") or {},
+                    )
                 task_now = _get_task(tenant_id, task_id)
                 if task_now is not None and task_now.get("status") == "verifying":
                     # The paused dispatch's decision was 'complete' (ACCEPT) — same verify-then-

@@ -672,6 +672,47 @@ class CampaignsWrapper(TenantScopedTable):
             )
             return (cur.rowcount or 0) > 0
 
+    def unexecuted_campaign_exists_for_runs(
+        self, tenant_id: UUID | str, run_ids: list[str], *, conn: Any = None
+    ) -> bool:
+        """VT-633 F-3 — true iff a campaign minted by one of ``run_ids`` (the manager loop's own
+        dispatch run identities — see ``manager.verification.resolve_terminal_outcome``) is still
+        stuck 'proposed'/'approved' (never reached ``execute_approved_campaign``'s own 'sent'
+        advance, nor an ops-driven 'cancelled'/'rejected' terminal) AND has zero real
+        ``campaign_messages`` rows recorded against it. This is the deterministic signature of the
+        VT-633 defect: an approved-but-never-executed campaign whose PROPOSAL step alone (evidence_
+        kind='campaign_plan', written at proposal time — before any send) satisfied the evidence-
+        presence proxy, letting the task settle 'completed_with_effect' with zero customers ever
+        contacted.
+
+        The ``campaign_messages`` join goes via ``idempotency_key``'s documented
+        ``{campaign_id}:{customer_id}`` prefix (``campaign/execute.py``'s D1 design), NOT the
+        ``campaign_messages.campaign_id`` column — ``send_whatsapp_template._write_campaign_message``
+        never populates that column (a pre-existing gap outside this row's scope); joining on it
+        would find zero rows for EVERY campaign, real sends included, and downgrade rows that
+        actually executed."""
+        tid = self._uuid(tenant_id)
+        ids = [str(r) for r in run_ids]
+        if not ids:
+            return False
+        with self._conn(tid, conn) as c:
+            row = c.execute(
+                """
+                SELECT 1 FROM campaigns c
+                WHERE c.tenant_id = %s
+                  AND c.run_id = ANY(%s)
+                  AND c.status IN ('proposed', 'approved')
+                  AND NOT EXISTS (
+                      SELECT 1 FROM campaign_messages m
+                      WHERE m.tenant_id = c.tenant_id
+                        AND m.idempotency_key LIKE c.id::text || %s
+                  )
+                LIMIT 1
+                """,
+                (str(tid), ids, ":%"),
+            ).fetchone()
+        return row is not None
+
     def count_by_status_in_range(
         self, tenant_id: UUID | str, start: Any, end: Any, *, conn: Any = None
     ) -> dict[str, int]:
@@ -846,6 +887,25 @@ class PendingApprovalsWrapper(TenantScopedTable):
             return None
         decision = dict(row)["decision"] if isinstance(row, dict) else row[0]
         return str(decision) if decision is not None else None
+
+    def approval_for_run(
+        self, tenant_id: UUID | str, run_id: UUID | str, *, conn: Any = None
+    ) -> dict[str, Any] | None:
+        """VT-633 F-2 — the FULL approval row (``decision``/``approval_type``/``campaign_id``) for
+        ``run_id``, resolved OR not (unlike ``find_open_for_run``, which only returns unresolved
+        rows). The loop's approved-branch execution owner (``workflow._execute_approved_campaign``)
+        needs this AFTER ``_approval_decision_for_run`` already read ``decision == 'approved'`` off
+        the same run_id, to learn WHAT was approved (a ``campaign_send`` vs some other
+        ``approval_type`` — a ``sensitive_data_access`` approval has nothing to execute here) and
+        which campaign to fan out. None when no row exists for this run_id."""
+        tid = self._uuid(tenant_id)
+        with self._conn(tid, conn) as c:
+            row = c.execute(
+                "SELECT decision, approval_type, campaign_id::text AS campaign_id "
+                "FROM pending_approvals WHERE tenant_id = %s AND run_id = %s",
+                (str(tid), str(run_id)),
+            ).fetchone()
+        return dict(row) if row is not None else None
 
     def has_open_for_tenant(self, tenant_id: UUID | str, *, conn: Any = None) -> bool:
         """True iff ANY unresolved approval exists for the tenant — the one-open-per-tenant
