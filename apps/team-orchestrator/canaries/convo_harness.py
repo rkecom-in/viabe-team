@@ -1277,6 +1277,57 @@ def _evaluate_db_asserts(dsn: str, tenant_id: str, run_id: str | None, step: dic
     return failures
 
 
+# VT-633 async-settle budgets (see run_scenario_steps): the enforce loop's out-of-band beats are
+# arm-wait ≤96s + reaction poll ≤15s + the fan-out — 150s covers the chain with headroom.
+_DB_ASSERT_SETTLE_S = 150.0
+_DB_ASSERT_SETTLE_POLL_S = 5.0
+_LATE_REPLY_SWEEP_CAP_S = 120.0
+_LATE_REPLY_SWEEP_POLL_S = 10.0
+
+
+def _sweep_late_replies(
+    dsn: str, tenant_id: str, results: list[StepResult], *, verbose: bool,
+) -> None:
+    """VT-633 — pull OUT-OF-BAND assistant replies into the judged transcript. The enforce loop
+    emits the real plan summary / approval template / outcome report from its own durable
+    workflow, often AFTER the triggering turn's capture window closed — the judge then scores
+    "plan never produced" against a conversation where it plainly arrived (measurement artifact,
+    observed live). Polls conversation_log until no new rows for two consecutive polls (or the
+    cap), then appends anything not already captured to the LAST step's transcript. Gated by the
+    caller — ordinary text-only scenarios never enter. Fail-soft: any error just leaves the
+    transcripts as captured."""
+    try:
+        def _key(t: Any) -> tuple[str, str]:
+            get = t.get if isinstance(t, dict) else lambda k, d=None: getattr(t, k, d)
+            return (str(get("created_at")), str(get("text"))[:120])
+
+        captured = {_key(t) for r in results for t in r.transcript}
+        stable_polls = 0
+        deadline = time.time() + _LATE_REPLY_SWEEP_CAP_S
+        last_count = -1
+        while time.time() < deadline and stable_polls < 2:
+            time.sleep(_LATE_REPLY_SWEEP_POLL_S)
+            with _connect(dsn) as conn:
+                turns = _new_conversation_turns(conn, tenant_id, set())
+            count = len(turns)
+            stable_polls = stable_polls + 1 if count == last_count else 0
+            last_count = count
+        late = [t for t in turns if _key(t) not in captured]
+        if late and results:
+            if verbose:
+                print(f"\n  [late-reply sweep] {len(late)} out-of-band message(s) added to the transcript")
+            results[-1] = StepResult(
+                ok=results[-1].ok, xfail=results[-1].xfail, label=results[-1].label,
+                reasons=results[-1].reasons,
+                transcript=list(results[-1].transcript) + late,
+                run_status=results[-1].run_status, ingress_reason=results[-1].ingress_reason,
+                run_id=results[-1].run_id,
+            )
+    except Exception as exc:  # noqa: BLE001 — the sweep must never fail a scenario
+        if verbose:
+            print(f"  [late-reply sweep] skipped (error: {type(exc).__name__})")
+
+
 def run_scenario_steps(
     dsn: str, base: str, secret: str, tenant_id: str, steps: list[dict[str, Any]],
     *, timeout: float, scenario_xfail: bool = False, verbose: bool = True,
@@ -1321,7 +1372,19 @@ def run_scenario_steps(
             # VT-611 Package H1 — DB-state proof (route/side-effects/grounded-count), never just the
             # reply text. Merged into the SAME failure list before classify_step so an expected_fail
             # step's DB-state gap XFAILs identically to a text-assertion gap.
-            failures = failures + _evaluate_db_asserts(dsn, tenant_id, turn.run_id, step)
+            db_failures = _evaluate_db_asserts(dsn, tenant_id, turn.run_id, step)
+            # VT-633 — ASYNC SETTLE: the enforce loop resolves approvals, executes sends, and
+            # notifies OUT-OF-BAND (arm-wait ≤96s + a ≤15s reaction poll + the fan-out), so a
+            # truthful side effect can land well after the triggering turn's run completes. A
+            # side-effect assert that fails on the first read re-polls until it settles or the
+            # budget runs out — a genuinely-failing assert still fails, just honestly late.
+            # Gated on the step DECLARING side-effect asserts: text-only steps pay nothing.
+            if db_failures and (step.get("assert_side_effects") or step.get("assert_grounded_count")):
+                _settle_deadline = time.time() + _DB_ASSERT_SETTLE_S
+                while db_failures and time.time() < _settle_deadline:
+                    time.sleep(_DB_ASSERT_SETTLE_POLL_S)
+                    db_failures = _evaluate_db_asserts(dsn, tenant_id, turn.run_id, step)
+            failures = failures + db_failures
             ok, xfail, label = classify_step(failures, expected_fail=step_xfail)
 
         if verbose:
@@ -1337,6 +1400,27 @@ def run_scenario_steps(
             transcript=turn.transcript, run_status=turn.run_status, ingress_reason=turn.ingress_reason,
             run_id=turn.run_id,
         ))
+
+    # VT-633 — late-reply sweep, gated to delegation-flavored scenarios: any step declaring
+    # side-effect asserts, or any step whose reply was only the D1 interim ack ("I'm on it" —
+    # the real answer is still composing out-of-band). Text-only scenarios skip entirely.
+    def _d1_only(r: StepResult) -> bool:
+        assistant = [
+            t for t in r.transcript
+            if (t.get("role") if isinstance(t, dict) else getattr(t, "role", "")) == "assistant"
+        ]
+        if len(assistant) != 1:
+            return False
+        txt = str(
+            assistant[0].get("text") if isinstance(assistant[0], dict)
+            else getattr(assistant[0], "text", "")
+        )
+        return "I'm on it" in txt or "काम कर रहा" in txt
+
+    if any(s.get("assert_side_effects") or s.get("assert_grounded_count") for s in steps) or any(
+        _d1_only(r) for r in results
+    ):
+        _sweep_late_replies(dsn, tenant_id, results, verbose=verbose)
 
     # VT-611 Package H1 — the safety-net check, ON BY DEFAULT for every scenario (not a per-step
     # opt-in): no customer send may have gone out without a matching approved decision, ANYWHERE in
