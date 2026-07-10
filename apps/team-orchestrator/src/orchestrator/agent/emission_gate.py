@@ -19,13 +19,18 @@ Two thin pieces, wired at the choke points where LLM text becomes an owner send:
     fact" (not "trust the claim") — a wrongly-softened honest message is Tier-2, a shipped lie is
     Tier-1.
 
-``apply_emission_gate`` composes the two: no claim -> pass through untouched (the overwhelming
-majority of turns, zero DB cost). Claim + fact -> pass through (the claim is true). Claim + no
-fact -> swap the ENTIRE message for a deterministic, bilingual, honest line (pending-approval-
-specific when one is open, else generic) and drop a ``tm_audit`` breadcrumb (the blocked text's
-hash only — CL-390, never the text itself). The whole function is wrapped so it can NEVER raise:
-a bug in the honest-replacement path must degrade to shipping the ORIGINAL text, not break the
-send outright (the gate is a backstop layered on a working pipeline, not a new way to go silent).
+``apply_emission_gate`` composes two deterministic layers:
+  1. Completion claim (fabricated "sent"): no claim -> pass through (the common case, zero DB
+     cost); claim + fact -> pass through (true); claim + no fact -> swap the ENTIRE message for a
+     bilingual honest line (pending-approval-specific when one is open, else generic).
+  2. #58/T7 phantom promise (a deferred follow-up from a nonexistent team/person — an
+     impossible_promise Tier-1 breaker): surgically STRIP the offending sentence(s), keeping the
+     honest remainder; if that empties the message, fall back to the honest generic line. Runs on
+     honest text and on a true completion claim alike.
+Every block drops a ``tm_audit`` breadcrumb (the blocked text's hash only — CL-390, never the
+text itself). The whole function is wrapped so it can NEVER raise: a bug in the
+strip/replacement path must degrade to shipping the ORIGINAL text, not break the send outright
+(the gate is a backstop layered on a working pipeline, not a new way to go silent).
 
 EXEMPT by construction (not wired here): ``task_outcome.py`` / ``freeform_acks`` (D1) / approval
 templates / the opt-out handler / ``dispatch._collapse_reply_body`` (VT-594) — every one of those
@@ -73,6 +78,61 @@ _DEVANAGARI_BIGRAMS = {
 }
 _COMPLETION_BIGRAMS = _EN_BIGRAMS | _HINGLISH_BIGRAMS | _DEVANAGARI_BIGRAMS
 
+# ── #58 (T7) — phantom-promise phrases ────────────────────────────────────────────────────
+# A SECOND deterministic class: the brain's LLM-composed FAQ fallback intermittently promises a
+# deferred follow-up from a team/person that does NOT exist ("I'll have the team confirm", "I'll
+# follow up", "get back to you"). There is no human team behind the manager and no async
+# follow-up loop, so any such promise is impossible to keep — a Tier-1 impossible_promise breaker.
+# The prompt (orchestrator_agent_system.md) is the root fix (license removed + explicit
+# prohibition); this is the deterministic backstop for the residual LLM variance.
+#
+# TIGHT by design — only unambiguously PROMISSORY constructs (agent -> owner deferred action).
+# Bare "the team" / "follow-up question?" never appear here. Matched as space-delimited phrases
+# against the normalized+tokenized text (apostrophes already stripped: "I'll" -> "ill").
+_PHANTOM_PROMISE_PHRASES = frozenset(
+    {
+        # English
+        "ill follow up",
+        "i will follow up",
+        "we will follow up",
+        "follow up with you",
+        "follow up shortly",
+        "follow up soon",
+        "and follow up",
+        "get back to you",
+        "ill get back",
+        "will get back to you",
+        "circle back",
+        "ill circle back",
+        "reach out to you",
+        "ill reach out",
+        "have the team confirm",
+        "the team will confirm",
+        "the team will get back",
+        "ill have the team",
+        "have someone confirm",
+        "have someone look into",
+        "ill let you know once",
+        "let you know once its",
+        # Hinglish (romanized)
+        "follow up karunga",
+        "follow up karungi",
+        "team se confirm",
+        "team se pata",
+        "pata karke bataunga",
+        "pata karke bataungi",
+        "check karke bataunga",
+        "check karke bataungi",
+        "baad me bataunga",
+        "baad mein bataunga",
+    }
+)
+
+# Sentence boundaries for the surgical clause-strip (EN + Devanagari danda). The phantom promise
+# is almost always a trailing clause on an otherwise-honest answer, so we drop the offending
+# SENTENCE rather than the whole message (which would discard the honest content).
+_SENTENCE_SPLIT_RE = re.compile(r"([.!?।]+)")
+
 
 def _tokenize(text: str) -> list[str]:
     """NFC-normalize + casefold + strip apostrophes, then split on whitespace/punct only."""
@@ -104,6 +164,52 @@ def contains_completion_claim(text: str) -> bool:
         ):
             return True
     return False
+
+
+def contains_phantom_promise(text: str) -> bool:
+    """True iff ``text`` promises a deferred follow-up from a nonexistent team/person.
+
+    Matches a curated set of unambiguously promissory phrases (agent -> owner deferred action)
+    as space-delimited token sequences, so punctuation/casing/apostrophes never break the match
+    and a legitimate 'any follow-up questions?' (no promissory verb) never trips it.
+    """
+    tokens = _tokenize(text)
+    if not tokens:
+        return False
+    hay = " " + " ".join(tokens) + " "
+    return any(f" {phrase} " in hay for phrase in _PHANTOM_PROMISE_PHRASES)
+
+
+def _split_sentences(text: str) -> list[str]:
+    """Split into sentences, each carrying its trailing terminator, dropping empties."""
+    parts = _SENTENCE_SPLIT_RE.split(text)
+    sentences: list[str] = []
+    for i in range(0, len(parts), 2):
+        body = parts[i]
+        delim = parts[i + 1] if i + 1 < len(parts) else ""
+        combined = body + delim
+        if combined.strip():
+            sentences.append(combined)
+    return sentences
+
+
+def _strip_phantom_promise(text: str, tenant_id: UUID | str) -> str:
+    """Drop every sentence that makes a phantom follow-up promise, keeping the honest remainder.
+
+    If stripping would leave nothing (the promise WAS the whole message), fall back to the honest
+    generic line rather than shipping an empty send. Emits a ``tm_audit`` breadcrumb (hash only).
+    """
+    kept = [s for s in _split_sentences(text) if not contains_phantom_promise(s)]
+    stripped = re.sub(r"\s+", " ", "".join(kept)).strip()
+    _emit_blocked_audit(tenant_id, text, event_kind="emission_phantom_promise_stripped")
+    if stripped:
+        return stripped
+    # The whole message was the phantom promise — swap for the honest generic line.
+    from orchestrator.owner_surface.freeform_acks import resolve_owner_locale
+
+    locale = resolve_owner_locale(tenant_id)
+    generic = _REPLACEMENT_COPY["generic"]
+    return generic.get(locale) or generic["en"]
 
 
 # One round-trip: any of (a real campaign send, a real l2_send ledger hit, a manager task that
@@ -193,16 +299,20 @@ _REPLACEMENT_COPY: dict[str, dict[str, str]] = {
 }
 
 
-def _emit_blocked_audit(tenant_id: UUID | str, blocked_text: str) -> None:
-    """tm_audit breadcrumb for a blocked claim. The blocked text is NEVER stored, only its
-    sha256 hash (CL-390 — no raw free text at rest for this event). ``emit_tm_audit`` with
+def _emit_blocked_audit(
+    tenant_id: UUID | str,
+    blocked_text: str,
+    event_kind: str = "emission_claim_blocked",
+) -> None:
+    """tm_audit breadcrumb for a blocked/stripped claim. The blocked text is NEVER stored, only
+    its sha256 hash (CL-390 — no raw free text at rest for this event). ``emit_tm_audit`` with
     ``conn=None`` is fail-soft by its own contract, so this never raises."""
     from orchestrator.observability.tm_audit import emit_tm_audit
 
     text_hash = hashlib.sha256(blocked_text.encode("utf-8")).hexdigest()
     emit_tm_audit(
         event_layer="does",
-        event_kind="emission_claim_blocked",
+        event_kind=event_kind,
         actor="team_manager",
         tenant_id=tenant_id,
         decision={"blocked_text_sha256": text_hash},
@@ -221,20 +331,30 @@ def apply_emission_gate(text: str, tenant_id: UUID | str) -> str:
     through — the gate must never be the reason a send breaks.
     """
     try:
-        if not text or not contains_completion_claim(text):
-            return text
-        if send_fact_exists(tenant_id):
+        if not text:
             return text
 
-        from orchestrator.owner_surface.freeform_acks import resolve_owner_locale
+        # Layer 1 — completion claim (fabricated "sent"): whole-message honest swap when no DB
+        # fact backs it. If it fires, the entire message is replaced, so there is nothing left to
+        # strip below.
+        if contains_completion_claim(text) and not send_fact_exists(tenant_id):
+            from orchestrator.owner_surface.freeform_acks import resolve_owner_locale
 
-        kind = "pending_approval" if _has_open_approval(tenant_id) else "generic"
-        locale = resolve_owner_locale(tenant_id)
-        variants = _REPLACEMENT_COPY[kind]
-        replacement = variants.get(locale) or variants["en"]
+            kind = "pending_approval" if _has_open_approval(tenant_id) else "generic"
+            locale = resolve_owner_locale(tenant_id)
+            variants = _REPLACEMENT_COPY[kind]
+            replacement = variants.get(locale) or variants["en"]
+            _emit_blocked_audit(tenant_id, text)
+            return replacement
 
-        _emit_blocked_audit(tenant_id, text)
-        return replacement
+        # Layer 2 — phantom promise (#58/T7): a deferred follow-up from a nonexistent team/person.
+        # Surgically strip the offending sentence(s), keeping the honest remainder. Runs on
+        # honest text AND on a true completion claim (a real "sent" can still trail a phantom
+        # follow-up clause).
+        if contains_phantom_promise(text):
+            return _strip_phantom_promise(text, tenant_id)
+
+        return text
     except Exception:  # noqa: BLE001 — the gate must NEVER break a send
         logger.warning(
             "emission_gate: guard failed (fail-soft passthrough) tenant=%s",
@@ -244,4 +364,9 @@ def apply_emission_gate(text: str, tenant_id: UUID | str) -> str:
         return text
 
 
-__all__ = ["apply_emission_gate", "contains_completion_claim", "send_fact_exists"]
+__all__ = [
+    "apply_emission_gate",
+    "contains_completion_claim",
+    "contains_phantom_promise",
+    "send_fact_exists",
+]
