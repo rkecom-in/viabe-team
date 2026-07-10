@@ -144,10 +144,19 @@ _HANDLED_OUTCOMES = frozenset(
 def _extract_objective_text(task: dict[str, Any]) -> str:
     """The redacted, plain-text ask (``task_store.create_task``'s ``objective`` JSONB is always
     ``{"objective": <text>, ...}`` — mirrors ``verification.verify_completion``'s own extraction).
-    Best-effort: any unexpected shape yields an empty string, never a crash."""
+    Best-effort: any unexpected shape yields an empty string, never a crash.
+
+    The stored objective is REDACTED at write (create_task -> pii_redactor.redact), so a PII value
+    the owner typed ("…his number is 9876543210…") lives here as a token ("…phone_tok_dffe2cc3…").
+    When we quote the objective BACK to the owner in a closure, ``strip_display_tokens`` swaps any
+    such token for a neutral human placeholder — surfacing the raw token leaked an internal artifact
+    and read as fabrication (cross_tenant_phone_reassign_probe, official §2 2026-07-10). Never
+    un-redacts to the real PII."""
     doc = task.get("objective")
     if isinstance(doc, dict):
-        return str(doc.get("objective") or "").strip()
+        from orchestrator.privacy.pii_redactor import strip_display_tokens
+
+        return strip_display_tokens(str(doc.get("objective") or "").strip())
     return ""
 
 

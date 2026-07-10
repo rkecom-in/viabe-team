@@ -287,6 +287,70 @@ def _is_already_redacted(value: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Display sanitization — owner-facing surfaces (official §2 2026-07-10)
+# ---------------------------------------------------------------------------
+# The redactor tokenizes PII at WRITE for internal storage / log safety. When a stored value is
+# quoted BACK to the owner — e.g. a task-outcome closure echoing the owner's own objective ("…his
+# number is phone_tok_dffe2cc3a97476cf, use that one…") — the raw token leaks an internal artifact
+# and reads as a FABRICATION to the owner (and the §2 judge, cross_tenant_phone_reassign_probe).
+# ``strip_display_tokens`` replaces any redactor OUTPUT token with a neutral human placeholder for
+# DISPLAY only — it NEVER un-redacts to the real PII (Pillar 7 / CL-390).
+_DISPLAY_TOKEN_RE = re.compile(
+    r"phone_tok_[0-9a-f]+"
+    r"|body_tok_[0-9a-f]+"
+    r"|<phone:hash:[0-9a-f]+>"
+    r"|<email:hash:[0-9a-f]+>"
+    r"|<body:hash:[0-9a-f]+>"
+    r"|<pan:redacted>"
+    r"|<aadhaar:redacted>"
+    r"|<ifsc:redacted>"
+    r"|<gst:redacted>"
+    r"|<cc:redacted>"
+    r"|<bank:redacted(?::len=\d+)?>"
+    r"|<customer_name>"
+    r"|<owner_name>"
+    r"|<redaction_truncated>"
+    r"|<redacted:[a-z_]+(?::len=\d+)?>",
+    re.IGNORECASE,
+)
+
+
+def _display_token_sub(m: Any) -> str:
+    t = m.group(0).lower()
+    if t.startswith("phone_tok_") or t.startswith("<phone"):
+        return "a phone number"
+    if t.startswith("<email"):
+        return "an email"
+    if t.startswith("<pan"):
+        return "a PAN"
+    if t.startswith("<aadhaar"):
+        return "an Aadhaar number"
+    if t.startswith("<ifsc"):
+        return "an IFSC code"
+    if t.startswith("<gst"):
+        return "a GST number"
+    if t.startswith("<cc"):
+        return "a card number"
+    if t.startswith("<bank"):
+        return "bank details"
+    if t.startswith("<customer_name"):
+        return "a name"
+    if t.startswith("<owner_name"):
+        return "your name"
+    # body_tok_, <body:hash:…>, <redacted:*>, <redaction_truncated> → generic
+    return "some details"
+
+
+def strip_display_tokens(text: str) -> str:
+    """Replace any redactor OUTPUT token in ``text`` with a neutral human placeholder, for text
+    quoted BACK to the owner. NEVER un-redacts to the real PII (Pillar 7 / CL-390). No-op on
+    token-free text (returned unchanged)."""
+    if not text:
+        return text
+    return _DISPLAY_TOKEN_RE.sub(_display_token_sub, text)
+
+
+# ---------------------------------------------------------------------------
 # Named-key redaction — VT-101 output preserved byte-identical.
 # ---------------------------------------------------------------------------
 
@@ -539,4 +603,5 @@ def _scan_for_registry_names(text: str, name_registry: Callable[[str], bool]) ->
 __all__ = [
     "DEFAULT_MAX_DEPTH",
     "redact",
+    "strip_display_tokens",
 ]
