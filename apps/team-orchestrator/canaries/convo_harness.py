@@ -1130,6 +1130,20 @@ def cmd_setup(args: argparse.Namespace) -> int:
                 "SET status = 'complete', completed_at = now()",
                 (tenant_id,),
             )
+            # VT-633 — an ONBOARDED tenant has a LIVE WABA by definition; without this row the
+            # universal send pre-gate (customer_send_choke -> wa_send_allowed, fail-closed on
+            # tenant_whatsapp_accounts.status='live') blocks EVERY campaign fan-out, so no
+            # synthetic tenant could ever record a send and the sr_approved 'sent >= 1' DB assert
+            # was unpassable by construction (live canary: executed=True with pre_gate_blocked=1,
+            # reason=skipped_waba_not_live). Bogus fixture credentials — no real Meta WABA is
+            # referenced; sends still go through the normal Twilio path + all remaining gates.
+            conn.execute(
+                "INSERT INTO tenant_whatsapp_accounts "
+                "(tenant_id, waba_id, phone_number_id, phone_number, display_name, status) "
+                "VALUES (%s, 'harness-waba', 'harness-pnid', %s, %s, 'live') "
+                "ON CONFLICT (tenant_id) DO UPDATE SET status = 'live'",
+                (tenant_id, f"+1555{tenant_id[:7].replace('-', '')}", name),
+            )
             if args.flow:
                 # VT-582 calibration fix — arm the __flow__ sentinel (_maybe_handle_post_profile_flow)
                 # so a completed-journey scenario starts mid-paced-flow instead of falling straight
