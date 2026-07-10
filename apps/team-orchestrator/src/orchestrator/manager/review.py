@@ -320,6 +320,7 @@ def manager_review(
     has_next_step: bool,
     client: Anthropic | None = None,
     campaign_plan: "CampaignPlan | None" = None,
+    run_id: UUID | str | None = None,
 ) -> ManagerReviewResult:
     """The manager_review node (Package 3): extract -> decide -> persist the plan_store effect +
     tm_audit + (escalate only) a VTR incident. Never silent: an extraction failure itself is
@@ -332,6 +333,14 @@ def manager_review(
     output — see that function's own docstring for the full grounding rationale). Every other
     specialist (``campaign_plan is None``) is completely unaffected — the sonnet-5 extraction path
     below runs exactly as before.
+
+    ``run_id`` (§7D): the caller's ACTIVE ObservabilityContext.run_id — NOT ``state['run_id']``.
+    The two diverge for an enforce-loop dispatch (``manager.workflow._dispatch_specialist_step``
+    enters ``observability_context(run_id=UUID(task_id), ...)`` while ``state['run_id']`` carries
+    the per-attempt ``loop_run_id(task_id, step_id, attempt)``); the orchestrator_agent_turn
+    reasoning_turn row this joins to is ALWAYS written under the former (``langchain_callback.py``
+    reads ``ctx.run_id``, never ``state['run_id']``), so the caller must pass THAT value, not the
+    loop's per-attempt one — see ``supervisor._manager_review_node``'s call site.
     """
     if campaign_plan is not None:
         ret = adapt_campaign_plan_to_specialist_return(tenant_id, campaign_plan)
@@ -450,6 +459,14 @@ def manager_review(
             "decision_kind": decision.kind.value,
             "reason": decision.reason,
         },
+        # §7D — joins back to the SAME turn's orchestrator_agent_turn reasoning_turn row (the
+        # extraction call above reads that turn's specialist output; decision.reason is the
+        # deterministic seam's OWN templated why, already carried in decision{} above).
+        reasoning_ref=(
+            {"run_id": str(run_id), "step_name": "orchestrator_agent_turn"}
+            if run_id is not None
+            else None
+        ),
     )
 
     return ManagerReviewResult(

@@ -950,6 +950,21 @@ def test_paused_approval_approved_settles_completed_with_effect(substrate, monke
     assert task["terminal_outcome"] == "completed_with_effect"
     assert task["owner_notification_status"] == "pending"
 
+    # §7D — the campaign_execution_result audit row's reasoning_ref must reference task_id (NOT
+    # loop_run_id(task_id, step_id, attempt)): every reasoning-capturing write in a loop dispatch
+    # (langchain_callback.py's orchestrator turn, specialists via with_reasoning_capture) is keyed
+    # by the ObservabilityContext's run_id, which _dispatch_specialist_step sets to UUID(task_id)
+    # regardless of attempt — task_id is what actually joins to that turn's reasoning_turn row.
+    with substrate.connection() as conn:
+        row = conn.execute(
+            "SELECT reasoning_ref FROM tm_audit_log WHERE tenant_id = %s "
+            "AND event_kind = 'campaign_execution_result' ORDER BY created_at DESC LIMIT 1",
+            (tid,),
+        ).fetchone()
+    assert row is not None
+    reasoning_ref = row["reasoning_ref"] if isinstance(row, dict) else row[0]
+    assert reasoning_ref == {"run_id": str(task_id), "step_name": "orchestrator_agent_turn"}
+
 
 def test_paused_approval_rejected_settles_cancelled_and_promotes_queued(
     substrate, monkeypatch: pytest.MonkeyPatch
