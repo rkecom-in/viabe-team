@@ -64,6 +64,13 @@ _DECISION_TO_STATUS: dict[str, str] = {
 # owner try again (Pillar 7: never auto-approve on a guess).
 _MIN_CONFIDENCE = 0.5
 
+# Customer-facing SEND approval types (money): a real customer send. For these, an ambiguous reply
+# (the deterministic classifier returned None) must NEVER be resolved to 'approved' by the LLM —
+# a send proceeds ONLY on an UNAMBIGUOUS deterministic explicit approval (Pillar 7, official §2
+# 2026-07-10 m_conversation_interruption breaker). Non-send approvals (autonomy_upgrade,
+# business_policy_grant, …) may still use the Haiku fallback for genuinely ambiguous text.
+_CUSTOMER_SEND_APPROVAL_TYPES = frozenset({"campaign_send", "agent_customer_send"})
+
 # VT-334 — an owner "defer" EXTENDS the window 48h; after this many defers it is treated as a
 # rejection (decision='defer', status='rejected'). With max=2: the 1st defer extends, the 2nd
 # is terminal (Cowork 20260606T103500Z (a)).
@@ -86,6 +93,7 @@ def resolve_decision_from_reply(
     text: str,
     *,
     tenant_id: UUID | str,
+    approval_type: str | None = None,
     classify_fn: Any | None = None,
 ) -> str | None:
     """Classify an owner reply (VT-49) and map it to a decision verb.
@@ -96,6 +104,10 @@ def resolve_decision_from_reply(
 
     ``tenant_id`` (VT-270): threaded into classify so the transmit is owner_inputs-consent-gated;
     a no-consent skip returns classification='other' → None → leave paused (conservative).
+    ``approval_type``: the pending row's type. For a customer-facing SEND (money;
+    ``_CUSTOMER_SEND_APPROVAL_TYPES``) an ambiguous reply (deterministic classifier None) is NOT
+    escalated to the LLM — a send needs an UNAMBIGUOUS explicit approval, so None means "re-ask,
+    leave paused", never a Haiku-guessed 'approved'.
     ``classify_fn`` defaults to VT-49 classify_owner_message; tests inject a stub so no live
     Anthropic call is made.
     """
@@ -108,6 +120,13 @@ def resolve_decision_from_reply(
     fast = classify_approval_reply(text)
     if fast is not None:
         return fast
+
+    # Money-safety: a customer-SEND approval never rides the LLM for an ambiguous reply. The
+    # deterministic classifier was ambiguous (None) — for a send, that means re-ask (leave paused),
+    # NEVER a Haiku-guessed approval. (A reject too: an ambiguous reply leaving the send paused is
+    # the fail-safe direction — no unconsented send.)
+    if approval_type in _CUSTOMER_SEND_APPROVAL_TYPES:
+        return None
 
     if classify_fn is None:
         from orchestrator.agent.tools.classify_owner_message import (

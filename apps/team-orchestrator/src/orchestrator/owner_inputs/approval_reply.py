@@ -64,6 +64,24 @@ _HEDGE = {
     "maybe", "perhaps", "might", "possibly", "guess", "probably",
     "शायद", "shayad", "shaayad", "sayad", "dekhte", "देखते",
 }
+# Vague RESUME / continue references — "do what you were saying", "that same thing", "carry on".
+# Money-safety (Pillar 7, official §2 2026-07-10): a reply whose ONLY affirmative signal is a
+# generic ack ("ok"/"theek") wrapped in a back-reference to prior context is NOT an unambiguous
+# decision on the SPECIFIC pending action. The m_conversation_interruption breaker: "ok theek hai,
+# chalo jo pehle bol raha tha wahi karo" ("ok fine, do what you were saying before") tokenized to a
+# bare approve-hit ("ok"/"theek") and DETERMINISTICALLY APPROVED — auto-sending an un-approved
+# winback. Mirrors the _HEDGE guard: push such a reply to None so it never deterministically approves
+# (for a customer-send, resolve_decision_from_reply then re-asks rather than sends). An EXPLICIT send
+# verb OVERRIDES ("chalo bhej do" = "come on, send it" is a real approval).
+_VAGUE_RESUME = {"wahi", "wahin", "continue", "resume"}
+_RESUME_BACKREF = (
+    "bol raha tha", "bol rahe the", "keh raha tha", "keh rahe the",
+    "bata raha tha", "what you were saying", "what i said before",
+    "carry on", "as before", "jo pehle",
+)
+# The SEND-specific verbs (subset of _APPROVE_VERB) — an explicit send instruction overrides a
+# vague-resume back-reference. Excludes the weak/generic proceed words (theek/go/proceed/ok).
+_EXPLICIT_SEND = {"send", "bhejo", "भेजो", "bhej", "भेज", "bhejdo", "bhejde", "bhejdena"}
 # Contrastive conjunctions — a GENUINE two-clause contradiction ("yes BUT don't send the
 # discount one") defers to Haiku. A BARE negation of an approve-word ("do not approve")
 # is NOT a contradiction — it is a deterministic reject (Cowork VT-83 #345 bounce).
@@ -144,6 +162,16 @@ def classify_approval_reply(body: str) -> ApprovalDecision | None:
     # on a non-negated reply.
     if has_defer:
         return "defer"
+
+    # Vague-resume guard (money-safety): a "do what you were saying / continue / that same thing"
+    # back-reference whose only affirmative signal is a generic ack ("ok"/"theek") is NOT an
+    # unambiguous approval of the SPECIFIC pending action — return None (Haiku layer / re-ask). An
+    # EXPLICIT send verb present overrides ("chalo bhej do" approves). Reached only on a non-negated,
+    # non-reject, non-defer reply, so it never weakens a reject (Pillar-7 asymmetry holds).
+    has_resume = bool(tokens & _VAGUE_RESUME) or any(p in normalized for p in _RESUME_BACKREF)
+    has_explicit_send = bool(tokens & _EXPLICIT_SEND)
+    if has_resume and not has_explicit_send:
+        return None
 
     if has_strong or has_verb:
         return "approved"
