@@ -880,6 +880,55 @@ def test_sales_recovery_node_passes_bundle_to_agent(
     assert plan.run_id == run_id
 
 
+def test_manager_review_node_uses_observability_context_run_id_not_state_run_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """§7D — ``_manager_review_node`` must thread the ACTIVE ObservabilityContext's run_id into
+    ``manager_review(run_id=...)``, NOT ``state['run_id']``. The two diverge for an enforce-loop
+    dispatch (``manager.workflow._dispatch_specialist_step`` enters
+    ``observability_context(run_id=UUID(task_id), ...)`` while ``state['run_id']`` carries the
+    per-attempt ``loop_run_id``) — using the wrong one would produce a ``reasoning_ref`` that never
+    joins to the turn's actual ``orchestrator_agent_turn`` reasoning row (see manager_review's own
+    docstring). This test seeds the two identities to DIFFERENT values to prove the node picks the
+    context one, not state's."""
+    from types import SimpleNamespace
+
+    import orchestrator.manager.review as review_mod
+    import orchestrator.supervisor as supervisor_mod
+    from orchestrator.observability.decorators import observability_context
+
+    captured: dict[str, Any] = {}
+
+    def _fake_manager_review(*a: Any, **kw: Any):  # noqa: ANN002, ANN003, ANN202
+        captured.update(kw)
+        return review_mod.ManagerReviewResult(
+            outcome="continue",
+            specialist_return=None,
+            decision=SimpleNamespace(revised_outcome=None),
+        )
+
+    monkeypatch.setattr(review_mod, "manager_review", _fake_manager_review)
+
+    tenant_id = uuid4()
+    task_id = uuid4()
+    step_id = uuid4()
+    ctx_run_id = uuid4()  # the ACTIVE ObservabilityContext's run_id
+    state_run_id = uuid4()  # a DIFFERENT value in state['run_id'] — the loop's per-attempt id
+
+    state = {
+        "tenant_id": tenant_id,
+        "manager_task_id": task_id,
+        "manager_step_id": step_id,
+        "run_id": state_run_id,
+    }
+
+    with observability_context(run_id=ctx_run_id, tenant_id=tenant_id):
+        supervisor_mod._manager_review_node(state)
+
+    assert captured["run_id"] == ctx_run_id
+    assert captured["run_id"] != state_run_id
+
+
 def test_sales_recovery_node_fails_loud_on_missing_bundle(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

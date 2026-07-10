@@ -1140,6 +1140,15 @@ def manager_task_workflow(tenant_id: str, task_id: str) -> str:
                     actor="team_manager", tenant_id=tenant_id,
                     summary=f"approved-campaign execution: executed={exec_result.get('executed')}",
                     decision={k: v for k, v in exec_result.items() if k in ("executed", "reason", "summary")},
+                    # §7D — joins to the ORIGINAL proposing dispatch's orchestrator_agent_turn
+                    # reasoning_turn row. Deliberately task_id, NOT loop_run_id(task_id, step_id,
+                    # attempt): loop_run_id is the structural correlator (campaigns.run_id,
+                    # pending_approvals.run_id, the checkpoint thread_id) — but EVERY reasoning-
+                    # capturing write in a loop dispatch (langchain_callback.py's orchestrator turn,
+                    # and specialist turns via decorators.with_reasoning_capture) is keyed by the
+                    # ObservabilityContext's run_id, which _dispatch_specialist_step sets to
+                    # UUID(task_id) regardless of attempt — task_id is what actually resolves here.
+                    reasoning_ref={"run_id": str(task_id), "step_name": "orchestrator_agent_turn"},
                 )
                 if exec_result.get("executed"):
                     # Tell the owner what actually happened, from the REAL summary — its own

@@ -488,6 +488,18 @@ def _manager_review_node(state: AgentGraphState) -> dict[str, Any]:
         )
         return {"manager_review_outcome": "escalate", "manager_review_revised_outcome": None}
 
+    # §7D — the reasoning_ref join target is the ACTIVE ObservabilityContext's run_id, NOT
+    # state['run_id']: the two diverge for an enforce-loop dispatch (manager.workflow.
+    # _dispatch_specialist_step enters observability_context(run_id=UUID(task_id), ...) while
+    # state['run_id'] carries the per-attempt loop_run_id) — see manager_review's own docstring
+    # for the full explanation. Fail-soft to state['run_id'] if the context is somehow unset
+    # (should not happen — every graph.invoke() reaching this node runs inside that context — but
+    # observability must never crash the graph over a missing ContextVar).
+    from orchestrator.observability.decorators import _observability_context
+
+    ctx = _observability_context.get()
+    review_run_id = ctx.run_id if ctx is not None else state.get("run_id")
+
     result = manager_review(
         tenant_id,
         task_id,
@@ -501,6 +513,7 @@ def _manager_review_node(state: AgentGraphState) -> dict[str, Any]:
         # routes manager_review through the deterministic typed adapter (no sonnet-5 call) —
         # see manager_review's own docstring for why.
         campaign_plan=state.get("campaign_plan"),
+        run_id=review_run_id,
     )
     return {
         "manager_review_outcome": result.outcome,

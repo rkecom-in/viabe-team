@@ -46,6 +46,15 @@ def loop_run_id(task_id: UUID | str, step_id: UUID | str, attempt: int) -> UUID:
     the graph's checkpoint ``thread_id`` (via ``step_thread_id``) and the graph state's own
     ``run_id`` field (set directly by ``workflow._dispatch_specialist_step``). See the module
     docstring's CRITICAL-fix note for why these two MUST always be the same value.
+
+    §7D FOOTGUN (2026-07-10): this is the STRUCTURAL identity (checkpoint thread /
+    pending_approvals.run_id / campaigns.run_id) — it is NOT what keys the REASONING rows.
+    ``_dispatch_specialist_step`` enters ``observability_context(run_id=UUID(task_id))``, so
+    every reasoning_turn / agent_reasoning_step written during a loop dispatch lands under
+    ``run_id = task_id``. A ``reasoning_ref`` on a loop-path audit row must therefore join on
+    the TASK id (or the active observability context), never on this value — joining on
+    loop_run_id resolves to zero reasoning rows. (The two coincide only on the legacy webhook
+    dispatch path.)
     """
     return uuid5(_NAMESPACE, f"manager_task:{task_id}:{step_id}:{attempt}")
 

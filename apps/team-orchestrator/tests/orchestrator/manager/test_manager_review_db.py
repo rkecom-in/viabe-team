@@ -118,6 +118,39 @@ def test_manager_review_continue_persists_evidence_and_advances(pool):
     assert steps[1]["evidence_kind"] == "pipeline_run"
 
 
+def test_manager_review_decision_audit_row_joins_to_the_turns_reasoning(pool):
+    """§7D — when the caller passes ``run_id`` (the ACTIVE ObservabilityContext's run_id — see
+    manager_review's own docstring on why this is NOT state['run_id'] for a loop dispatch), the
+    manager_review_decision audit row must carry a reasoning_ref pointing at the SAME (run_id,
+    step_name='orchestrator_agent_turn') the turn's own reasoning_turn row uses."""
+    from orchestrator.manager.review import manager_review
+
+    tid = _seed_tenant(pool)
+    task_id, step_id = _create_and_claim(pool, tid)
+    ctx_run_id = uuid4()
+
+    manager_review(
+        tid, task_id, step_id,
+        situation="s", desired_outcome="d", acceptance_criteria=["done"],
+        raw_output="did the thing",
+        has_next_step=True,
+        client=_FakeClient(
+            {"status": "completed", "action_summary": "did it", "outcome_summary": "ok"}
+        ),
+        run_id=ctx_run_id,
+    )
+
+    with pool.connection() as conn:
+        row = conn.execute(
+            "SELECT reasoning_ref FROM tm_audit_log WHERE tenant_id = %s "
+            "AND event_kind = 'manager_review_decision' ORDER BY created_at DESC LIMIT 1",
+            (tid,),
+        ).fetchone()
+    assert row is not None
+    reasoning_ref = row["reasoning_ref"] if isinstance(row, dict) else row[0]
+    assert reasoning_ref == {"run_id": str(ctx_run_id), "step_name": "orchestrator_agent_turn"}
+
+
 def test_manager_review_complete_settles_task_verifying(pool):
     from orchestrator.manager import task_store
     from orchestrator.manager.review import manager_review
