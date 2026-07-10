@@ -12,6 +12,10 @@
       "message": "make me a plan to win back my lapsed customers",
       "assert_no_silent": true,
       "assert_not_d1": true,
+      "assert_side_effects": {
+        "expect_sent_count": 0,
+        "tenant_wide": true
+      },
       "note": "No customers/ledger data exists for this tenant. Expect an honest 'not enough data yet' / 'connect a data source first' class reply — never a fabricated plan, never D1. Manual review (json-report/judge transcript) verdicts fabrication quality."
     }
   ]

@@ -3,21 +3,39 @@
   "domain": "manager",
   "critical": false,
   "expected_fail": false,
-  "setup_args": ["--onboarded", "--seed-lapsed-customers", "8"],
+  "setup_args": [
+    "--onboarded",
+    "--seed-lapsed-customers",
+    "8"
+  ],
   "notes": "Long multi-request single message, variation A: THREE distinct request TYPES bundled in one message (status_query + new_task delegation ask + pricing FAQ) — distinct from multi_field_single_message.json, which bundles PROFILE FIELDS (name/type/URL) answering a single readiness question, not three independently distinct request kinds. Setup: `setup --onboarded --seed-lapsed-customers 8 --name convo-harness-<id>` then `script <tenant> m_conversation_multi_request_mixed_ask.json`.",
   "steps": [
     {
       "message": "Hi — quickly: (1) how many customers do I have right now, (2) can you set up a winback offer for the ones who've gone quiet, and (3) is there any extra charge for running that campaign?",
       "assert_no_silent": true,
       "assert_not_d1": true,
-      "assert_contains": ["8"],
+      "assert_contains": [
+        "8"
+      ],
+      "assert_route": {
+        "expect_sr_delegation": true,
+        "tenant_wide": true
+      },
+      "assert_side_effects": {
+        "expect_campaign": true,
+        "tenant_wide": true
+      },
       "note": "Three distinct asks in ONE message: a count, a new campaign, and a pricing question. Expect the count (8) to be addressed and the other two engaged with (delegation/plan or honest data-gap, plus a real pricing answer) — not just one of the three answered."
     },
     {
       "message": "did you cover all three of those?",
       "assert_no_silent": true,
       "assert_not_d1": true,
-      "assert_not_contains": ["which three", "what do you mean by three", "can you remind me what the three were"],
+      "assert_not_contains": [
+        "which three",
+        "what do you mean by three",
+        "can you remind me what the three were"
+      ],
       "note": "Follow-up pressing on completeness. Must not lose track of what was actually asked in the bundled message."
     }
   ]

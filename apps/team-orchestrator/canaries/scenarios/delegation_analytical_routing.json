@@ -25,6 +25,10 @@
       "assert_contains": [
         "8"
       ],
+      "assert_route": {
+        "expect_sr_delegation": false,
+        "tenant_wide": true
+      },
       "note": "The pure count ask (genuinely status_query) still fast-paths to the raw number — this contrast is the point of the scenario."
     }
   ]

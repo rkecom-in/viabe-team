@@ -2,7 +2,9 @@
   "name": "routing_specialist_finance_vs_winback",
   "domain": "manager",
   "critical": false,
-  "setup_args": ["--onboarded"],
+  "setup_args": [
+    "--onboarded"
+  ],
   "expected_fail": false,
   "notes": "Correct specialist routing per intent: a SINGLE-customer overdue-payment chase is Finance's advisory propose_payment_reminder capability (the manager's own tool call), NOT the classic dormant-cohort win-back (spawn_sales_recovery). Grounded in orchestrator_agent_system.md's explicit example ('chase an overdue payment is Finance's receivable-and-reminder tools'). Setup: `setup --onboarded --name convo-harness-<id>` (deliberately WITHOUT --seed-lapsed-customers — this is a single named customer, not a cohort) then `script <tenant> routing_specialist_finance_vs_winback.json`.",
   "steps": [
@@ -10,8 +12,20 @@
       "message": "Can you remind Meera Textiles that they still owe us ₹8,000 from last month's order?",
       "assert_no_silent": true,
       "assert_not_d1": true,
-      "assert_contains": ["remind"],
-      "assert_not_contains": ["lapsed customers", "win-back campaign", "win back campaign", "dormant customers", "approval to send this campaign"],
+      "assert_contains": [
+        "remind"
+      ],
+      "assert_not_contains": [
+        "lapsed customers",
+        "win-back campaign",
+        "win back campaign",
+        "dormant customers",
+        "approval to send this campaign"
+      ],
+      "assert_route": {
+        "expect_sr_delegation": false,
+        "tenant_wide": true
+      },
       "note": "A single named overdue-payment ask. Expect a payment-reminder-flavored engagement (finance advisory), never the win-back-campaign approval-prompt framing meant for a lapsed-customer cohort."
     }
   ]
