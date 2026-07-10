@@ -713,6 +713,38 @@ class CampaignsWrapper(TenantScopedTable):
             ).fetchone()
         return row is not None
 
+    def executed_campaign_exists_for_runs(
+        self, tenant_id: UUID | str, run_ids: list[str], *, conn: Any = None
+    ) -> bool:
+        """VT-633 #52 — the INVERSE of ``unexecuted_campaign_exists_for_runs``: true iff a campaign
+        minted by one of ``run_ids`` reached 'sent' AND has real ``campaign_messages`` rows (same
+        ``{campaign_id}:{customer_id}`` idempotency-key prefix join — the campaign_id column is
+        never written by the send path). The deterministic UPWARD verification floor's read: a
+        task whose own dispatch EXECUTED its approved campaign has a DB-proven effect — the LLM
+        verifier must never second-guess it (live: a successful sent:3 execution was verify-
+        blocked into an escalate, telling the owner "sent to 3" then "couldn't finish")."""
+        tid = self._uuid(tenant_id)
+        ids = [str(r) for r in run_ids]
+        if not ids:
+            return False
+        with self._conn(tid, conn) as c:
+            row = c.execute(
+                """
+                SELECT 1 FROM campaigns c
+                WHERE c.tenant_id = %s
+                  AND c.run_id = ANY(%s)
+                  AND c.status = 'sent'
+                  AND EXISTS (
+                      SELECT 1 FROM campaign_messages m
+                      WHERE m.tenant_id = c.tenant_id
+                        AND m.idempotency_key LIKE c.id::text || %s
+                  )
+                LIMIT 1
+                """,
+                (str(tid), ids, ":%"),
+            ).fetchone()
+        return row is not None
+
     def count_by_status_in_range(
         self, tenant_id: UUID | str, start: Any, end: Any, *, conn: Any = None
     ) -> dict[str, int]:

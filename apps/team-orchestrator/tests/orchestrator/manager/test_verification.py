@@ -140,3 +140,47 @@ def test_completion_verification_model_accepts_verified() -> None:
 def test_completion_verification_model_rejects_unknown_verdict() -> None:
     with pytest.raises(Exception):
         CompletionVerification(verdict="maybe")  # type: ignore[arg-type]
+
+
+def test_upward_floor_verifies_an_executed_campaign_without_llm(monkeypatch):
+    """VT-633 #52 — a DB-proven executed campaign VERIFIES deterministically; the opus call must
+    never run (client=None would crash if reached — that's the proof)."""
+    from uuid import uuid4
+
+    from orchestrator.db.wrappers import CampaignsWrapper
+    from orchestrator.manager import task_store, verification
+
+    tid, kid = uuid4(), uuid4()
+    monkeypatch.setattr(task_store, "get_task", lambda t, k: {"plan_revision": 1, "objective": {}})
+    monkeypatch.setattr(
+        verification, "_current_steps",
+        lambda t, k, r: [{"id": uuid4(), "step_seq": 1, "status": "done", "evidence_kind": "x", "detail": {}}],
+    )
+    monkeypatch.setattr(
+        CampaignsWrapper, "executed_campaign_exists_for_runs", lambda self, t, r, **k: True
+    )
+    v = verification.verify_completion(tid, kid, client=None)
+    assert v.verdict == "verified"
+    assert "executed-effect floor" in v.reason
+
+
+def test_upward_floor_read_error_falls_through_to_llm(monkeypatch):
+    """A floor read error must fall through to the normal checkpoint (fail-soft, never a
+    fabricated 'verified'). client=None then fails CLOSED to not_verified — proving the LLM
+    path was reached."""
+    from uuid import uuid4
+
+    from orchestrator.db.wrappers import CampaignsWrapper
+    from orchestrator.manager import task_store, verification
+
+    tid, kid = uuid4(), uuid4()
+    monkeypatch.setattr(task_store, "get_task", lambda t, k: {"plan_revision": 1, "objective": {}})
+    monkeypatch.setattr(
+        verification, "_current_steps",
+        lambda t, k, r: [{"id": uuid4(), "step_seq": 1, "status": "done", "evidence_kind": "x", "detail": {}}],
+    )
+    def _boom(self, t, r, **k):
+        raise RuntimeError("db down")
+    monkeypatch.setattr(CampaignsWrapper, "executed_campaign_exists_for_runs", _boom)
+    v = verification.verify_completion(tid, kid, client=None)
+    assert v.verdict != "verified" or "executed-effect floor" not in v.reason

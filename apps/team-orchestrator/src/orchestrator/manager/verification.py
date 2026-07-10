@@ -164,6 +164,37 @@ def verify_completion(
     if not floor_ok:
         return CompletionVerification(verdict="not_verified", reason=floor_reason)
 
+    # VT-633 #52 — the deterministic UPWARD floor: a task whose own dispatch EXECUTED its
+    # approved campaign (campaigns.status='sent' + real campaign_messages rows, DB-proven) is
+    # VERIFIED — the opus judgment call is skipped entirely. Live defect this closes: the LLM
+    # verifier (which cannot read the DB) second-guessed a successful sent:3 execution into a
+    # retry → block → escalate, so the owner heard "Your campaign has gone out — I sent it to 3
+    # customers" followed by "I couldn't finish it — I've flagged it for my team" — two
+    # truthful-in-isolation lines that contradict each other. Symmetric with the F-3 DOWNWARD
+    # floor in resolve_terminal_outcome: DB facts outrank LLM judgment in BOTH directions.
+    # Fail-soft: a read error falls through to the normal opus checkpoint (never a fabricated
+    # 'verified').
+    try:
+        from orchestrator.db.wrappers import CampaignsWrapper
+
+        _run_ids = [
+            str(loop_run_id(task_id, step["id"], attempt))
+            for step in steps
+            if step.get("id") is not None
+            for attempt in range(1, _MAX_ATTEMPT_CANDIDATES + 1)
+        ]
+        if _run_ids and CampaignsWrapper().executed_campaign_exists_for_runs(tenant_id, _run_ids):
+            return CompletionVerification(
+                verdict="verified",
+                reason="executed-effect floor: an approved campaign this task dispatched was "
+                       "actually sent (campaigns 'sent' + recorded campaign_messages) — DB-proven",
+            )
+    except Exception as exc:  # noqa: BLE001 — fall through to the opus checkpoint, never crash
+        logger.warning(
+            "verify_completion: executed-effect upward floor check failed for task=%s "
+            "(falling through to the LLM checkpoint): %s", task_id, exc,
+        )
+
     objective_doc = task.get("objective") or {}
     objective = objective_doc.get("objective", "") if isinstance(objective_doc, dict) else ""
     criteria_doc = task.get("acceptance_criteria") or {}
