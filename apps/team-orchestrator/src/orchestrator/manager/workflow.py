@@ -98,12 +98,25 @@ LIMIT_MAX_CYCLES = 6
 # blocked+incident" — exactly one retry of the completion-verification checkpoint per task.
 LIMIT_MAX_VERIFICATION_ATTEMPTS = 1
 
-# The owner-answer wait cadence (ask_owner). Not a hot-path wait — an owner reply is not
-# time-critical to the second, unlike an ops-triggered run-control pause (runner.py's
-# _RUN_CONTROL_POLL_S). ~7 days at this cadence before giving up and blocking+incident-ing rather
-# than waiting silently forever (Package 3: "never silence").
+# The owner-answer wait cadence (ask_owner + the approval wait). Not a hot-path wait to the
+# SECOND — but a flat 300s cadence made the manager react to an owner's "haan bhej do" up to
+# 5 MINUTES late (VT-633 live canary: approval resolved at :47, first poll at ~:05:43 — the
+# owner's yes met dead silence, and the approved send sat unexecuted the whole window). Owners
+# answer quickly or not for hours, so the cadence is a deterministic BACKOFF LADDER: the first
+# ~10 minutes at 15s (fast reaction while a reply is likely), then 300s (the original DB-churn
+# economy for the long tail). The interval is a pure function of the poll INDEX — replay-safe
+# (a DBOS re-walk re-derives the identical sleep sequence). Total budget still ≈ 7 days before
+# giving up and blocking+incident-ing rather than waiting silently forever (Package 3).
+_OWNER_WAIT_POLL_FAST_S = 15.0
+_OWNER_WAIT_FAST_POLLS = 40  # 40 × 15s = the first ~10 minutes
 _OWNER_WAIT_POLL_S = 300.0
-_OWNER_WAIT_MAX_POLLS = 2016  # 2016 * 300s ≈ 7 days
+_OWNER_WAIT_MAX_POLLS = 2016 + 40  # 40×15s + 2016×300s ≈ 7 days
+
+
+def _owner_wait_interval_s(poll_index: int) -> float:
+    """VT-633 — the owner-wait backoff ladder (see the constants' note). Pure function of the
+    loop index, no live reads: deterministic under DBOS replay by construction."""
+    return _OWNER_WAIT_POLL_FAST_S if poll_index < _OWNER_WAIT_FAST_POLLS else _OWNER_WAIT_POLL_S
 
 # manager_task_steps.specialist -> activation_registry key. Only sales_recovery has a REAL
 # activation_registry entry today (the program baseline's own finding); onboarding_conductor still
@@ -1026,7 +1039,7 @@ def manager_task_workflow(tenant_id: str, task_id: str) -> str:
                     break  # answered — correlate_reply already flipped it; resume the loop
                 if not reengaged:
                     reengaged = _maybe_reengage_stale(tenant_id, task_id)
-                DBOS.sleep(_OWNER_WAIT_POLL_S)
+                DBOS.sleep(_owner_wait_interval_s(polls))
                 polls += 1
             else:
                 _block_limit_exceeded(
@@ -1074,7 +1087,7 @@ def manager_task_workflow(tenant_id: str, task_id: str) -> str:
                 if not _approval_still_pending(tenant_id, task_id, step_id, attempt):
                     resolved = True
                     break
-                DBOS.sleep(_OWNER_WAIT_POLL_S)
+                DBOS.sleep(_owner_wait_interval_s(polls))
                 polls += 1
             if not resolved:
                 _block_limit_exceeded(
