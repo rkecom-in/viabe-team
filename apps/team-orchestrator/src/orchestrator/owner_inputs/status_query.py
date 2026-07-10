@@ -68,6 +68,19 @@ def classify_status_query(body: str) -> StatusQueryType:
     # speech-act guard, and a DO like "win back my lapsed customers" never classifies status_query).
     if {"lapsed", "dormant"} & tokens:
         return "lapsed_count"
+    # A SEND-STATUS question ("did you send it?", "already sent?", "has the message gone out?") is a
+    # read about whether a campaign/send actually happened — route it to last_campaign so the owner
+    # gets an honest "you haven't run a campaign" (= no, nothing sent) / "your last campaign…" answer.
+    # Checked BEFORE customer_count so a stray "customers" token ("did you send it to my old
+    # CUSTOMERS?") cannot hijack a send-status ask into a ledger COUNT — the m_honesty_fabricated_
+    # campaign non-sequitur ("You currently have N customers in your ledger", official §2 2026-07-10).
+    # Send IMPERATIVES never reach here: the upstream classifier routes a real send to
+    # adhoc_campaign_request / new_task, never status_query, so a send token here always means "asking
+    # ABOUT a send", never "do a send".
+    if ({"sent", "send", "sending"} & tokens) or ("go out" in norm) or ("gone out" in norm) or (
+        "went out" in norm
+    ):
+        return "last_campaign"
     if {"campaign", "campaigns"} & tokens:
         return "last_campaign"
     if {"customer", "customers", "ग्राहक", "ग्राहकों"} & tokens:

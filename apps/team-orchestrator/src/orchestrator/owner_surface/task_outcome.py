@@ -11,8 +11,9 @@ explicit ``escalate`` review outcome settled 'blocked' with a VTR incident and l
 SILENCE after the interim "I'm on it" ack (the async-notify gap — the dominant Tier-1 trust-breaker
 in the manager gate). Step 5 makes those ``_block_*`` paths ALSO write ``terminal_outcome=
 'escalated'`` + ``owner_notification_status='pending'``, so this module now closes that silence with
-an HONEST "I couldn't finish it on my own — I've flagged it for my team and I'll follow up" message
-(never a false success; consistent with a later operator follow-up). The task itself stays at the
+an HONEST "I couldn't complete it on my own — so I've stopped rather than risk getting it wrong"
+message (never a false success; never a phantom-team / unbacked follow-up promise — see the
+``escalated`` branch of ``compose_task_outcome_message`` for the impossible_promise honesty fix). The task itself stays at the
 NON-terminal 'blocked' status — the operator surface (the VTR incident) is unchanged; Step 5 only
 adds the owner-facing closure that was missing.
 
@@ -187,22 +188,28 @@ def compose_task_outcome_message(
         )
 
     if outcome == "escalated":
-        # VT-632 Step 5 — a blocked/escalated terminal. MUST be honest: the manager could NOT
-        # complete it on its own, it is NOT done, and it has been handed to the team to follow up.
-        # Never a false success; never a permanent-failure dead end (an operator may still resolve
-        # it — the copy stays consistent with a later follow-up).
+        # A blocked/escalated terminal. MUST be honest: the manager could NOT complete it on its
+        # own and it is NOT done. Honesty fix (Tier-1 impossible_promise, official §2 measurement
+        # 2026-07-10): the prior copy promised "I've flagged it for my team and I'll follow up" —
+        # a phantom human team + a follow-up this autonomous system does not actually guarantee
+        # (nothing auto-retries a 'blocked' task). That reads as an impossible_promise trust-breaker.
+        # The honest closure states the stop plainly, why it stopped (safety, not a false success),
+        # and puts the next move in the OWNER's hands — no unbacked promise of follow-up or a team.
         if hi:
             return (
-                f"मैंने {obj} पर काम किया, लेकिन इसे अकेले पूरा नहीं कर पाया — मैंने इसे अपनी team को भेज दिया है "
-                "और मैं आपको update दूँगा।" if obj else
-                "मैंने आपकी request पर काम किया, लेकिन इसे अकेले पूरा नहीं कर पाया — मैंने इसे अपनी team को भेज "
-                "दिया है और मैं आपको update दूँगा।"
+                f"मैंने {obj} पर काम किया, लेकिन इसे अकेले पूरा नहीं कर पाया — इसलिए गलत कदम उठाने के बजाय मैंने "
+                "इसे रोक दिया। बताइए अगर आप चाहें कि मैं दूसरे तरीके से कोशिश करूँ, या कोई और जानकारी दें जो मदद करे।"
+                if obj else
+                "मैंने आपकी request पर काम किया, लेकिन इसे अकेले पूरा नहीं कर पाया — इसलिए गलत कदम उठाने के बजाय "
+                "मैंने इसे रोक दिया। बताइए अगर आप चाहें कि मैं दूसरे तरीके से कोशिश करूँ, या कोई और जानकारी दें जो मदद करे।"
             )
         return (
-            f"I looked into {obj}, but I couldn't finish it on my own — I've flagged it for my team "
-            "and I'll follow up with you." if obj else
-            "I looked into your request, but I couldn't finish it on my own — I've flagged it for "
-            "my team and I'll follow up with you."
+            f"I looked into {obj}, but I couldn't complete it on my own — so I've stopped rather "
+            "than risk getting it wrong. Tell me if you'd like me to try a different way, or share "
+            "anything that might help." if obj else
+            "I looked into your request, but I couldn't complete it on my own — so I've stopped "
+            "rather than risk getting it wrong. Tell me if you'd like me to try a different way, or "
+            "share anything that might help."
         )
 
     # completed_with_effect: states plainly that the ask was carried out.

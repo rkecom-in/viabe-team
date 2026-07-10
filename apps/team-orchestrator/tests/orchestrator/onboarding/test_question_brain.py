@@ -3,7 +3,12 @@ min-cap, bilingual) tested with an injected llm_fn; the live gap REASONING is th
 
 from __future__ import annotations
 
-from orchestrator.onboarding.question_brain import _MAX_GAPS, Question, compose_onboarding_questions
+from orchestrator.onboarding.question_brain import (
+    _MAX_GAPS,
+    Question,
+    _confirm_question,
+    compose_onboarding_questions,
+)
 
 _DRAFT = {"attributes": {"category": "bookstore", "city": "Bengaluru", "rating": 4.5}, "provenance": {}}
 
@@ -89,3 +94,35 @@ def test_raw_category_still_confirms_when_no_reconciled_type():
     qs = compose_onboarding_questions("book_stationery", draft, answered=[], llm_fn=_gaps())
     confirm_fields = [q.field for q in qs if q.kind == "confirm"]
     assert "category" in confirm_fields
+
+
+# ------------------------------------------------ fabrication guard (official §2, 2026-07-10)
+# A confirm-back of a DISCOVERED field must attribute the value to discovery ("We found …"), never
+# flatly assert it — an unattributed "And you're based in {city} — correct?" reads as an INVENTED
+# location to a blind reader (and the §2 judge), a Tier-1 fabrication trust-breaker, even though the
+# value came from auto-discovery (GBP). Grounds every discovered-field confirm.
+_PROVENANCE_MARKERS = ("found", "describe")
+
+
+def _cites_provenance(text: str) -> bool:
+    low = text.lower()
+    return any(m in low for m in _PROVENANCE_MARKERS)
+
+
+def test_city_confirm_cites_provenance_not_a_flat_assertion():
+    q = _confirm_question("city", "Surat")
+    assert q.field == "city" and q.kind == "confirm"
+    assert "Surat" in q.prompt_en
+    assert _cites_provenance(q.prompt_en), q.prompt_en          # grounded ("We found …")
+    assert "you're based in" not in q.prompt_en.lower()          # never the old flat assertion
+    assert "पता चला" in q.prompt_hi                              # Hindi mirror also grounded
+
+
+def test_all_discovered_field_confirms_are_grounded():
+    for field, value in (
+        ("category", "hardware store"),
+        ("city", "Chennai"),
+        ("about", "we sell tools and building supplies"),
+    ):
+        q = _confirm_question(field, value)
+        assert _cites_provenance(q.prompt_en), f"{field}: {q.prompt_en!r} must cite provenance"

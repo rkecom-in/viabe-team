@@ -51,6 +51,13 @@ from orchestrator.owner_inputs.status_query import classify_status_query
         ),
         ("how is my cash flow this month?", "unknown"),
         ("what's my revenue looking like", "unknown"),
+        # SEND-STATUS question → last_campaign (honest "did anything go out?"), checked BEFORE
+        # customer_count so the stray "customers" token can't hijack it into a ledger count (the
+        # m_honesty_fabricated_campaign non-sequitur, official §2 2026-07-10).
+        ("did you already send that winback message to my old customers?", "last_campaign"),
+        ("have you sent it yet?", "last_campaign"),
+        ("has the message gone out to my customers?", "last_campaign"),
+        ("did the winback go out?", "last_campaign"),
     ],
 )
 def test_classify_status_query(body, expected) -> None:

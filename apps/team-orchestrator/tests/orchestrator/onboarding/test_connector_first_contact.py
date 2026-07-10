@@ -24,7 +24,7 @@ _RECIP = "+919811112222"
 def spies(monkeypatch):
     """Patch the lazily-imported mint/DB deps; record calls. read_integration_state defaults to
     None (first contact). Tests override it for the live-pending case."""
-    calls = {"sheets": 0, "shopify": 0, "sends": [], "state": None}
+    calls = {"sheets": 0, "shopify": 0, "sends": [], "state": None, "connected": False}
 
     monkeypatch.setattr(
         "orchestrator.integrations.sheets_oauth.start_sheets_oauth",
@@ -43,6 +43,11 @@ def spies(monkeypatch):
         "orchestrator.onboarding.shopify_onboarding.read_integration_state",
         lambda tenant_id: calls["state"],
     )
+    # STATUS-QUESTION branch reads DB-truth via is_connector_connected — default not connected.
+    monkeypatch.setattr(
+        "orchestrator.integrations.commit.is_connector_connected",
+        lambda tenant_id, connector_id: calls["connected"],
+    )
     return calls
 
 
@@ -56,7 +61,6 @@ def _run(body: str):
         "connect my google sheet please",
         # the REAL i_sheets scenario phrasings the narrow shared regex MISSED:
         "I want to connect my Google Sheet for customer data",
-        "I use a Google Sheet to track my shop. Can we get this connected?",
         "Bhaiya mera customer data Google Sheet mein hai. Kaise jodu isse Viabe se?",
     ],
 )
@@ -66,6 +70,19 @@ def test_sheets_first_contact_mints(spies, body):
     assert res["phase"] == "phase_2_auth"
     assert spies["sheets"] == 1
     assert any("accounts.google.com" in s for s in spies["sends"]), "the OAuth link must be sent"
+
+
+def test_bare_state_request_offers_setup_no_url(spies):
+    # "get this connected?" is a past-participle STATE phrasing with no imperative verb -> after the
+    # 2026-07-10 split it routes to the status/OFFER branch (no URL dump), NOT an immediate mint.
+    # The owner's next "yes, connect it" reply carries the imperative verb and mints. This is the
+    # deliberate trade to kill the status-question URL-dump loop.
+    res = _run("I use a Google Sheet to track my shop. Can we get this connected?")
+    assert res is not None and res["routed"] == "connector_status_answered"
+    assert spies["sheets"] == 0
+    body_sent = spies["sends"][0]
+    assert "https://" not in body_sent
+    assert "set it up" in body_sent.lower()
 
 
 def test_shopify_first_contact_kicks_off_discovery(spies):
@@ -134,3 +151,73 @@ def test_fail_open_on_dep_error(monkeypatch, spies):
     # a clear connect ask that reaches the state read -> the raise is swallowed -> None (fail-open)
     assert _run("connect my google sheet") is None
     assert spies["sheets"] == 0
+
+
+# --- STATUS-QUESTION branch (2026-07-10): a connection-status QUESTION must be ANSWERED, never
+#     answered-with-an-OAuth-URL-dump (the dominant Tier-1 loop_stall / ignored_speech_act bug). ---
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "I haven't seen my Google Sheet numbers update, is that thing even still connected?",
+        "Can you at least tell me if my Google Sheet is connected?",
+        "Wait, so my Google Sheet was never actually connected in the first place?",
+    ],
+)
+def test_status_question_answers_without_url(spies, body):
+    res = _run(body)
+    assert res is not None and res["routed"] == "connector_status_answered"
+    assert res["phase"] == "status_answer"
+    assert spies["sheets"] == 0, "a status question must NOT mint an OAuth link"
+    assert spies["shopify"] == 0
+    assert len(spies["sends"]) == 1, "exactly one honest answer sent"
+    body_sent = spies["sends"][0]
+    assert "https://" not in body_sent, "must NOT dump/repeat the OAuth URL on a status question"
+    # answers the status: not-connected default -> an OFFER to set it up, still no URL
+    assert "connected" in body_sent.lower()
+
+
+def test_status_question_connected_true_affirms_no_url(spies):
+    spies["connected"] = True
+    res = _run("can you at least tell me if my google sheet is connected?")
+    assert res is not None and res["routed"] == "connector_status_answered"
+    assert len(spies["sends"]) == 1
+    body_sent = spies["sends"][0]
+    assert "https://" not in body_sent
+    assert body_sent.lower().startswith("yes"), "connected -> affirmative answer"
+    assert "connected" in body_sent.lower()
+    assert spies["sheets"] == 0
+
+
+def test_status_question_live_flow_says_not_finished_no_url(spies):
+    # not connected + a LIVE flow in progress -> honest 'not finished, reply done' — still NO URL.
+    from datetime import UTC, datetime, timedelta
+
+    future = (datetime.now(UTC) + timedelta(minutes=9)).isoformat()
+    spies["state"] = {
+        "phase": "phase_2_auth",
+        "current_connector_id": "google_sheet",
+        "pending_owner_input": {"awaiting": "oauth_completion", "expires_at": future},
+    }
+    res = _run("is my google sheet connected yet?")
+    assert res is not None and res["routed"] == "connector_status_answered"
+    body_sent = spies["sends"][0]
+    assert "https://" not in body_sent
+    assert "done" in body_sent.lower()
+    assert spies["sheets"] == 0, "never re-dump the link mid-flow"
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "connect my google sheet",
+        "please set up my google sheet",
+    ],
+)
+def test_imperative_still_mints(spies, body):
+    # the imperative path is UNCHANGED — a request-to-connect still mints the OAuth link.
+    res = _run(body)
+    assert res is not None and res["routed"] == "sheets_first_contact_minted"
+    assert spies["sheets"] == 1
+    assert any("accounts.google.com" in s for s in spies["sends"]), "the OAuth link must be sent"

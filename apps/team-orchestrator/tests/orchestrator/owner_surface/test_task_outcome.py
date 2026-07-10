@@ -54,13 +54,19 @@ def test_compose_cancelled_no_objective_still_declines_en() -> None:
 
 
 def test_compose_escalated_is_honest_never_a_false_success_en() -> None:
-    """VT-632 Step 5 — a blocked/escalated terminal MUST read as "couldn't finish, flagged, will
-    follow up": never "Done"/success, never "declined" (the owner did NOT decline it), never
-    "no action was needed" (action WAS needed and attempted). Consistent with a later follow-up."""
+    """A blocked/escalated terminal MUST read as an honest "couldn't complete it, I've stopped":
+    never "Done"/success, never "declined" (the owner did NOT decline it), never "no action was
+    needed" (action WAS needed and attempted). Impossible_promise honesty fix (official §2,
+    2026-07-10): NO phantom "my team", NO unbacked "I'll follow up" promise — nothing auto-retries
+    a blocked task, so promising follow-up was a Tier-1 trust-breaker."""
     body = to.compose_task_outcome_message("escalated", "re-engage the lapsed customers", locale="en")
     assert "re-engage the lapsed customers" in body
-    assert "couldn't finish" in body.lower()
-    assert "flagged" in body.lower() and "follow up" in body.lower()
+    assert "couldn't complete" in body.lower()
+    assert "stopped" in body.lower()            # states the honest stop
+    # impossible_promise regression guard — the phantom-team / follow-up promise MUST be gone.
+    assert "flagged" not in body.lower()
+    assert "follow up" not in body.lower()
+    assert "team" not in body.lower()
     assert "done" not in body.lower()          # never a false success
     assert "declined" not in body.lower()       # the owner did not decline
     assert "no action was needed" not in body   # action WAS needed
@@ -68,15 +74,18 @@ def test_compose_escalated_is_honest_never_a_false_success_en() -> None:
 
 def test_compose_escalated_no_objective_degrades_gracefully_en() -> None:
     body = to.compose_task_outcome_message("escalated", "", locale="en")
-    assert "couldn't finish" in body.lower()
+    assert "couldn't complete" in body.lower()
     assert "None" not in body
     assert "done" not in body.lower()
+    assert "team" not in body.lower()           # impossible_promise guard, empty-objective path too
 
 
 def test_compose_escalated_hi_is_honest_no_false_success() -> None:
     body = to.compose_task_outcome_message("escalated", "ग्राहकों से दोबारा जुड़ें", locale="hi")
     assert "ग्राहकों से दोबारा जुड़ें" in body
-    assert "team" in body                       # flagged for the team
+    assert "रोक दिया" in body                     # states the honest stop
+    assert "team" not in body                    # impossible_promise fix: no phantom team
+    assert "update दूँगा" not in body            # no unbacked follow-up promise
     assert "हो गया" not in body                  # never the completed_with_effect "done"
     assert "अस्वीकृत" not in body                 # never the cancelled "declined"
 
@@ -207,10 +216,11 @@ def test_notify_completed_no_action_message_class_never_claims_effect(monkeypatc
     assert "Done" not in seen["body"]
 
 
-def test_notify_escalated_sends_honest_flagged_message_flips_delivered(monkeypatch) -> None:
-    """VT-632 Step 5 — 'escalated' is now a HANDLED outcome (a blocked _block_* / review-escalate
-    path writes it 'pending'): it SENDS the honest "couldn't finish, flagged, will follow up"
-    closure and flips delivered — no longer the pre-Step-5 silent skip."""
+def test_notify_escalated_sends_honest_stopped_message_flips_delivered(monkeypatch) -> None:
+    """'escalated' is a HANDLED outcome (a blocked _block_* / review-escalate path writes it
+    'pending'): it SENDS the honest "couldn't complete it, I've stopped" closure and flips
+    delivered — no longer the pre-Step-5 silent skip. Impossible_promise fix (official §2,
+    2026-07-10): the closure carries NO phantom "flagged for my team" / follow-up promise."""
     task = _pending_task("escalated", "re-engage the lapsed customers")
     seen = _patch(monkeypatch, task=task)
     tenant_id, task_id = uuid4(), uuid4()
@@ -218,8 +228,9 @@ def test_notify_escalated_sends_honest_flagged_message_flips_delivered(monkeypat
     sent = to.maybe_notify_owner_of_task_outcome(tenant_id, task_id, recipient_phone="+919811111111")
 
     assert sent is True
-    assert "couldn't finish" in seen["body"].lower()
-    assert "flagged" in seen["body"].lower()
+    assert "couldn't complete" in seen["body"].lower()
+    assert "flagged" not in seen["body"].lower()          # impossible_promise regression guard
+    assert "follow up" not in seen["body"].lower()
     assert "Done" not in seen["body"] and "declined" not in seen["body"].lower()
     assert seen["flips"] == [("delivered", ("pending",))]
     assert seen["ledger"] == [("task_outcome_report", "SM_OUT", {"run_id": task_id})]
