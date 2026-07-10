@@ -310,7 +310,9 @@ def test_approval_arm_wait_resolves_a_clear_decision_that_precedes_the_arm(
     import orchestrator.agent.approval_resume as ar
 
     monkeypatch.setattr(ar, "find_open_approval_for_tenant", _find)
-    monkeypatch.setattr(ar, "resolve_decision_from_reply", lambda body, tenant_id=None: "approved")
+    monkeypatch.setattr(
+        ar, "resolve_decision_from_reply", lambda body, tenant_id=None, **kwargs: "approved"
+    )
     resolved = []
     monkeypatch.setattr(
         ar, "mark_approval_resolved",

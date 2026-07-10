@@ -76,6 +76,17 @@ from orchestrator.owner_inputs.approval_reply import classify_approval_reply
         ("what is this campaign?", None),
         ("make it more festive", None),
         ("", None),
+        # --- VAGUE RESUME (money-safety, official §2 2026-07-10): a "do what you were saying /
+        #     continue / that same thing" back-reference whose only affirmative signal is a generic
+        #     ack ("ok"/"theek") is NOT an unambiguous approval -> None (never a deterministic send).
+        ("ok theek hai, chalo jo pehle bol raha tha wahi karo", None),  # the m_interruption breaker
+        ("wahi karo", None),
+        ("continue what you were saying", None),
+        ("carry on with what you said before", None),
+        ("haan, jo pehle keh raha tha", None),
+        # --- an EXPLICIT send verb OVERRIDES the resume back-reference (still a real approval) ---
+        ("chalo bhej do", "approved"),
+        ("wahi bhej do", "approved"),  # "send that same one" — explicit send present
     ],
 )
 def test_classify_approval_reply(body, expected) -> None:

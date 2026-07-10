@@ -654,9 +654,13 @@ def try_resume_pending_approval(tenant_id: str, body: str, message_sid: str | No
     if approval is None:
         return None
 
-    decision = resolve_decision_from_reply(body, tenant_id=tenant_id)
+    decision = resolve_decision_from_reply(
+        body, tenant_id=tenant_id, approval_type=approval.get("approval_type"),
+    )
     if decision is None:
-        # Unclear reply — leave the gate paused (Pillar 7: no guessing).
+        # Unclear reply — leave the gate paused (Pillar 7: no guessing). For a customer-SEND
+        # approval this is also where a vague resume ("do what you were saying") lands now, instead
+        # of being mis-resolved to 'approved' — the send never fires; the turn falls through.
         return None
 
     # VT-309: resolve the approval + emit the L2 episodic decision ATOMICALLY

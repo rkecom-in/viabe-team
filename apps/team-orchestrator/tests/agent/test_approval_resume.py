@@ -65,6 +65,39 @@ def test_low_confidence_does_not_resume():
     ) is None
 
 
+def test_customer_send_ambiguous_reply_never_rides_the_llm():
+    """Money-safety (official §2 2026-07-10): for a customer-SEND approval, an ambiguous reply
+    (deterministic classifier -> None) must NEVER be resolved to 'approved' by the LLM — even a
+    high-confidence Haiku 'approval'. The send needs an UNAMBIGUOUS explicit approval; ambiguity
+    means re-ask (None), never an unconsented send. The vague resume 'chalo jo pehle bol raha tha
+    wahi karo' is exactly the breaker text."""
+    for atype in ("campaign_send", "agent_customer_send"):
+        assert resolve_decision_from_reply(
+            "chalo jo pehle bol raha tha wahi karo",
+            tenant_id="t-vt270", approval_type=atype,
+            classify_fn=_classify("approval"),  # Haiku WOULD approve — must be ignored
+        ) is None
+
+
+def test_non_send_approval_still_uses_haiku_fallback():
+    """A NON-send approval type (or unknown) keeps the Haiku fallback for genuinely ambiguous
+    text — the money gate is scoped to customer sends only, no regression elsewhere."""
+    assert resolve_decision_from_reply(
+        "chalo jo pehle bol raha tha wahi karo",
+        tenant_id="t-vt270", approval_type="business_policy_grant",
+        classify_fn=_classify("approval"),
+    ) == "approved"
+
+
+def test_customer_send_explicit_deterministic_approval_still_approves():
+    """The money gate only blocks the LLM fallback — an UNAMBIGUOUS deterministic approval still
+    resolves to 'approved' for a customer send (the deterministic fast-path wins first)."""
+    assert resolve_decision_from_reply(
+        "haan bhej do", tenant_id="t-vt270", approval_type="campaign_send",
+        classify_fn=_classify("rejection"),  # would be ignored — deterministic already approved
+    ) == "approved"
+
+
 class _CaptureConn:
     def __init__(self):
         self.calls: list[tuple] = []
