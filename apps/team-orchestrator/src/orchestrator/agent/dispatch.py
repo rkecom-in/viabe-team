@@ -449,6 +449,7 @@ def dispatch_brain(
     state: SubscriberState,
     run_id: UUID,
     tenant_id: UUID,
+    triage_outcome: str | None = None,
 ) -> DispatchResult:
     """Invoke the supervisor graph for a brain-routed webhook event.
 
@@ -799,6 +800,9 @@ def dispatch_brain(
             graph = build_supervisor_graph(
                 model=_resolve_model(brain_model_id),
                 checkpointer=get_checkpointer(),
+                # T9 — an answerable turn (triage direct_reply / task_status) must be ANSWERED
+                # in-turn from read-tools, not deferred to an async specialist that D1-stalls.
+                suppress_answerable_spawns=triage_outcome in ("direct_reply", "task_status"),
             )
             terminal_state: dict[str, Any] = graph.invoke(
                 initial_state,
