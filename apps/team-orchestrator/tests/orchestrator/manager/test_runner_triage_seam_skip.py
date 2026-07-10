@@ -233,3 +233,140 @@ def test_d1_wait_times_out_then_fires_fallback_once_when_no_reply(
     # check (1) before giving up — proof the loop terminated on the poll cap, not early.
     assert len(fallback_calls) == 1, "silent turn must fire the honest fallback exactly once"
     assert probe_calls["n"] >= runner_mod._D1_INTURN_WAIT_MAX_POLLS + 1
+
+
+def _drive_plain_turn(substrate, monkeypatch, tenant, *, body):
+    """Drive the REAL webhook_pipeline_run with triage forced to a no-op (legacy-like) so the
+    pre-triage seams (VT-633 approval-arm wait) are the behavior under test."""
+    import dbos as _dbos
+
+    import orchestrator.agent.dispatch as dispatch_mod
+    import orchestrator.manager.triage_seam as triage_seam_mod
+    import orchestrator.owner_surface.support_bot as support_bot_mod
+    from orchestrator.manager.triage_seam import TriageSeamResult
+    from orchestrator.runner import webhook_pipeline_run
+
+    monkeypatch.setattr(
+        dispatch_mod,
+        "dispatch_brain",
+        lambda **k: dispatch_mod.DispatchResult(final_status="completed", terminal_path=None),
+    )
+    monkeypatch.setattr(support_bot_mod, "maybe_escalate_support", lambda **k: None)
+    monkeypatch.setattr(
+        triage_seam_mod,
+        "triage_seam",
+        lambda *a, **k: TriageSeamResult(outcome=None, task_id=None, skip_legacy_dispatch=False),
+    )
+
+    message_sid = f"SM{uuid4().hex}"
+    run_id = str(uuid5(NAMESPACE_URL, message_sid))
+    fields = {
+        "MessageSid": message_sid,
+        "From": "+15551110099",
+        "To": "+15552220099",
+        "Body": body,
+        "NumMedia": "0",
+    }
+    with _dbos.SetWorkflowID(f"vt633-armwait-{message_sid}"):
+        handle = _dbos.DBOS.start_workflow(webhook_pipeline_run, tenant, run_id, fields)
+    return handle.get_result()
+
+
+def test_approval_arm_wait_resolves_a_clear_decision_that_precedes_the_arm(
+    substrate, monkeypatch: pytest.MonkeyPatch
+):
+    """VT-633 D-A — a CLEAR owner approval arriving BEFORE the loop arms pending_approvals must
+    WAIT (bounded, checkpointed poll) for the arm and then resolve it — never silently drop the
+    decision (live canary: a 17s reply→arm gap lost the approval and the send forever)."""
+    import orchestrator.runner as runner_mod
+    from orchestrator.manager import task_store
+
+    tenant = _seed_tenant_brain_ready(substrate)
+
+    monkeypatch.setattr(task_store, "has_active_task", lambda t: True)
+    monkeypatch.setattr(runner_mod, "_APPROVAL_ARM_WAIT_MAX_POLLS", 5)
+    monkeypatch.setattr(runner_mod, "_APPROVAL_ARM_WAIT_POLL_S", 0.01)
+
+    arm_polls = {"n": 0}
+
+    def _arm_lands_late(_tenant_id):
+        arm_polls["n"] += 1
+        return arm_polls["n"] >= 2  # not armed on the 1st probe, armed thereafter
+
+    monkeypatch.setattr(runner_mod, "_open_approval_exists_step", _arm_lands_late)
+
+    fake_approval = {
+        "id": uuid4(),
+        "approval_type": "sensitive_data_access",
+        "campaign_id": None,
+        "run_id": str(uuid4()),
+    }
+    finds = {"n": 0}
+
+    def _find(conn, t):
+        finds["n"] += 1
+        return None if finds["n"] == 1 else fake_approval  # pre-wait miss, post-arm hit
+
+    import orchestrator.agent.approval_resume as ar
+
+    monkeypatch.setattr(ar, "find_open_approval_for_tenant", _find)
+    monkeypatch.setattr(ar, "resolve_decision_from_reply", lambda body, tenant_id=None: "approved")
+    resolved = []
+    monkeypatch.setattr(
+        ar, "mark_approval_resolved",
+        lambda conn, t, aid, d, **k: resolved.append((aid, d)) or True,
+    )
+    monkeypatch.setattr(ar, "resume_run", lambda *a, **k: None)
+
+    result = _drive_plain_turn(substrate, monkeypatch, tenant, body="haan theek hai, bhej do unhe")
+
+    assert result["routed"] == "approval_resume", "the waited-for arm was not resolved"
+    assert result["decision"] == "approved"
+    assert resolved and resolved[0][1] == "approved"
+    assert arm_polls["n"] >= 2, "the wait did not re-poll for the arm"
+
+
+def test_approval_arm_wait_bounded_then_falls_through_when_never_armed(
+    substrate, monkeypatch: pytest.MonkeyPatch
+):
+    """VT-633 D-A — if no approval ever arms within the bounded window, the reply falls through to
+    the normal path exactly as before (no hang, no fabricated resolution)."""
+    import orchestrator.agent.approval_resume as ar
+    import orchestrator.runner as runner_mod
+    from orchestrator.manager import task_store
+
+    tenant = _seed_tenant_brain_ready(substrate)
+
+    monkeypatch.setattr(task_store, "has_active_task", lambda t: True)
+    monkeypatch.setattr(runner_mod, "_APPROVAL_ARM_WAIT_MAX_POLLS", 3)
+    monkeypatch.setattr(runner_mod, "_APPROVAL_ARM_WAIT_POLL_S", 0.01)
+    monkeypatch.setattr(runner_mod, "_open_approval_exists_step", lambda t: False)
+    monkeypatch.setattr(ar, "find_open_approval_for_tenant", lambda conn, t: None)
+
+    result = _drive_plain_turn(substrate, monkeypatch, tenant, body="haan theek hai, bhej do unhe")
+
+    assert result["routed"] != "approval_resume"  # fell through to the normal pipeline
+
+
+def test_ambiguous_reply_never_waits_for_an_arm(substrate, monkeypatch: pytest.MonkeyPatch):
+    """VT-633 D-A — an AMBIGUOUS reply must not wait at all (Pillar 7: no guessing, and no added
+    latency on ordinary conversation while a task runs)."""
+    import orchestrator.agent.approval_resume as ar
+    import orchestrator.runner as runner_mod
+    from orchestrator.manager import task_store
+
+    tenant = _seed_tenant_brain_ready(substrate)
+
+    monkeypatch.setattr(task_store, "has_active_task", lambda t: True)
+    monkeypatch.setattr(ar, "find_open_approval_for_tenant", lambda conn, t: None)
+    poll_calls = []
+    monkeypatch.setattr(
+        runner_mod, "_open_approval_exists_step", lambda t: poll_calls.append(1) or False
+    )
+
+    result = _drive_plain_turn(
+        substrate, monkeypatch, tenant, body="hmm dekhte hain, shayad theek rahega"
+    )
+
+    assert result["routed"] != "approval_resume"
+    assert poll_calls == [], "an ambiguous reply must never enter the arm wait"

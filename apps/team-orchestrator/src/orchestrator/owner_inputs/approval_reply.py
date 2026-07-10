@@ -55,7 +55,15 @@ _DEFER_NEXT = {"next", "agle", "अगले", "अगला"}
 _DEFER_WEEK = {"week", "hafte", "hafta", "हफ़्ते", "हफ्ते"}
 # Hedges — a qualified reply ("maybe ok", "perhaps", "शायद") is NOT a clear decision;
 # defer to the Haiku classifier (+ its confidence gate) rather than fire deterministically.
-_HEDGE = {"maybe", "perhaps", "might", "possibly", "guess", "probably", "शायद"}
+# VT-633 — the LATIN-script Hinglish hedges were missing: "shayad theek hai" ("maybe it's ok")
+# tokenized to a bare approve-verb hit ("theek") and classified APPROVED — a hedged non-decision
+# one step from an unconsented send. "dekhte" ("dekhte hain" = "let's see") is the other common
+# defer-flavored hedge; both now push the reply to the Haiku classifier, never a deterministic
+# approve. (Devanagari शायद was already here; the transliterations weren't.)
+_HEDGE = {
+    "maybe", "perhaps", "might", "possibly", "guess", "probably",
+    "शायद", "shayad", "shaayad", "sayad", "dekhte", "देखते",
+}
 # Contrastive conjunctions — a GENUINE two-clause contradiction ("yes BUT don't send the
 # discount one") defers to Haiku. A BARE negation of an approve-word ("do not approve")
 # is NOT a contradiction — it is a deterministic reject (Cowork VT-83 #345 bounce).
