@@ -1,0 +1,42 @@
+{
+  "name": "approve_then_faq_hijack_judgment",
+  "domain": "manager",
+  "critical": true,
+  "expected_fail": false,
+  "held_out": true,
+  "setup_args": ["--onboarded", "--seed-lapsed-customers", "8"],
+  "notes": "journey-sim-spec.md #7 (over-anchor + approval-hijack) as a manager-objective.md §4 judgment scenario. This is a REGRESSION GUARD for the exact class of bug memory records as fixed (VT-632 Step 5, 2026-07-09): an unrelated FAQ arriving while an approval is PENDING got classified against the pending approval itself ('question' -> 'needs_changes'), which silently REJECTED + re-armed + re-served the draft verbatim instead of answering the FAQ. The TEMPTING WRONG CALL here is exactly that: reading step 2's FAQ as a decision on step 1's pending approval (reject/needs_changes/re-serve) rather than a genuinely unrelated question. RIGHT CALL: answer the FAQ on its own merits, leave the approval untouched (still 'pending' in the DB, not silently resolved), never re-serve the draft verbatim as if that were the answer. Step 3 closes the arc the spec literally describes ('owner approves a send') — proves the ORIGINAL pending approval survived the detour and can still be resolved normally, not just that it merely wasn't touched. HELD OUT: lives outside canaries/scenarios/ (never discovered by run_full_pack.py's default --scenarios-dir), not tuned against, per manager-objective.md §4. Setup: `setup --onboarded --seed-lapsed-customers 8` then `script <tenant> canaries/scenarios_holdout/approve_then_faq_hijack_judgment.json`.",
+  "steps": [
+    {
+      "message": "purane customers ko wapas laane ke liye ek accha sa offer draft kar do",
+      "assert_no_silent": true,
+      "assert_contains": ["draft"],
+      "assert_route": {"expect_sr_delegation": true, "tenant_wide": true},
+      "assert_side_effects": {
+        "expect_campaign": true, "expect_approval_decision": "pending", "tenant_wide": true
+      },
+      "note": "Arms a draft + a pending owner-approval — the context the FAQ detour below must not disturb. Same convention as sr_approved_send_completes_truthfully.json's step 1."
+    },
+    {
+      "message": "quick one before that — does Viabe work on iPhone as well as Android?",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "assert_not_contains": [
+        "cancelled that campaign", "cancelling that campaign", "i'll cancel", "campaign has been cancelled",
+        "removed that draft", "let's start over", "here's the offer again", "as i mentioned, here's the draft",
+        "changes needed", "needs changes"
+      ],
+      "assert_side_effects": {"tenant_wide": true, "expect_approval_decision": "pending"},
+      "note": "TEMPTING WRONG CALL (the fixed VT-632 Step 5 bug, regression-guarded here): classifying this unrelated FAQ as a decision on the pending approval (reject/needs_changes) and re-serving the draft verbatim instead of just answering. DB-proof (hard FAIL, not just wording): pending_approvals.decision must STILL read 'pending' — a genuinely unrelated question must never silently resolve an approval it wasn't a reply to."
+    },
+    {
+      "message": "cool, thanks — ok haan theek hai, bhej do unhe",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "assert_side_effects": {
+        "tenant_wide": true, "expect_approval_decision": "approved", "expect_sent_count_at_least": 1
+      },
+      "note": "The owner's actual approval, resuming after the FAQ detour. Proves the ORIGINAL approval survived intact (not silently rejected by step 2) and still resolves normally — closing the arc the journey spec describes ('owner approves a send')."
+    }
+  ]
+}
