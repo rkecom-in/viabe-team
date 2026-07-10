@@ -1431,7 +1431,10 @@ def run_scenario_steps(
         # its transcript plus the swept out-of-band replies (the conversation the owner actually
         # had). Only failing steps that declared content asserts are re-checked; DB-assert
         # failures (already settle-polled) are preserved as-is.
-        if _late:
+        if True:  # VT-633 #54 — re-eval runs even with no swept rows: an out-of-band reply that
+            # landed during a LATER step's capture window is in THAT step's transcript, not in
+            # _late; the failing step must be re-checked against the FULL conversation either way.
+            _all_turns = [t for _res in results for t in _res.transcript] + list(_late)
             for _i, (_step, _r) in enumerate(zip(steps, results)):
                 # VT-633 #54 — also re-evaluate steps that failed assert_no_silent: an approval
                 # turn is legitimately reply-less IN-WINDOW (try_resume consumes it; the real
@@ -1442,7 +1445,7 @@ def run_scenario_steps(
                 ):
                     continue
                 _content_failures = evaluate_assertions(
-                    list(_r.transcript) + _late,
+                    _all_turns,
                     run_status=_r.run_status,
                     assert_no_silent=bool(_step.get("assert_no_silent", True)),
                     assert_contains=_step.get("assert_contains"),
