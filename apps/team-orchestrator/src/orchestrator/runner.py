@@ -246,6 +246,63 @@ def _send_completed_no_reply_fallback(tenant_id: str, event: WebhookEvent) -> No
         logger.warning("VT-583 D1: completed-no-reply fallback failed (fail-soft) tenant=%s", tenant_id)
 
 
+# T8 — re-surface copy: a RESUME cue ("do what you were saying / continue") that lands while an
+# approval is already armed must re-point the owner at THAT plan, not spawn a competing one. Honest
+# (there IS a plan waiting), advancing (says exactly what to do), and it NEVER claims a send or
+# invents cohort details — the specifics live in the original approval ask still on the thread.
+_RESURFACE_PENDING_APPROVAL = {
+    "en": (
+        "You've already got a plan waiting for your approval — reply \"yes\" to send it, "
+        "or tell me what you'd like to change."
+    ),
+    "hi": (
+        "Aapki approval ke liye ek plan pehle se taiyaar hai — bhejne ke liye \"yes\" bol dein, "
+        "ya batayein kya badalna chahenge."
+    ),
+}
+
+
+def _maybe_resurface_pending_approval(tenant_id: str, event: WebhookEvent) -> bool:
+    """T8 — if the inbound is a RESUME cue AND an approval is already armed, re-surface THAT
+    approval and CONSUME the turn, instead of letting it fall through to triage/new_task.
+
+    The confirmed §2 breaker (m_conversation_interruption_midtask_resume_winback): the owner says
+    "chalo jo pehle bol raha tha wahi karo" (resume) while a win-back approval is pending; T5
+    correctly refuses to auto-SEND on that vague reply (classify -> None), but the turn then falls
+    through and the Manager drafts a SECOND, different plan and deflects ("settle the other one
+    first") — an ignored_speech_act / wrong_action / loop_stall. This complements T5: on a resume
+    cue we ADVANCE by re-pointing the owner at the plan already waiting, never a competing draft,
+    never a claimed send.
+
+    Deterministic + honest + best-effort: opt-out/DSR and non-resume replies are excluded (they must
+    keep their normal path); any failure returns False so the normal pipeline still runs."""
+    recipient = event.sender_phone or None
+    if not recipient:
+        return False
+    try:
+        from orchestrator.owner_inputs.approval_reply import is_resume_cue
+        from orchestrator.pre_filter_gate import matches_opt_out_or_dsr
+
+        body = event.body or ""
+        # opt-out / DSR always wins (compliance) — never re-surface an approval over a STOP.
+        if matches_opt_out_or_dsr(body) or not is_resume_cue(body):
+            return False
+        if not _open_approval_exists_step(tenant_id):
+            return False
+
+        from orchestrator.owner_surface.freeform_acks import resolve_owner_locale, send_freeform_ack
+
+        locale = resolve_owner_locale(tenant_id)
+        send_freeform_ack(
+            tenant_id, recipient, _RESURFACE_PENDING_APPROVAL["hi" if locale == "hi" else "en"]
+        )
+        logger.info("T8: resume-cue re-surfaced pending approval (tenant=%s)", tenant_id)
+        return True
+    except Exception:  # noqa: BLE001 — a re-surface hiccup must not break the durable run
+        logger.warning("T8: approval re-surface failed (fail-soft) tenant=%s", tenant_id)
+        return False
+
+
 def _load_preferred_language(tenant_id: str) -> str | None:
     """VT-416 PR-3 wiring — read the tenant's WhatsApp language preference.
 
@@ -1011,6 +1068,19 @@ def webhook_pipeline_run(tenant_id: str, run_id: str, twilio_fields: dict) -> di
                 "routed": "approval_resume",
                 "handler": None,
                 "decision": resumed_decision,
+            }
+        # T8 — the reply was NOT a resolvable decision (T5 vague-resume -> None), but if it is a
+        # RESUME cue and an approval is already armed, re-surface THAT approval and consume the turn
+        # here, BEFORE the journey/dispatch gates below spawn a competing plan. Complements T5:
+        # refuse to auto-send on a vague resume (there), advance by re-pointing at the pending plan
+        # (here). Non-resume / opt-out replies return False and keep their normal path.
+        if _maybe_resurface_pending_approval(tenant_id, event):
+            close_webhook_run(tenant_id, run_id, "completed")
+            return {
+                "run_id": run_id,
+                "tenant_id": tenant_id,
+                "routed": "approval_resurfaced",
+                "handler": None,
             }
 
     # VT-367 — onboarding-JOURNEY gate. While an onboarding journey is active (or a fresh tenant's

@@ -94,6 +94,51 @@ def test_classify_approval_reply(body, expected) -> None:
 
 
 @pytest.mark.parametrize(
+    "body",
+    [
+        # T8 — bare "proceed / do what you were saying / continue" cues (the §2 breaker inputs)
+        "chalo jo pehle bol raha tha wahi karo",
+        "ok theek hai, chalo jo pehle bol raha tha wahi karo",
+        "haan wahi, continue",
+        "wahin se karo",
+        "carry on with what you were saying",
+        "resume",
+    ],
+)
+def test_is_resume_cue_true(body) -> None:
+    from orchestrator.owner_inputs.approval_reply import is_resume_cue
+
+    assert is_resume_cue(body) is True
+    # money-safety invariant: a resume cue is NEVER a resolvable approval decision (T5)
+    assert classify_approval_reply(body) is None
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        # explicit send verb -> an APPROVAL, not a resume cue (T5 override)
+        "chalo bhej do",
+        "haan bhejo",
+        "yes send it",
+        # negation / reject -> a stop, not a resume
+        "no",
+        "nahi, mat bhejo",
+        "cancel",
+        # a question -> not a decision, not a resume
+        "resume kya karu?",
+        # plain unrelated / new topic while an approval is pending -> not a resume cue
+        "what's my top product",
+        "haan",
+        "ok",
+    ],
+)
+def test_is_resume_cue_false(body) -> None:
+    from orchestrator.owner_inputs.approval_reply import is_resume_cue
+
+    assert is_resume_cue(body) is False
+
+
+@pytest.mark.parametrize(
     ("body", "expected"),
     [
         # --- DEFER (VT-334) — EN ---
