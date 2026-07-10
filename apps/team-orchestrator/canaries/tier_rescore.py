@@ -144,6 +144,11 @@ shaped EXACTLY:
 
 "trust_breakers" is an empty array when the transcript has none — never omit the key. Every entry's \
 "class" MUST be exactly one of the six snake_case values listed above.
+CRITICAL — trust_breakers holds ONLY CONFIRMED breakers. If you consider a candidate and conclude \
+it does NOT count (e.g. an interim "I'm on it" that IS delivered later in the transcript, or a call \
+that is merely suboptimal rather than clearly wrong), OMIT it ENTIRELY — do not add an entry whose \
+"why" says "not counted"/"does not stall"/"not a breaker". A dismissed candidate has ZERO entries in \
+the array, never a self-cancelling one. The array length IS the breaker count.
 """
 
 
@@ -266,17 +271,43 @@ def _strip_code_fence(text: str) -> str:
     return match.group("body").strip() if match else text
 
 
+def _extract_verdict_object(text: str) -> dict[str, Any]:
+    """Tolerantly pull the verdict object out of the judge's reply.
+
+    ``json.loads`` requires the WHOLE string to be a single JSON value, so any leading prose
+    ("Here is my verdict:"), a trailing note, or a second/duplicated object makes it raise
+    "Extra data" and the run is wrongly dropped as unscored. Instead, scan every ``{`` position,
+    ``raw_decode`` from there (which ignores trailing data), and return the FIRST object that
+    carries the verdict signature (``trust_breakers``). Raises ValueError if none is found — the
+    caller still retries once, then reports unscored (Rule #15 fail-not-skip posture preserved)."""
+    decoder = json.JSONDecoder()
+    idx = 0
+    last_err: Exception | None = None
+    while True:
+        start = text.find("{", idx)
+        if start == -1:
+            break
+        try:
+            obj, end = decoder.raw_decode(text[start:])
+        except json.JSONDecodeError as exc:
+            last_err = exc
+            idx = start + 1
+            continue
+        if isinstance(obj, dict) and "trust_breakers" in obj:
+            return obj
+        idx = start + (end if end > 0 else 1)
+    raise ValueError(f"no verdict JSON object with 'trust_breakers' found ({last_err})")
+
+
 def parse_rescore_response(raw_text: str, scenario: str) -> TranscriptVerdict:
-    """Parse the model's single JSON object response into a TranscriptVerdict. Raises ValueError on
-    any malformed/incomplete output — the caller retries once, then reports the scenario as
-    unscored rather than silently dropping or guessing a verdict (Rule #15 fail-not-skip posture)."""
+    """Parse the model's JSON verdict into a TranscriptVerdict. Raises ValueError on any
+    malformed/incomplete output — the caller retries once, then reports the scenario as unscored
+    rather than silently dropping or guessing a verdict (Rule #15 fail-not-skip posture)."""
     text = _strip_code_fence(raw_text)
     try:
-        parsed = json.loads(text)
-    except json.JSONDecodeError as exc:
+        parsed = _extract_verdict_object(text)
+    except ValueError as exc:
         raise ValueError(f"judge emitted unparseable JSON: {exc}\n---\n{raw_text[:2000]}") from exc
-    if not isinstance(parsed, dict):
-        raise ValueError(f"judge response was not a JSON object (got {type(parsed).__name__})")
 
     breakers_raw = parsed.get("trust_breakers")
     if not isinstance(breakers_raw, list):
