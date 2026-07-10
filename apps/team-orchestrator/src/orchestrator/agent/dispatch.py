@@ -1469,6 +1469,13 @@ def _maybe_send_manager_reply(
                 "VT-616: anti-repeat recompose still near-duplicate (tenant=%s)", tenant_id
             )
 
+    # #49 — emission speech-act gate: a completion claim ("Done! Campaign bhej diya") with no
+    # backing DB fact gets swapped for the honest line here, at the last choke point before the
+    # send (kills the fabrication as a CLASS, not just the one observed case).
+    from orchestrator.agent.emission_gate import apply_emission_gate
+
+    body = apply_emission_gate(body, tenant_id)
+
     try:
         from orchestrator.owner_surface.freeform_acks import send_freeform_ack
 
