@@ -160,6 +160,28 @@ _COMPLETED_NO_REPLY_FALLBACK = {
     "hi": "समझ गया — मैं इस पर काम कर रहा हूँ और जल्द ही आपको अपडेट करूँगा।",
 }
 
+# VT-623 Head3 (D1 in-turn wait): when triage started/resumed an async manager_task for THIS turn
+# (skip_legacy_dispatch), that durable workflow OWNS the owner reply — the plan summary / send
+# confirmation is composed INSIDE it, a beat behind this sync turn. Give it a bounded head-start to
+# land IN-TURN before the generic "I'm on it" fallback fires, so a fast async task replies in ONE beat
+# instead of "I'm on it" + a delayed real reply (the delegation/approval D1 race). A genuinely-slow
+# task still gets the honest ack after the budget. Tunable; measured via the SR/delegate before/after x3.
+_D1_INTURN_WAIT_POLL_S = 1.0
+_D1_INTURN_WAIT_MAX_POLLS = 15  # ≈15s head-start — bounded so a stuck task never hangs the turn
+
+
+@DBOS.step()
+def _brain_emitted_owner_reply_step(tenant_id: str, inbound_sid: str | None) -> bool:
+    """VT-623 Head3 — the CHECKPOINTED form of :func:`_brain_emitted_owner_reply`, used ONLY as the D1
+    in-turn-wait poll condition. Module-level ``@DBOS.step`` (mirrors ``read_webhook_pause`` /
+    manager.workflow ``_approval_still_pending``): a poll loop that ``DBOS.sleep``s between a NON-step
+    live read would replay a DIFFERENT number of sleeps after a mid-turn worker restart (the read moves
+    with wall-clock), shifting every later step's function_id → DBOS non-determinism → a wedged run.
+    Memoizing the condition makes replay re-walk the identical sleep sequence. Never raises (the inner
+    read fail-softs to True), so a control-read outage can't kill a live inbound run. The D1 fallback's
+    OWN one-shot call below stays the plain function — a single non-step read is deterministic by count."""
+    return _brain_emitted_owner_reply(tenant_id, inbound_sid)
+
 
 def _send_completed_no_reply_fallback(tenant_id: str, event: WebhookEvent) -> None:
     """VT-583 D1 — a brain run that COMPLETED but produced no owner-facing send owes the owner ONE honest
@@ -1216,6 +1238,25 @@ def webhook_pipeline_run(tenant_id: str, run_id: str, twilio_fields: dict) -> di
                         "VT-608: execute_pending_ingestion_commit failed tenant=%s run=%s",
                         tenant_id, run_id,
                     )
+
+            # VT-623 Head3 (D1 in-turn wait): if THIS turn started/resumed an async manager_task
+            # (skip_legacy_dispatch), that workflow owns the owner reply — give it a bounded head-start
+            # to land IN-TURN so the D1 check below suppresses the redundant "I'm on it" when the real
+            # reply arrives. The poll condition is the CHECKPOINTED _brain_emitted_owner_reply_step (NOT
+            # the plain read) so a mid-turn worker restart replays the identical sleep count — see that
+            # step's note. Fail-soft: it returns True on a read error, ending the wait early (assume
+            # replied — never risk a double-send).
+            if (
+                skip_legacy_dispatch
+                and final_status == "completed"
+                and event.message_type == "inbound_message"
+            ):
+                _polls = 0
+                while _polls < _D1_INTURN_WAIT_MAX_POLLS:
+                    if _brain_emitted_owner_reply_step(tenant_id, event.twilio_message_sid):
+                        break
+                    DBOS.sleep(_D1_INTURN_WAIT_POLL_S)
+                    _polls += 1
 
             # VT-583 D1 (THE biggest silent-drop): a brain run that COMPLETED but produced NO owner-facing
             # send left the owner in silence. Detect it (no assistant turn in the lifetime log at/after

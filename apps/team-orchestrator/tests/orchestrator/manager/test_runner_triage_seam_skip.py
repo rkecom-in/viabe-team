@@ -127,3 +127,109 @@ def test_skip_legacy_dispatch_still_closes_the_run_and_fires_the_fallback(
 
     assert result["run_id"] == run_id
     assert result["tenant_id"] == tenant
+
+
+def _drive_skip_turn(substrate, monkeypatch, tenant, *, body):
+    """Shared harness: drive the REAL webhook_pipeline_run with a canned skip_legacy_dispatch=True
+    triage result and dispatch_brain/escalate spied out, so the D1 in-turn-wait (VT-623 Head3) is the
+    only behaviour under test. Returns the message_sid."""
+    import dbos as _dbos
+
+    import orchestrator.agent.dispatch as dispatch_mod
+    import orchestrator.manager.triage_seam as triage_seam_mod
+    import orchestrator.owner_surface.support_bot as support_bot_mod
+    from orchestrator.manager.triage_seam import TriageSeamResult
+    from orchestrator.runner import webhook_pipeline_run
+
+    monkeypatch.setattr(
+        dispatch_mod,
+        "dispatch_brain",
+        lambda **k: dispatch_mod.DispatchResult(final_status="completed", terminal_path=None),
+    )
+    monkeypatch.setattr(support_bot_mod, "maybe_escalate_support", lambda **k: None)
+    monkeypatch.setattr(
+        triage_seam_mod,
+        "triage_seam",
+        lambda *a, **k: TriageSeamResult(
+            outcome="new_task", task_id=uuid4(), skip_legacy_dispatch=True
+        ),
+    )
+
+    message_sid = f"SM{uuid4().hex}"
+    run_id = str(uuid5(NAMESPACE_URL, message_sid))
+    fields = {
+        "MessageSid": message_sid,
+        "From": "+15551110099",
+        "To": "+15552220099",
+        "Body": body,
+        "NumMedia": "0",
+    }
+    with _dbos.SetWorkflowID(f"vt623-d1wait-{message_sid}"):
+        handle = _dbos.DBOS.start_workflow(webhook_pipeline_run, tenant, run_id, fields)
+    handle.get_result()
+    return message_sid
+
+
+def test_d1_wait_suppresses_fallback_when_async_reply_lands_late(
+    substrate, monkeypatch: pytest.MonkeyPatch
+):
+    """VT-623 Head3 B1 — the bounded in-turn wait must POLL: when the async manager_task emits its owner
+    reply a poll-tick AFTER the wait starts, the loop picks it up and the D1 fallback ('I'm on it') is
+    SUPPRESSED. Reply-detector returns False on the first probe then True (models a late-but-in-window
+    reply)."""
+    import orchestrator.runner as runner_mod
+
+    tenant = _seed_tenant_brain_ready(substrate)
+
+    probe_calls = {"n": 0}
+
+    def _late_reply(_tenant_id, _sid):
+        probe_calls["n"] += 1
+        return probe_calls["n"] >= 2  # False on the 1st probe, True thereafter
+
+    fallback_calls = []
+    monkeypatch.setattr(runner_mod, "_brain_emitted_owner_reply", _late_reply)
+    monkeypatch.setattr(
+        runner_mod, "_send_completed_no_reply_fallback", lambda *a: fallback_calls.append(a)
+    )
+    monkeypatch.setattr(runner_mod, "_D1_INTURN_WAIT_MAX_POLLS", 5)
+    monkeypatch.setattr(runner_mod, "_D1_INTURN_WAIT_POLL_S", 0.01)
+
+    _drive_skip_turn(substrate, monkeypatch, tenant, body="win back my lapsed customers")
+
+    # The wait looped at least once (1st probe False) THEN broke on the late reply — the fallback that
+    # sends the redundant "I'm on it" was never invoked.
+    assert fallback_calls == [], "D1 fallback fired despite the async reply arriving in-window"
+    assert probe_calls["n"] >= 2, "the wait did not re-poll after the first (False) probe"
+
+
+def test_d1_wait_times_out_then_fires_fallback_once_when_no_reply(
+    substrate, monkeypatch: pytest.MonkeyPatch
+):
+    """VT-623 Head3 B1 — when the async task never emits within the bounded window, the wait exhausts its
+    polls (strictly bounded — never hangs the turn) and the D1 fallback fires EXACTLY ONCE. No double-send:
+    the fallback is the single owner-facing message on a silent turn."""
+    import orchestrator.runner as runner_mod
+
+    tenant = _seed_tenant_brain_ready(substrate)
+
+    probe_calls = {"n": 0}
+
+    def _never_replies(_tenant_id, _sid):
+        probe_calls["n"] += 1
+        return False
+
+    fallback_calls = []
+    monkeypatch.setattr(runner_mod, "_brain_emitted_owner_reply", _never_replies)
+    monkeypatch.setattr(
+        runner_mod, "_send_completed_no_reply_fallback", lambda *a: fallback_calls.append(a)
+    )
+    monkeypatch.setattr(runner_mod, "_D1_INTURN_WAIT_MAX_POLLS", 3)
+    monkeypatch.setattr(runner_mod, "_D1_INTURN_WAIT_POLL_S", 0.01)
+
+    _drive_skip_turn(substrate, monkeypatch, tenant, body="win back my lapsed customers")
+
+    # Bounded: exactly one fallback send, and the wait probed the full budget (3 in-loop) plus the D1
+    # check (1) before giving up — proof the loop terminated on the poll cap, not early.
+    assert len(fallback_calls) == 1, "silent turn must fire the honest fallback exactly once"
+    assert probe_calls["n"] >= runner_mod._D1_INTURN_WAIT_MAX_POLLS + 1
