@@ -1342,6 +1342,7 @@ def webhook_pipeline_run(tenant_id: str, run_id: str, twilio_fields: dict) -> di
             # VT-611 gates enforce on anywhere. Scoped to real inbound messages only (a status
             # callback carries no body — nothing to triage), mirroring the record_turn guard above.
             skip_legacy_dispatch = False
+            triage_outcome: str | None = None
             if event.message_type == "inbound_message":
                 from orchestrator.manager.triage_seam import triage_seam
 
@@ -1349,6 +1350,9 @@ def webhook_pipeline_run(tenant_id: str, run_id: str, twilio_fields: dict) -> di
                     UUID(tenant_id), event.body or "", event.twilio_message_sid or run_id,
                 )
                 skip_legacy_dispatch = seam_result.skip_legacy_dispatch
+                # T9 — thread the triage outcome so dispatch_brain suppresses async specialist
+                # spawns on an answerable turn (direct_reply / task_status) and answers in-turn.
+                triage_outcome = seam_result.outcome
 
             # VT-193: brain wired into supervisor graph via dispatch_brain.
             # Replaces the VT-3.4 placeholder (record_brain_pending + 'escalated'
@@ -1370,6 +1374,7 @@ def webhook_pipeline_run(tenant_id: str, run_id: str, twilio_fields: dict) -> di
                     state=state,
                     run_id=UUID(run_id),
                     tenant_id=UUID(tenant_id),
+                    triage_outcome=triage_outcome,
                 )
                 final_status = dispatch_result.final_status
                 # VT-309: L2 agent-dispatch lifecycle event (completed/terminated).

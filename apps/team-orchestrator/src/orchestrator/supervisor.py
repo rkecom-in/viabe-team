@@ -537,6 +537,7 @@ def build_supervisor_graph(
     checkpointer: PostgresSaver | None = None,
     *,
     mode: LoopMode | None = None,
+    suppress_answerable_spawns: bool = False,
 ) -> Any:
     """Compose and compile the parent multi-agent graph.
 
@@ -584,10 +585,16 @@ def build_supervisor_graph(
     # (``ADVISORY_TOOLS``, below) — no spawn tool, no graph node, no conditional-edge
     # route for any of the six.
     from orchestrator.agent.advisory_registry import ADVISORY_TOOLS
-    from orchestrator.agent.roster import ROSTER
+    from orchestrator.agent.roster import ANSWERABLE_SUPPRESSED_ROUTE_KEYS, ROSTER
 
+    # T9 — on an answerable turn (triage direct_reply / task_status), drop the non-onboarding
+    # specialist spawns so the manager ANSWERS in-turn from its read-tools instead of spawning an
+    # async specialist that D1-stalls. onboarding_conductor stays (increment-2). The excluded
+    # specialists' graph nodes/edges remain but are unreachable this turn.
+    _spawn_exclusions = ANSWERABLE_SUPPRESSED_ROUTE_KEYS if suppress_answerable_spawns else frozenset()
     orchestrator = build_orchestrator_agent(
-        model=model, extra_tools=[*roster_spawn_tools(), *ADVISORY_TOOLS]
+        model=model,
+        extra_tools=[*roster_spawn_tools(exclude_route_keys=_spawn_exclusions), *ADVISORY_TOOLS],
     )
 
     # VT-183 retrofit: 3 function-based supervisor StateGraph nodes wrapped

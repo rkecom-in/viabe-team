@@ -60,7 +60,7 @@ bundle the specialist already consumes. ``build_handoff_update`` composes both.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from dataclasses import dataclass, field
 from typing import Any
 from uuid import UUID
@@ -519,9 +519,24 @@ def spawn_tool_route_keys() -> dict[str, str]:
     return {spec.spawn_tool_name: spec.route_key for spec in ROSTER}
 
 
-def roster_spawn_tools() -> list[BaseTool]:
-    """Build every roster member's handoff tool (passed as the manager's extra_tools)."""
-    return [spec.make_spawn() for spec in ROSTER]
+# T9 — route_keys of the specialist spawns that must be SUPPRESSED on an answerable turn
+# (triage outcome direct_reply / task_status). Dropping these forces the sync brain to ANSWER the
+# owner in-turn from its read-tools instead of spawning an async specialist that then D1-stalls
+# ("I'm on it" with the real answer landing late/never) — the dominant loop_stall / ignored_speech_act
+# breaker. onboarding_conductor is DELIBERATELY NOT here: during onboarding the conductor IS the way
+# the turn gets answered, and the brain has no onboarding-status read-tool yet (T9 increment-2).
+ANSWERABLE_SUPPRESSED_ROUTE_KEYS: frozenset[str] = frozenset({"spawn", "spawn_integration"})
+
+
+def roster_spawn_tools(exclude_route_keys: Collection[str] = ()) -> list[BaseTool]:
+    """Build every roster member's handoff tool (passed as the manager's extra_tools).
+
+    ``exclude_route_keys`` drops the specialists whose ``route_key`` is in the set — used on
+    answerable turns (T9) to remove the async-spawn temptation so the brain answers in-turn. The
+    graph nodes/edges for an excluded specialist stay in place but are unreachable (the manager can
+    no longer emit that spawn tool call, so ``route_after_orchestrator`` never returns its key)."""
+    excluded = frozenset(exclude_route_keys)
+    return [spec.make_spawn() for spec in ROSTER if spec.route_key not in excluded]
 
 
 __all__ = [
