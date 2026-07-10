@@ -17,7 +17,8 @@ SECURITY (the VT-268 boundary — this is the risk-row):
     closed guard by construction; the guard's explicit owner-reply carve-out documents WHY.
   * Effect-boundary validation runs IN the tool BEFORE any send: PII redaction (the same
     ``redact_for_log`` primitive the internal audit path uses), near-duplicate reject-and-reask
-    (no verbatim/semantic loop reaches the owner), and a per-turn reply cap.
+    (no verbatim/semantic loop reaches the owner), a per-turn reply cap, and the #49 emission
+    speech-act gate (a completion claim with no backing DB fact is swapped for an honest line).
 
 Flag-gated: registered + instructed only when ``MANAGER_REPLY_TOOL`` is on (dev-first rollout;
 the production cutover is Fazal-only). See ``orchestrator_agent.build_orchestrator_agent``.
@@ -160,6 +161,13 @@ def reply_to_owner(text: str, state: Annotated[dict[str, Any], InjectedState]) -
                 )
         except Exception:
             logger.debug("reply_to_owner: dup-check failed (fail-soft allow)", exc_info=True)
+
+    # Effect boundary 3 — emission gate (#49): a completion claim ("done"/"bhej diya") with no
+    # backing DB fact gets swapped for the honest line here, before it ever reaches the owner
+    # (kills the fabrication as a CLASS, not just the one observed case).
+    from orchestrator.agent.emission_gate import apply_emission_gate
+
+    body = apply_emission_gate(body, tenant_id)
 
     # Recipient resolved SERVER-SIDE — the model never supplies a number.
     recipient = _resolve_owner_phone(tenant_id)
