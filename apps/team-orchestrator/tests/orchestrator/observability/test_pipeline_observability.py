@@ -188,6 +188,33 @@ def test_write_step_redacts_error_and_envelopes_with_populated_registry(rls_ctx)
     assert row["output_envelope"] == {"strategy": "retry_with_backoff"}
 
 
+def test_write_step_returns_the_inserted_rows_id(rls_ctx):
+    """§7D — write_step's return value is the EXACT ``pipeline_steps.id`` it just inserted, so a
+    caller (langchain_callback.py) can thread a precise ``reasoning_ref.step_id`` instead of the
+    coarser (run_id, step_name) join."""
+    from orchestrator.observability.pipeline_observability import write_step
+
+    tenant = _new_tenant(rls_ctx.dsn)
+    run_id = _new_run(rls_ctx.dsn, tenant)
+
+    returned_id = write_step(
+        step_kind="error",
+        run_id=UUID(run_id),
+        tenant_id=UUID(tenant),
+        input_envelope={"failure_type": "llm_api_error", "message": "x"},
+        output_envelope={"strategy": "retry_with_backoff"},
+        status="completed",
+    )
+
+    assert returned_id is not None
+    with psycopg.connect(rls_ctx.dsn, autocommit=True) as conn:
+        row = conn.execute(
+            "SELECT id FROM pipeline_steps WHERE run_id = %s", (run_id,)
+        ).fetchone()
+    assert row is not None
+    assert returned_id == row[0]
+
+
 def test_write_step_registry_failure_fails_soft_pattern_only(rls_ctx, monkeypatch, caplog):
     """Fail-soft posture (documented in _registry_for_tenant): registry build
     failure → the write still lands, pattern redaction still runs, and a

@@ -163,12 +163,24 @@ def test_settle_verified_task_commits_from_verifying(substrate, monkeypatch: pyt
         lambda tenant_id, task_id, steps: "completed_no_action",
     )
 
-    wf._settle_verified_task(tid, task_id)
+    wf._settle_verified_task(tid, task_id, verification_reason="all acceptance criteria met")
 
     task = ts.get_task(tid, task_id)
     assert task["status"] == "completed"
     assert task["terminal_outcome"] == "completed_no_action"
     assert task["owner_notification_status"] == "pending"
+
+    # §7D — the task_verified_complete audit row carries the opus checkpoint's own WHY, not just
+    # the terminal_outcome it produced.
+    with pool.connection() as conn:
+        row = conn.execute(
+            "SELECT decision FROM tm_audit_log WHERE tenant_id = %s "
+            "AND event_kind = 'task_verified_complete' ORDER BY created_at DESC LIMIT 1",
+            (tid,),
+        ).fetchone()
+    assert row is not None
+    decision = row["decision"] if isinstance(row, dict) else row[0]
+    assert decision["verification_reason"] == "all acceptance criteria met"
 
 
 def test_settle_verified_task_rejected_when_task_is_not_verifying(
@@ -325,6 +337,17 @@ def test_append_verification_retry_step_transitions_task_from_verifying(substrat
 
     assert applied is True
     assert ts.get_task(tid, task_id)["status"] == "running"
+
+    # §7D — a verification_retry_appended audit row records WHY the retry was appended.
+    with pool.connection() as conn:
+        row = conn.execute(
+            "SELECT decision FROM tm_audit_log WHERE tenant_id = %s "
+            "AND event_kind = 'verification_retry_appended' ORDER BY created_at DESC LIMIT 1",
+            (tid,),
+        ).fetchone()
+    assert row is not None
+    decision = row["decision"] if isinstance(row, dict) else row[0]
+    assert decision["reason"] == "gap found"
 
 
 def test_append_verification_retry_step_task_status_rejected_when_not_verifying(substrate):

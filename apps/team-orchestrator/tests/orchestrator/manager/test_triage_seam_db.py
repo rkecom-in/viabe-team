@@ -381,6 +381,33 @@ def test_triage_turn_receives_false_kwargs_for_a_clean_tenant(pool, monkeypatch:
     assert captured_kwargs["has_open_question"] is False
 
 
+def test_triage_decision_audit_row_carries_the_classifiers_reasoning(
+    pool, monkeypatch: pytest.MonkeyPatch
+):
+    """§7D — the ``triage_decision`` audit row must carry the classifier's own stated WHY
+    (``TriageResult.reasoning``), not just the outcome it produced."""
+    from orchestrator.manager import triage_seam as ts
+    from orchestrator.manager.triage import TriageResult
+
+    tid = _seed_tenant(pool)
+    monkeypatch.setattr(
+        "orchestrator.manager.triage.triage_turn",
+        lambda **k: TriageResult(outcome="direct_reply", reasoning="owner asked a simple FAQ"),
+    )
+
+    ts.triage_seam(tid, "hi", "SM1100", mode="shadow")
+
+    with pool.connection() as conn:
+        row = conn.execute(
+            "SELECT decision FROM tm_audit_log WHERE tenant_id = %s "
+            "AND event_kind = 'triage_decision' ORDER BY created_at DESC LIMIT 1",
+            (tid,),
+        ).fetchone()
+    assert row is not None
+    decision = row["decision"] if isinstance(row, dict) else row[0]
+    assert decision["reasoning"] == "owner asked a simple FAQ"
+
+
 def test_template_draft_criteria_are_structurally_falsifiable():
     """VT-633 — the template's acceptance criteria must be CHECKABLE facts (a log row, a DB
     record), never a subjective judgment ('owner confirms the ask was addressed'), so the

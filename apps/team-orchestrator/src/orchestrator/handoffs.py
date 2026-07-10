@@ -102,14 +102,23 @@ def make_spawn_tool(
             update.update(update_builder(state))
         _spawn_tenant_id = state.get("tenant_id")
         if _spawn_tenant_id is not None:
+            _spawn_run_id = state.get("run_id")
             emit_tm_audit(
                 event_layer="does",
                 event_kind="spawn",
                 actor=state.get("active_agent") or "team_manager",
                 tenant_id=_spawn_tenant_id,
-                run_id=state.get("run_id"),
+                run_id=_spawn_run_id,
                 summary=f"Spawning {agent_name}",
                 action={"target_lane": agent_name, "spawn_tool": tool_name},
+                # §7D — join this spawn decision back to the SAME turn's
+                # reasoning_turn row (langchain_callback.py's own reasoning_ref
+                # shape) so the WHY behind the LLM's tool call is queryable
+                # alongside the WHAT it did.
+                reasoning_ref={
+                    "run_id": str(_spawn_run_id) if _spawn_run_id is not None else None,
+                    "step_name": "orchestrator_agent_turn",
+                },
                 conn=None,
             )
         return Command(goto=agent_name, graph=Command.PARENT, update=update)

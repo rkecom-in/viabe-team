@@ -404,3 +404,59 @@ def test_spawn_tool_handoff_attaches_standard_payload(
     envelope = update["specialist_handoff"]
     assert isinstance(envelope, SpecialistHandoff)
     assert envelope.desired_outcome == "recover sales from dormant customers"
+
+
+def test_spawn_tool_handoff_audit_row_joins_to_the_turns_reasoning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """§7D — the ``spawn`` audit row handoffs.py emits must carry a reasoning_ref pointing at
+    THIS turn's reasoning_turn row (the SAME (run_id, step_name) shape langchain_callback.py
+    emits), so a decision (WHAT was spawned) can be joined to the WHY behind it."""
+    import orchestrator.context_builder as context_builder_mod
+    import orchestrator.handoffs as handoffs_mod
+
+    # Stub the DB-backed bundle builders (keyless, no pool) — mirrors
+    # test_spawn_tool_handoff_attaches_standard_payload's own setup.
+    monkeypatch.setattr(
+        context_builder_mod, "_build_recent_campaigns", lambda tid: ([], False)
+    )
+    monkeypatch.setattr(
+        context_builder_mod, "_build_pending_owner_inputs", lambda tid: ([], False)
+    )
+    monkeypatch.setattr(
+        context_builder_mod,
+        "_build_ledger_summary",
+        lambda tid: (context_builder_mod.LedgerSummary(), True),
+    )
+    monkeypatch.setattr(
+        context_builder_mod,
+        "_build_l3_priors",
+        lambda tid, rid: (context_builder_mod.L3Priors(), False),
+    )
+    monkeypatch.setattr(
+        context_builder_mod,
+        "_build_l4_skills",
+        lambda tid, req: (context_builder_mod.L4Skills(), False),
+    )
+
+    captured: dict = {}
+    monkeypatch.setattr(handoffs_mod, "emit_tm_audit", lambda **kw: captured.update(kw))
+
+    sr = next(s for s in ROSTER if s.name == "sales_recovery")
+    tool = sr.make_spawn()
+
+    tenant_id = uuid4()
+    run_id = uuid4()
+    state = {
+        "messages": [{"role": "user", "content": "Recover dormant customers"}],
+        "tenant_id": tenant_id,
+        "run_id": run_id,
+        "trigger_reason": "owner_initiated",
+    }
+    tool.func(state=state, tool_call_id="tc-1")  # type: ignore[attr-defined]
+
+    assert captured["event_kind"] == "spawn"
+    assert captured["reasoning_ref"] == {
+        "run_id": str(run_id),
+        "step_name": "orchestrator_agent_turn",
+    }

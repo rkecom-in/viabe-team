@@ -566,14 +566,19 @@ def _verify_completion_step(tenant_id: str, task_id: str) -> tuple[str, str]:
 
 
 @DBOS.step()
-def _settle_verified_task(tenant_id: str, task_id: str) -> None:
+def _settle_verified_task(tenant_id: str, task_id: str, *, verification_reason: str = "") -> None:
     """A verified completion reaches a TRUE task_store.TASK_TERMINAL status for the first time in
     this row's own outcomes (see the module scope note) — terminal_outcome resolves via the
     evidence-presence proxy PLUS the VT-633 F-3 deterministic executed-effect floor
     (verification.resolve_terminal_outcome), owner_notification_status starts 'pending' (the
     VT-524 seam picks it up from there), and this is what finally makes queue promotion
     (_promote_next_queued, called from the workflow's own tail) a real transition instead of dead
-    code."""
+    code.
+
+    ``verification_reason`` (§7D): the opus checkpoint's own ``CompletionVerification.reason`` —
+    threaded in by the caller (``_run_verification_cycle``, which already reads it off
+    ``_verify_completion_step``) so the audit row records WHY verification passed, not only that
+    it did."""
     from orchestrator.manager.verification import resolve_terminal_outcome
 
     task = task_store.get_task(tenant_id, task_id)
@@ -592,7 +597,11 @@ def _settle_verified_task(tenant_id: str, task_id: str) -> None:
         actor="team_manager",
         tenant_id=tenant_id,
         summary=f"task={task_id} verified complete: terminal_outcome={outcome}",
-        decision={"task_id": str(task_id), "terminal_outcome": outcome},
+        decision={
+            "task_id": str(task_id),
+            "terminal_outcome": outcome,
+            "verification_reason": verification_reason,
+        },
     )
 
 
@@ -622,6 +631,16 @@ def _append_verification_retry_step(tenant_id: str, task_id: str, *, reason: str
         tenant_id, task_id, retry_step, expected_plan_revision=plan.plan_revision
     )
     task_store.set_task_status(tenant_id, task_id, "running", expected_from=("verifying",))
+    # §7D DECIDES — record WHY a retry step was appended (the opus checkpoint's own
+    # not_verified reason), not just that one was.
+    emit_tm_audit(
+        event_layer="decides",
+        event_kind="verification_retry_appended",
+        actor="team_manager",
+        tenant_id=tenant_id,
+        summary=f"task={task_id} verification retry appended: {reason}",
+        decision={"task_id": str(task_id), "reason": reason},
+    )
     return True
 
 
@@ -643,7 +662,7 @@ def _run_verification_cycle(tenant_id: str, task_id: str, verification_attempts:
     """
     verdict, reason = _verify_completion_step(tenant_id, task_id)
     if verdict == "verified":
-        _settle_verified_task(tenant_id, task_id)
+        _settle_verified_task(tenant_id, task_id, verification_reason=reason)
         _notify_owner_of_terminal(tenant_id, task_id)
         return "settled", verification_attempts
     verification_attempts += 1

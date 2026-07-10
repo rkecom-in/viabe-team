@@ -60,30 +60,42 @@ def route_after_orchestrator(state: AgentGraphState) -> str:
     for tc in tool_calls:
         route_key = route_for_tool.get(tc.get("name", ""))
         if route_key is not None:
+            _route_run_id = state.get("run_id")
             # VT-514 DECIDES — route_decided spine row (fail-soft, conn=None).
             emit_tm_audit(
                 event_layer="decides",
                 event_kind="route_decided",
                 actor="team_manager",
                 tenant_id=state.get("tenant_id"),
-                run_id=state.get("run_id"),
+                run_id=_route_run_id,
                 summary=f"orchestrator spawned specialist via {tc.get('name')}",
                 decision={
                     "route_key": route_key,
                     "spawn_tool": tc.get("name"),
                     "tool_call_args": tc.get("args"),
                 },
+                # §7D — same join as handoffs.py's spawn emit: point back at
+                # this turn's reasoning_turn row (langchain_callback.py shape).
+                reasoning_ref={
+                    "run_id": str(_route_run_id) if _route_run_id is not None else None,
+                    "step_name": "orchestrator_agent_turn",
+                },
             )
             return route_key
     # VT-514 DECIDES — terminal route (no spawn tool fired).
+    _terminal_run_id = state.get("run_id")
     emit_tm_audit(
         event_layer="decides",
         event_kind="route_decided",
         actor="team_manager",
         tenant_id=state.get("tenant_id"),
-        run_id=state.get("run_id"),
+        run_id=_terminal_run_id,
         summary="orchestrator terminated without spawning a specialist",
         decision={"route_key": "terminal", "spawn_tool": None},
+        reasoning_ref={
+            "run_id": str(_terminal_run_id) if _terminal_run_id is not None else None,
+            "step_name": "orchestrator_agent_turn",
+        },
     )
     return "terminal"
 
