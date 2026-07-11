@@ -164,6 +164,34 @@ def test_classify_defer(body, expected) -> None:
 
 
 @pytest.mark.parametrize(
+    ("body", "expected"),
+    [
+        # --- T17 temporal HOLD → defer (pause the send, keep the draft; never sends) ---
+        ("ruk jao, abhi mat bhejna", "defer"),  # the measured sr_no_actual_send breaker verbatim
+        ("abhi mat bhejo", "defer"),
+        ("abhi nahi", "defer"),
+        ("don't send it now", "defer"),
+        ("not yet", "defer"),
+        ("filhal mat bhejo", "defer"),
+        # --- still REJECT: bare negation (no temporal token) ---
+        ("mat bhejo", "rejected"),
+        ("nahi bhejna", "rejected"),
+        # --- still REJECT: explicit reject keyword wins over the temporal read ---
+        ("no, cancel it now", "rejected"),
+        ("stop it now", "rejected"),
+        # --- still REJECT: finality defeats the temporal read ---
+        ("don't send now or ever", "rejected"),
+        ("kabhi nahi bhejna, abhi toh bilkul nahi", "rejected"),
+        ("never send this now", "rejected"),
+        # --- contradictory "no, send it now" → defer → RE-ASK (safer than either misread) ---
+        ("no, send it now", "defer"),
+    ],
+)
+def test_classify_temporal_hold(body, expected) -> None:
+    assert classify_approval_reply(body) == expected
+
+
+@pytest.mark.parametrize(
     "body",
     [
         # Bare "next"/"अगले" must NOT defer on an APPROVING reply (Cowork #377 bounce) — defer
