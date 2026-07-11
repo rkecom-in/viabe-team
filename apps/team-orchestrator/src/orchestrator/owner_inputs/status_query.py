@@ -51,6 +51,17 @@ def classify_status_query(body: str) -> StatusQueryType:
     tokens = {t for t in re.split(r"[\s,.!?;:।/\\-]+", norm) if t}
     if (_FINANCE_READ_TOKENS & tokens) or "cash flow" in norm:
         return "unknown"
+    # T11 (§2 judge, x3-systematic) — a PUSHBACK / are-you-sure challenge refers to the PRIOR
+    # assistant turn, so a canned lookup is wrong by construction ("are you sure? I haven't seen
+    # new CUSTOMER numbers show up" hijacked into "You have 6 customers in your ledger" via the
+    # bare 'customer' token). Fall through to the brain, which holds the conversation context.
+    if (
+        "are you sure" in norm
+        or "you sure" in norm
+        or "sach me" in norm
+        or ({"pakka", "sacchi"} & tokens)
+    ):
+        return "unknown"
     if (
         "opted" in tokens
         or "optout" in tokens
@@ -88,6 +99,20 @@ def classify_status_query(body: str) -> StatusQueryType:
     if {"trial", "billing", "plan", "subscription", "phase"} & tokens:
         return "billing"
     return "unknown"
+
+
+def _open_approval_exists(tenant_id: UUID | str) -> bool:
+    """T10 — True iff the tenant has an OPEN pending approval (the thing a 'proposed'
+    campaign is waiting on). Fail-soft False: on a read error the answer degrades to the
+    generic honest "still awaiting approval" line — never blocks the status answer."""
+    try:
+        from orchestrator.agent.approval_resume import find_open_approval_for_tenant
+        from orchestrator.db import tenant_connection
+
+        with tenant_connection(tenant_id) as conn:
+            return find_open_approval_for_tenant(conn, tenant_id) is not None
+    except Exception:  # noqa: BLE001 — a control-read outage must not kill the status answer
+        return False
 
 
 def answer_status_query(tenant_id: UUID | str, body: str) -> str | None:
@@ -150,9 +175,28 @@ def answer_status_query(tenant_id: UUID | str, body: str) -> str | None:
         if not out.campaigns:
             return "You haven't run a campaign in the last 30 days."
         c = out.campaigns[0]
+        # T10 (§2 judge, x3-systematic) — the answer must be STATUS-AWARE. "has it gone out yet?"
+        # about a 'proposed' campaign answered "got 0 responses (status: proposed)" — a response-
+        # stats non-answer the judge reads as ignored_speech_act. A not-yet-sent campaign gets an
+        # honest "hasn't gone out" lead, and a proposed one names WHAT it's waiting on (the owner's
+        # own approval — resurfacing the pending ask instead of burying it).
+        if c.status == "proposed":
+            if _open_approval_exists(tenant_id):
+                return (
+                    "It hasn't gone out yet — it's waiting on your approval. Reply to the "
+                    "approval message and I'll send it."
+                )
+            return "It hasn't gone out yet — the draft is still awaiting approval."
+        if c.status == "approved":
+            return "It's approved and going out now — I'll confirm once it's sent."
+        if c.status in ("rejected", "cancelled"):
+            return f"No — that campaign didn't go out; it was {c.status}."
+        if c.status == "failed":
+            return "No — the send failed. I can retry or redraft it if you want."
+        # 'sent' (and any future terminal): the campaign went out — report responses.
         # NOTE: recipients_count is 1 per campaign row in the current model, so we report
         # responses + status (not a recipient count, which would be misleading as "1").
-        return f"Your last campaign got {c.response_count} responses (status: {c.status})."
+        return f"Yes — it went out, and it got {c.response_count} responses so far."
 
     if qtype == "billing":
         # Phase/trial detail lives in the portal; keep this a pointer (Pillar-7 copy TBD).

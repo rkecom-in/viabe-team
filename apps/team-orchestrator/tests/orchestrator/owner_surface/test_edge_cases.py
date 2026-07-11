@@ -58,10 +58,83 @@ from orchestrator.owner_inputs.status_query import classify_status_query
         ("have you sent it yet?", "last_campaign"),
         ("has the message gone out to my customers?", "last_campaign"),
         ("did the winback go out?", "last_campaign"),
+        # T11 pushback guard — an are-you-sure challenge refers to the PRIOR assistant turn;
+        # a canned lookup is wrong by construction. The bare 'customer' token must NOT hijack
+        # it into a ledger count (reconnect_broken_sync x3, §2 judge 2026-07-11).
+        (
+            "are you sure? because I definitely haven't seen new customer numbers show up",
+            "unknown",
+        ),
+        ("you sure the campaign went out?", "unknown"),
+        ("pakka customers aa rahe hain?", "unknown"),
+        # Guard: a genuine count ask without a pushback cue still fast-paths.
+        ("how many customers came in this week?", "customer_count"),
     ],
 )
 def test_classify_status_query(body, expected) -> None:
     assert classify_status_query(body) == expected
+
+
+# ----------------------------- pure: T10 status-aware last_campaign -------------------
+def _answer_with_campaign(monkeypatch, status: str, response_count: int = 0, *, open_approval: bool):
+    from orchestrator.owner_inputs import status_query as sq
+
+    campaign = SimpleNamespace(status=status, response_count=response_count)
+    monkeypatch.setattr(
+        "orchestrator.agent.tools.get_recent_campaigns.get_recent_campaigns",
+        lambda _inp: SimpleNamespace(campaigns=[campaign]),
+    )
+    monkeypatch.setattr(sq, "_open_approval_exists", lambda tenant_id: open_approval)
+    return sq.answer_status_query(uuid4(), "has that campaign gone out yet?")
+
+
+def test_last_campaign_proposed_with_open_approval_says_awaiting_approval(monkeypatch):
+    out = _answer_with_campaign(monkeypatch, "proposed", open_approval=True)
+    assert "hasn't gone out" in out
+    assert "approval" in out
+    assert "responses" not in out  # the old response-stats non-answer must be gone
+
+
+def test_last_campaign_proposed_without_open_approval_still_honest_not_sent(monkeypatch):
+    out = _answer_with_campaign(monkeypatch, "proposed", open_approval=False)
+    assert "hasn't gone out" in out
+
+
+def test_last_campaign_rejected_and_cancelled_say_did_not_go_out(monkeypatch):
+    for status in ("rejected", "cancelled"):
+        out = _answer_with_campaign(monkeypatch, status, open_approval=False)
+        assert "didn't go out" in out
+
+
+def test_last_campaign_sent_reports_responses(monkeypatch):
+    out = _answer_with_campaign(monkeypatch, "sent", response_count=3, open_approval=False)
+    assert "went out" in out
+    assert "3 responses" in out
+
+
+def test_last_campaign_failed_is_honest(monkeypatch):
+    out = _answer_with_campaign(monkeypatch, "failed", open_approval=False)
+    assert "failed" in out
+
+
+def test_open_approval_check_failure_fails_soft(monkeypatch):
+    """A control-read outage degrades to the generic honest not-sent line — never raises."""
+    from orchestrator.owner_inputs import status_query as sq
+
+    campaign = SimpleNamespace(status="proposed", response_count=0)
+    monkeypatch.setattr(
+        "orchestrator.agent.tools.get_recent_campaigns.get_recent_campaigns",
+        lambda _inp: SimpleNamespace(campaigns=[campaign]),
+    )
+
+    def _boom(_tenant_id):
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(
+        "orchestrator.agent.approval_resume.find_open_approval_for_tenant", _boom, raising=False
+    )
+    out = sq.answer_status_query(uuid4(), "has it gone out yet?")
+    assert "hasn't gone out" in out
 
 
 # ----------------------------- pure: phone / name extraction ---------------------------
