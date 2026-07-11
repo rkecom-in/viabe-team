@@ -1117,6 +1117,13 @@ def webhook_pipeline_run(tenant_id: str, run_id: str, twilio_fields: dict) -> di
     # 4's enforce-bypass acceptance
     # (test_runner_onboarding_mode_gate.py updated in the same commit) — the conductor remains the
     # enforce-mode owner WHEN SPAWNED; the gate is the deterministic floor for when it is not.
+    #
+    # ENFORCE runs the NARROW speech-act-aware gate (enforce_journey_gate: kickoff button +
+    # in-flight answers + an honest setup-status line; QUESTIONS fall through to the brain), NOT
+    # the full walker — running the raw walker in enforce was measured WORSE (dcc402f, x3: the
+    # script ignores a privacy question and the post-profile flow fabricates a platform
+    # assumption; 3/4/3 breakers vs the bypass's 1/2/2). Legacy/shadow keep the full walker
+    # byte-identical.
     journey_loop_owns_turn = False
     if event.message_type == "inbound_message" and not event.dupe_status:
         try:
@@ -1135,11 +1142,22 @@ def webhook_pipeline_run(tenant_id: str, run_id: str, twilio_fields: dict) -> di
         and not event.dupe_status
         and not journey_loop_owns_turn
     ):
-        from orchestrator.onboarding.journey import maybe_handle_journey_reply
+        from orchestrator.manager.loop_mode import is_enforce
 
-        journey_result = maybe_handle_journey_reply(
-            tenant_id, event.body or "", event.twilio_message_sid, event.sender_phone
-        )
+        if is_enforce():
+            from orchestrator.onboarding.enforce_journey_gate import (
+                maybe_handle_enforce_journey_turn,
+            )
+
+            journey_result = maybe_handle_enforce_journey_turn(
+                tenant_id, event.body or "", event.twilio_message_sid, event.sender_phone
+            )
+        else:
+            from orchestrator.onboarding.journey import maybe_handle_journey_reply
+
+            journey_result = maybe_handle_journey_reply(
+                tenant_id, event.body or "", event.twilio_message_sid, event.sender_phone
+            )
         if journey_result is not None:
             close_webhook_run(tenant_id, run_id, "completed")
             return {
