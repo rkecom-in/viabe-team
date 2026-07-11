@@ -1101,16 +1101,40 @@ def webhook_pipeline_run(tenant_id: str, run_id: str, twilio_fields: dict) -> di
     # double-guarded: the VT-149 message_sid UNIQUE seam above + handle_reply's last_message_sid).
     # Lazily imported so non-journey paths don't pay the import cost.
     #
-    # VT-609 (Loop Package 4) — mode-gated exactly like VT-606 gated the graph shape: legacy/shadow
-    # keep this gate byte-identical (this branch runs unconditionally, same as before this row).
-    # ONLY in enforce mode does an ordinary owner message stop being consumed here — the real
-    # onboarding_conductor SPECIALIST (agent/onboarding_conductor.py) now conducts the conversation,
-    # spawned by the Manager the same way any other roster member is. is_enforce() is read fresh
-    # per call (parity with every other mode-gated read site) so a mode flip never changes behavior
-    # mid-run.
-    from orchestrator.manager.loop_mode import is_enforce
+    # VT-609 (Loop Package 4) had this gate DISABLED in enforce mode, on the design assumption that
+    # the Manager brain reliably spawns the onboarding_conductor specialist for onboarding turns.
+    # T14 (§2 judge, onboarding_privacy_skeptic x3, 2026-07-11) MEASURED that assumption false: on an
+    # active-journey tenant the brain spawned the conductor 0/4 turns — the "Complete Setup" kickoff,
+    # the owner's volunteered profile fields, and the "are we set up now?" status ask all completed
+    # SILENT (D1 "I'm on it"), the fields were never recorded, and the judge scores it
+    # ignored_speech_act + loop_stall. Same LLM-gated-handoff failure class as VT-623/VT-626.
+    # So the deterministic journey gate now runs in EVERY mode, with a VT-608-style DEFER: when the
+    # loop genuinely owns the tenant's onboarding (an active manager_task whose CURRENT step targets
+    # onboarding_conductor), the gate skips — no dual-writer race on the journey state. In legacy/
+    # shadow a conductor-owned CURRENT step is effectively unreachable (this gate consumes journey
+    # turns before the brain can spawn one), so behavior there is unchanged in practice — and where
+    # one somehow exists, deferring is equally correct. This deliberately reverses VT-609 Package
+    # 4's enforce-bypass acceptance
+    # (test_runner_onboarding_mode_gate.py updated in the same commit) — the conductor remains the
+    # enforce-mode owner WHEN SPAWNED; the gate is the deterministic floor for when it is not.
+    journey_loop_owns_turn = False
+    if event.message_type == "inbound_message" and not event.dupe_status:
+        try:
+            from orchestrator.manager.task_store import has_active_onboarding_conductor_step
 
-    if event.message_type == "inbound_message" and not event.dupe_status and not is_enforce():
+            journey_loop_owns_turn = has_active_onboarding_conductor_step(tenant_id)
+        except Exception:  # noqa: BLE001 — defer-check failure must never block the journey gate
+            logger.warning(
+                "T14: has_active_onboarding_conductor_step check failed tenant=%s "
+                "(fail-open -> journey gate runs)",
+                tenant_id,
+            )
+
+    if (
+        event.message_type == "inbound_message"
+        and not event.dupe_status
+        and not journey_loop_owns_turn
+    ):
         from orchestrator.onboarding.journey import maybe_handle_journey_reply
 
         journey_result = maybe_handle_journey_reply(
