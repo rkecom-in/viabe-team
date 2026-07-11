@@ -43,10 +43,10 @@ def spies(monkeypatch):
         "orchestrator.onboarding.shopify_onboarding.read_integration_state",
         lambda tenant_id: calls["state"],
     )
-    # STATUS-QUESTION branch reads DB-truth via is_connector_connected — default not connected.
+    # STATUS-QUESTION branch + mint check-lead read DB-truth via _connected_or_healthy
+    # (tenant_oauth_tokens OR healthy tenant_connector_status) — default not connected.
     monkeypatch.setattr(
-        "orchestrator.integrations.commit.is_connector_connected",
-        lambda tenant_id, connector_id: calls["connected"],
+        fc, "_connected_or_healthy", lambda tenant_id, provider: calls["connected"]
     )
     return calls
 
@@ -93,10 +93,10 @@ def test_mint_on_unconnected_provider_has_no_check_lead(spies):
 
 
 def test_mint_check_failure_fails_soft_to_plain_mint(spies, monkeypatch):
-    def _boom(tenant_id, connector_id):
+    def _boom(tenant_id, provider):
         raise RuntimeError("db down")
 
-    monkeypatch.setattr("orchestrator.integrations.commit.is_connector_connected", _boom)
+    monkeypatch.setattr(fc, "_connected_or_healthy", _boom)
     res = _run("connect my google sheet please")
     assert res is not None and res["routed"] == "sheets_first_contact_minted"
     body_sent = spies["sends"][0]

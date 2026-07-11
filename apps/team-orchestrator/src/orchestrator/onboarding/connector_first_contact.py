@@ -64,6 +64,34 @@ _SHEETS_RE = re.compile(r"\b(google\s*sheet|sheets?|spreadsheet)\b", re.IGNORECA
 _SHOPIFY_RE = re.compile(r"\bshopify\b", re.IGNORECASE)
 
 
+def _connected_or_healthy(tenant_id: UUID | str, provider: str) -> bool:
+    """DB-truth 'connected' from EITHER source of record: a ``tenant_oauth_tokens`` row (the
+    OAuth-install truth ``is_connector_connected`` reads) OR an enabled+ok ``tenant_connector_
+    status`` row (the VT-210 operational truth ``read_integration_health`` reads). They genuinely
+    diverge — a status-only tenant answered "not connected" against a healthy, syncing connector
+    (the reconnect_broken_sync fabrication residual, §2 judge 2026-07-11). Either row grounds an
+    honest "shows connected on my side"."""
+    from orchestrator.db import tenant_connection
+
+    with tenant_connection(tenant_id) as conn:
+        row = conn.execute(
+            """
+            SELECT EXISTS (
+                SELECT 1 FROM tenant_oauth_tokens
+                WHERE tenant_id = %(t)s AND connector_id = %(c)s
+            ) OR EXISTS (
+                SELECT 1 FROM tenant_connector_status
+                WHERE tenant_id = %(t)s AND connector_id = %(c)s
+                  AND enabled AND last_status = 'ok'
+            ) AS connected
+            """,
+            {"t": str(tenant_id), "c": provider},
+        ).fetchone()
+    if row is None:
+        return False
+    return bool(row["connected"] if isinstance(row, dict) else row[0])
+
+
 def _detect_provider(body: str) -> str | None:
     """'google_sheet' | 'shopify' | None. None when ambiguous (both/neither) so the ask
     falls through to the brain — never guess a provider."""
@@ -114,9 +142,7 @@ def maybe_start_connector_onboarding(
         # from the DB; NEVER mint/dump a URL (dumping-then-repeating the link on push-back was the
         # dominant Tier-1 loop_stall / ignored_speech_act trust-breaker).
         if is_state and not is_imperative:
-            from orchestrator.integrations.commit import is_connector_connected
-
-            if is_connector_connected(tenant_id, provider):
+            if _connected_or_healthy(tenant_id, provider):
                 answer = f"Yes — your {label} is connected."
             elif live_flow:
                 answer = (
@@ -144,12 +170,11 @@ def maybe_start_connector_onboarding(
             return None  # a LIVE connector flow is in progress -> NOT first contact (no double-mint)
 
         if provider == "google_sheet":
-            from orchestrator.integrations.commit import is_connector_connected
             from orchestrator.integrations.sheets_oauth import start_sheets_oauth
 
             check_lead = ""
             try:
-                if is_connector_connected(tenant_id, provider):
+                if _connected_or_healthy(tenant_id, provider):
                     check_lead = (
                         f"I checked — your {label} shows connected on my side. If new data "
                         "still isn't coming through, let's re-authorize it fresh.\n\n"
