@@ -183,6 +183,56 @@ def test_settle_verified_task_commits_from_verifying(substrate, monkeypatch: pyt
     assert decision["verification_reason"] == "all acceptance criteria met"
 
 
+def test_settle_verified_task_suppresses_success_closure_when_campaign_reported(
+    substrate, monkeypatch: pytest.MonkeyPatch
+):
+    """T12 — when the owner already received the concrete campaign-outcome report, the settle
+    arms 'not_required' (no redundant "Done — I've taken care of it: <owner-echo>" closure)."""
+    import orchestrator.manager.workflow as wf
+    from orchestrator.manager import task_store as ts
+
+    pool = substrate
+    tid = _seed_tenant(pool)
+    task_id = str(_create_task(tid))
+    _force_task_status(pool, tid, task_id, "verifying")
+    monkeypatch.setattr(
+        "orchestrator.manager.verification.resolve_terminal_outcome",
+        lambda tenant_id, task_id, steps: "completed_with_effect",
+    )
+
+    wf._settle_verified_task(
+        tid, task_id, verification_reason="campaign executed", success_closure_not_required=True
+    )
+
+    task = ts.get_task(tid, task_id)
+    assert task["status"] == "completed"
+    assert task["owner_notification_status"] == "not_required"
+
+
+def test_run_verification_cycle_threads_campaign_reported_into_settle(monkeypatch: pytest.MonkeyPatch):
+    """T12 (pure) — the verified branch passes campaign_outcome_reported through to the settle's
+    success_closure_not_required, and still fires the terminal-notify step (which no-ops on a
+    'not_required' row by its own idempotency contract)."""
+    import orchestrator.manager.workflow as wf
+
+    seen: dict = {}
+    monkeypatch.setattr(wf, "_verify_completion_step", lambda t, k: ("verified", "ok"))
+    monkeypatch.setattr(
+        wf,
+        "_settle_verified_task",
+        lambda t, k, *, verification_reason="", success_closure_not_required=False: seen.__setitem__(
+            "suppress", success_closure_not_required
+        ),
+    )
+    monkeypatch.setattr(wf, "_notify_owner_of_terminal", lambda t, k: seen.__setitem__("notified", True))
+
+    action, attempts = wf._run_verification_cycle("t", "k", 0, campaign_outcome_reported=True)
+
+    assert action == "settled" and attempts == 0
+    assert seen["suppress"] is True
+    assert seen["notified"] is True
+
+
 def test_settle_verified_task_rejected_when_task_is_not_verifying(
     substrate, monkeypatch: pytest.MonkeyPatch
 ):

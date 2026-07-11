@@ -566,7 +566,13 @@ def _verify_completion_step(tenant_id: str, task_id: str) -> tuple[str, str]:
 
 
 @DBOS.step()
-def _settle_verified_task(tenant_id: str, task_id: str, *, verification_reason: str = "") -> None:
+def _settle_verified_task(
+    tenant_id: str,
+    task_id: str,
+    *,
+    verification_reason: str = "",
+    success_closure_not_required: bool = False,
+) -> None:
     """A verified completion reaches a TRUE task_store.TASK_TERMINAL status for the first time in
     this row's own outcomes (see the module scope note) — terminal_outcome resolves via the
     evidence-presence proxy PLUS the VT-633 F-3 deterministic executed-effect floor
@@ -578,7 +584,15 @@ def _settle_verified_task(tenant_id: str, task_id: str, *, verification_reason: 
     ``verification_reason`` (§7D): the opus checkpoint's own ``CompletionVerification.reason`` —
     threaded in by the caller (``_run_verification_cycle``, which already reads it off
     ``_verify_completion_step``) so the audit row records WHY verification passed, not only that
-    it did."""
+    it did.
+
+    ``success_closure_not_required`` (T12, §2 judge x6 2026-07-11): True when the owner ALREADY
+    received the concrete campaign-outcome report this workflow ("Your campaign has gone out —
+    sent to N"). The generic success closure would then be a redundant owner-echo ("Done — I've
+    taken care of it: <the owner's own message quoted back>") the judge reads as loop_stall —
+    so the settle arms owner_notification_status 'not_required' instead of 'pending' and
+    _notify_owner_of_terminal cleanly no-ops. A later blocked/escalated terminal still notifies
+    (the _block_*/_arm_escalation_for_notify steps re-arm 'pending' themselves)."""
     from orchestrator.manager.verification import resolve_terminal_outcome
 
     task = task_store.get_task(tenant_id, task_id)
@@ -589,7 +603,8 @@ def _settle_verified_task(tenant_id: str, task_id: str, *, verification_reason: 
     outcome = resolve_terminal_outcome(tenant_id, task_id, steps)
     task_store.set_task_status(
         tenant_id, task_id, "completed", expected_from=("verifying",),
-        terminal_outcome=outcome, owner_notification_status="pending",
+        terminal_outcome=outcome,
+        owner_notification_status="not_required" if success_closure_not_required else "pending",
     )
     emit_tm_audit(
         event_layer="does",
@@ -644,7 +659,13 @@ def _append_verification_retry_step(tenant_id: str, task_id: str, *, reason: str
     return True
 
 
-def _run_verification_cycle(tenant_id: str, task_id: str, verification_attempts: int) -> tuple[str, int]:
+def _run_verification_cycle(
+    tenant_id: str,
+    task_id: str,
+    verification_attempts: int,
+    *,
+    campaign_outcome_reported: bool = False,
+) -> tuple[str, int]:
     """Package 3: "complete -> verify objective" (team-lead ruling round 2) — manager_review
     settled the task 'verifying', but that is NOT yet a true terminal status. Run the opus
     completion-verification checkpoint.
@@ -662,7 +683,10 @@ def _run_verification_cycle(tenant_id: str, task_id: str, verification_attempts:
     """
     verdict, reason = _verify_completion_step(tenant_id, task_id)
     if verdict == "verified":
-        _settle_verified_task(tenant_id, task_id, verification_reason=reason)
+        _settle_verified_task(
+            tenant_id, task_id, verification_reason=reason,
+            success_closure_not_required=campaign_outcome_reported,
+        )
         _notify_owner_of_terminal(tenant_id, task_id)
         return "settled", verification_attempts
     verification_attempts += 1
@@ -800,7 +824,7 @@ def _execute_approved_campaign(tenant_id: str, task_id: str, step_id: str, attem
 
 
 @DBOS.step()
-def _report_campaign_outcome_to_owner(tenant_id: str, run_id: UUID, summary: dict[str, Any]) -> None:
+def _report_campaign_outcome_to_owner(tenant_id: str, run_id: UUID, summary: dict[str, Any]) -> bool:
     """VT-633 F-2 — the honest owner-facing counterpart to ``_execute_approved_campaign``: reports
     the REAL sent/skipped/failed counts via ``owner_surface.campaign_outcome`` (the same composer
     the legacy graph-resume path used before F-1's redirect), so the owner hears what actually
@@ -813,10 +837,18 @@ def _report_campaign_outcome_to_owner(tenant_id: str, run_id: UUID, summary: dic
     would re-send the WhatsApp outcome report to the owner every time the workflow re-executes past
     this point. Fail-soft by the callee's own contract (never raises); a no-activity/no-phone
     summary is a clean no-op inside it.
+
+    T12 (§2 judge x6, 2026-07-11): RETURNS whether a report was actually dispatched. The caller
+    threads that flag into the settle path so the later generic success closure ("Done — I've
+    taken care of it: <the owner's own message quoted back>") is suppressed — a redundant
+    owner-echo the judge reads as loop_stall once the owner already heard the concrete result.
+    The bool is a memoized step result, so the downstream branching on it is replay-deterministic.
     """
     from orchestrator.owner_surface.campaign_outcome import maybe_report_campaign_outcome
 
-    maybe_report_campaign_outcome(tenant_id, {"campaign_execution_summary": summary}, run_id=run_id)
+    return maybe_report_campaign_outcome(
+        tenant_id, {"campaign_execution_summary": summary}, run_id=run_id
+    )
 
 
 @DBOS.step()
@@ -989,6 +1021,10 @@ def manager_task_workflow(tenant_id: str, task_id: str) -> str:
     revision_counts: dict[int, int] = {}
     attempt_counts: dict[str, int] = {}
     verification_attempts = 0
+    # T12 — True once the owner received the concrete campaign-outcome report this workflow
+    # (a memoized step result, so replay re-derives the identical value). Threaded into every
+    # verification cycle so the settle suppresses the redundant generic success closure.
+    campaign_outcome_reported = False
     # VT-611 pre-work #6 (answer-threading): set by the ask_owner branch right after an owner
     # reply resumes a step; consumed EXACTLY ONCE, on the very next dispatch of that SAME step_id,
     # then cleared — never leaks into a later revise_step/ask_owner cycle for the same step.
@@ -1153,17 +1189,22 @@ def manager_task_workflow(tenant_id: str, task_id: str) -> str:
                 if exec_result.get("executed"):
                     # Tell the owner what actually happened, from the REAL summary — its own
                     # memoized step (see _report_campaign_outcome_to_owner's docstring for why an
-                    # un-stepped call here would be replay-unsafe).
-                    _report_campaign_outcome_to_owner(
-                        tenant_id, loop_run_id(task_id, step_id, attempt),
-                        exec_result.get("summary") or {},
+                    # un-stepped call here would be replay-unsafe). T12: the returned bool feeds
+                    # the settle's success-closure suppression (no redundant owner-echo).
+                    campaign_outcome_reported = (
+                        _report_campaign_outcome_to_owner(
+                            tenant_id, loop_run_id(task_id, step_id, attempt),
+                            exec_result.get("summary") or {},
+                        )
+                        or campaign_outcome_reported
                     )
                 task_now = _get_task(tenant_id, task_id)
                 if task_now is not None and task_now.get("status") == "verifying":
                     # The paused dispatch's decision was 'complete' (ACCEPT) — same verify-then-
                     # settle handling the 'complete' branch below runs, reused not duplicated.
                     action, verification_attempts = _run_verification_cycle(
-                        tenant_id, task_id, verification_attempts
+                        tenant_id, task_id, verification_attempts,
+                        campaign_outcome_reported=campaign_outcome_reported,
                     )
                     if action == "retry":
                         continue
@@ -1203,7 +1244,8 @@ def manager_task_workflow(tenant_id: str, task_id: str) -> str:
 
         if outcome == "complete":
             action, verification_attempts = _run_verification_cycle(
-                tenant_id, task_id, verification_attempts
+                tenant_id, task_id, verification_attempts,
+                campaign_outcome_reported=campaign_outcome_reported,
             )
             if action == "retry":
                 continue  # re-claim the freshly-appended verification-retry step
