@@ -53,6 +53,17 @@ _REJECT_KW = {"reject", "skip", "stop", "cancel"}
 _DEFER_BARE = {"later", "baad", "बाद"}
 _DEFER_NEXT = {"next", "agle", "अगले", "अगला"}
 _DEFER_WEEK = {"week", "hafte", "hafta", "हफ़्ते", "हफ्ते"}
+# T17 (§2 judge x2, sr_no_actual_send 2026-07-11) — a TEMPORAL HOLD negates the TIMING, not the
+# draft: "ruk jao, abhi mat bhejna" ("hold on, don't send NOW") / "don't send yet" / "not now"
+# was classified REJECT (the bare-negation branch), cancelling the whole draft the owner only
+# paused — the decline closure then read as ignoring their actual instruction. Negation + one of
+# these NOW/YET tokens (with NO explicit reject keyword and NO finality token) classifies DEFER:
+# the approval stays pending (nothing sends — same money-safety as reject), the window extends,
+# and the ask re-surfaces (VT-334 machinery, _MAX_DEFERS-bounded so it can never nag forever).
+_TEMPORAL_HOLD = {"abhi", "अभी", "now", "yet", "filhal", "filhaal", "फिलहाल", "फ़िलहाल"}
+# Finality tokens defeat the temporal read: "don't send now or EVER" / "kabhi nahi" is a REJECT.
+# ("never" is already a _NEGATION member; listing it here keeps the reject read explicit.)
+_FINALITY = {"ever", "never", "kabhi", "कभी"}
 # Hedges — a qualified reply ("maybe ok", "perhaps", "शायद") is NOT a clear decision;
 # defer to the Haiku classifier (+ its confidence gate) rather than fire deterministically.
 # VT-633 — the LATIN-script Hinglish hedges were missing: "shayad theek hai" ("maybe it's ok")
@@ -155,6 +166,19 @@ def classify_approval_reply(body: str) -> ApprovalDecision | None:
     # A negation (incl. negating an approve-word: "do not approve") or an explicit reject
     # word -> REJECT. The negation binds the approval — never send a negated reply.
     if has_neg or has_reject_kw:
+        # T17 — temporal hold: "abhi mat bhejna" / "don't send now" / "not yet" pauses the
+        # send, it does not decline the draft. DEFER (still no send; window extends; re-asks;
+        # _MAX_DEFERS-bounded). Never fires on an explicit reject keyword ("no, cancel it now")
+        # or a finality token ("don't send now or ever", "kabhi nahi") — those stay REJECT.
+        # A contradictory "no, send it now" also lands here → defer → RE-ASK, which is safer
+        # than either deterministic misread of a self-contradicting reply.
+        if (
+            has_neg
+            and not has_reject_kw
+            and bool(tokens & _TEMPORAL_HOLD)
+            and not (tokens & _FINALITY)
+        ):
+            return "defer"
         return "rejected"
 
     # VT-334 — defer beats approve (reject > defer > approve): "ok but later" defers the timing
