@@ -281,6 +281,25 @@ def has_active_integration_step(tenant_id: UUID | str) -> bool:
     return row is not None
 
 
+def has_active_onboarding_conductor_step(tenant_id: UUID | str) -> bool:
+    """T14 — the journey-gate DEFER check (mirrors ``has_active_integration_step`` exactly): is
+    there an active plan-store task whose CURRENT step targets the onboarding_conductor specialist?
+    When True, the deterministic VT-367 journey gate defers to the loop — the conductor owns this
+    tenant's onboarding conversation and writes through the SAME journey/profile recorders, so the
+    defer is what prevents a dual-writer race on the journey state. False (the common case — the
+    brain's conductor spawn is intermittent, which is exactly why the deterministic gate exists) →
+    the journey gate runs."""
+    with tenant_connection(tenant_id) as conn:
+        row = conn.execute(
+            "SELECT 1 FROM manager_tasks t "
+            "JOIN manager_task_steps s ON s.id = t.current_step_id AND s.tenant_id = t.tenant_id "
+            "WHERE t.tenant_id = %s AND t.status = ANY(%s) AND s.specialist = 'onboarding_conductor' "
+            "LIMIT 1",
+            (str(tenant_id), list(TASK_ACTIVE)),
+        ).fetchone()
+    return row is not None
+
+
 def find_task_id(tenant_id: UUID | str, idempotency_key: str) -> UUID | None:
     """Resolve a task's id from its ``(tenant, idempotency_key)`` — the live producer's run-keyed
     handle. A manager_task is minted at the delegation seam keyed on the run, so the later
