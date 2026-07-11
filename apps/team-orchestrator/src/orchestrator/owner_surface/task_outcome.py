@@ -169,7 +169,10 @@ def compose_task_outcome_message(
     objective can legitimately have nothing left after PII stripping, or the field was never set) —
     the copy degrades to a generic phrasing rather than saying "None" or leaving a blank. ``locale``
     is 'en' or 'hi' (anything else falls back to 'en')."""
-    obj = objective_text.strip()
+    # T15 (§2 judge, lane_capability x3) — quote the objective when we reference it. Interpolating
+    # the owner's raw imperative bare ("I looked into run a Facebook ad campaign for me, but…")
+    # reads as a broken verbatim ECHO of their message; quoting it reads as a reference to it.
+    obj = f'"{objective_text.strip()}"' if objective_text.strip() else ""
     hi = locale == "hi"
 
     if outcome == "cancelled":
@@ -231,6 +234,51 @@ def compose_task_outcome_message(
         f"Done — I've taken care of it: {obj}." if obj else
         "Done — I've taken care of what you asked."
     )
+
+
+# T15 — the reconcile framing for a closure landing after the owner moved on (en/hi).
+_STALE_CLOSURE_PREFIX = {
+    "en": "About your earlier request — ",
+    "hi": "आपके पहले वाले अनुरोध की बात — ",
+}
+
+
+def _owner_sent_newer_message(tenant_id: UUID | str, task: dict) -> bool:
+    """T15 — True iff the owner sent a NEWER inbound after the turn that spawned this task
+    (``manager_tasks.source_message_ref`` anchors the spawning inbound in conversation_log; the
+    role-flipped twin of runner._brain_emitted_owner_reply, same shape as request_owner_approval's
+    T9 stale check). Missing anchor / unmatched row → NULL comparison → NOT stale. Fail-soft
+    False: a read error only ever falls back to today's framing — never blocks the notify."""
+    ref = task.get("source_message_ref")
+    if not ref:
+        return False
+    try:
+        from orchestrator.db import tenant_connection
+
+        with tenant_connection(tenant_id) as conn:
+            row = conn.execute(
+                """
+                SELECT EXISTS (
+                    SELECT 1 FROM conversation_log o
+                    WHERE o.tenant_id = %s AND o.role = 'owner'
+                      AND o.created_at > (
+                          SELECT s.created_at FROM conversation_log s
+                          WHERE s.tenant_id = %s AND s.message_sid = %s AND s.role = 'owner'
+                          ORDER BY s.created_at DESC LIMIT 1
+                      )
+                ) AS stale
+                """,
+                (str(tenant_id), str(tenant_id), str(ref)),
+            ).fetchone()
+    except Exception:  # noqa: BLE001 — framing-only read; never block the notify on it
+        logger.warning(
+            "T15 task-outcome: stale-turn check failed (fail-soft -> default framing) "
+            "tenant=%s", tenant_id,
+        )
+        return False
+    if row is None:
+        return False
+    return bool(row["stale"] if isinstance(row, dict) else row[0])
 
 
 def _resolve_owner_phone(tenant_id: UUID | str) -> str | None:
@@ -334,6 +382,13 @@ def maybe_notify_owner_of_task_outcome(
     locale = resolve_owner_locale(tenant_id)
     objective_text = _extract_objective_text(task)
     body = compose_task_outcome_message(outcome, objective_text, locale=locale)
+    # T15 — stale settle (the T9 inc-3 reconcile, applied to the TERMINAL closure): when the owner
+    # has sent a NEWER inbound since the turn that spawned this task, this closure is landing on a
+    # LATER conversation turn (the measured collision: the FB-ad escalated closure piling onto the
+    # owner's GST question). Prefix the reconcile framing so it reads as a follow-through on the
+    # EARLIER request, not a non-sequitur. TEXT-ONLY; fail-soft (never blocks the notify).
+    if _owner_sent_newer_message(tenant_id, task):
+        body = (_STALE_CLOSURE_PREFIX.get(locale) or _STALE_CLOSURE_PREFIX["en"]) + body
 
     try:
         from orchestrator.utils.twilio_send import send_freeform_message

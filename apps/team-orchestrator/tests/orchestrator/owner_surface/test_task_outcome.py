@@ -34,6 +34,63 @@ def test_compose_completed_with_effect_no_objective_degrades_gracefully_en() -> 
     assert "None" not in body  # empty objective never renders as the string "None"
 
 
+# ----------------------------- T15: quoted objective + stale-turn reconcile ---------------
+def test_compose_quotes_the_objective_not_bare_echo() -> None:
+    """T15 — the objective is a QUOTED reference, never a bare verbatim echo of the owner's
+    imperative ("I looked into run a Facebook ad campaign for me, but…" read as a broken echo)."""
+    body = to.compose_task_outcome_message("escalated", "run a Facebook ad campaign for me", locale="en")
+    assert '"run a Facebook ad campaign for me"' in body
+
+
+def test_owner_sent_newer_message_no_anchor_is_not_stale() -> None:
+    assert to._owner_sent_newer_message("t", {"source_message_ref": None}) is False
+    assert to._owner_sent_newer_message("t", {}) is False
+
+
+def test_owner_sent_newer_message_read_error_fails_soft(monkeypatch) -> None:
+    def _boom(*a, **k):
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr("orchestrator.db.tenant_connection", _boom)
+    assert to._owner_sent_newer_message("t", {"source_message_ref": "SMx"}) is False
+
+
+def test_notify_prefixes_reconcile_framing_when_stale(monkeypatch) -> None:
+    """T15 — a closure landing after the owner moved on carries the 'earlier request' framing."""
+    from uuid import uuid4
+
+    sent: list[str] = []
+    task = {
+        "owner_notification_status": "pending",
+        "terminal_outcome": "escalated",
+        "objective": {"objective": "run a Facebook ad campaign for me"},
+        "source_message_ref": "SM" + "1" * 32,
+    }
+    monkeypatch.setattr("orchestrator.manager.task_store.get_task", lambda t, k: task)
+    monkeypatch.setattr(
+        "orchestrator.manager.task_store.set_owner_notification_status",
+        lambda *a, **k: True,
+    )
+    monkeypatch.setattr(to, "_check_send_idempotency_hit", lambda t, k: False)
+    monkeypatch.setattr(to, "_record_send_idempotency", lambda *a, **k: None, raising=False)
+    monkeypatch.setattr(to, "_owner_sent_newer_message", lambda t, task: True)
+    monkeypatch.setattr(
+        "orchestrator.owner_surface.freeform_acks.resolve_owner_locale", lambda t: "en"
+    )
+    monkeypatch.setattr(
+        "orchestrator.utils.twilio_send.send_freeform_message",
+        lambda body, recipient, **k: sent.append(body) or "SM_OK",
+    )
+
+    dispatched = to.maybe_notify_owner_of_task_outcome(
+        str(uuid4()), str(uuid4()), recipient_phone="+10000000001"
+    )
+
+    assert dispatched is True
+    assert sent and sent[0].startswith("About your earlier request — ")
+    assert '"run a Facebook ad campaign for me"' in sent[0]
+
+
 def test_compose_completed_no_action_never_claims_an_effect_en() -> None:
     body = to.compose_task_outcome_message("completed_no_action", "check the refund status", locale="en")
     assert "no action was needed" in body
