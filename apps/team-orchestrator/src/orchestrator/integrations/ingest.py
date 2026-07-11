@@ -237,6 +237,9 @@ def ingest_customer_rows(
 # identity-only (empty ``sales``) — that is by design, not a bug.
 
 # Case/space-insensitive column aliases. First non-empty match wins.
+# VT-636 — ingestion-side cap on the attacker-writable name field (see prompt_quarantine).
+_DISPLAY_NAME_MAX_LEN = 120
+
 _PHONE_KEYS = ("phone", "mobile", "phone_number", "phoneno", "contact", "whatsapp")
 _EMAIL_KEYS = ("email", "e-mail", "email_address", "mail")
 _NAME_KEYS = ("name", "customer_name", "customer", "full_name", "fullname", "display_name")
@@ -467,8 +470,12 @@ def sheet_row_to_canonical(
         name_raw = _first_by_mapping_or_alias(
             row, mapping, "customer_name", _NAME_KEYS, consumed=consumed
         )
+        # VT-636 — cap at ingestion (defense-in-depth under the prompt-quarantine fence): a
+        # 500-char "customer name" is not a name, it's a payload-delivery channel.
         display_name = (
-            str(name_raw).strip() if name_raw is not None and str(name_raw).strip() else None
+            str(name_raw).strip()[:_DISPLAY_NAME_MAX_LEN]
+            if name_raw is not None and str(name_raw).strip()
+            else None
         )
         if not (phone_e164 or email or display_name):
             return None
@@ -492,7 +499,9 @@ def sheet_row_to_canonical(
     )
     name_raw = _first_by_alias(row, _NAME_KEYS)
     display_name = (
-        str(name_raw).strip() if name_raw is not None and str(name_raw).strip() else None
+        str(name_raw).strip()[:_DISPLAY_NAME_MAX_LEN]
+        if name_raw is not None and str(name_raw).strip()
+        else None
     )
 
     if not (phone_e164 or email or display_name):

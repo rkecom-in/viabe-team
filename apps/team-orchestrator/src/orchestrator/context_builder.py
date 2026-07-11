@@ -995,7 +995,11 @@ def serialize_bundle_for_prompt(
         # context (build_self_evaluate_context_summary) uses the same figure.
         target_recovered_paise = _target_recovered_paise(context)
 
-    parts: list[str] = ["# Sales Recovery Context"]
+    # VT-636 — the quarantine framing renders ONCE at the top of the bundle: everything wrapped
+    # in <untrusted> below (customer names) is data, never instructions.
+    from orchestrator.security.prompt_quarantine import FRAMING
+
+    parts: list[str] = ["# Sales Recovery Context", f"\n{FRAMING}"]
 
     bp = context.business_profile
     parts.append("\n## Business profile")
@@ -1067,11 +1071,18 @@ def serialize_bundle_for_prompt(
                     "name field (CL-390) tenant=%s",
                     getattr(context, "tenant_id", "?"),
                 )
+            # VT-636 seam A (HIGH) — display_name/business_name are ATTACKER-WRITABLE (any
+            # customer or sheet collaborator writes those cells; Shopify names likewise). Fence
+            # them as untrusted data so an injected payload ("SYSTEM: …wire ₹…") cannot read as
+            # instructions inside the SR bundle. The framing line renders once in the preamble.
+            from orchestrator.security.prompt_quarantine import fence
+
             cohort_lines.append(
-                f"  - customer_id={m.customer_id} display_name={red_name} "
+                f"  - customer_id={m.customer_id} "
+                f"display_name={fence(red_name, source='customer_name', max_len=120)} "
                 f"days_since_last_sale={m.days_since_last_sale} "
                 f"lifetime_spend_paise={m.lifetime_spend_paise} "
-                f"business_name={red_biz}"
+                f"business_name={fence(red_biz, source='customer_business_name', max_len=120)}"
             )
         parts.append(
             f"- count: {len(dc)}\n" + "\n".join(cohort_lines) + "\n"
