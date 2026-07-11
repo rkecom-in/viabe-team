@@ -242,7 +242,45 @@ def run_scenario_x3(
         finally:
             if not keep_tenants:
                 _teardown_tenant(tenant_id)
+            else:
+                _quiesce_kept_tenant(dsn, tenant_id)
     return observations
+
+
+def _quiesce_kept_tenant(dsn: str, tenant_id: str) -> None:
+    """--keep-tenants keeps the DATA for forensics but must not keep the LIVENESS: an active
+    manager_task with an unanswered approval sits with no runnable step until the VT-557/560
+    reaper flips it 'blocked' and fires an orphaned_task WARNING to the ops Telegram (Fazal got
+    paged by exactly this, 2026-07-11). Same recipe as teardown's #53 cancel: flip the tenant's
+    PENDING/ENQUEUED manager_task workflows to CANCELLED on the DBOS system DB (recovery skips
+    CANCELLED), then settle its still-active manager_tasks rows 'cancelled'. Data untouched.
+    Fail-soft: a quiesce failure must never fail the measurement run."""
+    try:
+        import re as _re
+
+        import psycopg as _psycopg
+
+        sysdsn = _re.sub(r"/([^/?]+)(\?|$)", r"/postgres_dbos_sys\2", dsn, count=1)
+        with _psycopg.connect(sysdsn, autocommit=True, connect_timeout=10) as sc:
+            n_wf = sc.execute(
+                "UPDATE dbos.workflow_status SET status = 'CANCELLED' "
+                "WHERE workflow_uuid LIKE %s AND status IN ('PENDING', 'ENQUEUED')",
+                (f"manager_task:{tenant_id}:%",),
+            ).rowcount
+        with _psycopg.connect(dsn, autocommit=True, connect_timeout=10) as conn:
+            n_tasks = conn.execute(
+                "UPDATE manager_tasks SET status = 'cancelled', terminal_outcome = 'cancelled', "
+                "updated_at = now() WHERE tenant_id = %s "
+                "AND status NOT IN ('completed', 'cancelled', 'blocked', 'rejected', 'failed')",
+                (tenant_id,),
+            ).rowcount
+        if n_wf or n_tasks:
+            print(
+                f"    [keep-tenants] quiesced tenant {tenant_id[:8]}…: "
+                f"{n_wf} workflow(s) cancelled, {n_tasks} task(s) settled"
+            )
+    except Exception as exc:  # noqa: BLE001 — quiesce is hygiene; never fail the run on it
+        print(f"    [keep-tenants] quiesce skipped ({type(exc).__name__})")
 
 
 def _write_json_report(path: str, path_stem: str, scenario: dict[str, Any], obs: RunObservation) -> None:
