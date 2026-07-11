@@ -72,6 +72,38 @@ def test_sheets_first_contact_mints(spies, body):
     assert any("accounts.google.com" in s for s in spies["sends"]), "the OAuth link must be sent"
 
 
+def test_mint_on_connected_provider_leads_with_checked_status(spies):
+    """T11 residual (§2 judge x3) — 'sync seems stuck, check and reconnect it' on an ALREADY-
+    CONNECTED provider must LEAD with the checked status, then the fresh re-auth link — never a
+    bare link that evades the check the owner asked for."""
+    spies["connected"] = True
+    res = _run("My Google Sheet sync seems stuck, nothing's come in for 3 days — can you check and reconnect it?")
+    assert res is not None and res["routed"] == "sheets_first_contact_minted"
+    body_sent = spies["sends"][0]
+    assert "I checked" in body_sent
+    assert "shows connected" in body_sent
+    assert "accounts.google.com" in body_sent, "the re-auth link still goes out (same message)"
+
+
+def test_mint_on_unconnected_provider_has_no_check_lead(spies):
+    spies["connected"] = False
+    res = _run("connect my google sheet please")
+    assert res is not None and res["routed"] == "sheets_first_contact_minted"
+    assert "I checked" not in spies["sends"][0]
+
+
+def test_mint_check_failure_fails_soft_to_plain_mint(spies, monkeypatch):
+    def _boom(tenant_id, connector_id):
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr("orchestrator.integrations.commit.is_connector_connected", _boom)
+    res = _run("connect my google sheet please")
+    assert res is not None and res["routed"] == "sheets_first_contact_minted"
+    body_sent = spies["sends"][0]
+    assert "I checked" not in body_sent
+    assert "accounts.google.com" in body_sent
+
+
 def test_bare_state_request_offers_setup_no_url(spies):
     # "get this connected?" is a past-participle STATE phrasing with no imperative verb -> after the
     # 2026-07-10 split it routes to the status/OFFER branch (no URL dump), NOT an immediate mint.

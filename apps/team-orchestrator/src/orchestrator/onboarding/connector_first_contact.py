@@ -134,16 +134,36 @@ def maybe_start_connector_onboarding(
             )
             return {"done": False, "phase": "status_answer", "routed": "connector_status_answered"}
 
-        # MINT branch (imperative present) — the EXISTING behavior, unchanged.
+        # MINT branch (imperative present) — the EXISTING behavior, plus a CHECK-FIRST lead
+        # (T11 residual, §2 judge x3 2026-07-11): a "check and reconnect it" / "sync seems stuck"
+        # imperative on an ALREADY-CONNECTED provider dumped a bare OAuth link with no check — the
+        # owner's pushback then had no honest prior and the turn spiralled (repeat-link / stall).
+        # When the connection exists, the SAME mint message now LEADS with the checked status, so
+        # the link reads as a deliberate fresh re-auth, not an evasion of the check they asked for.
         if live_flow:
             return None  # a LIVE connector flow is in progress -> NOT first contact (no double-mint)
 
         if provider == "google_sheet":
+            from orchestrator.integrations.commit import is_connector_connected
             from orchestrator.integrations.sheets_oauth import start_sheets_oauth
+
+            check_lead = ""
+            try:
+                if is_connector_connected(tenant_id, provider):
+                    check_lead = (
+                        f"I checked — your {label} shows connected on my side. If new data "
+                        "still isn't coming through, let's re-authorize it fresh.\n\n"
+                    )
+            except Exception:  # noqa: BLE001 — the check is a lead-in; never block the mint
+                logger.warning(
+                    "connector_first_contact: connected-check failed (mint proceeds) tenant=%s",
+                    tenant_id,
+                )
 
             result = start_sheets_oauth(tenant_id)  # mints URL + arms phase_2_auth
             _send(
                 recipient,
+                f"{check_lead}"
                 "Tap this link to connect your Google account, pick the sheet you use for "
                 "your customers/orders, then reply 'done' here:\n"
                 f"{result['authorize_url']}",
