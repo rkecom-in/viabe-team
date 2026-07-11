@@ -213,10 +213,13 @@ def test_serialize_renders_only_five_allowed_fields() -> None:
     block = rendered.split("## Dormant cohort", 1)[1].split("\n## ", 1)[0]
     assert "## Dormant cohort" in rendered
     assert f"customer_id={m.customer_id}" in block
-    assert "display_name=Priya" in block
+    # VT-636 — the attacker-writable name fields render FENCED as untrusted data.
+    assert 'display_name=<untrusted source="customer_name">Priya</untrusted>' in block
     assert "days_since_last_sale=120" in block
     assert "lifetime_spend_paise=64000" in block
-    assert "business_name=Asha Cafe" in block
+    assert (
+        'business_name=<untrusted source="customer_business_name">Asha Cafe</untrusted>' in block
+    )
     # minimum-necessary: last_sale_amount_paise must NOT be rendered.
     assert "last_sale_amount_paise" not in block
     assert str(m.last_sale_amount_paise) not in block
@@ -242,7 +245,8 @@ def test_serialize_phone_shape_in_name_is_redacted_not_raised() -> None:
     assert "919321553267" not in block
     assert _PHONE_SHAPE_RE.search(block) is None
     assert f"customer_id={poisoned.customer_id}" in block
-    assert "display_name=[redacted]" in block
+    # VT-636 — redacted value renders inside the untrusted fence.
+    assert 'display_name=<untrusted source="customer_name">[redacted]</untrusted>' in block
 
 
 def test_serialize_dormant_cohort_empty_renders_count_zero() -> None:
