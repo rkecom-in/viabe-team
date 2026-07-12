@@ -454,3 +454,64 @@ def test_bare_google_mention_does_not_resolve(spies):
     res = _run("connect it again")
     assert res is None
     assert spies["sheets"] == 0
+
+
+# ----------------------------- R10: field-mapping answer (canonical registry, no fabrication) -----
+def test_field_mapping_ask_with_sheet_answers_from_registry(spies):
+    """i_sheets_invalid_field turn 1: the owner names non-canonical columns and asks to map them in.
+    The gate answers from the CanonicalField registry — enumerates what IS imported, states other
+    columns stay in the sheet — and NEVER confirms tracking a field Viabe doesn't hold. No URL dump."""
+    res = _run(
+        "My sheet has a column called 'Zodiac Sign' and another called 'Customer Birthday' — "
+        "can you map those in for me too, along with Name and Phone?"
+    )
+    assert res is not None and res["routed"] == "connector_field_mapping_answered"
+    assert res["phase"] == "field_mapping_answer"
+    assert spies["sheets"] == 0, "a mapping question must NOT mint an OAuth link"
+    assert spies["shopify"] == 0
+    assert len(spies["sends"]) == 1
+    reply = spies["sends"][0]
+    assert "https://" not in reply, "never dumps a URL on a mapping question"
+    low = reply.lower()
+    # enumerates the canonical fields it DOES import (registry-derived)
+    assert "customer name" in low and "phone number" in low
+    assert "stays in your sheet" in low and "don't import" in low
+    # NEVER fabricates mapping/tracking the non-canonical columns (the scenario's assert_not_contains)
+    for banned in ("zodiac sign is mapped", "birthday is mapped", "i've added zodiac", "birthday field is now tracked"):
+        assert banned not in low
+
+
+def test_field_mapping_no_provider_falls_through(spies):
+    """A mapping ask with NO provider in-message and nothing resolvable from context falls through
+    to the brain — the provider conjunct keeps generic 'fields' talk off this deterministic net."""
+    spies["state"] = None
+    spies["window"] = []
+    res = _run("which columns do you map into your system?")
+    assert res is None
+    assert not spies["sends"]
+
+
+def test_field_mapping_metaphor_falls_through(spies):
+    """Precision: a metaphorical 'map' with no column/field noun and no provider ('map out a diwali
+    plan') must NOT fire the field-mapping net -> falls through to the brain."""
+    res = _run("can you map out a diwali plan for my customers?")
+    assert res is None
+    assert spies["sheets"] == 0 and not spies["sends"]
+
+
+def test_field_mapping_resolves_provider_from_window(spies):
+    """The mapping ask names no provider in-message -> the gate resolves it from an explicit prior
+    conversation mention, then answers from the registry."""
+    spies["state"] = None
+    spies["window"] = [{"role": "owner", "text": "I want to connect my Google Sheet for orders"}]
+    res = _run("do you import the loyalty-points column?")
+    assert res is not None and res["routed"] == "connector_field_mapping_answered"
+    assert "Google Sheet" in spies["sends"][0]
+
+
+def test_field_mapping_does_not_steal_connect_imperative(spies):
+    """'connect my google sheet' is an imperative -> mints (never reaches the fall-through mapping
+    branch), even though a bare 'map' could otherwise match."""
+    res = _run("connect my google sheet and map the columns")
+    assert res is not None and res["routed"] == "sheets_first_contact_minted"
+    assert spies["sheets"] == 1

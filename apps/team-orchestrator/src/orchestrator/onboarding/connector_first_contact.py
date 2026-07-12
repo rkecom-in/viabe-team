@@ -105,6 +105,29 @@ _SYNC_PUSHBACK_RE = re.compile(
     re.IGNORECASE,
 )
 
+# R10 / i_sheets_invalid_field — a FIELD/COLUMN-MAPPING question: "can you map the 'Loyalty Points'
+# column?", "do you import the notes field?", "I have a column called 'Zodiac Sign' — track it too?".
+# The honest answer enumerates the closed CanonicalField set we import and states that any other
+# column stays in the owner's sheet — NEVER fabricates mapping/tracking a field Viabe doesn't hold
+# (the VT-611 confirm_mapping guardrail at the conversational layer). HIGH-PRECISION so unrelated
+# 'fields'/'map' talk ("map out a diwali plan") does NOT fire: either a "column/field/header
+# called/named X" construct, or a map/import/include/track/read VERB bound within a short span to a
+# column/field/header noun. The GATE that USES this ALSO requires a resolvable provider, so a bare
+# capability "can you map fields?" (no provider in play) still falls through to the brain.
+_FIELD_MAPPING_RE = re.compile(
+    r"(?:"
+    # a "column/field/header called/named/titled/labelled X" construct (owner names a column)
+    r"\b(?:column|columns|field|fields|header|headers)\b\s+(?:called|named|titled|labell?ed)\b"
+    # a map/import/include/track/read VERB within a short span BEFORE a column/field noun
+    r"|\b(?:map|maps|mapped|mapping|import|imports|imported|include|includes|included|track|tracks|"
+    r"tracked|read|reads)\b[^.?!]{0,40}?\b(?:column|columns|field|fields|header|headers)\b"
+    # ... or the column/field noun BEFORE the verb ("which columns do you map?")
+    r"|\b(?:column|columns|field|fields|header|headers)\b[^.?!]{0,40}?"
+    r"\b(?:map|maps|mapped|import|imported|include|included|track|tracked|read|used)\b"
+    r")",
+    re.IGNORECASE,
+)
+
 
 def _connected_or_healthy(tenant_id: UUID | str, provider: str) -> bool:
     """DB-truth 'connected' from EITHER source of record: a ``tenant_oauth_tokens`` row (the
@@ -275,6 +298,63 @@ def _maybe_answer_sync_freshness(
     }
 
 
+def _imported_field_labels() -> str:
+    """A natural-language, comma-joined enumeration of every canonical field a connector imports,
+    derived from the ``CanonicalField`` registry (never hand-listed here — the registry is the single
+    source of truth). Fail-soft to a generic phrase if the registry can't be read."""
+    try:
+        from orchestrator.integrations.canonical_fields import canonical_field_display_list
+
+        labels = canonical_field_display_list()
+    except Exception:  # noqa: BLE001 — enumeration is a courtesy; never break the answer
+        logger.warning("connector_first_contact: canonical-field label read failed (fail-soft)", exc_info=True)
+        return "your customer details"
+    if not labels:
+        return "your customer details"
+    if len(labels) == 1:
+        return labels[0]
+    return f"{', '.join(labels[:-1])}, and {labels[-1]}"
+
+
+def _maybe_answer_field_mapping(
+    tenant_id: UUID | str, text: str, recipient: str | None
+) -> dict[str, Any] | None:
+    """R10 / i_sheets_invalid_field — answer a FIELD/COLUMN-MAPPING question from the canonical-fields
+    registry instead of letting the brain fabricate mapping a column Viabe doesn't track. Fires ONLY
+    when the message is a field-mapping ask (``_FIELD_MAPPING_RE``) AND a provider resolves (in-message
+    or from durable context) — so unrelated 'fields'/'map' talk ("map out a diwali plan") and a bare
+    capability question with no connector in play both fall through to the brain. Enumerates exactly
+    what a connector imports and states that any other column stays in the owner's sheet; NEVER
+    confirms/tracks a non-canonical field. Deterministic, schema-truth, no async spawn. FAIL-OPEN."""
+    if not _FIELD_MAPPING_RE.search(text):
+        return None
+    provider = _detect_provider(text) or _resolve_provider_from_context(tenant_id)
+    if provider is None:
+        return None  # no sheet/connector in play -> not a connector mapping ask -> brain
+
+    from orchestrator.onboarding.shopify_onboarding import _send
+
+    label = "Google Sheet" if provider == "google_sheet" else "Shopify"
+    fields = _imported_field_labels()
+    answer = (
+        f"Here's exactly what I import from your {label} into your customer list: {fields}. "
+        "Any other column stays in your sheet — I don't import or track it. If a detail you need "
+        "isn't one of those, tell me and we'll work out how to capture it."
+    )
+    _send(recipient, answer, tenant_id=tenant_id)
+    logger.info(
+        "connector_first_contact: answered field-mapping ask from canonical registry provider=%s "
+        "tenant=%s",
+        provider,
+        tenant_id,
+    )
+    return {
+        "done": False,
+        "phase": "field_mapping_answer",
+        "routed": "connector_field_mapping_answered",
+    }
+
+
 def maybe_start_connector_onboarding(
     tenant_id: UUID | str,
     body: str,
@@ -325,7 +405,15 @@ def maybe_start_connector_onboarding(
             freshness = _maybe_answer_sync_freshness(tenant_id, text, recipient)
             if freshness is not None:
                 return freshness
-            return None  # not a connect ask and not a sync-freshness pushback -> normal pipeline
+            # R10 / i_sheets_invalid_field — a FIELD/COLUMN-MAPPING question ("map this column",
+            # "column called 'Zodiac Sign' — track it?") carries no connect verb/state either, so it
+            # too fell through to the brain, which fabricated mapping a field Viabe doesn't track.
+            # Answer it from the canonical-fields registry — TIGHTLY: only a mapping phrasing on a
+            # resolvable provider fires; everything else still falls through untouched.
+            mapping = _maybe_answer_field_mapping(tenant_id, text, recipient)
+            if mapping is not None:
+                return mapping
+            return None  # not a connect ask / sync-freshness / field-mapping -> normal pipeline
 
         provider = _detect_provider(text)
         if provider is None:
