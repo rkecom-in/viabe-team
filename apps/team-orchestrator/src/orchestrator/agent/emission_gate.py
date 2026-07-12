@@ -338,7 +338,48 @@ _REPLACEMENT_COPY: dict[str, dict[str, str]] = {
         "en": "I'm still working on this — I'll confirm once it's actually done.",
         "hi": "Main abhi ispar kaam kar raha hoon — poora hone par confirm kar dunga.",
     },
+    # cluster-4c (full-77 consent_natural / routing_db_proof) — the 'generic' "still working" line
+    # is a FALSE stall when NO task is actually running (terminated_without_spawn): it asserts
+    # in-progress work with no future turn to make it true (a loop_stall breaker). When there is no
+    # open approval AND no active task, this honest "haven't started" line is used instead.
+    "not_started": {
+        "en": "I haven't started on that yet — tell me to go ahead and I'll get on it.",
+        "hi": "Maine abhi is par kaam shuru nahi kiya — bataiye, aur main shuru kar deta hoon.",
+    },
 }
+
+
+def _has_active_task(tenant_id: UUID | str) -> bool:
+    """Best-effort: is there an active manager_task for this tenant? Distinguishes an honest
+    'still working' (a task really IS running) from a false one (nothing running -> the honest
+    'haven't started' line). Wrapper-layer read; any error -> False (degrades to 'not_started',
+    the more conservative/honest side — never claims work that isn't happening)."""
+    try:
+        from orchestrator.manager.task_store import has_active_task
+
+        return has_active_task(tenant_id)
+    except Exception:  # noqa: BLE001 — best-effort; default to the honest not-started line
+        logger.warning(
+            "emission_gate: active-task check failed tenant=%s — defaulting to not_started",
+            tenant_id,
+            exc_info=True,
+        )
+        return False
+
+
+def _replacement_line(tenant_id: UUID | str, locale: str) -> str:
+    """Pick the honest replacement for a blocked claim: the pending-approval line if one is open;
+    else the 'still working' generic line ONLY when a task is genuinely active; else the honest
+    'haven't started' line (cluster-4c — a false 'still working' when nothing runs is itself a
+    stall breaker). Shared by Layer-1 (completion) and Layer-3 (fabricated debt)."""
+    if _has_open_approval(tenant_id):
+        kind = "pending_approval"
+    elif _has_active_task(tenant_id):
+        kind = "generic"
+    else:
+        kind = "not_started"
+    variants = _REPLACEMENT_COPY[kind]
+    return variants.get(locale) or variants["en"]
 
 
 def _emit_blocked_audit(
@@ -382,10 +423,7 @@ def apply_emission_gate(text: str, tenant_id: UUID | str) -> str:
         if contains_completion_claim(text) and not send_fact_exists(tenant_id):
             from orchestrator.owner_surface.freeform_acks import resolve_owner_locale
 
-            kind = "pending_approval" if _has_open_approval(tenant_id) else "generic"
-            locale = resolve_owner_locale(tenant_id)
-            variants = _REPLACEMENT_COPY[kind]
-            replacement = variants.get(locale) or variants["en"]
+            replacement = _replacement_line(tenant_id, resolve_owner_locale(tenant_id))
             _emit_blocked_audit(tenant_id, text)
             return replacement
 
@@ -396,10 +434,7 @@ def apply_emission_gate(text: str, tenant_id: UUID | str) -> str:
         if contains_fabricated_debt_framing(text):
             from orchestrator.owner_surface.freeform_acks import resolve_owner_locale
 
-            kind = "pending_approval" if _has_open_approval(tenant_id) else "generic"
-            locale = resolve_owner_locale(tenant_id)
-            variants = _REPLACEMENT_COPY[kind]
-            replacement = variants.get(locale) or variants["en"]
+            replacement = _replacement_line(tenant_id, resolve_owner_locale(tenant_id))
             _emit_blocked_audit(tenant_id, text, event_kind="emission_fabricated_debt_blocked")
             return replacement
 
