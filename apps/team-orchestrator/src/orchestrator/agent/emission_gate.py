@@ -205,7 +205,7 @@ def _tokenize(text: str) -> list[str]:
 # THIS BLOCK LOOSENS the completion/spend matchers with three SENTENCE-SCOPED exemptions. Each is a
 # distinct false-positive class the deterministic gate was mis-blocking as a fabrication:
 #   (a) a NEGATED send/spend verb ("nahi bheja", "kharch nahi karta") is a DENIAL of the action, not
-#       a claim it happened — positional binding, ported verbatim from owner_inputs/approval_reply.py;
+#       a claim it happened — positional binding, ported verbatim out of approval_reply.py;
 #   (b) a message directed TO THE OWNER ("sent you the connect link", "aapko … bhej diya") is about a
 #       link/plan the owner receives, not a customer send — voided the moment the sentence also names
 #       customers (a "…40 customers reached" clause is a real customer-send claim and MUST still block);
