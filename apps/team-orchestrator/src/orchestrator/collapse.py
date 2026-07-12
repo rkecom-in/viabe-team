@@ -515,11 +515,14 @@ def _build_chat_summary_body(
     high_rupees = plan.expected_arrr.high_paise // 100
     start = window.start.strftime("%d %b")
     end = window.end.strftime("%d %b")
+    # RC1 (Fazal 2026-07-12 trust-floor): the approval template is armed + sent THIS turn, right
+    # after this summary — so a future-tense promise of a separate approval message falsely commits
+    # to something that never arrives (read as a loop_stall). Present-tense it + state the gate.
     en = (
         f"I've drafted a campaign for {cohort.cohort_size} customers "
         f"({label}), running {start}–{end}, with an expected "
-        f"recovery of ₹{low_rupees:,}–₹{high_rupees:,}. I'll send you the "
-        "formal approval ask next."
+        f"recovery of ₹{low_rupees:,}–₹{high_rupees:,}. Here's the approval "
+        "request — reply to approve, and nothing goes out until you do."
     )
     # Hindi wrapper, English detail set off in its own clause after the colon —
     # brain-composed per-language copy is the program end-state; this
@@ -527,8 +530,8 @@ def _build_chat_summary_body(
     hi = (
         f"मैंने {cohort.cohort_size} ग्राहकों ({label}) के लिए एक "
         f"अभियान तैयार किया है: {start}–{end}, अनुमानित वसूली "
-        f"₹{low_rupees:,}–₹{high_rupees:,}। मैं अगली बार आपको औपचारिक "
-        "अनुमोदन अनुरोध भेजूंगा।"
+        f"₹{low_rupees:,}–₹{high_rupees:,}। यह रहा अनुमोदन अनुरोध — मंज़ूरी देने "
+        "के लिए जवाब दें; जब तक आप मंज़ूर नहीं करते, कुछ नहीं भेजा जाएगा।"
     )
     return {"en": en, "hi": hi}
 
