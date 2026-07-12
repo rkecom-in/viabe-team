@@ -73,6 +73,18 @@ _THIRD_PARTY_SUBJECT_RE = re.compile(
     re.IGNORECASE,
 )
 
+# DF1(a) OWNER-DATA-PULL honesty: a request to PULL/IMPORT the owner's OWN data ("pull in my order
+# amounts from that sheet", "import my sales") when the named provider is NOT connected must be
+# answered HONESTLY — never fabricate having the data. Requires a data-pull VERB and a POSSESSIVE
+# owner-data OBJECT ("my orders/sales/...") — a BARE capability question ("can you map fields?")
+# carries no possessive data object, so it falls through to the brain.
+_OWNER_DATA_PULL_RE = re.compile(
+    r"\b(?:pull|import|fetch|bring|load|get|sync|add|include)\b[^.?!]*?"
+    r"\b(?:my|mera|meri|mere)\s+(?:\w+\s+){0,2}?"
+    r"(?:order|orders|amounts?|dates?|sales?|revenue|customers?|data|numbers?|transactions?|history)\b",
+    re.IGNORECASE,
+)
+
 
 def _connected_or_healthy(tenant_id: UUID | str, provider: str) -> bool:
     """DB-truth 'connected' from EITHER source of record: a ``tenant_oauth_tokens`` row (the
@@ -154,8 +166,9 @@ def maybe_start_connector_onboarding(
 
         is_imperative = bool(_CONNECT_IMPERATIVE_RE.search(text))
         is_state = bool(_CONNECT_STATE_RE.search(text))
-        if not (is_imperative or is_state):
-            return None  # no connect verb/state -> not a connect ask -> normal pipeline
+        is_data_pull = bool(_OWNER_DATA_PULL_RE.search(text))  # DF1(a)
+        if not (is_imperative or is_state or is_data_pull):
+            return None  # no connect verb/state/data-pull -> not a connect ask -> normal pipeline
 
         provider = _detect_provider(text)
         if provider is None:
@@ -170,6 +183,33 @@ def maybe_start_connector_onboarding(
         state = read_integration_state(tenant_id)
         live_flow = state is not None and _pending_is_unexpired(state.get("pending_owner_input"))
         label = "Google Sheet" if provider == "google_sheet" else "Shopify"
+
+        # DF1(a) OWNER-DATA-PULL honesty branch — a PURE data-pull ask ("pull in my order amounts
+        # from that sheet", no connect verb). If the provider is NOT connected, answer HONESTLY (never
+        # fabricate having the data) + point at the one connect step. If it IS connected, fall through
+        # to the brain (which can actually pull). Gated to a pure data-pull so a "connect ... and pull"
+        # imperative still mints below. Never dumps a bare OAuth URL for a data question.
+        if is_data_pull and not (is_imperative or is_state):
+            if _connected_or_healthy(tenant_id, provider):
+                return None  # connected -> the brain can actually pull the data
+            if live_flow:
+                answer = (
+                    f"I can't pull that in yet — your {label} connection isn't finished. Approve on "
+                    f"the {label} page, reply 'done', and I'll pull those in."
+                )
+            else:
+                answer = (
+                    f"I can't pull that in yet — your {label} isn't connected, so I don't have that "
+                    f"data. Connect it (tap the link, approve, reply 'done') and I'll pull those in."
+                )
+            _send(recipient, answer, tenant_id=tenant_id)
+            logger.info(
+                "connector_first_contact: owner-data-pull on unconnected provider -> honest not-"
+                "connected (no fabrication) provider=%s tenant=%s",
+                provider, tenant_id,
+            )
+            return {"done": False, "phase": "data_pull_not_connected",
+                    "routed": "connector_owner_data_not_connected"}
 
         # STATUS-QUESTION branch — a connection-state reference with NO imperative. Answer HONESTLY
         # from the DB; NEVER mint/dump a URL (dumping-then-repeating the link on push-back was the

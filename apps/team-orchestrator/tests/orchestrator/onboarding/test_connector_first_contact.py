@@ -282,3 +282,30 @@ def test_own_shopify_status_still_self_answers(spies):
     res = _run("is my shopify connected?")
     assert res is not None and res["routed"] == "connector_status_answered"
     assert "connected" in spies["sends"][-1].lower()
+
+
+# ----------------------------- DF1(a): owner-data-pull honesty (unconnected) --------------
+def test_owner_data_pull_unconnected_answers_honestly_no_fabrication(spies):
+    """A request to PULL the owner's own data when the Sheet isn't connected is answered HONESTLY
+    (never fabricates having the data) + points at the one connect step (i_sheets_partial)."""
+    spies["connected"] = False
+    res = _run("Can you also pull in my order amounts and order dates from that same sheet?")
+    assert res is not None and res["routed"] == "connector_owner_data_not_connected"
+    reply = spies["sends"][-1].lower()
+    assert "isn't connected" in reply or "connection isn't finished" in reply
+    assert "google sheet" in reply
+
+
+def test_owner_data_pull_when_connected_falls_through_to_brain(spies):
+    """If the Sheet IS connected, a data-pull ask falls through to the brain (which can actually
+    pull) — the honesty branch only fires on an UNCONNECTED provider."""
+    spies["connected"] = True
+    res = _run("pull in my order amounts from that same sheet")
+    assert res is None  # fell through, not the not-connected honesty branch
+
+
+def test_bare_capability_question_falls_through(spies):
+    """A bare capability question ('can you map fields?') has no possessive data object -> not a
+    data-pull -> falls through (never the not-connected honesty branch)."""
+    res = _run("can you map fields?")
+    assert res is None
