@@ -116,11 +116,12 @@ def _make_conn(
     campaign_row: dict | None = None,
     recipients: list[dict] | None = None,
     phase: str = "paid_active",
+    opt_out: bool = False,
 ) -> Any:
     """Build a MagicMock conn that returns controlled SELECT results.
 
     Query order:
-      0. tenants phase SELECT (fetchone) — VT-328 dispatch guard
+      0. tenants phase+opt_out SELECT (fetchone) — VT-328 dispatch guard + T13b opt-out gate
       1. campaigns SELECT (fetchone)
       2. campaign_recipients JOIN customers (fetchall)
       3. send_idempotency_keys INSERT (no return value)
@@ -128,6 +129,7 @@ def _make_conn(
 
     VT-365: the dispatch guard reads ONLY `phase` now (the refunded_at column +
     the graceful-exit window are deleted with the refund subsystem).
+    T13b: the guard SELECT also reads `opt_out` (owner consent-withdrawal gate).
     """
     conn = MagicMock()
     execute_calls: list[tuple[str, Any]] = []
@@ -135,8 +137,8 @@ def _make_conn(
     def _execute(sql: str, params: tuple | None = None) -> MagicMock:
         execute_calls.append((sql.strip(), params))
         result = MagicMock()
-        if "FROM tenants" in sql:  # VT-328/VT-365: the dispatch guard reads phase only
-            result.fetchone.return_value = {"phase": phase}
+        if "FROM tenants" in sql:  # VT-328/VT-365 phase + T13b opt_out: the dispatch guard
+            result.fetchone.return_value = {"phase": phase, "opt_out": opt_out}
             result.fetchall.return_value = []
         elif "FROM campaigns" in sql:  # VT-306: wrapper SELECT * FROM campaigns WHERE tenant_id AND id
             result.fetchone.return_value = campaign_row
@@ -561,6 +563,47 @@ def test_dispatch_allowed_active_sends_normally() -> None:
         _TENANT_ID, _CAMPAIGN_ID, conn=conn, send_template_fn=send_fn
     )
     assert "dispatch_blocked" not in summary
+    assert summary["sent"] == 1 and send_fn.call_count == 1
+
+
+def test_opt_out_blocks_campaign() -> None:
+    """T13b (full-77 sr_stop_then_resume): a tenant that has OPTED OUT (owner consent withdrawal)
+    is blocked INSIDE execute_approved_campaign — the same single Pillar-8 chokepoint — even when
+    the phase is otherwise dispatchable. This kills the money_action where an approval armed BEFORE
+    the opt-out gets resolved by a later "haan bhej do" and fires a send over the withdrawal.
+    Short-circuits BEFORE loading the campaign/recipients (zero sends)."""
+    from orchestrator.campaign.execute import execute_approved_campaign
+
+    conn = _make_conn(
+        campaign_row=_campaign_row(),
+        recipients=[_recipient(_CUSTOMER_1)],
+        phase="paid_active",  # phase is fine — ONLY opt_out blocks here
+        opt_out=True,
+    )
+    send_fn = MagicMock(return_value=_ok_send_result())
+
+    summary = execute_approved_campaign(
+        _TENANT_ID, _CAMPAIGN_ID, conn=conn, send_template_fn=send_fn
+    )
+
+    assert summary["opt_out_blocked"] == 1 and summary["sent"] == 0
+    assert send_fn.call_count == 0  # ZERO sends over an opt-out
+    # short-circuit: never loaded the campaign (no fan-out path reached)
+    assert not any("FROM campaigns" in sql for sql, _ in conn._execute_calls)
+
+
+def test_opt_out_false_sends_normally() -> None:
+    """T13b: opt_out=False (the default) does NOT block — the gate doesn't over-reach a live tenant."""
+    from orchestrator.campaign.execute import execute_approved_campaign
+
+    conn = _make_conn(
+        campaign_row=_campaign_row(), recipients=[_recipient(_CUSTOMER_1)], opt_out=False
+    )
+    send_fn = MagicMock(return_value=_ok_send_result())
+    summary = execute_approved_campaign(
+        _TENANT_ID, _CAMPAIGN_ID, conn=conn, send_template_fn=send_fn
+    )
+    assert "opt_out_blocked" not in summary
     assert summary["sent"] == 1 and send_fn.call_count == 1
 
 
