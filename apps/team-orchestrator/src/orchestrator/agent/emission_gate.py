@@ -133,6 +133,31 @@ _PHANTOM_PROMISE_PHRASES = frozenset(
 # SENTENCE rather than the whole message (which would discard the honest content).
 _SENTENCE_SPLIT_RE = re.compile(r"([.!?।]+)")
 
+# ── cluster-2a (full-77 sr_stop_then_resume, §2 fabrication 3/3) — fabricated CUSTOMER DEBT ──────
+# The brain told the owner their LAPSED customers "owe" / have "₹X overdue / payment pending". The
+# cohort is lapsed BUYERS (lifetime_spend_paise + days_since_last_sale) — there is NO receivable /
+# overdue / pending-payment concept anywhere in the schema, so an invented aggregate ₹ debt
+# attributed to customers is a fabrication (a false "they owe you money" that could push the owner
+# to dun customers who owe nothing). HIGH PRECISION by construction: fires ONLY when a debt word,
+# a ₹ figure, AND a customer reference are ALL present — so a legit recovery estimate ("expected
+# recovery ₹250–750"), agent pricing ("₹5,000/month per agent"), or a finance-lane answer about the
+# OWNER's OWN payables (no customer reference) never trips it.
+_DEBT_FRAMING_TOKENS = {
+    "overdue", "outstanding", "bakaya", "bakaaya", "बकाया", "udhaar", "udhar", "उधार",
+}
+_DEBT_FRAMING_PHRASES = frozenset(
+    {
+        "payment pending", "pending payment", "payment due", "amount due", "balance due",
+        "payment baki", "paisa baki", "paise baki", "payment baaki",
+    }
+)
+_CUSTOMER_REF_TOKENS = {
+    "customer", "customers", "grahak", "grahakon", "ग्राहक", "ग्राहकों", "buyer", "buyers",
+}
+_RUPEE_FIGURE_RE = re.compile(
+    r"(₹\s*\d|(?:\d[\d,]*)\s*(?:rupaye|rupaya|rupees|rupee|rs|inr)\b)", re.IGNORECASE
+)
+
 
 def _tokenize(text: str) -> list[str]:
     """NFC-normalize + casefold + strip apostrophes, then split on whitespace/punct only."""
@@ -178,6 +203,23 @@ def contains_phantom_promise(text: str) -> bool:
         return False
     hay = " " + " ".join(tokens) + " "
     return any(f" {phrase} " in hay for phrase in _PHANTOM_PROMISE_PHRASES)
+
+
+def contains_fabricated_debt_framing(text: str) -> bool:
+    """True iff ``text`` attributes an invented ₹ DEBT to customers — a receivable / overdue /
+    pending-payment that does not exist for lapsed BUYERS. Requires a debt word/phrase AND a ₹
+    figure AND a customer reference all present (high precision: legit recovery/pricing text, and a
+    finance answer about the owner's OWN payables, never trip). Devanagari-safe via ``_tokenize``."""
+    if not text or not _RUPEE_FIGURE_RE.search(text):
+        return False
+    tokens = _tokenize(text)
+    tokset = set(tokens)
+    if not (tokset & _CUSTOMER_REF_TOKENS):
+        return False
+    if tokset & _DEBT_FRAMING_TOKENS:
+        return True
+    hay = " " + " ".join(tokens) + " "
+    return any(f" {phrase} " in hay for phrase in _DEBT_FRAMING_PHRASES)
 
 
 def _split_sentences(text: str) -> list[str]:
@@ -347,6 +389,20 @@ def apply_emission_gate(text: str, tenant_id: UUID | str) -> str:
             _emit_blocked_audit(tenant_id, text)
             return replacement
 
+        # Layer 3 — fabricated customer DEBT (cluster-2a): the brain told the owner their lapsed
+        # customers "owe"/"have ₹X overdue/pending". Lapsed buyers are not debtors; the ₹ debt is
+        # invented. Whole-message honest swap (same replacement selection as Layer-1) — drops the
+        # fabricated figure and states the true state (draft pending / still working).
+        if contains_fabricated_debt_framing(text):
+            from orchestrator.owner_surface.freeform_acks import resolve_owner_locale
+
+            kind = "pending_approval" if _has_open_approval(tenant_id) else "generic"
+            locale = resolve_owner_locale(tenant_id)
+            variants = _REPLACEMENT_COPY[kind]
+            replacement = variants.get(locale) or variants["en"]
+            _emit_blocked_audit(tenant_id, text, event_kind="emission_fabricated_debt_blocked")
+            return replacement
+
         # Layer 2 — phantom promise (#58/T7): a deferred follow-up from a nonexistent team/person.
         # Surgically strip the offending sentence(s), keeping the honest remainder. Runs on
         # honest text AND on a true completion claim (a real "sent" can still trail a phantom
@@ -367,6 +423,7 @@ def apply_emission_gate(text: str, tenant_id: UUID | str) -> str:
 __all__ = [
     "apply_emission_gate",
     "contains_completion_claim",
+    "contains_fabricated_debt_framing",
     "contains_phantom_promise",
     "send_fact_exists",
 ]

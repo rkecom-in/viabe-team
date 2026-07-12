@@ -78,6 +78,41 @@ def test_unrelated_text_does_not_match():
     )
 
 
+# ── contains_fabricated_debt_framing (cluster-2a) — invented customer ₹ debt ─────────────
+
+
+def test_fabricated_customer_debt_matches():
+    # The sr_stop_then_resume breaker (all 3 runs): a ₹ "overdue"/"pending" aggregate on lapsed
+    # customers who owe nothing. Needs debt-word + ₹ figure + customer reference (all present).
+    assert mod.contains_fabricated_debt_framing(
+        "Aapke 5 purane customers ka total ₹5,500 overdue hai (30+ din se)."
+    )
+    assert mod.contains_fabricated_debt_framing(
+        "aapke 5 purane customers ka total ₹5,500 payment pending hai (30+ din se)"
+    )
+    assert mod.contains_fabricated_debt_framing(
+        "Your 8 customers have an outstanding balance of ₹12,000."
+    )
+    assert mod.contains_fabricated_debt_framing(
+        "customers ka total 5500 rupaye bakaya hai"
+    )
+
+
+def test_legit_money_text_does_not_match():
+    # Recovery estimate: ₹ + customers but NO debt word.
+    assert not mod.contains_fabricated_debt_framing(
+        "I've drafted a campaign for 4 customers with an expected recovery of ₹250–₹750."
+    )
+    # Agent pricing: ₹ but no customer ref, no debt word.
+    assert not mod.contains_fabricated_debt_framing("₹5,000/month per agent, one-month free trial.")
+    # Finance answer about the OWNER's OWN payables: debt word + ₹ but NO customer reference.
+    assert not mod.contains_fabricated_debt_framing("Aapka ₹10,000 ka payment pending hai supplier ko.")
+    # Debt word + customers but NO ₹ figure (vaguer — needs the invented aggregate).
+    assert not mod.contains_fabricated_debt_framing("Some customers may have a pending payment.")
+    assert not mod.contains_fabricated_debt_framing("")
+    assert not mod.contains_fabricated_debt_framing(None)  # type: ignore[arg-type]
+
+
 # ── send_fact_exists — fail-closed on a DB read error ───────────────────────────────────
 
 
