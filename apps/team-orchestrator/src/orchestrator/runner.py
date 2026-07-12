@@ -226,6 +226,23 @@ def _should_wait_for_approval_arm(tenant_id: str, body: str) -> bool:
 
 
 @DBOS.step()
+def _send_owner_reply_step(tenant_id: str, recipient: str | None, text: str | None) -> bool:
+    """Shared canonical REPLAY-SAFE in-turn owner send for the deterministic seam nets (D2/D3).
+
+    A detector is a PURE function that only RETURNS text; the ONE send site is here, inside a
+    ``@DBOS.step`` — a completed step returns its checkpointed result on replay, so the underlying
+    Twilio ``create()`` fires AT MOST ONCE (no double-send on a mid-turn worker restart). This is the
+    single reason nets never send from the plain-fn seam/runner body directly. ``send_freeform_ack``
+    records the 'assistant' leg (surface='manager') so the D1 in-turn wait + fallback below see a
+    reply and do NOT double-send. Never raises (send_freeform_ack swallows send errors)."""
+    if not recipient or not text:
+        return False
+    from orchestrator.owner_surface.freeform_acks import send_freeform_ack
+
+    return send_freeform_ack(tenant_id, recipient, text)
+
+
+@DBOS.step()
 def _brain_emitted_owner_reply_step(tenant_id: str, inbound_sid: str | None) -> bool:
     """VT-623 Head3 — the CHECKPOINTED form of :func:`_brain_emitted_owner_reply`, used ONLY as the D1
     in-turn-wait poll condition. Module-level ``@DBOS.step`` (mirrors ``read_webhook_pause`` /
@@ -1405,6 +1422,14 @@ def webhook_pipeline_run(tenant_id: str, run_id: str, twilio_fields: dict) -> di
                 # T9 — thread the triage outcome so dispatch_brain suppresses async specialist
                 # spawns on an answerable turn (direct_reply / task_status) and answers in-turn.
                 triage_outcome = seam_result.outcome
+                # Shared infra (D3/cluster-5b) — a deterministic in-turn reply from the enforce seam
+                # is delivered via the ONE canonical checkpointed step (replay-safe; at-most-once).
+                # Placed BEFORE the D1 in-turn wait + fallback: recording the 'assistant' turn makes
+                # _brain_emitted_owner_reply see a reply, so neither double-sends.
+                if seam_result.direct_reply_text is not None:
+                    _send_owner_reply_step(
+                        tenant_id, event.sender_phone, seam_result.direct_reply_text
+                    )
 
             # VT-193: brain wired into supervisor graph via dispatch_brain.
             # Replaces the VT-3.4 placeholder (record_brain_pending + 'escalated'
