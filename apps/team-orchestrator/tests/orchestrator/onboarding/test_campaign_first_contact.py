@@ -46,6 +46,20 @@ def test_planning_verbs_need_a_campaign_noun() -> None:
         assert cfc.is_campaign_plan_imperative(msg) is False, msg
 
 
+def test_external_ad_campaign_does_not_hijack_the_winback_net() -> None:
+    # Regression guard: a paid external-ad ask carries an ad-platform token + the generic "campaign"
+    # noun, but it is NOT a win-back -> must fall through to the brain, never the no-data reply.
+    for msg in [
+        "run a Facebook ad campaign for me",
+        "run an instagram ad campaign",
+        "launch a google ads campaign",
+    ]:
+        assert cfc.is_campaign_plan_imperative(msg) is False, msg
+    # A genuine win-back (no ad-platform token, OR a recovery noun present) still fires.
+    assert cfc.is_campaign_plan_imperative("run a win-back campaign for my lapsed customers") is True
+    assert cfc.is_campaign_plan_imperative("plan a re-engagement campaign for dormant customers") is True
+
+
 # ----------------------------- imperative detector: NEGATIVE -----------------------------
 def test_bare_noun_or_verb_alone_does_not_fire() -> None:
     # NOUN without a campaign VERB, or VERB without a campaign NOUN.
