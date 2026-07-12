@@ -87,6 +87,28 @@ def test_classify_status_query(body, expected) -> None:
     assert classify_status_query(body) == expected
 
 
+# ----------------------------- DF5: lapse-stem + mutation guard --------------------------
+def test_hinglish_lapse_stem_classifies_lapsed_count() -> None:
+    # "lapse ho gaye" tokenizes to the STEM "lapse" (not "lapsed") — must still answer the dormant
+    # count, not the total ledger (the sr_cohort_surfacing_recency_hinglish turn-2 defect).
+    assert classify_status_query("total kitne customers hain jo lapse ho gaye?") == "lapsed_count"
+    assert classify_status_query("kitne customers lapse ho chuke hain") == "lapsed_count"
+
+
+def test_field_mutation_is_not_a_bare_status_ask() -> None:
+    from orchestrator.owner_inputs.status_query import _is_bare_status_ask, _is_field_mutation
+
+    # A field mutation carries the {update/change} token but is NOT a status ask -> must not render
+    # the recent-campaign status (the "update my city" hijack the {update} bare-token caused).
+    for msg in ["update my city to Agra", "change my shop name", "mera business type badlo"]:
+        assert _is_field_mutation(msg) is True, msg
+        assert _is_bare_status_ask(msg) is False, msg
+    # A genuine bare status ask still passes.
+    for msg in ["what's the status?", "any update on that?", "koi update"]:
+        assert _is_field_mutation(msg) is False, msg
+        assert _is_bare_status_ask(msg) is True, msg
+
+
 # ----------------------------- pure: T10 status-aware last_campaign -------------------
 def _answer_with_campaign(monkeypatch, status: str, response_count: int = 0, *, open_approval: bool):
     from orchestrator.owner_inputs import status_query as sq
