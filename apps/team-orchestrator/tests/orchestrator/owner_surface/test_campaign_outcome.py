@@ -159,6 +159,9 @@ def test_compose_opt_out_blocked_message_en_names_reconsent() -> None:
     assert "ACTIVATE TEAM" in body
     assert "no action" not in body.lower()   # never the dishonest completed_no_action copy
     assert "gone out" not in body.lower()     # never a false send claim
+    # Soft-re-confirm (Fazal 2026-07-12): acknowledge the stop + ASK, not a cold rigid terminal.
+    assert "sure" in body.lower()             # "are you sure you want this sent?"
+    assert "stop" in body.lower()             # acknowledges the owner's own stop
 
 
 def test_compose_opt_out_blocked_message_hi_names_reconsent() -> None:

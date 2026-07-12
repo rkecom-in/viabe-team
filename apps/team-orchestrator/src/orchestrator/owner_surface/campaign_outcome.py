@@ -160,18 +160,25 @@ def _resolve_owner_phone(tenant_id: UUID | str) -> str | None:
 
 
 def compose_opt_out_blocked_message(*, locale: str = "en") -> str:
-    """D1b — the honest terminal when a campaign send was BLOCKED because the owner is opted out
-    (the T13b chokepoint, campaign/execute.py opt_out_blocked). Names the re-consent phrase
-    (ACTIVATE TEAM) and NEVER claims 'no action needed' — it REPLACES that dishonest
-    completed_no_action closure. Pure + deterministic. Copy is Pillar-7 (Fazal final words)."""
+    """D1b + soft-re-confirm (Fazal 2026-07-12) — the honest terminal when a campaign send was
+    BLOCKED because the owner is opted out (the T13b chokepoint, campaign/execute.py opt_out_blocked).
+
+    Fazal's stop->resume ruling: an in-conversation reversal ("stop everything" then "send it") must
+    be SOFT-RE-CONFIRMED — ACKNOWLEDGE the stop + ASK "are you sure you want to send now?" — NOT a
+    cold rigid terminal. This ADDRESSES the owner's send speech-act (so it never reads as ignoring or
+    wrong-action) while staying money-safe (nothing is sent; a deliberate re-enable is still required
+    before any send — Pillar-7). NEVER claims 'no action needed' (it REPLACES that dishonest closure)
+    and NEVER falsely claims a send happened. Pure + deterministic. Copy is Pillar-7 (Fazal words)."""
     if locale == "hi":
         return (
-            "मैं इसे भेज नहीं सका — आपने मैसेज भेजना बंद कर रखा है, इसलिए मैंने सब कुछ रोक कर रखा है। "
-            "भेजना दोबारा चालू करने के लिए ACTIVATE TEAM लिखकर भेजें।"
+            "आपने अभी सब कुछ रोकने के लिए कहा था, इसलिए मैंने रोक दिया है — कुछ भी नहीं भेजा गया। "
+            "क्या आप सचमुच इसे अभी भेजना चाहते हैं? अगर हाँ, तो भेजना दोबारा चालू करने के लिए "
+            "ACTIVATE TEAM लिखकर भेजें, फिर मुझे भेजने के लिए कहें।"
         )
     return (
-        "I couldn't send this — you've opted out of message sending, so I've kept everything "
-        "paused. Reply ACTIVATE TEAM to turn sending back on."
+        "You just asked me to stop everything, so I've paused it — nothing has been sent. Are you "
+        "sure you want this sent after all? If yes, reply ACTIVATE TEAM to turn sending back on, "
+        "then tell me to go ahead."
     )
 
 
