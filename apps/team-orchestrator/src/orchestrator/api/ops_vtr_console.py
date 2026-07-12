@@ -37,7 +37,7 @@ from datetime import UTC, datetime
 from typing import Any, Literal
 from uuid import UUID
 
-from fastapi import APIRouter, Header, HTTPException
+from fastapi import APIRouter, Header, HTTPException, Query
 from psycopg.types.json import Jsonb
 from pydantic import BaseModel
 
@@ -143,6 +143,30 @@ class VtrAgentDirectiveBody(BaseModel):
     content: str
     agent: str = "manager"
     directive_kind: Literal["strategy", "behavioural"] = "strategy"
+
+
+class VtrLlmLimitsBody(BaseModel):
+    """mig 173 — set/update ONE tenant's LLM caps. NULL cap = no cap on that dimension. ``set_by``
+    is NOT a field: it is the VERIFIED operator id, server-side (never client-trusted)."""
+
+    operator_id: str
+    tenant_id: str
+    max_cost_usd_month: float | None = None
+    max_tokens_in_month: int | None = None
+    max_tokens_out_month: int | None = None
+    soft_pct: int = 80
+    enabled: bool = True
+
+
+class VtrLlmLimitsGlobalBody(BaseModel):
+    """mig 173 — set the OVERALL platform-wide LLM caps (the ``global_llm_limits`` singleton).
+    Cross-tenant → exception-tier (Fazal=VTR#1) only; there is no tenant to scope assignment to."""
+
+    operator_id: str
+    max_cost_usd_day: float | None = None
+    max_cost_usd_month: float | None = None
+    soft_pct: int = 80
+    enabled: bool = True
 
 
 # ---------------------------------------------------------------------------
@@ -847,3 +871,274 @@ def vtr_agent_directive(
         operator, body.tenant_id, key, body.directive_kind, version,
     )
     return {"ok": True, "version": version, "memory_key": stored_key}
+
+
+# ---------------------------------------------------------------------------
+# Screen — VTR-controlled LLM cost caps + usage (mig 173)
+#   Writes to tenant_llm_limits / global_llm_limits go through the SERVICE pool: app_role has
+#   SELECT-only on those tables by design (the runtime enforces its caps but can never self-edit
+#   them), so only this server-side console path — running the privileged role — writes.
+# ---------------------------------------------------------------------------
+
+
+def _require_soft_pct(value: int) -> int:
+    """soft_pct must be a sane 1..100 threshold (the tenant table carries no CHECK; gate here)."""
+    if not (1 <= value <= 100):
+        raise HTTPException(status_code=400, detail="soft_pct must be between 1 and 100")
+    return value
+
+
+def _invalidate_budget_cache(tenant_id: str | None) -> None:
+    """Best-effort: drop the budget_gate TTL cache so a just-set cap takes effect immediately
+    instead of after ≤60s. Lazy + swallowed — the parallel llm package may not import yet, and the
+    cap still lands regardless (it only changes WHEN the new value is first read)."""
+    try:
+        from orchestrator.llm.budget_gate import reset_budget_cache
+
+        reset_budget_cache(tenant_id)
+    except Exception:  # noqa: BLE001 — pure latency optimisation; never fail the write on it
+        logger.debug("budget cache invalidation skipped", exc_info=True)
+
+
+def _limit_state(usage: float, cap: Any, soft_pct: int) -> str:
+    """Display verdict for ONE cap dimension (ok/soft/hard) — mirrors budget_gate.severity so the
+    console shows the same thresholds the runtime gate enforces. NULL cap = no cap = ok."""
+    if cap is None:
+        return "ok"
+    cap_f = float(cap)
+    if cap_f <= 0:
+        return "hard"
+    if usage >= cap_f:
+        return "hard"
+    if usage >= cap_f * (soft_pct / 100.0):
+        return "soft"
+    return "ok"
+
+
+@router.post("/api/orchestrator/ops/vtr-llm-limits")
+def vtr_llm_limits(
+    body: VtrLlmLimitsBody,
+    x_internal_secret: str | None = Header(default=None, alias="X-Internal-Secret"),
+    x_operator_jwt: str | None = Header(default=None, alias="X-Operator-Jwt"),
+) -> dict[str, Any]:
+    """Set/update ONE tenant's LLM caps (the ``same _gate pattern as vtr-plan`` the migration
+    calls for — an assigned VTR sets the caps for a tenant it is assigned to). The UPSERT + its
+    ops_audit row commit in ONE service-pool transaction; ``set_by`` is the VERIFIED operator id,
+    never a client field. Caps are non-PII platform config, so the audit records the values."""
+    _require_uuid(body.tenant_id, "tenant_id")
+    _require_soft_pct(body.soft_pct)
+    operator = _gate(
+        x_internal_secret=x_internal_secret,
+        x_operator_jwt=x_operator_jwt,
+        body_operator_id=body.operator_id,
+        tenant_id=body.tenant_id,
+        deny_action="llm_limits_set_denied",
+        deny_target_kind="tenant",
+    )
+    with get_pool().connection() as conn, conn.transaction():
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO tenant_llm_limits "
+            "  (tenant_id, max_cost_usd_month, max_tokens_in_month, max_tokens_out_month, "
+            "   soft_pct, enabled, set_by, updated_at) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, now()) "
+            "ON CONFLICT (tenant_id) DO UPDATE SET "
+            "  max_cost_usd_month   = EXCLUDED.max_cost_usd_month, "
+            "  max_tokens_in_month  = EXCLUDED.max_tokens_in_month, "
+            "  max_tokens_out_month = EXCLUDED.max_tokens_out_month, "
+            "  soft_pct = EXCLUDED.soft_pct, enabled = EXCLUDED.enabled, "
+            "  set_by = EXCLUDED.set_by, updated_at = now()",
+            (
+                body.tenant_id, body.max_cost_usd_month, body.max_tokens_in_month,
+                body.max_tokens_out_month, body.soft_pct, body.enabled, operator,
+            ),
+        )
+        audit(
+            cur,
+            operator_id=operator,
+            tenant_id=body.tenant_id,
+            action="vtr_llm_limits_set",
+            target_kind="tenant",
+            target_id=body.tenant_id,
+            detail=(
+                f"cost_month={body.max_cost_usd_month} tin={body.max_tokens_in_month} "
+                f"tout={body.max_tokens_out_month} soft_pct={body.soft_pct} "
+                f"enabled={body.enabled}"
+            ),
+        )
+    _invalidate_budget_cache(body.tenant_id)
+    logger.info(
+        "vtr_llm_limits OK operator=%s tenant=%s enabled=%s", operator, body.tenant_id, body.enabled
+    )
+    return {"ok": True, "tenant_id": body.tenant_id, "enabled": body.enabled}
+
+
+@router.post("/api/orchestrator/ops/vtr-llm-limits-global")
+def vtr_llm_limits_global(
+    body: VtrLlmLimitsGlobalBody,
+    x_internal_secret: str | None = Header(default=None, alias="X-Internal-Secret"),
+    x_operator_jwt: str | None = Header(default=None, alias="X-Operator-Jwt"),
+) -> dict[str, Any]:
+    """Set the OVERALL platform caps (the ``global_llm_limits`` singleton). Cross-tenant → this is
+    exception-tier (Fazal=VTR#1) ONLY: there is no tenant to scope an assignment to, and the
+    setting affects every tenant. Transport auth + body==claim, THEN ``require_exception_tier``.
+    UPSERT + a platform-scoped (tenant_id NULL) ops_audit row in ONE service-pool transaction."""
+    _require_soft_pct(body.soft_pct)
+    verify_internal_secret(x_internal_secret)
+    claim = verify_operator_jwt(x_operator_jwt)
+    operator = str(claim["operator_id"])
+    if body.operator_id != operator:
+        raise HTTPException(status_code=403, detail="operator_id in body != JWT claim")
+    require_exception_tier(operator)  # platform-wide cap = Fazal-only
+
+    with get_pool().connection() as conn, conn.transaction():
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO global_llm_limits "
+            "  (id, max_cost_usd_day, max_cost_usd_month, soft_pct, enabled, set_by, updated_at) "
+            "VALUES (true, %s, %s, %s, %s, %s, now()) "
+            "ON CONFLICT (id) DO UPDATE SET "
+            "  max_cost_usd_day   = EXCLUDED.max_cost_usd_day, "
+            "  max_cost_usd_month = EXCLUDED.max_cost_usd_month, "
+            "  soft_pct = EXCLUDED.soft_pct, enabled = EXCLUDED.enabled, "
+            "  set_by = EXCLUDED.set_by, updated_at = now()",
+            (body.max_cost_usd_day, body.max_cost_usd_month, body.soft_pct, body.enabled, operator),
+        )
+        audit(
+            cur,
+            operator_id=operator,
+            tenant_id=None,  # platform-scoped, not a tenant action
+            action="vtr_llm_limits_global_set",
+            target_kind="platform",
+            target_id="global",
+            detail=(
+                f"cost_day={body.max_cost_usd_day} cost_month={body.max_cost_usd_month} "
+                f"soft_pct={body.soft_pct} enabled={body.enabled}"
+            ),
+        )
+    _invalidate_budget_cache(None)  # global cap changed → every tenant's cached verdict is stale
+    logger.info("vtr_llm_limits_global OK operator=%s enabled=%s", operator, body.enabled)
+    return {"ok": True, "enabled": body.enabled}
+
+
+@router.get("/api/orchestrator/ops/vtr-llm-usage")
+def vtr_llm_usage(
+    operator_id: str = Query(...),
+    tenant_id: str | None = Query(default=None),
+    x_internal_secret: str | None = Header(default=None, alias="X-Internal-Secret"),
+    x_operator_jwt: str | None = Header(default=None, alias="X-Operator-Jwt"),
+) -> dict[str, Any]:
+    """LLM usage/cost for the console UI (mig 173).
+
+    ``tenant_id`` present → that tenant's current-month cost + tokens vs its caps + a per-dimension
+    state, gated by the assigned-VTR ``_gate`` (the tenant leg only; the runtime gate additionally
+    folds the platform leg — the console composes both by calling the no-tenant mode too).
+    ``tenant_id`` absent → platform totals (day/month, cross-tenant incl. NULL-tenant) + the global
+    caps + top-10 tenants by month cost — exception-tier (Fazal) only, since it is cross-tenant.
+    """
+    if tenant_id:
+        _require_uuid(tenant_id, "tenant_id")
+        _gate(
+            x_internal_secret=x_internal_secret,
+            x_operator_jwt=x_operator_jwt,
+            body_operator_id=operator_id,
+            tenant_id=tenant_id,
+            deny_action="llm_usage_read_denied",
+        )
+        with get_pool().connection() as conn:
+            lim = conn.execute(
+                "SELECT max_cost_usd_month, max_tokens_in_month, max_tokens_out_month, "
+                "       soft_pct, enabled FROM tenant_llm_limits WHERE tenant_id = %s",
+                (tenant_id,),
+            ).fetchone()
+            agg = conn.execute(
+                "SELECT COALESCE(SUM(cost_usd), 0)   AS cost, "
+                "       COALESCE(SUM(tokens_in), 0)  AS tokens_in, "
+                "       COALESCE(SUM(tokens_out), 0) AS tokens_out, COUNT(*) AS calls "
+                "FROM llm_call_events "
+                "WHERE tenant_id = %s AND occurred_at >= date_trunc('month', now())",
+                (tenant_id,),
+            ).fetchone()
+        soft_pct = int(lim["soft_pct"]) if lim else 80
+        enabled = bool(lim["enabled"]) if lim else False
+        cost = float(agg["cost"])
+        t_in = int(agg["tokens_in"])
+        t_out = int(agg["tokens_out"])
+        cost_cap = lim["max_cost_usd_month"] if lim else None
+        tin_cap = lim["max_tokens_in_month"] if lim else None
+        tout_cap = lim["max_tokens_out_month"] if lim else None
+        # Only an ENABLED limits row enforces; a disabled/absent row is display-only 'ok'.
+        state = (
+            _limit_state(cost, cost_cap, soft_pct) if enabled else "ok",
+            _limit_state(t_in, tin_cap, soft_pct) if enabled else "ok",
+            _limit_state(t_out, tout_cap, soft_pct) if enabled else "ok",
+        )
+        worst = max(state, key={"ok": 0, "soft": 1, "hard": 2}.get)
+        logger.info("vtr_llm_usage OK operator=%s tenant=%s state=%s", operator_id, tenant_id, worst)
+        return {
+            "scope": "tenant",
+            "tenant_id": tenant_id,
+            "month": {"cost_usd": cost, "tokens_in": t_in, "tokens_out": t_out,
+                      "calls": int(agg["calls"])},
+            "limits": {
+                "max_cost_usd_month": float(cost_cap) if cost_cap is not None else None,
+                "max_tokens_in_month": int(tin_cap) if tin_cap is not None else None,
+                "max_tokens_out_month": int(tout_cap) if tout_cap is not None else None,
+                "soft_pct": soft_pct, "enabled": enabled,
+            },
+            "state": worst,
+        }
+
+    # No tenant_id → platform-wide totals: cross-tenant, exception-tier (Fazal) only.
+    verify_internal_secret(x_internal_secret)
+    claim = verify_operator_jwt(x_operator_jwt)
+    operator = str(claim["operator_id"])
+    if operator_id != operator:
+        raise HTTPException(status_code=403, detail="operator_id in body != JWT claim")
+    require_exception_tier(operator)
+
+    with get_pool().connection() as conn:
+        lim = conn.execute(
+            "SELECT max_cost_usd_day, max_cost_usd_month, soft_pct, enabled "
+            "FROM global_llm_limits WHERE id = true"
+        ).fetchone()
+        totals = conn.execute(
+            "SELECT COALESCE(SUM(cost_usd) FILTER "
+            "         (WHERE occurred_at >= date_trunc('day', now())), 0) AS day_cost, "
+            "       COALESCE(SUM(cost_usd), 0)                            AS month_cost "
+            "FROM llm_call_events WHERE occurred_at >= date_trunc('month', now())"
+        ).fetchone()
+        top = conn.execute(
+            "SELECT tenant_id, COALESCE(SUM(cost_usd), 0) AS cost, "
+            "       COALESCE(SUM(tokens_in), 0) AS tokens_in, "
+            "       COALESCE(SUM(tokens_out), 0) AS tokens_out "
+            "FROM llm_call_events "
+            "WHERE occurred_at >= date_trunc('month', now()) AND tenant_id IS NOT NULL "
+            "GROUP BY tenant_id ORDER BY cost DESC LIMIT 10"
+        ).fetchall()
+    day_cost = float(totals["day_cost"])
+    month_cost = float(totals["month_cost"])
+    soft_pct = int(lim["soft_pct"]) if lim else 80
+    enabled = bool(lim["enabled"]) if lim else False
+    day_cap = lim["max_cost_usd_day"] if lim else None
+    month_cap = lim["max_cost_usd_month"] if lim else None
+    logger.info("vtr_llm_usage OK operator=%s scope=platform top=%d", operator, len(top))
+    return {
+        "scope": "platform",
+        "day_cost_usd": day_cost,
+        "month_cost_usd": month_cost,
+        "limits": {
+            "max_cost_usd_day": float(day_cap) if day_cap is not None else None,
+            "max_cost_usd_month": float(month_cap) if month_cap is not None else None,
+            "soft_pct": soft_pct, "enabled": enabled,
+        },
+        "state": {
+            "day": _limit_state(day_cost, day_cap, soft_pct) if enabled else "ok",
+            "month": _limit_state(month_cost, month_cap, soft_pct) if enabled else "ok",
+        },
+        "top_tenants": [
+            {"tenant_id": str(r["tenant_id"]), "cost_usd": float(r["cost"]),
+             "tokens_in": int(r["tokens_in"]), "tokens_out": int(r["tokens_out"])}
+            for r in top
+        ],
+    }
