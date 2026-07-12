@@ -305,7 +305,7 @@ def execute_approved_campaign(
     from orchestrator.billing.graceful_exit import dispatch_allowed
 
     _guard_row = conn.execute(
-        "SELECT phase FROM tenants WHERE id = %s", (tenant_id_str,)
+        "SELECT phase, opt_out FROM tenants WHERE id = %s", (tenant_id_str,)
     ).fetchone()
     if _guard_row is None:
         raise RuntimeError(
@@ -323,6 +323,29 @@ def execute_approved_campaign(
             "skipped_complaint_freeze": 0,
             "failed": 0,
             "dispatch_blocked": 1,
+        }
+
+    # T13b (full-77 sr_stop_then_resume money_action, 2026-07-12) — an OWNER opt-out is a hard
+    # consent withdrawal (opt_out_handler sets tenants.opt_out=true + freezes autonomy). But an
+    # approval armed BEFORE the opt-out lives in pending_approvals, not the autonomy-batch store the
+    # freeze cancels — so a later "haan bhej do" could resolve that stale approval and fire a send
+    # AFTER the withdrawal (money_action + a marketing send against an opt-out — the worst class).
+    # Gate it HERE at the single Pillar-8 chokepoint so NO resolve/replay path can send over an
+    # owner opt-out, regardless of which store armed the approval. Fail-closed, count-only summary.
+    # Read SERVER-SIDE from the tenant's own RLS-scoped row (never a client field). The downstream
+    # emission gate (cluster-2a Layer-1) then swaps any "sent" claim — sent=0 ⇒ no send_fact.
+    _opt_out = _guard_row["opt_out"] if isinstance(_guard_row, dict) else _guard_row[1]
+    if _opt_out:
+        logger.info(
+            "execute_approved_campaign: opt_out_blocked tenant=%s campaign=%s",
+            tenant_id_str, campaign_id_str,
+        )
+        return {
+            "sent": 0,
+            "skipped_opt_out": 0,
+            "skipped_complaint_freeze": 0,
+            "failed": 0,
+            "opt_out_blocked": 1,
         }
 
     # VT-460 gaps (a)+(b): the SHARED onboarded (Gate-0) + WABA-live pre-gate — the SAME deterministic
