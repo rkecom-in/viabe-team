@@ -85,6 +85,26 @@ _OWNER_DATA_PULL_RE = re.compile(
     re.IGNORECASE,
 )
 
+# DF1(c) SYNC-FRESHNESS-PUSHBACK: a doubt that FRESH data has arrived — "are you sure? I haven't
+# seen new numbers", "nothing's come in", "kuch nahi aaya". On a CONNECTED provider this carries no
+# connect verb/state, so it fell through to the brain, which INVENTED a last-sync date (fabrication;
+# reconnect_broken_sync_honesty §2 judge). HIGH-PRECISION: a negation/absence marker bound to a
+# fresh-data-ARRIVAL word (not a bare "are you sure"), plus the Hinglish "kuch nahi (aaya)". The gate
+# that USES this also requires a resolvable, connected/live provider, so a stray match on a non-
+# connected tenant simply falls through.
+_SYNC_PUSHBACK_RE = re.compile(
+    r"(?:"
+    # English: a negation within a short span of a 'fresh data showed up' word — "haven't seen new
+    # numbers", "nothing has come in", "not updating", "no new data".
+    r"\b(?:haven'?t|hasn'?t|didn'?t|not|no|nothing|never)\b[^.?!]{0,40}?"
+    r"\b(?:seen|see|come|coming|came|show(?:n|ing|ed|s)?|updat\w*|arriv\w*|refresh\w*|new)\b"
+    # Hinglish: "kuch nahi aaya", "kuch naya nahi", "abhi tak nahi aaya".
+    r"|\bkuch\b[^.?!]{0,20}?\b(?:nahi|nahin|naya)\b"
+    r"|\b(?:nahi|nahin)\b[^.?!]{0,12}?\b(?:aaya|aya|aye|aayi|aayaa)\b"
+    r")",
+    re.IGNORECASE,
+)
+
 
 def _connected_or_healthy(tenant_id: UUID | str, provider: str) -> bool:
     """DB-truth 'connected' from EITHER source of record: a ``tenant_oauth_tokens`` row (the
@@ -124,6 +144,135 @@ def _detect_provider(body: str) -> str | None:
     if is_shopify and not is_sheets:
         return "shopify"
     return None
+
+
+def _resolve_provider_from_context(tenant_id: UUID | str) -> str | None:
+    """DF1(d) — resolve a provider the owner referenced only by BACK-reference ("connect it again",
+    "use the same one you already have") from durable context, WITHOUT the LLM. Two ordered, DB-truth
+    sources, both fail-soft:
+      1. ``tenant_integration_state.current_connector_id`` — the connector the tenant's last/active
+         onboarding flow is for (already 'google_sheet' | 'shopify').
+      2. the recent conversation window — an EXPLICIT prior provider mention, matched via the SAME
+         ``_detect_provider`` (which needs "google sheet"/"sheet"/"spreadsheet" or "shopify"; a bare
+         "google" does NOT resolve — no broadening), newest turn first.
+    Returns the resolved provider or None (caller then falls through / fails open). Never guesses."""
+    try:
+        from orchestrator.onboarding.shopify_onboarding import read_integration_state
+
+        state = read_integration_state(tenant_id)
+        if state is not None:
+            cid = state.get("current_connector_id")
+            if cid in ("google_sheet", "shopify"):
+                return cid
+    except Exception:  # noqa: BLE001 — a state-read miss must not block the conversation-window try
+        logger.warning(
+            "connector_first_contact: integration-state provider read failed (fail-soft) tenant=%s",
+            tenant_id,
+        )
+
+    try:
+        from orchestrator.conversation_log import active_window
+
+        for turn in reversed(active_window(tenant_id)):  # active_window is oldest-first; scan newest-first
+            resolved = _detect_provider(turn.get("text") or "")
+            if resolved is not None:
+                return resolved
+    except Exception:  # noqa: BLE001 — a window-read miss returns None (fall through), never raises
+        logger.warning(
+            "connector_first_contact: conversation-window provider read failed (fail-soft) tenant=%s",
+            tenant_id,
+        )
+    return None
+
+
+def _last_sync_at(tenant_id: UUID | str, provider: str) -> Any | None:
+    """The real ``tenant_connector_status.last_sync_at`` for this connector, or None when the row
+    holds no timestamp (or there is no row). Reads DB truth ONLY — never computes or guesses a time —
+    so the freshness answer can state what the DB holds and, on None, HONESTLY admit it has none."""
+    from orchestrator.db import tenant_connection
+
+    with tenant_connection(tenant_id) as conn:
+        row = conn.execute(
+            """
+            SELECT last_sync_at FROM tenant_connector_status
+            WHERE tenant_id = %(t)s AND connector_id = %(c)s AND last_sync_at IS NOT NULL
+            ORDER BY last_sync_at DESC LIMIT 1
+            """,
+            {"t": str(tenant_id), "c": provider},
+        ).fetchone()
+    if row is None:
+        return None
+    return row["last_sync_at"] if isinstance(row, dict) else row[0]
+
+
+def _format_sync_time(value: Any) -> str | None:
+    """Render a DB ``last_sync_at`` (datetime or ISO string) FAITHFULLY as a date+time — no relative
+    fabrication, only what the DB holds. Returns None if it can't parse (caller then takes the
+    honest 'no reliable time' path rather than emit an unparseable value)."""
+    if value is None:
+        return None
+    try:
+        from datetime import datetime
+
+        dt = value if isinstance(value, datetime) else datetime.fromisoformat(str(value))
+        return dt.strftime("%d %b %Y, %H:%M")
+    except Exception:  # noqa: BLE001 — unparseable -> honest-admit path, never emit a bad literal
+        return None
+
+
+def _maybe_answer_sync_freshness(
+    tenant_id: UUID | str, text: str, recipient: str | None
+) -> dict[str, Any] | None:
+    """DF1(c) — answer a sync/data-FRESHNESS pushback ("are you sure? I haven't seen new numbers",
+    "kuch nahi aaya") from DB truth instead of letting the brain invent a last-sync date. Fires ONLY
+    when the message is a freshness-doubt phrasing AND a provider resolves (in-message or from
+    context) AND that provider is connected/live on our side. States the REAL
+    ``tenant_connector_status.last_sync_at`` when the DB holds one; else honestly admits it has no
+    reliable sync time and offers a re-check/re-auth. NEVER composes a date the DB doesn't hold.
+    Returns a routed result dict when it answered, or None to fall through to the normal pipeline."""
+    if not _SYNC_PUSHBACK_RE.search(text):
+        return None
+    provider = _detect_provider(text) or _resolve_provider_from_context(tenant_id)
+    if provider is None or not _connected_or_healthy(tenant_id, provider):
+        return None  # no connected provider to be honest ABOUT -> fall through (no fabrication here)
+
+    from orchestrator.onboarding.shopify_onboarding import _send
+
+    label = "Google Sheet" if provider == "google_sheet" else "Shopify"
+    try:
+        raw = _last_sync_at(tenant_id, provider)
+    except Exception:  # noqa: BLE001 — a status-read miss takes the honest-admit path, never fabricates
+        logger.warning(
+            "connector_first_contact: last_sync_at read failed -> honest no-time answer tenant=%s",
+            tenant_id,
+        )
+        raw = None
+    when = _format_sync_time(raw)
+    if when is not None:
+        answer = (
+            f"I checked directly — your {label} shows connected and last synced {when}. I'm not "
+            "seeing a break on my side. If new numbers still aren't coming through, I can "
+            "re-authorize it fresh — want me to?"
+        )
+    else:
+        answer = (
+            f"I checked — your {label} shows connected, but I don't have a reliable last-sync time "
+            "on record, so I can't say when data last came through. Want me to re-check the "
+            "connection or re-authorize it fresh?"
+        )
+    _send(recipient, answer, tenant_id=tenant_id)
+    logger.info(
+        "connector_first_contact: answered sync-freshness pushback from DB truth (has_time=%s) "
+        "provider=%s tenant=%s",
+        when is not None,
+        provider,
+        tenant_id,
+    )
+    return {
+        "done": False,
+        "phase": "sync_freshness_answer",
+        "routed": "connector_sync_freshness_answered",
+    }
 
 
 def maybe_start_connector_onboarding(
@@ -168,11 +317,31 @@ def maybe_start_connector_onboarding(
         is_state = bool(_CONNECT_STATE_RE.search(text))
         is_data_pull = bool(_OWNER_DATA_PULL_RE.search(text))  # DF1(a)
         if not (is_imperative or is_state or is_data_pull):
-            return None  # no connect verb/state/data-pull -> not a connect ask -> normal pipeline
+            # DF1(c) SYNC-FRESHNESS-PUSHBACK — a pure freshness pushback ("are you sure? I haven't
+            # seen new numbers", "kuch nahi aaya") carries NO connect verb/state, so it previously
+            # fell through to the brain, which invented a last-sync date. Before falling through,
+            # answer it from DB truth — but TIGHTLY: only a freshness-doubt phrasing on a resolvable,
+            # connected/live provider fires it; everything else still falls through untouched.
+            freshness = _maybe_answer_sync_freshness(tenant_id, text, recipient)
+            if freshness is not None:
+                return freshness
+            return None  # not a connect ask and not a sync-freshness pushback -> normal pipeline
 
         provider = _detect_provider(text)
         if provider is None:
-            return None  # no single unambiguous provider -> let the brain classify
+            # DF1(d) PROVIDER-RESOLVE-FROM-CONTEXT — the owner named the provider only by BACK-
+            # reference ("connect it again", "use the same one you already have"). Resolve it from
+            # durable context (integration-state connector_id / an explicit prior conversation
+            # mention) BEFORE giving up. Never broadens a bare "Google" -> google_sheet.
+            provider = _resolve_provider_from_context(tenant_id)
+            if provider is None:
+                return None  # still no single unambiguous provider -> let the brain classify
+            logger.info(
+                "connector_first_contact: resolved provider=%s from context (no in-message provider) "
+                "tenant=%s",
+                provider,
+                tenant_id,
+            )
 
         from orchestrator.onboarding.shopify_onboarding import (
             _pending_is_unexpired,
