@@ -45,7 +45,7 @@ EMPTY_COHORT_REPLY = (
 # and were the delegation-lane stall root (D3 couldn't fire without a matching verb). The VERB∧NOUN
 # requirement keeps them tight: "make it faster"/"plan my day" carry no campaign NOUN so never fire.
 _CAMPAIGN_VERB_RE = re.compile(
-    r"\b(run|start|launch|send|create|build|make|plan|prepare|kick\s*off|set\s*up|reach\s*out|"
+    r"\b(run|start|launch|send|create|build|make|draft|plan|prepare|kick\s*off|set\s*up|reach\s*out|"
     r"put\s*together|draw\s*up|chala(?:o|do|\s*do)?|bhej(?:o|do|\s*do)?|shuru\s*kar(?:o|do)?|"
     r"bana(?:o|do|\s*do)?|plan\s*kar(?:o|do)?)\b",
     re.IGNORECASE,
@@ -81,14 +81,34 @@ _INTERROGATIVE_LEAD_RE = re.compile(
     re.IGNORECASE,
 )
 
+# R7 — a POLITE-REQUEST form ("can you draft a win-back plan for my customers?") is an imperative
+# dressed as a question: a can/could/will/would-you (or "please") lead + VERB∧NOUN + a FIRST-PERSON
+# BENEFICIARY ("for me" / "my customers" / "mujhe"). It IS a command to dispatch, so the trailing "?"
+# / interrogative-lead question-rejection must NOT apply. The beneficiary is load-bearing: it keeps a
+# bare CAPABILITY question ("can you run campaigns?" — no beneficiary) falling to the brain.
+_POLITE_REQUEST_LEAD_RE = re.compile(r"^\s*(can|could|would|will)\s+(you|u)\b", re.IGNORECASE)
+_FIRST_PERSON_BENEFICIARY_RE = re.compile(
+    r"\b(my|me|mine|mera|meri|mere|mujhe|mujhko|hamare|hamari|humare|apne)\b|for\s+me",
+    re.IGNORECASE,
+)
+
+
+def _is_polite_request_form(text: str) -> bool:
+    """R7 — True iff ``text`` is a polite-REQUEST imperative (polite lead / 'please' + a first-person
+    beneficiary). Callers apply this ONLY after VERB∧NOUN already matched, so it just decides whether
+    a question-shaped VERB∧NOUN message is a genuine dispatch request vs a capability question."""
+    has_polite_lead = bool(_POLITE_REQUEST_LEAD_RE.match(text)) or "please" in text.lower()
+    return has_polite_lead and bool(_FIRST_PERSON_BENEFICIARY_RE.search(text))
+
 
 def is_campaign_plan_imperative(text: str) -> bool:
-    """True iff ``text`` is a deterministic "run a win-back campaign" IMPERATIVE (VERB ∧ NOUN,
-    and NOT a question).
+    """True iff ``text`` is a deterministic "run a win-back campaign" IMPERATIVE (VERB ∧ NOUN).
 
-    Opt-out / DSR ALWAYS wins first (a "stop"/"delete my data" is never a campaign ask). A question
-    (leading interrogative or trailing "?") is a status/how-to ask, not a command — it falls through
-    to the brain. FAIL-OPEN: any error -> False (the net does not fire; normal path handles it)."""
+    Opt-out / DSR ALWAYS wins first (a "stop"/"delete my data" is never a campaign ask). A plain
+    question (leading interrogative or trailing "?") is a status/how-to ask, not a command — it falls
+    through to the brain — EXCEPT a POLITE-REQUEST form ("can you draft a win-back plan for my
+    customers?"), which is an imperative and DOES dispatch (R7). FAIL-OPEN: any error -> False (the
+    net does not fire; normal path handles it)."""
     try:
         if not text or not text.strip():
             return False
@@ -98,15 +118,16 @@ def is_campaign_plan_imperative(text: str) -> bool:
 
         if matches_opt_out_or_dsr(text):
             return False
-        # A question is never an imperative — route it to the brain to be answered, not dispatched.
-        if text.strip().endswith("?") or _INTERROGATIVE_LEAD_RE.match(text):
-            return False
         if not (_CAMPAIGN_VERB_RE.search(text) and _CAMPAIGN_NOUN_RE.search(text)):
             return False
         # Ad-hijack guard: an external paid-ad ask ("run a Facebook ad campaign") matches VERB∧NOUN
         # on the generic "campaign", but it is NOT a win-back — fall through to the brain unless a
         # genuine recovery noun (win-back/lapsed/dormant/re-engage) is present.
         if _AD_PLATFORM_TOKEN_RE.search(text) and not _RECOVERY_NOUN_RE.search(text):
+            return False
+        # A plain question is not an imperative — EXCEPT the polite-request form, which dispatches.
+        is_question = text.strip().endswith("?") or bool(_INTERROGATIVE_LEAD_RE.match(text))
+        if is_question and not _is_polite_request_form(text):
             return False
         return True
     except Exception:  # noqa: BLE001 — a detector failure must never block the turn (fail-open)

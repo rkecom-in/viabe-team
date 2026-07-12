@@ -20,13 +20,13 @@
       "message": "total kitne customers hain mere paas jo lapse ho gaye?",
       "assert_no_silent": true,
       "assert_contains": [
-        "6"
+        "5"
       ],
       "assert_route": {
         "expect_sr_delegation": false,
         "tenant_wide": true
       },
-      "note": "Hinglish pure count ask — should still surface the real seeded total, grounding the cohort discussion in real data rather than an improvised figure."
+      "note": "Hinglish pure count ask ('total how many customers do I have who have lapsed?') — routes to the deterministic lapsed_count (45d). The seeder makes n_lapsed = n - max(1, n//4) = 6 - 1 = 5 dormant (the other 1 is recent), so the LAPSED count is 5, NOT the total 6 seeded — grounding the cohort discussion in real data rather than an improvised figure."
     }
   ]
 }

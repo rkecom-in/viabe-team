@@ -80,6 +80,24 @@ def test_questions_never_fire() -> None:
         assert cfc.is_campaign_plan_imperative(msg) is False, msg
 
 
+def test_polite_request_form_fires_but_capability_question_does_not() -> None:
+    """R7 — a POLITE-REQUEST imperative ("can you draft ... for my customers?") IS a dispatch, even
+    with a trailing '?' / interrogative lead; a bare CAPABILITY question ("can you run campaigns?" —
+    no first-person beneficiary) still falls to the brain."""
+    for msg in [
+        "can you draft a win-back plan for my customers who've stopped ordering?",
+        "could you please prepare a re-engagement for my lapsed customers",
+        "would you set up a win-back campaign for me?",
+    ]:
+        assert cfc.is_campaign_plan_imperative(msg) is True, msg
+    for msg in [
+        "can you run campaigns?",           # no beneficiary -> capability question
+        "could you build campaigns?",        # no beneficiary
+        "should I run a win-back campaign?",  # 'should' is not a polite-request lead
+    ]:
+        assert cfc.is_campaign_plan_imperative(msg) is False, msg
+
+
 def test_optout_dsr_never_read_as_campaign() -> None:
     """DPDP: opt-out / DSR wins first — never interpreted as a request to run a campaign."""
     for msg in ["stop everything", "band karo", "please delete my data", "STOP"]:

@@ -12,13 +12,14 @@ from __future__ import annotations
 
 import re
 import unicodedata
-from typing import Literal
+from typing import Any, Literal
 from uuid import UUID
 
 from orchestrator.db.wrappers import LAPSED_WINDOW_DAYS
 
 StatusQueryType = Literal[
-    "customer_count", "lapsed_count", "last_campaign", "opt_out_count", "billing", "unknown"
+    "customer_count", "lapsed_count", "lapsed_list", "last_campaign", "opt_out_count",
+    "billing", "unknown",
 ]
 
 _DASHBOARD = "https://viabe.ai/team/dashboard"
@@ -47,6 +48,70 @@ _FINANCE_READ_TOKENS = frozenset({
     "turnover", "collections", "collection", "outstanding", "dues", "income",
     "payment", "payments", "pending", "overdue",
 })
+
+# R7 — a campaign CREATION / planning REQUEST ("draft a win-back plan", "banao ek campaign") is a
+# request to DO work, not a status LOOKUP; it must fall through (to the D3 net / brain) rather than
+# be hijacked into a customer_count / last_campaign answer by a stray 'customers'/'campaign' token
+# (sr_second_plan_status_check turn 0: "can you draft a win-back plan for my customers who've stopped
+# ordering?" was read as customer_count). Fires only when a CREATE verb co-occurs with a campaign
+# NOUN. run/launch/start/send are deliberately NOT create verbs here — "did you run/launch/send the
+# campaign?" is a send-STATUS ask that must keep routing to last_campaign (unchanged). Checked AFTER
+# the lapsed_list net so "make a list of lapsed customers" still surfaces the list, not 'unknown'.
+_CAMPAIGN_CREATE_VERB_TOKENS = frozenset({
+    "make", "create", "build", "draft", "plan", "prepare", "design", "generate",
+    "compose", "write", "banao", "banado", "bana",
+})
+_CAMPAIGN_NOUN_RE = re.compile(
+    r"\b(campaign|campaigns|win[\s-]*back|winback|re[\s-]*engage(?:ment)?|"
+    r"re[\s-]*activation|outreach|lapsed|dormant)\b",
+    re.IGNORECASE,
+)
+
+# R7 lapsed_list — a LIST ask SCOPED to the lapsed/dormant cohort (list-cue AND inactivity-cue). The
+# render is a privacy-conscious COUNT + OFFER (CD2 interim, Fazal): it NEVER dumps raw customer names
+# inline — the file-attachment path is future work — so a list-cue with no inactivity cue is NOT a
+# lapsed_list (it vetoes customer_count and falls to the brain), and the poisoned-cohort bait can
+# never surface through this path. Kept above customer_count so "give me a list of the customers who
+# stopped ordering" answers the dormant cohort, not the total ledger.
+_LIST_CUE_TOKENS = frozenset({"list", "lists", "names", "naam", "naams"})
+_INACTIVITY_TOKEN_CUES = frozenset({"lapsed", "lapse", "dormant", "inactive", "quiet"})
+_PURCHASE_TOKENS = frozenset({
+    "order", "orders", "ordered", "ordering", "bought", "buy", "buying",
+    "purchase", "purchased", "purchases", "khareeda", "kharida", "khareed", "kharid",
+})
+_NEGATION_TOKENS = frozenset({"nahi", "not", "no", "never", "havent", "hasnt", "didnt", "dont", "doesnt"})
+_DAY_UNIT_TOKENS = frozenset({"din", "day", "days", "mahine", "mahina", "month", "months"})
+
+
+def _has_list_cue(norm: str, tokens: set[str]) -> bool:
+    """True iff the owner is asking for a LIST / NAMES (EN + Hinglish), incl. 'who are they'."""
+    if _LIST_CUE_TOKENS & tokens:
+        return True
+    return "who are" in norm or "kaun hain" in norm or "kaun" in tokens
+
+
+def _has_inactivity_cue(norm: str, tokens: set[str]) -> bool:
+    """True iff the message frames customers as DORMANT — an explicit lapsed/dormant token, a
+    'stopped/haven't ordered' negated-purchase phrase, or a recency framing ('60 din se', 'over 90
+    days'). Keyed to the dormancy the count_lapsed 45-day predicate models, not a bare 'customers'."""
+    if _INACTIVITY_TOKEN_CUES & tokens:
+        return True
+    if "haven't" in norm or "hasn't" in norm or "didn't" in norm:
+        return True
+    if "stopped" in tokens and (_PURCHASE_TOKENS & tokens):
+        return True
+    # a negation adjacent (same message) to a purchase word — "order nahi kiya", "not bought"
+    if (_PURCHASE_TOKENS & tokens) and (_NEGATION_TOKENS & tokens):
+        return True
+    # recency framing: a bare number + a day/month unit ("60 din se zyada", "over 90 days")
+    return bool(_DAY_UNIT_TOKENS & tokens) and any(t.isdigit() for t in tokens)
+
+
+def _is_campaign_creation_request(norm: str, tokens: set[str]) -> bool:
+    """R7 — True iff the message is a request to CREATE / plan a campaign (a create verb co-occurring
+    with a campaign noun), which must route to the D3 net / brain rather than a canned count/status
+    figure. See ``_CAMPAIGN_CREATE_VERB_TOKENS`` for why send/run/launch are excluded."""
+    return bool(_CAMPAIGN_CREATE_VERB_TOKENS & tokens) and bool(_CAMPAIGN_NOUN_RE.search(norm))
 
 
 def classify_status_query(body: str) -> StatusQueryType:
@@ -79,6 +144,17 @@ def classify_status_query(body: str) -> StatusQueryType:
         or "opt out" in norm
     ):
         return "opt_out_count"
+    # R7 lapsed_list — a LIST ask scoped to the dormant cohort (list-cue AND inactivity-cue). Checked
+    # BEFORE the creation guard so "make a list of lapsed customers" surfaces the list (not 'unknown'),
+    # and BEFORE customer_count so a dormant-list ask isn't answered with the total ledger count.
+    list_cue = _has_list_cue(norm, tokens)
+    if list_cue and _has_inactivity_cue(norm, tokens):
+        return "lapsed_list"
+    # R7 campaign-CREATION guard — a "draft/make/plan a win-back campaign" REQUEST is work to DO, not
+    # a status lookup: fall through (return 'unknown') so the D3 net / brain owns it, never a stray
+    # 'customers'/'campaign' token hijacking it into a count. run/launch/start/send stay send-STATUS.
+    if _is_campaign_creation_request(norm, tokens):
+        return "unknown"
     # VT-632 lapsed_count — checked BEFORE customer_count so "how many LAPSED customers" answers the
     # dormant count (45d), not the total ledger count (the sr_cohort defect: "10 total" for a lapsed
     # ask whose true answer is the dormant subset). Keyed on the explicit "lapsed"/"dormant" TOKEN
@@ -103,7 +179,10 @@ def classify_status_query(body: str) -> StatusQueryType:
         return "last_campaign"
     if {"campaign", "campaigns"} & tokens:
         return "last_campaign"
-    if {"customer", "customers", "ग्राहक", "ग्राहकों"} & tokens:
+    # R7 — VETO customer_count when a LIST cue is present ("give me a list of my customers"): a list is
+    # not a count. Without an inactivity cue it isn't a lapsed_list either, so it falls to the brain
+    # (the CD2 names path) rather than being answered with a bare total.
+    if ({"customer", "customers", "ग्राहक", "ग्राहकों"} & tokens) and not list_cue:
         return "customer_count"
     if {"trial", "billing", "plan", "subscription", "phase"} & tokens:
         return "billing"
@@ -196,7 +275,70 @@ def _recent_campaign_status_or_none(tenant_id: UUID | str) -> str | None:
     return _render_campaign_status(out.campaigns[0], tenant_id)
 
 
-def answer_status_query(tenant_id: UUID | str, body: str) -> str | None:
+def _lapsed_stats(cw: Any, tenant_id: UUID | str) -> tuple[bool, int]:
+    """(has_sales_base, lapsed_count). ``has_sales_base=False`` means an EMPTY ledger (no sales data
+    at all) — the count is meaningless and the caller must give the honest 'no data' line rather than
+    fabricate 'everyone bought recently'. ONE definition shared by ``lapsed_count`` + ``lapsed_list``
+    so the two never diverge (both use ``count_with_sales`` + ``count_lapsed`` with the SAME 45-day
+    window, ``LAPSED_WINDOW_DAYS``)."""
+    if cw.count_with_sales(tenant_id) == 0:
+        return (False, 0)
+    return (True, cw.count_lapsed(tenant_id, days=LAPSED_WINDOW_DAYS))
+
+
+def _recent_task_status_or_none(
+    tenant_id: UUID | str, *, terminal_task_sink: dict[str, Any] | None = None
+) -> str | None:
+    """R7 bare-status fallback: when a bare status ask has NO campaign to report, answer from the
+    most-recent manager_task's honest state (in-progress / stopped / done) instead of falling to the
+    brain (which stalled with a counter-question — injection_quarantine turn 1). Reads only; the
+    objective is already PII-redacted at write. None when the tenant has no task at all.
+
+    ``terminal_task_sink`` (optional): when the reported task is TERMINAL and still has a pending
+    owner-notification, its id is recorded here so the caller can flip that notification to
+    ``not_required`` — the status answer already conveyed the outcome, so the async composer must not
+    also send it (a duplicate). Left unset for every non-terminal / already-notified task.
+
+    FAIL-SOFT (like every read in this file): a task-store/pool error returns None — the ask falls
+    through to the brain, never a crashed turn (the pool is absent in unit tests and could blip live)."""
+    from orchestrator.manager import task_store
+
+    try:
+        task = task_store.get_most_recent_task(tenant_id)
+    except Exception:  # noqa: BLE001 — a status read must never crash the turn (fall through)
+        return None
+    if task is None:
+        return None
+    status = str(task.get("status") or "")
+    outcome = task.get("terminal_outcome")
+    if outcome in ("completed_with_effect", "completed_no_action") or status == "completed":
+        line, reported_terminal = "That's done — I've finished it. Anything else you need?", True
+    elif outcome in ("failed", "escalated") or status in ("failed", "dead_letter", "blocked"):
+        line, reported_terminal = (
+            "I couldn't finish that one on my own yet — I've flagged it and I'll follow up. "
+            "Nothing was sent without your go-ahead.",
+            True,
+        )
+    elif outcome == "cancelled" or status == "cancelled":
+        line, reported_terminal = "That one's been cancelled — nothing is running on it right now.", True
+    else:
+        # non-terminal (clarifying / planned / running / waiting_owner / verifying / queued)
+        line, reported_terminal = "I'm still working on that — I'll update you the moment it's done.", False
+    # Suppress the async composer's duplicate ONLY when we just reported a TERMINAL outcome that still
+    # had a pending owner-notification (never on the "still working" line — that task's terminal notice
+    # is still due). 'pending' is armed only at a terminal settle, so a running task never trips this.
+    if (
+        reported_terminal
+        and terminal_task_sink is not None
+        and task.get("owner_notification_status") == "pending"
+    ):
+        terminal_task_sink["task_id"] = task.get("id")
+    return line
+
+
+def answer_status_query(
+    tenant_id: UUID | str, body: str, *, terminal_task_sink: dict[str, Any] | None = None
+) -> str | None:
     """Return the templated answer text for the owner's status query (deterministic SQL).
 
     VT-600 — returns ``None`` when the keyword parse can't name a query type it
@@ -218,17 +360,16 @@ def answer_status_query(tenant_id: UUID | str, body: str) -> str | None:
 
     if qtype == "lapsed_count":
         # Fazal's 45d definition: bought before, no sale in the last LAPSED_WINDOW_DAYS.
-        cw = CustomersWrapper()
         # EMPTY-LEDGER honesty (sr_empty_cohort_honesty): a lapsed count of 0 is AMBIGUOUS — it means
         # either "all bought recently" OR "no sales data at all". Only claim the former when a sales
         # base actually exists; otherwise say we have no data (never fabricate "everyone bought
         # within 45 days" against an empty ledger).
-        if cw.count_with_sales(tenant_id) == 0:
+        has_base, n = _lapsed_stats(CustomersWrapper(), tenant_id)
+        if not has_base:
             return (
                 "I don't have any sales history for your customers yet — connect a data source and "
                 "I'll show you exactly who's gone quiet."
             )
-        n = cw.count_lapsed(tenant_id, days=LAPSED_WINDOW_DAYS)
         if n == 0:
             return (
                 "None of your customers are lapsed — everyone with a purchase history has bought "
@@ -237,6 +378,28 @@ def answer_status_query(tenant_id: UUID | str, body: str) -> str | None:
         return (
             f"{n} of your customers are lapsed — they bought before but haven't in the last "
             f"{LAPSED_WINDOW_DAYS} days."
+        )
+
+    if qtype == "lapsed_list":
+        # R7 — a LIST ask scoped to the dormant cohort. CD2 interim (Fazal): do NOT dump raw customer
+        # names inline (the file-attachment path is future work); answer with the grounded COUNT + the
+        # 45-day window and OFFER to prepare the full list — privacy-conscious, never a name dump (so
+        # the poisoned-cohort bait can never surface here). Same empty-ledger / zero-lapsed honesty as
+        # lapsed_count (shared _lapsed_stats) so the count the owner hears never diverges.
+        has_base, n = _lapsed_stats(CustomersWrapper(), tenant_id)
+        if not has_base:
+            return (
+                "I don't have any sales history for your customers yet — connect a data source and "
+                "I'll show you exactly who's gone quiet."
+            )
+        if n == 0:
+            return (
+                "None of your customers are lapsed — everyone with a purchase history has bought "
+                f"within the last {LAPSED_WINDOW_DAYS} days, so there's no dormant list to pull."
+            )
+        return (
+            f"{n} of your customers are lapsed — they bought before but haven't in the last "
+            f"{LAPSED_WINDOW_DAYS} days. Want me to put together the full list for you?"
         )
 
     if qtype == "opt_out_count":
@@ -263,9 +426,13 @@ def answer_status_query(tenant_id: UUID | str, body: str) -> str | None:
         return f"Your trial/billing status is on your portal: {_DASHBOARD}"
 
     # 'unknown' — cluster-3: a BARE "what's the status?" with a live campaign refers to it (answer
-    # status-aware, T10); otherwise (no campaign, or not a bare status ask) fall through to the brain.
+    # status-aware, T10); else fall back to the most-recent manager_task's honest state (R7 — kills
+    # the injection_quarantine counter-question); only then fall through to the brain.
     if _is_bare_status_ask(body):
         ans = _recent_campaign_status_or_none(tenant_id)
+        if ans is not None:
+            return ans
+        ans = _recent_task_status_or_none(tenant_id, terminal_task_sink=terminal_task_sink)
         if ans is not None:
             return ans
 

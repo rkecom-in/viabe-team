@@ -66,6 +66,29 @@ def test_create_and_get(pool):
     assert row["objective"]["goal"] == "recover lapsed cohort"
 
 
+def test_get_most_recent_task(pool):
+    """R7 — the bare-status fallback read: the most-recently-updated task, with the fields
+    status_query renders an honest line from. None when the tenant has no task."""
+    from orchestrator.manager import task_store as ts
+
+    tid = _seed_tenant(pool)
+    assert ts.get_most_recent_task(tid) is None  # no task yet
+
+    first = ts.create_task(tid, {"goal": "older"})
+    second = ts.create_task(tid, {"goal": "newer"})
+    # Advance `second` so it is the most-recently-updated (create order alone isn't relied on).
+    ts.set_task_status(tid, second, "planned", expected_from=("clarifying",))
+
+    row = ts.get_most_recent_task(tid)
+    assert row is not None
+    assert row["id"] == second
+    assert row["status"] == "planned"
+    # The render fields are present (terminal_outcome / owner_notification_status default unset/None).
+    assert "terminal_outcome" in row and "owner_notification_status" in row
+    assert row["objective"]["goal"] == "newer"
+    assert first != second
+
+
 def test_idempotency_dedupe(pool):
     from orchestrator.manager import task_store as ts
 

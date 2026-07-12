@@ -247,6 +247,24 @@ def get_task(tenant_id: UUID | str, task_id: UUID | str) -> dict[str, Any] | Non
     return dict(row) if row is not None else None
 
 
+def get_most_recent_task(tenant_id: UUID | str) -> dict[str, Any] | None:
+    """R7 — the tenant's most-recently-updated manager_task (ANY status), for the deterministic
+    bare-status answer (``status_query._recent_task_status_or_none``) when there's no campaign row to
+    report. Returns the id + status + terminal_outcome + owner_notification_status + the (already
+    PII-redacted at write) objective so the caller can render an honest in-progress / stopped / done
+    line — and, for a terminal task with a still-pending owner-notification, flip that notification to
+    'not_required' (the status answer already told the owner). RLS-scoped read-only; None when the
+    tenant has no task at all."""
+    with tenant_connection(tenant_id) as conn:
+        row = conn.execute(
+            "SELECT id, objective, status, terminal_outcome, owner_notification_status, "
+            "updated_at FROM manager_tasks WHERE tenant_id = %s "
+            "ORDER BY updated_at DESC, created_at DESC LIMIT 1",
+            (str(tenant_id),),
+        ).fetchone()
+    return dict(row) if row is not None else None
+
+
 def has_active_task(tenant_id: UUID | str) -> bool:
     """VT-606 (triage seam) — does this tenant have ANY plan-store task in ``TASK_ACTIVE``. Mirrors
     the SAME check ``plan_store.create_plan`` runs internally for admission control (reused, not
@@ -423,7 +441,8 @@ __all__ = [
     "TASK_STATUSES", "TASK_TERMINAL", "TASK_NON_TERMINAL", "TASK_ACTIVE",
     "TERMINAL_OUTCOMES", "OWNER_NOTIFICATION_STATUSES",
     "STEP_KINDS", "STEP_STATUSES", "STEP_TERMINAL", "STEP_NON_TERMINAL", "EVIDENCE_KINDS",
-    "create_task", "set_task_status", "set_owner_notification_status", "get_task", "find_task_id",
+    "create_task", "set_task_status", "set_owner_notification_status", "get_task",
+    "get_most_recent_task", "find_task_id",
     "find_task_by_source_ref", "has_active_task", "has_active_integration_step",
     "add_step", "set_step_status", "get_steps",
 ]
