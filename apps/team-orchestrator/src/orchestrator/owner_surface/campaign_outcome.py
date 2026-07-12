@@ -159,6 +159,22 @@ def _resolve_owner_phone(tenant_id: UUID | str) -> str | None:
     return str(phone) if phone else None
 
 
+def compose_opt_out_blocked_message(*, locale: str = "en") -> str:
+    """D1b — the honest terminal when a campaign send was BLOCKED because the owner is opted out
+    (the T13b chokepoint, campaign/execute.py opt_out_blocked). Names the re-consent phrase
+    (ACTIVATE TEAM) and NEVER claims 'no action needed' — it REPLACES that dishonest
+    completed_no_action closure. Pure + deterministic. Copy is Pillar-7 (Fazal final words)."""
+    if locale == "hi":
+        return (
+            "मैं इसे भेज नहीं सका — आपने मैसेज भेजना बंद कर रखा है, इसलिए मैंने सब कुछ रोक कर रखा है। "
+            "भेजना दोबारा चालू करने के लिए ACTIVATE TEAM लिखकर भेजें।"
+        )
+    return (
+        "I couldn't send this — you've opted out of message sending, so I've kept everything "
+        "paused. Reply ACTIVATE TEAM to turn sending back on."
+    )
+
+
 def maybe_report_campaign_outcome(
     tenant_id: UUID | str,
     terminal_state: Any,
@@ -180,7 +196,13 @@ def maybe_report_campaign_outcome(
     summary = None
     if isinstance(terminal_state, dict):
         summary = terminal_state.get("campaign_execution_summary")
-    if not summary_has_activity(summary):
+    # D1b — an opt-out-BLOCKED send (T13b) has all-zero counts but MUST be reported honestly: the
+    # owner asked to send, we blocked it because they're opted out, so we say so + name the
+    # re-consent phrase. Returning True here flips campaign_outcome_reported → success_closure_not_
+    # required, suppressing the dishonest completed_no_action "no action needed" closure. Scoped to
+    # opt_out_blocked ONLY — dispatch_blocked / pre_gate_blocked stay silent (all-zero, no such key).
+    opt_out_blocked = bool(isinstance(summary, dict) and summary.get("opt_out_blocked"))
+    if not opt_out_blocked and not summary_has_activity(summary):
         logger.info(
             "VT-562 outcome-report: no reportable summary tenant=%s (skip)", tenant_id
         )
@@ -197,7 +219,11 @@ def maybe_report_campaign_outcome(
     from orchestrator.owner_surface.freeform_acks import resolve_owner_locale
 
     locale = resolve_owner_locale(tenant_id)
-    body = compose_campaign_outcome_message(summary, locale=locale)
+    body = (
+        compose_opt_out_blocked_message(locale=locale)
+        if opt_out_blocked
+        else compose_campaign_outcome_message(summary, locale=locale)
+    )
 
     try:
         from orchestrator.utils.twilio_send import send_freeform_message

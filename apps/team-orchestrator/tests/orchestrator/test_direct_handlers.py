@@ -118,6 +118,34 @@ def test_opt_out_handler_handles_send_failure(handlers_ctx, twilio_create):
     assert row[0] is True  # bare psycopg.connect -> tuple rows
 
 
+# --- data_inputs_enable_handler (D1a — ACTIVATE TEAM clears opt_out) ----------
+
+
+def test_data_inputs_enable_clears_opt_out(handlers_ctx, twilio_create):
+    """D1a: ACTIVATE TEAM re-consent sets owner_inputs=true AND clears opt_out (the sole clearer,
+    symmetric to opt_out_handler the sole setter). An opted-out tenant is re-activated."""
+    ctx = handlers_ctx
+    phone = _phone()
+    tenant_id = _new_tenant(ctx.dsn, phone)
+    # Simulate a prior STOP: opted out + inputs disabled.
+    with psycopg.connect(ctx.dsn, autocommit=True) as conn:
+        conn.execute(
+            "UPDATE tenants SET opt_out = true, owner_inputs = false WHERE id = %s", (tenant_id,)
+        )
+    state = ctx.make_state(UUID(tenant_id))
+    event = ctx.WebhookEvent(body="ACTIVATE TEAM", sender_phone=phone)
+
+    outcome = ctx.HANDLERS["data_inputs_enable_handler"](event, state)
+    assert outcome["owner_inputs_set"] is True
+
+    with psycopg.connect(ctx.dsn, autocommit=True) as conn:
+        row = conn.execute(
+            "SELECT owner_inputs, opt_out FROM tenants WHERE id = %s", (tenant_id,)
+        ).fetchone()
+    assert row[0] is True   # owner_inputs re-enabled
+    assert row[1] is False  # opt_out CLEARED — re-consent retracts the STOP
+
+
 # --- dsr_handler -------------------------------------------------------------
 
 

@@ -153,6 +153,40 @@ def test_maybe_report_held_by_run_control_skips(monkeypatch) -> None:
     assert "body" not in seen
 
 
+# ----------------------------- D1b: opt-out-blocked honest terminal ----------------------
+def test_compose_opt_out_blocked_message_en_names_reconsent() -> None:
+    body = co.compose_opt_out_blocked_message(locale="en")
+    assert "ACTIVATE TEAM" in body
+    assert "no action" not in body.lower()   # never the dishonest completed_no_action copy
+    assert "gone out" not in body.lower()     # never a false send claim
+
+
+def test_compose_opt_out_blocked_message_hi_names_reconsent() -> None:
+    body = co.compose_opt_out_blocked_message(locale="hi")
+    assert "ACTIVATE TEAM" in body            # the enable keyword stays literal in both locales
+
+
+def test_maybe_report_opt_out_blocked_sends_honest_reconsent(monkeypatch) -> None:
+    """D1b: the T13b opt_out_blocked terminal (all-zero counts) reports the honest re-consent
+    message and returns True (→ suppresses the dishonest 'no action was needed' closure)."""
+    seen = _patch_send(monkeypatch)
+    state = {"campaign_execution_summary": {"sent": 0, "skipped_opt_out": 0, "opt_out_blocked": 1}}
+    sent = co.maybe_report_campaign_outcome(uuid4(), state, recipient_phone="+919811111111")
+    assert sent is True
+    assert "ACTIVATE TEAM" in seen["body"]
+    assert "no action" not in seen["body"].lower()
+
+
+def test_maybe_report_dispatch_blocked_stays_silent(monkeypatch) -> None:
+    """Scope guard: only opt_out_blocked speaks. dispatch_blocked / pre_gate_blocked (all-zero
+    counts, no opt_out_blocked key) stay SILENT — no false honest-but-unwanted message."""
+    seen = _patch_send(monkeypatch)
+    for key in ("dispatch_blocked", "pre_gate_blocked"):
+        state = {"campaign_execution_summary": {"sent": 0, key: 1}}
+        assert co.maybe_report_campaign_outcome(uuid4(), state, recipient_phone="+91981") is False
+    assert "body" not in seen
+
+
 def test_maybe_report_no_phone_skips(monkeypatch) -> None:
     seen = _patch_send(monkeypatch)
     monkeypatch.setattr(co, "_resolve_owner_phone", lambda t: None)
