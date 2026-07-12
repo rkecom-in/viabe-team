@@ -151,6 +151,22 @@ def test_sheets_flow_not_connected_never_invokes_shopify_ingest(substrate, monke
     assert _read_state(substrate.dsn, tid)["phase"] == "phase_2_auth"
 
 
+def test_sheets_data_action_while_oauth_pending_is_honest_no_fabrication(substrate):
+    """DF1(a) mint-armed: 'import my orders now' while OAuth is still pending (not connected) must be
+    answered HONESTLY (no fabricated import) + stay in phase_2_auth, never advance."""
+    from orchestrator.onboarding.connector_resume import maybe_resume_connector_onboarding
+
+    tid = _seed_tenant(substrate.dsn)
+    _seed_state(
+        substrate.dsn, tid, phase="phase_2_auth", connector_id="google_sheet", awaiting="oauth_completion"
+    )
+    result = maybe_resume_connector_onboarding(
+        tid, "Please go ahead and import my orders now, I mapped Name and Phone", "sid-da", "+911234567890"
+    )
+    assert result == {"done": False, "phase": "phase_2_auth", "routed": "sheets_data_action_not_connected"}
+    assert _read_state(substrate.dsn, tid)["phase"] == "phase_2_auth"  # no fabricated advance
+
+
 def test_sheets_flow_connected_advances_to_sample_pending(substrate):
     tid = _seed_tenant(substrate.dsn)
     _seed_state(

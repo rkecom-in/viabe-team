@@ -23,12 +23,23 @@ The connector-routing dispatcher that decides WHICH of the two hooks to call liv
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 from uuid import UUID
 
 logger = logging.getLogger(__name__)
 
 _CONNECTOR_ID = "google_sheet"
+
+# DF1(a) mint-armed: an owner DATA-ACTION ("import my orders now", "map the Zodiac Sign column")
+# while the OAuth is still pending (phase_2_auth, not yet connected) must be answered HONESTLY —
+# never fabricate importing/mapping. A data-action verb + a data/column object; a bare "done"
+# confirmation carries neither and is handled by the _DONE re-check.
+_OWNER_DATA_ACTION_RE = re.compile(
+    r"\b(?:import|pull|fetch|load|sync|map|mapping|bring)\b[^.?!]*?"
+    r"\b(?:order|orders|sales?|customers?|data|columns?|amounts?|dates?|records?|numbers?)\b",
+    re.IGNORECASE,
+)
 
 
 def maybe_resume_sheets_onboarding(
@@ -83,6 +94,29 @@ def maybe_resume_sheets_onboarding(
             # (the ten context-scoped tools each read/write this same state) — this deterministic
             # gate is scoped to the auth-wait step only.
             return None
+
+        # DF1(a) mint-armed honesty — an owner DATA-ACTION ("import my orders", "map my columns")
+        # while OAuth is still pending must NOT be fabricated. If the connection isn't finished, say
+        # so + point at the one step. If it IS connected, fall through (the agent does the import).
+        from orchestrator.integrations.commit import is_connector_connected
+
+        if _OWNER_DATA_ACTION_RE.search(body or ""):
+            if is_connector_connected(tenant_id, _CONNECTOR_ID):
+                return None  # connected -> the integration agent handles the real import/mapping
+            walkthrough = pending.get("walkthrough_url") if isinstance(pending, dict) else None
+            _send(
+                recipient,
+                "I can't import or map that yet — your Google Sheet connection isn't finished. "
+                "Approve on the Google page and reply 'done', then I'll pull your data in."
+                + (f"\n{walkthrough}" if walkthrough else ""),
+                tenant_id=tenant_id,
+            )
+            logger.info(
+                "sheets_resume: owner data-action while OAuth pending -> honest not-connected "
+                "(no fabrication) tenant=%s",
+                tenant_id,
+            )
+            return {"done": False, "phase": phase, "routed": "sheets_data_action_not_connected"}
 
         toks = _tokens(body)
         if not (toks & _DONE):
