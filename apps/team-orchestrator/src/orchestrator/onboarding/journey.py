@@ -405,8 +405,14 @@ def _reprompt_gap_after_affirm(q: dict[str, Any]) -> dict[str, Any]:
     not an ANSWER (a gap asks for information; "yes" carries none). Re-present the pending gap WITHOUT
     recording it as the value and WITHOUT advancing the cursor — state is untouched. ``re_present=True``
     tells the intercept this is a fresh, sendable re-presentation (mirrors ``_greet_then_question`` /
-    ``_reprompt_after_no``)."""
-    return {**_current_q_reply(q), "re_present": True}
+    ``_reprompt_after_no``).
+
+    The re-present ACKNOWLEDGES the affirmation and restates — never the byte-identical prompt (a
+    verbatim repeat with no new information reads as a loop_stall; §2 judge on efficient_collection:
+    'step 2 repeats the identical question from step 1 verbatim')."""
+    en = f"Great — I just need the detail itself: {q.get('prompt_en', '')}".strip()
+    hi = f"बहुत बढ़िया — बस यह जानकारी चाहिए: {q.get('prompt_hi', '')}".strip()
+    return {"reply_en": en, "reply_hi": hi, "done": False, "re_present": True}
 
 
 def handle_reply(

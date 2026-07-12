@@ -97,7 +97,24 @@ def _is_setup_status_ask(body: str) -> bool:
     text = _norm(body)
     if _DURATION_CUE_RE.search(text):
         return False  # DF7(c) — a DURATION ask ("kitna time lagega setup complete…") is not a status ask
-    return bool(_SETUP_TOKEN_RE.search(text)) and bool(_STATUS_CUE_RE.search(text))
+    if bool(_SETUP_TOKEN_RE.search(text)) and bool(_STATUS_CUE_RE.search(text)):
+        return True
+    # BARE completion question ("ab bas ho gaya kya sab kuch?", "is everything done?") — no "setup"
+    # noun, but this gate only runs on journey tenants, so a short completion QUESTION refers to the
+    # setup (§2 judge: the ask got a counter-question instead of a status answer). TIGHT: a completion
+    # cue + question shape + short (≤7 tokens) + no other-domain token (payment/customer/campaign/
+    # order/send) so a rich business message never collapses to a setup answer.
+    toks = text.replace("?", " ").split()
+    if len(toks) <= 7 and ("?" in body or "kya" in toks):
+        has_completion = bool(
+            re.search(r"\bho gaya\b|\bhogaya\b|\bho chuka\b|\bdone\b|\bcomplete(d)?\b|\bfinished\b", text)
+        )
+        other_domain = bool(
+            set(toks) & {"payment", "customer", "customers", "campaign", "order", "orders", "bhej", "bheja", "message"}
+        )
+        if has_completion and not other_domain:
+            return True
+    return False
 
 
 def _is_remaining_needs_ask(body: str) -> bool:

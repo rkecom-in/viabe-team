@@ -361,15 +361,22 @@ def maybe_start_connector_onboarding(
         if is_data_pull and not (is_imperative or is_state):
             if _connected_or_healthy(tenant_id, provider):
                 return None  # connected -> the brain can actually pull the data
+            # Copy is careful NOT to promise the data exists (§2 judge, i_sheets_partial): connecting
+            # only retrieves what's ACTUALLY in the sheet — if the owner's sheet lacks those columns,
+            # implying "connect and I'll pull them" is a false promise. Condition explicitly. Also
+            # never reference "the link" unless one is actually attached (live_flow carries it).
             if live_flow:
                 answer = (
-                    f"I can't pull that in yet — your {label} connection isn't finished. Approve on "
-                    f"the {label} page, reply 'done', and I'll pull those in."
+                    f"I can't see your {label} yet — the connection isn't finished. Approve on the "
+                    f"{label} page and reply 'done'. Then I can pull in whatever's actually in the "
+                    f"sheet — if those columns aren't there, we'd add them first."
                 )
             else:
                 answer = (
-                    f"I can't pull that in yet — your {label} isn't connected, so I don't have that "
-                    f"data. Connect it (tap the link, approve, reply 'done') and I'll pull those in."
+                    f"I can't see your {label} yet — it isn't connected, so I don't have that data. "
+                    f"Once you connect it, I can pull in whatever's actually in the sheet — if order "
+                    f"amounts or dates aren't columns there, we'd add them (or connect a source that "
+                    f"has them). Want me to send the connect link?"
                 )
             _send(recipient, answer, tenant_id=tenant_id)
             logger.info(
