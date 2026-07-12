@@ -40,9 +40,14 @@ EMPTY_COHORT_REPLY = (
 # Bare "do" is deliberately EXCLUDED — it is ambiguous (imperative "do a campaign" vs the far more
 # common interrogative aux "do I have…"). The strong imperatives below cover the real phrasings; a
 # rare "do a campaign" safely falls through to the brain rather than risk hijacking a question.
+# PLANNING verbs (make/plan/prepare/put together/draw up + "plan karo") are included — "make me a
+# plan to win back my lapsed customers" / "plan a win-back campaign" are the most common phrasings
+# and were the delegation-lane stall root (D3 couldn't fire without a matching verb). The VERB∧NOUN
+# requirement keeps them tight: "make it faster"/"plan my day" carry no campaign NOUN so never fire.
 _CAMPAIGN_VERB_RE = re.compile(
-    r"\b(run|start|launch|send|create|build|kick\s*off|set\s*up|reach\s*out|"
-    r"chala(?:o|do|\s*do)?|bhej(?:o|do|\s*do)?|shuru\s*kar(?:o|do)?|bana(?:o|do|\s*do)?)\b",
+    r"\b(run|start|launch|send|create|build|make|plan|prepare|kick\s*off|set\s*up|reach\s*out|"
+    r"put\s*together|draw\s*up|chala(?:o|do|\s*do)?|bhej(?:o|do|\s*do)?|shuru\s*kar(?:o|do)?|"
+    r"bana(?:o|do|\s*do)?|plan\s*kar(?:o|do)?)\b",
     re.IGNORECASE,
 )
 _CAMPAIGN_NOUN_RE = re.compile(

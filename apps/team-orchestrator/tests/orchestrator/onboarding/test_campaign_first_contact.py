@@ -27,12 +27,23 @@ def test_clear_winback_imperatives_fire() -> None:
         "launch a winback to dormant customers",
         "send a win-back to my lapsed customers",
         "set up a re-activation campaign",
+        # PLANNING verbs (the delegation-lane stall root — "make me a plan"/"plan a campaign")
+        "make me a plan to win back my lapsed customers",
+        "plan a win-back campaign",
+        "prepare a win-back for my lapsed customers",
+        "put together a campaign for lapsed customers",
         # Hinglish
         "lapsed customers ko win-back campaign chalao",
         "purane customers ko campaign bhejo",
         "campaign shuru karo",
     ]:
         assert cfc.is_campaign_plan_imperative(msg) is True, msg
+
+
+def test_planning_verbs_need_a_campaign_noun() -> None:
+    # The planning verbs stay tight: no campaign NOUN -> no fire (VERB∧NOUN).
+    for msg in ["make it faster", "plan my day", "make a payment of 500", "prepare the invoice"]:
+        assert cfc.is_campaign_plan_imperative(msg) is False, msg
 
 
 # ----------------------------- imperative detector: NEGATIVE -----------------------------
