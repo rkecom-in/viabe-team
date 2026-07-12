@@ -350,6 +350,13 @@ def is_send_push_cue(body: str) -> bool:
     if not token_list:
         return False
     tokens = set(token_list)
+    # A HEDGED musing ("hmm dekhte hain, shayad theek rahega") is genuinely ambiguous — the brain
+    # reads it, never a push. Without this, the weak-ack shape (b) fires on the bare "theek" inside a
+    # hedge (is_weak_ack_only_approval has no hedge guard — it was built to run only AFTER a
+    # deterministic 'approved', where a hedge can never arrive). Pinned by
+    # test_ambiguous_reply_never_waits_for_an_arm (the arm-wait must not trigger on a hedge).
+    if tokens & _HEDGE:
+        return False
     # (a) an explicit send verb that is NOT itself adjacent-negated ("bhej do" fires; "mat bhejo"
     # does not — the negation binds the send verb, positional, never bag-of-words).
     if (tokens & _EXPLICIT_SEND) and not _adjacent_to_negation(
