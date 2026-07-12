@@ -61,3 +61,22 @@ def test_legacy_mode_default_when_no_explicit_mode(monkeypatch: pytest.MonkeyPat
 
     assert called["n"] == 0
     assert result is ts._NO_OP
+
+
+def test_df5_question_shape_gate_pin() -> None:
+    """Hook-caught regression pin: the DF5 net answers QUESTIONS only. classify_status_query is
+    bag-of-words, so an IMPERATIVE carrying a count token ("win back lapsed customers") must NOT be
+    question-shaped — it falls through to D3/triage (new_task), never a count answer."""
+    from orchestrator.onboarding.campaign_first_contact import _INTERROGATIVE_LEAD_RE
+
+    def q(t: str) -> bool:
+        toks = set(t.lower().replace("?", " ").split())
+        return "?" in t or bool(_INTERROGATIVE_LEAD_RE.match(t)) or bool(
+            toks & {"kitne", "kitni", "kitna", "how"}
+        )
+
+    assert q("win back lapsed customers") is False
+    assert q("run a win-back campaign for my lapsed customers") is False
+    assert q("how many lapsed customers do I have?") is True
+    assert q("total kitne customers hain jo lapse ho gaye?") is True
+    assert q("what's the status?") is True

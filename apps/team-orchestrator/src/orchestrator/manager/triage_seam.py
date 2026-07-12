@@ -191,11 +191,22 @@ def triage_seam(
     # FAIL-OPEN: any error falls through to triage_turn.
     if resolved_mode == "enforce" and not has_active_task:
         try:
+            from orchestrator.onboarding.campaign_first_contact import _INTERROGATIVE_LEAD_RE
             from orchestrator.owner_inputs.status_query import answer_status_query
 
             _low = (message_text or "").lower()
             _is_list_or_names_ask = any(k in _low for k in ("list", "names", "naam"))
-            if not _is_list_or_names_ask:
+            # QUESTION-SHAPE gate (hook-caught regression): classify_status_query is bag-of-words, so
+            # an IMPERATIVE like "win back lapsed customers" hits the 'lapsed' token and would get a
+            # COUNT answer instead of a task. The net answers QUESTIONS only: a '?', an interrogative
+            # lead (how/what/kya/kitne/…), or a count-cue token. Imperatives fall through to D3/triage.
+            _toks = set(_low.replace("?", " ").split())
+            _is_question_shaped = (
+                "?" in (message_text or "")
+                or bool(_INTERROGATIVE_LEAD_RE.match(message_text or ""))
+                or bool(_toks & {"kitne", "kitni", "kitna", "how"})
+            )
+            if _is_question_shaped and not _is_list_or_names_ask:
                 _status_ans = answer_status_query(tenant_id, message_text)
                 if _status_ans is not None:
                     emit_tm_audit(
