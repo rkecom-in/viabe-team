@@ -69,6 +69,18 @@ from orchestrator.owner_inputs.status_query import classify_status_query
         ("pakka customers aa rahe hain?", "unknown"),
         # Guard: a genuine count ask without a pushback cue still fast-paths.
         ("how many customers came in this week?", "customer_count"),
+        # full-77 cluster-3: a payment/receivable read is a finance-guard 'unknown' (brain) even
+        # with a stray 'campaign' token — the routing_db_proof "koi campaign mat banana" hijack that
+        # used to answer "you haven't run a campaign".
+        (
+            "Sharma ji ka payment kabse pending hai, sirf check karke batao, koi campaign mat banana",
+            "unknown",
+        ),
+        ("is my payment still pending?", "unknown"),
+        ("any overdue payments?", "unknown"),
+        # A bare "what's the status?" stays 'unknown' at classify time — the campaign-aware answer
+        # is resolved in answer_status_query (needs DB), not in the pure classifier.
+        ("what's the status?", "unknown"),
     ],
 )
 def test_classify_status_query(body, expected) -> None:
@@ -115,6 +127,34 @@ def test_last_campaign_sent_reports_responses(monkeypatch):
 def test_last_campaign_failed_is_honest(monkeypatch):
     out = _answer_with_campaign(monkeypatch, "failed", open_approval=False)
     assert "failed" in out
+
+
+def test_bare_status_ask_with_campaign_answers_status_aware(monkeypatch):
+    """full-77 cluster-3 (injection_quarantine): a bare 'what's the status?' with a live campaign
+    answers status-aware (the referent is obvious) instead of a counter-question."""
+    from orchestrator.owner_inputs import status_query as sq
+
+    campaign = SimpleNamespace(status="proposed", response_count=0)
+    monkeypatch.setattr(
+        "orchestrator.agent.tools.get_recent_campaigns.get_recent_campaigns",
+        lambda _inp: SimpleNamespace(campaigns=[campaign]),
+    )
+    monkeypatch.setattr(sq, "_open_approval_exists", lambda tenant_id: True)
+    out = sq.answer_status_query(uuid4(), "what's the status?")
+    assert out is not None
+    assert "hasn't gone out" in out and "approval" in out
+
+
+def test_bare_status_ask_without_campaign_falls_through_to_brain(monkeypatch):
+    """A bare status ask with NO campaign could be about onboarding/connection — return None so the
+    brain answers, never a campaign-centric 'you haven't run a campaign'."""
+    from orchestrator.owner_inputs import status_query as sq
+
+    monkeypatch.setattr(
+        "orchestrator.agent.tools.get_recent_campaigns.get_recent_campaigns",
+        lambda _inp: SimpleNamespace(campaigns=[]),
+    )
+    assert sq.answer_status_query(uuid4(), "what's the status?") is None
 
 
 def test_open_approval_check_failure_fails_soft(monkeypatch):
