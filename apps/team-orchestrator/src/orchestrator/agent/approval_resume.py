@@ -32,6 +32,7 @@ never the owner phone. owner_message_sid (a Twilio SID) is allowed.
 from __future__ import annotations
 
 import logging
+import unicodedata
 from typing import Any
 from uuid import UUID
 
@@ -75,6 +76,28 @@ _CUSTOMER_SEND_APPROVAL_TYPES = frozenset({"campaign_send", "agent_customer_send
 # rejection (decision='defer', status='rejected'). With max=2: the 1st defer extends, the 2nd
 # is terminal (Cowork 20260606T103500Z (a)).
 _MAX_DEFERS = 2
+
+# CD5 (§7D audit; Fazal ruling 2026-07-12) — an EXPLICIT owner "skip the review, just send it" waiver
+# on a customer SEND is HONORED (the deterministic approval stands; the landed >12-token ambiguity
+# gate in classify_approval_reply remains the safety floor), but waiving the human-review step on a
+# real customer send is a governance-relevant act that MUST leave an audit trail. These markers
+# detect that explicit waiver — they are NOT a decision input (never change the return value), only
+# the trigger for the audit record. Tight but GENERAL: the review-waiving phrases an owner actually
+# types (EN + Hinglish), matched as normalized substrings — not a match on any one scenario string.
+_SKIP_REVIEW_MARKERS = (
+    "skip review",
+    "skip the review",
+    "bina review",
+    "without review",
+    "no review",
+    "review mat",          # "don't review it"
+    "kya review",          # rhetorical "what's to review" (sr_always_confirm_first_contact_floor)
+    "review ki zaroorat",  # "no need to review"
+    "seedha bhej",         # "just send it straight" (sr_always_confirm_first_contact_floor)
+    "seedhe bhej",
+    "direct bhej",
+    "directly bhej",
+)
 
 
 def find_open_approval_for_tenant(
@@ -134,6 +157,17 @@ def resolve_decision_from_reply(
             and is_weak_ack_only_approval(text)
         ):
             return None
+        # CD5 (§7D audit; Fazal ruling 2026-07-12): an EXPLICIT owner "skip review, seedha bhej do" on
+        # a customer SEND is HONORED (the deterministic approval above STANDS) but must be AUDITED —
+        # waiving the human-review step on a real customer send is governance-relevant. AUDIT-ONLY:
+        # this NEVER changes the return value; fail-soft so an audit error can't affect the send
+        # (Pillar 7 — the owner's authorized send is not held on an observability write).
+        if (
+            fast == "approved"
+            and approval_type in _CUSTOMER_SEND_APPROVAL_TYPES
+            and _has_skip_review_marker(text)
+        ):
+            _audit_owner_skip_review(tenant_id, approval_type)
         return fast
 
     # Money-safety: a customer-SEND approval never rides the LLM for an ambiguous reply. The
@@ -166,6 +200,53 @@ def resolve_decision_from_reply(
         # move a Pillar-7 gate. Leave paused.
         return None
     return decision
+
+
+def _has_skip_review_marker(text: str) -> bool:
+    """CD5 (§7D) — True iff the reply carries an EXPLICIT owner "skip the review, just send" waiver.
+
+    Detector for the audit record ONLY — never a decision input. Normalization (NFC + casefold +
+    apostrophe-strip) is kept in lockstep with ``classify_approval_reply`` so the markers match the
+    exact text the classifier read. GENERAL: a small set of review-waiving phrases (EN + Hinglish)
+    matched as substrings, not a match on the specific canary scenario string.
+    """
+    normalized = (
+        unicodedata.normalize("NFC", (text or "").casefold())
+        .replace("'", "")
+        .replace("’", "")
+    )
+    return any(marker in normalized for marker in _SKIP_REVIEW_MARKERS)
+
+
+def _audit_owner_skip_review(tenant_id: UUID | str, approval_type: str | None) -> None:
+    """CD5 (§7D) — emit the audit for an owner who explicitly WAIVED review on a customer SEND.
+
+    AUDIT-ONLY + FAIL-SOFT: the approval decision is unchanged and an audit failure must NEVER affect
+    it (Pillar 7 — the owner's authorized send is not held on an observability write). ``conn`` is
+    None (best-effort service-role write; ``emit_tm_audit``'s conn=None path already never raises),
+    and the whole call is additionally wrapped so an import/attr error can't escape either. PII-safe
+    (CL-390): the owner reply body is NEVER passed — only ``approval_type`` + structured facts.
+    """
+    try:
+        from orchestrator.observability.tm_audit import emit_tm_audit
+
+        emit_tm_audit(
+            event_layer="decides",
+            event_kind="owner_skip_review_authorized",
+            actor="team_manager",
+            tenant_id=tenant_id,
+            summary="owner explicitly waived human review on a customer send — decision HONORED, "
+            "audited (§7D); the >12-token ambiguity gate remains the safety floor",
+            decision={
+                "approval_type": approval_type,
+                "decision": "approved",
+                "review_waived": True,
+            },
+        )
+    except Exception:  # noqa: BLE001 — audit is never a gate on the owner's authorized send
+        logger.warning(
+            "CD5 skip-review audit emit failed (fail-soft) tenant=%s", tenant_id, exc_info=True
+        )
 
 
 def mark_approval_resolved(
