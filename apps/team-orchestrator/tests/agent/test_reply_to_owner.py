@@ -160,6 +160,44 @@ def test_counts_only_successful_prior_sends():
     assert mod._count_prior_sends(msgs) == 2
 
 
+# ── R3 — gate-swap visibility: sent_adjusted corrective result ───────────────────────────────────
+
+
+def test_gate_noop_returns_sent_byte_exact(monkeypatch, _patch_boundary):
+    """R3 — when the emission gate does NOT swap the body, the tool returns 'sent' byte-exact (the
+    prefix is load-bearing for _count_prior_sends + the dispatch scrape-skip)."""
+    monkeypatch.setattr(
+        "orchestrator.agent.emission_gate.apply_emission_gate", lambda body, tid: body
+    )
+    out = _call("A perfectly honest update with no completion claim at all.")
+    assert out == "sent"
+
+
+def test_gate_swap_delivers_honest_line_and_returns_sent_adjusted(monkeypatch, _patch_boundary):
+    """R3 — a gate SWAP (the brain claimed a completed action with no DB fact) still delivers the
+    honest line to the owner, but returns a corrective 'sent_adjusted' so the loop stops believing
+    its fabrication reached the owner. The 'sent' prefix keeps it counted by the per-turn cap."""
+    honest = "I haven't started on that yet — tell me to go ahead and I'll get on it."
+    monkeypatch.setattr(
+        "orchestrator.agent.emission_gate.apply_emission_gate", lambda body, tid: honest
+    )
+    out = _call("Done! Campaign bhej diya to 40 customers.")
+    assert out.startswith("sent_adjusted")
+    # the HONEST swapped line reached the owner, NOT the fabricated claim
+    _tenant, _recipient, delivered = _patch_boundary[0]
+    assert delivered == honest
+
+
+def test_sent_adjusted_still_counts_toward_the_per_turn_cap():
+    """R3 — 'sent_adjusted...' begins with 'sent', so _count_prior_sends counts it: a swapped reply
+    can't be retried into an infinite loop, but the loop can still CONTINUE (no terminal close)."""
+    msgs = [
+        SimpleNamespace(name="reply_to_owner", content="sent"),
+        SimpleNamespace(name="reply_to_owner", content="sent_adjusted: no DB record — do the work."),
+    ]
+    assert mod._count_prior_sends(msgs) == 2
+
+
 def test_reply_tool_already_sent_uses_in_process_fact():
     """VT-632 double-send/silence fix: the scrape-skip is decided from an in-process 'sent'
     ToolMessage in terminal_state (fail-CLOSED), not a fail-soft DB read."""

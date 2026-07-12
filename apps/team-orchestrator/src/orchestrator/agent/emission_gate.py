@@ -201,26 +201,113 @@ def _tokenize(text: str) -> list[str]:
     return [t for t in _SPLIT_RE.split(normalized) if t]
 
 
+# ── R2 (post-14-batch matcher batch) — false-positive guards on the honesty gate ────────────────
+# THIS BLOCK LOOSENS the completion/spend matchers with three SENTENCE-SCOPED exemptions. Each is a
+# distinct false-positive class the deterministic gate was mis-blocking as a fabrication:
+#   (a) a NEGATED send/spend verb ("nahi bheja", "kharch nahi karta") is a DENIAL of the action, not
+#       a claim it happened — positional binding, ported verbatim from owner_inputs/approval_reply.py;
+#   (b) a message directed TO THE OWNER ("sent you the connect link", "aapko … bhej diya") is about a
+#       link/plan the owner receives, not a customer send — voided the moment the sentence also names
+#       customers (a "…40 customers reached" clause is a real customer-send claim and MUST still block);
+#   (c) a SUBJECT-LESS bigram ("campaign/messages sent") preceded by an ability/future marker
+#       ("I can … sent automatically once you approve") is a capability statement, not a completed act.
+# Every guard is scoped to ONE sentence: a marker/exemption in sentence 1 can never exempt a bare
+# claim in sentence 2 (the merge-blocking invariant). The subject-FUL "I sent"/"maine bheja" assert a
+# past act outright and are NEVER owner/marker-exempted.
+_NEGATION = {
+    "no", "not", "never", "nah", "dont", "wont", "cant", "doesnt", "didnt",
+    "नहीं", "ना", "न", "मत", "nahi", "nahin", "mat",
+}
+# Hinglish/Devanagari send verbs whose ADJACENT negation flips "sent" into "didn't send". English
+# "sent" is deliberately excluded: a negated English completion ("not sent") can't form a completion
+# bigram anyway (the prefix would be "not", not i/ive/campaign/messages), and excluding it avoids
+# mis-reading a trailing new-clause "no" ("campaign sent, no issues") as binding the verb.
+_SEND_CLAIM_TOKENS = {"bhej", "bheja", "भेज"}
+# Subject-less completion bigrams — the only ones the ability-marker exemption (c) applies to.
+_SUBJECTLESS_BIGRAMS = {("campaign", "sent"), ("messages", "sent")}
+# Ability / conditional / future markers (apostrophes already stripped: "I'll" -> "ill"). Tight set.
+_ABILITY_MARKERS = {"can", "will", "ill", "once", "jab", "karunga", "karungi"}
+# Owner pronouns that mark a Hinglish/Devanagari send as directed TO THE OWNER.
+_OWNER_DIRECTED_HINGLISH = {"aapko", "tumhe", "tumhein", "आपको", "तुम्हें"}
+# Spend verbs whose adjacent negation flips a "spent"/"boosted" claim into a denial.
+_SPEND_CLAIM_NEG_TOKENS = {"kharch", "kharcha", "spent", "paid", "boost", "boosted"}
+
+
+def _adjacent_to_negation(token_list: list[str], target_set: set[str], neg_set: set[str]) -> bool:
+    """True iff some token in ``target_set`` has an IMMEDIATE neighbor (prev or next token) in
+    ``neg_set`` — positional negation-binding ("kharch nahi …" binds the spend verb; a non-adjacent
+    "nahi, … kharch kar diya" does not). Mirrors ``owner_inputs/approval_reply.py`` verbatim;
+    operates on already-tokenized/NFC-normalized tokens (Devanagari-safe)."""
+    for i, t in enumerate(token_list):
+        if t in target_set and (
+            (i > 0 and token_list[i - 1] in neg_set)
+            or (i + 1 < len(token_list) and token_list[i + 1] in neg_set)
+        ):
+            return True
+    return False
+
+
+def _sentence_is_owner_directed(tokens: list[str]) -> bool:
+    """True iff the sentence addresses the OWNER: an English "sent" with "you"/"u" within the next
+    ~3 tokens ("I've sent you the link"), or a Hinglish/Devanagari owner pronoun anywhere in it."""
+    for i, t in enumerate(tokens):
+        if t == "sent" and any(
+            tokens[j] in {"you", "u"} for j in range(i + 1, min(i + 4, len(tokens)))
+        ):
+            return True
+    return bool(set(tokens) & _OWNER_DIRECTED_HINGLISH)
+
+
+def _sentence_has_blocking_completion_claim(sentence: str) -> bool:
+    """True iff ONE sentence makes a NON-exempt send-completion claim (the R2 exemptions (a)/(b)/(c)
+    above applied within this sentence). A "sent to N" trigram is a customer send by construction —
+    never owner-exempt (only the ability-marker/negation guards can clear it)."""
+    tokens = _tokenize(sentence)
+    if len(tokens) < 2:
+        return False
+    tokset = set(tokens)
+    owner_directed = _sentence_is_owner_directed(tokens)
+    has_customer_ref = bool(tokset & _CUSTOMER_REF_TOKENS)
+    # (a) — a Hinglish/Devanagari send verb bound to an adjacent negation is a denial, sentence-wide.
+    if _adjacent_to_negation(tokens, _SEND_CLAIM_TOKENS, _NEGATION):
+        return False
+    for i in range(len(tokens) - 1):
+        bigram = (tokens[i], tokens[i + 1])
+        is_bigram = bigram in _COMPLETION_BIGRAMS
+        is_trigram = (
+            tokens[i] == "sent"
+            and tokens[i + 1] == "to"
+            and i + 2 < len(tokens)
+            and tokens[i + 2].isdigit()
+        )
+        if not (is_bigram or is_trigram):
+            continue
+        # (c) — a subject-less bigram with an ability/future marker BEFORE it is a capability.
+        if (
+            is_bigram
+            and bigram in _SUBJECTLESS_BIGRAMS
+            and any(tokens[j] in _ABILITY_MARKERS for j in range(i))
+        ):
+            continue
+        # (b) — owner-directed with no customer reference passes; the trigram never qualifies.
+        if owner_directed and not has_customer_ref and not is_trigram:
+            continue
+        return True
+    return False
+
+
 def contains_completion_claim(text: str) -> bool:
     """True iff ``text`` makes a send-COMPLETION claim (EN / Hinglish / Devanagari).
 
     Deliberately tight: matches adjacent-token bigrams anchored on an explicit send-completion
     phrase, plus the "sent to N" trigram (a count backs the claim). Bare "done" or "sent" alone
     never matches — those are common in perfectly honest replies ("Done!", "I've sent you the
-    plan") that make no claim about a customer/campaign send.
+    plan") that make no claim about a customer/campaign send. R2: evaluated per SENTENCE so the
+    owner-directed / ability-marker exemptions can never leak across a sentence boundary.
     """
-    tokens = _tokenize(text)
-    for i in range(len(tokens) - 1):
-        if (tokens[i], tokens[i + 1]) in _COMPLETION_BIGRAMS:
-            return True
-        if (
-            tokens[i] == "sent"
-            and tokens[i + 1] == "to"
-            and i + 2 < len(tokens)
-            and tokens[i + 2].isdigit()
-        ):
-            return True
-    return False
+    return any(
+        _sentence_has_blocking_completion_claim(s) for s in _split_sentences(text or "")
+    )
 
 
 def contains_phantom_promise(text: str) -> bool:
@@ -262,6 +349,11 @@ def contains_spend_completion_claim(text: str) -> bool:
     proposal or a bare cost mention never trips it. Devanagari-safe via ``_tokenize``."""
     tokens = _tokenize(text)
     if not tokens:
+        return False
+    # R2 (a) — an adjacent-negated spend verb is a DENIAL ("bina approval ke … kharch nahi karta" =
+    # "I never spend without your approval"), not a fabricated completion; never block an honest
+    # denial. A NON-adjacent negation ("nahi, ₹500 kharch kar diya") does NOT exempt (positional).
+    if _adjacent_to_negation(tokens, _SPEND_CLAIM_NEG_TOKENS, _NEGATION):
         return False
     hay = " " + " ".join(tokens) + " "
     if any(f" {phrase} " in hay for phrase in _SPEND_COMPLETION_PHRASES):
@@ -400,7 +492,31 @@ _REPLACEMENT_COPY: dict[str, dict[str, str]] = {
         "en": "I haven't started on that yet — tell me to go ahead and I'll get on it.",
         "hi": "Maine abhi is par kaam shuru nahi kiya — bataiye, aur main shuru kar deta hoon.",
     },
+    # R2 (d) — the fabricated-customer-DEBT block (Layer 3) gets its OWN schema-truth answer, NOT the
+    # task-framed "still working"/"haven't started" stall: there is no receivable / due / overdue
+    # concept in the schema (lapsed BUYERS, purchase history only), so the honest reply states what
+    # IS and ISN'T tracked. This is a SUBSTANTIVE answer (it answers the owner), so it is deliberately
+    # NOT part of INTERIM_REPLACEMENT_MARKERS below.
+    "receivables": {
+        "en": "I don't track customer payments or dues — I only see their purchase history.",
+        "hi": (
+            "Main customers ke payment ya udhaar track nahi karta — main sirf unki purchase "
+            "history dekh sakta hoon."
+        ),
+    },
 }
+
+# R3 — the gate-swap REPLACEMENT lines that are interim STALLS ("still working" generic / "haven't
+# started" not_started), NOT substantive answers. ``owner_surface/task_outcome._is_substantive_owner_
+# reply`` excludes these (lowercased substring match) so a gate-blocked stall the brain emitted can
+# never count as "the spawning turn was answered" and suppress the honest DF6 async closure — a
+# fabrication the gate swapped must not ALSO silence the eventual truthful notice. ``pending_approval``
+# and ``receivables`` ARE real answers to the owner, so they are deliberately EXCLUDED from this set.
+INTERIM_REPLACEMENT_MARKERS: tuple[str, ...] = tuple(
+    line.lower()
+    for kind in ("generic", "not_started")
+    for line in _REPLACEMENT_COPY[kind].values()
+)
 
 
 def _has_active_task(tenant_id: UUID | str) -> bool:
@@ -488,7 +604,9 @@ def apply_emission_gate(text: str, tenant_id: UUID | str) -> str:
         if contains_fabricated_debt_framing(text):
             from orchestrator.owner_surface.freeform_acks import resolve_owner_locale
 
-            replacement = _replacement_line(tenant_id, resolve_owner_locale(tenant_id))
+            # R2 (d) — the honest receivables line (schema truth), NOT the task-framed stall.
+            variants = _REPLACEMENT_COPY["receivables"]
+            replacement = variants.get(resolve_owner_locale(tenant_id)) or variants["en"]
             _emit_blocked_audit(tenant_id, text, event_kind="emission_fabricated_debt_blocked")
             return replacement
 
@@ -520,6 +638,7 @@ def apply_emission_gate(text: str, tenant_id: UUID | str) -> str:
 
 
 __all__ = [
+    "INTERIM_REPLACEMENT_MARKERS",
     "apply_emission_gate",
     "contains_completion_claim",
     "contains_fabricated_debt_framing",

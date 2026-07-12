@@ -167,7 +167,13 @@ def reply_to_owner(text: str, state: Annotated[dict[str, Any], InjectedState]) -
     # (kills the fabrication as a CLASS, not just the one observed case).
     from orchestrator.agent.emission_gate import apply_emission_gate
 
-    body = apply_emission_gate(body, tenant_id)
+    gated = apply_emission_gate(body, tenant_id)
+    # R3 — did the gate SWAP the body (a completion/spend/debt claim it couldn't back)? If so we
+    # still deliver the honest line to the owner, but the loop must NOT believe its own fabrication
+    # reached them — return a corrective ``sent_adjusted`` result below so the brain does the work or
+    # states the true status instead of re-claiming "done".
+    gate_swapped = gated != body
+    body = gated
 
     # Recipient resolved SERVER-SIDE — the model never supplies a number.
     recipient = _resolve_owner_phone(tenant_id)
@@ -188,6 +194,16 @@ def reply_to_owner(text: str, state: Annotated[dict[str, Any], InjectedState]) -
         )
 
     logger.info("VT-632: reply_to_owner delivered (tenant=%s len=%d)", tenant_id, len(body))
+    if gate_swapped:
+        # R3 — the honest line WAS delivered (above), but the brain's original claim was a fabrication
+        # with no matching DB record. Prefix is DELIBERATELY "sent" so ``_count_prior_sends`` still
+        # counts this toward the per-turn cap (a swapped reply can't be retried into an infinite loop);
+        # the rest tells the loop to progress rather than re-assert the false "done".
+        return (
+            "sent_adjusted: your reply claimed a completed action but NO matching DB record exists, "
+            "so an honest status line was sent to the owner instead. Do the work now (delegate/act) "
+            "or state the TRUE status — do not repeat the claim that it is done."
+        )
     return "sent"
 
 
