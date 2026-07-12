@@ -174,9 +174,10 @@ def test_send_fact_exists_fails_closed_on_db_error(monkeypatch):
 # ── apply_emission_gate — replacement selection + never-raise contract ─────────────────
 
 
-def _patch_facts(monkeypatch, *, fact: bool, pending: bool, locale: str = "en"):
+def _patch_facts(monkeypatch, *, fact: bool, pending: bool, active: bool = False, locale: str = "en"):
     monkeypatch.setattr(mod, "send_fact_exists", lambda t: fact)
     monkeypatch.setattr(mod, "_has_open_approval", lambda t: pending)
+    monkeypatch.setattr(mod, "_has_active_task", lambda t: active)
     monkeypatch.setattr(
         "orchestrator.owner_surface.freeform_acks.resolve_owner_locale", lambda t: locale
     )
@@ -212,16 +213,31 @@ def test_claim_without_fact_replaced_with_pending_approval_line_hi(monkeypatch):
     assert out == mod._REPLACEMENT_COPY["pending_approval"]["hi"]
 
 
-def test_claim_without_fact_and_no_pending_approval_uses_generic_line_en(monkeypatch):
-    _patch_facts(monkeypatch, fact=False, pending=False, locale="en")
+def test_claim_without_fact_no_approval_but_active_task_uses_generic_line_en(monkeypatch):
+    # cluster-4c: a task IS running -> "still working" is honest.
+    _patch_facts(monkeypatch, fact=False, pending=False, active=True, locale="en")
     out = mod.apply_emission_gate("I sent it already.", TENANT)
     assert out == mod._REPLACEMENT_COPY["generic"]["en"]
 
 
-def test_claim_without_fact_and_no_pending_approval_uses_generic_line_hi(monkeypatch):
-    _patch_facts(monkeypatch, fact=False, pending=False, locale="hi")
+def test_claim_without_fact_no_approval_but_active_task_uses_generic_line_hi(monkeypatch):
+    _patch_facts(monkeypatch, fact=False, pending=False, active=True, locale="hi")
     out = mod.apply_emission_gate("I sent it already.", TENANT)
     assert out == mod._REPLACEMENT_COPY["generic"]["hi"]
+
+
+def test_claim_without_fact_no_approval_no_active_task_uses_not_started_line_en(monkeypatch):
+    # cluster-4c (consent_natural / routing_db_proof): NOTHING is running -> "still working" would
+    # be a false stall; ship the honest "haven't started" line instead.
+    _patch_facts(monkeypatch, fact=False, pending=False, active=False, locale="en")
+    out = mod.apply_emission_gate("I sent it already.", TENANT)
+    assert out == mod._REPLACEMENT_COPY["not_started"]["en"]
+
+
+def test_claim_without_fact_no_approval_no_active_task_uses_not_started_line_hi(monkeypatch):
+    _patch_facts(monkeypatch, fact=False, pending=False, active=False, locale="hi")
+    out = mod.apply_emission_gate("I sent it already.", TENANT)
+    assert out == mod._REPLACEMENT_COPY["not_started"]["hi"]
 
 
 def test_gate_blocked_audit_carries_hash_not_text(monkeypatch):
@@ -278,8 +294,11 @@ def test_send_fact_read_error_still_yields_honest_replacement(monkeypatch):
     )
     monkeypatch.setattr("orchestrator.observability.tm_audit.emit_tm_audit", lambda **k: None)
 
+    # The fact-read AND the active-task read both error (both go through tenant_connection); the
+    # gate still swaps to an honest line — not_started (the fail-closed side: never claim work that
+    # isn't happening) — rather than passing the fabricated claim through.
     out = mod.apply_emission_gate("I sent it already.", TENANT)
-    assert out == mod._REPLACEMENT_COPY["generic"]["en"]
+    assert out == mod._REPLACEMENT_COPY["not_started"]["en"]
 
 
 # ── #58 (T7) contains_phantom_promise truth table ──────────────────────────────────────────
@@ -370,12 +389,14 @@ def test_completion_claim_layer_precedes_phantom_strip(monkeypatch):
     # WHOLE message, so we never reach the strip.
     monkeypatch.setattr(mod, "send_fact_exists", lambda t: False)
     monkeypatch.setattr(mod, "_has_open_approval", lambda t: False)
+    monkeypatch.setattr(mod, "_has_active_task", lambda t: False)
     monkeypatch.setattr(
         "orchestrator.owner_surface.freeform_acks.resolve_owner_locale", lambda t: "en"
     )
     monkeypatch.setattr(mod, "_emit_blocked_audit", lambda *a, **k: None)
     out = mod.apply_emission_gate("I sent it. I'll follow up shortly.", TENANT)
-    assert out == mod._REPLACEMENT_COPY["generic"]["en"]
+    # Layer-1 swapped the WHOLE message (not the phantom-stripped text) — no active task -> not_started.
+    assert out == mod._REPLACEMENT_COPY["not_started"]["en"]
 
 
 def test_true_send_claim_still_strips_trailing_phantom_promise(monkeypatch):
