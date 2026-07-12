@@ -24,7 +24,15 @@ _RECIP = "+919811112222"
 def spies(monkeypatch):
     """Patch the lazily-imported mint/DB deps; record calls. read_integration_state defaults to
     None (first contact). Tests override it for the live-pending case."""
-    calls = {"sheets": 0, "shopify": 0, "sends": [], "state": None, "connected": False}
+    calls = {
+        "sheets": 0,
+        "shopify": 0,
+        "sends": [],
+        "state": None,
+        "connected": False,
+        "last_sync": None,  # DF1(c): _last_sync_at DB truth (datetime or None)
+        "window": [],  # DF1(d): conversation_log.active_window() turns for context-resolve
+    }
 
     monkeypatch.setattr(
         "orchestrator.integrations.sheets_oauth.start_sheets_oauth",
@@ -47,6 +55,12 @@ def spies(monkeypatch):
     # (tenant_oauth_tokens OR healthy tenant_connector_status) — default not connected.
     monkeypatch.setattr(
         fc, "_connected_or_healthy", lambda tenant_id, provider: calls["connected"]
+    )
+    # DF1(c): the freshness gate reads tenant_connector_status.last_sync_at via _last_sync_at.
+    monkeypatch.setattr(fc, "_last_sync_at", lambda tenant_id, provider: calls["last_sync"])
+    # DF1(d): _resolve_provider_from_context scans the conversation window via active_window.
+    monkeypatch.setattr(
+        "orchestrator.conversation_log.active_window", lambda tenant_id, **k: calls["window"]
     )
     return calls
 
@@ -309,3 +323,134 @@ def test_bare_capability_question_falls_through(spies):
     data-pull -> falls through (never the not-connected honesty branch)."""
     res = _run("can you map fields?")
     assert res is None
+
+
+# ----------------------------- DF1(c): sync-freshness pushback (DB-truth, no invented date) ------
+def test_sync_pushback_connected_with_timestamp_states_db_truth(spies):
+    """A freshness pushback ('are you sure? I haven't seen new numbers') on a CONNECTED sheet states
+    the REAL tenant_connector_status.last_sync_at — never an invented date (reconnect_broken_sync)."""
+    from datetime import datetime
+
+    spies["connected"] = True
+    spies["last_sync"] = datetime(2026, 7, 10, 14, 30)
+    res = _run("are you sure bhaiya? I haven't seen new numbers on my google sheet in days")
+    assert res is not None and res["routed"] == "connector_sync_freshness_answered"
+    assert res["phase"] == "sync_freshness_answer"
+    assert spies["sheets"] == 0, "a freshness answer must NOT mint an OAuth link"
+    reply = spies["sends"][-1]
+    assert "10 Jul 2026, 14:30" in reply, "must state the REAL DB last_sync, not an invented date"
+    assert "https://" not in reply
+    assert "re-authorize" in reply.lower(), "offers a re-check/re-auth"
+
+
+def test_sync_pushback_connected_no_timestamp_honest_admit_no_date(spies):
+    """Connected but the DB holds no last_sync_at -> HONESTLY admit there's no reliable sync time +
+    offer re-check/re-auth. Must NOT compose any date literal."""
+    spies["connected"] = True
+    spies["last_sync"] = None
+    res = _run("are you sure? kuch nahi aaya from my google sheet")
+    assert res is not None and res["routed"] == "connector_sync_freshness_answered"
+    reply = spies["sends"][-1].lower()
+    assert "reliable last-sync time" in reply
+    assert "2026" not in reply and "jul" not in reply, "no fabricated date when the DB has none"
+    assert "re-check" in reply or "re-authorize" in reply
+
+
+def test_sync_pushback_resolves_provider_from_window(spies):
+    """The pushback names no provider in-message -> the gate resolves it from an explicit prior
+    conversation mention, then answers from DB truth."""
+    from datetime import datetime
+
+    spies["connected"] = True
+    spies["last_sync"] = datetime(2026, 7, 9, 9, 0)
+    spies["window"] = [{"role": "owner", "text": "I want to connect my Google Sheet for orders"}]
+    res = _run("are you sure? I haven't seen new numbers come through")
+    assert res is not None and res["routed"] == "connector_sync_freshness_answered"
+    reply = spies["sends"][-1]
+    assert "Google Sheet" in reply
+    assert "09 Jul 2026, 09:00" in reply
+
+
+def test_sync_pushback_not_connected_falls_through(spies):
+    """Tight gate: a freshness pushback on a provider that ISN'T connected on our side falls through
+    (no honest-status to give here) — proves the connected conjunct."""
+    spies["connected"] = False
+    res = _run("are you sure? I haven't seen new numbers on my google sheet")
+    assert res is None
+    assert spies["sheets"] == 0 and not spies["sends"]
+
+
+def test_sync_pushback_unresolvable_provider_falls_through(spies):
+    """No in-message provider and nothing to resolve from context -> the gate can't ground an answer
+    -> falls through (proves the provider conjunct)."""
+    spies["connected"] = True
+    spies["window"] = []
+    res = _run("are you sure? I haven't seen new numbers come through")
+    assert res is None
+    assert not spies["sends"]
+
+
+def test_bare_are_you_sure_no_data_absence_does_not_fire(spies):
+    """Precision: a bare doubt ('are you sure about that?') with NO data-absence phrasing must NOT
+    fire the freshness gate even on a connected provider — it falls through to the brain."""
+    spies["connected"] = True
+    res = _run("are you sure about my google sheet?")
+    assert res is None
+    assert not spies["sends"]
+
+
+# ----------------------------- DF1(d): provider-resolve-from-context ------------------------------
+def test_provider_resolve_from_integration_state_mints(spies):
+    """A connect imperative with NO in-message provider ('connect it again') resolves the provider
+    from tenant_integration_state.current_connector_id, then mints."""
+    spies["state"] = {
+        "phase": "phase_2_auth",
+        "current_connector_id": "google_sheet",
+        "pending_owner_input": None,  # not a LIVE flow -> mints (no double-mint guard trip)
+    }
+    res = _run("connect it again please, use the same one you already have")
+    assert res is not None and res["routed"] == "sheets_first_contact_minted"
+    assert spies["sheets"] == 1
+    assert any("accounts.google.com" in s for s in spies["sends"])
+
+
+def test_provider_resolve_from_conversation_window_mints(spies):
+    """No provider in-message and no integration-state -> resolves from an explicit prior
+    conversation mention, then mints."""
+    spies["state"] = None
+    spies["window"] = [{"role": "owner", "text": "please connect my google sheet"}]
+    res = _run("connect it again please")
+    assert res is not None and res["routed"] == "sheets_first_contact_minted"
+    assert spies["sheets"] == 1
+
+
+def test_provider_resolve_shopify_from_state_kicks_discovery(spies):
+    spies["state"] = {
+        "phase": "phase_1_discovery",
+        "current_connector_id": "shopify",
+        "pending_owner_input": None,
+    }
+    res = _run("connect it again")
+    assert res is not None and res["routed"] == "shopify_first_contact_discovery"
+    assert spies["shopify"] == 1
+    assert spies["sheets"] == 0
+
+
+def test_provider_resolve_no_context_falls_through(spies):
+    """A connect imperative with no in-message provider and nothing resolvable from context -> None
+    (fail-open, unchanged from before the rail)."""
+    spies["state"] = None
+    spies["window"] = []
+    res = _run("connect it again please")
+    assert res is None
+    assert spies["sheets"] == 0 and spies["shopify"] == 0
+
+
+def test_bare_google_mention_does_not_resolve(spies):
+    """A bare 'Google' in prior context must NOT broaden to google_sheet (no in-message provider
+    either) -> falls through. Guards against over-eager provider inference."""
+    spies["state"] = None
+    spies["window"] = [{"role": "owner", "text": "had to log into Google again this morning"}]
+    res = _run("connect it again")
+    assert res is None
+    assert spies["sheets"] == 0
