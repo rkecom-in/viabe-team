@@ -56,6 +56,10 @@ class TriageSeamResult:
     outcome: str | None
     task_id: UUID | None
     skip_legacy_dispatch: bool
+    # Shared infra (D2/D3) — a deterministic in-turn reply the seam wants the runner to SEND this
+    # turn (the seam is a plain fn inside a @DBOS.workflow, so it must NOT send itself — a naked send
+    # would double-fire on replay). None (default) keeps every existing construction byte-compatible.
+    direct_reply_text: str | None = None
 
 
 _NO_OP = TriageSeamResult(outcome=None, task_id=None, skip_legacy_dispatch=False)

@@ -38,6 +38,18 @@ def test_legacy_mode_no_op_result_is_a_singleton() -> None:
     assert result is ts._NO_OP
 
 
+def test_triage_seam_result_direct_reply_defaults_none() -> None:
+    """Shared infra (Step 1) — the new direct_reply_text field defaults None so every existing
+    3-arg construction stays byte-compatible, and _NO_OP carries no reply."""
+    r = ts.TriageSeamResult(outcome=None, task_id=None, skip_legacy_dispatch=False)
+    assert r.direct_reply_text is None
+    assert ts._NO_OP.direct_reply_text is None
+    r2 = ts.TriageSeamResult(
+        outcome="new_task", task_id=None, skip_legacy_dispatch=True, direct_reply_text="hello"
+    )
+    assert r2.direct_reply_text == "hello"
+
+
 def test_legacy_mode_default_when_no_explicit_mode(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("TEAM_MANAGER_LOOP_MODE", raising=False)
     called = {"n": 0}
