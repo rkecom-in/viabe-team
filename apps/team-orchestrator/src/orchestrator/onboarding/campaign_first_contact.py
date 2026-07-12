@@ -56,6 +56,21 @@ _CAMPAIGN_NOUN_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Ad-hijack guard: an EXTERNAL paid-ad ask ("run a Facebook ad campaign for me") carries an
+# ad-platform token + the generic "campaign" noun, but it is NOT a win-back — it must fall through
+# to the brain (which offers to draft the ad copy), never get the win-back no-data reply (a
+# non-sequitur). So when an ad-platform token is present, the net fires ONLY if a genuine RECOVERY
+# noun is also present (win-back / lapsed / dormant / re-engage / re-activation) — the bare
+# "campaign"/"outreach" noun no longer qualifies. A real win-back ("run a win-back campaign for my
+# lapsed customers") has no ad-platform token, so it is unaffected.
+_AD_PLATFORM_TOKEN_RE = re.compile(
+    r"\b(facebook|fb|instagram|insta|ig|meta|google|youtube|yt)\b", re.IGNORECASE
+)
+_RECOVERY_NOUN_RE = re.compile(
+    r"\b(win[\s-]*back|winback|re[\s-]*engage(?:ment)?|re[\s-]*activation|lapsed|dormant)\b",
+    re.IGNORECASE,
+)
+
 # An imperative is a COMMAND, not a QUESTION. A status/how-to question ("how many lapsed customers
 # do I have?", "did you send the campaign?") often carries the same VERB∧NOUN tokens but must NOT
 # trigger the net — it routes to the brain to be ANSWERED, not dispatched. A leading interrogative
@@ -86,7 +101,14 @@ def is_campaign_plan_imperative(text: str) -> bool:
         # A question is never an imperative — route it to the brain to be answered, not dispatched.
         if text.strip().endswith("?") or _INTERROGATIVE_LEAD_RE.match(text):
             return False
-        return bool(_CAMPAIGN_VERB_RE.search(text) and _CAMPAIGN_NOUN_RE.search(text))
+        if not (_CAMPAIGN_VERB_RE.search(text) and _CAMPAIGN_NOUN_RE.search(text)):
+            return False
+        # Ad-hijack guard: an external paid-ad ask ("run a Facebook ad campaign") matches VERB∧NOUN
+        # on the generic "campaign", but it is NOT a win-back — fall through to the brain unless a
+        # genuine recovery noun (win-back/lapsed/dormant/re-engage) is present.
+        if _AD_PLATFORM_TOKEN_RE.search(text) and not _RECOVERY_NOUN_RE.search(text):
+            return False
+        return True
     except Exception:  # noqa: BLE001 — a detector failure must never block the turn (fail-open)
         logger.warning("D3 is_campaign_plan_imperative failed (fail-open -> False)", exc_info=True)
         return False
