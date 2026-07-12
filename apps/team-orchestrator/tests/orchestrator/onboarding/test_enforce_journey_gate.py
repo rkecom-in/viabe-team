@@ -41,6 +41,18 @@ def spies(monkeypatch):
         "orchestrator.onboarding.journey.maybe_handle_journey_reply",
         lambda tenant_id, body, sid, recipient: calls["walker"].append(body) or {"done": False},
     )
+
+    # R9 item 3 — the DF4 connect-offer marker writes to onboarding_journey (no DB here). Stub it to
+    # persist the marker IN the mock journey's answers so a two-turn disambiguation test is realistic
+    # (and existing single-turn menu tests never touch the DB).
+    def _mark_offer(tenant_id, message_sid=None):
+        j = calls["journey"]
+        if isinstance(j, dict):
+            j.setdefault("answers", {})["__connect_offer_at__"] = "true"
+
+    monkeypatch.setattr(
+        "orchestrator.onboarding.journey._set_connect_offer_marker", _mark_offer
+    )
     monkeypatch.setattr(
         "orchestrator.owner_surface.freeform_acks.resolve_owner_locale", lambda tenant_id: "en"
     )
@@ -133,7 +145,30 @@ def test_setup_status_ask_answered_deterministically_active(spies):
     assert len(spies["sends"]) == 1
     sent = spies["sends"][0]
     assert "Not quite yet" in sent
-    assert "What do you sell?" in sent, "the honest status carries the pending question"
+    # R9 item 2 — the status NAMES the need with a short label; it does NOT re-paste the verbatim
+    # prompt sentence (a verbatim repeat reads as a loop_stall), and pluralizes 'detail'.
+    assert "what you sell or do" in sent.lower(), "the status names the pending need with a short label"
+    assert "What do you sell?" not in sent, "must NOT re-paste the verbatim prompt sentence"
+    assert "1 quick detail to go" in sent, "one remaining → singular 'detail'"
+
+
+def test_setup_status_ask_pluralizes_multiple_remaining(spies):
+    # R9 item 2 — two remaining details → plural 'details', still a short need label (the cursor head).
+    spies["journey"] = {
+        "status": "active",
+        "question_queue": [
+            {"field": "about", "prompt_en": "What do you sell?", "prompt_hi": ""},
+            {"field": "city", "prompt_en": "Which city?", "prompt_hi": ""},
+        ],
+        "cursor": 0,
+        "answers": {},
+        "skipped": [],
+    }
+    res = _run("are we set up now?")
+    assert res is not None and res["routed_kind"] == "journey_status"
+    sent = spies["sends"][0]
+    assert "2 quick details to go" in sent, "two remaining → plural 'details'"
+    assert "what you sell or do" in sent.lower()
 
 
 def test_setup_status_ask_completed_journey_states_fact_no_pitch(spies):
@@ -190,12 +225,16 @@ def _active_confirm_journey() -> dict:
     }
 
 
-def test_confirm_contradiction_routes_to_brain(spies):
-    # A rich, NON-bare correction on a confirm head → None (brain), NOT the walker (which would record
-    # the whole sentence as the business_type value).
+def test_confirm_contradiction_routes_to_walker(spies):
+    # R9 item 4 — a rich, NON-bare correction on a confirm head now DELEGATES to the walker, whose
+    # own DF7(b) branch (journey.handle_reply → _reprompt_after_no) re-prompts it deterministically
+    # (measured 3/3 vs the brain's 2/3 wrong re-assertion). It is no longer forked to the brain.
     spies["journey"] = _active_confirm_journey()
-    assert _run("nahi bhai hum footwear nahi bechte, hum leather bags bechte hain") is None
-    assert spies["walker"] == [], "the rich correction must not hit the scripted walker"
+    res = _run("nahi bhai hum footwear nahi bechte, hum leather bags bechte hain")
+    assert res is not None
+    assert spies["walker"] == ["nahi bhai hum footwear nahi bechte, hum leather bags bechte hain"], (
+        "the rich confirm-contradiction now delegates to the walker (handle_reply owns DF7(b))"
+    )
 
 
 def test_bare_no_on_confirm_still_goes_to_walker(spies):
@@ -224,7 +263,9 @@ def test_remaining_needs_answered_from_row_before_brain(spies):
     assert spies["walker"] == []
     assert len(spies["sends"]) == 1
     sent = spies["sends"][0]
-    assert "Not quite yet" in sent and "What do you sell?" in sent
+    # R9 item 2 — names the need with a short label, never the verbatim prompt sentence.
+    assert "Not quite yet" in sent and "what you sell or do" in sent.lower()
+    assert "What do you sell?" not in sent
 
 
 # --- DF4 — post-profile connect beat (completed journey, paced flow) -----------------------
@@ -262,6 +303,27 @@ def test_ready_asked_affirm_offers_connect_menu(spies, monkeypatch, _no_live_res
     sent = spies["sends"][0]
     assert "Shopify" in sent and "Google Sheet" in sent, "must be a MENU, both options named"
     assert "myshopify.com" in sent
+
+
+def test_ready_asked_second_connect_intent_disambiguates_not_repeat(spies, monkeypatch, _no_live_resume):
+    # R9 item 3 — a FIRST connect-intent with no store domain → the two-option menu (marker set). A
+    # SECOND connect-intent with STILL no domain → a short non-byte-equal disambiguation, NOT the
+    # identical menu (a verbatim repeat reads as a loop_stall). The spies fixture persists the marker.
+    spies["journey"] = _completed_flow_journey("ready_asked")
+    monkeypatch.setattr(
+        "orchestrator.onboarding.journey._recent_shop_domain",
+        lambda tid, current_body=None: None,
+    )
+    res1 = _run("Yes let's connect")
+    assert res1 is not None and res1["routed_kind"] == "journey_connect_offer"
+    menu = spies["sends"][-1]
+    assert "Shopify" in menu and "Google Sheet" in menu, "first turn is the full menu"
+
+    res2 = _run("come on, connect it na")
+    assert res2 is not None and res2["routed_kind"] == "journey_connect_offer"
+    disamb = spies["sends"][-1]
+    assert disamb != menu, "the second connect-intent must NOT re-send the byte-identical menu"
+    assert "which do you have" in disamb.lower(), "the second turn is the short disambiguation"
 
 
 def test_ready_asked_affirm_with_domain_offers_onetap_link(spies, monkeypatch, _no_live_resume):

@@ -79,6 +79,21 @@ def _is_bare_greeting(body: str) -> bool:
     return bool(toks) and toks <= _GREETING
 
 
+def _is_kickoff_token(body: str) -> bool:
+    """Hardening (efficient_collection diagnosis): a token-exact kickoff-button body ("complete
+    setup") arriving MID-journey is a re-TAP of the "Complete Setup" quick-reply, NOT an answer —
+    recording it would pollute the in-flight field (a real-prod exposure). Treat it as a NON-ANSWER
+    like ``_is_bare_greeting``: re-present the pending question WITHOUT recording/advancing. Reuses
+    the enforce gate's ``_norm``/``_KICKOFF_TOKEN`` (lazy import — enforce_journey_gate imports this
+    module, so a top-level import would cycle). Fail-soft: any error → False (never block a reply)."""
+    try:
+        from orchestrator.onboarding.enforce_journey_gate import _KICKOFF_TOKEN, _norm
+
+        return _norm(body) == _KICKOFF_TOKEN
+    except Exception:  # noqa: BLE001 — hardening only; a resolution hiccup must never block the reply
+        return False
+
+
 # --- VT-576 / CL-2026-07-03: the PACED post-profile flow -------------------------------------------
 #
 # After profile-confirm the journey does NOT dump a 4-message burst (card + Shopify pitch + summary +
@@ -127,6 +142,28 @@ def _set_flow(tenant_id: UUID | str, flow: str, *, message_sid: str | None = Non
             "    last_message_sid = COALESCE(%s, last_message_sid), updated_at = now() "
             "WHERE tenant_id = %s",
             (Jsonb(flow), message_sid, str(tenant_id)),
+        )
+
+
+# DF4 (R9 item 3) — a namespaced marker recording that the post-profile CONNECT MENU has already been
+# offered once (set by the enforce gate's connect beat). On a SECOND connect-intent turn with still no
+# store domain, the gate sends a short disambiguation instead of the byte-identical menu (a verbatim
+# repeat reads as a loop_stall). Lives IN ``answers`` on the COMPLETED journey row alongside ``__flow__``
+# (the ``__``-prefixed bookkeeping idiom turn_brain strips); never a real field / queued question.
+_CONNECT_OFFER_MARKER = "__connect_offer_at__"
+
+
+def _set_connect_offer_marker(tenant_id: UUID | str, *, message_sid: str | None = None) -> None:
+    """Stamp the ``__connect_offer_at__`` marker (a truthy sentinel) on the completed journey row via
+    jsonb_set so the rest of ``answers`` is preserved (mirrors ``_set_flow``; never touches
+    ``__flow__``). Best-effort; the row is 'complete' so this never races the active question-walk."""
+    with tenant_connection(tenant_id) as conn:
+        conn.execute(
+            "UPDATE onboarding_journey "
+            "SET answers = jsonb_set(coalesce(answers, '{}'::jsonb), '{__connect_offer_at__}', 'true'::jsonb), "
+            "    last_message_sid = COALESCE(%s, last_message_sid), updated_at = now() "
+            "WHERE tenant_id = %s",
+            (message_sid, str(tenant_id)),
         )
 
 
@@ -415,6 +452,24 @@ def _reprompt_gap_after_affirm(q: dict[str, Any]) -> dict[str, Any]:
     return {"reply_en": en, "reply_hi": hi, "done": False, "re_present": True}
 
 
+# R9 item 1 — a deterministic defer-ACK prefixed to the NEXT question when the owner SKIPS one, so a
+# skip is acknowledged ("no problem, later") rather than silently jumping to the next ask (the
+# onboarding_defer_field scenarios: an explicit "skip" / "abhi chodo yaar, baad mein bataunga" got no
+# acknowledgement). EN + HI; prefixed only on the next-question path (never on the completion closer).
+_DEFER_ACK = {
+    "en": "No problem — we'll come back to that later.",
+    "hi": "Theek hai — woh baad mein le lenge.",
+}
+
+
+def _prefix_defer_ack(reply: dict[str, Any]) -> dict[str, Any]:
+    """Prefix the deterministic skip defer-ack to a next-question reply (both locales), space-joined
+    and stripped so an empty ``reply_hi`` degrades cleanly to the ack alone."""
+    reply["reply_en"] = f"{_DEFER_ACK['en']} {reply.get('reply_en', '')}".strip()
+    reply["reply_hi"] = f"{_DEFER_ACK['hi']} {reply.get('reply_hi', '')}".strip()
+    return reply
+
+
 def handle_reply(
     tenant_id: UUID | str, body: str, message_sid: str | None, *, lang: str = "en"
 ) -> dict[str, Any]:
@@ -442,7 +497,7 @@ def handle_reply(
     q = _current(g)
     if q is None:
         _complete(tenant_id)
-        return _completion_message()
+        return _completion_message(g.get("answers"))
 
     toks = _tokens(body)
     field = q.get("field")
@@ -463,6 +518,10 @@ def handle_reply(
     if not is_skip and _is_bare_greeting(body):
         # A bare greeting → acknowledge + re-present the SAME question (the owner just said hi).
         return _greet_then_question(q)
+    if not is_skip and _is_kickoff_token(body):
+        # R9 item 6 — a re-tapped "Complete Setup" button mid-journey is NOT an answer (it would
+        # pollute the in-flight field). Re-present the pending question WITHOUT recording/advancing.
+        return {**_current_q_reply(q), "re_present": True}
     if not is_skip and is_bare_no_confirm:
         # VT-569a — a bare "no" to a confirm → ask for the correct value, NOT the identical prompt
         # (the live dead-end). Deterministic; holds even with the turn-brain off / LLM unavailable.
@@ -548,8 +607,12 @@ def handle_reply(
     nxt = _current(g2) if g2 else None
     if nxt is None:
         _complete(tenant_id)
-        return _completion_message()
-    return {"reply_en": nxt.get("prompt_en", ""), "reply_hi": nxt.get("prompt_hi", ""), "done": False}
+        return _completion_message(answers)
+    reply = {"reply_en": nxt.get("prompt_en", ""), "reply_hi": nxt.get("prompt_hi", ""), "done": False}
+    if is_skip:
+        # R9 item 1 — acknowledge the skip before the next ask (never on the completion closer above).
+        reply = _prefix_defer_ack(reply)
+    return reply
 
 
 def _advance(tenant_id, cursor, answers, skipped, message_sid) -> None:
@@ -811,10 +874,47 @@ def _emit_gap4_seam(tenant_id) -> None:
         logger.exception("journey: gap4 seam emit failed tenant=%s", tenant_id)
 
 
-def _completion_message() -> dict[str, Any]:
+# R9 item 5 — the key captured fields recapped at completion (capture-proof: the owner SEES what
+# landed; also softens the "did you get all that?" class). Ordered; business_type/category collapse
+# to ONE business line so a tenant with both doesn't get a doubled recap.
+_RECAP_FIELDS = ("business_type", "category", "city", "about")
+
+
+def _completion_recap(answers: dict[str, Any] | None) -> tuple[str, str]:
+    """Build a one-line recap fragment (EN, HI) of the KEY captured fields for the completion message.
+    Empty answers (or no recap-worthy field) → ("", "") so the closer falls back to today's copy
+    byte-identically. Values are the owner's own words; ``__``-sentinels are never among ``_RECAP_FIELDS``."""
+    if not answers:
+        return "", ""
+    vals: list[str] = []
+    business_seen = False
+    for field in _RECAP_FIELDS:
+        v = answers.get(field)
+        if not (isinstance(v, str) and v.strip()):
+            continue
+        if field in ("business_type", "category"):
+            if business_seen:
+                continue  # only one business line even if both are present
+            business_seen = True
+        vals.append(v.strip())
+    vals = vals[:3]  # keep the recap to one short line
+    if not vals:
+        return "", ""
+    joined = ", ".join(vals)
+    return f" Here's what I've noted: {joined}.", f" मैंने यह नोट किया: {joined}।"
+
+
+def _completion_message(answers: dict[str, Any] | None = None) -> dict[str, Any]:
+    recap_en, recap_hi = _completion_recap(answers)
     return {
-        "reply_en": "Thanks — that's everything we need to get started. We're setting up your assistant now.",
-        "reply_hi": "धन्यवाद — शुरू करने के लिए हमें इतना ही चाहिए था। हम आपका असिस्टेंट अभी तैयार कर रहे हैं।",
+        "reply_en": (
+            f"Thanks — that's everything we need to get started.{recap_en} "
+            "We're setting up your assistant now."
+        ),
+        "reply_hi": (
+            f"धन्यवाद — शुरू करने के लिए हमें इतना ही चाहिए था।{recap_hi} "
+            "हम आपका असिस्टेंट अभी तैयार कर रहे हैं।"
+        ),
         "done": True,
     }
 
@@ -1485,7 +1585,7 @@ def _handle_reply_with_turn_brain(
             reply = plan.reply_text
             buttons = list(plan.buttons)
         else:
-            completion = _completion_message()
+            completion = _completion_message(answers)
             reply = completion["reply_hi"] if lang == "hi" else completion["reply_en"]
             buttons = []
         # VT-569 memory: persist this exchange so any later conversation sees it.

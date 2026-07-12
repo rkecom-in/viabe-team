@@ -527,6 +527,80 @@ def test_handle_reply_confirm_rejection_sentence_represents(substrate):  # type:
     assert _canonical_profile_attributes(substrate.dsn, tenant) is None
 
 
+# --- R9 — walker batch (skip defer-ack, kickoff-token non-answer, completion recap) --------------
+
+
+@pytest.mark.parametrize("skip_body", ["skip", "abhi chodo yaar, baad mein bataunga"])
+def test_handle_reply_skip_prefixes_defer_ack_then_next_question(substrate, skip_body):  # type: ignore[no-untyped-def]
+    """R9 item 1: a SKIP (explicit 'skip' or the Hinglish 'abhi chodo yaar, baad mein bataunga') is
+    acknowledged with a deterministic defer-ack PREFIXED to the next question — never a silent jump."""
+    from orchestrator.onboarding import journey
+
+    tenant = _new_tenant(substrate.dsn, name="skip defer-ack")
+    journey.start_journey(tenant, [_confirm_q("business_type", "footwear"), _gap_q("operating_hours")])
+
+    r = journey.handle_reply(tenant, skip_body, "SM-skip-ack-1")
+    assert r["done"] is False
+    assert r["reply_en"].startswith(journey._DEFER_ACK["en"]), "the skip is acknowledged first"
+    assert "operating_hours" in r["reply_en"], "the ack is followed by the NEXT question"
+    assert r["reply_hi"].startswith(journey._DEFER_ACK["hi"])
+
+    g = journey.get_journey(tenant)
+    assert g is not None
+    assert "business_type" in g["skipped"], "the field was skipped"
+    assert "business_type" not in g["answers"], "a skip is not an answer"
+    assert g["cursor"] == 1, "the cursor advanced past the skipped field"
+
+
+def test_handle_reply_kickoff_token_mid_journey_re_presents_not_recorded(substrate):  # type: ignore[no-untyped-def]
+    """R9 item 6: a re-tapped 'Complete Setup' button MID-journey is NOT an answer — it re-presents
+    the pending (confirm) question WITHOUT recording/advancing, so the in-flight field isn't polluted."""
+    from orchestrator.onboarding import journey
+
+    tenant = _new_tenant(substrate.dsn, name="kickoff re-tap mid-journey")
+    journey.start_journey(tenant, [_confirm_q("business_type", "footwear"), _gap_q("operating_hours")])
+
+    r = journey.handle_reply(tenant, "Complete Setup", "SM-kickoff-mid-1")
+    assert r.get("re_present") is True, "a mid-journey kickoff re-tap must re-present, not record"
+    assert r["done"] is False
+    assert "footwear" in r["reply_en"], "the pending confirm question is re-presented"
+
+    g = journey.get_journey(tenant)
+    assert g is not None
+    assert g["cursor"] == 0, "a kickoff re-tap must NOT advance the cursor"
+    assert g["answers"] == {}, "a kickoff re-tap must NOT be recorded as the field value"
+    assert "business_type" not in g["skipped"]
+
+
+def test_handle_reply_completion_recap_names_captured_fields(substrate):  # type: ignore[no-untyped-def]
+    """R9 item 5: on completion the closer RECAPS the key captured fields (capture-proof). A confirmed
+    'city' → the completion reply names it."""
+    from orchestrator.onboarding import journey
+
+    tenant = _new_tenant(substrate.dsn, name="completion recap")
+    journey.start_journey(tenant, [_confirm_q("city", "Pune")])
+
+    r = journey.handle_reply(tenant, "yes", "SM-recap-1")
+    assert r["done"] is True
+    assert "Pune" in r["reply_en"], "the completion recap names the captured city"
+    assert r["reply_en"].startswith("Thanks — that's everything we need to get started.")
+
+
+def test_handle_reply_completion_empty_recap_falls_back_to_today_copy(substrate):  # type: ignore[no-untyped-def]
+    """R9 item 5: a completion with only non-recap fields (operating_hours) falls back to today's exact
+    closer — no dangling recap fragment."""
+    from orchestrator.onboarding import journey
+
+    tenant = _new_tenant(substrate.dsn, name="completion no recap")
+    journey.start_journey(tenant, [_gap_q("operating_hours")])
+
+    r = journey.handle_reply(tenant, "9 to 9", "SM-recap-empty-1")
+    assert r["done"] is True
+    assert r["reply_en"] == (
+        "Thanks — that's everything we need to get started. We're setting up your assistant now."
+    )
+
+
 def test_handle_reply_idempotent_redelivery_no_double_advance(substrate):  # type: ignore[no-untyped-def]
     """IDEMPOTENCY: a redelivered ``message_sid`` (== last_message_sid) re-emits
     the SAME current question WITHOUT advancing the cursor and WITHOUT mutating

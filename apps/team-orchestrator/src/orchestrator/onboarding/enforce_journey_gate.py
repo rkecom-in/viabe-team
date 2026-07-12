@@ -122,42 +122,49 @@ def _is_remaining_needs_ask(body: str) -> bool:
     return bool(_REMAINING_NEEDS_RE.search(_norm(body)))
 
 
-def _current_question(g: dict[str, Any]) -> dict[str, Any] | None:
-    """The in-flight question (the queue entry at the cursor), or None past the end / empty queue."""
-    queue = list(g.get("question_queue") or [])
-    cursor = int(g.get("cursor") or 0)
-    return queue[cursor] if 0 <= cursor < len(queue) else None
+# R9 item 2 — field-keyed SHORT need labels (mirrors journey._reprompt_after_no). The status answer
+# NAMES the pending need instead of re-pasting the verbatim prompt sentence — a verbatim re-paste
+# reads as a loop_stall repeat (onboarding_resume_after_interruption_deferred §2 judge). EN + HI.
+_NEED_LABELS: dict[str, tuple[str, str]] = {
+    "business_type": ("what kind of business it is", "यह किस तरह का व्यापार है"),
+    "category": ("what kind of business it is", "यह किस तरह का व्यापार है"),
+    "city": ("which city you're based in", "आप किस शहर में हैं"),
+    "about": ("what you sell or do", "आप क्या बेचते या करते हैं"),
+    "operating_hours": ("your opening hours", "आपके खुलने का समय"),
+    "hours": ("your opening hours", "आपके खुलने का समय"),
+    "price_range": ("your typical price range", "आपकी कीमत सीमा"),
+    "products": ("what you sell", "आप क्या बेचते हैं"),
+    "website": ("your website", "आपकी वेबसाइट"),
+}
 
 
-def _is_confirm_contradiction(body: str) -> bool:
-    """DF7(b) — a NON-bare contradiction to a confirm question: carries a negation token but is NOT
-    itself a bare "no" (a bare no keeps the walker's good ``_reprompt_after_no``). Such a rich correction
-    ("nahi bhai, hum footwear nahi bechte, hum leather bags bechte hain") must reach the brain, not be
-    recorded verbatim as the field value by the walker."""
-    from orchestrator.onboarding.journey import _NO, _tokens
-
-    toks = _tokens(body)
-    return bool(toks & _NO) and not (toks <= _NO)
+def _need_label(field: str | None) -> tuple[str, str]:
+    """A short (EN, HI) need label for the pending field — a known key, else a humanized fallback,
+    else a generic 'a couple more details'. NEVER the verbatim prompt sentence."""
+    if field and field in _NEED_LABELS:
+        return _NEED_LABELS[field]
+    if field:
+        human = field.replace("_", " ")
+        return f"your {human}", f"आपका {human}"
+    return "a couple more details", "कुछ और जानकारी"
 
 
 def _compose_status_answer(g: dict[str, Any]) -> dict[str, str]:
     """Honest, journey-row-grounded status. Never claims readiness beyond the row; never pitches
-    a platform (the measured Shopify-assumption fabrication)."""
+    a platform (the measured Shopify-assumption fabrication). R9 item 2: names the pending need with
+    a SHORT field-keyed label + pluralizes 'detail(s)' — never re-pastes the verbatim prompt (a
+    verbatim repeat reads as a loop_stall)."""
     if g.get("status") == "active":
         queue = list(g.get("question_queue") or [])
         cursor = int(g.get("cursor") or 0)
         remaining = max(len(queue) - cursor, 0)
         q = queue[cursor] if 0 <= cursor < len(queue) else None
-        prompt_en = (q or {}).get("prompt_en", "")
-        prompt_hi = (q or {}).get("prompt_hi", "")
-        if remaining > 0 and prompt_en:
+        if remaining > 0 and q is not None:
+            label_en, label_hi = _need_label(q.get("field"))
+            noun = "detail" if remaining == 1 else "details"
             return {
-                "en": (
-                    f"Not quite yet — {remaining} quick detail(s) to go. {prompt_en}"
-                ).strip(),
-                "hi": (
-                    f"अभी थोड़ा बाकी है — {remaining} छोटी जानकारी और। {prompt_hi or prompt_en}"
-                ).strip(),
+                "en": f"Not quite yet — {remaining} quick {noun} to go: {label_en}.",
+                "hi": f"अभी थोड़ा बाकी है — {remaining} छोटी जानकारी और: {label_hi}।",
             }
         return {
             "en": "Almost — I'm finishing your profile setup now.",
@@ -248,6 +255,23 @@ def _compose_connect_offer(tenant_id: UUID | str, body: str) -> dict[str, str]:
     }
 
 
+def _compose_connect_disambiguation() -> dict[str, str]:
+    """R9 item 3 — the SECOND connect-intent turn with STILL no store domain: a SHORT acknowledging
+    disambiguation instead of re-sending the byte-identical menu (a verbatim repeat reads as a
+    loop_stall). Asks for the one concrete thing that unblocks the mint — the store address or a
+    Sheet — without re-explaining the whole two-option menu."""
+    return {
+        "en": (
+            "Happy to — just point me to the one you use: your Shopify store address (like "
+            "yourstore.myshopify.com), or a Google Sheet of your sales. Which do you have?"
+        ),
+        "hi": (
+            "ज़रूर — बस बता दें आप कौन सा इस्तेमाल करते हैं: अपना Shopify store address (जैसे "
+            "yourstore.myshopify.com), या sales की Google Sheet। आपके पास कौन सा है?"
+        ),
+    }
+
+
 def _maybe_post_profile_connect(
     tenant_id: UUID | str, text: str, recipient: str | None, g: dict[str, Any]
 ) -> dict[str, Any] | None:
@@ -301,11 +325,43 @@ def _maybe_post_profile_connect(
     if not recipient:
         return None  # nothing to answer to → fall through rather than go silent
 
+    from orchestrator.onboarding.journey import (
+        _CONNECT_OFFER_MARKER,
+        _recent_shop_domain,
+        _set_connect_offer_marker,
+    )
     from orchestrator.owner_surface.freeform_acks import resolve_owner_locale, send_freeform_ack
 
-    offer = _compose_connect_offer(tenant_id, text)
     locale = resolve_owner_locale(tenant_id)
+
+    # R9 item 3 — decide menu-vs-link the same way _compose_connect_offer does (has the owner named a
+    # store domain?). On a SECOND connect-intent turn with STILL no domain, send a short disambiguation
+    # instead of the byte-identical menu (a verbatim repeat reads as a loop_stall). The domain branch
+    # (one-tap link) is unchanged.
+    domain: str | None = None
+    try:
+        domain = _recent_shop_domain(tenant_id, current_body=text)
+    except Exception:  # noqa: BLE001 — a courtesy scan; never break the offer
+        logger.warning("enforce_journey_gate: shop-domain scan failed (fail-soft)", exc_info=True)
+    already_offered = bool((g.get("answers") or {}).get(_CONNECT_OFFER_MARKER))
+
+    if domain is None and already_offered:
+        offer = _compose_connect_disambiguation()
+        send_freeform_ack(tenant_id, recipient, offer.get(locale) or offer["en"])
+        logger.info(
+            "enforce_journey_gate: post-profile connect disambiguation sent tenant=%s flow=%s",
+            tenant_id, flow,
+        )
+        return {"done": False, "routed_kind": "journey_connect_offer"}
+
+    offer = _compose_connect_offer(tenant_id, text)
     send_freeform_ack(tenant_id, recipient, offer.get(locale) or offer["en"])
+    if domain is None:
+        # First menu with no domain yet → remember it so the NEXT connect-intent disambiguates.
+        try:
+            _set_connect_offer_marker(tenant_id, message_sid=None)
+        except Exception:  # noqa: BLE001 — the marker is a courtesy; never break the offer send
+            logger.warning("enforce_journey_gate: connect-offer marker set failed (fail-soft)", exc_info=True)
     logger.info(
         "enforce_journey_gate: post-profile connect offer sent tenant=%s flow=%s", tenant_id, flow
     )
@@ -348,15 +404,13 @@ def maybe_handle_enforce_journey_turn(
         if _is_interrogative(text):
             return None
 
-        # C — a non-interrogative turn while the journey is active. DF7(b): when the in-flight question
-        # is a CONFIRM and the turn is a NON-bare contradiction ("nahi bhai, hum footwear nahi bechte,
-        # hum leather bags bechte hain"), route to the brain — the walker would otherwise record the
-        # whole sentence as the field value. A bare "no" is EXCLUDED (keeps the walker's good
-        # _reprompt_after_no). Otherwise the walker records the volunteered/direct answer and advances.
+        # C — a non-interrogative turn while the journey is active → the walker. R9 item 4: a NON-bare
+        # confirm-contradiction ("nahi bhai, hum footwear nahi bechte, hum leather bags bechte hain")
+        # is NO LONGER routed to the brain — handle_reply's own DF7(b) branch re-prompts it
+        # deterministically (measured 3/3 vs the brain's 2/3 wrong re-assertion), never recording the
+        # sentence as the field value. A bare "no" stays on the walker's _reprompt_after_no. So the
+        # walker owns every non-interrogative active turn; the earlier confirm-contradiction fork is gone.
         if g is not None and g.get("status") == "active":
-            cur = _current_question(g)
-            if cur is not None and cur.get("kind") == "confirm" and _is_confirm_contradiction(text):
-                return None
             return maybe_handle_journey_reply(tenant_id, text, message_sid, recipient)
 
         # DF4 — POST-PROFILE CONNECT BEAT: a COMPLETED journey still paced in the post-profile flow
