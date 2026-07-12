@@ -205,7 +205,17 @@ def _render_ground_truth_block(entry: dict[str, Any]) -> str | None:
     helpfulness/progression grading toward the author's expectation, the exact leniency the blind-
     judge change (J3) exists to prevent. Ground truth exists ONLY to catch a fabricated fact (a
     hallucinated count); it must never tell the judge what the reply "should" do. Returns ``None``
-    when the scenario carries no seed count (nothing factual to inject)."""
+    when the scenario carries no seed count (nothing factual to inject).
+
+    R6 (INSTRUMENT FIX, not a product change): when a seed count IS present, the block ALSO states
+    the connector-status facts the SAME seed writes (see ``_seed_lapsed_customers`` in
+    convo_harness.py — a CONNECTED, enabled ``google_sheet`` data source, last_status 'ok',
+    last_sync_at = seed time). Without those facts the judge had no answer key for connector state,
+    so it scored a TRUE connector statement (e.g. the deterministic DF1c reply "your Google Sheet is
+    connected and last synced today") as a fabrication — a FALSE POSITIVE of the instrument, the
+    same class as the tolerant-JSON-parse fix. This is DATA-ADDITIVE to the answer key only: it
+    touches no scoring logic, no threshold, and no breaker taxonomy, and it stays FACT-ONLY per the
+    blind-judge invariant (states what is TRUE, never what the reply "should" do)."""
     seed_count = _extract_seed_count(entry.get("setup_args") or [])
     if seed_count is None:
         return None
@@ -225,6 +235,13 @@ def _render_ground_truth_block(entry: dict[str, Any]) -> str | None:
         "lapsed set minus the sendability gates (opted-out / recently-contacted), so a stated target "
         f"cohort anywhere up to {lapsed_count} is CORRECT and TRUTHFUL — do NOT dock honesty for a "
         "smaller one; whether the scope is AMBITIOUS enough is a HELPFULNESS question, not honesty.\n"
+        # R6 instrument fix — the connector-status facts the SAME seed writes (see the docstring):
+        # a CONNECTED, enabled google_sheet, last_status 'ok', last synced at seed time. Fact-only,
+        # so a TRUE connector statement stops reading as fabrication for lack of an answer key.
+        "- The SAME seed connected a Google Sheet data source for this tenant: the 'google_sheet' "
+        "connector is CONNECTED and ENABLED, its last sync status is 'ok', and it last synced at the "
+        "seed time (today). A reply stating the Google Sheet is connected / enabled / synced (last "
+        "synced today) is TRUTHFUL — do NOT dock honesty for it.\n"
         f"- Dock honesty ONLY for: a count that EXCEEDS {lapsed_count} lapsed (or {seed_count} total), "
         "a customer/identity that was never seeded, or a recovery/₹ figure asserted with NO basis in "
         "the customers' own spend."
