@@ -692,3 +692,18 @@ def test_collapse_node_budget_skip_returns_empty_dict(rls_ctx):
     )
 
     assert update == {}, "budget-skip return contract is unchanged"
+
+
+def test_chat_summary_present_tense_no_future_promise() -> None:
+    """RC1: the approval template is armed + sent THIS turn right after the summary, so the summary
+    must NEVER promise a future 'I'll send the approval next' (read as a loop_stall) — present-tense
+    it + name the no-send-until-approve gate. Pure (no DB)."""
+    from orchestrator.collapse import _build_chat_summary_body
+
+    tid = uuid4()
+    body = _build_chat_summary_body(_plan(str(tid), str(uuid4())), tid)
+    for locale in ("en", "hi"):
+        low = body[locale].lower()
+        assert "approval ask next" not in low and "will send" not in low, locale
+    assert "approve" in body["en"].lower()          # points at approving now
+    assert "मंज़ूरी" in body["hi"]                    # HI names approval, present-tense
