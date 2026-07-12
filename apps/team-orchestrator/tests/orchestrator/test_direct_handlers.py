@@ -8,7 +8,9 @@ call. dupe_handler is not covered here: it sends nothing.
 
 from __future__ import annotations
 
+import json
 import os
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from uuid import UUID, uuid4
 
@@ -187,6 +189,87 @@ def test_dsr_handler_handles_send_failure(handlers_ctx, twilio_create):
             (outcome["dsr_ticket_id"],),
         ).fetchone()
     assert row[0] == "acknowledged"  # bare psycopg.connect -> tuple rows
+
+
+def _split_dsr_sends(twilio_create):
+    """Split the mock's recorded ``messages.create`` calls into the scope-confirmation freeform
+    (passes ``body=``) and the Meta acknowledgment template (passes ``content_sid=`` +
+    ``content_variables=``). Returns ``(freeform_call, template_call, freeform_i, template_i)`` with
+    ``None`` for any leg not sent."""
+    freeform = template = None
+    freeform_i = template_i = None
+    for i, call in enumerate(twilio_create.call_args_list):
+        if "body" in call.kwargs:
+            freeform, freeform_i = call, i
+        elif "content_sid" in call.kwargs:
+            template, template_i = call, i
+    return freeform, template, freeform_i, template_i
+
+
+def test_dsr_handler_scope_confirmation_before_template_with_real_params(handlers_ctx, twilio_create):
+    """R8: the DPDP acknowledgment now fills all three declared params (VT-400 class fix — no more
+    Twilio SAMPLE values to a real owner) AND a deterministic plain-language scope confirmation is
+    sent BEFORE the Meta template (RC1 chat-summary-before-template pattern)."""
+    ctx = handlers_ctx
+    phone = _phone()
+    tenant_id = _new_tenant(ctx.dsn, phone)
+    state = ctx.make_state(UUID(tenant_id))
+    event = ctx.WebhookEvent(body="please delete my data", sender_phone=phone)
+
+    outcome = ctx.HANDLERS["dsr_handler"](event, state)
+
+    freeform, template, freeform_i, template_i = _split_dsr_sends(twilio_create)
+    assert freeform is not None, "scope confirmation freeform was not sent"
+    assert template is not None, "acknowledgment template was not sent"
+    # ORDER: the scope confirmation is sent BEFORE the Meta template.
+    assert freeform_i < template_i
+
+    # The scope confirmation names deletion + account closure + automation-frozen + the deadline.
+    body = freeform.kwargs["body"]
+    assert "deleted" in body
+    assert "account closed" in body
+    assert "frozen" in body
+
+    # VT-400 fix: all THREE declared params filled (config/twilio_templates.yaml team_dsr_acknowledgment
+    # variables owner_name/dsr_type/completion_deadline_date -> positional {"1","2","3"}), none empty.
+    content_variables = json.loads(template.kwargs["content_variables"])
+    assert set(content_variables) == {"1", "2", "3"}
+    assert all(str(content_variables[k]).strip() for k in ("1", "2", "3"))
+    # owner_name is the seeded business_name; dsr_type comes from the ticket ('deletion').
+    assert content_variables["1"] == "VT-3.3c Handler Test"
+    assert content_variables["2"] == "deletion"
+    # completion_deadline_date ~30 days out, and the SAME date string appears in the scope confirmation.
+    deadline = datetime.strptime(content_variables["3"], "%d %B %Y").date()
+    days_out = (deadline - datetime.now(UTC).date()).days
+    assert 29 <= days_out <= 31
+    assert content_variables["3"] in body
+
+    # The return contract reports both sends honestly.
+    assert outcome["scope_confirmation"]["sid"] is not None
+    assert outcome["scope_confirmation"]["error"] is None
+    assert outcome["send_result"]["template_name"] == "team_dsr_acknowledgment"
+    assert outcome["send_result"]["success"] is True
+
+
+def test_dsr_handler_skips_scope_confirmation_when_no_sender_phone(handlers_ctx, twilio_create):
+    """Best-effort guard: with no sender phone on the event, the freeform scope confirmation is
+    skipped and honestly reported, while the ticket + freeze + template ack (which falls back to the
+    tenant's own whatsapp_number) still stand — the DSR is never blocked."""
+    ctx = handlers_ctx
+    phone = _phone()
+    tenant_id = _new_tenant(ctx.dsn, phone)
+    state = ctx.make_state(UUID(tenant_id))
+    event = ctx.WebhookEvent(body="please delete my data", sender_phone="")  # no sender phone
+
+    outcome = ctx.HANDLERS["dsr_handler"](event, state)
+
+    freeform, template, _, _ = _split_dsr_sends(twilio_create)
+    assert freeform is None  # no in-session scope confirmation without a recipient
+    assert template is not None  # the ack still sends (tenant whatsapp_number fallback)
+    assert outcome["dsr_ticket_id"] is not None
+    assert outcome["scope_confirmation"]["sid"] is None
+    assert outcome["scope_confirmation"]["error"] == "no recipient phone on event"
+    assert outcome["send_result"]["success"] is True
 
 
 # --- status_ping_handler -----------------------------------------------------
