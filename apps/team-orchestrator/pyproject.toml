@@ -23,6 +23,13 @@ dependencies = [
     # behaviour-sensitive, so bumps are Type 2 governance (VT-3.9 / CL-147).
     "langchain-openai==1.2.2",
     "openai==2.45.0",
+    # VT (multi-provider): Google Gemini 3.5/3.1 support via langchain-google-genai's
+    # ChatGoogleGenerativeAI. Pinned == exact like langchain-anthropic/langchain-openai
+    # above — the ctor kwarg surface (max_output_tokens, temperature) and the
+    # usage_metadata shape are behaviour-sensitive, so bumps are Type 2 governance
+    # (VT-3.9 / CL-147). 4.2.5 is the highest release compatible with the langchain-core
+    # ==1.4.0 pin (4.2.6+ requires langchain-core>=1.4.7).
+    "langchain-google-genai==4.2.5",
     "langgraph-checkpoint-postgres",
     # VT-101: LangSmith tracing. Pin == band rather than == exact because the
     # SDK is observability-only — a minor bump cannot change orchestrator

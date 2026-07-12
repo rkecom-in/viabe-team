@@ -32,12 +32,16 @@ logger = logging.getLogger(__name__)
 # cached_in_multiplier).
 _PriceEntry = tuple[Decimal, Decimal, Decimal, Decimal]
 
-# Fail-soft seed mirror of migration 173's ``model_pricing`` seed (READ IT: the
-# migration is the contract). Seed prices VERIFIED 2026-07-13 from the official
+# Fail-soft seed mirror of the ``model_pricing`` seed across migrations 173 (Anthropic +
+# OpenAI), 174 (Google Gemini), and 175 (Z.ai GLM) (READ THEM: the migrations are the
+# contract). Note the per-model multipliers are NOT uniform — glm-5.2 (175) carries
+# cached_in_multiplier 0.186 / discount_multiplier 1.0, unlike the 0.1 / 0.5 defaults. Seed
+# prices VERIFIED 2026-07-13 from the official
 # pages. Prices are VTR-tunable in the TABLE — the live cache picks changes up
 # within the TTL; this mirror is only the DB-down fallback. Keep it in lock-step
 # with the migration seed (the PG integration test asserts no drift). Elements:
-# (in, out, discount_multiplier[0.5 flex/batch], cached_in_multiplier[0.1 cache-read]).
+# (in, out, discount_multiplier, cached_in_multiplier) — PER-MODEL: discount is 0.5 for
+# flex/batch models but 1.0 for GLM (no batch tier); cached is 0.1 default but 0.186 for GLM.
 # NOTE: sonnet-5 is INTRODUCTORY $2/$10 through 2026-08-31, then $3/$15 from
 # 2026-09-01 (VTR bumps the row; mirror it here then).
 _SEED_PRICING: dict[str, _PriceEntry] = {
@@ -48,6 +52,15 @@ _SEED_PRICING: dict[str, _PriceEntry] = {
     "gpt-5.6-sol": (Decimal("5.0000"), Decimal("30.0000"), Decimal("0.5"), Decimal("0.1")),
     "gpt-5.6-terra": (Decimal("2.5000"), Decimal("15.0000"), Decimal("0.5"), Decimal("0.1")),
     "gpt-5.6-luna": (Decimal("1.0000"), Decimal("6.0000"), Decimal("0.5"), Decimal("0.1")),
+    # Migration 174 (Gemini 3.5 / 3.1). gemini-3.1-pro-preview is recorded at the <=200k-context
+    # rate ($2/$12); >200k tiers ($4/$18) are out of scope (our contexts stay under 200k).
+    "gemini-3.5-flash": (Decimal("1.5000"), Decimal("9.0000"), Decimal("0.5"), Decimal("0.1")),
+    "gemini-3.1-flash-lite": (Decimal("0.2500"), Decimal("1.5000"), Decimal("0.5"), Decimal("0.1")),
+    "gemini-3.1-pro-preview": (Decimal("2.0000"), Decimal("12.0000"), Decimal("0.5"), Decimal("0.1")),
+    # Migration 175 (Z.ai GLM). NOTE: glm-5.2's multipliers DIFFER from the 173/174 defaults —
+    # cached_in_multiplier 0.186 (cache-read $0.26/$1.40, NOT 0.1) and discount_multiplier 1.0
+    # (GLM publishes no batch/flex tier, so a mistaken service_tier='batch' must not under-cost).
+    "glm-5.2": (Decimal("1.4000"), Decimal("4.4000"), Decimal("1.0"), Decimal("0.186")),
 }
 
 # Service tiers that get the ``discount_multiplier`` (migration 173: OpenAI Flex ==
