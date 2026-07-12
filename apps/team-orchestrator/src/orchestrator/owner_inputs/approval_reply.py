@@ -122,6 +122,15 @@ _RESUME_BACKREF = (
 # The SEND-specific verbs (subset of _APPROVE_VERB) — an explicit send instruction overrides a
 # vague-resume back-reference. Excludes the weak/generic proceed words (theek/go/proceed/ok).
 _EXPLICIT_SEND = {"send", "bhejo", "भेजो", "bhej", "भेज", "bhejdo", "bhejde", "bhejdena"}
+# WEAK/generic acks — "theek hai"/"ok"/"go"/"proceed" affirm but are NOT, on their own, an
+# unambiguous decision on a SPECIFIC pending customer SEND (money). Fazal money middle-path
+# (2026-07-12): a bare weak ack with no explicit send verb and no strong yes ("haan"/"yes") re-asks
+# rather than auto-sends. Distinct from _STRONG_APPROVE (yes/haan) and _EXPLICIT_SEND (bhej do),
+# which DO approve. Used ONLY by is_weak_ack_only_approval (customer-send scoping in approval_resume).
+_WEAK_ACK = {"theek", "thik", "ठीक", "ok", "okay", "go", "proceed"}
+# The strong affirmations that, even bare, express an explicit approval INTENT (unlike the weak acks
+# above). Excludes ok/okay (those are weak). "sure"/"haan"/"yes" read as a deliberate yes.
+_STRONG_YES = _STRONG_APPROVE - {"ok", "okay"}
 # Contrastive conjunctions — a GENUINE two-clause contradiction ("yes BUT don't send the
 # discount one") defers to Haiku. A BARE negation of an approve-word ("do not approve")
 # is NOT a contradiction — it is a deterministic reject (Cowork VT-83 #345 bounce).
@@ -286,3 +295,26 @@ def is_resume_cue(body: str) -> bool:
     has_resume = bool(tokens & _VAGUE_RESUME) or any(p in normalized for p in _RESUME_BACKREF)
     has_explicit_send = bool(tokens & _EXPLICIT_SEND)
     return has_resume and not has_explicit_send
+
+
+def is_weak_ack_only_approval(body: str) -> bool:
+    """True iff the reply's ONLY affirmative signal is a WEAK/generic ack ("theek hai"/"ok"/"go"/
+    "proceed") — no explicit send verb (_EXPLICIT_SEND) and no strong yes (_STRONG_YES: haan/yes/
+    approve/sure/जी/हाँ).
+
+    Fazal money middle-path (2026-07-12): a bare weak ack is NOT an unambiguous approval of a
+    specific customer SEND. ``resolve_decision_from_reply`` uses this to HOLD (return None -> re-ask)
+    a customer-send approval on such a reply, never to reject it — so "theek hai bhej do" / "haan
+    bhej do" (explicit send / strong yes present) STILL approve, only a naked "theek hai" re-asks.
+    Normalization kept in lockstep with classify_approval_reply so the two never diverge."""
+    normalized = (
+        unicodedata.normalize("NFC", (body or "").strip().casefold())
+        .replace("'", "")
+        .replace("’", "")
+    )
+    tokens = {t for t in re.split(r"[\s,.!?;:।/\\-]+", normalized) if t}
+    if not (tokens & _WEAK_ACK):
+        return False
+    if tokens & _EXPLICIT_SEND or tokens & _STRONG_YES:
+        return False
+    return True
