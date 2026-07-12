@@ -99,6 +99,36 @@ def _build_draft_plan(message_text: str) -> ManagerPlan:
     )
 
 
+def _build_campaign_recovery_plan(message_text: str) -> ManagerPlan:
+    """D3 — a sales_recovery specialist_dispatch plan for a clear win-back imperative against a
+    REAL cohort. ONE dispatch step to ``sales_recovery_agent`` so the loop RUNS the win-back
+    (a clear imperative was already detected — no clarification round-trip). NO
+    ``allowed_effect_classes``: every existing SR plan omits it, and the actual send still routes
+    through the proposal-time approval / consent / opt-out rails exactly as any SR send does — this
+    plan grants NO effect bypass, it only makes the ROUTING deterministic (VT-633 variance root)."""
+    from orchestrator.manager.plan_models import ManagerPlan, PlanStep
+    from orchestrator.privacy.pii_redactor import redact
+
+    safe_text = redact(message_text) or message_text
+    return ManagerPlan(
+        objective=str(safe_text)[:500],
+        acceptance_criteria=[
+            "an owner-visible reply addressing this win-back ask is recorded in the conversation "
+            "log for this task",
+            "any campaign/send claimed to the owner has a matching DB record",
+        ],
+        steps=[
+            PlanStep(
+                step_seq=1,
+                kind="specialist_dispatch",
+                specialist="sales_recovery_agent",
+                situation=str(safe_text)[:500],
+                desired_outcome="Run a win-back campaign to the tenant's lapsed customers.",
+            )
+        ],
+    )
+
+
 def _create_plan_for_new_task(
     tenant_id: UUID, message_text: str, message_sid: str, *, shadow: bool,
 ) -> UUID | None:
@@ -150,6 +180,68 @@ def triage_seam(
     open_questions = pending_questions.get_open(tenant_id)
     has_open_question = bool(open_questions)
     has_active_task = task_store.has_active_task(tenant_id)
+
+    # D3 (subsumes cluster-5b) — the deterministic CAMPAIGN first-contact net. A clear "run a
+    # win-back campaign" imperative (enforce mode, no active task already owning the tenant) is
+    # routed HERE rather than left to the intermittent classifier below. Two honest, deterministic
+    # outcomes: an EMPTY customer ledger -> a grounded "no one to reach out to" reply + NO dispatch
+    # (kills the "I've started a win-back" fabrication against a no-data tenant); a real cohort ->
+    # mint a sales_recovery dispatch + start the durable workflow (the loop's approval/consent/
+    # opt-out rails still gate every send — this changes ROUTING, never the money gates). FAIL-OPEN:
+    # any error falls through to triage_turn below, exactly as if the net weren't here.
+    if resolved_mode == "enforce" and not has_active_task:
+        try:
+            from orchestrator.onboarding.campaign_first_contact import (
+                EMPTY_COHORT_REPLY,
+                campaign_cohort_is_empty,
+                is_campaign_plan_imperative,
+            )
+
+            if is_campaign_plan_imperative(message_text):
+                if campaign_cohort_is_empty(tenant_id):
+                    emit_tm_audit(
+                        event_layer="decides", event_kind="campaign_first_contact_empty_cohort",
+                        actor="team_manager", tenant_id=tenant_id,
+                        summary="win-back imperative but customer ledger is empty — honest no-data "
+                        "reply, no dispatch",
+                        decision={"message_sid": message_sid},
+                    )
+                    return TriageSeamResult(
+                        outcome="new_task", task_id=None, skip_legacy_dispatch=True,
+                        direct_reply_text=EMPTY_COHORT_REPLY,
+                    )
+                # Real cohort — deterministically mint a sales_recovery dispatch + start the loop.
+                from orchestrator.manager import plan_store
+                from orchestrator.manager.workflow import start_manager_task_workflow
+
+                camp_task_id = plan_store.create_plan(
+                    tenant_id, _build_campaign_recovery_plan(message_text),
+                    source_message_sid=message_sid, shadow=False,
+                )
+                camp_row = (
+                    task_store.get_task(tenant_id, camp_task_id)
+                    if camp_task_id is not None
+                    else None
+                )
+                if camp_row is not None and str(camp_row["status"]) == "planned":
+                    emit_tm_audit(
+                        event_layer="decides", event_kind="campaign_first_contact_dispatched",
+                        actor="team_manager", tenant_id=tenant_id,
+                        summary="win-back imperative + real cohort — deterministic sales_recovery "
+                        "dispatch",
+                        decision={"message_sid": message_sid, "task_id": str(camp_task_id)},
+                    )
+                    start_manager_task_workflow(tenant_id, camp_task_id)
+                    return TriageSeamResult(
+                        outcome="new_task", task_id=camp_task_id, skip_legacy_dispatch=True,
+                    )
+                # create_plan didn't admit 'planned' — fall through to triage_turn (never silent).
+        except Exception:  # noqa: BLE001 — the D3 net must never block the turn (fail-open)
+            logger.warning(
+                "D3 campaign first-contact net failed tenant=%s (fail-open -> triage_turn)",
+                tenant_id, exc_info=True,
+            )
+
     result = triage_turn(
         message_text=message_text,
         has_open_question=has_open_question,
