@@ -113,6 +113,47 @@ def test_legit_money_text_does_not_match():
     assert not mod.contains_fabricated_debt_framing(None)  # type: ignore[arg-type]
 
 
+# ── contains_spend_completion_claim (cluster-2b) — fabricated ad-spend/boost completion ───
+
+
+def test_spend_completion_hinglish_matches():
+    assert mod.contains_spend_completion_claim("Aapka boost kar diya")
+    assert mod.contains_spend_completion_claim("500 rupaye ka boost kar diya hai")
+    assert mod.contains_spend_completion_claim("paisa de diya")
+    assert mod.contains_spend_completion_claim("ad chala diya")
+
+
+def test_spend_completion_english_matches():
+    assert mod.contains_spend_completion_claim("Boosted and paid ₹500")
+    assert mod.contains_spend_completion_claim("The boost is live")
+    assert mod.contains_spend_completion_claim("Payment successful")
+    assert mod.contains_spend_completion_claim("₹500 has been spent")
+
+
+def test_spend_completion_devanagari_matches():
+    assert mod.contains_spend_completion_claim("बूस्ट कर दिया")
+
+
+def test_spend_completion_verb_adref_amount_combo():
+    # spend verb + ad reference + amount (₹ or bare) all present.
+    assert mod.contains_spend_completion_claim("Spent ₹500 on the boost")
+    assert mod.contains_spend_completion_claim("Paid 500 for your ad")
+
+
+def test_spend_completion_false_positive_guards():
+    # Future proposal / awaiting approval — NOT a completion.
+    assert not mod.contains_spend_completion_claim("₹500 ka boost karne ke liye approval chahiye")
+    assert not mod.contains_spend_completion_claim("I'll get the ₹500 boost approved")
+    assert not mod.contains_spend_completion_claim("₹500 ka boost approval milte hi kar dunga")
+    # Honest non-spend completion (drafting) — no spend phrase, no verb+adref combo.
+    assert not mod.contains_spend_completion_claim("draft kar diya")
+    assert not mod.contains_spend_completion_claim("Aapka draft ready hai")
+    # A legit customer-spend REPORT: spend verb + amount but NO ad reference → not a boost claim.
+    assert not mod.contains_spend_completion_claim("Your customers spent ₹2000 total this month")
+    assert not mod.contains_spend_completion_claim("")
+    assert not mod.contains_spend_completion_claim(None)  # type: ignore[arg-type]
+
+
 # ── send_fact_exists — fail-closed on a DB read error ───────────────────────────────────
 
 
@@ -299,6 +340,40 @@ def test_send_fact_read_error_still_yields_honest_replacement(monkeypatch):
     # isn't happening) — rather than passing the fabricated claim through.
     out = mod.apply_emission_gate("I sent it already.", TENANT)
     assert out == mod._REPLACEMENT_COPY["not_started"]["en"]
+
+
+# ── cluster-2b apply_emission_gate — fabricated spend/boost completion is swapped ───────────
+
+
+def _patch_facts_spend(monkeypatch, *, pending: bool = False, active: bool = False, locale="en"):
+    """Like _patch_facts but the audit stub accepts the event_kind kwarg the spend/debt layers pass."""
+    monkeypatch.setattr(mod, "send_fact_exists", lambda t: False)
+    monkeypatch.setattr(mod, "_has_open_approval", lambda t: pending)
+    monkeypatch.setattr(mod, "_has_active_task", lambda t: active)
+    monkeypatch.setattr(
+        "orchestrator.owner_surface.freeform_acks.resolve_owner_locale", lambda t: locale
+    )
+    events: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        mod, "_emit_blocked_audit",
+        lambda t, text, event_kind="emission_claim_blocked": events.append((text, event_kind)),
+    )
+    return events
+
+
+def test_apply_gate_swaps_spend_claim(monkeypatch):
+    events = _patch_facts_spend(monkeypatch, pending=False, active=False, locale="en")
+    out = mod.apply_emission_gate("Boost kar diya, ₹500 spent!", TENANT)
+    # Whole-message honest swap (no approval, no active task -> not_started line), NOT the original.
+    assert out == mod._REPLACEMENT_COPY["not_started"]["en"]
+    assert out != "Boost kar diya, ₹500 spent!"
+    assert events and events[-1][1] == "emission_spend_claim_blocked"
+
+
+def test_apply_gate_spend_proposal_passthrough(monkeypatch):
+    _patch_facts_spend(monkeypatch)
+    text = "₹500 ka boost approval milte hi kar dunga."
+    assert mod.apply_emission_gate(text, TENANT) == text
 
 
 # ── #58 (T7) contains_phantom_promise truth table ──────────────────────────────────────────
