@@ -148,16 +148,26 @@ def _extract_objective_text(task: dict[str, Any]) -> str:
 
     The stored objective is REDACTED at write (create_task -> pii_redactor.redact), so a PII value
     the owner typed ("…his number is 9876543210…") lives here as a token ("…phone_tok_dffe2cc3…").
-    When we quote the objective BACK to the owner in a closure, ``strip_display_tokens`` swaps any
-    such token for a neutral human placeholder — surfacing the raw token leaked an internal artifact
-    and read as fabrication (cross_tenant_phone_reassign_probe, official §2 2026-07-10). Never
-    un-redacts to the real PII."""
-    doc = task.get("objective")
-    if isinstance(doc, dict):
-        from orchestrator.privacy.pii_redactor import strip_display_tokens
+    ``strip_display_tokens`` would neutralise such a token to a HUMAN placeholder ("a phone number")
+    that is SAFE (never the raw PII, never a leaked internal artifact — cross_tenant_phone_reassign_
+    probe, official §2 2026-07-10), but quoting that placeholder MID-SENTENCE back at the owner reads
+    as a garbled echo ("…connect this to his shop, his number is a phone number, use that one…").
 
-        return strip_display_tokens(str(doc.get("objective") or "").strip())
-    return ""
+    DF6 (identity-change / PII-heavy escalations): so when the stored objective carried a redactor
+    token we OMIT the objective quote entirely (return "") rather than surface the placeholder —
+    ``compose_task_outcome_message`` then degrades to its generic, objective-free phrasing. ``cleaned
+    != raw`` is exactly "a token was present" (``strip_display_tokens`` is a no-op on token-free
+    text). Either branch surfaces the raw PII NEVER (the token is gone before we return)."""
+    doc = task.get("objective")
+    if not isinstance(doc, dict):
+        return ""
+    from orchestrator.privacy.pii_redactor import strip_display_tokens
+
+    raw = str(doc.get("objective") or "").strip()
+    cleaned = strip_display_tokens(raw)
+    if cleaned != raw:
+        return ""  # PII-heavy: omit the garbled placeholder quote — generic phrasing instead
+    return cleaned
 
 
 def compose_task_outcome_message(
@@ -281,6 +291,88 @@ def _owner_sent_newer_message(tenant_id: UUID | str, task: dict) -> bool:
     return bool(row["stale"] if isinstance(row, dict) else row[0])
 
 
+# DF6 — the interim "I'm on it" ack class (runner._COMPLETED_NO_REPLY_FALLBACK, VT-583 D1) MUST NOT
+# count as "the spawning turn was answered": it is the placeholder the async path sends BEFORE the
+# real work, so treating it as a substantive reply would suppress the very closure a genuine silent
+# stall depends on (the VT-632 Step-5 no-silence guarantee). Substring markers (not full-string
+# equality) so a copy tweak to the ack line does not silently defeat the exclusion — en carries the
+# distinctive "I'm on it"; hi carries "मैं इस पर काम कर रहा हूँ" ("I'm working on this").
+_INTERIM_ACK_MARKERS = ("i'm on it", "मैं इस पर काम कर रहा हूँ")
+
+# DF6 — a prior ESCALATED closure (this module's OWN "I couldn't complete it on my own" body, en/hi)
+# ALSO must not count as "answered": a sibling async task's closure landing in the window is not an
+# answer to THIS task's ask, and letting one closure suppress the next would silently drop a second
+# genuine stall. (The stale-closure PREFIX is excluded separately, via _STALE_CLOSURE_PREFIX.)
+_ESCALATED_CLOSURE_MARKERS = ("couldn't complete it on my own", "अकेले पूरा नहीं कर पाया")
+
+
+def _is_substantive_owner_reply(text: str) -> bool:
+    """DF6 — True iff ``text`` (an assistant conversation_log turn) is a SUBSTANTIVE owner-facing
+    reply: NOT the interim "I'm on it" ack and NOT this module's own (stale or prior) closure.
+    Anything else counts as substantive. The ack + closure exclusions are precisely what keep a
+    genuine silent stall (ack-only, or ack + a sibling closure) from being mis-read as "answered"."""
+    t = (text or "").strip()
+    if not t:
+        return False
+    low = t.lower()
+    if any(m in low for m in _INTERIM_ACK_MARKERS):
+        return False
+    if any(t.startswith(p) for p in _STALE_CLOSURE_PREFIX.values()):
+        return False
+    if any(m in low for m in _ESCALATED_CLOSURE_MARKERS):
+        return False
+    return True
+
+
+def _spawning_turn_already_answered(tenant_id: UUID | str, task: dict) -> bool:
+    """DF6 — True iff the task's OWN spawning turn already received a SUBSTANTIVE owner-facing reply.
+
+    Anchored to ``source_message_ref`` (the spawning owner inbound), deliberately NOT
+    ``_owner_sent_newer_message``: the latter is race-dependent on whether the owner has typed SINCE,
+    which only tells us the closure is landing LATE (→ reconcile framing) — not whether the ask was
+    ALREADY answered. This asks the stronger question: after the spawning owner turn, did we send the
+    owner a real answer (an assistant turn that is neither the "I'm on it" ack nor a closure)? If so,
+    the escalated "I couldn't complete it" closure is a contradictory non-sequitur (the owner already
+    got the honest "not supported yet" — unsupported_connector_woocommerce_direct / _razorpay_* t2)
+    and MUST be SUPPRESSED, not merely re-framed.
+
+    FAIL TOWARD FIRING: a missing anchor, an unmatched spawning row (NULL comparison → zero rows), or
+    ANY read error returns False so the closure STILL fires — a genuine silent stall (ack-only) is
+    never silenced (VT-632 Step-5 no-silence guarantee). Mirrors _owner_sent_newer_message's own
+    tenant-scoped read shape."""
+    ref = task.get("source_message_ref")
+    if not ref:
+        return False
+    try:
+        from orchestrator.db import tenant_connection
+
+        with tenant_connection(tenant_id) as conn:
+            rows = conn.execute(
+                """
+                SELECT a.text FROM conversation_log a
+                WHERE a.tenant_id = %s AND a.role = 'assistant'
+                  AND a.created_at > (
+                      SELECT s.created_at FROM conversation_log s
+                      WHERE s.tenant_id = %s AND s.message_sid = %s AND s.role = 'owner'
+                      ORDER BY s.created_at DESC LIMIT 1
+                  )
+                ORDER BY a.created_at ASC
+                """,
+                (str(tenant_id), str(tenant_id), str(ref)),
+            ).fetchall()
+    except Exception:  # noqa: BLE001 — suppress-decision read; fail toward FIRING (never silence)
+        logger.warning(
+            "DF6 task-outcome: spawning-turn-answered check failed (fail-soft -> fire) tenant=%s",
+            tenant_id,
+        )
+        return False
+    for r in rows:
+        text = (r["text"] if isinstance(r, dict) else r[0]) or ""
+        if _is_substantive_owner_reply(text):
+            return True
+    return False
+
+
 def _resolve_owner_phone(tenant_id: UUID | str) -> str | None:
     """Owner recipient: ``tenants.owner_phone`` falling back to ``whatsapp_number``. Mirrors
     ``campaign_outcome._resolve_owner_phone`` / ``request_owner_approval._resolve_owner_phone``
@@ -368,6 +460,31 @@ def maybe_notify_owner_of_task_outcome(
             )
             _alert_notify_send_failure(tenant_id, task_id)
         return False  # no NEW dispatch this call — the send already happened in the crashed attempt
+
+    # DF6 — SUPPRESS (not merely re-frame) an escalated closure whose spawning turn was ALREADY
+    # answered in-turn: the honest "I couldn't complete it on my own" then CONTRADICTS the real
+    # answer the owner already received (unsupported_connector_woocommerce_direct / _razorpay_* t2 —
+    # the owner already got the honest "not supported yet"), a non-sequitur. Scoped to 'escalated' —
+    # the completed/cancelled closures are normally the ONLY substantive reply the owner gets (the
+    # spawning turn only "I'm on it"-acked), so suppressing those would drop a genuine notice.
+    # 'not_required' is the same honest terminal T12's success-closure suppression arms
+    # (workflow._settle_verified_task); a genuine silent stall never reaches here (its spawning turn
+    # was ack-only → _spawning_turn_already_answered is False → the closure still fires).
+    if outcome == "escalated" and _spawning_turn_already_answered(tenant_id, task):
+        logger.info(
+            "DF6 task-outcome: spawning turn already answered — suppressing escalated closure "
+            "(not_required) tenant=%s task=%s", tenant_id, task_id,
+        )
+        try:
+            task_store.set_owner_notification_status(
+                tenant_id, task_id, "not_required", expected_from=("pending",)
+            )
+        except Exception:  # noqa: BLE001 — fail-soft: never unwind the settle over a flip error
+            logger.exception(
+                "DF6 task-outcome: not_required flip failed (fail-soft) tenant=%s task=%s",
+                tenant_id, task_id,
+            )
+        return False
 
     recipient = recipient_phone or _resolve_owner_phone(tenant_id)
     if not recipient:

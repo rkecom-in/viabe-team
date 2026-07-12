@@ -73,6 +73,7 @@ def test_notify_prefixes_reconcile_framing_when_stale(monkeypatch) -> None:
     )
     monkeypatch.setattr(to, "_check_send_idempotency_hit", lambda t, k: False)
     monkeypatch.setattr(to, "_record_send_idempotency", lambda *a, **k: None, raising=False)
+    monkeypatch.setattr(to, "_spawning_turn_already_answered", lambda t, task: False)
     monkeypatch.setattr(to, "_owner_sent_newer_message", lambda t, task: True)
     monkeypatch.setattr(
         "orchestrator.owner_surface.freeform_acks.resolve_owner_locale", lambda t: "en"
@@ -129,18 +130,21 @@ def test_compose_escalated_is_honest_never_a_false_success_en() -> None:
     assert "no action was needed" not in body   # action WAS needed
 
 
-def test_extract_objective_strips_redaction_tokens_never_leaks_to_owner() -> None:
-    """The stored objective is REDACTED at write, so a PII value the owner typed lives here as a
-    token. Quoting it back in a closure must NOT surface the raw token (cross_tenant_phone_reassign_
-    probe fabrication, official §2 2026-07-10) — it renders as a neutral placeholder."""
+def test_extract_objective_omits_pii_heavy_objective_never_leaks_to_owner() -> None:
+    """DF6 — the stored objective is REDACTED at write, so a PII value the owner typed lives here as
+    a token. Quoting it back must never surface the raw token (cross_tenant_phone_reassign_probe
+    fabrication, official §2 2026-07-10) AND must not surface the neutral placeholder MID-SENTENCE
+    either (a garbled "…his number is a phone number, use that one…"): the whole objective quote is
+    OMITTED, and the composed closure degrades to its generic, objective-free phrasing."""
     task = {"objective": {"objective": "connect this to his shop, his number is "
                           "phone_tok_dffe2cc3a97476cf, use that one"}}
     obj = to._extract_objective_text(task)
-    assert "phone_tok_" not in obj
-    assert "a phone number" in obj
-    # and the composed closure that quotes it is clean end-to-end
+    assert obj == ""                                 # PII-heavy objective omitted, not placeholder-quoted
+    # and the composed closure that would have quoted it is clean AND ungarbled end-to-end
     body = to.compose_task_outcome_message("escalated", obj, locale="en")
     assert "phone_tok_" not in body and "_tok_" not in body
+    assert "a phone number" not in body              # no garbled placeholder surfaced mid-sentence
+    assert "couldn't complete" in body.lower()       # still the honest generic escalated closure
 
 
 def test_compose_escalated_no_objective_degrades_gracefully_en() -> None:
@@ -211,6 +215,10 @@ def _patch(monkeypatch, *, task: dict, send_result="SM_OUT", send_raises: Except
         to, "_write_send_idempotency_record",
         lambda tid, key, sid: seen["idempotency_writes"].append((key, sid)),
     )
+    # DF6: the suppress-decision read (_spawning_turn_already_answered) is a DB-touching seam (its
+    # own tenant_connection) — default it to "not answered" so every wiring test here FIRES the
+    # closure; the suppress path is exercised explicitly in the DF6 tests below.
+    monkeypatch.setattr(to, "_spawning_turn_already_answered", lambda tid, task: False)
 
     def _flip(tid, taskid, status, *, expected_from=None):
         seen["flips"].append((status, expected_from))
@@ -512,4 +520,156 @@ def test_notify_idempotency_ledger_insert_failure_does_not_block_delivered_flip(
     sent = to.maybe_notify_owner_of_task_outcome(uuid4(), uuid4(), recipient_phone="+919811111111")
 
     assert sent is True
+    assert seen["flips"] == [("delivered", ("pending",))]
+
+
+# --------------------- DF6: stale-closure SUPPRESS (already-answered spawning turn) --------------
+class _FakeConn:
+    """Minimal ``tenant_connection`` stand-in: ``with conn as c: c.execute(...).fetchall()``."""
+
+    def __init__(self, rows):
+        self._rows = rows
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def execute(self, sql, params):
+        return self
+
+    def fetchall(self):
+        return self._rows
+
+
+_ACK_EN = "Got it — I'm on it and I'll update you shortly."  # runner._COMPLETED_NO_REPLY_FALLBACK
+_ACK_HI = "समझ गया — मैं इस पर काम कर रहा हूँ और जल्द ही आपको अपडेट करूँगा।"
+
+
+def test_is_substantive_owner_reply_excludes_ack_and_closures() -> None:
+    # the interim "I'm on it" ack (both locales) is NOT a substantive answer
+    assert to._is_substantive_owner_reply(_ACK_EN) is False
+    assert to._is_substantive_owner_reply(_ACK_HI) is False
+    # this module's own stale-closure (prefixed) + escalated closure body are NOT answers either
+    assert to._is_substantive_owner_reply(
+        to._STALE_CLOSURE_PREFIX["en"] + "anything"
+    ) is False
+    assert to._is_substantive_owner_reply(
+        to.compose_task_outcome_message("escalated", "run an ad", locale="en")
+    ) is False
+    # a real honest connector answer IS substantive
+    assert to._is_substantive_owner_reply(
+        "WooCommerce isn't supported yet — I can connect Shopify or a Google Sheet."
+    ) is True
+    assert to._is_substantive_owner_reply("") is False
+
+
+def test_spawning_turn_answered_true_when_substantive_reply_present(monkeypatch) -> None:
+    """A substantive assistant turn recorded AFTER the spawning owner turn → answered (suppress)."""
+    rows = [(_ACK_EN,), ("WooCommerce isn't supported yet — I can connect Shopify instead.",)]
+    monkeypatch.setattr("orchestrator.db.tenant_connection", lambda tid: _FakeConn(rows))
+    assert to._spawning_turn_already_answered(
+        uuid4(), {"source_message_ref": "SM" + "1" * 32}
+    ) is True
+
+
+def test_spawning_turn_answered_false_on_ack_only_silent_stall(monkeypatch) -> None:
+    """A genuine silent stall: the spawning turn got ONLY the "I'm on it" ack (no real reply) →
+    NOT answered → the closure MUST still fire (VT-632 Step-5 no-silence guarantee)."""
+    monkeypatch.setattr("orchestrator.db.tenant_connection", lambda tid: _FakeConn([(_ACK_EN,)]))
+    assert to._spawning_turn_already_answered(
+        uuid4(), {"source_message_ref": "SM" + "2" * 32}
+    ) is False
+    # and a sibling escalated closure in the window ALSO does not count as an answer to THIS task
+    monkeypatch.setattr(
+        "orchestrator.db.tenant_connection",
+        lambda tid: _FakeConn([
+            (_ACK_EN,),
+            (to.compose_task_outcome_message("escalated", "a different task", locale="en"),),
+        ]),
+    )
+    assert to._spawning_turn_already_answered(
+        uuid4(), {"source_message_ref": "SM" + "3" * 32}
+    ) is False
+
+
+def test_spawning_turn_answered_false_without_anchor() -> None:
+    assert to._spawning_turn_already_answered("t", {"source_message_ref": None}) is False
+    assert to._spawning_turn_already_answered("t", {}) is False
+
+
+def test_spawning_turn_answered_read_error_fails_toward_firing(monkeypatch) -> None:
+    """Any read error returns False (→ the closure FIRES) — fail toward firing, never silence."""
+    def _boom(*a, **k):
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr("orchestrator.db.tenant_connection", _boom)
+    assert to._spawning_turn_already_answered(
+        uuid4(), {"source_message_ref": "SM" + "4" * 32}
+    ) is False
+
+
+def test_notify_escalated_suppressed_when_spawning_turn_already_answered(monkeypatch) -> None:
+    """(a) DF6 — an escalated closure whose spawning turn was ALREADY answered is SUPPRESSED: no
+    send, no ledger row, no alert; the notification flips to 'not_required' (T12's honest terminal)
+    so it can never be a contradictory "About your earlier request — I couldn't complete it"
+    non-sequitur piled on top of the real answer the owner already got."""
+    task = _pending_task("escalated", "connect my WooCommerce store")
+    seen = _patch(monkeypatch, task=task)
+    monkeypatch.setattr(to, "_spawning_turn_already_answered", lambda tid, t: True)
+
+    sent = to.maybe_notify_owner_of_task_outcome(uuid4(), uuid4(), recipient_phone="+919811111111")
+
+    assert sent is False
+    assert "body" not in seen               # nothing sent
+    assert seen["ledger"] == []
+    assert seen["alerts"] == []
+    assert seen["flips"] == [("not_required", ("pending",))]
+
+
+def test_notify_escalated_still_fires_on_genuine_silent_stall(monkeypatch) -> None:
+    """(b) DF6 — the no-silence guarantee holds: when the spawning turn was NOT answered (a genuine
+    silent stall), the escalated closure STILL fires and flips 'delivered'."""
+    task = _pending_task("escalated", "re-engage the lapsed customers")
+    seen = _patch(monkeypatch, task=task)  # _patch defaults _spawning_turn_already_answered -> False
+
+    sent = to.maybe_notify_owner_of_task_outcome(uuid4(), uuid4(), recipient_phone="+919811111111")
+
+    assert sent is True
+    assert "couldn't complete" in seen["body"].lower()
+    assert seen["flips"] == [("delivered", ("pending",))]
+
+
+def test_notify_escalated_suppress_flip_error_is_fail_soft(monkeypatch) -> None:
+    """(c) DF6 — the not_required flip runs after the settle it reports on; a DB error on THAT write
+    must be caught, never propagate, and never send."""
+    task = _pending_task("escalated", "connect my WooCommerce store")
+    seen = _patch(monkeypatch, task=task)
+    monkeypatch.setattr(to, "_spawning_turn_already_answered", lambda tid, t: True)
+
+    def _flip_raises(tid, taskid, status, *, expected_from=None):
+        raise RuntimeError("db connection reset")
+
+    monkeypatch.setattr("orchestrator.manager.task_store.set_owner_notification_status", _flip_raises)
+
+    sent = to.maybe_notify_owner_of_task_outcome(uuid4(), uuid4(), recipient_phone="+919811111111")
+
+    assert sent is False        # suppressed + fail-soft: never raised, never sent
+    assert "body" not in seen
+
+
+def test_notify_completed_not_suppressed_even_if_spawning_turn_answered(monkeypatch) -> None:
+    """DF6 scope fence — suppression is 'escalated'-only. A completed/cancelled closure is normally
+    the ONLY substantive reply the owner gets, so it FIRES regardless of the spawning-turn check
+    (which is never even consulted for a non-escalated outcome)."""
+    task = _pending_task("completed_with_effect", "send the winback campaign")
+    seen = _patch(monkeypatch, task=task)
+    # even if the read WOULD say "answered", a completed outcome must not be suppressed
+    monkeypatch.setattr(to, "_spawning_turn_already_answered", lambda tid, t: True)
+
+    sent = to.maybe_notify_owner_of_task_outcome(uuid4(), uuid4(), recipient_phone="+919811111111")
+
+    assert sent is True
+    assert "Done" in seen["body"]
     assert seen["flips"] == [("delivered", ("pending",))]
