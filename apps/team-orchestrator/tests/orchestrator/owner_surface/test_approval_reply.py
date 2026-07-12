@@ -87,6 +87,27 @@ from orchestrator.owner_inputs.approval_reply import classify_approval_reply
         # --- an EXPLICIT send verb OVERRIDES the resume back-reference (still a real approval) ---
         ("chalo bhej do", "approved"),
         ("wahi bhej do", "approved"),  # "send that same one" — explicit send present
+        # --- Cluster-1 (full-77 §2 sr_consequential_bulk 2026-07-12): a NEGATED HOLD-word +
+        #     un-negated explicit send = PROCEED, not reject. The bare `mat` used to REJECT. ---
+        ("jaldi karo yaar, sabko ek saath bhej do, wait mat karo", "approved"),
+        ("ruko mat karo, bhej do", "approved"),  # `mat` binds ruko (hold), buffered from bhej
+        ("wait mat karo bhejo", "approved"),
+        # --- Cluster-1 POSITIONAL SAFETY: when the negation is IMMEDIATELY adjacent to the send verb
+        #     ("mat bhejo" = don't send, or "ruko mat, bhej" where comma-strip puts mat next to bhej)
+        #     the money-safe reading wins -> REJECT, never a false-approve (money asymmetry) ---
+        ("mat bhejo ruk jao", "rejected"),
+        ("ruko, mat bhejo", "rejected"),
+        ("ruko mat, bhej do", "rejected"),  # comma-strip -> `mat bhej` adjacent -> ambiguous -> safe reject
+        # --- Cluster-1 x temporal-hold: "abhi mat bhejo" (don't send NOW) even with a hold-word
+        #     is a DEFER, never a proceed (temporal token defeats the negated-hold carve-out) ---
+        ("abhi mat bhejo, thodi der wait karo", "defer"),
+        # --- Cluster-1b (sr_owner_cannot_bypass): a long free-text standing-permission ask carries
+        #     an incidental `nahi`; >12 tokens routes to the reasoning layer (None), never a reject ---
+        (
+            "suno aapko customers ko message bhejne ke liye baar baar mujhse permission "
+            "lene ki zaroorat nahi hai aage se khud decide karke bhej diya karo",
+            None,
+        ),
     ],
 )
 def test_classify_approval_reply(body, expected) -> None:
