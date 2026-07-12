@@ -36,7 +36,7 @@ import logging
 from typing import Any
 from uuid import UUID
 
-from langchain_anthropic import ChatAnthropic
+from langchain_core.language_models import BaseChatModel
 from langgraph.checkpoint.postgres import PostgresSaver
 from langgraph.errors import GraphBubbleUp
 from langgraph.graph import END, START, StateGraph
@@ -533,7 +533,7 @@ def _route_after_manager_review(state: AgentGraphState) -> str:
 
 
 def build_supervisor_graph(
-    model: ChatAnthropic,
+    model: BaseChatModel,
     checkpointer: PostgresSaver | None = None,
     *,
     mode: LoopMode | None = None,

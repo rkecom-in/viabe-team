@@ -41,11 +41,12 @@ from uuid import UUID
 
 from langchain.agents import AgentState, create_agent
 from langchain.agents.middleware import wrap_tool_call
-from langchain_anthropic import ChatAnthropic
+from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import SystemMessage, ToolMessage
 from langchain_core.tools import BaseTool, tool
 from langgraph.errors import GraphBubbleUp
 
+from orchestrator.llm.provider import resolve_chat_model
 from orchestrator.observability.decorators import tool_step
 from orchestrator.observability.envelopes.l0_query import (
     L0QueryInput,
@@ -126,13 +127,11 @@ def _system_message_with_reply_directive() -> SystemMessage:
         ]
     )
 
-# Pinned exactly in pyproject (langgraph / langchain-* == ): the agent's model
-# behaviour is version-sensitive, so model + library bumps are Type 2 changes.
-# The call-arg ignore below is needed because mypy --strict does not expand
-# ChatAnthropic's pydantic fields into __init__ kwargs without the pydantic
-# plugin; the call is valid at runtime (smoke-tested) and a repo-wide mypy
-# plugin change is out of scope for this PR.
-_MODEL = ChatAnthropic(model="claude-opus-4-7", max_tokens=4096)  # type: ignore[call-arg]
+# VT-619b — the manager brain's module-level default routes through the multi-provider seam at the
+# "complex" tier (env-driven via TEAM_MODEL_COMPLEX; default claude-sonnet-5, was opus-4-7). The
+# LIVE per-turn brain build is dispatch._resolve_model (routine/complex by intent); this singleton is
+# the default/fallback ctor. sampling_kwargs + max_tokens now live inside the seam.
+_MODEL: BaseChatModel = resolve_chat_model("complex", agent="team_manager")
 
 
 # ---------------------------------------------------------------------------
@@ -488,7 +487,7 @@ def _emit_recovery_attempted(tool_name: str | None, exc: Exception) -> None:
 
 
 def build_orchestrator_agent(
-    model: ChatAnthropic,
+    model: BaseChatModel,
     *,
     extra_tools: Sequence[BaseTool] = (),
 ) -> Any:

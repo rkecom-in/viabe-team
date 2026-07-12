@@ -30,12 +30,16 @@ from typing import Literal
 
 from anthropic import Anthropic
 
+from orchestrator.llm.provider import require_anthropic_model, resolve_model_id
 from orchestrator.llm_config import sampling_kwargs
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 logger = logging.getLogger("orchestrator.manager.triage")
 
-_TRIAGE_MODEL = "claude-sonnet-5"  # A5 — triage stays on the Sonnet-5 tier.
+# VT-619b — triage is Anthropic-SDK-only (v1). Its model id comes from the "complex" tier
+# (TEAM_MODEL_COMPLEX; default claude-sonnet-5, was the hard-coded _TRIAGE_MODEL), resolved FRESH
+# per call and asserted Anthropic (a gpt-* tier value fails LOUD rather than silently mis-calling).
+_TRIAGE_TIER = "complex"
 _MAX_TOKENS = 150
 
 _PROMPT_PATH = Path(__file__).parent / "prompts" / "manager_triage.md"
@@ -81,13 +85,14 @@ def triage_turn(
         f"has_active_task: {has_active_task}\n\n"
         f"Owner message:\n{message_text}"
     )
+    model_id = require_anthropic_model(resolve_model_id(_TRIAGE_TIER), site="triage")
     try:
         resp = client.messages.create(
-            model=_TRIAGE_MODEL,
+            model=model_id,
             max_tokens=_MAX_TOKENS,
-            # VT-628 — pin temp=0 only where the model accepts it (haiku). _TRIAGE_MODEL is
-            # sonnet-5, which DEPRECATES temperature (400), so this resolves to {} for it.
-            **sampling_kwargs(_TRIAGE_MODEL),
+            # VT-628 — pin temp=0 only where the model accepts it (haiku). The complex-tier default
+            # is sonnet-5, which DEPRECATES temperature (400), so this resolves to {} for it.
+            **sampling_kwargs(model_id),
             system=_TRIAGE_SYSTEM_PROMPT,
             messages=[{"role": "user", "content": user_content}],
         )

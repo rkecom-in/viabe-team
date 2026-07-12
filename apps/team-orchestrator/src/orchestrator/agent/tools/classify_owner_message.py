@@ -34,6 +34,7 @@ from uuid import UUID
 
 from anthropic import Anthropic
 
+from orchestrator.llm.provider import require_anthropic_model, resolve_model_id
 from orchestrator.llm_config import sampling_kwargs
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -95,7 +96,10 @@ _PROMPT_PATH = (
 )
 _SYSTEM_PROMPT = _PROMPT_PATH.read_text(encoding="utf-8")
 
-_MODEL = "claude-haiku-4-5-20251001"
+# VT-619b — classifier is Anthropic-SDK-only (v1). Its model id comes from the "classifier" tier
+# (TEAM_MODEL_CLASSIFIER; default claude-haiku-4-5 — the alias, was the pinned -20251001 snapshot),
+# resolved FRESH per call and asserted Anthropic (a gpt-* tier value fails LOUD).
+_CLASSIFIER_TIER = "classifier"
 
 # Markdown code-fence stripper. Haiku-4.5 intermittently wraps the JSON
 # envelope in a ```json … ``` fence even though the prompt asks for bare
@@ -181,12 +185,15 @@ def classify_owner_message(
     if client is None:
         client = Anthropic()
 
+    model_id = require_anthropic_model(
+        resolve_model_id(_CLASSIFIER_TIER), site="classify_owner_message"
+    )
     resp = client.messages.create(
-        model=_MODEL,
+        model=model_id,
         max_tokens=200,
-        # VT-628 — deterministic tier/intent signal. _MODEL is haiku, which accepts temperature,
-        # so this resolves to temperature=0 (kills the tier-flip non-determinism).
-        **sampling_kwargs(_MODEL),
+        # VT-628 — deterministic tier/intent signal. The classifier-tier default is haiku, which
+        # accepts temperature, so this resolves to temperature=0 (kills the tier-flip non-determinism).
+        **sampling_kwargs(model_id),
         system=_SYSTEM_PROMPT,
         messages=[{"role": "user", "content": input.text}],
     )

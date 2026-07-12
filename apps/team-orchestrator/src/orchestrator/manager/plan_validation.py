@@ -24,13 +24,16 @@ from pathlib import Path
 from anthropic import Anthropic
 from pydantic import BaseModel, ConfigDict
 
+from orchestrator.llm.provider import require_anthropic_model, resolve_model_id
 from orchestrator.manager.plan_models import ManagerPlan
 
 logger = logging.getLogger("orchestrator.manager.plan_validation")
 
 # A5: plan-validation-at-objective-creation is one of the loop's ONLY two opus calls (the other is
-# completion-verification).
-_VALIDATION_MODEL = "claude-opus-4-8"
+# completion-verification). VT-619b — Anthropic-SDK-only (v1). Its model id comes from the "review"
+# tier (TEAM_MODEL_REVIEW; default claude-opus-4-8), resolved FRESH per call and asserted Anthropic
+# (a gpt-* tier value fails LOUD).
+_VALIDATION_TIER = "review"
 _MAX_TOKENS = 400
 
 _PROMPT_PATH = Path(__file__).parent / "prompts" / "manager_plan_validation.md"
@@ -76,9 +79,10 @@ def validate_plan_draft(
     )
 
     anthropic_client = client if client is not None else Anthropic()
+    model_id = require_anthropic_model(resolve_model_id(_VALIDATION_TIER), site="plan_validation")
     try:
         resp = anthropic_client.messages.create(
-            model=_VALIDATION_MODEL,
+            model=model_id,
             max_tokens=_MAX_TOKENS,
             system=_SYSTEM_PROMPT,
             messages=[{"role": "user", "content": user_content}],

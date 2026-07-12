@@ -65,12 +65,13 @@ from typing import Any
 from uuid import UUID
 
 from langchain.agents import AgentState, create_agent
-from langchain_anthropic import ChatAnthropic
+from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import SystemMessage
 from langchain_core.tools import BaseTool, tool
 from pydantic import BaseModel, ConfigDict, Field
 
 from orchestrator.agent.lane_tenant import lane_tenant_error, resolve_lane_tenant
+from orchestrator.llm.provider import resolve_chat_model
 from orchestrator.types.trigger_reason import TriggerReason
 
 logger = logging.getLogger("orchestrator.agent.cost_opt_lane")
@@ -90,9 +91,10 @@ COST_OPT_LANE_SYSTEM_MESSAGE = SystemMessage(
     ]
 )
 
-# mypy --strict needs the call-arg ignore for ChatAnthropic's pydantic kwargs (parity with the
-# orchestrator / integration / onboarding agents).
-_MODEL = ChatAnthropic(model="claude-opus-4-7", max_tokens=4096)  # type: ignore[call-arg]
+# VT-619b — the specialist model routes through the multi-provider seam. Tier "specialist"
+# (default claude-sonnet-5, was opus-4-7) is env-driven via TEAM_MODEL_SPECIALIST so a claude-* ↔
+# gpt-5.6-* swap is a Railway env change. max_tokens + sampling_kwargs now live inside the seam.
+_MODEL: BaseChatModel = resolve_chat_model("specialist", agent="cost_opt_lane")
 
 # Default look-back window for the cost/spend reads when the manager does not frame one. 30 days
 # matches the monthly subscription/plan cadence the spend is measured against.
@@ -392,7 +394,7 @@ class CostOptLaneState(AgentState, total=False):
 
 
 def build_cost_opt_lane_agent(
-    model: ChatAnthropic = _MODEL,
+    model: BaseChatModel = _MODEL,
     *,
     extra_tools: Sequence[BaseTool] = (),
 ) -> Any:

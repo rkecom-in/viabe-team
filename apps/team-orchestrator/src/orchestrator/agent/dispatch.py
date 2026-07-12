@@ -63,7 +63,7 @@ from dataclasses import dataclass
 from typing import Any, Literal, cast
 from uuid import UUID
 
-from langchain_anthropic import ChatAnthropic
+from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from orchestrator.agent.orchestrator_agent_driver import (
@@ -80,7 +80,7 @@ from orchestrator.observability.langchain_callback import (
     OrchestratorReasoningCallback,
 )
 from orchestrator.observability.pipeline_observability import write_step
-from orchestrator.llm_config import sampling_kwargs
+from orchestrator.llm.provider import resolve_chat_model
 from orchestrator.observability.tm_audit import emit_tm_audit
 from orchestrator.output_composer import compose_owner_output
 from orchestrator.state import SubscriberState
@@ -132,6 +132,16 @@ _DEFAULT_MAX_TOKENS = 4096
 # tier is EXPECTED to drop — re-measured on the VT-611 gate before this is trusted.
 _BRAIN_MODEL_HAIKU = "claude-haiku-4-5"  # routine/default workhorse
 _BRAIN_MODEL_SONNET = "claude-sonnet-5"  # complex/extensive-reasoning — the capable fail-safe
+
+# VT-619b — the brain-model selection is now a TIER, resolved through the multi-provider seam
+# (provider.resolve_chat_model) so a Railway TEAM_MODEL_ROUTINE / TEAM_MODEL_COMPLEX env change can
+# swap the concrete model (claude-* ↔ gpt-5.6-*) with no code change. The _BRAIN_MODEL_* constants
+# above remain the SELECTION INTENT + the tier fallback defaults (haiku == routine default,
+# sonnet == complex default); an unmapped id fails safe to the capable ("complex") tier.
+_BRAIN_MODEL_TO_TIER: dict[str, str] = {
+    _BRAIN_MODEL_HAIKU: "routine",
+    _BRAIN_MODEL_SONNET: "complex",
+}
 
 # Classifications that are CLEARLY simple → route to Haiku. CORRECTNESS-FIRST:
 # anything NOT in this allow-set (incl. an absent/failed classify) falls back to
@@ -402,14 +412,17 @@ def _build_inflight_state_block(tenant_id: UUID) -> str | None:
     return "## In-flight state — do not repeat yourself\n" + "\n".join(parts)
 
 
-def _resolve_model(model_id: str = _BRAIN_MODEL_SONNET) -> ChatAnthropic:
-    # VT-480: ``model_id`` is the tier-selected brain model (see
-    # select_brain_model). Defaults to Opus (the capable model) so any caller
-    # that doesn't pass a selection still fails safe. mypy --strict needs the
-    # call-arg ignore because ChatAnthropic's pydantic kwargs aren't expanded
-    # without the pydantic mypy plugin (parity with orchestrator_agent.py:_MODEL).
-    return ChatAnthropic(  # type: ignore[call-arg]
-        model=model_id, max_tokens=_DEFAULT_MAX_TOKENS, **sampling_kwargs(model_id)
+def _resolve_model(
+    model_id: str = _BRAIN_MODEL_SONNET, *, tenant_id: UUID | None = None
+) -> BaseChatModel:
+    # VT-480/VT-619b: ``model_id`` is the tier-selected brain model (see select_brain_model).
+    # It is mapped to its TIER and built through the multi-provider seam so the concrete model is
+    # env-driven (TEAM_MODEL_ROUTINE / TEAM_MODEL_COMPLEX). An unmapped id fails safe to "complex"
+    # (the capable tier) — under-powering a business decision is worse than the cost. sampling_kwargs
+    # (temp pinning) + max_tokens now live inside the seam.
+    tier = _BRAIN_MODEL_TO_TIER.get(model_id, "complex")
+    return resolve_chat_model(
+        tier, agent="team_manager", tenant_id=tenant_id, max_tokens=_DEFAULT_MAX_TOKENS
     )
 
 
@@ -798,7 +811,7 @@ def dispatch_brain(
                 },
             )
             graph = build_supervisor_graph(
-                model=_resolve_model(brain_model_id),
+                model=_resolve_model(brain_model_id, tenant_id=tenant_id),
                 checkpointer=get_checkpointer(),
                 # T9 — an answerable turn (triage direct_reply / task_status) must be ANSWERED
                 # in-turn from read-tools, not deferred to an async specialist that D1-stalls.
@@ -1231,7 +1244,7 @@ def _compose_completed_reply(
         )
         human_content = "\n\n".join(human_parts)
 
-        response = _resolve_model(_BRAIN_MODEL_SONNET).invoke(
+        response = _resolve_model(_BRAIN_MODEL_SONNET, tenant_id=tenant_id).invoke(
             [
                 SystemMessage(content=_COMPOSE_COMPLETION_SYSTEM),
                 HumanMessage(content=human_content),
@@ -1364,7 +1377,7 @@ def _compose_progression_reply(
             "## Your PREVIOUS reply — the owner has already seen this; do NOT repeat it\n"
             f"{prior_reply}"
         )
-        response = _resolve_model(_BRAIN_MODEL_SONNET).invoke(
+        response = _resolve_model(_BRAIN_MODEL_SONNET, tenant_id=tenant_id).invoke(
             [
                 SystemMessage(content=_COMPOSE_ANTIREPEAT_SYSTEM),
                 HumanMessage(content="\n\n".join(human_parts)),
