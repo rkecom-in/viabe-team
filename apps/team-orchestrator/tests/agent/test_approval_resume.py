@@ -273,3 +273,70 @@ def test_bare_weak_ack_still_approves_non_send() -> None:
         resolve_decision_from_reply("theek hai", tenant_id=tid, approval_type="autonomy_upgrade")
         == "approved"
     )
+
+
+# --- CD5 §7D: owner "skip review, just send" is HONORED and AUDITED (Fazal ruling 2026-07-12) ----
+def test_skip_review_approved_customer_send_is_honored_and_audited(monkeypatch) -> None:
+    """An EXPLICIT owner skip-review waiver on a customer SEND ("bina review seedha bhej do") is
+    HONORED — the decision is the deterministic 'approved', UNCHANGED — AND leaves a §7D audit trail
+    (owner_skip_review_authorized). AUDIT-ONLY: the audit is a side-effect, never a decision input."""
+    import orchestrator.observability.tm_audit as tm_audit_mod
+
+    calls: list[dict] = []
+    monkeypatch.setattr(tm_audit_mod, "emit_tm_audit", lambda **kw: calls.append(kw))
+    decision = resolve_decision_from_reply(
+        "bina review seedha bhej do", tenant_id=uuid4(), approval_type="campaign_send"
+    )
+    assert decision == "approved"  # decision UNCHANGED — the owner's waiver is honored
+    assert len(calls) == 1
+    kw = calls[0]
+    assert kw["event_layer"] == "decides"
+    assert kw["event_kind"] == "owner_skip_review_authorized"
+    assert kw["actor"] == "team_manager"
+    assert kw["decision"]["review_waived"] is True
+    assert kw["decision"]["approval_type"] == "campaign_send"
+    # PII-safe (CL-390): the owner reply body is never carried in the audit payload.
+    assert "bhej" not in (kw.get("summary") or "")
+
+
+def test_ordinary_approval_emits_no_skip_review_audit(monkeypatch) -> None:
+    """An ordinary 'haan bhej do' approves but carries NO skip-review waiver -> NO §7D audit. The
+    record fires ONLY on an explicit review-waiver, not on every customer-send approval."""
+    import orchestrator.observability.tm_audit as tm_audit_mod
+
+    calls: list[dict] = []
+    monkeypatch.setattr(tm_audit_mod, "emit_tm_audit", lambda **kw: calls.append(kw))
+    decision = resolve_decision_from_reply(
+        "haan bhej do", tenant_id=uuid4(), approval_type="campaign_send"
+    )
+    assert decision == "approved"
+    assert calls == []  # no skip-review marker -> no audit
+
+
+def test_skip_review_audit_scoped_to_customer_send(monkeypatch) -> None:
+    """The §7D skip-review audit is scoped to CUSTOMER-SEND approvals (money). A non-send approval
+    type with the same waiver phrasing approves normally but emits NO skip-review audit."""
+    import orchestrator.observability.tm_audit as tm_audit_mod
+
+    calls: list[dict] = []
+    monkeypatch.setattr(tm_audit_mod, "emit_tm_audit", lambda **kw: calls.append(kw))
+    decision = resolve_decision_from_reply(
+        "bina review seedha bhej do", tenant_id=uuid4(), approval_type="autonomy_upgrade"
+    )
+    assert decision == "approved"
+    assert calls == []
+
+
+def test_skip_review_audit_failure_never_blocks_decision(monkeypatch) -> None:
+    """FAIL-SOFT (Pillar 7): an audit emit that RAISES must never affect the send decision — the
+    owner's authorized send is not held on an observability write. Decision is still 'approved'."""
+    import orchestrator.observability.tm_audit as tm_audit_mod
+
+    def _boom(**kw):
+        raise RuntimeError("audit sink down")
+
+    monkeypatch.setattr(tm_audit_mod, "emit_tm_audit", _boom)
+    decision = resolve_decision_from_reply(
+        "bina review seedha bhej do", tenant_id=uuid4(), approval_type="campaign_send"
+    )
+    assert decision == "approved"  # audit raised, decision unaffected
