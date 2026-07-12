@@ -306,11 +306,26 @@ _INTERIM_ACK_MARKERS = ("i'm on it", "मैं इस पर काम कर �
 _ESCALATED_CLOSURE_MARKERS = ("couldn't complete it on my own", "अकेले पूरा नहीं कर पाया")
 
 
+def _interim_replacement_markers() -> tuple[str, ...]:
+    """R3 — the emission gate's interim STALL replacement lines (generic "still working" /
+    not_started "haven't started"), lowercased, as substring markers. Lazy + fail-soft: ``emission_
+    gate`` lives under ``orchestrator.agent``, whose package ``__init__`` pulls the LangChain agent
+    stack — importing it at MODULE load would drag that onto this async-notify hot path (and break
+    the dep-less smoke). Any import failure returns () so the ack/closure guards below still hold."""
+    try:
+        from orchestrator.agent.emission_gate import INTERIM_REPLACEMENT_MARKERS
+
+        return INTERIM_REPLACEMENT_MARKERS
+    except Exception:  # noqa: BLE001 — best-effort: skip only this extra exclusion, never raise
+        return ()
+
+
 def _is_substantive_owner_reply(text: str) -> bool:
     """DF6 — True iff ``text`` (an assistant conversation_log turn) is a SUBSTANTIVE owner-facing
-    reply: NOT the interim "I'm on it" ack and NOT this module's own (stale or prior) closure.
-    Anything else counts as substantive. The ack + closure exclusions are precisely what keep a
-    genuine silent stall (ack-only, or ack + a sibling closure) from being mis-read as "answered"."""
+    reply: NOT the interim "I'm on it" ack, NOT this module's own (stale or prior) closure, and NOT
+    (R3) an emission-gate interim STALL replacement. Anything else counts as substantive. These
+    exclusions are precisely what keep a genuine silent stall (ack-only, ack + a sibling closure, or
+    a gate-blocked "still working" stall) from being mis-read as "answered"."""
     t = (text or "").strip()
     if not t:
         return False
@@ -320,6 +335,11 @@ def _is_substantive_owner_reply(text: str) -> bool:
     if any(t.startswith(p) for p in _STALE_CLOSURE_PREFIX.values()):
         return False
     if any(m in low for m in _ESCALATED_CLOSURE_MARKERS):
+        return False
+    # R3 — a gate-swapped interim stall ("still working" / "haven't started") is NOT an answer: it
+    # must not suppress the honest closure the async loop still owes. (pending_approval + receivables
+    # are substantive answers and are deliberately absent from INTERIM_REPLACEMENT_MARKERS.)
+    if any(m in low for m in _interim_replacement_markers()):
         return False
     return True
 

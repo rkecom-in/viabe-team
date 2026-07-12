@@ -659,6 +659,54 @@ def test_notify_escalated_suppress_flip_error_is_fail_soft(monkeypatch) -> None:
     assert "body" not in seen
 
 
+# ------------------- R3: gate-blocked interim stall must not count as an answer -------------------
+def test_is_substantive_excludes_gate_interim_replacements() -> None:
+    """R3 — an emission-gate interim STALL replacement ("still working" generic / not_started
+    "haven't started") is NOT a substantive answer; the substantive pending_approval + receivables
+    lines, and real prose, ARE. Requires the agent stack for the lazy INTERIM_REPLACEMENT_MARKERS
+    import (skipped in the dep-less smoke)."""
+    pytest.importorskip("langchain")
+    from orchestrator.agent.emission_gate import _REPLACEMENT_COPY
+
+    assert to._is_substantive_owner_reply(_REPLACEMENT_COPY["generic"]["en"]) is False
+    assert to._is_substantive_owner_reply(_REPLACEMENT_COPY["generic"]["hi"]) is False
+    assert to._is_substantive_owner_reply(_REPLACEMENT_COPY["not_started"]["en"]) is False
+    assert to._is_substantive_owner_reply(_REPLACEMENT_COPY["not_started"]["hi"]) is False
+    # substantive lines (a real answer to the owner) stay substantive
+    assert to._is_substantive_owner_reply(_REPLACEMENT_COPY["pending_approval"]["en"]) is True
+    assert to._is_substantive_owner_reply(_REPLACEMENT_COPY["receivables"]["en"]) is True
+    assert to._is_substantive_owner_reply(
+        "I've drafted a win-back plan for your 8 lapsed customers."
+    ) is True
+
+
+def test_spawning_turn_gate_stall_reply_is_not_an_answer_closure_fires(monkeypatch) -> None:
+    """R3 — when the spawning turn was answered ONLY by a gate-blocked interim stall (the brain's
+    fabrication the gate swapped for "still working"), the closure MUST still fire (not suppressed):
+    a swapped fabrication cannot silence the honest async notice. Real prose still suppresses."""
+    pytest.importorskip("langchain")
+    from orchestrator.agent.emission_gate import _REPLACEMENT_COPY
+
+    generic = _REPLACEMENT_COPY["generic"]["en"]
+    monkeypatch.setattr(
+        "orchestrator.db.tenant_connection", lambda tid: _FakeConn([(_ACK_EN,), (generic,)])
+    )
+    assert to._spawning_turn_already_answered(
+        uuid4(), {"source_message_ref": "SM" + "5" * 32}
+    ) is False
+    # a genuine substantive reply DOES suppress (the owner already got a real answer)
+    monkeypatch.setattr(
+        "orchestrator.db.tenant_connection",
+        lambda tid: _FakeConn([
+            (_ACK_EN,),
+            ("WooCommerce isn't supported yet — I can connect Shopify instead.",),
+        ]),
+    )
+    assert to._spawning_turn_already_answered(
+        uuid4(), {"source_message_ref": "SM" + "6" * 32}
+    ) is True
+
+
 def test_notify_completed_not_suppressed_even_if_spawning_turn_answered(monkeypatch) -> None:
     """DF6 scope fence — suppression is 'escalated'-only. A completed/cancelled closure is normally
     the ONLY substantive reply the owner gets, so it FIRES regardless of the spawning-turn check

@@ -494,3 +494,79 @@ def test_phantom_strip_never_raises_falls_back_to_original(monkeypatch):
     text = "I'll follow up shortly."
     # the strip path raises -> the gate's outer guard ships the ORIGINAL text, never breaks.
     assert mod.apply_emission_gate(text, TENANT) == text
+
+
+# ── R2 — negation / owner-directed / ability-marker exemptions (LOOSENS the honesty gate) ────────
+# THIS is the only build item that loosens the gate. Every exemption is SENTENCE-SCOPED; the full
+# existing fabrication suite above stays green and the three exemption-abuse fixtures below are
+# merge-blocking.
+
+
+def test_r2_owner_directed_send_passes():
+    # "sent you the connect link" / "aapko … bhej diya" is a message TO THE OWNER (a link/plan), not
+    # a customer-send claim — passes clean.
+    assert not mod.contains_completion_claim("I've sent you the connect link.")
+    assert not mod.contains_completion_claim("Maine aapko link bhej diya hai.")
+
+
+def test_r2_ability_framed_send_passes():
+    # A subject-less bigram gated by an ability/future marker BEFORE it is a capability statement,
+    # not a completed act.
+    assert not mod.contains_completion_claim(
+        "I can win back customers — messages sent automatically once you approve."
+    )
+
+
+def test_r2_spend_denial_adjacent_negation_passes():
+    # An adjacent-negated spend verb is a DENIAL, never a fabricated completion (money severity).
+    assert not mod.contains_spend_completion_claim(
+        "main bina aapki approval ke ads pe ₹1 bhi kharch nahi karta"
+    )
+
+
+def test_r2_true_positives_still_block():
+    # The loosening must not open the real fabrications.
+    assert mod.contains_completion_claim("Maine campaign bhej diya — 40 customers ko")
+    assert mod.contains_completion_claim("sent to 40 customers")
+    assert mod.contains_spend_completion_claim("₹500 boost pe kharch kar diya")
+
+
+def test_r2_exemption_abuse_fixtures_still_block():
+    # MERGE-BLOCKING adversarial set — every exemption is sentence-scoped and must NOT leak:
+    # (1) an owner-directed clause + a customer-send claim in the SAME sentence still blocks.
+    assert mod.contains_completion_claim("I sent you the campaign — 40 customers reached")
+    # (2) an ability marker in sentence 1 must NOT exempt the marker-less claim in sentence 2.
+    assert mod.contains_completion_claim(
+        "I can send campaigns. Campaign sent to 40 customers last week"
+    )
+    # (3) a NON-adjacent negation does NOT exempt a spend claim (positional binding).
+    assert mod.contains_spend_completion_claim("nahi, ₹500 kharch kar diya")
+
+
+def test_r2_debt_block_returns_receivables_line_both_locales(monkeypatch):
+    # R2 (d) — the fabricated-debt block now returns the schema-truth receivables line (a substantive
+    # answer), NOT the task-framed not_started stall.
+    text = "Aapke 5 purane customers ka total ₹5,500 overdue hai."
+    events = _patch_facts_spend(monkeypatch, locale="en")
+    out = mod.apply_emission_gate(text, TENANT)
+    assert out == mod._REPLACEMENT_COPY["receivables"]["en"]
+    assert out != text
+    assert events and events[-1][1] == "emission_fabricated_debt_blocked"
+
+    _patch_facts_spend(monkeypatch, locale="hi")
+    assert mod.apply_emission_gate(text, TENANT) == mod._REPLACEMENT_COPY["receivables"]["hi"]
+
+
+# ── R3 — INTERIM_REPLACEMENT_MARKERS export (interim stalls, not substantive answers) ────────────
+
+
+def test_r3_interim_replacement_markers_cover_stalls_not_answers():
+    markers = mod.INTERIM_REPLACEMENT_MARKERS
+    # the interim STALLS are in the set (lowercased, so task_outcome's substring match hits)
+    assert mod._REPLACEMENT_COPY["generic"]["en"].lower() in markers
+    assert mod._REPLACEMENT_COPY["generic"]["hi"].lower() in markers
+    assert mod._REPLACEMENT_COPY["not_started"]["en"].lower() in markers
+    assert mod._REPLACEMENT_COPY["not_started"]["hi"].lower() in markers
+    # substantive answers (pending_approval + receivables) are deliberately EXCLUDED
+    assert mod._REPLACEMENT_COPY["pending_approval"]["en"].lower() not in markers
+    assert mod._REPLACEMENT_COPY["receivables"]["en"].lower() not in markers
