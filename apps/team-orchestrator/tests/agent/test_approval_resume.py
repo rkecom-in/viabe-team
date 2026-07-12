@@ -236,3 +236,40 @@ def test_count_recent_campaign_requests_sql_and_value():
     assert "approval_type IN ('campaign_send', 'agent_customer_send')" in sql
     assert "created_at >= now() - make_interval(days => %s)" in sql
     assert params[1] == 7
+
+
+# --- theek-hai flip: customer-send scoping (Fazal money middle-path 2026-07-12) ----------------
+def test_bare_weak_ack_holds_customer_send() -> None:
+    """A bare 'theek hai' (weak ack, no send verb, no strong yes) does NOT approve a customer SEND
+    -> None (re-ask). Fires on the deterministic fast-path, so no classify_fn is consulted."""
+    tid = uuid4()
+    for at in ("campaign_send", "agent_customer_send"):
+        assert resolve_decision_from_reply("theek hai", tenant_id=tid, approval_type=at) is None
+        assert resolve_decision_from_reply("ok", tenant_id=tid, approval_type=at) is None
+
+
+def test_unambiguous_send_approval_still_approves() -> None:
+    """An explicit send verb / strong yes is unambiguous -> still approves a customer send."""
+    tid = uuid4()
+    assert (
+        resolve_decision_from_reply("theek hai bhej do", tenant_id=tid, approval_type="campaign_send")
+        == "approved"
+    )
+    assert (
+        resolve_decision_from_reply("haan bhej do", tenant_id=tid, approval_type="campaign_send")
+        == "approved"
+    )
+    assert (
+        resolve_decision_from_reply("bhej do", tenant_id=tid, approval_type="campaign_send")
+        == "approved"
+    )
+
+
+def test_bare_weak_ack_still_approves_non_send() -> None:
+    """The flip is customer-SEND-scoped: a non-send approval (autonomy_upgrade) keeps its existing
+    bare-ack behavior -> 'theek hai' still approves."""
+    tid = uuid4()
+    assert (
+        resolve_decision_from_reply("theek hai", tenant_id=tid, approval_type="autonomy_upgrade")
+        == "approved"
+    )

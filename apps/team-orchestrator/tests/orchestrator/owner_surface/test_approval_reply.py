@@ -13,7 +13,10 @@ import pytest
 # Skip the module cleanly when anthropic is absent; the full real-PG suite runs it.
 pytest.importorskip("anthropic")
 
-from orchestrator.owner_inputs.approval_reply import classify_approval_reply
+from orchestrator.owner_inputs.approval_reply import (
+    classify_approval_reply,
+    is_weak_ack_only_approval,
+)
 
 
 @pytest.mark.parametrize(
@@ -299,3 +302,33 @@ def test_build_approval_request_populates_template_params() -> None:
     assert params["1"] == "45-day lapsed"
     assert params["2"] == "recovery"
     assert params["3"] == "15,000–30,000"  # paise -> ₹ range
+
+
+# --- theek-hai flip: is_weak_ack_only_approval (Fazal money middle-path 2026-07-12) ----------
+def test_weak_ack_only_flags_bare_weak_acks() -> None:
+    for body in ["theek hai", "ok", "okay", "theek", "thik hai", "ok go", "proceed", "ठीक है"]:
+        assert is_weak_ack_only_approval(body) is True, body
+
+
+def test_weak_ack_only_false_when_explicit_send_present() -> None:
+    # An explicit send verb makes it an unambiguous approval -> NOT weak-ack-only.
+    for body in ["theek hai bhej do", "ok send it", "theek hai bhejo", "proceed and send"]:
+        assert is_weak_ack_only_approval(body) is False, body
+
+
+def test_weak_ack_only_false_when_strong_yes_present() -> None:
+    # A strong yes ("haan"/"yes"/"approve") is an explicit approval intent -> NOT weak-ack-only.
+    for body in ["haan theek hai", "yes ok", "approve, theek hai"]:
+        assert is_weak_ack_only_approval(body) is False, body
+
+
+def test_weak_ack_only_false_when_no_weak_ack() -> None:
+    for body in ["bhej do", "haan", "no", "later", ""]:
+        assert is_weak_ack_only_approval(body) is False, body
+
+
+def test_classifier_itself_unchanged_bare_theek_still_approves() -> None:
+    # The flip lives in resolve_decision_from_reply (customer-send scoped), NOT the classifier:
+    # classify_approval_reply still reads a bare weak ack as an approval (non-send flows rely on it).
+    assert classify_approval_reply("theek hai") == "approved"
+    assert classify_approval_reply("ok") == "approved"

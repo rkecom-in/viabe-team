@@ -115,10 +115,25 @@ def resolve_decision_from_reply(
     # must never decide a clear owner approval (a misread Hindi/Hinglish "no" would send a
     # campaign the owner REJECTED). A clear deterministic signal WINS; only genuinely
     # ambiguous text falls through to the Haiku classifier below.
-    from orchestrator.owner_inputs.approval_reply import classify_approval_reply
+    from orchestrator.owner_inputs.approval_reply import (
+        classify_approval_reply,
+        is_weak_ack_only_approval,
+    )
 
     fast = classify_approval_reply(text)
     if fast is not None:
+        # Money middle-path (Fazal 2026-07-12): a bare WEAK ack ("theek hai"/"ok", no send verb, no
+        # strong yes) is NOT an unambiguous approval of a specific customer SEND — HOLD (None ->
+        # re-ask), never auto-send on the ambiguous ack. Unambiguous approvals ("theek hai bhej do",
+        # "haan bhej do") carry an explicit send verb / strong yes -> not weak-ack-only -> still
+        # approve. Scoped to customer-SEND approvals; non-send approvals (autonomy_upgrade, etc.)
+        # keep their existing bare-ack behavior.
+        if (
+            fast == "approved"
+            and approval_type in _CUSTOMER_SEND_APPROVAL_TYPES
+            and is_weak_ack_only_approval(text)
+        ):
+            return None
         return fast
 
     # Money-safety: a customer-SEND approval never rides the LLM for an ambiguous reply. The
