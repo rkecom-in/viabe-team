@@ -158,6 +158,38 @@ _RUPEE_FIGURE_RE = re.compile(
     r"(₹\s*\d|(?:\d[\d,]*)\s*(?:rupaye|rupaya|rupees|rupee|rs|inr)\b)", re.IGNORECASE
 )
 
+# ── cluster-2b (full-77 sr_spend_ceiling) — fabricated SPEND/boost COMPLETION ────────────────────
+# The brain told the owner an ad-spend/boost was DONE/paid ("boost kar diya", "₹500 spent", "boost
+# is live", "payment successful"). There is NO real spend path anywhere: the sole spend effect is a
+# VT-467 stub (no money moves), it is not registered in advisory_registry, VT-268 forbids any spend
+# tool at graph build, and Meta/FB-Insta are available_today=False. So a same-turn spend/boost
+# completion claim is fabricated BY CONSTRUCTION — always swap it (no fact-check needed; there is no
+# ledger a true claim could reference). Layer-1's _COMPLETION_BIGRAMS cover SEND completions only, so
+# these needles pass through unguarded today. HIGH PRECISION: a curated past-tense phrase set, plus a
+# verb+ad-reference+amount combo (all three required) so a future proposal ("₹500 ka boost approval
+# milte hi kar dunga") or a bare cost mention never trips it. Devanagari-safe via ``_tokenize``.
+# Forward seam: when a real payment/boost integration + spend ledger lands, add spend_fact_exists()
+# (mirroring send_fact_exists) and gate on ``and not spend_fact_exists(tenant_id)``.
+_SPEND_COMPLETION_PHRASES = frozenset(
+    {
+        # Hinglish (romanized) — PAST-TENSE completions only
+        "boost kar diya", "boost kar diya hai", "boost ho gaya", "boost laga diya",
+        "boost live hai", "paisa de diya", "paise de diye", "payment kar diya",
+        "paid kar diya", "spend kar diya", "kharch kar diya", "ad chala diya",
+        "promote kar diya",
+        # English
+        "boost is live", "boosted and paid", "payment successful", "payment done",
+        "has been spent", "boost went live", "paid for the boost", "ad is live",
+        # Devanagari
+        "बूस्ट कर दिया", "पैसा दे दिया", "पेमेंट कर दिया",
+    }
+)
+_SPEND_VERB_TOKENS = {"spent", "paid", "kharch", "kharcha"}
+_AD_REF_TOKENS = {"boost", "boosted", "ad", "ads", "promo", "promote", "promotion", "campaign"}
+# A bare 2+-digit amount is accepted ONLY inside the verb+ad-ref combo (already high-signal), so
+# "Paid 500 for your ad" matches while a bare number elsewhere never fires this class on its own.
+_BARE_AMOUNT_RE = re.compile(r"\b\d{2,}\b")
+
 
 def _tokenize(text: str) -> list[str]:
     """NFC-normalize + casefold + strip apostrophes, then split on whitespace/punct only."""
@@ -220,6 +252,28 @@ def contains_fabricated_debt_framing(text: str) -> bool:
         return True
     hay = " " + " ".join(tokens) + " "
     return any(f" {phrase} " in hay for phrase in _DEBT_FRAMING_PHRASES)
+
+
+def contains_spend_completion_claim(text: str) -> bool:
+    """True iff ``text`` claims a completed ad-SPEND/boost ("boost kar diya", "₹500 spent", "boost
+    is live", "payment successful"). There is no real spend path (stub effect, no registered tool),
+    so any such same-turn claim is fabricated by construction. High precision: a curated past-tense
+    phrase set OR (a spend verb AND an ad reference AND an amount) all co-present — so a future
+    proposal or a bare cost mention never trips it. Devanagari-safe via ``_tokenize``."""
+    tokens = _tokenize(text)
+    if not tokens:
+        return False
+    hay = " " + " ".join(tokens) + " "
+    if any(f" {phrase} " in hay for phrase in _SPEND_COMPLETION_PHRASES):
+        return True
+    tokset = set(tokens)
+    if (
+        (tokset & _SPEND_VERB_TOKENS)
+        and (tokset & _AD_REF_TOKENS)
+        and (_RUPEE_FIGURE_RE.search(text) or _BARE_AMOUNT_RE.search(text))
+    ):
+        return True
+    return False
 
 
 def _split_sentences(text: str) -> list[str]:
@@ -438,6 +492,16 @@ def apply_emission_gate(text: str, tenant_id: UUID | str) -> str:
             _emit_blocked_audit(tenant_id, text, event_kind="emission_fabricated_debt_blocked")
             return replacement
 
+        # Layer 3b — fabricated SPEND/boost completion (cluster-2b): the brain claimed an ad-spend or
+        # boost was DONE/paid. No real spend path exists (stub effect, no registered tool), so the
+        # claim is fabricated by construction — whole-message honest swap, no fact-check needed.
+        if contains_spend_completion_claim(text):
+            from orchestrator.owner_surface.freeform_acks import resolve_owner_locale
+
+            replacement = _replacement_line(tenant_id, resolve_owner_locale(tenant_id))
+            _emit_blocked_audit(tenant_id, text, event_kind="emission_spend_claim_blocked")
+            return replacement
+
         # Layer 2 — phantom promise (#58/T7): a deferred follow-up from a nonexistent team/person.
         # Surgically strip the offending sentence(s), keeping the honest remainder. Runs on
         # honest text AND on a true completion claim (a real "sent" can still trail a phantom
@@ -460,5 +524,6 @@ __all__ = [
     "contains_completion_claim",
     "contains_fabricated_debt_framing",
     "contains_phantom_promise",
+    "contains_spend_completion_claim",
     "send_fact_exists",
 ]
