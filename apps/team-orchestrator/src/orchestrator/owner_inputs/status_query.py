@@ -36,9 +36,16 @@ _DASHBOARD = "https://viabe.ai/team/dashboard"
 # ("...only the number, no drafts, no messages, no campaigns") cannot hijack a finance ask into a
 # canned last_campaign/customer_count answer — the efficient_no_overstep wrong-read where an owner's
 # cash-flow question got answered "You haven't run a campaign in the last 30 days."
+# full-77 cluster-3 (routing_db_proof_finance_vs_sr): "Sharma ji ka payment kabse pending hai … koi
+# campaign mat banana" got answered "You haven't run a campaign in the last 30 days" — a stray
+# 'campaign' token hijacked a PAYMENT/receivable read into a campaign-status non-sequitur. payment/
+# pending/overdue are receivables reads the brain's finance advisory owns, not a status_query qtype;
+# guarding them here routes the ask to the brain. ('due' is deliberately EXCLUDED — too polysemous:
+# "when is the campaign due to go out" is a send-status ask that must still reach last_campaign.)
 _FINANCE_READ_TOKENS = frozenset({
     "cash", "cashflow", "receivable", "receivables", "revenue", "profit", "margin",
     "turnover", "collections", "collection", "outstanding", "dues", "income",
+    "payment", "payments", "pending", "overdue",
 })
 
 
@@ -115,6 +122,57 @@ def _open_approval_exists(tenant_id: UUID | str) -> bool:
         return False
 
 
+# full-77 cluster-3 (injection_quarantine): a bare "what's the status?" right after a campaign was
+# drafted got a counter-question ("Kya status chahiye — win-back campaign ka, ya kuch aur?"). A bare
+# status/update ask with NO other routing token, when a recent campaign EXISTS, obviously refers to
+# it — answer status-aware (T10). Keyed on a bare status/update cue; reached only after every
+# specific qtype missed (so "campaign status" already routed to last_campaign above).
+_BARE_STATUS_TOKENS = frozenset({"status", "update", "updates"})
+_BARE_STATUS_PHRASES = ("kya haal", "kya scene", "kahan tak", "kaha tak", "kya update", "koi update")
+
+
+def _is_bare_status_ask(body: str) -> bool:
+    norm = unicodedata.normalize("NFC", (body or "").strip().casefold())
+    tokens = {t for t in re.split(r"[\s,.!?;:।/\\-]+", norm) if t}
+    return bool(_BARE_STATUS_TOKENS & tokens) or any(p in norm for p in _BARE_STATUS_PHRASES)
+
+
+def _render_campaign_status(c, tenant_id: UUID | str) -> str:
+    """T10 status-aware rendering of the most-recent campaign row — shared by the ``last_campaign``
+    qtype and the bare-status fallback so the two never drift."""
+    if c.status == "proposed":
+        if _open_approval_exists(tenant_id):
+            return (
+                "It hasn't gone out yet — it's waiting on your approval. Reply to the "
+                "approval message and I'll send it."
+            )
+        return "It hasn't gone out yet — the draft is still awaiting approval."
+    if c.status == "approved":
+        return "It's approved and going out now — I'll confirm once it's sent."
+    if c.status in ("rejected", "cancelled"):
+        return f"No — that campaign didn't go out; it was {c.status}."
+    if c.status == "failed":
+        return "No — the send failed. I can retry or redraft it if you want."
+    return f"Yes — it went out, and it got {c.response_count} responses so far."
+
+
+def _recent_campaign_status_or_none(tenant_id: UUID | str) -> str | None:
+    """The bare-status answer: the most-recent campaign's status ONLY when one exists — else None
+    (a bare status ask with no campaign could be about onboarding/connection; let the brain handle
+    it rather than assert a campaign-centric 'you haven't run a campaign')."""
+    from orchestrator.agent.tools.get_recent_campaigns import (
+        GetRecentCampaignsInput,
+        get_recent_campaigns,
+    )
+
+    out = get_recent_campaigns(
+        GetRecentCampaignsInput(tenant_id=str(tenant_id), days_back=30, limit=1)
+    )
+    if not out.campaigns:
+        return None
+    return _render_campaign_status(out.campaigns[0], tenant_id)
+
+
 def answer_status_query(tenant_id: UUID | str, body: str) -> str | None:
     """Return the templated answer text for the owner's status query (deterministic SQL).
 
@@ -174,33 +232,19 @@ def answer_status_query(tenant_id: UUID | str, body: str) -> str | None:
         )
         if not out.campaigns:
             return "You haven't run a campaign in the last 30 days."
-        c = out.campaigns[0]
-        # T10 (§2 judge, x3-systematic) — the answer must be STATUS-AWARE. "has it gone out yet?"
-        # about a 'proposed' campaign answered "got 0 responses (status: proposed)" — a response-
-        # stats non-answer the judge reads as ignored_speech_act. A not-yet-sent campaign gets an
-        # honest "hasn't gone out" lead, and a proposed one names WHAT it's waiting on (the owner's
-        # own approval — resurfacing the pending ask instead of burying it).
-        if c.status == "proposed":
-            if _open_approval_exists(tenant_id):
-                return (
-                    "It hasn't gone out yet — it's waiting on your approval. Reply to the "
-                    "approval message and I'll send it."
-                )
-            return "It hasn't gone out yet — the draft is still awaiting approval."
-        if c.status == "approved":
-            return "It's approved and going out now — I'll confirm once it's sent."
-        if c.status in ("rejected", "cancelled"):
-            return f"No — that campaign didn't go out; it was {c.status}."
-        if c.status == "failed":
-            return "No — the send failed. I can retry or redraft it if you want."
-        # 'sent' (and any future terminal): the campaign went out — report responses.
-        # NOTE: recipients_count is 1 per campaign row in the current model, so we report
-        # responses + status (not a recipient count, which would be misleading as "1").
-        return f"Yes — it went out, and it got {c.response_count} responses so far."
+        # T10 (§2 judge, x3-systematic) — the answer must be STATUS-AWARE (shared renderer).
+        return _render_campaign_status(out.campaigns[0], tenant_id)
 
     if qtype == "billing":
         # Phase/trial detail lives in the portal; keep this a pointer (Pillar-7 copy TBD).
         return f"Your trial/billing status is on your portal: {_DASHBOARD}"
 
-    # 'unknown' — not a lookup this fast-path owns; the brain answers (VT-600).
+    # 'unknown' — cluster-3: a BARE "what's the status?" with a live campaign refers to it (answer
+    # status-aware, T10); otherwise (no campaign, or not a bare status ask) fall through to the brain.
+    if _is_bare_status_ask(body):
+        ans = _recent_campaign_status_or_none(tenant_id)
+        if ans is not None:
+            return ans
+
+    # not a lookup this fast-path owns; the brain answers (VT-600).
     return None
