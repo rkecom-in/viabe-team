@@ -191,6 +191,27 @@ def test_consent_required_handler_sends_prompt_no_transmit(gate, monkeypatch):
     assert sent["surface"] == "system"  # recorded as the consent-ask marker
 
 
+def test_consent_required_handler_acknowledges_decline(gate, monkeypatch):
+    # cluster-5 (sr_consent_decline_then_explicit): an explicit decline ("no thanks, not right now")
+    # is ACKNOWLEDGED, not re-pushed verbatim — but the full prompt (incl. ACTIVATE TEAM) still ships
+    # so the exact-keyword floor still works on the next turn.
+    import importlib
+
+    h = importlib.import_module("orchestrator.direct_handlers.consent_required_handler")
+    sent: dict[str, str] = {}
+
+    def _capture(body: str, phone: str, **kwargs: object) -> str:
+        sent["body"] = body
+        return "SMfake"
+
+    monkeypatch.setattr(h, "send_freeform_message", _capture)
+    sub = _state(gate, _new_tenant(gate.dsn))
+    outcome = h.consent_required_handler(_inbound(gate, "no thanks, not right now"), sub)
+    assert outcome["consent_prompt_sent"] is True
+    assert sent["body"].startswith(h._DECLINE_ACK)  # decline acknowledged, not verbatim repeat
+    assert "ACTIVATE TEAM" in sent["body"]  # exact-keyword floor still available
+
+
 def test_brain_owner_inputs_ok_fail_closed_on_error(gate, monkeypatch):
     """VT-303 / CL-425: a consent-check error fails CLOSED (no transmit)."""
     import orchestrator.runner as runner_mod

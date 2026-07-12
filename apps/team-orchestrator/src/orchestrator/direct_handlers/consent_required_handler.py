@@ -39,15 +39,31 @@ _CONSENT_PROMPT = (
     "recover sales for you. You can pause anytime by replying STOP."
 )
 
+# full-77 cluster-5 (sr_consent_decline_then_explicit, §2 3/3) — when the owner DECLINES the consent
+# ask ("no thanks, not right now"), re-sending _CONSENT_PROMPT verbatim ignores the decline (a
+# loop_stall + ignored_speech_act breaker). Prepend a one-line acknowledgment so the reply reflects
+# the decline, while KEEPING the full prompt (incl. the ACTIVATE TEAM phrase) intact — the runner's
+# consent gate still recognises the ask, and the exact-keyword floor still works on the next turn.
+# Zero LLM (classify_consent_intent is deterministic) — Pillar-1 unchanged.
+_DECLINE_ACK = (
+    "No problem — nothing's changed and your data stays private. Whenever you're ready:\n\n"
+)
+
 
 @DBOS.step()
 def consent_required_handler(
     event: WebhookEvent, state: SubscriberState
 ) -> dict[str, Any]:
     """Send the conservative enable-prompt; never transmit to the brain."""
+    from orchestrator.pre_filter_gate import classify_consent_intent
+
     sid: str | None = None
     error: str | None = None
     recipient = event.sender_phone or None
+    # cluster-5 — acknowledge an explicit decline instead of re-pushing the prompt verbatim.
+    prompt = _CONSENT_PROMPT
+    if classify_consent_intent(getattr(event, "body", "") or "") == "decline":
+        prompt = _DECLINE_ACK + _CONSENT_PROMPT
     if recipient is not None:
         try:
             # VT-583 — record this send into the lifetime log (surface='system'; the mig-164 CHECK allows
@@ -56,7 +72,7 @@ def consent_required_handler(
             # affirmation on the NEXT inbound then routes to the same audited enable path. Pillar-1
             # unchanged: still zero LLM.
             sid = send_freeform_message(
-                _CONSENT_PROMPT,
+                prompt,
                 recipient,
                 tenant_id=state["tenant_id"],
                 surface="system",
