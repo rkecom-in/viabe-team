@@ -88,10 +88,13 @@ from orchestrator.owner_inputs.approval_reply import classify_approval_reply
         ("chalo bhej do", "approved"),
         ("wahi bhej do", "approved"),  # "send that same one" — explicit send present
         # --- Cluster-1 (full-77 §2 sr_consequential_bulk 2026-07-12): a NEGATED HOLD-word +
-        #     un-negated explicit send = PROCEED, not reject. The bare `mat` used to REJECT. ---
-        ("jaldi karo yaar, sabko ek saath bhej do, wait mat karo", "approved"),
-        ("ruko mat karo, bhej do", "approved"),  # `mat` binds ruko (hold), buffered from bhej
-        ("wait mat karo bhejo", "approved"),
+        #     un-negated explicit send ("don't wait, send it") is NEITHER a reject (the bare `mat`
+        #     used to false-DECLINE) NOR a deterministic approve (dev proved auto-approving an
+        #     impatient "bhej do" AUTO-SENT a consequential batch = money_action). Money-safe -> None
+        #     (brain re-confirms the send explicitly). ---
+        ("jaldi karo yaar, sabko ek saath bhej do, wait mat karo", None),
+        ("ruko mat karo, bhej do", None),  # `mat` binds ruko (hold), buffered from bhej
+        ("wait mat karo bhejo", None),
         # --- Cluster-1 POSITIONAL SAFETY: when the negation is IMMEDIATELY adjacent to the send verb
         #     ("mat bhejo" = don't send, or "ruko mat, bhej" where comma-strip puts mat next to bhej)
         #     the money-safe reading wins -> REJECT, never a false-approve (money asymmetry) ---
