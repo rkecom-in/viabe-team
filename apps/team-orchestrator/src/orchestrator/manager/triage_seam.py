@@ -186,29 +186,51 @@ def triage_seam(
     # fragile Haiku classifier that in enforce routes it to an async specialist spawn
     # (loop_stall/ignored_speech_act). answer_status_query returns None for anything it doesn't own
     # (incl. field mutations "update my city" — guarded — and unknowns), so it falls through cleanly.
-    # LIST/NAMES asks are excluded (a count is not a list — that's the CD2 attachment path). All reads
-    # are RLS-scoped + read-only (money-safe); the reply sends via the runner's replay-safe step.
-    # FAIL-OPEN: any error falls through to triage_turn.
-    if resolved_mode == "enforce" and not has_active_task:
+    # R7: this net runs REGARDLESS of has_active_task (all reads, money-safe) — a status ask must be
+    # answered even while a task runs (sr_second_plan_status_check / injection_quarantine turn 1,
+    # where has_active_task=True previously skipped the net and the ask hit the brain's counter-
+    # question). D3 dispatch below KEEPS the has_active_task guard (it MINTS a task). A LIST cue is now
+    # a POSITIVE trigger (lapsed_list answers it as a count+offer, never a name dump — CD2 interim),
+    # not the old exclusion. All reads RLS-scoped + read-only; the reply sends via the runner's
+    # replay-safe step. FAIL-OPEN: any error falls through to triage_turn.
+    if resolved_mode == "enforce":
         try:
             from orchestrator.onboarding.campaign_first_contact import _INTERROGATIVE_LEAD_RE
             from orchestrator.owner_inputs.status_query import answer_status_query
 
             _low = (message_text or "").lower()
-            _is_list_or_names_ask = any(k in _low for k in ("list", "names", "naam"))
+            _is_list_cue = any(k in _low for k in ("list", "names", "naam"))
             # QUESTION-SHAPE gate (hook-caught regression): classify_status_query is bag-of-words, so
             # an IMPERATIVE like "win back lapsed customers" hits the 'lapsed' token and would get a
-            # COUNT answer instead of a task. The net answers QUESTIONS only: a '?', an interrogative
-            # lead (how/what/kya/kitne/…), or a count-cue token. Imperatives fall through to D3/triage.
+            # COUNT answer instead of a task. The net answers QUESTIONS (a '?', an interrogative lead
+            # how/what/kya/kitne/…, or a count-cue token) — OR an explicit LIST ask (lapsed_list owns
+            # it). Non-list imperatives fall through to D3/triage.
             _toks = set(_low.replace("?", " ").split())
             _is_question_shaped = (
                 "?" in (message_text or "")
                 or bool(_INTERROGATIVE_LEAD_RE.match(message_text or ""))
                 or bool(_toks & {"kitne", "kitni", "kitna", "how"})
             )
-            if _is_question_shaped and not _is_list_or_names_ask:
-                _status_ans = answer_status_query(tenant_id, message_text)
+            if _is_question_shaped or _is_list_cue:
+                _sink: dict[str, Any] = {}
+                _status_ans = answer_status_query(
+                    tenant_id, message_text, terminal_task_sink=_sink
+                )
                 if _status_ans is not None:
+                    # R7 — the answer reported a TERMINAL task that still had a pending owner-
+                    # notification; suppress the async composer's duplicate (we just told the owner).
+                    # Fail-soft: a flip error never blocks the status answer.
+                    _sink_task = _sink.get("task_id")
+                    if _sink_task is not None:
+                        try:
+                            task_store.set_owner_notification_status(
+                                tenant_id, _sink_task, "not_required", expected_from=("pending",)
+                            )
+                        except Exception:  # noqa: BLE001 — suppression is best-effort, never a gate
+                            logger.warning(
+                                "R7 owner-notification suppress failed tenant=%s task=%s (ignored)",
+                                tenant_id, _sink_task, exc_info=True,
+                            )
                     emit_tm_audit(
                         event_layer="decides", event_kind="status_answer_in_turn",
                         actor="team_manager", tenant_id=tenant_id,
