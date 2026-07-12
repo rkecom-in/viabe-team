@@ -4,16 +4,19 @@ Goal: pin ``temperature=0`` for deterministic manager behaviour where the model
 allows it — run-to-run gate variance was traced partly to sampling at the API
 default temperature on every call.
 
-HARD API CONSTRAINT (verified constraint table — Anthropic live 2026-07-08; OpenAI docs 2026-07-13):
+HARD API CONSTRAINT (verified constraint table — Anthropic live 2026-07-08; OpenAI docs 2026-07-13;
+Google SDK-verified 2026-07-13, langchain-google-genai==4.2.5 — NOT live-verified):
     claude-haiku-4-5     -> temperature ACCEPTED
     claude-sonnet-5      -> temperature DEPRECATED (400 "temperature is deprecated for this model")
     claude-opus-4-7/4-8  -> temperature DEPRECATED (400)
     gpt-5.6-*            -> temperature REJECTED (a reasoning model, like sonnet/opus)
-So on the CURRENT multi-provider lineup ONLY haiku accepts the param. Determinism-via-temperature
-is therefore available ONLY on haiku turns (the routine-brain + the intent
-classifier). sonnet/opus/gpt-5.6 turns (brain-complex, triage, review, the specialist
-lanes, the judge) CANNOT be pinned this way — their run-to-run variance is
-irreducible via temperature and would need a different lever (N-sample, reasoning
+    gemini-3.5/3.1-*     -> temperature ACCEPTED (SDK-verified; ctor default 0.7, we pin 0.0)
+    glm-5.2              -> temperature ACCEPTED (SDK-verified; we pin 0.0)
+So on the CURRENT multi-provider lineup haiku AND the gemini-* / glm-* families accept the param.
+Determinism-via-temperature is therefore available on haiku turns (the routine-brain +
+the intent classifier) and on any gemini-* / glm-* turn. sonnet/opus/gpt-5.6 turns (brain-complex,
+triage, review, the specialist lanes, the judge) CANNOT be pinned this way — their run-to-run
+variance is irreducible via temperature and would need a different lever (N-sample, reasoning
 effort, or a model that still honours the param).
 
 Route EVERY Anthropic/ChatAnthropic AND OpenAI/ChatOpenAI call through this helper (via the
@@ -27,12 +30,14 @@ from typing import Any
 
 
 def sampling_kwargs(model_id: str) -> dict[str, Any]:
-    """Return sampling kwargs for an Anthropic / ChatAnthropic call.
+    """Return sampling kwargs for an Anthropic / OpenAI / Google chat call.
 
-    ``{"temperature": 0.0}`` for haiku (the only current family that accepts the
-    param); ``{}`` for everything else (sonnet/opus 400 on it). Spread into the
-    call/ctor: ``client.messages.create(model=m, **sampling_kwargs(m), ...)``.
+    ``{"temperature": 0.0}`` for the families that ACCEPT the param — haiku (Anthropic),
+    gemini-* (Google), and glm-* (Z.ai) — for determinism; ``{}`` for everything else
+    (sonnet/opus/gpt-5.6 400/reject on it). Spread into the call/ctor:
+    ``client.messages.create(model=m, **sampling_kwargs(m), ...)``.
     """
-    if "haiku" in model_id.lower():
+    lc = model_id.lower()
+    if "haiku" in lc or "gemini" in lc or "glm" in lc:
         return {"temperature": 0.0}
     return {}

@@ -7,8 +7,8 @@ calls ``record_llm_call`` so the call lands in ``llm_call_events`` (+ the VT-619
 rollup). It is a pure observer: best-effort, never raises into the model call.
 
 Constructor is ``(tenant_id, agent, call_site)`` — fixed for the provider seam.
-Provider is inferred from the model id (``gpt*`` → openai, else anthropic) since the
-constructor carries no provider arg; the ledger records it on the event.
+Provider is inferred from the model id (``gpt*`` → openai, ``gemini*`` → google, ``glm*`` → zai,
+else anthropic) since the constructor carries no provider arg; the ledger records it on the event.
 """
 
 from __future__ import annotations
@@ -51,8 +51,18 @@ class LlmUsageCallback(BaseCallbackHandler):
 
 
 def _provider_for_model(model: str | None) -> str:
-    """Infer the provider from the model id. Provider is NOT NULL on the ledger."""
-    return "openai" if (model or "").lower().startswith("gpt") else "anthropic"
+    """Infer the provider from the model id (gpt* -> openai, gemini* -> google, glm* -> zai, else
+    anthropic). Provider is NOT NULL on the ledger. The model id here is the response's
+    ``model_name`` — ChatGoogleGenerativeAI reports the bare id (e.g. ``gemini-3.5-flash``); GLM's
+    OpenAI-compatible response reports ``glm-5.2``."""
+    lc = (model or "").lower()
+    if lc.startswith("gpt"):
+        return "openai"
+    if lc.startswith("gemini"):
+        return "google"
+    if lc.startswith("glm"):
+        return "zai"
+    return "anthropic"
 
 
 def _extract_usage(response: Any) -> tuple[int, int, str, str | None, int]:

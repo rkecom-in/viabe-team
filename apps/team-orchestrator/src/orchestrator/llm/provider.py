@@ -1,9 +1,11 @@
-"""VT-619b — provider-agnostic model resolution (Anthropic + OpenAI GPT-5.6).
+"""VT-619b — provider-agnostic model resolution (Anthropic + OpenAI GPT-5.6 + Google Gemini + Z.ai GLM).
 
 The one seam every model construction routes through. Two entry points:
 
   * ``resolve_chat_model(tier, *, agent, tenant_id=...)`` -> a langchain ``BaseChatModel``
-    (``ChatAnthropic`` or ``ChatOpenAI`` on the Responses API) for the langchain agent/lane sites.
+    (``ChatAnthropic``, ``ChatOpenAI`` on the Responses API, ``ChatGoogleGenerativeAI``, or
+    ``ChatOpenAI`` in plain-chat-completions mode against GLM's OpenAI-compatible endpoint) for the
+    langchain agent/lane sites.
   * ``resolve_model_id(tier)`` -> the raw model-id string for the direct Anthropic Messages-SDK
     sites (triage / classifiers / plan-validation); those stay Anthropic-only in v1 and call
     ``require_anthropic_model`` to fail LOUD if their tier is pointed at a gpt-* id.
@@ -21,6 +23,23 @@ GPT-5.6 facts (OpenAI docs, 2026-07-13):
     ``service_tier="auto"`` (``invoke_with_flex_fallback``).
   * GPT-5.6 REJECTS ``temperature`` like sonnet/opus — ``llm_config.sampling_kwargs`` returns ``{}``
     for gpt-*, so no temperature is sent (same guard that keeps sonnet/opus off the deprecated param).
+
+Gemini facts (langchain-google-genai==4.2.5, SDK-verified 2026-07-13):
+  * Constructed via ``ChatGoogleGenerativeAI``; API key is ``GOOGLE_API_KEY`` from the env (the
+    integration's default — no new var name). ``max_tokens`` maps to the ctor's ``max_output_tokens``.
+  * Gemini ACCEPTS ``temperature`` — ``llm_config.sampling_kwargs`` pins ``{"temperature": 0.0}`` for
+    gemini-* (determinism posture, same as haiku).
+  * flex/batch service tiers are NOT wired for google in v1 — TEAM_OPENAI_SERVICE_TIER is
+    OpenAI-scoped by name and never reaches a google call; google always records service_tier='standard'.
+
+GLM facts (Z.ai, docs.z.ai — SDK-verified 2026-07-13):
+  * glm-5.2 speaks the OpenAI-COMPATIBLE chat-completions API, so it REUSES ``ChatOpenAI`` — but with
+    ``use_responses_api=False`` (plain chat completions, NOT the Responses API) and NO service_tier
+    (GLM publishes no flex/batch; always records service_tier='standard').
+  * ``GLM_BASE_URL`` is the SINGLE self-host switch (default the managed z.ai endpoint) — point it at a
+    self-hosted vLLM/sglang OpenAI-compatible endpoint and GLM runs there with NO code change.
+    ``GLM_API_KEY`` is GLM's own credential (passed explicitly, never OPENAI_API_KEY).
+  * GLM ACCEPTS ``temperature`` — ``llm_config.sampling_kwargs`` pins ``{"temperature": 0.0}`` for glm-*.
 
 Metering + budget are wired but decoupled from the parallel builds:
   * usage recording is the Migration-173 ``orchestrator.llm.usage_callback.LlmUsageCallback``
@@ -69,7 +88,20 @@ OPENAI_MODELS: frozenset[str] = frozenset(
         "gpt-5.6-luna",
     }
 )
-SUPPORTED_MODELS: frozenset[str] = ANTHROPIC_MODELS | OPENAI_MODELS
+GOOGLE_MODELS: frozenset[str] = frozenset(
+    {
+        "gemini-3.5-flash",
+        "gemini-3.1-flash-lite",
+        "gemini-3.1-pro-preview",
+    }
+)
+# Z.ai GLM — OpenAI-COMPATIBLE (reuses ChatOpenAI, plain chat completions), self-host candidate.
+ZAI_MODELS: frozenset[str] = frozenset(
+    {
+        "glm-5.2",
+    }
+)
+SUPPORTED_MODELS: frozenset[str] = ANTHROPIC_MODELS | OPENAI_MODELS | GOOGLE_MODELS | ZAI_MODELS
 
 # Env tier mapping: (env var, default model id). Read fresh per call. NO env-suffix on the var
 # names — one canonical NAME across dev/prod (standing rule, Fazal 2026-06-26).
@@ -82,6 +114,9 @@ _TIER_DEFAULTS: dict[str, tuple[str, str]] = {
 }
 
 _DEFAULT_MAX_TOKENS = 4096
+# GLM (Z.ai) OpenAI-compatible endpoint. GLM_BASE_URL is the SINGLE self-host switch (see
+# _build_glm_chat_model); this is only the managed-z.ai fallback when that env var is unset.
+_GLM_DEFAULT_BASE_URL = "https://api.z.ai/api/paas/v4/"
 # FLEX: default request timeout is 10 min; a flex job can run longer, so widen to the documented
 # 15-min ceiling. Non-flex leaves the client default in place (None).
 _FLEX_TIMEOUT_S = 900.0
@@ -113,14 +148,18 @@ class BudgetExceededError(RuntimeError):
 # ---------------------------------------------------------------------------
 def provider_for(model_id: str) -> str:
     """Infer the provider from the model-id prefix. Raises ``UnknownModelError`` for anything
-    that is neither a gpt-* nor a claude-* id."""
+    that is not a gpt-*, claude-*, gemini-*, or glm-* id."""
     if model_id.startswith("gpt-"):
         return "openai"
     if model_id.startswith("claude-"):
         return "anthropic"
+    if model_id.startswith("gemini-"):
+        return "google"
+    if model_id.startswith("glm-"):
+        return "zai"
     raise UnknownModelError(
-        f"Cannot infer provider for model id {model_id!r}: expected a 'gpt-*' or 'claude-*' "
-        f"prefix. Supported models: {', '.join(sorted(SUPPORTED_MODELS))}."
+        f"Cannot infer provider for model id {model_id!r}: expected a 'gpt-*', 'claude-*', "
+        f"'gemini-*', or 'glm-*' prefix. Supported models: {', '.join(sorted(SUPPORTED_MODELS))}."
     )
 
 
@@ -151,13 +190,15 @@ def resolve_model_id(tier: str) -> str:
 
 def require_anthropic_model(model_id: str, *, site: str) -> str:
     """Assert ``model_id`` is an Anthropic model, else fail LOUD. Guards the direct Messages-SDK
-    call sites (triage / classifiers / plan-validation) which are Anthropic-only in v1 — a gpt-*
-    tier value there is a config error, and a clear error beats a silent wrong-provider call."""
-    if provider_for(model_id) != "anthropic":
+    call sites (triage / classifiers / plan-validation) which are Anthropic-only in v1 — a gpt-*,
+    gemini-*, or glm-* tier value there is a config error, and a clear error beats a silent
+    wrong-provider call."""
+    actual = provider_for(model_id)
+    if actual != "anthropic":
         raise UnknownModelError(
             f"Call site {site!r} is Anthropic-SDK-only (v1) but its tier resolved to {model_id!r} "
-            f"(provider=openai). Port {site} to the multi-provider seam before pointing its tier at "
-            f"a GPT model, or set its TEAM_MODEL_* var back to a claude-* id."
+            f"(provider={actual}). Port {site} to the multi-provider seam before pointing its tier at "
+            f"a non-Anthropic model, or set its TEAM_MODEL_* var back to a claude-* id."
         )
     return model_id
 
@@ -197,6 +238,10 @@ def resolve_chat_model(
     """
     model_id = resolve_model_id(tier)
     provider = provider_for(model_id)
+    # Service tier is OpenAI-scoped in v1: TEAM_OPENAI_SERVICE_TIER (flex/batch) applies ONLY to
+    # openai. anthropic + google + zai(GLM) are forced to 'standard' here — Gemini's flex/batch are
+    # NOT wired in v1, GLM publishes no batch/flex tier, and the env var's name is OpenAI-scoped so
+    # it must not affect google/GLM calls.
     configured_tier = _configured_service_tier() if provider == "openai" else "standard"
     callbacks = _seam_callbacks(tier=tier, agent=agent, tenant_id=tenant_id)
 
@@ -212,8 +257,68 @@ def resolve_chat_model(
             **sampling_kwargs(model_id),
         )
 
+    if provider == "google":
+        return _build_google_chat_model(model_id, max_tokens=max_tokens, callbacks=callbacks)
+
+    if provider == "zai":
+        return _build_glm_chat_model(model_id, max_tokens=max_tokens, callbacks=callbacks)
+
     return _build_openai_chat_model(
         model_id, max_tokens=max_tokens, configured_tier=configured_tier, callbacks=callbacks,
+    )
+
+
+def _build_glm_chat_model(
+    model_id: str,
+    *,
+    max_tokens: int,
+    callbacks: list[BaseCallbackHandler],
+) -> BaseChatModel:
+    from langchain_openai import ChatOpenAI
+
+    # GLM (Z.ai) speaks the OpenAI-COMPATIBLE chat-completions API, so we REUSE ChatOpenAI — but NOT
+    # the Responses API (plain chat completions: use_responses_api=False) and with NO service_tier
+    # (GLM publishes no flex/batch tier — it always records service_tier='standard').
+    #
+    # SELF-HOST SWITCH (Fazal): GLM-5.2 is a self-host candidate. GLM_BASE_URL is the SINGLE switch —
+    # point it at a self-hosted OpenAI-compatible endpoint (vLLM / sglang) and GLM runs there with NO
+    # code change; unset, it defaults to the managed z.ai endpoint. api_key is GLM's OWN credential
+    # from GLM_API_KEY (passed explicitly so it never silently falls back to OPENAI_API_KEY; an unset
+    # key fails LOUD at construction — the correct "GLM not configured" signal). GLM ACCEPTS
+    # temperature -> sampling_kwargs pins {"temperature": 0.0} (SDK-verified).
+    base_url = (os.environ.get("GLM_BASE_URL") or "").strip() or _GLM_DEFAULT_BASE_URL
+    api_key = os.environ.get("GLM_API_KEY") or ""
+    return ChatOpenAI(  # type: ignore[call-arg]
+        model=model_id,
+        use_responses_api=False,
+        base_url=base_url,
+        api_key=api_key,
+        max_tokens=max_tokens,
+        max_retries=_OPENAI_MAX_RETRIES,
+        callbacks=callbacks,
+        **sampling_kwargs(model_id),
+    )
+
+
+def _build_google_chat_model(
+    model_id: str,
+    *,
+    max_tokens: int,
+    callbacks: list[BaseCallbackHandler],
+) -> BaseChatModel:
+    from langchain_google_genai import ChatGoogleGenerativeAI
+
+    # API key: GOOGLE_API_KEY from the env — langchain-google-genai's default (do NOT invent a new
+    # var name), so it is NOT passed explicitly here. max_tokens maps to the ctor's
+    # ``max_output_tokens`` (langchain-google-genai==4.2.5; ``max_tokens`` is its alias). Gemini
+    # ACCEPTS temperature, so sampling_kwargs pins {"temperature": 0.0} for gemini-* (determinism
+    # posture, same as haiku). Service tier: Gemini flex/batch are NOT wired in v1 — google calls
+    # always record service_tier='standard' (the ledger's default; the callback passes no tier).
+    return ChatGoogleGenerativeAI(  # type: ignore[call-arg]
+        model=model_id,
+        max_output_tokens=max_tokens,
+        callbacks=callbacks,
+        **sampling_kwargs(model_id),
     )
 
 

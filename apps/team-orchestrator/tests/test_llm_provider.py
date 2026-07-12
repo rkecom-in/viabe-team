@@ -21,14 +21,16 @@ import pytest
 pytest.importorskip("langchain_core")
 pytest.importorskip("langchain_anthropic")
 pytest.importorskip("langchain_openai")
+pytest.importorskip("langchain_google_genai")
 
 from orchestrator.llm import provider as p  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
 def _clean_llm_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Guarantee unset TEAM_MODEL_* / service-tier / budget env so tests see the built-in defaults,
-    and a dummy OPENAI_API_KEY so ChatOpenAI ctors never fail on a missing credential."""
+    """Guarantee unset TEAM_MODEL_* / service-tier / budget / GLM_BASE_URL env so tests see the
+    built-in defaults, and dummy OPENAI_API_KEY / GOOGLE_API_KEY / GLM_API_KEY so the ChatOpenAI /
+    ChatGoogleGenerativeAI / GLM ctors never fail on a missing credential."""
     for var in (
         "TEAM_MODEL_ROUTINE",
         "TEAM_MODEL_COMPLEX",
@@ -37,28 +39,43 @@ def _clean_llm_env(monkeypatch: pytest.MonkeyPatch) -> None:
         "TEAM_MODEL_REVIEW",
         "TEAM_OPENAI_SERVICE_TIER",
         "TEAM_LLM_BUDGET_ENFORCE",
+        "GLM_BASE_URL",
     ):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test-not-real")
+    monkeypatch.setenv("GOOGLE_API_KEY", "gk-test-not-real")
+    monkeypatch.setenv("GLM_API_KEY", "glm-test-not-real")
 
 
 # --------------------------------------------------------------------------- registry
-def test_registry_has_exactly_six_supported() -> None:
-    assert p.SUPPORTED_MODELS == p.ANTHROPIC_MODELS | p.OPENAI_MODELS
-    assert len(p.SUPPORTED_MODELS) == 6
+def test_registry_has_exactly_ten_supported() -> None:
+    assert (
+        p.SUPPORTED_MODELS
+        == p.ANTHROPIC_MODELS | p.OPENAI_MODELS | p.GOOGLE_MODELS | p.ZAI_MODELS
+    )
+    assert len(p.SUPPORTED_MODELS) == 10
     assert p.ANTHROPIC_MODELS == {"claude-haiku-4-5", "claude-sonnet-5", "claude-opus-4-8"}
     assert p.OPENAI_MODELS == {"gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"}
+    assert p.GOOGLE_MODELS == {
+        "gemini-3.5-flash",
+        "gemini-3.1-flash-lite",
+        "gemini-3.1-pro-preview",
+    }
+    assert p.ZAI_MODELS == {"glm-5.2"}
 
 
 # --------------------------------------------------------------------------- provider inference
 def test_provider_inference_by_prefix() -> None:
     assert p.provider_for("claude-sonnet-5") == "anthropic"
     assert p.provider_for("gpt-5.6-terra") == "openai"
+    assert p.provider_for("gemini-3.5-flash") == "google"
+    assert p.provider_for("glm-5.2") == "zai"
 
 
 def test_provider_inference_unknown_prefix_raises() -> None:
+    # A prefix that is none of gpt-* / claude-* / gemini-*.
     with pytest.raises(p.UnknownModelError):
-        p.provider_for("gemini-2.0-pro")
+        p.provider_for("mistral-large-2")
 
 
 # --------------------------------------------------------------------------- env tier mapping
@@ -84,11 +101,14 @@ def test_unknown_tier_raises() -> None:
 
 # --------------------------------------------------------------------------- loud failures
 def test_unknown_model_id_fails_loud(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("TEAM_MODEL_COMPLEX", "gpt-4o")  # a real model, but NOT one of the six
+    monkeypatch.setenv("TEAM_MODEL_COMPLEX", "gpt-4o")  # a real model, but NOT one of the ten
     with pytest.raises(p.UnknownModelError) as exc:
         p.resolve_model_id("complex")
-    # the error names the supported set
-    assert "gpt-5.6-terra" in str(exc.value)
+    # the error names the full supported set (now ten models, incl. the gemini + glm families)
+    msg = str(exc.value)
+    assert "gpt-5.6-terra" in msg
+    assert "gemini-3.5-flash" in msg
+    assert "glm-5.2" in msg
 
 
 def test_require_anthropic_model_rejects_gpt() -> None:
@@ -131,6 +151,87 @@ def test_resolve_chat_model_openai_flex(monkeypatch: pytest.MonkeyPatch) -> None
 def test_invalid_service_tier_falls_back_to_standard(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("TEAM_OPENAI_SERVICE_TIER", "turbo")
     assert p._configured_service_tier() == "standard"
+
+
+# --------------------------------------------------------------------------- google (Gemini)
+def test_resolve_chat_model_google(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("TEAM_MODEL_SPECIALIST", "gemini-3.5-flash")
+    m = p.resolve_chat_model("specialist", agent="finance_lane", max_tokens=2048)
+    assert type(m).__name__ == "ChatGoogleGenerativeAI"
+    assert m.model == "gemini-3.5-flash"
+    # max_tokens maps to the ctor's max_output_tokens; Gemini ACCEPTS temperature -> pinned 0.0.
+    assert m.max_output_tokens == 2048
+    assert m.temperature == 0.0
+
+
+def test_google_ignores_openai_service_tier(monkeypatch: pytest.MonkeyPatch) -> None:
+    # TEAM_OPENAI_SERVICE_TIER is OpenAI-scoped by name — a flex setting must NOT affect a google
+    # call (flex/batch are not wired for google in v1). The model still builds as a Gemini model.
+    monkeypatch.setenv("TEAM_MODEL_SPECIALIST", "gemini-3.1-pro-preview")
+    monkeypatch.setenv("TEAM_OPENAI_SERVICE_TIER", "flex")
+    m = p.resolve_chat_model("specialist", agent="finance_lane")
+    assert type(m).__name__ == "ChatGoogleGenerativeAI"
+    assert m.model == "gemini-3.1-pro-preview"
+
+
+def test_resolve_google_attaches_seam_callbacks(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Same metering contract as the anthropic/openai paths: both the budget gate and the
+    # Migration-173 usage callback attach so google calls are metered exactly once.
+    from orchestrator.llm.usage_callback import LlmUsageCallback
+
+    monkeypatch.setenv("TEAM_MODEL_SPECIALIST", "gemini-3.5-flash")
+    m = p.resolve_chat_model("specialist", agent="finance_lane", tenant_id="t")
+    kinds = {type(cb).__name__ for cb in (m.callbacks or [])}
+    assert "_BudgetGateCallback" in kinds
+    assert any(isinstance(cb, LlmUsageCallback) for cb in (m.callbacks or []))
+
+
+def test_require_anthropic_model_rejects_gemini() -> None:
+    with pytest.raises(p.UnknownModelError) as exc:
+        p.require_anthropic_model("gemini-3.5-flash", site="triage")
+    assert "triage" in str(exc.value)
+    assert "google" in str(exc.value)
+
+
+# --------------------------------------------------------------------------- zai (GLM)
+def test_resolve_chat_model_glm_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    # GLM reuses ChatOpenAI but with plain chat completions (NOT the Responses API), the z.ai
+    # default base_url, no service_tier, and temperature pinned 0.0 (Gemini/haiku-style).
+    monkeypatch.setenv("TEAM_MODEL_SPECIALIST", "glm-5.2")
+    m = p.resolve_chat_model("specialist", agent="finance_lane", max_tokens=2048)
+    assert type(m).__name__ == "ChatOpenAI"
+    assert m.model_name == "glm-5.2"
+    assert m.use_responses_api is False
+    assert str(m.openai_api_base) == p._GLM_DEFAULT_BASE_URL
+    assert m.service_tier is None
+    assert m.temperature == 0.0
+
+
+def test_glm_base_url_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    # GLM_BASE_URL is the single self-host switch — a custom endpoint lands on the client.
+    monkeypatch.setenv("TEAM_MODEL_SPECIALIST", "glm-5.2")
+    monkeypatch.setenv("GLM_BASE_URL", "http://localhost:8000/v1/")
+    m = p.resolve_chat_model("specialist", agent="finance_lane")
+    assert str(m.openai_api_base) == "http://localhost:8000/v1/"
+
+
+def test_glm_ignores_openai_service_tier(monkeypatch: pytest.MonkeyPatch) -> None:
+    # TEAM_OPENAI_SERVICE_TIER is OpenAI-scoped — a flex setting must NOT wire flex onto a GLM call.
+    monkeypatch.setenv("TEAM_MODEL_SPECIALIST", "glm-5.2")
+    monkeypatch.setenv("TEAM_OPENAI_SERVICE_TIER", "flex")
+    m = p.resolve_chat_model("specialist", agent="finance_lane")
+    assert m.service_tier is None
+    assert m.request_timeout is None
+
+
+def test_resolve_glm_attaches_seam_callbacks(monkeypatch: pytest.MonkeyPatch) -> None:
+    from orchestrator.llm.usage_callback import LlmUsageCallback
+
+    monkeypatch.setenv("TEAM_MODEL_SPECIALIST", "glm-5.2")
+    m = p.resolve_chat_model("specialist", agent="finance_lane", tenant_id="t")
+    kinds = {type(cb).__name__ for cb in (m.callbacks or [])}
+    assert "_BudgetGateCallback" in kinds
+    assert any(isinstance(cb, LlmUsageCallback) for cb in (m.callbacks or []))
 
 
 # --------------------------------------------------------------------------- flex fallback
