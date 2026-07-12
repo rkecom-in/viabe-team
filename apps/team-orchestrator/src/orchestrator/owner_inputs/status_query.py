@@ -84,7 +84,9 @@ def classify_status_query(body: str) -> StatusQueryType:
     # ask whose true answer is the dormant subset). Keyed on the explicit "lapsed"/"dormant" TOKEN
     # (Cowork 202500Z) — NOT behavioural phrases like "haven't bought" (those stay with the brain's
     # speech-act guard, and a DO like "win back my lapsed customers" never classifies status_query).
-    if {"lapsed", "dormant"} & tokens:
+    # DF5: the Hinglish "lapse ho gaye" tokenizes to the STEM "lapse" (not "lapsed") — include it so
+    # "total kitne customers hain jo lapse ho gaye" answers the dormant count, not the total ledger.
+    if {"lapsed", "lapse", "dormant"} & tokens:
         return "lapsed_count"
     # A SEND-STATUS question ("did you send it?", "already sent?", "has the message gone out?") is a
     # read about whether a campaign/send actually happened — route it to last_campaign so the owner
@@ -129,9 +131,30 @@ def _open_approval_exists(tenant_id: UUID | str) -> bool:
 # specific qtype missed (so "campaign status" already routed to last_campaign above).
 _BARE_STATUS_TOKENS = frozenset({"status", "update", "updates"})
 _BARE_STATUS_PHRASES = ("kya haal", "kya scene", "kahan tak", "kaha tak", "kya update", "koi update")
+# DF5 mutation guard: the {update} token is too broad — "update my city to Agra" / "change my shop
+# name" are FIELD MUTATIONS, not status asks, and must NOT trigger the bare-status campaign render.
+# A mutation = a change verb AND a change object (a possessive or a profile field).
+_MUTATION_VERB_TOKENS = frozenset(
+    {"update", "change", "set", "edit", "correct", "fix", "rename", "badlo", "badal", "badalna"}
+)
+_MUTATION_OBJECT_TOKENS = frozenset(
+    {"my", "mera", "meri", "mere", "shop", "business", "name", "naam", "city", "address",
+     "gst", "gstin", "email", "phone", "number", "type", "category"}
+)
+
+
+def _is_field_mutation(body: str) -> bool:
+    """True iff ``body`` is a request to CHANGE a profile field (change-verb ∧ change-object) — e.g.
+    'update my city to Agra', 'change my shop name'. Distinct from a bare status ask ('any update?')
+    which has the verb but no change-object."""
+    norm = unicodedata.normalize("NFC", (body or "").strip().casefold())
+    tokens = {t for t in re.split(r"[\s,.!?;:।/\\-]+", norm) if t}
+    return bool(_MUTATION_VERB_TOKENS & tokens) and bool(_MUTATION_OBJECT_TOKENS & tokens)
 
 
 def _is_bare_status_ask(body: str) -> bool:
+    if _is_field_mutation(body):  # DF5: a field mutation is never a status ask
+        return False
     norm = unicodedata.normalize("NFC", (body or "").strip().casefold())
     tokens = {t for t in re.split(r"[\s,.!?;:।/\\-]+", norm) if t}
     return bool(_BARE_STATUS_TOKENS & tokens) or any(p in norm for p in _BARE_STATUS_PHRASES)

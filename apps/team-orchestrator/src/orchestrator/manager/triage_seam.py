@@ -181,6 +181,38 @@ def triage_seam(
     has_open_question = bool(open_questions)
     has_active_task = task_store.has_active_task(tenant_id)
 
+    # DF5 — the pre-brain deterministic COUNT/STATUS answer net. A status/count QUESTION ("how many
+    # lapsed customers?", "what's the status?") is ANSWERED in-turn from DB truth, bypassing the
+    # fragile Haiku classifier that in enforce routes it to an async specialist spawn
+    # (loop_stall/ignored_speech_act). answer_status_query returns None for anything it doesn't own
+    # (incl. field mutations "update my city" — guarded — and unknowns), so it falls through cleanly.
+    # LIST/NAMES asks are excluded (a count is not a list — that's the CD2 attachment path). All reads
+    # are RLS-scoped + read-only (money-safe); the reply sends via the runner's replay-safe step.
+    # FAIL-OPEN: any error falls through to triage_turn.
+    if resolved_mode == "enforce" and not has_active_task:
+        try:
+            from orchestrator.owner_inputs.status_query import answer_status_query
+
+            _low = (message_text or "").lower()
+            _is_list_or_names_ask = any(k in _low for k in ("list", "names", "naam"))
+            if not _is_list_or_names_ask:
+                _status_ans = answer_status_query(tenant_id, message_text)
+                if _status_ans is not None:
+                    emit_tm_audit(
+                        event_layer="decides", event_kind="status_answer_in_turn",
+                        actor="team_manager", tenant_id=tenant_id,
+                        summary="deterministic count/status answer in-turn (pre-brain, no async spawn)",
+                        decision={"message_sid": message_sid},
+                    )
+                    return TriageSeamResult(
+                        outcome="direct_reply", task_id=None, skip_legacy_dispatch=True,
+                        direct_reply_text=_status_ans,
+                    )
+        except Exception:  # noqa: BLE001 — the DF5 net must never block the turn (fail-open)
+            logger.warning(
+                "DF5 status net failed tenant=%s (fail-open -> triage_turn)", tenant_id, exc_info=True
+            )
+
     # D3 (subsumes cluster-5b) — the deterministic CAMPAIGN first-contact net. A clear "run a
     # win-back campaign" imperative (enforce mode, no active task already owning the tenant) is
     # routed HERE rather than left to the intermittent classifier below. Two honest, deterministic
