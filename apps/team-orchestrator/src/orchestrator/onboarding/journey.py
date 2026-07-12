@@ -54,6 +54,15 @@ _GREETING = {
     "salaam", "salam", "assalamualaikum", "adaab",
     "morning", "evening", "afternoon",  # "good morning"/"good evening" — "good" alone isn't a greeting
 }
+# DF7(a) — a bare affirmation to an OPEN gap question. A gap question ASKS for information; a bare
+# "haan"/"theek hai"/"bilkul"/"sab" carries NONE, so it is not an answer to a gap (only to a confirm).
+# This set is the _YES affirmations PLUS the affirmation particles ("hai"/"hain"/"bilkul"/"theek"/
+# "thik"/"sab") that only read as filler on a gap — applied ONLY to gap (non-confirm) questions, where
+# a body that is ENTIRELY these tokens is re-presented WITHOUT recording/advancing. Kept SEPARATE from
+# _YES (never extend _YES — the confirm branch's ``toks & _YES`` + ``_is_confirm_button_set`` must not
+# regress); the subset test (``toks <= _GAP_BARE_AFFIRM``) is what keeps a MID-SENTENCE particle
+# ("kaafi purane customers hain") a real answer that still records.
+_GAP_BARE_AFFIRM = _YES | {"hai", "hain", "bilkul", "theek", "thik", "sab"}
 
 
 def _tokens(body: str) -> set[str]:
@@ -391,6 +400,15 @@ def _reprompt_after_no(q: dict[str, Any]) -> dict[str, Any]:
     return {"reply_en": en, "reply_hi": hi, "done": False, "re_present": True}
 
 
+def _reprompt_gap_after_affirm(q: dict[str, Any]) -> dict[str, Any]:
+    """DF7(a) — a bare affirmation ("haan" / "theek hai" / "sab" / "bilkul") to an OPEN gap question is
+    not an ANSWER (a gap asks for information; "yes" carries none). Re-present the pending gap WITHOUT
+    recording it as the value and WITHOUT advancing the cursor — state is untouched. ``re_present=True``
+    tells the intercept this is a fresh, sendable re-presentation (mirrors ``_greet_then_question`` /
+    ``_reprompt_after_no``)."""
+    return {**_current_q_reply(q), "re_present": True}
+
+
 def handle_reply(
     tenant_id: UUID | str, body: str, message_sid: str | None, *, lang: str = "en"
 ) -> dict[str, Any]:
@@ -432,6 +450,10 @@ def handle_reply(
     # rejected. Re-present the pending question conversationally WITHOUT touching state.
     is_skip = bool(toks & _SKIP)
     is_bare_no_confirm = q.get("kind") == "confirm" and bool(toks) and toks <= _NO
+    # DF7(a) — a bare affirmation to an OPEN gap question ("haan sahi hai" answering "what do you sell?")
+    # is NOT an answer: re-present the gap WITHOUT recording/advancing. Gap-only (never a confirm — a
+    # confirm-"yes" is a real signal, handled below); subset test so a mid-sentence particle still records.
+    is_bare_gap_affirm = q.get("kind") != "confirm" and bool(toks) and toks <= _GAP_BARE_AFFIRM
     if not is_skip and _is_bare_greeting(body):
         # A bare greeting → acknowledge + re-present the SAME question (the owner just said hi).
         return _greet_then_question(q)
@@ -439,16 +461,42 @@ def handle_reply(
         # VT-569a — a bare "no" to a confirm → ask for the correct value, NOT the identical prompt
         # (the live dead-end). Deterministic; holds even with the turn-brain off / LLM unavailable.
         return _reprompt_after_no(q)
+    if not is_skip and is_bare_gap_affirm:
+        # DF7(a) — a bare affirmation to a gap question carries no value → re-present, don't record.
+        return _reprompt_gap_after_affirm(q)
 
     if is_skip:
         if field and field not in skipped:
             skipped.append(field)
     elif q.get("kind") == "confirm":
+        # DF7(b) defense-in-depth (parity with the enforce gate's confirm-correction routing, for the
+        # legacy/shadow walker paths): a NON-bare negation to a confirm ("nahi bhai, hum footwear nahi
+        # bechte, hum leather bags bechte hain") is a rejection/correction SENTENCE, not a clean value —
+        # re-present (ask for the correct value) rather than record the whole sentence as the field. A
+        # bare "no" was already handled above; this catches the RICH rejection the enforce gate routes
+        # to the brain. A plain correction with no negation ("hum leather bags bechte hain") is untouched.
+        if (toks & _NO) and not (toks <= _NO) and not (toks & _YES):
+            return _reprompt_after_no(q)
         # yes → confirm the discovered draft_value; anything else → a correction (the body is the value).
         value = q.get("draft_value") if (toks & _YES) else body.strip()
         if field and value not in (None, ""):
             answers[field] = value
-            _confirm(tenant_id, {field: value})
+            # DF7(b) — a business_type CONFIRM is PROMOTED to canonical ONLY when the value is a valid
+            # taxonomy key (CL-390 never-assert; mirrors _apply_turn_plan / confirm_field_answer). An
+            # off-taxonomy free-text correction is RECORDED as the journey answer and advanced past
+            # (records-and-moves-on — never re-looped), but NEVER asserted as fact. Other confirm fields
+            # (city, etc.) promote as before.
+            if field == "business_type" and not (toks & _YES):
+                from orchestrator.onboarding.business_type_reconcile import is_valid_business_type
+
+                try:
+                    promote_ok = is_valid_business_type(value)
+                except Exception:  # noqa: BLE001 — a reconcile hiccup must never block the confirm record
+                    promote_ok = True
+                if promote_ok:
+                    _confirm(tenant_id, {field: value})
+            else:
+                _confirm(tenant_id, {field: value})
     else:  # gap question — the body IS the value
         if field and body.strip():
             answers[field] = body.strip()

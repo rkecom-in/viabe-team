@@ -67,6 +67,8 @@ def _run(body: str):
         ("Ok that's fair enough. It's Sharma Hardware, we sell tools, in Karol Bagh.", False),
         ("Complete Setup", False),
         ("hello there", False),
+        # DF7(c) — a "how long"-lead Hinglish duration ask routes to the brain (no '?' needed).
+        ("kitna time lagega setup complete karne mein", True),
     ],
 )
 def test_is_interrogative(body, expected):
@@ -81,10 +83,27 @@ def test_is_interrogative(body, expected):
         ("setup ho gaya?", True),
         ("why do you need all these details about my shop?", False),
         ("It's Sharma Hardware, we sell tools", False),
+        # DF7(c) — a DURATION ask carries a setup token + "complete" status cue, yet is NOT a status ask.
+        ("kitna time lagega setup complete karne mein", False),
+        ("how long will the setup take?", False),
     ],
 )
 def test_is_setup_status_ask(body, expected):
     assert eg._is_setup_status_ask(body) is expected
+
+
+@pytest.mark.parametrize(
+    ("body", "expected"),
+    [
+        ("what else do you need from me", True),
+        ("aur kuch chahiye?", True),
+        ("kuch aur bataana hai?", True),
+        ("why do you need all this?", False),
+        ("It's Sharma Hardware", False),
+    ],
+)
+def test_is_remaining_needs_ask(body, expected):
+    assert eg._is_remaining_needs_ask(body) is expected
 
 
 # --- routing ------------------------------------------------------------------------------
@@ -152,3 +171,176 @@ def test_gate_fails_open_on_error(spies, monkeypatch):
 
     monkeypatch.setattr("orchestrator.onboarding.journey.get_journey", _boom)
     assert _run("Ok it's Sharma Hardware") is None
+
+
+# --- DF7(b) — confirm-correction routing (active journey, confirm head) --------------------
+
+
+def _active_confirm_journey() -> dict:
+    return {
+        "status": "active",
+        "question_queue": [{
+            "field": "business_type", "kind": "confirm",
+            "prompt_en": "We found you're a footwear business — is that right?",
+            "prompt_hi": "", "draft_value": "footwear",
+        }],
+        "cursor": 0,
+        "answers": {},
+        "skipped": [],
+    }
+
+
+def test_confirm_contradiction_routes_to_brain(spies):
+    # A rich, NON-bare correction on a confirm head → None (brain), NOT the walker (which would record
+    # the whole sentence as the business_type value).
+    spies["journey"] = _active_confirm_journey()
+    assert _run("nahi bhai hum footwear nahi bechte, hum leather bags bechte hain") is None
+    assert spies["walker"] == [], "the rich correction must not hit the scripted walker"
+
+
+def test_bare_no_on_confirm_still_goes_to_walker(spies):
+    # A BARE 'no' is EXCLUDED from the brain-route — it keeps the walker's good _reprompt_after_no.
+    spies["journey"] = _active_confirm_journey()
+    res = _run("nahi")
+    assert res is not None
+    assert spies["walker"] == ["nahi"], "bare 'no' must delegate to the walker"
+
+
+def test_active_duration_ask_routes_to_brain(spies):
+    # DF7(c) — an ACTIVE journey + a DURATION ask is not a status ask; it routes to the brain (rule D),
+    # never the canned status line, never the walker.
+    spies["journey"] = _active_confirm_journey()
+    assert _run("kitna time lagega setup complete karne mein") is None
+    assert spies["walker"] == [] and spies["sends"] == []
+
+
+def test_remaining_needs_answered_from_row_before_brain(spies):
+    # DF7(d) — "what else do you need" is answered from the row (remaining count + pending prompt),
+    # BEFORE the interrogative fall-through. Never the walker.
+    spies["journey"] = _active_journey("What do you sell?")
+    res = _run("what else do you need from me")
+    assert res is not None and res["routed_kind"] == "journey_remaining_needs"
+    assert res["done"] is False
+    assert spies["walker"] == []
+    assert len(spies["sends"]) == 1
+    sent = spies["sends"][0]
+    assert "Not quite yet" in sent and "What do you sell?" in sent
+
+
+# --- DF4 — post-profile connect beat (completed journey, paced flow) -----------------------
+
+
+def _completed_flow_journey(flow: str) -> dict:
+    return {
+        "status": "complete",
+        "question_queue": [],
+        "cursor": 0,
+        "answers": {"__flow__": flow},
+        "skipped": [],
+    }
+
+
+@pytest.fixture
+def _no_live_resume(monkeypatch):
+    monkeypatch.setattr(
+        "orchestrator.onboarding.shopify_onboarding.has_live_resume", lambda tid: False
+    )
+
+
+def test_ready_asked_affirm_offers_connect_menu(spies, monkeypatch, _no_live_resume):
+    # No store domain in-window → an HONEST two-option MENU (Shopify OR Google Sheet), never a
+    # single-pick Shopify pitch (CD1). The menu also names the *.myshopify.com shape.
+    spies["journey"] = _completed_flow_journey("ready_asked")
+    monkeypatch.setattr(
+        "orchestrator.onboarding.journey._recent_shop_domain",
+        lambda tid, current_body=None: None,
+    )
+    res = _run("Yes let's connect")
+    assert res is not None and res["routed_kind"] == "journey_connect_offer"
+    assert res["done"] is False
+    assert spies["walker"] == []
+    sent = spies["sends"][0]
+    assert "Shopify" in sent and "Google Sheet" in sent, "must be a MENU, both options named"
+    assert "myshopify.com" in sent
+
+
+def test_ready_asked_affirm_with_domain_offers_onetap_link(spies, monkeypatch, _no_live_resume):
+    # A store domain already captured in-window → surface the one-tap OAuth link (honest: the owner
+    # chose Shopify by naming their store).
+    spies["journey"] = _completed_flow_journey("ready_asked")
+    monkeypatch.setattr(
+        "orchestrator.onboarding.journey._recent_shop_domain",
+        lambda tid, current_body=None: "sundaram-sweets.myshopify.com",
+    )
+    minted = {}
+    def _fake_setup(tid, shop, **kw):
+        minted["shop"] = shop
+        return {"authorize_url": "https://viabe.example/oauth?state=xyz"}
+    monkeypatch.setattr(
+        "orchestrator.onboarding.shopify_onboarding.start_shopify_setup", _fake_setup
+    )
+    res = _run("Sure, my store address is sundaram-sweets.myshopify.com")
+    assert res is not None and res["routed_kind"] == "journey_connect_offer"
+    assert minted["shop"] == "sundaram-sweets.myshopify.com"
+    sent = spies["sends"][0]
+    assert "sundaram-sweets.myshopify.com" in sent
+    assert "https://viabe.example/oauth?state=xyz" in sent
+
+
+def test_ready_asked_interrogative_falls_to_brain(spies, monkeypatch, _no_live_resume):
+    # A QUESTION on the ready_asked beat is never consumed as a connect signal (the affirm floor
+    # excludes it AND rule D catches it first) → None → brain.
+    spies["journey"] = _completed_flow_journey("ready_asked")
+    assert _run("why do you need my data?") is None
+    assert spies["sends"] == [] and spies["walker"] == []
+
+
+def test_ready_asked_optout_short_circuits(spies, monkeypatch, _no_live_resume):
+    # Opt-out ALWAYS wins over a connect signal → None (falls to pre_filter), never sends.
+    spies["journey"] = _completed_flow_journey("ready_asked")
+    monkeypatch.setattr(
+        "orchestrator.pre_filter_gate.matches_opt_out_or_dsr", lambda body: True
+    )
+    assert _run("yes connect but STOP everything") is None
+    assert spies["sends"] == []
+
+
+def test_connect_defers_when_integration_resume_live(spies, monkeypatch):
+    # An integration handoff already in flight → DEFER to the downstream connector resume gate (None),
+    # so a later 'done' hits the DB re-check there, not a second link mint here.
+    spies["journey"] = _completed_flow_journey("ready_asked")
+    monkeypatch.setattr(
+        "orchestrator.onboarding.shopify_onboarding.has_live_resume", lambda tid: True
+    )
+    assert _run("done") is None
+    assert spies["sends"] == []
+
+
+def test_deferred_connect_intent_offers_menu(spies, monkeypatch, _no_live_resume):
+    # A clear connect-intent on a DEFERRED flow re-engages (floor hit — no LLM) with the honest menu.
+    spies["journey"] = _completed_flow_journey("deferred")
+    monkeypatch.setattr(
+        "orchestrator.onboarding.journey._recent_shop_domain",
+        lambda tid, current_body=None: None,
+    )
+    res = _run("haan chalo ab shuru karte hain, data connect karte hain")
+    assert res is not None and res["routed_kind"] == "journey_connect_offer"
+    assert "Shopify" in spies["sends"][0] and "Google Sheet" in spies["sends"][0]
+
+
+def test_deferred_chatter_falls_to_brain(spies, monkeypatch, _no_live_resume):
+    # Non-connect chatter on a DEFERRED flow → None (brain gives the understanding ack). The floor
+    # misses, so the classifier is consulted — mocked to 'other' (no network).
+    spies["journey"] = _completed_flow_journey("deferred")
+    monkeypatch.setattr(
+        "orchestrator.onboarding.turn_brain.classify_flow_intent", lambda body: "other"
+    )
+    assert _run("thanks for your patience") is None
+    assert spies["sends"] == []
+
+
+def test_completed_non_flow_chatter_falls_to_brain(spies, monkeypatch, _no_live_resume):
+    # A completed journey whose flow has finished (plan_kicked) → the connect beat does not own it → brain.
+    spies["journey"] = _completed_flow_journey("plan_kicked")
+    assert _run("Yes let's connect") is None
+    assert spies["sends"] == []

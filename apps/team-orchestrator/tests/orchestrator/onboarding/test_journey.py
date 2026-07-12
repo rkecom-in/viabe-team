@@ -439,6 +439,94 @@ def test_handle_reply_greeting_mixed_with_answer_is_recorded(substrate):  # type
     )
 
 
+# --- DF7 — walker hardening -------------------------------------------------
+
+
+def test_handle_reply_bare_gap_affirmation_not_recorded(substrate):  # type: ignore[no-untyped-def]
+    """DF7(a): a bare affirmation ("haan sahi hai") to an OPEN gap question carries no value — it must
+    be re-presented WITHOUT recording/advancing (a gap asks for information; "yes" is not information)."""
+    from orchestrator.onboarding import journey
+
+    tenant = _new_tenant(substrate.dsn, name="bare gap affirm")
+    journey.start_journey(tenant, [_gap_q("about"), _gap_q("operating_hours")])
+
+    r = journey.handle_reply(tenant, "haan sahi hai", "SM-gap-affirm-1")
+    assert r.get("re_present") is True, "a bare affirmation to a gap must re-present"
+    assert r["done"] is False
+    g = journey.get_journey(tenant)
+    assert g is not None
+    assert g["cursor"] == 0, "a bare affirmation must NOT advance the cursor on a gap"
+    assert "about" not in g["answers"], "a bare affirmation is not a gap answer"
+    assert g["answers"] == {}
+    assert g["status"] == "active", "the journey stays active after a re-presented gap affirmation"
+
+
+def test_handle_reply_gap_declarative_with_particle_still_records(substrate):  # type: ignore[no-untyped-def]
+    """DF7(a) REGRESSION: a volunteered DECLARATIVE with a mid-sentence affirmation particle
+    ("kaafi purane customers hain") is NOT a bare affirmation (the subset test fails) — it still
+    records as the gap answer via the walker."""
+    from orchestrator.onboarding import journey
+
+    tenant = _new_tenant(substrate.dsn, name="gap declarative particle")
+    journey.start_journey(tenant, [_gap_q("about"), _gap_q("operating_hours")])
+
+    r = journey.handle_reply(tenant, "kaafi purane customers hain", "SM-gap-decl-1")
+    assert r.get("re_present") is not True, "a declarative with content must NOT be re-presented"
+    g = journey.get_journey(tenant)
+    assert g is not None
+    assert g["cursor"] == 1, "a real gap answer advances the cursor"
+    assert g["answers"].get("about") == "kaafi purane customers hain", (
+        "a declarative carrying a mid-sentence particle is recorded, not rejected"
+    )
+
+
+def test_handle_reply_business_type_correction_records_not_promoted(substrate):  # type: ignore[no-untyped-def]
+    """DF7(b): a free-text business_type CONFIRM correction ("hum leather bags bechte hain") records +
+    ADVANCES (never loops), but an OFF-TAXONOMY value is NOT promoted to the canonical profile
+    (CL-390 never-assert)."""
+    from orchestrator.onboarding import journey
+
+    tenant = _new_tenant(substrate.dsn, name="bt correction no-promote")
+    journey.start_journey(
+        tenant, [_confirm_q("business_type", "footwear"), _gap_q("operating_hours")]
+    )
+
+    r = journey.handle_reply(tenant, "hum leather bags bechte hain", "SM-bt-corr-1")
+    assert r["done"] is False
+    assert "operating_hours" in r["reply_en"], "the cursor advanced to the next question (no loop)"
+    g = journey.get_journey(tenant)
+    assert g is not None
+    assert g["cursor"] == 1, "an off-taxonomy correction still advances the cursor"
+    assert g["answers"].get("business_type") == "hum leather bags bechte hain", (
+        "the correction is recorded as the journey answer"
+    )
+    # Off-taxonomy → never asserted as canonical fact.
+    promoted = _canonical_profile_attributes(substrate.dsn, tenant)
+    assert not (promoted or {}).get("business_type"), (
+        f"an off-taxonomy business_type must NOT be promoted to canonical; got {promoted!r}"
+    )
+
+
+def test_handle_reply_confirm_rejection_sentence_represents(substrate):  # type: ignore[no-untyped-def]
+    """DF7(b) defense-in-depth (legacy/shadow walker): a NON-bare rejection SENTENCE to a confirm
+    ("nahi bhai, hum footwear nahi bechte, hum leather bags bechte hain") is a contradiction, not a
+    clean value — re-present (ask for the correct value) rather than record the whole sentence."""
+    from orchestrator.onboarding import journey
+
+    tenant = _new_tenant(substrate.dsn, name="confirm rejection sentence")
+    journey.start_journey(tenant, [_confirm_q("business_type", "footwear")])
+
+    r = journey.handle_reply(
+        tenant, "nahi bhai, hum footwear nahi bechte, hum leather bags bechte hain", "SM-rej-1"
+    )
+    assert r.get("re_present") is True, "a rejection sentence must re-present, not record"
+    g = journey.get_journey(tenant)
+    assert g is not None
+    assert g["cursor"] == 0, "a rejection sentence must NOT advance the cursor"
+    assert "business_type" not in g["answers"], "the rejection sentence must NOT be recorded as the value"
+    assert _canonical_profile_attributes(substrate.dsn, tenant) is None
+
+
 def test_handle_reply_idempotent_redelivery_no_double_advance(substrate):  # type: ignore[no-untyped-def]
     """IDEMPOTENCY: a redelivered ``message_sid`` (== last_message_sid) re-emits
     the SAME current question WITHOUT advancing the cursor and WITHOUT mutating
