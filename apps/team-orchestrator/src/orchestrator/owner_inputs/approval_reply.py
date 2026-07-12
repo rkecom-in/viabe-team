@@ -64,6 +64,35 @@ _TEMPORAL_HOLD = {"abhi", "अभी", "now", "yet", "filhal", "filhaal", "फ�
 # Finality tokens defeat the temporal read: "don't send now or EVER" / "kabhi nahi" is a REJECT.
 # ("never" is already a _NEGATION member; listing it here keeps the reject read explicit.)
 _FINALITY = {"ever", "never", "kabhi", "कभी"}
+# Cluster-1 (full-77 §2 judge 3/3, sr_consequential_bulk_send 2026-07-12) — a NEGATED HOLD-word is a
+# PROCEED, not a reject: "wait mat karo, bhej do" ("don't wait, send it") negates the *waiting*, not
+# the send. The bare-negation branch read `mat` and REJECTED, false-declining an armed campaign the
+# owner was urgently pushing to SEND. Distinct from _TEMPORAL_HOLD ("abhi mat bhejna" = don't send
+# NOW -> DEFER): there the SEND is negated; here the HOLD is. The two are told apart POSITIONALLY
+# (`_adjacent_to_negation`), never by bag-of-words — "mat bhejo ruk jao" (don't send, stop) has the
+# same token set but the negation binds the send verb, so it must stay a REJECT (money asymmetry).
+_NEGATED_HOLD = {"wait", "ruk", "ruko", "ruko", "roko", "rukna", "रुक", "रुको", "रोको", "hold"}
+# Cluster-1b (full-77 §2, sr_owner_cannot_bypass_approval 2026-07-12) — a long free-text sentence is
+# not a button-press. A 25-token standing-permission ask ("aap ko baar baar permission ... zaroorat
+# NAHI hai, aage se khud decide karke bhej diya karo") carries an INCIDENTAL negation (`nahi` binds
+# "zaroorat", not the send) and was DETERMINISTICALLY REJECTED, false-declining a campaign the owner
+# never declined. Legit approve/reject/defer replies top out ~10-11 tokens; anything longer routes to
+# the reasoning layer (return None — money-safe: None NEVER auto-approves, leaves the row paused).
+_MAX_DECISION_TOKENS = 12
+
+
+def _adjacent_to_negation(token_list: list[str], target_set: set[str], neg_set: set[str]) -> bool:
+    """True iff some token in ``target_set`` has an IMMEDIATE neighbor (prev or next token) in
+    ``neg_set``. Positional negation-binding: "mat bhejo" (neg before send) binds the send verb;
+    "wait mat" (neg after hold) binds the hold-word. Bag-of-words membership cannot tell these
+    apart — adjacency can. Devanagari-safe (operates on already-tokenized/NFC-normalized tokens)."""
+    for i, t in enumerate(token_list):
+        if t in target_set and (
+            (i > 0 and token_list[i - 1] in neg_set)
+            or (i + 1 < len(token_list) and token_list[i + 1] in neg_set)
+        ):
+            return True
+    return False
 # Hedges — a qualified reply ("maybe ok", "perhaps", "शायद") is NOT a clear decision;
 # defer to the Haiku classifier (+ its confidence gate) rather than fire deterministically.
 # VT-633 — the LATIN-script Hinglish hedges were missing: "shayad theek hai" ("maybe it's ok")
@@ -139,6 +168,14 @@ def classify_approval_reply(body: str) -> ApprovalDecision | None:
     token_list = [t for t in re.split(r"[\s,.!?;:।/\\-]+", normalized) if t]
     tokens = set(token_list)
 
+    # Cluster-1b — a paragraph is not a button-press. A long free-text reply (a standing-permission
+    # ask, a rambling instruction) carries incidental approve/negation tokens that the bag-of-words
+    # matcher misreads; route anything longer than a clear approve/reject/defer to the reasoning
+    # layer (None — money-safe, never auto-approves, leaves any armed row paused). Placed FIRST so no
+    # incidental token below fires deterministically on a long message.
+    if len(token_list) > _MAX_DECISION_TOKENS:
+        return None
+
     # A hedged reply ("maybe ok") is not authoritative — defer to Haiku (Pillar 7).
     if tokens & _HEDGE:
         return None
@@ -148,6 +185,11 @@ def classify_approval_reply(body: str) -> ApprovalDecision | None:
     has_strong = bool(tokens & _STRONG_APPROVE)
     has_verb = bool(tokens & _APPROVE_VERB)
     has_contrast = bool(tokens & _CONTRAST)
+    has_explicit_send = bool(tokens & _EXPLICIT_SEND)
+    # Positional negation-binding (cluster-1): is the negation on the SEND verb ("mat bhejo" = don't
+    # send -> stop) or on a HOLD word ("wait mat" = don't wait -> proceed)?
+    negated_send = _adjacent_to_negation(token_list, _EXPLICIT_SEND, _NEGATION)
+    negated_hold = _adjacent_to_negation(token_list, _NEGATED_HOLD, _NEGATION)
     # Bare temporal defer, OR the next+week bigram (adjacent tokens) — never bare next/अगले.
     has_week_bigram = any(
         token_list[i] in _DEFER_NEXT and token_list[i + 1] in _DEFER_WEEK
@@ -166,6 +208,21 @@ def classify_approval_reply(body: str) -> ApprovalDecision | None:
     # A negation (incl. negating an approve-word: "do not approve") or an explicit reject
     # word -> REJECT. The negation binds the approval — never send a negated reply.
     if has_neg or has_reject_kw:
+        # Cluster-1 — a negated HOLD-word with an un-negated explicit send verb is a PROCEED, not a
+        # reject: "wait mat karo, bhej do" ("don't wait, send it"). Fires ONLY when the send verb is
+        # not itself adjacent-negated (so "mat bhejo ruk jao" = don't send, stop -> stays reject) and
+        # there is no temporal-hold ("abhi" -> defer below) or finality token. Money asymmetry holds:
+        # approves ONLY the owner's own explicit, un-negated send instruction.
+        if (
+            has_neg
+            and not has_reject_kw
+            and negated_hold
+            and has_explicit_send
+            and not negated_send
+            and not (tokens & _TEMPORAL_HOLD)
+            and not (tokens & _FINALITY)
+        ):
+            return "approved"
         # T17 — temporal hold: "abhi mat bhejna" / "don't send now" / "not yet" pauses the
         # send, it does not decline the draft. DEFER (still no send; window extends; re-asks;
         # _MAX_DEFERS-bounded). Never fires on an explicit reject keyword ("no, cancel it now")
@@ -193,7 +250,6 @@ def classify_approval_reply(body: str) -> ApprovalDecision | None:
     # EXPLICIT send verb present overrides ("chalo bhej do" approves). Reached only on a non-negated,
     # non-reject, non-defer reply, so it never weakens a reject (Pillar-7 asymmetry holds).
     has_resume = bool(tokens & _VAGUE_RESUME) or any(p in normalized for p in _RESUME_BACKREF)
-    has_explicit_send = bool(tokens & _EXPLICIT_SEND)
     if has_resume and not has_explicit_send:
         return None
 
