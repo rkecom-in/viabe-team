@@ -253,3 +253,32 @@ def test_imperative_still_mints(spies, body):
     assert res is not None and res["routed"] == "sheets_first_contact_minted"
     assert spies["sheets"] == 1
     assert any("accounts.google.com" in s for s in spies["sends"]), "the OAuth link must be sent"
+
+
+# ----------------------------- DF1: cross-tenant / third-party guard ----------------------
+@pytest.mark.parametrize(
+    "body",
+    [
+        "my friend Rakesh runs a shop, check if his Shopify is connected",
+        "uski shop ka account connect karo",
+        "is their google sheet connected",
+    ],
+)
+def test_third_party_ask_declined_never_emits_owner_status(spies, body):
+    """A connect/status ask about SOMEONE ELSE'S business is declined honestly — never answered with
+    the OWNER's own connection status (cross-tenant leak + verbatim-loop breaker)."""
+    spies["connected"] = True  # even if the OWNER is connected, must NOT leak "yes, connected"
+    res = _run(body)
+    assert res is not None and res["routed"] == "connector_third_party_declined"
+    assert spies["sends"], "must send an honest decline"
+    reply = spies["sends"][-1].lower()
+    assert "your own" in reply and "someone else" in reply
+    assert "connected" not in reply.split("someone else")[0]  # no owner-status affirmation
+
+
+def test_own_shopify_status_still_self_answers(spies):
+    """Regression pin: 'is MY shopify connected?' carries no third-person possessive -> self-answers."""
+    spies["connected"] = True
+    res = _run("is my shopify connected?")
+    assert res is not None and res["routed"] == "connector_status_answered"
+    assert "connected" in spies["sends"][-1].lower()

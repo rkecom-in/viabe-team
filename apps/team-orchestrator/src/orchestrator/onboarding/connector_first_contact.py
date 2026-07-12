@@ -63,6 +63,16 @@ _CONNECT_STATE_RE = re.compile(
 _SHEETS_RE = re.compile(r"\b(google\s*sheet|sheets?|spreadsheet)\b", re.IGNORECASE)
 _SHOPIFY_RE = re.compile(r"\bshopify\b", re.IGNORECASE)
 
+# DF1 cross-tenant / third-party guard (data isolation): a connect/status ask about ANOTHER person's
+# business ("check if HIS Shopify is connected", "uski shop ka account") must NEVER emit the OWNER's
+# own connection status. HIGH-PRECISION: a third-person possessive bound to a business noun. "is MY
+# shopify connected?" carries no third-person possessive, so it self-answers unaffected.
+_THIRD_PARTY_SUBJECT_RE = re.compile(
+    r"\b(?:his|her|their|uska|uski|unka|unki)\s+(?:\w+\s+)?"
+    r"(?:shop|store|business|account|connection|shopify|sheet|sheets|spreadsheet|data|numbers?)\b",
+    re.IGNORECASE,
+)
+
 
 def _connected_or_healthy(tenant_id: UUID | str, provider: str) -> bool:
     """DB-truth 'connected' from EITHER source of record: a ``tenant_oauth_tokens`` row (the
@@ -118,6 +128,29 @@ def maybe_start_connector_onboarding(
         text = body or ""
         if matches_opt_out_or_dsr(text):
             return None  # DPDP opt-out / DSR always wins (mirror the resume gate)
+
+        # DF1 — third-party / cross-tenant guard: a connect/status ask about SOMEONE ELSE'S business
+        # is DECLINED honestly, never answered with the owner's own status (a cross-tenant leak + the
+        # verbatim-loop breaker). Checked BEFORE the imperative/state branches so it can never emit
+        # the owner's connection. Offers the owner their OWN connection instead.
+        if _THIRD_PARTY_SUBJECT_RE.search(text):
+            from orchestrator.onboarding.shopify_onboarding import _send
+
+            _send(
+                recipient,
+                "I can only help with your own business — I can't check or connect someone else's "
+                "account. Want me to look at your own connection instead?",
+                tenant_id=tenant_id,
+            )
+            logger.info(
+                "connector_first_contact: declined third-party connect/status ask (isolation) tenant=%s",
+                tenant_id,
+            )
+            return {
+                "done": False,
+                "phase": "third_party_declined",
+                "routed": "connector_third_party_declined",
+            }
 
         is_imperative = bool(_CONNECT_IMPERATIVE_RE.search(text))
         is_state = bool(_CONNECT_STATE_RE.search(text))
