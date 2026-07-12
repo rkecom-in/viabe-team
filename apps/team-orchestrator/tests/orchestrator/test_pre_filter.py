@@ -118,6 +118,23 @@ def test_opt_out_keyword_hi_routes_and_sets_flag(gate):
     assert row == (True,)
 
 
+def test_cd6_global_stop_routes_to_opt_out_handler(gate):
+    """R5 / CD6 — a Hinglish GLOBAL send-stop the keyword list misses ("bas ab message mat bhejo")
+    routes to the authoritative opt_out_handler (Rule a leg). A PER-CUSTOMER stop must NOT — it falls
+    through to the brain (the edge-router exclusion path), never a tenant opt-out (Fazal CD6)."""
+    tenant_id = _new_tenant(gate.dsn)
+    sub = _state(gate, tenant_id)
+
+    result = gate.pre_filter(_inbound(gate, "bas ab message mat bhejo"), sub)
+    assert isinstance(result, gate.t.RouteToDirectHandler)
+    assert result.handler_name == "opt_out_handler"
+
+    # per-customer stop ("Rajesh ko …") + a bare send-negation reply stay OUT of the opt-out leg
+    for body in ("Rajesh ko message mat bhejo", "us customer ko mat bhejo", "mat bhejo"):
+        r = gate.pre_filter(_inbound(gate, body), sub)
+        assert isinstance(r, gate.t.RouteToBrain), body
+
+
 # --- VT-303 data-inputs ENABLE (opt-in) + brain consent gate -----------------
 
 

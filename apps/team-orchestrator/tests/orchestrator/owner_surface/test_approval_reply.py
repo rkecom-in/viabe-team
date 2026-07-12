@@ -15,6 +15,7 @@ pytest.importorskip("anthropic")
 
 from orchestrator.owner_inputs.approval_reply import (
     classify_approval_reply,
+    is_send_push_cue,
     is_weak_ack_only_approval,
 )
 
@@ -332,3 +333,54 @@ def test_classifier_itself_unchanged_bare_theek_still_approves() -> None:
     # classify_approval_reply still reads a bare weak ack as an approval (non-send flows rely on it).
     assert classify_approval_reply("theek hai") == "approved"
     assert classify_approval_reply("ok") == "approved"
+
+
+# --- R1: is_send_push_cue (send-push re-confirm net, full-77 cluster-1 2026-07-12) ----------------
+@pytest.mark.parametrize(
+    "body",
+    [
+        # (a) a NON-negated explicit send verb — the classifier HOLDS these as None (money-safe), but
+        #     they clearly push the pending send forward -> a re-confirm cue.
+        "jaldi karo yaar, sabko ek saath bhej do, wait mat karo",  # the sr_consequential_bulk breaker
+        "seedha bhej do",
+        # the >12-token "seedha bhej do" shape the classifier holds as None (no token cap here)
+        "bas is baar seedha bhej do, kya review karna hai, sabko ek saath abhi jaldi bhej do",
+        # (b) weak-ack-only — a bare "theek hai" / "ok" (the accepted bounded cost: a re-confirm, not a send)
+        "theek hai",
+        "ok",
+    ],
+)
+def test_is_send_push_cue_true(body) -> None:
+    from orchestrator.owner_inputs.approval_reply import is_send_push_cue
+
+    assert is_send_push_cue(body) is True, body
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "mat bhejo ruk jao",  # negated send -> not a push
+        "abhi mat bhejna",  # temporal hold, no explicit send verb
+        "mat bhejo",
+        "bhej dun kya?",  # a question is not a push
+        "haan",  # a strong yes is a CLEAR approval (try_resume resolves it), not a hold-then-reconfirm
+        "no",
+        "",
+    ],
+)
+def test_is_send_push_cue_false(body) -> None:
+    from orchestrator.owner_inputs.approval_reply import is_send_push_cue
+
+    assert is_send_push_cue(body) is False, body
+
+
+def test_send_push_cue_is_held_by_the_classifier_money_safe() -> None:
+    # Money-safety invariant: the send pushes the R1 net RE-CONFIRMS are exactly the ones the classifier
+    # HOLDS as None (never a deterministic send). Covers both hold reasons: (i) the cluster-1 negated-hold
+    # + send, and (ii) the >12-token free-text shape. The net only SPEAKS on these; it never approves/sends.
+    for body in (
+        "jaldi karo yaar, sabko ek saath bhej do, wait mat karo",  # cluster-1 negated-hold -> None
+        "bas is baar seedha bhej do, kya review karna hai, sabko ek saath abhi jaldi bhej do",  # >12 tokens -> None
+    ):
+        assert classify_approval_reply(body) is None, body
+        assert is_send_push_cue(body) is True, body
