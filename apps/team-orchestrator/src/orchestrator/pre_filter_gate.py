@@ -182,13 +182,87 @@ def _normalize(body: str) -> str:
     return _nfc(" ".join(body.split()).casefold())
 
 
+# R5 / CD6 (CL-2026-07-12-global-stop-is-optout-reconsent-to-resume) — a GLOBAL send-stop
+# ("bas ab message mat bhejo" = stop sending everyone) is a tenant OPT-OUT; a PER-CUSTOMER stop
+# ("Rajesh ko mat bhejo" / "us customer ko mat bhejo") is NOT — it suppresses that ONE recipient
+# (Fazal CD6), never a tenant opt-out. English/Devanagari opt-out words (STOP / band karo / roko /
+# बंद करो / UNSUBSCRIBE) are ALREADY caught by _OPT_OUT_PATTERNS; this matcher ADDS only the Hinglish
+# "<scope> mat/nahi/dont <send>" global stops those miss. It fires ONLY when the carve-out proves
+# there is no customer reference:
+#   (1) a send-negation CORE — a send verb IMMEDIATELY adjacent to a negation (positional, never
+#       bag-of-words, so "wait mat karo" is NOT read as a send-negation),
+#   (2) at least one GLOBAL SCOPE token — a message-noun or an everyone-word (a bare "mat bhejo" reply
+#       to an approval carries none, so it stays a per-CAMPAIGN reject, never a tenant opt-out), AND
+#   (3) NO phone digit-run AND every token in the bounded allow-set — any unstripped token (a potential
+#       customer name) FAILS (3) and falls through, so the matcher never STEALS a per-customer turn.
+# The stop side strictly TIGHTENS (more phrasings opt out — fail-safe). ZERO LLM (Pillar-1 subtree).
+_GS_NEGATION = {"no", "not", "dont", "never", "mat", "nahi", "nahin", "नहीं", "ना", "न", "मत"}
+_GS_SEND_VERB = {
+    "send", "sending", "bhejo", "bhejna", "bhej", "bhejde", "bhejdo", "bhejdena",
+    "भेजो", "भेज", "भेजना",
+}
+# Message-nouns double as GLOBAL SCOPE — "message"/"campaign"/… with no named recipient means "all".
+_GS_MSG_NOUN = {
+    "message", "messages", "messaging", "msg", "msgs", "text", "texts", "texting",
+    "campaign", "campaigns", "notification", "notifications", "whatsapp", "sms",
+    "मैसेज", "मेसेज", "संदेश",
+}
+# Everyone-words — the explicit global-scope form ("sabko mat bhejo").
+_GS_SCOPE = {"sab", "sabko", "sabhi", "sabke", "everyone", "everybody", "all", "anybody", "anyone", "सब", "सबको"}
+# Filler/particle tokens a global stop can carry WITHOUT naming a customer (referential words like
+# "us"/"is"/"ye"/"customer" are deliberately ABSENT — they mark a per-customer turn and must fall through).
+_GS_FILLER = {
+    "bas", "ab", "ko", "na", "please", "pls", "aur", "ya", "toh", "to", "yaar", "bhai", "ji",
+    "kar", "karo", "karna", "kardo", "dena", "do", "de", "बस", "अब", "को",
+}
+_GS_ALLOWED = _GS_NEGATION | _GS_SEND_VERB | _GS_MSG_NOUN | _GS_SCOPE | _GS_FILLER
+_GS_PHONE_DIGITS_RE = re.compile(r"\d{4,}")
+
+
+def matches_global_stop(body: str) -> bool:
+    """R5 / CD6 — True iff ``body`` is a GLOBAL send-stop (tenant opt-out) vs a per-customer stop. See
+    the token-set comment above. NFC + whitespace/punct split (VT-329-safe; no Devanagari-dead ``\\b``).
+    Conservative by construction: a question, a bare send-negation with no global scope, a phone/name,
+    or any unstripped token -> False (falls through to the per-customer / brain path)."""
+    norm = _nfc((body or "").strip().casefold()).replace("'", "").replace("’", "")
+    if "?" in norm:
+        return False
+    if _GS_PHONE_DIGITS_RE.search(norm):
+        return False  # a phone/order number means a specific target — never a global stop
+    token_list = [t for t in re.split(r"[\s,.!?;:।/\\-]+", norm) if t]
+    if not token_list:
+        return False
+    tokens = set(token_list)
+    # (1) send-negation core — a send verb IMMEDIATELY adjacent to a negation.
+    core = any(
+        t in _GS_SEND_VERB
+        and (
+            (i > 0 and token_list[i - 1] in _GS_NEGATION)
+            or (i + 1 < len(token_list) and token_list[i + 1] in _GS_NEGATION)
+        )
+        for i, t in enumerate(token_list)
+    )
+    if not core:
+        return False
+    # (2) global scope — a message-noun or an everyone-word (bare "mat bhejo" has neither).
+    if not (tokens & _GS_MSG_NOUN or tokens & _GS_SCOPE):
+        return False
+    # (3) carve-out — every token accounted for (no residual customer name/identifier).
+    return tokens <= _GS_ALLOWED
+
+
 def matches_opt_out_or_dsr(body: str) -> bool:
     """True if ``body`` CONTAINS an opt-out or DSR keyword (VT-329: boundary-safe containment, NFC,
-    EN+Devanagari+Hinglish). Phase-aware reply gates call this so opt-out / DSR routing ALWAYS wins
-    over any other interpretation (DPDP): a tenant who says "delete my data" / "बंद करो" /
-    "band karo" must reach the dsr/opt-out handler regardless of phase."""
+    EN+Devanagari+Hinglish), OR is a CD6 GLOBAL send-stop (``matches_global_stop`` — "bas ab message
+    mat bhejo"). Phase-aware reply gates call this so opt-out / DSR routing ALWAYS wins over any other
+    interpretation (DPDP): a tenant who says "delete my data" / "बंद करो" / "band karo" / a global
+    send-stop must reach the dsr/opt-out handler regardless of phase."""
     nfc = _nfc(body)
-    return any(p.search(nfc) for p in _OPT_OUT_PATTERNS) or _dsr_match(nfc) is not None
+    return (
+        any(p.search(nfc) for p in _OPT_OUT_PATTERNS)
+        or _dsr_match(nfc) is not None
+        or matches_global_stop(body)
+    )
 
 
 def matches_kill_keyword(body: str) -> bool:
@@ -242,6 +316,26 @@ def classify_consent_intent(body: str) -> str | None:
     return None
 
 
+# R5 / CD6 — the opted-out RESUME cue set (runner.webhook_pipeline_run opted-out resume leg). Deliberately
+# BOUNDED (do NOT widen — CL-2026-07-12): the enumerated restart verbs + the template's promised "reply
+# START". A plain consent-affirm ("yes"/"haan") is intentionally NOT here — that stays the existing
+# _consent_affirm_after_ask / ACTIVATE-TEAM path; this net only makes an EXPLICIT restart real.
+_RESTART_CUES = {"start", "restart", "resume", "reactivate", "shuru", "chalu", "शुरू", "चालू"}
+
+
+def matches_restart_cue(body: str) -> bool:
+    """R5 / CD6 — True iff ``body`` is an opted-out tenant's explicit RESUME cue (the bounded
+    ``_RESTART_CUES`` set: START / restart / resume / reactivate / shuru / chalu). NFC + whitespace/
+    punct split (VT-329-safe). A question -> False. The CALLER gates on ``tenants.opt_out=true`` AND
+    excludes opt-out/DSR (a repeat STOP must stay opted-out), so this only fires an explicit restart —
+    it never widens consent on its own. ZERO LLM (Pillar-1 subtree)."""
+    norm = _nfc((body or "").strip().casefold()).replace("'", "").replace("’", "")
+    if "?" in norm:
+        return False
+    tokens = {t for t in re.split(r"[\s,.!?;:।/\\-]+", norm) if t}
+    return bool(tokens & _RESTART_CUES)
+
+
 @DBOS.step()
 def pre_filter(event: WebhookEvent, state: SubscriberState) -> PreFilterResult:
     """Deterministically route a webhook event. See the module docstring.
@@ -290,6 +384,14 @@ def pre_filter(event: WebhookEvent, state: SubscriberState) -> PreFilterResult:
             return RouteToDirectHandler(
                 handler_name="opt_out_handler", payload={"matched": pattern.pattern}
             )
+    # Rule a (CD6 leg) — a Hinglish GLOBAL send-stop the keyword list misses ("bas ab message mat
+    # bhejo"). Same authoritative opt_out_handler, same FIRST-wins ordering (still Rule a in the
+    # RULE_ORDER pin). Per-customer stops ("Rajesh ko mat bhejo") DON'T match (matches_global_stop's
+    # carve-out) — they fall through to the brain/edge-router exclusion path, never a tenant opt-out.
+    if matches_global_stop(event.body):
+        return RouteToDirectHandler(
+            handler_name="opt_out_handler", payload={"matched": "global_stop_cd6"}
+        )
 
     # Rule a2 — VT-303 data-inputs ENABLE keyword (exact, case-insensitive, NFC).
     # The consent-grant phrase. Routed here (a direct handler, no LLM) so an

@@ -205,19 +205,76 @@ def _open_approval_exists_step(tenant_id: str) -> bool:
 
 
 @DBOS.step()
+def _open_customer_send_approval_exists_step(tenant_id: str) -> bool:
+    """R1 — CHECKPOINTED guard: True iff the tenant has an OPEN approval whose type is a CUSTOMER SEND
+    (money; approval_resume._CUSTOMER_SEND_APPROVAL_TYPES). Mirrors _open_approval_exists_step but
+    TYPE-scoped — the send-push re-confirm net (_maybe_reconfirm_send_push) must fire ONLY for a real
+    customer-send approval, never a non-send governance approval (autonomy_upgrade, …). Never raises:
+    a read error reports False (skip the re-confirm) — failing SOFT here can only DROP a re-confirm,
+    never fabricate one, and it never resolves/sends anything."""
+    try:
+        from orchestrator.agent.approval_resume import (
+            _CUSTOMER_SEND_APPROVAL_TYPES,
+            find_open_approval_for_tenant,
+        )
+
+        with tenant_connection(tenant_id) as conn:
+            approval = find_open_approval_for_tenant(conn, tenant_id)
+        return (
+            approval is not None
+            and approval.get("approval_type") in _CUSTOMER_SEND_APPROVAL_TYPES
+        )
+    except Exception:  # noqa: BLE001 — a control-read outage must not kill a live inbound run
+        logger.warning(
+            "R1: open customer-send approval read failed (fail-soft) tenant=%s", tenant_id
+        )
+        return False
+
+
+@DBOS.step()
+def _tenant_is_opted_out_step(tenant_id: str) -> bool:
+    """R5 / CD6 — CHECKPOINTED read of ``tenants.opt_out`` for the opted-out RESUME leg. A @DBOS.step
+    (a LIVE read, like the other webhook-path control reads) so replay re-walks the same routing.
+    Fail-soft False: a read error can only SKIP the resume leg (the restart falls through to the normal
+    pipeline), never fabricate a consent clear."""
+    try:
+        with tenant_connection(tenant_id) as conn:
+            row = conn.execute(
+                "SELECT opt_out FROM tenants WHERE id = %s LIMIT 1", (tenant_id,)
+            ).fetchone()
+        if row is None:
+            return False
+        return bool(row["opt_out"] if isinstance(row, dict) else row[0])
+    except Exception:  # noqa: BLE001 — a control-read outage must not kill a live inbound run
+        logger.warning("CD6: opt_out read failed (fail-soft) tenant=%s", tenant_id)
+        return False
+
+
+@DBOS.step()
 def _should_wait_for_approval_arm(tenant_id: str, body: str) -> bool:
     """VT-633 D-A — CHECKPOINTED gate for the approval-arm wait: True iff the reply is a CLEAR
     deterministic decision (classify_approval_reply — never the LLM classifier pre-arm; an
-    ambiguous reply must not wait at all) AND a manager task is actively in flight (the only
-    situation in which an arm can still be coming). A @DBOS.step because has_active_task is a
-    LIVE read: left un-memoized, a replay could re-evaluate it differently and skip/enter the
-    sleep loop with a different step count (the same divergence class the poll step guards).
-    Fail-soft False: an error here just means the reply falls through as it always did."""
+    ambiguous reply must not wait at all) OR a SEND-PUSH cue (R1 — is_send_push_cue: an
+    ambiguous-but-explicit "just send it" the classifier deliberately holds as None), AND a manager
+    task is actively in flight (the only situation in which an arm can still be coming). A @DBOS.step
+    because has_active_task is a LIVE read: left un-memoized, a replay could re-evaluate it
+    differently and skip/enter the sleep loop with a different step count (the same divergence class
+    the poll step guards). Fail-soft False: an error here just means the reply falls through as it
+    always did.
+
+    R1: adding the send-push cue extends the mid-turn ARM RACE cover to it too — an urgent
+    "sabko bhej do" that PRECEDES the arm now waits for the arm and is then re-confirmed by the R1 net
+    (_maybe_reconfirm_send_push), instead of falling through to the brain (which reads its own turn as
+    approval-taken / spawns a competing plan). The send-push cue never RESOLVES the approval (try_resume
+    still returns None on it); it only earns the bounded wait so the re-confirm net can see the arm."""
     try:
         from orchestrator.manager import task_store
-        from orchestrator.owner_inputs.approval_reply import classify_approval_reply
+        from orchestrator.owner_inputs.approval_reply import (
+            classify_approval_reply,
+            is_send_push_cue,
+        )
 
-        if classify_approval_reply(body or "") is None:
+        if classify_approval_reply(body or "") is None and not is_send_push_cue(body or ""):
             return False
         return task_store.has_active_task(tenant_id)
     except Exception:  # noqa: BLE001 — gating must never kill a live inbound run
@@ -327,6 +384,70 @@ def _maybe_resurface_pending_approval(tenant_id: str, event: WebhookEvent) -> bo
         return True
     except Exception:  # noqa: BLE001 — a re-surface hiccup must not break the durable run
         logger.warning("T8: approval re-surface failed (fail-soft) tenant=%s", tenant_id)
+        return False
+
+
+# R1 — send-push re-confirm copy. An ambiguous send PUSH ("jaldi karo, sabko bhej do" / a long
+# "seedha bhej do" / a bare weak "theek hai") that lands against an OPEN customer-send approval must be
+# re-confirmed, NOT sent and NOT fallen-through to the brain. Honest (the plan IS armed, waiting),
+# money-safe (NOTHING is sent), and it names the ONE explicit reply that resolves — so the owner is a
+# single "haan bhej do" from the unchanged approval-resume path. Never claims a send, never invents
+# cohort details (those live in the original approval ask still on the thread).
+_RECONFIRM_SEND_PUSH = {
+    "en": (
+        "Your plan is armed and waiting for your go-ahead — I haven't sent anything yet. "
+        "Reply \"haan bhej do\" to send it now, or tell me what you'd like to change."
+    ),
+    "hi": (
+        "Aapka plan taiyaar hai aur aapki haan ka intezaar kar raha hai — maine abhi tak kuch "
+        "nahi bheja. Bhejne ke liye \"haan bhej do\" likhein, ya batayein kya badalna hai."
+    ),
+}
+
+
+def _maybe_reconfirm_send_push(tenant_id: str, event: WebhookEvent) -> bool:
+    """R1 — if the inbound is a SEND-PUSH cue AND an OPEN customer-send approval is armed, RE-CONFIRM
+    that approval and CONSUME the turn, instead of letting an ambiguous send-intent reply fall through
+    to the brain (which was measured to (a) read its own turn as approval-taken and claim a send, or
+    (b) spawn a SECOND competing plan / deflect "settle the other one first" — both bulk-send breakers).
+
+    Complements T5/T8: T5 refuses to auto-SEND on the ambiguous reply (classify -> None), T8 re-points a
+    vague RESUME cue, and this re-confirms an explicit-but-unresolvable SEND PUSH. It STRICTLY TIGHTENS —
+    only SPEAKS (a re-confirm), never resolves/approves/sends; the plan stays ARMED and NOTHING is sent;
+    the >12-token CD5 ambiguity floor is untouched.
+
+    Deterministic + honest + best-effort: opt-out/DSR is excluded FIRST (a STOP keeps its compliance
+    path — never re-confirm over a STOP), the approval TYPE must be a real customer-send (money), the
+    send goes through the replay-safe ``_send_owner_reply_step`` (@DBOS.step — at-most-once), and any
+    failure returns False so the normal pipeline still runs."""
+    recipient = event.sender_phone or None
+    if not recipient:
+        return False
+    try:
+        from orchestrator.owner_inputs.approval_reply import is_send_push_cue
+        from orchestrator.pre_filter_gate import matches_opt_out_or_dsr
+
+        body = event.body or ""
+        # opt-out / DSR always wins (compliance) — never re-confirm over a STOP.
+        if matches_opt_out_or_dsr(body) or not is_send_push_cue(body):
+            return False
+        # Type-scoped: only a real OPEN customer-send approval (money) earns the re-confirm; a resolved
+        # or non-send approval reports False here, so this can never be reached by a resolved approval.
+        if not _open_customer_send_approval_exists_step(tenant_id):
+            return False
+
+        from orchestrator.owner_surface.freeform_acks import resolve_owner_locale
+
+        locale = resolve_owner_locale(tenant_id)
+        _send_owner_reply_step(
+            tenant_id, recipient, _RECONFIRM_SEND_PUSH["hi" if locale == "hi" else "en"]
+        )
+        logger.info(
+            "R1: send-push cue re-confirmed pending customer-send approval (tenant=%s)", tenant_id
+        )
+        return True
+    except Exception:  # noqa: BLE001 — a re-confirm hiccup must not break the durable run
+        logger.warning("R1: send-push re-confirm failed (fail-soft) tenant=%s", tenant_id)
         return False
 
 
@@ -1108,6 +1229,54 @@ def webhook_pipeline_run(tenant_id: str, run_id: str, twilio_fields: dict) -> di
                 "tenant_id": tenant_id,
                 "routed": "approval_resurfaced",
                 "handler": None,
+            }
+
+        # R1 (full-77 cluster-1, sr_consequential_bulk_send + sr_always_confirm_first_contact_floor) —
+        # the reply was NOT a resolvable decision (T5 -> None) and NOT a vague RESUME cue (T8 declined),
+        # but if it is a SEND PUSH ("jaldi karo, sabko bhej do" / a long "seedha bhej do" / a bare weak
+        # "theek hai") AND a customer-send approval is already armed, RE-CONFIRM that approval and consume
+        # the turn HERE — before the journey/dispatch gates spawn a competing plan or the brain reads its
+        # own turn as approval-taken. Only SPEAKS (never sends); the plan stays ARMED; opt-out/DSR and the
+        # customer-send type are guarded inside. Ordered AFTER the T8 re-surface so a vague resume keeps
+        # its own copy, and only reachable when try_resume left the approval unresolved.
+        if _maybe_reconfirm_send_push(tenant_id, event):
+            close_webhook_run(tenant_id, run_id, "completed")
+            return {
+                "run_id": run_id,
+                "tenant_id": tenant_id,
+                "routed": "approval_reconfirm",
+                "handler": None,
+            }
+
+    # R5 / CD6 (CL-2026-07-12-global-stop-is-optout-reconsent-to-resume) — the opted-out RESUME leg.
+    # An OPTED-OUT tenant's explicit restart cue ("START" / "restart karo" / "resume" — the template's
+    # promised "reply START") clears opt_out via the SOLE audited clearer (data_inputs_enable_handler,
+    # symmetric to opt_out_handler) and consumes the turn. Ordered AFTER the opt-out/DSR guard (a STOP /
+    # "delete my data" from an opted-out tenant is NOT a resume — matches_opt_out_or_dsr excludes it, so
+    # a repeat STOP stays opted-out / a DSR still routes to dsr_handler) and BEFORE the journey/connector
+    # gates so the restart is not eaten downstream. This is the ONLY consent-gate relaxation in the
+    # batch and stays exactly bounded: it clears opt_out ONLY through the existing audited handler, ONLY
+    # on the enumerated restart cues (matches_restart_cue — do NOT widen), and — critically — clearing
+    # opt_out here does NOT auto-resume any armed approval or queued send: no armed row is touched, and
+    # the send chokepoint (execute_approved_campaign, T13b) re-reads opt_out, so a pending campaign still
+    # needs the normal approval path afterward. FAIL-OPEN: any error falls through to the normal pipeline.
+    if event.message_type == "inbound_message" and not event.dupe_status:
+        from orchestrator.pre_filter_gate import matches_opt_out_or_dsr, matches_restart_cue
+
+        _resume_body = event.body or ""
+        if (
+            matches_restart_cue(_resume_body)
+            and not matches_opt_out_or_dsr(_resume_body)
+            and _tenant_is_opted_out_step(tenant_id)
+        ):
+            HANDLERS["data_inputs_enable_handler"](event, state)
+            close_webhook_run(tenant_id, run_id, "completed")
+            logger.info("CD6: opted-out tenant re-consented via restart cue (tenant=%s)", tenant_id)
+            return {
+                "run_id": run_id,
+                "tenant_id": tenant_id,
+                "routed": "optout_resume_reconsent",
+                "handler": "data_inputs_enable_handler",
             }
 
     # VT-367 — onboarding-JOURNEY gate. While an onboarding journey is active (or a fresh tenant's

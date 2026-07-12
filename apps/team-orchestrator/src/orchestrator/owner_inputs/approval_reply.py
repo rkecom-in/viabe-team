@@ -318,3 +318,43 @@ def is_weak_ack_only_approval(body: str) -> bool:
     if tokens & _EXPLICIT_SEND or tokens & _STRONG_YES:
         return False
     return True
+
+
+def is_send_push_cue(body: str) -> bool:
+    """R1 (full-77 cluster-1, sr_consequential_bulk_send + sr_always_confirm_first_contact_floor
+    2026-07-12) — True iff the reply is a SEND PUSH: an ambiguous-but-explicit "just send it" that
+    ``classify_approval_reply`` deliberately HOLDS (returns None, for money-safety) yet clearly pushes
+    the pending customer-send FORWARD. Two shapes, in lockstep with the classifier's normalization:
+
+      (a) a NON-negated explicit send verb — an explicit "bhej do" / "send it" whose send verb is NOT
+          immediately negated (``_adjacent_to_negation``); this catches the impatient "jaldi karo,
+          sabko bhej do, wait mat karo" and the long ">12-token seedha bhej do" shape the classifier
+          holds as None, and
+      (b) weak-ack-only — the reply's only affirmative signal is a bare weak ack ("theek hai"/"ok").
+
+    Excluded (-> False): any '?' (a question is not a push), a negated send ("mat bhejo" / "मत भेजो"),
+    and a temporal hold with no explicit send verb ("abhi mat bhejna"). The runner (R1) uses this to
+    RE-CONFIRM an already-armed customer-send approval AND consume the turn, so the brain never reads
+    its own turn as approval-taken or spawns a competing plan. It NEVER resolves / approves / sends —
+    the >12-token CD5 ambiguity floor in ``classify_approval_reply`` is untouched, opt-out/DSR are
+    excluded upstream, and money-safety is unchanged (a re-confirm only SPEAKS). Normalization kept in
+    lockstep with the classifier so the two never diverge."""
+    normalized = (
+        unicodedata.normalize("NFC", (body or "").strip().casefold())
+        .replace("'", "")
+        .replace("’", "")
+    )
+    if "?" in normalized:
+        return False
+    token_list = [t for t in re.split(r"[\s,.!?;:।/\\-]+", normalized) if t]
+    if not token_list:
+        return False
+    tokens = set(token_list)
+    # (a) an explicit send verb that is NOT itself adjacent-negated ("bhej do" fires; "mat bhejo"
+    # does not — the negation binds the send verb, positional, never bag-of-words).
+    if (tokens & _EXPLICIT_SEND) and not _adjacent_to_negation(
+        token_list, _EXPLICIT_SEND, _NEGATION
+    ):
+        return True
+    # (b) weak-ack-only — a bare "theek hai" / "ok" with no explicit send verb and no strong yes.
+    return is_weak_ack_only_approval(body)
