@@ -4,19 +4,21 @@ Goal: pin ``temperature=0`` for deterministic manager behaviour where the model
 allows it — run-to-run gate variance was traced partly to sampling at the API
 default temperature on every call.
 
-HARD API CONSTRAINT (verified live 2026-07-08, all current models):
+HARD API CONSTRAINT (verified constraint table — Anthropic live 2026-07-08; OpenAI docs 2026-07-13):
     claude-haiku-4-5     -> temperature ACCEPTED
     claude-sonnet-5      -> temperature DEPRECATED (400 "temperature is deprecated for this model")
     claude-opus-4-7/4-8  -> temperature DEPRECATED (400)
-So on the CURRENT lineup ONLY haiku accepts the param. Determinism-via-temperature
+    gpt-5.6-*            -> temperature REJECTED (a reasoning model, like sonnet/opus)
+So on the CURRENT multi-provider lineup ONLY haiku accepts the param. Determinism-via-temperature
 is therefore available ONLY on haiku turns (the routine-brain + the intent
-classifier). sonnet/opus turns (brain-complex, triage, review, the specialist
+classifier). sonnet/opus/gpt-5.6 turns (brain-complex, triage, review, the specialist
 lanes, the judge) CANNOT be pinned this way — their run-to-run variance is
-irreducible via temperature and would need a different lever (N-sample, or a
-model that still honours the param).
+irreducible via temperature and would need a different lever (N-sample, reasoning
+effort, or a model that still honours the param).
 
-Route EVERY Anthropic/ChatAnthropic call through this helper so a future model
-swap can never re-introduce a 400 (the bug this function exists to prevent).
+Route EVERY Anthropic/ChatAnthropic AND OpenAI/ChatOpenAI call through this helper (via the
+orchestrator.llm.provider seam) so a future model swap can never re-introduce a 400/400-class
+temperature error (the bug this function exists to prevent).
 """
 
 from __future__ import annotations

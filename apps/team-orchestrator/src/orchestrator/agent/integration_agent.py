@@ -39,12 +39,13 @@ from typing import Any, Literal
 from uuid import UUID
 
 from langchain.agents import AgentState, create_agent
-from langchain_anthropic import ChatAnthropic
+from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import SystemMessage
 from langchain_core.tools import BaseTool, tool
 from pydantic import BaseModel, ConfigDict, Field
 
 from orchestrator.agent.lane_tenant import lane_tenant_error, resolve_lane_tenant
+from orchestrator.llm.provider import resolve_chat_model
 from orchestrator.integrations import (
     OWNER_VISIBLE_CONNECTOR_IDS,
     list_owner_visible_connectors,
@@ -79,9 +80,10 @@ INTEGRATION_AGENT_SYSTEM_MESSAGE = SystemMessage(
     ]
 )
 
-# mypy --strict needs the call-arg ignore for ChatAnthropic's pydantic
-# kwargs — same pattern as orchestrator_agent.py.
-_MODEL = ChatAnthropic(model="claude-opus-4-7", max_tokens=4096)  # type: ignore[call-arg]
+# VT-619b — the specialist model routes through the multi-provider seam. Tier "specialist"
+# (default claude-sonnet-5, was opus-4-7) is env-driven via TEAM_MODEL_SPECIALIST so a claude-* ↔
+# gpt-5.6-* swap is a Railway env change. max_tokens + sampling_kwargs now live inside the seam.
+_MODEL: BaseChatModel = resolve_chat_model("specialist", agent="integration_agent")
 
 
 # Q2 Option A locked — Pydantic model gates JSONB writes for the
@@ -652,7 +654,7 @@ class IntegrationAgentState(AgentState, total=False):
 
 
 def build_integration_agent(
-    model: ChatAnthropic = _MODEL,
+    model: BaseChatModel = _MODEL,
     *,
     extra_tools: Sequence[BaseTool] = (),
 ) -> Any:

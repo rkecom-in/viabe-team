@@ -64,12 +64,13 @@ from typing import Any
 from uuid import UUID, uuid4
 
 from langchain.agents import AgentState, create_agent
-from langchain_anthropic import ChatAnthropic
+from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, SystemMessage
 from langchain_core.tools import BaseTool, tool
 from langgraph.errors import GraphBubbleUp
 
 from orchestrator.agent.lane_tenant import lane_tenant_error, resolve_lane_tenant
+from orchestrator.llm.provider import resolve_chat_model
 from orchestrator.agents.business_policy import MAX_SANE_SPEND_CEILING_MINOR, PolicyActionClass
 from orchestrator.types.trigger_reason import TriggerReason
 
@@ -92,13 +93,15 @@ ONBOARDING_CONDUCTOR_SYSTEM_MESSAGE = SystemMessage(
     ]
 )
 
-# mypy --strict needs the call-arg ignore for ChatAnthropic's pydantic kwargs (parity with the
-# orchestrator/integration agents).
-_MODEL = ChatAnthropic(model="claude-opus-4-8", max_tokens=4096)  # type: ignore[call-arg]
-# VT-617/cost: opus-4-8 is the declared capable default (dispatch _BRAIN_MODEL_OPUS) and ~1/3 the
-# token cost of legacy 4-7. A registry-grounded, scripted-conducted profile conductor does not need
-# the pricier legacy model; this cuts the per-turn cost so a multi-field onboarding save fits under
-# the ₹5 (500 paise) hard limit instead of aborting mid-loop. Sets no temperature (opus rejects it).
+# VT-619b — the conductor model routes through the multi-provider seam at the "specialist" tier
+# (env-driven via TEAM_MODEL_SPECIALIST). NOTE the DEFAULT changes claude-opus-4-8 -> claude-sonnet-5
+# (the specialist-tier default): a registry-grounded, scripted-conducted profile conductor does not
+# need the pricier model, and the cheaper per-turn cost keeps a multi-field onboarding save under the
+# ₹5 (500 paise) hard limit instead of aborting mid-loop — the same cost rationale as the VT-617
+# opus-4-7 -> opus-4-8 move, extended. To pin the conductor (and all specialists) back on opus, set
+# TEAM_MODEL_SPECIALIST=claude-opus-4-8. sampling_kwargs (no temperature on sonnet/opus/gpt) + the
+# max_tokens now live inside the seam.
+_MODEL: BaseChatModel = resolve_chat_model("specialist", agent="onboarding_conductor")
 
 
 # -----------------------------------------------------------------
@@ -514,7 +517,7 @@ class OnboardingConductorState(AgentState, total=False):
 
 
 def build_onboarding_conductor_agent(
-    model: ChatAnthropic = _MODEL,
+    model: BaseChatModel = _MODEL,
     *,
     tools_mode: str = "enforce",
     extra_tools: Sequence[BaseTool] = (),
@@ -682,7 +685,7 @@ def _emit_floor_engaged_seam(state: dict[str, Any], exc: Exception) -> None:
         logger.warning("onboarding_conductor: floor-engaged seam emit failed", exc_info=True)
 
 
-def build_onboarding_conductor_node(model: ChatAnthropic = _MODEL) -> Any:
+def build_onboarding_conductor_node(model: BaseChatModel = _MODEL) -> Any:
     """VT-609 — the onboarding_conductor GRAPH NODE, wrapping the compiled specialist sub-graph
     with the deterministic LLM-down floor. Builds the sub-graph ONCE (matching the prior
     per-graph-build cost of a raw ``build_onboarding_conductor_agent`` node) and returns a PLAIN
