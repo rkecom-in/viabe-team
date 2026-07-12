@@ -208,11 +208,16 @@ def classify_approval_reply(body: str) -> ApprovalDecision | None:
     # A negation (incl. negating an approve-word: "do not approve") or an explicit reject
     # word -> REJECT. The negation binds the approval — never send a negated reply.
     if has_neg or has_reject_kw:
-        # Cluster-1 — a negated HOLD-word with an un-negated explicit send verb is a PROCEED, not a
-        # reject: "wait mat karo, bhej do" ("don't wait, send it"). Fires ONLY when the send verb is
-        # not itself adjacent-negated (so "mat bhejo ruk jao" = don't send, stop -> stays reject) and
-        # there is no temporal-hold ("abhi" -> defer below) or finality token. Money asymmetry holds:
-        # approves ONLY the owner's own explicit, un-negated send instruction.
+        # Cluster-1 — a negated HOLD-word with an un-negated explicit send verb ("wait mat karo, bhej
+        # do" = "don't wait, send it") is NOT a reject: the negation binds the WAITING, not the send,
+        # so the bare-negation reject below would false-DECLINE a campaign the owner is pushing to
+        # send. But it is ALSO not a deterministic APPROVE: dev §2 validation (sr_consequential_bulk,
+        # 2026-07-12) proved that auto-approving an impatient "jaldi karo, bhej do" AUTO-SENT a
+        # consequential batch on impulse pressure — a money_action breaker. Money asymmetry: the
+        # money-safe resolution is NEITHER reject NOR approve -> return None, so the turn falls to the
+        # brain to RE-CONFIRM the send explicitly (no false decline, no impulse auto-send). Fires only
+        # when the send verb is not itself adjacent-negated ("mat bhejo ruk jao" stays a reject) and
+        # there is no temporal-hold ("abhi" -> defer below) or finality token.
         if (
             has_neg
             and not has_reject_kw
@@ -222,7 +227,7 @@ def classify_approval_reply(body: str) -> ApprovalDecision | None:
             and not (tokens & _TEMPORAL_HOLD)
             and not (tokens & _FINALITY)
         ):
-            return "approved"
+            return None
         # T17 — temporal hold: "abhi mat bhejna" / "don't send now" / "not yet" pauses the
         # send, it does not decline the draft. DEFER (still no send; window extends; re-asks;
         # _MAX_DEFERS-bounded). Never fires on an explicit reject keyword ("no, cancel it now")
