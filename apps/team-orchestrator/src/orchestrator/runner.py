@@ -1260,6 +1260,41 @@ def webhook_pipeline_run(tenant_id: str, run_id: str, twilio_fields: dict) -> di
                 "onboarding_done": first_contact_result.get("done"),
             }
 
+        # D2 (Fazal 2026-07-12 #2) — honest capability-disclosure for an UNSUPPORTED paid ad-boost.
+        # No paid-ad executor exists (roster = 3 specialists; marketing is advisory), so a paid-boost
+        # ask is DISCLOSED here — BEFORE the brain/triage/spend path — never routed into the spend gate
+        # (arming an approval for the unexecutable = impossible-promise). Money-safe: this net only
+        # speaks (no send/effect). Reply goes via the Step-1 replay-safe owner-reply step. Shares this
+        # block's inbound + non-dupe + not-loop-owned guard. FAIL-OPEN -> normal path.
+        try:
+            from orchestrator.onboarding.capability_disclosure import (
+                compose_capability_disclosure,
+                detect_unsupported_action,
+            )
+
+            if detect_unsupported_action(event.body or ""):
+                from orchestrator.owner_surface.freeform_acks import resolve_owner_locale
+
+                _cap_locale = resolve_owner_locale(tenant_id)
+                _send_owner_reply_step(
+                    tenant_id,
+                    event.sender_phone,
+                    compose_capability_disclosure(locale=_cap_locale),
+                )
+                close_webhook_run(tenant_id, run_id, "completed")
+                return {
+                    "run_id": run_id,
+                    "tenant_id": tenant_id,
+                    "routed": "capability_disclosure_unsupported_boost",
+                    "handler": None,
+                }
+        except Exception:  # noqa: BLE001 — the D2 net must never block the turn (fail-open)
+            logger.warning(
+                "D2 capability-disclosure net failed tenant=%s (fail-open -> normal path)",
+                tenant_id,
+                exc_info=True,
+            )
+
     # VT-384 — the demote CAS leg (plan-ack §2). A substantive owner inbound during an L3 hold
     # demotes the auto_send_pending batch to awaiting_approval (the owner wants eyes on it; the
     # batch re-enters the normal approval path — nothing is lost). The demote runs BEFORE pre_filter
