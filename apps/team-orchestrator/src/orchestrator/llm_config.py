@@ -12,9 +12,10 @@ Google SDK-verified 2026-07-13, langchain-google-genai==4.2.5 — NOT live-verif
     gpt-5.6-*            -> temperature REJECTED (a reasoning model, like sonnet/opus)
     gemini-3.5/3.1-*     -> temperature ACCEPTED (SDK-verified; ctor default 0.7, we pin 0.0)
     glm-5.2              -> temperature ACCEPTED (SDK-verified; we pin 0.0)
-So on the CURRENT multi-provider lineup haiku AND the gemini-* / glm-* families accept the param.
-Determinism-via-temperature is therefore available on haiku turns (the routine-brain +
-the intent classifier) and on any gemini-* / glm-* turn. sonnet/opus/gpt-5.6 turns (brain-complex,
+    grok-4.5/4.3         -> temperature ACCEPTED (docs.x.ai-verified 2026-07-13; we pin 0.0)
+So on the CURRENT multi-provider lineup haiku AND the gemini-* / glm-* / grok-* families accept the
+param. Determinism-via-temperature is therefore available on haiku turns (the routine-brain +
+the intent classifier) and on any gemini-* / glm-* / grok-* turn. sonnet/opus/gpt-5.6 turns (brain-complex,
 triage, review, the specialist lanes, the judge) CANNOT be pinned this way — their run-to-run
 variance is irreducible via temperature and would need a different lever (N-sample, reasoning
 effort, or a model that still honours the param).
@@ -30,14 +31,14 @@ from typing import Any
 
 
 def sampling_kwargs(model_id: str) -> dict[str, Any]:
-    """Return sampling kwargs for an Anthropic / OpenAI / Google chat call.
+    """Return sampling kwargs for an Anthropic / OpenAI / Google / Z.ai / xAI chat call.
 
     ``{"temperature": 0.0}`` for the families that ACCEPT the param — haiku (Anthropic),
-    gemini-* (Google), and glm-* (Z.ai) — for determinism; ``{}`` for everything else
+    gemini-* (Google), glm-* (Z.ai), and grok-* (xAI) — for determinism; ``{}`` for everything else
     (sonnet/opus/gpt-5.6 400/reject on it). Spread into the call/ctor:
     ``client.messages.create(model=m, **sampling_kwargs(m), ...)``.
     """
     lc = model_id.lower()
-    if "haiku" in lc or "gemini" in lc or "glm" in lc:
+    if "haiku" in lc or "gemini" in lc or "glm" in lc or "grok" in lc:
         return {"temperature": 0.0}
     return {}

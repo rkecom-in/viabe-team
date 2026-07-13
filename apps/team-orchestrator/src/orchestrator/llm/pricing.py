@@ -61,6 +61,11 @@ _SEED_PRICING: dict[str, _PriceEntry] = {
     # cached_in_multiplier 0.186 (cache-read $0.26/$1.40, NOT 0.1) and discount_multiplier 1.0
     # (GLM publishes no batch/flex tier, so a mistaken service_tier='batch' must not under-cost).
     "glm-5.2": (Decimal("1.4000"), Decimal("4.4000"), Decimal("1.0"), Decimal("0.186")),
+    # Migration 176 (xAI Grok). grok-4.5 = flagship, no batch tier -> discount 1.0. grok-4.3 =
+    # cheaper, 20% batch -> discount 0.8 (NOT the 0.5 default). xAI bills cached tokens at standard
+    # rate -> cached_in_multiplier 1.0 (NOT 0.1). Keep in lock-step with migration 176's seed.
+    "grok-4.5": (Decimal("2.0000"), Decimal("6.0000"), Decimal("1.0"), Decimal("1.0")),
+    "grok-4.3": (Decimal("1.2500"), Decimal("2.5000"), Decimal("0.8"), Decimal("1.0")),
 }
 
 # Service tiers that get the ``discount_multiplier`` (migration 173: OpenAI Flex ==
@@ -69,6 +74,20 @@ _DISCOUNTED_TIERS = frozenset({"flex", "batch"})
 
 _CACHE_TTL_SECONDS = 300.0  # ~5 min
 _MTOK = Decimal(1_000_000)
+_PER_SEARCH = Decimal(1000)  # search_tool_pricing is priced per 1000 invocations
+
+# Migration-176 search-tool cost: server-side web/X search is billed PER INVOCATION, separate from
+# tokens. VTR-tunable in the ``search_tool_pricing`` table; this seed mirror is the DB-down /
+# missing-row fallback (same fail-soft posture as _SEED_PRICING). Key: (provider, tool) ->
+# usd_per_1000. VERIFIED where public (anthropic web $10, xai web/x $5); PLACEHOLDER for openai/google
+# (no clear public per-search rate — VTR corrects the row). Keep in lock-step with migration 176.
+_SEED_SEARCH_PRICING: dict[tuple[str, str], Decimal] = {
+    ("anthropic", "web_search"): Decimal("10.0000"),
+    ("xai", "web_search"): Decimal("5.0000"),
+    ("xai", "x_search"): Decimal("5.0000"),
+    ("openai", "web_search"): Decimal("10.0000"),
+    ("google", "web_search"): Decimal("35.0000"),
+}
 
 # Anthropic returns fully-qualified, date-suffixed ids (`claude-haiku-4-5-20251001`)
 # in ``response.model`` while the registry may key only the base alias. Strip a
@@ -80,6 +99,10 @@ _MODEL_DATE_SUFFIX_RE = re.compile(r"-\d{8}$")
 _lock = threading.Lock()
 _cache: dict[str, _PriceEntry] | None = None
 _cache_loaded_at: float = 0.0  # 0.0 => never loaded from the live table (retry)
+
+_search_lock = threading.Lock()
+_search_cache: dict[tuple[str, str], Decimal] | None = None
+_search_cache_loaded_at: float = 0.0  # 0.0 => never loaded from the live table (retry)
 
 
 def _fetch_from_db() -> dict[str, _PriceEntry]:
@@ -193,4 +216,74 @@ def compute_cost_usd(
     return cost
 
 
-__all__ = ["compute_cost_usd"]
+# ---------------------------------------------------------------------------
+# Migration-176 search-tool cost (server-side web/X search, billed per 1000 invocations)
+# ---------------------------------------------------------------------------
+def _fetch_search_from_db() -> dict[tuple[str, str], Decimal]:
+    """Read the full ``search_tool_pricing`` registry via the privileged pool.
+
+    Global registry (RLS ``USING (true)``) → service/privileged pool, no tenant GUC. Lazy imports
+    keep this module dep-less at load (dep-less smoke safe), same as ``_fetch_from_db``.
+    """
+    from orchestrator.graph import get_pool
+
+    out: dict[tuple[str, str], Decimal] = {}
+    with get_pool().connection() as conn:
+        rows = conn.execute(
+            "SELECT provider, tool, usd_per_1000 FROM search_tool_pricing"
+        ).fetchall()
+    for row in rows:
+        provider = row["provider"] if isinstance(row, dict) else row[0]
+        tool = row["tool"] if isinstance(row, dict) else row[1]
+        price = row["usd_per_1000"] if isinstance(row, dict) else row[2]
+        out[(str(provider), str(tool))] = Decimal(str(price))
+    return out
+
+
+def _search_pricing() -> dict[tuple[str, str], Decimal]:
+    """Current search-tool price table — live cache if fresh, else refresh; fail-SOFT to the last
+    good cache, or the seed mirror if never loaded (mirrors ``_pricing``'s negative-caching)."""
+    global _search_cache, _search_cache_loaded_at
+    now = time.monotonic()
+    with _search_lock:
+        if _search_cache is not None and (now - _search_cache_loaded_at) < _CACHE_TTL_SECONDS:
+            return _search_cache
+        try:
+            loaded = _fetch_search_from_db()
+            if loaded:
+                _search_cache = loaded  # empty table (unexpected) → keep last good / seed below
+        except Exception:  # noqa: BLE001 — costing must survive a registry read blip
+            logger.warning(
+                "176 search_tool_pricing read failed; using %s",
+                "last-good cache" if _search_cache else "seed mirror",
+                exc_info=True,
+            )
+        if _search_cache is None:
+            _search_cache = dict(_SEED_SEARCH_PRICING)
+        _search_cache_loaded_at = now
+        return _search_cache
+
+
+def compute_search_cost(provider: str, tool: str, count: int) -> Decimal:
+    """USD cost of ``count`` server-side ``tool`` (web_search | x_search) invocations for ``provider``.
+
+    cost = usd_per_1000 * count / 1000, from the live ``search_tool_pricing`` registry (then the seed
+    mirror for a row the live table momentarily lacks). ``count`` <= 0 costs 0 (no lookup). A truly
+    unknown (provider, tool) logs a WARNING naming it and costs ``Decimal('0')`` — NEVER a crash
+    (a mispriced search must never break a turn; VTR seeds the row later).
+    """
+    n = int(count or 0)
+    if n <= 0:
+        return Decimal("0")
+    key = (str(provider), str(tool))
+    price = _search_pricing().get(key) or _SEED_SEARCH_PRICING.get(key)
+    if price is None:
+        logger.warning(
+            "176 compute_search_cost: unknown (provider, tool) %r — costing 0 (seed the price row)",
+            key,
+        )
+        return Decimal("0")
+    return price * Decimal(n) / _PER_SEARCH
+
+
+__all__ = ["compute_cost_usd", "compute_search_cost"]
