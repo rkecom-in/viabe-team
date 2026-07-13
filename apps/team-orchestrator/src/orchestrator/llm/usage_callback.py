@@ -6,7 +6,8 @@ usage — input/output tokens, model, provider request id — from the ``LLMResu
 calls ``record_llm_call`` so the call lands in ``llm_call_events`` (+ the VT-619
 rollup). It is a pure observer: best-effort, never raises into the model call.
 
-Constructor is ``(tenant_id, agent, call_site)`` — fixed for the provider seam.
+Constructor is ``(tenant_id, agent, call_site, service_tier='standard')`` — fixed for the provider
+seam; ``service_tier`` is the call's BILLING tier so the ledger applies the flex discount.
 Provider is inferred from the model id (``gpt*`` → openai, ``gemini*`` → google, ``glm*`` → zai,
 else anthropic) since the constructor carries no provider arg; the ledger records it on the event.
 """
@@ -24,11 +25,16 @@ logger = logging.getLogger(__name__)
 class LlmUsageCallback(BaseCallbackHandler):
     """langchain callback that records each LLM call's usage to the cost ledger."""
 
-    def __init__(self, tenant_id: Any, agent: str, call_site: str) -> None:
+    def __init__(
+        self, tenant_id: Any, agent: str, call_site: str, service_tier: str = "standard"
+    ) -> None:
         super().__init__()
         self.tenant_id = tenant_id
         self.agent = agent
         self.call_site = call_site
+        # The BILLING tier of the call (standard | flex). Must reach the ledger so cost_usd applies
+        # the flex discount_multiplier — otherwise a flex call is costed at full rate (2x overstated).
+        self.service_tier = service_tier
 
     def on_llm_end(self, response: Any, **kwargs: Any) -> None:
         try:
@@ -41,6 +47,7 @@ class LlmUsageCallback(BaseCallbackHandler):
                 call_site=self.call_site,
                 provider=_provider_for_model(model),
                 model=model,
+                service_tier=self.service_tier,
                 tokens_in=tokens_in,
                 tokens_out=tokens_out,
                 cached_tokens_in=cached_in,

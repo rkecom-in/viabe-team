@@ -153,6 +153,30 @@ def test_invalid_service_tier_falls_back_to_standard(monkeypatch: pytest.MonkeyP
     assert p._configured_service_tier() == "standard"
 
 
+def test_flex_billing_tier_reaches_usage_callback(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A flex OpenAI call must record service_tier='flex' on the ledger (else cost is 2x
+    overstated). The billing tier threads provider -> _seam_callbacks -> LlmUsageCallback."""
+    from orchestrator.llm.usage_callback import LlmUsageCallback
+
+    monkeypatch.setenv("TEAM_MODEL_SPECIALIST", "gpt-5.6-sol")
+    monkeypatch.setenv("TEAM_OPENAI_SERVICE_TIER", "flex")
+    m = p.resolve_chat_model("specialist", agent="finance_lane")
+    uc = next(cb for cb in (m.callbacks or []) if isinstance(cb, LlmUsageCallback))
+    assert uc.service_tier == "flex"
+
+
+def test_standard_billing_tier_on_anthropic_and_auto(monkeypatch: pytest.MonkeyPatch) -> None:
+    """anthropic calls + OpenAI 'auto' (server-picks the tier) record 'standard' — never
+    under-cost a call whose billed rate we can't know at write time."""
+    from orchestrator.llm.usage_callback import LlmUsageCallback
+
+    monkeypatch.setenv("TEAM_MODEL_SPECIALIST", "gpt-5.6-sol")
+    monkeypatch.setenv("TEAM_OPENAI_SERVICE_TIER", "auto")
+    m = p.resolve_chat_model("specialist", agent="finance_lane")
+    uc = next(cb for cb in (m.callbacks or []) if isinstance(cb, LlmUsageCallback))
+    assert uc.service_tier == "standard"
+
+
 # --------------------------------------------------------------------------- google (Gemini)
 def test_resolve_chat_model_google(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("TEAM_MODEL_SPECIALIST", "gemini-3.5-flash")
