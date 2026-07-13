@@ -9,6 +9,10 @@ THERMOMETER, not the objective — see §4.
 unsupervised** — i.e. it never does something that makes the owner fire it, and it is competent enough to be
 worth keeping.
 
+**"Run operations unsupervised" is two layers:** §1–§6 define the REACTIVE floor (respond to the owner without
+breaking trust + competent conversation). §7 (Fazal 2026-07-10) defines the PROACTIVE-MANAGER mandate that
+"run operations" concretely requires — **plan, lead, validate, audit** — which sits ON the trust floor.
+
 ## 2. Acceptance = TWO tiers (this is the real target, per Fazal 2026-07-08)
 
 ### Tier 1 — TRUST-BREAKERS = 0 (a COUNT, hard gate)
@@ -125,3 +129,104 @@ tool) + topic_switch (under-act). This is a DISTINCT third fix:
   most an OFFER to draft — NEVER silently draft+arm a campaign. Fixes the over-act class.
 Updated fix map (3 fixes for the trust-breakers): emission rewrite (~9 loop/stall+under-act) + capability
 grounding VT-630 (3 fabrication/impossible) + speech-act gate (2-3 over-act).
+
+## 7. The management mandate — what "run operations unsupervised" (§1) concretely requires
+Added Fazal 2026-07-10. §1–§6 are the reactive floor (respond without breaking trust). §7 is the PROACTIVE
+manager. **These SIT ON the Tier-1 = 0 foundation — a manager that plans, delegates and validates is worthless
+if its outcome-reporting fabricates.** (The verifier work in flight now — a genuinely-successful send must not be
+reported as "couldn't finish" — is literally the first brick of 7C. Trust-breakers=0 is the prerequisite, not a
+parallel track.) NOTE: 7A–7C are largely NET-NEW capability — today's TM is reactive-conversational; proactive
+planning + impact-validation do not substantially exist yet. This section is the target, not current behavior.
+
+### 7.0 Foundational principle — the LLM brain is central and irreducible (Fazal 2026-07-10)
+Every decision the Manager makes — what to do with an incoming event, which task to run, which method/modality,
+which scope — is made by the BRAIN reasoning. There is **NO hardcoded scenario/action logic that decides in the
+brain's place**; we do not pre-program business responses. The Manager MAY develop its OWN rules/heuristics
+through MEMORY + LEARNING and apply them — but even applying a learned rule is brain-mediated, not a static
+branch. Deterministic code has exactly two roles and NEITHER is deciding: (a) **SENSE** — detect events/changes
+and trigger the brain; (b) **GUARD effects** — the Pillar-7 rails check the brain's CHOSEN action against hard
+constraints (consent, approval, eligibility). Gates CHECK; the brain THINKS. "The Manager cannot function without
+his brain; the LLM is the brain." This reconciles with the effect-boundary: rails constrain effects, they never
+make the business decision.
+
+### 7A. PLAN — set the agenda, not just react
+- **Monthly plan:** propose a month-level business plan (goals + initiatives) grounded in the tenant's real data
+  and business type; **revisable as day-to-day conditions change** (new data, outcomes, owner input) — a living
+  plan, not a static document.
+- **Daily plan:** each day, a concrete "what we do today" derived from the monthly plan + today's conditions.
+- **Acceptance:** grounded (no invented targets/₹ — §2.1 fabrication applies), specific + actionable, ADAPTIVE
+  (re-plans on changed conditions; doesn't cling to a stale plan), owner-visible + steerable.
+- **Boundary:** the TM PROPOSES and drives the plan; the owner can steer/veto. Plan items with effects
+  (send/spend) execute through the effect-boundary (7C), never on the plan's own authority.
+
+### 7B. LEAD — decompose, allocate to the right agent, drive to done
+- Break goals/plan into tasks; allocate each to the CORRECT specialist agent; drive each to a REAL completed
+  outcome (never "I'm on it" → silence).
+- **Acceptance:** right-agent-for-the-task (§3 right-tool), tasks actually COMPLETE with the result surfaced to
+  the owner (§3 delegation-and-surfacing), effective (advances the goal). A delegated task that silently never
+  executes = Tier-1 breaker (§2.2 / §2.3).
+
+### 7C. VALIDATE — judge the outcome by business impact, approve / disapprove
+- After an agent completes, the TM validates the OUTCOME against the intended business impact and decides:
+  accept / redo / escalate / flag.
+- **Acceptance:** the judgment is grounded in the ACTUAL outcome (real audit facts — never a fabricated "done"),
+  and the accept/reject call is sound vs the business impact.
+- **Boundary — impact-graduated autonomy, NOT unbounded self-approval:** the TM may validate + approve
+  LOW-impact, reversible outcomes autonomously; HIGH-impact / IRREVERSIBLE actions (real customer sends, spend,
+  anything the owner must own) STILL gate to owner / VTR-human approval. **Pillar-7 holds — this does NOT loosen
+  the no-send-without-approval invariant.** Autonomy graduates per-capability as accuracy is proven (Track-C); it
+  is not granted wholesale.
+
+### 7D. AUDIT — every decision, reason, thought, action logged + reviewable
+- Every TM decision logs: the DECISION, the REASON/why, the underlying THOUGHT, and the ACTION taken — so any
+  decision can be audited and reviewed to understand WHY it was made.
+- **Acceptance:** complete (no silent decisions), captures the RATIONALE not just the action, human-reviewable,
+  immutable enough to trust for audit.
+- **Substrate:** VT-514 audit/trace log + VT-515 debug log + VT-516 viewer exist. **Gap-check:** confirm they
+  capture the REASONING / thought, not only the action taken — the "why" is the new requirement.
+
+### 7F. OPERATE CONTINUOUSLY — modular sensing layer + reactive Manager as its control plane
+**Architecture decision (Fazal 2026-07-10 — chosen over a monolithic proactive loop):** the Manager stays
+REACTIVE (preserves §1–§6 + the current build). Continuous operation is a SEPARATE, MODULAR sensing layer —
+independent pollers / listeners / watchers / schedulers — that runs on its own and TRIGGERS the Manager with the
+data when it detects something (event, data ingestion, schedule fire, external signal). The Manager then reasons
+(brain, §7.0) about what to do with that data by its type / source / value. Specialized agents stay reactive; the
+Manager is the reactive DECISION-MAKER **and** the CONTROL PLANE over the sensing layer. (Chosen because it
+scales on cost, reuses the reactive core rather than rewriting it, is auditable, and extends the existing
+DBOS/scheduler/reaper infra instead of fighting it — no capability is lost vs the monolith.)
+- **Control plane:** the Manager can SET / UNSET / DEFINE watchers/schedulers at runtime. "Decide the method" =
+  the brain chooses which sensing mechanism to instantiate (schedule / event-trigger / webhook / callback / poll)
+  from the runtime's bounded menu. It does NOT invent scheduling code at runtime.
+- **Scope reasoning (general-vs-specific — Fazal's example):** on installing a watcher the brain decides its
+  SCOPE — a SPECIFIC watcher (this one order's payment) vs a GENERAL one (all pending-payment orders) once it
+  recognizes a pattern — and CONSOLIDATES duplicates into a general watcher rather than spawning N specific ones.
+  **TENANT-SCOPED ONLY (Fazal's call):** a "general" watcher spans one tenant's own data, NEVER across tenants
+  (RLS / data isolation).
+- **Lifecycle — no leaked or duplicated watchers (first-class acceptance criterion, Fazal's call):** every
+  watcher is LAYERED for teardown — self-terminates when its condition resolves + a TTL backstop + a background
+  reaper sweeps stragglers; the Manager can also explicitly unset. Installing is easy; guaranteed teardown is the
+  hard part.
+- **The brain reasons on EVERY trigger (Fazal's decision, §7.0):** when a watcher fires a real event, the BRAIN
+  decides what to do — there is NO hardcoded action rule handling the event in the brain's place. The
+  deterministic sensing layer's only jobs: (a) DETECT — control WHEN a trigger fires (a no-change hourly poll
+  does NOT wake the brain; a status CHANGE does — this is how brain-on-every-trigger stays affordable), and
+  (b) EXECUTE on rails once the brain has decided.
+- **Effect-boundary unchanged:** a self-initiated effectful action (self-triggered send/spend) STILL passes
+  owner/VTR approval (Pillar-7, §7C). Self-initiation is not a back door around approval.
+- **Substrate:** DBOS workflows, scheduled pollers, the orphan-reaper, and the apify ingestion methods are the
+  existing sensing substrate — modular EXTENDS them (Manager-programmed watchers + scope reasoning + lifecycle)
+  vs today's FIXED crons. NET-NEW + roadmap AFTER trust-breakers = 0.
+
+**Worked example (payment-pending, Fazal's):** Manager reviewing an order sees payment-pending → brain decides
+to install an hourly payment-check scheduler and reasons scope: one order (specific) or many (one general,
+tenant-scoped) → scheduler polls hourly (deterministic SENSE; still-pending = no brain call) → payment arrives =
+TRIGGER → brain reasons what to do next (mark paid / thank the customer / update the plan / consolidate) →
+watcher self-terminates (+ TTL + reaper backstop).
+
+### 7G. Measurement
+7A–7C + 7F are LONGITUDINAL (multi-day / event-driven), not single-turn — the 53-scenario pack does not test
+them. Measured by: the 10-journey simulation (`.viabe/journey-sim-spec.md`) for lead + validate within a journey,
+plus authored multi-day PLANNING + CONTINUOUS-OPERATION scenarios (BUILD NEEDED) — a monthly plan is proposed,
+ADAPTS to an injected condition change, decomposes into sound daily actions, and the Manager self-initiates the
+right task via the right modality on an injected event/schedule (not an owner message). Tier-1 = 0 (§2) applies
+to every planning / leading / validating / self-initiated action.

@@ -65,3 +65,4 @@ cowork_sessions/session-export-*/
 .playwright-mcp/
 apps/team-web/test-results/
 pm_dashboard.html
+.vercel
