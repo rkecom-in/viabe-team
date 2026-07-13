@@ -11,34 +11,21 @@ from __future__ import annotations
 
 import json
 import os
-from types import SimpleNamespace
-from typing import Any
-from unittest.mock import MagicMock
 
 import pytest
 
-pytest.importorskip("anthropic")
+pytest.importorskip("pydantic")
 
 
-def _fake_response(*, text: str, input_tokens: int = 1500,
-                   output_tokens: int = 80) -> Any:
-    class _TextBlock(SimpleNamespace):
-        def model_dump(self) -> dict[str, Any]:
-            return {"type": "text", "text": self.text}
+def _text_call(raw: str):
+    """A ``text_call`` stub returning fixed raw text. Mirrors ``structured_text_call``'s signature
+    ``(tier, *, system, user, max_tokens, agent, call_site, tenant_id)`` — accepts and ignores
+    whatever the site passes."""
 
-    return SimpleNamespace(
-        usage=SimpleNamespace(
-            input_tokens=input_tokens, output_tokens=output_tokens
-        ),
-        content=[_TextBlock(type="text", text=text)],
-        stop_reason="end_turn",
-    )
+    def _call(*args, **kwargs) -> str:  # noqa: ANN002, ANN003
+        return raw
 
-
-def _patched_client(response: Any) -> Any:
-    fake = MagicMock()
-    fake.messages.create.return_value = response
-    return fake
+    return _call
 
 
 SCENARIOS = [
@@ -106,9 +93,9 @@ def test_classify_owner_message_labels(
     if os.environ.get("VT49_REAL_API") == "1":
         pytest.skip("real-API mode active; mock test skipped")
 
-    fake = _patched_client(_fake_response(text=json.dumps(envelope)))
     result = classify_owner_message(
-        ClassifyOwnerMessageInput(text=text, tenant_id="11111111-1111-1111-1111-111111111111"), client=fake,
+        ClassifyOwnerMessageInput(text=text, tenant_id="11111111-1111-1111-1111-111111111111"),
+        text_call=_text_call(json.dumps(envelope)),
         consent_check=lambda _t: True,  # VT-270: consent on → exercise classification
     )
     assert result.classification == expected_label
@@ -122,10 +109,10 @@ def test_classify_owner_message_invalid_json_raises() -> None:
     )
     if os.environ.get("VT49_REAL_API") == "1":
         pytest.skip("real-API mode active")
-    fake = _patched_client(_fake_response(text="not a json"))
     with pytest.raises(ValueError, match="non-JSON"):
         classify_owner_message(
-            ClassifyOwnerMessageInput(text="anything", tenant_id="11111111-1111-1111-1111-111111111111"), client=fake,
+            ClassifyOwnerMessageInput(text="anything", tenant_id="11111111-1111-1111-1111-111111111111"),
+            text_call=_text_call("not a json"),
             consent_check=lambda _t: True,
         )
 
@@ -170,13 +157,12 @@ def test_classify_parses_markdown_fenced_json(raw: str) -> None:
     )
     if os.environ.get("VT49_REAL_API") == "1":
         pytest.skip("real-API mode active")
-    fake = _patched_client(_fake_response(text=raw))
     result = classify_owner_message(
         ClassifyOwnerMessageInput(
             text="yes go ahead",
             tenant_id="11111111-1111-1111-1111-111111111111",
         ),
-        client=fake,
+        text_call=_text_call(raw),
         consent_check=lambda _t: True,
     )
     assert result.classification == "approval"
@@ -190,13 +176,11 @@ def test_classify_owner_message_invalid_envelope_raises() -> None:
     )
     if os.environ.get("VT49_REAL_API") == "1":
         pytest.skip("real-API mode active")
-    fake = _patched_client(_fake_response(
-        text=json.dumps({"classification": "approval", "confidence": 1.5,
-                         "suggested_action": "x"}),
-    ))
     with pytest.raises(ValueError, match="envelope validation"):
         classify_owner_message(
-            ClassifyOwnerMessageInput(text="anything", tenant_id="11111111-1111-1111-1111-111111111111"), client=fake,
+            ClassifyOwnerMessageInput(text="anything", tenant_id="11111111-1111-1111-1111-111111111111"),
+            text_call=_text_call(json.dumps({"classification": "approval", "confidence": 1.5,
+                                             "suggested_action": "x"})),
             consent_check=lambda _t: True,
         )
 
@@ -268,15 +252,15 @@ def test_classify_skips_transmit_when_consent_off() -> None:
         classify_owner_message,
     )
 
-    client = MagicMock()  # would record any transmit
+    transmit = MagicMock()  # the text_call — would record any transmit
     result = classify_owner_message(
         ClassifyOwnerMessageInput(text="please run the diwali campaign", tenant_id="11111111-1111-1111-1111-111111111111"),
-        client=client,
+        text_call=transmit,
         consent_check=lambda _t: False,
     )
     assert result.skipped_reason == "no_owner_inputs_consent"
     assert result.classification == "other"   # → resolve_decision_from_reply maps to None (paused)
-    client.messages.create.assert_not_called()  # FAIL-CLOSED: no transmit to the sub-processor
+    transmit.assert_not_called()  # FAIL-CLOSED: no transmit to the sub-processor
 
 
 def test_classify_fails_closed_on_consent_check_error() -> None:
@@ -288,15 +272,15 @@ def test_classify_fails_closed_on_consent_check_error() -> None:
         classify_owner_message,
     )
 
-    client = MagicMock()
+    transmit = MagicMock()
 
     def _boom(_t):
         raise RuntimeError("db down")
 
     result = classify_owner_message(
         ClassifyOwnerMessageInput(text="anything", tenant_id="11111111-1111-1111-1111-111111111111"),
-        client=client,
+        text_call=transmit,
         consent_check=_boom,
     )
     assert result.skipped_reason == "consent_check_error"
-    client.messages.create.assert_not_called()
+    transmit.assert_not_called()

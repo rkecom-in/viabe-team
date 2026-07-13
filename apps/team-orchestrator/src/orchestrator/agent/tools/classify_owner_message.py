@@ -4,8 +4,8 @@ Haiku-backed classifier. Takes a free-text owner message; emits a
 typed envelope with classification + confidence + suggested action.
 
 Standalone callable. NOT wired into an Agent yet (VT-4 SDK skeleton is
-Backlog). Importable as a function or class-method; tests mock the
-Anthropic client.
+Backlog). Importable as a function or class-method; tests inject a
+text-completion callable.
 
 VT-267 PR-B — prompt **v2.0** (Type-1 governance bump, logged in the decisions
 ledger): added the ``first_data_step_onboarding`` intent (owner initiating the
@@ -32,10 +32,7 @@ from pathlib import Path
 from typing import Literal
 from uuid import UUID
 
-from anthropic import Anthropic
-
-from orchestrator.llm.provider import require_anthropic_model, resolve_model_id
-from orchestrator.llm_config import sampling_kwargs
+from orchestrator.llm.structured import structured_text_call
 from pydantic import BaseModel, ConfigDict, Field
 
 logger = logging.getLogger(__name__)
@@ -96,9 +93,9 @@ _PROMPT_PATH = (
 )
 _SYSTEM_PROMPT = _PROMPT_PATH.read_text(encoding="utf-8")
 
-# VT-619b — classifier is Anthropic-SDK-only (v1). Its model id comes from the "classifier" tier
-# (TEAM_MODEL_CLASSIFIER; default claude-haiku-4-5 — the alias, was the pinned -20251001 snapshot),
-# resolved FRESH per call and asserted Anthropic (a gpt-* tier value fails LOUD).
+# The classifier runs on the "classifier" tier (TEAM_MODEL_CLASSIFIER; default claude-haiku-4-5).
+# VT-619b pinned this to the Anthropic SDK; it is now routed through the multi-provider seam
+# (structured_text_call) so the tier can be pointed at any provider and the call is cost-metered.
 _CLASSIFIER_TIER = "classifier"
 
 # Markdown code-fence stripper. Haiku-4.5 intermittently wraps the JSON
@@ -145,14 +142,15 @@ def _skipped_envelope(reason: str) -> ClassifyOwnerMessageOutput:
 def classify_owner_message(
     input: ClassifyOwnerMessageInput,
     *,
-    client: Anthropic | None = None,
+    text_call: Callable[..., str] | None = None,
     consent_check: "Callable[[UUID], bool] | None" = None,
 ) -> ClassifyOwnerMessageOutput:
     """Classify an owner message.
 
     Args:
       input: typed message + tenant_id + locale
-      client: optional Anthropic client (mockable for tests)
+      text_call: optional text-completion callable (mockable for tests); defaults to the
+        multi-provider seam ``structured_text_call``
       consent_check: tenant owner_inputs gate (default ``_owner_inputs_enabled``); injectable for tests
 
     Returns:
@@ -182,25 +180,16 @@ def classify_owner_message(
         logger.info("classify_owner_message: owner_inputs disabled; skipping transmit")
         return _skipped_envelope("no_owner_inputs_consent")
 
-    if client is None:
-        client = Anthropic()
-
-    model_id = require_anthropic_model(
-        resolve_model_id(_CLASSIFIER_TIER), site="classify_owner_message"
-    )
-    resp = client.messages.create(
-        model=model_id,
-        max_tokens=200,
-        # VT-628 — deterministic tier/intent signal. The classifier-tier default is haiku, which
-        # accepts temperature, so this resolves to temperature=0 (kills the tier-flip non-determinism).
-        **sampling_kwargs(model_id),
+    _call = text_call or structured_text_call
+    raw = _call(
+        _CLASSIFIER_TIER,
         system=_SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": input.text}],
-    )
-    text_blocks = [
-        b.text for b in resp.content if getattr(b, "type", "") == "text"
-    ]
-    raw = "".join(text_blocks).strip()
+        user=input.text,
+        max_tokens=200,
+        agent="classify_owner_message",
+        call_site="classify_owner_message",
+        tenant_id=input.tenant_id,
+    ).strip()
     if not raw:
         raise ValueError("classify_owner_message: model returned empty content")
 
