@@ -11,7 +11,7 @@ spec-level hints).
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Literal, get_args
 
 
 CanonicalField = Literal[
@@ -66,4 +66,34 @@ GLOBAL_FIELD_HINTS: dict[CanonicalField, list[str]] = {
 }
 
 
-__all__ = ["CanonicalField", "GLOBAL_FIELD_HINTS"]
+# Human-friendly display labels for every canonical field a connector imports. Used by the
+# connector first-contact FIELD-MAPPING answer (connector_first_contact.py) to enumerate exactly
+# what a connector maps IN, in plain words — schema-truth, never fabricated. Keyed by
+# ``CanonicalField`` so the display set can never silently drift from the closed enum: a new
+# canonical field with no entry here trips ``canonical_field_display_list`` at call time.
+CANONICAL_FIELD_DISPLAY: dict[CanonicalField, str] = {
+    "customer_name": "customer name",
+    "phone": "phone number",
+    "email": "email",
+    "order_amount": "order amount",
+    "order_date": "order date",
+    "last_seen": "last seen / last visit",
+    "address": "address",
+    "tags": "tags",
+}
+
+
+def canonical_field_display_list() -> list[str]:
+    """The ordered, human-friendly labels of every canonical field a connector imports, derived
+    FROM ``CanonicalField`` (declaration order) so it can never drift from the enum. Raises
+    ``KeyError`` if a canonical field lacks a display label — a deliberate fail-loud so a new field
+    is never silently dropped from the honesty answer."""
+    return [CANONICAL_FIELD_DISPLAY[f] for f in get_args(CanonicalField)]
+
+
+__all__ = [
+    "CanonicalField",
+    "GLOBAL_FIELD_HINTS",
+    "CANONICAL_FIELD_DISPLAY",
+    "canonical_field_display_list",
+]
