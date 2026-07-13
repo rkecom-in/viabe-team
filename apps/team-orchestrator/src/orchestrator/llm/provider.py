@@ -1,4 +1,5 @@
-"""VT-619b — provider-agnostic model resolution (Anthropic + OpenAI GPT-5.6 + Google Gemini + Z.ai GLM).
+"""VT-619b — provider-agnostic model resolution (Anthropic + OpenAI GPT-5.6 + Google Gemini + Z.ai
+GLM + xAI Grok).
 
 The one seam every model construction routes through. Two entry points:
 
@@ -40,6 +41,37 @@ GLM facts (Z.ai, docs.z.ai — SDK-verified 2026-07-13):
     self-hosted vLLM/sglang OpenAI-compatible endpoint and GLM runs there with NO code change.
     ``GLM_API_KEY`` is GLM's own credential (passed explicitly, never OPENAI_API_KEY).
   * GLM ACCEPTS ``temperature`` — ``llm_config.sampling_kwargs`` pins ``{"temperature": 0.0}`` for glm-*.
+
+Grok facts (xAI, docs.x.ai — verified 2026-07-13):
+  * grok-4.5 / grok-4.3 speak the OpenAI-COMPATIBLE **Responses** API (base https://api.x.ai/v1,
+    ``/v1/responses``), so they REUSE ``ChatOpenAI`` with ``use_responses_api=True`` — same path as
+    gpt-5.6 but pointed at xAI. ``XAI_BASE_URL`` is the SINGLE proxy/self-host switch (default the
+    managed x.ai endpoint, like ``GLM_BASE_URL``); ``XAI_API_KEY`` is xAI's own credential (passed
+    explicitly, never OPENAI_API_KEY).
+  * ``TEAM_OPENAI_SERVICE_TIER`` (flex/batch) is OpenAI-scoped by NAME and must NOT reach xai — Grok
+    publishes no flex/batch tier, so grok calls always record service_tier='standard'.
+  * Grok ACCEPTS ``temperature`` (unlike gpt-5.6) — ``llm_config.sampling_kwargs`` pins
+    ``{"temperature": 0.0}`` for grok-* (determinism posture, same as gemini/glm).
+
+Web / X-search CAPABILITY (Migration-176 — cross-provider server-side search, default OFF):
+  * ``resolve_chat_model(..., enable_web_search=False, enable_x_search=False)`` binds the provider's
+    NATIVE server-side search tool and returns the bound model (a ``Runnable`` — callers ``.invoke``
+    it identically). The MASTER env flag ``TEAM_ENABLE_WEB_SEARCH`` (default OFF, read fresh) is
+    Fazal's single kill switch: if off, BOTH are forced off regardless of the kwargs.
+  * Per-provider tool spec + binding form (SDK-verified 2026-07-13 against the installed
+    langchain-* pins — see ``_search_tools`` / ``_apply_search_tools``):
+      - anthropic  → ``bind_tools([{"type": "web_search_20260209", "name": "web_search"}])`` (the
+        ``web_search_`` type prefix is a langchain-anthropic built-in → passed through raw).
+      - openai/xai → ``.bind(tools=[{"type": "web_search"}])`` (and xai also ``{"type": "x_search"}``).
+        We use ``.bind`` NOT ``bind_tools`` because langchain-core's ``convert_to_openai_tool``
+        RAISES on ``x_search`` (not in its well-known set); raw specs flow untouched through the
+        Responses payload builder.
+      - google     → ``bind_tools([{"google_search": {}}])`` (grounding tool).
+      - zai (GLM)  → no server web-search on the installed path → logged once + skipped (no fabricated
+        tool). ``resolve_chat_model`` still returns a usable model.
+    ``x_search`` on a NON-xai provider is logged + ignored (X search is xAI-only). Search cost is
+    metered separately (``usage_callback`` + ``pricing.compute_search_cost`` + the Migration-176
+    ``search_count`` / ``search_cost_usd`` ledger columns) — additive, fail-soft, never gate-path.
 
 Metering + budget are wired but decoupled from the parallel builds:
   * usage recording is the Migration-173 ``orchestrator.llm.usage_callback.LlmUsageCallback``
@@ -101,7 +133,17 @@ ZAI_MODELS: frozenset[str] = frozenset(
         "glm-5.2",
     }
 )
-SUPPORTED_MODELS: frozenset[str] = ANTHROPIC_MODELS | OPENAI_MODELS | GOOGLE_MODELS | ZAI_MODELS
+# xAI Grok — OpenAI-COMPATIBLE on the RESPONSES API (reuses ChatOpenAI, use_responses_api=True),
+# base_url via XAI_BASE_URL. Distinct provider from GLM/zai.
+XAI_MODELS: frozenset[str] = frozenset(
+    {
+        "grok-4.5",
+        "grok-4.3",
+    }
+)
+SUPPORTED_MODELS: frozenset[str] = (
+    ANTHROPIC_MODELS | OPENAI_MODELS | GOOGLE_MODELS | ZAI_MODELS | XAI_MODELS
+)
 
 # Env tier mapping: (env var, default model id). Read fresh per call. NO env-suffix on the var
 # names — one canonical NAME across dev/prod (standing rule, Fazal 2026-06-26).
@@ -117,6 +159,13 @@ _DEFAULT_MAX_TOKENS = 4096
 # GLM (Z.ai) OpenAI-compatible endpoint. GLM_BASE_URL is the SINGLE self-host switch (see
 # _build_glm_chat_model); this is only the managed-z.ai fallback when that env var is unset.
 _GLM_DEFAULT_BASE_URL = "https://api.z.ai/api/paas/v4/"
+# xAI Grok OpenAI-compatible Responses endpoint. XAI_BASE_URL is the SINGLE proxy/self-host switch
+# (see _build_grok_chat_model); this is only the managed-x.ai fallback when that env var is unset.
+_XAI_DEFAULT_BASE_URL = "https://api.x.ai/v1"
+# Anthropic server-side web-search built-in tool type (Migration-176). The ``web_search_`` prefix is
+# a langchain-anthropic built-in → the dict is passed through bind_tools untouched (no beta header
+# needed for this type in the installed pin).
+_ANTHROPIC_WEB_SEARCH_TOOL_TYPE = "web_search_20260209"
 # FLEX: default request timeout is 10 min; a flex job can run longer, so widen to the documented
 # 15-min ceiling. Non-flex leaves the client default in place (None).
 _FLEX_TIMEOUT_S = 900.0
@@ -148,7 +197,7 @@ class BudgetExceededError(RuntimeError):
 # ---------------------------------------------------------------------------
 def provider_for(model_id: str) -> str:
     """Infer the provider from the model-id prefix. Raises ``UnknownModelError`` for anything
-    that is not a gpt-*, claude-*, gemini-*, or glm-* id."""
+    that is not a gpt-*, claude-*, gemini-*, glm-*, or grok-* id."""
     if model_id.startswith("gpt-"):
         return "openai"
     if model_id.startswith("claude-"):
@@ -157,9 +206,12 @@ def provider_for(model_id: str) -> str:
         return "google"
     if model_id.startswith("glm-"):
         return "zai"
+    if model_id.startswith("grok-"):
+        return "xai"
     raise UnknownModelError(
         f"Cannot infer provider for model id {model_id!r}: expected a 'gpt-*', 'claude-*', "
-        f"'gemini-*', or 'glm-*' prefix. Supported models: {', '.join(sorted(SUPPORTED_MODELS))}."
+        f"'gemini-*', 'glm-*', or 'grok-*' prefix. Supported models: "
+        f"{', '.join(sorted(SUPPORTED_MODELS))}."
     )
 
 
@@ -228,20 +280,32 @@ def resolve_chat_model(
     agent: str,
     tenant_id: UUID | str | None = None,
     max_tokens: int = _DEFAULT_MAX_TOKENS,
+    enable_web_search: bool = False,
+    enable_x_search: bool = False,
 ) -> BaseChatModel:
-    """Build the langchain chat model for ``tier`` (ChatAnthropic or ChatOpenAI-on-Responses-API).
+    """Build the langchain chat model for ``tier`` (ChatAnthropic / ChatOpenAI-on-Responses-API /
+    Gemini / GLM / Grok).
 
     Attaches the per-model seam callbacks: a pre-call budget hook (``enforce_budget``; default OFF)
     and the usage-recording ledger callback (Migration-173 ``LlmUsageCallback`` → ``record_llm_call``,
     lazy + fail-soft). ``agent`` / ``tenant_id`` are the metering attribution for this model's calls
     (``call_site`` == ``tier``).
+
+    ``enable_web_search`` / ``enable_x_search`` opt this model into the provider's NATIVE server-side
+    search tool (Migration-176). BOTH are gated by the master ``TEAM_ENABLE_WEB_SEARCH`` flag (default
+    OFF) — if that is off, search is forced off regardless of these kwargs. When a search is enabled
+    the return is the search-bound model (a ``Runnable`` — callers ``.invoke`` it identically); when
+    off (the default) the plain ``BaseChatModel`` is returned unchanged. A provider that cannot do
+    the requested search (e.g. GLM web-search, or x_search anywhere but xai) logs + returns a usable
+    model without that tool. The call-site allowlist (which lanes may pass these) is owned OUTSIDE
+    this seam — only advisory lanes, never the gate path.
     """
     model_id = resolve_model_id(tier)
     provider = provider_for(model_id)
     # Service tier is OpenAI-scoped in v1: TEAM_OPENAI_SERVICE_TIER (flex/batch) applies ONLY to
-    # openai. anthropic + google + zai(GLM) are forced to 'standard' here — Gemini's flex/batch are
-    # NOT wired in v1, GLM publishes no batch/flex tier, and the env var's name is OpenAI-scoped so
-    # it must not affect google/GLM calls.
+    # openai. anthropic + google + zai(GLM) + xai(Grok) are forced to 'standard' here — Gemini's
+    # flex/batch are NOT wired in v1, GLM/Grok publish no batch/flex tier, and the env var's name is
+    # OpenAI-scoped so it must not affect google/GLM/Grok calls.
     configured_tier = _configured_service_tier() if provider == "openai" else "standard"
     # Ledger-facing billing tier: only flex/batch carry the discount. 'auto' lets OpenAI pick the
     # tier server-side, so we can't know the billed rate at write time — record 'standard' (full
@@ -256,21 +320,59 @@ def resolve_chat_model(
 
         # mypy --strict needs the call-arg ignore for ChatAnthropic's pydantic kwargs (parity with
         # the pre-seam ctors in dispatch / the lanes). sampling_kwargs pins temp=0 only on haiku.
-        return ChatAnthropic(  # type: ignore[call-arg]
+        model: BaseChatModel = ChatAnthropic(  # type: ignore[call-arg]
             model=model_id,
             max_tokens=max_tokens,
             callbacks=callbacks,
             **sampling_kwargs(model_id),
         )
+    elif provider == "google":
+        model = _build_google_chat_model(model_id, max_tokens=max_tokens, callbacks=callbacks)
+    elif provider == "zai":
+        model = _build_glm_chat_model(model_id, max_tokens=max_tokens, callbacks=callbacks)
+    elif provider == "xai":
+        model = _build_grok_chat_model(model_id, max_tokens=max_tokens, callbacks=callbacks)
+    else:
+        model = _build_openai_chat_model(
+            model_id, max_tokens=max_tokens, configured_tier=configured_tier, callbacks=callbacks,
+        )
 
-    if provider == "google":
-        return _build_google_chat_model(model_id, max_tokens=max_tokens, callbacks=callbacks)
+    # Master kill switch gates the WHOLE capability (Fazal): both forced off when TEAM_ENABLE_WEB_SEARCH
+    # is off, regardless of the kwargs. Search OFF (the default) returns the plain BaseChatModel.
+    master = _web_search_master_on()
+    want_web = bool(enable_web_search) and master
+    want_x = bool(enable_x_search) and master
+    if want_web or want_x:
+        return _apply_search_tools(model, provider, web=want_web, x=want_x)
+    return model
 
-    if provider == "zai":
-        return _build_glm_chat_model(model_id, max_tokens=max_tokens, callbacks=callbacks)
 
-    return _build_openai_chat_model(
-        model_id, max_tokens=max_tokens, configured_tier=configured_tier, callbacks=callbacks,
+def _build_grok_chat_model(
+    model_id: str,
+    *,
+    max_tokens: int,
+    callbacks: list[BaseCallbackHandler],
+) -> BaseChatModel:
+    from langchain_openai import ChatOpenAI
+
+    # Grok (xAI) speaks the OpenAI-compatible RESPONSES API, so we REUSE ChatOpenAI with
+    # use_responses_api=True (same as gpt-5.6) — but pointed at xAI and with NO service_tier (Grok
+    # publishes no flex/batch tier → always records service_tier='standard'). XAI_BASE_URL is the
+    # SINGLE proxy/self-host switch (unset → managed x.ai). api_key is xAI's OWN credential from
+    # XAI_API_KEY (passed explicitly so it never falls back to OPENAI_API_KEY; an unset key fails
+    # LOUD at construction — the correct "Grok not configured" signal). Grok ACCEPTS temperature →
+    # sampling_kwargs pins {"temperature": 0.0}.
+    base_url = (os.environ.get("XAI_BASE_URL") or "").strip() or _XAI_DEFAULT_BASE_URL
+    api_key = os.environ.get("XAI_API_KEY") or ""
+    return ChatOpenAI(  # type: ignore[call-arg]
+        model=model_id,
+        use_responses_api=True,
+        base_url=base_url,
+        api_key=api_key,
+        max_tokens=max_tokens,
+        max_retries=_OPENAI_MAX_RETRIES,
+        callbacks=callbacks,
+        **sampling_kwargs(model_id),
     )
 
 
@@ -353,6 +455,76 @@ def _build_openai_chat_model(
         # gpt-* -> {} (no temperature), same guard as the anthropic path.
         **sampling_kwargs(model_id),
     )
+
+
+# ---------------------------------------------------------------------------
+# Web / X-search capability (Migration-176) — cross-provider server-side search, default OFF.
+# ---------------------------------------------------------------------------
+# Provider whose web-search we could NOT wire on the installed path — logged ONCE (not per call) to
+# avoid warning spam under a search-enabled advisory lane.
+_warned_no_web_search: set[str] = set()
+
+
+def _web_search_master_on() -> bool:
+    """The single master kill switch (Fazal): ``TEAM_ENABLE_WEB_SEARCH`` (default OFF, read fresh).
+    While off, BOTH web + X search are forced off regardless of the resolve_chat_model kwargs."""
+    return (os.environ.get("TEAM_ENABLE_WEB_SEARCH") or "").strip().lower() in {"1", "true", "yes"}
+
+
+def _search_tools(provider: str, *, web: bool, x: bool) -> list[dict[str, Any]]:
+    """Return the PROVIDER-NATIVE server-side search tool specs for the requested capabilities.
+
+    Forms are SDK-verified against the installed langchain-* pins (see the module docstring). GLM has
+    no server web-search on the installed path → logged once + no tool. x_search is xAI-ONLY → on any
+    other provider it is logged + dropped. An empty list means "no search tool for this provider."
+    """
+    tools: list[dict[str, Any]] = []
+    if web:
+        if provider == "anthropic":
+            tools.append({"type": _ANTHROPIC_WEB_SEARCH_TOOL_TYPE, "name": "web_search"})
+        elif provider in ("openai", "xai"):
+            tools.append({"type": "web_search"})
+        elif provider == "google":
+            tools.append({"google_search": {}})
+        else:  # zai (GLM) — no server web-search on the installed path.
+            if provider not in _warned_no_web_search:
+                logger.warning(
+                    "web_search requested for provider %r which has no server web-search on the "
+                    "installed path — skipping (model still usable, no tool bound)", provider
+                )
+                _warned_no_web_search.add(provider)
+    if x:
+        if provider == "xai":
+            tools.append({"type": "x_search"})
+        else:
+            logger.warning(
+                "x_search requested for provider %r — X search is xAI-only; ignoring", provider
+            )
+    return tools
+
+
+def _apply_search_tools(model: BaseChatModel, provider: str, *, web: bool, x: bool) -> Any:
+    """Bind the provider-native search tool(s) to ``model`` and return the bound Runnable.
+
+    Returns the ORIGINAL model unchanged when the provider has no matching tool (so resolve always
+    hands back a usable model). Binding form per provider (verified 2026-07-13):
+      * anthropic / google → ``bind_tools`` (builtin/grounding dicts pass through the converters).
+      * openai / xai       → ``.bind(tools=…)`` — NOT ``bind_tools``, because langchain-core's
+        ``convert_to_openai_tool`` RAISES on the ``x_search`` dict (it is not in its well-known set);
+        ``.bind`` puts the raw specs straight into the Responses payload, which passes non-function
+        tools through untouched. ``{"type": "web_search"}`` would survive ``bind_tools`` too, but a
+        SINGLE ``.bind`` path keeps web + X search uniform for the ChatOpenAI-based providers.
+    Return typed ``Any``: a search-bound model is a ``Runnable``, not a ``BaseChatModel`` — callers
+    ``.invoke`` it identically (directive), and this keeps resolve_chat_model's ``BaseChatModel``
+    contract for the default (search-off) callers untouched.
+    """
+    tools = _search_tools(provider, web=web, x=x)
+    if not tools:
+        return model
+    if provider in ("openai", "xai"):
+        return model.bind(tools=tools)
+    # anthropic + google: bind_tools passes the builtin/grounding dicts through their converters.
+    return model.bind_tools(tools)
 
 
 # ---------------------------------------------------------------------------

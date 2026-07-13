@@ -110,7 +110,12 @@ TECH_LANE_SYSTEM_MESSAGE = SystemMessage(
 # VT-619b — the specialist model routes through the multi-provider seam. Tier "specialist"
 # (default claude-sonnet-5, was opus-4-7) is env-driven via TEAM_MODEL_SPECIALIST so a claude-* ↔
 # gpt-5.6-* swap is a Railway env change. max_tokens + sampling_kwargs now live inside the seam.
-_MODEL: BaseChatModel = resolve_chat_model("specialist", agent="tech_lane")
+# Migration-176: this ADVISORY lane answers with public/latest info (tool comparisons, integration
+# how-tos) — so it opts into web search. INERT unless TEAM_ENABLE_WEB_SEARCH is on AND the specialist
+# model is search-capable; every search is ledger-costed. NOT on the gate path.
+_MODEL: BaseChatModel = resolve_chat_model(
+    "specialist", agent="tech_lane", enable_web_search=True
+)
 
 # A listing is "stale" if it has not been refreshed in this many days — a health flag the
 # specialist surfaces (the listing data the team reads is going out of date).

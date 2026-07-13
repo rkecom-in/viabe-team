@@ -128,7 +128,7 @@ def test_pricing_failsoft_to_seed_on_db_error(monkeypatch):
     monkeypatch.setattr(pricing_mod, "_cache", None, raising=False)
     monkeypatch.setattr(pricing_mod, "_cache_loaded_at", 0.0, raising=False)
     table = pricing_mod._pricing()
-    # Seed mirror carries every migration-173 + migration-174 seed model.
+    # Seed mirror carries every migration-173 + 174 + 175 + 176 seed model.
     for model in (
         "claude-sonnet-5",
         "claude-opus-4-8",
@@ -140,6 +140,8 @@ def test_pricing_failsoft_to_seed_on_db_error(monkeypatch):
         "gemini-3.1-flash-lite",
         "gemini-3.1-pro-preview",
         "glm-5.2",
+        "grok-4.5",
+        "grok-4.3",
     ):
         assert model in table
 
@@ -159,7 +161,102 @@ def test_seed_mirror_matches_migration_seed():
     assert seed["glm-5.2"][:2] == (Decimal("1.4000"), Decimal("4.4000"))
     assert seed["glm-5.2"][2] == Decimal("1.0")  # discount_multiplier (no batch/flex tier)
     assert seed["glm-5.2"][3] == Decimal("0.186")  # cached_in_multiplier
-    # Every OTHER row keeps the shared column defaults: discount_multiplier 0.5, cached_in_multiplier 0.1.
-    defaulted = {m: e for m, e in seed.items() if m != "glm-5.2"}
+    # Migration 176 (Grok) — also PER-MODEL non-default multipliers.
+    assert seed["grok-4.5"][:2] == (Decimal("2.0000"), Decimal("6.0000"))
+    assert seed["grok-4.5"][2] == Decimal("1.0")  # discount_multiplier (no batch tier)
+    assert seed["grok-4.5"][3] == Decimal("1.0")  # cached_in_multiplier (xai bills cache at std)
+    assert seed["grok-4.3"][:2] == (Decimal("1.2500"), Decimal("2.5000"))
+    assert seed["grok-4.3"][2] == Decimal("0.8")  # discount_multiplier (20% batch)
+    assert seed["grok-4.3"][3] == Decimal("1.0")  # cached_in_multiplier
+    # Every OTHER row keeps the shared column defaults: discount_multiplier 0.5, cached_in_multiplier
+    # 0.1. GLM + Grok carry their own per-model multipliers, so exclude them from the default check.
+    _non_default = {"glm-5.2", "grok-4.5", "grok-4.3"}
+    defaulted = {m: e for m, e in seed.items() if m not in _non_default}
     assert all(entry[2] == Decimal("0.5") for entry in defaulted.values())
     assert all(entry[3] == Decimal("0.1") for entry in defaulted.values())
+
+
+# --------------------------------------------------------------------------- grok (migration 176)
+def test_grok_standard_and_batch_and_cache(monkeypatch):
+    _fix_table(monkeypatch, {})  # seed-mirror path
+    # grok-4.5 = $2/M in, $6/M out; discount 1.0 (no batch), cached 1.0 (xai bills cache at std).
+    assert compute_cost_usd("grok-4.5", "standard", 1_000_000, 1_000_000) == Decimal("8")
+    # discount 1.0 -> a (mistaken) batch tier does NOT under-cost: still 8.
+    assert compute_cost_usd("grok-4.5", "batch", 1_000_000, 1_000_000) == Decimal("8")
+    # cached priced at 1.0x (NOT 0.1): 1M full in ($2) + 1M cache-read in ($2 * 1.0 = $2) = 4.
+    assert compute_cost_usd("grok-4.5", "standard", 1_000_000, 0, 1_000_000) == Decimal("4")
+    # grok-4.3 = $1.25/M in, $2.50/M out; discount 0.8 (20% batch).
+    assert compute_cost_usd("grok-4.3", "standard", 1_000_000, 1_000_000) == Decimal("3.75")
+    # batch 0.8x: 3.75 * 0.8 = 3.0.
+    assert compute_cost_usd("grok-4.3", "batch", 1_000_000, 1_000_000) == Decimal("3.0")
+
+
+# --------------------------------------------------------------------------- search-tool cost (176)
+def _fix_search_table(monkeypatch, table):
+    monkeypatch.setattr(pricing_mod, "_search_pricing", lambda: table)
+
+
+def test_compute_search_cost_verified_rates(monkeypatch):
+    from orchestrator.llm.pricing import compute_search_cost
+
+    _fix_search_table(monkeypatch, {})  # seed-mirror path
+    # anthropic web = $10/1000: 3 invocations = 0.03.
+    assert compute_search_cost("anthropic", "web_search", 3) == Decimal("0.03")
+    # xai web + x = $5/1000: 2 invocations = 0.01 each.
+    assert compute_search_cost("xai", "web_search", 2) == Decimal("0.01")
+    assert compute_search_cost("xai", "x_search", 2) == Decimal("0.01")
+    # placeholders: openai web $10/1000, google web $35/1000.
+    assert compute_search_cost("openai", "web_search", 1000) == Decimal("10")
+    assert compute_search_cost("google", "web_search", 1000) == Decimal("35")
+
+
+def test_compute_search_cost_zero_and_unknown(monkeypatch, caplog):
+    from orchestrator.llm.pricing import compute_search_cost
+
+    _fix_search_table(monkeypatch, {})
+    # zero / negative count costs 0 with NO lookup + NO warning.
+    assert compute_search_cost("anthropic", "web_search", 0) == Decimal("0")
+    assert compute_search_cost("anthropic", "web_search", -1) == Decimal("0")
+    # unknown (provider, tool) costs 0 and WARNS.
+    with caplog.at_level("WARNING"):
+        cost = compute_search_cost("nobody", "web_search", 5)
+    assert cost == Decimal("0")
+    assert any("nobody" in r.getMessage() for r in caplog.records)
+
+
+def test_compute_search_cost_live_table_first(monkeypatch):
+    from orchestrator.llm.pricing import compute_search_cost
+
+    # A live-table override is honoured before the seed mirror (VTR tuning path).
+    _fix_search_table(monkeypatch, {("xai", "x_search"): Decimal("7.0000")})
+    assert compute_search_cost("xai", "x_search", 1000) == Decimal("7")
+    # a (provider,tool) absent from the live table still prices off the seed mirror.
+    assert compute_search_cost("anthropic", "web_search", 1000) == Decimal("10")
+
+
+def test_search_pricing_failsoft_to_seed_on_db_error(monkeypatch):
+    def _boom():
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(pricing_mod, "_fetch_search_from_db", _boom)
+    monkeypatch.setattr(pricing_mod, "_search_cache", None, raising=False)
+    monkeypatch.setattr(pricing_mod, "_search_cache_loaded_at", 0.0, raising=False)
+    table = pricing_mod._search_pricing()
+    for key in (
+        ("anthropic", "web_search"),
+        ("xai", "web_search"),
+        ("xai", "x_search"),
+        ("openai", "web_search"),
+        ("google", "web_search"),
+    ):
+        assert key in table
+
+
+def test_search_seed_mirror_matches_migration_seed():
+    # Guard against seed drift from migration 176's search_tool_pricing seed.
+    seed = pricing_mod._SEED_SEARCH_PRICING
+    assert seed[("anthropic", "web_search")] == Decimal("10.0000")
+    assert seed[("xai", "web_search")] == Decimal("5.0000")
+    assert seed[("xai", "x_search")] == Decimal("5.0000")
+    assert seed[("openai", "web_search")] == Decimal("10.0000")
+    assert seed[("google", "web_search")] == Decimal("35.0000")

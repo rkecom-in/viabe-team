@@ -28,9 +28,10 @@ from orchestrator.llm import provider as p  # noqa: E402
 
 @pytest.fixture(autouse=True)
 def _clean_llm_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Guarantee unset TEAM_MODEL_* / service-tier / budget / GLM_BASE_URL env so tests see the
-    built-in defaults, and dummy OPENAI_API_KEY / GOOGLE_API_KEY / GLM_API_KEY so the ChatOpenAI /
-    ChatGoogleGenerativeAI / GLM ctors never fail on a missing credential."""
+    """Guarantee unset TEAM_MODEL_* / service-tier / budget / GLM_BASE_URL / XAI_BASE_URL /
+    TEAM_ENABLE_WEB_SEARCH env so tests see the built-in defaults, and dummy OPENAI_API_KEY /
+    GOOGLE_API_KEY / GLM_API_KEY / XAI_API_KEY so the ChatOpenAI / ChatGoogleGenerativeAI / GLM /
+    Grok ctors never fail on a missing credential."""
     for var in (
         "TEAM_MODEL_ROUTINE",
         "TEAM_MODEL_COMPLEX",
@@ -40,20 +41,23 @@ def _clean_llm_env(monkeypatch: pytest.MonkeyPatch) -> None:
         "TEAM_OPENAI_SERVICE_TIER",
         "TEAM_LLM_BUDGET_ENFORCE",
         "GLM_BASE_URL",
+        "XAI_BASE_URL",
+        "TEAM_ENABLE_WEB_SEARCH",
     ):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test-not-real")
     monkeypatch.setenv("GOOGLE_API_KEY", "gk-test-not-real")
     monkeypatch.setenv("GLM_API_KEY", "glm-test-not-real")
+    monkeypatch.setenv("XAI_API_KEY", "xai-test-not-real")
 
 
 # --------------------------------------------------------------------------- registry
-def test_registry_has_exactly_ten_supported() -> None:
+def test_registry_has_exactly_twelve_supported() -> None:
     assert (
         p.SUPPORTED_MODELS
-        == p.ANTHROPIC_MODELS | p.OPENAI_MODELS | p.GOOGLE_MODELS | p.ZAI_MODELS
+        == p.ANTHROPIC_MODELS | p.OPENAI_MODELS | p.GOOGLE_MODELS | p.ZAI_MODELS | p.XAI_MODELS
     )
-    assert len(p.SUPPORTED_MODELS) == 10
+    assert len(p.SUPPORTED_MODELS) == 12
     assert p.ANTHROPIC_MODELS == {"claude-haiku-4-5", "claude-sonnet-5", "claude-opus-4-8"}
     assert p.OPENAI_MODELS == {"gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"}
     assert p.GOOGLE_MODELS == {
@@ -62,6 +66,7 @@ def test_registry_has_exactly_ten_supported() -> None:
         "gemini-3.1-pro-preview",
     }
     assert p.ZAI_MODELS == {"glm-5.2"}
+    assert p.XAI_MODELS == {"grok-4.5", "grok-4.3"}
 
 
 # --------------------------------------------------------------------------- provider inference
@@ -70,10 +75,11 @@ def test_provider_inference_by_prefix() -> None:
     assert p.provider_for("gpt-5.6-terra") == "openai"
     assert p.provider_for("gemini-3.5-flash") == "google"
     assert p.provider_for("glm-5.2") == "zai"
+    assert p.provider_for("grok-4.5") == "xai"
 
 
 def test_provider_inference_unknown_prefix_raises() -> None:
-    # A prefix that is none of gpt-* / claude-* / gemini-*.
+    # A prefix that is none of gpt-* / claude-* / gemini-* / glm-* / grok-*.
     with pytest.raises(p.UnknownModelError):
         p.provider_for("mistral-large-2")
 
@@ -104,11 +110,12 @@ def test_unknown_model_id_fails_loud(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("TEAM_MODEL_COMPLEX", "gpt-4o")  # a real model, but NOT one of the ten
     with pytest.raises(p.UnknownModelError) as exc:
         p.resolve_model_id("complex")
-    # the error names the full supported set (now ten models, incl. the gemini + glm families)
+    # the error names the full supported set (now twelve models, incl. gemini + glm + grok families)
     msg = str(exc.value)
     assert "gpt-5.6-terra" in msg
     assert "gemini-3.5-flash" in msg
     assert "glm-5.2" in msg
+    assert "grok-4.5" in msg
 
 
 def test_require_anthropic_model_rejects_gpt() -> None:
@@ -256,6 +263,69 @@ def test_resolve_glm_attaches_seam_callbacks(monkeypatch: pytest.MonkeyPatch) ->
     kinds = {type(cb).__name__ for cb in (m.callbacks or [])}
     assert "_BudgetGateCallback" in kinds
     assert any(isinstance(cb, LlmUsageCallback) for cb in (m.callbacks or []))
+
+
+# --------------------------------------------------------------------------- xai (Grok)
+def test_resolve_chat_model_grok_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Grok reuses ChatOpenAI on the RESPONSES API (like gpt-5.6) but pointed at the x.ai base_url,
+    # with NO service_tier and temperature pinned 0.0 (Grok ACCEPTS temperature, unlike gpt-5.6).
+    monkeypatch.setenv("TEAM_MODEL_SPECIALIST", "grok-4.5")
+    m = p.resolve_chat_model("specialist", agent="advisor_lane", max_tokens=2048)
+    assert type(m).__name__ == "ChatOpenAI"
+    assert m.model_name == "grok-4.5"
+    assert m.use_responses_api is True
+    assert str(m.openai_api_base) == p._XAI_DEFAULT_BASE_URL
+    assert m.service_tier is None
+    assert m.request_timeout is None
+    assert m.temperature == 0.0
+    assert m.max_retries == p._OPENAI_MAX_RETRIES
+
+
+def test_grok_base_url_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    # XAI_BASE_URL is the single proxy/self-host switch — a custom endpoint lands on the client.
+    monkeypatch.setenv("TEAM_MODEL_SPECIALIST", "grok-4.3")
+    monkeypatch.setenv("XAI_BASE_URL", "http://localhost:9000/v1")
+    m = p.resolve_chat_model("specialist", agent="advisor_lane")
+    assert str(m.openai_api_base) == "http://localhost:9000/v1"
+
+
+def test_grok_ignores_openai_service_tier(monkeypatch: pytest.MonkeyPatch) -> None:
+    # TEAM_OPENAI_SERVICE_TIER is OpenAI-scoped by NAME — a flex setting must NOT reach a Grok call
+    # (xAI publishes no flex/batch tier; grok always records standard).
+    monkeypatch.setenv("TEAM_MODEL_SPECIALIST", "grok-4.5")
+    monkeypatch.setenv("TEAM_OPENAI_SERVICE_TIER", "flex")
+    m = p.resolve_chat_model("specialist", agent="advisor_lane")
+    assert m.service_tier is None
+    assert m.request_timeout is None
+
+
+def test_grok_billing_tier_is_standard(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Even with TEAM_OPENAI_SERVICE_TIER=flex set, the Grok call records 'standard' on the ledger
+    # (the flex discount is OpenAI-only; xai must never be under-costed).
+    from orchestrator.llm.usage_callback import LlmUsageCallback
+
+    monkeypatch.setenv("TEAM_MODEL_SPECIALIST", "grok-4.5")
+    monkeypatch.setenv("TEAM_OPENAI_SERVICE_TIER", "flex")
+    m = p.resolve_chat_model("specialist", agent="advisor_lane")
+    uc = next(cb for cb in (m.callbacks or []) if isinstance(cb, LlmUsageCallback))
+    assert uc.service_tier == "standard"
+
+
+def test_resolve_grok_attaches_seam_callbacks(monkeypatch: pytest.MonkeyPatch) -> None:
+    from orchestrator.llm.usage_callback import LlmUsageCallback
+
+    monkeypatch.setenv("TEAM_MODEL_SPECIALIST", "grok-4.5")
+    m = p.resolve_chat_model("specialist", agent="advisor_lane", tenant_id="t")
+    kinds = {type(cb).__name__ for cb in (m.callbacks or [])}
+    assert "_BudgetGateCallback" in kinds
+    assert any(isinstance(cb, LlmUsageCallback) for cb in (m.callbacks or []))
+
+
+def test_require_anthropic_model_rejects_grok() -> None:
+    with pytest.raises(p.UnknownModelError) as exc:
+        p.require_anthropic_model("grok-4.5", site="triage")
+    assert "triage" in str(exc.value)
+    assert "xai" in str(exc.value)
 
 
 # --------------------------------------------------------------------------- flex fallback

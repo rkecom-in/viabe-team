@@ -89,7 +89,12 @@ FINANCE_LANE_SYSTEM_MESSAGE = SystemMessage(
 # VT-619b — the specialist model routes through the multi-provider seam. Tier "specialist"
 # (default claude-sonnet-5, was opus-4-7) is env-driven via TEAM_MODEL_SPECIALIST so a claude-* ↔
 # gpt-5.6-* swap is a Railway env change. max_tokens + sampling_kwargs now live inside the seam.
-_MODEL: BaseChatModel = resolve_chat_model("specialist", agent="finance_lane")
+# Migration-176: this ADVISORY lane answers with public/latest info (current GST rates, filing
+# deadlines, scheme changes) — so it opts into web search. INERT unless TEAM_ENABLE_WEB_SEARCH is on
+# AND the specialist model is search-capable; every search is ledger-costed. NOT on the gate path.
+_MODEL: BaseChatModel = resolve_chat_model(
+    "specialist", agent="finance_lane", enable_web_search=True
+)
 
 
 def _col(row: Any, key: str, idx: int) -> Any:

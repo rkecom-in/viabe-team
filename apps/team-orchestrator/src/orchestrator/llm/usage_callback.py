@@ -9,7 +9,13 @@ rollup). It is a pure observer: best-effort, never raises into the model call.
 Constructor is ``(tenant_id, agent, call_site, service_tier='standard')`` — fixed for the provider
 seam; ``service_tier`` is the call's BILLING tier so the ledger applies the flex discount.
 Provider is inferred from the model id (``gpt*`` → openai, ``gemini*`` → google, ``glm*`` → zai,
-else anthropic) since the constructor carries no provider arg; the ledger records it on the event.
+``grok*`` → xai, else anthropic) since the constructor carries no provider arg; the ledger records
+it on the event.
+
+Migration-176: the callback ALSO pulls the server-side web/X-search invocation count from the
+provider's usage surface (guarded, default 0), costs it via ``pricing.compute_search_cost``, and
+threads ``search_count`` + ``search_cost_usd`` into ``record_llm_call`` (the new ledger columns).
+Fully fail-soft — search metering never breaks a turn.
 """
 
 from __future__ import annotations
@@ -39,29 +45,33 @@ class LlmUsageCallback(BaseCallbackHandler):
     def on_llm_end(self, response: Any, **kwargs: Any) -> None:
         try:
             tokens_in, tokens_out, model, request_id, cached_in = _extract_usage(response)
+            provider = _provider_for_model(model)
+            search_count, search_cost = _extract_search_cost(response, provider)
             from orchestrator.llm.ledger import record_llm_call
 
             record_llm_call(
                 tenant_id=self.tenant_id,
                 agent=self.agent,
                 call_site=self.call_site,
-                provider=_provider_for_model(model),
+                provider=provider,
                 model=model,
                 service_tier=self.service_tier,
                 tokens_in=tokens_in,
                 tokens_out=tokens_out,
                 cached_tokens_in=cached_in,
                 request_id=request_id,
+                search_count=search_count,
+                search_cost_usd=search_cost,
             )
         except Exception:  # noqa: BLE001 — CL-122: metering never breaks a turn
             logger.warning("173 LlmUsageCallback.on_llm_end swallowed (best-effort)", exc_info=True)
 
 
 def _provider_for_model(model: str | None) -> str:
-    """Infer the provider from the model id (gpt* -> openai, gemini* -> google, glm* -> zai, else
-    anthropic). Provider is NOT NULL on the ledger. The model id here is the response's
-    ``model_name`` — ChatGoogleGenerativeAI reports the bare id (e.g. ``gemini-3.5-flash``); GLM's
-    OpenAI-compatible response reports ``glm-5.2``."""
+    """Infer the provider from the model id (gpt* -> openai, gemini* -> google, glm* -> zai,
+    grok* -> xai, else anthropic). Provider is NOT NULL on the ledger. The model id here is the
+    response's ``model_name`` — ChatGoogleGenerativeAI reports the bare id (e.g. ``gemini-3.5-flash``);
+    GLM's OpenAI-compatible response reports ``glm-5.2``; Grok's reports ``grok-4.5``."""
     lc = (model or "").lower()
     if lc.startswith("gpt"):
         return "openai"
@@ -69,7 +79,84 @@ def _provider_for_model(model: str | None) -> str:
         return "google"
     if lc.startswith("glm"):
         return "zai"
+    if lc.startswith("grok"):
+        return "xai"
     return "anthropic"
+
+
+def _extract_search_cost(response: Any, provider: str) -> tuple[int, Any]:
+    """Return (total_search_count, total_search_cost_usd) for this call's server-side web/X searches.
+
+    Pulls the server-side search-invocation count per provider from the langchain result surface
+    (Migration-176), then costs each (tool, count) via ``pricing.compute_search_cost`` and sums. FULLY
+    GUARDED — any missing surface / error yields (0, 0), never a raise (search metering must never
+    break a turn). Most calls have no search → (0, 0), matching the ledger column defaults.
+
+    Per-provider surface (SDK-verified 2026-07-13):
+      * anthropic → ``llm_output['usage']['server_tool_use']['web_search_requests']``.
+      * openai/xai (Responses) → count message content blocks whose type ends in ``_search_call``
+        (``web_search_call`` verified; ``x_search_call`` mapped to x_search for xai).
+      * google → 1 grounded request when ``response_metadata['grounding_metadata']`` carries any
+        ``web_search_queries`` (Google grounding bills per REQUEST, not per query).
+    """
+    from decimal import Decimal
+
+    try:
+        counts = _search_invocation_counts(response, provider)
+    except Exception:  # noqa: BLE001 — search extraction must never break metering
+        logger.warning("176 search-count extraction swallowed (best-effort)", exc_info=True)
+        return 0, 0
+    if not counts:
+        return 0, 0
+    from orchestrator.llm.pricing import compute_search_cost
+
+    total_count = 0
+    total_cost = Decimal("0")
+    for tool, n in counts.items():
+        total_count += int(n or 0)
+        total_cost += compute_search_cost(provider, tool, int(n or 0))
+    return total_count, total_cost
+
+
+def _first_message(response: Any) -> Any:
+    """The first generation's chat message, or None. Guarded (used by the search extractors)."""
+    gens = getattr(response, "generations", None)
+    if gens and gens[0]:
+        return getattr(gens[0][0], "message", None)
+    return None
+
+
+def _search_invocation_counts(response: Any, provider: str) -> dict[str, int]:
+    """Map ``tool -> invocation count`` for this call's server-side searches. ``{}`` when none.
+    Guarded per-provider; see ``_extract_search_cost`` for the surface each provider uses."""
+    if provider == "anthropic":
+        llm_output = getattr(response, "llm_output", None)
+        usage = llm_output.get("usage") if isinstance(llm_output, dict) else None
+        stu = usage.get("server_tool_use") if isinstance(usage, dict) else None
+        n = int((stu or {}).get("web_search_requests") or 0) if isinstance(stu, dict) else 0
+        return {"web_search": n} if n else {}
+
+    if provider in ("openai", "xai"):
+        msg = _first_message(response)
+        content = getattr(msg, "content", None)
+        counts: dict[str, int] = {}
+        if isinstance(content, list):
+            for block in content:
+                btype = block.get("type") if isinstance(block, dict) else None
+                if isinstance(btype, str) and btype.endswith("_search_call"):
+                    tool = "x_search" if btype.startswith("x_search") else "web_search"
+                    counts[tool] = counts.get(tool, 0) + 1
+        return counts
+
+    if provider == "google":
+        msg = _first_message(response)
+        rmeta = getattr(msg, "response_metadata", None)
+        gmeta = rmeta.get("grounding_metadata") if isinstance(rmeta, dict) else None
+        queries = gmeta.get("web_search_queries") if isinstance(gmeta, dict) else None
+        # Google grounding is billed per grounded REQUEST, not per query → count 1 when grounded.
+        return {"web_search": 1} if queries else {}
+
+    return {}
 
 
 def _extract_usage(response: Any) -> tuple[int, int, str, str | None, int]:

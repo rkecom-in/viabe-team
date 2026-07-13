@@ -34,8 +34,8 @@ logger = logging.getLogger(__name__)
 _INSERT_SQL = (
     "INSERT INTO llm_call_events "
     "  (tenant_id, agent, call_site, provider, model, service_tier, "
-    "   tokens_in, tokens_out, cost_usd, request_id) "
-    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
+    "   tokens_in, tokens_out, cost_usd, request_id, search_count, search_cost_usd) "
+    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
 )
 
 
@@ -51,6 +51,8 @@ def record_llm_call(
     tokens_out: int,
     cached_tokens_in: int = 0,
     request_id: str | None = None,
+    search_count: int = 0,
+    search_cost_usd: Any = 0,
 ) -> None:
     """Record one LLM call to ``llm_call_events`` + bump the VT-619 rollup. Fail-soft.
 
@@ -60,6 +62,12 @@ def record_llm_call(
     for audit — the ledger has no separate cached-token column (migration 173 folds
     cache economics into ``cost_usd``). Cache-unaware callers pass ``cached_tokens_in=0``
     → total == uncached, full-price cost (unchanged behavior).
+
+    ``search_count`` / ``search_cost_usd`` (Migration-176) are the server-side web/X-search
+    invocation count + their ALREADY-COMPUTED USD cost for this call (the caller runs
+    ``pricing.compute_search_cost``). They are ADDITIVE to ``cost_usd`` (which stays the token
+    cost) and land in the new ``llm_call_events`` columns — token-vs-search spend stays separately
+    queryable. Search-unaware callers pass 0/0 (== the column defaults; unchanged behavior).
     """
     try:
         cost = compute_cost_usd(model, service_tier, tokens_in, tokens_out, cached_tokens_in)
@@ -75,6 +83,8 @@ def record_llm_call(
             tokens_out=tokens_out,
             cost=cost,
             request_id=request_id,
+            search_count=search_count,
+            search_cost_usd=search_cost_usd,
         )
         if tenant_id is not None:
             _insert_tenant(
@@ -98,6 +108,8 @@ def _event_params(
     tokens_out: int,
     cost: Decimal,
     request_id: str | None,
+    search_count: int = 0,
+    search_cost_usd: Any = 0,
 ) -> tuple[Any, ...]:
     return (
         str(tenant_id) if tenant_id is not None else None,
@@ -110,6 +122,8 @@ def _event_params(
         int(tokens_out or 0),
         cost,
         request_id,
+        int(search_count or 0),
+        Decimal(str(search_cost_usd or 0)),
     )
 
 
