@@ -25,20 +25,18 @@ from __future__ import annotations
 import json
 import logging
 import re
+from collections.abc import Callable
 from pathlib import Path
 from typing import Literal
 
-from anthropic import Anthropic
-
-from orchestrator.llm.provider import require_anthropic_model, resolve_model_id
-from orchestrator.llm_config import sampling_kwargs
+from orchestrator.llm.structured import structured_text_call
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 logger = logging.getLogger("orchestrator.manager.triage")
 
-# VT-619b — triage is Anthropic-SDK-only (v1). Its model id comes from the "complex" tier
-# (TEAM_MODEL_COMPLEX; default claude-sonnet-5, was the hard-coded _TRIAGE_MODEL), resolved FRESH
-# per call and asserted Anthropic (a gpt-* tier value fails LOUD rather than silently mis-calling).
+# Triage runs on the "complex" tier (TEAM_MODEL_COMPLEX; default claude-sonnet-5). VT-619b pinned
+# this to the Anthropic SDK; it is now routed through the multi-provider seam (structured_text_call)
+# so the tier can be pointed at any provider and the call is cost-metered.
 _TRIAGE_TIER = "complex"
 _MAX_TOKENS = 150
 
@@ -72,36 +70,33 @@ def triage_turn(
     message_text: str,
     has_open_question: bool,
     has_active_task: bool,
-    client: Anthropic | None = None,
+    text_call: Callable[..., str] | None = None,
 ) -> TriageResult | None:
     """Classify one inbound owner turn. Returns ``None`` on ANY failure (fail-soft — see module
     docstring); the caller must treat that as "run the legacy path, do nothing new," never as a
     default classification value."""
-    if client is None:
-        client = Anthropic()
+    _call = text_call or structured_text_call
 
     user_content = (
         f"has_open_question: {has_open_question}\n"
         f"has_active_task: {has_active_task}\n\n"
         f"Owner message:\n{message_text}"
     )
-    model_id = require_anthropic_model(resolve_model_id(_TRIAGE_TIER), site="triage")
     try:
-        resp = client.messages.create(
-            model=model_id,
-            max_tokens=_MAX_TOKENS,
-            # VT-628 — pin temp=0 only where the model accepts it (haiku). The complex-tier default
-            # is sonnet-5, which DEPRECATES temperature (400), so this resolves to {} for it.
-            **sampling_kwargs(model_id),
+        raw = _call(
+            _TRIAGE_TIER,
             system=_TRIAGE_SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": user_content}],
+            user=user_content,
+            max_tokens=_MAX_TOKENS,
+            agent="triage",
+            call_site="triage",
+            tenant_id=None,
         )
     except Exception:  # noqa: BLE001 — fail-soft: any transport/API error -> None, never a raise
         logger.warning("triage_turn: Anthropic call failed (fail-soft -> None)", exc_info=True)
         return None
 
-    text_blocks = [b.text for b in resp.content if getattr(b, "type", "") == "text"]
-    raw = "".join(text_blocks).strip()
+    raw = raw.strip()
     if not raw:
         logger.warning("triage_turn: empty model output (fail-soft -> None)")
         return None

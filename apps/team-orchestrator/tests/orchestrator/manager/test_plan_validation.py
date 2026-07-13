@@ -7,38 +7,32 @@ import json
 
 import pytest
 
-pytest.importorskip("anthropic")
+pytest.importorskip("pydantic")
 
 from orchestrator.manager.plan_models import ManagerPlan, PlanStep  # noqa: E402
 from orchestrator.manager.plan_validation import validate_plan_draft  # noqa: E402
 
 
-class _FakeTextBlock:
-    type = "text"
+def _json_call(payload: dict):
+    """A ``text_call`` stub returning ``payload`` as JSON text. Mirrors ``structured_text_call``'s
+    signature ``(tier, *, system, user, max_tokens, agent, call_site, tenant_id)`` — accepts and
+    ignores whatever the site passes."""
 
-    def __init__(self, text: str) -> None:
-        self.text = text
+    def _call(*args, **kwargs) -> str:  # noqa: ANN002, ANN003
+        return json.dumps(payload)
+
+    return _call
 
 
-class _FakeResp:
-    def __init__(self, content: list) -> None:
-        self.content = content
+def _text_call(raw: str):
+    def _call(*args, **kwargs) -> str:  # noqa: ANN002, ANN003
+        return raw
+
+    return _call
 
 
-class _FakeClient:
-    def __init__(self, payload: dict) -> None:
-        self._payload = payload
-
-    @property
-    def messages(self):
-        payload = self._payload
-
-        class _M:
-            @staticmethod
-            def create(**kwargs):  # noqa: ANN003, ANN201
-                return _FakeResp([_FakeTextBlock(json.dumps(payload))])
-
-        return _M()
+def _raising_call(*args, **kwargs) -> str:  # noqa: ANN002, ANN003
+    raise RuntimeError("network down")
 
 
 def _plan() -> ManagerPlan:
@@ -51,43 +45,31 @@ def _plan() -> ManagerPlan:
 
 def test_valid_plan() -> None:
     result = validate_plan_draft(
-        _plan(), client=_FakeClient({"valid": True, "reason": "criteria are measurable"})
+        _plan(), text_call=_json_call({"valid": True, "reason": "criteria are measurable"})
     )
     assert result.valid is True
 
 
 def test_invalid_plan_vague_criteria() -> None:
     result = validate_plan_draft(
-        _plan(), client=_FakeClient({"valid": False, "reason": "criteria not measurable"})
+        _plan(), text_call=_json_call({"valid": False, "reason": "criteria not measurable"})
     )
     assert result.valid is False
     assert result.reason
 
 
 def test_fail_soft_on_non_json_response() -> None:
-    class _RawTextClient:
-        class messages:  # noqa: N801
-            @staticmethod
-            def create(**kwargs):  # noqa: ANN003, ANN201
-                return _FakeResp([_FakeTextBlock("not json")])
-
-    result = validate_plan_draft(_plan(), client=_RawTextClient())
+    result = validate_plan_draft(_plan(), text_call=_text_call("not json"))
     assert result.valid is False
     assert "plan_validation_extraction_failed" in result.reason
 
 
 def test_fail_soft_on_client_exception() -> None:
-    class _RaisingClient:
-        class messages:  # noqa: N801
-            @staticmethod
-            def create(**kwargs):  # noqa: ANN003, ANN201
-                raise RuntimeError("network down")
-
-    result = validate_plan_draft(_plan(), client=_RaisingClient())
+    result = validate_plan_draft(_plan(), text_call=_raising_call)
     assert result.valid is False
 
 
 def test_fail_soft_on_schema_mismatch() -> None:
-    result = validate_plan_draft(_plan(), client=_FakeClient({"valid": "not_a_bool"}))
+    result = validate_plan_draft(_plan(), text_call=_json_call({"valid": "not_a_bool"}))
     assert result.valid is False
     assert "plan_validation_extraction_failed" in result.reason

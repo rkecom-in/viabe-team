@@ -19,20 +19,21 @@ from __future__ import annotations
 import json
 import logging
 import re
+from collections.abc import Callable
 from pathlib import Path
 
-from anthropic import Anthropic
 from pydantic import BaseModel, ConfigDict
 
-from orchestrator.llm.provider import require_anthropic_model, resolve_model_id
+from orchestrator.llm.structured import structured_text_call
 from orchestrator.manager.plan_models import ManagerPlan
 
 logger = logging.getLogger("orchestrator.manager.plan_validation")
 
 # A5: plan-validation-at-objective-creation is one of the loop's ONLY two opus calls (the other is
-# completion-verification). VT-619b — Anthropic-SDK-only (v1). Its model id comes from the "review"
-# tier (TEAM_MODEL_REVIEW; default claude-opus-4-8), resolved FRESH per call and asserted Anthropic
-# (a gpt-* tier value fails LOUD).
+# completion-verification). It runs on the "review" tier (TEAM_MODEL_REVIEW; default
+# claude-opus-4-8). VT-619b pinned this to the Anthropic SDK; it is now routed through the
+# multi-provider seam (structured_text_call) so the tier can be pointed at any provider and the
+# call is cost-metered.
 _VALIDATION_TIER = "review"
 _MAX_TOKENS = 400
 
@@ -53,7 +54,7 @@ class PlanValidationResult(BaseModel):
 
 
 def validate_plan_draft(
-    plan: ManagerPlan, *, client: Anthropic | None = None,
+    plan: ManagerPlan, *, text_call: Callable[..., str] | None = None,
 ) -> PlanValidationResult:
     """NEVER raises. A client/parse/schema failure fails SOFT to ``valid=False`` with a reason
     describing what went wrong — the caller's own contract ("validation failure -> fail-soft to
@@ -78,16 +79,17 @@ def validate_plan_draft(
         default=str,
     )
 
-    anthropic_client = client if client is not None else Anthropic()
-    model_id = require_anthropic_model(resolve_model_id(_VALIDATION_TIER), site="plan_validation")
+    _call = text_call or structured_text_call
     try:
-        resp = anthropic_client.messages.create(
-            model=model_id,
-            max_tokens=_MAX_TOKENS,
+        text = _call(
+            _VALIDATION_TIER,
             system=_SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": user_content}],
+            user=user_content,
+            max_tokens=_MAX_TOKENS,
+            agent="plan_validation",
+            call_site="plan_validation",
+            tenant_id=None,
         )
-        text = "".join(b.text for b in resp.content if getattr(b, "type", "") == "text")
         if not text.strip():
             raise ValueError("empty response from plan-validation call")
         cleaned = _FENCE_RE.sub("", text).strip()

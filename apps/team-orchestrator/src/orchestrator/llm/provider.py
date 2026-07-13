@@ -282,6 +282,7 @@ def resolve_chat_model(
     max_tokens: int = _DEFAULT_MAX_TOKENS,
     enable_web_search: bool = False,
     enable_x_search: bool = False,
+    call_site: str | None = None,
 ) -> BaseChatModel:
     """Build the langchain chat model for ``tier`` (ChatAnthropic / ChatOpenAI-on-Responses-API /
     Gemini / GLM / Grok).
@@ -312,7 +313,11 @@ def resolve_chat_model(
     # price) conservatively rather than under-costing.
     billing_tier = configured_tier if configured_tier in ("flex", "batch") else "standard"
     callbacks = _seam_callbacks(
-        tier=tier, agent=agent, tenant_id=tenant_id, billing_tier=billing_tier
+        tier=tier,
+        agent=agent,
+        tenant_id=tenant_id,
+        billing_tier=billing_tier,
+        call_site=call_site or tier,
     )
 
     if provider == "anthropic":
@@ -655,19 +660,26 @@ class _BudgetGateCallback(BaseCallbackHandler):
 
 
 def _seam_callbacks(
-    *, tier: str, agent: str, tenant_id: UUID | str | None, billing_tier: str = "standard"
+    *,
+    tier: str,
+    agent: str,
+    tenant_id: UUID | str | None,
+    billing_tier: str = "standard",
+    call_site: str | None = None,
 ) -> list[BaseCallbackHandler]:
     """The callbacks ``resolve_chat_model`` attaches to every model: the pre-call budget gate plus
     the usage-recording ``LlmUsageCallback`` (Migration-173, the parallel cost-ledger seam) with the
-    provider-fixed ``(tenant_id, agent, call_site, service_tier)`` ctor. ``billing_tier`` is the
-    ledger-facing service tier (standard | flex) so a flex call is costed with its 50% discount, not
-    at full rate. The usage callback is imported LAZILY + fail-soft — a metering-module hiccup must
-    never break model construction or a live turn."""
+    provider-fixed ``(tenant_id, agent, call_site, service_tier)`` ctor. ``call_site`` labels the
+    ledger row (defaults to ``tier``; the gate sites pass an explicit site so triage/classify/plan-
+    validation don't conflate with the brain's same-tier calls). ``billing_tier`` is the ledger-facing
+    service tier (standard | flex) so a flex call is costed with its 50% discount, not at full rate.
+    The usage callback is imported LAZILY + fail-soft — a metering-module hiccup must never break
+    model construction or a live turn."""
     callbacks: list[BaseCallbackHandler] = [_BudgetGateCallback(tenant_id=tenant_id, agent=agent)]
     try:
         from orchestrator.llm.usage_callback import LlmUsageCallback
 
-        callbacks.append(LlmUsageCallback(tenant_id, agent, tier, billing_tier))
+        callbacks.append(LlmUsageCallback(tenant_id, agent, call_site or tier, billing_tier))
     except Exception:  # noqa: BLE001 — CL-122: usage metering is best-effort, never load-bearing
         logger.warning("LlmUsageCallback unavailable; usage metering skipped this build", exc_info=True)
     return callbacks
