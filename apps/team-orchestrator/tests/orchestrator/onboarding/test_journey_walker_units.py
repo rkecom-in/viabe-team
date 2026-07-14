@@ -74,6 +74,44 @@ def test_completion_recap_ignores_non_string_and_blank_values():
     assert en.count(",") == 0, "blank/None fields contribute nothing to the recap"
 
 
+# --- VT-639: GST nature-of-business deflection detector -------------------------------------------
+
+
+def test_gst_nature_deflection_detects_pure_tax_codes():
+    # A pure GST 'nature of business' tax-activity code offered as the business type is a DEFLECTION,
+    # not a description — deterministic-walker parity with the turn-brain's 'never present GST nature
+    # values as business-type' rule. The scenario's own phrasing must trip it.
+    assert j._is_gst_nature_deflection("Supplier of Services")
+    assert j._is_gst_nature_deflection(
+        "actually humara GST mein 'Supplier of Services' likha hai, wahi bata dete hain"
+    )
+    assert j._is_gst_nature_deflection("we're a supplier of goods")
+    assert j._is_gst_nature_deflection("Works Contract")
+    assert j._is_gst_nature_deflection("Input Service Distributor")
+
+
+def test_gst_nature_deflection_ignores_real_descriptions():
+    # A genuine description — even a rich NON-taxonomy one (VT-601 salvages these into 'about') — is
+    # NOT a deflection. Narrow by design: only pure tax-activity phrases with no sector meaning.
+    assert not j._is_gst_nature_deflection("hum toh bas mithai aur namkeen banate aur bechte hain")
+    assert not j._is_gst_nature_deflection("Probe Traders, a hardware shop in Pune")
+    assert not j._is_gst_nature_deflection("leather bags")
+    # mentions GST but carries a real description → NOT a deflection (no pure tax-code phrase present)
+    assert not j._is_gst_nature_deflection("we sell sweets, we're GST registered")
+    # 'retail'/'wholesale' ARE usable business sectors, deliberately NOT deflection phrases
+    assert not j._is_gst_nature_deflection("retail business")
+    assert not j._is_gst_nature_deflection("")
+
+
+def test_reprompt_gst_nature_asks_what_they_sell_both_locales():
+    r = j._reprompt_gst_nature({"field": "business_type", "draft_value": "sweets"})
+    assert r["done"] is False
+    assert r["re_present"] is True
+    assert r["reply_en"] and r["reply_hi"]
+    # must NOT echo a rejection of the draft — it's a deflection, not a 'no'
+    assert "sweets" not in r["reply_en"].lower()
+
+
 # --- item 1: skip defer-ack -----------------------------------------------------------------------
 
 

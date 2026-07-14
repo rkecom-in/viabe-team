@@ -413,6 +413,60 @@ def _greet_then_question(q: dict[str, Any]) -> dict[str, Any]:
     return {"reply_en": en, "reply_hi": hi, "done": False, "re_present": True}
 
 
+# VT-639 — GST "Nature of Business Activity" tax-activity codes (the GSTN registration checkboxes)
+# that carry NO business-SECTOR meaning. An owner answering the business_type ask with one of these
+# ("humara GST mein 'Supplier of Services' likha hai") is DEFLECTING with a tax code, not describing
+# what they sell. turn_brain.py prompts the LLM to never present these as business-type guesses;
+# this is the DETERMINISTIC-walker parity so the same holds with the turn-brain OFF. NARROW by design:
+# ONLY the pure tax-activity phrases with no sector interpretation — 'retail business'/'wholesale
+# business'/'manufacturer' are deliberately EXCLUDED (they ARE usable business descriptions, and a
+# rich non-taxonomy description is intentionally salvaged into 'about' by VT-601).
+_GST_NATURE_DEFLECTION_PHRASES: tuple[str, ...] = (
+    "supplier of services",
+    "supplier of goods",
+    "recipient of goods or services",
+    "recipient of goods",
+    "works contract",
+    "input service distributor",
+    "office / sale office",
+    "office/sale office",
+    "warehouse / depot",
+    "warehouse/depot",
+    "bonded warehouse",
+    "leasing business",
+    "service provision",
+)
+
+
+def _is_gst_nature_deflection(body: str) -> bool:
+    """VT-639 — True iff ``body`` is a GST nature-of-business tax-activity code (a DEFLECTION), not a
+    business description. Substring match (case-insensitive) so the phrase is caught inside a sentence
+    ("actually humara GST mein 'Supplier of Services' likha hai"). NARROW: only the pure tax-activity
+    phrases in ``_GST_NATURE_DEFLECTION_PHRASES`` — a genuine description (even a rich non-taxonomy one)
+    never trips it. Deterministic-walker parity with the turn-brain's never-present-GST-nature rule."""
+    if not body:
+        return False
+    low = body.lower()
+    return any(phrase in low for phrase in _GST_NATURE_DEFLECTION_PHRASES)
+
+
+def _reprompt_gst_nature(q: dict[str, Any]) -> dict[str, Any]:
+    """VT-639 — the owner answered the business_type ask with a GST tax-activity code (a deflection),
+    not what they sell. Acknowledge it's a tax category and ask what the business actually does — NOT a
+    rejection framing (they didn't reject the draft, so no "(not <draft>)"). State untouched (the field
+    stays a candidate; nothing recorded → nothing echoed in the completion recap); ``re_present=True``
+    makes the intercept send this. Holds with the turn-brain OFF / LLM down."""
+    en = (
+        "That's your GST tax category, not what your business does — "
+        "what do you actually make or sell?"
+    )
+    hi = (
+        "यह आपकी GST टैक्स श्रेणी है, आपका असल काम नहीं — "
+        "आप असल में क्या बनाते या बेचते हैं?"
+    )
+    return {"reply_en": en, "reply_hi": hi, "done": False, "re_present": True}
+
+
 def _reprompt_after_no(q: dict[str, Any]) -> dict[str, Any]:
     """VT-569a (the deterministic dead-end fix) — a bare negative ("no") to a CONFIRM must NOT re-send
     the IDENTICAL question. The live defect: replying "No" to "We found you're a Local services
@@ -542,6 +596,15 @@ def handle_reply(
         # to the brain. A plain correction with no negation ("hum leather bags bechte hain") is untouched.
         if (toks & _NO) and not (toks <= _NO) and not (toks & _YES):
             return _reprompt_after_no(q)
+        # VT-639 — a GST nature-of-business tax-activity code answered to the business_type CONFIRM
+        # ("humara GST mein 'Supplier of Services' likha hai") is a DEFLECTION, not a value: recording
+        # it as body.strip() below would store the raw sentence as business_type (never promoted per
+        # CL-390, but the VT-601 cross-fill then copies it into 'about' AND _completion_recap echoes it
+        # verbatim — the visible defect). Re-present (ask what they actually sell) WITHOUT recording, so
+        # nothing lands in answers and nothing is echoed. Only for business_type, only when not a 'yes'
+        # (a bare-yes confirms the taxonomy draft_value, never the deflection body).
+        if field == "business_type" and not (toks & _YES) and _is_gst_nature_deflection(body):
+            return _reprompt_gst_nature(q)
         # yes → confirm the discovered draft_value; anything else → a correction (the body is the value).
         value = q.get("draft_value") if (toks & _YES) else body.strip()
         if field and value not in (None, ""):

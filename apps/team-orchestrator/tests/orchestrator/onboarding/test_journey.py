@@ -308,6 +308,39 @@ def test_handle_reply_confirm_correction_is_the_value(substrate):  # type: ignor
     )
 
 
+def test_offtaxonomy_gst_nature_confirm_reprompts_not_recorded(substrate):  # type: ignore[no-untyped-def]
+    """VT-639: a GST 'nature of business' tax-activity code answered to the business_type CONFIRM
+    ("humara GST mein 'Supplier of Services' likha hai") is a DEFLECTION — it must be RE-PRESENTED
+    (ask what they actually sell) WITHOUT recording. Regression guard for the visible defect: recording
+    it stored the raw sentence as business_type, the VT-601 cross-fill copied it into 'about', and the
+    completion recap echoed it verbatim (twice). The owner's REAL description next turn is captured."""
+    from orchestrator.onboarding import journey
+
+    tenant = _new_tenant(substrate.dsn, name="convo-harness- gst deflection")
+    journey.start_journey(tenant, [_confirm_q("business_type", "sweets"), _gap_q("about")])
+    raw = "actually humara GST mein 'Supplier of Services' likha hai, wahi bata dete hain"
+
+    r = journey.handle_reply(tenant, raw, "SM-gst-1")
+    assert r.get("re_present") is True, "a GST-nature deflection must re-present, not record/complete"
+    assert r["done"] is False
+    assert raw not in r["reply_en"], "the GST deflection must NOT be echoed back to the owner"
+
+    g = _journey_row(substrate.dsn, tenant)
+    assert g is not None
+    assert g["cursor"] == 0, "a deflection must NOT advance the cursor"
+    assert g["status"] == "active", "must NOT complete on a deflection"
+    assert "business_type" not in g["answers"], "deflection must not be recorded as business_type"
+    assert "about" not in g["answers"], "deflection must not cross-fill 'about' (the doubled-echo source)"
+
+    # The owner then gives the REAL description → captured normally on the same (un-advanced) confirm.
+    real = "hum toh bas mithai aur namkeen banate aur bechte hain"
+    journey.handle_reply(tenant, real, "SM-gst-2")
+    g2 = _journey_row(substrate.dsn, tenant)
+    assert g2["answers"].get("business_type") == real, (
+        "the genuine description on the next turn must be recorded as the business_type answer"
+    )
+
+
 def test_handle_reply_gap_stored_in_answers(substrate):  # type: ignore[no-untyped-def]
     """A gap-kind Q → the body IS the value: stored in ``answers`` under the
     field, cursor advances. A gap answer is NOT promoted to the canonical
