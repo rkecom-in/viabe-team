@@ -74,6 +74,20 @@ def test_completion_recap_ignores_non_string_and_blank_values():
     assert en.count(",") == 0, "blank/None fields contribute nothing to the recap"
 
 
+def test_completion_recap_dedups_identical_values():
+    # VT-639: the VT-601 cross-fill copies a descriptive business_type verbatim into 'about'; the
+    # recap must NOT emit "noted: <desc>, <desc>" — identical values collapse to one.
+    en, hi = j._completion_recap(
+        {"business_type": "mithai aur namkeen", "about": "mithai aur namkeen", "city": "Pune"}
+    )
+    assert en.count("mithai aur namkeen") == 1
+    assert hi.count("mithai aur namkeen") == 1
+    assert "Pune" in en  # distinct values are still kept
+    # case-insensitive dedup
+    en2, _ = j._completion_recap({"business_type": "Leather Bags", "about": "leather bags"})
+    assert en2.lower().count("leather bags") == 1
+
+
 # --- VT-639: GST nature-of-business deflection detector -------------------------------------------
 
 
