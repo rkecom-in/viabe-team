@@ -61,7 +61,12 @@ TRUST_BREAKER_CLASSES: tuple[str, ...] = (
 )
 TIER1_TARGET = 0
 TIER2_TARGET = 0.90
-DEFAULT_MODEL = "claude-opus-4-8"
+# Judge model (Fazal 2026-07-13): claude-sonnet-5. Upgraded from haiku-4.5 after haiku produced
+# false-positive breakers on the luna re-baseline (flagged a deterministic opt-out fire as
+# impossible_promise); sonnet-5 correctly clears those reasoning-based false positives. NOTE: a
+# smarter judge does NOT fix CONTEXT-blind false positives (e.g. the harness-seeded --draft-city
+# "Chennai" the judge isn't told about) — those need the seed values fed to the judge separately.
+DEFAULT_MODEL = "claude-sonnet-5"
 _MAX_OUTPUT_TOKENS = 4096
 
 _CODE_FENCE_RE = re.compile(r"^\s*```(?:json)?[ \t]*\n(?P<body>.*?)\n```\s*$", re.DOTALL | re.IGNORECASE)
