@@ -509,6 +509,28 @@ def test_r2_owner_directed_send_passes():
     assert not mod.contains_completion_claim("Maine aapko link bhej diya hai.")
 
 
+def test_vt640_owner_artifact_send_no_explicit_you_passes():
+    # VT-640 — the exact multi_field_single_message false-positive: a GOOD onboarding reply refers to
+    # the connect link the manager already sent the owner ("using the link I sent, then reply 'done'").
+    # The sentence has NO explicit "you", so the owner-directed exemption (b) missed it and the
+    # ("i","sent") bigram wrongly swapped a perfect answer for the "haven't started" stall. Exemption
+    # (d): an owner-FACING artifact (link/approval) send with no customer reference passes.
+    assert not mod.contains_completion_claim(
+        "The Shopify connection isn't complete yet — approve it in the browser using the link I "
+        "sent, then reply 'done'."
+    )
+    assert not mod.contains_completion_claim("Open the approval I sent and tap confirm.")
+    assert not mod.contains_completion_claim("I've sent the OAuth link — reply 'done' when finished.")
+
+
+def test_vt640_artifact_exemption_does_not_leak_to_customer_sends():
+    # MERGE-BLOCKING: the artifact exemption must NOT clear a real customer send that merely also
+    # mentions a link, and must NOT clear the "sent to N" trigram or a bare "I sent it".
+    assert mod.contains_completion_claim("I sent the offer link to 40 customers.")  # customer ref
+    assert mod.contains_completion_claim("Sent to 45 customers via the link.")       # trigram
+    assert mod.contains_completion_claim("I sent it just now.")                       # no artifact
+
+
 def test_r2_ability_framed_send_passes():
     # A subject-less bigram gated by an ability/future marker BEFORE it is a capability statement,
     # not a completed act.

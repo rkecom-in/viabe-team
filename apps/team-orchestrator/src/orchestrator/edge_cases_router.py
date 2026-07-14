@@ -83,13 +83,6 @@ def route_edge_case(
             intent_sink["suggested_action"] = str(
                 getattr(_out, "suggested_action", "") or ""
             )
-        # VT-640-DIAG (dev only; REMOVE after multi_field root-cause) — surface how the classifier
-        # tags a capture-confirm turn ("did you get all that?") so we know whether it reaches
-        # answer_status_query (status_query) or falls straight to the brain.
-        logger.warning(
-            "VT-640-DIAG classify: classification=%s confidence=%.2f body=%r",
-            classification, confidence, (body or "")[:80],
-        )
     except Exception:
         # A classify failure (bad model JSON / envelope validation) must NOT crash
         # dispatch or trigger a workflow retry — fall through to the agent (the prior

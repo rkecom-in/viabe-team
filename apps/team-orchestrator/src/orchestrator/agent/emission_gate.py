@@ -229,6 +229,12 @@ _SUBJECTLESS_BIGRAMS = {("campaign", "sent"), ("messages", "sent")}
 _ABILITY_MARKERS = {"can", "will", "ill", "once", "jab", "karunga", "karungi"}
 # Owner pronouns that mark a Hinglish/Devanagari send as directed TO THE OWNER.
 _OWNER_DIRECTED_HINGLISH = {"aapko", "tumhe", "tumhein", "आपको", "तुम्हें"}
+# VT-640 — owner-FACING artifacts the manager legitimately "sends" to the OWNER (the connect/OAuth
+# link, the approval request). "the link I sent" / "the approval I sent" is a delivery to the owner,
+# never a customer campaign send — but the ("i","sent") bigram over-matches these when the sentence
+# has no explicit "you" ("…using the link I sent, then reply 'done'"), so exemption (b) misses them.
+# These are NOT customer-send objects; a real customer send names customers or uses "sent to N".
+_OWNER_ARTIFACT_TOKENS = {"link", "links", "invite", "invitation", "oauth", "approval"}
 # Spend verbs whose adjacent negation flips a "spent"/"boosted" claim into a denial.
 _SPEND_CLAIM_NEG_TOKENS = {"kharch", "kharcha", "spent", "paid", "boost", "boosted"}
 
@@ -291,6 +297,18 @@ def _sentence_has_blocking_completion_claim(sentence: str) -> bool:
             continue
         # (b) — owner-directed with no customer reference passes; the trigram never qualifies.
         if owner_directed and not has_customer_ref and not is_trigram:
+            continue
+        # (d) VT-640 — a subject-ful i/ive "sent" of an owner-FACING artifact (the connect link, the
+        # approval) with NO customer reference is a delivery to the OWNER, not a customer send:
+        # "…using the link I sent, then reply 'done'" lacks an explicit "you" so (b) misses it. A real
+        # customer send names customers (has_customer_ref) or uses the "sent to N" trigram — both still
+        # block. Scoped to the i/ive bigrams that over-match this; campaign/messages bigrams unchanged.
+        if (
+            is_bigram
+            and bigram in {("i", "sent"), ("ive", "sent")}
+            and not has_customer_ref
+            and bool(tokset & _OWNER_ARTIFACT_TOKENS)
+        ):
             continue
         return True
     return False
