@@ -950,6 +950,7 @@ def _completion_recap(answers: dict[str, Any] | None) -> tuple[str, str]:
     if not answers:
         return "", ""
     vals: list[str] = []
+    seen: set[str] = set()
     business_seen = False
     for field in _RECAP_FIELDS:
         v = answers.get(field)
@@ -959,7 +960,15 @@ def _completion_recap(answers: dict[str, Any] | None) -> tuple[str, str]:
             if business_seen:
                 continue  # only one business line even if both are present
             business_seen = True
-        vals.append(v.strip())
+        val = v.strip()
+        # VT-639 — never recap the SAME value twice. The VT-601 cross-fill copies a descriptive
+        # business_type verbatim into 'about', so the naive join emitted "noted: <desc>, <desc>"
+        # (reads as a bug). Dedup case-insensitively; distinct values are all kept.
+        key = val.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        vals.append(val)
     vals = vals[:3]  # keep the recap to one short line
     if not vals:
         return "", ""
