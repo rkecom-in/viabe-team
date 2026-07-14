@@ -1676,7 +1676,16 @@ def test_execute_item_l3_grant_lands_auto_send_pending(substrate, monkeypatch): 
 
     def _stub_llm(prompt: str, model: str) -> str:
         import json as _json
+        import re as _re
+
         biz = _json.loads(prompt.split("<allowed_params>")[1].split("</allowed_params>")[0])
+        # VT-636: values arrive fenced (<untrusted source="...">…</untrusted>) per the RULES
+        # instructing the model to echo only the text INSIDE the tag — mirror a compliant model.
+        fence_re = _re.compile(r'^<untrusted[^>]*>(.*)</untrusted>$', _re.S)
+        biz = {
+            k: (fence_re.match(v).group(1) if isinstance(v, str) and fence_re.match(v) else v)
+            for k, v in biz.items()
+        }
         return _json.dumps(biz)
 
     agent = ex.SalesRecoveryAgent(llm=_stub_llm)
@@ -1717,7 +1726,16 @@ def test_execute_item_l2_tenant_still_l2_arms(substrate, monkeypatch):  # type: 
 
     def _stub_llm(prompt: str, model: str) -> str:
         import json as _json
+        import re as _re
+
         biz = _json.loads(prompt.split("<allowed_params>")[1].split("</allowed_params>")[0])
+        # VT-636: values arrive fenced (<untrusted source="...">…</untrusted>) per the RULES
+        # instructing the model to echo only the text INSIDE the tag — mirror a compliant model.
+        fence_re = _re.compile(r'^<untrusted[^>]*>(.*)</untrusted>$', _re.S)
+        biz = {
+            k: (fence_re.match(v).group(1) if isinstance(v, str) and fence_re.match(v) else v)
+            for k, v in biz.items()
+        }
         return _json.dumps(biz)
 
     armed_batches: list[str] = []

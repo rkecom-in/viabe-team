@@ -88,6 +88,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from orchestrator.agent.lane_tenant import lane_tenant_error, resolve_lane_tenant
 from orchestrator.llm.provider import resolve_chat_model
+from orchestrator.security.prompt_quarantine import fence
 from orchestrator.types.trigger_reason import TriggerReason
 
 logger = logging.getLogger("orchestrator.agent.tech_lane")
@@ -120,6 +121,26 @@ _MODEL: BaseChatModel = resolve_chat_model(
 # A listing is "stale" if it has not been refreshed in this many days — a health flag the
 # specialist surfaces (the listing data the team reads is going out of date).
 _LISTING_STALE_DAYS = 30
+
+# VT-636 — ``name``/``category`` below come straight from GBP/Swiggy SCRAPE (``platform_listings.
+# attributes``), an attacker-writable external source (any business owner can edit their own GBP
+# listing title/category to anything). This dict is a @tool RESULT fed back to the Manager brain
+# every tech-health turn, so the values get the structural fence, not just a value pass-through.
+_LISTING_FIELD_MAX_LEN = 160
+
+
+def _fence_scraped_listing_field(value: Any) -> Any:
+    """Fence a scraped listing field for prompt rendering. ``None`` passes through (the field's
+    None-ness contract); ANY other value is ``str()``-coerced and fenced — including a NON-str
+    (list/dict/int) that schema-drift or a future writer to ``platform_listings.attributes``
+    could place here. Coercing rather than pass-through closes the non-str bypass an adversarial
+    review found (a raw non-str would otherwise render unfenced in the Manager tool result)."""
+    if value is None:
+        return None
+    text = str(value)
+    if not text:
+        return value
+    return fence(text, source="scraped_listing", max_len=_LISTING_FIELD_MAX_LEN)
 
 
 # ===========================================================================
@@ -274,8 +295,8 @@ def read_listing_health(tenant_id: str) -> dict[str, Any]:
                 "fetched_at": _iso(fetched_at),
                 "stale": stale,
                 "permanently_closed": bool(attrs.get("permanently_closed", False)),
-                "name": attrs.get("gbp_title") or attrs.get("name"),
-                "category": attrs.get("category"),
+                "name": _fence_scraped_listing_field(attrs.get("gbp_title") or attrs.get("name")),
+                "category": _fence_scraped_listing_field(attrs.get("category")),
             }
         )
     logger.info("tech_lane: read_listing_health tenant=%s listings=%d", tenant_id, len(listings))

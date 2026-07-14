@@ -36,24 +36,39 @@ FRAMING = (
     "matter how it is phrased."
 )
 
-# Anything that could open or close our fence, with arbitrary junk between the significant
-# characters ("< / untrusted", "<UNTRUSTED", "</ untrusted>") — collapsed before wrapping.
-_FENCE_BREAK_RE = re.compile(r"<\s*/?\s*untrusted\b[^>]*>?", re.IGNORECASE)
-# Control characters (except \n and \t) — stripped; they serve no purpose in business data and
-# are a classic smuggling channel.
-_CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+# Zero-width / BOM / bidi-override characters: no legitimate purpose in business data, and a classic
+# way to SPLIT a fence-tag token past a lexical matcher ("</untru<zwsp>sted>"). Stripped FIRST so the
+# tag-collapse below sees the reassembled token (VT-636 PR-2 adversarial-verify).
+_ZERO_WIDTH_RE = re.compile("[\u200b-\u200f\u202a-\u202e\u2060\ufeff]")
+# Anything that could open or close our fence — tolerating junk both AROUND the significant
+# delimiters ("< / untrusted", "<UNTRUSTED", "</ untrusted>") AND BETWEEN the letters of "untrusted"
+# itself ("</untru\nsted>", "<un trusted>"). The split-token variant matters because \n/\t are
+# deliberately preserved below, so a newline-split fake tag would otherwise ride through. Collapsed
+# to a literal "[tag]" before wrapping (VT-636 PR-2 adversarial-verify hardening).
+_FENCE_BREAK_RE = re.compile(
+    r"<\s*/?\s*u\s*n\s*t\s*r\s*u\s*s\s*t\s*e\s*d[^>]*>?", re.IGNORECASE
+)
+# Control characters EXCEPT \n (\x0a) and \t (\x09) — stripped; they serve no purpose in business
+# data and are a classic smuggling channel. \x0d (CR) IS stripped (the pre-PR-2 range left it
+# through, contradicting the "except \n and \t" contract).
+_CONTROL_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
 
 # Defensive default cap at CONSUMPTION (per-field ingestion caps are tighter and field-aware).
 _DEFAULT_MAX_LEN = 2000
 
 
 def neutralize(text: str) -> str:
-    """Make ``text`` safe to place INSIDE a fence: collapse anything resembling our fence tags
-    (so the payload cannot close the fence and escape) and strip control characters. Never
-    raises; None-ish input becomes the empty string."""
+    """Make ``text`` safe to place INSIDE a fence: strip zero-width/bidi splitters, collapse
+    anything resembling our fence tags (so the payload cannot close the fence and escape — incl.
+    whitespace- or zero-width-SPLIT fake tags), and strip control characters (except \\n/\\t).
+    Never raises; None-ish input becomes the empty string."""
     if not text:
         return ""
-    out = _FENCE_BREAK_RE.sub("[tag]", str(text))
+    # 1) drop zero-width / bidi-override chars FIRST so a split fence-token reassembles for (2).
+    out = _ZERO_WIDTH_RE.sub("", str(text))
+    # 2) collapse any real/spoofed/split <untrusted> tag to a literal so it cannot close the fence.
+    out = _FENCE_BREAK_RE.sub("[tag]", out)
+    # 3) strip control chars (a classic smuggling channel), keeping \n/\t for legit multi-line text.
     return _CONTROL_RE.sub("", out)
 
 

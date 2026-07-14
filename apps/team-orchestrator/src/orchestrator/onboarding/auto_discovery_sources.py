@@ -32,6 +32,10 @@ _GST_COST_USD = 0.0
 # enough to cover a phonetic near-miss ranking above the real listing without inflating the prompt;
 # the Apify actor is bounded to the same N so the per-run cost stays ~_GBP_COST_USD (one search).
 _GBP_MAX_CANDIDATES = 5
+# VT-636 — GBP candidate title/category/address/website are Maps-SCRAPE fields (attacker-writable:
+# any owner can set their own listing text to anything). Cap at ingestion, defense-in-depth ahead of
+# the ``entity_resolution._default_adjudicate`` fence (which caps again at consumption).
+_GBP_CANDIDATE_FIELD_MAX_LEN = 200
 _HTTP_TIMEOUT = 20.0
 _WEBSITE_MAX_CHARS = 12000  # cap the page text fed to the LLM (cost + prompt-injection surface)
 _WEBSITE_MAX_BYTES = 3_000_000  # cap the response body fetched (DoS/cost)
@@ -174,6 +178,14 @@ def discover_gbp(
     return SourceResult("gbp", "ok" if fields else "empty", cost_usd=cost, fields=fields, website=website)
 
 
+def _cap_field(value: Any) -> str | None:
+    """Length-cap a raw GBP scrape field at ingestion (VT-636 defense-in-depth). Non-str/empty
+    passes through as-is (the dataclass's existing None-ness contract is untouched)."""
+    if not isinstance(value, str) or not value:
+        return value
+    return value[:_GBP_CANDIDATE_FIELD_MAX_LEN]
+
+
 def _to_candidates(items: list[dict[str, Any]]) -> list[Any]:
     """Map the GBP actor's top-N place dicts to entity_resolution ``GbpCandidate``s (index = rank)."""
     from orchestrator.onboarding.entity_resolution import GbpCandidate
@@ -185,11 +197,11 @@ def _to_candidates(items: list[dict[str, Any]]) -> list[Any]:
         out.append(
             GbpCandidate(
                 index=i,
-                title=place.get("title"),
-                category=place.get("categoryName"),
-                address=place.get("address") or place.get("street"),
-                city=place.get("city"),
-                website=place.get("website") or place.get("url"),
+                title=_cap_field(place.get("title")),
+                category=_cap_field(place.get("categoryName")),
+                address=_cap_field(place.get("address") or place.get("street")),
+                city=_cap_field(place.get("city")),
+                website=_cap_field(place.get("website") or place.get("url")),
             )
         )
     return out

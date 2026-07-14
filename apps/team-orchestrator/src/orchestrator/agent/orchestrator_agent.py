@@ -61,12 +61,23 @@ from orchestrator.observability.l0_memory import (
     query_l0 as _query_l0_impl,
     write_l0_fragment as _write_l0_fragment_impl,
 )
+from orchestrator.security.prompt_quarantine import FRAMING
 from orchestrator.types.trigger_reason import TriggerReason
 
 logger = logging.getLogger("orchestrator.agent")
 
 _PROMPT_PATH = Path(__file__).parent.parent / "prompts" / "orchestrator_agent_system.md"
 ORCHESTRATOR_AGENT_SYSTEM_PROMPT = _PROMPT_PATH.read_text(encoding="utf-8")
+
+# VT-636 — the manager's own advisory tools (``read_listing_health`` et al., always bound via
+# ``advisory_registry.ADVISORY_TOOLS``) return GBP/Swiggy-SCRAPED ``name``/``category`` values
+# fenced at the tool-result seam (``agent/tech_lane.py``). The framing that tells the model those
+# fences are DATA, never instructions, renders ONCE here — the manager's always-on system prompt —
+# guarded so a future edit to the .md source can never duplicate it.
+if FRAMING not in ORCHESTRATOR_AGENT_SYSTEM_PROMPT:
+    ORCHESTRATOR_AGENT_SYSTEM_PROMPT = (
+        f"{ORCHESTRATOR_AGENT_SYSTEM_PROMPT}\n\n## Untrusted tool-result data\n\n{FRAMING}\n"
+    )
 
 # VT-194 prompt caching: wrap the system prompt in a SystemMessage whose
 # content is a structured block list carrying ``cache_control:

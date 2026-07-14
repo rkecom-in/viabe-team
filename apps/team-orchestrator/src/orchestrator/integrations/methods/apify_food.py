@@ -45,6 +45,7 @@ from anthropic import Anthropic
 
 from orchestrator.integrations.methods._image_adapter import IngestionSummary
 from orchestrator.knowledge.l1 import upsert_business_profile
+from orchestrator.security.prompt_quarantine import FRAMING, fence
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +57,9 @@ _SWIGGY_ACTOR = "thirdwatch~swiggy-scraper"  # VT-110: the account's real Swiggy
 _ZOMATO_ACTOR = "easyapi~zomato-restaurant-reviews-scraper"
 _TOKEN_ENV = "APIFY_API_TOKEN"
 _MAX_OUTPUT_TOKENS = 1024
+# VT-636: attacker-writable (Zomato reviewText is public, third-party-authored). Ingestion-time
+# cap (defense-in-depth); the theme-LLM consumption site fences + caps again (fence(..., max_len=500)).
+_REVIEW_TEXT_MAX_LEN = 1000
 
 # (actor_id, run_input, token) -> dataset items.
 FetchFn = Callable[[str, dict[str, Any], str], list[dict[str, Any]]]
@@ -214,6 +218,21 @@ def _resolve_theme_model() -> str:
     return cast(str, config["zomato_theme_extraction"][slot])
 
 
+def _build_theme_prompt(base: str, review_texts: list[str]) -> str:
+    """Render the theme-clustering user-content text.
+
+    VT-636: ``review_texts`` is attacker-writable (public Zomato reviewText — any third party
+    can post one). Each review is fenced individually before joining; ``FRAMING`` is added ONCE
+    at the top of this (self-contained) prompt. The theme-clustering instruction text (``base``
+    / the "REVIEW TEXTS:" label) stays OUTSIDE the fence — only the reviews themselves are
+    untrusted data.
+    """
+    fenced = "\n".join(
+        f"- {fence(t, source='review_text', max_len=500)}" for t in review_texts if t
+    )
+    return f"{FRAMING}\n\n{base}\n\nREVIEW TEXTS:\n{fenced}\n"
+
+
 def _default_themes(review_texts: list[str]) -> list[dict[str, Any]]:
     """LLM theme clustering over IDENTITY-STRIPPED review text → abstract labels."""
     if not review_texts:
@@ -221,11 +240,10 @@ def _default_themes(review_texts: list[str]) -> list[dict[str, Any]]:
     client = Anthropic()
     model = _resolve_theme_model()
     base = _THEME_PROMPT.read_text(encoding="utf-8")
-    joined = "\n".join(f"- {t}" for t in review_texts if t)
+    text = _build_theme_prompt(base, review_texts)
     resp = client.messages.create(
         model=model, max_tokens=_MAX_OUTPUT_TOKENS,
-        messages=[{"role": "user", "content": [
-            {"type": "text", "text": f"{base}\n\nREVIEW TEXTS:\n{joined}\n"}]}],
+        messages=[{"role": "user", "content": [{"type": "text", "text": text}]}],
     )
     raw = "".join(
         getattr(b, "text", "") for b in resp.content if getattr(b, "type", "") == "text"
@@ -287,7 +305,7 @@ def ingest_zomato(
         ratings.append(_zomato_review_rating(it))
         txt = it.get("reviewText") or it.get("text") or it.get("review")
         if txt:
-            texts.append(str(txt))
+            texts.append(str(txt)[:_REVIEW_TEXT_MAX_LEN])
 
     rated = [r for r in ratings if r > 0]
     overall_rating = round(sum(rated) / len(rated), 2) if rated else None

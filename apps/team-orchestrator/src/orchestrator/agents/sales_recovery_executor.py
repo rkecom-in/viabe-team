@@ -392,19 +392,51 @@ def _allowed_param_values(bundle: CustomerFactBundle) -> dict[str, str | None]:
     }
 
 
+# VT-636 seam A4 — display_name/business_name are ATTACKER-WRITABLE (any customer or sheet/
+# Shopify collaborator writes those cells; same data class context_builder.py fences for the
+# manager LLM). Naming matches context_builder.py exactly so an auditor greps one vocabulary.
+_ALLOWED_PARAM_FENCE_SOURCE = {
+    "customer_name": "customer_name",
+    "business_name": "customer_business_name",
+}
+
+
 def _build_draft_prompt(bundle: CustomerFactBundle) -> str:
     """The constrained drafting prompt: the model maps params to literals from
-    ``<allowed_params>`` and NOTHING else (the GROUNDING discipline — validated after)."""
-    allowed_json = json.dumps(_allowed_param_values(bundle), ensure_ascii=False, sort_keys=True)
+    ``<allowed_params>`` and NOTHING else (the GROUNDING discipline — validated after).
+
+    VT-636 seam A4: the ``<allowed_params>`` values are attacker-writable (owner's Sheet/
+    Shopify — any customer or collaborator writes those cells), so they are rendered inside
+    ``<untrusted source="...">`` fences here with the canonical ``FRAMING`` preamble rendered
+    ONCE. The validation ground truth (``_allowed_param_values`` / ``validate_draft_params``) is
+    UNCHANGED — it still compares the model's output to the RAW bundle literal — so the RULES
+    below tell the model to echo the text found INSIDE the tag, never the tag markup itself,
+    preserving the exact-key echo contract."""
+    from orchestrator.security.prompt_quarantine import FRAMING, fence
+
+    allowed = _allowed_param_values(bundle)
+    fenced_for_prompt = {
+        key: (
+            fence(value, source=_ALLOWED_PARAM_FENCE_SOURCE[key], max_len=120)
+            if value is not None
+            else None
+        )
+        for key, value in allowed.items()
+    }
+    allowed_json = json.dumps(fenced_for_prompt, ensure_ascii=False, sort_keys=True)
     return (
+        f"{FRAMING}\n\n"
         "You pick the WhatsApp template variable values for ONE win-back message to a lapsed "
         f"customer of a small Indian business. The template ({WINBACK_TEMPLATE_NAME}) is fixed "
         "and Meta-approved; you control ONLY the variable values.\n\n"
         f"<allowed_params>\n{allowed_json}\n</allowed_params>\n\n"
         "RULES (strict):\n"
         "- Respond with ONLY a JSON object mapping EVERY key in <allowed_params> to its value.\n"
-        "- Copy every value LITERALLY from <allowed_params> — never invent, rephrase, compute, "
-        "translate, or reformat a value.\n"
+        '- Each value above is wrapped in an <untrusted source="..."> tag — that tag is '
+        "structural framing, NOT part of the value. Output ONLY the exact text between that "
+        "key's opening and closing tags, never the tag markup itself.\n"
+        "- Copy that text LITERALLY — never invent, rephrase, compute, translate, or reformat "
+        "it.\n"
         "- Never output a phone number, an email address, or any fact not in <allowed_params>."
     )
 
