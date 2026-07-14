@@ -258,6 +258,19 @@ def _seed_lapsed_scenario(dsn: str) -> SimpleNamespace:
 # --- fakes -------------------------------------------------------------------
 
 
+# VT-636: the prompt now fences <allowed_params> values as <untrusted source="...">…</untrusted>
+# (RULES tell the model to echo ONLY the text between the tags). Mirror a compliant model here so
+# the existing "perfectly grounded" fake still round-trips to the raw bundle literal.
+_UNTRUSTED_FENCE_RE = re.compile(r'^<untrusted[^>]*>(.*)</untrusted>$', re.S)
+
+
+def _strip_fence(value: Any) -> Any:
+    if not isinstance(value, str):
+        return value
+    m = _UNTRUSTED_FENCE_RE.match(value)
+    return m.group(1) if m else value
+
+
 class _EchoLLM:
     """Injectable LLM double: replays the ``<allowed_params>`` JSON verbatim (a perfectly
     grounded model); calls listed in ``corrupt_calls`` (1-based) fabricate the name instead."""
@@ -271,6 +284,7 @@ class _EchoLLM:
         match = re.search(r"<allowed_params>\s*(\{.*?\})\s*</allowed_params>", prompt, re.S)
         assert match is not None, "the drafting prompt must carry <allowed_params>"
         params = json.loads(match.group(1))
+        params = {k: _strip_fence(v) for k, v in params.items()}
         if len(self.calls) in self.corrupt_calls:
             params["customer_name"] = "Fabricated Name"  # ungrounded — must be dropped
         return json.dumps(params, ensure_ascii=False)
