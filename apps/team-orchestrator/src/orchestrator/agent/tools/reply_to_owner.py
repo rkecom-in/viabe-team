@@ -173,11 +173,6 @@ def reply_to_owner(text: str, state: Annotated[dict[str, Any], InjectedState]) -
     # reached them — return a corrective ``sent_adjusted`` result below so the brain does the work or
     # states the true status instead of re-claiming "done".
     gate_swapped = gated != body
-    if gate_swapped:  # VT-640-DIAG (dev only; REMOVE after multi_field root-cause)
-        logger.warning(
-            "VT-640-DIAG reply_to_owner gate SWAPPED (tenant=%s) pre_gate=%r post=%r",
-            tenant_id, body[:200], gated[:120],
-        )
     body = gated
 
     # Recipient resolved SERVER-SIDE — the model never supplies a number.

@@ -1491,13 +1491,7 @@ def _maybe_send_manager_reply(
     # send (kills the fabrication as a CLASS, not just the one observed case).
     from orchestrator.agent.emission_gate import apply_emission_gate
 
-    _pre_gate = body
     body = apply_emission_gate(body, tenant_id)
-    if body != _pre_gate:  # VT-640-DIAG (dev only; REMOVE after multi_field root-cause)
-        logger.warning(
-            "VT-640-DIAG scrape-path gate SWAPPED (tenant=%s path=%s) pre_gate=%r post=%r",
-            tenant_id, path, _pre_gate[:200], body[:120],
-        )
 
     try:
         from orchestrator.owner_surface.freeform_acks import send_freeform_ack
