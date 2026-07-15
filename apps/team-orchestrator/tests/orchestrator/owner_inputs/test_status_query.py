@@ -224,3 +224,69 @@ def test_vt641_devanagari_plain_count_still_customer_count() -> None:
 def test_vt641_devanagari_inactive_token_lapsed_count() -> None:
     """VT-641 — a Devanagari explicit-dormancy token (निष्क्रिय) routes to lapsed_count."""
     assert sq.classify_status_query("कितने ग्राहक निष्क्रिय हैं?") == "lapsed_count"
+
+
+# ----------------------------- B1/j04: top-customers-by-spend routing + render -----------------------------
+def test_classify_top_spend_ranking_asks() -> None:
+    for msg in [
+        "who are my top customers?",
+        "Who are my top customers by total spend?",
+        "show me my most valuable customers",
+        "biggest spenders",
+        "which are my highest value customers",
+        "kaun mere sabse zyada value wale customers hain",
+    ]:
+        assert sq.classify_status_query(msg) == "top_spend", msg
+
+
+def test_classify_top_spend_not_hijacked_by_a_stray_revenue_window() -> None:
+    # B1 root cause: a revenue time-window in the same message must NOT synthesize a dormancy route.
+    assert sq.classify_status_query(
+        "I've only had 2 sales in 90 days. Who are my top customers?"
+    ) == "top_spend"
+
+
+def test_classify_top_spend_yields_to_dormancy() -> None:
+    # A dormancy-framed ranking is NOT top_spend (a lapsed question owns it, not a value ranking).
+    assert sq.classify_status_query("top customers who haven't ordered in a while") != "top_spend"
+
+
+def test_inactivity_cue_bare_day_window_needs_a_dormancy_cocue() -> None:
+    # The bare digit+day-unit recency rule (sole consumer: lapsed_list) no longer fires alone.
+    assert sq._has_inactivity_cue("2 sales in 90 days", {"2", "sales", "in", "90", "days"}) is False
+    # ...but a genuine "in N days" dormancy ask (purchase + negation, or an elapsed-since phrasing) does.
+    assert sq._has_inactivity_cue(
+        "no order in 90 days", {"no", "order", "in", "90", "days"}
+    ) is True
+    assert sq._has_inactivity_cue("90 days since last visit", {"90", "days", "last", "visit"}) is True
+
+
+class _FakeTopCW:
+    def __init__(self, *, total: int, rows: list) -> None:
+        self._total = total
+        self._rows = rows
+
+    def count_all(self, _tid: object) -> int:
+        return self._total
+
+    def top_customers_by_spend(self, _tid: object, *, limit: int, conn: object = None) -> list:  # noqa: ARG002
+        return self._rows[:limit]
+
+
+def test_top_spend_render_is_rupee_ranking_no_names(monkeypatch: pytest.MonkeyPatch) -> None:
+    import orchestrator.db.wrappers as w
+    rows = [{"spend_paise": 185000, "display_name": "Asha", "phone_e164": "+15550001"},
+            {"spend_paise": 120000, "display_name": "Ravi", "phone_e164": "+15550002"}]
+    monkeypatch.setattr(w, "CustomersWrapper", lambda: _FakeTopCW(total=10, rows=rows))
+    ans = sq.answer_status_query(_TID, "who are my top customers by spend?")
+    assert "₹1,850" in ans and "₹1,200" in ans      # rupee ranking surfaced
+    assert "10 customers" in ans                     # total grounded
+    assert "Asha" not in ans and "Ravi" not in ans   # names Fazal-gated, never inlined
+    assert "+1555" not in ans                         # phone never leaks
+
+
+def test_top_spend_render_empty_is_honest(monkeypatch: pytest.MonkeyPatch) -> None:
+    import orchestrator.db.wrappers as w
+    monkeypatch.setattr(w, "CustomersWrapper", lambda: _FakeTopCW(total=0, rows=[]))
+    ans = sq.answer_status_query(_TID, "who are my top customers?")
+    assert "don't have enough" in ans.lower() or "connect" in ans.lower()
