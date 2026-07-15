@@ -482,6 +482,84 @@ def test_driver_sends_exactly_once_and_re_run_no_double_send(substrate, monkeypa
     assert out2.get("raced_out") == 1
 
 
+class _RaiseAtContactsInsert:
+    """A connection PROXY that simulates a crash AT the ``agent_customer_contacts`` INSERT (the last
+    statement inside the L2 draft->'sent' txn), delegating every other statement to the real
+    connection. VT-644: because the INSERT now runs INSIDE the flip txn, this failure rolls the flip
+    BACK — so ``draft_status`` stays 'drafted' (not 'sent'), the re-drive's draft_status early-out
+    (customer_send.py:510) does NOT fire, and the idempotent re-drive completes the contact-ledger row
+    with NO second wire send. (Pre-fix the INSERT ran as a separate autocommit AFTER the txn: the flip
+    committed 'sent', the INSERT crashed, and the re-drive early-out then lost the row permanently.)"""
+
+    _CONTACTS_INSERT = "INSERT INTO agent_customer_contacts"
+
+    def __init__(self, real: Any) -> None:
+        self._real = real
+
+    def execute(self, query: str, *args: Any, **kwargs: Any) -> Any:
+        if self._CONTACTS_INSERT in query:
+            raise RuntimeError("simulated crash at agent_customer_contacts INSERT")
+        return self._real.execute(query, *args, **kwargs)
+
+    def __getattr__(self, name: str) -> Any:  # delegate transaction()/cursor()/commit()/… to the real conn
+        return getattr(self._real, name)
+
+
+@pytest.mark.usefixtures("armed_registry")
+def test_crash_at_contacts_insert_rolls_back_flip_then_redrive_completes(substrate, monkeypatch):  # type: ignore[no-untyped-def]
+    """VT-644 crash-injection — THE atomicity regression guard for the frequency-cap suppression row.
+
+    A crash AT the ``agent_customer_contacts`` INSERT must roll the draft->'sent' flip BACK, so the
+    suppression-ledger row is never permanently lost. Then a clean re-drive (the DBOS step retry)
+    completes flip+contacts with NO second wire send (send_whatsapp_template's ledger idempotency).
+    If the INSERT is ever moved back OUTSIDE the flip txn, the first assertion (draft still 'drafted')
+    fails — the draft would be 'sent' with the ledger row gone, and the re-drive early-out at
+    customer_send.py:510 would strand it."""
+    s = _approved_l2_stack(substrate.dsn, with_consent_version="vt644-crash-v1")
+    monkeypatch.setattr(
+        customer_send, "_marketing_consent_versions", lambda: frozenset({"vt644-crash-v1"})
+    )
+    send_fn = _RecordingCustomerSend()
+
+    import contextlib
+
+    import orchestrator.agents.customer_send as cs
+
+    real_tc = cs.tenant_connection
+
+    @contextlib.contextmanager
+    def _wrapping_tc(tenant_id, *a, **k):  # noqa: ANN001, ANN202
+        with real_tc(tenant_id, *a, **k) as real_conn:
+            yield _RaiseAtContactsInsert(real_conn)
+
+    # --- First drive: the wire send fires, then the contacts INSERT crashes inside the flip txn.
+    monkeypatch.setattr(cs, "tenant_connection", _wrapping_tc)
+    with pytest.raises(RuntimeError, match="crash at agent_customer_contacts"):
+        _drive(s, send_fn)
+
+    assert len(send_fn.calls) == 1, "the wire send must have fired exactly once before the crash"
+    assert _draft_row(substrate.dsn, s.tenant, s.draft)[0] == "drafted", (
+        "ATOMICITY BREACH — the draft is 'sent' but the contact-ledger INSERT never committed; the "
+        "flip must roll back WITH the INSERT (VT-644) so the re-drive is not short-circuited"
+    )
+    assert _customer_contacts(substrate.dsn, s.tenant) == 0
+    # The idempotency ledger IS 'sent' — it committed in the wire-send txn, upstream of the flip txn.
+    ledger = _idempotency_rows(substrate.dsn, s.tenant, s.draft)
+    assert len(ledger) == 1 and ledger[0][0] == "sent", f"expected one 'sent' ledger row: {ledger}"
+
+    # --- Re-drive with the crash cleared (the DBOS step retry): completes flip+contacts, NO 2nd send.
+    monkeypatch.setattr(cs, "tenant_connection", real_tc)
+    _drive(s, send_fn)
+    assert len(send_fn.calls) == 1, (
+        f"DOUBLE-SEND on recovery — the re-drive re-hit the transport: {send_fn.calls}"
+    )
+    assert _draft_row(substrate.dsn, s.tenant, s.draft)[0] == "sent"
+    assert _customer_contacts(substrate.dsn, s.tenant) == 1, (
+        "the suppression-ledger row must be written on the idempotent re-drive (VT-644 recovery)"
+    )
+    assert len(_idempotency_rows(substrate.dsn, s.tenant, s.draft)) == 1, "no duplicate ledger row"
+
+
 @pytest.mark.usefixtures("armed_registry")
 def test_re_select_drafted_draft_hits_ledger_no_double_send(substrate, monkeypatch):  # type: ignore[no-untyped-def]
     """The harder no-double-send case: the batch is STILL 'approved' on re-run AND the draft is
