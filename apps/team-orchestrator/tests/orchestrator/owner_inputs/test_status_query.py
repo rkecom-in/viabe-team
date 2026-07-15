@@ -246,9 +246,39 @@ def test_classify_top_spend_not_hijacked_by_a_stray_revenue_window() -> None:
     ) == "top_spend"
 
 
+def test_classify_top_spend_with_order_metric_and_revenue_backref() -> None:
+    # VT-643 j04 run-2 (deployed dev, slipped past the "sales"-only revenue test): a top-value ask
+    # whose ranking metric is "order count" and which back-references the prior revenue turn ("₹220
+    # for 90 days") must stay top_spend. Regression: "order" (a RANKING dimension) + "90 days" (a
+    # revenue back-reference, no negation/elapsed-since) previously tripped the recency inactivity
+    # cue -> lapsed_list. A bare purchase word no longer co-qualifies the day-window as dormancy.
+    assert sq.classify_status_query(
+        "wait ₹220 total for 90 days? that seems way off but ok, separate issue. pull up my top "
+        "customers by total spend / order count - who are my most valuable ones right now"
+    ) == "top_spend"
+
+
 def test_classify_top_spend_yields_to_dormancy() -> None:
     # A dormancy-framed ranking is NOT top_spend (a lapsed question owns it, not a value ranking).
     assert sq.classify_status_query("top customers who haven't ordered in a while") != "top_spend"
+
+
+def test_classify_top_spend_with_unbound_negation_and_purchase_source() -> None:
+    # VT-643 j04 run-3 (deployed dev): "top customers by total spend - actual numbers from order
+    # history, not estimates" — 'not' negates 'estimates', NOT 'ordered'; 'order history' is a ranking
+    # SOURCE. The old bare (purchase & negation) set-cue over-fired -> customer_count. Adjacency binds
+    # them now, so this stays a deterministic top_spend (never left to the brain to answer by luck).
+    assert sq.classify_status_query(
+        "ok fine, tell me who my top customers are by total spend - actual numbers from order "
+        "history, not estimates"
+    ) == "top_spend"
+
+
+def test_adjacent_negation_purchase_binds_the_verb() -> None:
+    # A negation must NEIGHBOR the purchase word to signal dormancy (money-adjacent: feeds lapsed_count).
+    assert sq._adjacent_negation_purchase("order nahi kiya") is True       # Hinglish "didn't order"
+    assert sq._adjacent_negation_purchase("customers who have not bought") is True
+    assert sq._adjacent_negation_purchase("order history, not estimates") is False  # unrelated 'not'
 
 
 def test_inactivity_cue_bare_day_window_needs_a_dormancy_cocue() -> None:
