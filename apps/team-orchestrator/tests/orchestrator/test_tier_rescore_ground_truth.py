@@ -47,3 +47,55 @@ def test_journey_draft_still_renders_without_connector_line():
     assert block is not None
     assert "city='Pune'" in block
     assert "google_sheet' connector" not in block
+
+
+def test_vt641_ground_truth_grounds_recovery_rupee_estimate():
+    """VT-641 instrument — the seed writes a per-customer past-order amount, so a recovery ₹ range
+    derived from order sizes must be declared GROUNDED (kills the ₹250-750 fabrication FP)."""
+    block = tr._render_ground_truth_block(
+        {"setup_args": ["--onboarded", "--seed-lapsed-customers", "8"]}
+    )
+    assert block is not None
+    assert "past order" in block.lower()
+    assert "recovery" in block.lower() and "grounded" in block.lower()
+
+
+def test_vt641_render_transcript_dedups_relisted_sids():
+    """VT-641 instrument — the late-reply-sweep re-lists turns with IDENTICAL message_sids; the
+    rendered transcript must show each real message ONCE (kills the loop_stall FP)."""
+    entry = {
+        "name": "j_x",
+        "steps": [
+            {"transcript": [
+                {"role": "owner", "text": "kitne lapsed?", "message_sid": "SMa"},
+                {"role": "assistant", "text": "6 lapsed.", "message_sid": "MKb"},
+                {"role": "system", "text": "[internal route: none]", "message_sid": None},
+                {"role": "owner", "text": "draft banao", "message_sid": "SMc"},
+                {"role": "assistant", "text": "drafted.", "message_sid": "MKd"},
+                # late-reply-sweep re-lists turn 1 with the SAME sids (the artifact):
+                {"role": "owner", "text": "kitne lapsed?", "message_sid": "SMa"},
+                {"role": "assistant", "text": "6 lapsed.", "message_sid": "MKb"},
+            ]}
+        ],
+    }
+    rendered = tr.render_transcript_for_judge(entry)
+    assert rendered.count("6 lapsed.") == 1, rendered
+    assert rendered.count("kitne lapsed?") == 1, rendered
+    # a GENUINE new message (distinct sid) is preserved
+    assert rendered.count("drafted.") == 1
+
+
+def test_vt641_render_transcript_keeps_genuine_distinct_repeat():
+    """A real duplicate emission carries a DIFFERENT sid, so a genuine loop_stall is still surfaced."""
+    entry = {
+        "name": "j_y",
+        "steps": [
+            {"transcript": [
+                {"role": "assistant", "text": "6 lapsed.", "message_sid": "MK1"},
+                {"role": "owner", "text": "aur?", "message_sid": "SM2"},
+                {"role": "assistant", "text": "6 lapsed.", "message_sid": "MK3"},
+            ]}
+        ],
+    }
+    rendered = tr.render_transcript_for_judge(entry)
+    assert rendered.count("6 lapsed.") == 2, rendered

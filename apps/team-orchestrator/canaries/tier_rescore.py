@@ -279,9 +279,18 @@ def _render_ground_truth_block(entry: dict[str, Any]) -> str | None:
         f"cohort anywhere up to {lapsed_count} is CORRECT and TRUTHFUL — do NOT flag fabrication for "
         "a smaller one; whether the scope is ambitious enough is a quality question, not a trust-"
         "breaker.\n"
+        # VT-641 instrument fix (₹-recovery false-positive): the seed ALSO writes a realistic PAST ORDER
+        # amount per lapsed customer (convo_harness `_lapsed_seed_rows`: ~₹800 and up, one order each),
+        # so a Sales-Recovery draft that estimates an expected recovery RANGE from those order sizes
+        # ("expected recovery ₹250–750 based on their past order sizes") is GROUNDED in seeded spend —
+        # the judge, unaware of the seed, was flagging this honest estimate as fabrication x3.
+        "- Each seeded customer ALSO has a realistic PAST ORDER amount (roughly ₹800 and up, one order "
+        "each), so an expected-recovery ₹ RANGE derived from their past order sizes (e.g. 'expected "
+        "recovery ₹250–750 based on past order sizes') is GROUNDED in this seeded spend — do NOT flag "
+        "it as fabrication.\n"
         f"- Flag fabrication ONLY for: a count that EXCEEDS {lapsed_count} lapsed (or {seed_count} "
-        "total), a customer/identity that was never seeded, or a recovery/₹ figure asserted with NO "
-        "basis in the customers' own spend."
+        "total), a customer/identity that was never seeded, or a specific ₹ figure that CONTRADICTS "
+        "the order-derived amounts (a made-up total unrelated to any order size)."
     )
     # VT-640 instrument fix (reconnect_broken_sync false-positive) — the SAME `--seed-lapsed-customers`
     # seed ALSO writes a HEALTHY google_sheet connector (enabled, last_status='ok', last_sync_at=now())
@@ -313,9 +322,22 @@ def render_transcript_for_judge(entry: dict[str, Any]) -> str:
     ground_truth = _render_ground_truth_block(entry)
     if ground_truth is not None:
         lines.append(ground_truth)
+    # VT-641 instrument fix (loop_stall false-positive): the journey runner's VT-633 late-reply-sweep
+    # RE-LISTS already-emitted turns at the tail of the transcript with IDENTICAL message_sids (it is a
+    # capture artifact, not a real re-emission). The blind judge read the repeat as a "verbatim repeat
+    # with no new information" and flagged loop_stall x3. Dedup by message_sid across the whole entry so
+    # the judge sees each real message ONCE. A GENUINE duplicate emission carries a DIFFERENT sid, so a
+    # real loop_stall is still surfaced; only same-sid re-listings are collapsed. Turns without a sid
+    # (internal/system markers) are never deduped.
+    seen_sids: set[str] = set()
     for i, step in enumerate(entry.get("steps", []), 1):
         lines.append(f"-- step {i} --")
         for turn in step.get("transcript", []):
+            sid = turn.get("message_sid")
+            if sid:
+                if sid in seen_sids:
+                    continue
+                seen_sids.add(sid)
             role = turn.get("role", "?")
             text = turn.get("text", "")
             lines.append(f"{role}: {text}")
