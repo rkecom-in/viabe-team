@@ -130,6 +130,23 @@ def _has_list_cue(norm: str, tokens: set[str]) -> bool:
     return _km.contains_any(norm, _DEV_LIST_CUE_PATS)  # VT-641
 
 
+def _adjacent_negation_purchase(norm: str) -> bool:
+    """VT-643 — True iff a NEGATION token IMMEDIATELY neighbors a PURCHASE token in the ordered
+    stream ("order nahi kiya", "not bought", "haven't ordered"). The negation must BIND the purchase
+    verb to signal dormancy; a bare set co-occurrence over-fires on a ranking ask whose negation is
+    about something else ("top customers by ... order history, not estimates" — j04 run-3 dev, where
+    'not' negates 'estimates', not 'ordered'). Devanagari-safe (operates on already-NFC-normalized
+    tokens; the split mirrors ``classify_status_query``)."""
+    toks = [t for t in re.split(r"[\s,.!?;:।/\\-]+", norm) if t]
+    for i, t in enumerate(toks):
+        if t in _PURCHASE_TOKENS and (
+            (i > 0 and toks[i - 1] in _NEGATION_TOKENS)
+            or (i + 1 < len(toks) and toks[i + 1] in _NEGATION_TOKENS)
+        ):
+            return True
+    return False
+
+
 def _has_inactivity_cue(norm: str, tokens: set[str]) -> bool:
     """True iff the message frames customers as DORMANT — an explicit lapsed/dormant token, a
     'stopped/haven't ordered' negated-purchase phrase, or a recency framing ('60 din se', 'over 90
@@ -140,20 +157,27 @@ def _has_inactivity_cue(norm: str, tokens: set[str]) -> bool:
         return True
     if "stopped" in tokens and (_PURCHASE_TOKENS & tokens):
         return True
-    # a negation adjacent (same message) to a purchase word — "order nahi kiya", "not bought"
-    if (_PURCHASE_TOKENS & tokens) and (_NEGATION_TOKENS & tokens):
+    # a negation ADJACENT (bound to) a purchase word — "order nahi kiya", "not bought". VT-643: this
+    # was a bare set-intersection (co-occurrence), which over-fired on a top-spend ranking ask whose
+    # negation was unrelated to the purchase word ("order history, not estimates"). Now it requires
+    # the negation to immediately neighbor the purchase token, matching this comment's long-stated intent.
+    if _adjacent_negation_purchase(norm):
         return True
     # recency framing: a number + a day/month unit ("60 din se zyada", "over 90 days"). B1/j04 — a
     # bare count window alone does NOT frame dormancy: "top customers — I've only had 2 sales in 90
     # days" is a REVENUE window, not a "who's gone quiet" ask, yet it used to synthesize a lapsed_list
-    # route (this cue's sole consumer). Require the window to co-occur with a purchase/negation token
-    # or an explicit elapsed-since phrasing, so only a genuine "... in N days" dormancy ask routes here.
+    # route (this cue's sole consumer). Require the window to co-occur with a NEGATION token or an
+    # explicit elapsed-since phrasing, so only a genuine "... in N days" dormancy ask routes here.
+    # VT-643 fix (j04 run-2 dev): a bare PURCHASE word must NOT co-qualify — "top customers by total
+    # spend / order count ... ₹220 for 90 days" carries "order" as a RANKING dimension + a revenue
+    # back-reference, not dormancy. A real "hasn't ordered in 90 days" ask already carries a negation
+    # (line above) or "haven't/hasn't/didn't" / "din se" — those still route here; the pure-positive
+    # "ordered in 90 days" is ACTIVITY, never dormancy, so it must not synthesize a lapsed route.
     if (
         bool(_DAY_UNIT_TOKENS & tokens)
         and any(t.isdigit() for t in tokens)
         and (
-            bool(_PURCHASE_TOKENS & tokens)
-            or bool(_NEGATION_TOKENS & tokens)
+            bool(_NEGATION_TOKENS & tokens)
             or any(p in norm for p in ("since", "ago", "din se", "se zyada", "last visit", "last order"))
         )
     ):
