@@ -258,8 +258,10 @@ def triage_seam(
         try:
             from orchestrator.onboarding.campaign_first_contact import (
                 EMPTY_COHORT_REPLY,
+                LIST_SEND_ACK_PREAMBLE,
                 campaign_cohort_is_empty,
                 is_campaign_plan_imperative,
+                mentions_customer_list_request,
             )
 
             if is_campaign_plan_imperative(message_text):
@@ -297,8 +299,19 @@ def triage_seam(
                         decision={"message_sid": message_sid, "task_id": str(camp_task_id)},
                     )
                     start_manager_task_workflow(tenant_id, camp_task_id)
+                    # VT-642 — if the SAME message also asked to be SENT THE LIST / the names, the
+                    # async SR draft answers only the campaign half and drops the list-send half (a
+                    # Tier-1 ignored_speech_act, journey j08). We can't attach individual names in chat
+                    # yet (CD2/VT-79), so ride an honest can't-attach-yet ack (replay-safe direct reply)
+                    # ALONGSIDE the draft — the money gates are untouched (this is a reply string only).
+                    list_ack = (
+                        LIST_SEND_ACK_PREAMBLE
+                        if mentions_customer_list_request(message_text)
+                        else None
+                    )
                     return TriageSeamResult(
                         outcome="new_task", task_id=camp_task_id, skip_legacy_dispatch=True,
+                        direct_reply_text=list_ack,
                     )
                 # create_plan didn't admit 'planned' — fall through to triage_turn (never silent).
         except Exception:  # noqa: BLE001 — the D3 net must never block the turn (fail-open)

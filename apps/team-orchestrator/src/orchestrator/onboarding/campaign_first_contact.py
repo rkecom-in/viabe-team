@@ -158,6 +158,48 @@ def is_campaign_plan_imperative(text: str) -> bool:
         return False
 
 
+# VT-642 — a co-present "send me the LIST / the names" ask inside a win-back imperative. When the D3
+# net fires and drafts the campaign, the SR draft answers the CAMPAIGN half but silently DROPS the
+# list-send half (journey j08: "haan, वो लिस्ट भेज दो + ऑफर तैयार कर लो" -> only the draft, the list
+# request vanished = a Tier-1 ignored_speech_act). We cannot attach the individual customer names in
+# chat yet (the file-attachment path is CD2/VT-79, unbuilt), so the honest move is to ACKNOWLEDGE the
+# list-send request rather than drop it. This predicate flags the co-present list/names cue so the
+# caller can prepend an honest can't-attach-names-yet ack — the campaign draft still runs unchanged.
+_LIST_SEND_CUE_TOKENS = frozenset({"list", "lists", "names", "naam", "naams", "naamo"})
+# Devanagari list/names cues (ASCII \b is dead for matras — same VT-641 lesson; use keyword_match).
+_DEV_LIST_SEND_CUE_PATS = _km.boundary_patterns(("लिस्ट", "सूची", "नाम", "नामों", "नामो"))
+
+
+def mentions_customer_list_request(text: str) -> bool:
+    """True iff a win-back message ALSO asks to be sent/shown the customer LIST or NAMES.
+
+    Applied ONLY after ``is_campaign_plan_imperative`` already matched — it decides whether the
+    honest can't-attach-names-in-chat-yet acknowledgment (``LIST_SEND_ACK_PREAMBLE``) should ride
+    alongside the campaign draft, so a co-present list-send speech-act is never silently dropped
+    (CD2/VT-79 file-attachment is the real fix; this is the honest interim). EN + Hinglish +
+    Devanagari. FAIL-OPEN: any error -> False (no ack; the draft still runs, never blocks the turn)."""
+    try:
+        if not text or not text.strip():
+            return False
+        tokens = set(re.findall(r"[a-z]+", text.lower()))
+        if _LIST_SEND_CUE_TOKENS & tokens:
+            return True
+        return _km.contains_any(text, _DEV_LIST_SEND_CUE_PATS)
+    except Exception:  # noqa: BLE001 — a detector failure must never block the turn (fail-open)
+        logger.warning("D3 mentions_customer_list_request failed (fail-open -> False)", exc_info=True)
+        return False
+
+
+# The honest interim when the owner asks for the customer list inside a win-back imperative: we can't
+# attach the individual names in chat yet (CD2/VT-79), so we SAY so, confirm we have the cohort, bridge
+# to the draft the owner also asked for, and re-affirm the money gate (nothing sends without approval).
+LIST_SEND_ACK_PREAMBLE = (
+    "I can't send the individual customer names as a list here in chat just yet — but I've got your "
+    "lapsed cohort and I'm drafting the win-back offer for them now. You'll see it to approve in a "
+    "moment, and nothing goes out until you say so."
+)
+
+
 def campaign_cohort_is_empty(tenant_id: UUID | str) -> bool:
     """True iff the tenant has NO customer with any 'sale' ledger entry — i.e. there is literally
     no base to win back (an EMPTY customer ledger, distinct from "0 lapsed of N"). Reads the SAME
@@ -179,4 +221,10 @@ def campaign_cohort_is_empty(tenant_id: UUID | str) -> bool:
         return False
 
 
-__all__ = ["EMPTY_COHORT_REPLY", "campaign_cohort_is_empty", "is_campaign_plan_imperative"]
+__all__ = [
+    "EMPTY_COHORT_REPLY",
+    "LIST_SEND_ACK_PREAMBLE",
+    "campaign_cohort_is_empty",
+    "is_campaign_plan_imperative",
+    "mentions_customer_list_request",
+]
