@@ -1,0 +1,69 @@
+{
+  "_doc": "VT-648 acceptance gate for the LLM-primary send-intent classifier. Sourced from the F1 adversarial-verify (4 skeptics, 137 inputs, 2026-07-15). THE MONEY INVARIANT: nothing in must_not_approve may ever resolve to an approved customer send; everything in must_approve must resolve to approved. Fail-safe = re-ask/hold, never auto-send. Run every input through the send-intent decision (approve|reject|hold|None) and assert.",
+  "must_not_approve": {
+    "_why": "owner is asking / musing / deferring / referring to a past or different action / pausing — NOT authorizing THIS send. A false approve = an irreversible unconsented send.",
+    "inputs": [
+      "kya bhej du",
+      "क्या भेज दूं",
+      "kya abhi bhej du",
+      "should I bhej do",
+      "kaun sa bhej du",
+      "kitne baje bhej du",
+      "bhej du kya",
+      "theek hai lekin socho",
+      "theek hai dekh lenge",
+      "theek hai socho phir batao",
+      "proceed karne se pehle socho",
+      "send hold pe rakho",
+      "go slow",
+      "proceed with caution",
+      "main send ke baare me soch raha tha",
+      "pichla wala send kar diya tha",
+      "kal send kiya tha na",
+      "wo purana bhej diya tha",
+      "bhej ke kya milega socho",
+      "agar bhej dein toh",
+      "socho agar abhi bhej dein",
+      "maan lo bhej dena pade",
+      "haan theek hai jaise tumhe sahi lage",
+      "shayad bhej do dekhte hain baaki abhi confirm nahi kar sakta main filhaal",
+      "abhi mat bhejna ruk jao pehle mujhe ek baar aur draft dikhao poora",
+      "bhej do lekin sirf active customers ko discount wale ko mat bhejna abhi"
+    ]
+  },
+  "must_approve": {
+    "_why": "an unambiguous present-tense authorization to send THIS campaign now — long or short, EN/Hindi/Hinglish/Devanagari. A false None here = the emphatic-approval re-confirm loop (the j01 breaker).",
+    "inputs": [
+      "haan bhej do, final approval hai mera, abhi bhej de",
+      "bilkul bhej do bhai, maine soch liya hai, sab customers ko abhi ke abhi bhej do please",
+      "yes absolutely I completely authorize you to go ahead and proceed with dispatching this campaign to every customer right now please",
+      "yes go ahead and roll this campaign out to all of our customers immediately this is my final confirmation thank you so much",
+      "dispatch it now",
+      "dispatch the campaign now",
+      "bhijwa do",
+      "bhijwa dijiye",
+      "pahuncha do sabko",
+      "blast it out to everyone",
+      "roll it out now",
+      "fire it off",
+      "push it out now",
+      "chala do",
+      "bhejdijiye",
+      "भेजिए",
+      "haan bhej do",
+      "send it now",
+      "bhej do"
+    ]
+  },
+  "must_hold_or_defer": {
+    "_why": "genuinely ambiguous / temporal-pause / weak-ack / decline — never auto-send; hold (re-ask) or defer or reject. Regression guard for T5/T13/T17 + the money middle-path.",
+    "inputs": [
+      "abhi mat bhejna",
+      "theek hai",
+      "ok",
+      "mat bhejo",
+      "nahi ye mat bhejo galat hai isko cancel karo aur naya banao pehle",
+      "haan but discount wala mat bhejna"
+    ]
+  }
+}
