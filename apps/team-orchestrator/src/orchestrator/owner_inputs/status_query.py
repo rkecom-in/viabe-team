@@ -281,6 +281,30 @@ def _is_campaign_action_request(norm: str, tokens: set[str]) -> bool:
     )
 
 
+# VT-653 — the bare-campaign route (in classify) answered last_campaign on ANY message carrying a
+# 'campaign' token, so an ACTION phrasing that merely MENTIONS a campaign ("whip up a campaign for my
+# customers", "put together a Diwali campaign for my customers") got a campaign-STATUS non-sequitur
+# instead of deferring to the brain to draft it. This is the SAME disease as the count routes — VT-652
+# chased action verbs (infinite), so "whip up"/"put together" slipped past. Gate the bare-campaign
+# route behind a STATUS-QUESTION marker: the owner is asking ABOUT a campaign (did it go out / what was
+# the result / the last one), not requesting a new one. Send-status markers (did/have/has/already/sent/
+# gone out — reused) OR an outcome / past-reference cue (result/response/outcome/performance/last/
+# previous/recent/status). Like the count interrogatives (F2), a send-status / outcome question is a
+# FINITE, enumerable CLOSED class — legitimate keyword detection under CL-2026-07-15 (the no-lists rule
+# bans enumerating INFINITE action/create intent, NOT a bounded question-cue set).
+_CAMPAIGN_STATUS_QUESTION_TOKENS = frozenset({
+    "result", "results", "outcome", "outcomes", "response", "responses",
+    "performance", "last", "previous", "recent", "status",
+})
+
+
+def _is_campaign_status_question(norm: str, tokens: set[str]) -> bool:
+    """True iff the message asks ABOUT a campaign's send-status or outcome (a QUESTION) — did it go
+    out / what was the result / the last campaign's … — not a request to create/run one. A send-status
+    marker OR an outcome / past-reference cue."""
+    return _has_send_status_marker(norm, tokens) or bool(_CAMPAIGN_STATUS_QUESTION_TOKENS & tokens)
+
+
 def classify_status_query(body: str) -> StatusQueryType:
     """Keyword-route the query type. Opt-out is checked first (so 'how many opted-out
     customers' is an opt_out_count, not a customer_count). VT-632: a finance/cash-flow read is
@@ -331,7 +355,13 @@ def classify_status_query(body: str) -> StatusQueryType:
     # speech-act guard, and a DO like "win back my lapsed customers" never classifies status_query).
     # DF5: the Hinglish "lapse ho gaye" tokenizes to the STEM "lapse" (not "lapsed") — include it so
     # "total kitne customers hain jo lapse ho gaye" answers the dormant count, not the total ledger.
-    if ({"lapsed", "lapse", "dormant"} & tokens) or ("निष्क्रिय" in norm):  # VT-641 Devanagari dormancy
+    # VT-653: a bare lapsed/dormant TOKEN is not enough — REQUIRE a COUNT interrogative (how many /
+    # kitne / कितने) so an ACTION phrasing that merely contains a dormancy noun ("put together an offer
+    # for my dormant customers") DEFERS to the brain instead of being answered with a canned count. Every
+    # real "how many lapsed/dormant customers" ask carries the cue, so nothing genuine regresses.
+    if _has_count_cue(norm, tokens) and (
+        ({"lapsed", "lapse", "dormant"} & tokens) or ("निष्क्रिय" in norm)  # VT-641 Devanagari dormancy
+    ):
         return "lapsed_count"
     # A SEND-STATUS question ("did you send it?", "already sent?", "has the message gone out?") is a
     # read about whether a campaign/send actually happened — route it to last_campaign so the owner
@@ -346,7 +376,11 @@ def classify_status_query(body: str) -> StatusQueryType:
         "went out" in norm
     ):
         return "last_campaign"
-    if {"campaign", "campaigns"} & tokens:
+    # VT-653 — only a campaign-STATUS QUESTION (asking ABOUT a campaign) answers last_campaign here,
+    # never a bare 'campaign' token inside an action request ("whip up a campaign for my customers").
+    # See _is_campaign_status_question. "what was the last campaign result?" / "did you run the
+    # campaign?" still route here (they carry a status/outcome marker); a create/action phrasing defers.
+    if ({"campaign", "campaigns"} & tokens) and _is_campaign_status_question(norm, tokens):
         return "last_campaign"
     # B1/j04 — a "who are my top / most-valuable customers?" ranking ask. Checked BEFORE customer_count
     # so the 'customers' token doesn't hijack it into a bare ledger total (the observed misroute was via
@@ -363,10 +397,19 @@ def classify_status_query(body: str) -> StatusQueryType:
     # handles "how many lapsed customers"; this adds the behavioural (no-token) phrasing.
     if _has_count_cue(norm, tokens) and _has_inactivity_cue(norm, tokens) and not list_cue:
         return "lapsed_count"
-    # R7 — VETO customer_count when a LIST cue is present ("give me a list of my customers"): a list is
-    # not a count. Without an inactivity cue it isn't a lapsed_list either, so it falls to the brain
-    # (the CD2 names path) rather than being answered with a bare total.
-    if ({"customer", "customers", "ग्राहक", "ग्राहकों"} & tokens) and not list_cue:
+    # VT-653 — REQUIRE a COUNT interrogative: a bare 'customers' token in an ACTION phrasing ("put
+    # together a Diwali offer for my customers") must DEFER to the brain (which drafts the offer /
+    # routes to Sales-Recovery), never be answered with a canned ledger total — the residual j02
+    # leak (VT-652 chased action verbs, an infinite set; "put together" slipped past). "how many
+    # customers do I have" still fires (count cue present). This is the general no-lists rule; the
+    # campaign creation/action guards above are belt-and-suspenders (both defer in the SAFE direction).
+    # R7 — a LIST cue still vetoes ("give me a list of my customers"): a list is not a count. Without an
+    # inactivity cue it isn't a lapsed_list either, so it falls to the brain (the CD2 names path).
+    if (
+        _has_count_cue(norm, tokens)
+        and ({"customer", "customers", "ग्राहक", "ग्राहकों"} & tokens)
+        and not list_cue
+    ):
         return "customer_count"
     if {"trial", "billing", "plan", "subscription", "phase"} & tokens:
         return "billing"
