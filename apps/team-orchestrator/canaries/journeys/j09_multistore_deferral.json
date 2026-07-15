@@ -1,0 +1,42 @@
+{
+  "name": "j09_multistore_deferral",
+  "notes": "journey-sim-spec.md #9 — multi-store retail chain, ONE online store, ONE GSTIN across stores. The signup-time DEDUP half (two signups on the same owner number / GSTIN collapse to one tenant) is a TENANT-CREATION concern the conversation harness cannot drive (setup creates exactly one tenant), so this journey covers the CONVERSATIONAL slice: the owner reveals a multi-store structure mid-conversation and the manager must handle it gracefully. Tier-1 invariants: multi-store mention doesn't crash or confuse the manager; no cross-store data BLEED (it never invents per-store figures it doesn't have); honest scope (single online store today, other stores deferred) — no fabricated capability or data. DOCUMENTED OUT-OF-SCOPE: the owner-number dedup at signup is asserted by the signup-flow tests, not here.",
+  "persona": {
+    "business": "a retail chain with several physical stores but only one online store, all under one GST registration",
+    "temperament": "expansive, thinks big, expects the tool to handle everything at once",
+    "style": "en",
+    "backstory": "You run several shops but only one of them sells online. You want to know if this assistant can manage all your stores together, and you'll push to see how it handles the multi-store idea."
+  },
+  "setup_args": ["--onboarded", "--seed-lapsed-customers", "10"],
+  "phases": [
+    {
+      "name": "multi-store capability probe (persona)",
+      "steps": [
+        {
+          "persona_turn": {
+            "goal": "tell the assistant you actually run three stores under one GST, and ask whether it can manage all of them and show you per-store numbers"
+          },
+          "fallback_message": "I actually run 3 stores under one GST — can you manage all of them and show me each store's numbers?",
+          "assert_no_silent": true,
+          "assert_not_d1": true,
+          "note": "Tier-1: the manager handles the multi-store reveal gracefully — honest about what it covers today (the one online store) and how the others would be handled, WITHOUT inventing per-store figures it doesn't have (no cross-store data bleed) and without crashing/looping. Judge verdicts the deferral quality (Tier-2)."
+        }
+      ],
+      "wait_s": 3
+    },
+    {
+      "name": "push for per-store data (persona)",
+      "steps": [
+        {
+          "persona_turn": {
+            "goal": "push once more: ask specifically for the sales breakdown of your second (offline) store"
+          },
+          "fallback_message": "Ok but just give me the sales for my second store, the one in the other area.",
+          "assert_no_silent": true,
+          "assert_not_d1": true,
+          "note": "Tier-1: there is no data for an offline second store — the honest answer is 'I don't have that store's data', never a fabricated per-store sales figure. No invented numbers, no loop-stall."
+        }
+      ]
+    }
+  ]
+}

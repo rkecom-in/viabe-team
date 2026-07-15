@@ -1,6 +1,6 @@
 # Team-Manager Journey Simulation — 10-Tenant Spec + Scoring Rubric
 
-**Status: HELD — authored, NOT armed. Do NOT execute until Fazal greenlights ("once we are closer to the objective," 2026-07-10). CC: do not kick this off autonomously; it is a measurement asset kept handy, not an active task.**
+**Status: ARMED + FAST TIER RUN (Fazal greenlit 2026-07-15). All 10 journeys authored + validate-clean. Fast tier (j03/j04/j05/j08/j09/j10 x3 = 18 runs) scored on deployed dev: Tier-1 = 6/18 flagged (all one class — intent mis-route/ignored_speech_act, systematic on Devanagari j08 3/3 → VT-641); Tier-2 quality-of-clean = 12/12 (100%). Money tier (j01/j02/j06/j07) fixed to arm-then-send + ready, DEFERRED (token-mindful). j01 money-path findings already captured. CC: money tier is re-runnable any time; VT-641 mis-route is the priority fix.**
 
 Author: Cowork (2026-07-10). Owner of execution: CC (builds the runner on `apps/team-orchestrator/canaries/convo_harness.py`, runs on deployed dev, emits transcripts + trace). Scoring: off the transcripts, not summary numbers.
 

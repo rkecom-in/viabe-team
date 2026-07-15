@@ -1,0 +1,42 @@
+{
+  "name": "j05_b2b_onboarding_thin_discovery",
+  "notes": "journey-sim-spec.md #5 — B2B wholesale, corporate site + product catalog, NO e-commerce order data, GST-verified, discovery thin. Arc: an ACTIVE onboarding journey (--journey seeds a business_profile_draft + a small queue: confirm business_type + gap 'about') where the owner supplies the real business detail by hand — the onboarding conductor when discovery is weak. Tier-1 invariants: graceful manual fallback (the conductor keeps advancing, never stalls); no INVENTED business facts (it works from the seeded draft + what the owner actually says, never fabricating a category/city/type the owner didn't give); GST verify gate stays authoritative. NOTE: --journey seeds draft-city 'Chennai' + draft-type 'sweets' deterministically, so those ARE grounded (seeded), not invented — the invariant targets facts NEITHER seeded NOR owner-stated.",
+  "persona": {
+    "business": "a B2B wholesale supplier with a corporate website and product catalog but no online-order system",
+    "temperament": "matter-of-fact, business-like, gives clear answers when asked directly",
+    "style": "en",
+    "backstory": "You supply goods wholesale to other businesses. You don't sell online — there's no shopping cart — so automated discovery can only find so much. You'll answer the assistant's questions to fill in the gaps."
+  },
+  "setup_args": ["--journey", "--draft-about", "We supply goods wholesale to retailers and other businesses.", "--draft-type", "sweets"],
+  "phases": [
+    {
+      "name": "confirm business type (persona)",
+      "steps": [
+        {
+          "persona_turn": {
+            "goal": "the assistant is confirming what kind of business you run; tell it plainly that you're a B2B wholesale supplier, not a retail shop"
+          },
+          "fallback_message": "We're a B2B wholesale supplier — we sell to other businesses, not walk-in retail.",
+          "assert_no_silent": true,
+          "assert_not_d1": true,
+          "note": "The onboarding conductor should take the owner's real description and advance — never assert a business fact the owner didn't give, never stall. Judge verdicts the conductor's handling (Tier-2). Tier-1: no invented facts, no silent drop."
+        }
+      ],
+      "wait_s": 3
+    },
+    {
+      "name": "fill the discovery gap (persona)",
+      "steps": [
+        {
+          "persona_turn": {
+            "goal": "the assistant asks for a bit more about what your business does; describe your wholesale operation in a sentence or two"
+          },
+          "fallback_message": "We stock and distribute packaged goods in bulk to retail stores across the region.",
+          "assert_no_silent": true,
+          "assert_not_d1": true,
+          "note": "Manual-entry fallback when discovery is thin: the conductor accepts the owner's description and continues onboarding gracefully. Tier-1: advances (no loop-stall), no fabricated business facts."
+        }
+      ]
+    }
+  ]
+}

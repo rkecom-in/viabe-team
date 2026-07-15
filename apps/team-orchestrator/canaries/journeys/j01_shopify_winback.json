@@ -50,21 +50,40 @@
       "wait_s": 5
     },
     {
-      "name": "approval + send (persona)",
+      "name": "approve -> arm (persona)",
       "steps": [
         {
           "persona_turn": {
-            "goal": "clearly agree to send the offer to those customers right now, in Hinglish — a clean, unambiguous approval"
+            "goal": "clearly agree to the drafted offer, in Hinglish — an unambiguous approval"
           },
-          "fallback_message": "haan theek hai, bhej do unhe",
+          "fallback_message": "haan theek hai, ye plan approve hai",
           "assert_no_silent": true,
           "assert_not_d1": true,
           "assert_side_effects": {
-            "tenant_wide": true, "expect_approval_decision": "approved", "expect_sent_count_at_least": 1
+            "tenant_wide": true, "expect_sent_count": 0
           },
-          "note": "A clear Hinglish approval (owner_inputs.approval_reply's deterministic classifier reads 'haan ... bhej do' as APPROVED, Pillar 7). DB-proof (tenant-wide, since this turn's OWN run_id never matches phase 2's campaign — campaigns.run_id is set once at INSERT): pending_approvals.decision flips to 'approved' AND campaign_messages actually records >=1 sent row — the manager ACTS when authorized, never before."
+          "note": "ARM-THEN-SEND (VT-615/626, confirmed sales_recovery_executor _try_l3_arm / auto_send_pending): the approval ARMS the batch (auto_send_pending) but does NOT send — the manager asks for an explicit final 'bhej do'. So NO send yet here (expect_sent_count 0). This is a deliberate two-step money gate, NOT a stall — the send completes in the next phase."
         }
-      ]
+      ],
+      "wait_s": 8
+    },
+    {
+      "name": "explicit send confirm -> send (persona)",
+      "steps": [
+        {
+          "persona_turn": {
+            "goal": "give the final explicit go-ahead to send it now, in Hinglish — a short, unambiguous send confirmation"
+          },
+          "fallback_message": "haan bhej do abhi",
+          "assert_no_silent": true,
+          "assert_not_d1": true,
+          "assert_side_effects": {
+            "tenant_wide": true, "expect_sent_count_at_least": 1
+          },
+          "note": "The explicit send-confirm completes the arm-then-send: campaign_messages records >=1 sent row (transport-intercepted, never delivered — dev send-guard). wait_s below gives the async send workflow time to settle before the DB read. If the send STILL doesn't land after a clean 'bhej do' + settle, THAT is a genuine Tier-1 money-path finding (report it, don't loosen the assert)."
+        }
+      ],
+      "wait_s": 12
     }
   ]
 }
