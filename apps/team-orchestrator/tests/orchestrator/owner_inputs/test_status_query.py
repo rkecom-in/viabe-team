@@ -37,6 +37,42 @@ def test_classify_send_status_still_routes_last_campaign() -> None:
     assert sq.classify_status_query("has the message gone out yet?") == "last_campaign"
 
 
+def test_vt652_campaign_action_request_defers_to_brain() -> None:
+    # VT-652 — a FORWARD "set up / run / launch a campaign/offer FOR a cohort" is an ACTION to DO, not
+    # a count lookup. It must DEFER to the brain (unknown), never be answered with a canned
+    # customer_count / lapsed_count (the ignored_speech_act Tier-1 breaker). The 3 dev-confirmed leaks
+    # (were customer_count / lapsed_count / lapsed_count) + an adversarial launch-offer pin.
+    for msg in [
+        "Can you set up a win-back offer for my customers who've gone quiet?",  # was customer_count
+        "set up a win-back for my lapsed customers",                            # was lapsed_count
+        "run a campaign for my dormant customers",                              # was lapsed_count
+        "launch a festival offer for everyone",                                # adversarial
+    ]:
+        assert sq.classify_status_query(msg) == "unknown", msg
+
+
+def test_vt652_action_guard_does_not_regress_send_status() -> None:
+    # The action guard must NOT swallow a send-STATUS question: a past/interrogative marker
+    # (did/have/has/gone out) keeps it a "did it go out?" ask → last_campaign, never deferred.
+    assert sq.classify_status_query("did you run the campaign?") == "last_campaign"
+    assert (
+        sq.classify_status_query("have you run the winback campaign for everyone yet?")
+        == "last_campaign"
+    )
+    assert sq.classify_status_query("has the campaign gone out?") == "last_campaign"
+    assert (
+        sq.classify_status_query("did you already send that offer to my customers?")
+        == "last_campaign"
+    )
+
+
+def test_vt652_action_guard_does_not_regress_counts() -> None:
+    # A legit count ask carries no action verb, so the guard leaves it alone.
+    assert sq.classify_status_query("how many customers do I have?") == "customer_count"
+    assert sq.classify_status_query("how many dormant customers") == "lapsed_count"
+    assert sq.classify_status_query("how many lapsed customers?") == "lapsed_count"
+
+
 def test_classify_lapsed_count_unchanged() -> None:
     assert sq.classify_status_query("how many lapsed customers?") == "lapsed_count"
     assert sq.classify_status_query("and how many lapsed customers do I have in total?") == "lapsed_count"
