@@ -220,10 +220,65 @@ _DEV_CAMPAIGN_NOUN_PATS = _km.boundary_patterns(("वापसी", "वाप�
 def _is_campaign_creation_request(norm: str, tokens: set[str]) -> bool:
     """R7 — True iff the message is a request to CREATE / plan a campaign (a create verb co-occurring
     with a campaign noun), which must route to the D3 net / brain rather than a canned count/status
-    figure. See ``_CAMPAIGN_CREATE_VERB_TOKENS`` for why send/run/launch are excluded."""
-    verb = bool(_CAMPAIGN_CREATE_VERB_TOKENS & tokens) or bool(_DEV_CREATE_VERB_TOKENS & tokens)
+    figure. See ``_CAMPAIGN_CREATE_VERB_TOKENS`` for why send/run/launch are excluded. VT-652: "set
+    up"/"setup"/"set-up" is an unambiguous CREATE phrasing ("set up a win-back", never a status ask) —
+    add it as a create verb. It tokenizes to set+up, so match the phrase on ``norm`` (not a token)."""
+    setup = ("set up" in norm) or ("setup" in norm) or ("set-up" in norm)
+    verb = bool(_CAMPAIGN_CREATE_VERB_TOKENS & tokens) or bool(_DEV_CREATE_VERB_TOKENS & tokens) or setup
     noun = bool(_CAMPAIGN_NOUN_RE.search(norm)) or _km.contains_any(norm, _DEV_CAMPAIGN_NOUN_PATS)
     return verb and noun
+
+
+# VT-652 — a campaign ACTION request ("run a campaign FOR my dormant customers", "launch a festival
+# offer for everyone") is work to DO, not a status lookup. The CREATION guard above deliberately
+# excludes run/launch/start (a "did you run/launch it?" is a send-STATUS ask that must reach
+# last_campaign). But a FORWARD/imperative run/launch/start of a campaign for a cohort was slipping
+# PAST every guard and being answered as a COUNT (customer_count, or lapsed_count via the lapsed-token
+# route). Defer it to the brain (Sales-Recovery) — the SAFE direction under Fazal STANDING no-lists
+# (CL-2026-07-15): deterministic code only DEFERS on action intent; the LLM decides the positive
+# intent. Disambiguated from a send-STATUS question by requiring an action verb + a campaign/offer
+# noun + a cohort target AND NO past/interrogative send-status marker (did/have/has/already/sent/
+# gone out/bheja) — if a marker is present it stays a send-status ask (last_campaign), never regressed.
+_CAMPAIGN_ACTION_VERB_TOKENS = frozenset({"run", "launch", "start"})
+_CAMPAIGN_OFFER_NOUN_TOKENS = frozenset({"offer", "offers"})
+_COHORT_TARGET_TOKENS = frozenset({
+    "everyone", "everybody", "all", "customers", "customer", "clients", "client",
+    "lapsed", "dormant", "quiet", "inactive", "sabko", "sabhi", "ग्राहक", "ग्राहकों",
+})
+# A PAST / interrogative send-status marker: the owner is asking whether a send ALREADY happened, not
+# requesting a new one — keep it a send-status ask (last_campaign), do not defer.
+_SEND_STATUS_MARKER_TOKENS = frozenset({"did", "have", "has", "already", "sent", "bheja", "bheji"})
+_SEND_STATUS_MARKER_PHRASES = ("gone out", "went out", "go out")
+
+
+def _has_send_status_marker(norm: str, tokens: set[str]) -> bool:
+    """True iff a PAST/interrogative send-status marker is present ("did you…", "already sent", "has
+    it gone out") — meaning the owner is asking ABOUT a prior send, not requesting a new one."""
+    return bool(_SEND_STATUS_MARKER_TOKENS & tokens) or any(p in norm for p in _SEND_STATUS_MARKER_PHRASES)
+
+
+def _has_campaign_noun(norm: str, tokens: set[str]) -> bool:
+    """A campaign / offer / win-back noun (EN + Hinglish + Devanagari). Reuses ``_CAMPAIGN_NOUN_RE`` /
+    the Devanagari patterns and additionally accepts the ``offer`` noun (contained: only the action
+    guard uses this, which also demands an action verb + cohort, so a count ask never trips it)."""
+    return (
+        bool(_CAMPAIGN_NOUN_RE.search(norm))
+        or bool(_CAMPAIGN_OFFER_NOUN_TOKENS & tokens)
+        or _km.contains_any(norm, _DEV_CAMPAIGN_NOUN_PATS)
+    )
+
+
+def _is_campaign_action_request(norm: str, tokens: set[str]) -> bool:
+    """VT-652 — True iff the message is a FORWARD request to RUN / LAUNCH / START a campaign/offer FOR
+    a cohort (an action to DO), NOT a send-STATUS question. Requires an action verb + a campaign noun +
+    a cohort target, and NO send-status marker (which would make it a "did it go out?" ask). Returns
+    True so the caller defers to the brain rather than answering a canned count."""
+    return (
+        bool(_CAMPAIGN_ACTION_VERB_TOKENS & tokens)
+        and _has_campaign_noun(norm, tokens)
+        and bool(_COHORT_TARGET_TOKENS & tokens)
+        and not _has_send_status_marker(norm, tokens)
+    )
 
 
 def classify_status_query(body: str) -> StatusQueryType:
@@ -262,10 +317,12 @@ def classify_status_query(body: str) -> StatusQueryType:
     list_cue = _has_list_cue(norm, tokens)
     if list_cue and _has_inactivity_cue(norm, tokens):
         return "lapsed_list"
-    # R7 campaign-CREATION guard — a "draft/make/plan a win-back campaign" REQUEST is work to DO, not
-    # a status lookup: fall through (return 'unknown') so the D3 net / brain owns it, never a stray
-    # 'customers'/'campaign' token hijacking it into a count. run/launch/start/send stay send-STATUS.
-    if _is_campaign_creation_request(norm, tokens):
+    # R7 campaign-CREATION guard + VT-652 campaign-ACTION guard — a "draft/make/plan/set up a win-back
+    # campaign" REQUEST, or a "run/launch/start a campaign FOR my dormant customers" ACTION, is work to
+    # DO, not a status lookup: fall through (return 'unknown') so the D3 net / brain owns it, never a
+    # stray 'customers'/'lapsed'/'campaign' token hijacking it into a count. A send-STATUS ask ("did you
+    # run it?", "has it gone out?") carries a past/interrogative marker and stays last_campaign below.
+    if _is_campaign_creation_request(norm, tokens) or _is_campaign_action_request(norm, tokens):
         return "unknown"
     # VT-632 lapsed_count — checked BEFORE customer_count so "how many LAPSED customers" answers the
     # dormant count (45d), not the total ledger count (the sr_cohort defect: "10 total" for a lapsed
