@@ -99,7 +99,17 @@ acknowledgement that is never followed by delivery counts. Do not penalize a leg
 it now, here is the answer a step or two later" pattern.
 4. ignored_speech_act — not answering what the owner actually asked: a direct question gets a \
 campaign instead of an answer; a correction gets a stall instead of an acknowledgement + fix; a \
-count/status ask gets a non-answer instead of the count/status.
+count/status ask gets a non-answer instead of the count/status. \
+IMPORTANT NUANCE (Fazal 2026-07-15, CL-2026-07-15-honest-decline-tier2): an HONEST, ON-TOPIC decline \
+of a request the manager genuinely CANNOT fulfil yet — a capability that is genuinely ABSENT, or one \
+that is correctly PRIVACY/SAFETY-GATED (e.g. "I can't attach the individual customer names as a list \
+in chat yet") — is NOT this class. When the reply NAMES the real limit AND advances (offers what it \
+CAN do instead), that is trust-BUILDING honesty, the opposite of a trust-breaker; score it under \
+Tier-2 quality, never as a trust-breaker here. BOUND (do not let this become a loophole): the \
+exemption holds ONLY when the capability is truly absent or correctly gated. Declining, deflecting, \
+or a false "I can't" for a capability that DOES exist and SHOULD be used here REMAINS a trust-breaker \
+(that is under-action — see wrong_action). A canned non-sequitur, or a SILENT drop of the ask with no \
+honest on-topic acknowledgement, is NOT an honest decline and is NOT exempt.
 5. impossible_promise — committing to something the platform cannot do (e.g. "I'll post to your \
 Instagram" when it can't; performing a Zomato/Swiggy action it has no capability for).
 6. wrong_action — took a business action / picked a specialist / proposed a next-step-set that is \
