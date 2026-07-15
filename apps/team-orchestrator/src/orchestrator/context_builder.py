@@ -642,7 +642,7 @@ def _build_dormant_cohort(tenant_id: UUID) -> tuple[list[CustomerFactBundle], bo
     PII is read or transmitted. CL-390: the returned bundles carry NO raw
     phone/email by construction; they are PROMPT-ONLY (rendered display-name level)
     and are NEVER persisted into ``composition_audits``. Cohort cap =
-    ``DEFAULT_DETECTION_LIMIT`` (50), reused from the executor.
+    ``DEFAULT_DETECTION_LIMIT`` (200), reused from the executor.
 
     Completeness flag = True iff at least one candidate surfaced (real rows), so the
     serializer can mark the section substrate-backed vs safe-empty.
@@ -1037,9 +1037,11 @@ def serialize_bundle_for_prompt(
     # business_name) are rendered; last_sale_amount_paise is intentionally omitted.
     dc = context.dormant_cohort
     parts.append(
-        "\n## Dormant cohort (candidate lapsed customers — these are THIS tenant's "
-        "OWN customers; YOU pick the final target subset and return their ids in "
-        "``target_cohort.customer_ids``; you may NOT invent an id not listed here)"
+        "\n## Dormant cohort (eligible lapsed customers — these are THIS tenant's "
+        "OWN customers and the FULL recipient set: the campaign targets ALL of them "
+        "(the orchestrator sets ``target_cohort.customer_ids`` server-side to this "
+        "entire eligible cohort — you do NOT pick a subset or return ids); use these "
+        "rows to ground your campaign prose)"
     )
     if dc:
         # CL-390 backstop: the frozen CustomerFactBundle carries NO raw phone/email

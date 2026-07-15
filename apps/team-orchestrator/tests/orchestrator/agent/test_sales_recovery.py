@@ -1843,3 +1843,124 @@ def test_vt498_send_time_hydrator_fills_customer_name_from_record():
     assert allowed["business_name"] == "Bogus Winback Kirana"
     # The plan's placeholder KEYS must be exactly the hydrator/template contract.
     assert set(sre.WINBACK_TEMPLATE_PARAMS) == {"customer_name", "business_name"}
+
+
+# --- VT-651: target_cohort recipient list is SYSTEM-owned (Fazal: ALL eligible) ---
+#
+# The SR conversational LLM was TOLD to "pick the target subset" of the dormant
+# cohort, so sonnet-5 picked a different 3-5 of the 8 eligible each run ->
+# target_cohort.cohort_size varied run-to-run (a non-deterministic recipient set).
+# Fazal ruled the recipient list must be the DETERMINISTIC full eligible set; the LLM
+# drafts the MESSAGE + prose only. Mirroring the VT-499 server-authority discipline,
+# _construct_variant_payload now OVERRIDES target_cohort on the PROPOSED variant with
+# EVERY context.dormant_cohort member, preserving the model's cohort_label /
+# selection_reason PROSE and forcing no model-authored exclusions.
+
+
+def test_vt651_construct_payload_expands_subset_to_full_eligible_cohort():
+    """VT-651 — a proposed raw dict whose model-emitted target_cohort names only a
+    SUBSET (3 of 8 eligible) is EXPANDED server-side to the FULL dormant cohort:
+    customer_ids == all 8, cohort_size == 8 (deterministic), exclusion_list cleared.
+    The model's cohort_label + selection_reason PROSE is preserved (evidence-marker
+    consistency intact)."""
+    from datetime import UTC, datetime
+
+    from orchestrator.agent.sales_recovery import _construct_variant_payload
+    from orchestrator.agent.schemas.campaign_plan import (
+        CampaignPlanProposed,
+        parse_campaign_plan,
+    )
+
+    # 8-member eligible cohort (the full set the campaign must target).
+    ctx = _ctx_with_cohort("C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8")
+    eligible_ids = [str(m.customer_id) for m in ctx.dormant_cohort]
+    assert len(eligible_ids) == 8
+
+    raw = _proposed_raw_minimal()
+    # The model picks a NARROWED 3-of-8 subset + its own distinctive prose, and even
+    # authors an exclusion (which must be cleared — the set is already filtered).
+    raw["target_cohort"]["customer_ids"] = eligible_ids[:3]
+    raw["target_cohort"]["cohort_size"] = 3
+    raw["target_cohort"]["cohort_label"] = "top-3-lapsed-spenders"
+    raw["target_cohort"]["selection_reason"] = (
+        "Top 3 lapsed spenders, promo-eligible [E1]."
+    )
+    excluded = eligible_ids[7]
+    raw["exclusion_list"] = [excluded]
+    raw["exclusion_reasons"] = {excluded: "model decided to skip this one"}
+
+    now = datetime.now(UTC)
+    payload, _de, _dp = _construct_variant_payload(raw, context=ctx, generated_at=now)
+
+    plan = parse_campaign_plan(payload)
+    assert isinstance(plan, CampaignPlanProposed)
+    # Recipient list expanded to the FULL eligible set — deterministic.
+    assert sorted(str(cid) for cid in plan.target_cohort.customer_ids) == sorted(
+        eligible_ids
+    )
+    assert plan.target_cohort.cohort_size == 8
+    assert plan.target_cohort.cohort_size == len(ctx.dormant_cohort)
+    # Model-authored exclusions are cleared (the eligible set is already filtered).
+    assert plan.exclusion_list == []
+    assert plan.exclusion_reasons == {}
+    # The model's PROSE (label + selection_reason, incl. the [E1] marker) is preserved.
+    assert plan.target_cohort.cohort_label == "top-3-lapsed-spenders"
+    assert plan.target_cohort.selection_reason == (
+        "Top 3 lapsed spenders, promo-eligible [E1]."
+    )
+
+
+def test_vt651_full_cohort_is_deterministic_across_repeated_construction():
+    """VT-651 — for a FIXED cohort the server-owned recipient list is identical
+    every call, regardless of which subset the model emits (the run-to-run variance
+    the bug caused). Two different model subsets over the SAME 8-member cohort both
+    resolve to the identical full 8-id recipient set."""
+    from datetime import UTC, datetime
+
+    from orchestrator.agent.sales_recovery import _construct_variant_payload
+    from orchestrator.agent.schemas.campaign_plan import parse_campaign_plan
+
+    ctx = _ctx_with_cohort("C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8")
+    eligible_ids = [str(m.customer_id) for m in ctx.dormant_cohort]
+    now = datetime.now(UTC)
+
+    def _recipients_for_model_subset(subset: list[str]) -> list[str]:
+        raw = _proposed_raw_minimal()
+        raw["target_cohort"]["customer_ids"] = subset
+        raw["target_cohort"]["cohort_size"] = len(subset)
+        payload, _de, _dp = _construct_variant_payload(
+            raw, context=ctx, generated_at=now
+        )
+        plan = parse_campaign_plan(payload)
+        return sorted(str(cid) for cid in plan.target_cohort.customer_ids)
+
+    run_a = _recipients_for_model_subset(eligible_ids[:3])   # model picks 3
+    run_b = _recipients_for_model_subset(eligible_ids[2:7])  # model picks a different 5
+    assert run_a == run_b == sorted(eligible_ids)
+
+
+def test_vt651_empty_cohort_does_not_fire_override_stays_fail_closed():
+    """VT-651 — with an EMPTY dormant_cohort the override does NOT fire: the model's
+    target_cohort is left exactly as emitted (no synthesized recipient). The proposed
+    branch should not be reached without a cohort in practice; ge=1 fail-closed is the
+    acceptable posture, never a fabricated id."""
+    from datetime import UTC, datetime
+
+    from orchestrator.agent.sales_recovery import _construct_variant_payload
+    from orchestrator.agent.schemas.campaign_plan import parse_campaign_plan
+
+    ctx = _ctx_with_real_uuids()  # dormant_cohort == []
+    assert ctx.dormant_cohort == []
+
+    raw = _proposed_raw_minimal()
+    model_ids = raw["target_cohort"]["customer_ids"]
+    assert len(model_ids) == 1  # the fixture's single model-picked id
+
+    payload, _de, _dp = _construct_variant_payload(
+        raw, context=ctx, generated_at=datetime.now(UTC)
+    )
+    plan = parse_campaign_plan(payload)
+    # Untouched — override guarded on a non-empty cohort.
+    assert [str(cid) for cid in plan.target_cohort.customer_ids] == model_ids
+    assert plan.target_cohort.cohort_size == 1
+    assert plan.target_cohort.cohort_label == "dormant-60d"

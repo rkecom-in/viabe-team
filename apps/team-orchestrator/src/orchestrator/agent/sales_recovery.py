@@ -360,10 +360,13 @@ _EMPTY_SENTINELS: tuple[Any, ...] = (None, "", [], {})
 # / missing window 3/3 (VT-496 diagnostic: ``proposed.campaign_window:
 # value_error`` — a ``CampaignWindow._window_validity`` rejection). So the system
 # OWNS the window now: ``_construct_variant_payload`` OVERRIDES it server-side on
-# the PROPOSED variant with an always-valid ``now → now+7d`` span. The model
-# keeps owning every business field (target_cohort, message_plan, expected_arrr,
-# objective, evidence_refs). The validator is NOT weakened — we SUPPLY a valid
-# window so it passes legitimately, and genuinely-bad OTHER fields still fail.
+# the PROPOSED variant with an always-valid ``now → now+7d`` span. VT-651 extends
+# this server-authority to ``target_cohort``: the RECIPIENT LIST is now SYSTEM-owned
+# (like campaign_window) — the full eligible dormant cohort, deterministic — so the
+# model keeps owning message_plan / prose (cohort_label, selection_reason) +
+# expected_arrr / objective / evidence_refs, but NOT the recipient set. The validator
+# is NOT weakened — we SUPPLY a valid window + a size-consistent cohort so they pass
+# legitimately, and genuinely-bad OTHER fields still fail.
 #
 # START_BUFFER rationale: ``_window_validity`` rejects a past start with a STRICT
 # ``start < now`` where ``now`` is recomputed at VALIDATION time — strictly AFTER
@@ -392,9 +395,66 @@ def _server_campaign_window(now: datetime) -> dict[str, str]:
     return {"start": start.isoformat(), "end": end.isoformat()}
 
 
+# VT-651: the target_cohort RECIPIENT LIST is the SYSTEM's to set, not the LLM's —
+# mirroring the VT-499 campaign_window server-authority. Fazal ruled (A = ALL
+# eligible) the win-back must target the FULL eligible dormant cohort
+# DETERMINISTICALLY, every run. The SR conversational LLM was TOLD to "pick the
+# target subset" of the dormant cohort, so sonnet-5 picked a different 3–5 of the 8
+# eligible each run → ``target_cohort.cohort_size`` varied run-to-run (a non-
+# deterministic recipient set). The eligible set is ALREADY computed + in hand as
+# ``context.dormant_cohort`` (built by ``context_builder._build_dormant_cohort`` via
+# ``detect_lapsed_customers(limit=DEFAULT_DETECTION_LIMIT=200)`` — already
+# consent/opt-out/suppression-filtered + ``ORDER BY spend DESC``). So the system OWNS
+# the recipient list now: ``_construct_variant_payload`` OVERRIDES ``target_cohort``
+# on the PROPOSED variant with EVERY cohort member. The LLM keeps owning the MESSAGE
+# (message_plan) + the target-cohort PROSE (cohort_label / selection_reason), which we
+# PRESERVE — so the evidence-marker ``[E\d+]`` consistency the model asserted in
+# selection_reason survives untouched. The validator is NOT weakened:
+# ``cohort_size == len(customer_ids)`` holds by construction (``_size_matches_list``).
+_DEFAULT_COHORT_LABEL = "full-eligible-lapsed-cohort"
+_DEFAULT_SELECTION_REASON = (
+    "All eligible lapsed customers surfaced for this tenant "
+    "(system-owned recipient list; opt-out/suppression-filtered upstream)."
+)
+
+
+def _server_target_cohort(
+    context: SalesRecoveryContext, incoming: Any = None
+) -> dict[str, Any]:
+    """VT-651: a server-computed ``target_cohort`` naming the FULL eligible dormant cohort.
+
+    ``customer_ids`` = every ``context.dormant_cohort`` member's id (as ``str``; the
+    ``TargetCohort`` schema coerces to ``UUID``), ``cohort_size`` = its length — so
+    ``_size_matches_list`` holds by construction and the recipient set is
+    DETERMINISTIC for a fixed cohort. The model's own ``cohort_label`` +
+    ``selection_reason`` PROSE is preserved when the incoming payload carried a
+    ``target_cohort`` dict (keeping the evidence-marker consistency the model
+    asserted), else a system default. Caller only invokes this on a NON-empty cohort
+    (an empty cohort should not have reached the proposed branch; ``ge=1`` fail-closed
+    is acceptable there — we never synthesize a fake recipient).
+    """
+    customer_ids = [str(m.customer_id) for m in context.dormant_cohort]
+    label = _DEFAULT_COHORT_LABEL
+    reason = _DEFAULT_SELECTION_REASON
+    if isinstance(incoming, dict):
+        incoming_label = incoming.get("cohort_label")
+        if isinstance(incoming_label, str) and incoming_label.strip():
+            label = incoming_label
+        incoming_reason = incoming.get("selection_reason")
+        if isinstance(incoming_reason, str) and incoming_reason.strip():
+            reason = incoming_reason
+    return {
+        "customer_ids": customer_ids,
+        "cohort_label": label,
+        "cohort_size": len(customer_ids),
+        "selection_reason": reason,
+    }
+
+
 # VT-498: the message body is PLACEHOLDER-only — never literal customer PII.
 # serialize_bundle_for_prompt shows the model each dormant-cohort customer's real
-# ``display_name`` (so it can pick + name the target subset). The SR model (Haiku on
+# ``display_name`` (so it can ground its campaign prose in the eligible cohort; the
+# recipient list itself is system-owned per VT-651). The SR model (Haiku on
 # dev) was observed copying that name straight into ``message_plan.personalization``
 # ("Hi Anita, …") — customer PII baked into the persisted plan (collapse_campaign_plan
 # stores plan_json raw). The real personalization is hydrated PER-RECIPIENT at SEND
@@ -628,6 +688,22 @@ def _construct_variant_payload(
     # no window — untouched.
     if variant_enum is CampaignStatus.PROPOSED:
         payload["campaign_window"] = _server_campaign_window(generated_at)
+        # VT-651: the target_cohort RECIPIENT LIST is system-owned (Fazal: ALL
+        # eligible), mirroring campaign_window above. OVERRIDE the model's picked
+        # subset with the FULL eligible dormant cohort so the recipient set is
+        # DETERMINISTIC (cohort_size == len(context.dormant_cohort)) every run — the
+        # model was picking a varying 3–5 of the 8. Preserve the model's
+        # cohort_label / selection_reason prose (evidence-marker consistency intact).
+        # The cohort is ALREADY opt-out/suppression-filtered upstream, so force NO
+        # model-authored exclusions (they would double-handle a shorter send list).
+        # Only fires with a non-empty cohort; empty → leave as-is (fail-closed ge=1;
+        # never synthesize a fake recipient). See _server_target_cohort.
+        if context.dormant_cohort:
+            payload["target_cohort"] = _server_target_cohort(
+                context, payload.get("target_cohort")
+            )
+            payload["exclusion_list"] = []
+            payload["exclusion_reasons"] = {}
         # VT-498: scrub any literal cohort-customer name the model copied into the
         # message body (personalization / template_params) → <customer_name> token,
         # so the persisted plan is PII-free. The real name is hydrated per-recipient

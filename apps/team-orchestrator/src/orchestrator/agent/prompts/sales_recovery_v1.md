@@ -91,6 +91,15 @@ orchestrator overwrites those server-side; whatever you emit for them is
 discarded. Emit them if your generator finds it easier; the values do
 not matter.
 
+**The recipient list is SYSTEM-owned — you target ALL eligible.** The
+campaign targets the FULL eligible dormant cohort listed in your input
+context — every candidate, not a subset. The orchestrator sets
+`target_cohort.customer_ids` + `cohort_size` server-side to the entire
+eligible set; do NOT narrow it. Whatever `customer_ids` / `cohort_size` you
+emit is overwritten. You DO still own the `target_cohort.cohort_label` and
+`selection_reason` PROSE (they are preserved), and you own the message. Just
+don't choose who receives it — that's the full eligible cohort, always.
+
 ### Example — `proposed`
 
 ```json
@@ -101,10 +110,10 @@ not matter.
     "end":   "{{CAMPAIGN_WINDOW_END}}"
   },
   "target_cohort": {
-    "customer_ids": ["b6f3b6c4-3a90-4f86-9a16-7c1ab2a4f1e2"],
+    "customer_ids": ["b6f3b6c4-3a90-4f86-9a16-7c1ab2a4f1e2", "a1c2d3e4-5f60-4a71-8b92-0c3d4e5f6a7b"],
     "cohort_label": "lapsed-45d",
-    "cohort_size": 1,
-    "selection_reason": "No purchase in >=45d, opted-in for promos [E1]."
+    "cohort_size": 2,
+    "selection_reason": "All lapsed customers with no purchase in >=45d, opted-in for promos [E1]."
   },
   "expected_arrr": {
     "low_paise": 100000,
@@ -145,8 +154,9 @@ off-enum value fails schema validation:
 
 **Personalization is PLACEHOLDER-only — never a literal customer name (proposed
 variant).** The dormant-cohort context lists each candidate's real `display_name`
-SOLELY so you can choose the target subset and return their ids — it is NOT yours to
-copy into the message. In `message_plan.personalization` AND every
+SOLELY so you can ground your campaign in the eligible customers (the recipient set
+is the FULL eligible cohort, system-owned — you target ALL of them, you do not pick a
+subset or return ids) — those names are NOT yours to copy into the message. In `message_plan.personalization` AND every
 `message_plan.template_params` value, any customer-specific value (the name above
 all) MUST be the same `<customer_name>` placeholder token that
 `target_cohort.selection_reason` uses — never a literal name like "Anita". The real
