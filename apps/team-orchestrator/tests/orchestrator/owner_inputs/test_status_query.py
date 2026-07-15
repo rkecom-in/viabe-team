@@ -73,6 +73,30 @@ def test_vt652_action_guard_does_not_regress_counts() -> None:
     assert sq.classify_status_query("how many lapsed customers?") == "lapsed_count"
 
 
+def test_vt653_count_cue_required_action_phrasings_defer() -> None:
+    # VT-653 — the residual j02 leak: VT-652 chased action VERBS (infinite set), so "put together" /
+    # "whip up" slipped past and a bare 'customers'/'dormant'/'campaign' NOUN was answered with a
+    # canned count/last_campaign. A count/status net now fires ONLY on an actual QUESTION, so every
+    # action phrasing DEFERS to the brain (unknown) — which drafts the offer / routes to Sales-Recovery.
+    for msg in [
+        "put together a Diwali win-back offer for my customers",   # dev-confirmed → was customer_count
+        "can you put together a festival offer for my customers",  # dev-confirmed → was customer_count
+        "put together an offer for my dormant customers",          # bare 'dormant' noun, no count cue
+        "whip up a campaign for my customers",                     # bare 'campaign' noun → was last_campaign
+        "put together a Diwali campaign for my customers",         # action + campaign noun, no status marker
+    ]:
+        got = sq.classify_status_query(msg)
+        assert got == "unknown", f"{msg!r} -> {got} (must DEFER, not a count/last_campaign route)"
+
+
+def test_vt653_count_cue_required_does_not_regress_questions() -> None:
+    # Adversarial: a genuine count/status QUESTION carries the interrogative cue, so it still fires.
+    assert sq.classify_status_query("how many customers") == "customer_count"
+    assert sq.classify_status_query("how many dormant customers") == "lapsed_count"
+    # A campaign STATUS/outcome question still routes to last_campaign (send-status OR outcome marker).
+    assert sq.classify_status_query("what was the last campaign result?") == "last_campaign"
+
+
 def test_classify_lapsed_count_unchanged() -> None:
     assert sq.classify_status_query("how many lapsed customers?") == "lapsed_count"
     assert sq.classify_status_query("and how many lapsed customers do I have in total?") == "lapsed_count"
