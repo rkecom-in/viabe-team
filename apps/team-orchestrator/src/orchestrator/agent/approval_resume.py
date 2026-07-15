@@ -119,6 +119,52 @@ def resolve_decision_from_reply(
     approval_type: str | None = None,
     classify_fn: Any | None = None,
 ) -> str | None:
+    """Resolve an owner approval reply to a decision verb.
+
+    VT-648 (the MONEY GATE) — the ``TEAM_SEND_INTENT_LLM`` flag gates an LLM-primary send-intent
+    classifier ON TOP of the deterministic path, for customer-SEND approvals ONLY. Three states:
+      - ``off`` (default) — pure deterministic path, byte-for-byte the pre-VT-648 behavior.
+      - ``shadow``        — deterministic still DECIDES; the LLM runs and its decision is LOGGED
+                            alongside for comparison (no behavior change, no second effect).
+      - ``enforce``       — for a customer-SEND the LLM + hard-stop veto DECIDE the gate.
+    The flag is read ONCE here (a mode flip must not change behavior mid-turn). For a NON-customer-
+    send approval type the flag has no effect — that path is unchanged in every mode. The fail-safe
+    is identical to the deterministic path: uncertain / veto / low-confidence / LLM error → None.
+    """
+    from orchestrator.owner_inputs.send_intent import (
+        decide_send_intent_enforce,
+        get_send_intent_mode,
+        shadow_log_send_intent,
+    )
+
+    is_customer_send = approval_type in _CUSTOMER_SEND_APPROVAL_TYPES
+    mode = get_send_intent_mode()
+
+    # ENFORCE: for a customer-SEND (money) the LLM + hard-stop veto own the gate. Structurally
+    # money-safe — decide_send_intent_enforce returns 'approved' ONLY on a grounded, confident,
+    # un-vetoed LLM approve; every other path (veto/hold/low-conf/ungrounded/error) is a non-approve.
+    if mode == "enforce" and is_customer_send:
+        return decide_send_intent_enforce(text, tenant_id=str(tenant_id))
+
+    # OFF (default) + SHADOW: the deterministic path DECIDES (unchanged).
+    decision = _resolve_decision_deterministic(
+        text, tenant_id=tenant_id, approval_type=approval_type, classify_fn=classify_fn
+    )
+
+    # SHADOW: log what enforce WOULD have decided, alongside the live deterministic decision. Fail-
+    # soft + PII-safe (no reply body / cue logged); never affects ``decision``.
+    if mode == "shadow" and is_customer_send:
+        shadow_log_send_intent(text, tenant_id=str(tenant_id), deterministic_decision=decision)
+    return decision
+
+
+def _resolve_decision_deterministic(
+    text: str,
+    *,
+    tenant_id: UUID | str,
+    approval_type: str | None = None,
+    classify_fn: Any | None = None,
+) -> str | None:
     """Classify an owner reply (VT-49) and map it to a decision verb.
 
     Returns the decision ('approved'|'rejected'|'needs_changes') or None when
