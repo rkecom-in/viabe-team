@@ -24,7 +24,6 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 
-from orchestrator.agent.tool_guardrail import assert_agent_tools_safe
 from orchestrator.agent_framework.capabilities import AgentRole
 from orchestrator.agent_framework.context import ModuleContext, ModuleResult
 from orchestrator.agent_framework.gate_facade import GateFacade
@@ -97,7 +96,12 @@ class AgentFrameworkRegistry:
 
         # 2. deny-list: the module's tool surface holds no forbidden send/ledger/accounts tool.
         #    REUSES the existing graph-build guard verbatim — a module is held to the EXACT same
-        #    capability boundary as every hand-wired agent surface.
+        #    capability boundary as every hand-wired agent surface. Imported LAZILY here (not at
+        #    module top): ``orchestrator.agent.__init__`` eager-imports the langchain orchestrator
+        #    agent, so a top-level import would pull langchain into the framework's import surface and
+        #    break the dep-less smoke. Registration is a runtime path where the full deps are present.
+        from orchestrator.agent.tool_guardrail import assert_agent_tools_safe
+
         try:
             assert_agent_tools_safe(
                 manifest.tools, surface=f"agent_framework:{manifest.name}"
