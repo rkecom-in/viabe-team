@@ -24,6 +24,10 @@ class AgentRole(str, Enum):
     """The two distinct contracts every agent "type" splits into (map finding #1).
 
     A ``str`` enum so a manifest value serializes to a stable machine token (logs / tests pin it).
+
+    A module declares a SET of these (``AgentManifest.roles``): a pure ``{PROPOSER}``, a pure
+    ``{EXECUTOR}``, or BOTH ``{PROPOSER, EXECUTOR}`` (the Sales-Recovery shape — ONE module that
+    both proposes in the conversational lane AND executes a coordinator-dispatched work item).
     """
 
     #: Conversational-lane module. Returns a PROPOSAL, NO side effects. Generalizes the
@@ -33,6 +37,16 @@ class AgentRole(str, Enum):
     #: an ``ItemExecutionResult``-shaped result. Generalizes the ``SalesRecoveryAgent.execute_item``
     #: (``AgentItemContext`` -> ``ItemExecutionResult``) path.
     EXECUTOR = "executor"
+
+
+#: The impl method each role's context dispatches to. The single binding of ``AgentRole`` -> the
+#: method name a module must expose for that role (``registration.register`` checks presence per
+#: declared role; ``RegisteredModule.run`` dispatches on ``ctx.role`` through it). Kept beside the
+#: enum so "which method services which role" has ONE source of truth.
+ROLE_METHOD: dict["AgentRole", str] = {
+    AgentRole.PROPOSER: "propose",
+    AgentRole.EXECUTOR: "execute",
+}
 
 
 class Capability(str, Enum):
@@ -93,6 +107,7 @@ def is_gated(capability: Capability) -> bool:
 
 __all__ = [
     "GATED_CAPABILITIES",
+    "ROLE_METHOD",
     "AgentRole",
     "Capability",
     "is_gated",

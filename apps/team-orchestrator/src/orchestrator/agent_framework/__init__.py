@@ -15,17 +15,21 @@ production routing):
 
 THE TWO ROLES (the map's flagged implication #1)
 ------------------------------------------------
-Every agent "type" is really TWO roles with DIFFERENT contracts, and this framework models
-them as distinct ``AgentRole`` values rather than forcing them into one shape:
+Every agent "type" is really TWO roles with DIFFERENT contracts, modelled as ``AgentRole`` values. A
+module declares a SET of them (``AgentManifest.roles``, min 1): a pure ``{PROPOSER}``, a pure
+``{EXECUTOR}``, or BOTH ``{PROPOSER, EXECUTOR}`` — the Sales-Recovery shape (Ruling #1): ONE module
+that proposes in the conversational lane AND executes a coordinator work item, registered once and
+dispatched by ``ctx.role``.
 
-  - ``PROPOSER``  — a conversational-lane module. Returns a PROPOSAL (``ModuleResult`` with
-                    ``proposal``); has NO side effects. Generalizes ``AgentResult`` +
-                    ``SpecialistHandoff``. A proposer STRUCTURALLY cannot send/spend: its
-                    manifest may declare no gated capability, and its ``GateFacade`` is empty.
-  - ``EXECUTOR``  — a coordinator-dispatched module. Touches DB + ARMS the send gate; returns
-                    an ``ItemExecutionResult``-shaped ``ModuleResult``. Generalizes
-                    ``AgentItemContext`` + ``ItemExecutionResult``. Only an executor may declare
-                    a gated capability, and it reaches the gate ONLY through the ``GateFacade``.
+  - ``PROPOSER``  — the conversational LANE. Returns a PROPOSAL (``ModuleResult`` with ``proposal``);
+                    has NO side effects. Generalizes ``AgentResult`` + ``SpecialistHandoff``. The
+                    proposer lane is STRUCTURALLY side-effect-free: its ``GateFacade`` STRIPS gated
+                    capabilities (``capabilities_for_role``), so even a dual-role module cannot
+                    send/spend while proposing — a gated method raises ``CapabilityNotDeclared``.
+  - ``EXECUTOR``  — a coordinator-dispatched LANE. Touches DB + ARMS the send gate; returns an
+                    ``ItemExecutionResult``-shaped ``ModuleResult``. Generalizes ``AgentItemContext``
+                    + ``ItemExecutionResult``. A gated capability is legal ONLY when ``EXECUTOR`` is a
+                    declared role, and it reaches the gate ONLY through the ``GateFacade``.
 
 THE TRUST BOUNDARY (the map's flagged implication #3)
 -----------------------------------------------------
@@ -60,43 +64,67 @@ from orchestrator.agent_framework.capabilities import (
     Capability,
     is_gated,
 )
+from orchestrator.agent_framework.conformance import (
+    CHECK_NAMES,
+    CheckResult,
+    ConformanceReport,
+    assert_conforms,
+    check_module_conformance,
+)
 from orchestrator.agent_framework.context import (
     ModuleContext,
     ModuleResult,
     TenantResolutionError,
 )
+from orchestrator.agent_framework.entitlement import check_entitlement
 from orchestrator.agent_framework.gate_facade import (
     CapabilityNotDeclared,
     GateFacade,
 )
-from orchestrator.agent_framework.manifest import AgentManifest
+from orchestrator.agent_framework.manifest import AgentManifest, ManifestError
 from orchestrator.agent_framework.protocols import ExecutorModule, ProposerModule
 from orchestrator.agent_framework.registration import (
     AgentFrameworkRegistry,
+    ModuleDispatchError,
     ModuleRegistrationError,
     RegisteredModule,
     default_registry,
     get_registered,
+    register_activation_prereqs,
     register_agent,
 )
 
+# The COMPLETE public SDK surface. A module author imports EVERYTHING it needs from
+# ``orchestrator.agent_framework`` — never a submodule-deep path. This list IS the contract: the
+# manifest + roles + capabilities, the context/result value objects, the GateFacade (the only door
+# to a gated action), the two role Protocols, ``register_agent``, and the conformance kit
+# (``check_module_conformance`` / ``assert_conforms``) that verifies a module against all of it.
 __all__ = [
+    "CHECK_NAMES",
     "GATED_CAPABILITIES",
     "AgentFrameworkRegistry",
     "AgentManifest",
     "AgentRole",
     "Capability",
     "CapabilityNotDeclared",
+    "CheckResult",
+    "ConformanceReport",
     "ExecutorModule",
     "GateFacade",
+    "ManifestError",
     "ModuleContext",
+    "ModuleDispatchError",
     "ModuleRegistrationError",
     "ModuleResult",
     "ProposerModule",
     "RegisteredModule",
     "TenantResolutionError",
+    "assert_conforms",
+    "check_entitlement",
+    "check_module_conformance",
     "default_registry",
     "get_registered",
     "is_gated",
+    "register_activation_prereqs",
     "register_agent",
 ]
