@@ -1354,6 +1354,35 @@ _LATE_REPLY_SWEEP_CAP_S = 120.0
 _LATE_REPLY_SWEEP_POLL_S = 10.0
 
 
+# The manager_task states in which the async loop is ACTIVELY COMPOSING its out-of-band reply (plan
+# summary / approval template / outcome report) — the draft has NOT been emitted yet. Deliberately
+# EXCLUDES the PAUSED-for-owner states clarifying / waiting_owner / blocked: those mean any reply due has
+# ALREADY emitted and the task is parked awaiting the owner (so the normal stable-poll exit applies, and
+# the sweep never hangs to the cap on a parked task). The D3 sales-recovery draft is minted directly at
+# 'planned' (triage_seam) and runs planned->running->emit->waiting_owner, so the draft is always captured.
+# Inlined (not imported from the dbos-heavy task_store) to keep the harness import light.
+_PRODUCING_TASK_STATUSES = ("planned", "running", "verifying")
+
+
+def _tenant_has_producing_task(dsn: str, tenant_id: str) -> bool:
+    """True iff the tenant has a manager_task still PRODUCING its out-of-band reply. Used by the
+    late-reply sweep so "no new conversation rows yet" is never mistaken for "settled" while the async
+    draft is still being composed (the VT-642 regression: a sync ack now short-circuits the runner's
+    in-turn wait, so the draft lands AFTER the phase returns — the sweep must wait for it). Fail-soft:
+    any error (incl. an operator-claim/RLS gap on manager_tasks) returns False, leaving the sweep's
+    prior stable-poll behavior unchanged — never a regression, at worst a no-op."""
+    try:
+        with _connect(dsn) as conn:
+            _set_operator_claim(conn)
+            row = conn.execute(
+                "SELECT 1 FROM manager_tasks WHERE tenant_id = %s AND status = ANY(%s) LIMIT 1",
+                (str(tenant_id), list(_PRODUCING_TASK_STATUSES)),
+            ).fetchone()
+        return row is not None
+    except Exception:  # noqa: BLE001 — a status probe must never fail the sweep (fail-soft -> False)
+        return False
+
+
 def _sweep_late_replies(
     dsn: str, tenant_id: str, results: list[StepResult], *, verbose: bool,
 ) -> list[Any]:
@@ -1381,7 +1410,15 @@ def _sweep_late_replies(
             with _connect(dsn) as conn:
                 turns = _new_conversation_turns(conn, tenant_id, set())
             count = len(turns)
-            stable_polls = stable_polls + 1 if count == last_count else 0
+            # VT-642 follow-on: while a manager_task is still PRODUCING its out-of-band draft, "no new
+            # rows yet" means "still composing", NOT "settled" — hold the stable counter at 0 (up to the
+            # cap) so the async draft is captured, not scored as an undelivered "I'm on it" (loop_stall).
+            # Before VT-642 the runner's in-turn wait held the draft in-window; a sync ack now
+            # short-circuits that wait, so the sweep is where the wait has to happen.
+            if _tenant_has_producing_task(dsn, tenant_id):
+                stable_polls = 0
+            else:
+                stable_polls = stable_polls + 1 if count == last_count else 0
             last_count = count
         late = [t for t in turns if _key(t) not in captured]
         if late and results:
