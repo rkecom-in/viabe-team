@@ -39,9 +39,11 @@ from orchestrator.owner_inputs.status_query import classify_status_query
         ("how many lapsed?", "lapsed_count"),
         # Guard: a plain customer count with NO lapsed/dormant token stays customer_count.
         ("how many customers do I have on file?", "customer_count"),
-        # Guard: a behavioural "haven't bought" phrase (no token) is NOT lapsed_count here — it
-        # stays with the brain's speech-act guard, so the deterministic parse returns unknown.
-        ("how many haven't bought anything in a while?", "unknown"),
+        # F2 (VT-648) — a behavioural "how many haven't ordered" COUNT ask now routes to the dormant
+        # count (count interrogative + inactivity cue, no list cue), not the brain. This finite
+        # count-interrogative detection is legitimate under CL-2026-07-15 (a bounded closed class).
+        ("how many haven't bought anything in a while?", "lapsed_count"),
+        ("how many customers haven't ordered in a while?", "lapsed_count"),
         # VT-632 finance guard: a cash-flow read falls through to the brain (not a status_query
         # qtype) — and a NEGATED 'campaigns' token in the same message must NOT hijack it.
         (

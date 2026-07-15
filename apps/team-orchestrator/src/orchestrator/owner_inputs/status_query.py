@@ -99,6 +99,28 @@ _TOP_WHO_TOKENS = frozenset({
 })
 
 
+# F2 (VT-648) — a COUNT interrogative ("how many …", "kitne …", "कितने …"). Count interrogatives are
+# a FINITE, fully-enumerable CLOSED class, so keyword detection is legitimate here under Fazal STANDING
+# CL-2026-07-15 (the no-lists rule bans keyword lists for INFINITE natural-language intent — e.g. the
+# infinite ways to phrase "send" (VT-648 send-intent) — NOT a bounded interrogative set). Routes a
+# behavioural "how many haven't ordered" ask to the dormant COUNT (lapsed_count), not the total ledger.
+_COUNT_CUE_TOKENS = frozenset({"kitne", "kitni", "kitna", "count", "number"})
+
+
+def _has_count_cue(norm: str, tokens: set[str]) -> bool:
+    """True iff the message is a COUNT interrogative (EN + Hinglish + Devanagari): how many / how much
+    / kitne / कितने. Finite closed class — legitimate keyword detection under CL-2026-07-15."""
+    if _COUNT_CUE_TOKENS & tokens:
+        return True
+    return (
+        "how many" in norm
+        or "how much" in norm
+        or "कितने" in norm
+        or "कितनी" in norm
+        or "कितना" in norm
+    )
+
+
 def _is_top_spend_query(norm: str, tokens: set[str]) -> bool:
     """True iff the owner is asking WHO their top / most-valuable customers are (a value RANKING),
     not a dormancy or bare count. Requires a ranking or value cue + a customer/spender noun, and
@@ -275,6 +297,15 @@ def classify_status_query(body: str) -> StatusQueryType:
     # ranking ask is answered deterministically, never left to the brain to anchor on lapsed context).
     if _is_top_spend_query(norm, tokens):
         return "top_spend"
+    # F2 (VT-648) — a BEHAVIOURAL "how many haven't ordered" COUNT ask routes to the dormant count,
+    # not the total ledger. A count interrogative ("how many" / "kitne" / "कितने") + an inactivity cue
+    # ("haven't ordered", "60 din se", a negated-purchase phrase), and NOT a list ask (that is
+    # lapsed_list above), means the owner wants the NUMBER of lapsed customers. Placed BEFORE
+    # customer_count so a stray 'customers' token in "how many customers haven't ordered in a while?"
+    # can't hijack it into a total-ledger count. The explicit lapsed/dormant TOKEN route above already
+    # handles "how many lapsed customers"; this adds the behavioural (no-token) phrasing.
+    if _has_count_cue(norm, tokens) and _has_inactivity_cue(norm, tokens) and not list_cue:
+        return "lapsed_count"
     # R7 — VETO customer_count when a LIST cue is present ("give me a list of my customers"): a list is
     # not a count. Without an inactivity cue it isn't a lapsed_list either, so it falls to the brain
     # (the CD2 names path) rather than being answered with a bare total.
