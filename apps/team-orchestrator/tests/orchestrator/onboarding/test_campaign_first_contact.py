@@ -166,3 +166,46 @@ def test_vt641_devanagari_status_question_does_not_fire() -> None:
         "क्या तुमने कैंपेन भेज दिया?",
     ]:
         assert cfc.is_campaign_plan_imperative(msg) is False, msg
+
+
+# ----------------------------- VT-642: co-present list-send acknowledgment ----------------
+def test_vt642_list_send_cue_detected_alongside_winback() -> None:
+    """VT-642 — a win-back message that ALSO asks for the LIST / the names co-carries a list-send
+    speech-act (journey j08 turn-2). The predicate flags it so the caller rides an honest
+    can't-attach-names-yet ack alongside the draft (the ask is never silently dropped)."""
+    for msg in [
+        # EN / Hinglish
+        "send me the list and prepare a win-back offer for them",
+        "share the names of the lapsed customers, don't send anything yet",
+        "haan wo list bhej do mujhe",
+        "in customers ke naam bhejo aur offer taiyaar karo",
+        # Devanagari (journey j08 turn-2 phrasing)
+        "हां, वो 6 वाली लिस्ट भेज दो मुझे। उनके लिए एक वापसी ऑफर भी तैयार कर लो",
+        "उन ग्राहकों की सूची भेज दो और वापस लाने वाला ऑफर बनाओ",
+        "इन ग्राहकों के नाम भेजो",
+    ]:
+        assert cfc.mentions_customer_list_request(msg) is True, msg
+
+
+def test_vt642_bare_winback_has_no_list_cue() -> None:
+    """A win-back imperative with NO list/names ask must NOT trigger the list-send ack (no noise)."""
+    for msg in [
+        "run a win-back campaign for my lapsed customers",
+        "इन 8 ग्राहकों के लिए वापसी ऑफर तैयार कर दो, अभी भेजना मत",  # offer, no list/names cue
+        "start a re-engagement campaign",
+        "purane customers ko campaign bhejo",  # 'bhejo' = send campaign, not send-the-list
+    ]:
+        assert cfc.mentions_customer_list_request(msg) is False, msg
+
+
+def test_vt642_list_ack_is_honest_and_reaffirms_the_money_gate() -> None:
+    body = cfc.LIST_SEND_ACK_PREAMBLE
+    low = body.lower()
+    # Honest capability bound (can't attach names yet) — never a false "here they are" name dump.
+    assert "can't" in low or "cannot" in low
+    # Bridges to the draft AND re-affirms the money gate (nothing sends without approval).
+    assert "draft" in low or "drafting" in low
+    assert "approve" in low or "until you say so" in low
+    # Never a FALSE completion claim (nothing already sent).
+    for bad in ["i've sent", "i sent", "already sent", "has gone out"]:
+        assert bad not in low, bad
