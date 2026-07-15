@@ -21,7 +21,13 @@ from uuid import uuid4
 
 import pytest
 
-from orchestrator.agent_framework import (
+# The framework PACKAGE is import-light (registration.py lazy-imports the deny-list guard), but these
+# tests exercise register() and the coordinator adapter, which reach heavy seams at RUNTIME — langchain
+# (via orchestrator.agent.__init__ → the deny-list guard) and dbos (the coordinator). Skip the whole
+# module in the dep-less smoke; the full suite (deps present) runs all of it. Per the repo dep-less discipline.
+pytest.importorskip("langchain")
+
+from orchestrator.agent_framework import (  # noqa: E402 — after the importorskip guard
     AgentFrameworkRegistry,
     AgentManifest,
     AgentRole,
