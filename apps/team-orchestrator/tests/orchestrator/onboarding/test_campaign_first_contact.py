@@ -146,3 +146,23 @@ def test_empty_cohort_reply_is_honest_and_actionable() -> None:
         assert bad not in low, bad
     # Names the concrete fix so it is actionable, not a dead end.
     assert "Sheet" in body or "Shopify" in body
+
+
+def test_vt641_devanagari_winback_imperative_delegates() -> None:
+    """VT-641 — a Hindi-script win-back imperative fires D3 like its Roman twin (journey-sim j08 3/3).
+    ASCII \\b is dead for Devanagari matras, so these matched neither regex pre-fix."""
+    for msg in [
+        "इन 8 ग्राहकों के लिए एक अच्छा सा वापसी ऑफर तैयार कर दो, पर अभी भेजना मत, पहले दिखाओ",
+        "पुराने ग्राहकों के लिए वापसी ऑफर बनाओ",
+        "इन ग्राहकों को वापस लाने वाला कैंपेन तैयार कर दो",
+    ]:
+        assert cfc.is_campaign_plan_imperative(msg) is True, msg
+
+
+def test_vt641_devanagari_status_question_does_not_fire() -> None:
+    """VT-641 — a Devanagari count/list QUESTION (no campaign VERB∧NOUN imperative) falls through."""
+    for msg in [
+        "कितने पुराने ग्राहक वापस नहीं आए? एक लिस्ट निकाल सकते हो?",
+        "क्या तुमने कैंपेन भेज दिया?",
+    ]:
+        assert cfc.is_campaign_plan_imperative(msg) is False, msg

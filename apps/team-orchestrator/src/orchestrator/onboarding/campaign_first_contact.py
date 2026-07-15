@@ -24,6 +24,8 @@ import logging
 import re
 from uuid import UUID
 
+from orchestrator import keyword_match as _km
+
 logger = logging.getLogger("orchestrator.onboarding.campaign_first_contact")
 
 # The honest terminal when the owner asks for a win-back but there is no cohort to recover. Names
@@ -55,6 +57,23 @@ _CAMPAIGN_NOUN_RE = re.compile(
     r"outreach|lapsed|dormant)\b",
     re.IGNORECASE,
 )
+
+# VT-641 — Devanagari win-back imperative coverage. The ASCII ``\b`` anchors above are DEAD for
+# Devanagari (a matra ◌ा/◌ी is not ``\w``), so a Hindi-script win-back request
+# ("वापसी ऑफर तैयार कर दो" = prepare a win-back offer) matched NEITHER regex, the D3 SR-delegation
+# net never fired, and the manager fell through to a generic capability menu (journey-sim j08, 3/3).
+# Reuse the repo's Devanagari-safe boundary matcher (``keyword_match``, same one the opt-out gate
+# uses). VERB ∧ NOUN is still required below, so a Devanagari status QUESTION (no campaign noun)
+# never fires this net.
+_DEVANAGARI_CAMPAIGN_VERBS = (
+    "तैयार कर", "तैयार करो", "तैयार कीजिए", "बनाओ", "बना दो", "बना दीजिए", "बनाकर",
+    "ड्राफ्ट", "शुरू कर", "भेज", "भेजो", "चलाओ",
+)
+_DEVANAGARI_CAMPAIGN_NOUNS = (
+    "वापसी", "वापस लाने", "वापस-लाने", "विनबैक", "कैंपेन", "री-एंगेज", "री-एक्टिवेशन",
+)
+_DEV_CAMPAIGN_VERB_PATS = _km.boundary_patterns(_DEVANAGARI_CAMPAIGN_VERBS)
+_DEV_CAMPAIGN_NOUN_PATS = _km.boundary_patterns(_DEVANAGARI_CAMPAIGN_NOUNS)
 
 # Ad-hijack guard: an EXTERNAL paid-ad ask ("run a Facebook ad campaign for me") carries an
 # ad-platform token + the generic "campaign" noun, but it is NOT a win-back — it must fall through
@@ -118,7 +137,11 @@ def is_campaign_plan_imperative(text: str) -> bool:
 
         if matches_opt_out_or_dsr(text):
             return False
-        if not (_CAMPAIGN_VERB_RE.search(text) and _CAMPAIGN_NOUN_RE.search(text)):
+        # VT-641 — VERB ∧ NOUN, matching EITHER the Roman/Hinglish regexes OR the Devanagari-safe
+        # patterns, so a Hindi-script win-back imperative delegates like its Roman twin.
+        verb_ok = bool(_CAMPAIGN_VERB_RE.search(text)) or _km.contains_any(text, _DEV_CAMPAIGN_VERB_PATS)
+        noun_ok = bool(_CAMPAIGN_NOUN_RE.search(text)) or _km.contains_any(text, _DEV_CAMPAIGN_NOUN_PATS)
+        if not (verb_ok and noun_ok):
             return False
         # Ad-hijack guard: an external paid-ad ask ("run a Facebook ad campaign") matches VERB∧NOUN
         # on the generic "campaign", but it is NOT a win-back — fall through to the brain unless a
