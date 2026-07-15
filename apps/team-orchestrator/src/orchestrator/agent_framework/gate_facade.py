@@ -28,7 +28,11 @@ from collections.abc import Iterable
 from typing import Any
 from uuid import UUID
 
-from orchestrator.agent_framework.capabilities import Capability, is_gated
+from orchestrator.agent_framework.capabilities import (
+    GATED_CAPABILITIES,
+    Capability,
+    is_gated,
+)
 
 logger = logging.getLogger("orchestrator.agent_framework.gate_facade")
 
@@ -169,4 +173,31 @@ class GateFacade:
         )
 
 
-__all__ = ["CapabilityNotDeclared", "GateFacade"]
+#: The ``GateFacade`` method that SERVICES each gated capability — the single binding of a gated
+#: ``Capability`` to the facade door that routes it to a real deterministic gate. Its keys MUST
+#: equal ``GATED_CAPABILITIES`` (asserted at import below): a gated capability with no servicing
+#: method is an "orphan" — a manifest could declare it but no door would ever service it. The
+#: conformance harness reads this to prove (a) every declared gated capability has a real method
+#: (no orphan) and (b) a proposer-scoped facade raises ``CapabilityNotDeclared`` on every one.
+GATED_METHOD_BY_CAPABILITY: dict[Capability, str] = {
+    Capability.REQUEST_CUSTOMER_SEND: "request_customer_send",
+    Capability.REQUEST_BUSINESS_ACTION: "gate_business_action",
+}
+
+# Framework invariant (fail-loud at import): every gated capability is serviced by a real, callable
+# facade method, and the mapping introduces no method that is not an actual GateFacade attribute.
+# Cheap boot check — keeps "add a gated capability" and "wire its facade door" from drifting apart.
+if set(GATED_METHOD_BY_CAPABILITY) != set(GATED_CAPABILITIES):  # pragma: no cover - invariant guard
+    raise RuntimeError(
+        "GATED_METHOD_BY_CAPABILITY must map exactly GATED_CAPABILITIES; "
+        f"missing={sorted(c.value for c in GATED_CAPABILITIES - set(GATED_METHOD_BY_CAPABILITY))!r} "
+        f"extra={sorted(c.value for c in set(GATED_METHOD_BY_CAPABILITY) - GATED_CAPABILITIES)!r}"
+    )
+for _cap, _method in GATED_METHOD_BY_CAPABILITY.items():  # pragma: no cover - invariant guard
+    if not callable(getattr(GateFacade, _method, None)):
+        raise RuntimeError(
+            f"GATED_METHOD_BY_CAPABILITY[{_cap.value!r}] -> {_method!r} is not a GateFacade method"
+        )
+
+
+__all__ = ["GATED_METHOD_BY_CAPABILITY", "CapabilityNotDeclared", "GateFacade"]

@@ -51,7 +51,7 @@ class _ForbiddenToolProposer:
     manifest = AgentManifest(
         name="forbidden_tool_proposer",
         version="1.0.0",
-        role=AgentRole.PROPOSER,
+        roles=frozenset({AgentRole.PROPOSER}),
         description="holds a send tool it must not have",
         capabilities=frozenset({Capability.READ_BUSINESS_CONTEXT}),
         tools=(types.SimpleNamespace(name="send_whatsapp_message"),),
@@ -67,7 +67,7 @@ class _SendingExecutor:
     manifest = AgentManifest(
         name="sending_executor",
         version="1.0.0",
-        role=AgentRole.EXECUTOR,
+        roles=frozenset({AgentRole.EXECUTOR}),
         description="executor that arms a send through the facade",
         capabilities=frozenset({Capability.REQUEST_CUSTOMER_SEND}),
     )
@@ -112,7 +112,7 @@ def test_register_rejects_role_impl_mismatch():
         manifest = AgentManifest(
             name="broken",
             version="1.0.0",
-            role=AgentRole.PROPOSER,
+            roles=frozenset({AgentRole.PROPOSER}),
             description="no propose method",
             capabilities=frozenset(),
         )
@@ -141,7 +141,7 @@ def test_manifest_rejects_proposer_with_gated_capability():
     manifest = AgentManifest(
         name="bad_proposer",
         version="1.0.0",
-        role=AgentRole.PROPOSER,
+        roles=frozenset({AgentRole.PROPOSER}),
         description="proposer illegally declaring a send capability",
         capabilities=frozenset({Capability.REQUEST_CUSTOMER_SEND}),
     )
@@ -156,7 +156,7 @@ def test_registration_rejects_proposer_with_gated_capability():
         manifest = AgentManifest(
             name="bad_proposer2",
             version="1.0.0",
-            role=AgentRole.PROPOSER,
+            roles=frozenset({AgentRole.PROPOSER}),
             description="x",
             capabilities=frozenset({Capability.REQUEST_BUSINESS_ACTION}),
         )
@@ -186,7 +186,7 @@ def test_registration_rejects_various_forbidden_tools(bad_tool_name):
         manifest = AgentManifest(
             name=f"m_{bad_tool_name}",
             version="1.0.0",
-            role=AgentRole.EXECUTOR,
+            roles=frozenset({AgentRole.EXECUTOR}),
             description="x",
             capabilities=frozenset(),
             tools=(types.SimpleNamespace(name=bad_tool_name),),
@@ -206,7 +206,7 @@ def test_manifest_prereq_name_must_match():
     manifest = AgentManifest(
         name="agent_a",
         version="1.0.0",
-        role=AgentRole.EXECUTOR,
+        roles=frozenset({AgentRole.EXECUTOR}),
         description="x",
         capabilities=frozenset(),
         prerequisites=AgentPrerequisites(agent="agent_b"),  # mismatch
@@ -446,7 +446,7 @@ def test_executor_adapter_conforms_to_coordinator_protocol():
         manifest = AgentManifest(
             name="proto_executor",
             version="1.0.0",
-            role=AgentRole.EXECUTOR,
+            roles=frozenset({AgentRole.EXECUTOR}),
             description="x",
             capabilities=frozenset(),
         )
@@ -488,3 +488,219 @@ def test_coordinator_adapter_rejects_proposer():
     registered = reg.register(BusinessContextReader(reader=lambda _t: _fake_business_context()))
     with pytest.raises(ModuleRegistrationError):
         CoordinatorAgentAdapter(registered)
+
+
+# --- 7. dual-role modules (Ruling #1: SR is ONE module = PROPOSER + EXECUTOR) -------------------
+
+
+class _DualRoleModule:
+    """One module declaring BOTH roles — proposes in the conversational lane AND executes a
+    coordinator work item (the Sales-Recovery shape). Declares a gated capability: LEGAL because
+    EXECUTOR is a declared role. Registered ONCE; dispatch is by ``ctx.role``."""
+
+    manifest = AgentManifest(
+        name="dual_role_module",
+        version="1.0.0",
+        roles=frozenset({AgentRole.PROPOSER, AgentRole.EXECUTOR}),
+        description="proposes in the conversational lane AND executes a work item",
+        capabilities=frozenset(
+            {Capability.READ_BUSINESS_CONTEXT, Capability.REQUEST_CUSTOMER_SEND}
+        ),
+    )
+
+    def propose(self, ctx, gate):
+        return ModuleResult(
+            role=AgentRole.PROPOSER, status="completed", proposal={"lane": "propose"}
+        )
+
+    def execute(self, ctx, gate):
+        gate.request_customer_send("draft-dual", autonomy_level="L2")
+        return ModuleResult(role=AgentRole.EXECUTOR, status="sent", work_item_status="sent")
+
+
+def test_dual_role_registers_once_and_both_lanes_dispatch(monkeypatch):
+    """A {PROPOSER, EXECUTOR} module registers ONCE; ``run`` dispatches by ``ctx.role`` — ``propose``
+    under a proposer context, ``execute`` under an executor context — on the SAME instance."""
+    calls = {}
+    fake = types.ModuleType("orchestrator.agents.customer_send")
+
+    def agent_send_draft(tenant_id, draft_id, *, autonomy_level="L2", conn=None, send_fn=None):
+        calls["draft_id"] = draft_id
+        return "SENT"
+
+    fake.agent_send_draft = agent_send_draft
+    monkeypatch.setitem(sys.modules, "orchestrator.agents.customer_send", fake)
+
+    reg = AgentFrameworkRegistry()
+    registered = reg.register(_DualRoleModule())
+    assert reg.names() == ["dual_role_module"]  # ONE registration for BOTH roles
+
+    tenant = uuid4()
+    p_out = registered.run(
+        ModuleContext.for_proposer(
+            tenant_model_value=str(tenant), module_name="dual_role_module"
+        )
+    )
+    assert p_out.role is AgentRole.PROPOSER
+    assert p_out.proposal == {"lane": "propose"}
+
+    e_out = registered.run(
+        ModuleContext.for_executor(
+            tenant_id=tenant, item_id="i", work_item_id="w", run_id="r"
+        )
+    )
+    assert e_out.status == "sent"
+    assert calls["draft_id"] == "draft-dual"  # the executor lane armed the send through the facade
+
+
+def test_dual_role_with_gated_capability_is_accepted():
+    """Contrast the pure-proposer rejection: a {PROPOSER, EXECUTOR} module MAY declare a gated
+    capability — the manifest validates because EXECUTOR is a declared role."""
+    _DualRoleModule.manifest.validate()  # does not raise
+    AgentFrameworkRegistry().register(_DualRoleModule())  # registers cleanly
+
+
+def test_dual_role_proposer_lane_cannot_send():
+    """Even though the module DECLARES REQUEST_CUSTOMER_SEND, its PROPOSER-lane facade STRIPS gated
+    capabilities — the proposer lane is structurally side-effect-free (holds only the read cap)."""
+    registered = AgentFrameworkRegistry().register(_DualRoleModule())
+    p_ctx = ModuleContext.for_proposer(
+        tenant_model_value=str(uuid4()), module_name="dual_role_module"
+    )
+    gate = registered.new_gate(p_ctx)
+    assert gate.can(Capability.REQUEST_CUSTOMER_SEND) is False
+    assert gate.capabilities == frozenset({Capability.READ_BUSINESS_CONTEXT})
+    with pytest.raises(CapabilityNotDeclared):
+        gate.request_customer_send("draft-1")
+
+
+def test_dual_role_executor_lane_can_send():
+    """The EXECUTOR lane of the SAME module DOES service the gated capability."""
+    registered = AgentFrameworkRegistry().register(_DualRoleModule())
+    e_ctx = ModuleContext.for_executor(
+        tenant_id=uuid4(), item_id="i", work_item_id="w", run_id="r"
+    )
+    gate = registered.new_gate(e_ctx)
+    assert gate.can(Capability.REQUEST_CUSTOMER_SEND) is True
+
+
+def test_run_rejects_role_not_declared():
+    """``run`` with a ``ctx.role`` the module does not declare raises ``ModuleDispatchError``."""
+    from orchestrator.agent_framework import ModuleDispatchError
+
+    registered = AgentFrameworkRegistry().register(
+        BusinessContextReader(reader=lambda _t: _fake_business_context())
+    )  # pure PROPOSER
+    e_ctx = ModuleContext.for_executor(
+        tenant_id=uuid4(), item_id="i", work_item_id="w", run_id="r"
+    )
+    with pytest.raises(ModuleDispatchError):
+        registered.run(e_ctx)
+
+
+def test_pure_proposer_with_gated_capability_still_rejected():
+    """Regression guard for Ruling #1: a PURE proposer declaring a gated capability is REJECTED
+    (only a module that ALSO declares EXECUTOR may)."""
+    manifest = AgentManifest(
+        name="pure_proposer_gated",
+        version="1.0.0",
+        roles=frozenset({AgentRole.PROPOSER}),
+        description="pure proposer illegally declaring a gated capability",
+        capabilities=frozenset({Capability.REQUEST_CUSTOMER_SEND}),
+    )
+    with pytest.raises(ManifestError):
+        manifest.validate()
+
+
+# --- 8. D-REG: manifest -> activation_registry (single source, EXPLICIT wiring) -----------------
+
+
+def test_import_does_not_mutate_activation_registry():
+    """Importing the framework wires NOTHING: the framework's own default registry is empty AND the
+    activation registry carries no framework-injected probe entry (additive/inert)."""
+    from orchestrator.agent_framework import default_registry
+    from orchestrator.agents import activation_registry
+
+    assert default_registry().names() == []
+    assert "conformance_probe_agent" not in activation_registry.REGISTRY
+
+
+def test_register_activation_prereqs_wires_and_is_idempotent():
+    """The EXPLICIT wiring step publishes a manifest's declared bar into activation_registry, and a
+    second call is a safe no-op."""
+    from orchestrator.agent_framework import register_activation_prereqs
+    from orchestrator.agents import activation_registry
+    from orchestrator.agents.activation_registry import AgentPrerequisites
+
+    class _Executor:
+        manifest = AgentManifest(
+            name="conformance_probe_agent",
+            version="1.0.0",
+            roles=frozenset({AgentRole.EXECUTOR}),
+            description="probe module with a declared activation bar",
+            capabilities=frozenset(),
+            prerequisites=AgentPrerequisites(
+                agent="conformance_probe_agent",
+                requires_journey_complete=True,
+                requires_verification=False,
+                requires_enabled_data_source=False,
+                min_customers=0,
+                requires_ownership_verified=False,
+            ),
+        )
+
+        def execute(self, ctx, gate):  # pragma: no cover
+            ...
+
+    assert "conformance_probe_agent" not in activation_registry.REGISTRY
+    try:
+        register_activation_prereqs(_Executor())
+        assert "conformance_probe_agent" in activation_registry.REGISTRY
+        got = activation_registry.get_prerequisites("conformance_probe_agent")
+        assert got.requires_journey_complete is True
+        assert got.requires_verification is False
+        register_activation_prereqs(_Executor())  # idempotent — no raise
+        assert list(activation_registry.REGISTRY).count("conformance_probe_agent") == 1
+    finally:
+        activation_registry.REGISTRY.pop("conformance_probe_agent", None)
+
+
+def test_register_activation_prereqs_noop_without_bar():
+    """A module with NO prerequisites (a read-only advisory lane) wires nothing."""
+    from orchestrator.agent_framework import register_activation_prereqs
+    from orchestrator.agents import activation_registry
+
+    before = dict(activation_registry.REGISTRY)
+    register_activation_prereqs(BusinessContextReader())  # prerequisites=None
+    assert activation_registry.REGISTRY == before
+
+
+# --- 9. D-ENT: SOFT, COMPUTED entitlement seam --------------------------------------------------
+
+
+def test_entitlement_no_key_is_free():
+    """A manifest with no ``entitlement_key`` is a FREE capability — always entitled."""
+    from orchestrator.agent_framework import check_entitlement
+
+    manifest = AgentManifest(
+        name="free_agent",
+        version="1.0.0",
+        roles=frozenset({AgentRole.EXECUTOR}),
+        description="free capability, no SKU",
+    )
+    assert check_entitlement(manifest, uuid4()) is True
+
+
+def test_entitlement_with_key_is_soft_open():
+    """A billable module (SKU declared) is SOFT-OPEN pre-launch — the seam NEVER hard-blocks and
+    NEVER encodes a price; it documents where billing wires in at activation."""
+    from orchestrator.agent_framework import check_entitlement
+
+    manifest = AgentManifest(
+        name="billable_agent",
+        version="1.0.0",
+        roles=frozenset({AgentRole.EXECUTOR}),
+        description="billable capability with a SKU declaration",
+        entitlement_key="sku_specialised_agent",
+    )
+    assert check_entitlement(manifest, uuid4()) is True

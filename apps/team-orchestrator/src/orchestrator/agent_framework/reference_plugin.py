@@ -47,7 +47,7 @@ class BusinessContextReader:
     manifest = AgentManifest(
         name="business_context_reader",
         version="1.0.0",
-        role=AgentRole.PROPOSER,
+        roles=frozenset({AgentRole.PROPOSER}),
         description=(
             "Read-only reference module: reads the tenant's manager-held business objective + "
             "identity slice and returns it as a proposal for the manager to frame a finding "

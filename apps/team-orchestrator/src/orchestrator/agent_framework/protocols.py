@@ -14,11 +14,16 @@ a proposer."
 
 THE THIRD-PARTY CONTRACT — a new module is exactly:
     class MyModule:
-        manifest = AgentManifest(name=..., version=..., role=..., description=..., capabilities=...)
-        def propose(self, ctx, gate) -> ModuleResult: ...     # PROPOSER
-        # OR
-        def execute(self, ctx, gate) -> ModuleResult: ...     # EXECUTOR
+        manifest = AgentManifest(name=..., version=..., roles=..., description=..., capabilities=...)
+        def propose(self, ctx, gate) -> ModuleResult: ...     # if PROPOSER in roles
+        def execute(self, ctx, gate) -> ModuleResult: ...     # if EXECUTOR in roles
     register_agent(MyModule())
+
+A DUAL-role module (the Sales-Recovery shape) declares ``roles=frozenset({PROPOSER, EXECUTOR})``
+and implements BOTH methods on the ONE class — it registers once, and ``RegisteredModule.run``
+dispatches to ``propose`` under a PROPOSER context and ``execute`` under an EXECUTOR context. Its
+proposer-lane facade STRIPS gated capabilities (a proposal has no side effects) while its
+executor-lane facade services them — one module, two contracts, one trust boundary.
 """
 
 from __future__ import annotations
@@ -34,7 +39,7 @@ from orchestrator.agent_framework.manifest import AgentManifest
 class ProposerModule(Protocol):
     """A conversational-lane module that PROPOSES. No side effects.
 
-    ``manifest.role`` MUST be ``PROPOSER``. ``propose`` reads ``ctx`` (the IDOR-resolved tenant +
+    ``PROPOSER`` must be in ``manifest.roles``. ``propose`` reads ``ctx`` (the IDOR-resolved tenant +
     the manager's situation/desired_outcome framing) and returns a ``ModuleResult`` carrying a
     ``proposal``. The ``gate`` it receives is EMPTY (a proposer declares no gated capability), so
     any attempt to use it raises ``CapabilityNotDeclared`` — a proposer is structurally read/propose
@@ -50,7 +55,7 @@ class ProposerModule(Protocol):
 class ExecutorModule(Protocol):
     """A coordinator-dispatched module that EXECUTES a work item.
 
-    ``manifest.role`` MUST be ``EXECUTOR``. ``execute`` reads ``ctx`` (server-derived tenant + the
+    ``EXECUTOR`` must be in ``manifest.roles``. ``execute`` reads ``ctx`` (server-derived tenant + the
     work-item IDs), does its work (re-reading PII from RLS tables itself, IDs-in-state), ARMS any
     consequential action through ``gate`` (scoped to its declared gated capabilities), and returns
     a ``ModuleResult`` carrying the work-item status. Adapts to the coordinator's ``SpecialistAgent``

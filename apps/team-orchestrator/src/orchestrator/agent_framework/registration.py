@@ -24,7 +24,7 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 
-from orchestrator.agent_framework.capabilities import AgentRole
+from orchestrator.agent_framework.capabilities import ROLE_METHOD, AgentRole
 from orchestrator.agent_framework.context import ModuleContext, ModuleResult
 from orchestrator.agent_framework.gate_facade import GateFacade
 from orchestrator.agent_framework.manifest import AgentManifest, ManifestError
@@ -34,6 +34,13 @@ logger = logging.getLogger("orchestrator.agent_framework.registration")
 
 class ModuleRegistrationError(RuntimeError):
     """Raised when a module fails any registration check (validation / deny-list / conformance)."""
+
+
+class ModuleDispatchError(RuntimeError):
+    """Raised by ``RegisteredModule.run`` when a context's role is not one the module declares.
+
+    A dual-role module dispatched with either role runs; a pure PROPOSER handed an EXECUTOR context
+    (or vice-versa) is a caller/wiring bug — fail loud rather than silently mis-dispatch."""
 
 
 @dataclass(frozen=True)
@@ -47,26 +54,33 @@ class RegisteredModule:
         """Build the capability-scoped ``GateFacade`` for a run of this module against ``ctx``.
 
         The facade's tenant is the context's IDOR-resolved tenant; its capabilities are the
-        manifest's declared set. A proposer's manifest has no gated capability, so its facade
-        refuses every gated method — the structural read/propose-only guarantee.
+        manifest's declared set SCOPED TO ``ctx.role`` (``capabilities_for_role``). The PROPOSER lane
+        strips gated capabilities even for a dual-role module, so a proposer's facade refuses every
+        gated method — the structural read/propose-only guarantee holds regardless of the module's
+        executor lane. The EXECUTOR lane services the full declared set.
         """
         return GateFacade(
             tenant_id=ctx.tenant_id,
-            capabilities=self.manifest.capabilities,
+            capabilities=self.manifest.capabilities_for_role(ctx.role),
             run_id=ctx.run_id,
         )
 
     def run(self, ctx: ModuleContext) -> ModuleResult:
-        """Invoke the module for ``ctx`` (dispatching to ``propose`` or ``execute`` by role).
+        """Invoke the module for ``ctx`` (dispatching by ``ctx.role`` to ``propose`` / ``execute``).
 
-        This is the framework's uniform driver: build the scoped facade, call the role method,
-        return the module's ``ModuleResult``. The reference plugin + tests prove the full seam
-        (registration -> capability scope -> context in -> gate-mediated result out) through here.
+        This is the framework's uniform driver: assert the context's role is one the module
+        declares, build the role-scoped facade, call the matching role method, return the module's
+        ``ModuleResult``. A dual-role module dispatches to ``propose`` under a PROPOSER context and
+        ``execute`` under an EXECUTOR context — the SAME registered instance, selected by the lane.
+        Raises ``ModuleDispatchError`` if ``ctx.role`` is not among the module's declared roles.
         """
+        if ctx.role not in self.manifest.roles:
+            raise ModuleDispatchError(
+                f"module {self.manifest.name!r} dispatched with role={ctx.role.value!r}, but "
+                f"declares roles={sorted(r.value for r in self.manifest.roles)!r} — refusing to run."
+            )
         gate = self.new_gate(ctx)
-        if self.manifest.role is AgentRole.PROPOSER:
-            return self.impl.propose(ctx, gate)
-        return self.impl.execute(ctx, gate)
+        return getattr(self.impl, ROLE_METHOD[ctx.role])(ctx, gate)
 
 
 class AgentFrameworkRegistry:
@@ -111,13 +125,15 @@ class AgentFrameworkRegistry:
                 f"module {manifest.name!r}: tool surface rejected by the deny-list guard: {exc}"
             ) from exc
 
-        # 3. role/impl conformance — the code must match the declared role.
-        required_method = "propose" if manifest.role is AgentRole.PROPOSER else "execute"
-        if not callable(getattr(impl, required_method, None)):
-            raise ModuleRegistrationError(
-                f"module {manifest.name!r}: role={manifest.role.value} requires a callable "
-                f"{required_method!r} method"
-            )
+        # 3. role/impl conformance — the code must expose the method for EACH declared role
+        #    (a dual {PROPOSER, EXECUTOR} module must expose BOTH ``propose`` and ``execute``).
+        for role in manifest.roles:
+            required_method = ROLE_METHOD[role]
+            if not callable(getattr(impl, required_method, None)):
+                raise ModuleRegistrationError(
+                    f"module {manifest.name!r}: declared role={role.value!r} requires a callable "
+                    f"{required_method!r} method"
+                )
 
         # 4. name uniqueness.
         if manifest.name in self._modules:
@@ -128,9 +144,9 @@ class AgentFrameworkRegistry:
         registered = RegisteredModule(manifest=manifest, impl=impl)
         self._modules[manifest.name] = registered
         logger.info(
-            "agent_framework: registered module name=%s role=%s capabilities=%s tools=%d",
+            "agent_framework: registered module name=%s roles=%s capabilities=%s tools=%d",
             manifest.name,
-            manifest.role.value,
+            sorted(r.value for r in manifest.roles),
             sorted(c.value for c in manifest.capabilities),
             len(manifest.tools),
         )
@@ -175,6 +191,68 @@ def get_registered(name: str) -> RegisteredModule:
     return _DEFAULT_REGISTRY.get(name)
 
 
+# --- D-REG: manifest -> activation_registry (single source, EXPLICIT wiring) ------------------
+#
+# CL-2026-07-15-manifest-single-source-activation. The manifest is the SINGLE SOURCE of a module's
+# activation bar; ``register_activation_prereqs`` is the deliberate, EXPLICIT step that PUBLISHES
+# that bar into the existing ``activation_registry.REGISTRY`` the ``onboarding_gate`` reads. It is
+# NOT called at import — importing the framework mutates zero live routing; the bar stays inert
+# until a wiring step invokes this. Kept SEPARATE from ``register()`` on purpose: registering a
+# module into the framework registry does NOT touch the live activation gate.
+
+
+def register_activation_prereqs(module_or_manifest: Any) -> None:
+    """Wire a module's declared activation prerequisites into ``activation_registry.REGISTRY``.
+
+    ``module_or_manifest`` is a module instance (carrying ``.manifest``) OR an ``AgentManifest``.
+    Reads the manifest's ``as_prerequisites()`` (the carried ``AgentPrerequisites``, or ``None``) and
+    publishes it, keyed by the prereq's agent name, into the EXISTING activation registry.
+
+    Guarantees:
+      - NOT import-time — call this deliberately (a wiring step), never at module load.
+      - No declared bar (``as_prerequisites()`` is ``None``, e.g. a read-only advisory lane) → no-op.
+      - IDEMPOTENT — calling twice with the same manifest is a no-op (equal declaration).
+      - DRIFT-GUARDED — a CONFLICTING re-declaration for the same agent name raises
+        ``ModuleRegistrationError`` (the manifest is the single source; refuse to silently clobber).
+      - LAZY-imports ``activation_registry`` (keeps the package dep-less-smoke safe).
+    """
+    manifest = (
+        module_or_manifest
+        if isinstance(module_or_manifest, AgentManifest)
+        else getattr(module_or_manifest, "manifest", None)
+    )
+    if not isinstance(manifest, AgentManifest):
+        raise ModuleRegistrationError(
+            f"register_activation_prereqs: {module_or_manifest!r} is neither an AgentManifest nor a "
+            "module carrying a 'manifest' attribute"
+        )
+    prereqs = manifest.as_prerequisites()
+    if prereqs is None:
+        return  # no declared activation bar — nothing to wire.
+
+    # Lazy import: keep the mutation (and activation_registry) OUT of the framework's import surface.
+    from orchestrator.agents import activation_registry
+
+    existing = activation_registry.REGISTRY.get(prereqs.agent)
+    if existing is not None and existing != prereqs:
+        raise ModuleRegistrationError(
+            f"register_activation_prereqs: activation registry already holds a DIFFERENT bar for "
+            f"agent {prereqs.agent!r}; refusing to clobber it. The manifest is the single source — "
+            "reconcile the declaration rather than double-wiring."
+        )
+    activation_registry.REGISTRY[prereqs.agent] = prereqs
+    logger.info(
+        "agent_framework: wired activation prereqs agent=%s journey=%s verify=%s data_source=%s "
+        "min_customers=%d ownership=%s",
+        prereqs.agent,
+        prereqs.requires_journey_complete,
+        prereqs.requires_verification,
+        prereqs.requires_enabled_data_source,
+        prereqs.min_customers,
+        prereqs.requires_ownership_verified,
+    )
+
+
 # --- Role adapter: EXECUTOR module -> coordinator SpecialistAgent Protocol --------------------
 #
 # Concrete proof that the framework GENERALIZES the coordinator seam without replacing it: this
@@ -196,10 +274,11 @@ class CoordinatorAgentAdapter:
     """
 
     def __init__(self, registered: RegisteredModule) -> None:
-        if registered.manifest.role is not AgentRole.EXECUTOR:
+        if AgentRole.EXECUTOR not in registered.manifest.roles:
             raise ModuleRegistrationError(
-                f"CoordinatorAgentAdapter requires an EXECUTOR module; "
-                f"{registered.manifest.name!r} is {registered.manifest.role.value}"
+                f"CoordinatorAgentAdapter requires a module declaring the EXECUTOR role; "
+                f"{registered.manifest.name!r} declares "
+                f"{sorted(r.value for r in registered.manifest.roles)!r}"
             )
         self._registered = registered
         self.name = registered.manifest.name
@@ -220,9 +299,11 @@ class CoordinatorAgentAdapter:
 __all__ = [
     "AgentFrameworkRegistry",
     "CoordinatorAgentAdapter",
+    "ModuleDispatchError",
     "ModuleRegistrationError",
     "RegisteredModule",
     "default_registry",
     "get_registered",
+    "register_activation_prereqs",
     "register_agent",
 ]
