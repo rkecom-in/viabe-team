@@ -19,7 +19,7 @@ from orchestrator import keyword_match as _km
 from orchestrator.db.wrappers import LAPSED_WINDOW_DAYS
 
 StatusQueryType = Literal[
-    "customer_count", "lapsed_count", "lapsed_list", "last_campaign", "opt_out_count",
+    "customer_count", "lapsed_count", "lapsed_list", "top_spend", "last_campaign", "opt_out_count",
     "billing", "unknown",
 ]
 
@@ -83,6 +83,31 @@ _PURCHASE_TOKENS = frozenset({
 _NEGATION_TOKENS = frozenset({"nahi", "not", "no", "never", "havent", "hasnt", "didnt", "dont", "doesnt"})
 _DAY_UNIT_TOKENS = frozenset({"din", "day", "days", "mahine", "mahina", "month", "months"})
 
+# B1/j04 — a TOP-CUSTOMERS-BY-VALUE ranking ask ("who are my top customers?", "most valuable
+# customers", "biggest spenders", "customers by spend"). A ranking word (top/highest/biggest/…) OR a
+# value word (valuable/spend), co-occurring with a customer/spender noun, and NOT a dormancy ask (a
+# lapsed ranking is a different question). Answered deterministically from top_customers_by_spend so
+# the reply never depends on the brain not anchoring on the always-present dormant-cohort context.
+_TOP_RANK_TOKENS = frozenset({"top", "highest", "biggest", "best", "largest", "valuable", "valued"})
+_TOP_VALUE_TOKENS = frozenset({
+    "valuable", "valued", "spend", "spends", "spending", "spender", "spenders",
+    "paying", "value", "revenue",
+})
+_TOP_WHO_TOKENS = frozenset({
+    "customer", "customers", "spender", "spenders", "buyer", "buyers", "client", "clients",
+    "ग्राहक", "ग्राहकों",
+})
+
+
+def _is_top_spend_query(norm: str, tokens: set[str]) -> bool:
+    """True iff the owner is asking WHO their top / most-valuable customers are (a value RANKING),
+    not a dormancy or bare count. Requires a ranking or value cue + a customer/spender noun, and
+    explicitly excludes any dormancy framing (a lapsed ranking stays with lapsed_count/lapsed_list)."""
+    if _has_inactivity_cue(norm, tokens):
+        return False
+    rank_or_value = bool((_TOP_RANK_TOKENS | _TOP_VALUE_TOKENS) & tokens) or "most valuable" in norm or "by spend" in norm
+    return rank_or_value and bool(_TOP_WHO_TOKENS & tokens)
+
 
 # VT-641 — Devanagari-safe cue patterns (the ASCII/token sets above are Roman/Hinglish-only, so a
 # Hindi-script lapsed-list ask "कितने पुराने ग्राहक ... वापस नहीं आए? लिस्ट निकाल सकते हो?" collapsed to a
@@ -118,8 +143,20 @@ def _has_inactivity_cue(norm: str, tokens: set[str]) -> bool:
     # a negation adjacent (same message) to a purchase word — "order nahi kiya", "not bought"
     if (_PURCHASE_TOKENS & tokens) and (_NEGATION_TOKENS & tokens):
         return True
-    # recency framing: a bare number + a day/month unit ("60 din se zyada", "over 90 days")
-    if bool(_DAY_UNIT_TOKENS & tokens) and any(t.isdigit() for t in tokens):
+    # recency framing: a number + a day/month unit ("60 din se zyada", "over 90 days"). B1/j04 — a
+    # bare count window alone does NOT frame dormancy: "top customers — I've only had 2 sales in 90
+    # days" is a REVENUE window, not a "who's gone quiet" ask, yet it used to synthesize a lapsed_list
+    # route (this cue's sole consumer). Require the window to co-occur with a purchase/negation token
+    # or an explicit elapsed-since phrasing, so only a genuine "... in N days" dormancy ask routes here.
+    if (
+        bool(_DAY_UNIT_TOKENS & tokens)
+        and any(t.isdigit() for t in tokens)
+        and (
+            bool(_PURCHASE_TOKENS & tokens)
+            or bool(_NEGATION_TOKENS & tokens)
+            or any(p in norm for p in ("since", "ago", "din se", "se zyada", "last visit", "last order"))
+        )
+    ):
         return True
     # VT-641 Devanagari dormancy framing: an old/inactive token, or a negated-return phrase.
     if _km.contains_any(norm, _DEV_INACTIVITY_PATS):
@@ -208,6 +245,12 @@ def classify_status_query(body: str) -> StatusQueryType:
         return "last_campaign"
     if {"campaign", "campaigns"} & tokens:
         return "last_campaign"
+    # B1/j04 — a "who are my top / most-valuable customers?" ranking ask. Checked BEFORE customer_count
+    # so the 'customers' token doesn't hijack it into a bare ledger total (the observed misroute was via
+    # a DIFFERENT path — a stray revenue-window tripping lapsed_list — but this also guarantees the
+    # ranking ask is answered deterministically, never left to the brain to anchor on lapsed context).
+    if _is_top_spend_query(norm, tokens):
+        return "top_spend"
     # R7 — VETO customer_count when a LIST cue is present ("give me a list of my customers"): a list is
     # not a count. Without an inactivity cue it isn't a lapsed_list either, so it falls to the brain
     # (the CD2 names path) rather than being answered with a bare total.
@@ -386,6 +429,27 @@ def answer_status_query(
     if qtype == "customer_count":
         n = CustomersWrapper().count_all(tenant_id)
         return f"You currently have {n} customers in your ledger."
+
+    if qtype == "top_spend":
+        # B1/j04 — a deterministic top-customers-by-spend ranking. id/₹ only: display_name is
+        # Fazal-gated (CL-2026-07-12 CD2 — names go out as a WhatsApp file attachment, NEVER inlined
+        # here), so we surface the rupee ranking + the total, and are honest the names aren't in this
+        # chat view yet. Grounded in top_customers_by_spend (aggregate owner-owned data, CL-390).
+        cw = CustomersWrapper()
+        rows = cw.top_customers_by_spend(tenant_id, limit=5)
+        ranked = [r for r in rows if int(r.get("spend_paise") or 0) > 0]
+        if not ranked:
+            return (
+                "I don't have enough customer spend data yet to rank your top customers — connect a "
+                "data source with sales history and I'll show you who your most valuable customers are."
+            )
+        total = cw.count_all(tenant_id)
+        amounts = ", ".join(f"₹{int(r['spend_paise']) // 100:,}" for r in ranked)
+        return (
+            f"Your top {len(ranked)} customers by total spend: {amounts} (out of {total} customers). "
+            "I can't attach their individual names here in chat just yet — but I can draft a win-back "
+            "or a thank-you offer to them whenever you'd like."
+        )
 
     if qtype == "lapsed_count":
         # Fazal's 45d definition: bought before, no sale in the last LAPSED_WINDOW_DAYS.

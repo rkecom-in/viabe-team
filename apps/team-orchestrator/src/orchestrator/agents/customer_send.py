@@ -883,20 +883,29 @@ def agent_send_draft(
         capture_then_redact_draft(
             conn, draft, tenant_id=tid, message_sid=out.message_sid, language=_SEND_LANGUAGE
         )
-    contact = conn.execute(
-        "INSERT INTO agent_customer_contacts "
-        "  (tenant_id, customer_id, agent, draft_id, batch_id, template_name, "
-        "   autonomy_level, message_sid) "
-        "SELECT %s, %s, %s, %s, %s, %s, %s, %s "
-        "WHERE NOT EXISTS (SELECT 1 FROM agent_customer_contacts "
-        "                  WHERE tenant_id = %s AND draft_id = %s) "
-        "RETURNING id",
-        (
-            tid, draft["customer_id"], draft["agent"], did, draft["batch_id"],
-            draft["template_name"], autonomy_level, out.message_sid,
-            tid, did,
-        ),
-    ).fetchone()
+        # B2 (money-safety) — the frequency-cap SUPPRESSION-LEDGER row must commit ATOMICALLY with the
+        # draft->'sent' flip. It used to run as a SEPARATE autocommit statement AFTER this txn: a crash
+        # in the gap left the draft 'sent' but agent_customer_contacts ABSENT, and the DBOS re-drive
+        # early-outs on draft_status=='sent' (never re-reaching the INSERT) — permanently losing the
+        # 30d/90d recontact-suppression record and letting a later batch re-send inside the window. The
+        # L3 path already writes this INSERT inside its FOR UPDATE txn; match it. (_finalize_batch_if_
+        # terminal deliberately stays OUTSIDE — its externalization is the VT-382 choice, backed by the
+        # daily outbox_redaction sweep. Enlarging the txn makes a rollback re-drive the send, which the
+        # send_idempotency_keys dedup already makes side-effect-free — 'sent' is an idempotent hit.)
+        contact = conn.execute(
+            "INSERT INTO agent_customer_contacts "
+            "  (tenant_id, customer_id, agent, draft_id, batch_id, template_name, "
+            "   autonomy_level, message_sid) "
+            "SELECT %s, %s, %s, %s, %s, %s, %s, %s "
+            "WHERE NOT EXISTS (SELECT 1 FROM agent_customer_contacts "
+            "                  WHERE tenant_id = %s AND draft_id = %s) "
+            "RETURNING id",
+            (
+                tid, draft["customer_id"], draft["agent"], did, draft["batch_id"],
+                draft["template_name"], autonomy_level, out.message_sid,
+                tid, did,
+            ),
+        ).fetchone()
     batch_status = _finalize_batch_if_terminal(
         conn, tid, draft["batch_id"], draft["work_item_id"]
     )
