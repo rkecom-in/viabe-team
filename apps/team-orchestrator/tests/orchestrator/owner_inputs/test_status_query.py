@@ -200,3 +200,27 @@ def test_task_fallback_none_when_no_task(monkeypatch: pytest.MonkeyPatch) -> Non
     _patch_no_campaign_and_task(monkeypatch, None)
     # No campaign AND no task -> the fast-path owns nothing; the brain answers (None).
     assert sq.answer_status_query(_TID, "what's the status?") is None
+
+
+def test_vt641_devanagari_lapsed_list() -> None:
+    """VT-641 — a Devanagari lapsed-LIST ask classifies as lapsed_list, not a bare customer_count."""
+    assert sq.classify_status_query(
+        "कितने पुराने ग्राहक ऐसे हैं जिन्होंने अपॉइंटमेंट नहीं ली या वापस नहीं आए? एक लिस्ट निकाल सकते हो?"
+    ) == "lapsed_list"
+
+
+def test_vt641_devanagari_winback_create_falls_through_to_d3() -> None:
+    """VT-641 — a Devanagari win-back CREATE request returns 'unknown' so the D3 net delegates to SR."""
+    assert sq.classify_status_query(
+        "इन 8 ग्राहकों के लिए वापसी ऑफर तैयार कर दो, पर अभी भेजना मत, पहले दिखाओ"
+    ) == "unknown"
+
+
+def test_vt641_devanagari_plain_count_still_customer_count() -> None:
+    """VT-641 regression — a plain Devanagari count ask (no list/inactivity cue) stays customer_count."""
+    assert sq.classify_status_query("कितने ग्राहक हैं?") == "customer_count"
+
+
+def test_vt641_devanagari_inactive_token_lapsed_count() -> None:
+    """VT-641 — a Devanagari explicit-dormancy token (निष्क्रिय) routes to lapsed_count."""
+    assert sq.classify_status_query("कितने ग्राहक निष्क्रिय हैं?") == "lapsed_count"

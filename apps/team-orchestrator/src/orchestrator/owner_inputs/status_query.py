@@ -15,6 +15,7 @@ import unicodedata
 from typing import Any, Literal
 from uuid import UUID
 
+from orchestrator import keyword_match as _km
 from orchestrator.db.wrappers import LAPSED_WINDOW_DAYS
 
 StatusQueryType = Literal[
@@ -83,11 +84,25 @@ _NEGATION_TOKENS = frozenset({"nahi", "not", "no", "never", "havent", "hasnt", "
 _DAY_UNIT_TOKENS = frozenset({"din", "day", "days", "mahine", "mahina", "month", "months"})
 
 
+# VT-641 — Devanagari-safe cue patterns (the ASCII/token sets above are Roman/Hinglish-only, so a
+# Hindi-script lapsed-list ask "कितने पुराने ग्राहक ... वापस नहीं आए? लिस्ट निकाल सकते हो?" collapsed to a
+# bare customer_count total in English (journey-sim j08, 3/3). Reuse keyword_match (Devanagari-safe;
+# ``\b`` is dead for matras). Kept SCOPED: an inactivity Devanagari cue only reaches lapsed_list when a
+# list cue is ALSO present, so a plain "कितने ग्राहक हैं" still answers the total count.
+_DEV_LIST_CUE_PATS = _km.boundary_patterns(("लिस्ट", "सूची", "निकाल", "निकालो"))
+_DEV_INACTIVITY_PATS = _km.boundary_patterns(("पुराने", "पुराना", "निष्क्रिय", "दोबारा नहीं"))
+# Negated-return / no-visit phrases (substring, since these span tokens): "वापस नहीं आए" (haven't
+# returned), "नहीं आए/आये" (didn't come), "अपॉइंटमेंट नहीं" (no appointment).
+_DEV_INACTIVITY_SUBSTRINGS = ("वापस नहीं", "नहीं आए", "नहीं आये", "अपॉइंटमेंट नहीं")
+
+
 def _has_list_cue(norm: str, tokens: set[str]) -> bool:
-    """True iff the owner is asking for a LIST / NAMES (EN + Hinglish), incl. 'who are they'."""
+    """True iff the owner is asking for a LIST / NAMES (EN + Hinglish + Devanagari), incl. 'who are they'."""
     if _LIST_CUE_TOKENS & tokens:
         return True
-    return "who are" in norm or "kaun hain" in norm or "kaun" in tokens
+    if "who are" in norm or "kaun hain" in norm or "kaun" in tokens:
+        return True
+    return _km.contains_any(norm, _DEV_LIST_CUE_PATS)  # VT-641
 
 
 def _has_inactivity_cue(norm: str, tokens: set[str]) -> bool:
@@ -104,14 +119,28 @@ def _has_inactivity_cue(norm: str, tokens: set[str]) -> bool:
     if (_PURCHASE_TOKENS & tokens) and (_NEGATION_TOKENS & tokens):
         return True
     # recency framing: a bare number + a day/month unit ("60 din se zyada", "over 90 days")
-    return bool(_DAY_UNIT_TOKENS & tokens) and any(t.isdigit() for t in tokens)
+    if bool(_DAY_UNIT_TOKENS & tokens) and any(t.isdigit() for t in tokens):
+        return True
+    # VT-641 Devanagari dormancy framing: an old/inactive token, or a negated-return phrase.
+    if _km.contains_any(norm, _DEV_INACTIVITY_PATS):
+        return True
+    return any(s in norm for s in _DEV_INACTIVITY_SUBSTRINGS)
+
+
+# VT-641 — Devanagari create-verb tokens + campaign-noun patterns, so a Hindi-script win-back CREATE
+# request ("वापसी ऑफर तैयार कर दो") returns 'unknown' here and flows to the D3 net (which delegates to
+# sales-recovery), instead of being answered with a canned customer_count total.
+_DEV_CREATE_VERB_TOKENS = frozenset({"तैयार", "बनाओ", "बना", "बनाकर", "बनाना", "ड्राफ्ट"})
+_DEV_CAMPAIGN_NOUN_PATS = _km.boundary_patterns(("वापसी", "वापस लाने", "वापस-लाने", "विनबैक", "कैंपेन"))
 
 
 def _is_campaign_creation_request(norm: str, tokens: set[str]) -> bool:
     """R7 — True iff the message is a request to CREATE / plan a campaign (a create verb co-occurring
     with a campaign noun), which must route to the D3 net / brain rather than a canned count/status
     figure. See ``_CAMPAIGN_CREATE_VERB_TOKENS`` for why send/run/launch are excluded."""
-    return bool(_CAMPAIGN_CREATE_VERB_TOKENS & tokens) and bool(_CAMPAIGN_NOUN_RE.search(norm))
+    verb = bool(_CAMPAIGN_CREATE_VERB_TOKENS & tokens) or bool(_DEV_CREATE_VERB_TOKENS & tokens)
+    noun = bool(_CAMPAIGN_NOUN_RE.search(norm)) or _km.contains_any(norm, _DEV_CAMPAIGN_NOUN_PATS)
+    return verb and noun
 
 
 def classify_status_query(body: str) -> StatusQueryType:
@@ -162,7 +191,7 @@ def classify_status_query(body: str) -> StatusQueryType:
     # speech-act guard, and a DO like "win back my lapsed customers" never classifies status_query).
     # DF5: the Hinglish "lapse ho gaye" tokenizes to the STEM "lapse" (not "lapsed") — include it so
     # "total kitne customers hain jo lapse ho gaye" answers the dormant count, not the total ledger.
-    if {"lapsed", "lapse", "dormant"} & tokens:
+    if ({"lapsed", "lapse", "dormant"} & tokens) or ("निष्क्रिय" in norm):  # VT-641 Devanagari dormancy
         return "lapsed_count"
     # A SEND-STATUS question ("did you send it?", "already sent?", "has the message gone out?") is a
     # read about whether a campaign/send actually happened — route it to last_campaign so the owner
