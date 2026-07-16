@@ -592,3 +592,197 @@ def test_r3_interim_replacement_markers_cover_stalls_not_answers():
     # substantive answers (pending_approval + receivables) are deliberately EXCLUDED
     assert mod._REPLACEMENT_COPY["pending_approval"]["en"].lower() not in markers
     assert mod._REPLACEMENT_COPY["receivables"]["en"].lower() not in markers
+    # cluster-3c/3d swaps are SUBSTANTIVE answers too — never interim stalls.
+    assert mod._REPLACEMENT_COPY["campaign_not_drafted"]["en"].lower() not in markers
+    assert mod._REPLACEMENT_COPY["onboarding_incomplete"]["en"].lower() not in markers
+
+
+# ── cluster-3c (VT-655) contains_campaign_draft_claim truth table ───────────────────────────────
+
+
+def test_campaign_draft_claim_matches():
+    assert mod.contains_campaign_draft_claim("Your plan is ready for approval.")
+    assert mod.contains_campaign_draft_claim("I've drafted the offer for your lapsed customers.")
+    assert mod.contains_campaign_draft_claim("Great news — the campaign is approved.")
+    assert mod.contains_campaign_draft_claim("Reviewed and approved — sending shortly.")
+    assert mod.contains_campaign_draft_claim("Campaign taiyaar hai, bas approve kar dijiye.")
+    assert mod.contains_campaign_draft_claim("मैंने कैंपेन बना दिया है।")
+
+
+def test_campaign_draft_future_proposal_does_not_match():
+    # PROPOSAL / future — NOT a claim that a draft already exists.
+    assert not mod.contains_campaign_draft_claim("Shall I draft the campaign for you?")
+    assert not mod.contains_campaign_draft_claim("I'll draft the offer once you confirm.")
+    assert not mod.contains_campaign_draft_claim("Want me to put together a campaign?")
+    assert not mod.contains_campaign_draft_claim("Once you approve, your plan is ready to send.")
+    # Unrelated / no draft claim.
+    assert not mod.contains_campaign_draft_claim("Your customers are ready to hear from you.")
+    assert not mod.contains_campaign_draft_claim("")
+    assert not mod.contains_campaign_draft_claim(None)  # type: ignore[arg-type]
+
+
+# ── cluster-3c campaign_draft_fact_exists — fail-closed on a DB read error ───────────────────────
+
+
+def test_campaign_draft_fact_exists_true_when_row_says_so(monkeypatch):
+    monkeypatch.setattr(
+        tenant_connection_mod,
+        "tenant_connection",
+        lambda *a, **k: _FakeCtx({"fact_exists": True}),
+    )
+    assert mod.campaign_draft_fact_exists(TENANT) is True
+
+
+def test_campaign_draft_fact_exists_false_when_row_says_so(monkeypatch):
+    monkeypatch.setattr(
+        tenant_connection_mod,
+        "tenant_connection",
+        lambda *a, **k: _FakeCtx({"fact_exists": False}),
+    )
+    assert mod.campaign_draft_fact_exists(TENANT) is False
+
+
+def test_campaign_draft_fact_exists_fails_closed_on_db_error(monkeypatch):
+    def _boom(*a, **k):
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(tenant_connection_mod, "tenant_connection", _boom)
+    assert mod.campaign_draft_fact_exists(TENANT) is False
+
+
+# ── cluster-3c apply_emission_gate — fabricated campaign draft swapped; true draft passes through ──
+
+
+def test_apply_gate_swaps_campaign_draft_when_no_fact(monkeypatch):
+    events = _patch_facts_spend(monkeypatch, locale="en")  # neutralize layers 1/3/3b + audit stub
+    monkeypatch.setattr(mod, "campaign_draft_fact_exists", lambda t: False)
+    out = mod.apply_emission_gate("Your festival plan is ready for approval.", TENANT)
+    assert out == mod._REPLACEMENT_COPY["campaign_not_drafted"]["en"]
+    assert out != "Your festival plan is ready for approval."
+    assert events and events[-1][1] == "emission_campaign_draft_blocked"
+
+
+def test_apply_gate_campaign_draft_passthrough_when_fact_exists(monkeypatch):
+    # A TRUE draft claim (a real ``campaigns`` row exists) passes through UNCHANGED.
+    _patch_facts_spend(monkeypatch, locale="en")
+    monkeypatch.setattr(mod, "campaign_draft_fact_exists", lambda t: True)
+    text = "Your festival plan is ready for approval."
+    assert mod.apply_emission_gate(text, TENANT) == text
+
+
+def test_apply_gate_campaign_proposal_passthrough(monkeypatch):
+    # A future proposal never trips the matcher, so no fact-check / swap even with no draft.
+    _patch_facts_spend(monkeypatch, locale="en")
+    monkeypatch.setattr(mod, "campaign_draft_fact_exists", lambda t: False)
+    text = "Want me to draft a festival campaign for your lapsed customers?"
+    assert mod.apply_emission_gate(text, TENANT) == text
+
+
+# ── cluster-3d (VT-654) contains_onboarding_complete_claim truth table ──────────────────────────
+
+
+def test_onboarding_complete_claim_matches():
+    assert mod.contains_onboarding_complete_claim(
+        "Great — that's everything we need. Setting up your assistant now."
+    )
+    assert mod.contains_onboarding_complete_claim("You're all set!")
+    assert mod.contains_onboarding_complete_claim("Onboarding is complete.")
+    assert mod.contains_onboarding_complete_claim("Setup ho gaya, ab main aage badhta hoon.")
+    assert mod.contains_onboarding_complete_claim("आपका सेटअप हो गया है।")
+
+
+def test_onboarding_complete_future_conditional_does_not_match():
+    # Honest FUTURE/CONDITIONAL framing — the completion is not yet asserted.
+    assert not mod.contains_onboarding_complete_claim(
+        "Once you tell me your hours, you're all set."
+    )
+    assert not mod.contains_onboarding_complete_claim(
+        "After this, I'll be setting up your assistant."
+    )
+    assert not mod.contains_onboarding_complete_claim("Should I finish setting up your assistant?")
+    assert not mod.contains_onboarding_complete_claim("What does your business do?")
+    assert not mod.contains_onboarding_complete_claim("")
+    assert not mod.contains_onboarding_complete_claim(None)  # type: ignore[arg-type]
+
+
+# ── cluster-3d apply_emission_gate — premature complete swapped; true complete passes through ─────
+
+
+class _FakeQ:
+    def __init__(self, prompt_en: str, prompt_hi: str):
+        self.prompt_en = prompt_en
+        self.prompt_hi = prompt_hi
+
+
+class _FakeDecision:
+    def __init__(self, next_question):
+        self.next_question = next_question
+
+
+def _patch_conductor(monkeypatch, decision):
+    """Monkeypatch the lazily-imported ``next_question_for_tenant`` at its source module (the gate
+    does ``from orchestrator.onboarding.conductor import next_question_for_tenant`` at call time)."""
+    monkeypatch.setattr(
+        "orchestrator.onboarding.conductor.next_question_for_tenant", lambda t: decision
+    )
+
+
+def test_apply_gate_swaps_premature_onboarding_complete(monkeypatch):
+    # Active journey + profile INCOMPLETE (a pending question remains) -> swap for that question.
+    events = _patch_facts_spend(monkeypatch, locale="en")
+    monkeypatch.setattr(mod, "_onboarding_journey_active", lambda t: True)
+    _patch_conductor(
+        monkeypatch, _FakeDecision(_FakeQ("What does your business do?", "Aapka business kya karta hai?"))
+    )
+    out = mod.apply_emission_gate(
+        "That's everything we need — setting up your assistant now.", TENANT
+    )
+    assert out == "What does your business do?"
+    assert events and events[-1][1] == "emission_onboarding_incomplete_blocked"
+
+
+def test_apply_gate_swaps_premature_onboarding_complete_hi(monkeypatch):
+    _patch_facts_spend(monkeypatch, locale="hi")
+    monkeypatch.setattr(mod, "_onboarding_journey_active", lambda t: True)
+    _patch_conductor(
+        monkeypatch, _FakeDecision(_FakeQ("What does your business do?", "Aapka business kya karta hai?"))
+    )
+    out = mod.apply_emission_gate("Sab kuch mil gaya, assistant taiyaar hai.", TENANT)
+    assert out == "Aapka business kya karta hai?"
+
+
+def test_apply_gate_onboarding_passthrough_when_actually_complete(monkeypatch):
+    # A TRUE "onboarding complete" (deterministic completion True -> next_question None) passes through.
+    _patch_facts_spend(monkeypatch, locale="en")
+    monkeypatch.setattr(mod, "_onboarding_journey_active", lambda t: True)
+    _patch_conductor(monkeypatch, _FakeDecision(None))
+    text = "Onboarding is complete. You're all set!"
+    assert mod.apply_emission_gate(text, TENANT) == text
+
+
+def test_apply_gate_onboarding_inactive_journey_passthrough(monkeypatch):
+    # MERGE-BLOCKING false-positive guard: the matcher matches, but there is NO active onboarding
+    # journey (a non-onboarding "all set"), so the fact-check must NOT run and nothing is swapped.
+    _patch_facts_spend(monkeypatch, locale="en")
+    monkeypatch.setattr(mod, "_onboarding_journey_active", lambda t: False)
+
+    def _boom(t):
+        raise AssertionError("next_question_for_tenant must not run when the journey is inactive")
+
+    monkeypatch.setattr("orchestrator.onboarding.conductor.next_question_for_tenant", _boom)
+    text = "You're all set — I'll message your customers next."
+    assert mod.apply_emission_gate(text, TENANT) == text
+
+
+def test_apply_gate_onboarding_factcheck_fails_closed(monkeypatch):
+    # Inside an active journey, a completion fact-check read error must FAIL-CLOSED to the honest
+    # generic continuation (never ship the unverifiable "all set").
+    _patch_facts_spend(monkeypatch, locale="en")
+    monkeypatch.setattr(mod, "_onboarding_journey_active", lambda t: True)
+
+    def _boom(t):
+        raise RuntimeError("conductor down")
+
+    monkeypatch.setattr("orchestrator.onboarding.conductor.next_question_for_tenant", _boom)
+    out = mod.apply_emission_gate("Onboarding complete!", TENANT)
+    assert out == mod._REPLACEMENT_COPY["onboarding_incomplete"]["en"]
