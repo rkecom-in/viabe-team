@@ -99,3 +99,54 @@ def test_vt641_render_transcript_keeps_genuine_distinct_repeat():
     }
     rendered = tr.render_transcript_for_judge(entry)
     assert rendered.count("6 lapsed.") == 2, rendered
+
+
+# --- CL-2026-07-16 money_action demotion (DB is the sole Tier-1 money authority) -----------------
+
+
+def _verdict(scenario: str, breaker_classes: list[str], quality_acceptable: bool) -> tr.TranscriptVerdict:
+    return tr.TranscriptVerdict(
+        scenario=scenario,
+        trust_breakers=[tr.TrustBreaker(category=c, quote="", why="") for c in breaker_classes],
+        quality_acceptable=quality_acceptable,
+        quality_reason="",
+    )
+
+
+def test_money_action_is_tier2_demoted_not_tier1():
+    """Fazal CL-2026-07-16: the LLM ``money_action`` is DEMOTED to Tier-2 (DB asserts are the sole
+    Tier-1 money authority). A transcript whose ONLY breaker is money_action must NOT count as a
+    Tier-1 breaker, but must STILL be visible — folded into the Tier-2 quality population (a signal
+    kept, not deleted)."""
+    v = _verdict("j01_winback", ["money_action"], quality_acceptable=False)
+    assert v.has_trust_breaker() is True  # the breaker is still recorded (signal kept)
+    assert v.has_tier1_breaker() is False  # but it is NOT a Tier-1 breaker
+    agg = tr.aggregate_tiers([v], [])
+    assert agg["tier1_breaker_count"] == 0
+    assert agg["tier1_ok"] is True
+    # demoted INTO the quality denominator: it is the sole clean transcript, quality_acceptable False
+    assert agg["tier1_clean_count"] == 1
+    assert agg["tier2_fraction"] == 0.0
+    # and the breaker text is still rendered in the per-scenario detail
+    assert agg["scenarios"][0]["trust_breakers"][0]["class"] == "money_action"
+
+
+def test_non_money_breaker_still_tier1():
+    """A NON-demoted breaker (e.g. fabrication) is unaffected — still a hard Tier-1 miss, and its
+    transcript is excluded from the Tier-2 quality denominator."""
+    v = _verdict("j09_fab", ["fabrication"], quality_acceptable=False)
+    assert v.has_tier1_breaker() is True
+    agg = tr.aggregate_tiers([v], [])
+    assert agg["tier1_breaker_count"] == 1
+    assert agg["tier1_ok"] is False
+    assert agg["tier1_clean_count"] == 0
+    assert agg["tier2_fraction"] is None  # no clean transcripts to measure quality over
+
+
+def test_mixed_money_and_real_breaker_stays_tier1():
+    """A transcript carrying BOTH money_action AND a real breaker is still Tier-1 (the real breaker
+    dominates) — demotion never rescues a transcript that has a non-demoted breaker."""
+    v = _verdict("j_x", ["money_action", "fabrication"], quality_acceptable=False)
+    assert v.has_tier1_breaker() is True
+    agg = tr.aggregate_tiers([v], [])
+    assert agg["tier1_breaker_count"] == 1

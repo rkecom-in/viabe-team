@@ -454,6 +454,41 @@ def _sentence_has_send_state_claim(sentence: str) -> bool:
     return False
 
 
+_SENT_VERB_TOKENS = _SEND_CLAIM_TOKENS | {"sent"}
+_SENT_COUNT_NEG = _NEGATION | _SEND_STATE_NEG_AUX
+
+
+def _stated_send_count(text: str) -> int | None:
+    """CL-2026-07-16 (money-authority Part B) — the customer-send count a reply CLAIMS. Returns the
+    FIRST such N across sentences, or ``None`` when the reply states no send count.
+
+    PRECISION-BIASED (a false rewrite of a TRUTHFUL claim is the dangerous direction, so under-match
+    rather than over-match): a bare digit counts as a stated send-count ONLY inside a sentence that
+    (a) carries a send verb (EN ``sent`` or the Hinglish/Devanagari ``bhej``/``bheja``/``भेज`` set) and
+    (b) has NO negation adjacent to that verb ("haven't sent to 40" / "40 nahi bheje" is a denial), and
+    ONLY when the digit is structurally a send TARGET — immediately after ``to``/``ko`` ("sent [it]
+    to 40"), or immediately before a customer-noun ("40 customers ko bheja"). Reuses existing token
+    sets (structural number-parse, NOT an intent keyword list — the no-lists law targets infinite
+    intent phrasings, not locating a number next to known structural tokens). This is the value the
+    count-binding compares to the real DB send count."""
+    for sentence in _split_sentences(text or ""):
+        tokens = _tokenize(sentence)
+        if len(tokens) < 3:
+            continue
+        if not (set(tokens) & _SENT_VERB_TOKENS):
+            continue  # no send verb in this sentence -> not a send-count claim
+        if _adjacent_to_negation(tokens, _SENT_VERB_TOKENS, _SENT_COUNT_NEG):
+            continue  # a negated send verb is a DENIAL, not a stated count
+        for j, tok in enumerate(tokens):
+            if not tok.isdigit():
+                continue
+            prev_tok = tokens[j - 1] if j > 0 else ""
+            next_tok = tokens[j + 1] if j + 1 < len(tokens) else ""
+            if prev_tok in {"to", "ko"} or next_tok in _CUSTOMER_REF_TOKENS:
+                return int(tok)
+    return None
+
+
 def contains_completion_claim(text: str) -> bool:
     """True iff ``text`` makes a send-COMPLETION claim (EN / Hinglish / Devanagari).
 
@@ -752,6 +787,41 @@ def send_fact_exists(tenant_id: UUID | str) -> bool:
     return bool(dict(row).get("fact_exists")) if row else False
 
 
+# CL-2026-07-16 (money-authority Part B) — the REAL customer-send fan-out count in the SAME window
+# ``send_fact_exists`` trusts. campaign_messages is the fan-out authority (a "sent to N" claim is a
+# campaign fan-out); the single-send agent-draft ledger (send_idempotency_keys) is NOT a "sent to N"
+# fan-out and is excluded to avoid a double-count that could rewrite a truthful claim to a wrong value.
+_SENT_COUNT_SQL = """
+    SELECT count(*) AS sent_count FROM campaign_messages
+     WHERE tenant_id = %(tenant_id)s
+       AND send_status IN ('sent', 'template_sent')
+       AND created_at >= now() - interval '{window} minutes'
+""".format(window=_FACT_WINDOW_MINUTES)
+
+
+def send_count_since(tenant_id: UUID | str) -> int | None:
+    """The real number of customer sends (campaign fan-out rows) for this tenant in the last 15 min —
+    the DB truth the count-binding compares a stated "sent to N" against.
+
+    FAIL direction is DELIBERATELY OPPOSITE ``send_fact_exists``: a read error returns ``None`` (NOT
+    0), so the count-binding SKIPS on a DB blip and never rewrites a possibly-truthful claim to a wrong
+    number off a failed read (a wrongly-rewritten truthful send count would itself be a fabrication).
+    """
+    try:
+        from orchestrator.db.tenant_connection import tenant_connection
+
+        with tenant_connection(tenant_id) as conn:
+            row = conn.execute(_SENT_COUNT_SQL, {"tenant_id": str(tenant_id)}).fetchone()
+    except Exception:  # noqa: BLE001 — fail to None: skip the binding, never a false rewrite
+        logger.warning(
+            "emission_gate: send-count read failed tenant=%s — skip count-binding (no rewrite)",
+            tenant_id,
+            exc_info=True,
+        )
+        return None
+    return int(dict(row).get("sent_count") or 0) if row else 0
+
+
 def _has_open_approval(tenant_id: UUID | str) -> bool:
     """Best-effort: is there an unresolved ``pending_approvals`` row? Picks which honest
     replacement line to use. Wrapper-layer read (VT-72/306 no-direct-tenant-db-access gate).
@@ -813,6 +883,13 @@ _REPLACEMENT_COPY: dict[str, dict[str, str]] = {
     "campaign_not_drafted": {
         "en": "I haven't drafted that yet — want me to put it together now?",
         "hi": "Maine abhi tak wo draft nahi kiya — bataiye, main abhi bana dun?",
+    },
+    # CL-2026-07-16 (money-authority Part B) — a "sent to N" claim whose N CONTRADICTS the real DB
+    # send count. A real send DID happen (Layer-1 passed), so this states the TRUE count — the
+    # deterministic never-lie correction. A SUBSTANTIVE truthful answer -> not an interim stall.
+    "sent_count_corrected": {
+        "en": "I've sent the campaign to {n} customers.",
+        "hi": "Maine campaign {n} customers ko bhej diya hai.",
     },
     # cluster-3d (VT-654) — a premature onboarding-COMPLETE claim while profile discovery is not
     # deterministically done. The primary swap is the ACTUAL pending question (from
@@ -920,6 +997,30 @@ def apply_emission_gate(text: str, tenant_id: UUID | str) -> str:
             replacement = _replacement_line(tenant_id, resolve_owner_locale(tenant_id))
             _emit_blocked_audit(tenant_id, text)
             return replacement
+
+        # Layer 1b — NEVER-LIE COUNT BINDING (CL-2026-07-16 money-authority Part B). Layer-1 is
+        # ``claim AND NOT exists``: once ANY real send lands in the window, an OVERSTATED "sent to N"
+        # ("sent to 40" when 3 went out) rides through unblocked — the DB confirms *a* send but not the
+        # *number*. Bind the stated N to the real DB count and REWRITE to the truth on mismatch. This is
+        # the deterministic enforcement Fazal ruled: giving the LLM the number does NOT force it to
+        # state the number correctly; the gate does. Fires ONLY when the reply states a "sent to N" AND
+        # a real fan-out exists (``real > 0``) — a matching count (the truthful j01 "sent to 8" when 8
+        # went out) passes clean; ``send_count_since`` returning None (read error) skips (no false
+        # rewrite). A stated count contradicting the DB is a hard Tier-1 fabrication, caught here
+        # deterministically (mirrored by the harness DB-vs-claim assert), NOT by the LLM judge.
+        stated_count = _stated_send_count(text)
+        if stated_count is not None:
+            real_count = send_count_since(tenant_id)
+            if real_count is not None and real_count > 0 and stated_count != real_count:
+                from orchestrator.owner_surface.freeform_acks import resolve_owner_locale
+
+                variants = _REPLACEMENT_COPY["sent_count_corrected"]
+                locale = resolve_owner_locale(tenant_id)
+                line = (variants.get(locale) or variants["en"]).format(n=real_count)
+                _emit_blocked_audit(
+                    tenant_id, text, event_kind="emission_sent_count_mismatch_blocked"
+                )
+                return line
 
         # Layer 3 — fabricated customer DEBT (cluster-2a): the brain told the owner their lapsed
         # customers "owe"/"have ₹X overdue/pending". Lapsed buyers are not debtors; the ₹ debt is

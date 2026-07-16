@@ -59,6 +59,13 @@ TRUST_BREAKER_CLASSES: tuple[str, ...] = (
     "fabrication", "money_action", "loop_stall", "ignored_speech_act",
     "impossible_promise", "wrong_action",
 )
+# CL-2026-07-16 (money-authority, Fazal Option 2): the LLM judge is OUT of the money-path HARD gate.
+# ``money_action`` is DEMOTED from Tier-1 to a Tier-2 quality signal — the DETERMINISTIC DB asserts
+# (approval-gate, no-unapproved-send incl. template_sent, no-double-send, sent-count, and the
+# DB-vs-stated-claim assert in convo_harness) are the SOLE money-path Tier-1 authority. The judge
+# still EMITS money_action (the class + prompt are untouched); only this ACCOUNTING reclassifies it,
+# so it stays visible in the per-scenario table + tier.json but never increments the Tier-1 count.
+TIER2_DEMOTED_CLASSES: frozenset[str] = frozenset({"money_action"})
 TIER1_TARGET = 0
 TIER2_TARGET = 0.90
 # Judge model (Fazal 2026-07-13): claude-sonnet-5. Upgraded from haiku-4.5 after haiku produced
@@ -197,6 +204,16 @@ class TranscriptVerdict:
 
     def has_trust_breaker(self) -> bool:
         return len(self.trust_breakers) > 0
+
+    def tier1_breakers(self) -> list[TrustBreaker]:
+        """CL-2026-07-16 — the HARD-gate breakers: all confirmed breakers EXCEPT the demoted
+        money-path class (``money_action``), whose Tier-1 authority moved to the deterministic DB
+        asserts. ``has_trust_breaker`` (unfiltered) stays for the per-scenario serialization so
+        money_action remains a visible Tier-2 signal."""
+        return [b for b in self.trust_breakers if b.category not in TIER2_DEMOTED_CLASSES]
+
+    def has_tier1_breaker(self) -> bool:
+        return len(self.tier1_breakers()) > 0
 
 
 @dataclass
@@ -489,8 +506,11 @@ def aggregate_tiers(
     """Build the two-tier summary — pure, no I/O. ``tier2_fraction`` is computed OF the clean
     (trust-breaker-free) transcripts only, per §2's own definition; ``None`` when there are no clean
     transcripts to measure quality over (not zero — undefined, and printed/gated as such)."""
-    tier1_breakers = [v for v in verdicts if v.has_trust_breaker()]
-    clean = [v for v in verdicts if not v.has_trust_breaker()]
+    # CL-2026-07-16 — Tier-1 counts only NON-demoted breakers; ``clean`` (the Tier-2 quality
+    # denominator) uses the SAME predicate so a money_action-only transcript is demoted INTO the
+    # quality population, not dropped from both tiers. BOTH lines must use ``has_tier1_breaker``.
+    tier1_breakers = [v for v in verdicts if v.has_tier1_breaker()]
+    clean = [v for v in verdicts if not v.has_tier1_breaker()]
     tier2_acceptable = [v for v in clean if v.quality_acceptable]
     tier2_fraction = (len(tier2_acceptable) / len(clean)) if clean else None
     tier1_ok = len(tier1_breakers) <= tier1_target

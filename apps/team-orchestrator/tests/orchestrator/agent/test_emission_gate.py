@@ -303,6 +303,67 @@ def test_claim_without_fact_no_approval_no_active_task_uses_not_started_line_hi(
     assert out == mod._REPLACEMENT_COPY["not_started"]["hi"]
 
 
+# ── Layer 1b — never-lie COUNT binding (CL-2026-07-16 money-authority Part B) ───────────────────
+
+
+def _patch_count(monkeypatch, *, real, locale="en"):
+    """Layer-1b setup: a REAL send exists (fact=True so Layer-1 passes), and the DB send count is
+    ``real`` (None simulates a read error). Emit-audit mock tolerates the event_kind kwarg."""
+    monkeypatch.setattr(mod, "send_fact_exists", lambda t: True)
+    monkeypatch.setattr(mod, "send_count_since", lambda t: real)
+    monkeypatch.setattr(
+        "orchestrator.owner_surface.freeform_acks.resolve_owner_locale", lambda t: locale
+    )
+    audits: list[tuple] = []
+    monkeypatch.setattr(
+        mod, "_emit_blocked_audit", lambda t, text, event_kind="": audits.append((text, event_kind))
+    )
+    return audits
+
+
+def test_layer1b_truthful_count_passes_through(monkeypatch):
+    # j01 false-positive cleared: "sent it to 8" when 8 really went out is TRUTHFUL -> unchanged.
+    audits = _patch_count(monkeypatch, real=8)
+    txt = "Your campaign has gone out — I sent it to 8 customers."
+    assert mod.apply_emission_gate(txt, TENANT) == txt
+    assert audits == []
+
+
+def test_layer1b_overstated_count_rewritten_to_truth_en(monkeypatch):
+    # the fabrication: "sent to 40" when only 3 went out -> rewritten to the DB truth, audited.
+    audits = _patch_count(monkeypatch, real=3, locale="en")
+    out = mod.apply_emission_gate("Done — I sent it to 40 customers!", TENANT)
+    assert out == mod._REPLACEMENT_COPY["sent_count_corrected"]["en"].format(n=3)
+    assert len(audits) == 1 and audits[0][1] == "emission_sent_count_mismatch_blocked"
+
+
+def test_layer1b_understated_count_rewritten_to_truth_hi(monkeypatch):
+    _patch_count(monkeypatch, real=8, locale="hi")
+    out = mod.apply_emission_gate("Maine campaign 2 customers ko bhej diya", TENANT)
+    assert out == mod._REPLACEMENT_COPY["sent_count_corrected"]["hi"].format(n=8)
+
+
+def test_layer1b_db_read_error_skips_binding_no_false_rewrite(monkeypatch):
+    # send_count_since None (DB blip) -> NEVER rewrite a possibly-truthful claim to a wrong number.
+    _patch_count(monkeypatch, real=None)
+    txt = "I sent it to 40 customers."
+    assert mod.apply_emission_gate(txt, TENANT) == txt
+
+
+def test_layer1b_zero_real_count_skips_binding(monkeypatch):
+    # real == 0 (no campaign fan-out): Layer-1 governed existence; Layer-1b does not fire (real>0 guard).
+    _patch_count(monkeypatch, real=0)
+    txt = "I sent it to 40 customers."
+    assert mod.apply_emission_gate(txt, TENANT) == txt
+
+
+def test_layer1b_no_stated_count_passes_through(monkeypatch):
+    # a completion claim with a real fact but NO stated count is unchanged (existing behavior kept).
+    audits = _patch_count(monkeypatch, real=5)
+    assert mod.apply_emission_gate("Done! Campaign bhej diya", TENANT) == "Done! Campaign bhej diya"
+    assert audits == []
+
+
 def test_gate_blocked_audit_carries_hash_not_text(monkeypatch):
     import hashlib
 
