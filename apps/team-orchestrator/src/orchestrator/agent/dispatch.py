@@ -1184,8 +1184,10 @@ _COMPOSE_COMPLETION_SYSTEM = (
     "small Indian business. You are given the conversation and the manager's DRAFT so far. "
     "Output ONLY the complete message to send the owner — no narration, no meta-commentary, "
     "no third person, never describe what you are doing. "
-    'Write in second person ("you", "your store") and in the owner\'s language (match '
-    "the conversation). Your reply MUST be complete and self-contained: never end on a "
+    'Write in second person ("you", "your store") and in the SAME language and script the '
+    "owner is using — Devanagari Hindi → Hindi, romanized Hindi/Hinglish → Hinglish, English → "
+    "English; NEVER reply in English when the owner wrote in Hindi or Hinglish. "
+    "Your reply MUST be complete and self-contained: never end on a "
     "dangling colon or a half-sentence, never stop at an intro that only promises an "
     "explanation ('here's how it works:' / 'here's the short version.') — actually GIVE the "
     "full answer in this message. If the owner asked a question, answer it in full. "
@@ -1287,8 +1289,9 @@ _COMPOSE_ANTIREPEAT_SYSTEM = (
     "destroys trust. You MUST reply DIFFERENTLY and MOVE THE CONVERSATION FORWARD: acknowledge their "
     "follow-up, then either (a) go one level deeper / more concrete than before, (b) proceed with a "
     "sensible default and say so, or (c) ask ONE specific, shorter, DIFFERENT question. Never restate "
-    "your previous reply. Output ONLY the message to send the owner — second person, the owner's "
-    "language (match the conversation), complete and self-contained, no narration or meta-commentary. "
+    "your previous reply. Output ONLY the message to send the owner — second person, in the SAME "
+    "language and script the owner is using (Hindi/Hinglish/English; never switch them into English "
+    "when they wrote Hindi or Hinglish), complete and self-contained, no narration or meta-commentary. "
     "Never invent a number, price, date, or status, and never claim an action you did not take."
 )
 
