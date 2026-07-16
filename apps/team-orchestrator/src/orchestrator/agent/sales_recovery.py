@@ -407,42 +407,86 @@ def _server_campaign_window(now: datetime) -> dict[str, str]:
 # consent/opt-out/suppression-filtered + ``ORDER BY spend DESC``). So the system OWNS
 # the recipient list now: ``_construct_variant_payload`` OVERRIDES ``target_cohort``
 # on the PROPOSED variant with EVERY cohort member. The LLM keeps owning the MESSAGE
-# (message_plan) + the target-cohort PROSE (cohort_label / selection_reason), which we
-# PRESERVE — so the evidence-marker ``[E\d+]`` consistency the model asserted in
-# selection_reason survives untouched. The validator is NOT weakened:
+# (message_plan) + the target-cohort TONE. The validator is NOT weakened:
 # ``cohort_size == len(customer_ids)`` holds by construction (``_size_matches_list``).
-_DEFAULT_COHORT_LABEL = "full-eligible-lapsed-cohort"
+#
+# VT-661: the WINDOW FIGURE in the cohort PROSE is a SERVER-OWNED FACT, not model
+# tone. VT-651 preserved the model's ``cohort_label`` verbatim; the SR model then
+# authored an UNGROUNDED window (e.g. ``lapsed-120d-plus``) that CONTRADICTS the real
+# lapsed window (``LAPSED_WINDOW_DAYS`` = 45, the ONE definition, VT-632) it had just
+# told the owner — a Tier-1 fabrication the judge flags (j01_shopify_winback, ~1/3 on
+# dev). The label flows VERBATIM into the owner-facing draft (dispatch.py reads
+# ``cohort.cohort_label`` into the recap; manager/review too). So the SERVER now OWNS
+# the window figure exactly as it owns the recipient list: ``cohort_label`` is set
+# DETERMINISTICALLY to a window-consistent label derived from ``LAPSED_WINDOW_DAYS``
+# (never a re-literal 45), and any day-window figure the model wrote into
+# ``selection_reason`` is GROUND to the real window — WITHOUT touching the
+# ``[E\d+]`` evidence markers (the grounding regex never matches a bracketed marker,
+# which carries no day-unit suffix), so evidence-marker consistency survives untouched.
 _DEFAULT_SELECTION_REASON = (
     "All eligible lapsed customers surfaced for this tenant "
     "(system-owned recipient list; opt-out/suppression-filtered upstream)."
 )
 
+# A model-authored lapse-window day figure: a bare integer immediately followed
+# (optionally via ``+`` / a hyphen / spaces) by a day unit — ``60d``, ``120d-plus``,
+# ``90+ days``, ``45-day``. Captures (number)(connector)(unit) so grounding swaps ONLY
+# the number, preserving surrounding words + any ``-plus`` / ``+`` suffix. It cannot
+# match an ``[E\d+]`` evidence marker (no day-unit follows the digits there), so
+# grounding a prose block leaves the model's citation markers intact.
+_LAPSE_WINDOW_FIGURE_RE = re.compile(
+    r"\b(\d+)(\s*\+?\s*-?\s*)(days\b|day\b|d\b)",
+    re.IGNORECASE,
+)
+
+
+def _ground_window_prose(text: str, window_days: int) -> str:
+    """VT-661: rewrite every lapse-window day figure in ``text`` to ``window_days``.
+
+    Swaps ONLY the numeric day-count (an ungrounded ``120d`` / ``90 days`` →
+    ``LAPSED_WINDOW_DAYS``), leaving the connector + unit + all other prose — including
+    ``[E\\d+]`` evidence markers — verbatim. A figure already equal to ``window_days``
+    is left byte-identical (idempotent; no spurious rewrite).
+    """
+
+    def _sub(m: re.Match[str]) -> str:
+        if int(m.group(1)) == window_days:
+            return m.group(0)
+        return f"{window_days}{m.group(2)}{m.group(3)}"
+
+    return _LAPSE_WINDOW_FIGURE_RE.sub(_sub, text)
+
 
 def _server_target_cohort(
     context: SalesRecoveryContext, incoming: Any = None
 ) -> dict[str, Any]:
-    """VT-651: a server-computed ``target_cohort`` naming the FULL eligible dormant cohort.
+    """VT-651/VT-661: a server-computed ``target_cohort`` naming the FULL eligible cohort.
 
     ``customer_ids`` = every ``context.dormant_cohort`` member's id (as ``str``; the
     ``TargetCohort`` schema coerces to ``UUID``), ``cohort_size`` = its length — so
     ``_size_matches_list`` holds by construction and the recipient set is
-    DETERMINISTIC for a fixed cohort. The model's own ``cohort_label`` +
-    ``selection_reason`` PROSE is preserved when the incoming payload carried a
-    ``target_cohort`` dict (keeping the evidence-marker consistency the model
-    asserted), else a system default. Caller only invokes this on a NON-empty cohort
-    (an empty cohort should not have reached the proposed branch; ``ge=1`` fail-closed
-    is acceptable there — we never synthesize a fake recipient).
+    DETERMINISTIC for a fixed cohort (VT-651).
+
+    VT-661: ``cohort_label`` is SERVER-OWNED — set deterministically to a
+    window-consistent label derived from ``LAPSED_WINDOW_DAYS`` (the ONE lapsed
+    definition; imported, never a re-literal 45), NOT the model's free text, so the
+    owner-facing recap can never carry an ungrounded window figure the model invented.
+    The model still owns ``selection_reason`` TONE, but any day-window figure it wrote
+    there is GROUND to the real window (markers preserved), else a system default.
+    Caller only invokes this on a NON-empty cohort (an empty cohort should not have
+    reached the proposed branch; ``ge=1`` fail-closed is acceptable there — we never
+    synthesize a fake recipient).
     """
+    from orchestrator.db.wrappers import LAPSED_WINDOW_DAYS
+
     customer_ids = [str(m.customer_id) for m in context.dormant_cohort]
-    label = _DEFAULT_COHORT_LABEL
+    # Window figure = server-owned FACT. Deterministic, grounded in the ONE window.
+    label = f"lapsed-{LAPSED_WINDOW_DAYS}d-plus"
     reason = _DEFAULT_SELECTION_REASON
     if isinstance(incoming, dict):
-        incoming_label = incoming.get("cohort_label")
-        if isinstance(incoming_label, str) and incoming_label.strip():
-            label = incoming_label
         incoming_reason = incoming.get("selection_reason")
         if isinstance(incoming_reason, str) and incoming_reason.strip():
-            reason = incoming_reason
+            reason = _ground_window_prose(incoming_reason, LAPSED_WINDOW_DAYS)
     return {
         "customer_ids": customer_ids,
         "cohort_label": label,
@@ -692,8 +736,10 @@ def _construct_variant_payload(
         # eligible), mirroring campaign_window above. OVERRIDE the model's picked
         # subset with the FULL eligible dormant cohort so the recipient set is
         # DETERMINISTIC (cohort_size == len(context.dormant_cohort)) every run — the
-        # model was picking a varying 3–5 of the 8. Preserve the model's
-        # cohort_label / selection_reason prose (evidence-marker consistency intact).
+        # model was picking a varying 3–5 of the 8. VT-661: cohort_label is
+        # server-grounded to the real lapsed window + selection_reason window figures
+        # are grounded too (evidence markers preserved) — the model no longer authors
+        # the window figure the owner-facing recap repeats.
         # The cohort is ALREADY opt-out/suppression-filtered upstream, so force NO
         # model-authored exclusions (they would double-handle a shorter send list).
         # Only fires with a non-empty cohort; empty → leave as-is (fail-closed ge=1;
