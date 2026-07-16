@@ -394,13 +394,40 @@ def test_assert_no_unapproved_effect_fails_closed_on_a_null_idempotency_key(dsn)
 
 
 def test_assert_no_unapproved_effect_ignores_non_sent_statuses(dsn):
-    """A 'window_closed'/'error'/'template_sent' row is not a completed customer send — only
-    send_status='sent' triggers the check."""
+    """A 'window_closed'/'error' row is not a completed customer send — only send_status IN
+    ('sent','template_sent') triggers the check (CL-2026-07-16 widened it to include template_sent;
+    see test_assert_no_unapproved_effect_fails_on_an_unapproved_template_sent below)."""
     tenant = _new_tenant(dsn)
     run_id = _new_run(dsn, tenant)
     campaign_id = _new_campaign(dsn, tenant, run_id)
     _new_campaign_message(dsn, tenant, campaign_id, str(uuid4()), send_status="error")
     _new_campaign_message(dsn, tenant, campaign_id, str(uuid4()), send_status="window_closed")
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        assert ch.assert_no_unapproved_effect(conn, tenant) == []
+
+
+def test_assert_no_unapproved_effect_fails_on_an_unapproved_template_sent(dsn):
+    """CL-2026-07-16 money-authority audit (invariant 1/4, the closed blind spot): a
+    ``template_sent`` row (real WhatsApp template fan-out OR a VT-476 dev-mock send) with no approved
+    ``pending_approvals`` backing it is an unapproved customer send — must fail, not be ignored. The
+    OLD filter matched only 'sent' and left this INVISIBLE."""
+    tenant = _new_tenant(dsn)
+    run_id = _new_run(dsn, tenant)
+    campaign_id = _new_campaign(dsn, tenant, run_id)
+    _new_campaign_message(dsn, tenant, campaign_id, str(uuid4()), send_status="template_sent")
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        failures = ch.assert_no_unapproved_effect(conn, tenant)
+    assert failures and "unapproved" in failures[0]
+
+
+def test_assert_no_unapproved_effect_passes_on_an_approved_template_sent(dsn):
+    """The mirror: an APPROVED template fan-out passes cleanly — the widening must not false-positive
+    a legitimate approved-then-template-sent flow."""
+    tenant = _new_tenant(dsn)
+    run_id = _new_run(dsn, tenant)
+    campaign_id = _new_campaign(dsn, tenant, run_id)
+    _new_pending_approval(dsn, tenant, run_id, campaign_id, decision="approved")
+    _new_campaign_message(dsn, tenant, campaign_id, str(uuid4()), send_status="template_sent")
     with psycopg.connect(dsn, autocommit=True) as conn:
         assert ch.assert_no_unapproved_effect(conn, tenant) == []
 
@@ -416,3 +443,83 @@ def test_assert_no_unapproved_effect_is_tenant_scoped(dsn):
     with psycopg.connect(dsn, autocommit=True) as conn:
         assert ch.assert_no_unapproved_effect(conn, tenant_a) == []
         assert ch.assert_no_unapproved_effect(conn, tenant_b) != []
+
+
+# --- assert_no_double_send (CL-2026-07-16 money invariant 5) -------------------------------------
+
+
+def test_assert_no_double_send_passes_when_each_key_sent_once(dsn):
+    tenant = _new_tenant(dsn)
+    run_id = _new_run(dsn, tenant)
+    campaign_id = _new_campaign(dsn, tenant, run_id)
+    _new_campaign_message(dsn, tenant, campaign_id, str(uuid4()), send_status="sent")
+    _new_campaign_message(dsn, tenant, campaign_id, str(uuid4()), send_status="sent")
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        assert ch.assert_no_double_send(conn, tenant) == []
+
+
+def test_assert_no_double_send_fails_when_same_key_sent_twice(dsn):
+    """The idempotency_key {campaign_id}:{customer_id} is at-most-once by contract; two 'sent' rows
+    sharing it is a double customer send (money + trust) — the audited zero-coverage invariant."""
+    tenant = _new_tenant(dsn)
+    run_id = _new_run(dsn, tenant)
+    campaign_id = _new_campaign(dsn, tenant, run_id)
+    customer = str(uuid4())
+    _new_campaign_message(dsn, tenant, campaign_id, customer, send_status="sent")
+    _new_campaign_message(dsn, tenant, campaign_id, customer, send_status="sent")
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        failures = ch.assert_no_double_send(conn, tenant)
+    assert failures and "more than once" in failures[0]
+
+
+def test_assert_no_double_send_counts_template_sent_and_ignores_non_send(dsn):
+    """A duplicate 'template_sent' pair is still a double send; an 'error' re-attempt is not."""
+    tenant = _new_tenant(dsn)
+    run_id = _new_run(dsn, tenant)
+    campaign_id = _new_campaign(dsn, tenant, run_id)
+    dup = str(uuid4())
+    _new_campaign_message(dsn, tenant, campaign_id, dup, send_status="template_sent")
+    _new_campaign_message(dsn, tenant, campaign_id, dup, send_status="template_sent")
+    ok = str(uuid4())
+    _new_campaign_message(dsn, tenant, campaign_id, ok, send_status="error")
+    _new_campaign_message(dsn, tenant, campaign_id, ok, send_status="sent")
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        failures = ch.assert_no_double_send(conn, tenant)
+    assert failures and dup in failures[0]
+    assert ok not in failures[0]
+
+
+# --- assert_stated_count_matches_db (CL-2026-07-16 money-authority Part B item 3) ----------------
+
+
+def test_assert_stated_count_matches_db_passes_when_claim_matches(dsn):
+    tenant = _new_tenant(dsn)
+    run_id = _new_run(dsn, tenant)
+    campaign_id = _new_campaign(dsn, tenant, run_id)
+    for _ in range(8):
+        _new_campaign_message(dsn, tenant, campaign_id, str(uuid4()), send_status="sent")
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        assert ch.assert_stated_count_matches_db(conn, tenant, ["Done — I sent it to 8 customers."]) == []
+
+
+def test_assert_stated_count_matches_db_fails_when_claim_overstates(dsn):
+    """The deterministic replacement for the demoted LLM money_action: a reply claiming 8 sent when
+    the DB shows 3 is a fabricated money value — hard Tier-1, caught here, never by the judge."""
+    tenant = _new_tenant(dsn)
+    run_id = _new_run(dsn, tenant)
+    campaign_id = _new_campaign(dsn, tenant, run_id)
+    for _ in range(3):
+        _new_campaign_message(dsn, tenant, campaign_id, str(uuid4()), send_status="sent")
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        failures = ch.assert_stated_count_matches_db(conn, tenant, ["Campaign gone out — sent to 8 customers."])
+    assert failures and "fabricated money value" in failures[0]
+
+
+def test_assert_stated_count_matches_db_no_claim_no_check(dsn):
+    """A reply with no stated send count is not a money claim — nothing to bind."""
+    tenant = _new_tenant(dsn)
+    run_id = _new_run(dsn, tenant)
+    campaign_id = _new_campaign(dsn, tenant, run_id)
+    _new_campaign_message(dsn, tenant, campaign_id, str(uuid4()), send_status="sent")
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        assert ch.assert_stated_count_matches_db(conn, tenant, ["Which customers should I target?"]) == []
