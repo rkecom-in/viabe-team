@@ -13,6 +13,8 @@ import json
 from types import SimpleNamespace
 from typing import Any
 
+import pytest
+
 from orchestrator.onboarding import turn_brain
 from orchestrator.onboarding.turn_brain import TurnPlan, compose_turn
 
@@ -182,3 +184,32 @@ def test_pinnable_domains_from_website_and_message():
         "mysite.in", "rkecom.in",
     ]
     assert turn_brain._pinnable_domains({}, "we're open 9am-9pm in Pune") == []
+
+
+# --- VT-662: empty-betas header regression (the turn-brain was silently dead on dev) ----------------
+
+
+def test_invoke_llm_tools_omits_empty_betas_header(monkeypatch):
+    """VT-662 — ``betas=[]`` must NOT be forwarded to ``beta.messages.create``. An empty list makes the
+    SDK emit an ``anthropic-beta:`` header with a blank value → API 400 ("Unexpected value(s) `` for the
+    `anthropic-beta` header"), which silently killed the turn-brain on EVERY no-web-fetch onboarding
+    turn (→ walker fallback → ignored_speech_act). Non-empty betas MUST still be forwarded."""
+    pytest.importorskip("anthropic")  # monkeypatching anthropic.Anthropic requires the module present
+    captured: dict[str, Any] = {}
+
+    class _FakeMessages:
+        def create(self, **kwargs):
+            captured.clear()
+            captured.update(kwargs)
+            return SimpleNamespace(content=[SimpleNamespace(type="text", text='{"reply_text":"hi"}')])
+
+    class _FakeClient:
+        beta = SimpleNamespace(messages=_FakeMessages())
+
+    monkeypatch.setattr("anthropic.Anthropic", lambda *a, **k: _FakeClient())
+
+    turn_brain._invoke_llm_tools("sys", [{"role": "user", "content": "x"}], [], [])
+    assert "betas" not in captured, "empty betas must be omitted (blank anthropic-beta header 400s)"
+
+    turn_brain._invoke_llm_tools("sys", [{"role": "user", "content": "x"}], [], ["web-fetch-2025-09-10"])
+    assert captured.get("betas") == ["web-fetch-2025-09-10"], "non-empty betas must be forwarded"
