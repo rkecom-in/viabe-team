@@ -609,12 +609,27 @@ def test_campaign_draft_claim_matches():
     assert mod.contains_campaign_draft_claim("मैंने कैंपेन बना दिया है।")
 
 
+def test_campaign_draft_verb_noun_combo_matches_with_intervening_word():
+    # The self-gate false-NEGATIVE: an intervening word ("Diwali") breaks the adjacency phrase, but
+    # the PAST-verb + campaign-noun combo still catches it. High precision, past-tense only.
+    assert mod.contains_campaign_draft_claim("I've drafted the Diwali offer for you.")
+    assert mod.contains_campaign_draft_claim("I've prepared a festive winback campaign for you.")
+    assert mod.contains_campaign_draft_claim("I put together the campaign.")
+    assert mod.contains_campaign_draft_claim("Maine aapke liye ek offer banaya hai.")
+    assert mod.contains_campaign_draft_claim("मैंने आपके लिए ऑफर बनाया है।")
+
+
 def test_campaign_draft_future_proposal_does_not_match():
-    # PROPOSAL / future — NOT a claim that a draft already exists.
+    # PROPOSAL / future — NOT a claim that a draft already exists (phrase AND combo paths).
     assert not mod.contains_campaign_draft_claim("Shall I draft the campaign for you?")
     assert not mod.contains_campaign_draft_claim("I'll draft the offer once you confirm.")
     assert not mod.contains_campaign_draft_claim("Want me to put together a campaign?")
+    assert not mod.contains_campaign_draft_claim("Want me to put together a festival offer?")
+    assert not mod.contains_campaign_draft_claim("Should I make a Diwali offer for your customers?")
     assert not mod.contains_campaign_draft_claim("Once you approve, your plan is ready to send.")
+    # Combo must NOT trip on a generic verb+generic-noun that isn't a campaign draft.
+    assert not mod.contains_campaign_draft_claim("I made a note of your plan.")
+    assert not mod.contains_campaign_draft_claim("I reviewed the draft you sent.")
     # Unrelated / no draft claim.
     assert not mod.contains_campaign_draft_claim("Your customers are ready to hear from you.")
     assert not mod.contains_campaign_draft_claim("")
@@ -676,6 +691,17 @@ def test_apply_gate_campaign_proposal_passthrough(monkeypatch):
     monkeypatch.setattr(mod, "campaign_draft_fact_exists", lambda t: False)
     text = "Want me to draft a festival campaign for your lapsed customers?"
     assert mod.apply_emission_gate(text, TENANT) == text
+
+
+def test_apply_gate_swaps_drafted_offer_for_you_when_no_fact(monkeypatch):
+    # PIN (self-gate): "I've drafted the offer for you" is a past-tense draft-EXISTS claim — with NO
+    # backing ``campaigns`` row it MUST be swapped for the honest line, never shipped as-is.
+    events = _patch_facts_spend(monkeypatch, locale="en")
+    monkeypatch.setattr(mod, "campaign_draft_fact_exists", lambda t: False)
+    out = mod.apply_emission_gate("I've drafted the offer for you.", TENANT)
+    assert out == mod._REPLACEMENT_COPY["campaign_not_drafted"]["en"]
+    assert out != "I've drafted the offer for you."
+    assert events and events[-1][1] == "emission_campaign_draft_blocked"
 
 
 # ── cluster-3d (VT-654) contains_onboarding_complete_claim truth table ──────────────────────────

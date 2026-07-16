@@ -233,6 +233,7 @@ _CAMPAIGN_CLAIM_PHRASES = frozenset(
         "drafted the campaign", "drafted a campaign", "drafted your campaign",
         "drafted the offer", "drafted the plan", "ive drafted the campaign",
         "i drafted the campaign", "prepared the campaign", "prepared your campaign",
+        "put together the campaign", "put together a campaign", "put together your campaign",
         "campaign is ready", "your campaign is ready", "the campaign is ready",
         "plan is ready", "your plan is ready", "the plan is ready",
         "draft is ready", "offer is ready", "the offer is ready",
@@ -256,6 +257,27 @@ _CAMPAIGN_CLAIM_PHRASES = frozenset(
 # still bounded, and strictly REDUCES false-positives (Tier-2) vs a tight 15-min window without
 # weakening the target catch: the j02 fabrication tenant has ZERO campaigns in ANY window.
 _CAMPAIGN_FACT_WINDOW_MINUTES = 24 * 60
+
+# The adjacency-based phrase set above MISSES a draft-EXISTS claim when a word intervenes between the
+# verb and the noun ("I've drafted the Diwali offer for you" — "drafted the offer" is not contiguous).
+# This VERB+NOUN combo closes that class at HIGH PRECISION: a PAST-TENSE draft verb (never the base/
+# future form — "drafted" yes, "draft" no) CO-PRESENT with a CAMPAIGN-SPECIFIC noun in one sentence,
+# with the SAME future/proposal positional guard (a marker before the verb exempts it, so "I'll draft"
+# has no "drafted" token and "want me to put together" is marker-exempted). The combo noun set is
+# deliberately campaign-SPECIFIC (campaign/offer/promo) — the generic "plan"/"draft" are excluded here
+# (they stay in the state-phrase set) so "made a note of your plan" / "reviewed the draft" never trip.
+_CAMPAIGN_DRAFT_VERB_TOKENS = {
+    # English past-tense completions
+    "drafted", "prepared", "readied", "made",
+    # Hinglish past "made/prepared" (bare-verb forms; the "bana diya" compound stays a phrase above)
+    "banaya", "banayi", "banai",
+    # Devanagari past "made"
+    "बनाया", "बनाई",
+}
+_CAMPAIGN_COMBO_NOUN_TOKENS = {
+    "campaign", "campaigns", "offer", "offers", "promo", "promotion",
+    "कैंपेन", "ऑफर", "ऑफ़र",
+}
 
 # ── cluster-3d (VT-654, j05 b2b_onboarding_thin_discovery) — premature ONBOARDING-COMPLETE claim ─────
 # The brain falsely declared "that's everything we need… setting up your assistant now" after ONE
@@ -515,14 +537,32 @@ def _sentence_has_phrase_non_future(
     return False
 
 
+def _sentence_has_draft_verb_claim(sentence: str) -> bool:
+    """True iff ONE sentence co-locates a PAST-TENSE draft verb (``_CAMPAIGN_DRAFT_VERB_TOKENS``) with
+    a campaign-specific noun (``_CAMPAIGN_COMBO_NOUN_TOKENS``), the verb NOT preceded by a future/
+    proposal marker. Catches the intervening-word class the adjacency phrases miss ("I've drafted the
+    Diwali offer for you") without loosening: the verbs are past-tense only (so "I'll draft" / "shall
+    I draft" carry no matching token), and a marker before the verb ("once I've prepared…") exempts."""
+    tokens = _tokenize(sentence)
+    if len(tokens) < 2 or not (set(tokens) & _CAMPAIGN_COMBO_NOUN_TOKENS):
+        return False
+    for i, t in enumerate(tokens):
+        if t in _CAMPAIGN_DRAFT_VERB_TOKENS and not (set(tokens[:i]) & _FUTURE_CONDITIONAL_MARKERS):
+            return True
+    return False
+
+
 def contains_campaign_draft_claim(text: str) -> bool:
     """True iff ``text`` claims a campaign DRAFT/APPROVAL already EXISTS ("your plan is ready", "I've
-    drafted the offer", "the campaign is approved", Hinglish/Devanagari). Tight past/present-STATE
-    phrases only — a future proposal ("shall I draft…" / "I'll draft…" / "want me to draft…") is
-    _FUTURE_CONDITIONAL-guarded per sentence and never trips. The fact-check
-    (``campaign_draft_fact_exists``) is the load-bearing gate; a missed phrasing just passes clean."""
+    drafted the offer", "I've drafted the Diwali offer for you", "the campaign is approved",
+    Hinglish/Devanagari). Two high-precision paths, both future/proposal-guarded per sentence: (a) the
+    adjacency STATE phrases; (b) a PAST-tense draft verb + a campaign-specific noun co-present (the
+    intervening-word form). A future proposal ("shall I draft…" / "I'll draft…" / "want me to put it
+    together…") never trips either. The fact-check (``campaign_draft_fact_exists``) is the load-bearing
+    gate; a missed phrasing just passes clean."""
     return any(
         _sentence_has_phrase_non_future(s, _CAMPAIGN_CLAIM_PHRASES, _FUTURE_CONDITIONAL_MARKERS)
+        or _sentence_has_draft_verb_claim(s)
         for s in _split_sentences(text or "")
     )
 
