@@ -579,28 +579,20 @@ def contains_onboarding_complete_claim(text: str) -> bool:
     )
 
 
-# One round-trip: does a real campaign draft/plan row exist for this tenant in the (wide) window?
-_CAMPAIGN_FACT_SQL = """
-    SELECT EXISTS (
-        SELECT 1 FROM campaigns
-         WHERE tenant_id = %(tenant_id)s
-           AND created_at >= now() - interval '{window} minutes'
-    ) AS fact_exists
-""".format(window=_CAMPAIGN_FACT_WINDOW_MINUTES)
-
-
 def campaign_draft_fact_exists(tenant_id: UUID | str) -> bool:
     """Did a real campaign draft/plan land for this tenant in the campaign fact window?
 
     FAIL-CLOSED: any read error returns ``False`` (no confirmed fact), never raises — a DB blip must
     swap the fabricated "your plan is ready" for the honest line, not silently trust it (a
     wrongly-softened honest message is Tier-2; a shipped fabrication is Tier-1). Mirrors
-    ``send_fact_exists`` exactly."""
+    ``send_fact_exists`` exactly. The ``campaigns`` read goes through ``CampaignsWrapper`` (the
+    direct-tenant-DB-access lint requires wrapper-layer SQL — VT-655)."""
     try:
-        from orchestrator.db.tenant_connection import tenant_connection
+        from orchestrator.db.wrappers import CampaignsWrapper
 
-        with tenant_connection(tenant_id) as conn:
-            row = conn.execute(_CAMPAIGN_FACT_SQL, {"tenant_id": str(tenant_id)}).fetchone()
+        return CampaignsWrapper().has_any_since(
+            tenant_id, within_minutes=_CAMPAIGN_FACT_WINDOW_MINUTES
+        )
     except Exception:  # noqa: BLE001 — fail-closed: treat a read error as "no fact"
         logger.warning(
             "emission_gate: campaign-draft fact read failed tenant=%s — fail-closed (no fact)",
@@ -608,7 +600,6 @@ def campaign_draft_fact_exists(tenant_id: UUID | str) -> bool:
             exc_info=True,
         )
         return False
-    return bool(dict(row).get("fact_exists")) if row else False
 
 
 def _onboarding_journey_active(tenant_id: UUID | str) -> bool:

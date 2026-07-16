@@ -640,28 +640,26 @@ def test_campaign_draft_future_proposal_does_not_match():
 
 
 def test_campaign_draft_fact_exists_true_when_row_says_so(monkeypatch):
-    monkeypatch.setattr(
-        tenant_connection_mod,
-        "tenant_connection",
-        lambda *a, **k: _FakeCtx({"fact_exists": True}),
-    )
+    from orchestrator.db.wrappers import CampaignsWrapper
+
+    monkeypatch.setattr(CampaignsWrapper, "has_any_since", lambda self, *a, **k: True)
     assert mod.campaign_draft_fact_exists(TENANT) is True
 
 
 def test_campaign_draft_fact_exists_false_when_row_says_so(monkeypatch):
-    monkeypatch.setattr(
-        tenant_connection_mod,
-        "tenant_connection",
-        lambda *a, **k: _FakeCtx({"fact_exists": False}),
-    )
+    from orchestrator.db.wrappers import CampaignsWrapper
+
+    monkeypatch.setattr(CampaignsWrapper, "has_any_since", lambda self, *a, **k: False)
     assert mod.campaign_draft_fact_exists(TENANT) is False
 
 
 def test_campaign_draft_fact_exists_fails_closed_on_db_error(monkeypatch):
-    def _boom(*a, **k):
+    from orchestrator.db.wrappers import CampaignsWrapper
+
+    def _boom(self, *a, **k):
         raise RuntimeError("db down")
 
-    monkeypatch.setattr(tenant_connection_mod, "tenant_connection", _boom)
+    monkeypatch.setattr(CampaignsWrapper, "has_any_since", _boom)
     assert mod.campaign_draft_fact_exists(TENANT) is False
 
 

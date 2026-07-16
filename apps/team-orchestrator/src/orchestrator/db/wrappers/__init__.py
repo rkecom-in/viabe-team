@@ -606,6 +606,21 @@ class CampaignsWrapper(TenantScopedTable):
         self._validate(out, tid)
         return out
 
+    def has_any_since(
+        self, tenant_id: UUID | str, *, within_minutes: int, conn: Any = None
+    ) -> bool:
+        """True iff ANY campaigns row exists for the tenant created within ``within_minutes`` —
+        the VT-655 emission-honesty draft-EXISTS fact-check (a claimed "your plan is ready" must
+        be backed by a real ``campaigns`` row; the caller fail-closes on error)."""
+        tid = self._uuid(tenant_id)
+        with self._conn(tid, conn) as c:
+            row = c.execute(
+                "SELECT 1 FROM campaigns WHERE tenant_id = %s "
+                "AND created_at >= now() - make_interval(mins => %s) LIMIT 1",
+                (str(tid), int(within_minutes)),
+            ).fetchone()
+        return row is not None
+
     def recovered_paise_for_campaigns(
         self, tenant_id: UUID | str, campaign_ids: list[str], *, conn: Any = None
     ) -> dict[str, int]:
