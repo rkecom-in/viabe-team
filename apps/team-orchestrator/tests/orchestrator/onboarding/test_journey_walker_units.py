@@ -419,3 +419,102 @@ def test_turn_brain_card_branch_completes_unchanged(monkeypatch):
     assert _COMPLETION_MARK not in r["reply_text"]
     assert state.complete_calls == 1
     assert state.s["status"] == "complete"
+
+
+# --- VT-662: deterministic about-gap capture floor (turn-brain ignored_speech_act re-ask) ----------
+#
+# The LLM turn-brain sometimes re-asks the open free-text ``about`` gap on the SAME turn the owner
+# DESCRIBED their business (measured on j05, 2/2 byte-identical). ``_apply_turn_plan`` records only what
+# the LLM extracted, so nothing captured the missed gap and it was re-asked next turn. The floor records
+# a SUBSTANTIVE owner statement into an open ``about`` gap so the brain sees it ALREADY-COLLECTED and
+# cannot re-ask. Only ``about`` (a finite schema field), only while open — never a keyword list.
+
+_ABOUT_GAP = {"field": "about", "kind": "gap",
+              "prompt_en": "Tell us about your business", "prompt_hi": "बताइए?"}
+_J05_TURN = "We stock and distribute packaged goods in bulk to retail stores across the region."
+
+
+@pytest.mark.parametrize(
+    "body,expected",
+    [
+        (_J05_TURN, True),                                   # the j05 turn — a real description
+        ("We supply goods wholesale to businesses", True),   # 5 tokens, substantive
+        ("hi", False),                                       # bare greeting
+        ("namaste", False),                                  # bare greeting (HI)
+        ("haan theek hai", False),                           # bare gap-affirmation particles
+        ("no", False),                                       # bare negation
+        ("skip", False),                                     # skip token
+        ("Mumbai", False),                                   # single token — a value, not a description
+        ("what products do you mean?", False),               # a question (has '?')
+        ("", False),                                         # empty
+    ],
+)
+def test_is_substantive_statement(body, expected):
+    assert j._is_substantive_statement(body) is expected
+
+
+def test_capture_about_gap_records_when_open_and_substantive():
+    g = {"question_queue": [_ABOUT_GAP], "cursor": 0}
+    answers: dict = {}
+    assert j._capture_missed_about_gap(g, answers, [], _J05_TURN) is True
+    assert answers["about"] == _J05_TURN.strip()
+
+
+def test_capture_about_gap_noop_when_already_answered():
+    # The brain DID extract about → the floor must NOT clobber it.
+    g = {"question_queue": [_ABOUT_GAP], "cursor": 0}
+    answers = {"about": "brain-extracted value"}
+    assert j._capture_missed_about_gap(g, answers, [], _J05_TURN) is False
+    assert answers["about"] == "brain-extracted value"
+
+
+def test_capture_about_gap_noop_when_skipped():
+    g = {"question_queue": [_ABOUT_GAP], "cursor": 0}
+    answers: dict = {}
+    assert j._capture_missed_about_gap(g, answers, ["about"], _J05_TURN) is False
+    assert "about" not in answers
+
+
+def test_capture_about_gap_noop_when_no_about_gap_in_queue():
+    g = {"question_queue": [_GAP_Q], "cursor": 0}  # a city gap, no about
+    answers: dict = {}
+    assert j._capture_missed_about_gap(g, answers, [], _J05_TURN) is False
+    assert answers == {}
+
+
+def test_capture_about_gap_noop_when_about_is_confirm_not_gap():
+    # An about CONFIRM needs a real confirm/correct — not a free-text capture.
+    g = {"question_queue": [{"field": "about", "kind": "confirm"}], "cursor": 0}
+    answers: dict = {}
+    assert j._capture_missed_about_gap(g, answers, [], _J05_TURN) is False
+    assert answers == {}
+
+
+def test_capture_about_gap_noop_when_body_is_greeting():
+    g = {"question_queue": [_ABOUT_GAP], "cursor": 0}
+    answers: dict = {}
+    assert j._capture_missed_about_gap(g, answers, [], "hi there") is False
+    assert "about" not in answers
+
+
+def test_turn_brain_captures_missed_about_gap_end_to_end(monkeypatch):
+    # THE j05 FIX on the turn-brain seam: the LLM extracted nothing (apply → {}), an about gap is open,
+    # the owner gave a real description → the floor records `about` so the persisted answers carry it and
+    # the brain cannot re-ask it next turn.
+    state = _FakeJourneyState(queue=[_ABOUT_GAP], cursor=0)
+    _wire_turn_brain(monkeypatch, state, profile_complete=False, answers={}, new_cursor=0,
+                     plan_reply="What products or services does your business offer?")
+    r = j._handle_reply_with_turn_brain("t", _J05_TURN, "sid-j05-1")
+    assert r["done"] is False
+    assert state.s["answers"]["about"] == _J05_TURN.strip()
+
+
+def test_turn_brain_does_not_clobber_extracted_about(monkeypatch):
+    # When the brain DID extract about, the floor is a no-op — the brain's value persists unchanged.
+    state = _FakeJourneyState(queue=[_ABOUT_GAP], cursor=0)
+    _wire_turn_brain(monkeypatch, state, profile_complete=False,
+                     answers={"about": "packaged-goods wholesaler"}, new_cursor=0,
+                     plan_reply="Got it — anything else?")
+    r = j._handle_reply_with_turn_brain("t", _J05_TURN, "sid-j05-2")
+    assert r["done"] is False
+    assert state.s["answers"]["about"] == "packaged-goods wholesaler"
