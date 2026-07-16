@@ -219,6 +219,38 @@ def _wrap_lane_node_exceptions(node_callable: Any, *, lane: str) -> Any:
     return _lane_node_wrapper
 
 
+# VT-101 Stage 3(b) — the framework registration for the SR PROPOSER path, cached per-process.
+_SR_REGISTERED: Any = None
+
+
+def _sr_registered_module() -> Any:
+    """Register the SR module into the framework's process-global default registry ONCE and cache it.
+
+    The default registry is SHARED with ``coordinator.get_registry``'s flag-ON EXECUTOR branch;
+    whichever path runs first registers, the other re-enters. A module is keyed by ``manifest.name``,
+    so ``register_agent`` raises ``ModuleRegistrationError`` on a duplicate — on a second entry (this
+    node re-invoked in the same process, OR the coordinator having registered first) fall back to
+    ``get_registered`` rather than crash. Both paths then share the SAME ``RegisteredModule``.
+    """
+    global _SR_REGISTERED
+    if _SR_REGISTERED is None:
+        from orchestrator.agent_framework import (
+            ModuleRegistrationError,
+            get_registered,
+            register_agent,
+        )
+        from orchestrator.agent_framework.modules.sales_recovery_module import (
+            MODULE_NAME,
+            SalesRecoveryModule,
+        )
+
+        try:
+            _SR_REGISTERED = register_agent(SalesRecoveryModule())
+        except ModuleRegistrationError:
+            _SR_REGISTERED = get_registered(MODULE_NAME)
+    return _SR_REGISTERED
+
+
 def _sales_recovery_node(state: AgentGraphState) -> dict[str, Any]:
     """The supervisor's specialist-dispatch node.
 
@@ -285,9 +317,35 @@ def _sales_recovery_node(state: AgentGraphState) -> dict[str, Any]:
 
     validate_context_isolation(context)
 
-    agent_result = run_sales_recovery_agent(context, evaluator=evaluator)
+    # VT-101 Stage 3(b): behind ``TEAM_SR_VIA_FRAMEWORK`` (default OFF), route the proposer through
+    # the agent_framework module contract instead of calling ``run_sales_recovery_agent`` directly.
+    # Both branches yield the SAME two downstream locals (``result_output`` / ``result_status``); the
+    # flag-OFF branch IS the original call, byte-identical to pre-VT-101 behavior. The module's
+    # ``propose`` is None-preserving, so ``result_output is None`` iff the agent produced no output —
+    # the ``SpecialistNoOutputError`` detection below is unchanged under the flag.
+    from orchestrator.agent_framework.modules.sales_recovery_module import (
+        sr_via_framework,
+    )
 
-    if agent_result.output is None:
+    if sr_via_framework():
+        from orchestrator.agent_framework import ModuleContext
+
+        registered = _sr_registered_module()
+        module_ctx = ModuleContext.for_proposer(
+            tenant_model_value=str(tenant_uuid),
+            module_name="sales_recovery",
+            run_id=str(run_uuid),
+            data={"sales_recovery_context": context, "evaluator": evaluator},
+        )
+        mres = registered.run(module_ctx)
+        result_output = mres.proposal  # None-preserving (the VT-101 module fix guarantees this)
+        result_status = mres.status
+    else:
+        agent_result = run_sales_recovery_agent(context, evaluator=evaluator)
+        result_output = agent_result.output
+        result_status = agent_result.status
+
+    if result_output is None:
         # Live-agent terminal failure modes (status in {refused, invalid,
         # terminated}) produce no output. The agent's own emit calls
         # routed a FailureRecord; the supervisor surfaces the failure
@@ -304,7 +362,7 @@ def _sales_recovery_node(state: AgentGraphState) -> dict[str, Any]:
         # already-routed FailureRecord — this does not mask the real bug.
         raise SpecialistNoOutputError(
             specialist="sales_recovery",
-            status=str(agent_result.status),
+            status=str(result_status),
             run_id=run_uuid,
             tenant_id=tenant_uuid,
         )
@@ -321,11 +379,11 @@ def _sales_recovery_node(state: AgentGraphState) -> dict[str, Any]:
     # output=None path uses, VT-492) so dispatch_brain resolves a CLEAN
     # 'escalated' terminal and the owner gets the VT-88 no-silence ack.
     try:
-        plan = parse_campaign_plan(agent_result.output)
+        plan = parse_campaign_plan(result_output)
     except (json.JSONDecodeError, ValidationError) as exc:
         raise SpecialistNoOutputError(
             specialist="sales_recovery",
-            status=str(agent_result.status),
+            status=str(result_status),
             run_id=run_uuid,
             tenant_id=tenant_uuid,
         ) from exc
