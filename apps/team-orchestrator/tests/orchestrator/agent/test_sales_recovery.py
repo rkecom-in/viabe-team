@@ -1903,8 +1903,13 @@ def test_vt651_construct_payload_expands_subset_to_full_eligible_cohort():
     # Model-authored exclusions are cleared (the eligible set is already filtered).
     assert plan.exclusion_list == []
     assert plan.exclusion_reasons == {}
-    # The model's PROSE (label + selection_reason, incl. the [E1] marker) is preserved.
-    assert plan.target_cohort.cohort_label == "top-3-lapsed-spenders"
+    # VT-661: cohort_label is SERVER-grounded to the real lapsed window (not the
+    # model's free text), derived from LAPSED_WINDOW_DAYS (never a re-literal 45).
+    from orchestrator.db.wrappers import LAPSED_WINDOW_DAYS
+
+    assert plan.target_cohort.cohort_label == f"lapsed-{LAPSED_WINDOW_DAYS}d-plus"
+    # selection_reason TONE is preserved; it carries no day-window figure here, so
+    # grounding is a no-op and the [E1] marker survives (evidence-marker consistency).
     assert plan.target_cohort.selection_reason == (
         "Top 3 lapsed spenders, promo-eligible [E1]."
     )
@@ -1964,3 +1969,67 @@ def test_vt651_empty_cohort_does_not_fire_override_stays_fail_closed():
     assert [str(cid) for cid in plan.target_cohort.customer_ids] == model_ids
     assert plan.target_cohort.cohort_size == 1
     assert plan.target_cohort.cohort_label == "dormant-60d"
+
+
+# VT-661: the WINDOW figure in the owner-facing cohort prose is a SERVER-OWNED FACT.
+# The SR model authored an ungrounded window in cohort_label (e.g. "lapsed-120d-plus")
+# that CONTRADICTS the real 45d lapsed window (LAPSED_WINDOW_DAYS) it had just told the
+# owner — a Tier-1 fabrication (j01_shopify_winback, ~1/3 on dev). The label flows
+# verbatim into the owner recap (dispatch/manager). _server_target_cohort now sets
+# cohort_label DETERMINISTICALLY to a window-grounded label derived from
+# LAPSED_WINDOW_DAYS, and grounds any day-window figure the model wrote into
+# selection_reason — preserving [E\d+] evidence markers.
+
+
+def test_vt661_cohort_label_grounded_to_real_lapsed_window():
+    """VT-661 — cohort_label is server-owned + window-grounded. A model label with a
+    CONTRADICTORY window ("lapsed-120d-plus") is replaced with a deterministic label
+    derived from LAPSED_WINDOW_DAYS (never a re-literal 45); a window-consistent or an
+    ABSENT model label yields the SAME grounded label. A day-window figure in
+    selection_reason is ground to the real window with its [E1] marker intact."""
+    from datetime import UTC, datetime
+
+    from orchestrator.agent.sales_recovery import _construct_variant_payload
+    from orchestrator.agent.schemas.campaign_plan import parse_campaign_plan
+    from orchestrator.db.wrappers import LAPSED_WINDOW_DAYS
+
+    grounded = f"lapsed-{LAPSED_WINDOW_DAYS}d-plus"
+    ctx = _ctx_with_cohort("C1", "C2", "C3")
+    now = datetime.now(UTC)
+
+    def _label_reason_for(
+        model_label: str | None, model_reason: str
+    ) -> tuple[str, str]:
+        raw = _proposed_raw_minimal()
+        if model_label is None:
+            raw["target_cohort"].pop("cohort_label", None)
+        else:
+            raw["target_cohort"]["cohort_label"] = model_label
+        raw["target_cohort"]["selection_reason"] = model_reason
+        payload, _de, _dp = _construct_variant_payload(
+            raw, context=ctx, generated_at=now
+        )
+        plan = parse_campaign_plan(payload)
+        return plan.target_cohort.cohort_label, plan.target_cohort.selection_reason
+
+    # (1) A contradictory model window is REPLACED with the grounded label, and the
+    #     ungrounded window in the reason is ground too (marker preserved).
+    label, reason = _label_reason_for(
+        "lapsed-120d-plus", "Customers with no purchase in 120+ days [E1]."
+    )
+    assert label == grounded
+    assert "120" not in label
+    assert reason == f"Customers with no purchase in {LAPSED_WINDOW_DAYS}+ days [E1]."
+    assert "120" not in reason
+    assert "[E1]" in reason
+
+    # (2) A window-CONSISTENT model label still yields the SAME deterministic label.
+    label2, _ = _label_reason_for(f"lapsed-{LAPSED_WINDOW_DAYS}d", "All eligible [E1].")
+    assert label2 == grounded
+
+    # (3) An ABSENT model label yields the grounded label too (deterministic).
+    label3, _ = _label_reason_for(None, "All eligible [E1].")
+    assert label3 == grounded
+
+    # The grounded label is DERIVED from the constant — not a hard-coded 45.
+    assert str(LAPSED_WINDOW_DAYS) in grounded
