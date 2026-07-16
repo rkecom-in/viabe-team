@@ -27,6 +27,14 @@ Two thin pieces, wired at the choke points where LLM text becomes an owner send:
      impossible_promise Tier-1 breaker): surgically STRIP the offending sentence(s), keeping the
      honest remainder; if that empties the message, fall back to the honest generic line. Runs on
      honest text and on a true completion claim alike.
+Additional whole-message-swap clusters share the same shape (tight past/present-STATE matcher +
+fail-closed DB/state fact-check): cluster-2a fabricated customer DEBT, cluster-2b fabricated
+SPEND/boost completion, cluster-3c (VT-655) fabricated CAMPAIGN DRAFT/APPROVAL (fact = a
+``campaigns`` row), and cluster-3d (VT-654) premature ONBOARDING-COMPLETE (fact = the deterministic
+``conductor.profile_collection_complete``, gated on an ACTIVE journey; swap = the real pending
+question). The onboarding cluster is the conductor's "NEVER self-declare complete" invariant made
+DETERMINISTIC at the send boundary — the conductor reply reaches the owner through this same gate
+(``onboarding_conductor`` routes to END -> ``dispatch._maybe_send_manager_reply`` -> the gate).
 Every block drops a ``tm_audit`` breadcrumb (the blocked text's hash only — CL-390, never the
 text itself). The whole function is wrapped so it can NEVER raise: a bug in the
 strip/replacement path must degrade to shipping the ORIGINAL text, not break the send outright
@@ -189,6 +197,101 @@ _AD_REF_TOKENS = {"boost", "boosted", "ad", "ads", "promo", "promote", "promotio
 # A bare 2+-digit amount is accepted ONLY inside the verb+ad-ref combo (already high-signal), so
 # "Paid 500 for your ad" matches while a bare number elsewhere never fires this class on its own.
 _BARE_AMOUNT_RE = re.compile(r"\b\d{2,}\b")
+
+# ── shared future/conditional guard (VT-654/655 clusters) ─────────────────────────────────────────
+# The campaign-draft (cluster-3c) and onboarding-complete (cluster-3d) matchers below key on a
+# PAST/PRESENT-STATE claim ("your plan is ready", "onboarding is complete") — a FUTURE or CONDITIONAL
+# framing of the same phrase ("once you approve, your plan is ready to send", "I'll set up your
+# assistant after this") is an HONEST statement, never a fabrication, and must pass clean. Mirrors the
+# _COMPLETION_BIGRAMS future-vs-past discipline: a future/conditional marker appearing BEFORE the
+# claim phrase (positional, sentence-scoped) exempts that occurrence. Tight set — apostrophes are
+# already stripped by ``_tokenize`` ("I'll" -> "ill", "you'll" -> "youll").
+_FUTURE_CONDITIONAL_MARKERS = {
+    # future / conditional
+    "once", "when", "after", "will", "ill", "well", "youll", "wed", "soon", "then",
+    "jab", "baad", "phir", "hone", "milte", "milne", "karne", "karunga", "karungi", "dunga", "dungi",
+    # proposal / modal ("shall I draft…", "want me to…", "should I set up…", "let me…")
+    "shall", "should", "want", "can", "could", "may", "let", "lets", "chahiye", "karu", "karun",
+    # incompleteness framing ("to FINISH setting up…", "BEFORE you're all set…") — the setup is
+    # explicitly NOT-yet-done, so the phrase names a GOAL, not a completed state. NB "finished"
+    # (a real past completion) is deliberately NOT here, only the infinitive "finish".
+    "finish", "finishing", "before",
+}
+
+# ── cluster-3c (VT-655, j02 restaurant_festival_marketing) — fabricated CAMPAIGN DRAFT/APPROVAL ──────
+# The brain claimed a campaign was DRAFTED and/or reviewed/APPROVED when NO such draft exists. Blind
+# judge: "No campaign draft/offer content was ever actually shown to the owner… the assistant invents
+# that a concrete plan existed and was reviewed/approved." The authoritative store is the ``campaigns``
+# table (collapse.py's ``collapse_campaign_plan`` INSERTs one row per proposed CampaignPlan; status
+# progresses proposed -> approved/rejected -> sent/failed). So the fact = a ``campaigns`` row exists
+# for this tenant. TIGHT past/present-STATE phrases only (future/proposal is _FUTURE_CONDITIONAL-
+# guarded per sentence, so "shall I draft…" / "I'll draft…" / "want me to draft…" never trip). A missed
+# phrasing just means the honest message passes (safe); the fact-check is the load-bearing gate.
+_CAMPAIGN_CLAIM_PHRASES = frozenset(
+    {
+        # English — draft/plan EXISTS
+        "drafted the campaign", "drafted a campaign", "drafted your campaign",
+        "drafted the offer", "drafted the plan", "ive drafted the campaign",
+        "i drafted the campaign", "prepared the campaign", "prepared your campaign",
+        "campaign is ready", "your campaign is ready", "the campaign is ready",
+        "plan is ready", "your plan is ready", "the plan is ready",
+        "draft is ready", "offer is ready", "the offer is ready",
+        "campaign is drafted", "plan is drafted", "offer is drafted",
+        # English — reviewed/APPROVED
+        "campaign is approved", "plan is approved", "reviewed and approved",
+        "already approved the campaign",
+        # Hinglish (romanized)
+        "campaign taiyaar hai", "campaign tayaar hai", "plan taiyaar hai", "plan tayaar hai",
+        "draft taiyaar hai", "offer taiyaar hai", "campaign ready hai", "plan ready hai",
+        "campaign draft kar diya", "campaign bana diya", "plan bana diya",
+        "campaign taiyaar kar diya", "campaign approve ho gaya", "campaign approve kar diya",
+        # Devanagari
+        "कैंपेन तैयार है", "प्लान तैयार है", "ड्राफ्ट तैयार है",
+        "कैंपेन ड्राफ्ट कर दिया", "कैंपेन बना दिया", "कैंपेन अप्रूव हो गया",
+    }
+)
+# A campaign draft is a PERSISTENT artifact (not a momentary "just sent" action), so the fact window
+# is deliberately WIDER than _FACT_WINDOW_MINUTES — a real plan the owner is still discussing may be
+# an hour+ old within one conversation. 24h scopes "a plan exists for this recent conversation" while
+# still bounded, and strictly REDUCES false-positives (Tier-2) vs a tight 15-min window without
+# weakening the target catch: the j02 fabrication tenant has ZERO campaigns in ANY window.
+_CAMPAIGN_FACT_WINDOW_MINUTES = 24 * 60
+
+# ── cluster-3d (VT-654, j05 b2b_onboarding_thin_discovery) — premature ONBOARDING-COMPLETE claim ─────
+# The brain falsely declared "that's everything we need… setting up your assistant now" after ONE
+# message while profile discovery was NOT deterministically complete (the 'about' gap still pending),
+# then step 2 asked for more — a contradiction. The conductor's own invariant is "NEVER self-declare
+# complete" (onboarding_conductor_system.md lines 42/71/157); this makes it DETERMINISTICALLY enforced.
+# FACT-CHECK: the deterministic ``conductor.profile_collection_complete`` (via
+# ``next_question_for_tenant`` — one call yields BOTH the completeness signal AND the pending question
+# for the honest swap). PRECONDITION: only inside an ACTIVE onboarding journey (``journey.is_active``)
+# — a non-onboarding "all set" ("your campaign is all set") must never be swapped for an onboarding
+# continuation. TIGHT past/present-STATE phrases, _FUTURE_CONDITIONAL-guarded per sentence so an honest
+# "once you tell me X, you're all set" passes clean.
+_ONBOARDING_COMPLETE_PHRASES = frozenset(
+    {
+        # English
+        "thats everything we need", "thats all we need", "thats everything i need",
+        "got everything i need", "have everything i need", "we have everything we need",
+        # present-continuous setup claim — REQUIRE the definitive "now" so an infinitival GOAL
+        # ("to finish setting up your assistant, what does your business do?") never trips.
+        "setting up your assistant now", "setting you up now", "activating your assistant now",
+        "onboarding is complete", "onboarding complete", "onboarding is done", "onboarding done",
+        "setup is complete", "setup complete", "setup is done",
+        "profile is complete", "profile complete", "everything is set up",
+        "youre all set", "you are all set", "were all set", "we are all set",
+        "youre onboarded", "you are onboarded", "youre ready to go",
+        "your assistant is ready", "assistant is ready",
+        # Hinglish (romanized)
+        "sab kuch mil gaya", "jo chahiye tha mil gaya", "setup ho gaya",
+        "setup complete ho gaya", "onboarding ho gaya", "onboarding complete ho gaya",
+        "profile complete ho gaya", "profile taiyaar ho gaya", "sab set ho gaya",
+        "assistant taiyaar hai", "assistant ready hai", "aap set ho gaye", "aap onboard ho gaye",
+        # Devanagari
+        "ऑनबोर्डिंग पूरी हो गई", "ऑनबोर्डिंग हो गई", "सेटअप हो गया",
+        "प्रोफ़ाइल पूरी हो गई", "प्रोफ़ाइल तैयार है", "असिस्टेंट तैयार है", "सब मिल गया",
+    }
+)
 
 
 def _tokenize(text: str) -> list[str]:
@@ -386,6 +489,139 @@ def contains_spend_completion_claim(text: str) -> bool:
     return False
 
 
+def _sentence_has_phrase_non_future(
+    sentence: str, phrases: frozenset[str], future_markers: set[str]
+) -> bool:
+    """True iff ONE sentence contains a claim ``phrase`` that is NOT future/conditional-framed.
+
+    A phrase matches as a space-delimited token subsequence against the normalized+tokenized text
+    (Devanagari-safe via ``_tokenize``). The occurrence is EXEMPT when a future/conditional marker
+    precedes the phrase in the same sentence ("once you tell me X, you're all set" — the "all set"
+    is conditional, not a completed state), mirroring the ability-marker-BEFORE discipline the
+    completion cluster uses. Positional + sentence-scoped: a marker after the phrase ("You're all
+    set — I'll message next") does NOT exempt it."""
+    tokens = _tokenize(sentence)
+    if not tokens:
+        return False
+    hay = " " + " ".join(tokens) + " "
+    for phrase in phrases:
+        idx = hay.find(" " + phrase + " ")
+        if idx < 0:
+            continue
+        prefix_tokens = set(hay[:idx].split())
+        if prefix_tokens & future_markers:
+            continue  # future/conditional framing — an honest statement, not a completed claim
+        return True
+    return False
+
+
+def contains_campaign_draft_claim(text: str) -> bool:
+    """True iff ``text`` claims a campaign DRAFT/APPROVAL already EXISTS ("your plan is ready", "I've
+    drafted the offer", "the campaign is approved", Hinglish/Devanagari). Tight past/present-STATE
+    phrases only — a future proposal ("shall I draft…" / "I'll draft…" / "want me to draft…") is
+    _FUTURE_CONDITIONAL-guarded per sentence and never trips. The fact-check
+    (``campaign_draft_fact_exists``) is the load-bearing gate; a missed phrasing just passes clean."""
+    return any(
+        _sentence_has_phrase_non_future(s, _CAMPAIGN_CLAIM_PHRASES, _FUTURE_CONDITIONAL_MARKERS)
+        for s in _split_sentences(text or "")
+    )
+
+
+def contains_onboarding_complete_claim(text: str) -> bool:
+    """True iff ``text`` declares onboarding/profile setup COMPLETE ("that's everything we need",
+    "setting up your assistant", "all set", "onboarding complete", Hinglish/Devanagari). Tight
+    past/present-STATE phrases, _FUTURE_CONDITIONAL-guarded per sentence so an honest "once you tell
+    me X, you're all set" passes clean. The DETERMINISTIC completion fact-check (against
+    ``conductor.profile_collection_complete``, only inside an active journey) is load-bearing."""
+    return any(
+        _sentence_has_phrase_non_future(s, _ONBOARDING_COMPLETE_PHRASES, _FUTURE_CONDITIONAL_MARKERS)
+        for s in _split_sentences(text or "")
+    )
+
+
+# One round-trip: does a real campaign draft/plan row exist for this tenant in the (wide) window?
+_CAMPAIGN_FACT_SQL = """
+    SELECT EXISTS (
+        SELECT 1 FROM campaigns
+         WHERE tenant_id = %(tenant_id)s
+           AND created_at >= now() - interval '{window} minutes'
+    ) AS fact_exists
+""".format(window=_CAMPAIGN_FACT_WINDOW_MINUTES)
+
+
+def campaign_draft_fact_exists(tenant_id: UUID | str) -> bool:
+    """Did a real campaign draft/plan land for this tenant in the campaign fact window?
+
+    FAIL-CLOSED: any read error returns ``False`` (no confirmed fact), never raises — a DB blip must
+    swap the fabricated "your plan is ready" for the honest line, not silently trust it (a
+    wrongly-softened honest message is Tier-2; a shipped fabrication is Tier-1). Mirrors
+    ``send_fact_exists`` exactly."""
+    try:
+        from orchestrator.db.tenant_connection import tenant_connection
+
+        with tenant_connection(tenant_id) as conn:
+            row = conn.execute(_CAMPAIGN_FACT_SQL, {"tenant_id": str(tenant_id)}).fetchone()
+    except Exception:  # noqa: BLE001 — fail-closed: treat a read error as "no fact"
+        logger.warning(
+            "emission_gate: campaign-draft fact read failed tenant=%s — fail-closed (no fact)",
+            tenant_id,
+            exc_info=True,
+        )
+        return False
+    return bool(dict(row).get("fact_exists")) if row else False
+
+
+def _onboarding_journey_active(tenant_id: UUID | str) -> bool:
+    """Best-effort PRECONDITION for the onboarding-complete cluster: is the tenant IN an active
+    onboarding journey? Reuses ``journey.is_active`` (a cheap PK lookup, itself fail-open). Any error
+    -> ``False`` — a non-onboarding reply (or a journey-read blip) must NOT have its "all set" swapped
+    for an onboarding continuation (that would be a Tier-2 false-positive; the load-bearing honesty
+    fact-check lives in ``profile_collection_complete`` and only runs once this precondition holds)."""
+    try:
+        from orchestrator.onboarding.journey import is_active
+
+        return bool(is_active(tenant_id))
+    except Exception:  # noqa: BLE001 — a journey-read error must never swap a non-onboarding reply
+        logger.warning(
+            "emission_gate: onboarding journey-active check failed tenant=%s — treating inactive",
+            tenant_id,
+            exc_info=True,
+        )
+        return False
+
+
+def _onboarding_incomplete_swap(tenant_id: UUID | str, locale: str) -> str | None:
+    """Fact-check a claimed onboarding-COMPLETE against the DETERMINISTIC completion check, returning
+    the honest SWAP text when the profile is NOT actually complete, or ``None`` (pass the claim
+    through) when it IS complete.
+
+    ONE call to ``conductor.next_question_for_tenant`` yields BOTH signals: a ``None`` next-question
+    means the registry-bounded set is satisfied (profile complete -> the claim is true -> ``None`` =
+    pass through); a real next-question means a gap remains (the completion claim is premature -> SWAP
+    for the honest continuation that asks that pending question). FAIL-CLOSED: a read error inside an
+    active journey means we cannot confirm completeness, so we still swap (the generic honest
+    continuation) rather than ship the unverifiable "all set"."""
+    try:
+        from orchestrator.onboarding.conductor import next_question_for_tenant
+
+        decision = next_question_for_tenant(tenant_id)
+        q = decision.next_question
+        if q is None:
+            return None  # profile IS deterministically complete — the claim is true, pass through
+        prompt = (q.prompt_hi if locale == "hi" else q.prompt_en) or ""
+        prompt = prompt.strip()
+        if prompt:
+            return prompt  # the honest next question — ask it instead of falsely declaring "done"
+    except Exception:  # noqa: BLE001 — fail-closed below
+        logger.warning(
+            "emission_gate: onboarding completion fact-check failed tenant=%s — fail-closed swap",
+            tenant_id,
+            exc_info=True,
+        )
+    variants = _REPLACEMENT_COPY["onboarding_incomplete"]
+    return variants.get(locale) or variants["en"]
+
+
 def _split_sentences(text: str) -> list[str]:
     """Split into sentences, each carrying its trailing terminator, dropping empties."""
     parts = _SENTENCE_SPLIT_RE.split(text)
@@ -522,6 +758,27 @@ _REPLACEMENT_COPY: dict[str, dict[str, str]] = {
             "history dekh sakta hoon."
         ),
     },
+    # cluster-3c (VT-655) — a claimed campaign draft/approval with NO backing ``campaigns`` row. This
+    # is a SUBSTANTIVE answer (it tells the owner the true state AND offers the real next step), so it
+    # is deliberately NOT in INTERIM_REPLACEMENT_MARKERS.
+    "campaign_not_drafted": {
+        "en": "I haven't drafted that yet — want me to put it together now?",
+        "hi": "Maine abhi tak wo draft nahi kiya — bataiye, main abhi bana dun?",
+    },
+    # cluster-3d (VT-654) — a premature onboarding-COMPLETE claim while profile discovery is not
+    # deterministically done. The primary swap is the ACTUAL pending question (from
+    # ``next_question_for_tenant``); this generic honest continuation is only the FAIL-CLOSED fallback
+    # when that read errors inside an active journey. A SUBSTANTIVE answer -> not an interim stall.
+    "onboarding_incomplete": {
+        "en": (
+            "Before I finish setting up, I need a little more from you — could you tell me a bit "
+            "more about your business?"
+        ),
+        "hi": (
+            "Setup poora karne se pehle mujhe thodi aur jaankari chahiye — apne business ke baare "
+            "mein thoda aur bata sakte hain?"
+        ),
+    },
 }
 
 # R3 — the gate-swap REPLACEMENT lines that are interim STALLS ("still working" generic / "haven't
@@ -638,6 +895,34 @@ def apply_emission_gate(text: str, tenant_id: UUID | str) -> str:
             _emit_blocked_audit(tenant_id, text, event_kind="emission_spend_claim_blocked")
             return replacement
 
+        # Layer 3c — fabricated CAMPAIGN DRAFT/APPROVAL (VT-655, j02): the brain claimed a campaign was
+        # drafted/reviewed/approved with NO backing ``campaigns`` row. Claim + no fact -> honest swap
+        # ("I haven't drafted that yet — want me to put it together now?"); claim + a real draft row ->
+        # pass through unchanged (the claim is true).
+        if contains_campaign_draft_claim(text) and not campaign_draft_fact_exists(tenant_id):
+            from orchestrator.owner_surface.freeform_acks import resolve_owner_locale
+
+            variants = _REPLACEMENT_COPY["campaign_not_drafted"]
+            replacement = variants.get(resolve_owner_locale(tenant_id)) or variants["en"]
+            _emit_blocked_audit(tenant_id, text, event_kind="emission_campaign_draft_blocked")
+            return replacement
+
+        # Layer 3d — premature ONBOARDING-COMPLETE (VT-654, j05): the brain declared onboarding done
+        # while the deterministic ``profile_collection_complete`` is FALSE (a question still remains).
+        # PRECONDITION: only inside an ACTIVE onboarding journey (so a non-onboarding "all set" is never
+        # swapped). Claim + incomplete -> swap for the actual pending question (the conductor's own
+        # "NEVER self-declare complete" invariant, deterministically enforced); claim + complete -> the
+        # swap resolver returns None and we fall through (pass through / phantom-promise layer still runs).
+        if contains_onboarding_complete_claim(text) and _onboarding_journey_active(tenant_id):
+            from orchestrator.owner_surface.freeform_acks import resolve_owner_locale
+
+            swap = _onboarding_incomplete_swap(tenant_id, resolve_owner_locale(tenant_id))
+            if swap is not None:
+                _emit_blocked_audit(
+                    tenant_id, text, event_kind="emission_onboarding_incomplete_blocked"
+                )
+                return swap
+
         # Layer 2 — phantom promise (#58/T7): a deferred follow-up from a nonexistent team/person.
         # Surgically strip the offending sentence(s), keeping the honest remainder. Runs on
         # honest text AND on a true completion claim (a real "sent" can still trail a phantom
@@ -658,8 +943,11 @@ def apply_emission_gate(text: str, tenant_id: UUID | str) -> str:
 __all__ = [
     "INTERIM_REPLACEMENT_MARKERS",
     "apply_emission_gate",
+    "campaign_draft_fact_exists",
+    "contains_campaign_draft_claim",
     "contains_completion_claim",
     "contains_fabricated_debt_framing",
+    "contains_onboarding_complete_claim",
     "contains_phantom_promise",
     "contains_spend_completion_claim",
     "send_fact_exists",
