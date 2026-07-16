@@ -86,6 +86,20 @@ _DEVANAGARI_BIGRAMS = {
 }
 _COMPLETION_BIGRAMS = _EN_BIGRAMS | _HINGLISH_BIGRAMS | _DEVANAGARI_BIGRAMS
 
+# VT-657 — a send-STATE completion ("your campaign has gone out", "the offer went out") claims the
+# send happened, but it carries NO "sent" token, so the subject+verb bigrams above missed it:
+# "your campaign has gone out to everyone" with zero real sends slipped through as a Tier-1
+# fabrication (j02). PAST-TENSE send-state bigrams ONLY — the base/future "go out" ("it'll go out
+# once you approve") and present-continuous "going out" are deliberately excluded; a preceding
+# negation ("hasn't gone out yet") or future/ability marker exempts the occurrence, and a "went out
+# OF …" (stock/business) is not a send. The load-bearing gate is still ``send_fact_exists``.
+_SEND_STATE_BIGRAMS = {("gone", "out"), ("went", "out")}
+# Auxiliary negatives the base _NEGATION set (below) omits — an apostrophe-stripped "hasn't"/"isn't"
+# adjacent BEFORE the phrase is a denial, never a completed-state claim.
+_SEND_STATE_NEG_AUX = frozenset(
+    {"hasnt", "havent", "hadnt", "isnt", "wasnt", "arent", "werent"}
+)
+
 # ── #58 (T7) — phantom-promise phrases ────────────────────────────────────────────────────
 # A SECOND deterministic class: the brain's LLM-composed FAQ fallback intermittently promises a
 # deferred follow-up from a team/person that does NOT exist ("I'll have the team confirm", "I'll
@@ -413,17 +427,46 @@ def _sentence_has_blocking_completion_claim(sentence: str) -> bool:
     return False
 
 
+def _sentence_has_send_state_claim(sentence: str) -> bool:
+    """VT-657 — True iff ONE sentence claims a send is COMPLETE via a PAST-TENSE send-STATE phrase
+    ("campaign has gone out", "the offer went out") — the fabrication class the subject+verb bigrams
+    miss (no "sent" token). Exempt when: a negation is adjacent BEFORE ("hasn't gone out yet"), a
+    future/ability marker precedes it in the sentence ("once approved it'll have gone out"), or it is
+    a "went out OF …" (out of stock/business — not a send). Positional + sentence-scoped, mirroring
+    the R2 discipline."""
+    tokens = _tokenize(sentence)
+    if len(tokens) < 2:
+        return False
+    for i in range(len(tokens) - 1):
+        if (tokens[i], tokens[i + 1]) not in _SEND_STATE_BIGRAMS:
+            continue
+        # "went/gone out OF <x>" (out of stock/business/town) is not a send.
+        if i + 2 < len(tokens) and tokens[i + 2] == "of":
+            continue
+        prefix = tokens[:i]
+        # a negation within the two tokens BEFORE the phrase is a denial, not a completion.
+        if set(prefix[-2:]) & (_NEGATION | _SEND_STATE_NEG_AUX):
+            continue
+        # a future / ability marker anywhere before the phrase -> not a completed state.
+        if set(prefix) & (_ABILITY_MARKERS | _FUTURE_CONDITIONAL_MARKERS):
+            continue
+        return True
+    return False
+
+
 def contains_completion_claim(text: str) -> bool:
     """True iff ``text`` makes a send-COMPLETION claim (EN / Hinglish / Devanagari).
 
     Deliberately tight: matches adjacent-token bigrams anchored on an explicit send-completion
-    phrase, plus the "sent to N" trigram (a count backs the claim). Bare "done" or "sent" alone
-    never matches — those are common in perfectly honest replies ("Done!", "I've sent you the
-    plan") that make no claim about a customer/campaign send. R2: evaluated per SENTENCE so the
-    owner-directed / ability-marker exemptions can never leak across a sentence boundary.
+    phrase, plus the "sent to N" trigram (a count backs the claim), plus (VT-657) a past-tense
+    send-STATE phrase ("campaign has gone out"/"went out"). Bare "done" or "sent" alone never
+    matches — those are common in perfectly honest replies ("Done!", "I've sent you the plan") that
+    make no claim about a customer/campaign send. R2: evaluated per SENTENCE so the owner-directed /
+    ability-marker / negation exemptions can never leak across a sentence boundary.
     """
     return any(
-        _sentence_has_blocking_completion_claim(s) for s in _split_sentences(text or "")
+        _sentence_has_blocking_completion_claim(s) or _sentence_has_send_state_claim(s)
+        for s in _split_sentences(text or "")
     )
 
 

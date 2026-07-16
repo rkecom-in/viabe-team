@@ -44,6 +44,46 @@ def test_new_task_classification() -> None:
     assert result == TriageResult(outcome="new_task", reasoning="owner wants a campaign")
 
 
+def test_task_kind_defaults_general_and_parses_campaign_recovery() -> None:
+    """VT-657 (option C) — task_kind is optional (defaults 'general', backward-compatible with a
+    prompt/model that omits it) and parses 'campaign_recovery' when the LLM emits it for a win-back
+    new_task. The routing seam reads this field to decide the SR-dispatch vs clarification plan."""
+    # omitted -> default general (existing prompt / non-new_task turns)
+    assert (
+        triage_turn(
+            message_text="win back my lapsed customers",
+            has_open_question=False,
+            has_active_task=False,
+            text_call=_json_call({"outcome": "new_task", "reasoning": "campaign"}),
+        ).task_kind
+        == "general"
+    )
+    # emitted campaign_recovery -> parsed
+    assert (
+        triage_turn(
+            message_text="put together a Diwali offer to bring my past customers back",
+            has_open_question=False,
+            has_active_task=False,
+            text_call=_json_call(
+                {"outcome": "new_task", "reasoning": "win-back", "task_kind": "campaign_recovery"}
+            ),
+        ).task_kind
+        == "campaign_recovery"
+    )
+    # a bad task_kind value is a schema violation -> fail-soft None (never a guessed route)
+    assert (
+        triage_turn(
+            message_text="do something",
+            has_open_question=False,
+            has_active_task=False,
+            text_call=_json_call(
+                {"outcome": "new_task", "reasoning": "x", "task_kind": "nonsense"}
+            ),
+        )
+        is None
+    )
+
+
 def test_direct_reply_classification() -> None:
     result = triage_turn(
         message_text="hi",
