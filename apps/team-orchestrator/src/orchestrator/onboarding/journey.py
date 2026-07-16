@@ -1634,6 +1634,60 @@ def _advance_cursor_past_answered(g: dict[str, Any], answers: dict[str, Any], sk
     return c
 
 
+def _is_substantive_statement(body: str) -> bool:
+    """A real, multi-token owner STATEMENT that carries business content — NOT a greeting, a re-tapped
+    kickoff button, a bare affirmation/negation/skip, a question, or an opt-out/DSR. Mirrors the
+    walker's own non-answer guards; the ≥4-token bar matches the VT-601 cross-fill (a terse
+    "yes"/"no"/"Mumbai" is not a business DESCRIPTION). Used by the VT-662 about-gap capture floor."""
+    text = (body or "").strip()
+    if not text or "?" in text:
+        return False
+    toks = _tokens(text)
+    if not toks:
+        return False
+    if toks <= _GREETING or toks <= _GAP_BARE_AFFIRM or toks <= _NO or toks <= _SKIP:
+        return False
+    if _is_kickoff_token(text):
+        return False
+    if len(text.split()) < 4:
+        return False
+    try:
+        from orchestrator.pre_filter_gate import matches_opt_out_or_dsr
+
+        if matches_opt_out_or_dsr(text):
+            return False
+    except Exception:  # noqa: BLE001 — a matcher hiccup must never block the capture decision
+        pass
+    return True
+
+
+def _capture_missed_about_gap(
+    g: dict[str, Any], answers: dict[str, Any], skipped: list[str], body: str
+) -> bool:
+    """VT-662 — a DETERMINISTIC floor for the turn-brain's ``ignored_speech_act`` re-ask. The LLM turn-
+    brain sometimes re-asks the open free-text ``about`` gap ("What products or services does your
+    business offer?") on the SAME turn the owner DESCRIBED their business — it failed RECORD-AND-MOVE-ON
+    and ``_apply_turn_plan`` records only what the LLM extracted, so nothing captures the missed gap and
+    it is re-asked next turn (measured on j05, 2/2 byte-identical).
+
+    When ``about`` is STILL an open queue gap after the plan applied AND the owner's message is a
+    SUBSTANTIVE business statement, record it as the ``about`` value — parity with ``handle_reply``'s gap
+    branch (free-text, recorded-not-asserted; never promoted to canonical). Closing it here means the
+    brain sees ``about`` in ALREADY-COLLECTED next turn and cannot re-ask it. ``about`` is a finite known
+    schema field (``_DERIVABLE_PROFILE_FIELDS``), so this is a schema-keyed capture — NOT a natural-
+    language keyword list (Fazal STANDING: lists only for finite exact-match outcomes). Mutates
+    ``answers`` in place; returns True iff it captured. NARROW: only ``about``, only while still open."""
+    if "about" in answers or "about" in skipped:
+        return False
+    queue = g.get("question_queue") or []
+    if not any(q.get("field") == "about" and q.get("kind") != "confirm" for q in queue):
+        return False
+    if not _is_substantive_statement(body):
+        return False
+    answers["about"] = body.strip()
+    return True
+
+
 # Scheme/www URLs OR bare domains ("rkecom.in") — the live drill showed owners type the bare form.
 # The bare pattern requires a plausible dotted host + short TLD and excludes trailing punctuation;
 # false positives are harmless (the refresh is fail-soft and the fetch of a non-site just errors).
@@ -1758,6 +1812,10 @@ def _handle_reply_with_turn_brain(
         return handle_reply(tenant_id, body, message_sid, lang=lang)
 
     answers, skipped = _apply_turn_plan(tenant_id, g, plan, draft_attrs)
+    # VT-662 — deterministic about-gap capture floor: when the LLM left an open free-text ``about`` gap
+    # while the owner just DESCRIBED their business, record it so the brain cannot re-ask it next turn
+    # (the ignored_speech_act re-ask, measured on j05). Free-text, recorded-not-asserted; only ``about``.
+    _capture_missed_about_gap(g, answers, skipped, body)
     new_cursor = _advance_cursor_past_answered(g, answers, skipped)
     _advance(tenant_id, new_cursor, answers, skipped, message_sid)
 
