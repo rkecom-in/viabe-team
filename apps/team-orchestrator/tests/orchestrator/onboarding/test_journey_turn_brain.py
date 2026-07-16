@@ -299,6 +299,14 @@ def test_completion_uses_durable_closer_and_does_not_burst_seam(substrate, monke
         return turn_brain.TurnPlan(reply_text="anything", extracted_answers={"operating_hours": "9-9"})
 
     _enable_turn_brain(monkeypatch, _fake)
+    # VT-660: completion now gates on the AUTHORITATIVE profile_collection_complete signal, not raw
+    # queue-exhaustion (the j05 premature-close fix). This test pins the completion MECHANICS (durable
+    # closer + no seam burst + paced-flow sentinel) — the precondition (profile actually complete) is
+    # forced True here so the done-branch is reached; the incomplete-profile HOLD path is pinned
+    # separately in test_journey_walker_units.py::test_point2_incomplete_thin_draft_holds_no_completion.
+    monkeypatch.setattr(
+        "orchestrator.onboarding.conductor.profile_collection_complete", lambda **k: True
+    )
     tenant = _new_tenant(substrate.dsn, name="tb completion")
     _seed_draft(substrate.dsn, tenant, {"business_type": "services"})
     journey.start_journey(tenant, [_gap_q("operating_hours")])
