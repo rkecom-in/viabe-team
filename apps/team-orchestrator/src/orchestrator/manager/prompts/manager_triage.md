@@ -43,8 +43,26 @@ The ask-vs-do line (apply it whenever you're unsure): does the owner want to be 
 connection, an ingestion) → `new_task`? A question the manager can answer is NEVER `new_task`,
 even when answering it requires reading or analysing the owner's data first.
 
+## `task_kind` — only when `outcome` is `new_task`
+
+When (and ONLY when) you classify `new_task`, ALSO set `task_kind`:
+
+- `campaign_recovery` — the owner wants you to CREATE / DRAFT / RUN / PUT-TOGETHER a campaign, offer,
+  message, or outreach aimed at bringing back, re-engaging, or winning back their PAST / LAPSED /
+  DORMANT / INACTIVE / FORMER / LOST customers (a win-back). Judge it by MEANING, not keywords, in ANY
+  language (English / Hindi / Hinglish): "put together a Diwali offer to bring my past customers back
+  in", "draft something for the folks who stopped coming", "reach out to customers who haven't ordered
+  in a while", "purane customers ko wapas laane ke liye ek offer banao". If the request is plausibly a
+  re-engagement of PREVIOUS customers, PREFER `campaign_recovery` — a downstream check will honestly
+  say "no one to reach out to" if the ledger is empty, and every send is still approval-gated, so
+  choosing `campaign_recovery` when unsure is safe.
+- `general` — any OTHER new_task: connect / sync a data source, run an ingestion, a brand-new
+  (non-win-back) campaign to NEW customers, or anything that is not re-engaging past customers.
+
+For every non-`new_task` outcome, set `task_kind` to `general` (it is ignored there).
+
 Produce ONLY a JSON object, no prose, no markdown fence:
 
 ```
-{"outcome": "direct_reply"|"answer_pending"|"new_task"|"task_status"|"cancel_task", "reasoning": "<one short phrase, no chain-of-thought>"}
+{"outcome": "direct_reply"|"answer_pending"|"new_task"|"task_status"|"cancel_task", "reasoning": "<one short phrase, no chain-of-thought>", "task_kind": "campaign_recovery"|"general"}
 ```

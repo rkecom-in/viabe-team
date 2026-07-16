@@ -38,7 +38,10 @@ logger = logging.getLogger("orchestrator.manager.triage")
 # this to the Anthropic SDK; it is now routed through the multi-provider seam (structured_text_call)
 # so the tier can be pointed at any provider and the call is cost-metered.
 _TRIAGE_TIER = "complex"
-_MAX_TOKENS = 150
+# VT-657 — headroom for the added ``task_kind`` field so a verbose ``reasoning`` can never truncate
+# the JSON (a truncated envelope fails-soft to None -> legacy dispatch, which would silently
+# reintroduce the dither this fix removes). The model still emits ~35 tokens; this is only a cap.
+_MAX_TOKENS = 200
 
 _PROMPT_PATH = Path(__file__).parent / "prompts" / "manager_triage.md"
 _TRIAGE_SYSTEM_PROMPT = _PROMPT_PATH.read_text(encoding="utf-8")
@@ -55,6 +58,15 @@ def _strip_code_fence(raw: str) -> str:
 
 TriageOutcome = Literal["direct_reply", "answer_pending", "new_task", "task_status", "cancel_task"]
 
+# VT-657 (option C) — a sub-classification of a ``new_task`` turn. The LLM (not a keyword list —
+# Fazal no-lists STANDING 2026-07-15) decides whether a new task is a win-back / customer-recovery
+# campaign, so the seam can route it to the deterministic sales_recovery dispatch instead of the
+# generic clarification plan that made the brain dither ("I need recent campaign history/context",
+# j02 ignored_speech_act). Meaningful ONLY when ``outcome == "new_task"``; ``general`` (the default)
+# for every other outcome. Default-general keeps the field backward-compatible: an older prompt that
+# omits it, or any non-new_task turn, parses cleanly as ``general``.
+TaskKind = Literal["campaign_recovery", "general"]
+
 
 class TriageResult(BaseModel):
     """The structured triage envelope (execution-plan §3 step 4)."""
@@ -63,6 +75,7 @@ class TriageResult(BaseModel):
 
     outcome: TriageOutcome
     reasoning: str = ""
+    task_kind: TaskKind = "general"
 
 
 def triage_turn(

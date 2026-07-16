@@ -129,6 +129,69 @@ def _build_campaign_recovery_plan(message_text: str) -> ManagerPlan:
     )
 
 
+def _dispatch_campaign_first_contact(
+    tenant_id: UUID, message_text: str, message_sid: str,
+) -> TriageSeamResult | None:
+    """Shared campaign first-contact dispatch — the body of the D3 keyword net AND the VT-657 (option
+    C) LLM-primary route. Two honest deterministic outcomes: an EMPTY customer ledger -> a grounded
+    "no one to reach out to" reply + NO dispatch (kills the "I've started a win-back" fabrication
+    against a no-data tenant); a REAL cohort -> mint a sales_recovery dispatch + start the durable
+    workflow. This is ROUTING only — the loop's approval / consent / opt-out rails still gate every
+    send, exactly as any SR send. Returns a ``TriageSeamResult`` when it HANDLED the turn, or ``None``
+    when ``create_plan`` did not admit 'planned' (the caller falls through to its normal path). The
+    CALLER owns the fail-open try/except and the enforce / has_active_task guards (both triggers only
+    fire in enforce with no active task)."""
+    from orchestrator.manager import plan_store, task_store
+    from orchestrator.manager.workflow import start_manager_task_workflow
+    from orchestrator.onboarding.campaign_first_contact import (
+        EMPTY_COHORT_REPLY,
+        LIST_SEND_ACK_PREAMBLE,
+        campaign_cohort_is_empty,
+        mentions_customer_list_request,
+    )
+
+    if campaign_cohort_is_empty(tenant_id):
+        emit_tm_audit(
+            event_layer="decides", event_kind="campaign_first_contact_empty_cohort",
+            actor="team_manager", tenant_id=tenant_id,
+            summary="win-back imperative but customer ledger is empty — honest no-data reply, "
+            "no dispatch",
+            decision={"message_sid": message_sid},
+        )
+        return TriageSeamResult(
+            outcome="new_task", task_id=None, skip_legacy_dispatch=True,
+            direct_reply_text=EMPTY_COHORT_REPLY,
+        )
+    # Real cohort — deterministically mint a sales_recovery dispatch + start the loop.
+    camp_task_id = plan_store.create_plan(
+        tenant_id, _build_campaign_recovery_plan(message_text),
+        source_message_sid=message_sid, shadow=False,
+    )
+    camp_row = (
+        task_store.get_task(tenant_id, camp_task_id) if camp_task_id is not None else None
+    )
+    if camp_row is not None and str(camp_row["status"]) == "planned":
+        emit_tm_audit(
+            event_layer="decides", event_kind="campaign_first_contact_dispatched",
+            actor="team_manager", tenant_id=tenant_id,
+            summary="win-back imperative + real cohort — deterministic sales_recovery dispatch",
+            decision={"message_sid": message_sid, "task_id": str(camp_task_id)},
+        )
+        start_manager_task_workflow(tenant_id, camp_task_id)
+        # VT-642 — if the SAME message also asked to be SENT THE LIST / the names, ride an honest
+        # can't-attach-yet ack (replay-safe direct reply) ALONGSIDE the draft (reply string only,
+        # money gates untouched).
+        list_ack = (
+            LIST_SEND_ACK_PREAMBLE if mentions_customer_list_request(message_text) else None
+        )
+        return TriageSeamResult(
+            outcome="new_task", task_id=camp_task_id, skip_legacy_dispatch=True,
+            direct_reply_text=list_ack,
+        )
+    # create_plan didn't admit 'planned' — caller falls through (never silent).
+    return None
+
+
 def _create_plan_for_new_task(
     tenant_id: UUID, message_text: str, message_sid: str, *, shadow: bool,
 ) -> UUID | None:
@@ -256,63 +319,14 @@ def triage_seam(
     # any error falls through to triage_turn below, exactly as if the net weren't here.
     if resolved_mode == "enforce" and not has_active_task:
         try:
-            from orchestrator.onboarding.campaign_first_contact import (
-                EMPTY_COHORT_REPLY,
-                LIST_SEND_ACK_PREAMBLE,
-                campaign_cohort_is_empty,
-                is_campaign_plan_imperative,
-                mentions_customer_list_request,
-            )
+            from orchestrator.onboarding.campaign_first_contact import is_campaign_plan_imperative
 
+            # The KEYWORD trigger (frozen — no phrasing growth; the LLM route below is the phrasing-
+            # agnostic primary per the Fazal no-lists law). Shares one dispatch body with option C.
             if is_campaign_plan_imperative(message_text):
-                if campaign_cohort_is_empty(tenant_id):
-                    emit_tm_audit(
-                        event_layer="decides", event_kind="campaign_first_contact_empty_cohort",
-                        actor="team_manager", tenant_id=tenant_id,
-                        summary="win-back imperative but customer ledger is empty — honest no-data "
-                        "reply, no dispatch",
-                        decision={"message_sid": message_sid},
-                    )
-                    return TriageSeamResult(
-                        outcome="new_task", task_id=None, skip_legacy_dispatch=True,
-                        direct_reply_text=EMPTY_COHORT_REPLY,
-                    )
-                # Real cohort — deterministically mint a sales_recovery dispatch + start the loop.
-                from orchestrator.manager import plan_store
-                from orchestrator.manager.workflow import start_manager_task_workflow
-
-                camp_task_id = plan_store.create_plan(
-                    tenant_id, _build_campaign_recovery_plan(message_text),
-                    source_message_sid=message_sid, shadow=False,
-                )
-                camp_row = (
-                    task_store.get_task(tenant_id, camp_task_id)
-                    if camp_task_id is not None
-                    else None
-                )
-                if camp_row is not None and str(camp_row["status"]) == "planned":
-                    emit_tm_audit(
-                        event_layer="decides", event_kind="campaign_first_contact_dispatched",
-                        actor="team_manager", tenant_id=tenant_id,
-                        summary="win-back imperative + real cohort — deterministic sales_recovery "
-                        "dispatch",
-                        decision={"message_sid": message_sid, "task_id": str(camp_task_id)},
-                    )
-                    start_manager_task_workflow(tenant_id, camp_task_id)
-                    # VT-642 — if the SAME message also asked to be SENT THE LIST / the names, the
-                    # async SR draft answers only the campaign half and drops the list-send half (a
-                    # Tier-1 ignored_speech_act, journey j08). We can't attach individual names in chat
-                    # yet (CD2/VT-79), so ride an honest can't-attach-yet ack (replay-safe direct reply)
-                    # ALONGSIDE the draft — the money gates are untouched (this is a reply string only).
-                    list_ack = (
-                        LIST_SEND_ACK_PREAMBLE
-                        if mentions_customer_list_request(message_text)
-                        else None
-                    )
-                    return TriageSeamResult(
-                        outcome="new_task", task_id=camp_task_id, skip_legacy_dispatch=True,
-                        direct_reply_text=list_ack,
-                    )
+                camp_res = _dispatch_campaign_first_contact(tenant_id, message_text, message_sid)
+                if camp_res is not None:
+                    return camp_res
                 # create_plan didn't admit 'planned' — fall through to triage_turn (never silent).
         except Exception:  # noqa: BLE001 — the D3 net must never block the turn (fail-open)
             logger.warning(
@@ -341,6 +355,39 @@ def triage_seam(
     task_id: UUID | None = None
     task_status: str | None = None
     if result.outcome == "new_task":
+        # VT-657 (option C) — LLM-PRIMARY campaign-recovery routing. When triage classifies this new
+        # task as a win-back / customer-recovery campaign (``task_kind == "campaign_recovery"``,
+        # decided by MEANING in any language — NOT a keyword list, per the Fazal no-lists STANDING),
+        # route it through the SAME deterministic campaign first-contact dispatch as the D3 keyword net
+        # (empty cohort -> honest no-data reply, real cohort -> SR dispatch) INSTEAD of the generic
+        # clarification plan that made the brain dither ("I need recent campaign history/context",
+        # j02 ignored_speech_act). This is the phrasing-agnostic primary; the keyword net stays FROZEN.
+        # Enforce-only + no active task, mirroring D3. Over-routing to SR is bounded-safe: an empty
+        # ledger answers honestly and every send is still approval-gated. Intercept BEFORE the generic
+        # plan so we never mint two plans. FAIL-OPEN: any error falls through to the generic template.
+        if (
+            resolved_mode == "enforce"
+            and not has_active_task
+            and result.task_kind == "campaign_recovery"
+        ):
+            try:
+                camp_res = _dispatch_campaign_first_contact(tenant_id, message_text, message_sid)
+            except Exception:  # noqa: BLE001 — mirror D3 fail-open: never block the turn
+                logger.warning(
+                    "C campaign-recovery route failed tenant=%s (fail-open -> generic plan)",
+                    tenant_id, exc_info=True,
+                )
+                camp_res = None
+            if camp_res is not None:
+                emit_tm_audit(
+                    event_layer="decides", event_kind="triage_campaign_recovery_routed",
+                    actor="team_manager", tenant_id=tenant_id,
+                    summary="triage new_task classified campaign_recovery — routed to deterministic "
+                    "campaign first-contact dispatch (LLM-primary trigger, keyword net frozen)",
+                    decision={"message_sid": message_sid, "reasoning": result.reasoning},
+                )
+                return camp_res
+            # helper fell through (create_plan didn't admit 'planned') — generic template below.
         task_id = _create_plan_for_new_task(
             tenant_id, message_text, message_sid, shadow=(resolved_mode == "shadow")
         )

@@ -78,6 +78,28 @@ def test_unrelated_text_does_not_match():
     )
 
 
+# ── VT-657 — send-STATE completion ("gone out"/"went out"), the "sent"-less fabrication class ─────
+
+
+def test_vt657_send_state_completion_matches():
+    # "your campaign has gone out" carries NO "sent" token, so the subject+verb bigrams missed it
+    # (j02: the brain claimed a send that never happened). These must now be caught.
+    assert mod.contains_completion_claim("Your campaign has gone out to everyone.")
+    assert mod.contains_completion_claim("The offer went out this morning.")
+    assert mod.contains_completion_claim("Your Diwali campaign has gone out.")
+
+
+def test_vt657_send_state_negated_or_future_or_out_of_passes_clean():
+    # An honest denial, a future/conditional framing, and a non-send "out of …" must NOT match.
+    assert not mod.contains_completion_claim("It hasn't gone out yet.")
+    assert not mod.contains_completion_claim("It has not gone out yet.")
+    assert not mod.contains_completion_claim("It will go out once you approve.")
+    assert not mod.contains_completion_claim(
+        "The draft is ready and it will go out after you approve."
+    )
+    assert not mod.contains_completion_claim("The item went out of stock last week.")
+
+
 # ── contains_fabricated_debt_framing (cluster-2a) — invented customer ₹ debt ─────────────
 
 
