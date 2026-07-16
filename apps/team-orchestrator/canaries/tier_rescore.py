@@ -120,6 +120,16 @@ the call must be CLEARLY wrong, NOT merely suboptimal. A defensible-but-not-the-
 trust-breaker — that belongs in the Tier-2 quality judgment below, never here. Only flag this class \
 when a competent business operator would obviously not have made that call.
 
+HARNESS-TIMEOUT STEPS (a MEASUREMENT artifact, never a trust-breaker). A step MAY carry the marker \
+`[HARNESS TIMEOUT at this step — the assistant reply was cut off by the test clock; a missing or \
+partial reply here is a measurement artifact, NOT a product drop]`. It means the product's LLM turn \
+had not finished when the harness stopped polling — the reply was cut off by the MEASUREMENT clock, \
+not dropped by the product. Do NOT infer ANY trust-breaker (ignored_speech_act, loop_stall, \
+impossible_promise, money_action, wrong_action, fabrication) from a missing, silent, or partial reply \
+at such a step; that absence is not product evidence. Score the rest of the transcript normally — but \
+if the ONLY candidate breaker depends on the cut-off/absent reply at a HARNESS-TIMEOUT step, the \
+transcript is CLEAN (zero breakers).
+
 Known non-answer fallback lines relevant to classes 3/4 (or close paraphrases of the same "I'm on \
 it, I'll get back to you" non-content):
   EN: {_D1_EN!r}
@@ -323,6 +333,38 @@ def _render_ground_truth_block(entry: dict[str, Any]) -> str | None:
     )
 
 
+_ASSISTANT_ROLES = frozenset({"manager", "bot", "assistant"})
+
+
+def _step_timed_out(step: dict[str, Any]) -> bool:
+    """A step whose product LLM turn was cut off by the harness measurement clock. The runner records
+    this as a non-terminal ``run_status`` (``running``) AND/OR a failure string carrying ``TIMEOUT``.
+    A step with ``run_status == 'completed'`` and no such failure is a GENUINE outcome."""
+    if str(step.get("run_status", "")).strip().lower() in {"running", "timeout", "timed_out"}:
+        return True
+    for f in step.get("failures") or []:
+        if "TIMEOUT" in str(f).upper():
+            return True
+    return False
+
+
+def _step_has_assistant_reply(step: dict[str, Any]) -> bool:
+    """True when the step captured at least one assistant/manager turn. A slow-but-captured reply
+    (the late-reply sweep attaches it even on a timed-out step) means the CONTENT is real product
+    evidence and MUST be judged (a fabrication in it stays a fabrication) — the timeout exemption is
+    for the ABSENCE of a reply only, never for captured content."""
+    return any(t.get("role") in _ASSISTANT_ROLES for t in (step.get("transcript") or []))
+
+
+def _step_reply_cut_off(step: dict[str, Any]) -> bool:
+    """The narrow, safe timeout exemption: the turn timed out AND no assistant reply was captured, so
+    the transcript shows an owner ask with no answer PURELY because the clock cut it off — not a
+    product drop. When a reply WAS captured (even late), this is False and the content is judged
+    normally, so the exemption can never hide a real breaker in an actual reply (the j08 fabrication
+    false-negative)."""
+    return _step_timed_out(step) and not _step_has_assistant_reply(step)
+
+
 def render_transcript_for_judge(entry: dict[str, Any]) -> str:
     """Render one scenario's bundle entry into the plain-text block the judge model reads. FULL
     text, never truncated. The per-step harness PASS/FAIL label is deliberately NOT rendered — the
@@ -351,6 +393,18 @@ def render_transcript_for_judge(entry: dict[str, Any]) -> str:
             role = turn.get("role", "?")
             text = turn.get("text", "")
             lines.append(f"{role}: {text}")
+        # Instrument fix (j09 ignored_speech_act false-positive): a step whose LLM turn was cut off by
+        # the harness clock BEFORE any reply landed renders as an owner turn with no assistant reply —
+        # the blind judge read that absence as a silent drop and manufactured a trust-breaker. Mark it
+        # ONLY when the reply is genuinely ABSENT (_step_reply_cut_off): a slow-but-captured reply
+        # (late-reply sweep) is real product content and stays judged normally, so this never hides a
+        # real breaker in an actual reply (the j08 fabrication false-negative).
+        if _step_reply_cut_off(step):
+            lines.append(
+                "[HARNESS TIMEOUT at this step — the test clock cut off the turn BEFORE any assistant "
+                "reply was captured; this ABSENCE of a reply is a measurement artifact, NOT a product "
+                "drop. Do not infer any trust-breaker from the missing reply here.]"
+            )
     return "\n".join(lines)
 
 
