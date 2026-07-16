@@ -29,8 +29,8 @@ Today `preferred_language` is set only at signup (en/hi). An owner who signed up
 - **Detect** the inbound message language → `{en, hi}` (Devanagari → hi trivially by script; romanized Hinglish → hi via the existing Hinglish-aware read; English → en). Reuse existing script/Hinglish infra (keyword_match, classify_owner_message locale, send_intent) — do NOT hardcode a keyword list for the en-vs-Hinglish call ([[no-lists-for-undefined-possibilities]]); LLM/heuristic decides register, deterministic code only for the unambiguous Devanagari-script case.
 - **Sticky update** with hysteresis: null/default + first substantive message → set from inference; set + N consecutive messages in a different language → shift (N≥2 to avoid flip-flop on a borrowed word). Explicit onboarding choice = initial value; consistent behavior overrides. Deterministic + audited (write reason).
 
-### 4. Template layer — no change
-Already column-driven (output_composer, freeform_acks, runner reconfirm). Verify the composed-output path receives the same resolved value post-binding.
+### 4. Deterministic layer — BIGGER than templates (P1-validation finding, 2026-07-17)
+The Meta-template layer IS column-driven (output_composer, freeform_acks, runner reconfirm). BUT the P1 dev validation surfaced that the deterministic ANSWER NETS are NOT — e.g. `owner_inputs/status_query.py:586` returns a hardcoded English `f"You currently have {n} customers in your ledger."` regardless of owner language (a Hinglish owner's count/status ask gets an English deterministic answer even after P1, because P1 only binds the BRAIN prompts). **P2 scope therefore includes the deterministic answer nets in `owner_inputs/status_query.py` (and any sibling pre-brain nets), not just the Meta templates.** These need Hindi/Hinglish variants selected off the resolved owner-language, OR routing through a language-aware renderer.
 
 ### 5. j08 subsumption
 Brain bound to `hi` + Devanagari-aware classification already present → j08 (Devanagari negation answered in-register) is covered by the core.
