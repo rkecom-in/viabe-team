@@ -24,7 +24,8 @@ import surface stays dep-light for the dep-less smoke suite.
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
+from dataclasses import dataclass
 from typing import Any
 from uuid import UUID
 
@@ -44,6 +45,22 @@ class CapabilityNotDeclared(RuntimeError):
     holds a module to it at CALL time (registration holds it at DECLARE time). A proposer — or any
     module that omitted the capability — hits this the instant it reaches for a gated action.
     """
+
+
+@dataclass(frozen=True, slots=True)
+class BusinessActionOutcome:
+    """The whole-round-trip result of ``GateFacade.perform_business_action``.
+
+    Exactly one arm of the gate fired, decided deterministically (never by the module):
+      - AUTONOMOUS              -> ``performed=True``,  ``result=<effect_fn() return>``, ``armed=None``
+      - REQUIRES_OWNER_APPROVAL -> ``performed=False``, ``result=None``, ``armed=<PauseRequestResult>``
+    PII-safe: ``gate`` carries only ids + class + magnitude + reason code (see ``BusinessActionGate``).
+    """
+
+    gate: Any  # business_impact_choke.BusinessActionGate
+    performed: bool
+    result: Any = None  # effect_fn return — only when performed (AUTONOMOUS)
+    armed: Any = None  # PauseRequestResult — only when approval-routed
 
 
 class GateFacade:
@@ -172,6 +189,94 @@ class GateFacade:
             conn=conn,
         )
 
+    def perform_business_action(
+        self,
+        action_class: Any,
+        magnitude_minor: int,
+        effect_fn: Callable[[], Any],
+        *,
+        summary: str,
+        action_attrs: dict[str, Any] | None = None,
+        details: dict[str, Any] | None = None,
+        conn: Any = None,
+        send_fn: Any = None,
+        dry_run: bool = False,
+    ) -> BusinessActionOutcome:
+        """Perform a consequential business action END-TO-END through the gate — the WHOLE round-trip.
+
+        Requires ``REQUEST_BUSINESS_ACTION``. This is the round-trip door (ARCHITECTURE §2: "the gated
+        tool owns the whole round-trip — classify AND issue-inside-choke"), symmetric with
+        ``request_customer_send`` (which fuses its 7 gates + the ``customer_send_context`` send). It
+        classifies via ``assert_or_gate_business_action`` and then, ON THE GATE'S WORD:
+
+          - **AUTONOMOUS** -> issues ``effect_fn()`` INSIDE ``business_action_context(action_class)``
+            so the effect's own ``assert_in_business_action_context`` self-guard passes; returns
+            ``BusinessActionOutcome(performed=True, result=<effect_fn return>)``.
+          - **REQUIRES_OWNER_APPROVAL** -> arms the Pillar-7 owner approval via
+            ``arm_business_action_approval`` and does NOT run ``effect_fn``; returns
+            ``BusinessActionOutcome(performed=False, armed=<PauseRequestResult>)``.
+
+        The module supplies ONLY the ``effect_fn`` payload + framing (``summary``/``details``); it
+        never enters the choke or arms the approval itself, and — like ``gate_business_action`` — it
+        cannot bypass a gate. This differs from ``gate_business_action`` (decision-ONLY, for advisory
+        intent-checks that issue no effect): a module that actually PERFORMS an effect uses THIS door,
+        so "facade decision + caller-issued effect outside the choke" can never be the end-state.
+
+        The correctness gates (owner policy bound, per-class autonomy tier, negative-magnitude,
+        frozen kill-switch) are UNCHANGED — they live entirely in the deterministic gate this calls.
+        """
+        self._require(Capability.REQUEST_BUSINESS_ACTION)
+        from orchestrator.agents.business_impact_choke import (
+            arm_business_action_approval,
+            assert_or_gate_business_action,
+            business_action_context,
+        )
+
+        gate = assert_or_gate_business_action(
+            self._tenant_id,
+            action_class,
+            magnitude_minor,
+            action_attrs=action_attrs,
+            conn=conn,
+        )
+        if gate.requires_owner_approval:
+            if self._run_id is None:
+                raise ValueError(
+                    "perform_business_action: the gate REQUIRES_OWNER_APPROVAL but this facade "
+                    "carries no run_id to arm the approval against. Construct the GateFacade with "
+                    "the dispatch run_id (ModuleContext.run_id) for any module that can perform a "
+                    "business action."
+                )
+            logger.info(
+                "gate_facade: perform_business_action tenant=%s class=%s magnitude_minor=%d -> "
+                "REQUIRES_OWNER_APPROVAL (arming approval; effect NOT issued)",
+                self._tenant_id,
+                action_class,
+                magnitude_minor,
+            )
+            armed = arm_business_action_approval(
+                self._tenant_id,
+                self._run_id,
+                gate,
+                summary=summary,
+                details=details,
+                conn=conn,
+                send_fn=send_fn,
+                dry_run=dry_run,
+            )
+            return BusinessActionOutcome(gate=gate, performed=False, armed=armed)
+
+        logger.info(
+            "gate_facade: perform_business_action tenant=%s class=%s magnitude_minor=%d -> "
+            "AUTONOMOUS (issuing effect inside the choke)",
+            self._tenant_id,
+            action_class,
+            magnitude_minor,
+        )
+        with business_action_context(action_class):
+            result = effect_fn()
+        return BusinessActionOutcome(gate=gate, performed=True, result=result)
+
 
 #: The ``GateFacade`` method that SERVICES each gated capability — the single binding of a gated
 #: ``Capability`` to the facade door that routes it to a real deterministic gate. Its keys MUST
@@ -179,6 +284,12 @@ class GateFacade:
 #: method is an "orphan" — a manifest could declare it but no door would ever service it. The
 #: conformance harness reads this to prove (a) every declared gated capability has a real method
 #: (no orphan) and (b) a proposer-scoped facade raises ``CapabilityNotDeclared`` on every one.
+#: NOTE: ``REQUEST_BUSINESS_ACTION`` has TWO doors under the same capability — the decision-only
+#: ``gate_business_action`` (advisory intent-checks that issue no effect) and the whole-round-trip
+#: ``perform_business_action`` (classify AND issue-inside-choke; the ARCHITECTURE §2 door a module
+#: uses to actually PERFORM an effect). The mapping names ONE canonical door per capability (the
+#: no-orphan invariant); ``perform_business_action`` is ``_require``-guarded identically, so a
+#: proposer still cannot reach it (covered by a dedicated unit test).
 GATED_METHOD_BY_CAPABILITY: dict[Capability, str] = {
     Capability.REQUEST_CUSTOMER_SEND: "request_customer_send",
     Capability.REQUEST_BUSINESS_ACTION: "gate_business_action",
@@ -200,4 +311,9 @@ for _cap, _method in GATED_METHOD_BY_CAPABILITY.items():  # pragma: no cover - i
         )
 
 
-__all__ = ["GATED_METHOD_BY_CAPABILITY", "CapabilityNotDeclared", "GateFacade"]
+__all__ = [
+    "GATED_METHOD_BY_CAPABILITY",
+    "BusinessActionOutcome",
+    "CapabilityNotDeclared",
+    "GateFacade",
+]

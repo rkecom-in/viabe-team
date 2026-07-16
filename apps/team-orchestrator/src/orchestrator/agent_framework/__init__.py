@@ -78,6 +78,7 @@ from orchestrator.agent_framework.context import (
 )
 from orchestrator.agent_framework.entitlement import check_entitlement
 from orchestrator.agent_framework.gate_facade import (
+    BusinessActionOutcome,
     CapabilityNotDeclared,
     GateFacade,
 )
@@ -105,6 +106,7 @@ __all__ = [
     "AgentFrameworkRegistry",
     "AgentManifest",
     "AgentRole",
+    "BusinessActionOutcome",
     "Capability",
     "CapabilityNotDeclared",
     "CheckResult",
