@@ -64,6 +64,7 @@ unit-tests with no LLM and no DB.
 from __future__ import annotations
 
 import logging
+import os
 from collections.abc import Callable
 from typing import Any
 
@@ -93,6 +94,25 @@ EVALUATOR_KEY = "evaluator"
 #: Injectable delegate signatures (default ``None`` -> lazy-import the real implementation).
 ProposerFn = Callable[..., Any]  # (context, *, evaluator) -> agent.types.AgentResult
 ExecutorFactory = Callable[[], Any]  # () -> object with .execute_item(AgentItemContext)
+
+#: VT-101 — the SINGLE SOURCE OF TRUTH for whether Sales Recovery routes through the agent_framework
+#: contract (both the supervisor PROPOSER path and the coordinator EXECUTOR path read it). Default
+#: OFF: the pre-VT-101 direct paths run byte-identically. Dev sets it to validate the cutover; prod
+#: stays unset until Fazal promotes.
+FRAMEWORK_ROUTING_FLAG = "TEAM_SR_VIA_FRAMEWORK"
+
+
+def sr_via_framework() -> bool:
+    """True iff SR should route through the agent_framework contract (default OFF).
+
+    Read at CALL TIME (never cached at import) so dev can flip it per-process; prod stays unset
+    until Fazal promotes."""
+    return os.environ.get(FRAMEWORK_ROUTING_FLAG, "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
 
 
 class SalesRecoveryModule:
@@ -162,10 +182,16 @@ class SalesRecoveryModule:
             )
         evaluator = ctx.data.get(EVALUATOR_KEY)  # None -> VT-36 gate skipped (production default).
         agent_result = self._run_proposer(context, evaluator=evaluator)
+        # VT-101 money-path faithfulness: preserve ``output`` VERBATIM. It may be ``None`` — a legal
+        # ``ModuleResult.proposal`` value (typed ``Mapping | None``). The live proposer node
+        # (``supervisor._sales_recovery_node``) relies on ``proposal is None`` to fire
+        # ``SpecialistNoOutputError``; collapsing None -> {} (the old ``dict(output or {})``) would
+        # mask a no-output terminal as an empty-but-present proposal and break that detection.
+        # ``status`` passes through verbatim too (do NOT normalize it here).
         return ModuleResult(
             role=AgentRole.PROPOSER,
             status=agent_result.status,
-            proposal=dict(agent_result.output or {}),
+            proposal=agent_result.output,
             reason=agent_result.terminated_reason or "",
         )
 
@@ -210,9 +236,11 @@ class SalesRecoveryModule:
 
 __all__ = [
     "EVALUATOR_KEY",
+    "FRAMEWORK_ROUTING_FLAG",
     "MODULE_NAME",
     "SR_CONTEXT_KEY",
     "ExecutorFactory",
     "ProposerFn",
     "SalesRecoveryModule",
+    "sr_via_framework",
 ]

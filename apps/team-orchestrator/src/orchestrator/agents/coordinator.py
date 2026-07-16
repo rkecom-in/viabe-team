@@ -169,7 +169,14 @@ _registry_cache: dict[str, SpecialistAgent] | None = None
 def get_registry() -> dict[str, SpecialistAgent]:
     """The static agent registry. Executor classes import HERE (call time), not at module import —
     coordinator.py must stay importable while sibling executor modules land, and the executor is
-    free to import this module's types without a cycle. Validated fail-loud on first build."""
+    free to import this module's types without a cycle. Validated fail-loud on first build.
+
+    VT-101 Stage 3(a): behind ``TEAM_SR_VIA_FRAMEWORK`` (default OFF), the ``sales_recovery`` entry
+    is served by the agent_framework ``CoordinatorAgentAdapter`` (whose ``.name`` == the module
+    manifest name == the registry key, so ``_validate_registry``'s name==key check still passes)
+    instead of the hand-wired ``SalesRecoveryAgent``. The flag is read at first build and fixes with
+    the cache (env is fixed at process start on dev). The framework registration is imported LAZILY
+    inside the flag branch so the flag-OFF import path is unchanged."""
     global _registry_cache
     if _registry_cache is None:
         import importlib
@@ -178,6 +185,37 @@ def get_registry() -> dict[str, SpecialistAgent]:
         for key, (module_name, class_name) in _REGISTRY_SPEC.items():
             module = importlib.import_module(module_name)
             built[key] = getattr(module, class_name)()
+
+        # VT-101 Stage 3(a) — flag-gated EXECUTOR cutover for Sales Recovery. ``sr_via_framework``
+        # is the single source of truth (dep-light import; the heavier framework registration is
+        # pulled only inside the branch when the flag is ON).
+        from orchestrator.agent_framework.modules.sales_recovery_module import (
+            MODULE_NAME as _SR_NAME,
+            sr_via_framework,
+        )
+
+        if sr_via_framework() and _SR_NAME in built:
+            from orchestrator.agent_framework import (
+                ModuleRegistrationError,
+                get_registered,
+                register_agent,
+            )
+            from orchestrator.agent_framework.modules.sales_recovery_module import (
+                SalesRecoveryModule,
+            )
+            from orchestrator.agent_framework.registration import (
+                CoordinatorAgentAdapter,
+            )
+
+            # The default registry is process-global and shared with supervisor's flag-ON proposer
+            # path; ``register_agent`` raises on a duplicate name, so re-use the existing
+            # registration via ``get_registered`` — the two paths must not crash each other.
+            try:
+                registered = register_agent(SalesRecoveryModule())
+            except ModuleRegistrationError:
+                registered = get_registered(_SR_NAME)
+            built[_SR_NAME] = CoordinatorAgentAdapter(registered)
+
         _validate_registry(built)
         _registry_cache = built
     return _registry_cache

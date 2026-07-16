@@ -122,13 +122,17 @@ def test_name_matches_coordinator_specialist():
 
 def test_propose_delegates_and_maps():
     """``propose`` hands the pre-built context (+ evaluator) to the SR proposer and maps its
-    ``AgentResult`` -> ``ModuleResult(role=PROPOSER, proposal=output)``. Round-trips to AgentResult."""
+    ``AgentResult`` -> ``ModuleResult(role=PROPOSER, proposal=output)``. Round-trips to AgentResult.
+
+    VT-101: ``proposal`` is the EXACT output object (verbatim, not a copy) — the live proposer node
+    reads it directly (never through the lossy ``to_agent_result``)."""
     captured = {}
+    output_obj = {"campaign_plan": {"variant": "A"}}
 
     def fake_proposer(context, *, evaluator):
         captured["context"] = context
         captured["evaluator"] = evaluator
-        return _fake_agent_result(output={"campaign_plan": {"variant": "A"}})
+        return _fake_agent_result(output=output_obj)
 
     sentinel_ctx = object()
     module = SalesRecoveryModule(proposer=fake_proposer)
@@ -143,7 +147,8 @@ def test_propose_delegates_and_maps():
 
     assert result.role is AgentRole.PROPOSER
     assert result.status == "completed"
-    assert result.proposal == {"campaign_plan": {"variant": "A"}}
+    # verbatim passthrough — the exact object, not a rebuilt dict (None-preserving fix).
+    assert result.proposal is output_obj
     # the exact pre-built context object was delegated, evaluator defaults to None (VT-36 skipped).
     assert captured["context"] is sentinel_ctx
     assert captured["evaluator"] is None
@@ -152,6 +157,33 @@ def test_propose_delegates_and_maps():
     agent_result = result.to_agent_result()
     assert agent_result.status == "completed"
     assert agent_result.output == {"campaign_plan": {"variant": "A"}}
+
+
+def test_propose_preserves_none_output():
+    """VT-101 money-path faithfulness: an ``AgentResult`` with ``output=None`` maps to
+    ``ModuleResult.proposal IS None`` (NOT ``{}``), with ``status`` verbatim. The live proposer node
+    relies on ``proposal is None`` to fire ``SpecialistNoOutputError``; the old ``dict(output or {})``
+    collapsed None -> {} and would have masked the no-output terminal."""
+
+    def fake_proposer(context, *, evaluator):
+        return types.SimpleNamespace(
+            status="refused", output=None, terminated_reason="no lapsed customers"
+        )
+
+    module = SalesRecoveryModule(proposer=fake_proposer)
+    registered = AgentFrameworkRegistry().register(module)
+    ctx = ModuleContext.for_proposer(
+        tenant_model_value=str(uuid4()),
+        module_name=MODULE_NAME,
+        data={SR_CONTEXT_KEY: object()},
+    )
+
+    result = registered.run(ctx)
+
+    assert result.role is AgentRole.PROPOSER
+    assert result.proposal is None
+    assert result.status == "refused"
+    assert result.reason == "no lapsed customers"
 
 
 def test_propose_passes_evaluator_when_supplied():
