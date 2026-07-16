@@ -702,31 +702,29 @@ def test_apply_gate_swaps_drafted_offer_for_you_when_no_fact(monkeypatch):
     assert events and events[-1][1] == "emission_campaign_draft_blocked"
 
 
-# ── cluster-3d (VT-654) contains_onboarding_complete_claim truth table ──────────────────────────
+# ── cluster-3d (VT-656) _reply_asks_a_question — the STRUCTURAL over-fire guard ─────────────────────
 
 
-def test_onboarding_complete_claim_matches():
-    assert mod.contains_onboarding_complete_claim(
-        "Great — that's everything we need. Setting up your assistant now."
+def test_reply_asks_a_question_structural():
+    # A reply that ADVANCES the turn by asking anything (contains an interrogative) — the good case.
+    assert mod._reply_asks_a_question("We found your business is based in Chennai — is that right?")
+    assert mod._reply_asks_a_question("Got it. What does your business do?")
+    assert mod._reply_asks_a_question("Aapka business kya karta hai?")  # Hinglish, ASCII '?'
+    assert mod._reply_asks_a_question("आपका व्यवसाय क्या करता है?")  # Devanagari, ASCII '?'
+    assert mod._reply_asks_a_question("You're all set! Anything else I can note?")  # trailing question
+
+
+def test_reply_asks_a_question_false_for_statements():
+    # Question-LESS replies — read as statements/completions, NOT advancing.
+    assert not mod._reply_asks_a_question(
+        "Thanks — that's everything we need to get started. Here's what I've noted."
     )
-    assert mod.contains_onboarding_complete_claim("You're all set!")
-    assert mod.contains_onboarding_complete_claim("Onboarding is complete.")
-    assert mod.contains_onboarding_complete_claim("Setup ho gaya, ab main aage badhta hoon.")
-    assert mod.contains_onboarding_complete_claim("आपका सेटअप हो गया है।")
-
-
-def test_onboarding_complete_future_conditional_does_not_match():
-    # Honest FUTURE/CONDITIONAL framing — the completion is not yet asserted.
-    assert not mod.contains_onboarding_complete_claim(
-        "Once you tell me your hours, you're all set."
-    )
-    assert not mod.contains_onboarding_complete_claim(
-        "After this, I'll be setting up your assistant."
-    )
-    assert not mod.contains_onboarding_complete_claim("Should I finish setting up your assistant?")
-    assert not mod.contains_onboarding_complete_claim("What does your business do?")
-    assert not mod.contains_onboarding_complete_claim("")
-    assert not mod.contains_onboarding_complete_claim(None)  # type: ignore[arg-type]
+    assert not mod._reply_asks_a_question("You're all set!")
+    assert not mod._reply_asks_a_question("Onboarding is complete.")
+    assert not mod._reply_asks_a_question("Setup ho gaya, ab main aage badhta hoon.")
+    assert not mod._reply_asks_a_question("आपका सेटअप हो गया है।")
+    assert not mod._reply_asks_a_question("")
+    assert not mod._reply_asks_a_question(None)  # type: ignore[arg-type]
 
 
 # ── cluster-3d apply_emission_gate — premature complete swapped; true complete passes through ─────
@@ -785,7 +783,7 @@ def test_apply_gate_onboarding_passthrough_when_actually_complete(monkeypatch):
 
 
 def test_apply_gate_onboarding_inactive_journey_passthrough(monkeypatch):
-    # MERGE-BLOCKING false-positive guard: the matcher matches, but there is NO active onboarding
+    # MERGE-BLOCKING false-positive guard: a question-less "all set", but there is NO active onboarding
     # journey (a non-onboarding "all set"), so the fact-check must NOT run and nothing is swapped.
     _patch_facts_spend(monkeypatch, locale="en")
     monkeypatch.setattr(mod, "_onboarding_journey_active", lambda t: False)
@@ -810,3 +808,38 @@ def test_apply_gate_onboarding_factcheck_fails_closed(monkeypatch):
     monkeypatch.setattr("orchestrator.onboarding.conductor.next_question_for_tenant", _boom)
     out = mod.apply_emission_gate("Onboarding complete!", TENANT)
     assert out == mod._REPLACEMENT_COPY["onboarding_incomplete"]["en"]
+
+
+def test_apply_gate_swaps_offlist_completion_phrasing(monkeypatch):
+    # THE VT-656 CORE: a false completion phrased in a way NO phrase list enumerated (the real dev
+    # transcript: "that's everything we need TO GET STARTED"). The structural guard (active + incomplete
+    # + reply asks NO question) catches it REGARDLESS of phrasing — no whack-a-mole.
+    events = _patch_facts_spend(monkeypatch, locale="en")
+    monkeypatch.setattr(mod, "_onboarding_journey_active", lambda t: True)
+    _patch_conductor(
+        monkeypatch,
+        _FakeDecision(
+            _FakeQ("We found your business is based in Chennai — is that right?", "Chennai — sahi hai?")
+        ),
+    )
+    out = mod.apply_emission_gate(
+        "Thanks — that's everything we need to get started. Here's what I've noted: B2B wholesale.",
+        TENANT,
+    )
+    assert out == "We found your business is based in Chennai — is that right?"
+    assert events and events[-1][1] == "emission_onboarding_incomplete_blocked"
+
+
+def test_apply_gate_onboarding_reply_already_asks_question_not_degraded(monkeypatch):
+    # OVER-FIRE GUARD (the critical regression risk): the GOOD conductor turn — active + INCOMPLETE, but
+    # the reply already ASKS the pending question. It must pass through UNTOUCHED (never degraded /
+    # double-asked), even though the profile is deterministically incomplete.
+    _patch_facts_spend(monkeypatch, locale="en")
+    monkeypatch.setattr(mod, "_onboarding_journey_active", lambda t: True)
+
+    def _boom(t):
+        raise AssertionError("swap must not run when the reply already asks a question")
+
+    monkeypatch.setattr("orchestrator.onboarding.conductor.next_question_for_tenant", _boom)
+    text = "Got it — B2B wholesale. We found your business is based in Chennai — is that right?"
+    assert mod.apply_emission_gate(text, TENANT) == text

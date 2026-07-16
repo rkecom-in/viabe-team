@@ -279,41 +279,15 @@ _CAMPAIGN_COMBO_NOUN_TOKENS = {
     "कैंपेन", "ऑफर", "ऑफ़र",
 }
 
-# ── cluster-3d (VT-654, j05 b2b_onboarding_thin_discovery) — premature ONBOARDING-COMPLETE claim ─────
+# ── cluster-3d (VT-654 → VT-656, j05 b2b_onboarding_thin_discovery) — premature ONBOARDING-COMPLETE ──
 # The brain falsely declared "that's everything we need… setting up your assistant now" after ONE
 # message while profile discovery was NOT deterministically complete (the 'about' gap still pending),
-# then step 2 asked for more — a contradiction. The conductor's own invariant is "NEVER self-declare
-# complete" (onboarding_conductor_system.md lines 42/71/157); this makes it DETERMINISTICALLY enforced.
-# FACT-CHECK: the deterministic ``conductor.profile_collection_complete`` (via
-# ``next_question_for_tenant`` — one call yields BOTH the completeness signal AND the pending question
-# for the honest swap). PRECONDITION: only inside an ACTIVE onboarding journey (``journey.is_active``)
-# — a non-onboarding "all set" ("your campaign is all set") must never be swapped for an onboarding
-# continuation. TIGHT past/present-STATE phrases, _FUTURE_CONDITIONAL-guarded per sentence so an honest
-# "once you tell me X, you're all set" passes clean.
-_ONBOARDING_COMPLETE_PHRASES = frozenset(
-    {
-        # English
-        "thats everything we need", "thats all we need", "thats everything i need",
-        "got everything i need", "have everything i need", "we have everything we need",
-        # present-continuous setup claim — REQUIRE the definitive "now" so an infinitival GOAL
-        # ("to finish setting up your assistant, what does your business do?") never trips.
-        "setting up your assistant now", "setting you up now", "activating your assistant now",
-        "onboarding is complete", "onboarding complete", "onboarding is done", "onboarding done",
-        "setup is complete", "setup complete", "setup is done",
-        "profile is complete", "profile complete", "everything is set up",
-        "youre all set", "you are all set", "were all set", "we are all set",
-        "youre onboarded", "you are onboarded", "youre ready to go",
-        "your assistant is ready", "assistant is ready",
-        # Hinglish (romanized)
-        "sab kuch mil gaya", "jo chahiye tha mil gaya", "setup ho gaya",
-        "setup complete ho gaya", "onboarding ho gaya", "onboarding complete ho gaya",
-        "profile complete ho gaya", "profile taiyaar ho gaya", "sab set ho gaya",
-        "assistant taiyaar hai", "assistant ready hai", "aap set ho gaye", "aap onboard ho gaye",
-        # Devanagari
-        "ऑनबोर्डिंग पूरी हो गई", "ऑनबोर्डिंग हो गई", "सेटअप हो गया",
-        "प्रोफ़ाइल पूरी हो गई", "प्रोफ़ाइल तैयार है", "असिस्टेंट तैयार है", "सब मिल गया",
-    }
-)
+# then step 2 asked for more — a contradiction. VT-654 caught this with an ENUMERATED completion-phrase
+# list; VT-656 replaces that with a STATE-DRIVEN structural guard (``_reply_asks_a_question`` +
+# ``_onboarding_journey_active`` + ``next_question_for_tenant``) — see the Layer-3d block in
+# ``apply_emission_gate``. No phrase list: the authoritative completion state is known deterministically
+# BEFORE the reply, so an active+incomplete turn is enforced to ask its pending question REGARDLESS of
+# how the (false) completion was phrased (the no-lists whack-a-mole trap the phrase list kept re-opening).
 
 
 def _tokenize(text: str) -> list[str]:
@@ -567,16 +541,16 @@ def contains_campaign_draft_claim(text: str) -> bool:
     )
 
 
-def contains_onboarding_complete_claim(text: str) -> bool:
-    """True iff ``text`` declares onboarding/profile setup COMPLETE ("that's everything we need",
-    "setting up your assistant", "all set", "onboarding complete", Hinglish/Devanagari). Tight
-    past/present-STATE phrases, _FUTURE_CONDITIONAL-guarded per sentence so an honest "once you tell
-    me X, you're all set" passes clean. The DETERMINISTIC completion fact-check (against
-    ``conductor.profile_collection_complete``, only inside an active journey) is load-bearing."""
-    return any(
-        _sentence_has_phrase_non_future(s, _ONBOARDING_COMPLETE_PHRASES, _FUTURE_CONDITIONAL_MARKERS)
-        for s in _split_sentences(text or "")
-    )
+def _reply_asks_a_question(text: str) -> bool:
+    """STRUCTURAL (not phrase-matched) test: does the owner-facing reply ADVANCE the turn by asking a
+    question? True iff the reply contains an interrogative marker (ASCII ``?`` or fullwidth ``？``;
+    Hindi/Devanagari questions use ``?`` too). This is the OVER-FIRE guard for the onboarding Layer-3d
+    guard: a reply that already asks something (the good conductor case — it is soliciting the next
+    field, so it CANNOT read as "done") is passed through untouched and never degraded / re-asked. A
+    reply with NO question during an active+incomplete journey reads as a premature stop (the bug, in
+    ANY phrasing) and is swapped for the deterministic pending question. Deliberately over-fire-SAFE:
+    a stray ``?`` biases toward pass-through (never degrade a reply that asked), the task's priority."""
+    return "?" in (text or "") or "？" in (text or "")
 
 
 def campaign_draft_fact_exists(tenant_id: UUID | str) -> bool:
@@ -622,9 +596,10 @@ def _onboarding_journey_active(tenant_id: UUID | str) -> bool:
 
 
 def _onboarding_incomplete_swap(tenant_id: UUID | str, locale: str) -> str | None:
-    """Fact-check a claimed onboarding-COMPLETE against the DETERMINISTIC completion check, returning
-    the honest SWAP text when the profile is NOT actually complete, or ``None`` (pass the claim
-    through) when it IS complete.
+    """Resolve the honest onboarding SWAP against the DETERMINISTIC completion check (VT-656: called
+    on a question-LESS reply inside an active journey — see Layer 3d). Returns the pending-question
+    text when the profile is NOT deterministically complete, or ``None`` (pass the reply through)
+    when it IS complete.
 
     ONE call to ``conductor.next_question_for_tenant`` yields BOTH signals: a ``None`` next-question
     means the registry-bounded set is satisfied (profile complete -> the claim is true -> ``None`` =
@@ -938,13 +913,19 @@ def apply_emission_gate(text: str, tenant_id: UUID | str) -> str:
             _emit_blocked_audit(tenant_id, text, event_kind="emission_campaign_draft_blocked")
             return replacement
 
-        # Layer 3d — premature ONBOARDING-COMPLETE (VT-654, j05): the brain declared onboarding done
-        # while the deterministic ``profile_collection_complete`` is FALSE (a question still remains).
-        # PRECONDITION: only inside an ACTIVE onboarding journey (so a non-onboarding "all set" is never
-        # swapped). Claim + incomplete -> swap for the actual pending question (the conductor's own
-        # "NEVER self-declare complete" invariant, deterministically enforced); claim + complete -> the
-        # swap resolver returns None and we fall through (pass through / phantom-promise layer still runs).
-        if contains_onboarding_complete_claim(text) and _onboarding_journey_active(tenant_id):
+        # Layer 3d — premature ONBOARDING-COMPLETE (VT-654 → VT-656, j05): STATE-DRIVEN, not phrase-
+        # matched. The authoritative completion state is known deterministically BEFORE the reply
+        # (``next_question_for_tenant``). INVARIANT: while the onboarding journey is ACTIVE and profile
+        # collection is INCOMPLETE (a pending question remains), the owner-facing reply MUST ask that
+        # pending question and MUST NOT read as "done". Trigger = active journey AND the reply does NOT
+        # already ask a question (``_reply_asks_a_question`` — structural, over-fire guard): a reply that
+        # already asks something is the good conductor turn (soliciting the next field, cannot read as
+        # done) and is passed through untouched; a question-LESS reply during active+incomplete onboarding
+        # reads as a premature stop/completion in ANY phrasing (the whack-a-mole a phrase list can't win)
+        # and is swapped for the deterministic pending question. ``_onboarding_incomplete_swap`` returns
+        # None when the profile is deterministically COMPLETE (next_question None) — a true "all set" then
+        # falls through untouched; a NON-onboarding reply (journey inactive) never reaches the swap.
+        if _onboarding_journey_active(tenant_id) and not _reply_asks_a_question(text):
             from orchestrator.owner_surface.freeform_acks import resolve_owner_locale
 
             swap = _onboarding_incomplete_swap(tenant_id, resolve_owner_locale(tenant_id))
@@ -978,7 +959,6 @@ __all__ = [
     "contains_campaign_draft_claim",
     "contains_completion_claim",
     "contains_fabricated_debt_framing",
-    "contains_onboarding_complete_claim",
     "contains_phantom_promise",
     "contains_spend_completion_claim",
     "send_fact_exists",
