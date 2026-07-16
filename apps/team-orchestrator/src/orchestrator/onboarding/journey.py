@@ -524,6 +524,115 @@ def _prefix_defer_ack(reply: dict[str, Any]) -> dict[str, Any]:
     return reply
 
 
+# --- VT-660: honest journey completion — gate on profile_collection_complete, not queue-exhaustion ---
+#
+# handle_reply historically declared the journey DONE on QUEUE-EXHAUSTION (``_current is None``). That
+# is WRONG when the 2a draft was THIN at compose time: ``_compose_queue`` returned a short/empty queue
+# that runs out after ONE answer while ``conductor.profile_collection_complete`` still reports necessary
+# fields remaining — the j05 premature "that's everything we need to get started … setting up your
+# assistant now" defect (Tier-1 wrong_action). The AUTHORITATIVE completion signal already exists
+# (``_maybe_complete_from_specialist`` uses it for the specialist path); these helpers reuse the SAME
+# signal at the walker's queue-exhaustion seams so the walker only completes when the profile REALLY is.
+
+
+def _journey_profile_complete(
+    tenant_id: UUID | str,
+    business_type: str | None,
+    answers: dict[str, Any] | None,
+    skipped: list[str] | None,
+) -> bool:
+    """VT-660 — the AUTHORITATIVE profile-collection-complete signal for handle_reply's queue-exhaustion
+    paths (the SAME deterministic check ``_maybe_complete_from_specialist`` uses). Re-derives
+    ``conductor.profile_collection_complete`` from the live draft + the given answered/skipped so
+    queue-exhaustion is no longer ASSUMED to mean profile-complete.
+
+    Fail direction is DELIBERATE: ANY derivation error → True (today's queue-exhaustion == complete
+    behaviour). ``onboarding_gate.is_agent_eligible`` hard-requires ``status='complete'``; a false
+    'incomplete' would STRAND a genuinely-onboarded tenant behind the gate forever — a far worse failure
+    than the premature-completion bug this guards. So on doubt, complete (never strand)."""
+    try:
+        from orchestrator.onboarding.conductor import profile_collection_complete
+        from orchestrator.onboarding.draft_profile import get_draft
+
+        draft = get_draft(tenant_id)
+        return profile_collection_complete(
+            business_type=business_type,
+            draft=draft,
+            answered=list((answers or {}).keys()),
+            skipped=list(skipped or []),
+        )
+    except Exception:  # noqa: BLE001 — a signal hiccup must never strand a complete tenant
+        logger.exception(
+            "journey: profile_collection_complete check failed tenant=%s — treating as complete",
+            tenant_id,
+        )
+        return True
+
+
+def _install_recomposed_queue(
+    tenant_id: UUID | str, queue: list[dict[str, Any]], message_sid: str | None
+) -> None:
+    """VT-660 — install a freshly recomposed question_queue for an ACTIVE journey and reset the cursor
+    to its head, preserving answers/skipped. Used by the queue-exhausted-but-profile-INCOMPLETE path:
+    the original queue was composed thin (2a draft not ready at compose time) and exhausted prematurely;
+    the draft has since populated more necessary questions. ``_compose_queue`` already excludes
+    already-answered/skipped fields at source (via ``decide_next_question``), so the recomposed queue
+    holds ONLY pending questions and cursor 0 points at the first one. ``last_message_sid`` is stamped to
+    the CURRENT inbound so a WhatsApp redelivery re-emits this head via the idempotency guard rather than
+    re-composing/advancing a second time."""
+    with tenant_connection(tenant_id) as conn:
+        conn.execute(
+            "UPDATE onboarding_journey SET question_queue = %s, cursor = 0, "
+            "last_message_sid = %s, updated_at = now() "
+            "WHERE tenant_id = %s AND status = 'active'",
+            (Jsonb(queue), message_sid, str(tenant_id)),
+        )
+
+
+def _complete_or_hold(
+    tenant_id: UUID | str,
+    answers: dict[str, Any] | None,
+    skipped: list[str] | None,
+    message_sid: str | None,
+) -> dict[str, Any]:
+    """VT-660 — the HONEST queue-exhaustion decision shared by handle_reply's two exhaustion points
+    (``_current is None`` at entry, and after ``_advance``). Gate completion on the REAL deterministic
+    signal, not on queue-exhaustion:
+
+      - profile COMPLETE → complete as before (``_complete`` + ``_completion_message``). Byte-identical
+        normal path: when the queue held the full necessary set, exhaustion and
+        ``profile_collection_complete`` AGREE, so nothing changes.
+      - profile INCOMPLETE → do NOT complete, do NOT emit the completion message. RE-COMPOSE the queue
+        from the (now possibly richer) draft; if it yields a pending question, install it + present the
+        head (``re_present`` → the intercept sends it). If it STILL yields nothing (draft genuinely not
+        ready yet), emit an honest HOLDING message (``_opener`` copy, ``done: False``) — NEVER "that's
+        everything we need" while the profile is incomplete.
+    """
+    _, business_type = _tenant_phase_and_type(tenant_id)
+    if _journey_profile_complete(tenant_id, business_type, answers, skipped):
+        _complete(tenant_id)
+        return _completion_message(answers)
+    # Queue exhausted but profile NOT complete — the thin-draft case. Recompose from the current draft
+    # and present the pending question; hold honestly if the draft still yields nothing (never a closer).
+    queue = _compose_queue(tenant_id, business_type)
+    if queue:
+        _install_recomposed_queue(tenant_id, queue, message_sid)
+        head = queue[0]
+        return {
+            "reply_en": head.get("prompt_en", ""),
+            "reply_hi": head.get("prompt_hi", ""),
+            "done": False,
+            "re_present": True,
+        }
+    opener = _opener()
+    return {
+        "reply_en": opener["prompt_en"],
+        "reply_hi": opener["prompt_hi"],
+        "done": False,
+        "re_present": True,
+    }
+
+
 def handle_reply(
     tenant_id: UUID | str, body: str, message_sid: str | None, *, lang: str = "en"
 ) -> dict[str, Any]:
@@ -550,8 +659,10 @@ def handle_reply(
 
     q = _current(g)
     if q is None:
-        _complete(tenant_id)
-        return _completion_message(g.get("answers"))
+        # VT-660 — queue exhausted at entry is NOT necessarily profile-complete (a thin draft composed a
+        # short/empty queue that ran out prematurely). Gate on the real deterministic signal: complete
+        # only if profile_collection_complete holds, else recompose/hold — never a premature closer.
+        return _complete_or_hold(tenant_id, g.get("answers"), g.get("skipped"), message_sid)
 
     toks = _tokens(body)
     field = q.get("field")
@@ -669,8 +780,10 @@ def handle_reply(
     g2 = get_journey(tenant_id)
     nxt = _current(g2) if g2 else None
     if nxt is None:
-        _complete(tenant_id)
-        return _completion_message(answers)
+        # VT-660 — same honest gate as the entry path: exhausting the (possibly thin) queue after this
+        # answer does NOT prove the profile is complete. Complete only on profile_collection_complete;
+        # otherwise recompose the queue from the now-richer draft (or hold) instead of a false closer.
+        return _complete_or_hold(tenant_id, answers, skipped, message_sid)
     reply = {"reply_en": nxt.get("prompt_en", ""), "reply_hi": nxt.get("prompt_hi", ""), "done": False}
     if is_skip:
         # R9 item 1 — acknowledge the skip before the next ask (never on the completion closer above).
@@ -1650,17 +1763,28 @@ def _handle_reply_with_turn_brain(
 
     done = new_cursor >= len(g.get("question_queue") or [])
     if done:
-        _complete(tenant_id)
         if card:
-            # Populate-first: the CARD is the closing message (present the profile, invite edits) — never
-            # a generic closer stacked over it. The integration seam then continues the conversation.
+            # Populate-first: the CARD is a LEGITIMATE completion — it presents the FULL profile and
+            # invites edits (a real close), so complete now. Never gated (VT-660 gates only the generic
+            # _completion_message closer, not the card). The integration seam continues the conversation.
+            _complete(tenant_id)
             reply = plan.reply_text
             buttons = list(plan.buttons)
+            done_flag = True
         else:
-            completion = _completion_message(answers)
-            reply = completion["reply_hi"] if lang == "hi" else completion["reply_en"]
+            # VT-660 (flag-independent): the no-card closer is _completion_message — and queue-exhaustion
+            # is NOT profile-complete under a THIN draft (the j05 defect; this turn-brain seam emits the
+            # SAME template as handle_reply, so fixing only the walker would miss it when ONBOARDING_TURN_
+            # BRAIN is on). Gate on the real deterministic signal via the SAME _complete_or_hold helper the
+            # walker uses: it completes (_complete + _completion_message) ONLY when profile_collection_
+            # complete holds; otherwise it recomposes the queue + presents the pending question (or an
+            # honest holding message) and the journey STAYS active. _complete therefore fires ONLY on a
+            # genuine close (card, or no-card + profile-complete) — never prematurely.
+            r = _complete_or_hold(tenant_id, answers, skipped, message_sid)
+            reply = r["reply_hi"] if lang == "hi" else r["reply_en"]
             buttons = []
-        # VT-569 memory: persist this exchange so any later conversation sees it.
+            done_flag = bool(r.get("done"))
+        # VT-569 memory: persist this exchange so any later conversation sees what was ACTUALLY said.
         _append_recent_turns(
             tenant_id, {"role": "owner", "text": body}, {"role": "bot", "text": reply},
             message_sid=message_sid,
@@ -1669,7 +1793,7 @@ def _handle_reply_with_turn_brain(
             "turn_brain": True,
             "reply_text": reply,
             "buttons": buttons,
-            "done": True,
+            "done": done_flag,
         }
     # VT-569 memory: the brain must see what IT said this turn — an owner affirmation next turn
     # ("Use that") carries THIS bot-proposed value (the live-drill amnesia fix).
