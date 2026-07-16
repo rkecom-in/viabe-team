@@ -627,15 +627,22 @@ def _invoke_llm_tools(
     accumulated beta content blocks stay valid. Tests monkeypatch THIS to drive the loop deterministically."""
     from anthropic import Anthropic
 
-    return Anthropic().beta.messages.create(
-        model=_TURN_MODEL,
-        max_tokens=_MAX_TOKENS,
-        system=system_prompt,
-        messages=messages,
-        tools=tools,
-        betas=betas,
-        timeout=_TURN_TIMEOUT_S,
-    )
+    # VT-662 — pass ``betas`` ONLY when non-empty. An empty list makes the SDK emit an
+    # ``anthropic-beta:`` header with a blank value, which the API rejects with a 400
+    # ("Unexpected value(s) `` for the `anthropic-beta` header"). That silently killed the
+    # turn-brain on EVERY no-web-fetch onboarding turn (the common case) → walker fallback →
+    # ignored_speech_act re-asks (j05). Omit the kwarg entirely when there are no betas.
+    kwargs: dict[str, Any] = {
+        "model": _TURN_MODEL,
+        "max_tokens": _MAX_TOKENS,
+        "system": system_prompt,
+        "messages": messages,
+        "tools": tools,
+        "timeout": _TURN_TIMEOUT_S,
+    }
+    if betas:
+        kwargs["betas"] = betas
+    return Anthropic().beta.messages.create(**kwargs)
 
 
 def _force_final(system_prompt: str, messages: list[dict[str, Any]], betas: list[str]) -> Any:
@@ -741,7 +748,12 @@ def compose_turn(
         )
         return _parse_turn_plan(raw)
     except Exception as exc:  # noqa: BLE001 — hot path: any failure degrades to the walker, never stalls
-        logger.warning("turn_brain: compose_turn failed (%s) — falling back to walker", type(exc).__name__)
+        # Include the message (truncated) — a bare type name hid the empty-anthropic-beta 400 for a
+        # long time (the turn-brain was silently dead on dev, every turn falling to the walker).
+        logger.warning(
+            "turn_brain: compose_turn failed (%s: %s) — falling back to walker",
+            type(exc).__name__, str(exc)[:300],
+        )
         return None
 
 
