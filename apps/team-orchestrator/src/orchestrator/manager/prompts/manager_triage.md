@@ -61,8 +61,21 @@ When (and ONLY when) you classify `new_task`, ALSO set `task_kind`:
 
 For every non-`new_task` outcome, set `task_kind` to `general` (it is ignored there).
 
+## `language` — the language of THIS owner message (always set)
+
+Classify the language the owner wrote THIS message in:
+
+- `en` — English.
+- `hinglish` — Hindi (or mixed Hindi-English) written in LATIN script: "purane customers ko offer
+  bhejo", "kitne lapsed hain?".
+- `hi` — Hindi written in DEVANAGARI script.
+
+Judge the DOMINANT register of the message, not isolated loanwords ("campaign chalao" is
+`hinglish`; "run the campaign" with zero Hindi is `en`). If genuinely unclear (emoji-only,
+numbers-only, a bare name), default `en`.
+
 Produce ONLY a JSON object, no prose, no markdown fence:
 
 ```
-{"outcome": "direct_reply"|"answer_pending"|"new_task"|"task_status"|"cancel_task", "reasoning": "<one short phrase, no chain-of-thought>", "task_kind": "campaign_recovery"|"general"}
+{"outcome": "direct_reply"|"answer_pending"|"new_task"|"task_status"|"cancel_task", "reasoning": "<one short phrase, no chain-of-thought>", "task_kind": "campaign_recovery"|"general", "language": "en"|"hinglish"|"hi"}
 ```

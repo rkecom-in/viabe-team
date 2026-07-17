@@ -1,4 +1,4 @@
-# Viabe Team — Agent Framework Architecture (Manager / SubAgent / Tool)
+# Viabe Team — Agent Capability Framework (ACF) — Manager / SubAgent / Tool
 
 **Status: CANONICAL — ratified by Fazal 2026-07-16. State sections updated 2026-07-18 (post-VT-101 build; §7).**
 Author: Cowork, 2026-07-16, from Fazal's target definition (2026-07-16) + CC's code-grounded
@@ -73,18 +73,43 @@ distributed; authority over effects is narrow and central. That split is the who
 ### 1.3 Tool (registered, decoupled action)
 - **Kinds:**
   - **READ tools** — DB/context reads (customer ledger, business context, integration state),
-    always scoped to the Manager's resolved tenant (§3). **BUILT (2026-07-17,
-    `tools_common.py`):** three reference READ tools wrap the canonical existing readers
-    (never re-implemented) — `read_customer_ledger_summary` (counts only, no PII),
-    `read_business_context`, `read_integration_state`. Pattern every future READ tool copies:
-    `resolve_lane_tenant` FIRST (ambient wins), structured error dicts (never raises), own
-    RLS conn (the §3 sanctioned pattern until DB-inversion), deny-list-checked at import.
+    always scoped to the Manager's resolved tenant (§3). **BUILT (2026-07-17/18,
+    `tools_common.py`):** EIGHT common READ tools wrap the canonical existing readers (never
+    re-implemented) — `read_customer_ledger_summary` (counts only, no PII),
+    `read_business_context`, `read_integration_state`, `read_active_plan` (VT-673),
+    `read_agent_memory` (VT-674: L3 prior via `lookup_pattern` — quarantine + k-anon
+    structural), plus the three VT-675 resolve-first promotions (`get_recent_campaigns`,
+    `get_attribution_data`, `query_customer_ledger` — wrappers, because the raw agent/tools
+    functions take a model-supplied `payload.tenant_id`, the IDOR class). PLUS ONE common
+    ADVISORY tool: `escalate` (VT-672, `COMMON_ADVISORY_TOOLS`). Pattern every future common
+    tool copies: `resolve_lane_tenant` FIRST (ambient wins), structured error dicts (never
+    raises), own RLS conn (the §3 sanctioned pattern until DB-inversion), deny-list-checked
+    at import.
   - **GATED-EFFECT tools** — customer-send, business/money action. These ARE the gate (§2).
   - **INTEGRATION tools** — Shopify, GST portal, Google Sheets, email, CSV/file, MCP/API
     connectors. Third-party actions are Tools, not agents. Zero-manual-paste after OAuth
     (CL-421) is a Tool-level property and survives any reshuffle.
 - **Contract:** a registry entry — manifest + declared capability + deny-list-checked tool
   objects. Tools do the data exchange; brains command, tools act.
+- **The common-tool surface (Fazal rulings, 2026-07-18) — CATEGORIZED, not just reads:**
+  - **DATA/READ** — customer-ledger-summary, business-context, integration-state (built) +
+    recent-campaigns, attribution, PII-gated ledger query, plan/roadmap read.
+  - **CUSTOMER_SEND (GATED)** — request_customer_send → `agent_send_draft` (7 gates) + arm.
+  - **BUSINESS_ACTION (GATED)** — perform_business_action (whole round-trip, §2).
+  - **ESCALATE** — ONE common escalate tool (per-lane duplicates consolidate into it).
+  - **TASK/PLAN/AUDIT/EVAL** — report_item_status, emit_tm_audit, self_evaluate,
+    schedule_followup.
+- **Owner communication is MANAGER-ONLY (Fazal, confirmed).** There is NO owner-message
+  tool in the common surface and never will be: a sub-agent returns an outcome or an honest
+  decline to the Manager; the Manager does all owner conversation (§1.2). Do not add a
+  specialist owner-message tool.
+- **ACF-tracked capability gaps — ALL 4 CLOSED (2026-07-18, same day they were registered):**
+  (1) unified escalate tool → VT-672 (`escalate` on `COMMON_ADVISORY_TOOLS`); (2) plan/roadmap
+  read tool → VT-673 (`read_active_plan`); (3) on-demand memory read tool → VT-674
+  (`read_agent_memory`); (4) the richer reads promoted into the common set → VT-675
+  (resolve-first wrappers). `KNOWN_CAPABILITY_GAPS` is EMPTY and the
+  `check_capability_gaps.py` gate is GREEN; the registry + honesty test re-arm automatically
+  on the next named hole (register future gaps there, each with a board row).
 - **Canonical inventory (VT-669, 2026-07-18, `tool_catalog.py`):** the single source of
   truth for every tool surface — name → kind → capability → gated? → PII posture (CL-390) →
   tenant scope → holders — as a code registry (introspection-backed, drift-guarded). The doc
@@ -219,9 +244,12 @@ render against the same preference.
   (`tool_catalog.py` — 74 surfaces inventoried, `TOOLS.md` generated; `AgentManifest.
   required_tools` + the 9th `required_tools_reachable` conformance check; SR + Onboarding
   carry required-tools manifests). Additive/inert — no live routing change.
+- **Approval seam hardened (2026-07-18):** VT-668 CLOSED (approval liveness, §2 — an owner
+  approval can never resolve into silence). VT-667 core CLOSED (correction=revision +
+  creative-brief threading proven on dev; latency/persona tail = VT-671).
 - **REMAINING:** §7.3 DB-access inversion (§3) — Fazal-explicit LAST, not yet granted.
   Codex/third-party builders stay HELD until the post-migration full-pack re-aggregate
-  re-proves Tier-1=0 and the VT-669 catalog lands.
+  re-proves Tier-1=0.
 
 ## 8. Ratification (Fazal)
 

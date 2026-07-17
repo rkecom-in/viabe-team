@@ -130,3 +130,48 @@ def test_floor_language_hinglish_never_devanagari(monkeypatch: pytest.MonkeyPatc
     tc_mod = importlib.import_module("orchestrator.db.tenant_connection")
     monkeypatch.setattr(tc_mod, "tenant_connection", _fake)
     assert oc._floor_language(uuid4()) == "en"  # NOT 'hi'
+
+
+# --- VT-677 phase-2: triage language enum + observed persist ------------------------------------
+
+
+def test_triage_result_language_field_and_default() -> None:
+    pytest.importorskip("anthropic")
+    from orchestrator.manager.triage import TriageResult
+
+    # Backward-compat: an older prompt omitting the field parses to 'en'.
+    r = TriageResult(outcome="direct_reply")
+    assert r.language == "en"
+    r2 = TriageResult(outcome="new_task", task_kind="campaign_recovery", language="hinglish")
+    assert r2.language == "hinglish"
+    with pytest.raises(Exception):
+        TriageResult(outcome="direct_reply", language="klingon")
+
+
+def test_seam_persist_applies_devanagari_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The deterministic script override beats the LLM enum: a Devanagari turn persists 'hi'
+    even if the classifier said 'en'; a Latin turn persists the classifier's value."""
+    pytest.importorskip("anthropic")
+    from orchestrator.manager import triage_seam as ts
+
+    recorded: list[str] = []
+    monkeypatch.setattr(
+        "orchestrator.owner_surface.owner_locale.record_observed_language",
+        lambda tid, lang: recorded.append(lang) or True,
+    )
+    ts._persist_observed_language(uuid4(), "मेरे customers को offer भेजो", "en")
+    ts._persist_observed_language(uuid4(), "purane customers ko offer bhejo", "hinglish")
+    assert recorded == ["hi", "hinglish"]
+
+
+def test_seam_persist_fails_soft(monkeypatch: pytest.MonkeyPatch) -> None:
+    pytest.importorskip("anthropic")
+    from orchestrator.manager import triage_seam as ts
+
+    def _boom(tid, lang):
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(
+        "orchestrator.owner_surface.owner_locale.record_observed_language", _boom
+    )
+    ts._persist_observed_language(uuid4(), "hello", "en")  # must not raise
