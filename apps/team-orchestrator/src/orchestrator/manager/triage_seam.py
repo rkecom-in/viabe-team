@@ -208,6 +208,27 @@ def _recent_sent_campaign_guard(
         return None
 
 
+def _persist_observed_language(tenant_id: UUID, message_text: str, llm_language: str) -> None:
+    """VT-677 — persist the OBSERVED per-turn language to ``tenants.language_preference``.
+
+    The triage LLM's enum with the DETERMINISTIC Devanagari override on top (script is a codepoint
+    fact — a Devanagari turn IS 'hi' regardless of what the classifier said). Nudges the OBSERVED
+    column only; NEVER touches ``preferred_language`` (D2: an off-register turn never rewrites an
+    explicit choice), and NEVER affects this turn's reply (mirroring is prompt-owned). Best-effort:
+    a persist failure must never touch the turn.
+    """
+    try:
+        from orchestrator.owner_surface.owner_locale import (
+            is_devanagari,
+            record_observed_language,
+        )
+
+        lang = "hi" if is_devanagari(message_text) else llm_language
+        record_observed_language(tenant_id, lang)
+    except Exception:  # noqa: BLE001 — observation is telemetry-grade; the turn always proceeds
+        logger.warning("VT-677 observed-language persist failed (fail-soft)", exc_info=True)
+
+
 def _dispatch_campaign_first_contact(
     tenant_id: UUID, message_text: str, message_sid: str,
 ) -> TriageSeamResult | None:
@@ -583,6 +604,8 @@ def triage_seam(
         has_open_question=has_open_question,
         has_active_task=has_active_task,
     )
+    if result is not None:
+        _persist_observed_language(tenant_id, message_text, result.language)
     if result is None:
         # triage.py's own fail-soft contract — classify failure falls back to the legacy dispatch
         # behavior for THIS turn, exactly as if the mode were legacy. VT-633: emit the audit row —

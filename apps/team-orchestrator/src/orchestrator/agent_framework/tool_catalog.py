@@ -4,7 +4,7 @@ WHAT THIS IS
 ------------
 The framework enforces tool SAFETY (``assert_agent_tools_safe`` deny-list + the positive-capability
 manifest) but never had a single INVENTORY of "what tools exist, who holds them, what each is."
-~90 ``@tool`` functions grew across 11 surfaces + 2 GateFacade doors with no canonical map. This
+~90 ``@tool`` functions grew across 11 surfaces + 3 GateFacade doors with no canonical map. This
 module is that map, AS DATA — a ``ToolCatalogEntry`` per tool surface — so the inventory is
 version-controlled, diffable, and unit-testable at boot (the same "why code, not a DB table" call
 as ``roster.py`` / ``registration.py``). The doc (``docs/agent-framework/TOOLS.md``) is GENERATED

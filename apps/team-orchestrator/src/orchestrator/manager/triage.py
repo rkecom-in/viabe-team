@@ -67,6 +67,14 @@ TriageOutcome = Literal["direct_reply", "answer_pending", "new_task", "task_stat
 # omits it, or any non-new_task turn, parses cleanly as ``general``.
 TaskKind = Literal["campaign_recovery", "general"]
 
+# VT-677 — the OBSERVED language of the owner's turn (D2: informs the observed rolling value +
+# ambiguous-turn fallback ONLY; never overrides live mirroring). An enum = a finite outcome (the
+# no-lists standing permits enums); 'hinglish' = Hindi in Latin script. Default 'en' keeps the
+# field backward-compatible with an older prompt that omits it. The deterministic Devanagari
+# override (owner_locale.is_devanagari) is applied by the CALLER on top of this — script is a
+# codepoint fact, never an LLM judgment.
+TurnLanguage = Literal["en", "hinglish", "hi"]
+
 
 class TriageResult(BaseModel):
     """The structured triage envelope (execution-plan §3 step 4)."""
@@ -76,6 +84,7 @@ class TriageResult(BaseModel):
     outcome: TriageOutcome
     reasoning: str = ""
     task_kind: TaskKind = "general"
+    language: TurnLanguage = "en"
 
 
 def triage_turn(
