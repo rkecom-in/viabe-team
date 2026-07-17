@@ -1,6 +1,6 @@
 """VT-664 Stage 1 — unit tests for the Integration connector-tools agent_framework MODULE.
 
-Proves the module CONFORMS to the framework contract (``assert_conforms`` — all 8 checks, esp.
+Proves the module CONFORMS to the framework contract (``assert_conforms`` — all 9 checks, esp.
 ``tool_surface_safe`` over the eleven connector tools) and that its PROPOSER lane is a thin,
 side-effect-free read that reports the integration state + the connector tool surface WITHOUT
 touching a DB (the state reader is injected). Also pins the additive-shape invariants: the manifest
@@ -77,10 +77,10 @@ def test_module_conforms():
 
 
 def test_conformance_report_names_stable():
-    """The report shape is stable (all 8 named checks present), via the pure entrypoint."""
+    """The report shape is stable (all 9 named checks present), via the pure entrypoint."""
     report = check_module_conformance(IntegrationToolsModule())
     assert [r.name for r in report.results] == list(CHECK_NAMES)
-    assert len(CHECK_NAMES) == 8
+    assert len(CHECK_NAMES) == 9  # VT-669 added required_tools_reachable
 
 
 def test_tool_surface_safe_check_passes_explicitly():

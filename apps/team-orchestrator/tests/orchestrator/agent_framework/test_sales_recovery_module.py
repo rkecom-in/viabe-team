@@ -1,6 +1,6 @@
 """VT-659 — unit tests for the Sales-Recovery agent_framework MODULE (the thin dual-role adapter).
 
-Proves the module CONFORMS to the framework contract (``assert_conforms`` — all 8 checks) and that
+Proves the module CONFORMS to the framework contract (``assert_conforms`` — all 9 checks) and that
 its two lanes DELEGATE to the existing SR proposer/executor and MAP their results onto the framework
 value objects WITHOUT touching a real LLM or DB (the delegates are injected). Also pins the two
 migration invariants the adapter must hold: the manifest name equals the coordinator
@@ -72,10 +72,12 @@ def test_module_conforms():
 
 
 def test_conformance_report_names_stable():
-    """The report shape is stable (all 8 named checks present), via the pure entrypoint."""
+    """The report shape is stable (all 9 named checks present), via the pure entrypoint."""
     report = check_module_conformance(SalesRecoveryModule())
     assert [r.name for r in report.results] == list(CHECK_NAMES)
-    assert len(CHECK_NAMES) == 8
+    # VT-669 added the 9th check (``required_tools_reachable``) to the suite.
+    assert len(CHECK_NAMES) == 9
+    assert "required_tools_reachable" in CHECK_NAMES
 
 
 # --- 2. manifest shape (Option A capability model) ---------------------------------------------
@@ -91,6 +93,12 @@ def test_manifest_shape():
     assert m.gated_capabilities == frozenset()
     assert Capability.REQUEST_CUSTOMER_SEND not in m.capabilities
     assert m.tools == ()
+    # VT-669 SUFFICIENCY: SR holds NO tools of its own (tools=()), but its job REQUIRES the two
+    # Manager-scoped common READ tools to frame a win-back — recorded here (the ``tools=()``
+    # resolution: required reads are Manager-scoped, not tools on SR's own surface). Its send EFFECT
+    # is NOT a required gated tool (arm != send, Option A) — the send is reached downstream via the
+    # deterministic arm path, so there is no REQUEST_CUSTOMER_SEND tool to require.
+    assert m.required_tools == ("read_customer_ledger_summary", "read_business_context")
 
 
 def test_manifest_reuses_sr_activation_bar_verbatim():

@@ -1,6 +1,6 @@
 # Viabe Team — Agent Framework Architecture (Manager / SubAgent / Tool)
 
-**Status: CANONICAL — ratified by Fazal 2026-07-16.**
+**Status: CANONICAL — ratified by Fazal 2026-07-16. State sections updated 2026-07-18 (post-VT-101 build; §7).**
 Author: Cowork, 2026-07-16, from Fazal's target definition (2026-07-16) + CC's code-grounded
 reconciliation (`docs/archive/agent-framework-target-reconciliation.md`, archived). Grounded in the
 VT-649/650 contract as built (`apps/team-orchestrator/src/orchestrator/agent_framework/`).
@@ -73,19 +73,37 @@ distributed; authority over effects is narrow and central. That split is the who
 ### 1.3 Tool (registered, decoupled action)
 - **Kinds:**
   - **READ tools** — DB/context reads (customer ledger, business context, integration state),
-    always scoped to the Manager's resolved tenant (§3).
+    always scoped to the Manager's resolved tenant (§3). **BUILT (2026-07-17,
+    `tools_common.py`):** three reference READ tools wrap the canonical existing readers
+    (never re-implemented) — `read_customer_ledger_summary` (counts only, no PII),
+    `read_business_context`, `read_integration_state`. Pattern every future READ tool copies:
+    `resolve_lane_tenant` FIRST (ambient wins), structured error dicts (never raises), own
+    RLS conn (the §3 sanctioned pattern until DB-inversion), deny-list-checked at import.
   - **GATED-EFFECT tools** — customer-send, business/money action. These ARE the gate (§2).
   - **INTEGRATION tools** — Shopify, GST portal, Google Sheets, email, CSV/file, MCP/API
     connectors. Third-party actions are Tools, not agents. Zero-manual-paste after OAuth
     (CL-421) is a Tool-level property and survives any reshuffle.
 - **Contract:** a registry entry — manifest + declared capability + deny-list-checked tool
   objects. Tools do the data exchange; brains command, tools act.
+- **Canonical inventory (VT-669, 2026-07-18, `tool_catalog.py`):** the single source of
+  truth for every tool surface — name → kind → capability → gated? → PII posture (CL-390) →
+  tenant scope → holders — as a code registry (introspection-backed, drift-guarded). The doc
+  [`TOOLS.md`](./TOOLS.md) is GENERATED from it (`render_catalog_markdown`), never hand-typed.
+  74 tool surfaces today (3 gated GateFacade doors). The catalog DOCUMENTS the gates; it never
+  widens them.
+- **Sufficiency, not just safety (VT-669):** the framework enforced tool SAFETY (deny-list +
+  positive-capability manifest) but never SUFFICIENCY. `AgentManifest.required_tools` declares
+  the tools a specialist's job REQUIRES to reach; the 9th conformance check
+  `required_tools_reachable` fails-loud at boot if a required tool is not in the catalog OR not
+  reachable (own `tools` surface OR the Manager-scoped common READ set). SR records its required
+  reads while keeping `tools=()` (Manager-scoped, arm != send); Onboarding via its own surface.
 - **Invariant (by construction):** no capability exists that means "perform an effect
   directly." The strongest declarable capabilities are `REQUEST_CUSTOMER_SEND` /
   `REQUEST_BUSINESS_ACTION` — both gated, both serviced only by the GateFacade. Registration
   rejects raw send/spend/ledger/config-write tool objects (`assert_agent_tools_safe`, VT-268)
   and rejects a PROPOSER-only module declaring a gated capability. **An un-gated effect Tool
-  is unregistrable.**
+  is unregistrable.** A `required_tools` entry is NEVER a raw effect — the strongest is a gated
+  `REQUEST_*` door.
 
 ## 2. The gated-tool boundary (non-negotiable)
 
@@ -104,6 +122,16 @@ Every effect, from any brain, routes through the deterministic gate:
   effect is NOT an acceptable end-state.)
 - **Correctness gates never bend for a green run:** GST verify, ownership, consent, onboarded,
   opt-out. Opt-out wins immediately and irreversibly within a turn.
+- **Approval liveness (VT-668, 2026-07-17 — learned live):** an owner approval must NEVER
+  resolve into silence. While an approval is armed, the consuming task PARKS (`waiting_owner`,
+  stall-sweep-exempt) instead of burning its retry ladder against the approval TTL; resolution
+  guarantees a live consumer (re-drive + honest ack) or an honest-expiry message to the owner;
+  a dead-lettered consumer surfaces to the owner and closes its dangling approval. Silence
+  after explicit owner authorization is a Tier-1-grade breach of this contract.
+- **Correction = revision (VT-667):** an owner correction to a pending campaign REVISES it —
+  supersede the stale draft, re-dispatch with the combined brief, re-arm. Never a re-mint,
+  never a deflection, never a double-arm. What the owner approves IS what sends, in content
+  as well as count.
 
 ## 3. The DB-access rule
 
@@ -172,19 +200,28 @@ render against the same preference.
   the sole money Tier-1 authority (CL-2026-07-16). More brains widen the reasoning surface,
   not the effect surface.
 
-## 7. Migration state (ground truth as of 2026-07-16)
+## 7. Migration state (ground truth as of 2026-07-18)
 
-- **BUILT + INERT:** the `agent_framework` contract (VT-649/650) — manifest, roles,
-  GateFacade, conformance harness, registration, SDK boundary. Wired into no live path;
-  `default_registry()` empty.
-- **DESIGN-ONLY:** SR migration (VT-659 plan: thin-adapter-first, edit zero SR files, cutover
-  deferred). **UNBUILT:** Integration adapter (VT-658) — superseded by dissolution into Tools.
-- **LIVE TODAY:** effects flow through `agent_send_draft` / `business_action_context`
-  directly; SR is already proposer/executor-split; Integration is still a brained specialist.
-- **Migration order:** (1) Tool registry + connector Tools (Integration dissolution),
-  (2) SR onto {brain + tools} via the thin adapter, (3) DB-access inversion (§3) last,
-  isolation re-verified. VT-101 re-scopes accordingly. Codex/third-party builders stay HELD
-  until SR proves the contract live.
+- **VT-101 MIGRATION COMPLETE on dev** (CL-2026-07-16-arch-ratified-migration). All stages
+  landed, each delta-gated on deployed dev and HELD:
+  - Stages 0–2 (additive): SR as a dual-role module (VT-659, thin adapter, zero SR-file
+    edits) · Integration surface as an 11-tool connector-Tools module (VT-664) ·
+    `GateFacade.perform_business_action` owning the whole round-trip (§2).
+  - Stage 3(a)+(b): **SR routes through the framework contract** — coordinator canary armed
+    a real win-back with zero sends/zero errors; j01 clean.
+  - Stage 3(c): **Integration's brain DISSOLVED** into Manager-driven connector Tools;
+    owner-facing connect flow intact; VT-658 closed.
+- **Flags:** `TEAM_SR_VIA_FRAMEWORK` + `TEAM_INTEGRATION_VIA_FRAMEWORK` — **ON in dev,
+  OFF in prod.** Prod promotion rides the VT-231 cutover checklist (Fazal 2026-07-17,
+  Pillar-7).
+- **Common READ-tools layer BUILT** (§1.3, `tools_common.py` + `CommonToolsModule`).
+  **Tool catalog / required-tools manifest / sufficiency conformance = VT-669 BUILT**
+  (`tool_catalog.py` — 74 surfaces inventoried, `TOOLS.md` generated; `AgentManifest.
+  required_tools` + the 9th `required_tools_reachable` conformance check; SR + Onboarding
+  carry required-tools manifests). Additive/inert — no live routing change.
+- **REMAINING:** §7.3 DB-access inversion (§3) — Fazal-explicit LAST, not yet granted.
+  Codex/third-party builders stay HELD until the post-migration full-pack re-aggregate
+  re-proves Tier-1=0 and the VT-669 catalog lands.
 
 ## 8. Ratification (Fazal)
 

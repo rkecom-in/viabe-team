@@ -143,6 +143,16 @@ class SalesRecoveryModule:
         # ``.agent == "sales_recovery" == manifest.name``, so ``manifest.validate()`` accepts it.
         prerequisites=_ACTIVATION_REGISTRY[MODULE_NAME],
         tools=(),  # works purely through the context contract + its delegates; holds no tool.
+        # VT-669 SUFFICIENCY (the SR ``tools=()`` resolution): SR's job REQUIRES the two Manager-
+        # scoped common READ tools to frame a win-back — the lapsed-customer ledger counts + the
+        # business context (ARCHITECTURE §1.1). It records them as REQUIRED here while keeping
+        # ``tools=()`` because those reads are Manager-scoped (the common set the specialist reaches
+        # through the Manager), NOT tools SR holds on its own surface. Its send EFFECT is likewise
+        # NOT a required gated tool: SR reaches the send through the deterministic ARM path
+        # (arm != send, VT-659 Option A) downstream, so there is no ``REQUEST_CUSTOMER_SEND`` tool
+        # to require on the manifest. The ``required_tools_reachable`` check verifies both reads are
+        # cataloged + reachable via the Manager-scoped common READ set.
+        required_tools=("read_customer_ledger_summary", "read_business_context"),
     )
 
     def __init__(
