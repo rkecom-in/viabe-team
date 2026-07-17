@@ -8,13 +8,15 @@
 
 ---
 
-## TL;DR
+## TL;DR (UPDATED 2026-07-17 ~07:45 IST — you lifted the 3am rail; I resumed + landed the SR cutover)
 
-- **LANDED tonight (safe):** the ADDITIVE foundation — Stages 0, 1, 2. Three coherent commits, all green, full pre-push suite passed (4834 tests), deployed on dev. **They change ZERO live behavior** (inert modules + one additive facade method); nothing is routed through them yet.
-- **DEFERRED (deliberately, per your rail):** Stage 3 (LIVE CUTOVER) + Stage 4 (j01–j10 regression). This is the risky part — dissolving the integration brain and rerouting the manager's SR/integration handling. Validating it means a ~1.5–2 hr **unsupervised** j01–j10 + tier_rescore + possible roll-back cycle **at ~4am** — exactly the "don't patch forward at 3am, roll back not forward" case you named. I stopped at the safe checkpoint rather than cut over live and validate blind before dawn.
-- **§7.3 (DB-access inversion):** not attempted — you said explicitly it's LAST and not required tonight.
+- **LANDED + VALIDATED:** additive Stages 0–2 (inert foundation) **AND** Stage 3(a)+(b) — the **live SR cutover**, now running on dev behind `TEAM_SR_VIA_FRAMEWORK=1` (prod flag-OFF). HEAD dev = `c7fff55`, deployed SUCCESS.
+- **SR cutover VALIDATED on deployed dev → HELD:** the coordinator SR **executor** arms through the `CoordinatorAgentAdapter` (awaiting_approval, **0 sends**, no exception); the SR **proposer** journey j01 win-back is CLEAN (4/4); full j01–j10 Tier-2 100%. The SR cutover introduced **ZERO deterministic breakers**.
+- **The gate premise changed** (and I surfaced it, didn't silently reinterpret): your re-baseline "confirm Tier-1=0" actually showed **Tier-1 = 1 — a PRE-EXISTING marketing bug (VT-666, j02), reproduced ×2, orthogonal to SR**. So I ran a **delta gate** (cutover must add no new breaker vs baseline). It passed: the only post-cutover extra (j09) re-drove ×2 CLEAN = variance, not cutover-caused (the code delta is SR-only).
+- **REMAINING:** Stage 3(c) integration-brain dissolution (deepest surgery — separate validated push) + Stage 4 sign-off. **§7.3 DB-inversion** stays deferred (your call).
+- **NEW finding rostered:** **VT-666** — the manager serves the generic onboarding menu instead of answering/honestly-declining a specific in-session ask (j02 campaign-create + j09 per-store breakdown). Pre-existing, orthogonal to the migration, own row + fix.
 
-**Net:** the contract + the two migrated modules + the money-path round-trip fix all EXIST, CONFORM, and are deployed. The live repoint is the one remaining step, staged and ready for a supervised window.
+**Net:** the SR half of the migration (proposer + executor) is LIVE on dev through the framework contract and validated — no money-path regression. The integration half (3c) is the one remaining build.
 
 ---
 
