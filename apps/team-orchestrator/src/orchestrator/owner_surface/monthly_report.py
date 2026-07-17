@@ -164,7 +164,11 @@ def generate_monthly_report(
         business_name = _scalar(trow, "business_name", 0)
         phase = _scalar(trow, "phase", 1)
         signed_up_at = _scalar(trow, "signed_up_at", 2)
-        language = _scalar(trow, "lang", 3) or "en"
+        # VT-677 D1: the report renders from en|hi variants — map the resolved locale through the
+        # canonical template register ('hinglish' → 'en'; NEVER Devanagari for a hinglish owner).
+        from orchestrator.owner_surface.owner_locale import template_register
+
+        language = template_register(str(_scalar(trow, "lang", 3) or "en"))
 
         if should_skip(phase=phase, signed_up_at=signed_up_at, period_end=end):
             return None

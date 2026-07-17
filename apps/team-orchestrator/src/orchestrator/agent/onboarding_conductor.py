@@ -615,8 +615,11 @@ def _floor_language(tenant_id: UUID) -> str:
             return "en"
         preferred = row["preferred_language"] if isinstance(row, dict) else row[0]
         fallback = row["language_preference"] if isinstance(row, dict) else row[1]
-        lang = preferred or fallback or "en"
-        return "hi" if str(lang).lower().startswith("hi") else "en"
+        lang = str(preferred or fallback or "en").lower()
+        # VT-677 D1: EXACT 'hi' only — 'hinglish'.startswith('hi') was TRUE, which would serve the
+        # DEVANAGARI floor to a hinglish-preference owner (ruled NEVER). Scripted floor copy is
+        # en|hi; hinglish falls back to EN until hi-Latn floor copy is authored.
+        return "hi" if lang == "hi" else "en"
     except Exception:  # noqa: BLE001 — a language-read hiccup never blocks the floor itself
         return "en"
 
