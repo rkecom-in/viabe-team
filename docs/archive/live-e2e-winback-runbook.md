@@ -1,3 +1,5 @@
+> **ARCHIVED 2026-07-17 — zero live authority; see docs/README.md.**
+
 # Fully-Live e2e Runbook — Win-back to +917738859946
 
 **Date authored:** 2026-06-29

@@ -1,3 +1,5 @@
+> **ARCHIVED 2026-07-17 — zero live authority; see docs/README.md.**
+
 # Viabe Team — Automation Architecture v1.0
 
 **Status:** Locked 2026-05-24 by Fazal. v1.0 — iterate as we learn. This document is the operating contract between Fazal (CEO), Cowork (delivery captain), Clau (architect-on-call), and Claude Code (developer).

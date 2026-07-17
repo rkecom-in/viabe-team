@@ -1,3 +1,5 @@
+> **ARCHIVED 2026-07-17 — zero live authority; see docs/README.md.**
+
 # L0 per-tenant k-anonymity admission design (VT-225)
 
 **Status:** DRAFTED BY CC — AWAITS FAZAL REVIEW BEFORE VT-225 IMPLEMENTATION BEGINS

@@ -1,3 +1,5 @@
+> **ARCHIVED 2026-07-17 — zero live authority; see docs/README.md.**
+
 # Team-Manager — Exhaustive Scenario Test Matrix (Fazal bar 2026-06-28)
 
 **The bar (Fazal):** the Team-Manager must have real intelligence + self-thinking + the ability to **run the business correctly** — "as capable and intelligent in running business as Claude Code is in coding." Not a scripted bot. Every scenario below must pass at VT-464 (the new-brain live e2e re-drive) before sign-off. Tests live as orchestrator unit/integration + a live-drive harness; adversarial scenarios run via fan-out verification.

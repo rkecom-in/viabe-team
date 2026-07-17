@@ -1,3 +1,5 @@
+> **ARCHIVED 2026-07-17 — zero live authority; see docs/README.md.**
+
 # Team-Manager Rebuild — Canonical Design (Cowork architect input, Fazal-ratified FOLD-IN 2026-06-28)
 
 Owner-facing brain rebuild: from a thin router (CL-24) to a reasoning **Business-Executioner / Team-Leader** that understands owner intent and delegates to domain specialists — **inside fixed safety rails**. Fazal folded this into the single sign-off: the win-back send + sign-off WAIT until the new brain's live e2e re-drive is clean.

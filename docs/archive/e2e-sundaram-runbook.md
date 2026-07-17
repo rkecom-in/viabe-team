@@ -1,3 +1,5 @@
+> **ARCHIVED 2026-07-17 — zero live authority; see docs/README.md.**
+
 # Sundaram Book Store — E2E Test Runbook
 ### Sales Recovery via the conversational onboarding (WhatsApp-first)
 

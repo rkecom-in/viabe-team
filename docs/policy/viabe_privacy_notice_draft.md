@@ -2,7 +2,7 @@
 
 **LAWYER-FACING WORKING DRAFT — NOT FOR PUBLICATION**
 
-> **Status:** Draft v0.1, prepared by Clau (AI co-founder) for review by DPDP-competent
+> **Status:** Draft v0.1, prepared by Viabe (AI-assisted) for review by DPDP-competent
 > counsel. This document is **not** a final or signed privacy notice. It is a structured
 > starting point that states Viabe's data flows as currently known, so counsel can harden
 > the language and close the gaps.

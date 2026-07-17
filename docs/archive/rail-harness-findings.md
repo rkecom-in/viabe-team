@@ -1,3 +1,5 @@
+> **ARCHIVED 2026-07-17 — zero live authority; see docs/README.md.**
+
 # Rail-Harness Findings (VT-460 map, 2026-06-28) — the rail LARGELY EXISTS; VT-460 = verify + close 4 gaps
 
 ## KEY FINDING (validates "review existing first")

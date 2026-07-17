@@ -1,3 +1,5 @@
+> **ARCHIVED 2026-07-17 — zero live authority; see docs/README.md.**
+
 # VT-609 recon (2026-07-05, sonnet — the conversion contract)
 
 ## Conversion map (old seam → tool)

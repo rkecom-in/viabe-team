@@ -1,6 +1,8 @@
 # Viabe Team — Launch Runbook
 *As of 2026-06-09. Target launch: 2026-07-15.*
 
+> **⚠️ Dates and row-counts below are STALE as of 2026-07-17 — reconcile against `git log` + the sprint board before acting on any number here.**
+
 ## Where we are
 Engineering is essentially complete (323/356 rows done). The dev→prod cutover is built and the Mumbai prod database is live and verified (121/121 migrations, RLS enforced). What remains is **provisioning, external approvals, and one prod smoke test** — almost none of it is code.
 

@@ -1,3 +1,5 @@
+> **ARCHIVED 2026-07-17 — zero live authority; see docs/README.md.**
+
 # The Capability Program — Team Manager to Claude-Code grade
 **Authorized:** CL-2026-07-03-autonomous-capability-program (Fazal, autonomous mode, do-or-die).
 **Owner:** Claude Code, autonomous. **Audit:** Cowork (audit-after). **This file = the resumable approach doc** — any future CC session or Cowork reads this first.

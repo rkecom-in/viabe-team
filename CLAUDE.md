@@ -2,11 +2,14 @@
 
 You (Claude) just got pointed at this repo. **Read these files first, in this order, before answering any question or starting any work.** Skipping any of them is the #1 reason fresh sessions misroute work.
 
-1. **`docs/clau/operating-brief.md`** — defines the four-role model (Fazal/Cowork/Claude Code/Clau), the sequencing principle, and how decisions flow. ~5 min read.
+1. **`docs/clau/operating-brief.md`** — defines the three-role model (Fazal/Cowork/Claude Code), the sequencing principle, and how decisions flow. ~5 min read.
 2. **`docs/clau/latest-snapshot.md`** — 5-field State Snapshot: Critical Path / In Flight / Blocked On / Next Action / Do Not. **Treat as suspect until reconciled.** This file drifts; see Rule #14 below.
 3. **`docs/clau/decisions-ledger.md`** — flat list of every Standing decision with originating CL number. Do not re-litigate anything in here.
-4. **`docs/clau/active-context-summary.md`** — Cowork-maintained digest of every active CL + brief contract. Required reading before any brief-ready dispatch (Rule #16).
-5. **`docs/clau/discipline-rules.md`** — full text of Rules #1–17. Reference; read on demand.
+4. **`docs/agent-framework/ARCHITECTURE.md`** — CANONICAL definition of how the system is shaped (Manager / SubAgent / Tool; ratified Fazal 2026-07-16). The structural source of truth.
+5. **`docs/clau/active-context-summary.md`** — Cowork-maintained digest of every active CL + brief contract. Required reading before any brief-ready dispatch (Rule #16).
+6. **`docs/clau/discipline-rules.md`** — full text of Rules #1–17. Reference; read on demand.
+
+**Doc map:** `docs/README.md` is THE documentation index — every live doc, tiered by authority, plus what's archived. If a doc isn't listed there, it's structured history (sprint rows / session-log entries) or archived.
 
 After reading, **reconcile the snapshot against reality** before trusting it:
 

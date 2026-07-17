@@ -1,3 +1,5 @@
+> **ARCHIVED 2026-07-17 — zero live authority; see docs/README.md.**
+
 # Team-Manager Rebuild — Authoritative Per-Scenario Sign-Off Ledger
 
 **Built by:** Claude Code (read-only audit) · **Date:** 2026-06-29 · **Branch/HEAD:** `cc-winback-followups` @ `7653e11`
