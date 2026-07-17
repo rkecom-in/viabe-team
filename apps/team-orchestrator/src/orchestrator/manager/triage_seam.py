@@ -129,6 +129,85 @@ def _build_campaign_recovery_plan(message_text: str) -> ManagerPlan:
     )
 
 
+# VT-670 — the already-SENT re-mint window. Within it, a fresh win-back imperative after a SENT
+# campaign gets ONE honest "already went out" reply instead of silently arming a duplicate to the
+# same server-owned cohort (VT-651). Asking AGAIN proceeds (warn-once, see the guard).
+ALREADY_SENT_WINDOW_HOURS = 48
+_ALREADY_SENT_AUDIT_KIND = "campaign_already_sent_reply"
+
+
+def _recent_sent_campaign_guard(
+    tenant_id: UUID, message_sid: str,
+) -> TriageSeamResult | None:
+    """VT-670 — block the duplicate re-mint after a SENT campaign, warn-ONCE, fail-open.
+
+    The residual gap the other guards structurally miss: after a campaign reaches SENT its task is
+    terminal (``not has_active_task`` passes) and its approval is resolved (``revise_pending_
+    campaign`` finds nothing) — so a repeat win-back imperative minted a brand-new plan → SR loop →
+    a second ``campaign_send`` approval to the SAME cohort (server-owned = same customers, VT-651).
+
+    Semantics:
+      - a campaign with ``status='sent'`` generated within ``ALREADY_SENT_WINDOW_HOURS`` → return
+        the honest ``ALREADY_SENT_REPLY`` (no mint) and stamp a ``campaign_already_sent_reply``
+        tm_audit row. ONLY 'sent' blocks — a rejected/cancelled/timed-out prior draft stays freely
+        re-mintable.
+      - WARN-ONCE: if that stamp already exists since the sent campaign, the owner asked AGAIN —
+        that is the explicit confirm; return ``None`` and let the mint proceed (never a stall loop).
+      - any read failure → ``None`` (fail-OPEN: this is dedup protection, not a correctness gate —
+        a DB blip must not block a legitimate campaign; the approval/consent rails still gate the
+        send itself).
+
+    The tm_audit dedup SELECT runs on the service pool (``tm_audit_log`` grants app_role INSERT
+    only — the exact ``llm.budget_gate`` precedent); best-effort, tenant-predicated, no PII.
+    """
+    try:
+        from datetime import UTC, datetime, timedelta
+
+        from orchestrator.db.wrappers import CampaignsWrapper
+        from orchestrator.onboarding.campaign_first_contact import ALREADY_SENT_REPLY
+
+        recent = CampaignsWrapper().list_recent_basic(tenant_id, limit=5)
+        cutoff = datetime.now(UTC) - timedelta(hours=ALREADY_SENT_WINDOW_HOURS)
+        sent = next(
+            (
+                r
+                for r in recent
+                if str(r.get("status")) == "sent"
+                and r.get("generated_at") is not None
+                and r["generated_at"] >= cutoff
+            ),
+            None,
+        )
+        if sent is None:
+            return None
+
+        from orchestrator.graph import get_pool
+
+        with get_pool().connection() as conn:
+            warned = conn.execute(
+                "SELECT 1 FROM tm_audit_log WHERE tenant_id = %s AND event_kind = %s "
+                "AND created_at >= %s LIMIT 1",
+                (str(tenant_id), _ALREADY_SENT_AUDIT_KIND, sent["generated_at"]),
+            ).fetchone()
+        if warned is not None:
+            return None  # second ask since that send = explicit confirm — proceed to mint
+
+        emit_tm_audit(
+            event_layer="decides", event_kind=_ALREADY_SENT_AUDIT_KIND,
+            actor="team_manager", tenant_id=tenant_id,
+            summary="win-back imperative but a campaign was SENT within the window — honest "
+            "already-sent reply, no duplicate mint (asking again proceeds)",
+            decision={"message_sid": message_sid, "sent_campaign_id": str(sent.get("id"))},
+        )
+        return TriageSeamResult(
+            outcome="new_task", task_id=None, skip_legacy_dispatch=True,
+            direct_reply_text=ALREADY_SENT_REPLY,
+        )
+    except Exception:  # noqa: BLE001 — fail-OPEN by design (see docstring)
+        logger.warning("VT-670 already-sent guard failed open", exc_info=True)
+        return None
+
+
 def _dispatch_campaign_first_contact(
     tenant_id: UUID, message_text: str, message_sid: str,
 ) -> TriageSeamResult | None:
@@ -162,6 +241,10 @@ def _dispatch_campaign_first_contact(
             outcome="new_task", task_id=None, skip_legacy_dispatch=True,
             direct_reply_text=EMPTY_COHORT_REPLY,
         )
+    # VT-670 — a campaign SENT within the window blocks a duplicate re-mint (warn-once, fail-open).
+    already_sent = _recent_sent_campaign_guard(tenant_id, message_sid)
+    if already_sent is not None:
+        return already_sent
     # Real cohort — deterministically mint a sales_recovery dispatch + start the loop.
     camp_task_id = plan_store.create_plan(
         tenant_id, _build_campaign_recovery_plan(message_text),
