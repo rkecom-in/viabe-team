@@ -164,6 +164,33 @@ def test_seam_persist_applies_devanagari_override(monkeypatch: pytest.MonkeyPatc
     assert recorded == ["hi", "hinglish"]
 
 
+def test_campaign_language_never_sourced_from_owner_preference() -> None:
+    """Design (e) conformance guard: CUSTOMER campaign copy language is per-COHORT
+    (CampaignPlan.message_plan.language, the SR prompt owns it) and must NEVER be sourced from the
+    owner's tenants language columns. Structural: the campaign-copy path modules must not import
+    the owner-locale resolver. A future import here = conflating owner chat language with customer
+    send language — fail loud."""
+    import pathlib
+
+    src = pathlib.Path(__file__).resolve().parents[3] / "src" / "orchestrator"
+    campaign_path_files = [
+        src / "collapse.py",
+        src / "campaign" / "execute.py",
+        src / "agent" / "sales_recovery.py",
+    ]
+    for f in campaign_path_files:
+        if not f.exists():
+            continue
+        text = f.read_text(encoding="utf-8")
+        assert "resolve_owner_locale" not in text, (
+            f"{f.name}: campaign path must not read the OWNER language preference — "
+            "campaign language is per-cohort (CampaignPlan.message_plan.language)"
+        )
+        assert "owner_locale" not in text, (
+            f"{f.name}: campaign path must not import owner_surface.owner_locale"
+        )
+
+
 def test_seam_persist_fails_soft(monkeypatch: pytest.MonkeyPatch) -> None:
     pytest.importorskip("anthropic")
     from orchestrator.manager import triage_seam as ts
