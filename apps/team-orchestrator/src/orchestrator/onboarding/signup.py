@@ -148,10 +148,14 @@ def create_signup_tenant(
 
     pool = get_pool()
     with pool.connection() as conn, conn.transaction():
+        # VT-677 D3: the signup form's EN/HI toggle is a UI-display PROXY, not an asked question —
+        # it seeds the OBSERVED column (language_preference); preferred_language (the EXPLICIT
+        # choice) stays NULL until the owner actually chooses (verbal override / settings). The
+        # per-turn triage inference then refines the observed value from real usage.
         row = conn.execute(
             """
             INSERT INTO tenants
-                (business_name, plan_tier, phase, whatsapp_number, preferred_language,
+                (business_name, plan_tier, phase, whatsapp_number, language_preference,
                  business_type, city_tier, signed_up_at, trial_started_at,
                  phase_entered_at, created_via, verification_status,
                  verified_business_name, verification_method, gstin, verified_at)

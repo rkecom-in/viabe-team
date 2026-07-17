@@ -271,6 +271,11 @@ _ORCHESTRATOR_ANN: dict[str, _Ann] = {
         ToolKind.ADVISORY, None,
         note="Manager-scoped context WRITE (business_objective, VT-466) — non-gated",
     ),
+    "set_language_preference": _Ann(
+        ToolKind.ADVISORY, None,
+        note="VT-677: the owner's EXPLICIT language choice (preferred_language write, D3 verbal "
+        "override) — non-gated owner-own-preference write; never affects live-turn mirroring (D2)",
+    ),
     "search_conversation_history": _Ann(
         ToolKind.READ, None,
         note="owner<->assistant conversation-log retrieval (owner-authored text; not customer rows)",

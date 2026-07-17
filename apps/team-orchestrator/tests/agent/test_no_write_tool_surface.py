@@ -45,6 +45,10 @@ ORCHESTRATOR_EXPECTED = {
     "record_business_objective",
     # VT-579 — the manager's RETRIEVAL over the lifetime conversation log.
     "search_conversation_history",
+    # VT-677 (reviewed) — the owner's EXPLICIT language choice: writes ONLY
+    # tenants.preferred_language for the owner's OWN tenant (ambient-resolved, Pillar 3);
+    # no send, no ledger/accounts, no customer PII. D2: never affects live-turn mirroring.
+    "set_language_preference",
 }
 INTEGRATION_EXPECTED = {
     # VT-608 (Loop Package 5) — the ten context-scoped tools replacing the VT-206/425 stub
