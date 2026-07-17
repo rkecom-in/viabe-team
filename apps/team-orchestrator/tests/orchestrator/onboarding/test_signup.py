@@ -60,13 +60,18 @@ def test_create_signup_tenant_atomic(pool):
 
     with pool.connection() as c:
         t = c.execute(
-            "SELECT phase, plan_tier, preferred_language, trial_started_at, "
-            "signed_up_at, created_via, business_type FROM tenants WHERE id = %s",
+            "SELECT phase, plan_tier, preferred_language, language_preference, "
+            "trial_started_at, signed_up_at, created_via, business_type "
+            "FROM tenants WHERE id = %s",
             (str(res.tenant_id),),
         ).fetchone()
         assert t["phase"] == "onboarding"
         assert t["plan_tier"] == "founding"
-        assert t["preferred_language"] == "hi"
+        # VT-677 D3: the form toggle is a display-language PROXY — it seeds the OBSERVED column
+        # (language_preference); preferred_language (EXPLICIT choice) stays NULL until the owner
+        # actually chooses (verbal override / settings).
+        assert t["language_preference"] == "hi"
+        assert t["preferred_language"] is None
         assert t["trial_started_at"] is not None
         assert t["created_via"] == "web"
         assert t["business_type"] == "kirana"
