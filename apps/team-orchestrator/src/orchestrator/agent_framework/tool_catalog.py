@@ -276,6 +276,12 @@ _ORCHESTRATOR_ANN: dict[str, _Ann] = {
         note="VT-677: the owner's EXPLICIT language choice (preferred_language write, D3 verbal "
         "override) — non-gated owner-own-preference write; never affects live-turn mirroring (D2)",
     ),
+    "export_customer_list": _Ann(
+        ToolKind.ADVISORY, None,
+        note="VT-676 F3: delivers the owner's OWN customer list as a WhatsApp CSV to the VERIFIED "
+        "owner (send_customer_list_to_owner: server-derived recipient, private bucket, 300s URL, "
+        "audit) — OWNER-comms delivery, not a customer send; Manager-only holder (§1.2)",
+    ),
     "search_conversation_history": _Ann(
         ToolKind.READ, None,
         note="owner<->assistant conversation-log retrieval (owner-authored text; not customer rows)",

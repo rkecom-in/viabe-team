@@ -164,7 +164,7 @@ def _recent_sent_campaign_guard(
         from datetime import UTC, datetime, timedelta
 
         from orchestrator.db.wrappers import CampaignsWrapper
-        from orchestrator.onboarding.campaign_first_contact import ALREADY_SENT_REPLY
+        from orchestrator.onboarding.campaign_first_contact import already_sent_reply
 
         recent = CampaignsWrapper().list_recent_basic(tenant_id, limit=5)
         cutoff = datetime.now(UTC) - timedelta(hours=ALREADY_SENT_WINDOW_HOURS)
@@ -199,9 +199,11 @@ def _recent_sent_campaign_guard(
             "already-sent reply, no duplicate mint (asking again proceeds)",
             decision={"message_sid": message_sid, "sent_campaign_id": str(sent.get("id"))},
         )
+        # VT-676-F2: time-ground the WHEN from the actual campaign row (coarse honest buckets).
+        hours_ago = (datetime.now(UTC) - sent["generated_at"]).total_seconds() / 3600
         return TriageSeamResult(
             outcome="new_task", task_id=None, skip_legacy_dispatch=True,
-            direct_reply_text=ALREADY_SENT_REPLY,
+            direct_reply_text=already_sent_reply(hours_ago),
         )
     except Exception:  # noqa: BLE001 — fail-OPEN by design (see docstring)
         logger.warning("VT-670 already-sent guard failed open", exc_info=True)
