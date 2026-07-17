@@ -51,6 +51,7 @@ _EXPECTED_TOOL_NAMES = [
     "read_customer_ledger_summary",
     "read_business_context",
     "read_integration_state",
+    "read_active_plan",  # VT-673
 ]
 
 
@@ -99,7 +100,7 @@ def test_manifest_carries_the_three_common_read_tools():
     """``manifest.tools`` IS the exact ``COMMON_READ_TOOLS`` surface (same objects, in order)."""
     tools = CommonToolsModule().manifest.tools
     assert isinstance(tools, tuple)
-    assert len(tools) == 3
+    assert len(tools) == 4  # VT-673 added read_active_plan
     assert [t.name for t in tools] == _EXPECTED_TOOL_NAMES
     assert list(tools) == list(COMMON_READ_TOOLS)
     for t in tools:

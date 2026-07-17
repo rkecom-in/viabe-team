@@ -205,6 +205,77 @@ def read_integration_state(tenant_id: str) -> dict[str, Any]:
     return dict(state)
 
 
+@tool
+def read_active_plan(tenant_id: str, owning_agent: str = "") -> dict[str, Any]:
+    """Read this tenant's ACTIVE business plan / roadmap — the owner's own plan data, no customer PII.
+
+    VT-673 (capability gap `plan_roadmap_read`): `get_active_plan` / `items_for_agent` were dispatch
+    MACHINERY — the Manager assembled the context and handed a slice down; a specialist could not ask
+    "what is my plan / what's next on my roadmap" mid-loop. This tool is that first-class read. It
+    DELEGATES to the same `business_plan.store.get_active_plan` / `seams.items_for_agent` readers
+    Gap-5 dispatch uses (re-expressed on the tool contract, never re-authored).
+
+    Args:
+      - ``owning_agent`` (optional): empty → the FULL latest roadmap, all statuses. A specialist key
+        (e.g. ``sales_recovery``) → only that agent's actionable items (``accepted``/``in_progress``,
+        the same default slice dispatch consumes), seq-ordered.
+
+    Returns (CL-390 PII-safe — plan/roadmap fields are the owner's own business data):
+      - ``plan_version``, ``item_count``, and ``items``: each with ``item_id`` / ``seq`` / ``month`` /
+        ``objective`` / ``status`` / ``owning_agent`` / ``owner_action_needed`` only (no fact bundle,
+        no provenance dump). No plan yet → ``{"plan_version": None, "items": []}`` — an honest empty,
+        never a fabricated roadmap.
+
+    Tenant is resolved from the ambient run context (model ``tenant_id`` untrusted); an unresolvable
+    tenant returns a structured error dict, never a raise. The underlying readers open their OWN
+    ``tenant_connection`` (§3).
+    """
+    resolved = resolve_lane_tenant(tenant_id, tool_name="read_active_plan")
+    if resolved is None:
+        return lane_tenant_error("read_active_plan")
+
+    # Lazy: the plan store pulls psycopg — kept off this module's import surface.
+    from orchestrator.business_plan import store as plan_store
+    from orchestrator.business_plan.seams import items_for_agent
+
+    try:
+        if owning_agent:
+            picked = items_for_agent(resolved, owning_agent)
+            plan = plan_store.get_active_plan(resolved)
+            items = [
+                {
+                    "item_id": it.item_id, "seq": it.seq, "month": it.month,
+                    "objective": it.objective, "status": it.status,
+                    "owning_agent": it.owning_agent,
+                    "owner_action_needed": it.owner_action_needed,
+                }
+                for it in picked
+            ]
+        else:
+            plan = plan_store.get_active_plan(resolved)
+            items = [
+                {
+                    "item_id": raw.get("item_id"), "seq": raw.get("seq"),
+                    "month": raw.get("month"), "objective": raw.get("objective"),
+                    "status": raw.get("status"), "owning_agent": raw.get("owning_agent"),
+                    "owner_action_needed": bool(raw.get("owner_action_needed", False)),
+                }
+                for raw in (plan.roadmap if plan is not None else [])
+            ]
+    except ValueError as exc:
+        # items_for_agent rejects an unknown owning_agent/status — structured, never a raise.
+        return {"status": "error", "error": f"read_active_plan: {exc}"}
+    except Exception as exc:  # noqa: BLE001 — a lane tool must never RAISE (would orphan the tool_use)
+        logger.warning("read_active_plan: plan read failed (tenant=%s): %s", resolved, exc)
+        return {"status": "error", "error": "read_active_plan: plan read failed"}
+
+    return {
+        "plan_version": plan.version if plan is not None else None,
+        "item_count": len(items),
+        "items": items,
+    }
+
+
 #: The common READ tools, in a stable order — the surface a Manager/specialist drives to pull
 #: operational data (ARCHITECTURE.md §1.1/§1.3). These are the whole point of this module; the
 #: Manager holds them on its shelf and a specialist reaches them through the Manager's resolved
@@ -213,6 +284,7 @@ COMMON_READ_TOOLS: tuple[Any, ...] = (
     read_customer_ledger_summary,
     read_business_context,
     read_integration_state,
+    read_active_plan,
 )
 
 # Fail-CLOSED at import: these are READS and MUST pass the deny-list guard (they hold no
@@ -224,6 +296,7 @@ assert_agent_tools_safe(COMMON_READ_TOOLS, surface="common_read_tools")
 
 __all__ = [
     "COMMON_READ_TOOLS",
+    "read_active_plan",
     "read_business_context",
     "read_customer_ledger_summary",
     "read_integration_state",
