@@ -36,6 +36,16 @@ EMPTY_COHORT_REPLY = (
     "Shopify) and I'll build the win-back list and get started."
 )
 
+# VT-670 — the honest terminal when a win-back ALREADY WENT OUT recently (the cohort is
+# server-owned, so a re-mint within the window would hit the SAME customers). Deliberately
+# number-free (no count/hours to mis-ground) and actionable: asking AGAIN proceeds (the guard is
+# warn-once), so the owner is never dead-ended.
+ALREADY_SENT_REPLY = (
+    "Your win-back campaign already went out a short while ago — sending another one this soon "
+    "can put customers off. If you do want a fresh campaign anyway, just ask me again (tell me "
+    "the offer you'd like this time) and I'll draft it for your approval."
+)
+
 # VERB ∧ NOUN — BOTH must be present for a campaign IMPERATIVE (tight, low false-positive). A bare
 # noun ("how many lapsed customers?") is a status QUERY, not a request to run one; a bare verb
 # ("run a report") is not a campaign. EN + Hinglish. Word-boundary anchored; case-insensitive.

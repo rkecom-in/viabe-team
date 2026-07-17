@@ -405,3 +405,171 @@ def test_dispatch_first_contact_or_revision_falls_to_first_contact_when_no_pendi
     monkeypatch.setattr(ts, "revise_pending_campaign", lambda *a, **k: None)
     monkeypatch.setattr(ts, "_dispatch_campaign_first_contact", lambda *a, **k: sentinel)
     assert ts._dispatch_campaign_first_contact_or_revision(uuid4(), "win back", "SMf") is sentinel
+
+
+# --- VT-670: the already-SENT re-mint guard (warn-once, fail-open) -------------------------------
+
+
+class _FakeCampaigns:
+    """A CampaignsWrapper stand-in returning a fixed recent-campaigns list."""
+
+    def __init__(self, rows):
+        self._rows = rows
+
+    def list_recent_basic(self, tenant_id, *, limit=5, conn=None):
+        return list(self._rows)
+
+
+class _FakePool:
+    """A get_pool() stand-in whose connection returns a fixed dedup-SELECT row."""
+
+    def __init__(self, warned_row):
+        self._warned_row = warned_row
+
+    def connection(self):
+        from contextlib import contextmanager
+
+        pool = self
+
+        @contextmanager
+        def _cm():
+            class _Conn:
+                def execute(self, sql, params):
+                    class _Cur:
+                        def fetchone(_s):
+                            return pool._warned_row
+
+                    return _Cur()
+
+            yield _Conn()
+
+        return _cm()
+
+
+def _install_sent_guard_stubs(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    rows,
+    warned_row=None,
+):
+    """Wire the guard's lazy imports to fakes + capture emitted audit events."""
+    import orchestrator.db.wrappers as wrappers_mod
+    import orchestrator.graph as graph_mod
+
+    events: list[dict] = []
+    monkeypatch.setattr(wrappers_mod, "CampaignsWrapper", lambda: _FakeCampaigns(rows))
+    monkeypatch.setattr(graph_mod, "get_pool", lambda: _FakePool(warned_row))
+    monkeypatch.setattr(ts, "emit_tm_audit", lambda **kw: events.append(kw))
+    return events
+
+
+def _sent_row(hours_ago: float, status: str = "sent"):
+    from datetime import UTC, datetime, timedelta
+    from uuid import uuid4 as _u
+
+    return {
+        "id": str(_u()),
+        "status": status,
+        "generated_at": datetime.now(UTC) - timedelta(hours=hours_ago),
+    }
+
+
+def test_sent_guard_blocks_first_reask_with_honest_reply(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A campaign SENT 2h ago + no prior warn → honest already-sent reply, no mint, audit stamped."""
+    from orchestrator.onboarding.campaign_first_contact import ALREADY_SENT_REPLY
+
+    events = _install_sent_guard_stubs(monkeypatch, rows=[_sent_row(2.0)])
+    out = ts._recent_sent_campaign_guard(uuid4(), "SMdup")
+    assert out is not None
+    assert out.direct_reply_text == ALREADY_SENT_REPLY
+    assert out.skip_legacy_dispatch is True and out.task_id is None
+    assert len(events) == 1
+    assert events[0]["event_kind"] == ts._ALREADY_SENT_AUDIT_KIND
+    assert events[0]["decision"]["message_sid"] == "SMdup"
+
+
+def test_sent_guard_second_ask_proceeds(monkeypatch: pytest.MonkeyPatch) -> None:
+    """WARN-ONCE: the dedup stamp exists since the send → the owner asked AGAIN = explicit confirm
+    → guard returns None (mint proceeds). Never a stall loop."""
+    events = _install_sent_guard_stubs(
+        monkeypatch, rows=[_sent_row(2.0)], warned_row=(1,)
+    )
+    assert ts._recent_sent_campaign_guard(uuid4(), "SMagain") is None
+    assert events == []  # no double warn
+
+
+def test_sent_guard_outside_window_proceeds(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A send OLDER than the window never blocks."""
+    events = _install_sent_guard_stubs(
+        monkeypatch, rows=[_sent_row(ts.ALREADY_SENT_WINDOW_HOURS + 5.0)]
+    )
+    assert ts._recent_sent_campaign_guard(uuid4(), "SMold") is None
+    assert events == []
+
+
+def test_sent_guard_only_sent_status_blocks(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A recent REJECTED/CANCELLED draft stays freely re-mintable — only 'sent' blocks."""
+    events = _install_sent_guard_stubs(
+        monkeypatch,
+        rows=[_sent_row(1.0, status="cancelled"), _sent_row(3.0, status="proposed")],
+    )
+    assert ts._recent_sent_campaign_guard(uuid4(), "SMrej") is None
+    assert events == []
+
+
+def test_sent_guard_fails_open_on_read_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Any wrapper failure → None (fail-OPEN: dedup protection must not block a legit campaign)."""
+    import orchestrator.db.wrappers as wrappers_mod
+
+    def _boom_wrapper():
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(wrappers_mod, "CampaignsWrapper", _boom_wrapper)
+    assert ts._recent_sent_campaign_guard(uuid4(), "SMerr") is None
+
+
+def test_first_contact_returns_guard_result_before_mint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The dispatch chokepoint returns the guard's reply INSTEAD of minting when the guard fires."""
+    import orchestrator.onboarding.campaign_first_contact as cfc
+
+    guard_result = ts.TriageSeamResult(
+        outcome="new_task", task_id=None, skip_legacy_dispatch=True, direct_reply_text="ALREADY"
+    )
+    monkeypatch.setattr(cfc, "campaign_cohort_is_empty", lambda tid: False)
+    monkeypatch.setattr(ts, "_recent_sent_campaign_guard", lambda *a, **k: guard_result)
+    # create_plan must never be reached.
+    import orchestrator.manager.plan_store as plan_store_mod
+
+    monkeypatch.setattr(
+        plan_store_mod, "create_plan", lambda *a, **k: (_ for _ in ()).throw(AssertionError("minted"))
+    )
+    out = ts._dispatch_campaign_first_contact(uuid4(), "run winback again", "SMg")
+    assert out is guard_result
+
+
+def test_first_contact_mints_when_guard_passes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Guard None → the mint path runs exactly as before (no behavior change)."""
+    import orchestrator.manager.plan_store as plan_store_mod
+    import orchestrator.manager.task_store as task_store_mod
+    import orchestrator.manager.workflow as workflow_mod
+    import orchestrator.onboarding.campaign_first_contact as cfc
+
+    tid = uuid4()
+    task_id = uuid4()
+    started: list = []
+    monkeypatch.setattr(cfc, "campaign_cohort_is_empty", lambda t: False)
+    monkeypatch.setattr(cfc, "mentions_customer_list_request", lambda t: False)
+    monkeypatch.setattr(ts, "_recent_sent_campaign_guard", lambda *a, **k: None)
+    monkeypatch.setattr(ts, "emit_tm_audit", lambda **kw: None)
+    monkeypatch.setattr(plan_store_mod, "create_plan", lambda *a, **k: task_id)
+    monkeypatch.setattr(
+        task_store_mod, "get_task", lambda t, i: {"id": str(i), "status": "planned"}
+    )
+    monkeypatch.setattr(workflow_mod, "start_manager_task_workflow", lambda t, i: started.append(i))
+    out = ts._dispatch_campaign_first_contact(tid, "run winback", "SMok")
+    assert out is not None and out.task_id == task_id
+    assert started == [task_id]
