@@ -264,6 +264,46 @@ def test_serializer_renders_manager_framing_when_present() -> None:
     assert rendered.index("Manager's desired outcome") < rendered.index("## Owner request")
 
 
+def test_serializer_omits_campaign_brief_section_when_absent() -> None:
+    """VT-667: a brief-less dispatch (creative_brief at its safe-empty default) renders
+    IDENTICALLY to before — the ``## Campaign brief`` section is omitted entirely, not an empty
+    stub. This is the byte-unchanged guarantee for the autonomous / non-campaign SR path."""
+    rendered = serialize_bundle_for_prompt(_seeded_context())
+    assert "## Campaign brief" not in rendered
+
+
+def test_serializer_renders_campaign_brief_verbatim_when_present() -> None:
+    """VT-667: when the conversational campaign path supplies the owner's brief, it renders
+    VERBATIM (no keyword extraction — CL-2026-07-15-no-lists), ahead of the owner request, with
+    the content-only scoping that names the offer template + keeps cohort/window/₹ server-owned."""
+    ctx = _seeded_context()
+    brief = "whip up a Diwali festive offer — 20% off or free dessert, warm greeting, dine-in + online"
+    ctx_with_brief = SalesRecoveryContext(
+        tenant_id=ctx.tenant_id,
+        run_id=ctx.run_id,
+        user_request=ctx.user_request,
+        trigger_reason=ctx.trigger_reason,
+        business_profile=ctx.business_profile,
+        customer_ledger_summary=ctx.customer_ledger_summary,
+        recent_campaigns=ctx.recent_campaigns,
+        attribution_snapshot=ctx.attribution_snapshot,
+        pending_owner_inputs=ctx.pending_owner_inputs,
+        creative_brief=brief,
+        meta=ctx.meta,
+        data_completeness=ctx.data_completeness,
+    )
+    rendered = serialize_bundle_for_prompt(ctx_with_brief)
+    assert "## Campaign brief (owner's own words)" in rendered
+    assert brief in rendered  # verbatim, not extracted
+    # names the offer-carrying template + admits the brief as the {{3}} grounding source
+    assert "team_winback_offer" in rendered
+    assert "offer_description" in rendered
+    # scoping: cohort/window/₹ stay server-owned; brief is content-only
+    assert "SYSTEM-owned" in rendered
+    # ordering: brief before the owner request (still last)
+    assert rendered.index("## Campaign brief") < rendered.index("## Owner request")
+
+
 def test_serializer_omits_identity_fields() -> None:
     """(g) — ``tenant_id`` / ``run_id`` are orchestrator state, not
     agent input. They must NOT reach the rendered block (the agent

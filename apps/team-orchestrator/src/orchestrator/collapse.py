@@ -603,6 +603,68 @@ def _derive_summary_money(
         return _SummaryMoney(llm_low_rupees, llm_high_rupees, False, None)
 
 
+# VT-667 — human-readable label per agent-selectable win-back template, so the approval echo
+# can name WHAT is being approved without fabricating copy. Template ids are a FINITE
+# exact-match set (registry keys, enum-like) — a fixed map is legitimate here (CL-2026-07-15
+# bars keyword lists for OPEN-ENDED natural-language intent, not a closed registry-key map).
+# An id not in the map falls back to a neutral, honest phrase.
+_WINBACK_TEMPLATE_LABELS = {
+    "team_winback_offer": "a win-back message with a special offer",
+    "team_winback_simple": "a simple win-back message",
+}
+_DEFAULT_WINBACK_TEMPLATE_LABEL = "a win-back message"
+# Cap the offer copy echoed into the (owner-facing) chat summary. The send path fills {{3}} at
+# [:512]; the summary is a preview, so it stays tighter and marks truncation honestly.
+_SUMMARY_OFFER_ECHO_CAP = 400
+
+
+def _summary_offer_copy(plan: CampaignPlanProposed) -> tuple[str, str | None]:
+    """VT-667 — resolve ``(template label, offer copy)`` for the approval echo.
+
+    The owner must see the ACTUAL offer copy they are approving, not just cohort + ₹
+    (VT-667: a generic lapsed-recovery win-back was approved when a Diwali OFFER was asked
+    for). Mirrors the send-path's own {{3}} fill (``_complete_message_plan``): the offer line
+    is the TYPED ``template_params['offer_description']`` when the model filled it, else the
+    ``personalization`` copy the deterministic repair promotes into {{3}} at persist. BOTH are
+    VT-498-scrubbed of cohort-customer PII before the plan is parsed, so neither leaks a name;
+    ``target_cohort.selection_reason`` (the VT-498 PII-bearing field) is NEVER read here.
+
+    Returns ``(label, offer_copy)``. ``offer_copy`` is None when the chosen template carries no
+    offer slot ({{3}}) — e.g. ``team_winback_simple`` — in which case the caller names the
+    template honestly and shows NO copy (it never fabricates one).
+    """
+    mp = plan.message_plan
+    template_id = mp.template_id
+    params = mp.template_params or {}
+    label = _WINBACK_TEMPLATE_LABELS.get(template_id, _DEFAULT_WINBACK_TEMPLATE_LABEL)
+
+    # Does this template have a {{3}} offer_description slot? The registry is the source of
+    # truth; fail-soft to the presence of a filled ``offer_description`` param when the id is
+    # unknown (e.g. a test-only template) so the echo never raises on the money path.
+    try:
+        from orchestrator.templates_registry import resolve
+
+        has_offer_slot = "offer_description" in resolve(template_id, mp.language.value).variables
+    except Exception:  # noqa: BLE001 — echo must never break arming; degrade to param presence
+        raw = params.get("offer_description")
+        has_offer_slot = isinstance(raw, str) and bool(raw.strip())
+    if not has_offer_slot:
+        return label, None
+
+    raw_offer = str(params.get("offer_description") or "").strip()
+    # A literal angle-bracket placeholder ("<offer_description>") is treated as UNFILLED by the
+    # send-path repair — mirror that and promote personalization instead.
+    if raw_offer and not (raw_offer.startswith("<") and raw_offer.endswith(">")):
+        offer = raw_offer
+    else:
+        offer = mp.personalization.strip()
+    if not offer:
+        return label, None
+    if len(offer) > _SUMMARY_OFFER_ECHO_CAP:
+        offer = offer[:_SUMMARY_OFFER_ECHO_CAP].rstrip() + "…"
+    return label, offer
+
+
 def _build_chat_summary_body(
     plan: CampaignPlanProposed,
     tenant_id: UUID,
@@ -675,6 +737,24 @@ def _build_chat_summary_body(
         f"₹{low_rupees:,}–₹{high_rupees:,}{arrr_basis_hi}। यह रहा अनुमोदन अनुरोध — मंज़ूरी देने "
         f"के लिए जवाब दें; जब तक आप मंज़ूर नहीं करते, कुछ नहीं भेजा जाएगा।{nofm_hi}"
     )
+    # VT-667 — surface WHAT the owner is approving: the template identity + the actual offer
+    # copy that will send (mirrors the send-path {{3}} fill). Money path — the approved artifact
+    # must MATCH the described one (a generic win-back must not pass for a "Diwali offer" ask).
+    # selection_reason stays excluded (VT-498); the offer copy is VT-498-scrubbed at source.
+    # FAIL-SOFT like _derive_summary_money above: this file legitimately receives duck-typed
+    # plan stubs (test/lean callers without message_plan) — the echo clause is an ENRICHMENT and
+    # must never break arming; on any failure the summary simply omits it.
+    try:
+        label, offer_copy = _summary_offer_copy(plan)
+    except Exception:  # noqa: BLE001 — echo enrichment only; arming must proceed
+        logger.warning("collapse: offer-copy echo derivation failed (fail-soft, summary omits it)")
+        label, offer_copy = None, None
+    if offer_copy:
+        en += f' The message they will see includes this offer: "{offer_copy}".'
+        hi += f' उन्हें भेजे जाने वाले संदेश में यह ऑफ़र होगा: "{offer_copy}"।'
+    elif label:
+        en += f" The message is {label} (no special offer)."
+        hi += " भेजा जाने वाला संदेश एक सामान्य विन-बैक संदेश है (कोई विशेष ऑफ़र नहीं)।"
     return {"en": en, "hi": hi}
 
 

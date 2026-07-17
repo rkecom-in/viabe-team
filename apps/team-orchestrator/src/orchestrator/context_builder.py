@@ -254,6 +254,18 @@ class SalesRecoveryContext:
     # these, so the specialist just sees one fewer section, never a crash.
     manager_desired_outcome: str = ""
     manager_acceptance_criteria: list[str] = field(default_factory=list)
+    # VT-667 — the owner's CAMPAIGN CONTENT brief, in their own words. Threaded
+    # from handoffs._build_sales_recovery_update's read of ``manager_step_situation``
+    # (the owner's redacted verbatim ask; on the D3/VT-657 campaign dispatch path it
+    # IS the creative brief — "whip up a Diwali festive offer …"). Free text, LLM-read,
+    # NO keyword extraction (CL-2026-07-15-no-lists). serialize_bundle_for_prompt
+    # renders it SCOPED to MESSAGE CONTENT / template / offer choice ONLY — the
+    # recipient cohort, the campaign window, and the recovery ₹ floors stay
+    # SERVER-owned (VT-651/499) and the brief never overrides them. Safe-empty
+    # default (CL-190): an autonomous (weekly-cadence) dispatch, or any caller
+    # outside the conversational campaign path, leaves it "" so the render section is
+    # omitted and every existing constructor / brief-less flow is byte-unchanged.
+    creative_brief: str = ""
     meta: ContextMeta = field(default_factory=_default_meta)
     # CL-190: True = real data; False = safe-empty fallback (substrate absent
     # or no rows for tenant). Keys are the five section names below.
@@ -691,6 +703,7 @@ def build_sales_recovery_context(
     *,
     manager_desired_outcome: str = "",
     manager_acceptance_criteria: list[str] | None = None,
+    creative_brief: str = "",
 ) -> SalesRecoveryContext:
     """Sole constructor for SalesRecoveryContext bundles.
 
@@ -707,6 +720,10 @@ def build_sales_recovery_context(
     the durable plan step's OWN framing, when this dispatch is running inside the manager loop
     (``handoffs._build_sales_recovery_update`` reads them from graph state and passes them
     through). Both default empty — a non-loop caller (legacy/shadow mode) never supplies them.
+
+    ``creative_brief`` (VT-667): the owner's CAMPAIGN CONTENT ask in their own words, threaded
+    from ``handoffs._build_sales_recovery_update``'s read of ``manager_step_situation``. Default
+    empty — an autonomous / brief-less dispatch leaves it "" and the prompt render is unchanged.
     """
     if not isinstance(user_request, str) or not user_request.strip():
         raise ValueError(
@@ -862,6 +879,7 @@ def build_sales_recovery_context(
         l4_skills=l4_skills,
         manager_desired_outcome=manager_desired_outcome,
         manager_acceptance_criteria=list(manager_acceptance_criteria or []),
+        creative_brief=creative_brief,
         meta=meta,
         data_completeness=data_completeness,
         recovery_target_multiplier=recovery_target_multiplier,
@@ -1209,6 +1227,29 @@ def serialize_bundle_for_prompt(
         if context.manager_acceptance_criteria:
             criteria_lines = "\n".join(f"- {c}" for c in context.manager_acceptance_criteria)
             parts.append(f"\n## Acceptance criteria\n{criteria_lines}")
+
+    # VT-667 — the owner's campaign CONTENT brief (their own words), rendered ONLY when the
+    # conversational campaign path supplied one. An autonomous / brief-less dispatch leaves
+    # creative_brief at its safe-empty default and this section is OMITTED entirely (not an
+    # empty stub) — the prompt for every brief-less flow is byte-unchanged. The instruction
+    # scopes the brief to MESSAGE CONTENT only: the recipient cohort, the campaign window, and
+    # the recovery ₹ figures are SYSTEM-owned (VT-651/499) and the brief must NOT change them.
+    if context.creative_brief.strip():
+        parts.append(
+            "\n## Campaign brief (owner's own words)\n"
+            f"{context.creative_brief}\n\n"
+            "Use this brief to shape the MESSAGE CONTENT ONLY — the greeting, the tone, and the "
+            "offer copy. When the brief describes a specific offer (a discount, a free item, a "
+            "festival theme), choose the win-back template that fits it: `team_winback_offer` "
+            "carries an offer line in its `offer_description` param ({{3}}) — select it and put "
+            "the owner's offer text there; `team_winback_simple` has no offer slot. The owner's "
+            "brief is a legitimate grounding source for the OFFER copy (an owner-authored offer "
+            "is not a customer fact) — but any claim ABOUT a customer still grounds in the cohort "
+            "facts above, never invented, and customer names stay the `<customer_name>` "
+            "placeholder. The recipient cohort (who receives it), the campaign window (when it "
+            "runs), and the expected-recovery figures are SYSTEM-owned — the brief must NOT "
+            "change them."
+        )
 
     parts.append(f"\n## Owner request\n{context.user_request}")
 

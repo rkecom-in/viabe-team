@@ -68,3 +68,38 @@ def test_build_sales_recovery_update_defaults_safe_empty_outside_the_loop() -> N
     bundle = update["sales_recovery_context"]
     assert bundle.manager_desired_outcome == ""
     assert bundle.manager_acceptance_criteria == []
+
+
+def test_build_sales_recovery_update_threads_creative_brief_from_situation() -> None:
+    """VT-667 — the owner's redacted verbatim ask (``manager_step_situation``, set by
+    triage_seam._build_campaign_recovery_plan on the D3/VT-657 campaign path) is threaded
+    VERBATIM into ``SalesRecoveryContext.creative_brief`` so the draft path can reflect the
+    owner's actual campaign brief (a Diwali OFFER, not the canonical win-back)."""
+    from orchestrator.handoffs import _build_sales_recovery_update
+
+    brief = "whip up a Diwali festive offer — 20% off or free dessert, dine-in + online"
+    state = {
+        "messages": [HumanMessage(content="recover my dormant customers")],
+        "tenant_id": uuid4(),
+        "run_id": uuid4(),
+        "manager_step_situation": brief,
+    }
+    update = _build_sales_recovery_update(state)
+    bundle = update["sales_recovery_context"]
+    assert bundle.creative_brief == brief
+
+
+def test_build_sales_recovery_update_creative_brief_defaults_empty() -> None:
+    """VT-667 — an autonomous / non-loop dispatch never sets ``manager_step_situation``; the
+    bundle gets the CL-190 safe-empty default so the prompt render section is omitted (brief-less
+    flows stay byte-unchanged)."""
+    from orchestrator.handoffs import _build_sales_recovery_update
+
+    state = {
+        "messages": [HumanMessage(content="recover my dormant customers")],
+        "tenant_id": uuid4(),
+        "run_id": uuid4(),
+    }
+    update = _build_sales_recovery_update(state)
+    bundle = update["sales_recovery_context"]
+    assert bundle.creative_brief == ""
