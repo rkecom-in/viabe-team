@@ -29,6 +29,15 @@ THE CHECKS (each a named result in the report):
                                        real ``GateFacade`` method (no orphan capability).
   - ``name_registerable``            — the manifest name is non-empty AND the module registers cleanly
                                        into a fresh registry (the full registration path succeeds).
+  - ``required_tools_reachable``     — VT-669 SUFFICIENCY: every tool the manifest lists in
+                                       ``required_tools`` is present in the ``tool_catalog`` AND is
+                                       reachable — on the module's OWN ``tools`` surface OR in the
+                                       Manager-scoped common READ set. Fails-loud (naming the missing
+                                       tool) so a specialist that silently lacks a tool its job needs
+                                       dies at boot, not at 10am. ``n/a`` for a module declaring no
+                                       ``required_tools`` (so this check adds no heavy catalog import
+                                       to the common empty case — the catalog is imported LAZILY, only
+                                       when a module actually declares a required tool).
 
 Heavy imports are LAZY (the deny-list guard pulls langchain via ``orchestrator.agent`` at RUNTIME)
 so this module stays dep-less-smoke safe. A test that exercises the register()/facade paths should
@@ -202,6 +211,55 @@ def _check_gated_capabilities_serviced(module: Any, manifest: AgentManifest) -> 
     return True, ""
 
 
+def _tool_surface_names(tools: Any) -> set[str]:
+    """The ``.name`` (or callable ``__name__``) of each object on a ``tools`` surface."""
+    names: set[str] = set()
+    for t in tools:
+        name = getattr(t, "name", None)
+        if not (isinstance(name, str) and name):
+            name = getattr(t, "__name__", None)
+        if isinstance(name, str) and name:
+            names.add(name)
+    return names
+
+
+def _check_required_tools_reachable(module: Any, manifest: AgentManifest) -> tuple[bool, str]:
+    required = tuple(getattr(manifest, "required_tools", ()) or ())
+    if not required:
+        # The common case (reference plugin + existing modules): nothing required -> nothing to
+        # verify, and — crucially — we do NOT import the tool catalog (heavy: it pulls every tool
+        # surface). The catalog import is gated on a module ACTUALLY declaring a required tool.
+        return True, "n/a: no required_tools declared"
+
+    # Lazy: importing the catalog + the common-read surface pulls langchain (+ a constructed chat
+    # model for the integration surface). Only reached when a module declares required_tools.
+    from orchestrator.agent_framework.tool_catalog import catalog_tool_names
+    from orchestrator.agent_framework.tools_common import COMMON_READ_TOOLS
+
+    catalog_names = catalog_tool_names()
+    own_names = _tool_surface_names(manifest.tools)
+    common_read_names = _tool_surface_names(COMMON_READ_TOOLS)
+    # "reachable" = a tool the module holds itself OR a Manager-scoped common READ it is declared to
+    # reach (ARCHITECTURE §1.1/§1.3 — the specialist pulls operational data via the Manager's reads).
+    reachable = own_names | common_read_names
+
+    not_in_catalog = sorted(t for t in required if t not in catalog_names)
+    if not_in_catalog:
+        return False, (
+            f"required tool(s) not in the tool_catalog (unknown/typo'd tool — a required tool must "
+            f"be a real cataloged tool): {not_in_catalog!r}"
+        )
+    unreachable = sorted(t for t in required if t not in reachable)
+    if unreachable:
+        return False, (
+            f"required tool(s) not REACHABLE by module {manifest.name!r}: {unreachable!r} — none is "
+            f"on the module's own tools surface {sorted(own_names)!r} nor in the Manager-scoped "
+            f"common READ set {sorted(common_read_names)!r}. The specialist cannot actually do its "
+            "job; provision the tool (hold it, or reach it through the Manager's common reads)."
+        )
+    return True, ""
+
+
 def _check_name_registerable(module: Any, manifest: AgentManifest) -> tuple[bool, str]:
     if not manifest.name or not manifest.name.strip():
         return False, "manifest.name is empty/whitespace"
@@ -229,6 +287,7 @@ _CHECKS: tuple[tuple[str, Callable[[Any, AgentManifest], tuple[bool, str]]], ...
     ("proposer_gate_readonly", _check_proposer_gate_readonly),
     ("gated_capabilities_serviced", _check_gated_capabilities_serviced),
     ("name_registerable", _check_name_registerable),
+    ("required_tools_reachable", _check_required_tools_reachable),
 )
 
 #: The complete ordered set of check names a report carries (has_manifest + the manifest-dependent

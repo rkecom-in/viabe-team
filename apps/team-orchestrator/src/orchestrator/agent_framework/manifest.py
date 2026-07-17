@@ -56,6 +56,21 @@ class AgentManifest:
                             ``assert_agent_tools_safe`` — a module holding a forbidden tool is
                             rejected. Default ``()`` (a module that works purely through the context
                             contract + facade, like the reference plugin, holds no tools).
+      - ``required_tools`` — VT-669 SUFFICIENCY: the tool NAMES this module's job REQUIRES to reach
+                            to deliver its outcome (the READ tools per ARCHITECTURE §1.1 + the gated
+                            effect DOOR it arms). The framework enforces tool SAFETY (deny-list) but
+                            never SUFFICIENCY — a specialist could silently lack a tool it needs and
+                            still register clean. This POSITIVE spec closes that hole: the
+                            ``required_tools_reachable`` conformance check fails-loud at boot if a
+                            required tool is not in the ``tool_catalog`` OR is not reachable (neither
+                            on this module's own ``tools`` surface NOR in the Manager-scoped common
+                            READ set). A required tool is NEVER a raw effect — the strongest is a
+                            gated ``REQUEST_*`` door reached through the ``GateFacade``. Default
+                            ``()`` (a module with no hard tool dependency, like the reference plugin).
+                            NOTE the SR "arm != send" nuance: SR records its required READS here while
+                            keeping ``tools=()`` — its reads are Manager-scoped (common set), not
+                            tools it holds; its send EFFECT is reached through the deterministic arm
+                            path, not a gated tool on its manifest (VT-659 Option A).
       - ``entitlement_key`` — OPEN DESIGN QUESTION (for Fazal): the ₹5000-per-agent enablement key.
                             Left OPTIONAL and UN-enforced by the framework: today per-tenant
                             enable/disable is COMPUTED (``onboarding_gate`` + ``coordinator.is_frozen``
@@ -71,6 +86,7 @@ class AgentManifest:
     capabilities: frozenset[Capability] = frozenset()
     prerequisites: AgentPrerequisites | None = None
     tools: tuple[Any, ...] = ()
+    required_tools: tuple[str, ...] = ()
     entitlement_key: str | None = None
 
     @property
@@ -150,6 +166,13 @@ class AgentManifest:
             raise ManifestError(
                 f"manifest {self.name!r}: prerequisites.agent={self.prerequisites.agent!r} must "
                 f"equal manifest.name={self.name!r} (the activation bar keys on the agent name)"
+            )
+        bad_required = [t for t in self.required_tools if not isinstance(t, str) or not t.strip()]
+        if bad_required:
+            raise ManifestError(
+                f"manifest {self.name!r}: required_tools must be a tuple of non-empty tool-name "
+                f"strings (got {bad_required!r}). It names the tools the module's job requires to "
+                "reach (verified by the required_tools_reachable conformance check), not tool objects."
             )
 
 
