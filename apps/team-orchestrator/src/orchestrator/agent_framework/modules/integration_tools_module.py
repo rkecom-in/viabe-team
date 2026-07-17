@@ -81,6 +81,7 @@ deny-list-clean. That is the shape here.
 from __future__ import annotations
 
 import logging
+import os
 from collections.abc import Callable
 from typing import Any
 
@@ -94,6 +95,30 @@ logger = logging.getLogger("orchestrator.agent_framework.modules.integration_too
 #: The module's stable registry key. DISTINCT from the live roster ``integration`` brain (see the
 #: module docstring, "REGISTRATION SHAPE"); a naming call is deferred to the gated cutover step.
 MODULE_NAME = "integration_tools"
+
+#: VT-101 Stage 3(c) — the SINGLE SOURCE OF TRUTH for whether the Integration surface routes through
+#: the agent_framework contract: the Manager holds the connector Tools directly (advisory-tool
+#: demotion) and the ``integration`` sub-graph specialist is dissolved from the spawnable roster.
+#: Both the roster (``spawnable_roster``) and the supervisor (Manager tool set) read it. Default OFF:
+#: the pre-VT-101 spawn-the-integration-specialist path runs byte-identically. Dev sets it to validate
+#: the dissolution; prod stays unset until Fazal promotes. Mirrors the SR module's
+#: ``FRAMEWORK_ROUTING_FLAG`` / ``sr_via_framework`` pattern exactly.
+FRAMEWORK_ROUTING_FLAG = "TEAM_INTEGRATION_VIA_FRAMEWORK"
+
+
+def integration_via_framework() -> bool:
+    """True iff the Integration surface should route through the agent_framework contract — the
+    Manager drives the connector Tools directly and the ``integration`` specialist is excluded from
+    the spawnable roster (default OFF).
+
+    Read at CALL TIME (never cached at import) so dev can flip it per-process; prod stays unset until
+    Fazal promotes. Mirrors ``sales_recovery_module.sr_via_framework`` exactly."""
+    return os.environ.get(FRAMEWORK_ROUTING_FLAG, "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
 
 #: Injectable state-reader signature: ``(tenant_id: str) -> integration-state dict | None`` (the
 #: ``{"phase", "current_connector_id", "pending_owner_input"}`` shape ``read_integration_state``
@@ -199,7 +224,9 @@ class IntegrationToolsModule:
 
 
 __all__ = [
+    "FRAMEWORK_ROUTING_FLAG",
     "MODULE_NAME",
     "IntegrationToolsModule",
     "StateReaderFn",
+    "integration_via_framework",
 ]
