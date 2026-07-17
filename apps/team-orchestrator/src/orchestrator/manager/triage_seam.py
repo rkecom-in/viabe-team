@@ -192,6 +192,157 @@ def _dispatch_campaign_first_contact(
     return None
 
 
+# VT-667 fix-4 — the honest owner ack when a pending campaign draft is REVISED (never a re-mint,
+# never a template-error deflection). Deterministic reply string only; sent via the runner's /
+# router's replay-safe ack step (money gates untouched).
+_REVISION_ACK = (
+    "Got it — I'm reworking the campaign with your changes. I'll send the updated draft here for "
+    "your approval before anything goes out."
+)
+
+
+def revise_pending_campaign(
+    tenant_id: UUID | str, correction_text: str, message_sid: str
+) -> str | None:
+    """VT-667 fix-4 (MONEY-PATH) — a campaign-reaction turn arriving while an OPEN ``campaign_send``
+    approval is pending is a REVISION of THAT draft: never a fresh campaign (loop_stall / double-arm)
+    and never a template-error deflection (ignored_speech_act). The deterministic anchor is the
+    STATE — an open ``campaign_send`` approval exists — NOT the phrasing (CL-2026-07-15-no-lists);
+    the CALLER supplies the campaign-reaction SIGNAL (triage's campaign_recovery / the D3 imperative,
+    or the Haiku ``template_error_followup`` bucket in edge_cases_router). Returns the honest owner
+    ack when it HANDLED the turn (revision dispatched), else None (no pending ``campaign_send``
+    approval — the caller keeps its own path unchanged).
+
+    Money-safety (all hold):
+      * the OLD draft can NEVER send — its approval is RESOLVED (decision='rejected') before we
+        return, so the send chokepoint (which requires decision=='approved' on that run_id) refuses
+        it. ``mark_resolved`` IS the supersede primitive (no new wrapper needed).
+      * NO double-arm — exactly one open approval at a time: the old approval is resolved HERE,
+        synchronously, before the fresh SR loop (started below) can arm the revised draft's approval.
+      * NO auto-send — the revised draft goes through the normal arm→approve gate (the owner rejected
+        the old copy; they must approve the new one). Correctness gates unchanged.
+
+    The stale draft's loop is a LIVE durable approval-poll (``workflow._dispatch_specialist_step``
+    waits in-line via ``DBOS.sleep``). We CANCEL that workflow FIRST so it can't wake, read the
+    resolution, and settle/notify 'declined' — racing this revision. Best-effort: money-safety does
+    NOT depend on the cancel (the supersede already makes the draft unsendable); the cancel only
+    suppresses the confusing decline notify. Every write here is idempotent — replay-safe as a plain
+    fn inside the webhook ``@DBOS.workflow`` (mirrors ``_dispatch_campaign_first_contact``):
+    mark_resolved no-ops on an already-resolved row, set_task_status CAS no-ops on a terminal task,
+    create_plan dedups on ``message_sid``, start/cancel_workflow key on the deterministic workflow_id.
+    """
+    from orchestrator.db.wrappers import PendingApprovalsWrapper
+    from orchestrator.manager import plan_store, task_store
+    from orchestrator.manager.workflow import (
+        manager_task_workflow_id,
+        start_manager_task_workflow,
+    )
+
+    wrapper = PendingApprovalsWrapper()
+    approval = wrapper.find_open_for_tenant(tenant_id)
+    # Anchor: ONLY an open campaign_send approval (the SR loop-armed customer send). Any other open
+    # type (agent_customer_send batch, autonomy_upgrade, …) or none at all → not our case.
+    if approval is None or approval.get("approval_type") != "campaign_send":
+        return None
+    approval_id = approval["id"]
+
+    # The stale draft's bound loop task (for cancel + the ORIGINAL brief); None on a legacy
+    # graph-path approval with no manager_task (then: supersede + re-dispatch, nothing to cancel).
+    bound = wrapper.find_bound_task_for_approval(tenant_id, approval_id)
+    old_task_id = bound.get("id") if bound else None
+
+    original_brief = ""
+    if old_task_id is not None:
+        old = task_store.get_task(tenant_id, old_task_id)
+        # objective IS the original campaign brief (_build_campaign_recovery_plan set it to the
+        # redacted first message); the safe-empty fallback keeps the revision working brief-less.
+        original_brief = (old.get("objective") if old else "") or ""
+
+    # (1) STOP the stale draft's live approval-poll BEFORE superseding, so it can't wake, read the
+    #     resolution, and settle/notify 'declined'. Best-effort (money-safety holds without it).
+    if old_task_id is not None:
+        try:
+            from dbos import DBOS
+
+            DBOS.cancel_workflow(manager_task_workflow_id(tenant_id, old_task_id))
+        except Exception:  # noqa: BLE001 — cancel is best-effort; the supersede below is the money gate
+            logger.warning(
+                "revise_pending_campaign: cancel stale loop failed (best-effort) tenant=%s task=%s",
+                tenant_id, old_task_id, exc_info=True,
+            )
+
+    # (2) SUPERSEDE the stale approval — resolved ⇒ the old draft can NEVER send (the money anchor).
+    wrapper.mark_resolved(
+        tenant_id, approval_id, decision="rejected", status="rejected",
+        owner_message_sid=message_sid,
+    )
+
+    # (3) CANCEL the stale task so it frees the tenant's one-active slot (create_plan below can then
+    #     admit the revision 'planned'). CAS no-op if already terminal.
+    if old_task_id is not None:
+        task_store.set_task_status(
+            tenant_id, old_task_id, "cancelled",
+            expected_from=tuple(task_store.TASK_NON_TERMINAL),
+        )
+
+    # (4) RE-DISPATCH a fresh SR campaign_recovery plan whose creative brief = the ORIGINAL brief +
+    #     the owner's correction, threaded VERBATIM (VT-667: the plan step situation → creative_brief
+    #     → serialize_bundle_for_prompt's "Campaign brief" section). NO effect bypass — the revised
+    #     draft routes through the same arm/approval/consent/opt-out rails as any SR send.
+    combined_brief = (
+        f"{original_brief}\n\nOwner's follow-up correction: {correction_text}"
+        if original_brief.strip()
+        else correction_text
+    )
+    new_task_id = plan_store.create_plan(
+        tenant_id, _build_campaign_recovery_plan(combined_brief),
+        source_message_sid=message_sid, shadow=False,
+    )
+    new_row = task_store.get_task(tenant_id, new_task_id) if new_task_id is not None else None
+    if new_row is None or str(new_row["status"]) != "planned":
+        # The old task was cancelled above, so the slot is free and this should admit 'planned'; if
+        # it somehow didn't, NEVER leave a queued revision that won't start — record + fall through
+        # (the caller keeps its own path). The old approval is already superseded (still money-safe).
+        emit_tm_audit(
+            event_layer="decides", event_kind="campaign_revision_not_admitted",
+            actor="team_manager", tenant_id=tenant_id,
+            summary="campaign revision plan not admitted 'planned' — fell through after supersede",
+            decision={"message_sid": message_sid, "old_approval_id": str(approval_id)},
+        )
+        return None
+    start_manager_task_workflow(tenant_id, new_task_id)
+    emit_tm_audit(
+        event_layer="decides", event_kind="campaign_revision_dispatched",
+        actor="team_manager", tenant_id=tenant_id,
+        summary="pending campaign correction → superseded the stale draft + re-dispatched SR with "
+        "the combined brief (no re-mint, no template-error deflect)",
+        decision={
+            "message_sid": message_sid,
+            "old_approval_id": str(approval_id),
+            "old_task_id": str(old_task_id) if old_task_id is not None else None,
+            "new_task_id": str(new_task_id),
+        },
+    )
+    return _REVISION_ACK
+
+
+def _dispatch_campaign_first_contact_or_revision(
+    tenant_id: UUID, message_text: str, message_sid: str,
+) -> TriageSeamResult | None:
+    """VT-667 fix-4 — the campaign-dispatch entry shared by the enforce D3 keyword net AND the VT-657
+    campaign_recovery route. When an OPEN ``campaign_send`` approval is pending, a campaign turn is a
+    REVISION of THAT draft (``revise_pending_campaign``: supersede the stale draft + re-dispatch with
+    the combined brief), never a fresh first-contact re-mint (the observed loop_stall/double-arm).
+    Otherwise it is a genuine first contact. Returns the revision result / first-contact result /
+    None (caller falls through), preserving both call sites' existing None-means-fall-through."""
+    ack = revise_pending_campaign(tenant_id, message_text, message_sid)
+    if ack is not None:
+        return TriageSeamResult(
+            outcome="new_task", task_id=None, skip_legacy_dispatch=True, direct_reply_text=ack,
+        )
+    return _dispatch_campaign_first_contact(tenant_id, message_text, message_sid)
+
+
 def _create_plan_for_new_task(
     tenant_id: UUID, message_text: str, message_sid: str, *, shadow: bool,
 ) -> UUID | None:
@@ -324,7 +475,11 @@ def triage_seam(
             # The KEYWORD trigger (frozen — no phrasing growth; the LLM route below is the phrasing-
             # agnostic primary per the Fazal no-lists law). Shares one dispatch body with option C.
             if is_campaign_plan_imperative(message_text):
-                camp_res = _dispatch_campaign_first_contact(tenant_id, message_text, message_sid)
+                # VT-667 fix-4: an OPEN campaign_send approval turns this into a REVISION of the
+                # pending draft, not a fresh first-contact re-mint (revise_pending_campaign).
+                camp_res = _dispatch_campaign_first_contact_or_revision(
+                    tenant_id, message_text, message_sid
+                )
                 if camp_res is not None:
                     return camp_res
                 # create_plan didn't admit 'planned' — fall through to triage_turn (never silent).
@@ -371,7 +526,10 @@ def triage_seam(
             and result.task_kind == "campaign_recovery"
         ):
             try:
-                camp_res = _dispatch_campaign_first_contact(tenant_id, message_text, message_sid)
+                # VT-667 fix-4: a pending campaign_send approval makes this a REVISION, not a re-mint.
+                camp_res = _dispatch_campaign_first_contact_or_revision(
+                    tenant_id, message_text, message_sid
+                )
             except Exception:  # noqa: BLE001 — mirror D3 fail-open: never block the turn
                 logger.warning(
                     "C campaign-recovery route failed tenant=%s (fail-open -> generic plan)",
@@ -451,4 +609,4 @@ def triage_seam(
     return TriageSeamResult(outcome=result.outcome, task_id=None, skip_legacy_dispatch=False)
 
 
-__all__ = ["TriageSeamResult", "triage_seam"]
+__all__ = ["TriageSeamResult", "revise_pending_campaign", "triage_seam"]

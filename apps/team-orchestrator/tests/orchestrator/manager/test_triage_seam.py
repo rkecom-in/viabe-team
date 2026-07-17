@@ -99,6 +99,10 @@ def _stub_seam_reads(
     monkeypatch.setattr(
         "orchestrator.owner_inputs.status_query.answer_status_query", lambda *a, **k: None
     )
+    # VT-667 fix-4: the campaign-dispatch entry now first checks for a pending campaign_send approval
+    # (revise_pending_campaign). Default it to "no pending campaign" so the first-contact routing
+    # tests below stay pure-logic (no DB read); the revision path has its own dedicated tests.
+    monkeypatch.setattr(ts, "revise_pending_campaign", lambda *a, **k: None)
 
 
 def _boom(*_a, **_k):
@@ -193,3 +197,211 @@ def test_vt657_campaign_recovery_not_dispatched_when_active_task(
         mode="enforce",
     )
     assert result.outcome == "new_task"
+
+
+# ── VT-667 fix-4 — pending-campaign REVISION (correction → supersede stale draft + re-dispatch) ────
+
+
+class _FakeApprovals:
+    """Stand-in for PendingApprovalsWrapper: returns the seeded open approval / bound task and
+    records the supersede (mark_resolved) — appending to a shared ``order`` list so a test can pin
+    that the old approval is resolved BEFORE the fresh loop starts (no double-arm window)."""
+
+    def __init__(self, *, open_approval, bound_task, order):
+        self._open = open_approval
+        self._bound = bound_task
+        self._order = order
+        self.resolved: list[dict] = []
+
+    def find_open_for_tenant(self, tenant_id, *, conn=None):
+        return self._open
+
+    def find_bound_task_for_approval(self, tenant_id, approval_id, *, conn=None):
+        return self._bound
+
+    def mark_resolved(
+        self, tenant_id, approval_id, *, decision, status, owner_message_sid=None, conn=None
+    ):
+        self._order.append("supersede")
+        self.resolved.append({"approval_id": approval_id, "decision": decision, "status": status})
+        return 1
+
+
+_ORIGINAL_BRIEF = "run a simple win-back (no offer) for my lapsed customers"
+
+
+def _install_revision_stubs(monkeypatch, *, open_approval, bound_task, new_status="planned"):
+    """Wire revise_pending_campaign's collaborators for a pure-logic test (no DB / no DBOS)."""
+    order: list[str] = []
+    fake = _FakeApprovals(open_approval=open_approval, bound_task=bound_task, order=order)
+    monkeypatch.setattr("orchestrator.db.wrappers.PendingApprovalsWrapper", lambda: fake)
+
+    new_id = uuid4()
+    events: dict[str, list] = {
+        "cancelled_wf": [], "cancelled_task": [], "started": [], "created": [], "order": order,
+    }
+
+    def _get_task(tenant_id, task_id):
+        if bound_task is not None and str(task_id) == str(bound_task["id"]):
+            return {"objective": _ORIGINAL_BRIEF}  # the OLD task carries the original brief
+        return {"status": new_status}  # the freshly-created revision task's admission status
+
+    monkeypatch.setattr("orchestrator.manager.task_store.get_task", _get_task)
+    monkeypatch.setattr(
+        "orchestrator.manager.task_store.set_task_status",
+        lambda tid, task_id, status, **k: events["cancelled_task"].append((str(task_id), status))
+        or True,
+    )
+
+    def _create_plan(tenant_id, plan, *, source_message_sid, shadow=False):
+        events["created"].append(
+            {"situation": plan.steps[0].situation, "sid": source_message_sid, "shadow": shadow}
+        )
+        return new_id
+
+    monkeypatch.setattr("orchestrator.manager.plan_store.create_plan", _create_plan)
+    monkeypatch.setattr(
+        "orchestrator.manager.workflow.start_manager_task_workflow",
+        lambda tid, task_id: (events["order"].append("start"), events["started"].append(str(task_id))),
+    )
+    monkeypatch.setattr(
+        "orchestrator.manager.workflow.manager_task_workflow_id",
+        lambda tid, task_id: f"manager_task:{tid}:{task_id}",
+    )
+    import dbos
+
+    monkeypatch.setattr(
+        dbos.DBOS, "cancel_workflow",
+        lambda wf_id: events["cancelled_wf"].append(wf_id), raising=False,
+    )
+    monkeypatch.setattr(ts, "emit_tm_audit", lambda **k: None)
+    return fake, events, new_id
+
+
+def test_revision_supersedes_old_draft_and_redispatches_with_combined_brief(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The core fix: a correction while a campaign_send approval is OPEN cancels the stale loop,
+    supersedes the old approval (decision='rejected' → the old draft can never send), cancels the
+    old task, and re-dispatches SR with creative_brief = ORIGINAL brief + the correction verbatim."""
+    tenant = uuid4()
+    old_task = uuid4()
+    aid = str(uuid4())
+    fake, events, new_id = _install_revision_stubs(
+        monkeypatch,
+        open_approval={"id": aid, "run_id": str(uuid4()), "approval_type": "campaign_send"},
+        bound_task={"id": str(old_task), "status": "waiting_owner", "approval_type": "campaign_send"},
+    )
+
+    correction = "this isn't the Diwali offer I asked for — redo it with the festive vibe + 20% discount"
+    ack = ts.revise_pending_campaign(tenant, correction, "SMcorr")
+
+    assert ack == ts._REVISION_ACK
+    # supersede: exactly one, non-approved → the old draft is unsendable at the chokepoint
+    assert fake.resolved == [{"approval_id": aid, "decision": "rejected", "status": "rejected"}]
+    # the stale loop workflow was cancelled (by the deterministic id) BEFORE anything else
+    assert events["cancelled_wf"] == [f"manager_task:{tenant}:{old_task}"]
+    # the stale task was cancelled to free the one-active slot
+    assert events["cancelled_task"] == [(str(old_task), "cancelled")]
+    # a fresh loop was started for the revision task
+    assert events["started"] == [str(new_id)]
+    # the re-dispatched plan's brief carries BOTH the original AND the correction (VT-667 threading)
+    situation = events["created"][0]["situation"]
+    assert "simple win-back (no offer)" in situation  # original brief
+    assert "festive vibe" in situation and "20% discount" in situation  # the owner's correction
+    assert events["created"][0]["sid"] == "SMcorr"  # idempotency key = the correction's sid
+    assert events["created"][0]["shadow"] is False
+
+
+def test_revision_supersede_happens_before_the_new_loop_starts_no_double_arm(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Money-safety: the old approval is RESOLVED before the fresh SR loop is started, so there is
+    never a window with two open approvals for the tenant (no double-arm / no double-send)."""
+    fake, events, _ = _install_revision_stubs(
+        monkeypatch,
+        open_approval={"id": str(uuid4()), "run_id": str(uuid4()), "approval_type": "campaign_send"},
+        bound_task={"id": str(uuid4()), "status": "waiting_owner", "approval_type": "campaign_send"},
+    )
+    ts.revise_pending_campaign(uuid4(), "make it festive", "SMorder")
+    assert events["order"].index("supersede") < events["order"].index("start")
+
+
+def test_revision_no_open_approval_returns_none_and_touches_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No pending campaign_send approval → NOT a revision: return None, supersede/dispatch nothing."""
+    fake, events, _ = _install_revision_stubs(monkeypatch, open_approval=None, bound_task=None)
+    assert ts.revise_pending_campaign(uuid4(), "anything", "SMx") is None
+    assert fake.resolved == [] and events["started"] == [] and events["created"] == []
+
+
+def test_revision_non_campaign_send_approval_is_left_alone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An OPEN approval of another type (autonomy_upgrade, agent_customer_send batch, …) is NOT a
+    campaign draft — the revision must not touch it (returns None → caller keeps its own path)."""
+    fake, events, _ = _install_revision_stubs(
+        monkeypatch,
+        open_approval={"id": str(uuid4()), "run_id": str(uuid4()), "approval_type": "autonomy_upgrade"},
+        bound_task=None,
+    )
+    assert ts.revise_pending_campaign(uuid4(), "yes go ahead", "SMx") is None
+    assert fake.resolved == [] and events["started"] == []
+
+
+def test_revision_legacy_graph_approval_without_bound_task_still_safe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A campaign_send approval with NO bound manager_task (legacy graph path) still supersedes +
+    re-dispatches — nothing to cancel, brief falls back to the correction alone."""
+    fake, events, new_id = _install_revision_stubs(
+        monkeypatch,
+        open_approval={"id": str(uuid4()), "run_id": str(uuid4()), "approval_type": "campaign_send"},
+        bound_task=None,
+    )
+    ack = ts.revise_pending_campaign(uuid4(), "add a Diwali discount", "SMleg")
+    assert ack == ts._REVISION_ACK
+    assert events["cancelled_wf"] == [] and events["cancelled_task"] == []  # nothing bound to cancel
+    assert len(fake.resolved) == 1 and events["started"] == [str(new_id)]
+    assert events["created"][0]["situation"] == "add a Diwali discount"  # correction-only brief
+
+
+def test_revision_not_admitted_falls_through_after_supersede(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If the fresh plan somehow does not admit 'planned', never leave a queued revision that won't
+    start — return None (caller falls through). The old approval is still superseded (money-safe)."""
+    fake, events, _ = _install_revision_stubs(
+        monkeypatch,
+        open_approval={"id": str(uuid4()), "run_id": str(uuid4()), "approval_type": "campaign_send"},
+        bound_task={"id": str(uuid4()), "status": "waiting_owner", "approval_type": "campaign_send"},
+        new_status="queued",  # slot somehow still held → not admitted 'planned'
+    )
+    assert ts.revise_pending_campaign(uuid4(), "make it festive", "SMq") is None
+    assert len(fake.resolved) == 1  # supersede STILL happened (old draft unsendable)
+    assert events["started"] == []  # no orphan loop started
+
+
+def test_dispatch_first_contact_or_revision_prefers_revision_when_pending(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The shared campaign-dispatch entry routes to the REVISION (not a first-contact re-mint) when
+    revise_pending_campaign reports a pending draft."""
+    monkeypatch.setattr(ts, "revise_pending_campaign", lambda *a, **k: "REWORKING IT")
+    monkeypatch.setattr(ts, "_dispatch_campaign_first_contact", _boom)  # must NOT re-mint
+    out = ts._dispatch_campaign_first_contact_or_revision(uuid4(), "redo the offer", "SMr")
+    assert out is not None
+    assert out.skip_legacy_dispatch is True
+    assert out.direct_reply_text == "REWORKING IT"
+    assert out.outcome == "new_task"
+
+
+def test_dispatch_first_contact_or_revision_falls_to_first_contact_when_no_pending(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No pending draft → the entry behaves exactly as the first-contact dispatch (unchanged)."""
+    sentinel = ts.TriageSeamResult(outcome="new_task", task_id=uuid4(), skip_legacy_dispatch=True)
+    monkeypatch.setattr(ts, "revise_pending_campaign", lambda *a, **k: None)
+    monkeypatch.setattr(ts, "_dispatch_campaign_first_contact", lambda *a, **k: sentinel)
+    assert ts._dispatch_campaign_first_contact_or_revision(uuid4(), "win back", "SMf") is sentinel

@@ -130,6 +130,29 @@ def route_edge_case(
         )
 
     if classification == "template_error_followup":
+        # VT-667 fix-4 (MONEY-PATH) — a "this message is wrong" report arriving while an OPEN
+        # campaign_send approval is pending is almost never a delivered-template failure (that draft
+        # has NOT been sent yet); it is a CORRECTION of the pending draft. Route it to the campaign
+        # REVISION (supersede the stale draft + re-dispatch SR with the combined brief) instead of
+        # the Fazal-review deflection that ignores the owner's ask (the observed ignored_speech_act).
+        # Gated on enforce mode (the SR loop) + the open-approval STATE (revise_pending_campaign
+        # self-checks it): a genuine template-error with NO open campaign approval keeps the existing
+        # path byte-for-byte, and legacy/shadow behaviour is unchanged.
+        from orchestrator.manager.loop_mode import is_enforce
+
+        message_sid = getattr(event, "twilio_message_sid", None)
+        if is_enforce() and message_sid:
+            from orchestrator.manager.triage_seam import revise_pending_campaign
+
+            revision_ack = revise_pending_campaign(tenant_id, body, message_sid)
+            if revision_ack is not None:
+                _send_edge_ack(tenant_id, sender_phone, revision_ack)
+                return DispatchResult(
+                    final_status="completed",
+                    terminal_path="terminal",
+                    reason="edge_case:campaign_revision",
+                )
+
         from orchestrator.owner_inputs.template_error import handle_template_error
 
         te_result = handle_template_error(tenant_id, body)

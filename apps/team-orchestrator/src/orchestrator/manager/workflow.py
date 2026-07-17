@@ -1325,14 +1325,21 @@ def manager_task_workflow(tenant_id: str, task_id: str) -> str:
     return final_status
 
 
+def manager_task_workflow_id(tenant_id: UUID | str, task_id: UUID | str) -> str:
+    """The deterministic DBOS workflow_id for a task's loop — the SINGLE source of this format so a
+    caller that needs to address the running workflow (start OR cancel) can never drift from it.
+    VT-667 fix-4 reuses this to cancel a stale campaign draft's live approval-poll before superseding
+    its approval (triage_seam.revise_pending_campaign)."""
+    return f"manager_task:{tenant_id}:{task_id}"
+
+
 def start_manager_task_workflow(tenant_id: UUID | str, task_id: UUID | str) -> None:
     """Durably START the loop for ``task_id`` — fire-and-forget (``DBOS.start_workflow``), keyed
     by ``(tenant_id, task_id)`` so a REPEAT start for the SAME task (e.g. an idempotent triage
     re-classification) is a safe no-op while the workflow is in flight or already completed. NOT
     the resume path for an ``ask_owner`` pause — that resume happens INSIDE the SAME workflow
     execution via its own durable poll/sleep loop, never a second start."""
-    workflow_id = f"manager_task:{tenant_id}:{task_id}"
-    with SetWorkflowID(workflow_id):
+    with SetWorkflowID(manager_task_workflow_id(tenant_id, task_id)):
         DBOS.start_workflow(manager_task_workflow, str(tenant_id), str(task_id))
 
 
@@ -1341,5 +1348,6 @@ __all__ = [
     "LIMIT_MAX_REVISIONS_PER_STEP",
     "StepOutcome",
     "manager_task_workflow",
+    "manager_task_workflow_id",
     "start_manager_task_workflow",
 ]
