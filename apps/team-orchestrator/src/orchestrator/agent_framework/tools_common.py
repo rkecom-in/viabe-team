@@ -276,6 +276,59 @@ def read_active_plan(tenant_id: str, owning_agent: str = "") -> dict[str, Any]:
     }
 
 
+@tool
+def read_agent_memory(tenant_id: str, pattern_type: str, cohort_key: str) -> dict[str, Any]:
+    """Read an anonymized L3 prior ON DEMAND — cross-tenant aggregates only, never a tenant's data.
+
+    VT-674 (capability gap `on_demand_memory_read`): L3 priors were context-ASSEMBLED (pre-baked
+    into the bundle at dispatch); a specialist could not ask memory mid-loop ("have we tried this
+    play on this cohort before"). This tool is that on-demand read. It DELEGATES to the canonical
+    ``knowledge.l3_query.lookup_pattern`` seam — so BOTH structural protections hold by construction,
+    not by re-implementation:
+      - the 180-day tenant QUARANTINE (VT-69, Type-3/Pillar-7: no override parameter exists), and
+      - k-anonymity (VT-68 construction only ever writes cohorts with >=10 contributing tenants;
+        a pattern row carries aggregates only — no tenant_id, no customer id, no city).
+
+    Returns on a hit: ``pattern_type`` / ``cohort_key`` / ``n_tenants`` / ``n_campaigns`` /
+    ``metrics`` (aggregate dict) / ``confidence_band`` — the anonymized prior. On a miss (cohort
+    below k at construction, or the tenant is quarantined): ``{"prior": None, ...}`` — an HONEST
+    no-prior marker the caller must render as "no prior available", NEVER a fabricated default.
+    (Deliberately does not disclose WHICH reason produced None — quarantine state is not a
+    specialist-visible signal.)
+
+    Tenant is resolved from the ambient run context (model ``tenant_id`` untrusted); an
+    unresolvable tenant returns a structured error dict, never a raise. This is a READ — no L3
+    mutation path exists on this surface.
+    """
+    resolved = resolve_lane_tenant(tenant_id, tool_name="read_agent_memory")
+    if resolved is None:
+        return lane_tenant_error("read_agent_memory")
+
+    # Lazy: the L3 query seam pulls psycopg/pool — kept off this module's import surface.
+    from orchestrator.knowledge.l3_query import lookup_pattern
+
+    try:
+        pattern = lookup_pattern(resolved, str(pattern_type), str(cohort_key))
+    except Exception as exc:  # noqa: BLE001 — a lane tool must never RAISE (would orphan the tool_use)
+        logger.warning("read_agent_memory: L3 lookup failed (tenant=%s): %s", resolved, exc)
+        return {"status": "error", "error": "read_agent_memory: memory read failed"}
+
+    if pattern is None:
+        return {"prior": None, "pattern_type": str(pattern_type), "cohort_key": str(cohort_key)}
+    return {
+        "prior": {
+            "pattern_type": pattern.pattern_type,
+            "cohort_key": pattern.cohort_key,
+            "n_tenants": pattern.n_tenants,
+            "n_campaigns": pattern.n_campaigns,
+            "metrics": dict(pattern.metrics or {}),
+            "confidence_band": pattern.confidence_band,
+        },
+        "pattern_type": pattern.pattern_type,
+        "cohort_key": pattern.cohort_key,
+    }
+
+
 #: The common READ tools, in a stable order — the surface a Manager/specialist drives to pull
 #: operational data (ARCHITECTURE.md §1.1/§1.3). These are the whole point of this module; the
 #: Manager holds them on its shelf and a specialist reaches them through the Manager's resolved
@@ -285,6 +338,7 @@ COMMON_READ_TOOLS: tuple[Any, ...] = (
     read_business_context,
     read_integration_state,
     read_active_plan,
+    read_agent_memory,
 )
 
 # Fail-CLOSED at import: these are READS and MUST pass the deny-list guard (they hold no
@@ -297,6 +351,7 @@ assert_agent_tools_safe(COMMON_READ_TOOLS, surface="common_read_tools")
 __all__ = [
     "COMMON_READ_TOOLS",
     "read_active_plan",
+    "read_agent_memory",
     "read_business_context",
     "read_customer_ledger_summary",
     "read_integration_state",
