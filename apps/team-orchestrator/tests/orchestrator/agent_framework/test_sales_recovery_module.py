@@ -93,12 +93,20 @@ def test_manifest_shape():
     assert m.gated_capabilities == frozenset()
     assert Capability.REQUEST_CUSTOMER_SEND not in m.capabilities
     assert m.tools == ()
-    # VT-669 SUFFICIENCY: SR holds NO tools of its own (tools=()), but its job REQUIRES the two
+    # VT-669 SUFFICIENCY: SR holds NO tools of its own (tools=()), but its job REQUIRES the
     # Manager-scoped common READ tools to frame a win-back — recorded here (the ``tools=()``
     # resolution: required reads are Manager-scoped, not tools on SR's own surface). Its send EFFECT
     # is NOT a required gated tool (arm != send, Option A) — the send is reached downstream via the
     # deterministic arm path, so there is no REQUEST_CUSTOMER_SEND tool to require.
-    assert m.required_tools == ("read_customer_ledger_summary", "read_business_context")
+    # VT-675 widened the set with the three promoted richer reads (campaign history + attribution +
+    # per-customer ledger) — now common-reachable, so declaring them is verified, not aspirational.
+    assert m.required_tools == (
+        "read_customer_ledger_summary",
+        "read_business_context",
+        "get_recent_campaigns",
+        "get_attribution_data",
+        "query_customer_ledger",
+    )
 
 
 def test_manifest_reuses_sr_activation_bar_verbatim():

@@ -152,7 +152,16 @@ class SalesRecoveryModule:
         # (arm != send, VT-659 Option A) downstream, so there is no ``REQUEST_CUSTOMER_SEND`` tool
         # to require on the manifest. The ``required_tools_reachable`` check verifies both reads are
         # cataloged + reachable via the Manager-scoped common READ set.
-        required_tools=("read_customer_ledger_summary", "read_business_context"),
+        required_tools=(
+            "read_customer_ledger_summary",
+            "read_business_context",
+            # VT-675: the promoted richer reads — a win-back needs prior-campaign history +
+            # attribution + per-customer ledger detail; now common-reachable, so declaring them
+            # is verified (not aspirational) by required_tools_reachable.
+            "get_recent_campaigns",
+            "get_attribution_data",
+            "query_customer_ledger",
+        ),
     )
 
     def __init__(

@@ -162,6 +162,25 @@ _COMMON_READ_ANN: dict[str, _Ann] = {
         "180d quarantine + k>=10 anonymized aggregates structural — cross-tenant global table, "
         "resolved tenant used ONLY for the quarantine check)",
     ),
+    # VT-675 promotions — resolve-first @tool WRAPPERS over the agent/tools payload functions (the
+    # raw functions take a model-supplied payload.tenant_id — promoting them verbatim would be the
+    # VT-293/294/599 IDOR class; the wrappers resolve the ambient tenant then delegate).
+    # get_recent_campaigns gains its FIRST catalog entry here — the raw fn was on no swept surface.
+    "get_recent_campaigns": _Ann(
+        ToolKind.READ, None,
+        note="VT-675 promoted (resolve-first wrapper): recent-campaign rollup (counts/statuses "
+        "only, CL-390)",
+    ),
+    "get_attribution_data": _Ann(
+        ToolKind.READ, None,
+        note="VT-675 promoted (resolve-first wrapper): attribution rollup (counts/aggregates)",
+    ),
+    "query_customer_ledger": _Ann(
+        ToolKind.READ, None,
+        note="VT-675 promoted (resolve-first wrapper): operator-role ledger read (phone-token "
+        "input, customer_id UUIDs + amounts out — never name/phone/email; scope unchanged, "
+        "CL-82/CL-390)",
+    ),
 }
 
 # --- home: integration_agent (agent/integration_agent.py) — the 11 VT-608 connector tools ---------
@@ -770,20 +789,9 @@ KNOWN_CAPABILITY_GAPS: tuple[CapabilityGap, ...] = (
     # on_demand_memory_read (VT-674): CLOSED 2026-07-18 — `read_agent_memory` built into
     # COMMON_READ_TOOLS (delegates to knowledge.l3_query.lookup_pattern: quarantine + k-anon
     # structural); entry deleted per the registry-honesty test.
-    CapabilityGap(
-        key="richer_reads_into_common",
-        title="Promote richer reads into the COMMON set",
-        kind=GapKind.ABSENT_FROM_COMMON,
-        probe_names=("get_recent_campaigns", "get_attribution_data", "query_customer_ledger"),
-        needed_by=("sales_recovery", "all_lanes"),
-        reason=(
-            "`get_recent_campaigns` / `get_attribution_data` / `query_customer_ledger` exist as LANE "
-            "tools (cataloged) but are not in the Manager-scoped COMMON read set every specialist reaches. "
-            "A win-back specialist needs prior-campaign + attribution + ledger reads as COMMON, not lane-"
-            "local. Promote them (PII-gated) into the common surface."
-        ),
-        followon_vt="VT-675",
-    ),
+    # richer_reads_into_common (VT-675): CLOSED 2026-07-18 — get_recent_campaigns /
+    # get_attribution_data / query_customer_ledger promoted onto COMMON_READ_TOOLS (same objects,
+    # scope unchanged); entry deleted per the registry-honesty test.
 )
 
 

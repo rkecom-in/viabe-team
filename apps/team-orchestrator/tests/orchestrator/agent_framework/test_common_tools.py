@@ -299,6 +299,9 @@ def test_common_read_tools_surface_names() -> None:
         "read_integration_state",
         "read_active_plan",  # VT-673
         "read_agent_memory",  # VT-674
+        "get_recent_campaigns",  # VT-675 promoted
+        "get_attribution_data",  # VT-675 promoted
+        "query_customer_ledger",  # VT-675 promoted
     ]
 
 

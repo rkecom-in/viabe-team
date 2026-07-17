@@ -3,7 +3,7 @@
 > GENERATED from `orchestrator.agent_framework.tool_catalog` by `render_catalog_markdown()`.
 > Do NOT hand-edit — edit the catalog annotations and regenerate. ARCHITECTURE §1.3.
 
-**74 tool surfaces** across the roster — 3 gated (GateFacade doors). advisory: 28, decision: 4, eval: 2, gated_effect: 2, integration: 10, read: 25, spawn: 3
+**79 tool surfaces** across the roster — 3 gated (GateFacade doors). advisory: 28, decision: 4, eval: 2, gated_effect: 2, integration: 10, read: 30, spawn: 3
 
 | Tool | Surface | Kind | Capability | Gated | PII-safe | Tenant | Holders | Note |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -75,6 +75,11 @@
 | `get_attribution_data` | `agent/tools/get_attribution_data.py` | read | — | no | yes | resolved | — | attribution rollup (counts/aggregates) |
 | `get_business_profile` | `agent/tools/get_business_profile.py` | read | read_business_context | no | yes | resolved | — | owner's own business profile |
 | `query_customer_ledger` | `agent/tools/query_customer_ledger.py` | read | read_customer_ledger | no | yes | resolved | — | returns customer_id + amounts/dates/notes — no name/phone column (CL-390) |
+| `get_attribution_data` | `agent_framework/tools_common.py` | read | — | no | yes | resolved | manager_common_read | VT-675 promoted (resolve-first wrapper): attribution rollup (counts/aggregates) |
+| `get_recent_campaigns` | `agent_framework/tools_common.py` | read | — | no | yes | resolved | manager_common_read | VT-675 promoted (resolve-first wrapper): recent-campaign rollup (counts/statuses only, CL-390) |
+| `query_customer_ledger` | `agent_framework/tools_common.py` | read | — | no | yes | resolved | manager_common_read | VT-675 promoted (resolve-first wrapper): operator-role ledger read (phone-token input, customer_id UUIDs + amounts out — never name/phone/email; scope unchanged, CL-82/CL-390) |
+| `read_active_plan` | `agent_framework/tools_common.py` | read | — | no | yes | resolved | manager_common_read | VT-673: first-class plan/roadmap read (delegates to business_plan store/seams; owner's own plan data, no customer PII) |
+| `read_agent_memory` | `agent_framework/tools_common.py` | read | — | no | yes | n/a | manager_common_read | VT-674: on-demand L3-prior read (delegates to knowledge.l3_query.lookup_pattern; 180d quarantine + k>=10 anonymized aggregates structural — cross-tenant global table, resolved tenant used ONLY for the quarantine check) |
 | `read_business_context` | `agent_framework/tools_common.py` | read | read_business_context | no | yes | resolved | manager_common_read |  |
 | `read_customer_ledger_summary` | `agent_framework/tools_common.py` | read | read_customer_ledger | no | yes | resolved | manager_common_read |  |
 | `read_integration_state` | `agent_framework/tools_common.py` | read | read_integration_state | no | yes | resolved | manager_common_read |  |
@@ -84,11 +89,8 @@
 
 ## Open capability gaps (sufficiency frontier)
 
-**4 OPEN** — the common-tool ACTION surface is not yet complete. `scripts/check_capability_gaps.py` exits non-zero while any is open.
+**1 OPEN** — the common-tool ACTION surface is not yet complete. `scripts/check_capability_gaps.py` exits non-zero while any is open.
 
 | Gap | Needed by | Missing | Follow-on |
 | --- | --- | --- | --- |
 | Unified common `escalate` tool | sales_recovery, onboarding_conductor, integration, all_lanes | Escalation is duplicated per-lane (integration/finance/tech/accounting/sales/onboarding each own a bespoke escalate) — there is no ONE common `escalate` tool a specialist reaches to hand a decision back to the Manager/owner. Consolidate to a single common tool. | VT-672 |
-| Plan/roadmap read tool (specialist can query its own plan) | sales_recovery, onboarding_conductor, all_lanes | `get_active_plan` / `items_for_agent` are dispatch MACHINERY (the Manager assembles the context), not a callable tool — a specialist cannot ask 'what is my plan / what's next on my roadmap' mid-loop. Needs a first-class read tool. | VT-673 |
-| On-demand agent-memory read tool (L3 priors reachable mid-loop) | sales_recovery, onboarding_conductor, all_lanes | L3 priors are context-ASSEMBLED (pre-baked into the bundle); only L4 skills is callable. A specialist cannot query memory ON DEMAND mid-loop (e.g. 'have we tried this play before'). Needs a scoped memory-read tool. | VT-674 |
-| Promote richer reads into the COMMON set | sales_recovery, all_lanes | `get_recent_campaigns` / `get_attribution_data` / `query_customer_ledger` exist as LANE tools (cataloged) but are not in the Manager-scoped COMMON read set every specialist reaches. A win-back specialist needs prior-campaign + attribution + ledger reads as COMMON, not lane-local. Promote them (PII-gated) into the common surface. | VT-675 |
