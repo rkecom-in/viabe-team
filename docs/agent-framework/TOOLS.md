@@ -3,7 +3,7 @@
 > GENERATED from `orchestrator.agent_framework.tool_catalog` by `render_catalog_markdown()`.
 > Do NOT hand-edit — edit the catalog annotations and regenerate. ARCHITECTURE §1.3.
 
-**79 tool surfaces** across the roster — 3 gated (GateFacade doors). advisory: 28, decision: 4, eval: 2, gated_effect: 2, integration: 10, read: 30, spawn: 3
+**80 tool surfaces** across the roster — 3 gated (GateFacade doors). advisory: 29, decision: 4, eval: 2, gated_effect: 2, integration: 10, read: 30, spawn: 3
 
 | Tool | Surface | Kind | Capability | Gated | PII-safe | Tenant | Holders | Note |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -35,6 +35,7 @@
 | `propose_config_change` | `agent/tech_lane.py` | advisory | propose_config_change | no | yes | resolved | manager_advisory, tech_lane | drafts a config intent; no write |
 | `tech_escalate_to_fazal` | `agent/tech_lane.py` | advisory | — | no | yes | n/a | tech_lane | ops escalation to Fazal (excluded from ADVISORY_TOOLS as redundant); no effect |
 | `schedule_followup` | `agent/tools/schedule_followup.py` | advisory | — | no | yes | resolved | — | schedules an internal followup (non-gated write; no customer send) |
+| `escalate` | `agent_framework/tools_common.py` | advisory | — | no | yes | n/a | — | VT-672: the ONE common escalate — a specialist hands a decision back to the Manager (§1.2 owner-comms stays Manager-only); no external effect, no DB write. The Manager's own escalate_to_fazal terminal signal is separate and untouched. |
 | `check_ad_spend_intent` | `agent/marketing_lane.py` | decision | — | no | yes | resolved | manager_advisory, marketing_lane | rail-facing probe: reports the SPEND business-impact gate; spends nothing (non-gated) |
 | `check_send_intent` | `agent/marketing_lane.py` | decision | — | no | yes | resolved | manager_advisory, marketing_lane | rail-facing probe: reports the CUSTOMER_SEND policy bound; sends nothing (non-gated) |
 | `check_config_change_intent` | `agent/tech_lane.py` | decision | — | no | yes | resolved | manager_advisory, tech_lane | rail-facing probe: reports the CONFIG business-impact gate; writes nothing (non-gated) |
@@ -89,8 +90,4 @@
 
 ## Open capability gaps (sufficiency frontier)
 
-**1 OPEN** — the common-tool ACTION surface is not yet complete. `scripts/check_capability_gaps.py` exits non-zero while any is open.
-
-| Gap | Needed by | Missing | Follow-on |
-| --- | --- | --- | --- |
-| Unified common `escalate` tool | sales_recovery, onboarding_conductor, integration, all_lanes | Escalation is duplicated per-lane (integration/finance/tech/accounting/sales/onboarding each own a bespoke escalate) — there is no ONE common `escalate` tool a specialist reaches to hand a decision back to the Manager/owner. Consolidate to a single common tool. | VT-672 |
+None open — every tracked capability gap has been built/promoted.
