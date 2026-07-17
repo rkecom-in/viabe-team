@@ -212,7 +212,8 @@ def _read_identity(tenant_id: UUID) -> dict[str, Any]:
         with tenant_connection(tenant_id) as conn:
             row = conn.execute(
                 "SELECT business_name, verified_business_name, business_type, "
-                "phase, verification_status, gstin FROM tenants WHERE id = %s",
+                "phase, verification_status, gstin, preferred_language, "
+                "language_preference FROM tenants WHERE id = %s",
                 (str(tenant_id),),
             ).fetchone()
     except Exception:  # noqa: BLE001 — identity is enrichment; a read miss degrades
@@ -229,6 +230,14 @@ def _read_identity(tenant_id: UUID) -> dict[str, Any]:
     status = _col("verification_status", 4)
     verified = status in _verified_tiers()
     verified_name = _col("verified_business_name", 1)
+    # VT-677: the owner's language preference — explicit(preferred_language) wins, else the
+    # OBSERVED rolling value; normalized to the supported space (junk → en). Read here so the
+    # brain's ambiguous-turn fallback is grounded, never a second DB round-trip.
+    _explicit = _col("preferred_language", 6)
+    _observed = _col("language_preference", 7)
+    _lang = str(_explicit or _observed or "en")
+    if _lang not in ("en", "hinglish", "hi"):
+        _lang = "en"
     return {
         # The verified name when verified, else the owner-entered name — the
         # manager reasons off the strongest available identity, flagged below.
@@ -238,6 +247,8 @@ def _read_identity(tenant_id: UUID) -> dict[str, Any]:
         "phase": _col("phase", 3),
         "gst_status": status,
         "gst_verified": verified,
+        "owner_language": _lang,
+        "owner_language_explicit": bool(_explicit),
         "gstin_present": bool(_col("gstin", 5)),
     }
 
@@ -308,6 +319,12 @@ def render_business_context_block(ctx: BusinessContext) -> str | None:
             f"- phase: {phase}\n"
             f"- verification: {gst} (verified={bool(ident.get('gst_verified'))})"
         )
+        # VT-677: the stored owner-language preference — the brain's AMBIGUOUS-turn fallback only
+        # (D2: live-turn mirroring always wins; the system prompt owns that rule).
+        _owner_lang = ident.get("owner_language")
+        if _owner_lang:
+            _src = "explicit" if ident.get("owner_language_explicit") else "observed"
+            lines.append(f"- owner language preference: {_owner_lang} ({_src})")
 
     obj = ctx.objective
     if obj:
