@@ -1,3 +1,5 @@
+> **ARCHIVED 2026-07-17 — zero live authority; see docs/README.md.**
+
 # VT-608 recon + team-lead rulings (2026-07-05)
 
 ## Verified map (sonnet recon, file:line in session history)

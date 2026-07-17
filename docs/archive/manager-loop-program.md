@@ -1,3 +1,5 @@
+> **ARCHIVED 2026-07-17 — zero live authority; see docs/README.md.**
+
 # The Manager-Loop Program — Codex-grade Team Manager (Phase 1)
 
 **Authorized:** Fazal 2026-07-05 — "Meeting the objective is primary so enable loop engineering,

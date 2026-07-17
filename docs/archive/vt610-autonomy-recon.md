@@ -1,3 +1,5 @@
+> **ARCHIVED 2026-07-17 — zero live authority; see docs/README.md.**
+
 # VT-610 recon (2026-07-05, haiku scan — verified file:line map)
 Key build facts:
 - force_l3 seam: extend ops_vtr_console.py:571-643 action Literal + new autonomy.py force_l3()

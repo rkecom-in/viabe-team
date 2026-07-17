@@ -1,0 +1,206 @@
+# Viabe Team — Agent Framework Architecture (Manager / SubAgent / Tool)
+
+**Status: CANONICAL — ratified by Fazal 2026-07-16.**
+Author: Cowork, 2026-07-16, from Fazal's target definition (2026-07-16) + CC's code-grounded
+reconciliation (`docs/archive/agent-framework-target-reconciliation.md`, archived). Grounded in the
+VT-649/650 contract as built (`apps/team-orchestrator/src/orchestrator/agent_framework/`).
+
+This is the canonical definition of how the Viabe agent system works. The builder's guide
+(`docs/agent-framework/README.md`) and the SR tutorial defer to this doc on architecture.
+`.viabe/manager-objective.md` remains the behavioral north-star; this doc is the structural one.
+
+---
+
+## 0. The model in one paragraph
+
+**The Manager is the only always-on brain, the only component that invokes SubAgents, and the
+only holder of the tenant-scoped DB session. SubAgents are modular, decoupled, own-brain
+programs the Manager triggers on events or requests. Tools are decoupled, registered actions —
+including every third-party integration — and all data exchange flows through them. Effects
+(customer sends, money/business actions) happen ONLY through gated Tools; the deterministic
+gate is the sole effect authority, no matter which brain is asking.** Intelligence is wide and
+distributed; authority over effects is narrow and central. That split is the whole design.
+
+## 1. The three roles
+
+### 1.1 Manager (the embedded agent)
+- **Owns:** the resolved-tenant RLS session (established once at the dispatch boundary,
+  IDOR-guarded — ambient context always wins over any model-supplied id); sub-agent dispatch;
+  in-turn answering; the advisory-tool inventory (the VT-604 shelf); planning/allocation/
+  validation per the manager objective (§7 of `manager-objective.md`).
+- **Is:** the only always-on reasoner and the HEAVIEST reasoner (Fazal 2026-07-16). Every
+  trigger (owner message, scheduled event, callback) reaches the Manager's brain first. Its
+  reasoning arc per request: understand the owner's requirement → identify the specialist
+  capability → **define the outcome** → cross-validate the outcome with the owner ONLY when
+  ambiguous or high-impact (never re-ask a known fact) → assemble the framing context →
+  spawn and delegate → **validate the returned outcome against the outcome it defined**
+  (approve/disapprove, logged with reasons — VT-514).
+- **Delegation contract:** the Manager passes `situation` + `desired_outcome` +
+  `context_slice` (the built `ModuleContext` payload). It gathers the FRAMING data — resolved
+  tenant scope, the situation, the starter slice — NOT every operational datum the specialist
+  might need (pre-fetching everything forces over-fetch or under-fetch; the specialist pulls
+  operational data itself via Manager-scoped READ tools, §1.3/§3).
+- **Model tier:** reasoning cost follows reasoning responsibility — heaviest model on the
+  Manager; specialist tiers on SubAgents.
+- **Never:** performs an effect except via a gated Tool; never delegates effect authority to
+  its own reasoning (the gate decides, not the brain). Owner cross-validation of the OUTCOME
+  is discretionary; the deterministic APPROVAL gate before an effect is not (§2) — the two
+  must never be conflated.
+
+### 1.2 SubAgent (spawned specialist)
+- **Has:** its **own brain** (LLM reasoning loop), its own declared tool surface, an activation
+  bar (entitlement/prereq-gated), durable task/plan participation, and a specialist-return to
+  the Manager.
+- **Is:** a program, triggered by the Manager on events/requests — never self-triggering in
+  Phase 1.1 (dynamic sensing is Phase 1.2, held).
+- **Contract:** a registered `agent_framework` module — manifest (positive capability
+  allow-list) + role(s) + `assert_conforms`-clean. The PROPOSER/EXECUTOR split is the
+  **internal mechanism of its gated tools**: the sub-agent brain reasons, its "propose" is a
+  tool-call, and the deterministic gate executes after checks. The brain sits above the tools;
+  the gate sits between the tools and the world.
+- **Brain scope (Fazal 2026-07-16):** the SubAgent brain reasons ONLY within its delegated
+  lane — evaluate the delegated action, identify the plan, choose tools and logic, drive to
+  the outcome. It is a LOOP, not a one-shot plan: tool results surprise (empty cohort, failed
+  OAuth, mismatched data) and the brain re-plans within its lane. When it cannot deliver the
+  defined outcome, it returns an HONEST calibrated decline to the Manager — never a forced or
+  fabricated outcome. It does not re-litigate the outcome definition, re-scope the tenant, or
+  converse with the owner directly (owner conversation is the Manager's).
+- **Never:** holds a raw DB connection; never a transport handle; never any un-gated effect
+  path. Distributing reasoning does NOT distribute effect authority.
+- **Examples:** Sales Recovery (the launch proof), Onboarding Conductor. Future: Marketing,
+  Compliance, Finance, Data Import/Export, Online-presence — each promoted per §5's bar.
+
+### 1.3 Tool (registered, decoupled action)
+- **Kinds:**
+  - **READ tools** — DB/context reads (customer ledger, business context, integration state),
+    always scoped to the Manager's resolved tenant (§3).
+  - **GATED-EFFECT tools** — customer-send, business/money action. These ARE the gate (§2).
+  - **INTEGRATION tools** — Shopify, GST portal, Google Sheets, email, CSV/file, MCP/API
+    connectors. Third-party actions are Tools, not agents. Zero-manual-paste after OAuth
+    (CL-421) is a Tool-level property and survives any reshuffle.
+- **Contract:** a registry entry — manifest + declared capability + deny-list-checked tool
+  objects. Tools do the data exchange; brains command, tools act.
+- **Invariant (by construction):** no capability exists that means "perform an effect
+  directly." The strongest declarable capabilities are `REQUEST_CUSTOMER_SEND` /
+  `REQUEST_BUSINESS_ACTION` — both gated, both serviced only by the GateFacade. Registration
+  rejects raw send/spend/ledger/config-write tool objects (`assert_agent_tools_safe`, VT-268)
+  and rejects a PROPOSER-only module declaring a gated capability. **An un-gated effect Tool
+  is unregistrable.**
+
+## 2. The gated-tool boundary (non-negotiable)
+
+Every effect, from any brain, routes through the deterministic gate:
+
+- **Customer send** → `agent_send_draft` — the SOLE send path, running all 7 gates in order:
+  onboarded → WABA live → batch/approval (Pillar-7 L2/L3) → template + opt-out line → opt-out
+  → consent → caps — then transport-choke idempotency. The emission gate additionally binds
+  stated money values (count/scope/₹) to the DB (CL-2026-07-16): a claim contradicting the DB
+  is deterministically blocked/rewritten and flagged Tier-1.
+- **Business/money action** → policy classification (per-class autonomy tier) AND the effect
+  issued **inside** `business_action_context` (else `UngatedBusinessActionError`). **The gated
+  tool owns the whole round-trip — classify AND issue-inside-choke.** A decision without a
+  choke-issued effect, or an effect outside the choke, is a contract violation. (This closes
+  the half-wired GateFacade gap found in reconciliation: facade decision + caller-issued
+  effect is NOT an acceptable end-state.)
+- **Correctness gates never bend for a green run:** GST verify, ownership, consent, onboarded,
+  opt-out. Opt-out wins immediately and irreversibly within a turn.
+
+## 3. The DB-access rule
+
+- **Only the Manager holds DB access.** It establishes the resolved-tenant RLS scope once per
+  dispatch. Sub-agent brains never see a connection object — not as a tool argument, not in
+  context.
+- **DB Tools operate within the Manager's scope:** they take the RESOLVED tenant only (never a
+  brain-supplied id), and either open/scope their own RLS connection or validate an injected
+  conn's `app.tenant_id` GUC matches the resolved tenant. They never mint a connection from a
+  raw/BYPASSRLS pool.
+- **Explicitly:** a DB Tool is decoupled in *definition* but bound to the Manager's
+  resolved-tenant scope at *invocation*. A "standalone" DB Tool that creates its own session
+  is the RLS-isolation footgun and is forbidden.
+- **Migration note:** today's SR-executor and Integration tools open `tenant_connection`
+  directly — the opposite of this rule. This is the riskiest delta (VT-621 GUC-pool class):
+  it migrates LAST, behind the SR proof, with cross-tenant isolation rails (VT-603 /
+  `resolve_lane_tenant` / DF1) re-verified at cutover.
+
+## 4. Lifecycle of a unit of work
+
+```
+trigger (owner msg / scheduled event / callback)
+  → Manager brain reasons on FULL context (never re-asks a known fact)
+      → answer in-turn                                (most turns; T9 suppression)
+      → call a Manager-held advisory tool             (analysis/draft, no effect)
+      → spawn a SubAgent                              (work needing its own loop)
+          Manager first: defines the OUTCOME → cross-validates with owner ONLY if
+          ambiguous/high-impact → assembles framing context (situation, desired_outcome,
+          context_slice, resolved tenant scope) → spawns
+          → SubAgent brain loops within its lane: plan → call Tools → re-plan on surprises
+              → READ tools (Manager-scoped; operational data pulled as needed)
+              → gated-effect tool: propose → deterministic gate decides
+                    (autonomous | owner-approval L2/L3)   [NEVER discretionary]
+                → effect issued inside the choke → audited
+              → cannot deliver? → honest calibrated decline (never forced/fabricated)
+          → specialist-return to Manager
+  → Manager VALIDATES the returned outcome against the outcome it defined
+    (approve/disapprove, logs decision + reason — VT-514), reports/asks owner
+```
+
+Owner-language: replies render in the owner's language per the per-tenant language preference
+(elevated build, 2026-07-16 live-drive finding); deterministic template copy and brain replies
+render against the same preference.
+
+## 5. Launch scope vs framework scope
+
+- **Framework:** designed for N brained SubAgents. Adding one = registering a conforming
+  module. No architectural change per agent.
+- **Launch:** prove the pattern on **SR + Onboarding Conductor only**. Integration **dissolves
+  into connector Tools** (its brain is removed; its owner-facing conversational beats — OAuth
+  back-and-forth, mapping confirmation, escalation — move to the Manager driving the connector
+  Tools, and must not be lost). The six advisory lanes (sales/marketing/finance/accounting/
+  tech/cost-opt) stay Manager-held advisory tools.
+- **Promotion bar (per lane, per demand — never big-bang):** a lane becomes a brained SubAgent
+  only when it has (a) an activation bar (entitlement ₹5000/agent + prereqs), (b) durable
+  task/plan participation, (c) its own effect Tools behind the gate. This is the same bar
+  VT-604 used to demote them.
+
+## 6. Cost & containment posture
+
+- Every SubAgent brain is a full LLM loop: N brains = N× reasoning cost + handoff latency.
+  Spawn only when the work needs its own reasoning loop + tool surface (T9 already suppresses
+  spawns on answerable turns). Default to Manager-in-turn or advisory tools.
+- Tier-1 containment does not depend on any brain's honesty: fabricated money claims are
+  deterministically bound to the DB; effects are deterministically gated; the DB asserts are
+  the sole money Tier-1 authority (CL-2026-07-16). More brains widen the reasoning surface,
+  not the effect surface.
+
+## 7. Migration state (ground truth as of 2026-07-16)
+
+- **BUILT + INERT:** the `agent_framework` contract (VT-649/650) — manifest, roles,
+  GateFacade, conformance harness, registration, SDK boundary. Wired into no live path;
+  `default_registry()` empty.
+- **DESIGN-ONLY:** SR migration (VT-659 plan: thin-adapter-first, edit zero SR files, cutover
+  deferred). **UNBUILT:** Integration adapter (VT-658) — superseded by dissolution into Tools.
+- **LIVE TODAY:** effects flow through `agent_send_draft` / `business_action_context`
+  directly; SR is already proposer/executor-split; Integration is still a brained specialist.
+- **Migration order:** (1) Tool registry + connector Tools (Integration dissolution),
+  (2) SR onto {brain + tools} via the thin adapter, (3) DB-access inversion (§3) last,
+  isolation re-verified. VT-101 re-scopes accordingly. Codex/third-party builders stay HELD
+  until SR proves the contract live.
+
+## 8. Ratification (Fazal)
+
+Settled by Fazal 2026-07-16: the three-role model (Manager/SubAgent/Tool), sub-agents have
+own brains, only-Manager-DB, Integration dissolves into Tools, and the reasoning split —
+Manager = heaviest reasoner (understand → identify specialist → define outcome →
+cross-validate with owner only if required → frame context → spawn → validate the return);
+SubAgent brain = evaluate the delegated action, plan, tools, logic, outcome, within its lane.
+
+Refinements folded in (CC + Cowork, need Fazal's nod): the gated tool owns the whole effect
+round-trip (§2); DB Tools bound to Manager scope at invocation (§3); launch proves SR +
+Onboarding only, six lanes stay advisory behind the promotion bar (§5); Manager gathers
+FRAMING data, SubAgents pull operational data via Manager-scoped READ tools (§1.1); the
+SubAgent brain is an iterative lane-bounded loop with honest calibrated decline (§1.2);
+outcome cross-validation with the owner is discretionary, the effect approval gate never is
+(§1.1/§2).
+
+- [x] **RATIFIED — Fazal, 2026-07-16** (including the reasoning split + all three
+  refinements). VT-101 re-scoped build granted same day ("close this tonight").

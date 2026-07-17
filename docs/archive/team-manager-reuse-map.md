@@ -1,3 +1,5 @@
+> **ARCHIVED 2026-07-17 — zero live authority; see docs/README.md.**
+
 # Team-Manager Rebuild — Reuse Map (governs the build; no duplication, Fazal 2026-06-28)
 
 ## REUSE AS-IS (do NOT rebuild — call/extend these)

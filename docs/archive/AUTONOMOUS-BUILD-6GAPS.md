@@ -1,3 +1,5 @@
+> **ARCHIVED 2026-07-17 — zero live authority; see docs/README.md.**
+
 # Autonomous Build Plan — 6 Concept Gaps (Fazal away, 2026-06-09)
 *Grounded in `team_phase1_concept_business_plan_v1.docx`. Build on `dev` ONLY. Live customer send stays stubbed until WABA. Cowork gates risk rows with adversarial subagents; architectural rows are plan-first (Cowork reviews the plan, not Fazal). Fazal reviews all on return.*
 

@@ -1,3 +1,5 @@
+> **ARCHIVED 2026-07-17 — zero live authority; see docs/README.md.**
+
 CLAU RESURRECTION DUMP — founding session brain dump
 Authored 2026-05-25. For pasting into a new session alongside the updated Project Instructions.
 1. Identity & relationship

@@ -1,9 +1,11 @@
+> **⚠️ HISTORICAL v1.0 — reflects main @ 46da1d9 (May 2026).** Pre-dates agent_framework, the Manager rebuild, and VT-604. Current architecture: `docs/agent-framework/ARCHITECTURE.md`. A real v2 gets its own roster row; the "Canonical document" note below is scoped to the May-2026 snapshot — do not use it for current architecture.
+
 > **📖 Canonical document** (VT-119)
 >
 > Authoritative for: **Viabe Team engineering architecture, schema, and contracts**.
 > NOT authoritative for: product strategy (→ `concept-team.md`) or the Pillars (→ `concept-team-pillars.md`).
 > Source-of-truth hierarchy: **under** `concept-team.md` + `concept-team-pillars.md`; **supersedes** sub-component READMEs. ADRs (`docs/adr/`) hold the *why*; this holds the *what*.
-> Update protocol: CC implements; Clau/Fazal review; refresh per the "Next refresh trigger" below (or when a Standing decision invalidates a section).
+> Update protocol: CC implements; Cowork/Fazal review; refresh per the "Next refresh trigger" below (or when a Standing decision invalidates a section).
 > Last reviewed: 2026-06-06 · Next review: Sprint-3 start or on a Standing-decision invalidation.
 
 **Doc status:** v1.0 · 2026-05-29

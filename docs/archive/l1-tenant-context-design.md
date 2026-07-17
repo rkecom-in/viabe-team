@@ -1,3 +1,5 @@
+> **ARCHIVED 2026-07-17 — zero live authority; see docs/README.md.**
+
 # L1 Tenant Context — Design (Option A: integrate over the existing L1 KG)
 
 > **Status: REFRAMED to Option A (Cowork ruling 2026-05-31; Fazal veto pending on
