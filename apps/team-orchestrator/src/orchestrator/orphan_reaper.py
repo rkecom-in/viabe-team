@@ -213,16 +213,28 @@ def reap_stalled_manager_tasks(*, pool: Any = None, age_hours: int = _STALLED_TA
             # stall notification ('not_required' -> 'pending' + terminal_outcome='escalated') and
             # CLOSE the approval (decision='timeout', status='timed_out'). The Twilio send itself
             # fires AFTER this service txn commits (a network send must never hold the sweep's conn).
-            from orchestrator.manager import task_store as _task_store
 
             approval_holders: list[Any] = []
             for _dl_task_id, _dl_tid, _dl_attempt in dead_lettered:
-                # conn=None deliberately: the join now lives in PendingApprovalsWrapper (VT-72),
-                # whose VT-306 guard rejects this sweep's BYPASSRLS service conn — the wrapper
-                # opens its own per-row RLS-scoped tenant_connection instead. The read needs no
-                # txn atomicity with the dead-letter writes below (worst case a benign stale read
-                # on a rare event); the closes still run on the service conn (allowlisted).
-                open_run = _task_store.find_open_approval_run_for_task(_dl_tid, _dl_task_id)
+                # Inline tenant-predicated join on the sweep's OWN service conn — this file is the
+                # allowlisted BYPASSRLS cross-tenant sweep (VT-72 allowlist entry), and the wrapper
+                # path is unusable here twice over: its VT-306 guard rejects a non-app_role conn,
+                # and conn=None would open tenant_connection → the global pool, which is not
+                # initialized in the reaper's context (init_substrate is a service-boot concern).
+                # Same two linkages as PendingApprovalsWrapper.open_run_for_task (the resolution
+                # seam keeps the wrapper — it holds a real app_role conn).
+                _row = conn.execute(
+                    "SELECT p.run_id::text AS run_id FROM pending_approvals p "
+                    "JOIN manager_tasks t ON t.tenant_id = p.tenant_id "
+                    "WHERE t.tenant_id = %s AND t.id = %s AND p.resolved_at IS NULL "
+                    "  AND (t.stall_metadata->>'awaiting_approval_run_id' = p.run_id::text "
+                    "       OR t.source_message_ref = p.run_id::text) "
+                    "ORDER BY p.requested_at DESC LIMIT 1",
+                    (str(_dl_tid), str(_dl_task_id)),
+                ).fetchone()
+                open_run = None if _row is None else str(
+                    _row["run_id"] if isinstance(_row, dict) else _row[0]
+                )
                 if open_run is None:
                     continue
                 conn.execute(
