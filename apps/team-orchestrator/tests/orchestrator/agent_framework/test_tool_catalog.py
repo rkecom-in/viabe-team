@@ -70,11 +70,15 @@ def test_catalog_covers_every_tuple_surface():
     from orchestrator.agent.integration_agent import INTEGRATION_AGENT_TOOLS
     from orchestrator.agent.onboarding_conductor import ONBOARDING_CONDUCTOR_TOOLS
     from orchestrator.agent.orchestrator_agent import ORCHESTRATOR_AGENT_TOOLS
-    from orchestrator.agent_framework.tools_common import COMMON_READ_TOOLS
+    from orchestrator.agent_framework.tools_common import (
+        COMMON_ADVISORY_TOOLS,
+        COMMON_READ_TOOLS,
+    )
 
     catalog_names = catalog_tool_names()
     for label, surface in [
         ("COMMON_READ_TOOLS", COMMON_READ_TOOLS),
+        ("COMMON_ADVISORY_TOOLS", COMMON_ADVISORY_TOOLS),  # VT-672
         ("INTEGRATION_AGENT_TOOLS", INTEGRATION_AGENT_TOOLS),
         ("ONBOARDING_CONDUCTOR_TOOLS", ONBOARDING_CONDUCTOR_TOOLS),
         ("ORCHESTRATOR_AGENT_TOOLS", ORCHESTRATOR_AGENT_TOOLS),
@@ -82,6 +86,7 @@ def test_catalog_covers_every_tuple_surface():
     ]:
         missing = sorted({t.name for t in surface} - catalog_names)
         assert not missing, f"{label} tools missing from the catalog: {missing}"
+    assert "escalate" in catalog_names  # VT-672: the ONE common escalate is cataloged
 
 
 def test_lane_tuple_surfaces_covered():
@@ -269,13 +274,11 @@ def test_required_tools_reachable_fails_unreachable():
 # silently linger, and prove the frontier is currently non-empty (hiding it is the anti-pattern).
 
 
-def test_capability_gaps_are_currently_open_and_on_the_board():
-    """The sufficiency frontier is real: the common-tool surface has KNOWN open gaps today, each
-    tracked to a board row. If this ever reads empty, either every gap was built (great — delete the
-    registry) or someone silently trimmed it (bad)."""
-    open_gaps = open_capability_gaps()
-    assert open_gaps, "expected open capability gaps — the common-tool surface is not yet complete"
-    for g in open_gaps:
+def test_every_registered_gap_is_on_the_board():
+    """Every REGISTERED capability gap is tracked to a board row with a named owner + reason.
+    (The registry went EMPTY 2026-07-18 — all 4 original gaps were built same-day; this stays as
+    the shape-check for future entries, and the honesty test below guards against stale ones.)"""
+    for g in KNOWN_CAPABILITY_GAPS:
         assert g.followon_vt.startswith("VT-"), f"gap {g.key!r} has no board row"
         assert g.needed_by, f"gap {g.key!r} names no specialist that needs it"
         assert g.reason.strip(), f"gap {g.key!r} has no reason"

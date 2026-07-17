@@ -231,17 +231,21 @@ def _check_required_tools_reachable(module: Any, manifest: AgentManifest) -> tup
         # surface). The catalog import is gated on a module ACTUALLY declaring a required tool.
         return True, "n/a: no required_tools declared"
 
-    # Lazy: importing the catalog + the common-read surface pulls langchain (+ a constructed chat
+    # Lazy: importing the catalog + the common surfaces pulls langchain (+ a constructed chat
     # model for the integration surface). Only reached when a module declares required_tools.
     from orchestrator.agent_framework.tool_catalog import catalog_tool_names
-    from orchestrator.agent_framework.tools_common import COMMON_READ_TOOLS
+    from orchestrator.agent_framework.tools_common import (
+        COMMON_ADVISORY_TOOLS,
+        COMMON_READ_TOOLS,
+    )
 
     catalog_names = catalog_tool_names()
     own_names = _tool_surface_names(manifest.tools)
     common_read_names = _tool_surface_names(COMMON_READ_TOOLS)
-    # "reachable" = a tool the module holds itself OR a Manager-scoped common READ it is declared to
-    # reach (ARCHITECTURE §1.1/§1.3 — the specialist pulls operational data via the Manager's reads).
-    reachable = own_names | common_read_names
+    # "reachable" = a tool the module holds itself OR a Manager-scoped common tool it is declared to
+    # reach (ARCHITECTURE §1.1/§1.3 — the specialist pulls operational data via the Manager's reads;
+    # VT-672 adds the common ADVISORY hand-backs, e.g. `escalate`).
+    reachable = own_names | common_read_names | _tool_surface_names(COMMON_ADVISORY_TOOLS)
 
     not_in_catalog = sorted(t for t in required if t not in catalog_names)
     if not_in_catalog:

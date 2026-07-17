@@ -183,6 +183,16 @@ _COMMON_READ_ANN: dict[str, _Ann] = {
     ),
 }
 
+# --- home: common_advisory (agent_framework/tools_common.py) — the common hand-back tools ---------
+_COMMON_ADVISORY_ANN: dict[str, _Ann] = {
+    "escalate": _Ann(
+        ToolKind.ADVISORY, None, tenant_scope="n/a",
+        note="VT-672: the ONE common escalate — a specialist hands a decision back to the Manager "
+        "(§1.2 owner-comms stays Manager-only); no external effect, no DB write. The Manager's own "
+        "escalate_to_fazal terminal signal is separate and untouched.",
+    ),
+}
+
 # --- home: integration_agent (agent/integration_agent.py) — the 11 VT-608 connector tools ---------
 _INTEGRATION_ANN: dict[str, _Ann] = {
     "list_supported_connectors": _Ann(
@@ -515,6 +525,10 @@ def _defining_surfaces() -> list[_DefiningSurface]:
             _load("orchestrator.agent_framework.tools_common", "COMMON_READ_TOOLS"),
         ),
         _DefiningSurface(
+            "common_advisory", _COMMON_ADVISORY_ANN,
+            _load("orchestrator.agent_framework.tools_common", "COMMON_ADVISORY_TOOLS"),
+        ),
+        _DefiningSurface(
             "integration_agent", _INTEGRATION_ANN,
             _load("orchestrator.agent.integration_agent", "INTEGRATION_AGENT_TOOLS"),
         ),
@@ -766,23 +780,13 @@ class CapabilityGap:
 
 
 #: The known holes in the common-tool surface, as of VT-669 (Fazal 2026-07-18). Each is on the board.
-#: This is DELIBERATELY non-empty — the sufficiency frontier is real and unfinished; hiding it behind
-#: green checks is the exact anti-pattern Fazal called out. Building a gap's tool auto-drops it from
-#: ``open_capability_gaps`` (see the honesty test).
+#: The 4 gaps registered 2026-07-18 (Fazal "fail loudly") were ALL BUILT the same day — the registry
+#: is empty until the next capability hole is named. Register future holes here (each with a board
+#: row); the gate + honesty test re-arm automatically on the first entry.
 KNOWN_CAPABILITY_GAPS: tuple[CapabilityGap, ...] = (
-    CapabilityGap(
-        key="unified_escalate",
-        title="Unified common `escalate` tool",
-        kind=GapKind.ABSENT_FROM_CATALOG,
-        probe_names=("escalate",),
-        needed_by=("sales_recovery", "onboarding_conductor", "integration", "all_lanes"),
-        reason=(
-            "Escalation is duplicated per-lane (integration/finance/tech/accounting/sales/onboarding "
-            "each own a bespoke escalate) — there is no ONE common `escalate` tool a specialist reaches "
-            "to hand a decision back to the Manager/owner. Consolidate to a single common tool."
-        ),
-        followon_vt="VT-672",
-    ),
+    # unified_escalate (VT-672): CLOSED 2026-07-18 — common `escalate` built into
+    # COMMON_ADVISORY_TOOLS (the Manager's escalate_to_fazal terminal stays separate); entry
+    # deleted per the registry-honesty test.
     # plan_roadmap_read (VT-673): CLOSED 2026-07-18 — `read_active_plan` built into
     # COMMON_READ_TOOLS (delegates to business_plan store/seams); entry deleted per the
     # registry-honesty test.

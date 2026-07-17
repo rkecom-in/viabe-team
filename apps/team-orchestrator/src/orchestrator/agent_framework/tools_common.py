@@ -447,6 +447,32 @@ def query_customer_ledger(
     return out.model_dump(mode="json")
 
 
+# --- VT-672: the ONE common escalate (capability gap `unified_escalate`) -------------------------
+
+
+@tool
+def escalate(reason: str, context: str = "", severity: str = "normal") -> dict[str, Any]:
+    """Hand a decision back to the Manager — the ONE common escalate every specialist reaches.
+
+    VT-672 consolidation: escalation was duplicated per-lane (integration/finance/tech/accounting/
+    sales/onboarding each owned a bespoke ``*_escalate_to_fazal``). This is the single common tool a
+    specialist calls when it cannot proceed and needs the Manager (and, through the Manager, the
+    owner or Fazal) to decide. ADVISORY: no external effect, no DB write, and it NEVER messages the
+    owner directly — owner communication is a MANAGER capability (ARCHITECTURE §1.2, Fazal ruling
+    2026-07-18). It logs the escalation and returns a structured marker the driving loop reads.
+
+    NOTE: the Manager's own ``escalate_to_fazal`` (orchestrator_agent.py) is a TERMINAL SIGNAL keyed
+    by name in ``dispatch._classify_terminal`` — it stays separate and untouched; this tool is the
+    SPECIALIST-side hand-back, not the Manager's terminal.
+    """
+    logger.warning("ESCALATE severity=%s reason=%s context=%s", severity, reason, context)
+    return {"escalated": True, "severity": severity, "reason": reason, "context": context}
+
+
+#: The common ADVISORY tools — non-effectful hand-backs a specialist reaches (today: escalate).
+COMMON_ADVISORY_TOOLS: tuple[Any, ...] = (escalate,)
+
+
 #: The common READ tools, in a stable order — the surface a Manager/specialist drives to pull
 #: operational data (ARCHITECTURE.md §1.1/§1.3). These are the whole point of this module; the
 #: Manager holds them on its shelf and a specialist reaches them through the Manager's resolved
@@ -467,10 +493,13 @@ COMMON_READ_TOOLS: tuple[Any, ...] = (
 # module registration would run over this surface — so a future edit that renames one of these into
 # a forbidden capability trips at import, not silently at a live wiring seam (VT-268).
 assert_agent_tools_safe(COMMON_READ_TOOLS, surface="common_read_tools")
+assert_agent_tools_safe(COMMON_ADVISORY_TOOLS, surface="common_advisory_tools")
 
 
 __all__ = [
+    "COMMON_ADVISORY_TOOLS",
     "COMMON_READ_TOOLS",
+    "escalate",
     "get_attribution_data",
     "get_recent_campaigns",
     "query_customer_ledger",
