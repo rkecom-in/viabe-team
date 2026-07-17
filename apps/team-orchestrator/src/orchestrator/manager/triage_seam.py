@@ -261,12 +261,18 @@ def _dispatch_campaign_first_contact(
             decision={"message_sid": message_sid, "task_id": str(camp_task_id)},
         )
         start_manager_task_workflow(tenant_id, camp_task_id)
-        # VT-642 — if the SAME message also asked to be SENT THE LIST / the names, ride an honest
-        # can't-attach-yet ack (replay-safe direct reply) ALONGSIDE the draft (reply string only,
-        # money gates untouched).
-        list_ack = (
-            LIST_SEND_ACK_PREAMBLE if mentions_customer_list_request(message_text) else None
-        )
+        # VT-642 → VT-676 — if the SAME message also asked to be SENT THE LIST / the names,
+        # actually DELIVER it: CSV → private bucket → short-TTL signed URL → media send to the
+        # VERIFIED owner (send_customer_list_to_owner owns every PII rail + its own audit). On
+        # success the attachment (with its own caption) IS the list reply — no ack needed here.
+        # On ANY failure, fall back to the honest can't-attach-yet ack (VT-642, replay-safe
+        # direct reply). Money gates untouched either way.
+        list_ack = None
+        if mentions_customer_list_request(message_text):
+            from orchestrator.owner_surface.customer_export import send_customer_list_to_owner
+
+            if not send_customer_list_to_owner(tenant_id):
+                list_ack = LIST_SEND_ACK_PREAMBLE
         return TriageSeamResult(
             outcome="new_task", task_id=camp_task_id, skip_legacy_dispatch=True,
             direct_reply_text=list_ack,
