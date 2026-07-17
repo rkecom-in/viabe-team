@@ -151,6 +151,11 @@ _COMMON_READ_ANN: dict[str, _Ann] = {
     "read_customer_ledger_summary": _Ann(ToolKind.READ, _C.READ_CUSTOMER_LEDGER),
     "read_business_context": _Ann(ToolKind.READ, _C.READ_BUSINESS_CONTEXT),
     "read_integration_state": _Ann(ToolKind.READ, _C.READ_INTEGRATION_STATE),
+    "read_active_plan": _Ann(
+        ToolKind.READ, None,
+        note="VT-673: first-class plan/roadmap read (delegates to business_plan store/seams; "
+        "owner's own plan data, no customer PII)",
+    ),
 }
 
 # --- home: integration_agent (agent/integration_agent.py) — the 11 VT-608 connector tools ---------
@@ -753,19 +758,9 @@ KNOWN_CAPABILITY_GAPS: tuple[CapabilityGap, ...] = (
         ),
         followon_vt="VT-672",
     ),
-    CapabilityGap(
-        key="plan_roadmap_read",
-        title="Plan/roadmap read tool (specialist can query its own plan)",
-        kind=GapKind.ABSENT_FROM_CATALOG,
-        probe_names=("read_active_plan", "read_agent_plan"),
-        needed_by=("sales_recovery", "onboarding_conductor", "all_lanes"),
-        reason=(
-            "`get_active_plan` / `items_for_agent` are dispatch MACHINERY (the Manager assembles the "
-            "context), not a callable tool — a specialist cannot ask 'what is my plan / what's next on "
-            "my roadmap' mid-loop. Needs a first-class read tool."
-        ),
-        followon_vt="VT-673",
-    ),
+    # plan_roadmap_read (VT-673): CLOSED 2026-07-18 — `read_active_plan` built into
+    # COMMON_READ_TOOLS (delegates to business_plan store/seams); entry deleted per the
+    # registry-honesty test.
     CapabilityGap(
         key="on_demand_memory_read",
         title="On-demand agent-memory read tool (L3 priors reachable mid-loop)",

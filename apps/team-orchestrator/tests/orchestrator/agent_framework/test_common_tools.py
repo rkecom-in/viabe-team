@@ -290,13 +290,14 @@ def test_integration_state_unresolvable_returns_error_dict() -> None:
 # =============================================================================================
 
 
-def test_common_read_tools_surface_is_the_three_reads() -> None:
+def test_common_read_tools_surface_names() -> None:
     from orchestrator.agent_framework.tools_common import COMMON_READ_TOOLS
 
     assert [t.name for t in COMMON_READ_TOOLS] == [
         "read_customer_ledger_summary",
         "read_business_context",
         "read_integration_state",
+        "read_active_plan",  # VT-673
     ]
 
 
@@ -307,3 +308,126 @@ def test_common_read_tools_pass_the_deny_list() -> None:
     from orchestrator.agent_framework.tools_common import COMMON_READ_TOOLS
 
     assert find_forbidden_tools(COMMON_READ_TOOLS) == []
+
+
+# =============================================================================================
+#  read_active_plan (VT-673) — first-class plan/roadmap read, delegates to store/seams
+# =============================================================================================
+
+
+def _fake_plan(items: list[dict[str, Any]], version: int = 3) -> Any:
+    return SimpleNamespace(version=version, roadmap=items)
+
+
+_RAW_ITEMS = [
+    {
+        "item_id": "it-2", "seq": 2, "month": 1, "objective": "Win back lapsed buyers",
+        "status": "accepted", "owning_agent": "sales_recovery", "owner_action_needed": False,
+        "why": "spend dropped", "cited_facts": ["f1"], "provenance": {"src": "gen"},
+    },
+    {
+        "item_id": "it-1", "seq": 1, "month": 1, "objective": "Fix listing hours",
+        "status": "done", "owning_agent": "reputation", "owner_action_needed": True,
+    },
+]
+
+
+def test_read_active_plan_no_plan_is_honest_empty(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No plan yet → honest empty (version None, no items) — never a fabricated roadmap."""
+    import orchestrator.business_plan.store as plan_store
+
+    from orchestrator.agent_framework.tools_common import read_active_plan
+
+    monkeypatch.setattr(plan_store, "get_active_plan", lambda tid: None)
+    tenant = uuid4()
+    with observability_context(run_id=uuid4(), tenant_id=tenant):
+        out = read_active_plan.func(tenant_id=str(tenant))  # type: ignore[attr-defined]
+    assert out == {"plan_version": None, "item_count": 0, "items": []}
+
+
+def test_read_active_plan_full_roadmap_pii_safe(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No filter → the FULL latest roadmap, minimal fields only (no fact bundle / provenance dump),
+    CL-390 PII-safe."""
+    import orchestrator.business_plan.store as plan_store
+
+    from orchestrator.agent_framework.tools_common import read_active_plan
+
+    monkeypatch.setattr(plan_store, "get_active_plan", lambda tid: _fake_plan(_RAW_ITEMS))
+    tenant = uuid4()
+    with observability_context(run_id=uuid4(), tenant_id=tenant):
+        out = read_active_plan.func(tenant_id=str(tenant))  # type: ignore[attr-defined]
+
+    assert out["plan_version"] == 3
+    assert out["item_count"] == 2
+    assert [i["item_id"] for i in out["items"]] == ["it-2", "it-1"]
+    # Minimal projection: the bulky/raw fields never pass through.
+    for item in out["items"]:
+        assert set(item) == {
+            "item_id", "seq", "month", "objective", "status", "owning_agent",
+            "owner_action_needed",
+        }
+    _assert_no_customer_pii_keys(out)
+
+
+def test_read_active_plan_owning_agent_filter_delegates_to_seam(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``owning_agent`` set → the items_for_agent slice (the same read dispatch consumes)."""
+    import orchestrator.business_plan.seams as seams
+    import orchestrator.business_plan.store as plan_store
+
+    from orchestrator.agent_framework.tools_common import read_active_plan
+
+    captured: dict[str, Any] = {}
+
+    def _fake_items(tid: Any, owning_agent: str) -> list[Any]:
+        captured["tid"] = tid
+        captured["agent"] = owning_agent
+        return [
+            SimpleNamespace(
+                item_id="it-2", seq=2, month=1, objective="Win back lapsed buyers",
+                status="accepted", owning_agent="sales_recovery", owner_action_needed=False,
+            )
+        ]
+
+    monkeypatch.setattr(seams, "items_for_agent", _fake_items)
+    monkeypatch.setattr(plan_store, "get_active_plan", lambda tid: _fake_plan(_RAW_ITEMS))
+    tenant = uuid4()
+    with observability_context(run_id=uuid4(), tenant_id=tenant):
+        out = read_active_plan.func(  # type: ignore[attr-defined]
+            tenant_id=str(tenant), owning_agent="sales_recovery"
+        )
+
+    assert captured["agent"] == "sales_recovery"
+    assert captured["tid"] == tenant  # the RESOLVED ambient tenant, not the model string
+    assert out["item_count"] == 1
+    assert out["items"][0]["owning_agent"] == "sales_recovery"
+
+
+def test_read_active_plan_unknown_agent_structured_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """items_for_agent's ValueError (unknown owning_agent) → structured error dict, never a raise."""
+    import orchestrator.business_plan.store as plan_store
+
+    from orchestrator.agent_framework.tools_common import read_active_plan
+
+    # items_for_agent validates owning_agent BEFORE any DB read — no store patch needed for the
+    # validation itself, but patch get_active_plan defensively so no live DB is reachable.
+    monkeypatch.setattr(plan_store, "get_active_plan", lambda tid: None)
+    tenant = uuid4()
+    with observability_context(run_id=uuid4(), tenant_id=tenant):
+        out = read_active_plan.func(  # type: ignore[attr-defined]
+            tenant_id=str(tenant), owning_agent="not_a_lane"
+        )
+    assert out["status"] == "error"
+    assert "not_a_lane" in out["error"]
+
+
+def test_read_active_plan_unresolvable_tenant_error_dict() -> None:
+    """No ambient context + junk model tenant → the structured lane_tenant_error, never a raise."""
+    from orchestrator.agent_framework.tools_common import read_active_plan
+
+    out = read_active_plan.func(tenant_id="not-a-uuid")  # type: ignore[attr-defined]
+    assert out["status"] == "error"
+    assert "read_active_plan" in out["error"]
