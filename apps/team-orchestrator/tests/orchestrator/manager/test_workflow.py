@@ -966,6 +966,43 @@ def test_paused_approval_approved_settles_completed_with_effect(substrate, monke
     assert reasoning_ref == {"run_id": str(task_id), "step_name": "orchestrator_agent_turn"}
 
 
+def test_paused_approval_parks_waiting_owner_during_wait(substrate, monkeypatch: pytest.MonkeyPatch):
+    """VT-668 fix 1 — while the owner is deciding, the task MUST sit 'waiting_owner' (EXCLUDED from
+    the stall-sweep reaper), NOT 'verifying'/'running' (an active-work state with a 'done' step,
+    which the reaper walks to dead_letter — the incident). The approval's loop_run_id is stamped
+    into stall_metadata (the reverse-join anchor), and the pre-pause status is restored on
+    resolution so the settle path is byte-for-byte unchanged (settles 'completed')."""
+    import orchestrator.manager.workflow as wf
+    from orchestrator.manager import task_store
+
+    tid = _seed_tenant(substrate)
+    task_id = str(_create_task(tid))
+    _mock_verified(monkeypatch, wf)
+
+    def _dispatch(tenant_id, tid_, step_id, *a, **k):
+        return _paused_after_complete(tid, task_id, step_id), None  # -> step 'done', task 'verifying'
+
+    observed: dict = {"status": None, "stamp": None}
+
+    def _still_pending(tenant_id, tid_, step_id, attempt):
+        # First poll: fix 1 must already have parked the task 'waiting_owner' + stamped the run_id.
+        if observed["status"] is None:
+            t = task_store.get_task(tid, task_id)
+            observed["status"] = t["status"]
+            observed["stamp"] = (t.get("stall_metadata") or {}).get("awaiting_approval_run_id")
+        return False  # resolve now
+
+    monkeypatch.setattr(wf, "_dispatch_specialist_step", _dispatch)
+    monkeypatch.setattr(wf, "_approval_still_pending", _still_pending)
+    monkeypatch.setattr(wf, "_approval_decision_for_run", lambda *a, **k: "approved")
+
+    status = wf.manager_task_workflow(tid, task_id)
+
+    assert observed["status"] == "waiting_owner", "task not parked waiting_owner during the wait"
+    assert observed["stamp"], "approval run_id not stamped into stall_metadata for the reverse join"
+    assert status == "completed"  # pre-pause 'verifying' restored -> verify-then-settle unchanged
+
+
 def test_paused_approval_rejected_settles_cancelled_and_promotes_queued(
     substrate, monkeypatch: pytest.MonkeyPatch
 ):

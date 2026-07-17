@@ -208,6 +208,172 @@ def test_defer_at_max_resolves_as_rejected():
     assert params[1] == "rejected"  # status (safe downstream)
 
 
+# ── VT-668: the resolution-seam consumer guarantee (an approval must never resolve into silence) ──
+
+
+class _ConsumerProbe:
+    """Captures redrive_task + ack calls so a _guarantee_campaign_consumer test asserts behavior
+    without a live DB / Twilio. ``bound`` is what find_task_for_resolved_approval returns."""
+
+    def __init__(self, bound):
+        self.bound = bound
+        self.redriven: list = []
+        self.acks: list = []
+
+    def install(self, monkeypatch):
+        import orchestrator.agent.approval_resume as ar
+        from orchestrator.manager import task_store
+
+        monkeypatch.setattr(
+            task_store, "find_task_for_resolved_approval",
+            lambda tenant_id, approval_id, conn=None: self.bound,
+        )
+        monkeypatch.setattr(
+            task_store, "redrive_task",
+            lambda tenant_id, task_id, *, conn: (self.redriven.append(task_id) or True),
+        )
+        # Stub the owner ack send so no Twilio / owner-phone read happens in the unit test.
+        monkeypatch.setattr(
+            ar, "_ack_owner_stalled_campaign",
+            lambda conn, tenant_id, *, reset: self.acks.append(reset),
+        )
+        return ar
+
+
+def _bound(status, approval_type="campaign_send"):
+    return {"id": "task-1", "status": status, "approval_type": approval_type}
+
+
+def test_consumer_guarantee_dead_letter_redrives_and_acks(monkeypatch):
+    """The VT-668 incident: an APPROVED campaign_send whose executor was reaped to dead_letter must
+    redrive the task (un-stick) AND send an honest owner ack — NEVER silence."""
+    probe = _ConsumerProbe(_bound("dead_letter"))
+    ar = probe.install(monkeypatch)
+    ar._guarantee_campaign_consumer(_CaptureConn(), uuid4(), uuid4(), "approved")
+    assert probe.redriven == ["task-1"]
+    assert probe.acks == [True]  # reset=True: honest "stalled, couldn't send now" ack
+
+
+def test_consumer_guarantee_blocked_redrives_and_acks(monkeypatch):
+    """A 'blocked' (retry-ladder rung) executor is equally dead to a just-resolved approval —
+    redrive + honest ack (the reaper would otherwise walk it to dead_letter with the approval now
+    closed, i.e. silently)."""
+    probe = _ConsumerProbe(_bound("blocked"))
+    ar = probe.install(monkeypatch)
+    ar._guarantee_campaign_consumer(_CaptureConn(), uuid4(), uuid4(), "approved")
+    assert probe.redriven == ["task-1"]
+    assert probe.acks == [True]
+
+
+def test_consumer_guarantee_terminal_task_honest_expiry_no_redrive(monkeypatch):
+    """The approved reply arrived after the task already closed (cancelled) — honest-expiry ack
+    (reset=False), NO redrive (a terminal task is not redrivable)."""
+    probe = _ConsumerProbe(_bound("cancelled"))
+    ar = probe.install(monkeypatch)
+    ar._guarantee_campaign_consumer(_CaptureConn(), uuid4(), uuid4(), "approved")
+    assert probe.redriven == []
+    assert probe.acks == [False]  # reset=False: honest "already closed" ack
+
+
+def test_consumer_guarantee_live_loop_task_left_untouched(monkeypatch):
+    """A task in an active/waiting state (waiting_owner) is presumed to have a LIVE loop that will
+    react — the resolution seam must NOT redrive or ack (that is the loop's job; the reaper's
+    orphaned-approval sweep is the backstop if the loop is actually dead)."""
+    for status in ("waiting_owner", "running", "verifying", "clarifying"):
+        probe = _ConsumerProbe(_bound(status))
+        ar = probe.install(monkeypatch)
+        ar._guarantee_campaign_consumer(_CaptureConn(), uuid4(), uuid4(), "approved")
+        assert probe.redriven == [], status
+        assert probe.acks == [], status
+
+
+def test_consumer_guarantee_non_campaign_send_is_noop(monkeypatch):
+    """Only a campaign_send routes through the manager loop; a dead_letter task bound to some other
+    approval_type must NOT be touched by this money-path guarantee."""
+    probe = _ConsumerProbe(_bound("dead_letter", approval_type="autonomy_upgrade"))
+    ar = probe.install(monkeypatch)
+    ar._guarantee_campaign_consumer(_CaptureConn(), uuid4(), uuid4(), "approved")
+    assert probe.redriven == []
+    assert probe.acks == []
+
+
+def test_consumer_guarantee_no_bound_task_is_noop(monkeypatch):
+    """No bound manager_task (the legacy graph-resume path owns its own run lifecycle) — clean
+    no-op, no crash."""
+    probe = _ConsumerProbe(None)
+    ar = probe.install(monkeypatch)
+    ar._guarantee_campaign_consumer(_CaptureConn(), uuid4(), uuid4(), "approved")
+    assert probe.redriven == []
+    assert probe.acks == []
+
+
+def test_consumer_guarantee_only_on_approved(monkeypatch):
+    """A rejected / needs_changes resolution has nothing to send — the guarantee is a no-op and
+    must not even look up the task."""
+    for decision in ("rejected", "needs_changes", "timeout"):
+        probe = _ConsumerProbe(_bound("dead_letter"))
+        ar = probe.install(monkeypatch)
+        ar._guarantee_campaign_consumer(_CaptureConn(), uuid4(), uuid4(), decision)
+        assert probe.redriven == [], decision
+        assert probe.acks == [], decision
+
+
+def test_consumer_guarantee_failsoft_never_raises(monkeypatch):
+    """A bug in the consumer guarantee must NEVER unwind the owner's authoritative resolution
+    (Pillar 7) — the whole body is fail-soft."""
+    import orchestrator.agent.approval_resume as ar
+    from orchestrator.manager import task_store
+
+    def _boom(*a, **k):
+        raise RuntimeError("join blew up")
+
+    monkeypatch.setattr(task_store, "find_task_for_resolved_approval", _boom)
+    # Must not raise.
+    ar._guarantee_campaign_consumer(_CaptureConn(), uuid4(), uuid4(), "approved")
+
+
+def test_mark_resolved_invokes_consumer_guarantee_on_applied(monkeypatch):
+    """mark_approval_resolved runs the consumer guarantee exactly once, gated on the resolve having
+    applied (rowcount>0) — the wiring that makes a double-resolve idempotent (the second resolve's
+    rowcount is 0, so no second redrive/ack)."""
+    import orchestrator.agent.approval_resume as ar
+
+    calls: list[str] = []
+    monkeypatch.setattr(
+        ar, "_guarantee_campaign_consumer",
+        lambda conn, tenant_id, approval_id, decision: calls.append(decision),
+    )
+    # _CaptureConn.execute returns rowcount=1 -> resolve applied -> guarantee runs once.
+    mark_approval_resolved(_CaptureConn(), uuid4(), uuid4(), "approved")
+    assert calls == ["approved"]
+
+
+def test_mark_resolved_skips_consumer_guarantee_when_already_resolved(monkeypatch):
+    """Double-resolve idempotency: when the resolve UPDATE matches 0 rows (already resolved), the
+    consumer guarantee is NOT invoked again."""
+    import orchestrator.agent.approval_resume as ar
+
+    calls: list[str] = []
+    monkeypatch.setattr(
+        ar, "_guarantee_campaign_consumer",
+        lambda conn, tenant_id, approval_id, decision: calls.append(decision),
+    )
+
+    class _AlreadyResolvedConn(_CaptureConn):
+        def execute(self, sql, params=None):
+            from types import SimpleNamespace
+
+            if "current_user" in sql:
+                return SimpleNamespace(fetchone=lambda: None, rowcount=0)
+            self.calls.append((" ".join(sql.split()), params))
+            # The resolve UPDATE matches 0 rows (resolved_at already set); everything else 1.
+            rc = 0 if "UPDATE pending_approvals" in sql and "resolved_at = now()" in sql else 1
+            return SimpleNamespace(rowcount=rc, fetchone=lambda: None)
+
+    mark_approval_resolved(_AlreadyResolvedConn(), uuid4(), uuid4(), "approved")
+    assert calls == []
+
+
 def test_count_recent_campaign_requests_sql_and_value():
     """VT-334 per-week budget count: scopes to campaign_send + a created_at window, returns the
     count (the collapse guard skips at >= _WEEKLY_APPROVAL_BUDGET)."""

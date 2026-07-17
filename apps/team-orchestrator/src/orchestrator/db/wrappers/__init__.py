@@ -900,6 +900,50 @@ class PendingApprovalsWrapper(TenantScopedTable):
             ).fetchone()
         return dict(row) if row is not None else None
 
+    def find_bound_task_for_approval(
+        self, tenant_id: UUID | str, approval_id: UUID | str, *, conn: Any = None
+    ) -> dict[str, Any] | None:
+        """VT-668 — the resolution-seam approval→manager_task reverse join (composite read lives
+        HERE because the pending_approvals fragment is wrapper-scoped). Returns
+        ``{id, status, approval_type}`` for the task bound to ``approval_id``, else None. The link
+        is one of two (both producers): the loop's ``stall_metadata->>'awaiting_approval_run_id'``
+        stamp OR the legacy ``source_message_ref = run_id`` (a loop task's source_message_ref is a
+        Twilio SID, never a run_id UUID — no collision). ``ORDER BY t.updated_at DESC`` is a
+        defensive tie-break."""
+        tid = self._uuid(tenant_id)
+        with self._conn(tid, conn) as c:
+            row = c.execute(
+                "SELECT t.id, t.status, p.approval_type FROM pending_approvals p "
+                "JOIN manager_tasks t ON t.tenant_id = p.tenant_id "
+                "  AND (t.stall_metadata->>'awaiting_approval_run_id' = p.run_id::text "
+                "       OR t.source_message_ref = p.run_id::text) "
+                "WHERE p.tenant_id = %s AND p.id = %s "
+                "ORDER BY t.updated_at DESC LIMIT 1",
+                (str(tid), str(approval_id)),
+            ).fetchone()
+        return dict(row) if row is not None else None
+
+    def open_run_for_task(
+        self, tenant_id: UUID | str, task_id: UUID | str, *, conn: Any = None
+    ) -> str | None:
+        """VT-668 — the task→OPEN-approval forward join (reaper dead-letter surfacing, fix 3).
+        Returns the ``run_id`` (text) of an unresolved approval bound to ``task_id`` (same two
+        linkages as ``find_bound_task_for_approval``), else None."""
+        tid = self._uuid(tenant_id)
+        with self._conn(tid, conn) as c:
+            row = c.execute(
+                "SELECT p.run_id::text AS run_id FROM pending_approvals p "
+                "JOIN manager_tasks t ON t.tenant_id = p.tenant_id "
+                "WHERE t.tenant_id = %s AND t.id = %s AND p.resolved_at IS NULL "
+                "  AND (t.stall_metadata->>'awaiting_approval_run_id' = p.run_id::text "
+                "       OR t.source_message_ref = p.run_id::text) "
+                "ORDER BY p.requested_at DESC LIMIT 1",
+                (str(tid), str(task_id)),
+            ).fetchone()
+        if row is None:
+            return None
+        return str(row["run_id"] if isinstance(row, dict) else row[0])
+
     def status_for_run(
         self, tenant_id: UUID | str, run_id: UUID | str, *, conn: Any = None
     ) -> str | None:

@@ -358,7 +358,7 @@ def mark_approval_resolved(
         return True
 
     status = _DECISION_TO_STATUS.get(decision, "rejected")
-    PendingApprovalsWrapper().mark_resolved(
+    resolved_rows = PendingApprovalsWrapper().mark_resolved(
         tenant_id,
         approval_id,
         decision=decision,
@@ -382,6 +382,13 @@ def mark_approval_resolved(
         conn=conn,
     )
     _apply_agent_glue(conn, tenant_id, approval_id, decision, owner_feedback)
+    # VT-668 — money-path anti-silence: an approved campaign_send whose loop executor is dead must
+    # never resolve into silence. Runs on this resolve conn (redrive commits with the resolution);
+    # fail-soft, and a no-op for every non-approved / non-campaign_send / live-loop resolution. Gated
+    # on the resolve having ACTUALLY applied (rowcount>0) so a double-resolve re-entry is a clean
+    # no-op — no second redrive/ack (the FIRST resolution already handled the consumer).
+    if resolved_rows:
+        _guarantee_campaign_consumer(conn, tenant_id, approval_id, decision)
     return True
 
 
@@ -415,6 +422,95 @@ def _apply_agent_glue(
         owner_feedback=owner_feedback,
     )
     apply_business_policy_decision(conn, tenant_id, approval_id, decision)
+
+
+# VT-668 — approval types whose executor is a manager-loop task the resolution seam must guarantee
+# a live consumer for. A ``campaign_send`` is armed by the loop (workflow._dispatch_specialist_step,
+# run_type='manager_dispatch') and executed by the loop's OWN approved-branch — so if that loop dies
+# (a Railway redeploy strands its DBOS workflow; the ~6h retry ladder then reaps the task to
+# dead_letter, all long before the 48h approval TTL), the owner's eventual approval resolves into
+# SILENCE. Other types don't route through the loop: agent_customer_send owns its own durable send
+# workflow (start_l2_send_for_resolved_approval), business_policy_grant/autonomy_upgrade have no send.
+_LOOP_CONSUMER_APPROVAL_TYPES = frozenset({"campaign_send"})
+
+
+def _guarantee_campaign_consumer(
+    conn: Any, tenant_id: UUID | str, approval_id: UUID | str, decision: str
+) -> None:
+    """VT-668 — the money-path anti-silence guarantee at the single resolution choke point. When the
+    owner APPROVES a ``campaign_send`` whose executing manager_task is DEAD (retry-ladder terminal or
+    reaper-parked 'blocked'), the loop that would react is gone, so the approval otherwise resolves
+    into SILENCE — the worst money-path trust shape. This finds the bound task (task_store.
+    find_task_for_resolved_approval — the loop's run_id is a one-way hash, so the join rides the
+    approval-park stamp / legacy source_message_ref) and, when it is dead, UN-STICKS it
+    (``redrive_task``, the VT-557 operator primitive) and sends the owner an HONEST reply — never
+    silence, never a false "sent" claim.
+
+    Scope: ONLY an ``approved`` ``campaign_send``. A task in an ACTIVE/waiting state
+    (running/verifying/waiting_owner/clarifying) is left for its (presumed live) loop — the reaper's
+    orphaned-awaiting-approval sweep is the backstop if that loop is actually dead. Runs on the
+    resolve ``conn`` so the redrive commits atomically with the resolution. FULLY FAIL-SOFT: the
+    owner's authoritative resolution must never be unwound by a consumer-guarantee error (Pillar 7).
+
+    Deliberately does NOT auto-send the customer campaign from here: a send at this seam would race a
+    possibly-live loop (money-path double-send risk), so the honest reply directs the owner to
+    re-trigger instead — the send is never claimed unless it actually happened (VT-668 no-drift)."""
+    if decision != "approved":
+        return
+    try:
+        from orchestrator.manager import task_store
+
+        bound = task_store.find_task_for_resolved_approval(tenant_id, approval_id, conn=conn)
+        if bound is None or bound.get("approval_type") not in _LOOP_CONSUMER_APPROVAL_TYPES:
+            return  # no bound loop task (legacy graph-resume owns its own run), or not a loop send
+        status = str(bound["status"])
+        task_id = bound["id"]
+        if status in ("dead_letter", "blocked"):
+            task_store.redrive_task(tenant_id, task_id, conn=conn)
+            _ack_owner_stalled_campaign(conn, tenant_id, reset=True)
+        elif status in ("completed", "failed", "cancelled"):
+            _ack_owner_stalled_campaign(conn, tenant_id, reset=False)
+        # else running/verifying/waiting_owner/clarifying: a live loop reacts (unchanged path).
+    except Exception:  # noqa: BLE001 — the consumer guarantee must never unwind the resolution
+        logger.warning(
+            "VT-668 consumer-guarantee failed (fail-soft) tenant=%s approval=%s",
+            tenant_id, approval_id, exc_info=True,
+        )
+
+
+def _ack_owner_stalled_campaign(conn: Any, tenant_id: UUID | str, *, reset: bool) -> None:
+    """VT-668 — the HONEST owner reply when an approved ``campaign_send`` resolves onto a dead
+    executor. NEVER claims the send happened (the redriven task's dispatch step is already 'done',
+    so the loop cannot auto-resume the send). Free-form (the owner just replied ⇒ inside the 24h
+    window) via the SAME ``send_freeform_message`` primitive the owner-notification path uses — no
+    new transport. FULLY FAIL-SOFT: an ack-send failure must never unwind the resolution. CL-390:
+    no owner phone / body logged."""
+    try:
+        row = conn.execute(
+            "SELECT owner_phone FROM tenants WHERE id = %s", (str(tenant_id),)
+        ).fetchone()
+        owner_phone = (row["owner_phone"] if isinstance(row, dict) else row[0]) if row else None
+        if not owner_phone:
+            logger.warning("VT-668 stalled-campaign ack: no owner_phone tenant=%s", tenant_id)
+            return
+        if reset:
+            body = (
+                "Got your approval — but this campaign had stalled while it was waiting, so I "
+                "couldn't send it just now. Please send the request again and I'll set it up and "
+                "send it right away."
+            )
+        else:
+            body = (
+                "Got your approval — but this campaign had already been closed by the time it "
+                "arrived. Please send the request again and I'll prepare it fresh for you."
+            )
+        from orchestrator.utils.twilio_send import send_freeform_message
+
+        send_freeform_message(body, owner_phone, tenant_id=tenant_id, surface="manager")
+    except Exception:  # noqa: BLE001 — fail-soft: the owner ack never unwinds the resolution
+        logger.warning(
+            "VT-668 stalled-campaign ack send failed (fail-soft) tenant=%s", tenant_id, exc_info=True
+        )
 
 
 def resume_run(run_id: UUID | str, decision: str) -> dict[str, Any]:

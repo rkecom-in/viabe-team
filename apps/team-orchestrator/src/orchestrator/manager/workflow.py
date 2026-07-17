@@ -705,6 +705,47 @@ def _run_verification_cycle(
 
 
 @DBOS.step()
+def _park_task_awaiting_approval(tenant_id: str, task_id: str, step_id: str, attempt: int) -> str | None:
+    """VT-668 — park the approval-paused task at ``waiting_owner`` for the duration of the owner-
+    approval wait, and return its PRE-PAUSE status so the resolution branch can restore it exactly.
+
+    The defect this closes (money path): by the time this loop reports ``paused_approval``,
+    manager_review has ALREADY marked the dispatch step ``done`` and moved the task to
+    ``verifying`` (accept/complete) or left it ``running`` — an active-work state with no runnable
+    step, which is PRECISELY the stall-sweep reaper's target. While the owner thinks (up to the 48h
+    approval TTL) the reaper walks the task through the VT-557 retry ladder to dead_letter, so the
+    owner's eventual approval resolves into a dead executor (VT-668 — silent no-op on the money
+    path). ``waiting_owner`` is excluded from the sweep's active set, so the ladder can never burn
+    an awaiting-approval task. ``task_store.park_awaiting_approval`` also stamps this dispatch's
+    ``loop_run_id`` into ``stall_metadata`` so the resolution seam can reverse-join the approval's
+    (one-way-hashed) ``run_id`` back to this task. Returns None (no park) when the task is not in an
+    active state we recognize as a paused-dispatch shape (defensive — leaves it untouched)."""
+    task = task_store.get_task(tenant_id, task_id)
+    if task is None:
+        return None
+    current = str(task["status"])
+    if current not in ("running", "verifying"):
+        return None
+    run_id = loop_run_id(task_id, step_id, attempt)
+    task_store.park_awaiting_approval(
+        tenant_id, task_id, run_id=run_id, expected_from=("running", "verifying"),
+    )
+    return current
+
+
+@DBOS.step()
+def _restore_task_after_approval(tenant_id: str, task_id: str, pre_pause_status: str) -> None:
+    """VT-668 — restore the pre-pause status captured by ``_park_task_awaiting_approval`` once the
+    approval resolves, so the decision routing below (the ``verifying`` check on the approved
+    branch; ``_settle_declined_approval`` / ``_resume_task_after_needs_changes``'s
+    ``expected_from=('verifying',)``) sees byte-for-byte the state it saw before the park.
+    CAS-guarded to ``waiting_owner`` — a no-op if something else already moved it."""
+    task_store.set_task_status(
+        tenant_id, task_id, pre_pause_status, expected_from=("waiting_owner",),
+    )
+
+
+@DBOS.step()
 def _approval_still_pending(tenant_id: str, task_id: str, step_id: str, attempt: int) -> bool:
     """VT-607 (Loop Package 6) — the 'paused_approval' wait target: is the interrupt's OWN
     pending_approvals row still unresolved? Uses the SAME message_ids.loop_run_id the dispatch
@@ -1136,6 +1177,13 @@ def manager_task_workflow(tenant_id: str, task_id: str) -> str:
             # owner's WhatsApp reply arrives); it durably waits for THAT resolution the same way
             # the ask_owner branch waits for an answer, then continues from wherever the already-
             # applied decision left the task.
+            #
+            # VT-668 — park the task 'waiting_owner' for the wait so the stall-sweep reaper can't
+            # dead-letter it while the owner thinks (see _park_task_awaiting_approval). Restored to
+            # its pre-pause status on resolution so the routing below is unchanged. On a poll
+            # timeout the task is left 'waiting_owner' and _block_limit_exceeded moves it 'blocked'
+            # (waiting_owner ∈ TASK_NON_TERMINAL) — no restore needed on that path.
+            pre_pause_status = _park_task_awaiting_approval(tenant_id, task_id, step_id, attempt)
             polls = 0
             resolved = False
             while polls < _OWNER_WAIT_MAX_POLLS:
@@ -1150,6 +1198,8 @@ def manager_task_workflow(tenant_id: str, task_id: str) -> str:
                     limit="approval_resolution_timeout", count=polls, threshold=_OWNER_WAIT_MAX_POLLS,
                 )
                 break
+            if pre_pause_status is not None:
+                _restore_task_after_approval(tenant_id, task_id, pre_pause_status)
 
             # VT-607 fix round (CRITICAL) — route on the owner's ACTUAL decision, never on "no
             # longer pending" alone (that treated ANY resolution — including a REJECTED or timed-

@@ -197,6 +197,89 @@ def redrive_task(tenant_id: UUID | str, task_id: UUID | str, *, conn: Any) -> bo
     return cur.rowcount > 0
 
 
+def park_awaiting_approval(
+    tenant_id: UUID | str,
+    task_id: UUID | str,
+    *,
+    run_id: UUID | str,
+    expected_from: tuple[str, ...] = ("running", "verifying"),
+) -> bool:
+    """VT-668 — atomically park a task ``waiting_owner`` for an owner-approval wait AND stamp the
+    approval's ``run_id`` into ``stall_metadata`` (the durable approval↔task linkage).
+
+    WHY the park: the stall-sweep reaper (``orphan_reaper.reap_stalled_manager_tasks``) walks any
+    task in planned/running/verifying with no runnable step through the VT-557 retry ladder to
+    dead_letter. That is EXACTLY an approval-paused loop task's shape — manager_review marked its
+    dispatch step ``done`` and moved the task to ``verifying``/``running`` BEFORE the approval gate
+    paused — so while the owner thinks (up to the 48h approval TTL) the ladder burns the executor to
+    dead_letter, and a later owner approval resolves into a dead consumer (the VT-668 incident).
+    ``waiting_owner`` is EXCLUDED from the sweep's active set (and its 'blocked' wake), so the
+    ladder can never touch an awaiting-approval task.
+
+    WHY the stamp: ``pending_approvals.run_id`` for a loop dispatch is ``loop_run_id(task, step,
+    attempt)`` — a one-way ``uuid5``, so the approval's run_id can NOT be decoded back to the task.
+    Recording it here at park time gives the resolution seam / reaper a deterministic reverse join
+    (``find_task_awaiting_approval_run``). CAS-guarded to ``expected_from`` so a stale/terminal task
+    is a no-op (returns False). The ``||`` merge preserves any existing ``stall_metadata`` keys."""
+    with tenant_connection(tenant_id) as conn:
+        cur = conn.execute(
+            "UPDATE manager_tasks SET status = 'waiting_owner', version = version + 1, "
+            "    updated_at = now(), "
+            "    stall_metadata = COALESCE(stall_metadata, '{}'::jsonb) "
+            "      || jsonb_build_object('awaiting_approval_run_id', %s::text) "
+            "WHERE tenant_id = %s AND id = %s AND status = ANY(%s)",
+            (str(run_id), str(tenant_id), str(task_id), list(expected_from)),
+        )
+        if cur.rowcount == 0:
+            logger.warning(
+                "manager_task park_awaiting_approval CAS no-op (task=%s not in expected_from=%r) "
+                "— stale write suppressed", task_id, expected_from,
+            )
+            return False
+    return True
+
+
+def find_task_for_resolved_approval(
+    tenant_id: UUID | str, approval_id: UUID | str, *, conn: Any = None
+) -> dict[str, Any] | None:
+    """VT-668 — the resolution-seam bound-task reverse join, BY approval_id (the resolution choke
+    point ``approval_resume.mark_approval_resolved`` holds the approval_id, not its run_id). Returns
+    ``{id, status, approval_type}`` for the manager_task bound to the approval, else None. The
+    approval↔task link is one of two, covering BOTH producers, since a loop dispatch's
+    ``pending_approvals.run_id`` is ``loop_run_id(task, step, attempt)`` — a one-way ``uuid5`` that
+    cannot be decoded back to the task:
+      * ``t.stall_metadata->>'awaiting_approval_run_id' = p.run_id`` — the loop path, stamped by
+        ``park_awaiting_approval`` at the approval park.
+      * ``t.source_message_ref = p.run_id`` — the legacy ``task_producer`` path, where ``run_id`` IS
+        the webhook pipeline_run recorded verbatim in ``source_message_ref`` (a loop task's
+        ``source_message_ref`` is a Twilio SID, never a run_id UUID — no collision).
+    Runs on the caller's tenant-scoped ``conn`` when given (the resolve txn), else opens its own.
+    ``ORDER BY t.updated_at DESC`` is a defensive tie-break; None when no bound task exists (the
+    legacy graph-resume path owns its own run lifecycle and has no manager_task)."""
+    # VT-72 — the pending_approvals fragment is wrapper-scoped; the composite join lives in
+    # PendingApprovalsWrapper (the documented composite-read home), this is a thin delegate.
+    from orchestrator.db.wrappers import PendingApprovalsWrapper
+
+    return PendingApprovalsWrapper().find_bound_task_for_approval(
+        tenant_id, approval_id, conn=conn
+    )
+
+
+def find_open_approval_run_for_task(
+    tenant_id: UUID | str, task_id: UUID | str, *, conn: Any = None
+) -> str | None:
+    """VT-668 — the task→open-approval forward join used by the reaper's dead-letter surfacing
+    (fix 3). Returns the ``run_id`` (text) of an OPEN (``resolved_at IS NULL``) ``pending_approvals``
+    row bound to ``task_id``, else None. Joins on the SAME two linkages as
+    ``find_task_awaiting_approval_run`` (loop stamp OR legacy ``source_message_ref``). Accepts an
+    optional caller ``conn`` (the reaper's service cursor) so the read runs in the same connection
+    as the dead-letter write; when ``conn`` is None it opens its own RLS-scoped tenant connection."""
+    # VT-72 — wrapper-scoped composite join (see find_task_for_resolved_approval); thin delegate.
+    from orchestrator.db.wrappers import PendingApprovalsWrapper
+
+    return PendingApprovalsWrapper().open_run_for_task(tenant_id, task_id, conn=conn)
+
+
 def set_owner_notification_status(
     tenant_id: UUID | str,
     task_id: UUID | str,
@@ -442,6 +525,8 @@ __all__ = [
     "TERMINAL_OUTCOMES", "OWNER_NOTIFICATION_STATUSES",
     "STEP_KINDS", "STEP_STATUSES", "STEP_TERMINAL", "STEP_NON_TERMINAL", "EVIDENCE_KINDS",
     "create_task", "set_task_status", "set_owner_notification_status", "get_task",
+    "park_awaiting_approval", "find_task_for_resolved_approval",
+    "find_open_approval_run_for_task",
     "get_most_recent_task", "find_task_id",
     "find_task_by_source_ref", "has_active_task", "has_active_integration_step",
     "add_step", "set_step_status", "get_steps",

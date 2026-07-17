@@ -67,6 +67,12 @@ _ALLOWLIST = frozenset(
         # through tenant-scoped paths (close_attribution / mark_approval_resolved,
         # tenant-predicated). Cross-tenant scan = residual, like the other sweeps.
         "apps/team-orchestrator/src/orchestrator/scheduled_triggers.py",
+        # VT-668 orphan_reaper — the SAME cross-tenant-sweep class as scheduled_triggers
+        # directly above: the stalled/orphaned sweeps scan manager_tasks + close dangling
+        # pending_approvals ACROSS tenants under BYPASSRLS, by design (a sweep cannot run
+        # inside one tenant's RLS scope). The per-row work (redrive, owner notification,
+        # bound-task joins) routes through tenant-predicated task_store/wrapper calls.
+        "apps/team-orchestrator/src/orchestrator/orphan_reaper.py",
         # VT-176 attribution close — by-PK UPDATE of `campaigns` under BYPASSRLS in
         # the scheduled cross-tenant sweep; the id is sourced from the INTERNAL
         # sweep query, never client input (no IDOR surface) (Cowork 20260605T002000Z).
