@@ -156,6 +156,12 @@ _COMMON_READ_ANN: dict[str, _Ann] = {
         note="VT-673: first-class plan/roadmap read (delegates to business_plan store/seams; "
         "owner's own plan data, no customer PII)",
     ),
+    "read_agent_memory": _Ann(
+        ToolKind.READ, None, tenant_scope="n/a",
+        note="VT-674: on-demand L3-prior read (delegates to knowledge.l3_query.lookup_pattern; "
+        "180d quarantine + k>=10 anonymized aggregates structural — cross-tenant global table, "
+        "resolved tenant used ONLY for the quarantine check)",
+    ),
 }
 
 # --- home: integration_agent (agent/integration_agent.py) — the 11 VT-608 connector tools ---------
@@ -761,19 +767,9 @@ KNOWN_CAPABILITY_GAPS: tuple[CapabilityGap, ...] = (
     # plan_roadmap_read (VT-673): CLOSED 2026-07-18 — `read_active_plan` built into
     # COMMON_READ_TOOLS (delegates to business_plan store/seams); entry deleted per the
     # registry-honesty test.
-    CapabilityGap(
-        key="on_demand_memory_read",
-        title="On-demand agent-memory read tool (L3 priors reachable mid-loop)",
-        kind=GapKind.ABSENT_FROM_CATALOG,
-        probe_names=("read_agent_memory", "query_memory"),
-        needed_by=("sales_recovery", "onboarding_conductor", "all_lanes"),
-        reason=(
-            "L3 priors are context-ASSEMBLED (pre-baked into the bundle); only L4 skills is callable. "
-            "A specialist cannot query memory ON DEMAND mid-loop (e.g. 'have we tried this play before'). "
-            "Needs a scoped memory-read tool."
-        ),
-        followon_vt="VT-674",
-    ),
+    # on_demand_memory_read (VT-674): CLOSED 2026-07-18 — `read_agent_memory` built into
+    # COMMON_READ_TOOLS (delegates to knowledge.l3_query.lookup_pattern: quarantine + k-anon
+    # structural); entry deleted per the registry-honesty test.
     CapabilityGap(
         key="richer_reads_into_common",
         title="Promote richer reads into the COMMON set",

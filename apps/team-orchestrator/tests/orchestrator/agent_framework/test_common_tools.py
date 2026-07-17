@@ -298,6 +298,7 @@ def test_common_read_tools_surface_names() -> None:
         "read_business_context",
         "read_integration_state",
         "read_active_plan",  # VT-673
+        "read_agent_memory",  # VT-674
     ]
 
 
@@ -431,3 +432,89 @@ def test_read_active_plan_unresolvable_tenant_error_dict() -> None:
     out = read_active_plan.func(tenant_id="not-a-uuid")  # type: ignore[attr-defined]
     assert out["status"] == "error"
     assert "read_active_plan" in out["error"]
+
+
+# =============================================================================================
+#  read_agent_memory (VT-674) — on-demand L3 prior, delegates to lookup_pattern
+# =============================================================================================
+
+
+def test_read_agent_memory_hit_returns_anonymized_prior(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pattern hit returns the anonymized aggregate fields ONLY — no tenant ids, no PII."""
+    import orchestrator.knowledge.l3_query as l3_query
+
+    from orchestrator.agent_framework.tools_common import read_agent_memory
+
+    captured: dict[str, Any] = {}
+
+    def _fake_lookup(tid: Any, pattern_type: str, cohort_key: str) -> Any:
+        captured["tid"] = tid
+        return SimpleNamespace(
+            pattern_type=pattern_type, cohort_key=cohort_key, n_tenants=14, n_campaigns=41,
+            metrics={"send_rate": 0.6}, confidence_band="medium",
+        )
+
+    monkeypatch.setattr(l3_query, "lookup_pattern", _fake_lookup)
+    tenant = uuid4()
+    with observability_context(run_id=uuid4(), tenant_id=tenant):
+        out = read_agent_memory.func(  # type: ignore[attr-defined]
+            tenant_id=str(tenant), pattern_type="winback", cohort_key="kirana_metro"
+        )
+
+    assert captured["tid"] == tenant  # the RESOLVED ambient tenant drives the quarantine check
+    assert out["prior"]["n_tenants"] == 14
+    assert out["prior"]["metrics"] == {"send_rate": 0.6}
+    # The prior carries NO tenant identity — only cohort aggregates.
+    assert "tenant_id" not in out["prior"]
+    _assert_no_customer_pii_keys(out)
+
+
+def test_read_agent_memory_none_is_honest_no_prior(monkeypatch: pytest.MonkeyPatch) -> None:
+    """lookup_pattern None (quarantined OR below-k cohort) → honest ``prior: None`` marker; the
+    reason is deliberately NOT disclosed."""
+    import orchestrator.knowledge.l3_query as l3_query
+
+    from orchestrator.agent_framework.tools_common import read_agent_memory
+
+    monkeypatch.setattr(l3_query, "lookup_pattern", lambda tid, pt, ck: None)
+    tenant = uuid4()
+    with observability_context(run_id=uuid4(), tenant_id=tenant):
+        out = read_agent_memory.func(  # type: ignore[attr-defined]
+            tenant_id=str(tenant), pattern_type="winback", cohort_key="kirana_metro"
+        )
+    assert out == {"prior": None, "pattern_type": "winback", "cohort_key": "kirana_metro"}
+
+
+def test_read_agent_memory_lookup_failure_structured_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A lookup crash returns a structured error dict, never a raise (lane-tool invariant)."""
+    import orchestrator.knowledge.l3_query as l3_query
+
+    from orchestrator.agent_framework.tools_common import read_agent_memory
+
+    def _boom(tid: Any, pt: str, ck: str) -> Any:
+        raise RuntimeError("pool down")
+
+    monkeypatch.setattr(l3_query, "lookup_pattern", _boom)
+    tenant = uuid4()
+    with observability_context(run_id=uuid4(), tenant_id=tenant):
+        out = read_agent_memory.func(  # type: ignore[attr-defined]
+            tenant_id=str(tenant), pattern_type="winback", cohort_key="kirana_metro"
+        )
+    assert out["status"] == "error"
+    assert "read_agent_memory" in out["error"]
+
+
+def test_read_agent_memory_unresolvable_tenant_error_dict() -> None:
+    """No ambient context + junk model tenant → lane_tenant_error, never a raise (and the L3 seam
+    is never reached — quarantine cannot be probed without a resolved tenant)."""
+    from orchestrator.agent_framework.tools_common import read_agent_memory
+
+    out = read_agent_memory.func(  # type: ignore[attr-defined]
+        tenant_id="not-a-uuid", pattern_type="winback", cohort_key="kirana_metro"
+    )
+    assert out["status"] == "error"
+    assert "read_agent_memory" in out["error"]
