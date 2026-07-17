@@ -164,15 +164,40 @@ def _patch_cw(monkeypatch: pytest.MonkeyPatch, cw: _FakeCW) -> None:
     monkeypatch.setattr(w, "CustomersWrapper", lambda: cw)
 
 
+def _patch_export(monkeypatch: pytest.MonkeyPatch, *, delivered: bool) -> None:
+    import orchestrator.owner_surface.customer_export as ce
+
+    monkeypatch.setattr(ce, "send_customer_list_to_owner", lambda tid: delivered)
+
+
 def test_lapsed_list_render_is_count_plus_offer_never_names(monkeypatch: pytest.MonkeyPatch) -> None:
+    """VT-676 fallback arm: export delivery FAILS → the pre-VT-676 honest count+OFFER copy (never a
+    fabricated 'sent', never names inline)."""
     _patch_cw(monkeypatch, _FakeCW(with_sales=6, lapsed=5))
+    _patch_export(monkeypatch, delivered=False)
     ans = sq.answer_status_query(
         _TID, "kaafi customers hain jinhone 60 din se zyada order nahi kiya — unki list bhej do mujhe"
     )
     assert ans is not None
     assert "5" in ans and str(sq.LAPSED_WINDOW_DAYS) in ans
-    # CD2 interim: the render OFFERS the list, it never dumps names inline.
+    # Fallback: the render OFFERS the list, it never dumps names inline and never claims a send.
     assert "list" in ans.lower()
+    assert "sent" not in ans.lower()
+
+
+def test_lapsed_list_delivers_the_file_when_export_succeeds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """VT-676 primary arm: export delivery SUCCEEDS → the reply states the grounded count AND that
+    the file was sent (a DB-backed claim — send_customer_list_to_owner returned True only after a
+    real transport sid + audit row). Still never names inline."""
+    _patch_cw(monkeypatch, _FakeCW(with_sales=6, lapsed=5))
+    _patch_export(monkeypatch, delivered=True)
+    ans = sq.answer_status_query(_TID, "make a list of lapsed customers")
+    assert ans is not None
+    assert "5" in ans and str(sq.LAPSED_WINDOW_DAYS) in ans
+    assert "sent" in ans.lower() and "file" in ans.lower()
+    assert "flagged" in ans.lower()  # points the owner at the lapsed flag in the CSV
 
 
 def test_lapsed_list_empty_ledger_is_honest(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -183,6 +208,7 @@ def test_lapsed_list_empty_ledger_is_honest(monkeypatch: pytest.MonkeyPatch) -> 
 
 def test_lapsed_count_and_list_share_the_same_number(monkeypatch: pytest.MonkeyPatch) -> None:
     _patch_cw(monkeypatch, _FakeCW(with_sales=9, lapsed=3))
+    _patch_export(monkeypatch, delivered=False)  # VT-676: pin the count invariant, not delivery
     count_ans = sq.answer_status_query(_TID, "how many lapsed customers?")
     list_ans = sq.answer_status_query(_TID, "make a list of lapsed customers")
     assert count_ans is not None and list_ans is not None

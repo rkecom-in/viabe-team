@@ -302,6 +302,36 @@ class CustomersWrapper(TenantScopedTable):
             ).fetchone()
         return int(dict(row)["n"]) if row else 0
 
+    def list_customers_for_export(
+        self, tenant_id: UUID | str, *, lapsed_days: int, limit: int, offset: int, conn: Any = None
+    ) -> list[dict[str, Any]]:
+        """VT-676 — the customer-list EXPORT read (owner-facing CSV): id, tenant_id, display_name,
+        phone_e164 (RAW — leaves only via the verified-owner attachment path), opt_out_status,
+        spend_paise, last_sale_date, and ``lapsed`` computed with the SAME canonical definition as
+        ``count_lapsed`` (had a sale, none within ``lapsed_days``) — so the flag the owner sees in
+        the file NEVER diverges from the count they hear in chat. Newest first, tenant-predicated."""
+        tid = self._uuid(tenant_id)
+        with self._conn(tid, conn) as c:
+            rows = c.execute(
+                "SELECT c.id, c.tenant_id, c.display_name, c.phone_e164, c.opt_out_status, "
+                "       COALESCE(SUM(l.amount_paise), 0) AS spend_paise, "
+                "       MAX(l.entry_date) FILTER (WHERE l.entry_type = 'sale') AS last_sale_date, "
+                "       (MAX(l.entry_date) FILTER (WHERE l.entry_type = 'sale') IS NOT NULL "
+                "        AND MAX(l.entry_date) FILTER (WHERE l.entry_type = 'sale') "
+                "            <= CURRENT_DATE - make_interval(days => %(days)s)) AS lapsed "
+                "FROM customers c "
+                "LEFT JOIN customer_ledger_entries l "
+                "  ON l.tenant_id = c.tenant_id AND l.customer_id = c.id "
+                "WHERE c.tenant_id = %(tid)s "
+                "GROUP BY c.id, c.tenant_id, c.display_name, c.phone_e164, c.opt_out_status "
+                "ORDER BY c.created_at DESC, c.id "
+                "LIMIT %(limit)s OFFSET %(offset)s",
+                {"tid": str(tid), "days": lapsed_days, "limit": limit, "offset": offset},
+            ).fetchall()
+        out = [dict(r) for r in rows]
+        self._validate(out, tid)  # layer-2 tenant-isolation backstop
+        return out
+
     def count_with_sales(self, tenant_id: UUID | str, *, conn: Any = None) -> int:
         """VT-632 — how many customers have ANY 'sale' ledger entry (the active base). Distinguishes
         an EMPTY ledger (no sales data at all -> a lapsed_count of 0 must NOT claim "everyone bought

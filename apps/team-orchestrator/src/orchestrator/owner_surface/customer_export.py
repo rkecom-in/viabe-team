@@ -61,31 +61,38 @@ def export_storage_path(tenant_id: str) -> str:
 def build_customer_list_csv(tenant_id: UUID | str) -> tuple[bytes, int]:
     """The owner's full customer list as CSV bytes + the row count.
 
-    Columns: name, phone, status, total_spend_inr — the SAME fields the owner portal's customer
-    page shows (``list_customers_page``: display_name / phone_e164 RAW / opt_out_status /
-    spend_paise). Spend is converted paise→INR verbatim (no derived/estimated numbers). RLS-scoped
-    read; pages to exhaustion.
+    Columns: name, phone, status, total_spend_inr, last_purchase, lapsed — the portal fields
+    (display_name / phone_e164 RAW / opt_out_status / spend_paise) PLUS the recency the R7
+    lapsed-list ask needs: ``lapsed`` is computed by the wrapper with the SAME canonical
+    ``count_lapsed`` definition (had a sale, none within ``LAPSED_WINDOW_DAYS``), so the flag in
+    the file never diverges from the count the owner hears in chat. Spend is paise→INR verbatim
+    (no derived/estimated numbers). RLS-scoped read; pages to exhaustion.
     """
-    from orchestrator.db.wrappers import CustomersWrapper
+    from orchestrator.db.wrappers import LAPSED_WINDOW_DAYS, CustomersWrapper
 
     customers = CustomersWrapper()
     buf = io.StringIO()
     writer = csv.writer(buf)
-    writer.writerow(["name", "phone", "status", "total_spend_inr"])
+    writer.writerow(["name", "phone", "status", "total_spend_inr", "last_purchase", "lapsed"])
     count = 0
     offset = 0
     while True:
-        page = customers.list_customers_page(tenant_id, limit=_PAGE_SIZE, offset=offset)
+        page = customers.list_customers_for_export(
+            tenant_id, lapsed_days=LAPSED_WINDOW_DAYS, limit=_PAGE_SIZE, offset=offset
+        )
         if not page:
             break
         for row in page:
             spend_inr = int(row.get("spend_paise") or 0) / 100
+            last_sale = row.get("last_sale_date")
             writer.writerow(
                 [
                     row.get("display_name") or "",
                     row.get("phone_e164") or "",
                     row.get("opt_out_status") or "",
                     f"{spend_inr:.2f}",
+                    str(last_sale) if last_sale else "",
+                    "yes" if row.get("lapsed") else "no",
                 ]
             )
             count += 1

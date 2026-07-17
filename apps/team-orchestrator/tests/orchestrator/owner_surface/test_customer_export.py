@@ -48,6 +48,8 @@ class _FakeStorage:
 
 
 def _customers_rows(n: int) -> list[dict[str, Any]]:
+    from datetime import date
+
     return [
         {
             "id": str(uuid4()),
@@ -55,6 +57,8 @@ def _customers_rows(n: int) -> list[dict[str, Any]]:
             "phone_e164": f"+91900000{i:04d}",
             "opt_out_status": "subscribed",
             "spend_paise": 12345,
+            "last_sale_date": date(2026, 5, 1),
+            "lapsed": (i % 2 == 0),  # alternate flags — proves verbatim passthrough
         }
         for i in range(n)
     ]
@@ -64,7 +68,9 @@ def _patch_customers(monkeypatch: pytest.MonkeyPatch, rows: list[dict[str, Any]]
     import orchestrator.db.wrappers as wrappers_mod
 
     class _FakeCustomers:
-        def list_customers_page(self, tenant_id: Any, *, limit: int, offset: int, **kw: Any):
+        def list_customers_for_export(
+            self, tenant_id: Any, *, lapsed_days: int, limit: int, offset: int, **kw: Any
+        ):
             return rows[offset : offset + limit]
 
     monkeypatch.setattr(wrappers_mod, "CustomersWrapper", _FakeCustomers)
@@ -78,8 +84,11 @@ def test_csv_shape_and_verbatim_spend(monkeypatch: pytest.MonkeyPatch) -> None:
     data, count = ce.build_customer_list_csv(uuid4())
     assert count == 3
     parsed = list(csv.reader(io.StringIO(data.decode("utf-8"))))
-    assert parsed[0] == ["name", "phone", "status", "total_spend_inr"]
-    assert parsed[1] == ["Cust 0", "+919000000000", "subscribed", "123.45"]  # 12345 paise verbatim
+    assert parsed[0] == ["name", "phone", "status", "total_spend_inr", "last_purchase", "lapsed"]
+    # 12345 paise verbatim; last_sale/lapsed flags pass through untouched (wrapper computes lapsed
+    # with the canonical count_lapsed definition — the builder never re-derives it).
+    assert parsed[1] == ["Cust 0", "+919000000000", "subscribed", "123.45", "2026-05-01", "yes"]
+    assert parsed[2][5] == "no"
     assert len(parsed) == 4
 
 
