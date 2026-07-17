@@ -329,6 +329,124 @@ def read_agent_memory(tenant_id: str, pattern_type: str, cohort_key: str) -> dic
     }
 
 
+# --- VT-675: the PROMOTED richer reads (capability gap `richer_reads_into_common`) ---------------
+# get_recent_campaigns / get_attribution_data / query_customer_ledger EXISTED as pydantic-payload
+# functions on the agent/tools surface — but those take a MODEL-SUPPLIED ``payload.tenant_id``
+# directly (the pre-framework MCP-era contract). Promoting them onto the common surface VERBATIM
+# would hand a specialist a tenant-injectable read (the VT-293/294/599 IDOR class). So promotion =
+# a thin langchain ``@tool`` wrapper per read that (1) resolve-first (ambient wins), (2) constructs
+# the payload with the RESOLVED tenant only, (3) DELEGATES to the existing function (never
+# re-authors the read), (4) returns structured errors, never raises. The underlying scope/PII
+# posture is unchanged: query_customer_ledger stays the operator-role phone-token read returning
+# customer_id UUIDs + amounts — never name/phone/email (CL-82/CL-390).
+
+
+@tool
+def get_recent_campaigns(tenant_id: str, days_back: int = 7, limit: int = 20) -> dict[str, Any]:
+    """Read recent campaigns + per-campaign response counts — rollups only, no customer PII.
+
+    VT-675 promotion of the existing ``agent/tools/get_recent_campaigns`` read onto the common
+    surface. Returns newest-first campaign rollups (ids / statuses / counts / template refs).
+    ``days_back`` (1-365) and ``limit`` (1-200) are clamped by the underlying payload model; an
+    out-of-bounds value returns a structured error. Tenant is resolved from the ambient run
+    context (model ``tenant_id`` untrusted).
+    """
+    resolved = resolve_lane_tenant(tenant_id, tool_name="get_recent_campaigns")
+    if resolved is None:
+        return lane_tenant_error("get_recent_campaigns")
+
+    # Lazy: the underlying read pulls the campaigns wrapper (psycopg).
+    from orchestrator.agent.tools.get_recent_campaigns import (
+        GetRecentCampaignsInput,
+        get_recent_campaigns as _raw_get_recent_campaigns,
+    )
+
+    try:
+        payload = GetRecentCampaignsInput(
+            tenant_id=str(resolved), days_back=int(days_back), limit=int(limit)
+        )
+        out = _raw_get_recent_campaigns(payload)
+    except Exception as exc:  # noqa: BLE001 — a lane tool must never RAISE (would orphan the tool_use)
+        logger.warning("get_recent_campaigns: read failed (tenant=%s): %s", resolved, exc)
+        return {"status": "error", "error": f"get_recent_campaigns: {exc}"}
+    return out.model_dump(mode="json")
+
+
+@tool
+def get_attribution_data(
+    tenant_id: str,
+    campaign_id: str = "",
+    window_start_iso: str = "",
+    window_end_iso: str = "",
+) -> dict[str, Any]:
+    """Read the attribution snapshot for ONE campaign or a close-window — aggregates only.
+
+    VT-675 promotion of the existing ``agent/tools/get_attribution_data`` read. Exactly one mode:
+    pass ``campaign_id`` OR an ISO ``window_start_iso``/``window_end_iso`` pair (the underlying
+    payload model enforces the XOR; a violation returns a structured error). Tenant is resolved
+    from the ambient run context (model ``tenant_id`` untrusted).
+    """
+    resolved = resolve_lane_tenant(tenant_id, tool_name="get_attribution_data")
+    if resolved is None:
+        return lane_tenant_error("get_attribution_data")
+
+    # Lazy: the underlying read pulls tenant_connection/wrappers (psycopg).
+    from datetime import datetime
+
+    from orchestrator.agent.tools.get_attribution_data import (
+        GetAttributionDataInput,
+        get_attribution_data as _raw_get_attribution_data,
+    )
+
+    try:
+        payload = GetAttributionDataInput(
+            tenant_id=str(resolved),
+            campaign_id=campaign_id or None,
+            window_start=datetime.fromisoformat(window_start_iso) if window_start_iso else None,
+            window_end=datetime.fromisoformat(window_end_iso) if window_end_iso else None,
+        )
+        out = _raw_get_attribution_data(payload)
+    except Exception as exc:  # noqa: BLE001 — a lane tool must never RAISE (would orphan the tool_use)
+        logger.warning("get_attribution_data: read failed (tenant=%s): %s", resolved, exc)
+        return {"status": "error", "error": f"get_attribution_data: {exc}"}
+    return out.model_dump(mode="json")
+
+
+@tool
+def query_customer_ledger(
+    tenant_id: str, customer_phone_token: str, limit: int = 100
+) -> dict[str, Any]:
+    """Read ONE customer's ledger window by phone TOKEN — customer_id UUID + amounts, never PII.
+
+    VT-675 promotion of the existing ``agent/tools/query_customer_ledger`` operator-role read.
+    Input is a phone TOKEN (never a raw phone); the return carries the resolved ``customer_id``
+    (UUID), ledger entries, and the total balance in paise — no name/phone/email (CL-82/CL-390).
+    Scope is UNCHANGED by promotion. Tenant is resolved from the ambient run context (model
+    ``tenant_id`` untrusted).
+    """
+    resolved = resolve_lane_tenant(tenant_id, tool_name="query_customer_ledger")
+    if resolved is None:
+        return lane_tenant_error("query_customer_ledger")
+
+    # Lazy: the underlying read pulls the DBOS pool (psycopg).
+    from orchestrator.agent.tools.query_customer_ledger import (
+        QueryCustomerLedgerInput,
+        query_customer_ledger as _raw_query_customer_ledger,
+    )
+
+    try:
+        payload = QueryCustomerLedgerInput(
+            tenant_id=str(resolved),
+            customer_phone_token=str(customer_phone_token),
+            limit=int(limit),
+        )
+        out = _raw_query_customer_ledger(payload)
+    except Exception as exc:  # noqa: BLE001 — a lane tool must never RAISE (would orphan the tool_use)
+        logger.warning("query_customer_ledger: read failed (tenant=%s): %s", resolved, exc)
+        return {"status": "error", "error": f"query_customer_ledger: {exc}"}
+    return out.model_dump(mode="json")
+
+
 #: The common READ tools, in a stable order — the surface a Manager/specialist drives to pull
 #: operational data (ARCHITECTURE.md §1.1/§1.3). These are the whole point of this module; the
 #: Manager holds them on its shelf and a specialist reaches them through the Manager's resolved
@@ -339,6 +457,9 @@ COMMON_READ_TOOLS: tuple[Any, ...] = (
     read_integration_state,
     read_active_plan,
     read_agent_memory,
+    get_recent_campaigns,  # VT-675 promoted (resolve-first wrapper over the agent/tools read)
+    get_attribution_data,  # VT-675 promoted (resolve-first wrapper)
+    query_customer_ledger,  # VT-675 promoted (resolve-first wrapper; operator-role scope unchanged)
 )
 
 # Fail-CLOSED at import: these are READS and MUST pass the deny-list guard (they hold no
@@ -350,6 +471,9 @@ assert_agent_tools_safe(COMMON_READ_TOOLS, surface="common_read_tools")
 
 __all__ = [
     "COMMON_READ_TOOLS",
+    "get_attribution_data",
+    "get_recent_campaigns",
+    "query_customer_ledger",
     "read_active_plan",
     "read_agent_memory",
     "read_business_context",
