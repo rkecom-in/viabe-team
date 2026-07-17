@@ -380,3 +380,31 @@ def test_top_spend_render_empty_is_honest(monkeypatch: pytest.MonkeyPatch) -> No
     monkeypatch.setattr(w, "CustomersWrapper", lambda: _FakeTopCW(total=0, rows=[]))
     ans = sq.answer_status_query(_TID, "who are my top customers?")
     assert "don't have enough" in ans.lower() or "connect" in ans.lower()
+
+
+def test_vt666_send_create_request_defers_to_brain() -> None:
+    # VT-666 (j02 Tier-1 loop_stall) — a campaign-CREATE phrasing that merely contains a send
+    # token must NOT be answered as send-STATUS ("You haven't run a campaign in the last 30
+    # days"). The send-ish cue now requires a co-occurring past/interrogative send-status MARKER
+    # (_has_send_status_marker) — the exact VT-653 pattern applied to the send-token route.
+    assert (
+        sq.classify_status_query(
+            "can you whip up a festive offer message to send to our past customers?"
+        )
+        != "last_campaign"
+    )
+    assert (
+        sq.classify_status_query("draft something nice and send it out to my old customers?")
+        != "last_campaign"
+    )
+
+
+def test_vt666_send_status_asks_still_answer() -> None:
+    # The genuine send-STATUS asks keep routing (markers present) — regression floor for the gate.
+    assert sq.classify_status_query("did you send it?") == "last_campaign"
+    assert sq.classify_status_query("already sent?") == "last_campaign"
+    assert sq.classify_status_query("has the diwali message gone out?") == "last_campaign"
+    # NOTE: "bheja kya message?" routes 'unknown' — the send-CUE set never contained the Hinglish
+    # "bheja" (pre-existing, unchanged by the VT-666 gate; the brain answers it). Hinglish
+    # send-status cue coverage is VT-663 P2 scope, per CL-2026-07-15-no-lists (LLM-primary).
+    assert sq.classify_status_query("bheja kya message?") == "unknown"

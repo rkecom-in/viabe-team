@@ -369,12 +369,20 @@ def classify_status_query(body: str) -> StatusQueryType:
     # Checked BEFORE customer_count so a stray "customers" token ("did you send it to my old
     # CUSTOMERS?") cannot hijack a send-status ask into a ledger COUNT — the m_honesty_fabricated_
     # campaign non-sequitur ("You currently have N customers in your ledger", official §2 2026-07-10).
-    # Send IMPERATIVES never reach here: the upstream classifier routes a real send to
-    # adhoc_campaign_request / new_task, never status_query, so a send token here always means "asking
-    # ABOUT a send", never "do a send".
-    if ({"sent", "send", "sending"} & tokens) or ("go out" in norm) or ("gone out" in norm) or (
-        "went out" in norm
-    ):
+    # VT-666 — the old claim "send imperatives never reach here" was FALSE on the DF5 pre-brain path:
+    # triage_seam calls answer_status_query DIRECTLY on any question-shaped turn, with no upstream
+    # send-intent classify. A bare send TOKEN therefore also matched CREATE requests ("whip up a
+    # festive offer message to send to our past customers" → "You haven't run a campaign…", the j02
+    # Tier-1 loop_stall). Mirror the landed VT-653 pattern: the send-ish cue must CO-OCCUR with a
+    # past/interrogative send-STATUS marker (_has_send_status_marker — a finite closed marker set,
+    # CL-2026-07-15-no-lists-compliant) to answer here; a markerless send phrasing is work to DO and
+    # falls through to the brain/D3 net.
+    if (
+        ({"sent", "send", "sending"} & tokens)
+        or ("go out" in norm)
+        or ("gone out" in norm)
+        or ("went out" in norm)
+    ) and _has_send_status_marker(norm, tokens):
         return "last_campaign"
     # VT-653 — only a campaign-STATUS QUESTION (asking ABOUT a campaign) answers last_campaign here,
     # never a bare 'campaign' token inside an action request ("whip up a campaign for my customers").
