@@ -178,8 +178,12 @@ class _MockTwilioMessages:
     def create(**kwargs: Any) -> Any:
         safe_kwargs = {
             k: v for k, v in kwargs.items()
-            if k not in ("body", "content_variables")
+            # VT-676: media_url may be a SHORT-TTL signed PII-document URL (customer export) —
+            # log its PRESENCE via media_count, never the URL itself.
+            if k not in ("body", "content_variables", "media_url")
         }
+        if "media_url" in kwargs:
+            safe_kwargs["media_count"] = len(kwargs["media_url"] or ())
         logger.warning(
             "[TEAM_TWILIO_MOCK_MODE] would-send: %s", safe_kwargs
         )
@@ -498,6 +502,7 @@ def send_freeform_message(
     is_customer_session: bool = False,
     tenant_id: UUID | str | None = None,
     surface: str = "manager",
+    media_urls: list[str] | None = None,
 ) -> str:
     """Send a free-form WhatsApp message via Twilio (VT-44).
 
@@ -528,15 +533,22 @@ def send_freeform_message(
         recipient_token=recipient_token,
     )
     logger.info(
-        "twilio-send: freeform -> %s body_len=%d",
+        "twilio-send: freeform -> %s body_len=%d media=%d",
         recipient_token,
         len(body),
+        len(media_urls or ()),
     )
-    message = _client().messages.create(
-        body=body,
-        from_=_wa(os.environ["TEAM_TWILIO_FROM_NUMBER"], role="sender"),
-        to=_wa(recipient_phone),
-    )
+    # VT-676: optional in-session media attachment (WhatsApp allows media on a freeform reply
+    # inside an open session — no Meta media-template approval needed). The URL may be a SHORT-TTL
+    # signed PII-document URL (customer export) — it is passed to the transport ONLY, never logged.
+    create_kwargs: dict[str, Any] = {
+        "body": body,
+        "from_": _wa(os.environ["TEAM_TWILIO_FROM_NUMBER"], role="sender"),
+        "to": _wa(recipient_phone),
+    }
+    if media_urls:
+        create_kwargs["media_url"] = list(media_urls)
+    message = _client().messages.create(**create_kwargs)
     logger.info(
         "twilio-send: freeform sent -> %s (sid=%s)",
         recipient_token,
