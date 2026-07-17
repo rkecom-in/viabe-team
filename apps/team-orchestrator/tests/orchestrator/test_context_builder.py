@@ -76,6 +76,8 @@ _EXPECTED_FIELDS = {
     # VT-607 (Loop Package 6): the manager loop's own step framing, threaded through
     "manager_desired_outcome",
     "manager_acceptance_criteria",
+    # VT-667: the owner's campaign CONTENT brief (their own words), threaded through
+    "creative_brief",
     "meta",
     "data_completeness",
     # VT-164: per-tenant recovery-target config fields

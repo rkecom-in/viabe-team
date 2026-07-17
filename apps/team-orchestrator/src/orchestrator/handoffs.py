@@ -166,6 +166,16 @@ def _build_sales_recovery_update(state: dict[str, Any]) -> dict[str, Any]:
     manager_desired_outcome = state.get("manager_step_desired_outcome") or ""
     manager_acceptance_criteria = state.get("manager_step_acceptance_criteria") or []
 
+    # VT-667 — the owner's CAMPAIGN CONTENT brief in their own words. manager_step_situation
+    # is the owner's redacted verbatim ask (triage_seam._build_campaign_recovery_plan sets it to
+    # the redacted message on the D3/VT-657 campaign dispatch path, where it IS the creative
+    # brief — "whip up a Diwali festive offer …"). Threaded VERBATIM (no keyword extraction,
+    # CL-2026-07-15-no-lists); serialize_bundle_for_prompt scopes its use to MESSAGE CONTENT.
+    # Absent (autonomous / non-loop dispatch) → "" → the render section is omitted, brief-less
+    # flows are byte-unchanged. On non-campaign SR paths the situation is a generic string —
+    # harmless as a content-only input (the prompt scopes it).
+    creative_brief = state.get("manager_step_situation") or ""
+
     bundle = build_sales_recovery_context(
         tenant_id=tenant_id,
         run_id=run_id,
@@ -173,6 +183,7 @@ def _build_sales_recovery_update(state: dict[str, Any]) -> dict[str, Any]:
         user_request=user_request,
         manager_desired_outcome=manager_desired_outcome,
         manager_acceptance_criteria=manager_acceptance_criteria,
+        creative_brief=creative_brief,
     )
     return {"sales_recovery_context": bundle}
 
