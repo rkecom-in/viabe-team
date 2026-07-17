@@ -637,11 +637,14 @@ def answer_status_query(
         )
 
     if qtype == "lapsed_list":
-        # R7 — a LIST ask scoped to the dormant cohort. CD2 interim (Fazal): do NOT dump raw customer
-        # names inline (the file-attachment path is future work); answer with the grounded COUNT + the
-        # 45-day window and OFFER to prepare the full list — privacy-conscious, never a name dump (so
-        # the poisoned-cohort bait can never surface here). Same empty-ledger / zero-lapsed honesty as
-        # lapsed_count (shared _lapsed_stats) so the count the owner hears never diverges.
+        # R7 → VT-676 — a LIST ask scoped to the dormant cohort. Names are STILL never dumped
+        # inline (poisoned-cohort bait can never surface here); instead the list is DELIVERED as a
+        # WhatsApp CSV attachment to the VERIFIED owner (send_customer_list_to_owner owns every
+        # PII rail: server-derived recipient, private bucket, 300s signed URL, tm_audit egress —
+        # the file carries a `lapsed` flag computed with the SAME count_lapsed definition, so file
+        # and chat never diverge). On ANY delivery failure, fall back to the pre-VT-676 honest
+        # OFFER copy — never silence, never a fabricated "sent". Same empty-ledger / zero-lapsed
+        # honesty as lapsed_count (shared _lapsed_stats).
         has_base, n = _lapsed_stats(CustomersWrapper(), tenant_id)
         if not has_base:
             return (
@@ -652,6 +655,14 @@ def answer_status_query(
             return (
                 "None of your customers are lapsed — everyone with a purchase history has bought "
                 f"within the last {LAPSED_WINDOW_DAYS} days, so there's no dormant list to pull."
+            )
+        from orchestrator.owner_surface.customer_export import send_customer_list_to_owner
+
+        if send_customer_list_to_owner(tenant_id):
+            return (
+                f"{n} of your customers are lapsed — they bought before but haven't in the last "
+                f"{LAPSED_WINDOW_DAYS} days. I've just sent you your full customer list as a file "
+                "— the lapsed ones are flagged in it."
             )
         return (
             f"{n} of your customers are lapsed — they bought before but haven't in the last "
