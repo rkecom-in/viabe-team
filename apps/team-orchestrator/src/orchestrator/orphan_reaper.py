@@ -202,7 +202,83 @@ def reap_stalled_manager_tasks(*, pool: Any = None, age_hours: int = _STALLED_TA
                 "RETURNING id",
             ).fetchall()
 
+            # VT-668 fix 3 — a dead-lettered task may still hold an OPEN owner-approval: the owner
+            # authorized (or is about to authorize) a send that now has no live executor. That death
+            # must NOT be silent, and the dangling approval MUST be closed so a LATER owner reply
+            # gets the honest-expiry resolution path (VT-668 fix 2), never a resolve-into-nothing on
+            # a dead consumer. (With VT-668 fix 1 in place an approval-paused loop task parks
+            # 'waiting_owner' and never reaches here — this is the backstop for the legacy
+            # task_producer path and any task that armed an approval but stalled for another reason.)
+            # For each just-dead-lettered task with an open bound approval: ARM the honest owner
+            # stall notification ('not_required' -> 'pending' + terminal_outcome='escalated') and
+            # CLOSE the approval (decision='timeout', status='timed_out'). The Twilio send itself
+            # fires AFTER this service txn commits (a network send must never hold the sweep's conn).
+            from orchestrator.manager import task_store as _task_store
+
+            approval_holders: list[Any] = []
+            for _dl_task_id, _dl_tid, _dl_attempt in dead_lettered:
+                # conn=None deliberately: the join now lives in PendingApprovalsWrapper (VT-72),
+                # whose VT-306 guard rejects this sweep's BYPASSRLS service conn — the wrapper
+                # opens its own per-row RLS-scoped tenant_connection instead. The read needs no
+                # txn atomicity with the dead-letter writes below (worst case a benign stale read
+                # on a rare event); the closes still run on the service conn (allowlisted).
+                open_run = _task_store.find_open_approval_run_for_task(_dl_tid, _dl_task_id)
+                if open_run is None:
+                    continue
+                conn.execute(
+                    "UPDATE manager_tasks SET terminal_outcome = 'escalated', "
+                    "    owner_notification_status = 'pending', version = version + 1, "
+                    "    updated_at = now() "
+                    "WHERE tenant_id = %s AND id = %s AND owner_notification_status = 'not_required'",
+                    (str(_dl_tid), str(_dl_task_id)),
+                )
+                conn.execute(
+                    "UPDATE pending_approvals SET decision = COALESCE(decision, 'timeout'), "
+                    "    status = 'timed_out', resolved_at = now() "
+                    "WHERE tenant_id = %s AND run_id = %s AND resolved_at IS NULL",
+                    (str(_dl_tid), open_run),
+                )
+                approval_holders.append((_dl_task_id, _dl_tid))
+
+            # VT-668 fix 2 (orphaned awaiting-approval sweep) — a task parked 'waiting_owner'
+            # (VT-668 fix 1) whose bound approval has since RESOLVED (the owner replied) but which
+            # the loop never consumed: the loop's process died between the reply and the restore
+            # (DBOS can't recover a prior-app-version workflow), and the stall-sweep EXCLUDES
+            # 'waiting_owner', so nothing else catches this — the exact VT-668 incident shape once
+            # fix 1 parks the task. The gate is the APPROVAL's ``resolved_at`` age (NOT the task's
+            # updated_at, which reflects park time): a LIVE loop restores the task within its poll
+            # cadence (≤300s) of the resolution, so an approval resolved > age_hours ago with the
+            # task STILL 'waiting_owner' is, with certainty, a dead consumer. Surface honestly: move
+            # to dead_letter (operator-redrivable) + arm the honest owner stall notification. (No
+            # auto-send: re-driving a done-step task cannot re-execute the send, and a customer send
+            # from the reaper is a money-path action deferred by design — the owner is told the
+            # truth and can re-trigger.)
+            orphaned = conn.execute(
+                "SELECT t.id, t.tenant_id FROM manager_tasks t "
+                "JOIN pending_approvals p ON p.tenant_id = t.tenant_id "
+                "  AND p.run_id::text = t.stall_metadata->>'awaiting_approval_run_id' "
+                "WHERE t.status = 'waiting_owner' AND p.resolved_at IS NOT NULL "
+                "  AND p.resolved_at < now() - make_interval(hours => %s)",
+                (age_hours,),
+            ).fetchall()
+            for _o_row in orphaned:
+                _o_tid = _o_row["tenant_id"] if isinstance(_o_row, dict) else _o_row[1]
+                _o_task = _o_row["id"] if isinstance(_o_row, dict) else _o_row[0]
+                conn.execute(
+                    "UPDATE manager_tasks SET status = 'dead_letter', terminal_outcome = 'escalated', "
+                    "    owner_notification_status = CASE WHEN owner_notification_status = "
+                    "        'not_required' THEN 'pending' ELSE owner_notification_status END, "
+                    "    version = version + 1, updated_at = now(), "
+                    "    stall_metadata = COALESCE(stall_metadata, '{}'::jsonb) "
+                    "      || jsonb_build_object('reaped_by', 'vt668_orphaned_approval', "
+                    "         'reaped_reason', 'approval_resolved_no_consumer', 'reaped_at', now()::text) "
+                    "WHERE tenant_id = %s AND id = %s AND status = 'waiting_owner'",
+                    (str(_o_tid), str(_o_task)),
+                )
+                approval_holders.append((_o_task, _o_tid))
+
         n = len(candidates)
+        n_orphaned = len(orphaned)
         n_woken = len(woken)
         if n_woken:
             logger.warning(
@@ -218,7 +294,19 @@ def reap_stalled_manager_tasks(*, pool: Any = None, age_hours: int = _STALLED_TA
             # exhausted. Fail-soft per alert + dev-routed (a dev/canary tenant never pages Fazal).
             _alert_orphaned_tasks([{"id": t, "tenant_id": g} for t, g in retried])
             _alert_dead_letter_tasks(dead_lettered)
-        elif not n_woken:
+        if n_orphaned:
+            logger.warning(
+                "VT-668 orphaned-approval sweep: %d 'waiting_owner' task(s) whose approval resolved "
+                "with no live consumer -> dead_letter + honest owner notify", n_orphaned,
+            )
+        # VT-668 — POST-commit: the dead_letter + notify-arm + approval-close (fix 3) and the
+        # orphaned-approval surfacing (fix 2b) already committed above, so each honest owner stall
+        # notification lands on a durable 'pending' row (its delivered-flip is a real second
+        # backstop). Fires whenever there is ANY approval-holder to surface, independent of the
+        # stall-candidate count. Fail-soft per task.
+        if approval_holders:
+            _notify_approval_holders(approval_holders)
+        if not n and not n_woken and not n_orphaned:
             logger.info("VT-557 retry-ladder reaper: no stalled or wakeable manager_tasks")
         return n
     except Exception:  # noqa: BLE001 — best-effort by design; must never block boot
@@ -284,6 +372,27 @@ def _alert_dead_letter_tasks(rows: Any) -> None:
             ))
         except Exception:  # noqa: BLE001 — one alert failing must not stop the rest or the reaper
             logger.warning("VT-557 dead_letter_task alert dispatch failed (fail-soft)", exc_info=True)
+
+
+def _notify_approval_holders(rows: Any) -> None:
+    """VT-668 fix 3 — fire the honest owner stall notification for each dead-lettered task that held
+    an OPEN owner-approval (armed 'pending' + terminal_outcome='escalated' in the committed sweep
+    txn above). Reuses the SAME VT-611 owner-notification composer the workflow tail uses
+    (``maybe_notify_owner_of_task_outcome`` — idempotent on ``owner_notification_status``, fail-soft,
+    honest 'I couldn't complete it on my own' copy for the 'escalated' outcome). Post-commit + fail-
+    soft per task: a notify failure must never break the reaper. ``rows`` carry (task_id, tenant_id)."""
+    try:
+        from orchestrator.owner_surface.task_outcome import maybe_notify_owner_of_task_outcome
+    except Exception:  # noqa: BLE001 — the notifier import must never break the reaper
+        logger.warning("VT-668 approval-holder notify import failed (fail-soft)", exc_info=True)
+        return
+    for task_id, tid in rows:
+        try:
+            maybe_notify_owner_of_task_outcome(tid, task_id)
+        except Exception:  # noqa: BLE001 — one notify failing must not stop the rest or the reaper
+            logger.warning(
+                "VT-668 approval-holder notify failed (fail-soft) task=%s", task_id, exc_info=True
+            )
 
 
 _SILENT_TERMINAL_AGE_MINUTES = 30
