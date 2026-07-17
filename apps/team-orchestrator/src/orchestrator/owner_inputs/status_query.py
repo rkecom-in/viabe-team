@@ -19,7 +19,8 @@ from orchestrator import keyword_match as _km
 from orchestrator.db.wrappers import LAPSED_WINDOW_DAYS
 
 StatusQueryType = Literal[
-    "customer_count", "lapsed_count", "lapsed_list", "top_spend", "last_campaign", "opt_out_count",
+    "customer_count", "lapsed_count", "lapsed_list", "customer_list", "top_spend", "last_campaign",
+    "opt_out_count",
     "billing", "unknown",
 ]
 
@@ -396,6 +397,17 @@ def classify_status_query(body: str) -> StatusQueryType:
     # ranking ask is answered deterministically, never left to the brain to anchor on lapsed context).
     if _is_top_spend_query(norm, tokens):
         return "top_spend"
+    # VT-676 F1 (canary-1 incident 2026-07-18): a FULL customer-list ask WITHOUT a dormancy cue —
+    # "send me my customer list", "customer list bhejo". Fazal's natural phrasing carried no
+    # inactivity cue, so it fell to the brain, which denied the (now-existing) export and pushed
+    # his open integration flow. Finite cue class (list-cue AND customer-noun — the sanctioned
+    # VT-653 deterministic-cue shape). Positioned AFTER lapsed_list (dormancy-scoped stays there),
+    # the creation/action guards (campaign asks defer), last_campaign, and top_spend (a ranking ask
+    # with a stray 'list' token stays a ranking) — so it catches ONLY the plain "my customer list /
+    # names" ask. This SUPERSEDES the pre-VT-676 "names path falls to the brain" behavior: the
+    # delivery is now a FILE to the verified owner (names never inline — poisoned-cohort safe).
+    if list_cue and ({"customer", "customers", "ग्राहक", "ग्राहकों"} & tokens):
+        return "customer_list"
     # F2 (VT-648) — a BEHAVIOURAL "how many haven't ordered" COUNT ask routes to the dormant count,
     # not the total ledger. A count interrogative ("how many" / "kitne" / "कितने") + an inactivity cue
     # ("haven't ordered", "60 din se", a negated-purchase phrase), and NOT a list ask (that is
@@ -667,6 +679,24 @@ def answer_status_query(
         return (
             f"{n} of your customers are lapsed — they bought before but haven't in the last "
             f"{LAPSED_WINDOW_DAYS} days. Want me to put together the full list for you?"
+        )
+
+    if qtype == "customer_list":
+        # VT-676 F1 — the FULL-list ask (no dormancy cue): deliver the CSV to the verified owner
+        # (send_customer_list_to_owner owns every PII rail + audit). Success reply is a DB-backed
+        # claim (True only after a transport sid + audit row). Failure → honest offer, NEVER a
+        # fabricated 'sent'. Names still never dumped inline.
+        from orchestrator.owner_surface.customer_export import send_customer_list_to_owner
+
+        if send_customer_list_to_owner(tenant_id):
+            return (
+                "I've just sent you your full customer list as a file — names, numbers, status "
+                "and total purchases, with the lapsed ones flagged."
+            )
+        # No unfulfillable promise (T7 class): a re-ask re-fires this net, so "ask again" is TRUE.
+        return (
+            "I couldn't attach your customer list here just now — ask me again in a bit and "
+            "I'll retry."
         )
 
     if qtype == "opt_out_count":

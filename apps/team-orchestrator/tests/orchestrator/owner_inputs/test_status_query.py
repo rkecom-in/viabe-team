@@ -120,12 +120,18 @@ def test_classify_lapsed_list_needs_list_cue_and_inactivity_cue() -> None:
     assert sq.classify_status_query("make a list of lapsed customers") == "lapsed_list"
 
 
-def test_classify_bare_list_ask_vetoes_customer_count() -> None:
-    # A list ask with NO inactivity cue is neither a count nor a lapsed_list -> brain (CD2 names path).
-    assert sq.classify_status_query("give me a list of my customers") == "unknown"
-    assert sq.classify_status_query("list all my customer names") == "unknown"
+def test_classify_bare_list_ask_routes_to_customer_list() -> None:
+    # VT-676 F1 (SUPERSEDES the pre-VT-676 "names path falls to the brain" pin): a plain
+    # customer-list ask now DELIVERS the CSV to the verified owner — names never inline, so the
+    # poisoned-cohort protection holds by construction (the file path, not a brain dump).
+    assert sq.classify_status_query("give me a list of my customers") == "customer_list"
+    assert sq.classify_status_query("list all my customer names") == "customer_list"
+    assert sq.classify_status_query("send me my customer list") == "customer_list"  # the canary ask
     # A plain count ask (no list cue) still routes to customer_count.
     assert sq.classify_status_query("how many customers do I have?") == "customer_count"
+    # Ranking + dormancy scopes are untouched (position guards): they classify before customer_list.
+    assert sq.classify_status_query("who are my top customers by spend?") == "top_spend"
+    assert sq.classify_status_query("make a list of lapsed customers") == "lapsed_list"
 
 
 def test_classify_finance_and_billing_unchanged() -> None:

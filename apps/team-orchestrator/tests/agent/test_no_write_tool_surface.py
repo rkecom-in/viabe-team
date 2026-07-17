@@ -49,6 +49,11 @@ ORCHESTRATOR_EXPECTED = {
     # tenants.preferred_language for the owner's OWN tenant (ambient-resolved, Pillar 3);
     # no send, no ledger/accounts, no customer PII. D2: never affects live-turn mirroring.
     "set_language_preference",
+    # VT-676 F3 (reviewed) — the owner's OWN customer list as a CSV attachment TO THE VERIFIED
+    # OWNER only (send_customer_list_to_owner owns every rail: server-derived recipient, private
+    # bucket, 300s URL, tm_audit). An OWNER-comms delivery, not a customer send; the transport
+    # rides the guarded freeform funnel (dev_send_guard/mock apply). Ambient-resolved tenant.
+    "export_customer_list",
 }
 INTEGRATION_EXPECTED = {
     # VT-608 (Loop Package 5) — the ten context-scoped tools replacing the VT-206/425 stub

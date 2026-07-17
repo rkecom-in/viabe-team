@@ -401,6 +401,36 @@ def set_language_preference(tenant_id: str, language: str) -> dict[str, Any]:
     return {"status": "ok", "language": lang}
 
 
+@tool
+def export_customer_list(tenant_id: str) -> dict[str, Any]:
+    """Send the owner THEIR OWN full customer list as a WhatsApp CSV attachment — call when the
+    owner asks for their customer list / customer data as a file ("send me my customer list").
+
+    This IS available (VT-676) — never tell the owner an export isn't possible. The delivery path
+    owns every rail: recipient is the VERIFIED owner number (server-derived, never an argument),
+    private storage + short-lived link, audited. Returns {"status":"ok","delivered":true} on a real
+    transport send, or a structured error — on error tell the owner honestly it didn't attach and
+    that asking again retries; NEVER claim it was sent unless delivered=true.
+    """
+    from orchestrator.observability.decorators import _observability_context
+    from orchestrator.owner_surface.customer_export import send_customer_list_to_owner
+
+    ctx = _observability_context.get()
+    resolved_tenant: UUID | str | None = ctx.tenant_id if ctx is not None else None
+    if resolved_tenant is None:
+        try:
+            resolved_tenant = UUID(str(tenant_id))
+        except (ValueError, TypeError):
+            return {
+                "status": "error",
+                "error": "export_customer_list: no resolvable tenant context",
+            }
+    if send_customer_list_to_owner(resolved_tenant):
+        return {"status": "ok", "delivered": True}
+    return {"status": "error", "delivered": False,
+            "error": "export_customer_list: delivery failed — tell the owner honestly; a re-ask retries"}
+
+
 # Base tools every orchestrator-agent has, regardless of context. Specialist
 # handoff tools (spawn_*) are NOT here — they are passed as extra_tools by the
 # supervisor graph, since a handoff is only valid inside the parent graph.
@@ -424,6 +454,7 @@ ORCHESTRATOR_AGENT_TOOLS: list[BaseTool] = [
     record_business_objective,  # VT-466 manager WRITE seam (tenant-scoped objective)
     search_conversation_history,  # VT-579 manager RETRIEVAL over the lifetime conversation log
     set_language_preference,  # VT-677 explicit owner language choice (D3 verbal override)
+    export_customer_list,  # VT-676 F3: owner's own customer list as a CSV attachment (brain path)
 ]
 
 
