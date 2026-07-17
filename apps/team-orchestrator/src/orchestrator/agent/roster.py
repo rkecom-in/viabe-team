@@ -498,8 +498,39 @@ ROSTER: list[SpecialistSpec] = [
 # row, should a lane ever graduate to a real specialist under Package 3+).
 
 
+# VT-101 Stage 3(c) — the name of the roster spec dissolved into Manager-held connector Tools when
+# ``TEAM_INTEGRATION_VIA_FRAMEWORK`` is on (see ``spawnable_roster``).
+_INTEGRATION_SPEC_NAME = "integration"
+
+
+def spawnable_roster() -> list[SpecialistSpec]:
+    """The roster view every SPAWN-WIRING site reads — spawn tools, route keys, and
+    ``build_supervisor_graph``'s graph-node / conditional-edge / route-map iteration.
+
+    Default (VT-101 flag OFF) → ``ROSTER`` UNCHANGED: the three Phase-1 specialists, byte-identical
+    to pre-VT-101. Flag ON (``TEAM_INTEGRATION_VIA_FRAMEWORK`` truthy) → the ``integration`` spec is
+    EXCLUDED, so ``spawn_integration`` is never offered to the Manager LLM and no ``integration_agent``
+    graph node / conditional-edge / route-map entry is wired — the Manager holds the connector Tools
+    directly instead (the advisory-tool demotion, §7.1 dissolution). Every spawn-wiring site reading
+    THIS view is what keeps a cleanly-excluded spec from leaving a dangling route_key or edge.
+
+    Read at CALL TIME (the flag is a per-process env read); a single ``build_supervisor_graph`` call
+    reads it consistently across all sites within one build."""
+    from orchestrator.agent_framework.modules.integration_tools_module import (
+        integration_via_framework,
+    )
+
+    if not integration_via_framework():
+        return ROSTER
+    return [spec for spec in ROSTER if spec.name != _INTEGRATION_SPEC_NAME]
+
+
 def get_spec(agent_name: str) -> SpecialistSpec:
-    """Look up a roster entry by its ``agent_name``. Raises ``KeyError`` if absent."""
+    """Look up a roster entry by its ``agent_name``. Raises ``KeyError`` if absent.
+
+    Reads the FULL ``ROSTER`` (not the flag-filtered ``spawnable_roster``): this is an identity
+    lookup, independent of whether the spec is currently spawnable — an excluded-from-spawn spec
+    still EXISTS."""
     for spec in ROSTER:
         if spec.agent_name == agent_name:
             return spec
@@ -510,13 +541,15 @@ def get_spec(agent_name: str) -> SpecialistSpec:
 
 
 def spawn_tool_route_keys() -> dict[str, str]:
-    """Map ``spawn_tool_name -> route_key`` for every roster member.
+    """Map ``spawn_tool_name -> route_key`` for every SPAWNABLE roster member.
 
     ``route_after_orchestrator`` uses this to derive the conditional-edge key
     from whichever spawn tool the manager's LLM fired — registry-driven, so a
-    new lane needs no edit to the routing function.
+    new lane needs no edit to the routing function. Reads ``spawnable_roster``
+    so a flag-excluded specialist (VT-101) contributes no route key (no dangling
+    edge); flag-off it is the full roster, byte-identical.
     """
-    return {spec.spawn_tool_name: spec.route_key for spec in ROSTER}
+    return {spec.spawn_tool_name: spec.route_key for spec in spawnable_roster()}
 
 
 # T9 — route_keys of the specialist spawns that must be SUPPRESSED on an answerable turn
@@ -534,9 +567,13 @@ def roster_spawn_tools(exclude_route_keys: Collection[str] = ()) -> list[BaseToo
     ``exclude_route_keys`` drops the specialists whose ``route_key`` is in the set — used on
     answerable turns (T9) to remove the async-spawn temptation so the brain answers in-turn. The
     graph nodes/edges for an excluded specialist stay in place but are unreachable (the manager can
-    no longer emit that spawn tool call, so ``route_after_orchestrator`` never returns its key)."""
+    no longer emit that spawn tool call, so ``route_after_orchestrator`` never returns its key).
+
+    Iterates ``spawnable_roster`` (VT-101), so a flag-excluded specialist contributes no spawn tool
+    at all — an UN-wired dissolution, distinct from the T9 per-turn suppression above. Flag-off it is
+    the full roster, so the ``exclude_route_keys`` behavior is byte-identical to before."""
     excluded = frozenset(exclude_route_keys)
-    return [spec.make_spawn() for spec in ROSTER if spec.route_key not in excluded]
+    return [spec.make_spawn() for spec in spawnable_roster() if spec.route_key not in excluded]
 
 
 __all__ = [
@@ -550,4 +587,5 @@ __all__ = [
     "get_spec",
     "roster_spawn_tools",
     "spawn_tool_route_keys",
+    "spawnable_roster",
 ]

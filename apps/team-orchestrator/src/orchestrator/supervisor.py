@@ -37,6 +37,7 @@ from typing import Any
 from uuid import UUID
 
 from langchain_core.language_models import BaseChatModel
+from langchain_core.tools import BaseTool
 from langgraph.checkpoint.postgres import PostgresSaver
 from langgraph.errors import GraphBubbleUp
 from langgraph.graph import END, START, StateGraph
@@ -643,16 +644,45 @@ def build_supervisor_graph(
     # (``ADVISORY_TOOLS``, below) — no spawn tool, no graph node, no conditional-edge
     # route for any of the six.
     from orchestrator.agent.advisory_registry import ADVISORY_TOOLS
-    from orchestrator.agent.roster import ANSWERABLE_SUPPRESSED_ROUTE_KEYS, ROSTER
+    from orchestrator.agent.roster import ANSWERABLE_SUPPRESSED_ROUTE_KEYS, spawnable_roster
+    from orchestrator.agent_framework.modules.integration_tools_module import (
+        integration_via_framework,
+    )
+
+    # VT-101 Stage 3(c) — the flag-filtered spawn view. Flag OFF (default) => the full three-spec
+    # ROSTER, byte-identical to pre-VT-101. Flag ON => the ``integration`` spec is dissolved from the
+    # spawnable roster (no spawn_integration tool, no integration_agent node/edge/route) and the
+    # Manager holds the connector Tools directly instead (below). Computed ONCE so every wiring site
+    # in this build (spawn tools, graph nodes, route map, edges) reads one consistent view.
+    _spawnable_roster = spawnable_roster()
 
     # T9 — on an answerable turn (triage direct_reply / task_status), drop the non-onboarding
     # specialist spawns so the manager ANSWERS in-turn from its read-tools instead of spawning an
     # async specialist that D1-stalls. onboarding_conductor stays (increment-2). The excluded
     # specialists' graph nodes/edges remain but are unreachable this turn.
     _spawn_exclusions = ANSWERABLE_SUPPRESSED_ROUTE_KEYS if suppress_answerable_spawns else frozenset()
+
+    # VT-101 Stage 3(c) — flag ON: the Manager holds the eleven VT-608 connector @tools DIRECTLY (the
+    # advisory-tool demotion — same seam ADVISORY_TOOLS use), authoring the OAuth/mapping/escalate
+    # beats itself (see prompts/orchestrator_agent_system.md) instead of spawning the integration
+    # sub-graph. build_orchestrator_agent runs assert_agent_tools_safe over the WHOLE tool set, so the
+    # eleven (all VT-268-safe reads/config-proposals — no send/paste/write) are re-verified at build.
+    # Flag OFF: this stays [] and the tool set is byte-identical to pre-VT-101.
+    _connector_tools: list[BaseTool] = []
+    if integration_via_framework():
+        # Lazy — importing the integration agent eager-builds its langchain sub-graph; keep it out of
+        # supervisor's import surface and off the flag-OFF path entirely.
+        from orchestrator.agent.integration_agent import INTEGRATION_AGENT_TOOLS
+
+        _connector_tools = list(INTEGRATION_AGENT_TOOLS)
+
     orchestrator = build_orchestrator_agent(
         model=model,
-        extra_tools=[*roster_spawn_tools(exclude_route_keys=_spawn_exclusions), *ADVISORY_TOOLS],
+        extra_tools=[
+            *roster_spawn_tools(exclude_route_keys=_spawn_exclusions),
+            *ADVISORY_TOOLS,
+            *_connector_tools,
+        ],
     )
 
     # VT-183 retrofit: 3 function-based supervisor StateGraph nodes wrapped
@@ -688,7 +718,9 @@ def build_supervisor_graph(
     # sub-graph added raw (integration — LangGraph rejects function wrappers
     # around compiled sub-graphs, VT-183/VT-206).
     # observability:opt-out reason=CompiledStateGraph-subgraph-rejects-function-wrappers-per-VT-183
-    for spec in ROSTER:
+    # VT-101 — iterate the flag-filtered spawn view so a dissolved specialist (integration, flag ON)
+    # adds NO graph node; flag OFF this is the full ROSTER (byte-identical).
+    for spec in _spawnable_roster:
         node = spec.node_builder(model)
         if spec.wrap_node:
             node = with_state_transition_hook(node, node_name=spec.agent_name)
@@ -722,8 +754,10 @@ def build_supervisor_graph(
     # spec's route_key -> its agent_name node, plus the 'terminal' sink for the
     # no-spawn case. route_after_orchestrator returns whichever applies. A new
     # lane's branch appears here automatically from its SpecialistSpec.
+    # VT-101 — same flag-filtered view: a dissolved specialist contributes no route_key branch,
+    # so there is no dangling route target for a node that was not added above.
     orchestrator_route_map: dict[str, str] = {
-        spec.route_key: spec.agent_name for spec in ROSTER
+        spec.route_key: spec.agent_name for spec in _spawnable_roster
     }
     orchestrator_route_map["terminal"] = "orchestrator_terminal"
 
@@ -781,7 +815,9 @@ def build_supervisor_graph(
             "manager_review",
             with_state_transition_hook(_manager_review_node, node_name="manager_review"),
         )
-        for spec in ROSTER:
+        # VT-101 — flag-filtered: only the specialist nodes ACTUALLY added above get a
+        # ->manager_review edge (a dissolved specialist has no node to edge from).
+        for spec in _spawnable_roster:
             graph.add_edge(spec.agent_name, "manager_review")
         # manager_review's OWN routing: a produced campaign_plan still needs collapse + the
         # approval rail (Package 3: "Preserve the approval interrupt and campaign effect path") —
@@ -800,7 +836,8 @@ def build_supervisor_graph(
         #   - integration -> END (spec.edge_to=None): the integration_agent
         #     sub-graph emits its own internal state transitions and produces no
         #     campaign plan, so control returns straight to the supervisor's END.
-        for spec in ROSTER:
+        # VT-101 — flag-filtered: edge only the nodes actually added above.
+        for spec in _spawnable_roster:
             graph.add_edge(spec.agent_name, spec.edge_to if spec.edge_to is not None else END)
     # VT-47 — after collapse persists a PROPOSED campaign it attaches
     # pending_approval_request; route_after_collapse sends that to the
