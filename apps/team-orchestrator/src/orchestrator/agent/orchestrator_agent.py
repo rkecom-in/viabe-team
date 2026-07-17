@@ -356,6 +356,51 @@ def search_conversation_history(query: str, limit: int = 10) -> dict[str, Any]:
 # ship the real surfaces.
 
 
+@tool
+def set_language_preference(tenant_id: str, language: str) -> dict[str, Any]:
+    """Set the owner's EXPLICIT language preference — call ONLY when the owner explicitly asks
+    for a language ("English only please", "Hindi mein baat karo", "Hinglish chalega").
+
+    ``language`` must be one of: 'en' (English), 'hinglish' (Hindi in Latin script), 'hi'
+    (Hindi in Devanagari). This governs AGENT-INITIATED messages (reports, nudges, template
+    variants) and ambiguous turns ONLY — you still MIRROR the owner's live message language in
+    conversation, always (that rule is unchanged). Do NOT call this from your own inference of
+    what the owner "seems to" prefer — observation is handled automatically; this tool is for
+    an EXPLICIT owner instruction only.
+
+    Returns {"status": "ok", "language": ...} or a structured error (never raises).
+    """
+    from orchestrator.observability.decorators import _observability_context
+    from orchestrator.owner_surface.owner_locale import (
+        SUPPORTED_OWNER_LANGS,
+        set_explicit_language,
+    )
+
+    # Pillar 3 — ambient dispatch context is the authoritative tenant (mirrors
+    # record_business_objective; the model-supplied arg is a fallback only).
+    ctx = _observability_context.get()
+    resolved_tenant: UUID | str | None = ctx.tenant_id if ctx is not None else None
+    if resolved_tenant is None:
+        try:
+            resolved_tenant = UUID(str(tenant_id))
+        except (ValueError, TypeError):
+            return {
+                "status": "error",
+                "error": "set_language_preference: no resolvable tenant context",
+            }
+
+    lang = str(language).strip().lower()
+    if lang not in SUPPORTED_OWNER_LANGS:
+        return {
+            "status": "error",
+            "error": f"set_language_preference: language must be one of "
+            f"{sorted(SUPPORTED_OWNER_LANGS)}",
+        }
+    if not set_explicit_language(resolved_tenant, lang):
+        return {"status": "error", "error": "set_language_preference: persist failed"}
+    return {"status": "ok", "language": lang}
+
+
 # Base tools every orchestrator-agent has, regardless of context. Specialist
 # handoff tools (spawn_*) are NOT here — they are passed as extra_tools by the
 # supervisor graph, since a handoff is only valid inside the parent graph.
@@ -378,6 +423,7 @@ ORCHESTRATOR_AGENT_TOOLS: list[BaseTool] = [
     query_l0,
     record_business_objective,  # VT-466 manager WRITE seam (tenant-scoped objective)
     search_conversation_history,  # VT-579 manager RETRIEVAL over the lifetime conversation log
+    set_language_preference,  # VT-677 explicit owner language choice (D3 verbal override)
 ]
 
 
