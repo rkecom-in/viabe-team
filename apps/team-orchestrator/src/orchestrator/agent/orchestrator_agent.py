@@ -400,6 +400,16 @@ class OrchestratorAgentState(AgentState, total=False):
     run_id: UUID | None
     tenant_id: UUID | None
     trigger_reason: TriggerReason | None
+    # VT-667 iter-2 — the enforce-loop step framing MUST cross the subgraph boundary: the
+    # spawn_sales_recovery handoff (handoffs._build_sales_recovery_update, InjectedState) reads
+    # these to thread the owner's verbatim CREATIVE BRIEF (manager_step_situation) + the manager's
+    # framing into the SR bundle. Without them here, LangGraph's schema filter STRIPPED the keys at
+    # this exact seam (the same CL-209 mechanism the three fields above were added back for) — the
+    # brief silently read as "" on every live enforce dispatch, and the '## Manager's desired
+    # outcome' section had never rendered live (latent since VT-607).
+    manager_step_situation: str | None
+    manager_step_desired_outcome: str | None
+    manager_step_acceptance_criteria: list[str] | None
 
 
 # ---------------------------------------------------------------------------
