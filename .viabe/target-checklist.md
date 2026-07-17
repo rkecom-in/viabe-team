@@ -3,7 +3,7 @@
 > **Maintenance rule (CC, standing):** update at every phase transition (land/push/gate-result),
 > same moment as the Cowork signal. This is the OBJECTIVE-level view; per-row detail lives in
 > `.viabe/sprint/VT-*.md`. Reconcile against `git log` before trusting (Rule #14).
-> Last updated: **2026-07-18 ~04:15 IST** · dev HEAD at update: 2656d0e (+2 commits pushing).
+> Last updated: **2026-07-18 ~05:10 IST** · dev HEAD at update: **b121e49** (VT-677 full build landed).
 
 ## ✅ ACHIEVED (proven, on origin/dev)
 
@@ -37,13 +37,23 @@
 - [x] Brain context line + ONE-sentence ambiguous-turn fallback + campaign-conflation guard.
 
 ## 🔄 IN FLIGHT (CC)
-- [ ] **VT-677 ×3 full-journey re-drive** on deployed dev — the prompt-diff gate; row stays open
-      until clean vs baseline. (Kick after the current push deploys.)
-- [ ] Final VT-677/phase-3 push landing (pre-push suite running).
+- [ ] **O2 incident fixes F1-F3 pushing** (customer_list deterministic delivery + time-grounded
+      guard copy + export_customer_list manager tool). Canary-2 trail OVERTURNED my first read:
+      NO breach — Fazal approved from his phone 13:49Z Jul 17, fixed consumer executed, confirm
+      delivered 15:10:37Z → **VT-668 LIVE PROOF PASSED, row fully closed**. O2 needs only
+      Fazal's canary-1 re-run ("Send me my customer list") after this deploys.
+- [ ] **VT-677 ×3 full-journey re-drive RUNNING** on deployed dev (b121e49) — 3 rounds × 11
+      journeys incl. j_hinglish_manager_lang; then local tier_rescore → gate verdict vs baseline.
+      Row stays open until clean. (Push landed 2656d0e..b121e49; the one real pre-push failure was
+      the signup test pinning pre-D3 column semantics — fixed, not a flake.)
 
-## ⏳ PENDING — CC queue (in order)
-- [ ] **VT-671** — SR turn latency + j02 persona-variance tail (measurement-heavy).
-- [ ] **#84** — Batch-API adoption (~50% off the measurement pipeline; cost-opt).
+## ⏳ PENDING — CC queue (O-drive order, Cowork 220837Z)
+- [ ] **O5 gate**: ×3 verdict → tier_rescore → VT-677 close (push freeze lifts).
+- [ ] **O4**: VT-679 §7A + VT-680 §7C design briefs → ratify → build (×3 after each brain-touch).
+- [ ] **O6**: dirty-tenant fixture as a `--dirty` harness seed mode (fold-not-roster take sent).
+- [ ] **VT-681** (O10-1 closing row, L/4-phase): per-tenant capability registry enforced at the
+      promise — rostered; slots after O2/O6/O5 unless Fazal pulls forward.
+- [ ] **VT-671** latency/variance tail · **#84** batch-API (ride gaps).
 - [ ] VT-668 follow-up cosmetic (redrive-actor churn one-liner, next manager-loop touch).
 
 ## 🧍 PENDING — FAZAL (blocking their rows)

@@ -14,6 +14,7 @@ from uuid import UUID
 
 from langgraph.checkpoint.postgres import PostgresSaver
 from langgraph.graph import END, START, StateGraph
+import psycopg
 from psycopg.rows import dict_row
 from psycopg_pool import ConnectionPool
 
@@ -87,11 +88,17 @@ def _setup_checkpoint_rls(pool: ConnectionPool) -> None:
         for table in _CHECKPOINT_TABLES:
             conn.execute(f"ALTER TABLE {table} ENABLE ROW LEVEL SECURITY")
             conn.execute(f"DROP POLICY IF EXISTS {table}_tenant_isolation ON {table}")
-            conn.execute(
-                f"CREATE POLICY {table}_tenant_isolation ON {table} "
-                "USING (thread_id::uuid IN ("
-                "SELECT id FROM pipeline_runs WHERE tenant_id = app_current_tenant()))"
-            )
+            try:
+                conn.execute(
+                    f"CREATE POLICY {table}_tenant_isolation ON {table} "
+                    "USING (thread_id::uuid IN ("
+                    "SELECT id FROM pipeline_runs WHERE tenant_id = app_current_tenant()))"
+                )
+            except psycopg.errors.DuplicateObject:
+                # Concurrent init race (two processes both passed the DROP): the policy EXISTS,
+                # which is the desired end state — the loser proceeds. Seen crashing parallel
+                # journey-runner processes 2026-07-18; DROP-then-CREATE is not atomic.
+                conn.rollback()
 
 
 def init_substrate(database_url: str) -> None:
