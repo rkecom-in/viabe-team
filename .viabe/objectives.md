@@ -6,7 +6,7 @@
 > status-changing event, same moment as the to-cowork signal). Cowork audits (Rule #14).
 > Bar lines are Fazal's — never edited without a ruling; Now/Gate/status lines are CC's.
 > Statuses: MET · MET–INCIDENT OPEN · IN PROGRESS · AT RISK · PENDING · HELD/PARKED.
-> Last updated: 2026-07-18 16:35 IST · pushing the graduated batch (VT-679/680 flag-off, #84, VT-676 fix-4, VT-683 brief, VT-684) · gate 651cb75 PASSED.
+> Last updated: 2026-07-18 17:15 IST · dev 1f3111b (O4 flags ON, gate-2 ×3 running) · local: fix-4e/f/g (PDF export), wakeup2 + whitelist ledger — push on gate-2 green.
 
 ## O1 · Trustworthy conversation — MET (holding)
 - Bar: Tier-1 trust-breakers = 0 across the 10-journey pack ×3; Tier-2 quality ≥ 90%.
@@ -26,11 +26,14 @@
   was NOT a breach — conversation_log proved Fazal's own phone approval 13:49 + honest outcome
   report 15:10; live proof PASSED. Canary-1 (customer-list) root-caused → F1–F3 landed 42bd7e6
   (plain-ask delivers, guard copy time-grounded, export_customer_list manager tool).
-- Gate to MET: canary-1 re-run 2026-07-18 13:07 IST **FAILED — new defect found + fixed**: text
-  arrived, file didn't (WhatsApp rejects text/csv media; async attach death was invisible — the
-  one owner-send path without delivery reconciliation; two texts double-claimed success).
-  Fix-4 landed (MIME text/plain + owner-notification ledger wiring + single-claim copy) —
-  LOCAL, rides the post-gate push. Fazal re-canaries after the next deploy.
+- Gate to MET: canary-1 r1–r3 all FAILED on the media leg — root FOUND (Fazal screenshot +
+  ledger evidence): the Twilio WhatsApp channel delivers PDF as its only document type; csv and
+  plain-text both die async at Meta AFTER a successful create. **Fix-4g: list now renders as a
+  PDF** (same weasyprint path as the monthly report) + fix-4f status-callback wiring (NO owner
+  send on dev has EVER received a delivery callback — ledger was write-only) + fix-4e acks never
+  assert visibility on a mere accept. LOCAL, rides the post-gate-2 push → **canary r4 = the PDF
+  attempt**. Fazal console action: copy TEAM_TWILIO_WEBHOOK_URL (Vercel) → Railway dev
+  TEAM_TWILIO_STATUS_CALLBACK_URL (value carries the bypass token — his hands, not CC's).
 
 ## O3 · Agent Capability Framework — MET ON DEV
 - Bar: ratified Manager/SubAgent/Tool architecture live — SR + Onboarding on the contract,
@@ -42,8 +45,9 @@
 ## O4 · Autonomous Manager (management mandate §7) — IN PROGRESS
 - Bar: plans (monthly/daily), allocates to specialists, validates outcomes, logs every
   decision with reasons — a manager, not a responder.
-- Now: reactive core + delegation contract + outcome-validation + audit log (VT-514) live.
-  VT-679 (§7A) + VT-680 (§7C) rostered design-first with question sets — briefs queue after O6.
+- Now: **VT-679 (§7A proactive planning) + VT-680 (§7C impact judge) BUILT + DEPLOYED on dev,
+  flags ON** — gate-2 ×3 running now; green closes both named gaps. Reactive core + delegation
+  contract + outcome-validation + audit log (VT-514) live.
 - Missing: proactive planning loop (§7A) mid-build depth · §7C impact-judge (validate outcome
   quality, not just completion) · dynamic sensing is O9 (held).
 
@@ -53,8 +57,11 @@
 - Now: VT-677 CLOSED — all phases landed + ×3 full-journey gate CLEAN (33 runs, hinglish
   journey 3/3, d9a4e10). D1–D3 built as ruled: hi-Latn register, live mirroring never
   overridden, no onboarding question, EN template fallback until Meta approves.
-- Gate (last unmet bar item, Fazal/Meta-side): hi-Latn template variants registered with
-  Meta — until approved, hinglish owners get EN templates by ruled fallback.
+- Gate (Fazal/Meta-side): welcome hing SID registered (Meta approval pending) · wake-up v1
+  (all 3 langs) FORCE-CONVERTED UTILITY→MARKETING by Meta (welcome2/3 class) → **team_wakeup2
+  v2 registered** (account-fact copy, 3 SIDs) — awaiting Meta's category verdict. NOTE: the
+  2026-07-18 whitelist ruling shrank O5's template scope to welcome+wakeup only (all other
+  owner comms ride the 24h session — VT-683).
 
 ## O6 · Real-tenant reliability — AT RISK (the honest one)
 - Bar: what passes on harness tenants must pass on REAL tenants with accumulated state.
@@ -68,8 +75,9 @@
   arm-then-send, 8/8 only after explicit confirm). r1 caught + fixed a real instrument hole
   (unfenced late-reply sweep read residue as live money claims) — the fixture earning its keep
   on run one. Clean-vs-dirty is now ONE flag on every journey.
-- Gate to lift AT RISK: Fazal's canary-1 re-run (the O2 leg) + a dirty slice folded into the
-  standing ×3 gate cadence (roster call: which journeys run dirty by default).
+- Gate to lift AT RISK: canary r4 (the PDF attempt — O2 leg; r1–r3 taught: transport-level
+  classes need the REAL phone, mocks can't see Meta's media policy) + a dirty slice folded into
+  the standing ×3 cadence (Cowork roster call pending).
 
 ## O7 · Launch readiness (prod) — PENDING
 - Bar: prod Mumbai live (VT-231), framework flags promoted, billing ₹5000/agent + per-agent
