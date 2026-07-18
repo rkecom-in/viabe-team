@@ -6,9 +6,25 @@
 > status-changing event, same moment as the to-cowork signal). Cowork audits (Rule #14).
 > Bar lines are Fazal's — never edited without a ruling; Now/Gate/status lines are CC's.
 > Statuses: MET · MET–INCIDENT OPEN · IN PROGRESS · AT RISK · PENDING · HELD/PARKED.
-> Last updated: 2026-07-18 18:35 IST · **O2 MET (r4 PASSED)** · O4 CLOSED · pushing VT-685 kit + wakeup2 approval docs.
+> Last updated: 2026-07-18 19:20 IST · dev b5f639c · O1/O2 MET, O4 CLOSED today · Codex cleared (VT-685, 3 review passes) · wakeup2 Meta-APPROVED · latest-snapshot refreshed (Rule #14).
 
-## O1 · Trustworthy conversation — MET (holding)
+## O0 · NORTH STAR — Claude Code for Business — IN PROGRESS (the objective all others compose into)
+- Bar (Fazal, ratified 2026-07-01 — Track C first-class): an owner hands the Team-Manager a
+  business GOAL in one WhatsApp message, the way a developer hands Claude Code a coding goal —
+  and the TM understands it in full context (never re-asks a known fact), plans the work,
+  delegates to specialists and tools, executes end-to-end, validates its own outcomes, learns
+  from every run, and stops ONLY at the deterministic effect gates (money/consent/approval).
+  Autonomy is earned per capability from measured clean outcomes, never assumed.
+- Composition (how the other objectives add up to this): O1 trust floor (MET) + O2 money
+  integrity (MET) + O3 the framework that makes capabilities pluggable (MET on dev) + O4
+  plan-delegate-validate (MET on dev) + O5 owner's language (near) + O6 real-world
+  reliability (at risk) + O8 learning loop (parked) + O9 sensing (held) + O10 launch roster
+  (in progress).
+- Honest stage: **a trustworthy reactive-plus-planned OPERATOR is real on dev today.** The
+  gap to the full north star is exactly O8 + O9 + soak-proven depth: it does not yet LEARN
+  from its runs, does not yet SENSE and initiate without a trigger, and its planning depth
+  is young. Those are sequenced behind the trust floor deliberately — a Claude Code that
+  can't be trusted isn't one.
 - Bar: Tier-1 trust-breakers = 0 across the 10-journey pack ×3; Tier-2 quality ≥ 90%.
 - Now: met HEAD-authoritative (Tier-1=0, Tier-2=100%); every brain-touching change re-gates
   against the full pack before trusting.
@@ -38,7 +54,7 @@
   gaps closed; flags ON dev.
 - Remaining: §7.3 DB-inversion (Fazal-explicit LAST) · prod flag promotion (rides VT-231).
 
-## O4 · Autonomous Manager (management mandate §7) — IN PROGRESS
+## O4 · Autonomous Manager (management mandate §7) — MET ON DEV (gate-2 passed)
 - Bar: plans (monthly/daily), allocates to specialists, validates outcomes, logs every
   decision with reasons — a manager, not a responder.
 - Now: **§7A + §7C CLOSED — gate-2 PASSED** (1f3111b, flags ON): cleanest full pack ever
@@ -46,8 +62,9 @@
   judge-FP deterministically refuted by the DB money-authority asserts (stated 8 == DB 8 —
   CL-2026-07-16: DB is sole authority; transcript-artifact misread, VT-641 family). Proactive
   planning + impact judge are LIVE on dev.
-- Missing: proactive planning loop (§7A) mid-build depth · §7C impact-judge (validate outcome
-  quality, not just completion) · dynamic sensing is O9 (held).
+- Remaining: depth/robustness measured over the soak (phase1-plan C-track) · dynamic sensing
+  is O9 (held). *(Cowork audit-patch 2026-07-18: header + this line reconciled to the gate-2
+  Now — the old "Missing" line contradicted it. CC: verify on next write.)*
 
 ## O5 · Owner's language, owner's register — IN PROGRESS (CC-side DONE)
 - Bar: every reply and agent-initiated message in the owner's language/register (en/hinglish/hi);
@@ -101,9 +118,12 @@
   graduate) · **Onboarding Conductor** LIVE. Advisory functions as Manager-held tools, never
   described autonomous: Marketing (prepare+propose via send rails) · Finance (advisory) ·
   Accounting (prepare-only) · Tech (owner-authorised only) · Cost-Opt (advisory) ·
-  **Compliance (NEW, Fazal 2026-07-18): Codex builds GSTR-1/3B filing-READINESS as a framework
-  module (advisory/prepare-only; filing = declared-disabled until graduation; MCA parked —
-  owner-docs only). VT-685 onboarding kit building now.**
+  **Compliance (NEW, Fazal 2026-07-18): Codex CLEARED to build GSTR-1/3B filing-READINESS as a
+  framework module** (advisory/prepare-only; filing declared-disabled; MCA parked — owner-docs
+  only). VT-685 kit SHIPPED + hardened through THREE Codex review passes
+  (EXTERNAL-BUILDER-ONBOARDING.md, engagement-agnostic; 9-check conformance documented;
+  wrappers-first DB rule; wire-to-live CC-owned; spawn_integration annotated LEGACY in the
+  generated catalog).
 - Tools: Shopify OAuth connector ✓ · GST verify gate ✓ · knowyourgst discovery ✓ · Sheets
   zero-paste ✓ · WhatsApp send rails ✓ · common READ set + 74-surface catalog ✓ ·
   customer-list export ✓-built (live canary OPEN) · connector-Tools registry ✓.
