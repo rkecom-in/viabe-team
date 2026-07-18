@@ -6,7 +6,7 @@
 > status-changing event, same moment as the to-cowork signal). Cowork audits (Rule #14).
 > Bar lines are Fazal's — never edited without a ruling; Now/Gate/status lines are CC's.
 > Statuses: MET · MET–INCIDENT OPEN · IN PROGRESS · AT RISK · PENDING · HELD/PARKED.
-> Last updated: 2026-07-18 20:05 IST · dev d2340ed · VT-683 P1 LANDED (session-window truth + 3 reactive handlers freeform-first; template surface shrinking to the whitelist) · P2 awaits Fazal point A (queued-approval timeout at DELIVERY).
+> Last updated: 2026-07-19 (promotion called — PR #526 open) · prev: 2026-07-18 20:05 IST · dev d2340ed · VT-683 P1 LANDED (session-window truth + 3 reactive handlers freeform-first; template surface shrinking to the whitelist) · P2 awaits Fazal point A (queued-approval timeout at DELIVERY).
 
 ## O0 · NORTH STAR — Claude Code for Business — IN PROGRESS (the objective all others compose into)
 - Bar (Fazal, ratified 2026-07-01 — Track C first-class): an owner hands the Team-Manager a
@@ -97,7 +97,11 @@
 - Bar: prod Mumbai live (VT-231), framework flags promoted, billing ₹5000/agent + per-agent
   trials, Meta template set approved, prod failed-workflow ops (VT-634 — VT-668 is its dev
   seed), signup exposure gate, ownership VTR gate.
-- Now: dev-complete substrate; prod not started by design. Waits on Fazal calling VT-231.
+- Now: **PROMOTION CALLED (Fazal "promote", 2026-07-19) — PR #526 OPEN (dev→main, 781
+  commits, the measured gate-green snapshot).** Merge = Fazal's button (Pillar 7). Prod env
+  pre-flight run: DATABASE_URL/EXPECTED_ENV confirmed; remaining critical names need Fazal's
+  console eyeball (sealed vars read unset via injection). Post-merge: migrations auto-apply →
+  parity check → Fazal authorizes framework flags → prod smoke.
 
 ## O8 · Learning loop & moat (Track C) — PARKED (post-trust-floor)
 - Bar: the Manager learns per-tenant from the audit log; KG/RAG wired; per-capability
