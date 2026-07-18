@@ -29,7 +29,14 @@
       already-SENT duplicate re-arm guard (warn-once) · **VT-676 build+mock-e2e** customer-list CSV
       attachment (R7 front door + D3 ride-along; PII rails; mock e2e PASSED on deployed dev).
 
-### LANGUAGE (VT-677, design RATIFIED, phases 1-3b BUILT)
+### O2 fixes + VT-677 gate (2026-07-18 morning)
+- [x] **O2 F1-F3 LANDED** (42bd7e6): plain customer-list ask delivers · guard copy time-grounded ·
+      export_customer_list manager tool. Canary-2 leg CLEAN (VT-668 live proof PASSED — no breach).
+- [x] **VT-677 ×3 GATE CLEAN → CLOSED** (serial, d9a4e10): 33 runs, ZERO behavioral fails;
+      hinglish journey 3/3. Two harness-infra defects found+fixed en route (pooler ceiling → serial
+      drives; checkpoint-RLS policy race → idempotent).
+
+### LANGUAGE (VT-677 — CLOSED, ×3-gated)
 - [x] Canonical owner_locale module (en|hinglish|hi) + D1 template-register mapping.
 - [x] 2 live D1 violations fixed (_floor_language Devanagari-to-hinglish; monthly_report raw flow).
 - [x] Triage language enum + Devanagari-override observed persist (D2-clean).
@@ -37,15 +44,8 @@
 - [x] Brain context line + ONE-sentence ambiguous-turn fallback + campaign-conflation guard.
 
 ## 🔄 IN FLIGHT (CC)
-- [ ] **O2 incident fixes F1-F3 pushing** (customer_list deterministic delivery + time-grounded
-      guard copy + export_customer_list manager tool). Canary-2 trail OVERTURNED my first read:
-      NO breach — Fazal approved from his phone 13:49Z Jul 17, fixed consumer executed, confirm
-      delivered 15:10:37Z → **VT-668 LIVE PROOF PASSED, row fully closed**. O2 needs only
-      Fazal's canary-1 re-run ("Send me my customer list") after this deploys.
-- [ ] **VT-677 ×3 full-journey re-drive RUNNING** on deployed dev (b121e49) — 3 rounds × 11
-      journeys incl. j_hinglish_manager_lang; then local tier_rescore → gate verdict vs baseline.
-      Row stays open until clean. (Push landed 2656d0e..b121e49; the one real pre-push failure was
-      the signup test pinning pre-D3 column semantics — fixed, not a flake.)
+- [ ] **VT-671** now TOP (latency tail): the ×3 mapped its exact steps — j01 explicit-send-confirm
+      leg + one late step each in j02/j06/j08 (j07 2of3). Replies land late; content passes.
 
 ## ⏳ PENDING — CC queue (O-drive order, Cowork 220837Z)
 - [ ] **O5 gate**: ×3 verdict → tier_rescore → VT-677 close (push freeze lifts).
