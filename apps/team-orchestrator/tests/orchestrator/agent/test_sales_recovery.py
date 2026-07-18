@@ -129,6 +129,13 @@ def _patched_client(response: Any) -> Any:
     return fake
 
 
+def _joined_system_text(blocks: Any) -> str:
+    """The model-visible system text: the concatenated ``text`` of the block list
+    ``_render_sr_system_prompt`` returns (cache batch 2026-07-18 — the render is
+    [static cache_control block, volatile date block], no longer a plain string)."""
+    return "".join(b["text"] for b in blocks)
+
+
 def test_max_tokens_stop_continues_and_stitches_terminal_text(monkeypatch):
     """VT-596 #2 — a stop_reason='max_tokens' turn is NOT terminal: the loop banks
     the partial text, sends the continuation prompt, and stitches the parts for
@@ -284,10 +291,16 @@ def test_run_sales_recovery_agent_passes_brief_required_params(monkeypatch):
     # decision; VT-33 (system prompt) does not pre-empt it.
     assert "thinking" not in call.kwargs
     assert call.kwargs["tools"] == []
-    # System prompt is the v1.0 sales_recovery file (VT-33). Spot-check
-    # identity, output-contract reference, and a Pillar 4 marker so a
-    # silent edit that drops a load-bearing section is caught.
-    prompt = call.kwargs["system"]
+    # System prompt is the v1.0 sales_recovery file (VT-33), sent as the cache
+    # batch 2026-07-18 BLOCK LIST: static cached body first, the date-rendered
+    # section last and un-marked. Pin the block shape AND spot-check identity,
+    # output-contract reference, and a Pillar 4 marker so a silent edit that
+    # drops a load-bearing section (or the cache_control marker) is caught.
+    system = call.kwargs["system"]
+    assert isinstance(system, list) and len(system) == 2
+    assert system[0]["cache_control"] == {"type": "ephemeral"}
+    assert "cache_control" not in system[1]  # the daily-varying block must not cache
+    prompt = _joined_system_text(system)
     assert "Sales Recovery Agent" in prompt
     assert "CampaignPlan" in prompt
     assert "out_of_scope" in prompt
@@ -1088,7 +1101,7 @@ def test_sr_prompt_injects_current_date_not_stale_literal_and_enum_source_kinds(
     from orchestrator.agent.sales_recovery import _render_sr_system_prompt
 
     fixed_now = datetime(2026, 7, 1, 14, 30, tzinfo=UTC)
-    rendered = _render_sr_system_prompt(now=fixed_now)
+    rendered = _joined_system_text(_render_sr_system_prompt(now=fixed_now))
 
     # A1 — the stale absolute window is gone and the template fully rendered.
     assert "2026-05-22" not in rendered
@@ -1115,7 +1128,7 @@ def test_sr_prompt_example_window_passes_campaign_window_validator():
     from orchestrator.agent.sales_recovery import _render_sr_system_prompt
     from orchestrator.agent.schemas.campaign_plan import CampaignWindow
 
-    rendered = _render_sr_system_prompt()
+    rendered = _joined_system_text(_render_sr_system_prompt())
     m = re.search(
         r'"start":\s*"([^"]+)",\s*"end":\s*"([^"]+)"', rendered
     )
@@ -1132,9 +1145,62 @@ def test_sr_prompt_default_render_uses_real_now():
 
     from orchestrator.agent.sales_recovery import _render_sr_system_prompt
 
-    rendered = _render_sr_system_prompt()
+    rendered = _joined_system_text(_render_sr_system_prompt())
     assert datetime.now(UTC).date().isoformat() in rendered
     assert "2026-05-22" not in rendered
+
+
+# --- Cache batch 2026-07-18: SR system prompt is a [static cached, volatile date] block list ---
+
+
+def test_sr_system_blocks_static_cached_first_dates_last_unmarked():
+    """Cache batch — ``_render_sr_system_prompt`` returns exactly two blocks: the
+    byte-stable body FIRST with ``cache_control: ephemeral``, the date-rendered
+    section LAST and deliberately NOT cache-marked (the daily date change must
+    never invalidate the cached prefix). The CACHE-SPLIT marker comment is
+    dropped — it must not leak into the model-visible text."""
+    from datetime import UTC, datetime
+
+    from orchestrator.agent.sales_recovery import _render_sr_system_prompt
+
+    blocks = _render_sr_system_prompt(now=datetime(2026, 7, 1, 14, 30, tzinfo=UTC))
+    assert isinstance(blocks, list) and len(blocks) == 2
+    static, volatile = blocks
+
+    # Static block: first, cache-marked, carries the stable body, ZERO date content.
+    assert static["type"] == "text"
+    assert static["cache_control"] == {"type": "ephemeral"}
+    assert "Sales Recovery Agent" in static["text"]
+    assert "2026-07-01" not in static["text"]
+    assert "{{" not in static["text"]
+
+    # Volatile block: last, NOT cache-marked, carries the fully-rendered date line
+    # + the proposed example's window.
+    assert volatile["type"] == "text"
+    assert "cache_control" not in volatile
+    assert "Today's date is `2026-07-01`" in volatile["text"]
+    assert "2026-07-02T09:00:00+00:00" in volatile["text"]
+    assert "{{" not in volatile["text"]
+
+    # The split marker never reaches the model on either side.
+    for b in blocks:
+        assert "CACHE-SPLIT" not in b["text"]
+        assert "<!--" not in b["text"]
+
+
+def test_sr_system_static_block_byte_identical_across_days():
+    """Cache batch — THE cache invariant: rendering on two different days yields a
+    byte-identical static block (the cached prefix survives the date roll); only
+    the trailing volatile block changes."""
+    from datetime import UTC, datetime
+
+    from orchestrator.agent.sales_recovery import _render_sr_system_prompt
+
+    day_a = _render_sr_system_prompt(now=datetime(2026, 7, 1, 8, 0, tzinfo=UTC))
+    day_b = _render_sr_system_prompt(now=datetime(2026, 9, 15, 23, 59, tzinfo=UTC))
+
+    assert day_a[0]["text"] == day_b[0]["text"]  # static prefix: byte-identical
+    assert day_a[1]["text"] != day_b[1]["text"]  # date block: differs per day
 
 
 # --- VT-499: campaign_window is system-owned (server-injected, not LLM) -------
@@ -1741,7 +1807,7 @@ def test_vt498_prompt_instructs_placeholder_personalization_no_literal_pii():
     literal name."""
     from orchestrator.agent.sales_recovery import _render_sr_system_prompt
 
-    rendered = _render_sr_system_prompt()
+    rendered = _joined_system_text(_render_sr_system_prompt())
 
     # The placeholder token the model must emit is present (the SAME <customer_name>
     # token target_cohort.selection_reason already carries — mirrored discipline)...
