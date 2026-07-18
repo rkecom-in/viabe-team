@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -338,3 +339,144 @@ def test_aggregate_verdicts_round_trips_through_json():
     verdicts = tj.parse_judge_response(json.dumps([{"scenario": "a", "scores": _valid_scores()}]))
     summary = tj.aggregate_verdicts(verdicts)
     json.loads(json.dumps(summary))  # must be plain-JSON-serializable
+
+
+# --- #84 batch-mode (--batch): judge_bundle_via_batches, pure/mocked-client (no real API call) ----
+
+
+def _batch_array_json(scenarios: list[str], *, all_5=True):
+    return json.dumps([{"scenario": s, "scores": _valid_scores(all_5)} for s in scenarios])
+
+
+def _ok(text):
+    return lambda cid: SimpleNamespace(
+        custom_id=cid,
+        result=SimpleNamespace(type="succeeded", message=SimpleNamespace(content=[SimpleNamespace(text=text)])),
+    )
+
+
+def _api_error():
+    return lambda cid: SimpleNamespace(
+        custom_id=cid,
+        result=SimpleNamespace(
+            type="errored",
+            error=SimpleNamespace(error=SimpleNamespace(message="server exploded", type="api_error")),
+        ),
+    )
+
+
+class _FakeBatchesResource:
+    """Minimal `client.messages.batches` double — one scripted outcome-factory per custom_id
+    (group), returned on the single `create()` call `judge_bundle_via_batches` makes (it has no
+    retry round of its own, mirroring `judge_batch`'s no-retry serial behavior)."""
+
+    def __init__(self, outcome_by_custom_id: dict[str, "callable"]):
+        self._outcome_by_custom_id = outcome_by_custom_id
+        self.create_calls: list[list[str]] = []
+
+    def create(self, *, requests):
+        self.create_calls.append([r["custom_id"] for r in requests])
+        return SimpleNamespace(id="batch-1")
+
+    def retrieve(self, batch_id):
+        return SimpleNamespace(processing_status="ended")
+
+    def results(self, batch_id):
+        return iter(factory(cid) for cid, factory in self._outcome_by_custom_id.items())
+
+
+class _FakeClient:
+    def __init__(self, batches: _FakeBatchesResource):
+        self.messages = SimpleNamespace(batches=batches)
+
+
+def _entries(names: list[str]) -> list[dict]:
+    return [{"name": n, "steps": [{"transcript": [{"role": "owner", "text": "hi"}]}]} for n in names]
+
+
+def test_judge_bundle_via_batches_one_group_per_batch_size_unit():
+    """The existing per-call batching-of-4-scenarios stays the unit: 5 scenarios at batch_size=4
+    become 2 groups -> 2 batch ITEMS in ONE Anthropic Batches API create() call."""
+    entries = _entries([f"s{i}" for i in range(5)])
+    outcomes = {
+        "group-0": _ok(_batch_array_json(["s0", "s1", "s2", "s3"])),
+        "group-1": _ok(_batch_array_json(["s4"])),
+    }
+    client = _FakeClient(_FakeBatchesResource(outcomes))
+    verdicts = tj.judge_bundle_via_batches(entries, model="claude-opus-4-8", batch_size=4, client=client)
+    assert [v.scenario for v in verdicts] == ["s0", "s1", "s2", "s3", "s4"]
+    assert len(client.messages.batches.create_calls) == 1
+    assert client.messages.batches.create_calls[0] == ["group-0", "group-1"]
+
+
+def test_judge_bundle_via_batches_raises_on_api_error_no_retry():
+    """No retry-on-failure here, mirroring judge_batch's own no-retry serial behavior — an errored
+    batch item raises immediately rather than silently dropping that group's verdicts."""
+    entries = _entries(["s0", "s1"])
+    outcomes = {"group-0": _api_error()}
+    client = _FakeClient(_FakeBatchesResource(outcomes))
+    with pytest.raises(RuntimeError, match="failed"):
+        tj.judge_bundle_via_batches(entries, model="claude-opus-4-8", batch_size=4, client=client)
+
+
+def test_judge_bundle_via_batches_raises_on_count_mismatch():
+    entries = _entries(["s0", "s1"])
+    outcomes = {"group-0": _ok(_batch_array_json(["s0"]))}  # only 1 verdict for a group of 2
+    client = _FakeClient(_FakeBatchesResource(outcomes))
+    with pytest.raises(ValueError, match="order/count mismatch"):
+        tj.judge_bundle_via_batches(entries, model="claude-opus-4-8", batch_size=4, client=client)
+
+
+# --- CLI wiring: --batch flag defaults off and dispatches correctly --------------------------------
+
+
+def test_build_parser_batch_flag_defaults_off():
+    args = tj.build_parser().parse_args(["bundle.json"])
+    assert args.batch is False
+
+
+def test_build_parser_batch_flag_can_be_set():
+    args = tj.build_parser().parse_args(["bundle.json", "--batch"])
+    assert args.batch is True
+
+
+def test_main_default_dispatches_to_serial_judge_batch(tmp_path, monkeypatch):
+    bundle_path = tmp_path / "bundle.json"
+    bundle_path.write_text(json.dumps([{"name": "s0", "steps": []}]), encoding="utf-8")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-not-real")
+    monkeypatch.setattr(tj, "_client", lambda: object())
+    calls = {"serial": 0, "batch": 0}
+
+    def fake_judge_batch(entries, *, model, client):
+        calls["serial"] += 1
+        return []
+
+    def fake_judge_bundle_via_batches(entries, *, model, batch_size, client, **kw):
+        calls["batch"] += 1
+        return []
+
+    monkeypatch.setattr(tj, "judge_batch", fake_judge_batch)
+    monkeypatch.setattr(tj, "judge_bundle_via_batches", fake_judge_bundle_via_batches)
+    tj.main([str(bundle_path)])
+    assert calls == {"serial": 1, "batch": 0}
+
+
+def test_main_batch_flag_dispatches_to_judge_bundle_via_batches(tmp_path, monkeypatch):
+    bundle_path = tmp_path / "bundle.json"
+    bundle_path.write_text(json.dumps([{"name": "s0", "steps": []}]), encoding="utf-8")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-not-real")
+    monkeypatch.setattr(tj, "_client", lambda: object())
+    calls = {"serial": 0, "batch": 0}
+
+    def fake_judge_batch(entries, *, model, client):
+        calls["serial"] += 1
+        return []
+
+    def fake_judge_bundle_via_batches(entries, *, model, batch_size, client, **kw):
+        calls["batch"] += 1
+        return []
+
+    monkeypatch.setattr(tj, "judge_batch", fake_judge_batch)
+    monkeypatch.setattr(tj, "judge_bundle_via_batches", fake_judge_bundle_via_batches)
+    tj.main([str(bundle_path), "--batch"])
+    assert calls == {"serial": 0, "batch": 1}

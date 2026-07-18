@@ -47,6 +47,8 @@ import sys
 from dataclasses import dataclass
 from typing import Any
 
+import batch_judge  # #84 — shared Message Batches API helper; no anthropic dep at import time
+
 # --- constants -----------------------------------------------------------------------------------
 
 DIMENSIONS: tuple[str, ...] = (
@@ -414,6 +416,72 @@ def judge_batch(
     return verdicts
 
 
+# --- Anthropic Message Batches API path (#84 — 50% cost; behind --batch, OFF by default) -----------
+
+
+def _batch_group_id(index: int) -> str:
+    return f"group-{index}"
+
+
+def _batch_item_for_group(group: list[dict[str, Any]], index: int, *, model: str) -> batch_judge.BatchJudgeItem:
+    """Build the batch item for one scenario-group — SAME user-content construction as
+    ``judge_batch``, so the prompt stays byte-identical between the serial and batch paths (judge
+    comparability requirement). The existing per-call batching of ``batch_size`` scenarios per
+    prompt is UNCHANGED here — each such group becomes exactly one batch item, i.e. what would have
+    been one ``messages.create`` call in the serial path."""
+    blocks = "\n\n".join(render_transcript_for_judge(e) for e in group)
+    user_content = (
+        f"Judge these {len(group)} scenario transcript(s). Return the JSON array in the SAME "
+        f"order as given:\n\n{blocks}"
+    )
+    return batch_judge.BatchJudgeItem(
+        custom_id=_batch_group_id(index), system=SYSTEM_PROMPT, user_content=user_content,
+        model=model, max_tokens=_MAX_OUTPUT_TOKENS,
+    )
+
+
+def judge_bundle_via_batches(
+    entries: list[dict[str, Any]],
+    *,
+    model: str,
+    batch_size: int,
+    client: Any,
+    poll_interval_s: float = batch_judge.DEFAULT_POLL_INTERVAL_S,
+    timeout_s: float = batch_judge.DEFAULT_TIMEOUT_S,
+) -> list[ScenarioVerdict]:
+    """Batch-mode equivalent of the serial ``for batch in batch_entries(...): judge_batch(...)``
+    loop in ``main()`` — every scenario-group submitted as ONE Anthropic Message Batches request
+    instead of N serial ``messages.create`` calls (50% cost via ``batch_judge``). ``judge_batch``'s
+    own per-call batching-of-``batch_size``-scenarios stays the unit: each group becomes one batch
+    item, reusing the SAME prompt-construction and parse/count-check logic. Behind ``--batch``; OFF
+    by default — the serial path (``judge_batch`` + the loop in ``main``) stays byte-unchanged.
+
+    Fail-not-skip, matching ``judge_batch``: NO retry-on-parse-failure here, same as the serial path
+    (``judge_batch`` itself never retries) — any group's API error or parse/count mismatch raises
+    immediately rather than silently dropping that group's verdicts.
+    """
+    groups = batch_entries(entries, batch_size)
+    items = [_batch_item_for_group(group, i, model=model) for i, group in enumerate(groups)]
+    results = batch_judge.run_batch_judge(
+        items, client=client, poll_interval_s=poll_interval_s, timeout_s=timeout_s,
+    )
+
+    all_verdicts: list[ScenarioVerdict] = []
+    for i, group in enumerate(groups):
+        item_result = results[_batch_group_id(i)]
+        if item_result.error is not None:
+            names = [e.get("name") or e.get("scenario") for e in group]
+            raise RuntimeError(f"transcript_judge batch item {i} (scenarios {names}) failed: {item_result.error}")
+        verdicts = parse_judge_response(item_result.text or "")
+        if len(verdicts) != len(group):
+            raise ValueError(
+                f"judge returned {len(verdicts)} verdict(s) for a batch of {len(group)} scenario(s) "
+                f"(order/count mismatch) — batch item {i}"
+            )
+        all_verdicts.extend(verdicts)
+    return all_verdicts
+
+
 # --- CLI --------------------------------------------------------------------------------------------
 
 
@@ -455,6 +523,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--batch-size", type=int, default=DEFAULT_BATCH_SIZE, metavar="N",
         help=f"scenario transcripts per Anthropic call (default {DEFAULT_BATCH_SIZE})",
     )
+    p.add_argument(
+        "--batch", action="store_true",
+        help="#84 — use the Anthropic Message Batches API (50%% cost) instead of N serial "
+             "messages.create calls; default OFF (serial path unchanged)",
+    )
     return p
 
 
@@ -476,9 +549,14 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     client = _client()
-    all_verdicts: list[ScenarioVerdict] = []
-    for batch in batch_entries(entries, args.batch_size):
-        all_verdicts.extend(judge_batch(batch, model=args.model, client=client))
+    if args.batch:
+        all_verdicts = judge_bundle_via_batches(
+            entries, model=args.model, batch_size=args.batch_size, client=client,
+        )
+    else:
+        all_verdicts = []
+        for batch in batch_entries(entries, args.batch_size):
+            all_verdicts.extend(judge_batch(batch, model=args.model, client=client))
 
     summary = aggregate_verdicts(all_verdicts, entries=entries)
 

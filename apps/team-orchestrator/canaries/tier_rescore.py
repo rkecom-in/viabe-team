@@ -51,6 +51,8 @@ import sys
 from dataclasses import dataclass, field
 from typing import Any
 
+import batch_judge  # #84 — shared Message Batches API helper; no anthropic dep at import time
+
 # --- constants -----------------------------------------------------------------------------------
 
 # §2.1's six trust-breaker classes, short snake_case names — this list is what "class" in the
@@ -621,6 +623,93 @@ def rescore_bundle(
     return verdicts, unscored
 
 
+# --- Anthropic Message Batches API path (#84 — 50% cost; behind --batch, OFF by default) -----------
+
+
+def _batch_item_id(index: int) -> str:
+    return f"scenario-{index}"
+
+
+def _batch_item_for_entry(entry: dict[str, Any], index: int, *, model: str) -> batch_judge.BatchJudgeItem:
+    """Build the batch item for one transcript — SAME system prompt + user-content construction as
+    ``_call_judge_once``, so the rubric/prompt stays byte-identical between the serial and batch
+    paths (judge comparability requirement)."""
+    transcript_text = render_transcript_for_judge(entry)
+    user_content = f"Judge this scenario transcript. Return the JSON object as specified:\n\n{transcript_text}"
+    return batch_judge.BatchJudgeItem(
+        custom_id=_batch_item_id(index), system=SYSTEM_PROMPT, user_content=user_content,
+        model=model, max_tokens=_MAX_OUTPUT_TOKENS,
+    )
+
+
+def rescore_bundle_via_batches(
+    entries: list[dict[str, Any]],
+    *,
+    model: str,
+    client: Any,
+    poll_interval_s: float = batch_judge.DEFAULT_POLL_INTERVAL_S,
+    timeout_s: float = batch_judge.DEFAULT_TIMEOUT_S,
+) -> tuple[list[TranscriptVerdict], list[UnscoredResult]]:
+    """Batch-mode equivalent of ``rescore_bundle`` — SAME parse/retry semantics (a parse-failed or
+    API-errored item gets exactly ONE retry, collected into a second, smaller batch), but submits
+    every transcript in ONE Anthropic Message Batches request per round instead of N serial
+    ``messages.create`` calls (50% cost via ``batch_judge``). Behind ``--batch``; OFF by default —
+    ``rescore_bundle`` (the serial path) stays byte-unchanged.
+
+    Final ``verdicts``/``unscored`` ordering matches ``rescore_bundle``'s: each is a stable
+    subsequence of the ORIGINAL entry order (verdicts in the order their entries appear among
+    successes; unscored likewise among failures) — batch results arrive in arbitrary order, but the
+    caller-facing lists never reflect that.
+    """
+    names = [str(e.get("name") or e.get("scenario") or "(unnamed)") for e in entries]
+    all_indices = list(range(len(entries)))
+
+    def _run(indices: list[int]) -> dict[str, batch_judge.BatchItemResult]:
+        items = [_batch_item_for_entry(entries[i], i, model=model) for i in indices]
+        return batch_judge.run_batch_judge(
+            items, client=client, poll_interval_s=poll_interval_s, timeout_s=timeout_s,
+        )
+
+    verdict_by_idx: dict[int, TranscriptVerdict] = {}
+    error_by_idx: dict[int, str] = {}
+    retry_indices: list[int] = []
+
+    results = _run(all_indices)
+    for i in all_indices:
+        item_result = results[_batch_item_id(i)]
+        if item_result.error is not None:
+            error_by_idx[i] = item_result.error
+            retry_indices.append(i)
+            continue
+        try:
+            verdict_by_idx[i] = parse_rescore_response(item_result.text or "", names[i])
+        except Exception as exc:  # retry-once posture, mirrors rescore_transcript
+            error_by_idx[i] = str(exc)
+            retry_indices.append(i)
+
+    if retry_indices:
+        retry_results = _run(retry_indices)
+        for i in retry_indices:
+            item_result = retry_results[_batch_item_id(i)]
+            if item_result.error is not None:
+                error_by_idx[i] = item_result.error
+                continue
+            try:
+                verdict_by_idx[i] = parse_rescore_response(item_result.text or "", names[i])
+                error_by_idx.pop(i, None)
+            except Exception as exc:
+                error_by_idx[i] = str(exc)
+
+    verdicts: list[TranscriptVerdict] = []
+    unscored: list[UnscoredResult] = []
+    for i in all_indices:
+        if i in verdict_by_idx:
+            verdicts.append(verdict_by_idx[i])
+        else:
+            unscored.append(UnscoredResult(scenario=names[i], error=error_by_idx.get(i, "unknown error")))
+    return verdicts, unscored
+
+
 # --- CLI --------------------------------------------------------------------------------------------
 
 
@@ -669,6 +758,11 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="tier_rescore", description=__doc__)
     p.add_argument("bundle", help="path to a convo_harness.py --json-report bundle")
     p.add_argument("--model", default=DEFAULT_MODEL, help=f"judge model id (default {DEFAULT_MODEL!r})")
+    p.add_argument(
+        "--batch", action="store_true",
+        help="#84 — use the Anthropic Message Batches API (50%% cost) instead of N serial "
+             "messages.create calls; default OFF (serial path unchanged)",
+    )
     return p
 
 
@@ -690,7 +784,10 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     client = _client()
-    verdicts, unscored = rescore_bundle(entries, model=args.model, client=client)
+    if args.batch:
+        verdicts, unscored = rescore_bundle_via_batches(entries, model=args.model, client=client)
+    else:
+        verdicts, unscored = rescore_bundle(entries, model=args.model, client=client)
     summary = aggregate_tiers(verdicts, unscored)
     conjunctive = _load_conjunctive_gate(args.bundle)
 
