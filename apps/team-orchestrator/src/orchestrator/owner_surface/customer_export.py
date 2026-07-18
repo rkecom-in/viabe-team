@@ -55,9 +55,14 @@ CUSTOMER_LIST_CAPTION = (
 
 def export_storage_path(tenant_id: str) -> str:
     """Tenant-scoped object path. Pure + deterministic per (tenant, day) — a same-day re-ask
-    overwrites (upsert) instead of piling PII copies in the bucket."""
+    overwrites (upsert) instead of piling PII copies in the bucket.
+
+    Fix-4a2 (canary-1 r2, 2026-07-18): extension ``.txt`` — r2 proved the text/plain MIME clears
+    Twilio's create gate (MM sid minted) but the document still didn't land on the phone;
+    Meta's document allowlist gates the visible EXTENSION as well, and ``.txt`` is the one that
+    matches text/plain. Content stays CSV-formatted (opens in Excel/Sheets via rename or import)."""
     day = datetime.now(UTC).strftime("%Y-%m-%d")
-    return f"{tenant_id}/customers-{day}.csv"
+    return f"{tenant_id}/customers-{day}.txt"
 
 
 def build_customer_list_csv(tenant_id: UUID | str) -> tuple[bytes, int]:
@@ -199,11 +204,15 @@ def send_customer_list_to_owner(
         # in the body, never in a log line.
         from orchestrator.utils.twilio_send import send_freeform_message
 
+        # Fix-4d (canary-1 r2): surface MUST be a conversation_log-legal value — the CHECK
+        # constraint allows only journey|manager|system, so "customer_export" made the caption's
+        # transcript insert fail SILENTLY (best-effort) and the follow-up ack's "file just above"
+        # pointed at a message conversation_log never saw.
         sid = send_freeform_message(
             CUSTOMER_LIST_CAPTION,
             recipient,
             tenant_id=tenant_id,
-            surface="customer_export",
+            surface="manager",
             media_urls=[url],
         )
 
