@@ -76,6 +76,13 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     # contract as register_purge_scheduler — see scheduled_triggers.py
     # docstring for the DBOS app_version invariant.
     register_scheduled_triggers()
+    # VT-686 live wiring: register every first-party framework module at boot so the Manager's
+    # agent-directory block sees ALL identity cards from the first turn (before this, the
+    # registry started empty and only SR self-registered lazily mid-dispatch). Fail-closed:
+    # an invalid manifest/brief crashes boot here, loudly. Registering ≠ routing.
+    from orchestrator.agent_framework.modules import register_all_modules
+
+    register_all_modules()
     # VT-210: fan-out ingestion scheduler. Same contract.
     from orchestrator.integrations.scheduler import (
         register_ingestion_scheduler,
