@@ -427,3 +427,113 @@ def test_bundle_builder_has_no_customer_data_path():
         "FROM customers", "phone_e164", "display_name",
     ):
         assert banned not in src, f"generator.py must not read customer data ({banned})"
+
+
+# ---------------------------------------------------------------------------
+# VT-679 D1.1 — refresh_business_plan_workflow + compose_refresh_delta_summary
+# ---------------------------------------------------------------------------
+
+
+def test_compose_delta_summary_reports_changed_headline_metrics() -> None:
+    prior_summary = {"headline_metrics": {"zomato_rating": 4.2, "listing_count": 1}}
+    new_summary = {"headline_metrics": {"zomato_rating": 4.5, "listing_count": 1}}
+    body = generator.compose_refresh_delta_summary(prior_summary, [], new_summary, [], "en")
+    assert "zomato_rating 4.2 -> 4.5" in body
+    assert "listing_count" not in body, "an UNCHANGED metric must not appear in the diff"
+    assert body.endswith("Reply PLAN for the full plan.")
+
+
+def test_compose_delta_summary_reports_item_count_added() -> None:
+    prior_roadmap = [{"item_id": "a"}]
+    new_roadmap = [{"item_id": "b"}, {"item_id": "c"}, {"item_id": "d"}]
+    body = generator.compose_refresh_delta_summary({}, prior_roadmap, {}, new_roadmap, "en")
+    assert "2 new step(s) added." in body
+
+
+def test_compose_delta_summary_reports_item_count_removed() -> None:
+    prior_roadmap = [{"item_id": "a"}, {"item_id": "b"}, {"item_id": "c"}]
+    new_roadmap = [{"item_id": "d"}]
+    body = generator.compose_refresh_delta_summary({}, prior_roadmap, {}, new_roadmap, "en")
+    assert "2 step(s) removed." in body
+
+
+def test_compose_delta_summary_falls_back_to_generic_when_nothing_changed() -> None:
+    metrics = {"zomato_rating": 4.2}
+    body = generator.compose_refresh_delta_summary(
+        {"headline_metrics": metrics}, [{"item_id": "a"}],
+        {"headline_metrics": dict(metrics)}, [{"item_id": "b"}],  # same count, same metrics
+        "en",
+    )
+    assert body == (
+        "Your business plan has been refreshed based on your latest business data. "
+        "Reply PLAN for the full plan."
+    )
+
+
+def test_compose_delta_summary_hindi_locale() -> None:
+    body = generator.compose_refresh_delta_summary(
+        {"headline_metrics": {}}, [{"item_id": "a"}], {"headline_metrics": {}},
+        [{"item_id": "a"}, {"item_id": "b"}], "hi",
+    )
+    assert "नए कदम जोड़े गए" in body
+    assert body.endswith("PLAN लिखकर भेजें।")
+
+
+def test_compose_delta_summary_unsupported_locale_falls_back_to_en() -> None:
+    body = generator.compose_refresh_delta_summary({}, [], {}, [], "hinglish")
+    assert body.endswith("Reply PLAN for the full plan.")
+
+
+@requires_db
+def test_refresh_workflow_bypasses_plan_exists(substrate, log_spy, monkeypatch):  # type: ignore[no-untyped-def]
+    """VT-679 D1.1 — unlike ``generate_business_plan_workflow``, a refresh MUST re-generate even
+    though a plan already exists (the plan_exists skip is the ONE-SHOT onboarding rail, not a
+    refresh rail). NOTE: deliberately does NOT use the ``write_spy`` fixture — that mocks
+    ``store.write_new_version`` entirely, which would fake out the REAL seed write below too;
+    this test needs a genuinely-persisted prior version for ``get_active_plan`` to find."""
+    monkeypatch.setitem(
+        sys.modules, "orchestrator.business_plan.schema", _fake_schema(violations_per_call=[[]])
+    )
+    llm = _SpyLLM([_CLEAN_PLAN_JSON])
+    monkeypatch.setattr(generator, "_call_llm", llm)
+    monkeypatch.setattr(generator, "_deliver_refresh_delta", lambda *a, **k: None)
+
+    tenant = _new_tenant(substrate.dsn, name="refresh bypass")
+    _seed_grounding(substrate.dsn, tenant)
+    v1 = store.write_new_version(
+        tenant,
+        summary={"text": "seed", "text_hi": "seed", "cited_facts": [], "headline_metrics": {}},
+        roadmap=[],
+        fact_bundle={},
+        generated_by="test_seed",
+    )
+    assert v1 == 1
+
+    result = generator.refresh_business_plan_workflow(str(tenant))
+
+    assert result == {"version": 2, "prior_version": 1}, "refresh must mint a NEW version, not skip"
+    assert len(llm.calls) == 1, "refresh must actually call the LLM (never skips like generate does)"
+
+    refreshed_plan = store.get_active_plan(tenant)
+    assert refreshed_plan is not None
+    assert refreshed_plan.version == 2
+    assert refreshed_plan.generated_by == "gap4_generator_refresh"
+
+    refreshed = [c for c in log_spy if c.get("event_type") == "business_plan_refreshed"]
+    assert len(refreshed) == 1
+    assert (refreshed[0].get("payload") or {}).get("prior_version") == 1
+
+
+@requires_db
+def test_refresh_workflow_skips_when_no_existing_plan(substrate, log_spy, monkeypatch):  # type: ignore[no-untyped-def]
+    """A tenant with NO existing plan has nothing to refresh — onboarding's generate path owns
+    first creation; refresh is skip-not-error, and the LLM is never reached."""
+    monkeypatch.setattr(generator, "_call_llm", _forbidden_llm)
+    tenant = _new_tenant(substrate.dsn, name="refresh no existing plan")
+
+    result = generator.refresh_business_plan_workflow(str(tenant))
+
+    assert result == {"skipped": "no_existing_plan"}
+    skipped = [c for c in log_spy if c.get("event_type") == "business_plan_refresh_skipped"]
+    assert len(skipped) == 1
+    assert (skipped[0].get("payload") or {}).get("reason") == "no_existing_plan"
