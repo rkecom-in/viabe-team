@@ -224,7 +224,12 @@ def test_run_verification_cycle_threads_campaign_reported_into_settle(monkeypatc
             "suppress", success_closure_not_required
         ),
     )
-    monkeypatch.setattr(wf, "_notify_owner_of_terminal", lambda t, k: seen.__setitem__("notified", True))
+    monkeypatch.setattr(wf, "_judge_impact_step", lambda t, k: ("unjudged", "flag_off"))
+    monkeypatch.setattr(
+        wf,
+        "_notify_owner_of_terminal",
+        lambda t, k, **kw: seen.__setitem__("notified", True),
+    )
 
     action, attempts = wf._run_verification_cycle("t", "k", 0, campaign_outcome_reported=True)
 
