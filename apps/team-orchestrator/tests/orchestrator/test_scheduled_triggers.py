@@ -95,6 +95,10 @@ def test_cron_expressions_match_brief() -> None:
     # batch-review finding; boot-only until that lands).
     assert st.STALLED_TASK_SWEEP_CRON == "*/10 * * * *"
     assert st.ORPHAN_RUN_REAPER_CRON == "0 * * * *"
+    # VT-679 — §7A proactive planning: monthly refresh (1st 03:30 UTC / 09:00 IST) + daily
+    # initiative pick (05:00 UTC / 10:30 IST).
+    assert st.PLAN_REFRESH_CRON == "30 3 1 * *"
+    assert st.DAILY_INITIATIVE_CRON == "0 5 * * *"
 
 
 # ---------------------------------------------------------------------------
@@ -946,12 +950,14 @@ def test_register_scheduled_triggers_idempotent(monkeypatch) -> None:
     # boot-only — no final_outcome writer yet, batch-review finding): 20 → 22.
     # VT-620 added one (test_tenant_reaper — hourly GC of leaked convo-harness
     # test tenants so they stop paging ops as noise): 22 → 23.
-    assert first == 23, "expected 23 triggers registered on first call"
-    assert second == 23, "second call must short-circuit (idempotent)"
+    # VT-679 added two (plan_refresh + daily_initiative — §7A proactive planning, both behind
+    # TEAM_PROACTIVE_PLANNING; the cron registration itself is unconditional): 23 → 25.
+    assert first == 25, "expected 25 triggers registered on first call"
+    assert second == 25, "second call must short-circuit (idempotent)"
     # VT-464 D3: every scheduled handler MUST also be registered as a workflow
     # (one DBOS.workflow() wrap per DBOS.scheduled() call) — otherwise the cron
     # fire raises DBOSWorkflowFunctionNotFoundError.
-    assert first_wf == 23, "expected 23 handlers wrapped as @DBOS.workflow"
+    assert first_wf == 25, "expected 25 handlers wrapped as @DBOS.workflow"
     st._registered = False
 
 
@@ -993,5 +999,158 @@ def test_scheduled_sweeps_are_registered_workflows() -> None:
             assert name in reg.workflow_info_map, (
                 f"{name} must be a registered workflow (VT-560 steady-state sweep)"
             )
+        # VT-679 — same class of bug: both new proactive-planning handlers must be registered
+        # workflows too, or their (currently flag-gated) cron fire would raise the same error
+        # once TEAM_PROACTIVE_PLANNING flips on.
+        for name in ("plan_refresh_scheduled", "daily_initiative_scheduled"):
+            assert name in reg.workflow_info_map, (
+                f"{name} must be a registered workflow (VT-679 proactive planning)"
+            )
     finally:
         st._registered = False
+
+
+# ---------------------------------------------------------------------------
+# VT-679 (§7A) — proactive planning: flag gate, IST belt, sweep delegation
+# ---------------------------------------------------------------------------
+
+
+def test_plan_refresh_scheduled_noop_when_flag_unset(monkeypatch) -> None:
+    monkeypatch.delenv("TEAM_PROACTIVE_PLANNING", raising=False)
+    called = {"n": 0}
+    monkeypatch.setattr(st, "run_plan_refresh_body", lambda **kw: called.__setitem__("n", called["n"] + 1))
+    st.plan_refresh_scheduled(
+        datetime(2026, 8, 1, 3, 30, tzinfo=timezone.utc),
+        datetime(2026, 8, 1, 3, 30, 5, tzinfo=timezone.utc),
+    )
+    assert called["n"] == 0, "flag unset must no-op fast — run_plan_refresh_body must not run"
+
+
+def test_plan_refresh_scheduled_delegates_when_flag_set(monkeypatch) -> None:
+    monkeypatch.setenv("TEAM_PROACTIVE_PLANNING", "1")
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(st, "run_plan_refresh_body", lambda **kw: captured.update(kw))
+    actual = datetime(2026, 8, 1, 3, 30, 5, tzinfo=timezone.utc)
+    st.plan_refresh_scheduled(datetime(2026, 8, 1, 3, 30, tzinfo=timezone.utc), actual)
+    assert captured.get("now") == actual
+
+
+def test_daily_initiative_scheduled_noop_when_flag_unset(monkeypatch) -> None:
+    monkeypatch.delenv("TEAM_PROACTIVE_PLANNING", raising=False)
+    called = {"n": 0}
+    monkeypatch.setattr(
+        st, "run_daily_initiative_body", lambda **kw: called.__setitem__("n", called["n"] + 1)
+    )
+    # Even a NIGHT-time fire (would fail the IST belt) must no-op cleanly when the flag is unset —
+    # the flag check runs FIRST, before the belt assert.
+    st.daily_initiative_scheduled(
+        datetime(2026, 8, 2, 20, 0, tzinfo=timezone.utc),
+        datetime(2026, 8, 2, 20, 0, 5, tzinfo=timezone.utc),
+    )
+    assert called["n"] == 0
+
+
+def test_daily_initiative_scheduled_delegates_when_flag_set(monkeypatch) -> None:
+    monkeypatch.setenv("TEAM_PROACTIVE_PLANNING", "1")
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(st, "run_daily_initiative_body", lambda **kw: captured.update(kw))
+    # 05:00 UTC = 10:30 IST — inside the belt.
+    actual = datetime(2026, 8, 2, 5, 0, 5, tzinfo=timezone.utc)
+    st.daily_initiative_scheduled(datetime(2026, 8, 2, 5, 0, tzinfo=timezone.utc), actual)
+    assert captured.get("now") == actual
+
+
+def test_daily_initiative_scheduled_raises_outside_ist_belt(monkeypatch) -> None:
+    """D1.2 belt: a mis-set cron firing outside 10:00-19:00 IST must raise, never silently run."""
+    monkeypatch.setenv("TEAM_PROACTIVE_PLANNING", "1")
+    monkeypatch.setattr(
+        st,
+        "run_daily_initiative_body",
+        lambda **kw: pytest.fail("must not reach the body — the IST belt should have raised"),
+    )
+    # 20:00 UTC = 01:30 IST (next day) — well outside 10:00-19:00 IST.
+    with pytest.raises(RuntimeError, match="outside the 10:00-19:00 IST belt"):
+        st.daily_initiative_scheduled(
+            datetime(2026, 8, 2, 20, 0, tzinfo=timezone.utc),
+            datetime(2026, 8, 2, 20, 0, 5, tzinfo=timezone.utc),
+        )
+
+
+@pytest.mark.parametrize(
+    "utc_hour,utc_minute,should_raise",
+    [
+        (4, 0, True),  # 04:00 UTC = 09:30 IST — before the belt (hour=9)
+        (4, 30, False),  # 04:30 UTC = 10:00 IST — exactly at the belt open (hour=10)
+        (13, 0, False),  # 13:00 UTC = 18:30 IST — inside the belt (hour=18)
+        (13, 30, True),  # 13:30 UTC = 19:00 IST — exactly at the belt close, exclusive (hour=19)
+    ],
+)
+def test_ist_belt_boundaries(utc_hour, utc_minute, should_raise) -> None:
+    now = datetime(2026, 8, 2, utc_hour, utc_minute, tzinfo=timezone.utc)
+    if should_raise:
+        with pytest.raises(RuntimeError):
+            st._assert_ist_daytime(now)
+    else:
+        st._assert_ist_daytime(now)  # must not raise
+
+
+def test_run_plan_refresh_body_starts_workflow_per_tenant(monkeypatch) -> None:
+    """VT-679 D1.1: the sweep scans active paid/trial tenants and starts
+    ``refresh_business_plan_workflow`` per tenant, keyed on ``monthly_workflow_id`` — one
+    tenant's failure to start must not halt the sweep."""
+    t1 = UUID("00000000-0000-4000-8000-000000000601")
+    t2 = UUID("00000000-0000-4000-8000-000000000602")
+    monkeypatch.setattr(st, "_scan_active_paid_or_trial_tenants", lambda: [t1, t2])
+
+    from orchestrator.business_plan import generator as gen_mod
+
+    started: list[tuple[Any, ...]] = []
+
+    class _FakeDBOS:
+        @staticmethod
+        def start_workflow(fn, *args):
+            if args and args[0] == str(t1):
+                raise RuntimeError("boom — t1 fails to start")
+            started.append((fn, args))
+
+    class _FakeSetWorkflowID:
+        def __init__(self, workflow_id):
+            self.workflow_id = workflow_id
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    import dbos as dbos_mod
+
+    monkeypatch.setattr(dbos_mod, "DBOS", _FakeDBOS)
+    monkeypatch.setattr(dbos_mod, "SetWorkflowID", _FakeSetWorkflowID)
+
+    out = st.run_plan_refresh_body(now=datetime(2026, 8, 1, 3, 30, tzinfo=timezone.utc))
+
+    assert out == [t2], "t1's start failure must not halt the sweep; only t2 recorded as started"
+    assert started == [(gen_mod.refresh_business_plan_workflow, (str(t2),))]
+
+
+def test_run_daily_initiative_body_delegates_per_tenant(monkeypatch) -> None:
+    t1 = UUID("00000000-0000-4000-8000-000000000701")
+    t2 = UUID("00000000-0000-4000-8000-000000000702")
+    monkeypatch.setattr(st, "_scan_active_paid_or_trial_tenants", lambda: [t1, t2])
+
+    from orchestrator.business_plan import daily_initiative as di_mod
+
+    def _fake_dispatch(tenant_id, *, now):
+        if tenant_id == t1:
+            raise RuntimeError("boom — t1 dispatch fails")
+        return {"task_id": "abc", "item_id": "item-1", "owning_agent": "reputation"}
+
+    monkeypatch.setattr(di_mod, "dispatch_daily_initiative", _fake_dispatch)
+
+    now = datetime(2026, 8, 2, 5, 0, tzinfo=timezone.utc)
+    out = st.run_daily_initiative_body(now=now)
+
+    assert out == [{"task_id": "abc", "item_id": "item-1", "owning_agent": "reputation"}], (
+        "t1's failure must not halt the sweep; only t2's result recorded"
+    )
