@@ -27,10 +27,12 @@ def test_is_available_env_gating():
 
 def test_disabled_capability_available_nowhere():
     """VT-681 — the D2 ad-boost class: declared so the Manager can decline honestly, available in
-    NO environment until the mode flips."""
-    assert cap.mode_of("marketing.paid_ad_boost") == "disabled"
-    assert cap.is_available("marketing.paid_ad_boost", env="dev") is False
-    assert cap.is_available("marketing.paid_ad_boost", env="prod") is False
+    NO environment until the mode flips. VT-685 — compliance.return_filing is the SAME class
+    (declared-disabled honesty entry for GST return filing, not yet graduated)."""
+    for key in ("marketing.paid_ad_boost", "compliance.return_filing"):
+        assert cap.mode_of(key) == "disabled", key
+        assert cap.is_available(key, env="dev") is False, key
+        assert cap.is_available(key, env="prod") is False, key
 
 
 def test_launch_roster_modes():
@@ -39,8 +41,9 @@ def test_launch_roster_modes():
                 "integration.google_sheet_ingest", "integration.shopify_connect",
                 "integration.gst_verify", "manager.customer_list_export"):
         assert cap.mode_of(key) == "live", key
+    # VT-685 — compliance.gstr_readiness joins the advisory (prepare-only) set.
     for key in ("marketing.campaign_prepare", "finance.advice", "accounting.prepare",
-                "tech.owner_authorized_help", "cost_opt.advice"):
+                "tech.owner_authorized_help", "cost_opt.advice", "compliance.gstr_readiness"):
         assert cap.mode_of(key) == "advisory", key
         assert cap.resolve(key).effect_class == "advisory", key
 
