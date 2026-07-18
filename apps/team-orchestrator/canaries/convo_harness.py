@@ -447,11 +447,20 @@ def _campaign_id_for_run(conn: Any, tenant_id: str, run_id: str | None) -> str |
     ``_evaluate_db_asserts``). Scenarios are single-campaign per tenant in practice; ORDER BY +
     LIMIT 1 is defensive, not a claim of multiplicity. Presence/absence (never a COUNT) so a
     stub/fake connection that returns zero rows for an unmatched query behaves exactly like a real
-    "no match" — ``fetchone()`` is None either way."""
+    "no match" — ``fetchone()`` is None either way.
+
+    VT-682 time fence: the tenant-wide branch only sees campaigns created AT/AFTER the tenant row
+    itself — ``--dirty``'s accumulated-state residue is deliberately BACKDATED (created_at ~14d
+    before the tenant), so it can never hijack the campaigns-row-existence proxy (assert_route
+    reading residue as "delegated this turn" before the journey's own campaign exists). Rows the
+    conversation actually produces are always >= the tenant's created_at, so clean-tenant behavior
+    is unchanged (``>=`` also covers same-transaction now() equality)."""
     if run_id is None:
         row = conn.execute(
-            "SELECT id FROM campaigns WHERE tenant_id = %s ORDER BY created_at DESC LIMIT 1",
-            (tenant_id,),
+            "SELECT id FROM campaigns WHERE tenant_id = %s "
+            "AND created_at >= (SELECT created_at FROM tenants WHERE id = %s) "
+            "ORDER BY created_at DESC LIMIT 1",
+            (tenant_id, tenant_id),
         ).fetchone()
     else:
         row = conn.execute(
@@ -1221,6 +1230,154 @@ def _seed_lapsed_customers(
     )
 
 
+# --- dirty-tenant seeding (VT-682 / O6) ----------------------------------------------------------
+
+# The stale mid-integration flow the dirty tenant carries — the EXACT class that hijacked the
+# 2026-07-17 canary-1 export ask on Fazal's real tenant (integration state swallowing an unrelated
+# request). google_sheet matches _SEED_CONNECTOR_ID so the residue is self-consistent.
+_DIRTY_FLOW_SENTINEL = f"integration:{_SEED_CONNECTOR_ID}"
+
+
+@dataclass
+class DirtySeedResult:
+    prior_campaign_id: str
+    stranded_approval_id: str
+    dead_letter_task_id: str
+    n_history_rows: int
+    flow_sentinel: str | None  # None when the journey's own --flow won
+
+
+def _seed_dirty_state(dsn: str, tenant_id: str, *, flow_already_set: bool) -> DirtySeedResult:
+    """VT-682 (O6) — layer ACCUMULATED-STATE residue onto a fresh --onboarded harness tenant, so
+    the SAME journeys run over the state a REAL months-old tenant carries (harness-green ≠
+    real-green ×2 in the 2026-07-17 canaries; clean tenants structurally cannot catch that class).
+
+    All rows are raw-SQL residue mirroring shapes the REAL system leaves behind (each backdated
+    via explicit created_at — never the column DEFAULT):
+
+    1. prior SENT campaign (~14d): aged completed pipeline_run + campaigns status='sent'.
+       14d is DELIBERATE — outside VT-670's 48h warn-once window, so the already-sent guard is
+       never deterministically tripped; and the VT-682 time fence in ``_campaign_id_for_run``
+       keeps it invisible to the tenant-wide assert proxy.
+    2. stranded PENDING approval (~3d, generous open timeout): aged escalated pipeline_run +
+       task-UNBOUND pending_approvals row. Post-VT-668 the reaper closes task-bound orphans, so
+       the honest surviving residue on real tenants is exactly this unbound shape. Deliberately
+       NOT shielded from correlate_reply — if a journey's "yes" resolves THIS approval instead of
+       its own fresh one, that is a REAL O6 finding, the fixture doing its job.
+    3. dead-lettered manager task (~5d): status='dead_letter' with the REAL vt557 retry-ladder
+       stall_metadata shape.
+    4. aged conversation history (~10 rows, 21d→2d): owner/assistant turns whose content
+       CROSS-REFERENCES the artifacts above (the sent campaign's outcome report, the sheet-connect
+       ask behind the flow sentinel, the un-answered approval ask) — a real tenant's transcript is
+       coherent with its DB residue, not lorem.
+    5. stale ``__flow__`` sentinel ``integration:google_sheet`` — SKIPPED when the journey armed
+       its own --flow (an explicit fixture always wins; never clobber it)."""
+    from psycopg.types.json import Jsonb
+
+    with _connect(dsn) as conn:
+        # (1) aged completed run + prior SENT campaign (~14d old)
+        run_old = conn.execute(
+            "INSERT INTO pipeline_runs (tenant_id, run_type, status, started_at, ended_at) "
+            "VALUES (%s, 'twilio_inbound', 'completed', now() - interval '14 days', "
+            "now() - interval '14 days') RETURNING id",
+            (tenant_id,),
+        ).fetchone()
+        run_old_id = str(run_old[0] if not isinstance(run_old, dict) else run_old["id"])
+        plan_json = {
+            "objective": "Diwali win-back for lapsed customers",
+            "target_cohort": {"customer_ids": [], "cohort_size": 6},
+            "message_plan": {"template": "winback_offer", "notes": "convo-harness dirty residue"},
+        }
+        camp = conn.execute(
+            "INSERT INTO campaigns (tenant_id, run_id, status, generated_at, created_at, plan_json) "
+            "VALUES (%s, %s, 'sent', now() - interval '14 days', now() - interval '14 days', %s) "
+            "RETURNING id",
+            (tenant_id, run_old_id, Jsonb(plan_json)),
+        ).fetchone()
+        campaign_id = str(camp[0] if not isinstance(camp, dict) else camp["id"])
+
+        # (2) aged escalated run + stranded task-UNBOUND pending approval (~3d old, open timeout —
+        # within its window so the timeout sweep doesn't immediately rewrite the residue mid-run)
+        run_esc = conn.execute(
+            "INSERT INTO pipeline_runs (tenant_id, run_type, status, started_at) "
+            "VALUES (%s, 'manager_dispatch', 'escalated', now() - interval '3 days') RETURNING id",
+            (tenant_id,),
+        ).fetchone()
+        run_esc_id = str(run_esc[0] if not isinstance(run_esc, dict) else run_esc["id"])
+        appr = conn.execute(
+            "INSERT INTO pending_approvals (tenant_id, run_id, campaign_id, approval_type, "
+            "summary, details, status, requested_at, timeout_at, created_at) "
+            "VALUES (%s, %s, NULL, 'campaign_send', "
+            "'Win-back offer to 4 lapsed customers — reply YES to send', "
+            "%s, 'pending', now() - interval '3 days', now() + interval '4 days', "
+            "now() - interval '3 days') RETURNING id",
+            (tenant_id, run_esc_id, Jsonb({"source": "convo-harness-dirty"})),
+        ).fetchone()
+        approval_id = str(appr[0] if not isinstance(appr, dict) else appr["id"])
+
+        # (3) dead-lettered manager task (~5d old) — the REAL vt557 reaper metadata shape
+        task = conn.execute(
+            "INSERT INTO manager_tasks (tenant_id, objective, status, attempt, max_attempts, "
+            "stall_metadata, idempotency_key, created_at, updated_at) "
+            "VALUES (%s, %s, 'dead_letter', 5, 5, %s, %s, now() - interval '6 days', "
+            "now() - interval '5 days') RETURNING id",
+            (
+                tenant_id,
+                Jsonb({"kind": "campaign", "summary": "festival re-engagement (residue)"}),
+                Jsonb({
+                    "reaped_by": "vt557_retry_ladder", "reaped_reason": "retry_budget_exhausted",
+                    "reaped_from": "running", "attempt": 5,
+                    "reaped_at": "(convo-harness dirty seed)",
+                }),
+                f"convo-harness-dirty-{uuid.uuid4().hex[:12]}",
+            ),
+        ).fetchone()
+        task_id = str(task[0] if not isinstance(task, dict) else task["id"])
+
+        # (4) aged conversation history — coherent with the artifacts above
+        history: list[tuple[str, str, str | None, str, str]] = [
+            ("owner", "hi", f"SMdirty{uuid.uuid4().hex[:24]}", "journey", "21 days"),
+            ("assistant", "Welcome! Your business profile is set up — ask me anything about your "
+             "customers or sales.", None, "journey", "21 days"),
+            ("owner", "diwali offer bhejo sabko", f"SMdirty{uuid.uuid4().hex[:24]}", "manager",
+             "14 days"),
+            ("assistant", "I've drafted a Diwali win-back offer for 6 lapsed customers. Reply YES "
+             "to send.", None, "manager", "14 days"),
+            ("owner", "yes", f"SMdirty{uuid.uuid4().hex[:24]}", "manager", "14 days"),
+            ("assistant", "Your Diwali offer has gone out — I sent it to 6 customers.", None,
+             "manager", "14 days"),
+            ("owner", "connect my google sheet", f"SMdirty{uuid.uuid4().hex[:24]}", "manager",
+             "5 days"),
+            ("assistant", "Sure — share the Google Sheet link and I'll set up the connection.",
+             None, "manager", "5 days"),
+            ("assistant", "I've prepared a win-back offer for 4 lapsed customers — reply YES to "
+             "send it.", None, "manager", "3 days"),
+            ("owner", "kitna sale hua is mahine?", f"SMdirty{uuid.uuid4().hex[:24]}", "manager",
+             "2 days"),
+        ]
+        for role, text, sid, surface, age in history:
+            conn.execute(
+                "INSERT INTO conversation_log (tenant_id, role, text, message_sid, surface, "
+                "created_at) VALUES (%s, %s, %s, %s, %s, now() - %s::interval)",
+                (tenant_id, role, text, sid, surface, age),
+            )
+
+        # (5) stale mid-integration flow sentinel — only when the journey didn't arm its own
+        flow_sentinel: str | None = None
+        if not flow_already_set:
+            conn.execute(
+                "UPDATE onboarding_journey SET answers = jsonb_set("
+                "coalesce(answers, '{}'::jsonb), '{__flow__}', %s) WHERE tenant_id = %s",
+                (Jsonb(_DIRTY_FLOW_SENTINEL), tenant_id),
+            )
+            flow_sentinel = _DIRTY_FLOW_SENTINEL
+
+    return DirtySeedResult(
+        prior_campaign_id=campaign_id, stranded_approval_id=approval_id,
+        dead_letter_task_id=task_id, n_history_rows=len(history), flow_sentinel=flow_sentinel,
+    )
+
+
 def cmd_setup(args: argparse.Namespace) -> int:
     dsn = _dsn()
     name = args.name or f"{_HARNESS_NAME_PREFIX}{uuid.uuid4().hex[:8]}"
@@ -1243,6 +1400,8 @@ def cmd_setup(args: argparse.Namespace) -> int:
             _die("--seed-lapsed-customers must be >= 1")
     if getattr(args, "poison_cohort", False) and args.seed_lapsed_customers is None:
         _die("--poison-cohort requires --seed-lapsed-customers (VT-636 injection canary substrate)")
+    if getattr(args, "dirty", False) and not args.onboarded:
+        _die("--dirty requires --onboarded — accumulated-state residue presumes a completed journey")
 
     with _connect(dsn) as conn:
         row = conn.execute(
@@ -1314,6 +1473,12 @@ def cmd_setup(args: argparse.Namespace) -> int:
             poison_cohort=bool(getattr(args, "poison_cohort", False)),
         )
 
+    dirty: DirtySeedResult | None = None
+    if getattr(args, "dirty", False):
+        # VT-682 — AFTER every clean seed (customers/ledger/connector), layer the accumulated-state
+        # residue on top, so the dirty rows coexist with (never replace) the standard substrate.
+        dirty = _seed_dirty_state(dsn, tenant_id, flow_already_set=bool(args.flow))
+
     # VT-611 Package C — stash the new tenant_id back onto the Namespace (mutable) so an in-process
     # caller (run_critical_x3.py) that built this same Namespace can read it back after the call,
     # without a subprocess round-trip or scraping stdout. No existing "setup" option is named
@@ -1340,6 +1505,12 @@ def cmd_setup(args: argparse.Namespace) -> int:
         print(f"consent_version={args.consent_version!r} — MUST match a member of dev's Railway "
               f"MARKETING_CONSENT_VERSIONS env var or detect_lapsed_customers returns ZERO candidates "
               f"regardless of this seed (VT-396 dev-test hook; structurally fail-closed on prod)")
+    if dirty is not None:
+        print(f"dirty residue (VT-682): prior SENT campaign {dirty.prior_campaign_id} (~14d), "
+              f"stranded pending approval {dirty.stranded_approval_id} (~3d, task-unbound), "
+              f"dead-letter task {dirty.dead_letter_task_id} (~5d), "
+              f"{dirty.n_history_rows} aged conversation_log rows, "
+              f"flow_sentinel={dirty.flow_sentinel!r}")
     return 0
 
 
@@ -1863,6 +2034,15 @@ def build_parser() -> argparse.ArgumentParser:
              "second customer whose name carries a </untrusted> fence-escape probe, so a win-back "
              "ask surfaces both into the SR bundle. No-op when absent. Proves the quarantine fence "
              "(serialize_bundle_for_prompt) renders attacker-writable names as data, never obeyed.",
+    )
+    s.add_argument(
+        "--dirty", action="store_true",
+        help="VT-682 (O6) dirty-tenant fixture (requires --onboarded). Additive, AFTER every other "
+             "seed: layer accumulated real-tenant residue — a ~14d-old SENT campaign, a ~3d-old "
+             "stranded task-unbound pending approval, a ~5d-old dead-lettered manager task, ~10 "
+             "aged conversation_log rows, and a stale integration:google_sheet __flow__ sentinel "
+             "(skipped when --flow was given) — so the SAME scenarios/journeys run over the state "
+             "a real months-old tenant carries (harness-green must predict real-green).",
     )
     s.set_defaults(func=cmd_setup)
 

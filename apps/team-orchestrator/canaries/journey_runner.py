@@ -169,6 +169,17 @@ def style_instruction(style: str) -> str:
     return _STYLE_INSTRUCTIONS.get(style, _STYLE_INSTRUCTIONS[_DEFAULT_STYLE])
 
 
+def apply_dirty(setup_args: list[Any], dirty: bool) -> list[Any]:
+    """VT-682 (O6) — the runner-level dirty switch: append ``--dirty`` to a journey's own
+    ``setup_args`` so the SAME journey JSON runs over an accumulated-state tenant with zero
+    per-journey edits. Pure + idempotent (never doubles the flag); ``dirty=False`` returns the
+    list unchanged (a copy either way — never mutates the journey dict's own list)."""
+    out = list(setup_args)
+    if dirty and "--dirty" not in out:
+        out.append("--dirty")
+    return out
+
+
 def build_persona_system_prompt(persona: dict[str, Any], style: str) -> str:
     business = persona.get("business", "a small Indian business")
     temperament = persona.get("temperament", "")
@@ -357,18 +368,19 @@ def _setup_tenant(setup_args: list[Any], *, ingress_url: str | None, run_label: 
 
 def run_journey(
     journey: dict[str, Any], *, scenarios_dir: Path, ingress_url: str | None, timeout: float,
-    keep_tenants: bool, verbose: bool = True,
+    keep_tenants: bool, verbose: bool = True, dirty: bool = False,
 ) -> JourneyRunResult:
     """Drive every phase of ``journey`` against ONE fresh harness tenant, in order. Each resolved
     step is driven through ``ch.run_scenario_steps`` one at a time (a length-1 list per call) — see
-    the module docstring for why (persona reactivity + step-precise safety-net attribution)."""
+    the module docstring for why (persona reactivity + step-precise safety-net attribution).
+    ``dirty=True`` (VT-682/O6) appends ``--dirty`` to the journey's setup_args via ``apply_dirty``."""
     validate_journey(journey)
     dsn = ch._dsn()
     base = ch._ingress_base(ingress_url)
     secret = ch._dev_secret()
     name = str(journey.get("name", "journey"))
     persona = journey.get("persona", {})
-    setup_args = journey.get("setup_args", [])
+    setup_args = apply_dirty(journey.get("setup_args", []), dirty)
 
     tenant_id = _setup_tenant(setup_args, ingress_url=ingress_url, run_label=name)
     client: Any = None
@@ -447,6 +459,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--scenarios-dir", default=str(_CANARIES / "scenarios"),
         help="dir a phase's 'scenario_ref' resolves filenames against",
     )
+    p.add_argument(
+        "--dirty", action="store_true",
+        help="VT-682 (O6): run this journey over an accumulated-state tenant — appends --dirty to "
+             "the journey's setup_args (see convo_harness setup --dirty). Same journey JSON, zero "
+             "edits; clean-vs-dirty is this one flag.",
+    )
     return p
 
 
@@ -461,7 +479,7 @@ def main(argv: list[str] | None = None) -> int:
 
     result = run_journey(
         journey, scenarios_dir=Path(args.scenarios_dir), ingress_url=args.ingress_url,
-        timeout=args.timeout, keep_tenants=args.keep_tenants,
+        timeout=args.timeout, keep_tenants=args.keep_tenants, dirty=bool(args.dirty),
     )
 
     passed = sum(1 for r in result.results if r.label == "PASS")
@@ -483,7 +501,10 @@ def main(argv: list[str] | None = None) -> int:
             "failed": failed, "timed_out": timed_out,
         }
         entry = ch._build_json_report(
-            {"name": name, "setup_args": journey.get("setup_args", []), "notes": journey.get("notes")},
+            # setup_args records the EFFECTIVE args (incl. an appended --dirty) — the report must
+            # say what actually seeded the tenant, not what the journey file alone declared.
+            {"name": name, "setup_args": apply_dirty(journey.get("setup_args", []), bool(args.dirty)),
+             "notes": journey.get("notes")},
             args.journey, result.tenant_id, result.steps, result.results, summary,
         )
         entry["phases"] = [

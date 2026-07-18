@@ -604,3 +604,57 @@ def test_main_exit_1_when_a_step_fails(monkeypatch, tmp_path):
 
     rc = jr.main([str(journey_path)])
     assert rc == 1
+
+
+# --- apply_dirty (VT-682 / O6) -------------------------------------------------------------------
+
+
+def test_apply_dirty_appends_the_flag():
+    assert jr.apply_dirty(["--onboarded", "--seed-lapsed-customers", "10"], True) == [
+        "--onboarded", "--seed-lapsed-customers", "10", "--dirty",
+    ]
+
+
+def test_apply_dirty_false_returns_args_unchanged():
+    assert jr.apply_dirty(["--onboarded"], False) == ["--onboarded"]
+
+
+def test_apply_dirty_is_idempotent_never_doubles_the_flag():
+    assert jr.apply_dirty(["--onboarded", "--dirty"], True) == ["--onboarded", "--dirty"]
+
+
+def test_apply_dirty_never_mutates_the_journeys_own_list():
+    """The journey dict's setup_args list is shared state across runs of the same loaded JSON —
+    apply_dirty must copy, or a second run of the journey would see a phantom --dirty."""
+    original = ["--onboarded"]
+    out = jr.apply_dirty(original, True)
+    assert original == ["--onboarded"]
+    assert out is not original
+
+
+def test_run_journey_dirty_flag_reaches_setup_args(monkeypatch):
+    """run_journey(dirty=True) must thread --dirty into the REAL setup parser call — proven via
+    the cmd_setup stub capturing the parsed Namespace (same stubbing shape as _stub_infra)."""
+    captured: dict = {}
+
+    def _fake_cmd_setup(ns):
+        captured["dirty"] = getattr(ns, "dirty", False)
+        ns.tenant_id = "00000000-0000-0000-0000-000000000001"
+        return 0
+
+    monkeypatch.setattr(ch, "_dsn", lambda: "postgresql://stub/db")
+    monkeypatch.setattr(ch, "_ingress_base", lambda url: "http://stub")
+    monkeypatch.setattr(ch, "_dev_secret", lambda: "stub-secret")
+    monkeypatch.setattr(ch, "cmd_setup", _fake_cmd_setup)
+    monkeypatch.setattr(ch, "cmd_teardown", lambda ns: 0)
+    monkeypatch.setattr(ch, "run_scenario_steps", lambda *a, **k: [_sr("PASS")])
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+
+    journey = {"name": "dirty-thread", "setup_args": ["--onboarded"],
+               "phases": [{"steps": [{"message": "hi"}]}]}
+    jr.run_journey(
+        journey, scenarios_dir=Path("."), ingress_url=None, timeout=1.0,
+        keep_tenants=False, verbose=False, dirty=True,
+    )
+    assert captured["dirty"] is True
+    assert journey["setup_args"] == ["--onboarded"]  # journey dict never mutated
