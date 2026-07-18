@@ -370,11 +370,23 @@ def _iso(value: Any) -> str | None:
 
 
 def _new_conversation_turns(conn: Any, tenant_id: str, before_ids: set[str]) -> list[Turn]:
+    """VT-682 time fence (same rationale as ``_campaign_id_for_run``'s): only rows created AT/AFTER
+    the tenant row itself. ``--dirty``'s aged conversation residue is BACKDATED, so without the
+    fence the VT-633 late-reply sweep (which passes an EMPTY seen-set) folded all residue rows
+    into the judged transcript — the j01 dirty proof then read the residue's 14d-old "sent it to
+    6 customers" as THIS conversation's money claim, a false Tier-1 ×3
+    (assert_stated_count_matches_db [6] vs the real campaign's 8). The instrument measures THIS
+    tenant-lifetime conversation; residue is context for the PRODUCT, never claims for the JUDGE."""
     _set_operator_claim(conn)
+    # NB: the fence subselect aliases tenants as `t` — the helpers-test _FakeConn routes execute()
+    # by SQL substring, and an unaliased `FROM tenants WHERE id` here would collide with its
+    # tenant-lookup route and mis-serve the fake rows.
     rows = conn.execute(
         "SELECT id, role, text, message_sid, surface, created_at FROM conversation_log "
-        "WHERE tenant_id = %s ORDER BY created_at ASC, id ASC",
-        (tenant_id,),
+        "WHERE tenant_id = %s "
+        "AND created_at >= (SELECT t.created_at FROM tenants t WHERE t.id = %s) "
+        "ORDER BY created_at ASC, id ASC",
+        (tenant_id, tenant_id),
     ).fetchall()
     out: list[Turn] = []
     for r in rows:
