@@ -114,8 +114,10 @@ distributed; authority over effects is narrow and central. That split is the who
   truth for every tool surface — name → kind → capability → gated? → PII posture (CL-390) →
   tenant scope → holders — as a code registry (introspection-backed, drift-guarded). The doc
   [`TOOLS.md`](./TOOLS.md) is GENERATED from it (`render_catalog_markdown`), never hand-typed.
-  74 tool surfaces today (3 gated GateFacade doors). The catalog DOCUMENTS the gates; it never
-  widens them.
+  The generated [`TOOLS.md`](./TOOLS.md) is the AUTHORITATIVE surface inventory — this doc
+  deliberately carries no count (hardcoded counts drifted twice; regenerate TOOLS.md via
+  `render_catalog_markdown()` whenever a surface lands). The catalog DOCUMENTS the gates; it
+  never widens them.
 - **Sufficiency, not just safety (VT-669):** the framework enforced tool SAFETY (deny-list +
   positive-capability manifest) but never SUFFICIENCY. `AgentManifest.required_tools` declares
   the tools a specialist's job REQUIRES to reach; the 9th conformance check

@@ -3,7 +3,7 @@
 > GENERATED from `orchestrator.agent_framework.tool_catalog` by `render_catalog_markdown()`.
 > Do NOT hand-edit — edit the catalog annotations and regenerate. ARCHITECTURE §1.3.
 
-**80 tool surfaces** across the roster — 3 gated (GateFacade doors). advisory: 29, decision: 4, eval: 2, gated_effect: 2, integration: 10, read: 30, spawn: 3
+**82 tool surfaces** across the roster — 3 gated (GateFacade doors). advisory: 31, decision: 4, eval: 2, gated_effect: 2, integration: 10, read: 30, spawn: 3
 
 | Tool | Surface | Kind | Capability | Gated | PII-safe | Tenant | Holders | Note |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -26,7 +26,9 @@
 | `record_answer` | `agent/onboarding_conductor.py` | advisory | — | no | yes | resolved | onboarding_specialist | onboarding-profile WRITE (owner's own data) — non-gated, no customer send |
 | `record_skip` | `agent/onboarding_conductor.py` | advisory | — | no | yes | resolved | onboarding_specialist | onboarding-profile WRITE (skip marker) — non-gated |
 | `escalate_to_fazal` | `agent/orchestrator_agent.py` | advisory | — | no | yes | n/a | manager_core | ops escalation to Fazal; no external effect |
+| `export_customer_list` | `agent/orchestrator_agent.py` | advisory | — | no | yes | resolved | manager_core | VT-676 F3: delivers the owner's OWN customer list as a WhatsApp CSV to the VERIFIED owner (send_customer_list_to_owner: server-derived recipient, private bucket, 300s URL, audit) — OWNER-comms delivery, not a customer send; Manager-only holder (§1.2) |
 | `record_business_objective` | `agent/orchestrator_agent.py` | advisory | — | no | yes | resolved | manager_core | Manager-scoped context WRITE (business_objective, VT-466) — non-gated |
+| `set_language_preference` | `agent/orchestrator_agent.py` | advisory | — | no | yes | resolved | manager_core | VT-677: the owner's EXPLICIT language choice (preferred_language write, D3 verbal override) — non-gated owner-own-preference write; never affects live-turn mirroring (D2) |
 | `write_l0_fragment` | `agent/orchestrator_agent.py` | advisory | — | no | yes | resolved | manager_core | Manager-scoped context WRITE (L0 memory) — non-gated, no external effect (VT-268 benign) |
 | `push_back_to_manager` | `agent/sales_lane.py` | advisory | — | no | yes | n/a | sales_lane | specialist->manager pushback protocol; no effect (excluded from ADVISORY_TOOLS) |
 | `recommend_sales_play` | `agent/sales_lane.py` | advisory | — | no | yes | resolved | manager_advisory, sales_lane | drafts a sales-play recommendation (intent only; no send) |
