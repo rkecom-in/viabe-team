@@ -236,12 +236,28 @@ def test_sr_through_the_loop_full_acceptance(substrate: Any, monkeypatch: pytest
         assert task_row is not None
         assert task_row["status"] == "completed"
         assert task_row["terminal_outcome"] == "completed_with_effect"
-        # VT-611 pre-work #1: the owner-notification composer now actually fires right after the
-        # settle (workflow.py's _notify_owner_of_terminal) — 'pending' flips synchronously to
-        # 'delivered' on the mocked send's success, closing the "truthful owner outcome" gap this
-        # test's own docstring used to describe as the terminal state (nothing consumed 'pending'
-        # before this row; see owner_surface/task_outcome.py for the composer + its own unit tests).
-        assert task_row["owner_notification_status"] == "delivered"
+        # VT-611 pre-work #1 + VT-671 timing: the owner is told EXACTLY ONE honest way —
+        #   'delivered'    — the settle's _notify_owner_of_terminal fired (outcome report hadn't
+        #                    reached the owner before settle), OR
+        #   'not_required' — the campaign-OUTCOME report leg already told the owner ("gone out —
+        #                    N customers") BEFORE settle, so T12 suppression correctly arms
+        #                    not_required (a second settle notification would be a duplicate).
+        # Pre-VT-671 the poll ladder made 'delivered' the usual winner; the wake-on-signal fix
+        # makes resolution→execution→outcome-report fast enough that 'not_required' is now the
+        # COMMON honest terminal. Pinning ONE of the two was a race assert (the recurring
+        # not_required-vs-delivered flake). The REAL invariant: a terminal state was armed AND the
+        # owner actually received a completion message (checked below via conversation_log).
+        assert task_row["owner_notification_status"] in ("delivered", "not_required")
+        with psycopg.connect(dsn, autocommit=True) as conn:
+            told = conn.execute(
+                "SELECT count(*) FROM conversation_log WHERE tenant_id = %s AND role = 'assistant' "
+                "AND (text ILIKE '%%gone out%%' OR text ILIKE '%%sent%%' OR text ILIKE '%%भेज%%')",
+                (str(t1.tenant_id),),
+            ).fetchone()[0]
+        assert told >= 1, (
+            "owner never received a completion message despite terminal "
+            f"owner_notification_status={task_row['owner_notification_status']!r}"
+        )
 
         with psycopg.connect(dsn, autocommit=True) as conn:
             campaign_status = conn.execute(
