@@ -86,7 +86,7 @@
 | `read_business_context` | `agent_framework/tools_common.py` | read | read_business_context | no | yes | resolved | manager_common_read |  |
 | `read_customer_ledger_summary` | `agent_framework/tools_common.py` | read | read_customer_ledger | no | yes | resolved | manager_common_read |  |
 | `read_integration_state` | `agent_framework/tools_common.py` | read | read_integration_state | no | yes | resolved | manager_common_read |  |
-| `spawn_integration` | `agent/roster.py` | spawn | — | no | yes | n/a | — | handoff to the Integration specialist sub-graph; returns a Command |
+| `spawn_integration` | `agent/roster.py` | spawn | — | no | yes | n/a | — | LEGACY/fallback spawn — excluded from the roster when TEAM_INTEGRATION_VIA_FRAMEWORK is on (the Integration brain is dissolved; the Manager holds connector Tools directly). Do NOT target from new framework modules. |
 | `spawn_onboarding_conductor` | `agent/roster.py` | spawn | — | no | yes | n/a | — | handoff to the Onboarding-Conductor specialist sub-graph; returns a Command |
 | `spawn_sales_recovery` | `agent/roster.py` | spawn | — | no | yes | n/a | — | handoff to the Sales-Recovery specialist sub-graph; returns a Command |
 
