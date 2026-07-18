@@ -298,6 +298,39 @@ CAPABILITY_REGISTRY: dict[str, CapabilitySpec] = {
         summary="Cost-optimisation analysis and recommendations (advisory only).",
         verifier=None, rollback=None, prerequisites=None, environments=KNOWN_ENVS,
     ),
+    # ── Compliance (VT-685 — Codex-onboarding kit; the FIRST Codex-built specialist target) ──
+    # Phase-1 posture is ADVISORY/PREPARE-ONLY (docs/agent-framework/CODEX-ONBOARDING.md §1): the
+    # ``compliance_tools`` module reads + analyses + prepares GSTR-1/3B filing-READINESS; it never
+    # files, sends, spends, or mutates business state. Actual return filing is a LATER graduation
+    # through this registry (flip ``compliance.return_filing`` from disabled once Fazal grants it a
+    # real verifier + a filing effect path) — declaring it now, disabled, is the D2-class honesty
+    # entry so the Manager can decline a "file my GST return" ask truthfully from day one.
+    "compliance.gstr_readiness": CapabilitySpec(
+        key="compliance.gstr_readiness",
+        lane="compliance",
+        effect_class="advisory",
+        mode="advisory",
+        policy_rail=False,                       # advice/prep has no external effect to gate
+        summary="Read + analyse the sales ledger and GST verification status to PREPARE a "
+                "GSTR-1/3B return-filing readiness snapshot (checklist only — nothing filed).",
+        verifier=None,
+        rollback=None,
+        prerequisites=None,
+        environments=KNOWN_ENVS,
+    ),
+    "compliance.return_filing": CapabilitySpec(
+        key="compliance.return_filing",
+        lane="compliance",
+        effect_class="db_mutation",              # would mutate filing state once it graduates
+        mode="disabled",                         # NOT supported — the honesty entry (D2 class)
+        policy_rail=True,                        # the rail is declared now so graduation can
+                                                  # never drop it (Thesis 2 applies to disabled too)
+        summary="File a GSTR return with the GST portal on the owner's behalf. NOT supported — "
+                "the Manager must disclose the limit and offer the readiness prep instead (D2).",
+        verifier=None,                           # permitted ONLY because mode='disabled'
+        rollback=None, prerequisites=None,
+        environments=frozenset(),                # available nowhere until the mode flips
+    ),
     # ── Declared DISABLED (honesty entries — the D2 class, now registry-backed) ──
     "marketing.paid_ad_boost": CapabilitySpec(
         key="marketing.paid_ad_boost",
@@ -411,6 +444,7 @@ _LANE_MODULE: dict[str, str] = {
     "sales_recovery": "sales_recovery",
     "integration": "integration_tools",
     "onboarding_conductor": "onboarding_tools",
+    "compliance": "compliance_tools",  # VT-685 — the Codex-built compliance_tools module
 }
 
 

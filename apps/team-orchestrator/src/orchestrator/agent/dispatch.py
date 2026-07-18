@@ -384,6 +384,9 @@ _CAPABILITY_DISPLAY: dict[str, str] = {
     "tech.owner_authorized_help": "tech help (only on the owner's explicit say-so)",
     "cost_opt.advice": "cost review",
     "marketing.paid_ad_boost": "paid ad boosts (Instagram / Facebook / Google ads)",
+    # VT-685 — the compliance lane (first Codex-onboarded specialist target).
+    "compliance.gstr_readiness": "GSTR-1/3B filing-readiness checks (prepare-only)",
+    "compliance.return_filing": "GST return filing",
 }
 
 
