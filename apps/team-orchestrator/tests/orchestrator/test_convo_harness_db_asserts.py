@@ -523,3 +523,130 @@ def test_assert_stated_count_matches_db_no_claim_no_check(dsn):
     _new_campaign_message(dsn, tenant, campaign_id, str(uuid4()), send_status="sent")
     with psycopg.connect(dsn, autocommit=True) as conn:
         assert ch.assert_stated_count_matches_db(conn, tenant, ["Which customers should I target?"]) == []
+
+
+# --- VT-682 (O6): dirty-residue time fence + _seed_dirty_state shapes ----------------------------
+
+
+def _backdated_campaign(dsn: str, tenant_id: str, run_id: str, *, days: int = 14) -> str:
+    """A campaigns row created BEFORE the tenant — the --dirty residue shape (explicit created_at,
+    never the DEFAULT)."""
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        row = conn.execute(
+            "INSERT INTO campaigns (tenant_id, run_id, plan_json, status, generated_at, created_at) "
+            "VALUES (%s, %s, %s, 'sent', now() - %s * interval '1 day', "
+            "now() - %s * interval '1 day') RETURNING id",
+            (tenant_id, run_id, Jsonb({"target_cohort": {"cohort_size": 6}}), days, days),
+        ).fetchone()
+    assert row is not None
+    return str(row[0])
+
+
+def test_tenant_wide_lookup_ignores_backdated_dirty_residue(dsn):
+    """The VT-682 time fence: a backdated (pre-tenant) residue campaign must be INVISIBLE to the
+    tenant-wide proxy — assert_route(expect_sr_delegation=False) tenant-wide stays green on a
+    dirty tenant until the conversation itself produces a campaign."""
+    tenant = _new_tenant(dsn)
+    run_id = _new_run(dsn, tenant)
+    _backdated_campaign(dsn, tenant, run_id)
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        assert ch._campaign_id_for_run(conn, tenant, None) is None
+        assert ch._observed_route(conn, tenant, None) == "none"
+        assert ch.assert_route(conn, tenant, None, expect_sr_delegation=False) == []
+
+
+def test_tenant_wide_lookup_still_finds_the_journeys_own_campaign_over_residue(dsn):
+    """With BOTH residue and a journey-era campaign present, tenant-wide must resolve to the
+    journey's own (created_at >= tenant's) — residue never shadows real work."""
+    tenant = _new_tenant(dsn)
+    run_old = _new_run(dsn, tenant)
+    run_new = _new_run(dsn, tenant)
+    _backdated_campaign(dsn, tenant, run_old)
+    fresh_id = _new_campaign(dsn, tenant, run_new)
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        assert ch._campaign_id_for_run(conn, tenant, None) == fresh_id
+        # run_id-scoped lookup is deliberately UNfenced — the residue row IS addressable by its own
+        # run_id (nothing in a real journey ever holds that run_id, so no contamination path).
+        assert ch._campaign_id_for_run(conn, tenant, run_old) is not None
+
+
+def _onboarded_tenant(dsn: str) -> str:
+    """Tenant + completed onboarding_journey row — the substrate --dirty requires (cmd_setup
+    enforces --dirty ⇒ --onboarded; the seeder's flow-sentinel UPDATE presumes the row exists)."""
+    tenant = _new_tenant(dsn)
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute(
+            "INSERT INTO onboarding_journey (tenant_id, status, completed_at) "
+            "VALUES (%s, 'complete', now()) ON CONFLICT (tenant_id) DO NOTHING",
+            (tenant,),
+        )
+    return tenant
+
+
+def test_seed_dirty_state_writes_all_five_residue_shapes(dsn):
+    tenant = _onboarded_tenant(dsn)
+    result = ch._seed_dirty_state(dsn, tenant, flow_already_set=False)
+
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        # (1) prior SENT campaign, backdated → invisible to the tenant-wide proxy (fence proof on
+        # the REAL seeder output, not just the synthetic row above)
+        camp = conn.execute(
+            "SELECT status, created_at < (SELECT created_at FROM tenants WHERE id = %s) "
+            "FROM campaigns WHERE tenant_id = %s AND id = %s",
+            (tenant, tenant, result.prior_campaign_id),
+        ).fetchone()
+        assert camp is not None and camp[0] == "sent" and camp[1] is True
+        assert ch._campaign_id_for_run(conn, tenant, None) is None
+
+        # (2) stranded approval: pending, task-unbound, campaign_id NULL, timeout still open
+        appr = conn.execute(
+            "SELECT status, campaign_id, timeout_at > now() FROM pending_approvals "
+            "WHERE tenant_id = %s AND id = %s",
+            (tenant, result.stranded_approval_id),
+        ).fetchone()
+        assert appr is not None and appr[0] == "pending" and appr[1] is None and appr[2] is True
+
+        # (3) dead-lettered task with the vt557 reaper metadata shape
+        task = conn.execute(
+            "SELECT status, stall_metadata->>'reaped_by' FROM manager_tasks "
+            "WHERE tenant_id = %s AND id = %s",
+            (tenant, result.dead_letter_task_id),
+        ).fetchone()
+        assert task is not None and task[0] == "dead_letter" and task[1] == "vt557_retry_ladder"
+
+        # (4) aged conversation history, all backdated
+        n_hist = conn.execute(
+            "SELECT count(*) FROM conversation_log WHERE tenant_id = %s "
+            "AND created_at < now() - interval '1 day'",
+            (tenant,),
+        ).fetchone()[0]
+        assert n_hist == result.n_history_rows
+
+        # (5) stale flow sentinel armed
+        flow = conn.execute(
+            "SELECT answers->>'__flow__' FROM onboarding_journey WHERE tenant_id = %s",
+            (tenant,),
+        ).fetchone()[0]
+        assert flow == result.flow_sentinel == "integration:google_sheet"
+
+        # residue must NOT trip the always-on money nets on a virgin dirty tenant
+        assert ch.assert_no_unapproved_effect(conn, tenant) == []
+        assert ch.assert_no_double_send(conn, tenant) == []
+
+
+def test_seed_dirty_state_never_clobbers_an_explicit_flow(dsn):
+    tenant = _onboarded_tenant(dsn)
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute(
+            "UPDATE onboarding_journey SET answers = jsonb_set(coalesce(answers, '{}'::jsonb), "
+            "'{__flow__}', '\"ready_asked\"') WHERE tenant_id = %s",
+            (tenant,),
+        )
+    result = ch._seed_dirty_state(dsn, tenant, flow_already_set=True)
+    assert result.flow_sentinel is None
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        flow = conn.execute(
+            "SELECT answers->>'__flow__' FROM onboarding_journey WHERE tenant_id = %s",
+            (tenant,),
+        ).fetchone()[0]
+    assert flow == "ready_asked"
