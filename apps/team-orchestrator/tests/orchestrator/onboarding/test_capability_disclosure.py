@@ -66,3 +66,26 @@ def test_disclosure_en_states_the_limit() -> None:
     low = body.lower()
     assert "can't" in low or "cannot" in low or "isn't something i can" in low
     assert "boost" in low
+
+
+# ----------------------- VT-681 phase 3: registry-gated auto-retire -----------------------
+def test_net_retires_when_ad_boost_graduates(monkeypatch) -> None:
+    """The day marketing.paid_ad_boost flips live in the capability registry, the hand-rolled
+    decline must STOP firing — no stale disclosure over a real feature."""
+    import orchestrator.capability.registry as reg
+
+    monkeypatch.setitem(
+        reg.CAPABILITY_REGISTRY, "marketing.paid_ad_boost",
+        reg.CapabilitySpec(
+            key="marketing.paid_ad_boost", lane="marketing", effect_class="campaign",
+            mode="live", policy_rail=True, summary="graduated (test)",
+            verifier="real_send_evidence", environments=reg.KNOWN_ENVS,
+        ),
+    )
+    assert cd.detect_unsupported_action("boost my instagram post for ₹500") is False
+
+
+def test_net_fires_while_registry_says_disabled() -> None:
+    """Baseline re-assert THROUGH the registry gate: shipped registry declares it disabled, so
+    the detector still fires on a paid-boost ask (same case as test_paid_boost_asks_fire)."""
+    assert cd.detect_unsupported_action("boost my instagram post for ₹500") is True

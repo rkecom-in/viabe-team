@@ -367,6 +367,92 @@ def _build_onboarding_state_block(tenant_id: UUID) -> str | None:
     )
 
 
+_CAPABILITY_DISPLAY: dict[str, str] = {
+    # VT-681 phase 3 — owner-facing display names for the capability-truth block. Presentation
+    # only; the CONTRACT stays in capability/registry.py. onboarding.conduct_journey is
+    # deliberately absent: it's the system's own journey, not a promisable service.
+    "sales_recovery.winback_send": "win-back campaigns to lapsed customers (you approve every send)",
+    "sales_recovery.advice": "win-back advice",
+    "integration.google_sheet_ingest": "Google Sheet connect + sales ingest",
+    "integration.shopify_connect": "Shopify store connect",
+    "integration.gst_verify": "GST verification",
+    "integration.knowyourgst_discovery": "GSTIN business discovery",
+    "manager.customer_list_export": "customer-list export (CSV sent to the owner)",
+    "marketing.campaign_prepare": "marketing campaign + content drafts",
+    "finance.advice": "cash-flow / receivables / pricing analysis",
+    "accounting.prepare": "accounting prep (prepare-only)",
+    "tech.owner_authorized_help": "tech help (only on the owner's explicit say-so)",
+    "cost_opt.advice": "cost review",
+    "marketing.paid_ad_boost": "paid ad boosts (Instagram / Facebook / Google ads)",
+}
+
+
+def _render_capability_truth(resolved: list[Any]) -> str | None:
+    """VT-681 phase 3 — pure renderer: the per-tenant capability ground truth as one compact
+    block. Buckets: live-and-available / live-but-not-yet-for-this-owner (activation bar unmet) /
+    advisory (prepare-only) / declared-disabled. Keys without a display name are skipped
+    (system-internal capabilities are not promisable). Returns None when nothing renders."""
+    live, not_yet, advisory, unsupported = [], [], [], []
+    for r in resolved:
+        name = _CAPABILITY_DISPLAY.get(r.key)
+        if name is None:
+            continue
+        if r.mode == "disabled":
+            unsupported.append(name)
+        elif r.mode == "advisory":
+            advisory.append(name)
+        elif r.available:
+            live.append(name)
+        else:
+            not_yet.append(name)
+    if not (live or not_yet or advisory or unsupported):
+        return None
+    lines = [
+        "## What you can and cannot do for THIS owner (ground truth — never promise beyond it)",
+    ]
+    if live:
+        lines.append(f"- Live now: {'; '.join(live)}.")
+    if not_yet:
+        lines.append(
+            f"- Not yet available for this owner (their setup hasn't reached the bar): "
+            f"{'; '.join(not_yet)}. Offer the setup step, never the outcome as if ready."
+        )
+    if advisory:
+        lines.append(
+            f"- Prepare-only (say 'I can prepare/draft this for you' — NEVER claim to run it "
+            f"autonomously): {'; '.join(advisory)}."
+        )
+    if unsupported:
+        lines.append(
+            f"- Not supported: {'; '.join(unsupported)}. Say so honestly and pivot to what IS "
+            f"live — never promise these."
+        )
+    return "\n".join(lines)
+
+
+def _build_capability_truth_block(tenant_id: UUID) -> str | None:
+    """VT-681 phase 3 — the PROMISE seam's context half: per-tenant capability truth from
+    capability.registry.resolve_all_for, rendered for the brain. This is what makes a disabled
+    or not-yet-activated capability HONESTLY declinable at promise time instead of silently
+    blocked at execution (the O10-1 gap). Read-only, best-effort (any miss → no block), a
+    per-turn SystemMessage AFTER the cached prefix — the VT-194 cache holds."""
+    try:
+        import os
+
+        from orchestrator.capability.registry import resolve_all_for
+        from orchestrator.db import tenant_connection
+
+        env = os.environ.get("EXPECTED_ENV", "dev")
+        with tenant_connection(str(tenant_id)) as conn:
+            resolved = resolve_all_for(str(tenant_id), env=env, conn=conn)
+        return _render_capability_truth(resolved)
+    except Exception:  # noqa: BLE001 — best-effort, like every block in this family
+        logger.warning(
+            "dispatch: capability-truth assembly failed (tenant=%s); proceeding without", tenant_id
+        )
+        return None
+
+
 def _build_inflight_state_block(tenant_id: UUID) -> str | None:
     """VT-616 — surface durable in-flight state the conversational brain is otherwise BLIND to, so a
     ``route: none`` turn ADVANCES instead of re-deriving the same reply. dispatch_brain re-composes each
@@ -706,6 +792,21 @@ def dispatch_brain(
             ),
         )
 
+    # VT-681 phase 3: the CAPABILITY-TRUTH block — the per-tenant live/advisory/disabled ground
+    # truth (capability.registry.resolve_all_for), so a disabled or not-yet-activated capability
+    # is honestly declinable AT PROMISE TIME instead of silently blocked at execution (the O10-1
+    # gap; generalizes the hand-rolled D2 ad-boost disclosure). Best-effort + per-turn
+    # SystemMessage (cache holds). None on any read miss.
+    capability_truth_block = _build_capability_truth_block(tenant_id)
+    if capability_truth_block:
+        _messages.insert(
+            0,
+            SystemMessage(
+                content=capability_truth_block,
+                id=_initial_turn_msg_id(run_id, "capability_truth_block"),
+            ),
+        )
+
     # VT-514 GETS — retrieval audit spine row: which context sources hit
     # (presence flags only; the redacted block CONTENT rides the KNOWS row).
     emit_tm_audit(
@@ -727,6 +828,8 @@ def dispatch_brain(
             "onboarding_state_present": bool(onboarding_state_block),
             # VT-616: whether the in-flight-state block (open approval / active task) was present.
             "inflight_state_present": bool(inflight_state_block),
+            # VT-681: whether the per-tenant capability-truth block was present.
+            "capability_truth_present": bool(capability_truth_block),
             "intent_classification": _manager_intent.get("classification"),
         },
     )
