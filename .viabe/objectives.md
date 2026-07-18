@@ -6,7 +6,7 @@
 > status-changing event, same moment as the to-cowork signal). Cowork audits (Rule #14).
 > Bar lines are Fazal's — never edited without a ruling; Now/Gate/status lines are CC's.
 > Statuses: MET · MET–INCIDENT OPEN · IN PROGRESS · AT RISK · PENDING · HELD/PARKED.
-> Last updated: 2026-07-18 18:20 IST · gate-2 PASSED → pushing the batch (PDF export, wakeup2, whitelist, objectives) · r4 canary next · VT-685 kit lands separately.
+> Last updated: 2026-07-18 18:35 IST · **O2 MET (r4 PASSED)** · O4 CLOSED · pushing VT-685 kit + wakeup2 approval docs.
 
 ## O1 · Trustworthy conversation — MET (holding)
 - Bar: Tier-1 trust-breakers = 0 across the 10-journey pack ×3; Tier-2 quality ≥ 90%.
@@ -16,7 +16,7 @@
   variance disambiguated 3/3-clean on re-drive → VT-684 rostered for the class). Graduates the
   VT-681 promise seam + the SR/turn-brain cache restructure. Next re-gate: O4 flags-on (gate-2).
 
-## O2 · Money-path integrity — MET, INCIDENT OPEN
+## O2 · Money-path integrity — MET
 - Bar: the Manager can never perform OR claim a money action falsely — DB is sole authority,
   stated values bind to DB, approvals never resolve into silence, corrections revise.
 - Now: proven in code/unit/DB asserts (CL-2026-07-16, VT-667/668/670). VT-671 wake-on-signal
@@ -26,14 +26,10 @@
   was NOT a breach — conversation_log proved Fazal's own phone approval 13:49 + honest outcome
   report 15:10; live proof PASSED. Canary-1 (customer-list) root-caused → F1–F3 landed 42bd7e6
   (plain-ask delivers, guard copy time-grounded, export_customer_list manager tool).
-- Gate to MET: canary-1 r1–r3 all FAILED on the media leg — root FOUND (Fazal screenshot +
-  ledger evidence): the Twilio WhatsApp channel delivers PDF as its only document type; csv and
-  plain-text both die async at Meta AFTER a successful create. **Fix-4g: list now renders as a
-  PDF** (same weasyprint path as the monthly report) + fix-4f status-callback wiring (NO owner
-  send on dev has EVER received a delivery callback — ledger was write-only) + fix-4e acks never
-  assert visibility on a mere accept. LOCAL, rides the post-gate-2 push → **canary r4 = the PDF
-  attempt**. Fazal console action: copy TEAM_TWILIO_WEBHOOK_URL (Vercel) → Railway dev
-  TEAM_TWILIO_STATUS_CALLBACK_URL (value carries the bypass token — his hands, not CC's).
+- INCIDENT CLOSED 2026-07-18: canary r4 PASSED (Fazal-confirmed PDF delivery). The three-run
+  root-cause: Twilio WhatsApp delivers PDF as its only document type — list now renders via the
+  monthly-report weasyprint path. Delivery-status callback wired (TEAM_TWILIO_STATUS_CALLBACK_URL
+  set by Fazal); watch: first 'delivered' flip pending. VT-676 CLOSED.
 
 ## O3 · Agent Capability Framework — MET ON DEV
 - Bar: ratified Manager/SubAgent/Tool architecture live — SR + Onboarding on the contract,
@@ -77,9 +73,8 @@
   arm-then-send, 8/8 only after explicit confirm). r1 caught + fixed a real instrument hole
   (unfenced late-reply sweep read residue as live money claims) — the fixture earning its keep
   on run one. Clean-vs-dirty is now ONE flag on every journey.
-- Gate to lift AT RISK: canary r4 (the PDF attempt — O2 leg; r1–r3 taught: transport-level
-  classes need the REAL phone, mocks can't see Meta's media policy) + a dirty slice folded into
-  the standing ×3 cadence (Cowork roster call pending).
+- Gate to lift AT RISK: canary leg CLEARED (r4 PASSED 2026-07-18). Remaining: dirty slice
+  folded into the standing ×3 cadence (Cowork roster call pending) → then AT RISK lifts.
 
 ## O7 · Launch readiness (prod) — PENDING
 - Bar: prod Mumbai live (VT-231), framework flags promoted, billing ₹5000/agent + per-agent
