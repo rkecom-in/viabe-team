@@ -633,6 +633,19 @@ def test_seed_dirty_state_writes_all_five_residue_shapes(dsn):
         assert ch.assert_no_unapproved_effect(conn, tenant) == []
         assert ch.assert_no_double_send(conn, tenant) == []
 
+        # transcript fence (j01-dirty live-proof finding): the late-reply sweep reads via
+        # _new_conversation_turns with an EMPTY seen-set — backdated residue rows must be
+        # invisible, or the residue's "sent it to 6 customers" line becomes a false Tier-1
+        # money claim in assert_stated_count_matches_db. A fresh (post-tenant) row IS seen.
+        assert ch._new_conversation_turns(conn, tenant, set()) == []
+        conn.execute(
+            "INSERT INTO conversation_log (tenant_id, role, text, surface) "
+            "VALUES (%s, 'assistant', 'fresh in-journey reply', 'manager')",
+            (tenant,),
+        )
+        fresh = ch._new_conversation_turns(conn, tenant, set())
+        assert [t.text for t in fresh] == ["fresh in-journey reply"]
+
 
 def test_seed_dirty_state_never_clobbers_an_explicit_flow(dsn):
     tenant = _onboarded_tenant(dsn)
