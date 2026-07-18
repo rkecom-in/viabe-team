@@ -34,8 +34,9 @@ logger = logging.getLogger(__name__)
 _INSERT_SQL = (
     "INSERT INTO llm_call_events "
     "  (tenant_id, agent, call_site, provider, model, service_tier, "
-    "   tokens_in, tokens_out, cost_usd, request_id, search_count, search_cost_usd) "
-    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
+    "   tokens_in, tokens_out, cost_usd, request_id, search_count, search_cost_usd, "
+    "   cached_tokens_in) "
+    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
 )
 
 
@@ -59,9 +60,10 @@ def record_llm_call(
     ``tokens_in`` is the full-price (uncached) input count; ``cached_tokens_in`` the
     cache-read count (priced at ``cached_in_multiplier``). ``cost_usd`` reflects the
     split, while the persisted ``tokens_in`` is the TOTAL input (uncached + cached)
-    for audit — the ledger has no separate cached-token column (migration 173 folds
-    cache economics into ``cost_usd``). Cache-unaware callers pass ``cached_tokens_in=0``
-    → total == uncached, full-price cost (unchanged behavior).
+    for audit; migration 177 additionally persists ``cached_tokens_in`` in its own
+    column so cache-hit-rate (cached vs total input) is queryable straight off the
+    ledger. Cache-unaware callers pass ``cached_tokens_in=0`` → total == uncached,
+    full-price cost, cached column 0 (unchanged behavior).
 
     ``search_count`` / ``search_cost_usd`` (Migration-176) are the server-side web/X-search
     invocation count + their ALREADY-COMPUTED USD cost for this call (the caller runs
@@ -85,6 +87,7 @@ def record_llm_call(
             request_id=request_id,
             search_count=search_count,
             search_cost_usd=search_cost_usd,
+            cached_tokens_in=cached_tokens_in,
         )
         if tenant_id is not None:
             _insert_tenant(
@@ -110,6 +113,7 @@ def _event_params(
     request_id: str | None,
     search_count: int = 0,
     search_cost_usd: Any = 0,
+    cached_tokens_in: int = 0,
 ) -> tuple[Any, ...]:
     return (
         str(tenant_id) if tenant_id is not None else None,
@@ -124,6 +128,9 @@ def _event_params(
         request_id,
         int(search_count or 0),
         Decimal(str(search_cost_usd or 0)),
+        # Migration-177: the cache-read subset, persisted in its own column so
+        # cache-hit-rate is queryable (tokens_in above stays the TOTAL input).
+        int(cached_tokens_in or 0),
     )
 
 

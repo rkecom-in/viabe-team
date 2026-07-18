@@ -103,6 +103,57 @@ def test_cached_tokens_fold_into_total_input_and_cost(monkeypatch):
     assert captured["rollup_in"] == 1400
 
 
+def test_migration_177_cached_tokens_persist_in_dedicated_column(monkeypatch):
+    """Migration-177 — ``cached_tokens_in`` lands in its OWN ledger column (cache-hit-rate
+    queryable), while ``tokens_in`` stays the TOTAL input (uncached + cached, unchanged)."""
+    _fix_cost(monkeypatch, "0.03")
+    captured = {}
+    monkeypatch.setattr(
+        ledger_mod,
+        "_insert_tenant",
+        lambda tenant_id, params, *, agent, tokens_in, tokens_out: captured.update(params=params),
+    )
+
+    record_llm_call(
+        tenant_id=uuid4(),
+        agent="sales_recovery",
+        call_site="sales_recovery_executor",
+        provider="anthropic",
+        model="claude-sonnet-5",
+        tokens_in=1000,
+        tokens_out=200,
+        cached_tokens_in=400,
+    )
+
+    # The INSERT names the 177 column, and the params tuple carries it LAST
+    # (appended after search_cost_usd so the pre-177 positions are unchanged).
+    assert "cached_tokens_in" in ledger_mod._INSERT_SQL
+    assert ledger_mod._INSERT_SQL.count("%s") == 13
+    params = captured["params"]
+    assert len(params) == 13
+    assert params[6] == 1400  # tokens_in stays TOTAL (1000 uncached + 400 cached)
+    assert params[12] == 400  # the dedicated cached column
+
+
+def test_migration_177_cache_unaware_caller_persists_zero_cached(monkeypatch):
+    """A cache-unaware caller (no ``cached_tokens_in``) writes 0 to the 177 column —
+    matching the migration's DEFAULT and leaving pre-177 behavior unchanged."""
+    _fix_cost(monkeypatch, "0.01")
+    captured = {}
+    monkeypatch.setattr(ledger_mod, "_insert_platform", lambda params: captured.update(params=params))
+
+    record_llm_call(
+        tenant_id=None,
+        agent="judge",
+        call_site="blind_judge",
+        provider="anthropic",
+        model="claude-opus-4-8",
+        tokens_in=900,
+        tokens_out=100,
+    )
+    assert captured["params"][12] == 0
+
+
 def test_platform_call_uses_null_tenant_and_no_rollup(monkeypatch):
     _fix_cost(monkeypatch, "0.01")
     captured = {}
