@@ -74,6 +74,7 @@ for the graph SHAPE this workflow drives).
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any
 from uuid import UUID
 
@@ -97,6 +98,15 @@ LIMIT_MAX_CYCLES = 6
 # Team-lead ruling round 2: "not_verified -> one revise cycle if the revision budget allows, else
 # blocked+incident" — exactly one retry of the completion-verification checkpoint per task.
 LIMIT_MAX_VERIFICATION_ATTEMPTS = 1
+
+# VT-680 (§7C) — the ONLINE impact judge's kill switch. Dev ON, prod unset/Fazal-only (this row's
+# D6). Mirrors ``auth.prod_safety._flag_on``'s exact activation literal (``== "1"``) so the guard's
+# notion of "ON" never diverges from what this reader honours.
+_IMPACT_JUDGE_FLAG = "TEAM_IMPACT_JUDGE"
+
+
+def _impact_judge_enabled() -> bool:
+    return os.environ.get(_IMPACT_JUDGE_FLAG, "0") == "1"
 
 # The owner-answer wait cadence (ask_owner + the approval wait). Not a hot-path wait to the
 # SECOND — but a flat 300s cadence made the manager react to an owner's "haan bhej do" up to
@@ -632,6 +642,57 @@ def _settle_verified_task(
 
 
 @DBOS.step()
+def _judge_impact_step(tenant_id: str, task_id: str) -> tuple[str, str]:
+    """VT-680 (§7C) — the ONLINE impact judge. Called from ``_run_verification_cycle`` right after
+    a "verified" completion has already SETTLED (``_settle_verified_task``) — additive, never a
+    gate: this task has already reached ``completed`` and stays there regardless of what this
+    returns (v1 has NO auto-retry; see the module's VT-680 note in ``manager/verification.py`` for
+    why re-running a specialist step outside the normal approval-gated reactive path is a replay
+    hazard, especially for money steps). Returns ``(verdict, reason)`` as a plain string tuple
+    (DBOS-step-result-safe, mirrors ``_verify_completion_step``'s own shape) — ``verdict`` is one of
+    ``ImpactVerdict``'s met/partial/unmet OR the workflow-level fallback ``"unjudged"`` (flag off,
+    or the judge itself failed/timed out).
+
+    Flag-gated by ``TEAM_IMPACT_JUDGE`` (default OFF): OFF returns ``("unjudged", "flag_off")``
+    WITHOUT calling the LLM at all — the downstream notify composer treats 'unjudged' identically to
+    'met' (no quality note appended), so the owner-facing settle path is BYTE-IDENTICAL to
+    pre-VT-680 when the flag is off.
+
+    Fail-soft: ANY judge failure (network/parse/schema — ``judge_impact`` itself raises rather than
+    fail-softing internally, since its ``ImpactVerdict`` type has no 'unjudged' member to return)
+    is caught HERE and reported as ``("unjudged", <reason>)`` — this step, and the settle it follows,
+    must never hang or unwind over an advisory judgment call."""
+    if not _impact_judge_enabled():
+        return "unjudged", "flag_off"
+
+    from orchestrator.manager.verification import judge_impact
+
+    try:
+        result = judge_impact(tenant_id, task_id)
+    except Exception as exc:  # noqa: BLE001 — advisory-only: never block/retry the settle over this
+        logger.warning(
+            "_judge_impact_step: impact judge failed for task=%s (fail-soft -> unjudged): %s",
+            task_id, exc,
+        )
+        return "unjudged", f"impact_judge_failed:{type(exc).__name__}"
+
+    # §7D DECIDES — the impact verdict is per-task honesty, §7D-joinable via reasoning_ref (VT-680
+    # D3). Fail-soft (conn=None): an audit-emit failure must never unwind the settle that already
+    # committed or block the owner notify that follows.
+    emit_tm_audit(
+        event_layer="decides",
+        event_kind="impact_judged",
+        actor="team_manager",
+        tenant_id=tenant_id,
+        summary=f"task={task_id} impact judged: {result.verdict}",
+        decision={"verdict": result.verdict, "reason": result.reason},
+        reasoning_ref={"run_id": str(task_id), "step_name": "impact_judge"},
+        conn=None,
+    )
+    return result.verdict, result.reason
+
+
+@DBOS.step()
 def _append_verification_retry_step(tenant_id: str, task_id: str, *, reason: str) -> bool:
     """The 'one revise cycle' for a not_verified completion: appends ONE additional step via
     ``plan_store.append_step`` (VT-606 round-3 fix — NOT ``revise_plan``, which re-INSERTS every
@@ -698,7 +759,13 @@ def _run_verification_cycle(
             tenant_id, task_id, verification_reason=reason,
             success_closure_not_required=campaign_outcome_reported,
         )
-        _notify_owner_of_terminal(tenant_id, task_id)
+        # VT-680 (§7C) — the ONLINE impact judge: additive, runs AFTER the settle above (the task
+        # is already 'completed' and stays there regardless of this verdict — see
+        # ``_judge_impact_step``'s own docstring for why v1 never auto-retries). Its verdict rides
+        # into the owner's terminal notification as an honest quality note (partial/unmet only;
+        # met/unjudged leave the notification byte-identical to pre-VT-680).
+        impact_verdict, _impact_reason = _judge_impact_step(tenant_id, task_id)
+        _notify_owner_of_terminal(tenant_id, task_id, impact_verdict=impact_verdict)
         return "settled", verification_attempts
     verification_attempts += 1
     if (
@@ -935,7 +1002,9 @@ def _settle_declined_approval(tenant_id: str, task_id: str) -> None:
 
 
 @DBOS.step()
-def _notify_owner_of_terminal(tenant_id: str, task_id: str) -> None:
+def _notify_owner_of_terminal(
+    tenant_id: str, task_id: str, *, impact_verdict: str | None = None,
+) -> None:
     """VT-611 pre-work #1 — the owner-notification composer's own DBOS checkpoint. Called right
     after EITHER settle path lands (_settle_verified_task via _run_verification_cycle;
     _settle_declined_approval directly) so a completed/cancelled task actually tells the owner
@@ -948,10 +1017,16 @@ def _notify_owner_of_terminal(tenant_id: str, task_id: str) -> None:
     Fail-soft by construction (owner_surface.task_outcome never raises) — a notification-send
     failure must never unwind the settle/block that already committed. Idempotent: maybe_notify
     only sends while owner_notification_status=='pending' (a re-call on a delivered/failed/
-    not_required row is a clean no-op)."""
+    not_required row is a clean no-op).
+
+    ``impact_verdict`` (VT-680, §7C) — only ever passed by the ``_run_verification_cycle`` "verified"
+    branch (``_judge_impact_step``'s own return); every other caller (``_settle_declined_approval``'s
+    'cancelled' path, the blocked/escalated tail) omits it, so those closures are unaffected. 'met'/
+    'unjudged'/None append nothing to the composed message — only 'partial'/'unmet' add the honest
+    quality note (see ``owner_surface.task_outcome.compose_task_outcome_message``)."""
     from orchestrator.owner_surface.task_outcome import maybe_notify_owner_of_task_outcome
 
-    maybe_notify_owner_of_task_outcome(tenant_id, task_id)
+    maybe_notify_owner_of_task_outcome(tenant_id, task_id, impact_verdict=impact_verdict)
 
 
 @DBOS.step()
