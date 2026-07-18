@@ -671,10 +671,11 @@ def answer_status_query(
         from orchestrator.owner_surface.customer_export import send_customer_list_to_owner
 
         if send_customer_list_to_owner(tenant_id):
+            # Fix-4c: complement the media message, don't re-claim a second send (see the
+            # customer_list branch below).
             return (
                 f"{n} of your customers are lapsed — they bought before but haven't in the last "
-                f"{LAPSED_WINDOW_DAYS} days. I've just sent you your full customer list as a file "
-                "— the lapsed ones are flagged in it."
+                f"{LAPSED_WINDOW_DAYS} days. They're flagged in the file just above."
             )
         return (
             f"{n} of your customers are lapsed — they bought before but haven't in the last "
@@ -686,12 +687,15 @@ def answer_status_query(
         # (send_customer_list_to_owner owns every PII rail + audit). Success reply is a DB-backed
         # claim (True only after a transport sid + audit row). Failure → honest offer, NEVER a
         # fabricated 'sent'. Names still never dumped inline.
+        # Fix-4c (live canary 2026-07-18): the success ack COMPLEMENTS the media message instead
+        # of re-claiming a second send — the caption on the file already says what it is, and two
+        # independent "I sent you the file" claims doubled the damage when the attach failed.
         from orchestrator.owner_surface.customer_export import send_customer_list_to_owner
 
         if send_customer_list_to_owner(tenant_id):
             return (
-                "I've just sent you your full customer list as a file — names, numbers, status "
-                "and total purchases, with the lapsed ones flagged."
+                "That's the file just above — lapsed customers are flagged in it. "
+                "Ping me anytime for a fresh copy."
             )
         # No unfulfillable promise (T7 class): a re-ask re-fires this net, so "ask again" is TRUE.
         return (

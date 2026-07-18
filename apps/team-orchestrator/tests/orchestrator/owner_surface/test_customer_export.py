@@ -143,7 +143,9 @@ def test_delivery_happy_path_all_rails(monkeypatch: pytest.MonkeyPatch) -> None:
     assert len(storage.uploads) == 1
     path, blob, opts = storage.uploads[0]
     assert path.startswith(str(tid))
-    assert opts["content-type"] == "text/csv"
+    # Fix-4a: text/plain (WhatsApp document allowlist has no text/csv — the live-canary
+    # media-attach failure); the .csv FILENAME stays for spreadsheet apps.
+    assert opts["content-type"] == "text/plain"
 
     # Media send: URL ONLY in media_urls, never in the body; recipient = server-derived owner.
     assert len(sends) == 1
@@ -267,3 +269,31 @@ def test_seam_falls_back_to_honest_ack_on_failure(monkeypatch: pytest.MonkeyPatc
     out = ts._dispatch_campaign_first_contact(uuid4(), "winback + send me the list", "SMl2")
     assert out is not None
     assert out.direct_reply_text == cfc.LIST_SEND_ACK_PREAMBLE  # VT-642 honest fallback preserved
+
+
+def test_send_registers_owner_notification_for_delivery_reconciliation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fix-4b (live canary 2026-07-18): the media send must register with the owner-notification
+    ledger so a failed/undelivered Twilio status callback flips the row + opens the internal
+    incident — this was the ONE owner-send path with zero async-delivery reconciliation (both
+    success texts fired while the attach silently died)."""
+    _patch_customers(monkeypatch, _customers_rows(2))
+    _patch_owner_phone(monkeypatch, "+919321553267")
+    storage = _FakeStorage()
+    sends: list[dict[str, Any]] = []
+    events: list[dict[str, Any]] = []
+    _patch_send(monkeypatch, sends)
+    _patch_audit(monkeypatch, events)
+    recorded: list[tuple[str, str, str | None]] = []
+    import orchestrator.owner_surface.owner_notification as onotif
+
+    monkeypatch.setattr(
+        onotif, "record_owner_notification",
+        lambda tid, template, sid, **kw: recorded.append((str(tid), template, sid)),
+    )
+    assert ce.send_customer_list_to_owner(uuid4(), storage_client=storage) is True
+    assert len(recorded) == 1
+    _tid, template, sid = recorded[0]
+    assert template == "customer_list_export"
+    assert sid is not None

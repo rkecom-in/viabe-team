@@ -44,10 +44,12 @@ _SIGNED_URL_TTL_SECONDS = 300
 _PAGE_SIZE = 500
 
 #: The media message body (the caption WhatsApp shows with the file). Number-free; the file itself
-#: carries the data.
+#: carries the data. Fix-4c: no "download link expires" talk — the 300s signed-URL TTL only gates
+#: TWILIO's fetch; once the document is attached, WhatsApp serves its own copy and expiry never
+#: touches the owner. The old copy confused the live canary ("link inside" with no visible link).
 CUSTOMER_LIST_CAPTION = (
-    "Here's your customer list — names, numbers, status and total purchases. "
-    "The download link inside expires in a few minutes, but the file is yours to keep."
+    "Here's your customer list — names, numbers, status and total purchases, "
+    "with lapsed customers flagged. The file is yours to keep."
 )
 
 
@@ -110,10 +112,17 @@ def store_customer_csv(
     bucket: str = EXPORT_BUCKET,
 ) -> str:
     """Upload the CSV to the private export bucket; return the object path. Upsert (same-day
-    re-ask overwrites)."""
+    re-ask overwrites).
+
+    VT-676 fix-4a (live canary 2026-07-18, real tenant): content-type is ``text/plain``, NOT
+    ``text/csv`` — WhatsApp's document-media allowlist (Meta: txt/xls(x)/doc(x)/ppt(x)/pdf) does
+    NOT include text/csv, so Twilio accepted the message synchronously but the async media attach
+    died and the owner got a text-only "here's your file". The signed URL's response content-type
+    is whatever we store here. The ``.csv`` FILENAME stays (Excel/Sheets open by extension); if a
+    re-canary shows Meta also rejecting the extension, the one-line fallback is ``.txt``."""
     path = export_storage_path(tenant_id)
     storage = client if client is not None else _supabase_storage(bucket)
-    storage.upload(path, csv_bytes, {"content-type": "text/csv", "upsert": "true"})
+    storage.upload(path, csv_bytes, {"content-type": "text/plain", "upsert": "true"})
     return path
 
 
@@ -197,6 +206,15 @@ def send_customer_list_to_owner(
             surface="customer_export",
             media_urls=[url],
         )
+
+        # VT-676 fix-4b (live canary 2026-07-18): register this send with the owner-notification
+        # ledger so the async Twilio status callback RECONCILES it — a failed/undelivered media
+        # message flips the row + opens the internal incident (owner_notification.record_owner_
+        # notification_delivery), instead of a success-claiming text with no file being invisible
+        # forever. This was the ONE owner-send path not wired in (campaign/task/owner_send are).
+        from orchestrator.owner_surface.owner_notification import record_owner_notification
+
+        record_owner_notification(tenant_id, "customer_list_export", sid)
 
         from orchestrator.observability.tm_audit import emit_tm_audit
 
