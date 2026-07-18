@@ -476,9 +476,13 @@ An external reviewer (Codex) audited this kit; these clarifications are BINDING:
    as a framework MODULE/tool surface. Graduating a module to a full brained SubAgent has a
    promotion bar (Tier-1-clean measurement + explicit Fazal authorization); do not design for
    it prematurely.
-2. **Build + verify is builder-takeable; LIVE ROUTING is CC-owned.** You deliver a registering,
-   conformance-passing, unit-tested module on a branch. Wiring it into live dispatch/routing —
-   and every deploy — is done by CC after review. Never touch dispatch/triage/routing files.
+2. **Build + verify is builder-takeable; LIVE WIRING is CC-owned.** You deliver a registering,
+   conformance-passing, unit-tested module on a branch. CC then does BOTH wiring legs after
+   review: (a) REGISTRATION — adds your module to `register_all_modules()` (boot-time; makes
+   your identity card visible in the Manager's agent directory from turn one; VT-686), and
+   (b) ROUTING — if/when your module graduates to executing. Registration ≠ routing: a
+   registered PROPOSER is discoverable and honestly describable without executing anything.
+   Never touch dispatch/triage/routing files or `register_all_modules` yourself.
 3. **DB access: wrappers-first, strictly.** New module code reads ONLY through
    `orchestrator.db.wrappers` (or existing sanctioned read helpers). Do NOT open
    `tenant_connection` directly in new code — the direct-connection pattern you may see in older
