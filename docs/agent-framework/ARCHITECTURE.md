@@ -123,6 +123,7 @@ distributed; authority over effects is narrow and central. That split is the who
   until the §7.3-era cleanup renames them). Conceptually they are connector Tools.
 - **Sufficiency, not just safety (VT-669):** the framework enforced tool SAFETY (deny-list +
   positive-capability manifest) but never SUFFICIENCY. `AgentManifest.required_tools` declares
+  VT-686: every manifest ALSO carries `category` (finite AGENT_CATEGORIES set), `tags` (capability identifiers), and a structured `AgentBrief` (what/actions/business-activities/when-to-use/honest limits) — the Manager-facing identity card rendered into its per-turn context (`render_agent_directory`), so delegation decisions ground in declared briefs, enforced by conformance check #10 (`brief_complete`).
   the tools a specialist's job REQUIRES to reach; the 9th conformance check
   `required_tools_reachable` fails-loud at boot if a required tool is not in the catalog OR not
   reachable (own `tools` surface OR the Manager-scoped common READ set). SR records its required
