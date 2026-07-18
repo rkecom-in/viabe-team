@@ -671,11 +671,12 @@ def answer_status_query(
         from orchestrator.owner_surface.customer_export import send_customer_list_to_owner
 
         if send_customer_list_to_owner(tenant_id):
-            # Fix-4c: complement the media message, don't re-claim a second send (see the
-            # customer_list branch below).
+            # Fix-4c/4e: complement the media message; never assert it is already visible
+            # (sync accept != delivery).
             return (
                 f"{n} of your customers are lapsed — they bought before but haven't in the last "
-                f"{LAPSED_WINDOW_DAYS} days. They're flagged in the file just above."
+                f"{LAPSED_WINDOW_DAYS} days. I've sent the full list as a file with the lapsed "
+                "ones flagged; if it doesn't appear within a minute, tell me and I'll resend."
             )
         return (
             f"{n} of your customers are lapsed — they bought before but haven't in the last "
@@ -693,9 +694,12 @@ def answer_status_query(
         from orchestrator.owner_surface.customer_export import send_customer_list_to_owner
 
         if send_customer_list_to_owner(tenant_id):
+            # Fix-4e (canary r2: file never delivered while the ack claimed "just above"): a sync
+            # Twilio accept is NOT delivery — the ack must be truthful under async uncertainty,
+            # never assert the file is already visible.
             return (
-                "That's the file just above — lapsed customers are flagged in it. "
-                "Ping me anytime for a fresh copy."
+                "I've sent your customer list as a file — lapsed customers are flagged in it. "
+                "If it doesn't appear within a minute, tell me and I'll resend."
             )
         # No unfulfillable promise (T7 class): a re-ask re-fires this net, so "ask again" is TRUE.
         return (
