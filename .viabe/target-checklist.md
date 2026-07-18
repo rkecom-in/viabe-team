@@ -1,8 +1,8 @@
-# TARGET CHECKLIST — achieved vs pending (single page, CC-maintained)
+# TARGET CHECKLIST — CC-PRIVATE working file (RETIRED as Fazal-facing, 2026-07-18)
 
-> **Maintenance rule (CC, standing):** update at every phase transition (land/push/gate-result),
-> same moment as the Cowork signal. This is the OBJECTIVE-level view; per-row detail lives in
-> `.viabe/sprint/VT-*.md`. Reconcile against `git log` before trusting (Rule #14).
+> **Fazal-facing scoreboard is `.viabe/objectives.md`** (Fazal ruling via Cowork 224500Z —
+> CC maintains it directly at every status-changing event). This file stays as CC's private
+> working detail-list only; no maintenance SLA. Per-row detail lives in `.viabe/sprint/VT-*.md`.
 > Last updated: **2026-07-18 ~10:15 IST** · dev HEAD at update: **a57514b** (VT-671 wake-on-signal proven).
 
 ## ✅ ACHIEVED (proven, on origin/dev)
