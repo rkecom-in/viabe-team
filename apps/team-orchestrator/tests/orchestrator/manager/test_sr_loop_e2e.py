@@ -114,6 +114,26 @@ def test_sr_through_the_loop_full_acceptance(substrate: Any, monkeypatch: pytest
     monkeypatch.setenv("TEAM_TWILIO_MOCK_MODE", "1")
     monkeypatch.setenv("TEAM_MANAGER_LOOP_MODE", "enforce")
 
+    # UNIQUE mock sids (real-Twilio semantics): the previous static-sid stub gave EVERY send the
+    # same message_sid, so conversation_log's per-(tenant, sid) redelivery-dedup collapsed all
+    # owner-facing messages into the FIRST row — the outcome report silently vanished from the
+    # transcript and the told-the-owner invariant below read 0. Real Twilio mints a unique sid per
+    # send; the mock must too.
+    from types import SimpleNamespace as _NS
+
+    import orchestrator.utils.twilio_send as _tw
+
+    class _UniqueSidMessages:
+        @staticmethod
+        def create(**kwargs: Any) -> Any:
+            return _NS(
+                sid=f"SM{uuid4().hex}", status="queued", error_code=None, error_message=None
+            )
+
+    monkeypatch.setattr(
+        _tw, "_client", lambda: _NS(messages=_UniqueSidMessages())
+    )
+
     # The workflow's real poll interval (5 min) would make this test take up to 5 minutes to
     # notice the resolution this test drives concurrently — shorten it (a test-only knob, never a
     # production behavior change) so the wait is seconds, not minutes.
