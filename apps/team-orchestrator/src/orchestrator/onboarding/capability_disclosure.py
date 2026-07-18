@@ -75,9 +75,20 @@ def detect_unsupported_action(body: str) -> bool:
     """True iff ``body`` is a request to run a PAID ad boost (an external-ad-platform token AND a
     money-intent signal) — the one unsupported paid action the roster cannot execute.
 
-    Opt-out / DSR ALWAYS wins first. FAIL-OPEN: any error -> False (net does not fire; normal path)."""
+    Opt-out / DSR ALWAYS wins first. FAIL-OPEN: any error -> False (net does not fire; normal path).
+
+    VT-681 phase 3 — registry-gated: this net now fires ONLY while the capability registry still
+    declares ``marketing.paid_ad_boost`` disabled. The day that capability graduates to live, the
+    net auto-retires (no stale hand-rolled decline over a real feature) — the generalization of
+    the D2 one-off onto the registry as the single source of capability truth."""
     try:
         if not body or not body.strip():
+            return False
+        # VT-681: consult the capability registry FIRST — a graduated (non-disabled) ad-boost
+        # means there is nothing to disclose; the net retires itself.
+        from orchestrator.capability.registry import mode_of
+
+        if mode_of("marketing.paid_ad_boost") != "disabled":
             return False
         # DPDP: opt-out / DSR routing wins over any other interpretation.
         from orchestrator.pre_filter_gate import matches_opt_out_or_dsr
