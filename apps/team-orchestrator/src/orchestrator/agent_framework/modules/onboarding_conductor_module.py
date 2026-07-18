@@ -70,7 +70,7 @@ from typing import Any
 from orchestrator.agent_framework.capabilities import AgentRole, Capability
 from orchestrator.agent_framework.context import ModuleContext, ModuleResult
 from orchestrator.agent_framework.gate_facade import GateFacade
-from orchestrator.agent_framework.manifest import AgentManifest
+from orchestrator.agent_framework.manifest import AgentBrief, AgentManifest
 
 logger = logging.getLogger("orchestrator.agent_framework.modules.onboarding_conductor")
 
@@ -139,6 +139,43 @@ class OnboardingConductorModule:
             tools=_conductor_tools(),
             required_tools=REQUIRED_TOOLS,
             entitlement_key=None,
+            # VT-686 — the agent taxonomy: category/tags/brief, written from this module's own
+            # docstring above (accurate, no invention).
+            category="Onboarding",
+            tags=frozenset({"onboarding", "profile-setup", "activation", "journey"}),
+            brief=AgentBrief(
+                what_it_does=(
+                    "Reads the tenant's onboarding state and drives the owner's profile-setup "
+                    "conversation — extracting, recording, skipping, or correcting answers, and "
+                    "running the deterministic profile-completion / activation checks."
+                ),
+                actions=(
+                    "read_onboarding_state",
+                    "extract_owner_answer",
+                    "record_answer",
+                    "skip_question",
+                    "correct_answer",
+                    "profile_completion_check",
+                    "activation_check",
+                    "propose_business_policy",
+                ),
+                business_activities=(
+                    "collect the owner's business profile",
+                    "guide the owner through onboarding step by step",
+                    "determine when the account is ready to activate",
+                ),
+                when_to_use=(
+                    "Route here when the owner is still completing onboarding/profile setup, or a "
+                    "message reads as an answer to an outstanding onboarding question."
+                ),
+                limits=(
+                    "no customer send, no money action",
+                    "reads and writes only the owner's OWN onboarding/business data (CL-390) — "
+                    "never customer PII",
+                    "does not activate the account itself — it reports the deterministic "
+                    "completion/activation check result for the Manager to act on",
+                ),
+            ),
         )
 
     # --- PROPOSER lane -------------------------------------------------------------------------

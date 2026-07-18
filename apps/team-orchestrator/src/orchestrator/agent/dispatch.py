@@ -456,6 +456,26 @@ def _build_capability_truth_block(tenant_id: UUID) -> str | None:
         return None
 
 
+def _build_agent_directory_block() -> str | None:
+    """VT-686 — the AGENT-DIRECTORY block: a compact, Manager-facing card per registered
+    agent_framework module (category / tags / what-it-does / when-to-use / limits —
+    ``render_agent_directory`` over the default registry), so a delegation decision is grounded in
+    each agent's own declared ``AgentBrief`` instead of a spawn-tool docstring. Tenant-independent
+    (the directory describes the AGENT roster, not per-tenant state) — unlike its VT-681 sibling,
+    it takes no ``tenant_id``. Read-only, best-effort (any miss -> no block; an empty registry also
+    yields no block), a per-turn SystemMessage AFTER the cached prefix — the VT-194 cache holds,
+    exactly like the capability-truth block it rides alongside."""
+    try:
+        from orchestrator.agent_framework.directory import render_agent_directory
+        from orchestrator.agent_framework.registration import default_registry
+
+        text = render_agent_directory(default_registry())
+        return text or None
+    except Exception:  # noqa: BLE001 — best-effort, like every block in this family
+        logger.warning("dispatch: agent-directory assembly failed; proceeding without")
+        return None
+
+
 def _build_inflight_state_block(tenant_id: UUID) -> str | None:
     """VT-616 — surface durable in-flight state the conversational brain is otherwise BLIND to, so a
     ``route: none`` turn ADVANCES instead of re-deriving the same reply. dispatch_brain re-composes each
@@ -810,6 +830,21 @@ def dispatch_brain(
             ),
         )
 
+    # VT-686: the AGENT-DIRECTORY block — a compact Manager-facing card per registered
+    # agent_framework module (category/tags/what/when/limits: render_agent_directory over the
+    # default registry), so a delegation decision is grounded in each agent's own AgentBrief instead
+    # of a spawn-tool docstring. Best-effort + per-turn SystemMessage (cache holds). None on an
+    # empty registry or any read miss.
+    agent_directory_block = _build_agent_directory_block()
+    if agent_directory_block:
+        _messages.insert(
+            0,
+            SystemMessage(
+                content=agent_directory_block,
+                id=_initial_turn_msg_id(run_id, "agent_directory_block"),
+            ),
+        )
+
     # VT-514 GETS — retrieval audit spine row: which context sources hit
     # (presence flags only; the redacted block CONTENT rides the KNOWS row).
     emit_tm_audit(
@@ -833,6 +868,8 @@ def dispatch_brain(
             "inflight_state_present": bool(inflight_state_block),
             # VT-681: whether the per-tenant capability-truth block was present.
             "capability_truth_present": bool(capability_truth_block),
+            # VT-686: whether the agent-directory block (registered module identity cards) was present.
+            "agent_directory_present": bool(agent_directory_block),
             "intent_classification": _manager_intent.get("classification"),
         },
     )

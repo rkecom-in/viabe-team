@@ -51,7 +51,7 @@ from typing import Any
 from orchestrator.agent_framework.capabilities import AgentRole, Capability
 from orchestrator.agent_framework.context import ModuleContext, ModuleResult
 from orchestrator.agent_framework.gate_facade import GateFacade
-from orchestrator.agent_framework.manifest import AgentManifest
+from orchestrator.agent_framework.manifest import AgentBrief, AgentManifest
 
 logger = logging.getLogger("orchestrator.agent_framework.modules.common_tools")
 
@@ -111,6 +111,47 @@ class CommonToolsModule:
             # (tools_common asserts it at import); the conformance ``tool_surface_safe`` re-proves it.
             tools=tools,
             entitlement_key=None,
+            # VT-686 — the agent taxonomy: category/tags/brief, written from this module's own
+            # docstring above (accurate, no invention). "Tech" — this is cross-cutting platform
+            # infrastructure (the shared read surface every specialist reaches through), not a
+            # domain specialist in its own right; see ``when_to_use`` below.
+            category="Tech",
+            tags=frozenset(
+                {"reads", "common", "ledger", "business-context", "integration-state"}
+            ),
+            brief=AgentBrief(
+                what_it_does=(
+                    "Exposes the Manager-scoped common READ tools every specialist pulls "
+                    "operational data through — customer-ledger counts, business-context, "
+                    "integration-state, active-plan, agent-memory, recent campaigns, attribution, "
+                    "and per-customer ledger query."
+                ),
+                actions=(
+                    "read_customer_ledger_summary",
+                    "read_business_context",
+                    "read_integration_state",
+                    "read_active_plan",
+                    "read_agent_memory",
+                    "get_recent_campaigns",
+                    "get_attribution_data",
+                    "query_customer_ledger",
+                ),
+                business_activities=(
+                    "give every specialist a shared, safe way to read tenant-scoped operational "
+                    "data",
+                ),
+                when_to_use=(
+                    "Not a standalone delegation target — this is the shared read surface other "
+                    "specialists (Sales Recovery, Integration, Compliance) reach through to pull "
+                    "their own operational context. The Manager does not spawn this as its own "
+                    "specialist for an owner-facing turn."
+                ),
+                limits=(
+                    "pure reads only — no write, no send, no money action",
+                    "counts / owner-business-fields / integration phase only — no customer PII "
+                    "(CL-390)",
+                ),
+            ),
         )
 
     # --- PROPOSER lane -------------------------------------------------------------------------

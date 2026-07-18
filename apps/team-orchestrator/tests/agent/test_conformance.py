@@ -20,6 +20,7 @@ pytest.importorskip("langchain")
 
 import orchestrator.agent_framework.gate_facade as gate_facade  # noqa: E402
 from orchestrator.agent_framework import (  # noqa: E402
+    AgentBrief,
     AgentManifest,
     AgentRole,
     Capability,
@@ -49,6 +50,17 @@ class _ConformingDualRole:
         description="proposes AND executes; declares a gated capability (legal — EXECUTOR present)",
         capabilities=frozenset(
             {Capability.READ_BUSINESS_CONTEXT, Capability.REQUEST_CUSTOMER_SEND}
+        ),
+        # VT-686: a fully taxonomy-complete manifest — this fixture must pass EVERY check,
+        # brief_complete included.
+        category="Tech",
+        tags=frozenset({"fixture"}),
+        brief=AgentBrief(
+            what_it_does="a conformance-harness test fixture",
+            actions=("propose", "execute"),
+            business_activities=("prove the harness passes a well-formed dual-role module",),
+            when_to_use="never — test fixture only",
+            limits=("not a real agent — test double",),
         ),
     )
 
