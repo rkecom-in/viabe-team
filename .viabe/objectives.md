@@ -6,7 +6,7 @@
 > status-changing event, same moment as the to-cowork signal). Cowork audits (Rule #14).
 > Bar lines are Fazal's — never edited without a ruling; Now/Gate/status lines are CC's.
 > Statuses: MET · MET–INCIDENT OPEN · IN PROGRESS · AT RISK · PENDING · HELD/PARKED.
-> Last updated: 2026-07-18 12:20 IST · dev HEAD 54509d6 on origin (+2 local: sweep fence, O4 briefs — pushing).
+> Last updated: 2026-07-18 13:20 IST · origin f2f4881 (+3 local: VT-681 phases 3-4, objectives) · cache-fix subagent building.
 
 ## O1 · Trustworthy conversation — MET (holding)
 - Bar: Tier-1 trust-breakers = 0 across the 10-journey pack ×3; Tier-2 quality ≥ 90%.
@@ -96,7 +96,9 @@
 - Gaps to the bar: **welcome template Meta UTILITY reapproval** — resubmission pack PREPARED
   (`.viabe/welcome-template-resubmission-package.md`), Fazal runs STEP 0 status check + submits ·
   **hi-Latn template variants** (Fazal/Meta) · export live-canary (fix LANDED 42bd7e6; Fazal
-  re-run pending, = O2 gate) · **per-tenant capability registry VERIFIED 2026-07-18**: verdict
-  distributed-with-gaps — catalog + prereqs exist but the promise-level per-tenant mode
-  declaration is absent → **VT-681 rostered** (L, 4-phase) · seedable-memory mechanism (C3,
+  re-run pending, = O2 gate) · **per-tenant capability registry: VT-681 phases 1–4
+  CODE-COMPLETE** (2026-07-18, local commits) — 14-entry promise-relevant registry,
+  live/advisory/disabled modes, resolve_for(tenant, env), capability-truth context block at the
+  promise seam, D2 net registry-gated (auto-retires on graduation); gate to close = ×3 full-pack
+  re-drive (brain-touch, batched with the Fazal-GO cache fixes) · seedable-memory mechanism (C3,
   ships with launch posture).
