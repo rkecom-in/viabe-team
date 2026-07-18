@@ -117,7 +117,10 @@ distributed; authority over effects is narrow and central. That split is the who
   The generated [`TOOLS.md`](./TOOLS.md) is the AUTHORITATIVE surface inventory — this doc
   deliberately carries no count (hardcoded counts drifted twice; regenerate TOOLS.md via
   `render_catalog_markdown()` whenever a surface lands). The catalog DOCUMENTS the gates; it
-  never widens them.
+  never widens them. NOTE on holder labels: TOOLS.md's holders are CODE-LEVEL surface owners —
+  `integration_specialist` is the LEGACY holder name for the dissolved Integration brain's
+  surfaces (the brain is gone per this doc; its tool surfaces remain, held under the old label
+  until the §7.3-era cleanup renames them). Conceptually they are connector Tools.
 - **Sufficiency, not just safety (VT-669):** the framework enforced tool SAFETY (deny-list +
   positive-capability manifest) but never SUFFICIENCY. `AgentManifest.required_tools` declares
   the tools a specialist's job REQUIRES to reach; the 9th conformance check
@@ -243,7 +246,7 @@ render against the same preference.
   Pillar-7).
 - **Common READ-tools layer BUILT** (§1.3, `tools_common.py` + `CommonToolsModule`).
   **Tool catalog / required-tools manifest / sufficiency conformance = VT-669 BUILT**
-  (`tool_catalog.py` — 74 surfaces inventoried, `TOOLS.md` generated; `AgentManifest.
+  (`tool_catalog.py` — the generated `TOOLS.md` is the authoritative, always-current inventory; `AgentManifest.
   required_tools` + the 9th `required_tools_reachable` conformance check; SR + Onboarding
   carry required-tools manifests). Additive/inert — no live routing change.
 - **Approval seam hardened (2026-07-18):** VT-668 CLOSED (approval liveness, §2 — an owner
