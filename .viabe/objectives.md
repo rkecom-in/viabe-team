@@ -6,14 +6,15 @@
 > status-changing event, same moment as the to-cowork signal). Cowork audits (Rule #14).
 > Bar lines are Fazal's — never edited without a ruling; Now/Gate/status lines are CC's.
 > Statuses: MET · MET–INCIDENT OPEN · IN PROGRESS · AT RISK · PENDING · HELD/PARKED.
-> Last updated: 2026-07-18 14:15 IST · origin 651cb75 · local batch pending post-gate push (VT-679/680, #84, VT-676 fix-4) · ×3 running (12/30).
+> Last updated: 2026-07-18 16:35 IST · pushing the graduated batch (VT-679/680 flag-off, #84, VT-676 fix-4, VT-683 brief, VT-684) · gate 651cb75 PASSED.
 
 ## O1 · Trustworthy conversation — MET (holding)
 - Bar: Tier-1 trust-breakers = 0 across the 10-journey pack ×3; Tier-2 quality ≥ 90%.
 - Now: met HEAD-authoritative (Tier-1=0, Tier-2=100%); every brain-touching change re-gates
   against the full pack before trusting.
-- Gate: VT-677 ×3 re-drive PASSED (33 runs, ZERO behavioral fails, d9a4e10) — latest full re-proof
-  clean. Next re-gate arms on the next brain-touching land (VT-679/680 builds).
+- Gate: 651cb75 full-pack ×3 PASSED 2026-07-18 (30/30 scored; Tier-2 100%; one j05 sampled
+  variance disambiguated 3/3-clean on re-drive → VT-684 rostered for the class). Graduates the
+  VT-681 promise seam + the SR/turn-brain cache restructure. Next re-gate: O4 flags-on (gate-2).
 
 ## O2 · Money-path integrity — MET, INCIDENT OPEN
 - Bar: the Manager can never perform OR claim a money action falsely — DB is sole authority,
