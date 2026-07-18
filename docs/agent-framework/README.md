@@ -170,6 +170,16 @@ Integration migrations (VT-658/659, complete + delta-gated on dev) are the worke
 what wiring involves; their adapters are the reference. A builder PR that touches
 dispatch/triage/routing files fails review by policy.
 
+Wiring has TWO distinct legs (VT-686 live wiring, 2026-07-19 — do not conflate):
+1. **REGISTRATION (visibility)** — `agent_framework.modules.register_all_modules()` runs at BOOT
+   (main.py, register-before-launch): every first-party module's manifest is validated
+   fail-closed and its identity card becomes visible to the Manager's agent directory from the
+   first turn. CC adds a new module to this list at merge — that alone makes it DISCOVERABLE
+   (the Manager can describe it and route asks toward it honestly).
+2. **ROUTING (execution)** — supervisor/coordinator wiring decides what actually EXECUTES.
+   Registration never changes routing; a registered-but-unrouted module is honestly described
+   as advisory/not-yet-live via its brief + the capability registry.
+
 Building + verifying (§5–6) is fully decoupled and Codex-takeable. Making a module **live** is a
 deliberate, separate set of steps CC owns, documented here as the migration lands:
 
