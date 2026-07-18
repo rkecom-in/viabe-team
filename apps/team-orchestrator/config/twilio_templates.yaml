@@ -94,13 +94,10 @@ team_welcome4:
     hing: HX7097590ccf0e901d893f78d9a9224e92
 
 team_wakeup:
-  # VT-683 — the daily wake-up/re-engage template (Fazal-created 2026-07-18, all three langs).
-  # One of the THREE whitelisted owner-facing templates (OTP is Twilio-Verify-handled, no SID
-  # here): welcome4 + wakeup + OTP; everything else rides the 24h session (Fazal ruling
-  # 2026-07-18). Quick-reply button payload CONTINUE_UPDATES (SAME id all three langs — the
-  # session-open + queue-drain trigger; any typed reply works too). {{1}} = owner name.
-  # hing = Roman-script Hindi registered under Meta language=en (no hi-Latn code exists).
-  # Send rules (VT-683 P3): session CLOSED ∧ queue non-empty ∧ ≤1/day ∧ owner hours IST.
+  # DEPRECATED same-day (2026-07-18): Meta FORCE-CONVERTED all three langs UTILITY→MARKETING
+  # (the welcome2/3 class — "updates ready / available to continue / where we left off" reads as
+  # re-engagement marketing to the classifier; MARKETING = silent 63049 frequency-capping, dead
+  # for a daily loop). Superseded by team_wakeup2 (account-fact framing). NEVER send.
   audience: owner
   agent_selectable: false
   variables:
@@ -109,6 +106,26 @@ team_wakeup:
     en: HXd6c8cb1300e1d1aaf033fb449f138a7e
     hi: HX26d778c5fdf6a02528b88b9f53f1b171
     hing: HX08b861987d462ef9f7405a0257199dc1
+
+team_wakeup2:
+  # VT-683 — the daily wake-up (v2, Fazal-created 2026-07-18). Replaces team_wakeup after the
+  # Meta MARKETING force-conversion: leads with an ACCOUNT FACT ("{{2}} item(s) waiting for your
+  # review" — DB-backed queue count; the VT-683 loop only sends when the queue is non-empty, so
+  # the count is honest by construction) + one Review action — the welcome4 UTILITY playbook.
+  # One of the THREE whitelisted owner templates (OTP Twilio-handled / welcome4 / wakeup2);
+  # everything else rides the 24h session (Fazal ruling 2026-07-18). Button payload: confirm
+  # with Fazal at P3 wiring (any typed reply ALSO opens the session — payload is a convenience,
+  # not a dependency). hing = Roman-script Hindi under Meta language=en.
+  # Send rules (VT-683 P3): session CLOSED ∧ queue non-empty ∧ ≤1/day ∧ owner hours IST.
+  audience: owner
+  agent_selectable: false
+  variables:
+    - owner_name
+    - pending_count
+  languages:
+    en: HXaedb9a8bff0163bd4c162c90cd05bc45
+    hi: HXb2dd5579ea46c2715397f2e274ec533c
+    hing: HXd2bfed18f25eb8c2319ccca9b22f5d35
 
 onboarding_confirm_yesno:
   # VT-479: an INTERACTIVE quick-reply Content object (twilio/quick-reply, Yes/No/Skip buttons) the
