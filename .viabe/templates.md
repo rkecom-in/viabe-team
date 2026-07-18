@@ -21,7 +21,7 @@ the 24h conversation session (queued, idle-paced — VT-683). CC maintains this 
 |---|---|---|
 | **auth OTP** | Twilio Verify (no content SID) | login/verification |
 | **`team_welcome4`** | en `HXc8188616…` · hi `HXd8a8d5…` · hing `HX7097590ccf0e901d893f78d9a9224e92` (Meta approval pending) | account-created + Complete Setup button |
-| **`team_wakeup2`** | en `HXaedb9a8bff0163bd4c162c90cd05bc45` · hi `HXb2dd5579ea46c2715397f2e274ec533c` · hing `HXd2bfed18f25eb8c2319ccca9b22f5d35` | daily wake-up v2 — "{{2}} item(s) waiting for your review" + Review button; opens the session + drains the queue (VT-683 P3). Vars: owner_name, pending_count |
+| **`team_wakeup2`** | en `HXaedb9a8bff0163bd4c162c90cd05bc45` · hi `HXb2dd5579ea46c2715397f2e274ec533c` · hing `HXd2bfed18f25eb8c2319ccca9b22f5d35` — **Meta APPROVED 2026-07-18** (Fazal-confirmed; category verify pending CC ask) | daily wake-up v2 — "{{2}} item(s) waiting for your review" + Review button; opens the session + drains the queue (VT-683 P3). Vars: owner_name, pending_count |
 
 ### UNDER RETIREMENT REVIEW (registered, still have live callers — migrate into the session per VT-683)
 
