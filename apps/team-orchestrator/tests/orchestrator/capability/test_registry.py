@@ -161,3 +161,71 @@ def test_live_registry_all_valid():
     keys = frozenset(cap._ACTIVATION_KEYS)
     for spec in cap.CAPABILITY_REGISTRY.values():
         cap._validate_spec(spec, verifiers=cap.VERIFIER_REGISTRY, activation_keys=keys)
+
+
+# ── VT-681 phase 2 — resolve_for (per-tenant tri-state join) ──────────────────
+
+
+def test_resolve_for_disabled_short_circuits(monkeypatch):
+    r = cap.resolve_for("marketing.paid_ad_boost", "t-1", env="dev", conn=object())
+    assert r.available is False
+    assert r.mode == "disabled"
+    assert "decline honestly" in r.reasons[0]
+
+
+def test_resolve_for_env_gate():
+    r = cap.resolve_for("sales_recovery.winback_send", "t-1", env="staging", conn=object())
+    assert r.available is False
+    assert "env" in r.reasons[0]
+
+
+def _stub_gate(monkeypatch, eligible: bool):
+    import orchestrator.agents.onboarding_gate as og
+
+    monkeypatch.setattr(og, "is_agent_eligible", lambda tid, agent, *, conn: eligible)
+
+
+def test_resolve_for_activation_bar_unmet(monkeypatch):
+    _stub_gate(monkeypatch, False)
+    r = cap.resolve_for("sales_recovery.winback_send", "t-1", env="dev", conn=object())
+    assert r.available is False
+    assert r.reasons == ("activation bar unmet: 'sales_recovery'",)
+
+
+def test_resolve_for_activation_error_fails_closed(monkeypatch):
+    import orchestrator.agents.onboarding_gate as og
+
+    def _boom(tid, agent, *, conn):
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(og, "is_agent_eligible", _boom)
+    r = cap.resolve_for("sales_recovery.winback_send", "t-1", env="dev", conn=object())
+    assert r.available is False
+    assert "fail-closed" in r.reasons[0]
+
+
+def test_resolve_for_available_carries_full_reason_trail(monkeypatch):
+    """The soft-open entitlement + absent freeze subsystem are VISIBLE reasons on an available
+    capability — the named honesty notes, never silently laundered as 'resolved'."""
+    _stub_gate(monkeypatch, True)
+    r = cap.resolve_for("sales_recovery.winback_send", "t-1", env="dev", conn=object())
+    assert r.available is True
+    joined = " | ".join(r.reasons)
+    assert "activation bar met" in joined
+    assert "entitlement" in joined            # soft-open or not-resolvable — either way visible
+    assert "freeze/kill" in joined
+
+
+def test_resolve_for_free_capability_no_prereq_no_module():
+    r = cap.resolve_for("finance.advice", "t-1", env="dev", conn=object())
+    assert r.available is True
+    assert any("free capability" in x for x in r.reasons)
+
+
+def test_resolve_all_for_covers_every_declared_key(monkeypatch):
+    _stub_gate(monkeypatch, True)
+    resolved = cap.resolve_all_for("t-1", env="dev", conn=object())
+    assert sorted(r.key for r in resolved) == cap.all_capabilities()
+    by_key = {r.key: r for r in resolved}
+    assert by_key["marketing.paid_ad_boost"].available is False
+    assert by_key["finance.advice"].available is True

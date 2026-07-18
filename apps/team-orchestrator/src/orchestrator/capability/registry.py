@@ -402,6 +402,108 @@ def mode_of(key: str) -> CapabilityMode:
     return resolve(key).mode
 
 
+# ── Per-tenant resolution (VT-681 phase 2) ───────────────────────────────────
+
+# capability lane → agent_framework module name, for the entitlement join. Lanes with no
+# registered module are FREE capabilities (no SKU). Kept explicit — deriving it from
+# prerequisites keys would silently break when either registry renames.
+_LANE_MODULE: dict[str, str] = {
+    "sales_recovery": "sales_recovery",
+    "integration": "integration_tools",
+    "onboarding_conductor": "onboarding_tools",
+}
+
+
+@dataclass(frozen=True)
+class ResolvedCapability:
+    """One capability's truth FOR ONE TENANT in ONE environment — what the promise seam
+    (phase 3) reads before the Manager may promise anything. ``reasons`` is the full audit
+    trail of the resolution (including non-blocking visibility notes), never just the blocker."""
+
+    key: str
+    mode: CapabilityMode
+    available: bool
+    reasons: tuple[str, ...]
+
+
+def resolve_for(key: str, tenant_id: str, *, env: str, conn: Any) -> ResolvedCapability:
+    """The per-tenant tri-state join: declared mode × environment × activation bar ×
+    entitlement. Fail-closed at every uncertain edge (an error reads as unavailable, with the
+    reason recorded). ``conn`` is the caller's RLS-scoped tenant connection — the SAME contract
+    ``onboarding_gate.is_agent_eligible`` requires; resolution never opens its own.
+
+    HONESTY NOTES (named, deliberate — never silently laundered):
+      - Entitlement is SOFT-OPEN until billing wires (D-ENT): ``check_entitlement`` structurally
+        returns True today. resolve_for still CALLS it (so the join is already live the day it
+        can say no) and ALWAYS records the soft-open status in ``reasons``.
+      - There is NO freeze/kill-switch subsystem in the tree today (audited 2026-07-18); when one
+        exists it joins here. Recorded as a reason, not silently omitted.
+    """
+    spec = resolve(key)
+    reasons: list[str] = []
+
+    if spec.mode == "disabled":
+        return ResolvedCapability(
+            key=key, mode=spec.mode, available=False,
+            reasons=("mode=disabled — declared unsupported; decline honestly (D2 class)",),
+        )
+    if env not in spec.environments:
+        return ResolvedCapability(
+            key=key, mode=spec.mode, available=False,
+            reasons=(f"not available in env {env!r} (declared: {sorted(spec.environments)})",),
+        )
+
+    if spec.prerequisites is not None:
+        try:
+            from orchestrator.agents.onboarding_gate import is_agent_eligible  # lazy: DB deps
+
+            if not is_agent_eligible(tenant_id, spec.prerequisites, conn=conn):
+                return ResolvedCapability(
+                    key=key, mode=spec.mode, available=False,
+                    reasons=(f"activation bar unmet: {spec.prerequisites!r}",),
+                )
+            reasons.append(f"activation bar met: {spec.prerequisites!r}")
+        except Exception as exc:  # noqa: BLE001 — fail-closed: an unreadable bar is an unmet bar
+            return ResolvedCapability(
+                key=key, mode=spec.mode, available=False,
+                reasons=(f"activation check failed ({type(exc).__name__}) — fail-closed",),
+            )
+
+    module_name = _LANE_MODULE.get(spec.lane)
+    if module_name is None:
+        reasons.append("entitlement: free capability (no module SKU)")
+    else:
+        try:
+            from orchestrator.agent_framework.entitlement import check_entitlement  # lazy
+            from orchestrator.agent_framework.registration import get_registered  # lazy
+
+            manifest = get_registered(module_name).manifest
+            if not check_entitlement(manifest, tenant_id):
+                return ResolvedCapability(
+                    key=key, mode=spec.mode, available=False,
+                    reasons=(*reasons, f"entitlement denied for module {module_name!r}"),
+                )
+            reasons.append(
+                f"entitlement ok for module {module_name!r} "
+                "(SOFT-OPEN until billing wires — D-ENT, never blocks today)"
+            )
+        except Exception as exc:  # noqa: BLE001 — an unregistered module is a FREE join, visibly
+            reasons.append(
+                f"entitlement: module {module_name!r} not resolvable "
+                f"({type(exc).__name__}) — treated free, not blocked"
+            )
+
+    reasons.append("freeze/kill: no such subsystem exists yet (joins here when built)")
+    return ResolvedCapability(
+        key=key, mode=spec.mode, available=True, reasons=tuple(reasons),
+    )
+
+
+def resolve_all_for(tenant_id: str, *, env: str, conn: Any) -> list[ResolvedCapability]:
+    """Every declared capability resolved for one tenant — the promise seam's one-call read."""
+    return [resolve_for(k, tenant_id, env=env, conn=conn) for k in all_capabilities()]
+
+
 def requires_policy_rail(key: str) -> bool:
     return resolve(key).policy_rail
 
@@ -431,10 +533,13 @@ __all__ = [
     "VERIFIER_REGISTRY",
     "Verifier",
     "VerifierResult",
+    "ResolvedCapability",
     "all_capabilities",
     "is_available",
     "mode_of",
     "requires_policy_rail",
     "resolve",
+    "resolve_all_for",
+    "resolve_for",
     "verify",
 ]
