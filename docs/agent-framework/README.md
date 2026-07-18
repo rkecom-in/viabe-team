@@ -140,10 +140,12 @@ assert_conforms(MyModule())        # raises on the first violation
 # or, for a non-raising report (CI/diffing): check_module_conformance(MyModule()) -> ConformanceReport
 ```
 
-The 8 checks: `has_manifest`, `manifest_valid`, `capabilities_legal_for_roles` (gated ⇒ EXECUTOR),
+The 9 checks: `has_manifest`, `manifest_valid`, `capabilities_legal_for_roles` (gated ⇒ EXECUTOR),
 `tool_surface_safe` (deny-list), `role_methods_present`, `proposer_gate_readonly` (a proposer's facade
-raises on every gated call), `gated_capabilities_serviced` (no orphan gated cap), `name_registerable`.
-Verifying **any** module — including a third party's — is "run this suite." Test your business logic with
+raises on every gated call), `gated_capabilities_serviced` (no orphan gated cap), `name_registerable`,
+`required_tools_reachable` (VT-669 sufficiency: every manifest-required tool exists in the catalog).
+Verifying a **trusted, reviewed** module is "run this suite" — conformance proves the safety SHAPE,
+not competence, and is NOT a substitute for review or sandboxing of untrusted code. Test business logic with
 **injected fakes** (no DB, no keys) — see the reference plugin's `reader=` and the tutorial's test.
 
 ---

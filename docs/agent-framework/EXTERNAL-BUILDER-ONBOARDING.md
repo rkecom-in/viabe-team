@@ -241,9 +241,11 @@ follows the identical shape). The three invariants every tool there documents, w
 also hold:
 
 1. **Resolve-first, model-untrusted** (§2.5).
-2. **Own RLS scope, never a passed connection** — a DB-touching tool opens its **own**
-   `tenant_connection(resolved_tenant)` (or delegates to a reader that does); it never accepts a
-   `conn` argument from a caller and never touches a raw/BYPASSRLS pool.
+2. **Own RLS scope, never a passed connection** — a DB-touching tool delegates to a wrapper
+   (`orchestrator.db.wrappers`) which opens its **own** `tenant_connection(resolved_tenant)`
+   internally; your tool never accepts a `conn` argument from a caller, never touches a
+   raw/BYPASSRLS pool, and (per §7.3, which wins over anything else in this doc) never opens
+   `tenant_connection` directly in new code.
 3. **CL-390 PII-safe** — a tool's return carries counts / IDs / statuses / the owner's own business
    fields only. **Never** a customer name, phone, or email. (A GSTR-readiness snapshot has no
    reason to ever touch customer PII in the first place — it reads aggregate ledger shape and the
@@ -259,11 +261,12 @@ specific, small list of tenant-scoped hot tables (`customers`, `campaigns`, `pen
 `orchestrator.db.wrappers` (e.g. `CustomersWrapper`), never raw `conn.execute("... FROM customers
 ...")`.
 
-**Important nuance for your compliance work:** `customer_ledger_entries` (the sales ledger table)
-is **not** on that gated list. Direct SQL against it through `tenant_connection(...)` is the
-existing, sanctioned pattern — see `orchestrator/agent/accounting_lane.py`'s
-`_read_ledger_summary` and `compliance_tools_module._compute_gstr_readiness`, which does the same
-thing. Don't invent a wrapper class for it; follow the accounting-lane precedent.
+**Important nuance — read together with §7.3 (wrappers-first, which WINS):** the shipped
+skeleton reads `customer_ledger_entries` with direct SQL because no wrapper existed at kit time —
+that is a NAMED, TEMPORARY exception carried by the skeleton itself (a `CustomersWrapper`-style
+ledger read is the follow-up; when it lands, the skeleton switches). It is NOT a pattern for you
+to copy: any NEW read you add goes through `orchestrator.db.wrappers`, and if the wrapper you
+need doesn't exist, you request it instead of inlining SQL
 
 ### 3.4 LLM calls — only through the resolver, never a raw client
 
