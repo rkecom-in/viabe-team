@@ -41,6 +41,7 @@ analog).
 from __future__ import annotations
 
 import logging
+import os
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import UUID, uuid4
@@ -71,9 +72,24 @@ IMPLICIT_ATTRIBUTION_SWEEP_CRON = "0 23 * * *"
 # VT-439: daily 01:00 UTC (06:30 IST) — Razorpay orphan-DETECT backstop. Runs after the
 # attribution_close and outbox batches; off-peak billing window. DETECT-ONLY (no cancel/charge).
 RECONCILE_SUBSCRIPTION_ORPHANS_CRON = "0 1 * * *"
+# VT-679 (§7A proactive planning): monthly plan-refresh — 1st of month 03:30 UTC = 09:00 IST
+# (matches monthly_impact's own 09:00 IST slot on a different minute).
+PLAN_REFRESH_CRON = "30 3 1 * *"
+# VT-679: daily proactive-initiative pick — 05:00 UTC = 10:30 IST, inside owner waking hours BY
+# CRON PLACEMENT. See ``_assert_ist_daytime`` for the belt-and-suspenders runtime guard.
+DAILY_INITIATIVE_CRON = "0 5 * * *"
 
 
 SHELL_STATUS = "skipped_schema_pending"
+
+# VT-679 — proactive planning is fully OFF by default; both new scheduled handlers below no-op
+# fast (before any DB scan) when this is unset. Mirrors the house boolean-flag convention
+# (TEAM_TWILIO_MOCK_MODE / TEAM_SANDBOX_GST_MOCK_MODE / TEAM_RAZORPAY_LIVE — exact string "1").
+TEAM_PROACTIVE_PLANNING_FLAG = "TEAM_PROACTIVE_PLANNING"
+
+
+def _proactive_planning_enabled() -> bool:
+    return os.environ.get(TEAM_PROACTIVE_PLANNING_FLAG, "0") == "1"
 
 
 # ---------------------------------------------------------------------------
@@ -1025,6 +1041,109 @@ def run_approval_timeout_sweep_body(now: datetime | None = None) -> list[UUID]:
 
 
 # ---------------------------------------------------------------------------
+# VT-679 (§7A) — proactive planning: monthly plan-refresh + daily initiative
+# ---------------------------------------------------------------------------
+# Two triggers, both gated behind TEAM_PROACTIVE_PLANNING (default OFF — the handlers below no-op
+# fast, before any DB scan, when unset; dev turns it ON, prod stays unset/Fazal per the VT-101
+# rollout pattern). Shared workspace scan: active paid/trial tenants only (an onboarding/lapsed/
+# cancelled tenant has no business reason for either a plan refresh or a daily initiative).
+
+
+def _scan_active_paid_or_trial_tenants() -> list[UUID]:
+    """The shared workspace scan for BOTH proactive-planning triggers below."""
+    from orchestrator.graph import get_pool
+    from psycopg.rows import dict_row
+
+    with get_pool().connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+        cur.execute("SELECT id FROM tenants WHERE phase = ANY(%s)", (["trial", "paid_active"],))
+        return [row["id"] for row in cur.fetchall()]
+
+
+def plan_refresh_scheduled(scheduled_time: datetime, actual_time: datetime) -> None:
+    """DBOS scheduled handler — fires 1st of month 09:00 IST / 03:30 UTC (VT-679 D1.1). Behind
+    ``TEAM_PROACTIVE_PLANNING`` (no-op fast when unset, before any DB scan). NO LLM in THIS
+    handler — the LLM call lives inside the per-tenant ``refresh_business_plan_workflow`` child
+    workflow it starts."""
+    if not _proactive_planning_enabled():
+        return
+    run_plan_refresh_body(now=actual_time)
+
+
+def run_plan_refresh_body(now: datetime | None = None) -> list[UUID]:
+    """Workspace scan → per-tenant loop → per-tenant ``refresh_business_plan_workflow`` child-start
+    (VT-679 D1.1). Per-tenant try/except: one tenant's failure never halts the sweep (mirrors
+    ``monthly_impact``'s own posture). Keyed on ``monthly_workflow_id(tenant, YYYY-MM)`` so a
+    duplicate cron fire within the same month cannot double-start the SAME tenant's refresh
+    (``DBOS.start_workflow`` no-ops on a known workflow id). Returns the tenant ids the refresh was
+    STARTED for (the child workflow runs durably on its own — this does not wait for it)."""
+    from dbos import DBOS, SetWorkflowID
+
+    from orchestrator.business_plan.generator import refresh_business_plan_workflow
+
+    now = now or datetime.now(timezone.utc)
+    year_month = now.strftime("%Y-%m")
+    started: list[UUID] = []
+    for tenant_id in _scan_active_paid_or_trial_tenants():
+        try:
+            with SetWorkflowID(monthly_workflow_id(tenant_id, year_month)):
+                DBOS.start_workflow(refresh_business_plan_workflow, str(tenant_id))
+            started.append(tenant_id)
+        except Exception:  # noqa: BLE001 — one tenant's failure must not halt the sweep
+            logger.exception(
+                "VT-679 plan_refresh: failed to start refresh for tenant=%s", tenant_id
+            )
+    return started
+
+
+# D1.2 belt: a mis-set cron must never fire the daily initiative outside owner waking hours. The
+# cron PLACEMENT (05:00 UTC = 10:30 IST) already guarantees this; this is a defensive runtime
+# assert, not the primary control (scout confirmed no runtime quiet-hours helper exists anywhere
+# in the codebase — building a general one is out of scope for this row).
+_DAILY_INITIATIVE_IST_HOUR_MIN = 10
+_DAILY_INITIATIVE_IST_HOUR_MAX = 19
+_IST_OFFSET = timedelta(hours=5, minutes=30)
+
+
+def _assert_ist_daytime(now: datetime) -> None:
+    ist_hour = (now.astimezone(timezone.utc) + _IST_OFFSET).hour
+    if not (_DAILY_INITIATIVE_IST_HOUR_MIN <= ist_hour < _DAILY_INITIATIVE_IST_HOUR_MAX):
+        raise RuntimeError(
+            "VT-679 daily_initiative_scheduled: fired outside the 10:00-19:00 IST belt "
+            f"(IST hour={ist_hour}) — refusing to run (cron mis-configuration guard)"
+        )
+
+
+def daily_initiative_scheduled(scheduled_time: datetime, actual_time: datetime) -> None:
+    """DBOS scheduled handler — fires daily 10:30 IST / 05:00 UTC (VT-679 D1.2). Behind
+    ``TEAM_PROACTIVE_PLANNING`` (no-op fast when unset, before any DB scan or the IST belt check).
+    NO LLM — the daily-initiative selection is fully deterministic (Pillar 1)."""
+    if not _proactive_planning_enabled():
+        return
+    _assert_ist_daytime(actual_time)
+    run_daily_initiative_body(now=actual_time)
+
+
+def run_daily_initiative_body(now: datetime | None = None) -> list[dict[str, Any]]:
+    """Workspace scan → per-tenant deterministic selection + dispatch (VT-679 D2/D3/D4, the real
+    logic lives in ``business_plan.daily_initiative.dispatch_daily_initiative`` — this is just the
+    trigger + sweep). Per-tenant try/except: one tenant's failure never halts the sweep. Returns
+    the per-tenant dispatch results for tenants that actually got something dispatched — most days
+    most tenants dispatch nothing (back-pressure skip / no plan / no accepted item left)."""
+    from orchestrator.business_plan.daily_initiative import dispatch_daily_initiative
+
+    now = now or datetime.now(timezone.utc)
+    results: list[dict[str, Any]] = []
+    for tenant_id in _scan_active_paid_or_trial_tenants():
+        try:
+            result = dispatch_daily_initiative(tenant_id, now=now)
+            if result is not None:
+                results.append(result)
+        except Exception:  # noqa: BLE001 — one tenant's failure must not halt the sweep
+            logger.exception("VT-679 daily_initiative: dispatch failed tenant=%s", tenant_id)
+    return results
+
+
+# ---------------------------------------------------------------------------
 # Deterministic workflow_id derivation (DBOS exactly-once short-circuit)
 # ---------------------------------------------------------------------------
 
@@ -1162,6 +1281,11 @@ def register_scheduled_triggers() -> None:
     # VT-620: hourly GC of leaked convo-harness test tenants (offset 15m from the orphan reaper).
     # Pure SQL FK-safe delete, NO LLM, STRICT convo-harness-% scope. EXTENDS this surface.
     _register_scheduled(TEST_TENANT_REAPER_CRON, test_tenant_reaper_scheduled)
+    # VT-679 (§7A proactive planning): monthly plan-refresh + daily initiative pick. Both
+    # unconditionally REGISTERED here (cron infrastructure is always-on); TEAM_PROACTIVE_PLANNING
+    # gates the HANDLER BODY (no-op fast when unset) — EXTENDS this surface, NOT parallel pollers.
+    _register_scheduled(PLAN_REFRESH_CRON, plan_refresh_scheduled)
+    _register_scheduled(DAILY_INITIATIVE_CRON, daily_initiative_scheduled)
     _registered = True
 
 
@@ -1213,6 +1337,13 @@ __all__ = [
     "run_attribution_close_body",
     "run_monthly_impact_body",
     "run_weekly_cadence_body",
+    "TEAM_PROACTIVE_PLANNING_FLAG",
+    "PLAN_REFRESH_CRON",
+    "DAILY_INITIATIVE_CRON",
+    "plan_refresh_scheduled",
+    "run_plan_refresh_body",
+    "daily_initiative_scheduled",
+    "run_daily_initiative_body",
     "weekly_cadence_scheduled",
     "weekly_workflow_id",
 ]

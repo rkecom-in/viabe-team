@@ -416,8 +416,179 @@ def generate_business_plan_workflow(tenant_id: str) -> dict[str, Any]:
     return {"version": version}
 
 
+# --- VT-679 D1.1 — the monthly plan-refresh workflow --------------------------------
+
+
+REFRESH_GENERATED_BY = "gap4_generator_refresh"
+
+_DELTA_UPDATED = {"en": "Updated", "hi": "अपडेट"}
+_DELTA_STEPS_ADDED = {"en": "{n} new step(s) added.", "hi": "{n} नए कदम जोड़े गए।"}
+_DELTA_STEPS_REMOVED = {"en": "{n} step(s) removed.", "hi": "{n} कदम हटाए गए।"}
+_DELTA_GENERIC = {
+    "en": "Your business plan has been refreshed based on your latest business data.",
+    "hi": "आपका बिज़नेस प्लान आपके नए डेटा के आधार पर अपडेट कर दिया गया है।",
+}
+_DELTA_HINT = {"en": "Reply PLAN for the full plan.", "hi": "पूरा प्लान देखने के लिए PLAN लिखकर भेजें।"}
+_MAX_DELTA_METRICS = 3
+
+
+def _headline_metric_diffs(
+    old_metrics: dict[str, Any], new_metrics: dict[str, Any]
+) -> list[tuple[str, Any, Any]]:
+    """Which grounded ``headline_metrics`` keys actually changed value (added/removed/changed) —
+    LITERAL facts (copied verbatim from the fact bundle per the generator prompt), never LLM prose,
+    so this diff is honest + stable across a whole-plan regenerate even though roadmap item_ids and
+    objective text are NOT stable (fresh uuid4s + fresh LLM wording every regeneration)."""
+    diffs: list[tuple[str, Any, Any]] = []
+    for key in sorted(set(old_metrics) | set(new_metrics)):
+        old_v = old_metrics.get(key)
+        new_v = new_metrics.get(key)
+        if old_v != new_v:
+            diffs.append((key, old_v, new_v))
+    return diffs
+
+
+def compose_refresh_delta_summary(
+    prior_summary: dict[str, Any],
+    prior_roadmap: list[dict[str, Any]],
+    new_summary: dict[str, Any],
+    new_roadmap: list[dict[str, Any]],
+    locale: str,
+) -> str:
+    """The ONE-LINE delta-summary message a monthly refresh sends (VT-679 resolved open point —
+    never the full multi-part ``delivery.deliver_plan`` burst; a monthly full re-burst reads as
+    spam). Deterministic (Pillar 1): diffs the grounded ``headline_metrics`` (stable, literal facts)
+    + the roadmap item COUNT (item_ids are NOT stable across a whole-plan regenerate, so a
+    per-item diff would be meaningless noise). Falls back to an honest generic line when nothing
+    detectably changed. Always ends with the "reply PLAN for the full plan" hint — the full plan
+    stays fetchable, this is just not pushed unprompted every month."""
+    lang = locale if locale in ("en", "hi") else "en"
+    old_metrics = dict((prior_summary or {}).get("headline_metrics") or {})
+    new_metrics = dict((new_summary or {}).get("headline_metrics") or {})
+    diffs = _headline_metric_diffs(old_metrics, new_metrics)
+    item_delta = len(new_roadmap or []) - len(prior_roadmap or [])
+
+    lines: list[str] = []
+    if diffs:
+        formatted = ", ".join(
+            f"{key} {old} -> {new}" for key, old, new in diffs[:_MAX_DELTA_METRICS]
+        )
+        lines.append(f"{_DELTA_UPDATED[lang]}: {formatted}.")
+    if item_delta > 0:
+        lines.append(_DELTA_STEPS_ADDED[lang].format(n=item_delta))
+    elif item_delta < 0:
+        lines.append(_DELTA_STEPS_REMOVED[lang].format(n=abs(item_delta)))
+    if not lines:
+        lines.append(_DELTA_GENERIC[lang])
+    lines.append(_DELTA_HINT[lang])
+    return " ".join(lines)
+
+
+def _deliver_refresh_delta(
+    tenant_id: str, prior: store.BusinessPlan, new_summary: dict[str, Any], new_roadmap: list[dict[str, Any]]
+) -> None:
+    """Send the delta-summary line to the owner (best-effort; the caller wraps this too)."""
+    from orchestrator.owner_surface.owner_locale import resolve_owner_locale
+    from orchestrator.utils.twilio_send import get_tenant_whatsapp_number, send_freeform_message
+
+    recipient = get_tenant_whatsapp_number(UUID(str(tenant_id)))
+    if not recipient:
+        logger.warning(
+            "VT-679 plan refresh: tenant=%s has no whatsapp_number — skipping delta-summary send",
+            tenant_id,
+        )
+        return
+    locale = resolve_owner_locale(tenant_id)
+    body = compose_refresh_delta_summary(
+        prior.summary, prior.roadmap, new_summary, new_roadmap, locale
+    )
+    send_freeform_message(body, recipient, tenant_id=tenant_id, surface="manager")
+
+
+@DBOS.workflow()
+def refresh_business_plan_workflow(tenant_id: str) -> dict[str, Any]:
+    """VT-679 D1.1 — the monthly plan-refresh spine. BYPASSES ``generate_business_plan_workflow``'s
+    ``plan_exists`` skip (that skip is the ONE-SHOT onboarding rail — VT-368's own docstring calls a
+    "whole-plan regenerate" the "explicit refresh"; this workflow IS that explicit refresh) and
+    re-grounds + regenerates a brand-new roadmap from the SAME grounding + generate + validate
+    pipeline ``generate_business_plan_workflow`` uses. Delivery is the ONE-LINE delta-summary
+    (never the full paced burst) — see :func:`compose_refresh_delta_summary`.
+
+    No-op (skip, never an error) when the tenant has no EXISTING plan yet (a refresh re-grounds an
+    existing plan; first creation is onboarding's job) or no confirmed grounding facts — mirrors
+    ``generate_business_plan_workflow``'s own gates. Best-effort throughout: a delivery failure
+    never unwinds the already-persisted version."""
+    run_id = uuid4()
+
+    prior = store.get_active_plan(tenant_id)
+    if prior is None:
+        obs_log.log_event(
+            event_type="business_plan_refresh_skipped",
+            run_id=run_id,
+            tenant_id=tenant_id,
+            severity="info",
+            component="business_plan",
+            payload={"reason": "no_existing_plan"},
+        )
+        return {"skipped": "no_existing_plan"}
+
+    grounding = _gather_grounding(tenant_id)
+    if not grounding.confirmed_profile or not grounding.bundle:
+        obs_log.log_event(
+            event_type="business_plan_refresh_skipped",
+            run_id=run_id,
+            tenant_id=tenant_id,
+            severity="info",
+            component="business_plan",
+            payload={"reason": "no_profile"},
+        )
+        return {"skipped": "no_profile"}
+
+    # VT-374 (plan_generate, generate_validate) seam — same hold points generation uses; a paused
+    # tenant must not get a proactive refresh either.
+    _hold_if_paused(tenant_id, "plan_generate")
+    result = _generate_and_validate(tenant_id, grounding)
+    version = store.write_new_version(
+        tenant_id,
+        summary=result["summary"],
+        roadmap=result["roadmap"],
+        fact_bundle=grounding.bundle,
+        generated_by=REFRESH_GENERATED_BY,
+        model_id=result["model_id"],
+    )
+
+    try:
+        _hold_if_paused(tenant_id, "plan_deliver")
+        _deliver_refresh_delta(tenant_id, prior, result["summary"], result["roadmap"])
+    except Exception:  # noqa: BLE001 — delivery is best-effort; the version is already persisted
+        logger.exception(
+            "business_plan refresh delta-summary delivery failed (best-effort) tenant=%s "
+            "version=%s",
+            tenant_id,
+            version,
+        )
+
+    obs_log.log_event(
+        event_type="business_plan_refreshed",
+        run_id=run_id,
+        tenant_id=tenant_id,
+        severity="info",
+        component="business_plan",
+        payload={
+            "version": version,
+            "prior_version": prior.version,
+            "model_id": result["model_id"],
+            "item_count": len(result["roadmap"]),
+        },
+    )
+    return {"version": version, "prior_version": prior.version}
+
+
 __all__ = [
     "GENERATED_BY",
+    "REFRESH_GENERATED_BY",
     "Grounding",
+    "compose_refresh_delta_summary",
     "generate_business_plan_workflow",
+    "refresh_business_plan_workflow",
 ]
