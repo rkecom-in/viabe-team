@@ -3,7 +3,7 @@
 > **Maintenance rule (CC, standing):** update at every phase transition (land/push/gate-result),
 > same moment as the Cowork signal. This is the OBJECTIVE-level view; per-row detail lives in
 > `.viabe/sprint/VT-*.md`. Reconcile against `git log` before trusting (Rule #14).
-> Last updated: **2026-07-18 ~05:10 IST** · dev HEAD at update: **b121e49** (VT-677 full build landed).
+> Last updated: **2026-07-18 ~10:15 IST** · dev HEAD at update: **a57514b** (VT-671 wake-on-signal proven).
 
 ## ✅ ACHIEVED (proven, on origin/dev)
 
@@ -44,24 +44,24 @@
 - [x] Brain context line + ONE-sentence ambiguous-turn fallback + campaign-conflation guard.
 
 ## 🔄 IN FLIGHT (CC)
-- [ ] **VT-671** now TOP (latency tail): the ×3 mapped its exact steps — j01 explicit-send-confirm
-      leg + one late step each in j02/j06/j08 (j07 2of3). Replies land late; content passes.
+- [x] **VT-671 wait-loop half DONE + PROVEN** (a57514b): wake-on-signal (DBOS.recv/send) — the
+      send-confirm leg 3/3 in-window (was 3/3 timeout); first-ever full j01 pass. Bonus: the e2e
+      told-the-owner invariant added + a transcript-dedup mock defect fixed.
+- [ ] **VT-671 residual re-scoped**: SR plan-DRAFT turn duration (raw LLM chain) + the
+      j02/j06/j08 late-step class. Measure-first; levers = prompt diet / chain count / tier / #84.
 
 ## ⏳ PENDING — CC queue (O-drive order, Cowork 220837Z)
-- [ ] **O5 gate**: ×3 verdict → tier_rescore → VT-677 close (push freeze lifts).
 - [ ] **O4**: VT-679 §7A + VT-680 §7C design briefs → ratify → build (×3 after each brain-touch).
 - [ ] **O6**: dirty-tenant fixture as a `--dirty` harness seed mode (fold-not-roster take sent).
 - [ ] **VT-681** (O10-1 closing row, L/4-phase): per-tenant capability registry enforced at the
       promise — rostered; slots after O2/O6/O5 unless Fazal pulls forward.
-- [ ] **VT-671** latency/variance tail · **#84** batch-API (ride gaps).
+- [ ] **#84** batch-API (ride gaps) · VT-671 residual (see In-Flight).
 - [ ] VT-668 follow-up cosmetic (redrive-actor churn one-liner, next manager-loop touch).
 
 ## 🧍 PENDING — FAZAL (blocking their rows)
 - [ ] **VT-676 live canary** — WhatsApp "Send me my customer list" from your phone → file opens +
       URL dies ≤300s. (Sealed Twilio token = the deployed service must originate; your message is
       the trigger.) Closes VT-676.
-- [ ] **VT-668 live re-arm** — "Run my win-back campaign again" → approve → fixed consumer executes
-      → true-count confirm. Closes VT-668's live proof.
 - [ ] **Meta hi-Latn template variants** — register with Meta (D1); EN fallback live until approved.
 - [ ] **Track B (#117)** — live hands-on Manager drive (needs you at the wheel).
 - [ ] **VT-678 decision** — co-present ask one-turn routing (rostered, held on your call).
