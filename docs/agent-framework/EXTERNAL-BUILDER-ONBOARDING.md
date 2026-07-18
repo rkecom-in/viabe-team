@@ -1,9 +1,13 @@
-# Onboarding kit for Codex — building Financial-Compliance agents on the Viabe Team framework
+# External-builder onboarding — building specialised agents on the Viabe Team framework
 
-**Audience: you are Codex, an external AI coding agent (OpenAI) with zero prior context on this
-repository.** This document is self-contained. Read it top to bottom before writing code. It tells
-you what you are building, the exact contract you must satisfy, the rules that keep your code safe
-to merge, what data actually exists for you to read, the gates your PR must pass, and the mechanics
+**Audience: any EXTERNAL implementer with zero prior context on this repository** — an AI coding
+agent (Codex, Claude, etc.) or a human contractor. This document is self-contained.
+Sections 2, 3, 5 and 6 (the contract, tool rules, acceptance gates, workflow) are
+ENGAGEMENT-AGNOSTIC — they apply to every module ever built on this framework, whoever builds
+it. Sections 1 and 4 describe the CURRENT engagement (the Financial-Compliance module) and get
+replaced per assignment. Read it top to bottom before writing code. It tells you what
+you are building, the exact contract you must satisfy, the rules that keep your code safe to
+merge, what data actually exists for you to read, the gates your PR must pass, and the mechanics
 of how work moves through this repo.
 
 Everything referenced here lives under `apps/team-orchestrator/src/orchestrator/` unless stated
@@ -23,7 +27,7 @@ Companion docs, in case you need more depth than this file gives you:
 
 ---
 
-## 1. What you are building
+## 1. What you are building *(current engagement — replaced per assignment)*
 
 You are building **independent specialised agents as FRAMEWORK MODULES** — small, self-contained
 classes that plug into `orchestrator.agent_framework`, the platform's modular agent-integration
@@ -284,7 +288,7 @@ prompt caching).
 
 ---
 
-## 4. Data available today for GSTR readiness
+## 4. Data available today for GSTR readiness *(current engagement — replaced per assignment)*
 
 This is what actually exists for you to read. Do not invent fields; if the data isn't here, your
 readiness check should honestly report its absence, not guess.
