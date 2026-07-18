@@ -189,6 +189,77 @@ def test_compose_unknown_locale_falls_back_to_en() -> None:
     ) == to.compose_task_outcome_message("completed_with_effect", "x", locale="en")
 
 
+# ----------------------------- VT-680 (§7C online impact judge) — the quality note --------
+def test_compose_met_verdict_is_byte_identical_to_no_verdict() -> None:
+    """'met' must never change the message — the honest note is scoped to partial/unmet only."""
+    for outcome in ("completed_with_effect", "completed_no_action"):
+        base = to.compose_task_outcome_message(outcome, "handle it", locale="en")
+        met = to.compose_task_outcome_message(outcome, "handle it", locale="en", impact_verdict="met")
+        assert base == met
+
+
+def test_compose_unjudged_verdict_is_byte_identical_to_no_verdict() -> None:
+    """'unjudged' (flag off, or the judge failed) must ALSO leave the message unchanged — the
+    flag-off / judge-failure no-drift requirement (VT-680 D6)."""
+    for outcome in ("completed_with_effect", "completed_no_action"):
+        base = to.compose_task_outcome_message(outcome, "handle it", locale="en")
+        unjudged = to.compose_task_outcome_message(
+            outcome, "handle it", locale="en", impact_verdict="unjudged"
+        )
+        assert base == unjudged
+
+
+def test_compose_partial_verdict_appends_honest_quality_note_en() -> None:
+    body = to.compose_task_outcome_message(
+        "completed_with_effect", "send the winback campaign", locale="en", impact_verdict="partial"
+    )
+    assert "Done" in body and "send the winback campaign" in body
+    assert "take another pass" in body.lower()
+
+
+def test_compose_unmet_verdict_appends_honest_quality_note_completed_no_action_en() -> None:
+    body = to.compose_task_outcome_message(
+        "completed_no_action", "check refund status", locale="en", impact_verdict="unmet"
+    )
+    assert "no action was needed" in body
+    assert "take another pass" in body.lower()
+
+
+def test_compose_partial_verdict_hi() -> None:
+    body = to.compose_task_outcome_message(
+        "completed_with_effect", "रिफंड भेजें", locale="hi", impact_verdict="partial"
+    )
+    assert "हो गया" in body
+    assert "दोबारा कोशिश" in body
+
+
+def test_compose_cancelled_ignores_impact_verdict() -> None:
+    """'cancelled' is a decline — "want me to take another pass?" would be a non-sequitur, so the
+    note is withheld even if a caller erroneously passed one (defense in depth: the real caller,
+    ``_settle_declined_approval``'s notify, never passes one — see workflow.py)."""
+    body = to.compose_task_outcome_message(
+        "cancelled", "20% discount campaign", locale="en", impact_verdict="partial"
+    )
+    assert "declined" in body.lower()
+    assert "take another pass" not in body.lower()
+
+
+def test_compose_escalated_ignores_impact_verdict() -> None:
+    body = to.compose_task_outcome_message(
+        "escalated", "re-engage the lapsed customers", locale="en", impact_verdict="unmet"
+    )
+    assert "couldn't complete" in body.lower()
+    assert "take another pass" not in body.lower()
+
+
+def test_compose_unrecognized_verdict_value_appends_nothing() -> None:
+    """A stray/unexpected verdict string (schema drift) degrades to no note, never a crash."""
+    body = to.compose_task_outcome_message(
+        "completed_with_effect", "handle it", locale="en", impact_verdict="something_else"
+    )
+    assert "take another pass" not in body.lower()
+
+
 # ----------------------------- pure: _extract_objective_text -----------------------------
 def test_extract_objective_text_reads_the_redacted_text() -> None:
     task = {"objective": {"objective": "handle the refund request", "schema_version": 1}}
@@ -271,6 +342,32 @@ def test_notify_completed_with_effect_sends_flips_delivered_and_records_ledger(m
     assert seen["flips"] == [("delivered", ("pending",))]
     assert seen["ledger"] == [("task_outcome_report", "SM_OUT", {"run_id": task_id})]
     assert seen["alerts"] == []
+
+
+def test_notify_threads_impact_verdict_into_composed_body(monkeypatch) -> None:
+    """VT-680 — ``impact_verdict`` passed into the wiring function reaches the composed message."""
+    task = _pending_task("completed_with_effect", "send the winback campaign")
+    seen = _patch(monkeypatch, task=task)
+
+    sent = to.maybe_notify_owner_of_task_outcome(
+        uuid4(), uuid4(), recipient_phone="+919811111111", impact_verdict="partial"
+    )
+
+    assert sent is True
+    assert "take another pass" in seen["body"].lower()
+
+
+def test_notify_no_impact_verdict_is_byte_identical_to_pre_vt680(monkeypatch) -> None:
+    """The default (no ``impact_verdict`` passed) must compose exactly the pre-VT-680 message."""
+    task = _pending_task("completed_with_effect", "send the winback campaign")
+    seen = _patch(monkeypatch, task=task)
+
+    to.maybe_notify_owner_of_task_outcome(uuid4(), uuid4(), recipient_phone="+919811111111")
+
+    assert "take another pass" not in seen["body"].lower()
+    assert seen["body"] == to.compose_task_outcome_message(
+        "completed_with_effect", "send the winback campaign", locale="en"
+    )
 
 
 def test_notify_cancelled_message_class_reads_as_declined(monkeypatch) -> None:
