@@ -21,7 +21,7 @@ the 24h conversation session (queued, idle-paced — VT-683). CC maintains this 
 |---|---|---|
 | **auth OTP** | Twilio Verify (no content SID) | login/verification |
 | **`team_welcome4`** | en `HXc8188616…` · hi `HXd8a8d5…` · hing `HX7097590ccf0e901d893f78d9a9224e92` (Meta approval pending) | account-created + Complete Setup button |
-| **`team_wakeup`** | en `HXd6c8cb1300e1d1aaf033fb449f138a7e` · hi `HX26d778c5fdf6a02528b88b9f53f1b171` · hing `HX08b861987d462ef9f7405a0257199dc1` | daily re-engage; Continue button (payload `CONTINUE_UPDATES`) opens the session + drains the queue (VT-683 P3) |
+| **`team_wakeup2`** | en `HXaedb9a8bff0163bd4c162c90cd05bc45` · hi `HXb2dd5579ea46c2715397f2e274ec533c` · hing `HXd2bfed18f25eb8c2319ccca9b22f5d35` | daily wake-up v2 — "{{2}} item(s) waiting for your review" + Review button; opens the session + drains the queue (VT-683 P3). Vars: owner_name, pending_count |
 
 ### UNDER RETIREMENT REVIEW (registered, still have live callers — migrate into the session per VT-683)
 
@@ -40,7 +40,7 @@ the 24h conversation session (queued, idle-paced — VT-683). CC maintains this 
 | `team_monthly_report` | **ORPHANED — no code sends it** (report ships via email/PDF) | mark deprecated at P4 |
 
 ### DEPRECATED (never send)
-`team_welcome` · `team_welcome2` · `team_welcome3` (Meta category force-conversions; history in their sections below).
+`team_welcome` · `team_welcome2` · `team_welcome3` · **`team_wakeup` v1** (en `HXd6c8cb13…` hi `HX26d778c5…` hing `HX08b86198…` — Meta force-converted UTILITY→MARKETING 2026-07-18, the welcome2/3 class; superseded by `team_wakeup2`).
 
 ---
 
