@@ -6,7 +6,7 @@ anyone (a Viabe engineer, Codex, or a future third party) building a specialist 
 (`apps/team-orchestrator/src/orchestrator/agent_framework/`, VT-649 + VT-650).
 
 > Status: this doc's **Build + Verify** sections are validated against the shipped code. The **Integrate
-> (wire-to-live)** section (§8) is marked PENDING — it is documented from the SR/Integration migration as
+> (wire-to-live)** section (§8) is CC-owned (not builder-takeable) — documented from the SR/Integration migration as
 > that lands (CC owns the migration). Everything else is inert-and-stable today.
 
 ---
@@ -157,7 +157,14 @@ hardcodes ₹5,000 — the billing store is the single source. (CL-2026-07-15-en
 
 ---
 
-## 8. Integrate — wire a module to live  *(PENDING — filled from the SR/Integration migration)*
+## 8. Integrate — wire a module to live  *(CC-OWNED — not builder-takeable)*
+
+**The rule (Codex review 2026-07-18):** steps 1–7 (build + verify) are what an external builder
+delivers — a registering, conformance-passing, tested module on a branch. THIS step — routing a
+module into live dispatch, flipping flags, deploying — is CC's alone, after review. The SR +
+Integration migrations (VT-658/659, complete + delta-gated on dev) are the worked precedent for
+what wiring involves; their adapters are the reference. A builder PR that touches
+dispatch/triage/routing files fails review by policy.
 
 Building + verifying (§5–6) is fully decoupled and Codex-takeable. Making a module **live** is a
 deliberate, separate set of steps CC owns, documented here as the migration lands:

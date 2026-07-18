@@ -421,3 +421,36 @@ readers (`read_business_context`, direct SQL on `customer_ledger_entries` mirror
 `accounting_lane.py`), never invent a new write path. Never file, send, spend, or mutate — this is
 a readiness check, not an action. Prove it with `assert_conforms`, keep the module import-light,
 and open your PR against `dev` with an allocated VT-ID.
+
+
+---
+
+## 7. Boundaries recap (external review, 2026-07-18 — read this LAST, remember it FIRST)
+
+An external reviewer (Codex) audited this kit; these clarifications are BINDING:
+
+1. **A module is NOT a "SubAgent."** Launch proves exactly two brained SubAgents (Sales
+   Recovery + Onboarding Conductor). Everything new — Marketing, Finance, Compliance — starts
+   as a framework MODULE/tool surface. Graduating a module to a full brained SubAgent has a
+   promotion bar (Tier-1-clean measurement + explicit Fazal authorization); do not design for
+   it prematurely.
+2. **Build + verify is builder-takeable; LIVE ROUTING is CC-owned.** You deliver a registering,
+   conformance-passing, unit-tested module on a branch. Wiring it into live dispatch/routing —
+   and every deploy — is done by CC after review. Never touch dispatch/triage/routing files.
+3. **DB access: wrappers-first, strictly.** New module code reads ONLY through
+   `orchestrator.db.wrappers` (or existing sanctioned read helpers). Do NOT open
+   `tenant_connection` directly in new code — the direct-connection pattern you may see in older
+   lanes is TRANSITIONAL (pre-§7.3 DB-inversion), not a license. If a read you need has no
+   wrapper, request one; don't inline SQL.
+4. **Conformance proves the SAFETY SHAPE, not competence.** `assert_conforms` green is the
+   floor. Your PR must ALSO carry domain evals: fake-injected unit tests for every tool's logic
+   and edge cases, and scenario tests for the advice quality. A safe module that gives bad
+   business advice fails review.
+5. **Structured outputs ONLY — never owner-facing prose.** Your tools return dicts/dataclasses;
+   the Manager renders every word the owner reads. A module that returns polished owner copy is
+   a shadow conversational agent and will be rejected in review.
+6. **Trusted-builder posture.** There is no sandboxing, egress restriction, or dependency
+   scanning for modules — this contract is for trusted first-party engagements only, not a
+   marketplace. Your code is reviewed as first-party code.
+7. **Entitlement is soft-open.** `entitlement_key` is declared but billing does NOT enforce it
+   yet — never assume paid activation gates your module's availability.
