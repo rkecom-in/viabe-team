@@ -1,5 +1,7 @@
-"""VT-528 (B5) — capability registry: contract resolution, the verify gate, and the
-fail-closed import-time invariants (no self-certify + every effect policy-gated)."""
+"""VT-528 (B5) + VT-681 phase 1 — capability registry: contract resolution, the verify gate,
+the live/advisory/disabled launch-mode taxonomy, and the fail-closed import-time invariants
+(no self-certify + every effect policy-gated + advisory-mode-never-effectful + the
+disabled-graduation ratchet)."""
 
 from __future__ import annotations
 
@@ -23,6 +25,26 @@ def test_is_available_env_gating():
     assert cap.is_available("sales_recovery.winback_send", env="staging") is False
 
 
+def test_disabled_capability_available_nowhere():
+    """VT-681 — the D2 ad-boost class: declared so the Manager can decline honestly, available in
+    NO environment until the mode flips."""
+    assert cap.mode_of("marketing.paid_ad_boost") == "disabled"
+    assert cap.is_available("marketing.paid_ad_boost", env="dev") is False
+    assert cap.is_available("marketing.paid_ad_boost", env="prod") is False
+
+
+def test_launch_roster_modes():
+    """The O10 roster labels, registry-backed: live agents live, advisory functions advisory."""
+    for key in ("sales_recovery.winback_send", "onboarding.conduct_journey",
+                "integration.google_sheet_ingest", "integration.shopify_connect",
+                "integration.gst_verify", "manager.customer_list_export"):
+        assert cap.mode_of(key) == "live", key
+    for key in ("marketing.campaign_prepare", "finance.advice", "accounting.prepare",
+                "tech.owner_authorized_help", "cost_opt.advice"):
+        assert cap.mode_of(key) == "advisory", key
+        assert cap.resolve(key).effect_class == "advisory", key
+
+
 def test_verify_send_requires_real_transport_receipt():
     assert cap.verify("sales_recovery.winback_send", {"message_sid": "SMabc123"}).ok is True
     # a dev-mock (MKDEV) SID is NOT a real send → must fail (no self-certify by a mocked send)
@@ -32,6 +54,27 @@ def test_verify_send_requires_real_transport_receipt():
 
 def test_advisory_verify_ok_no_effect():
     assert cap.verify("sales_recovery.advice", {}).ok is True
+
+
+def test_verify_connector_health_evidence():
+    ok = cap.verify("integration.google_sheet_ingest",
+                    {"connector_id": "google_sheet", "last_status": "ok"})
+    assert ok.ok is True
+    assert cap.verify("integration.google_sheet_ingest",
+                      {"connector_id": "google_sheet", "last_status": "error"}).ok is False
+    assert cap.verify("integration.google_sheet_ingest", {}).ok is False
+
+
+def test_verify_gstin_and_journey_and_export_evidence():
+    assert cap.verify("integration.gst_verify", {"verification_status": "gstin_verified"}).ok is True
+    assert cap.verify("integration.gst_verify", {"verification_status": "pending"}).ok is False
+    assert cap.verify("onboarding.conduct_journey", {"journey_status": "complete"}).ok is True
+    assert cap.verify("onboarding.conduct_journey", {"journey_status": "missing"}).ok is False
+    good = {"audit_kind": "customer_list_exported", "row_count": 42}
+    assert cap.verify("manager.customer_list_export", good).ok is True
+    assert cap.verify("manager.customer_list_export",
+                      {"audit_kind": "customer_list_exported", "row_count": True}).ok is False
+    assert cap.verify("manager.customer_list_export", {"row_count": 42}).ok is False
 
 
 def test_requires_policy_rail():
@@ -48,7 +91,7 @@ def test_all_capabilities_declared():
 # ── Import-time invariants (exercised via _validate_spec with crafted bad specs) ──
 def _spec(**over) -> cap.CapabilitySpec:
     base = dict(
-        key="x.y", lane="l", effect_class="advisory", mode="concierge",
+        key="x.y", lane="l", effect_class="advisory", mode="live",
         policy_rail=False, summary="s", verifier=None, rollback=None,
         prerequisites=None, environments=cap.KNOWN_ENVS,
     )
@@ -85,6 +128,32 @@ def test_invariant_unknown_prerequisite():
 def test_invariant_bad_env():
     with pytest.raises(RuntimeError, match="environments"):
         _validate(_spec(environments=frozenset({"dev", "moon"})))
+
+
+def test_invariant_empty_envs_only_for_disabled():
+    with pytest.raises(RuntimeError, match="environments empty"):
+        _validate(_spec(environments=frozenset()))
+    _validate(_spec(mode="disabled", environments=frozenset()))  # legal
+
+
+def test_invariant_advisory_mode_never_effectful():
+    """An advisory-MODE function may not declare a real effect class — that would launder an
+    effect past the roster posture."""
+    with pytest.raises(RuntimeError, match="advisory"):
+        _validate(_spec(mode="advisory", effect_class="send",
+                        policy_rail=True, verifier="real_send_evidence"))
+
+
+def test_invariant_disabled_defers_verifier_but_never_the_rail():
+    """The graduation ratchet: a DISABLED effect may omit its verifier (nothing executes), but
+    must already carry policy_rail; flipping mode to live without a verifier crashes boot."""
+    _validate(_spec(mode="disabled", effect_class="campaign", policy_rail=True,
+                    verifier=None, environments=frozenset()))  # legal while disabled
+    with pytest.raises(RuntimeError, match="no verifier"):
+        _validate(_spec(mode="live", effect_class="campaign", policy_rail=True, verifier=None))
+    with pytest.raises(RuntimeError, match="policy_rail"):
+        _validate(_spec(mode="disabled", effect_class="campaign", policy_rail=False,
+                        verifier=None, environments=frozenset()))
 
 
 def test_live_registry_all_valid():
