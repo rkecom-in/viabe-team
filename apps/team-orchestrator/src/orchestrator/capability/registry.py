@@ -31,14 +31,22 @@ from typing import Any, Callable, Literal
 
 from orchestrator.agents.activation_registry import REGISTRY as _ACTIVATION_REGISTRY
 
-# ── Taxonomies (net-new; the plan's effect-class set) ────────────────────────
+# ── Taxonomies ───────────────────────────────────────────────────────────────
 EffectClass = Literal["send", "db_mutation", "connector", "campaign", "advisory"]
-CapabilityMode = Literal["concierge", "supervised_auto", "full_auto"]
+# VT-681 phase 1 — the mode axis is the LAUNCH OPERATING MODE of the capability (the B-track
+# contract's tri-state), replacing VT-528's autonomy postures (concierge/supervised_auto/
+# full_auto), which conflated "how autonomously it runs" with "whether it may be promised":
+#   live      — executes end-to-end (through its gates); the Manager may promise it.
+#   advisory  — Manager-held prepare/propose/analyse only; described as such, never as
+#               an autonomous action ("I'll prepare X for you", never "I'll run X").
+#   disabled  — declared so the Manager can be HONEST about it (the D2 ad-boost class);
+#               never available in any environment until the mode flips.
+CapabilityMode = Literal["live", "advisory", "disabled"]
 
 EFFECT_CLASSES: frozenset[str] = frozenset(
     {"send", "db_mutation", "connector", "campaign", "advisory"}
 )
-CAPABILITY_MODES: frozenset[str] = frozenset({"concierge", "supervised_auto", "full_auto"})
+CAPABILITY_MODES: frozenset[str] = frozenset({"live", "advisory", "disabled"})
 KNOWN_ENVS: frozenset[str] = frozenset({"dev", "prod"})
 # Every effect class EXCEPT advisory is a real-world effect → must be verified + policy-gated.
 _EFFECTFUL: frozenset[str] = EFFECT_CLASSES - {"advisory"}
@@ -86,18 +94,65 @@ def _verify_real_send_evidence(evidence: Mapping[str, Any]) -> VerifierResult:
     return VerifierResult(True, "real transport receipt present")
 
 
+def _verify_connector_health_evidence(evidence: Mapping[str, Any]) -> VerifierResult:
+    """A connector is verified by its persisted health row (tenant_connector_status), not the
+    specialist's claim: evidence must name the connector and carry last_status='ok'."""
+    connector_id = evidence.get("connector_id")
+    if not isinstance(connector_id, str) or not connector_id:
+        return VerifierResult(False, "no connector_id in connector evidence")
+    if evidence.get("last_status") != "ok":
+        return VerifierResult(False, f"connector {connector_id!r} last_status != 'ok'")
+    return VerifierResult(True, "connector health row ok")
+
+
+def _verify_gstin_verified_evidence(evidence: Mapping[str, Any]) -> VerifierResult:
+    """GST verification is verified by the persisted tenants.verification_status value."""
+    if evidence.get("verification_status") != "gstin_verified":
+        return VerifierResult(False, "verification_status != 'gstin_verified'")
+    return VerifierResult(True, "gstin_verified persisted")
+
+
+def _verify_journey_progress_evidence(evidence: Mapping[str, Any]) -> VerifierResult:
+    """An onboarding step is verified by the persisted journey row state, never the turn text."""
+    status = evidence.get("journey_status")
+    if status not in ("active", "complete"):
+        return VerifierResult(False, f"journey_status {status!r} not active/complete")
+    return VerifierResult(True, "journey row state present")
+
+
+def _verify_export_audit_evidence(evidence: Mapping[str, Any]) -> VerifierResult:
+    """A customer-list export is verified by its tm_audit trail (VT-676: counts/tokens are
+    audited — content/URL never are), not by the reply claiming a file was sent."""
+    if evidence.get("audit_kind") != "customer_list_exported":
+        return VerifierResult(False, "no customer_list_exported audit in evidence")
+    row_count = evidence.get("row_count")
+    if not isinstance(row_count, int) or isinstance(row_count, bool) or row_count < 0:
+        return VerifierResult(False, f"row_count {row_count!r} not a non-negative int")
+    return VerifierResult(True, "export audit trail present")
+
+
 VERIFIER_REGISTRY: dict[str, Verifier] = {
     "real_send_evidence": _verify_real_send_evidence,
+    "connector_health_evidence": _verify_connector_health_evidence,
+    "gstin_verified_evidence": _verify_gstin_verified_evidence,
+    "journey_progress_evidence": _verify_journey_progress_evidence,
+    "export_audit_evidence": _verify_export_audit_evidence,
 }
 
 
-# ── The registry — one entry per declared capability ─────────────────────────
+# ── The registry — one entry per PROMISE-RELEVANT capability (VT-681 phase 1) ─
+# The set the Manager can meaningfully promise (or must honestly decline) at Phase-1 launch,
+# joined from the O10 roster: 3 live agents (Manager embedded / Sales Recovery / Onboarding
+# Conductor), the live Tools, the 5 advisory functions (Manager-held, prepare-only), and the
+# one DECLARED-DISABLED action the D2 net already discloses by hand. Per-tenant resolution
+# (activation × entitlement × freeze) is phase 2's resolve_for; these are the ENV-level defaults.
 CAPABILITY_REGISTRY: dict[str, CapabilitySpec] = {
+    # ── Sales Recovery (LIVE agent; Concierge roster, first eligible to graduate) ──
     "sales_recovery.winback_send": CapabilitySpec(
         key="sales_recovery.winback_send",
         lane="sales_recovery",
         effect_class="send",
-        mode="concierge",
+        mode="live",
         policy_rail=True,
         summary="Send an owner-approved win-back message to a lapsed-customer cohort.",
         verifier="real_send_evidence",
@@ -109,13 +164,152 @@ CAPABILITY_REGISTRY: dict[str, CapabilitySpec] = {
         key="sales_recovery.advice",
         lane="sales_recovery",
         effect_class="advisory",
-        mode="concierge",
+        mode="live",
         policy_rail=False,                       # advice has no external effect to gate
         summary="Give the owner grounded win-back advice (no send, no mutation).",
         verifier=None,
         rollback=None,
         prerequisites=None,
         environments=KNOWN_ENVS,
+    ),
+    # ── Onboarding Conductor (LIVE agent) ──
+    "onboarding.conduct_journey": CapabilitySpec(
+        key="onboarding.conduct_journey",
+        lane="onboarding_conductor",
+        effect_class="db_mutation",              # writes journey answers + business profile
+        mode="live",
+        policy_rail=True,                        # every write is the owner's own conversational input
+        summary="Run the WhatsApp onboarding journey: confirm/collect profile fields, pace the "
+                "post-profile flows, complete the journey.",
+        verifier="journey_progress_evidence",
+        rollback="re-open journey (answers are re-editable until complete)",
+        prerequisites=None,                      # onboarding IS the prerequisite-builder
+        environments=KNOWN_ENVS,
+    ),
+    # ── Integration Tools (dissolved into Tools per ACF; LIVE) ──
+    "integration.google_sheet_ingest": CapabilitySpec(
+        key="integration.google_sheet_ingest",
+        lane="integration",
+        effect_class="connector",
+        mode="live",
+        policy_rail=True,
+        summary="Zero-paste Google Sheets connect + ledger ingestion (CL-421).",
+        verifier="connector_health_evidence",
+        rollback="disable connector (tenant_connector_status.enabled=false)",
+        prerequisites="integration_agent",
+        environments=KNOWN_ENVS,
+    ),
+    "integration.shopify_connect": CapabilitySpec(
+        key="integration.shopify_connect",
+        lane="integration",
+        effect_class="connector",
+        mode="live",
+        policy_rail=True,
+        summary="Shopify OAuth connect + catalog/order ingestion.",
+        verifier="connector_health_evidence",
+        rollback="disable connector (tenant_connector_status.enabled=false)",
+        prerequisites="integration_agent",
+        environments=KNOWN_ENVS,
+    ),
+    "integration.gst_verify": CapabilitySpec(
+        key="integration.gst_verify",
+        lane="integration",
+        effect_class="db_mutation",              # flips tenants.verification_status
+        mode="live",
+        policy_rail=True,
+        summary="Verify the owner's GSTIN and persist verification_status (a correctness gate — "
+                "never bent to make a flow pass).",
+        verifier="gstin_verified_evidence",
+        rollback=None,                           # verification is a ratchet, not undone in-product
+        prerequisites=None,
+        environments=KNOWN_ENVS,
+    ),
+    "integration.knowyourgst_discovery": CapabilitySpec(
+        key="integration.knowyourgst_discovery",
+        lane="integration",
+        effect_class="advisory",                 # read-only business discovery
+        mode="live",
+        policy_rail=False,
+        summary="Discover business facts from a GSTIN (knowyourgst) to pre-fill the profile draft.",
+        verifier=None,
+        rollback=None,
+        prerequisites=None,
+        environments=KNOWN_ENVS,
+    ),
+    # ── Manager-held owner service (LIVE; VT-676) ──
+    "manager.customer_list_export": CapabilitySpec(
+        key="manager.customer_list_export",
+        lane="team_manager",
+        effect_class="send",                     # sends a media message to the OWNER
+        mode="live",
+        policy_rail=True,
+        summary="Export the tenant's customer list as a CSV attachment to the verified owner "
+                "(private bucket, 300s signed URL, counts-only audit).",
+        verifier="export_audit_evidence",
+        rollback=None,                           # the signed URL self-expires (300s TTL)
+        prerequisites=None,
+        environments=KNOWN_ENVS,
+    ),
+    # ── Advisory functions (Manager-held tools; NEVER described as autonomous) ──
+    "marketing.campaign_prepare": CapabilitySpec(
+        key="marketing.campaign_prepare",
+        lane="marketing",
+        effect_class="advisory",
+        mode="advisory",
+        policy_rail=False,
+        summary="Prepare + propose campaign plans and content drafts; any resulting send goes "
+                "through the Manager's approval-gated send rails, never this function.",
+        verifier=None, rollback=None, prerequisites=None, environments=KNOWN_ENVS,
+    ),
+    "finance.advice": CapabilitySpec(
+        key="finance.advice",
+        lane="finance",
+        effect_class="advisory",
+        mode="advisory",
+        policy_rail=False,
+        summary="Cash-flow / receivables / pricing-margin analysis; payment-reminder PROPOSALS only.",
+        verifier=None, rollback=None, prerequisites=None, environments=KNOWN_ENVS,
+    ),
+    "accounting.prepare": CapabilitySpec(
+        key="accounting.prepare",
+        lane="accounting",
+        effect_class="advisory",
+        mode="advisory",
+        policy_rail=False,
+        summary="Prepare-only accounting outputs (v1 charter: nothing filed, nothing mutated).",
+        verifier=None, rollback=None, prerequisites=None, environments=KNOWN_ENVS,
+    ),
+    "tech.owner_authorized_help": CapabilitySpec(
+        key="tech.owner_authorized_help",
+        lane="tech",
+        effect_class="advisory",
+        mode="advisory",
+        policy_rail=False,
+        summary="Technical guidance; any action only on the owner's explicit authorization, "
+                "described as assistance, never as an autonomous agent.",
+        verifier=None, rollback=None, prerequisites=None, environments=KNOWN_ENVS,
+    ),
+    "cost_opt.advice": CapabilitySpec(
+        key="cost_opt.advice",
+        lane="cost_opt",
+        effect_class="advisory",
+        mode="advisory",
+        policy_rail=False,
+        summary="Cost-optimisation analysis and recommendations (advisory only).",
+        verifier=None, rollback=None, prerequisites=None, environments=KNOWN_ENVS,
+    ),
+    # ── Declared DISABLED (honesty entries — the D2 class, now registry-backed) ──
+    "marketing.paid_ad_boost": CapabilitySpec(
+        key="marketing.paid_ad_boost",
+        lane="marketing",
+        effect_class="campaign",
+        mode="disabled",                         # the ONE unsupported paid action the D2 net
+        policy_rail=True,                        # discloses by hand today; graduating it re-arms
+        summary="Run a paid ad boost on an external platform (Instagram/Facebook/Google). NOT "
+                "supported — the Manager must disclose the limit and pivot (D2).",
+        verifier=None,                           # permitted ONLY because mode='disabled'
+        rollback=None, prerequisites=None,
+        environments=frozenset(),                # available nowhere until the mode flips
     ),
 }
 
@@ -133,19 +327,33 @@ def _validate_spec(
         raise RuntimeError(f"capability {spec.key!r}: unknown effect_class {spec.effect_class!r}")
     if spec.mode not in CAPABILITY_MODES:
         raise RuntimeError(f"capability {spec.key!r}: unknown mode {spec.mode!r}")
-    if not spec.environments or not spec.environments <= KNOWN_ENVS:
+    # VT-681: an empty environments set is legal ONLY for a declared-disabled capability (it is
+    # available nowhere by definition); everything else must claim a subset of the known envs.
+    if not spec.environments and spec.mode != "disabled":
+        raise RuntimeError(f"capability {spec.key!r}: environments empty but mode != 'disabled'")
+    if not spec.environments <= KNOWN_ENVS:
         raise RuntimeError(
             f"capability {spec.key!r}: environments {sorted(spec.environments)} not ⊆ "
-            f"{sorted(KNOWN_ENVS)} (or empty)"
+            f"{sorted(KNOWN_ENVS)}"
+        )
+    # VT-681: an advisory-MODE capability prepares/proposes only — declaring a real effect class
+    # under advisory mode would launder an effect past the roster posture.
+    if spec.mode == "advisory" and spec.effect_class != "advisory":
+        raise RuntimeError(
+            f"capability {spec.key!r}: mode 'advisory' but effect_class {spec.effect_class!r} "
+            "(an advisory-mode function may only declare effect_class='advisory')"
         )
     if spec.effect_class in _EFFECTFUL:
-        # Thesis 1 — no self-certify: an effect must name a verifier.
-        if spec.verifier is None:
+        # Thesis 1 — no self-certify: an effect must name a verifier. A DISABLED effect may
+        # defer its verifier (nothing can execute); flipping the mode to live re-arms this
+        # invariant at boot — the graduation ratchet.
+        if spec.verifier is None and spec.mode != "disabled":
             raise RuntimeError(
                 f"capability {spec.key!r}: effectful ({spec.effect_class}) but declares no verifier "
                 "(no specialist self-certifies an effect)"
             )
-        # Thesis 2 — every effect is owner-policy-gated.
+        # Thesis 2 — every effect is owner-policy-gated (disabled included: the declaration of
+        # intent must already carry the rail so graduation can never drop it).
         if not spec.policy_rail:
             raise RuntimeError(
                 f"capability {spec.key!r}: effectful ({spec.effect_class}) but policy_rail=False "
@@ -182,8 +390,16 @@ def resolve(key: str) -> CapabilitySpec:
 
 def is_available(key: str, *, env: str) -> bool:
     """Whether the capability may run in ``env`` (the caller's EXPECTED_ENV). Fail-closed on an
-    unknown env value."""
-    return env in resolve(key).environments
+    unknown env value. VT-681: a declared-DISABLED capability is available NOWHERE regardless of
+    env — that's the honesty entry the promise seam (phase 3) reads to decline truthfully."""
+    spec = resolve(key)
+    return spec.mode != "disabled" and env in spec.environments
+
+
+def mode_of(key: str) -> CapabilityMode:
+    """The declared launch operating mode (live/advisory/disabled) — the label the Manager must
+    describe the capability WITH (an advisory function is 'I can prepare…', never 'I'll run…')."""
+    return resolve(key).mode
 
 
 def requires_policy_rail(key: str) -> bool:
@@ -217,6 +433,7 @@ __all__ = [
     "VerifierResult",
     "all_capabilities",
     "is_available",
+    "mode_of",
     "requires_policy_rail",
     "resolve",
     "verify",
