@@ -1826,8 +1826,13 @@ def test_stop_processed_end_to_end_while_paused(substrate, monkeypatch):
         def model_dump(self) -> dict[str, Any]:
             return {"stubbed": True}
 
+    # VT-683 P1: the handler now replies via send_freeform_first (session freeform + template
+    # belt) — stub THAT seam; the dict IS the send_result (no model_dump on this path).
     opt_out_mod = importlib.import_module("orchestrator.direct_handlers.opt_out_handler")
-    monkeypatch.setattr(opt_out_mod, "send_template_message", lambda *a, **k: _SendStub())
+    monkeypatch.setattr(
+        opt_out_mod, "send_freeform_first",
+        lambda *a, **k: {"stubbed": True, "success": True, "channel": "freeform_session"},
+    )
     # stub the brain so the control-leg park doesn't need an LLM (it parks BEFORE the brain,
     # but the stub guarantees no transmit if the seam were ever bypassed).
     import orchestrator.agent.dispatch as dispatch_mod

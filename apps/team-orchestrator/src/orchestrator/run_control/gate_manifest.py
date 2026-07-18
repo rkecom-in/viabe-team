@@ -30,6 +30,9 @@ GATE_MODULES: frozenset[str] = frozenset(
         "orchestrator.agent.tools.send_whatsapp_message",
         "orchestrator.agent.tools.send_whatsapp_template",
         "orchestrator.owner_surface.freeform_acks",
+        # VT-683 P1: the freeform-first wrapper the reactive direct handlers reply through
+        # (session freeform + Meta-template fallback) — a send surface like the two it wraps.
+        "orchestrator.direct_handlers._freeform_first",
         # Owner-approval gates (Pillar 7: approvals are never inherited/overridden).
         "orchestrator.agent.tools.request_owner_approval",
         "orchestrator.agent.approval_resume",
