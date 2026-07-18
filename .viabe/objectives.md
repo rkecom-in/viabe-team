@@ -6,7 +6,7 @@
 > status-changing event, same moment as the to-cowork signal). Cowork audits (Rule #14).
 > Bar lines are Fazal's — never edited without a ruling; Now/Gate/status lines are CC's.
 > Statuses: MET · MET–INCIDENT OPEN · IN PROGRESS · AT RISK · PENDING · HELD/PARKED.
-> Last updated: 2026-07-18 19:20 IST · dev b5f639c · O1/O2 MET, O4 CLOSED today · Codex cleared (VT-685, 3 review passes) · wakeup2 Meta-APPROVED · latest-snapshot refreshed (Rule #14).
+> Last updated: 2026-07-18 20:05 IST · dev d2340ed · VT-683 P1 LANDED (session-window truth + 3 reactive handlers freeform-first; template surface shrinking to the whitelist) · P2 awaits Fazal point A (queued-approval timeout at DELIVERY).
 
 ## O0 · NORTH STAR — Claude Code for Business — IN PROGRESS (the objective all others compose into)
 - Bar (Fazal, ratified 2026-07-01 — Track C first-class): an owner hands the Team-Manager a
@@ -19,7 +19,7 @@
   integrity (MET) + O3 the framework that makes capabilities pluggable (MET on dev) + O4
   plan-delegate-validate (MET on dev) + O5 owner's language (near) + O6 real-world
   reliability (at risk) + O8 learning loop (parked) + O9 sensing (held) + O10 launch roster
-  (in progress).
+  (in progress) + O11 judgment measured (pending — added 2026-07-18, Fazal).
 - Honest stage: **a trustworthy reactive-plus-planned OPERATOR is real on dev today.** The
   gap to the full north star is exactly O8 + O9 + soak-proven depth: it does not yet LEARN
   from its runs, does not yet SENSE and initiate without a trigger, and its planning depth
@@ -109,6 +109,20 @@
 ## O9 · Dynamic sensing (Phase 1.2) — HELD (by design)
 - Bar: watchers/pollers/listeners the Manager configures; event-driven autonomy.
 - Now: spec written + held from CC until Phase 1.1's gate is met (Fazal's sequencing).
+
+## O11 · Business judgment quality — measured, not asserted — PENDING (measurement can start pre-O8)
+- Bar (phase1-plan Track D, reshaped 2026-07-01): the quality of the Manager's business
+  DECISIONS and advice is SCORED, not assumed — the advice-quality eval (factuality /
+  actionability / relevance / tone) runs on a held-out measurement set, and per-capability
+  autonomy graduation (C4) is gated on measured clean outcomes, never elapsed time. No
+  fabricated numbers/benchmarks (the surviving claim-grounding rail). "Understands business"
+  becomes a provable claim.
+- Now: the rail (no-fabricated-figures) is live via the trust floor; the EVAL itself is not
+  built; graduation linkage (C4) not built. Distinct from Tier-2 (conversation quality) and
+  §7C (outcome-vs-defined-outcome): this scores whether the decision was GOOD.
+- Sequencing: the measurement harness can start BEFORE O8 un-parks (it measures today's
+  LLM+data judgment; the learning loop then has a baseline to improve against). Graduation
+  linkage lands with O8/C4.
 
 ## O10 · Phase-1 launch roster — agents + tools READY — IN PROGRESS
 - Bar (phase1-plan LOCKED, "Function scope at launch" + ACF §5): every launch agent, function
