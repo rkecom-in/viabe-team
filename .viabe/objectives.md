@@ -6,7 +6,7 @@
 > status-changing event, same moment as the to-cowork signal). Cowork audits (Rule #14).
 > Bar lines are Fazal's — never edited without a ruling; Now/Gate/status lines are CC's.
 > Statuses: MET · MET–INCIDENT OPEN · IN PROGRESS · AT RISK · PENDING · HELD/PARKED.
-> Last updated: 2026-07-18 11:05 IST · dev HEAD a57514b on origin (+2 local docs commits riding next code push).
+> Last updated: 2026-07-18 11:27 IST · dev HEAD 54509d6 on origin (VT-682 --dirty harness mode).
 
 ## O1 · Trustworthy conversation — MET (holding)
 - Bar: Tier-1 trust-breakers = 0 across the 10-journey pack ×3; Tier-2 quality ≥ 90%.
@@ -57,8 +57,11 @@
   scary read was wrong), canary-1 was a REAL harness-green≠real-green miss (integration state
   hijacked the export route) — fixed 42bd7e6, live re-proof pending (O2 gate). Score: 1 real
   miss, not 2.
-- Direction: dirty-tenant fixture folded as a `--dirty` harness seed mode (fold-not-roster
-  take sent to Cowork) — NEXT in the CC queue per the 220837Z order (O2 blocked on Fazal).
+- Direction: **VT-682 `--dirty` seed mode LANDED** (54509d6): same journeys over accumulated
+  residue (14d sent campaign, 3d stranded approval, 5d dead-letter task, aged transcript, stale
+  integration flow sentinel — the exact canary-1 hijack class) + instrument fence so residue
+  never corrupts the DB-assert proxy. 86 tests + CLI smoke green. Gate: j01 `--dirty` live on
+  deployed dev (running next) — completion = fixture proven; failures it surfaces = O6 findings.
 
 ## O7 · Launch readiness (prod) — PENDING
 - Bar: prod Mumbai live (VT-231), framework flags promoted, billing ₹5000/agent + per-agent
