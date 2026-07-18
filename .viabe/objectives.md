@@ -6,7 +6,7 @@
 > status-changing event, same moment as the to-cowork signal). Cowork audits (Rule #14).
 > Bar lines are Fazal's — never edited without a ruling; Now/Gate/status lines are CC's.
 > Statuses: MET · MET–INCIDENT OPEN · IN PROGRESS · AT RISK · PENDING · HELD/PARKED.
-> Last updated: 2026-07-18 13:20 IST · origin f2f4881 (+3 local: VT-681 phases 3-4, objectives) · cache-fix subagent building.
+> Last updated: 2026-07-18 14:15 IST · origin 651cb75 · local batch pending post-gate push (VT-679/680, #84, VT-676 fix-4) · ×3 running (12/30).
 
 ## O1 · Trustworthy conversation — MET (holding)
 - Bar: Tier-1 trust-breakers = 0 across the 10-journey pack ×3; Tier-2 quality ≥ 90%.
@@ -25,7 +25,11 @@
   was NOT a breach — conversation_log proved Fazal's own phone approval 13:49 + honest outcome
   report 15:10; live proof PASSED. Canary-1 (customer-list) root-caused → F1–F3 landed 42bd7e6
   (plain-ask delivers, guard copy time-grounded, export_customer_list manager tool).
-- Gate to MET: Fazal re-runs canary-1 ("Send me my customer list") — GO sent via Telegram.
+- Gate to MET: canary-1 re-run 2026-07-18 13:07 IST **FAILED — new defect found + fixed**: text
+  arrived, file didn't (WhatsApp rejects text/csv media; async attach death was invisible — the
+  one owner-send path without delivery reconciliation; two texts double-claimed success).
+  Fix-4 landed (MIME text/plain + owner-notification ledger wiring + single-claim copy) —
+  LOCAL, rides the post-gate push. Fazal re-canaries after the next deploy.
 
 ## O3 · Agent Capability Framework — MET ON DEV
 - Bar: ratified Manager/SubAgent/Tool architecture live — SR + Onboarding on the contract,
