@@ -112,12 +112,31 @@ _SR_AGENT_PROMPT_PATH = (
 # Fix: keep the dates as tokens in the file and render them per dispatch.
 _SR_AGENT_PROMPT_TEMPLATE = _SR_AGENT_PROMPT_PATH.read_text(encoding="utf-8")
 
+# Cache batch 2026-07-18: the template carries a CACHE-SPLIT marker (an HTML
+# comment the model never sees). Everything ABOVE it is byte-stable across
+# dispatches → the FIRST system block, marked ``cache_control: ephemeral`` so
+# per-campaign-turn requests read the ~13KB static body from cache. Everything
+# BELOW it is the date-rendered VT-493 content ({{TODAY}} + the proposed
+# example's {{CAMPAIGN_WINDOW_*}}) → a SECOND, un-cached block AFTER the
+# cached prefix, so the daily date change never busts the static prefix.
+_SR_PROMPT_CACHE_SPLIT_OPEN = "<!-- CACHE-SPLIT"
+_SR_PROMPT_CACHE_SPLIT_CLOSE = "-->"
 
-def _render_sr_system_prompt(now: datetime | None = None) -> str:
-    """Render the SR system-prompt template with the current server date (VT-493).
 
-    Substitutes three tokens so the proposed example + the campaign_window
-    instruction always carry a CURRENT, schema-valid date:
+def _render_sr_system_prompt(now: datetime | None = None) -> list[dict[str, Any]]:
+    """Render the SR system prompt as [static cached block, volatile date block].
+
+    Cache batch 2026-07-18 — returns the Messages-API ``system`` block list:
+    block 0 is the byte-stable template body (everything above the template's
+    CACHE-SPLIT marker) carrying ``cache_control: {"type": "ephemeral"}``;
+    block 1 is the date-rendered remainder (the proposed example + the
+    campaign_window instruction), deliberately UN-marked and LAST so the
+    per-day render never invalidates the cached prefix. The model sees the
+    same total text as the pre-split prompt (the dated section reads at the
+    end); the marker comment itself is dropped and never reaches the model.
+
+    Substitutes three tokens (VT-493) so the proposed example + the
+    campaign_window instruction always carry a CURRENT, schema-valid date:
 
       - ``{{TODAY}}`` → today's UTC date (``YYYY-MM-DD``), used in the
         campaign_window instruction ("start must be today or later").
@@ -136,11 +155,30 @@ def _render_sr_system_prompt(now: datetime | None = None) -> str:
         today.year, today.month, today.day, 9, 0, 0, tzinfo=UTC
     ) + timedelta(days=1)
     end = start + timedelta(days=7)
-    return (
-        _SR_AGENT_PROMPT_TEMPLATE.replace("{{TODAY}}", today.isoformat())
+
+    static_part, marker, rest = _SR_AGENT_PROMPT_TEMPLATE.partition(
+        _SR_PROMPT_CACHE_SPLIT_OPEN
+    )
+    if not marker:
+        raise ValueError(
+            "sales_recovery_v1.md is missing its CACHE-SPLIT marker — the "
+            "static/volatile split (prompt caching) cannot be rendered"
+        )
+    _, _, volatile_part = rest.partition(_SR_PROMPT_CACHE_SPLIT_CLOSE)
+    volatile_rendered = (
+        volatile_part.lstrip("\n")
+        .replace("{{TODAY}}", today.isoformat())
         .replace("{{CAMPAIGN_WINDOW_START}}", start.isoformat())
         .replace("{{CAMPAIGN_WINDOW_END}}", end.isoformat())
     )
+    return [
+        {
+            "type": "text",
+            "text": static_part.rstrip() + "\n",
+            "cache_control": {"type": "ephemeral"},
+        },
+        {"type": "text", "text": volatile_rendered},
+    ]
 
 # Markdown code-fence stripper. Matches a recognised fence shape and
 # captures the inner content. NARROW by design: it does not extract a
@@ -274,11 +312,16 @@ def _run_one_turn(
     client: Anthropic,
     *,
     model: str,
-    system_prompt: str,
+    system_prompt: list[dict[str, Any]],
     messages: list[dict[str, Any]],
     timeout: float = PER_TURN_HTTP_TIMEOUT_S,
 ) -> Any:
     """One Messages.create round-trip. VT-35 per-turn / token-meter seam.
+
+    ``system_prompt`` is the ``_render_sr_system_prompt`` BLOCK LIST (cache
+    batch 2026-07-18): [static cache_control block, volatile date block] —
+    passed through verbatim so every turn in a run (and every run in a day)
+    reads the static ~13KB prefix from cache.
 
     Isolated so VT-35's enforcers can instrument exactly one turn at a
     time and so tests can mock at this boundary (zero real API calls in
@@ -839,6 +882,9 @@ def run_sales_recovery_agent(
     # VT-493 A1: render the date-anchored template ONCE per dispatch so the
     # proposed example + campaign_window instruction carry today's date (not the
     # stale 2026-05-22 literal the model used to echo into a backdated window).
+    # Cache batch 2026-07-18: the render is now a BLOCK LIST — static body
+    # first with cache_control (read from cache per turn), the dated section
+    # last and un-marked so the daily render never busts the cached prefix.
     system_prompt = _render_sr_system_prompt()
     # CL-287: the orchestrator-supplied user request is the initial user
     # message — NOT a hardcoded "begin" cue. Empty / whitespace-only is

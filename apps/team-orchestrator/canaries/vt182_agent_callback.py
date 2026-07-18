@@ -190,19 +190,28 @@ def run_canary() -> int:
                     {"tool": "prev", "iter": j} for j in range(idx)
                 ],
             ):
+                # Cache batch 2026-07-18: _run_one_turn takes the system as a
+                # block LIST (matching _render_sr_system_prompt's shape). The
+                # canary's tiny prompt needs no cache_control marker.
+                canary_system = [
+                    {
+                        "type": "text",
+                        "text": "You are a concise customer-service helper.",
+                    }
+                ]
                 if logfire_available:
                     with logfire.span(f"canary-iteration-{idx}"):
                         _run_one_turn(
                             client,
                             model=model,
-                            system_prompt="You are a concise customer-service helper.",
+                            system_prompt=canary_system,
                             messages=messages,
                         )
                 else:
                     _run_one_turn(
                         client,
                         model=model,
-                        system_prompt="You are a concise customer-service helper.",
+                        system_prompt=canary_system,
                         messages=messages,
                     )
 
