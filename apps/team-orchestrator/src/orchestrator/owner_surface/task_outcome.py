@@ -170,20 +170,57 @@ def _extract_objective_text(task: dict[str, Any]) -> str:
     return cleaned
 
 
+# VT-680 (§7C online impact judge) — the honest quality-note suffix appended when the judge's
+# verdict is 'partial'/'unmet' ('met'/'unjudged'/None append nothing — the message stays BYTE-
+# IDENTICAL to pre-VT-680 in those cases, satisfying the flag-off / met-verdict no-drift requirement).
+# Pillar 1 (this composer is deterministic, no LLM prose reaches the owner unfiltered): the note is
+# FIXED templated copy per verdict class, deliberately NOT the judge's own raw free-text 'reason'
+# (unvetted LLM output that has never been meant for a direct owner-facing surface — 'reason' stays
+# internal, in the tm_audit row only).
+_IMPACT_QUALITY_NOTES: dict[str, dict[str, str]] = {
+    "partial": {
+        "en": " Though, this fell a bit short of what you were after — want me to take another pass?",
+        "hi": " हालांकि, यह उतना पूरा नहीं हुआ जितना आप चाहते थे — चाहें तो मैं दोबारा कोशिश करूँ?",
+    },
+    "unmet": {
+        "en": " Though, this didn't really hit what you were after — want me to take another pass?",
+        "hi": " हालांकि, यह वैसा नहीं हुआ जैसा आप चाहते थे — चाहें तो मैं दोबारा कोशिश करूँ?",
+    },
+}
+
+
+def _impact_quality_note(impact_verdict: str | None, *, locale: str) -> str:
+    """VT-680 — empty string for None/''/'met'/'unjudged'/anything unrecognized (message
+    unchanged); a fixed honest sentence for 'partial'/'unmet'."""
+    if not impact_verdict:
+        return ""
+    copy = _IMPACT_QUALITY_NOTES.get(impact_verdict)
+    if not copy:
+        return ""
+    return copy.get(locale) or copy["en"]
+
+
 def compose_task_outcome_message(
-    outcome: str, objective_text: str, *, locale: str = "en"
+    outcome: str, objective_text: str, *, locale: str = "en", impact_verdict: str | None = None,
 ) -> str:
     """Compose the honest, owner-readable terminal-outcome message. Pure + deterministic.
 
     ``outcome`` must be one of ``_HANDLED_OUTCOMES``. ``objective_text`` may be empty (a redacted
     objective can legitimately have nothing left after PII stripping, or the field was never set) —
     the copy degrades to a generic phrasing rather than saying "None" or leaving a blank. ``locale``
-    is 'en' or 'hi' (anything else falls back to 'en')."""
+    is 'en' or 'hi' (anything else falls back to 'en').
+
+    ``impact_verdict`` (VT-680, §7C online impact judge) — only ever populated for the
+    'completed_with_effect'/'completed_no_action' branches (the only outcomes the judge's own call
+    site, ``workflow._run_verification_cycle``'s "verified" branch, ever settles); 'cancelled'/
+    'escalated' NEVER carry one and this function does not append the note there even if a caller
+    somehow passed one, since "want me to take another pass?" makes no sense on a decline/stop."""
     # T15 (§2 judge, lane_capability x3) — quote the objective when we reference it. Interpolating
     # the owner's raw imperative bare ("I looked into run a Facebook ad campaign for me, but…")
     # reads as a broken verbatim ECHO of their message; quoting it reads as a reference to it.
     obj = f'"{objective_text.strip()}"' if objective_text.strip() else ""
     hi = locale == "hi"
+    note = _impact_quality_note(impact_verdict, locale="hi" if hi else "en")
 
     if outcome == "cancelled":
         # MUST read as a decline — never a success (the row's whole honesty gate).
@@ -203,11 +240,11 @@ def compose_task_outcome_message(
             return (
                 f"मैंने इसे देखा — {obj} — और कोई कार्रवाई की ज़रूरत नहीं थी।" if obj else
                 "मैंने आपकी request देखी और कोई कार्रवाई की ज़रूरत नहीं थी।"
-            )
+            ) + note
         return (
             f"I looked into it — {obj} — and found no action was needed." if obj else
             "I looked into your request and found no action was needed."
-        )
+        ) + note
 
     if outcome == "escalated":
         # A blocked/escalated terminal. MUST be honest: the manager could NOT complete it on its
@@ -239,11 +276,11 @@ def compose_task_outcome_message(
         return (
             f"हो गया — मैंने इसे पूरा कर दिया: {obj}।" if obj else
             "हो गया — आपने जो कहा था, मैंने पूरा कर दिया।"
-        )
+        ) + note
     return (
         f"Done — I've taken care of it: {obj}." if obj else
         "Done — I've taken care of what you asked."
-    )
+    ) + note
 
 
 # T15 — the reconcile framing for a closure landing after the owner moved on (en/hi).
@@ -420,6 +457,7 @@ def maybe_notify_owner_of_task_outcome(
     task_id: UUID | str,
     *,
     recipient_phone: str | None = None,
+    impact_verdict: str | None = None,
 ) -> bool:
     """Send the owner the terminal-outcome notification for ``task_id``, if one is due.
 
@@ -433,6 +471,9 @@ def maybe_notify_owner_of_task_outcome(
     both status-flip writes themselves: this function never raises, because it runs immediately
     after the settle it is reporting on and must never unwind it (mirrors
     ``maybe_report_campaign_outcome``'s own binding fail-soft contract).
+
+    ``impact_verdict`` (VT-680, §7C online impact judge) — threaded straight into
+    ``compose_task_outcome_message``; see that function's own docstring for the honest-note rules.
 
     Returns True only when a message was actually dispatched to Twilio THIS call.
     """
@@ -518,7 +559,9 @@ def maybe_notify_owner_of_task_outcome(
 
     locale = resolve_owner_locale(tenant_id)
     objective_text = _extract_objective_text(task)
-    body = compose_task_outcome_message(outcome, objective_text, locale=locale)
+    body = compose_task_outcome_message(
+        outcome, objective_text, locale=locale, impact_verdict=impact_verdict
+    )
     # T15 — stale settle (the T9 inc-3 reconcile, applied to the TERMINAL closure): when the owner
     # has sent a NEWER inbound since the turn that spawned this task, this closure is landing on a
     # LATER conversation turn (the measured collision: the FB-ad escalated closure piling onto the
