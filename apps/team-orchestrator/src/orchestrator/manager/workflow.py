@@ -112,6 +112,13 @@ _OWNER_WAIT_FAST_POLLS = 40  # 40 × 15s = the first ~10 minutes
 _OWNER_WAIT_POLL_S = 300.0
 _OWNER_WAIT_MAX_POLLS = 2016 + 40  # 40×15s + 2016×300s ≈ 7 days
 
+# VT-671 — the wake-on-signal topic. The resolution seams (approval resolve / answer correlate)
+# DBOS.send a hint here; the wait loops recv with the ladder interval as TIMEOUT, so the worst case
+# is byte-identical to the old sleep-poll and the typical case is an instant wake. The message
+# content is DISCARDED — the DB condition (_approval_still_pending / _question_still_open) stays
+# the sole authority; a spurious/duplicate signal just causes one extra harmless re-check.
+_OWNER_SIGNAL_TOPIC = "owner_signal"
+
 
 def _owner_wait_interval_s(poll_index: int) -> float:
     """VT-633 — the owner-wait backoff ladder (see the constants' note). Pure function of the
@@ -727,8 +734,16 @@ def _park_task_awaiting_approval(tenant_id: str, task_id: str, step_id: str, att
     if current not in ("running", "verifying"):
         return None
     run_id = loop_run_id(task_id, step_id, attempt)
+    # VT-671 — stamp THIS workflow's live id so the resolution seam can WAKE it (DBOS.send) the
+    # instant the owner decides, instead of leaving it to the poll ladder. workflow_id is the
+    # RUNNING id (redrive-suffixed when redriven — exactly why the base id can't be derived).
+    try:
+        wf_id = DBOS.workflow_id
+    except Exception:  # noqa: BLE001 — outside a workflow ctx (unit tests) the stamp is optional
+        wf_id = None
     task_store.park_awaiting_approval(
-        tenant_id, task_id, run_id=run_id, expected_from=("running", "verifying"),
+        tenant_id, task_id, run_id=run_id, wait_workflow_id=wf_id,
+        expected_from=("running", "verifying"),
     )
     return current
 
@@ -1135,7 +1150,9 @@ def manager_task_workflow(tenant_id: str, task_id: str) -> str:
                     break  # answered — correlate_reply already flipped it; resume the loop
                 if not reengaged:
                     reengaged = _maybe_reengage_stale(tenant_id, task_id)
-                DBOS.sleep(_owner_wait_interval_s(polls))
+                # VT-671 — recv-with-timeout replaces sleep: the answer seam sends a wake hint the
+                # moment the owner replies; timeout falls back to the identical ladder cadence.
+                DBOS.recv(_OWNER_SIGNAL_TOPIC, timeout_seconds=_owner_wait_interval_s(polls))
                 polls += 1
             else:
                 _block_limit_exceeded(
@@ -1190,7 +1207,10 @@ def manager_task_workflow(tenant_id: str, task_id: str) -> str:
                 if not _approval_still_pending(tenant_id, task_id, step_id, attempt):
                     resolved = True
                     break
-                DBOS.sleep(_owner_wait_interval_s(polls))
+                # VT-671 — recv-with-timeout replaces sleep: mark_approval_resolved sends a wake
+                # hint on the owner's decision (the ×3-measured j01 send-confirm lateness = this
+                # exact interval); timeout falls back to the identical ladder cadence.
+                DBOS.recv(_OWNER_SIGNAL_TOPIC, timeout_seconds=_owner_wait_interval_s(polls))
                 polls += 1
             if not resolved:
                 _block_limit_exceeded(

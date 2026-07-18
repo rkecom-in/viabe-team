@@ -943,7 +943,8 @@ class PendingApprovalsWrapper(TenantScopedTable):
         tid = self._uuid(tenant_id)
         with self._conn(tid, conn) as c:
             row = c.execute(
-                "SELECT t.id, t.status, p.approval_type FROM pending_approvals p "
+                "SELECT t.id, t.status, p.approval_type, t.stall_metadata "
+                "FROM pending_approvals p "
                 "JOIN manager_tasks t ON t.tenant_id = p.tenant_id "
                 "  AND (t.stall_metadata->>'awaiting_approval_run_id' = p.run_id::text "
                 "       OR t.source_message_ref = p.run_id::text) "

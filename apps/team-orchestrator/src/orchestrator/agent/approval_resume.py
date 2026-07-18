@@ -389,7 +389,39 @@ def mark_approval_resolved(
     # no-op — no second redrive/ack (the FIRST resolution already handled the consumer).
     if resolved_rows:
         _guarantee_campaign_consumer(conn, tenant_id, approval_id, decision)
+        _wake_waiting_workflow(conn, tenant_id, approval_id)
     return True
+
+
+def _wake_waiting_workflow(conn: Any, tenant_id: UUID | str, approval_id: UUID | str) -> None:
+    """VT-671 — WAKE the workflow parked on this approval the instant it resolves (ANY decision:
+    an approval routes the execution leg, a decline routes the honest-decline leg — both should
+    happen NOW, not on the next poll tick).
+
+    Reads the ``wait_workflow_id`` stamped at park time (``task_store.park_awaiting_approval`` —
+    the LIVE, possibly redrive-suffixed id) via the VT-668 reverse join, then ``DBOS.send``s a
+    content-free hint on the owner-signal topic. The waiting loop's ``DBOS.recv`` returns early and
+    RE-CHECKS the DB condition — the signal is a hint, never an authority, so a missed/duplicate
+    send changes nothing but latency. Best-effort: any failure falls back to the poll ladder.
+    """
+    try:
+        from dbos import DBOS
+
+        from orchestrator.manager import task_store
+
+        bound = task_store.find_task_for_resolved_approval(tenant_id, approval_id, conn=conn)
+        if bound is None:
+            return
+        meta = bound.get("stall_metadata") or {}
+        wf_id = meta.get("wait_workflow_id") if isinstance(meta, dict) else None
+        if not wf_id:
+            return  # pre-VT-671 park (no stamp) — the poll ladder covers it
+        DBOS.send(str(wf_id), "resolved", topic="owner_signal")
+    except Exception:  # noqa: BLE001 — a wake failure must never unwind the resolution
+        logger.warning(
+            "VT-671 workflow wake failed (fail-soft — poll ladder covers) tenant=%s approval=%s",
+            tenant_id, approval_id, exc_info=True,
+        )
 
 
 def _apply_agent_glue(
