@@ -213,3 +213,63 @@ def test_invoke_llm_tools_omits_empty_betas_header(monkeypatch):
 
     turn_brain._invoke_llm_tools("sys", [{"role": "user", "content": "x"}], [], ["web-fetch-2025-09-10"])
     assert captured.get("betas") == ["web-fetch-2025-09-10"], "non-empty betas must be forwarded"
+
+
+# --- Cache batch 2026-07-18: both model seams pass the system as ONE cache_control block ------------
+
+
+def _assert_cached_system_shape(system: Any, expected_text: str) -> None:
+    """The block-list cache shape both seams must emit: ONE text block carrying the full system
+    string, marked ephemeral so the per-turn prefix is served from cache."""
+    assert isinstance(system, list) and len(system) == 1
+    block = system[0]
+    assert block["type"] == "text"
+    assert block["text"] == expected_text
+    assert block["cache_control"] == {"type": "ephemeral"}
+
+
+def test_invoke_llm_passes_system_as_cache_control_block(monkeypatch):
+    """Cache batch — the single-call seam sends ``system`` as a block LIST whose only block carries
+    ``cache_control: ephemeral`` and the FULL system string (locale sub included — it is per-owner
+    stable and belongs inside the cached prefix). Volatile content stays on the user prompt."""
+    pytest.importorskip("anthropic")
+    captured: dict[str, Any] = {}
+
+    class _FakeMessages:
+        def create(self, **kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(content=[SimpleNamespace(type="text", text='{"reply_text":"hi"}')])
+
+    class _FakeClient:
+        messages = _FakeMessages()
+
+    monkeypatch.setattr("anthropic.Anthropic", lambda *a, **k: _FakeClient())
+
+    turn_brain._invoke_llm("SYSTEM en-locale", "USER volatile")
+    _assert_cached_system_shape(captured["system"], "SYSTEM en-locale")
+    assert captured["messages"] == [{"role": "user", "content": "USER volatile"}]
+
+
+def test_invoke_llm_tools_passes_system_as_cache_control_block(monkeypatch):
+    """Cache batch — the tool-loop seam sends the SAME block-list cache shape (the caller-assembled
+    system string, _TOOLS_ADDENDUM included, inside the cached block) while the VT-662 empty-betas
+    omission stays intact."""
+    pytest.importorskip("anthropic")
+    captured: dict[str, Any] = {}
+
+    class _FakeMessages:
+        def create(self, **kwargs):
+            captured.clear()
+            captured.update(kwargs)
+            return SimpleNamespace(content=[SimpleNamespace(type="text", text='{"reply_text":"hi"}')])
+
+    class _FakeClient:
+        beta = SimpleNamespace(messages=_FakeMessages())
+
+    monkeypatch.setattr("anthropic.Anthropic", lambda *a, **k: _FakeClient())
+
+    turn_brain._invoke_llm_tools(
+        "SYSTEM plus addendum", [{"role": "user", "content": "x"}], [], []
+    )
+    _assert_cached_system_shape(captured["system"], "SYSTEM plus addendum")
+    assert "betas" not in captured  # VT-662 guard undisturbed by the cache shape
