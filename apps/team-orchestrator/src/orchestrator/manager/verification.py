@@ -38,6 +38,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Literal
 from uuid import UUID
@@ -45,6 +46,7 @@ from uuid import UUID
 from anthropic import Anthropic
 from pydantic import BaseModel, ConfigDict
 
+from orchestrator.llm.structured import structured_text_call
 from orchestrator.manager import task_store
 from orchestrator.manager.message_ids import loop_run_id
 
@@ -84,6 +86,145 @@ class CompletionVerification(BaseModel):
 
     verdict: VerificationVerdict
     reason: str = ""
+
+
+# --- VT-680 (§7C) — the ONLINE impact judge --------------------------------------------------------
+#
+# ``verify_completion`` above checks that a task's work was DONE (evidence recorded, criteria
+# structurally satisfied). It never checks whether the outcome was any GOOD against what the task
+# actually set out to achieve — a completed-but-poor outcome passes silently today. This is that
+# second, additive check: run ONLY after ``verify_completion`` has already returned "verified"
+# (workflow.py's ``_run_verification_cycle`` is the call site), on the SAME persisted substrate
+# (never a live specialist payload — replay/recovery semantics unchanged), advisory-only (v1: no
+# auto-retry — see workflow.py's ``_judge_impact_step`` for why).
+
+# opus-tier ("review" == TEAM_MODEL_REVIEW, default claude-opus-4-8) — the same tier class as this
+# module's OWN completion-verification checkpoint above and plan_validation's sibling opus
+# checkpoint. Routed through the multi-provider seam (``structured_text_call`` ->
+# ``resolve_chat_model``), NOT a raw ``Anthropic()`` client like ``verify_completion`` above (a raw
+# client bypasses the VT-619 cost-metering ledger — the audit finding this row's D4 responds to).
+_IMPACT_JUDGE_TIER = "review"
+_IMPACT_MAX_TOKENS = 400
+
+ImpactJudgeVerdict = Literal["met", "partial", "unmet"]
+
+# The online rubric is a STRICT SUBSET of tier_rescore's (the OFFLINE ×3 measurement judge) Tier-2
+# quality dimensions: outcome-vs-desired_outcome + acceptance-criteria satisfaction ONLY — no tone/
+# language/brevity (those are measurement-gate concerns, not per-task honesty). This comment BINDS
+# the rubric to tier_rescore's Tier-2 categories (VT-680 D5) — a scope drift between the two becomes
+# a diff away from visible instead of a silent divergence. The OFFLINE ×3 gate stays the promotion
+# authority; this online judge is per-task honesty only, never a measurement metric itself.
+_IMPACT_RUBRIC = """You are checking whether a completed business task actually achieved what it \
+set out to do — NOT whether it merely finished (that was already verified separately; assume the \
+task genuinely completed its steps).
+
+You will be given the task's objective, its acceptance_criteria, and a summary of each step it \
+executed — including each step's OWN desired_outcome and any evidence_kind it recorded.
+
+Judge ONLY two things:
+1. Did the real outcome match what each step's own desired_outcome asked for?
+2. Were the objective's acceptance_criteria genuinely satisfied (not merely claimed)?
+
+Do NOT judge tone, language, brevity, or anything else — those are a separate concern handled \
+elsewhere.
+
+Respond with ONLY a JSON object: {"verdict": "met" | "partial" | "unmet", "reason": "<one short \
+sentence, plain language, no PII>"}
+- "met": the outcome matches the desired outcome and the criteria are satisfied.
+- "partial": the task technically completed but the outcome falls short of what was asked, or a
+  criterion is only weakly evidenced.
+- "unmet": the outcome does not match what was asked, or the criteria are not evidenced at all.
+"""
+
+
+class ImpactVerdict(BaseModel):
+    """VT-680 (§7C) — the online impact judge's structured verdict: outcome/impact QUALITY against
+    the task's own desired_outcome/acceptance_criteria, distinct from ``CompletionVerification``
+    (which only checks the work was DONE). ``extra='forbid'`` mirrors ``CompletionVerification``.
+
+    Deliberately has NO 'unjudged' member: a judge failure/timeout is a WORKFLOW-level fallback
+    (``workflow._judge_impact_step`` catches and reports a plain ``"unjudged"`` string that never
+    touches this pydantic type) — never a value this model itself represents."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    verdict: ImpactJudgeVerdict
+    reason: str = ""
+
+
+def judge_impact(
+    tenant_id: UUID | str, task_id: UUID | str, *, text_call: Callable[..., str] | None = None,
+) -> ImpactVerdict:
+    """The §7C online impact judge: scores the completed task's OUTCOME against its own
+    desired_outcome/acceptance_criteria — quality/impact, never mere completion (``verify_completion``'s
+    job, already passed by the time this is ever called). Reads the EXACT SAME persisted substrate
+    ``verify_completion`` reads (task objective + acceptance_criteria + per-step summaries, including
+    each step's OWN ``desired_outcome`` from its ``detail`` — never a live specialist payload, so
+    replay/recovery semantics are unchanged).
+
+    Routed through the multi-provider seam (``structured_text_call`` -> ``resolve_chat_model``), NOT
+    a raw Anthropic client — VT-619 cost-metering free, luna-portable (the ``text_call=`` seam-port
+    convention; mirrors ``plan_validation.validate_plan_draft``'s own port).
+
+    Unlike its sibling checkpoints in this module (``verify_completion``, and
+    ``plan_validation.validate_plan_draft``), this function does NOT fail-soft internally — it
+    RAISES on any client/parse/schema failure. ``ImpactVerdict.verdict`` has no 'unjudged' member
+    (this row's D1 Literal is exactly met/partial/unmet), so there is no value this function could
+    honestly return for a failure; the caller (``workflow._judge_impact_step``) is the fail-soft
+    boundary — it catches and reports a workflow-level 'unjudged' string that never touches this
+    pydantic type, and the settle path proceeds exactly as if the judge had never run.
+    """
+    task = task_store.get_task(tenant_id, task_id)
+    if task is None:
+        raise ValueError(f"judge_impact: task not found tenant={tenant_id} task={task_id}")
+
+    plan_revision = int(task.get("plan_revision") or 1)
+    steps = _current_steps(tenant_id, task_id, plan_revision)
+
+    objective_doc = task.get("objective") or {}
+    objective = objective_doc.get("objective", "") if isinstance(objective_doc, dict) else ""
+    criteria_doc = task.get("acceptance_criteria") or {}
+    acceptance_criteria = (
+        criteria_doc.get("acceptance_criteria", []) if isinstance(criteria_doc, dict) else []
+    )
+    step_summaries = [
+        {
+            "step_seq": s.get("step_seq"),
+            "kind": s.get("kind"),
+            "status": s.get("status"),
+            "evidence_kind": s.get("evidence_kind"),
+            "desired_outcome": (s.get("detail") or {}).get("desired_outcome") or "",
+            "acceptance_criteria": (s.get("detail") or {}).get("acceptance_criteria") or [],
+        }
+        for s in steps
+    ]
+    user_content = json.dumps(
+        {
+            "objective": objective,
+            "acceptance_criteria": acceptance_criteria,
+            "steps": step_summaries,
+        },
+        default=str,
+    )
+
+    _call = text_call or structured_text_call
+    text = _call(
+        _IMPACT_JUDGE_TIER,
+        system=_IMPACT_RUBRIC,
+        user=user_content,
+        max_tokens=_IMPACT_MAX_TOKENS,
+        agent="team_manager",
+        call_site="impact_judge",
+        tenant_id=tenant_id,
+    )
+    if not text.strip():
+        raise ValueError("empty response from impact-judge call")
+    cleaned = _FENCE_RE.sub("", text).strip()
+    try:
+        parsed = json.loads(cleaned)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"non-JSON impact-judge response: {exc}") from exc
+    return ImpactVerdict(**parsed)
 
 
 def _current_steps(tenant_id: UUID | str, task_id: UUID | str, plan_revision: int) -> list[dict[str, Any]]:
@@ -274,9 +415,12 @@ def verify_completion(
 
 __all__ = [
     "CompletionVerification",
+    "ImpactJudgeVerdict",
+    "ImpactVerdict",
     "TerminalOutcome",
     "VerificationVerdict",
     "deterministic_floor_ok",
+    "judge_impact",
     "resolve_terminal_outcome",
     "verify_completion",
 ]
