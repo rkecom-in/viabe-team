@@ -420,7 +420,9 @@ _SPAWN_ANN: dict[str, _Ann] = {
     ),
     "spawn_integration": _Ann(
         ToolKind.SPAWN, None, tenant_scope="n/a",
-        note="handoff to the Integration specialist sub-graph; returns a Command",
+        note="LEGACY/fallback spawn — excluded from the roster when "
+             "TEAM_INTEGRATION_VIA_FRAMEWORK is on (the Integration brain is dissolved; the "
+             "Manager holds connector Tools directly). Do NOT target from new framework modules.",
     ),
     "spawn_onboarding_conductor": _Ann(
         ToolKind.SPAWN, None, tenant_scope="n/a",
