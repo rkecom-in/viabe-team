@@ -202,7 +202,10 @@ def test_lapsed_list_delivers_the_file_when_export_succeeds(
     ans = sq.answer_status_query(_TID, "make a list of lapsed customers")
     assert ans is not None
     assert "5" in ans and str(sq.LAPSED_WINDOW_DAYS) in ans
-    assert "sent" in ans.lower() and "file" in ans.lower()
+    # Fix-4c: the ack COMPLEMENTS the media message ("the file just above") instead of
+    # re-claiming a second send — two success-claims doubled the damage when the live
+    # canary's media attach failed.
+    assert "file" in ans.lower()
     assert "flagged" in ans.lower()  # points the owner at the lapsed flag in the CSV
 
 
