@@ -311,17 +311,30 @@ def _build_prompts(
 
 def _invoke_llm(system_prompt: str, user_prompt: str) -> str:
     """The single LLM call (lazy anthropic import — keeps module import dep-less for the smoke suite).
-    Separated so tests monkeypatch THIS and the prompt-build + parse path stay pure + deterministic."""
+    Separated so tests monkeypatch THIS and the prompt-build + parse path stay pure + deterministic.
+
+    Cache batch 2026-07-18: the system prompt rides as ONE cache_control block. It is stable
+    per-owner (the only substitution — {locale} — is per-owner-stable, so it belongs INSIDE the
+    cached prefix); everything volatile (conversation, answers, owner message) already rides the
+    user prompt, AFTER the cached prefix. Per-turn requests within an onboarding then read the
+    ~6KB system from cache instead of re-paying full input price."""
     from anthropic import Anthropic
 
     resp = Anthropic().messages.create(
         model=_TURN_MODEL,
         max_tokens=_MAX_TOKENS,
-        system=system_prompt,
+        system=[_cached_system_block(system_prompt)],
         messages=[{"role": "user", "content": user_prompt}],
         timeout=_TURN_TIMEOUT_S,
     )
     return resp.content[0].text if resp.content else ""
+
+
+def _cached_system_block(system_prompt: str) -> dict[str, Any]:
+    """The system prompt as a cache_control text block (cache batch 2026-07-18). Shared by BOTH
+    model seams (single-call ``_invoke_llm`` + tool-loop ``_invoke_llm_tools``) so the two paths
+    never diverge on the cache shape."""
+    return {"type": "text", "text": system_prompt, "cache_control": {"type": "ephemeral"}}
 
 
 def _coerce_str_list(value: Any) -> tuple[str, ...]:
@@ -638,10 +651,13 @@ def _invoke_llm_tools(
     # ("Unexpected value(s) `` for the `anthropic-beta` header"). That silently killed the
     # turn-brain on EVERY no-web-fetch onboarding turn (the common case) → walker fallback →
     # ignored_speech_act re-asks (j05). Omit the kwarg entirely when there are no betas.
+    # Cache batch 2026-07-18: system rides as ONE cache_control block (the full string the caller
+    # assembled — compose_turn already appended the static _TOOLS_ADDENDUM, so it is INSIDE the
+    # cached prefix). Same shape as the single-call seam via _cached_system_block.
     kwargs: dict[str, Any] = {
         "model": _TURN_MODEL,
         "max_tokens": _MAX_TOKENS,
-        "system": system_prompt,
+        "system": [_cached_system_block(system_prompt)],
         "messages": messages,
         "tools": tools,
         "timeout": _TURN_TIMEOUT_S,
