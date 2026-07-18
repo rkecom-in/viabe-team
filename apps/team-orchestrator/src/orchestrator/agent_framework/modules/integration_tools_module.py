@@ -88,7 +88,7 @@ from typing import Any
 from orchestrator.agent_framework.capabilities import AgentRole, Capability
 from orchestrator.agent_framework.context import ModuleContext, ModuleResult
 from orchestrator.agent_framework.gate_facade import GateFacade
-from orchestrator.agent_framework.manifest import AgentManifest
+from orchestrator.agent_framework.manifest import AgentBrief, AgentManifest
 
 logger = logging.getLogger("orchestrator.agent_framework.modules.integration_tools")
 
@@ -171,6 +171,46 @@ class IntegrationToolsModule:
             # ``tool_surface_safe`` check re-proves it over all eleven here.
             tools=_connector_tools(),
             entitlement_key=None,
+            # VT-686 — the agent taxonomy: category/tags/brief, written from this module's own
+            # docstring above (accurate, no invention).
+            category="Integration",
+            tags=frozenset({"integration", "connectors", "oauth", "data-source", "ingestion"}),
+            brief=AgentBrief(
+                what_it_does=(
+                    "Reads the tenant's current integration/connector phase and exposes the "
+                    "connector tools (list/read/OAuth/pull-sample/propose+confirm-mapping/"
+                    "commit-proposal/schedule/verify) for setting up and maintaining a "
+                    "customer-data source."
+                ),
+                actions=(
+                    "read_integration_state",
+                    "check_oauth_status",
+                    "verify_connector",
+                    "list_supported_connectors",
+                    "pull_sample",
+                    "propose_mapping",
+                    "confirm_mapping",
+                    "commit_ingestion",
+                    "schedule_recurring_pull",
+                    "start_oauth",
+                ),
+                business_activities=(
+                    "connect a sales-data source (Google Sheets / Shopify)",
+                    "set up and maintain automated customer-data ingestion",
+                ),
+                when_to_use=(
+                    "Route here when the owner wants to connect, check, or fix a data source / "
+                    "integration (Sheets, Shopify, etc.), or asks about the status of an already-"
+                    "connected source."
+                ),
+                limits=(
+                    "no customer send, no money action",
+                    "commit_ingestion is PROPOSAL-ONLY — the real ingest WRITE is a deterministic "
+                    "module-external executor, never performed here",
+                    "does not talk to the owner directly — the Manager renders every word the "
+                    "owner reads",
+                ),
+            ),
         )
 
     # --- PROPOSER lane -------------------------------------------------------------------------

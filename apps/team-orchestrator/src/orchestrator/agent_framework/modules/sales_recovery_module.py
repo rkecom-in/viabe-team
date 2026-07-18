@@ -71,7 +71,7 @@ from typing import Any
 from orchestrator.agent_framework.capabilities import AgentRole, Capability
 from orchestrator.agent_framework.context import ModuleContext, ModuleResult
 from orchestrator.agent_framework.gate_facade import GateFacade
-from orchestrator.agent_framework.manifest import AgentManifest
+from orchestrator.agent_framework.manifest import AgentBrief, AgentManifest
 from orchestrator.agents.activation_registry import REGISTRY as _ACTIVATION_REGISTRY
 
 logger = logging.getLogger("orchestrator.agent_framework.modules.sales_recovery")
@@ -161,6 +161,42 @@ class SalesRecoveryModule:
             "get_recent_campaigns",
             "get_attribution_data",
             "query_customer_ledger",
+        ),
+        # VT-686 — the agent taxonomy: category/tags/brief, written from this module's own
+        # docstring above (accurate, no invention) so the Manager knows WHAT this agent does and
+        # WHEN to delegate to it, instead of inferring both from a spawn-tool description.
+        category="Sales",
+        tags=frozenset({"winback", "lapsed", "campaigns", "sales-recovery"}),
+        brief=AgentBrief(
+            what_it_does=(
+                "Detects lapsed customers, drafts and grounds a win-back campaign, and ARMS the "
+                "Pillar-7 send approval (L3 hold or L2 owner-gated). Proposes a win-back campaign "
+                "in conversation and executes as a coordinator-swept daily-sweep target."
+            ),
+            actions=(
+                "read_lapsed_customer_ledger",
+                "propose_winback_campaign",
+                "draft_campaign_message",
+                "arm_send_approval",
+            ),
+            business_activities=(
+                "win back lapsed customers",
+                "recover at-risk revenue",
+                "run automated win-back campaigns",
+            ),
+            when_to_use=(
+                "Route here when the owner asks about lapsed/inactive customers, wants to win back "
+                "customers who haven't purchased recently, or asks for a win-back / re-engagement "
+                "campaign. Also the coordinator's daily-sweep target for automated win-back."
+            ),
+            limits=(
+                "does NOT send the customer message itself — it ARMS the approval; the actual "
+                "send is a downstream, platform-owned gate (arm != send)",
+                "does not choose which customers to target — the win-back cohort is SERVER-owned, "
+                "never an LLM pick (VT-651); it only drafts the message",
+                "does not talk to the owner directly — the Manager renders every word the owner "
+                "reads",
+            ),
         ),
     )
 

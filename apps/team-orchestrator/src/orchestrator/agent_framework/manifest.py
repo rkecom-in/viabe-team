@@ -25,6 +25,59 @@ class ManifestError(ValueError):
     """Raised by ``AgentManifest.validate`` for a structurally invalid manifest."""
 
 
+#: VT-686 — the finite category registry every registered agent's ``manifest.category`` must be
+#: drawn from (when set). Mirrors the ``CapabilityMode`` discipline elsewhere in this package: a
+#: closed, code-reviewed set, not a free string — ``AgentManifest.validate()`` boot-fails on an
+#: unrecognized value. Adding a category is a deliberate, reviewed code change (like adding a
+#: ``Capability``), never a typo'd string a module author invents inline.
+AGENT_CATEGORIES: frozenset[str] = frozenset(
+    {
+        "Compliance",
+        "Sales",
+        "Marketing",
+        "Finance",
+        "Accounting",
+        "Onboarding",
+        "Integration",
+        "Tech",
+        "CostOpt",
+    }
+)
+
+
+@dataclass(frozen=True)
+class AgentBrief:
+    """VT-686 — the Manager-facing capability brief for an agent: STRUCTURED, not a prose blob.
+
+    This is what lets the Manager know what an agent DOES and WHEN to delegate to it, instead of
+    inferring both from a spawn-tool docstring. ``render_agent_directory`` (``agent_framework.
+    directory``) turns a registry of these into the compact per-turn context card; the conformance
+    ``brief_complete`` check (``agent_framework.conformance``) makes every field here REQUIRED for a
+    module that wants to pass conformance (the dataclass itself stays permissive — see
+    ``AgentManifest.brief``'s docstring for why).
+
+    Fields:
+      - ``what_it_does``         — 1-2 sentences: the agent's job, in plain language.
+      - ``actions``              — tuple of concrete verbs/operations it performs (e.g.
+                                   ``("draft_campaign", "read_lapsed_customers")``).
+      - ``business_activities``  — tuple of owner-recognizable outcomes it completes (e.g.
+                                   ``("win back lapsed customers",)``) — what an OWNER would call
+                                   this, not internal jargon.
+      - ``when_to_use``          — delegation guidance written FOR THE MANAGER: when to route a
+                                   turn to this agent (and, implicitly, when not to).
+      - ``limits``                — what it does NOT do — honesty-first, mirrors the capability
+                                   registry's disabled/advisory entries (e.g. "does not file GST
+                                   returns; readiness/prepare only"). An agent that claims NO limits
+                                   fails conformance — every agent has a boundary; state it.
+    """
+
+    what_it_does: str
+    actions: tuple[str, ...]
+    business_activities: tuple[str, ...]
+    when_to_use: str
+    limits: tuple[str, ...]
+
+
 @dataclass(frozen=True)
 class AgentManifest:
     """The declarative contract for ONE module. Frozen value object (a code manifest, like the
@@ -77,6 +130,27 @@ class AgentManifest:
                             + ``usage_meter.budget_status``), not a manifest field. Carried here only
                             as a forward-compat slot should entitlement become a first-class manifest
                             declaration; ``None`` = entitlement stays computed elsewhere.
+      - ``category``      — VT-686: ONE of the finite ``AGENT_CATEGORIES`` set (e.g. ``"Compliance"``,
+                            ``"Sales"``). Default ``""`` — a SAFE default for back-compat during the
+                            taxonomy retrofit (an un-migrated module still constructs + ``validate()``s
+                            clean). ``validate()`` enforces it ONLY when non-default: a non-empty
+                            category not in ``AGENT_CATEGORIES`` boot-fails. The conformance
+                            ``brief_complete`` check makes a valid category REQUIRED for a module that
+                            wants to pass conformance — registration is the ratchet, not the dataclass.
+      - ``tags``          — VT-686: a ``frozenset[str]`` of free-vocabulary capability identifiers
+                            (e.g. ``{"gst", "gstr1", "gstr3b", "returns", "filing-readiness"}``).
+                            Default ``frozenset()``. ``validate()`` checks SHAPE ONLY when non-empty
+                            (every tag lowercase, non-empty, no whitespace) — it does not enforce a
+                            closed vocabulary (tags are free-form, unlike ``category``).
+                            ``brief_complete`` requires at least one tag.
+      - ``brief``          — VT-686: a structured ``AgentBrief`` (what/actions/business-activities/
+                            when/limits) the Manager reads to decide WHEN to delegate here — see
+                            ``AgentBrief`` for field-by-field detail. Default ``None`` (back-compat).
+                            ``validate()`` only checks it IS an ``AgentBrief`` when supplied (not a
+                            dict/string by mistake); ``brief_complete`` requires every field non-empty.
+                            ``render_agent_directory`` (``agent_framework.directory``) skips any
+                            module whose ``category``/``tags``/``brief`` are still default — only a
+                            VT-686-complete manifest gets a Manager-facing directory card.
     """
 
     name: str
@@ -88,6 +162,9 @@ class AgentManifest:
     tools: tuple[Any, ...] = ()
     required_tools: tuple[str, ...] = ()
     entitlement_key: str | None = None
+    category: str = ""
+    tags: frozenset[str] = frozenset()
+    brief: AgentBrief | None = None
 
     @property
     def gated_capabilities(self) -> frozenset[Capability]:
@@ -174,6 +251,31 @@ class AgentManifest:
                 f"strings (got {bad_required!r}). It names the tools the module's job requires to "
                 "reach (verified by the required_tools_reachable conformance check), not tool objects."
             )
+        # VT-686: category/tags/brief are back-compat-DEFAULTED (an un-migrated module validates
+        # clean) — but the moment one is SUPPLIED (non-default), its SHAPE is enforced here. The
+        # conformance ``brief_complete`` check is the separate, stricter layer that makes all three
+        # REQUIRED for a module that wants to pass conformance (see the field docstrings above).
+        if self.category and self.category not in AGENT_CATEGORIES:
+            raise ManifestError(
+                f"manifest {self.name!r}: category={self.category!r} is not a recognized "
+                f"AGENT_CATEGORIES value ({sorted(AGENT_CATEGORIES)!r}); adding a new category is a "
+                "deliberate, reviewed code change (like adding a Capability), never a free string"
+            )
+        bad_tags = [
+            t
+            for t in self.tags
+            if not isinstance(t, str) or not t or t != t.lower() or " " in t
+        ]
+        if bad_tags:
+            raise ManifestError(
+                f"manifest {self.name!r}: tags must be lowercase, non-empty, space-free strings "
+                f"(got {bad_tags!r})"
+            )
+        if self.brief is not None and not isinstance(self.brief, AgentBrief):
+            raise ManifestError(
+                f"manifest {self.name!r}: brief must be an AgentBrief instance or None (got "
+                f"{type(self.brief).__name__}) — a structured brief, not a prose blob"
+            )
 
 
-__all__ = ["AgentManifest", "ManifestError"]
+__all__ = ["AGENT_CATEGORIES", "AgentBrief", "AgentManifest", "ManifestError"]

@@ -22,6 +22,7 @@ import pytest
 pytest.importorskip("langchain")
 
 from orchestrator.agent_framework import (  # noqa: E402
+    AGENT_CATEGORIES,
     CHECK_NAMES,
     AgentFrameworkRegistry,
     AgentRole,
@@ -66,7 +67,9 @@ def test_module_conforms():
 def test_conformance_report_names_stable():
     report = check_module_conformance(ComplianceToolsModule())
     assert [r.name for r in report.results] == list(CHECK_NAMES)
-    assert len(CHECK_NAMES) == 9  # VT-669 added required_tools_reachable
+    # VT-669 added required_tools_reachable (9th); VT-686 added brief_complete (10th).
+    assert len(CHECK_NAMES) == 10
+    assert "brief_complete" in CHECK_NAMES
 
 
 def test_tool_surface_safe_check_passes_explicitly():
@@ -100,6 +103,25 @@ def test_manifest_shape():
     assert m.prerequisites is None
     assert m.required_tools == ()
     assert m.entitlement_key == "compliance_agent"
+
+
+def test_manifest_carries_vt686_taxonomy():
+    """VT-686: category/tags/brief are populated — and the brief HONESTLY states the Phase-1
+    prepare-only + MCA-parked limits (never invented, mirrors the module's own docstring)."""
+    m = ComplianceToolsModule().manifest
+    assert m.category == "Compliance"
+    assert m.category in AGENT_CATEGORIES
+    assert m.tags == frozenset({"gst", "gstr1", "gstr3b", "returns", "filing-readiness"})
+    assert all(t == t.lower() and " " not in t for t in m.tags)
+    assert m.brief is not None
+    assert m.brief.what_it_does
+    assert m.brief.actions
+    assert m.brief.business_activities
+    assert m.brief.when_to_use
+    assert m.brief.limits
+    limits_text = " ".join(m.brief.limits).lower()
+    assert "does not file" in limits_text or "does not file gst returns" in limits_text
+    assert "mca" in limits_text or "roc" in limits_text
 
 
 def test_manifest_carries_the_one_example_tool():

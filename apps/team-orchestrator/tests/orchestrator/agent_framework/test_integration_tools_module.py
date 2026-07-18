@@ -28,6 +28,7 @@ from orchestrator.agent.integration_agent import (  # noqa: E402 — after the i
     INTEGRATION_AGENT_TOOLS,
 )
 from orchestrator.agent_framework import (  # noqa: E402
+    AGENT_CATEGORIES,
     CHECK_NAMES,
     AgentFrameworkRegistry,
     AgentRole,
@@ -77,10 +78,12 @@ def test_module_conforms():
 
 
 def test_conformance_report_names_stable():
-    """The report shape is stable (all 9 named checks present), via the pure entrypoint."""
+    """The report shape is stable (all 10 named checks present), via the pure entrypoint."""
     report = check_module_conformance(IntegrationToolsModule())
     assert [r.name for r in report.results] == list(CHECK_NAMES)
-    assert len(CHECK_NAMES) == 9  # VT-669 added required_tools_reachable
+    # VT-669 added required_tools_reachable (9th); VT-686 added brief_complete (10th).
+    assert len(CHECK_NAMES) == 10
+    assert "brief_complete" in CHECK_NAMES
 
 
 def test_tool_surface_safe_check_passes_explicitly():
@@ -104,6 +107,21 @@ def test_manifest_shape():
     assert Capability.REQUEST_BUSINESS_ACTION not in m.capabilities
     assert m.prerequisites is None
     assert m.entitlement_key is None
+
+
+def test_manifest_carries_vt686_taxonomy():
+    """VT-686: category/tags/brief are populated (not the back-compat defaults)."""
+    m = IntegrationToolsModule().manifest
+    assert m.category == "Integration"
+    assert m.category in AGENT_CATEGORIES
+    assert m.tags
+    assert all(t == t.lower() and " " not in t for t in m.tags)
+    assert m.brief is not None
+    assert m.brief.what_it_does
+    assert m.brief.actions
+    assert m.brief.business_activities
+    assert m.brief.when_to_use
+    assert m.brief.limits
 
 
 def test_manifest_carries_the_eleven_connector_tools():

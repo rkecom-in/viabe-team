@@ -91,8 +91,45 @@ AgentManifest(
     tools: tuple[Any, ...] = (),
     required_tools: tuple[str, ...] = (),
     entitlement_key: str | None = None,
+    category: str = "",                           # VT-686 — REQUIRED for conformance; see below
+    tags: frozenset[str] = frozenset(),            # VT-686 — REQUIRED for conformance; see below
+    brief: AgentBrief | None = None,               # VT-686 — REQUIRED for conformance; see below
 )
 ```
+
+**VT-686 — `category` / `tags` / `brief` are REQUIRED fields for your module** (even though the
+dataclass itself defaults them empty — that default exists only for BACK-COMPAT during the
+first-party retrofit, not as an option you get to skip). This is what lets the Manager know what
+your agent DOES and WHEN to delegate to it, instead of inferring both from a spawn-tool
+description. Concretely:
+
+- **`category: str`** — exactly ONE value from the finite `AGENT_CATEGORIES` registry
+  (`agent_framework/manifest.py`): `Compliance`, `Sales`, `Marketing`, `Finance`, `Accounting`,
+  `Onboarding`, `Integration`, `Tech`, `CostOpt`. `manifest.validate()` boot-fails on an unrecognized
+  value. Compliance work uses `category="Compliance"`.
+- **`tags: frozenset[str]`** — free-vocabulary capability identifiers, lowercase, no spaces (e.g.
+  `{"gst", "gstr1", "gstr3b", "returns", "filing-readiness"}`). At least one is required.
+- **`brief: AgentBrief`** — a STRUCTURED dataclass (`agent_framework/manifest.py`), not a prose
+  blob. Every field is required and non-empty:
+  ```python
+  AgentBrief(
+      what_it_does: str,                    # 1-2 sentences: your module's job, plain language
+      actions: tuple[str, ...],             # concrete verbs/operations it performs
+      business_activities: tuple[str, ...], # owner-recognizable outcomes it completes
+      when_to_use: str,                     # delegation guidance written FOR THE MANAGER
+      limits: tuple[str, ...],              # what it does NOT do — honesty-first, non-empty
+  )
+  ```
+  **Write the brief from your own module's docstring — accurate, never invented, and `limits` must
+  be honest about the boundary.** For Phase-1 compliance, `limits` must say it does NOT file GST
+  returns (readiness/prepare-only) and that MCA/ROC work is parked — see the compliance skeleton's
+  own manifest for the worked example. **An agent that declares NO limits fails conformance** —
+  every agent has a boundary; state it.
+
+The REQUIREDNESS bar is enforced by the conformance `brief_complete` check (§5), not by
+`manifest.validate()` — `validate()` only checks SHAPE when a field is non-default (a supplied
+category is a real `AGENT_CATEGORIES` member; supplied tags are lowercase/space-free), so an
+un-migrated first-party module still boots. Your NEW module has no such exemption: write the brief.
 
 Call `manifest.validate()` (or let registration/conformance call it for you) — it enforces, among
 other things, the **positive-capability rule**: a gated capability (§2.3) is legal **only** when
@@ -342,10 +379,12 @@ Run these from `apps/team-orchestrator/` unless noted:
    ```
    in a test (fails the test at the first violation) — see
    `tests/orchestrator/agent_framework/test_compliance_tools_module.py::test_module_conforms` for
-   the exact pattern. This runs the full 9-check suite (`has_manifest`, `manifest_valid`,
+   the exact pattern. This runs the full 10-check suite (`has_manifest`, `manifest_valid`,
    `capabilities_legal_for_roles`, `tool_surface_safe`, `role_methods_present`,
    `proposer_gate_readonly`, `gated_capabilities_serviced`, `name_registerable`,
-   `required_tools_reachable`) — see `agent_framework/conformance.py` for what each one asserts.
+   `required_tools_reachable`, `brief_complete`) — see `agent_framework/conformance.py` for what
+   each one asserts. **`brief_complete` (VT-686) is what makes `category`/`tags`/`brief` (§2.1)
+   REQUIRED** — a module missing any of them fails this check even though it registers fine.
 2. **`ruff check`** over every file you touched:
    ```
    uv run ruff check src/orchestrator/agent_framework/modules/<your_module>.py \
