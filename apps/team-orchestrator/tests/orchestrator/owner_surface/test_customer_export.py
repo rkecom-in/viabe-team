@@ -144,7 +144,7 @@ def test_delivery_happy_path_all_rails(monkeypatch: pytest.MonkeyPatch) -> None:
     path, blob, opts = storage.uploads[0]
     assert path.startswith(str(tid))
     # Fix-4a: text/plain (WhatsApp document allowlist has no text/csv — the live-canary
-    # media-attach failure); the .csv FILENAME stays for spreadsheet apps.
+    # media-attach failure); fix-4a2: .txt extension (Meta gates the extension too — r2).
     assert opts["content-type"] == "text/plain"
 
     # Media send: URL ONLY in media_urls, never in the body; recipient = server-derived owner.
