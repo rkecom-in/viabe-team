@@ -24,6 +24,7 @@ from orchestrator.agent.onboarding_conductor import (  # noqa: E402
     ONBOARDING_CONDUCTOR_TOOLS,
 )
 from orchestrator.agent_framework import (  # noqa: E402
+    AGENT_CATEGORIES,
     CHECK_NAMES,
     AgentFrameworkRegistry,
     AgentRole,
@@ -57,16 +58,18 @@ _EXPECTED_TOOL_NAMES = [
 ]
 
 
-# --- 1. conformance (the required gate, now 9 checks) ------------------------------------------
+# --- 1. conformance (the required gate, now 10 checks) ------------------------------------------
 
 
 def test_module_conforms():
     """``assert_conforms`` passes — every trust-boundary + sufficiency property holds, including
-    ``tool_surface_safe`` over the ten conductor tools and ``required_tools_reachable``."""
+    ``tool_surface_safe`` over the ten conductor tools, ``required_tools_reachable``, and the VT-686
+    ``brief_complete`` taxonomy check."""
     report = assert_conforms(OnboardingConductorModule())
     assert report.passed, str(report)
     assert {r.name for r in report.results} == set(CHECK_NAMES)
     assert all(r.passed for r in report.results), str(report)
+    assert "brief_complete" in CHECK_NAMES
 
 
 def test_required_tools_reachable_via_own_surface():
@@ -96,6 +99,21 @@ def test_manifest_shape():
         "profile_completion_check",
         "activation_check",
     )
+
+
+def test_manifest_carries_vt686_taxonomy():
+    """VT-686: category/tags/brief are populated (not the back-compat defaults)."""
+    m = OnboardingConductorModule().manifest
+    assert m.category == "Onboarding"
+    assert m.category in AGENT_CATEGORIES
+    assert m.tags
+    assert all(t == t.lower() and " " not in t for t in m.tags)
+    assert m.brief is not None
+    assert m.brief.what_it_does
+    assert m.brief.actions
+    assert m.brief.business_activities
+    assert m.brief.when_to_use
+    assert m.brief.limits
 
 
 def test_manifest_carries_the_ten_conductor_tools():

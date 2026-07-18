@@ -31,7 +31,7 @@ from typing import Any
 from orchestrator.agent_framework.capabilities import AgentRole, Capability
 from orchestrator.agent_framework.context import ModuleContext, ModuleResult
 from orchestrator.agent_framework.gate_facade import GateFacade
-from orchestrator.agent_framework.manifest import AgentManifest
+from orchestrator.agent_framework.manifest import AgentBrief, AgentManifest
 
 logger = logging.getLogger("orchestrator.agent_framework.reference_plugin")
 
@@ -56,6 +56,30 @@ class BusinessContextReader:
         capabilities=frozenset({Capability.READ_BUSINESS_CONTEXT}),
         prerequisites=None,  # like the advisory lanes: no activation bar (a read is always safe).
         tools=(),  # works purely through the context contract; holds no callable tool.
+        # VT-686 — the agent taxonomy: this is the CANONICAL example a third-party module copies
+        # (see the module docstring), so it demonstrates the required category/tags/brief fields
+        # too, written from its own docstring above (accurate, no invention).
+        category="Tech",
+        tags=frozenset({"reference", "business-context"}),
+        brief=AgentBrief(
+            what_it_does=(
+                "Reads the tenant's manager-held business objective and identity slice and "
+                "returns it as a proposal — the reference/example module proving the framework "
+                "seam end-to-end (registration -> capability declaration -> resolved-tenant "
+                "context in -> proposal out)."
+            ),
+            actions=("read_business_context",),
+            business_activities=("frame a finding against the owner's own business goal",),
+            when_to_use=(
+                "Not a delegation target for a real owner turn — this is the canonical example "
+                "module a new framework module is copied from."
+            ),
+            limits=(
+                "no side effects, no send, no write — read-only",
+                "does not talk to the owner directly — the Manager renders every word the owner "
+                "reads",
+            ),
+        ),
     )
 
     def __init__(self, *, reader: BusinessContextReaderFn | None = None) -> None:

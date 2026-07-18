@@ -190,14 +190,15 @@ def test_manifest_rejects_non_string_required_tools():
 
 
 def test_required_tools_reachable_passes_for_launch_specialists():
-    """SR (Manager-scoped common reads) + Onboarding (own-surface reads) both PASS the 9th check."""
+    """SR (Manager-scoped common reads) + Onboarding (own-surface reads) both PASS the
+    ``required_tools_reachable`` check (and, since VT-686 retrofitted both, the whole suite)."""
     from orchestrator.agent_framework.modules.onboarding_conductor_module import (
         OnboardingConductorModule,
     )
     from orchestrator.agent_framework.modules.sales_recovery_module import SalesRecoveryModule
 
     for module in (SalesRecoveryModule(), OnboardingConductorModule()):
-        report = assert_conforms(module)  # all 9 checks green
+        report = assert_conforms(module)  # all 10 checks green
         assert report.result("required_tools_reachable").passed, str(report)
 
 
