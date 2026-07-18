@@ -25,10 +25,9 @@ would 63016.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from uuid import UUID
 
-from orchestrator.db import tenant_connection
 from orchestrator.observability.incident_store import create_incident, escalate_incident
 from orchestrator.observability.tm_audit import emit_tm_audit
 from orchestrator.output_composer import compose_owner_output
@@ -49,27 +48,20 @@ _TWENTY_FOUR_HOURS = timedelta(hours=24)
 
 
 def last_owner_inbound_at(tenant_id: UUID | str) -> datetime | None:
-    """The tenant's most recent OWNER-authored ``conversation_log`` turn, or ``None`` if the
-    tenant has never messaged (a fresh tenant — treated as stale by ``is_stale``)."""
-    with tenant_connection(tenant_id) as conn:
-        row = conn.execute(
-            "SELECT MAX(created_at) AS last_at FROM conversation_log "
-            "WHERE tenant_id = %s AND role = 'owner'",
-            (str(tenant_id),),
-        ).fetchone()
-    if row is None:
-        return None
-    val = row["last_at"] if isinstance(row, dict) else row[0]
-    return val if isinstance(val, datetime) else None
+    """The tenant's most recent OWNER-authored turn. VT-683 P1: delegates to the ONE
+    session-window truth (``owner_surface.session_window``) — this module proved the logic
+    first (VT-671-era) and now re-imports it; never re-derive."""
+    from orchestrator.owner_surface import session_window
+
+    return session_window.last_owner_inbound_at(tenant_id)
 
 
 def is_stale(last_inbound_at: datetime | None, *, now: datetime | None = None) -> bool:
-    """True iff the WhatsApp freeform window is CLOSED (>24h since the owner's last inbound, or
-    the owner has never messaged at all)."""
-    now = now or datetime.now(timezone.utc)
-    if last_inbound_at is None:
-        return True
-    return (now - last_inbound_at) > _TWENTY_FOUR_HOURS
+    """True iff the WhatsApp freeform window is CLOSED — the inverse of
+    ``session_window.window_open`` (one definition, VT-683 P1)."""
+    from orchestrator.owner_surface import session_window
+
+    return not session_window.window_open(last_inbound_at, now=now)
 
 
 def reengage_stale_task(

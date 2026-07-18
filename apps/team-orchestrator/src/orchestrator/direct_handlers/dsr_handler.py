@@ -40,7 +40,8 @@ from orchestrator.agents.autonomy import kill_autonomy_by_keyword
 from orchestrator.db import tenant_connection
 from orchestrator.state import SubscriberState
 from orchestrator.types import WebhookEvent
-from orchestrator.utils.twilio_send import send_freeform_message, send_template_message
+from orchestrator.direct_handlers._freeform_first import send_freeform_first
+from orchestrator.utils.twilio_send import send_freeform_message
 
 logger = logging.getLogger(__name__)
 
@@ -137,17 +138,22 @@ def dsr_handler(event: WebhookEvent, state: SubscriberState) -> dict[str, Any]:
     else:
         scope_error = "no recipient phone on event"
 
-    # "We received your request; we'll respond within 30 days per DPDP." Now with all three declared
-    # params filled (VT-400) so Twilio renders real values, not the template SAMPLE.
-    send_result = send_template_message(
+    # "We received your request; we'll respond within 30 days per DPDP." VT-683 P1: rides the
+    # SESSION (the owner just messaged — window open by construction) with the Meta template as
+    # the transition belt (same three real params on fallback, VT-400). Copy = same DRAFT
+    # convention as _SCOPE_CONFIRMATION_DRAFT (Fazal wording approval pending).
+    send_result = send_freeform_first(
         tenant_id,
-        "team_dsr_acknowledgment",
-        {
+        f"Hi {owner_name}, we've received your {dsr_type} request and will complete it within "
+        f"{_COMPLETION_WINDOW_DAYS} days — by {deadline_str}. Automated messaging stays paused "
+        "in the meantime.",
+        recipient,
+        fallback_template="team_dsr_acknowledgment",
+        fallback_params={
             "owner_name": owner_name,
             "dsr_type": dsr_type,
             "completion_deadline_date": deadline_str,
         },
-        recipient_phone=recipient,
     )
 
     return {
@@ -155,5 +161,5 @@ def dsr_handler(event: WebhookEvent, state: SubscriberState) -> dict[str, Any]:
         "dsr_ticket_id": ticket_id,
         "autonomy_frozen": autonomy_frozen,
         "scope_confirmation": {"sid": scope_sid, "error": scope_error},
-        "send_result": send_result.model_dump(),
+        "send_result": send_result,
     }

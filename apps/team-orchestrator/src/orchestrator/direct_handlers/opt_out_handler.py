@@ -28,7 +28,7 @@ from orchestrator.agents.autonomy import kill_autonomy_by_keyword
 from orchestrator.db import tenant_connection
 from orchestrator.state import SubscriberState
 from orchestrator.types import WebhookEvent
-from orchestrator.utils.twilio_send import send_template_message
+from orchestrator.direct_handlers._freeform_first import send_freeform_first
 
 logger = logging.getLogger(__name__)
 
@@ -62,16 +62,22 @@ def opt_out_handler(event: WebhookEvent, state: SubscriberState) -> dict[str, An
             )
 
     # Pillar 7: the confirmation send is unconditional; send_result is the truth.
-    send_result = send_template_message(
+    # VT-683 P1: the owner just sent STOP — the 24h window is open by construction, so the
+    # confirmation rides the SESSION (freeform, same Fazal-approved copy) with the Meta template
+    # as the transition belt (redelivery-past-window edge). Whitelist ruling 2026-07-18.
+    send_result = send_freeform_first(
         tenant_id,
-        "team_opt_out_confirmation",
-        {},
-        recipient_phone=event.sender_phone or None,
+        "Got it. I've paused all automated messages and campaigns immediately. Your "
+        "subscription remains active for billing purposes, but I won't initiate anything new "
+        "until you tell me to restart. To resume, reply START. To cancel your subscription "
+        "entirely, reply CANCEL and I'll process that for you. Thanks for letting me know.",
+        event.sender_phone or None,
+        fallback_template="team_opt_out_confirmation",
     )
 
     return {
         "handler": "opt_out_handler",
         "opt_out_set": True,
         "autonomy_frozen": autonomy_frozen,
-        "send_result": send_result.model_dump(),
+        "send_result": send_result,
     }
