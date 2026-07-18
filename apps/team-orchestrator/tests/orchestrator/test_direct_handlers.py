@@ -218,36 +218,36 @@ def test_dsr_handler_scope_confirmation_before_template_with_real_params(handler
 
     outcome = ctx.HANDLERS["dsr_handler"](event, state)
 
-    freeform, template, freeform_i, template_i = _split_dsr_sends(twilio_create)
-    assert freeform is not None, "scope confirmation freeform was not sent"
-    assert template is not None, "acknowledgment template was not sent"
-    # ORDER: the scope confirmation is sent BEFORE the Meta template.
-    assert freeform_i < template_i
+    # VT-683 P1: BOTH legs now ride the open session as freeform (the owner just messaged) —
+    # scope confirmation first, then the acknowledgment; the Meta template is only the fallback
+    # (covered by the dedicated fallback test below).
+    freeform_calls = [c for c in twilio_create.call_args_list if "body" in c.kwargs]
+    template_calls = [c for c in twilio_create.call_args_list if "content_sid" in c.kwargs]
+    assert len(freeform_calls) == 2, "scope confirmation + freeform ack expected"
+    assert not template_calls, "template must not fire when the freeform ack succeeds (P1)"
 
     # The scope confirmation names deletion + account closure + automation-frozen + the deadline.
-    body = freeform.kwargs["body"]
+    body = freeform_calls[0].kwargs["body"]
     assert "deleted" in body
     assert "account closed" in body
     assert "frozen" in body
 
-    # VT-400 fix: all THREE declared params filled (config/twilio_templates.yaml team_dsr_acknowledgment
-    # variables owner_name/dsr_type/completion_deadline_date -> positional {"1","2","3"}), none empty.
-    content_variables = json.loads(template.kwargs["content_variables"])
-    assert set(content_variables) == {"1", "2", "3"}
-    assert all(str(content_variables[k]).strip() for k in ("1", "2", "3"))
-    # owner_name is the seeded business_name; dsr_type comes from the ticket ('deletion').
-    assert content_variables["1"] == "VT-3.3c Handler Test"
-    assert content_variables["2"] == "deletion"
-    # completion_deadline_date ~30 days out, and the SAME date string appears in the scope confirmation.
-    deadline = datetime.strptime(content_variables["3"], "%d %B %Y").date()
+    # The freeform ACK carries the real dsr_type + the SAME ~30-day deadline as the scope leg.
+    ack = freeform_calls[1].kwargs["body"]
+    assert "deletion" in ack
+    import re as _re
+    m = _re.search(r"by (\d{2} \w+ \d{4})", ack)
+    assert m, ack
+    deadline = datetime.strptime(m.group(1), "%d %B %Y").date()
     days_out = (deadline - datetime.now(UTC).date()).days
     assert 29 <= days_out <= 31
-    assert content_variables["3"] in body
+    assert m.group(1) in body
 
     # The return contract reports both sends honestly.
     assert outcome["scope_confirmation"]["sid"] is not None
     assert outcome["scope_confirmation"]["error"] is None
     assert outcome["send_result"]["template_name"] == "team_dsr_acknowledgment"
+    assert outcome["send_result"]["channel"] == "freeform_session"
     assert outcome["send_result"]["success"] is True
 
 

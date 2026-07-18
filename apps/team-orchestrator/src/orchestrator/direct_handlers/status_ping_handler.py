@@ -19,7 +19,7 @@ from dbos import DBOS
 from orchestrator.db import tenant_connection
 from orchestrator.state import SubscriberState
 from orchestrator.types import WebhookEvent
-from orchestrator.utils.twilio_send import send_template_message
+from orchestrator.direct_handlers._freeform_first import send_freeform_first
 
 
 @DBOS.step()
@@ -41,15 +41,18 @@ def status_ping_handler(event: WebhookEvent, state: SubscriberState) -> dict[str
             f"{row['business_name']}: current phase '{row['phase']}'{since}."
         )
 
-    send_result = send_template_message(
+    # VT-683 P1: reactive to an owner ping — window open by construction. The freeform now
+    # carries the ACCURATE status_text this handler always computed (the template never could —
+    # it took no params), with the template as the transition belt.
+    send_result = send_freeform_first(
         state["tenant_id"],
-        "team_status_ping",
-        {},
-        recipient_phone=event.sender_phone or None,
+        status_text,
+        event.sender_phone or None,
+        fallback_template="team_status_ping",
     )
 
     return {
         "handler": "status_ping_handler",
         "status_text": status_text,
-        "send_result": send_result.model_dump(),
+        "send_result": send_result,
     }
