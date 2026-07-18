@@ -548,6 +548,15 @@ def send_freeform_message(
     }
     if media_urls:
         create_kwargs["media_url"] = list(media_urls)
+    # VT-676 fix-4f (canary r2 evidence: EVERY owner_notifications row ever written on dev is
+    # stuck at 'accepted' — Twilio has NEVER posted us a delivery status): per-message
+    # status_callback so failed/undelivered actually reaches the reconciliation ledger
+    # (runner's status-callback leg → record_owner_notification_delivery). Env-gated + inert
+    # when unset (today's behavior). The URL value is the Twilio-signed webhook (may carry the
+    # Vercel bypass token) — never logged.
+    _status_cb = os.environ.get("TEAM_TWILIO_STATUS_CALLBACK_URL")
+    if _status_cb:
+        create_kwargs["status_callback"] = _status_cb
     message = _client().messages.create(**create_kwargs)
     logger.info(
         "twilio-send: freeform sent -> %s (sid=%s)",

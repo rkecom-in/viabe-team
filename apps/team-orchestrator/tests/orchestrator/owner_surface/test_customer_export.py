@@ -143,9 +143,11 @@ def test_delivery_happy_path_all_rails(monkeypatch: pytest.MonkeyPatch) -> None:
     assert len(storage.uploads) == 1
     path, blob, opts = storage.uploads[0]
     assert path.startswith(str(tid))
-    # Fix-4a: text/plain (WhatsApp document allowlist has no text/csv — the live-canary
-    # media-attach failure); fix-4a2: .txt extension (Meta gates the extension too — r2).
-    assert opts["content-type"] == "text/plain"
+    # Fix-4g: application/pdf — the ONLY document type the Twilio WhatsApp channel delivers
+    # (text/csv died r1, text/plain died r2/r3 — all async at Meta after a successful create).
+    assert opts["content-type"] == "application/pdf"
+    assert path.endswith(".pdf")
+    assert blob.startswith(b"%PDF")
 
     # Media send: URL ONLY in media_urls, never in the body; recipient = server-derived owner.
     assert len(sends) == 1

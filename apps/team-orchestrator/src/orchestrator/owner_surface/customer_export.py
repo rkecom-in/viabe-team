@@ -57,12 +57,13 @@ def export_storage_path(tenant_id: str) -> str:
     """Tenant-scoped object path. Pure + deterministic per (tenant, day) — a same-day re-ask
     overwrites (upsert) instead of piling PII copies in the bucket.
 
-    Fix-4a2 (canary-1 r2, 2026-07-18): extension ``.txt`` — r2 proved the text/plain MIME clears
-    Twilio's create gate (MM sid minted) but the document still didn't land on the phone;
-    Meta's document allowlist gates the visible EXTENSION as well, and ``.txt`` is the one that
-    matches text/plain. Content stays CSV-formatted (opens in Excel/Sheets via rename or import)."""
+    Fix-4g (canary-1 r1–r3, 2026-07-18): the file is a PDF. Three live attempts proved the
+    Twilio WhatsApp channel drops non-PDF documents at Meta AFTER a successful create (MM sid
+    minted, nothing delivered): text/csv failed r1, text/plain failed r2/r3. Twilio's supported
+    WhatsApp media list is images/audio/video/vcard/**PDF** — PDF is the only document type it
+    reliably delivers. Rendered via the SAME weasyprint path the monthly report uses."""
     day = datetime.now(UTC).strftime("%Y-%m-%d")
-    return f"{tenant_id}/customers-{day}.txt"
+    return f"{tenant_id}/customers-{day}.pdf"
 
 
 def build_customer_list_csv(tenant_id: UUID | str) -> tuple[bytes, int]:
@@ -109,26 +110,91 @@ def build_customer_list_csv(tenant_id: UUID | str) -> tuple[bytes, int]:
     return buf.getvalue().encode("utf-8"), count
 
 
-def store_customer_csv(
+def render_customer_list_pdf(tenant_id: UUID | str) -> tuple[bytes, int]:
+    """The owner's customer list as PDF bytes + row count (fix-4g — the ONLY document type the
+    Twilio WhatsApp channel reliably delivers). Same paged RLS read + columns as the CSV builder;
+    rendered as one compact table via the SAME weasyprint path the monthly report uses (lazy
+    import — system cairo/pango libs live in the orchestrator Docker image)."""
+    from html import escape
+
+    from orchestrator.db.wrappers import LAPSED_WINDOW_DAYS, CustomersWrapper
+
+    customers = CustomersWrapper()
+    rows_html: list[str] = []
+    count = 0
+    offset = 0
+    while True:
+        page = customers.list_customers_for_export(
+            tenant_id, lapsed_days=LAPSED_WINDOW_DAYS, limit=_PAGE_SIZE, offset=offset
+        )
+        if not page:
+            break
+        for row in page:
+            spend_inr = int(row.get("spend_paise") or 0) / 100
+            last_sale = row.get("last_sale_date")
+            lapsed = bool(row.get("lapsed"))
+            rows_html.append(
+                "<tr{cls}><td>{name}</td><td>{phone}</td><td>{status}</td>"
+                "<td class='num'>₹{spend:,.2f}</td><td>{last}</td><td>{flag}</td></tr>".format(
+                    cls=" class='lapsed'" if lapsed else "",
+                    name=escape(str(row.get("display_name") or "")),
+                    phone=escape(str(row.get("phone_e164") or "")),
+                    status=escape(str(row.get("opt_out_status") or "")),
+                    spend=spend_inr,
+                    last=escape(str(last_sale) if last_sale else "—"),
+                    flag="lapsed" if lapsed else "",
+                )
+            )
+            count += 1
+        if len(page) < _PAGE_SIZE:
+            break
+        offset += _PAGE_SIZE
+
+    if count == 0:
+        return b"", 0
+
+    day = datetime.now(UTC).strftime("%d %b %Y")
+    html = (
+        "<style>"
+        "body{font-family:sans-serif;font-size:9pt;margin:24px}"
+        "h1{font-size:13pt;margin-bottom:2px}"
+        "p.meta{color:#555;margin-top:0}"
+        "table{border-collapse:collapse;width:100%}"
+        "th,td{border:1px solid #ccc;padding:4px 6px;text-align:left}"
+        "th{background:#f0f0f0}"
+        "td.num{text-align:right}"
+        "tr.lapsed td{background:#fff4e5}"
+        "</style>"
+        f"<h1>Customer list</h1><p class='meta'>{count} customers · {day} · "
+        f"lapsed = no purchase in {int(LAPSED_WINDOW_DAYS)} days (highlighted)</p>"
+        "<table><tr><th>Name</th><th>Phone</th><th>Status</th><th>Total purchases</th>"
+        "<th>Last purchase</th><th></th></tr>"
+        + "".join(rows_html)
+        + "</table>"
+    )
+    from weasyprint import HTML  # lazy: system-dep, not importable everywhere
+
+    return HTML(string=html).write_pdf(), count
+
+
+def store_customer_export(
     tenant_id: str,
-    csv_bytes: bytes,
+    pdf_bytes: bytes,
     *,
     client: _StorageClient | None = None,
     bucket: str = EXPORT_BUCKET,
 ) -> str:
-    """Upload the CSV to the private export bucket; return the object path. Upsert (same-day
-    re-ask overwrites).
-
-    VT-676 fix-4a (live canary 2026-07-18, real tenant): content-type is ``text/plain``, NOT
-    ``text/csv`` — WhatsApp's document-media allowlist (Meta: txt/xls(x)/doc(x)/ppt(x)/pdf) does
-    NOT include text/csv, so Twilio accepted the message synchronously but the async media attach
-    died and the owner got a text-only "here's your file". The signed URL's response content-type
-    is whatever we store here. The ``.csv`` FILENAME stays (Excel/Sheets open by extension); if a
-    re-canary shows Meta also rejecting the extension, the one-line fallback is ``.txt``."""
+    """Upload the export PDF to the private bucket; return the object path. Upsert (same-day
+    re-ask overwrites). content-type application/pdf — the one document type the Twilio WhatsApp
+    channel delivers (fix-4g; text/csv and text/plain both died async at Meta, r1–r3)."""
     path = export_storage_path(tenant_id)
     storage = client if client is not None else _supabase_storage(bucket)
-    storage.upload(path, csv_bytes, {"content-type": "text/plain", "upsert": "true"})
+    storage.upload(path, pdf_bytes, {"content-type": "application/pdf", "upsert": "true"})
     return path
+
+
+# Back-compat alias (tests + any external caller); same behavior, PDF-era name preferred.
+store_customer_csv = store_customer_export
 
 
 def export_signed_url(
@@ -183,7 +249,8 @@ def send_customer_list_to_owner(
     ``LIST_SEND_ACK_PREAMBLE`` fallback instead. Never raises.
     """
     try:
-        csv_bytes, row_count = build_customer_list_csv(tenant_id)
+        # Fix-4g: PDF, not CSV — the only Twilio-WhatsApp-deliverable document type (r1–r3).
+        pdf_bytes, row_count = render_customer_list_pdf(tenant_id)
         if row_count == 0:
             # Nothing to export — not an error, but nothing honest to attach either.
             return False
@@ -193,7 +260,7 @@ def send_customer_list_to_owner(
             logger.warning("VT-676 customer-export: no verified owner phone tenant=%s", tenant_id)
             return False
 
-        path = store_customer_csv(str(tenant_id), csv_bytes, client=storage_client)
+        path = store_customer_export(str(tenant_id), pdf_bytes, client=storage_client)
         url = export_signed_url(path, client=storage_client)
         if not url:
             logger.warning("VT-676 customer-export: signed-URL mint failed tenant=%s", tenant_id)
@@ -249,6 +316,8 @@ __all__ = [
     "build_customer_list_csv",
     "export_signed_url",
     "export_storage_path",
+    "render_customer_list_pdf",
     "send_customer_list_to_owner",
     "store_customer_csv",
+    "store_customer_export",
 ]
