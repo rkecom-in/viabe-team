@@ -38,6 +38,18 @@ THE CHECKS (each a named result in the report):
                                        ``required_tools`` (so this check adds no heavy catalog import
                                        to the common empty case — the catalog is imported LAZILY, only
                                        when a module actually declares a required tool).
+  - ``brief_complete``                — VT-686 REQUIREDNESS: ``manifest.category`` is a member of
+                                       ``AGENT_CATEGORIES``, ``manifest.tags`` holds at least one
+                                       (already-shape-validated) tag, and ``manifest.brief`` is an
+                                       ``AgentBrief`` with EVERY field non-empty — ``what_it_does`` /
+                                       ``when_to_use`` non-empty strings, ``actions`` /
+                                       ``business_activities`` / ``limits`` non-empty tuples. An agent
+                                       declaring NO limits fails (every agent has a boundary; state it
+                                       honestly). This is what makes category/tags/brief REQUIRED for
+                                       a module that wants to pass conformance even though the
+                                       ``AgentManifest`` dataclass itself defaults them empty for
+                                       back-compat during the retrofit — registration is the ratchet,
+                                       not the dataclass.
 
 Heavy imports are LAZY (the deny-list guard pulls langchain via ``orchestrator.agent`` at RUNTIME)
 so this module stays dep-less-smoke safe. A test that exercises the register()/facade paths should
@@ -61,7 +73,12 @@ from orchestrator.agent_framework.gate_facade import (
     CapabilityNotDeclared,
     GateFacade,
 )
-from orchestrator.agent_framework.manifest import AgentManifest, ManifestError
+from orchestrator.agent_framework.manifest import (
+    AGENT_CATEGORIES,
+    AgentBrief,
+    AgentManifest,
+    ManifestError,
+)
 
 
 @dataclass(frozen=True)
@@ -264,6 +281,42 @@ def _check_required_tools_reachable(module: Any, manifest: AgentManifest) -> tup
     return True, ""
 
 
+def _check_brief_complete(module: Any, manifest: AgentManifest) -> tuple[bool, str]:
+    """VT-686 — ``category``/``tags``/``brief`` are REQUIRED here even though the dataclass defaults
+    them empty (back-compat during the retrofit, see ``manifest.py``). This is the check that makes
+    the taxonomy a ratchet: a module cannot claim conformance without a Manager-readable identity
+    card. ``manifest.validate()`` already proved SHAPE (a supplied category is a real
+    ``AGENT_CATEGORIES`` member; supplied tags are lowercase/space-free) — this check proves
+    PRESENCE + COMPLETENESS on top of that.
+    """
+    if not manifest.category or manifest.category not in AGENT_CATEGORIES:
+        return False, (
+            f"category {manifest.category!r} is not one of AGENT_CATEGORIES "
+            f"({sorted(AGENT_CATEGORIES)!r}) — every registered agent must declare a valid category"
+        )
+    if not manifest.tags:
+        return False, "tags must declare at least one lowercase capability identifier (got none)"
+    brief = manifest.brief
+    if not isinstance(brief, AgentBrief):
+        return False, "brief is missing — every registered agent needs a structured AgentBrief"
+    if not isinstance(brief.what_it_does, str) or not brief.what_it_does.strip():
+        return False, "brief.what_it_does must be a non-empty summary"
+    if not brief.actions:
+        return False, "brief.actions must be a non-empty tuple of concrete actions"
+    if not brief.business_activities:
+        return False, (
+            "brief.business_activities must be a non-empty tuple of owner-recognizable outcomes"
+        )
+    if not isinstance(brief.when_to_use, str) or not brief.when_to_use.strip():
+        return False, "brief.when_to_use must be non-empty delegation guidance for the Manager"
+    if not brief.limits:
+        return False, (
+            "brief.limits must be a non-empty tuple — an agent that claims no limits fails "
+            "conformance (honesty-first)"
+        )
+    return True, ""
+
+
 def _check_name_registerable(module: Any, manifest: AgentManifest) -> tuple[bool, str]:
     if not manifest.name or not manifest.name.strip():
         return False, "manifest.name is empty/whitespace"
@@ -292,6 +345,7 @@ _CHECKS: tuple[tuple[str, Callable[[Any, AgentManifest], tuple[bool, str]]], ...
     ("gated_capabilities_serviced", _check_gated_capabilities_serviced),
     ("name_registerable", _check_name_registerable),
     ("required_tools_reachable", _check_required_tools_reachable),
+    ("brief_complete", _check_brief_complete),
 )
 
 #: The complete ordered set of check names a report carries (has_manifest + the manifest-dependent

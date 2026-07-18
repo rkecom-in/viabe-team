@@ -5,7 +5,8 @@ WHAT THIS IS
 The FIRST Codex-built specialist target named in ``docs/agent-framework/CODEX-ONBOARDING.md``: an
 independent, framework-conforming module for GST return-filing READINESS (Phase 1) and, later,
 ROC/AOC/balance-sheet readiness (Phase 2, MCA-gated — see the hard boundary below). This file is a
-SKELETON: it registers, it conforms (``assert_conforms`` passes all 9 checks), and it carries ONE
+SKELETON: it registers, it conforms (``assert_conforms`` passes all 10 checks, VT-686's
+``brief_complete`` included — see the manifest's ``category``/``tags``/``brief`` below), and it carries ONE
 real, working, read-only example tool — ``gstr_filing_readiness_snapshot`` — so Codex has a proven
 seam to extend rather than a blank page. Every extension point is marked ``TODO(Codex)``.
 
@@ -112,7 +113,7 @@ from uuid import UUID
 from orchestrator.agent_framework.capabilities import AgentRole, Capability
 from orchestrator.agent_framework.context import ModuleContext, ModuleResult
 from orchestrator.agent_framework.gate_facade import GateFacade
-from orchestrator.agent_framework.manifest import AgentManifest
+from orchestrator.agent_framework.manifest import AgentBrief, AgentManifest
 
 logger = logging.getLogger("orchestrator.agent_framework.modules.compliance_tools")
 
@@ -306,6 +307,36 @@ class ComplianceToolsModule:
             # ₹5000/agent SKU declaration (D-ENT, soft-open today — see agent_framework/
             # entitlement.py). TODO(Codex) extension point #3: no action needed until billing wires.
             entitlement_key="compliance_agent",
+            # VT-686 — the agent taxonomy: category/tags/brief, written from this module's own
+            # docstring above (accurate, no invention; limits mirror the PHASE-1 POSTURE +
+            # MCA/ROC BOUNDARY sections verbatim).
+            category="Compliance",
+            tags=frozenset({"gst", "gstr1", "gstr3b", "returns", "filing-readiness"}),
+            brief=AgentBrief(
+                what_it_does=(
+                    "Reads the tenant's GST verification status and sales ledger and reports a "
+                    "GSTR-1/3B filing-READINESS snapshot — whether the data a filing would need "
+                    "is present, never whether a return IS filed."
+                ),
+                actions=("gstr_filing_readiness_snapshot",),
+                business_activities=(
+                    "check whether a business is ready to file its GST return",
+                    "prepare a GST filing-readiness summary",
+                ),
+                when_to_use=(
+                    "Route here when the owner asks about GST return filing, GSTR-1/3B readiness, "
+                    "or whether their sales/ledger data is sufficient to file."
+                ),
+                limits=(
+                    "does NOT file GST returns — readiness/prepare-only (Phase 1); real filing is "
+                    "a later graduation, declared TODAY as a disabled capability "
+                    "(compliance.return_filing)",
+                    "no ROC/AOC/balance-sheet/MCA work — there is no MCA integration in this "
+                    "codebase; that boundary stays parked until Fazal explicitly un-parks it",
+                    "never estimates tax owed or gives a filing verdict — reports data presence "
+                    "only (an honest empty, never a guessed readiness verdict)",
+                ),
+            ),
         )
 
     def _read(self, tenant_id: UUID) -> dict[str, Any]:

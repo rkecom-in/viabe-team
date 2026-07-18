@@ -76,13 +76,19 @@ from orchestrator.agent_framework.context import (
     ModuleResult,
     TenantResolutionError,
 )
+from orchestrator.agent_framework.directory import render_agent_directory
 from orchestrator.agent_framework.entitlement import check_entitlement
 from orchestrator.agent_framework.gate_facade import (
     BusinessActionOutcome,
     CapabilityNotDeclared,
     GateFacade,
 )
-from orchestrator.agent_framework.manifest import AgentManifest, ManifestError
+from orchestrator.agent_framework.manifest import (
+    AGENT_CATEGORIES,
+    AgentBrief,
+    AgentManifest,
+    ManifestError,
+)
 from orchestrator.agent_framework.protocols import ExecutorModule, ProposerModule
 from orchestrator.agent_framework.registration import (
     AgentFrameworkRegistry,
@@ -101,8 +107,10 @@ from orchestrator.agent_framework.registration import (
 # to a gated action), the two role Protocols, ``register_agent``, and the conformance kit
 # (``check_module_conformance`` / ``assert_conforms``) that verifies a module against all of it.
 __all__ = [
+    "AGENT_CATEGORIES",
     "CHECK_NAMES",
     "GATED_CAPABILITIES",
+    "AgentBrief",
     "AgentFrameworkRegistry",
     "AgentManifest",
     "AgentRole",
@@ -129,4 +137,5 @@ __all__ = [
     "is_gated",
     "register_activation_prereqs",
     "register_agent",
+    "render_agent_directory",
 ]

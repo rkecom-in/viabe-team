@@ -57,3 +57,82 @@ def test_builder_fail_soft_returns_none(monkeypatch) -> None:
     from uuid import uuid4
 
     assert dp._build_capability_truth_block(uuid4()) is None
+
+
+# --- VT-686: the AGENT-DIRECTORY block — same insert-site family, tenant-INDEPENDENT (the
+# directory describes the agent roster, not per-tenant state) ------------------------------------
+
+
+def test_agent_directory_builder_returns_none_on_registry_read_error(monkeypatch) -> None:
+    """A ``default_registry()`` read failure is best-effort -> None, never raises."""
+    import orchestrator.agent_framework.registration as registration_mod
+
+    def _boom():
+        raise RuntimeError("registry unavailable in unit test")
+
+    monkeypatch.setattr(registration_mod, "default_registry", _boom)
+    assert dp._build_agent_directory_block() is None
+
+
+def test_agent_directory_builder_returns_none_on_render_error(monkeypatch) -> None:
+    """A ``render_agent_directory`` failure is best-effort -> None, never raises."""
+    import orchestrator.agent_framework.directory as directory_mod
+
+    def _boom(_registry):
+        raise RuntimeError("render exploded in unit test")
+
+    monkeypatch.setattr(directory_mod, "render_agent_directory", _boom)
+    assert dp._build_agent_directory_block() is None
+
+
+def test_agent_directory_builder_returns_none_for_empty_registry(monkeypatch) -> None:
+    """An empty (or all-incomplete) registry renders "" -> the builder maps that to None."""
+    import orchestrator.agent_framework.registration as registration_mod
+
+    class _EmptyRegistry:
+        def names(self):
+            return []
+
+    monkeypatch.setattr(registration_mod, "default_registry", lambda: _EmptyRegistry())
+    assert dp._build_agent_directory_block() is None
+
+
+def test_agent_directory_builder_returns_block_content(monkeypatch) -> None:
+    """A registry holding one VT-686-complete module renders its identity card into the block."""
+    from types import SimpleNamespace
+
+    import orchestrator.agent_framework.registration as registration_mod
+    from orchestrator.agent_framework import AgentBrief, AgentManifest, AgentRole
+
+    manifest = AgentManifest(
+        name="sales_recovery",
+        version="1.0.0",
+        roles=frozenset({AgentRole.PROPOSER}),
+        description="x",
+        category="Sales",
+        tags=frozenset({"winback"}),
+        brief=AgentBrief(
+            what_it_does="Wins back lapsed customers.",
+            actions=("draft_campaign",),
+            business_activities=("win back lapsed customers",),
+            when_to_use="Route here for lapsed-customer asks.",
+            limits=("does not send directly — arms the approval",),
+        ),
+    )
+
+    class _FakeRegistry:
+        def names(self):
+            return ["sales_recovery"]
+
+        def get(self, _name):
+            return SimpleNamespace(manifest=manifest)
+
+    monkeypatch.setattr(registration_mod, "default_registry", lambda: _FakeRegistry())
+
+    block = dp._build_agent_directory_block()
+
+    assert block is not None
+    assert "### sales_recovery [Sales]" in block
+    assert "Wins back lapsed customers." in block
+    assert "Route here for lapsed-customer asks." in block
+    assert "does not send directly" in block

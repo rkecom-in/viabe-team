@@ -25,6 +25,7 @@ import pytest
 pytest.importorskip("langchain")
 
 from orchestrator.agent_framework import (  # noqa: E402 — after the importorskip guard
+    AGENT_CATEGORIES,
     CHECK_NAMES,
     AgentFrameworkRegistry,
     AgentRole,
@@ -72,12 +73,14 @@ def test_module_conforms():
 
 
 def test_conformance_report_names_stable():
-    """The report shape is stable (all 9 named checks present), via the pure entrypoint."""
+    """The report shape is stable (all 10 named checks present), via the pure entrypoint."""
     report = check_module_conformance(SalesRecoveryModule())
     assert [r.name for r in report.results] == list(CHECK_NAMES)
-    # VT-669 added the 9th check (``required_tools_reachable``) to the suite.
-    assert len(CHECK_NAMES) == 9
+    # VT-669 added the 9th check (``required_tools_reachable``); VT-686 added the 10th
+    # (``brief_complete``).
+    assert len(CHECK_NAMES) == 10
     assert "required_tools_reachable" in CHECK_NAMES
+    assert "brief_complete" in CHECK_NAMES
 
 
 # --- 2. manifest shape (Option A capability model) ---------------------------------------------
@@ -107,6 +110,22 @@ def test_manifest_shape():
         "get_attribution_data",
         "query_customer_ledger",
     )
+
+
+def test_manifest_carries_vt686_taxonomy():
+    """VT-686: category/tags/brief are populated (not the back-compat defaults) — the module has a
+    Manager-readable identity card."""
+    m = SalesRecoveryModule.manifest
+    assert m.category == "Sales"
+    assert m.category in AGENT_CATEGORIES
+    assert m.tags == frozenset({"winback", "lapsed", "campaigns", "sales-recovery"})
+    assert all(t == t.lower() and " " not in t for t in m.tags)
+    assert m.brief is not None
+    assert m.brief.what_it_does
+    assert m.brief.actions
+    assert m.brief.business_activities
+    assert m.brief.when_to_use
+    assert m.brief.limits
 
 
 def test_manifest_reuses_sr_activation_bar_verbatim():
