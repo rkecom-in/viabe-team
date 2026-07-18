@@ -51,6 +51,13 @@ This file becomes the contract. Code in `apps/team-orchestrator/` (when wired) r
 - **Copy (en):** `Hi {{1}}, your Viabe account has been created. To complete your setup, tap the button below.`
 - **Copy (hi):** `नमस्ते {{1}}, आपका Viabe अकाउंट बन गया है। सेटअप पूरा करने के लिए नीचे दिए गए बटन पर टैप करें।` *(HI copy = Fazal-approved)*
 - **Button (en/hi):** `Complete Setup` / `सेटअप पूरा करें`
+- **Twilio Content SID (hing / hi-Latn):** `HX7097590ccf0e901d893f78d9a9224e92` — Roman-script
+  Hindi registered under Meta language=en (Meta has no hi-Latn code), Fazal-created 2026-07-18
+  (O5). Meta approval ASYNC; hinglish welcome routing flips to it on Fazal's approved-confirm.
+- **TEMPLATE-WHITELIST RULING (Fazal 2026-07-18):** owner-facing template surface is MINIMAL —
+  auth OTP (Twilio-handled) + welcome + wake-up/re-engage ONLY. All other owner comms ride the
+  24h conversation session (owner replies daily → session opens → queued comms deliver at idle
+  pace). NO hing variants for weekly_approval / monthly_report / draft_approval, by design.
 - **VT-555:** replaces `team_welcome3` (Meta force-converted that UTILITY→MARKETING). Leads with the account-created FACT + one transactional next-step (a button), no offer/promotion/brand-greeting → Meta classifies UTILITY. `_default_welcome` + the `welcome` routing both point here. Continue-trigger: the onboarding journey lazy-starts on the button tap OR any typed reply.
 
 ---

@@ -84,6 +84,14 @@ team_welcome4:
   languages:
     en: HXc8188616b2e97b557f4c7330157c4f8f
     hi: HXd8a8d5945c79c75d373d9c24edd4b183
+    # hing = hi-Latn (Roman-script Hindi) registered under Meta language=en as a separate content
+    # object (Meta has no hi-Latn language code). Fazal-created 2026-07-18 (O5); Meta approval
+    # ASYNC — the hinglish welcome ROUTING flips to this only on Fazal's approved-confirmation.
+    # Template-whitelist ruling (Fazal 2026-07-18): owner-facing template surface is MINIMAL —
+    # auth OTP (Twilio-handled) + welcome + wake-up/re-engage. Everything else rides the 24h
+    # session (queued owner-comms, idle-pace delivery) — no hing variants for weekly_approval/
+    # monthly_report/draft_approval, by design.
+    hing: HX7097590ccf0e901d893f78d9a9224e92
 
 onboarding_confirm_yesno:
   # VT-479: an INTERACTIVE quick-reply Content object (twilio/quick-reply, Yes/No/Skip buttons) the
