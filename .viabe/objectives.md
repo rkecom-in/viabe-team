@@ -6,7 +6,7 @@
 > status-changing event, same moment as the to-cowork signal). Cowork audits (Rule #14).
 > Bar lines are Fazal's — never edited without a ruling; Now/Gate/status lines are CC's.
 > Statuses: MET · MET–INCIDENT OPEN · IN PROGRESS · AT RISK · PENDING · HELD/PARKED.
-> Last updated: 2026-07-18 17:15 IST · dev 1f3111b (O4 flags ON, gate-2 ×3 running) · local: fix-4e/f/g (PDF export), wakeup2 + whitelist ledger — push on gate-2 green.
+> Last updated: 2026-07-18 18:05 IST · dev 1f3111b · gate-2 drives DONE (raw: 0 fail / 0 timeout — cleanest ever), judge running · local batch (PDF export fix-4e/f/g, wakeup2, whitelist ledger, VT-685 kit) pushes on green.
 
 ## O1 · Trustworthy conversation — MET (holding)
 - Bar: Tier-1 trust-breakers = 0 across the 10-journey pack ×3; Tier-2 quality ≥ 90%.
@@ -46,8 +46,9 @@
 - Bar: plans (monthly/daily), allocates to specialists, validates outcomes, logs every
   decision with reasons — a manager, not a responder.
 - Now: **VT-679 (§7A proactive planning) + VT-680 (§7C impact judge) BUILT + DEPLOYED on dev,
-  flags ON** — gate-2 ×3 running now; green closes both named gaps. Reactive core + delegation
-  contract + outcome-validation + audit log (VT-514) live.
+  flags ON**. Gate-2 ×3 drives COMPLETE — raw read is the cleanest full pack ever recorded
+  (30/30, 69 steps passed, ZERO failures, ZERO timeouts); judge verdict pending (~15 min).
+  Green closes both §7 named gaps. Reactive core + delegation + validation + audit live.
 - Missing: proactive planning loop (§7A) mid-build depth · §7C impact-judge (validate outcome
   quality, not just completion) · dynamic sensing is O9 (held).
 
@@ -89,7 +90,8 @@
 - Bar: the Manager learns per-tenant from the audit log; KG/RAG wired; per-capability
   accuracy graduation; concierge as the learning engine.
 - Now: substrate exists (audit/trace, L2/L3, KG separate); RAG broker landed but UNWIRED;
-  learning loop not started. Deliberately behind the trust floor.
+  learning loop not started. Park condition (trust floor) is MET — awaiting Fazal's explicit
+  un-park word.
 
 ## O9 · Dynamic sensing (Phase 1.2) — HELD (by design)
 - Bar: watchers/pollers/listeners the Manager configures; event-driven autonomy.
@@ -102,7 +104,10 @@
 - Agents: **Manager** (embedded) LIVE · **Sales Recovery** LIVE (Concierge; first eligible to
   graduate) · **Onboarding Conductor** LIVE. Advisory functions as Manager-held tools, never
   described autonomous: Marketing (prepare+propose via send rails) · Finance (advisory) ·
-  Accounting (prepare-only) · Tech (owner-authorised only) · Cost-Opt (advisory).
+  Accounting (prepare-only) · Tech (owner-authorised only) · Cost-Opt (advisory) ·
+  **Compliance (NEW, Fazal 2026-07-18): Codex builds GSTR-1/3B filing-READINESS as a framework
+  module (advisory/prepare-only; filing = declared-disabled until graduation; MCA parked —
+  owner-docs only). VT-685 onboarding kit building now.**
 - Tools: Shopify OAuth connector ✓ · GST verify gate ✓ · knowyourgst discovery ✓ · Sheets
   zero-paste ✓ · WhatsApp send rails ✓ · common READ set + 74-surface catalog ✓ ·
   customer-list export ✓-built (live canary OPEN) · connector-Tools registry ✓.
