@@ -6,13 +6,17 @@ the deterministic floor + the terminal_outcome proxy + the opus structured-extra
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 pytest.importorskip("anthropic")
 
 from orchestrator.manager.verification import (  # noqa: E402
     CompletionVerification,
+    ImpactVerdict,
     deterministic_floor_ok,
+    judge_impact,
     resolve_terminal_outcome,
 )
 
@@ -204,3 +208,164 @@ def test_no_effect_fast_path_verifies_without_llm(monkeypatch):
     v = verification.verify_completion(tid, kid, client=None)
     assert v.verdict == "verified"
     assert "no-effect fast path" in v.reason
+
+
+# --- VT-680 (§7C) — the ONLINE impact judge -------------------------------------------------------
+
+
+def _json_text_call(payload: dict):
+    """Mirrors ``structured_text_call``'s signature ``(tier, *, system, user, max_tokens, agent,
+    call_site, tenant_id)`` — accepts and ignores whatever the site passes, returns ``payload`` as
+    JSON text (matches ``test_plan_validation.py``'s own stub shape)."""
+
+    def _call(*args, **kwargs) -> str:  # noqa: ANN002, ANN003
+        return json.dumps(payload)
+
+    return _call
+
+
+def _raw_text_call(raw: str):
+    def _call(*args, **kwargs) -> str:  # noqa: ANN002, ANN003
+        return raw
+
+    return _call
+
+
+def _raising_text_call(*args, **kwargs) -> str:  # noqa: ANN002, ANN003
+    raise RuntimeError("network down")
+
+
+def test_impact_verdict_model_accepts_all_three_verdicts() -> None:
+    for verdict in ("met", "partial", "unmet"):
+        iv = ImpactVerdict(verdict=verdict, reason="x")
+        assert iv.verdict == verdict
+
+
+def test_impact_verdict_model_rejects_unknown_verdict() -> None:
+    with pytest.raises(Exception):
+        ImpactVerdict(verdict="unjudged")  # type: ignore[arg-type]  # NOT a member of this Literal
+
+
+def test_impact_verdict_model_rejects_extra_fields() -> None:
+    with pytest.raises(Exception):
+        ImpactVerdict(verdict="met", reason="x", extra_field="nope")  # type: ignore[call-arg]
+
+
+def _seed_task_and_steps(monkeypatch: pytest.MonkeyPatch) -> None:
+    from orchestrator.manager import task_store, verification
+
+    monkeypatch.setattr(
+        task_store, "get_task",
+        lambda t, k: {
+            "plan_revision": 1,
+            "objective": {"objective": "win back lapsed customers"},
+            "acceptance_criteria": {"acceptance_criteria": ["3+ customers recovered within 7 days"]},
+        },
+    )
+    monkeypatch.setattr(
+        verification, "_current_steps",
+        lambda t, k, r: [
+            {
+                "step_seq": 1,
+                "status": "done",
+                "kind": "specialist_dispatch",
+                "evidence_kind": "campaign_plan",
+                "detail": {
+                    "desired_outcome": "recover 3+ lapsed customers",
+                    "acceptance_criteria": ["3+ customers recovered"],
+                },
+            }
+        ],
+    )
+
+
+def test_judge_impact_met(monkeypatch: pytest.MonkeyPatch) -> None:
+    from uuid import uuid4
+
+    _seed_task_and_steps(monkeypatch)
+    result = judge_impact(
+        uuid4(), uuid4(),
+        text_call=_json_text_call({"verdict": "met", "reason": "criteria satisfied"}),
+    )
+    assert result.verdict == "met"
+
+
+def test_judge_impact_partial(monkeypatch: pytest.MonkeyPatch) -> None:
+    from uuid import uuid4
+
+    _seed_task_and_steps(monkeypatch)
+    result = judge_impact(
+        uuid4(), uuid4(),
+        text_call=_json_text_call({"verdict": "partial", "reason": "only 1 of 3 recovered"}),
+    )
+    assert result.verdict == "partial"
+    assert result.reason
+
+
+def test_judge_impact_raises_on_non_json_response(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Unlike ``verify_completion``/``validate_plan_draft``, ``judge_impact`` does NOT fail-soft
+    internally — ``ImpactVerdict`` has no 'unjudged' member to degrade to, so a parse failure
+    propagates; the caller (``workflow._judge_impact_step``) is the fail-soft boundary."""
+    from uuid import uuid4
+
+    _seed_task_and_steps(monkeypatch)
+    with pytest.raises(ValueError, match="non-JSON"):
+        judge_impact(uuid4(), uuid4(), text_call=_raw_text_call("not json"))
+
+
+def test_judge_impact_raises_on_empty_response(monkeypatch: pytest.MonkeyPatch) -> None:
+    from uuid import uuid4
+
+    _seed_task_and_steps(monkeypatch)
+    with pytest.raises(ValueError, match="empty response"):
+        judge_impact(uuid4(), uuid4(), text_call=_raw_text_call("   "))
+
+
+def test_judge_impact_raises_on_schema_mismatch(monkeypatch: pytest.MonkeyPatch) -> None:
+    from uuid import uuid4
+
+    _seed_task_and_steps(monkeypatch)
+    with pytest.raises(Exception):
+        judge_impact(
+            uuid4(), uuid4(),
+            text_call=_json_text_call({"verdict": "sort-of"}),  # not a member of the Literal
+        )
+
+
+def test_judge_impact_raises_on_client_exception(monkeypatch: pytest.MonkeyPatch) -> None:
+    from uuid import uuid4
+
+    _seed_task_and_steps(monkeypatch)
+    with pytest.raises(RuntimeError, match="network down"):
+        judge_impact(uuid4(), uuid4(), text_call=_raising_text_call)
+
+
+def test_judge_impact_raises_when_task_not_found(monkeypatch: pytest.MonkeyPatch) -> None:
+    from uuid import uuid4
+
+    from orchestrator.manager import task_store
+
+    monkeypatch.setattr(task_store, "get_task", lambda t, k: None)
+    with pytest.raises(ValueError, match="task not found"):
+        judge_impact(uuid4(), uuid4(), text_call=_json_text_call({"verdict": "met"}))
+
+
+def test_judge_impact_reads_desired_outcome_from_step_detail(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Proves the substrate this reads is exactly what ``verify_completion`` reads PLUS each step's
+    OWN ``desired_outcome`` (VT-680 D1) — captured via the ``text_call`` stub's ``user`` kwarg."""
+    from uuid import uuid4
+
+    _seed_task_and_steps(monkeypatch)
+    captured: dict = {}
+
+    def _capture(tier, *, system, user, max_tokens, agent, call_site, tenant_id):
+        captured["user"] = user
+        captured["agent"] = agent
+        captured["call_site"] = call_site
+        return json.dumps({"verdict": "met", "reason": "ok"})
+
+    judge_impact(uuid4(), uuid4(), text_call=_capture)
+
+    assert "recover 3+ lapsed customers" in captured["user"]  # the step's own desired_outcome
+    assert captured["agent"] == "team_manager"
+    assert captured["call_site"] == "impact_judge"
