@@ -202,6 +202,7 @@ def park_awaiting_approval(
     task_id: UUID | str,
     *,
     run_id: UUID | str,
+    wait_workflow_id: str | None = None,
     expected_from: tuple[str, ...] = ("running", "verifying"),
 ) -> bool:
     """VT-668 — atomically park a task ``waiting_owner`` for an owner-approval wait AND stamp the
@@ -221,14 +222,19 @@ def park_awaiting_approval(
     Recording it here at park time gives the resolution seam / reaper a deterministic reverse join
     (``find_task_awaiting_approval_run``). CAS-guarded to ``expected_from`` so a stale/terminal task
     is a no-op (returns False). The ``||`` merge preserves any existing ``stall_metadata`` keys."""
+    # VT-671 — also stamp the LIVE waiting workflow id (redriven workflows carry SUFFIXED ids, so
+    # the base manager_task_workflow_id() can miss): the resolution seam reads this to WAKE the
+    # exact waiting workflow via DBOS.send instead of leaving it to the poll ladder.
+    meta = {"awaiting_approval_run_id": str(run_id)}
+    if wait_workflow_id:
+        meta["wait_workflow_id"] = str(wait_workflow_id)
     with tenant_connection(tenant_id) as conn:
         cur = conn.execute(
             "UPDATE manager_tasks SET status = 'waiting_owner', version = version + 1, "
             "    updated_at = now(), "
-            "    stall_metadata = COALESCE(stall_metadata, '{}'::jsonb) "
-            "      || jsonb_build_object('awaiting_approval_run_id', %s::text) "
+            "    stall_metadata = COALESCE(stall_metadata, '{}'::jsonb) || %s::jsonb "
             "WHERE tenant_id = %s AND id = %s AND status = ANY(%s)",
-            (str(run_id), str(tenant_id), str(task_id), list(expected_from)),
+            (Jsonb(meta), str(tenant_id), str(task_id), list(expected_from)),
         )
         if cur.rowcount == 0:
             logger.warning(
