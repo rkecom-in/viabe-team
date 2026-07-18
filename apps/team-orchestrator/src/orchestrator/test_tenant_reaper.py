@@ -49,6 +49,10 @@ def fk_safe_delete_tenant(conn, tenant_id: str) -> list[tuple[str, str]]:
     """Delete one tenant + all its rows, FK-safely. Returns still-blocked (table,col) list
     (EMPTY == fully deleted). NEVER swallows silently (that was the cmd_teardown bug). autocommit conn."""
     conn.execute("DELETE FROM pipeline_steps WHERE tenant_id = %s", (tenant_id,))  # unblocks pipeline_runs
+    # escalations.tenant_id carries NO FK to tenants, so the catalog-driven pass below never
+    # sees it — 21 orphaned escalations accumulated on dev (each re-alerting the hourly VT-357
+    # SLA sweep forever). Delete explicitly, like pipeline_steps. (2026-07-19 orphan sweep.)
+    conn.execute("DELETE FROM escalations WHERE tenant_id = %s", (tenant_id,))
     noncascade = conn.execute(
         "SELECT DISTINCT cl.relname AS tbl, att.attname AS col FROM pg_constraint con "
         "JOIN pg_class cl ON cl.oid=con.conrelid "
