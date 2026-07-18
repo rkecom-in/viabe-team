@@ -158,12 +158,16 @@ def _claim_step(tenant_id: str, task_id: str) -> dict[str, Any] | None:
 @DBOS.step()
 def _validate_step(tenant_id: str, step: dict[str, Any]) -> bool:
     """"validate capability, prerequisites and policy" (Package 3's diagram) — the LIVE rails the
-    advisory tools already ride, not the dead ``capability/registry.py`` (VT-528) scaffolding.
-    ``capability/registry.py`` is a genuinely separate, more elaborate capability-contract system
-    (mode/effect-class/verifier/rollback declarations) with no live caller today; wiring THIS diff
-    to it would be scope creep in the program's most consequential change (team-lead ruling). It
-    stays on the roster as a future consolidation target — a later row should decide whether
-    ``_validate_step`` migrates onto it once it has a real caller elsewhere.
+    advisory tools already ride.
+
+    VT-681 phase 4 note — ``capability/registry.py`` is NO LONGER dead scaffolding: it is the
+    PROMISE-truth layer (per-tenant live/advisory/disabled via ``resolve_for``; the dispatch
+    capability-truth block + the D2 disclosure net read it). THIS function remains the
+    EXECUTION-gate layer. Deliberate split, one truth each: the registry decides what may be
+    PROMISED; these rails decide what may be DISPATCHED — migrating this gate onto the registry
+    stays a Fazal-callable follow-on, not an ambient refactor (the two layers agree by
+    construction today because the registry's activation join reuses the SAME
+    ``is_agent_eligible`` bar this gate checks).
 
     Three checks, fail-closed, all BEFORE any dispatch:
       1. ``onboarding_gate.is_agent_eligible`` — the specialist's activation prerequisites
