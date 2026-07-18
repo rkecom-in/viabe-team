@@ -93,6 +93,23 @@ team_welcome4:
     # monthly_report/draft_approval, by design.
     hing: HX7097590ccf0e901d893f78d9a9224e92
 
+team_wakeup:
+  # VT-683 — the daily wake-up/re-engage template (Fazal-created 2026-07-18, all three langs).
+  # One of the THREE whitelisted owner-facing templates (OTP is Twilio-Verify-handled, no SID
+  # here): welcome4 + wakeup + OTP; everything else rides the 24h session (Fazal ruling
+  # 2026-07-18). Quick-reply button payload CONTINUE_UPDATES (SAME id all three langs — the
+  # session-open + queue-drain trigger; any typed reply works too). {{1}} = owner name.
+  # hing = Roman-script Hindi registered under Meta language=en (no hi-Latn code exists).
+  # Send rules (VT-683 P3): session CLOSED ∧ queue non-empty ∧ ≤1/day ∧ owner hours IST.
+  audience: owner
+  agent_selectable: false
+  variables:
+    - owner_name
+  languages:
+    en: HXd6c8cb1300e1d1aaf033fb449f138a7e
+    hi: HX26d778c5fdf6a02528b88b9f53f1b171
+    hing: HX08b861987d462ef9f7405a0257199dc1
+
 onboarding_confirm_yesno:
   # VT-479: an INTERACTIVE quick-reply Content object (twilio/quick-reply, Yes/No/Skip buttons) the
   # onboarding journey sends IN-SESSION (≤24h window) so a confirm question is a tappable button, not

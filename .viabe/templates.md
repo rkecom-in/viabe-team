@@ -10,6 +10,40 @@
 
 **Source authority:** Meta-approval status owned by Fazal (vendor relationship). Twilio Content SIDs are the canonical runtime identifier — assigned when the template is uploaded to Twilio Content API after Meta approval. The `template_name` is the human-readable handle used in code.
 
+## TEMPLATE WHITELIST — the source of truth for what may send as a template (Fazal ruling 2026-07-18)
+
+Owner-facing template surface is MINIMAL. Everything not on the whitelist delivers ONLY inside
+the 24h conversation session (queued, idle-paced — VT-683). CC maintains this list.
+
+### ACTIVE (whitelisted, in use)
+
+| Template | Languages / SIDs | Purpose |
+|---|---|---|
+| **auth OTP** | Twilio Verify (no content SID) | login/verification |
+| **`team_welcome4`** | en `HXc8188616…` · hi `HXd8a8d5…` · hing `HX7097590ccf0e901d893f78d9a9224e92` (Meta approval pending) | account-created + Complete Setup button |
+| **`team_wakeup`** | en `HXd6c8cb1300e1d1aaf033fb449f138a7e` · hi `HX26d778c5fdf6a02528b88b9f53f1b171` · hing `HX08b861987d462ef9f7405a0257199dc1` | daily re-engage; Continue button (payload `CONTINUE_UPDATES`) opens the session + drains the queue (VT-683 P3) |
+
+### UNDER RETIREMENT REVIEW (registered, still have live callers — migrate into the session per VT-683)
+
+| Template | Today's caller | Migration path |
+|---|---|---|
+| `team_weekly_approval` | weekly cadence arm (request_owner_approval) | → owner-comms queue (VT-683 P2) |
+| `team_agent_draft_approval` | L2 agent-send arm | → queue (P2) |
+| `team_l3_presend_notice` | L3 arm 2h hold | → queue (P2) |
+| `team_autonomy_offer` | coordinator streak sweep | → queue (P2) |
+| `team_agent_stuck_escalation` | extreme-scenario escalation | → queue (P2; consider keeping template for URGENT class — Fazal call at P2 review) |
+| `team_opt_out_confirmation` | reactive to owner STOP (window open) | → freeform NOW (P1 — no template needed) |
+| `team_status_ping` | reactive to owner ping | → freeform NOW (P1) |
+| `team_dsr_acknowledgment` | reactive to owner DSR keyword | → freeform NOW (P1) |
+| `team_error_handler` | async Twilio failure callback | keep as system fallback until P4 review |
+| `team_reengage` | manager stale-task nudge | → MERGE into `team_wakeup` (Fazal point B, pending) |
+| `team_monthly_report` | **ORPHANED — no code sends it** (report ships via email/PDF) | mark deprecated at P4 |
+
+### DEPRECATED (never send)
+`team_welcome` · `team_welcome2` · `team_welcome3` (Meta category force-conversions; history in their sections below).
+
+---
+
 ## WhatsApp Senders (the sending numbers)
 
 The number the runtime sends FROM (`TEAM_TWILIO_FROM_NUMBER`) — a Twilio WhatsApp Sender resource, per env. Recorded here so the sender identity isn't lost in the consoles.
