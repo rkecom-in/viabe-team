@@ -6,7 +6,7 @@
 > status-changing event, same moment as the to-cowork signal). Cowork audits (Rule #14).
 > Bar lines are Fazal's — never edited without a ruling; Now/Gate/status lines are CC's.
 > Statuses: MET · MET–INCIDENT OPEN · IN PROGRESS · AT RISK · PENDING · HELD/PARKED.
-> Last updated: 2026-07-18 18:05 IST · dev 1f3111b · gate-2 drives DONE (raw: 0 fail / 0 timeout — cleanest ever), judge running · local batch (PDF export fix-4e/f/g, wakeup2, whitelist ledger, VT-685 kit) pushes on green.
+> Last updated: 2026-07-18 18:20 IST · gate-2 PASSED → pushing the batch (PDF export, wakeup2, whitelist, objectives) · r4 canary next · VT-685 kit lands separately.
 
 ## O1 · Trustworthy conversation — MET (holding)
 - Bar: Tier-1 trust-breakers = 0 across the 10-journey pack ×3; Tier-2 quality ≥ 90%.
@@ -45,10 +45,11 @@
 ## O4 · Autonomous Manager (management mandate §7) — IN PROGRESS
 - Bar: plans (monthly/daily), allocates to specialists, validates outcomes, logs every
   decision with reasons — a manager, not a responder.
-- Now: **VT-679 (§7A proactive planning) + VT-680 (§7C impact judge) BUILT + DEPLOYED on dev,
-  flags ON**. Gate-2 ×3 drives COMPLETE — raw read is the cleanest full pack ever recorded
-  (30/30, 69 steps passed, ZERO failures, ZERO timeouts); judge verdict pending (~15 min).
-  Green closes both §7 named gaps. Reactive core + delegation + validation + audit live.
+- Now: **§7A + §7C CLOSED — gate-2 PASSED** (1f3111b, flags ON): cleanest full pack ever
+  (30/30, 0 step failures, 0 timeouts); judge Tier-2 96.6% PASS; the single judged Tier-1 was a
+  judge-FP deterministically refuted by the DB money-authority asserts (stated 8 == DB 8 —
+  CL-2026-07-16: DB is sole authority; transcript-artifact misread, VT-641 family). Proactive
+  planning + impact judge are LIVE on dev.
 - Missing: proactive planning loop (§7A) mid-build depth · §7C impact-judge (validate outcome
   quality, not just completion) · dynamic sensing is O9 (held).
 
