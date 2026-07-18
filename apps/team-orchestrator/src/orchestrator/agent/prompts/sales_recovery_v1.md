@@ -100,50 +100,6 @@ emit is overwritten. You DO still own the `target_cohort.cohort_label` and
 `selection_reason` PROSE (they are preserved), and you own the message. Just
 don't choose who receives it — that's the full eligible cohort, always.
 
-### Example — `proposed`
-
-```json
-{
-  "status": "proposed",
-  "campaign_window": {
-    "start": "{{CAMPAIGN_WINDOW_START}}",
-    "end":   "{{CAMPAIGN_WINDOW_END}}"
-  },
-  "target_cohort": {
-    "customer_ids": ["b6f3b6c4-3a90-4f86-9a16-7c1ab2a4f1e2", "a1c2d3e4-5f60-4a71-8b92-0c3d4e5f6a7b"],
-    "cohort_label": "lapsed-45d",
-    "cohort_size": 2,
-    "selection_reason": "All lapsed customers with no purchase in >=45d, opted-in for promos [E1]."
-  },
-  "expected_arrr": {
-    "low_paise": 100000,
-    "high_paise": 500000,
-    "confidence": "low",
-    "basis": "Historical recovery rate 20-40% per [E1]."
-  },
-  "evidence_refs": [
-    {
-      "claim_id": "E1",
-      "source_kind": "l4_skill_corpus",
-      "source_id": "dormant-recovery-benchmark"
-    }
-  ],
-  "message_plan": {
-    "template_id": "dormant_recovery_v1",
-    "template_params": {"customer_name": "<customer_name>", "discount": "10"},
-    "language": "en",
-    "personalization": "Hi <customer_name>, we miss you — here's 10% off your next visit."
-  }
-}
-```
-
-**Dates (proposed variant).** Today's date is `{{TODAY}}` (UTC). Set
-`campaign_window.start` to today or a future date — NEVER a past/backdated
-date — and `campaign_window.end` roughly 7 days after `start`. The
-`CampaignWindow` validator rejects any window whose `start` is before "now",
-so do NOT copy a date from this prompt verbatim; compute the window from the
-current date.
-
 **Evidence sources (proposed variant).** Every `evidence_refs[].source_kind`
 MUST be EXACTLY one of these three values — no others are legal and any
 off-enum value fails schema validation:
@@ -298,3 +254,53 @@ When the request is ambiguous or the context is thin: prefer
 `insufficient_data` with structured `missing_data` entries over a
 speculative `proposed`. The orchestrator surfaces refusals cleanly to the
 owner; it has no graceful path for a fabricated campaign.
+
+<!-- CACHE-SPLIT: everything ABOVE this marker is byte-stable across dispatches and is sent
+     as the FIRST system block with cache_control (prompt caching). Everything BELOW is
+     date-rendered per dispatch ({{TODAY}} / {{CAMPAIGN_WINDOW_*}}, VT-493) and rides as a
+     SECOND, un-cached system block — keep ALL date tokens below this line, and keep the
+     marker itself out of the rendered prompt (the renderer splits on and drops it). -->
+
+### Example — `proposed`
+
+```json
+{
+  "status": "proposed",
+  "campaign_window": {
+    "start": "{{CAMPAIGN_WINDOW_START}}",
+    "end":   "{{CAMPAIGN_WINDOW_END}}"
+  },
+  "target_cohort": {
+    "customer_ids": ["b6f3b6c4-3a90-4f86-9a16-7c1ab2a4f1e2", "a1c2d3e4-5f60-4a71-8b92-0c3d4e5f6a7b"],
+    "cohort_label": "lapsed-45d",
+    "cohort_size": 2,
+    "selection_reason": "All lapsed customers with no purchase in >=45d, opted-in for promos [E1]."
+  },
+  "expected_arrr": {
+    "low_paise": 100000,
+    "high_paise": 500000,
+    "confidence": "low",
+    "basis": "Historical recovery rate 20-40% per [E1]."
+  },
+  "evidence_refs": [
+    {
+      "claim_id": "E1",
+      "source_kind": "l4_skill_corpus",
+      "source_id": "dormant-recovery-benchmark"
+    }
+  ],
+  "message_plan": {
+    "template_id": "dormant_recovery_v1",
+    "template_params": {"customer_name": "<customer_name>", "discount": "10"},
+    "language": "en",
+    "personalization": "Hi <customer_name>, we miss you — here's 10% off your next visit."
+  }
+}
+```
+
+**Dates (proposed variant).** Today's date is `{{TODAY}}` (UTC). Set
+`campaign_window.start` to today or a future date — NEVER a past/backdated
+date — and `campaign_window.end` roughly 7 days after `start`. The
+`CampaignWindow` validator rejects any window whose `start` is before "now",
+so do NOT copy a date from this prompt verbatim; compute the window from the
+current date.
