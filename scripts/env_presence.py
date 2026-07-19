@@ -114,6 +114,16 @@ def _cmd_presence(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_names(args: argparse.Namespace) -> int:
+    """Print the sorted variable NAMES declared in a Railway env/service — names only, one per
+    line, never a value (weaker than presence: not even the set/unset boolean). Exists so an
+    unused-variable audit can enumerate the store without ever running raw ``railway variables``
+    (Rule #18)."""
+    for name, _present in sorted(_railway_vars(args.environment, args.service)):
+        print(name)
+    return 0
+
+
 def _cmd_equal(args: argparse.Namespace) -> int:
     a = _resolve(args.spec_a, args.environment, args.service)
     b = _resolve(args.spec_b, args.environment, args.service)
@@ -135,6 +145,11 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--service")
     p.add_argument("names", nargs="+")
     p.set_defaults(func=_cmd_presence)
+
+    n = sub.add_parser("names", help="print the sorted declared variable NAMES (railway; never values)")
+    n.add_argument("--environment", required=True)
+    n.add_argument("--service", required=True)
+    n.set_defaults(func=_cmd_names)
 
     e = sub.add_parser("equal", help="print LABEL: MATCH|MISMATCH|unset for two value specs")
     e.add_argument("label")
