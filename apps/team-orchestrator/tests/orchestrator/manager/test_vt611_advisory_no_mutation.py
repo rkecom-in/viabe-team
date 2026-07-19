@@ -354,6 +354,15 @@ _SQL_MUTATION_RE = re.compile(r"^\s*(INSERT|UPDATE|DELETE)\b", re.IGNORECASE)
 # keeps the check scoped to what it's actually for.
 _AUDIT_LOG_TABLE = "tm_audit_log"
 
+# The ``dbos.`` schema is the durable-execution runtime's OWN state machine (workflow_status /
+# operation_outputs bookkeeping) — the substrate every tool invocation rides on, not business data
+# a tool mutates. The class-level psycopg patch sees EVERY statement in the process, so a DBOS
+# internal status write landing inside the invocation window flagged accounting_categorize_books
+# on CI (timing-dependent: "UPDATE dbos.workflow_status SET status=..." — 2026-07-19 run
+# 29690266772) while the same tool passed locally and on the prior run. Same rationale as the
+# tm_audit_log exemption above: runtime bookkeeping is orthogonal to "the effect".
+_DBOS_SCHEMA_PREFIX = "dbos."
+
 
 class _MutationDetected(Exception):
     """Raised by the patched psycopg execute/executemany methods when a mutation-shaped query is
@@ -370,7 +379,8 @@ def _make_guarded_execute(hits: list[str], original: Any) -> Any:
     def _wrapper(self: Any, query: Any, *args: Any, **kwargs: Any) -> Any:
         text = _query_text(query)
         m = _SQL_MUTATION_RE.match(text)
-        if m and _AUDIT_LOG_TABLE not in text.lower():
+        low = text.lower()
+        if m and _AUDIT_LOG_TABLE not in low and _DBOS_SCHEMA_PREFIX not in low:
             hits.append(text.strip()[:120])
             raise _MutationDetected(f"mutation-shaped SQL observed: {m.group(1)}...")
         return original(self, query, *args, **kwargs)
