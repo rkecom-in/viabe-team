@@ -71,10 +71,15 @@ def opt_out_handler(event: WebhookEvent, state: SubscriberState) -> dict[str, An
         # message my customers — opt everyone out") — the old template copy answered in
         # owner-subscription/billing terms and never confirmed the customer-scope effect
         # (ignored_speech_act). Confirm the customer scope FIRST; account status second.
+        # 462fe33 gate finding (j06 impossible_promise): NO CANCEL keyword handler exists
+        # anywhere in the tree, so the copy must not promise "reply CANCEL and I'll process
+        # it" (ungrounded platform commitment — pre-existing in the old template text too).
+        # Only promise what's real: the stop (this handler) + START resume (_RESTART_CUES
+        # net in pre_filter_gate).
         "Got it — I've stopped all messaging to your customers immediately. No campaigns or "
         "automated messages will go out to anyone until you tell me to restart. Your Viabe "
-        "account itself stays active. To resume customer messaging, reply START. To cancel "
-        "your Viabe subscription entirely, reply CANCEL and I'll process it.",
+        "account itself stays active. Whenever you want to resume customer messaging, just "
+        "reply START.",
         event.sender_phone or None,
         fallback_template="team_opt_out_confirmation",
     )
