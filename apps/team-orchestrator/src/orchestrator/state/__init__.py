@@ -9,25 +9,21 @@ the orchestrator-agent and specialists read phase but never mutate it.
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import Literal, TypedDict
+from typing import Literal, NotRequired, TypedDict
 from uuid import UUID, uuid4
 
 Phase = Literal[
     "onboarding",
     "trial",
-    "trial_extended",
+    "lapsed",  # VT-365: 30-day trial expired without subscribe — dormant, re-subscribable
     "paid_active",
     "paid_at_risk",
-    "refund_offered",  # VT-85: day-39 refund offer pending owner reply (non-terminal)
     "cancelled",
-    "refunded",
 ]
 
-# Phases with no outgoing transitions — see transitions.TRANSITIONS.
-TERMINAL_PHASES: frozenset[Phase] = frozenset({"cancelled", "refunded"})
-
-# Max trial extensions (covers a 14 -> 60 day trial). Enforced as an invariant.
-MAX_TRIAL_EXTENSIONS = 3
+# Phases with no outgoing transitions — see transitions.TRANSITIONS. (VT-365 removed 'refunded';
+# 'lapsed' is dormant but NOT terminal — a lapsed owner can still subscribe.)
+TERMINAL_PHASES: frozenset[Phase] = frozenset({"cancelled"})
 
 
 class SubscriberState(TypedDict):
@@ -38,7 +34,6 @@ class SubscriberState(TypedDict):
     phase: Phase
     phase_entered_at: datetime
     trial_started_at: datetime | None
-    trial_extension_count: int
     paid_conversion_at: datetime | None
     last_campaign_at: datetime | None
     # Campaign ids awaiting their T+7 attribution close.
@@ -49,6 +44,11 @@ class SubscriberState(TypedDict):
     last_owner_message_at: datetime | None
     # Append-only event log within the run; complements pipeline_steps (VT-122).
     history: list[dict]
+    # VT-416 PR-3: the tenant's WhatsApp language preference ('en' | 'hi'), threaded
+    # from tenants.preferred_language. Optional so existing state construction
+    # (new_subscriber_state) and every caller stay valid; the output_composer reads
+    # it per-tenant and falls back to TENANT_DEFAULT_LANGUAGE when absent.
+    preferred_language: NotRequired[str | None]
 
 
 def new_subscriber_state(
@@ -64,7 +64,6 @@ def new_subscriber_state(
         phase=phase,
         phase_entered_at=datetime.now(UTC),
         trial_started_at=None,
-        trial_extension_count=0,
         paid_conversion_at=None,
         last_campaign_at=None,
         attribution_close_pending=[],

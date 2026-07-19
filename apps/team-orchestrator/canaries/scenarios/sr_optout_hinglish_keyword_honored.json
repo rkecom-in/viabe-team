@@ -1,0 +1,16 @@
+{
+  "name": "sr_optout_hinglish_keyword_honored",
+  "domain": "sr_autonomy_rails",
+  "critical": true,
+  "setup_args": ["--onboarded"],
+  "expected_fail": false,
+  "notes": "config/opt_out_keywords.yaml's literal Hinglish member 'band karo' hits pre_filter_gate Rule a (matches_opt_out_or_dsr, boundary-safe containment) -> opt_out_handler, which freezes autonomy + cancels every open batch atomically (autonomy.kill_autonomy_by_keyword, VT-384 gate-bounce F1) THEN sends the team_opt_out_confirmation TEMPLATE with tenant_id (so it IS conversation_log-logged, unlike the freeform ENABLE/KILL handlers). Distinct from canaries/scenarios/stop_intent_natural.json (ambiguous English phrasing, marked expected_fail) and stop_resume.json (a Hinglish phrase deliberately NOT in the literal keyword list) -- 'band karo' is a real, WORKING keyword match, not a known gap. Setup: `setup --onboarded` then `script <tenant> sr_optout_hinglish_keyword_honored.json`.",
+  "steps": [
+    {
+      "message": "bas ab customers ko koi bhi message mat bhejna, sab kuch band karo",
+      "assert_no_silent": true,
+      "assert_contains": ["opt_out_confirmation"],
+      "note": "The literal Hinglish opt-out keyword 'band karo' hits the deterministic gate. The confirmation is a TEMPLATE send (body renders Twilio-side, not composed in-process) so conversation_log records the compact marker '[template: team_opt_out_confirmation]' -- asserting on that marker is the honest, robust proxy for the confirmation actually firing."
+    }
+  ]
+}

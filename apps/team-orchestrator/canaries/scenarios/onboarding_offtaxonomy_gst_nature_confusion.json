@@ -1,0 +1,23 @@
+{
+  "name": "onboarding_offtaxonomy_gst_nature_confusion",
+  "domain": "onboarding",
+  "critical": true,
+  "setup_args": ["--owner-inputs", "true", "--journey"],
+  "expected_fail": false,
+  "notes": "Owner answers the business-type ask with a raw GST 'nature of business' tax-activity code instead of a real description — the turn-brain system prompt explicitly bans presenting these as business-type guesses ('GST nature of business values ... are coarse TAX-ACTIVITY codes, NOT a description of what the business does. NEVER present them as guesses'), and business_type promotion is taxonomy-gated (CL-390 never-assert: an off-taxonomy value is recorded as a plain answer but never asserted as canonical fact). Setup: `setup --owner-inputs true --journey` (ACTIVE journey, pending business_type confirm for draft-type 'sweets') then `script <tenant> onboarding_offtaxonomy_gst_nature_confusion.json`.",
+  "steps": [
+    {
+      "message": "actually humara GST mein 'Supplier of Services' likha hai, wahi bata dete hain",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "assert_not_contains": ["your business type is supplier of services", "so you're a supplier of services", "confirmed: supplier of services"],
+      "note": "Owner offers a GST tax-activity code ('Supplier of Services') as if it were their business type. Expect the manager NOT to adopt/assert that code as the actual business description/category — it should ask what the business actually sells or does instead."
+    },
+    {
+      "message": "hum toh bas mithai aur namkeen banate aur bechte hain",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "note": "Owner then gives the REAL, concrete description (sweets and snacks). Expect this genuine description to be picked up and the conversation to move forward on it."
+    }
+  ]
+}

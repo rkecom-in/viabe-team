@@ -34,6 +34,7 @@ from orchestrator.agent.cost import compute_cost_paise
 from orchestrator.observability.decorators import _observability_context
 from orchestrator.observability.pii import redact_for_log
 from orchestrator.observability.pipeline_observability import write_step
+from orchestrator.observability.tm_audit import emit_tm_audit
 
 if TYPE_CHECKING:
     from orchestrator.agent.orchestrator_agent_driver import (
@@ -78,8 +79,33 @@ class OrchestratorReasoningCallback(BaseCallbackHandler):
         self.usage = usage
         self.run_id = run_id
         self.tenant_id = tenant_id
+        # VT-619: per-LLM-run (langgraph_node, checkpoint_ns) stash, keyed by the PER-LLM run_id
+        # (NOT self.run_id, which is the pipeline run). on_(chat_model|llm)_start stashes;
+        # on_llm_end pops it to attribute the call to the graph node (specialist) that served it.
+        # The ns is stashed too because a specialist SUB-GRAPH reports the inner node name in
+        # langgraph_node but its agent_name only in the checkpoint namespace.
+        self._node_by_run: dict[Any, tuple[str | None, str | None]] = {}
 
     # -- llm boundary ------------------------------------------------
+
+    def _stash_node(self, **kwargs: Any) -> None:
+        """Record this LLM run's (langgraph_node, checkpoint_ns) for on_llm_end billing."""
+        md = kwargs.get("metadata") or {}
+        rid = kwargs.get("run_id")
+        if rid is not None:
+            self._node_by_run[rid] = (
+                md.get("langgraph_node"),
+                md.get("langgraph_checkpoint_ns"),
+            )
+
+    def _on_start_common(self, **kwargs: Any) -> None:
+        # Mid-invocation pre-LLM check (catches the case where prior
+        # boundary pushed us over a limit; we cancel before incurring
+        # another LLM cost) + stash this run's graph node for VT-619 billing.
+        self.driver.check_mid_invocation(
+            self.usage, run_id=self.run_id, tenant_id=self.tenant_id
+        )
+        self._stash_node(**kwargs)
 
     def on_llm_start(
         self,
@@ -87,12 +113,18 @@ class OrchestratorReasoningCallback(BaseCallbackHandler):
         prompts: list[str],
         **kwargs: Any,
     ) -> None:
-        # Mid-invocation pre-LLM check (catches the case where prior
-        # boundary pushed us over a limit; we cancel before incurring
-        # another LLM cost).
-        self.driver.check_mid_invocation(
-            self.usage, run_id=self.run_id, tenant_id=self.tenant_id
-        )
+        self._on_start_common(**kwargs)
+
+    def on_chat_model_start(
+        self,
+        serialized: dict[str, Any],
+        messages: list[Any],
+        **kwargs: Any,
+    ) -> None:
+        # ChatAnthropic is a CHAT model — langchain fires on_chat_model_start (not on_llm_start),
+        # so this is the seam that actually runs for the orchestrator agent. Same body as
+        # on_llm_start: mid-invocation check + node stash.
+        self._on_start_common(**kwargs)
 
     def on_llm_end(self, response: Any, **kwargs: Any) -> None:
         usage_data = self._extract_usage(response)
@@ -131,6 +163,28 @@ class OrchestratorReasoningCallback(BaseCallbackHandler):
 
         self._write_reasoning_step(response, usage_data, status="completed")
 
+        # VT-619 — per-tenant × per-agent metering (guarded, best-effort; NEVER breaks a turn).
+        # Attribute THIS LLM call to the agent it serves: the graph node stashed at start (a
+        # specialist execution turn) else the route target scanned from this turn's tool_calls (a
+        # manager turn routing to a specialist) else the tenant's primary billed agent. The stash
+        # key is the PER-LLM run_id from kwargs (langchain passes run_id to on_llm_end), NOT
+        # self.run_id (the pipeline run).
+        try:
+            node, checkpoint_ns = self._node_by_run.pop(kwargs.get("run_id"), (None, None))
+            from orchestrator.agent.usage_meter import meter_llm_call, resolve_billed_agent
+
+            agent = resolve_billed_agent(
+                node, response, self.tenant_id, checkpoint_ns=checkpoint_ns
+            )
+            meter_llm_call(
+                tenant_id=self.tenant_id,
+                agent=agent,
+                tokens_in=usage_data.get("input_tokens", 0),
+                tokens_out=usage_data.get("output_tokens", 0),
+            )
+        except Exception:  # noqa: BLE001 — CL-122: metering never breaks a turn
+            logger.warning("VT-619 langchain-seam meter swallowed", exc_info=True)
+
         # Post-LLM mid-invocation check (catches token/cost overshoot
         # from the call we just completed).
         self.driver.check_mid_invocation(
@@ -158,6 +212,28 @@ class OrchestratorReasoningCallback(BaseCallbackHandler):
         self.usage.tool_calls += 1
         self.driver.check_mid_invocation(
             self.usage, run_id=self.run_id, tenant_id=self.tenant_id
+        )
+        emit_tm_audit(
+            event_layer="does",
+            event_kind="tool_invoked",
+            actor="team_manager",
+            tenant_id=self.tenant_id,
+            run_id=self.run_id,
+            summary=f"tool_invoked: {serialized.get('name', 'unknown')}",
+            action={"tool_name": serialized.get("name", "unknown"), "input_str": input_str[:500] or None},
+            conn=None,
+        )
+
+    def on_tool_end(self, output: str, **kwargs: Any) -> None:
+        emit_tm_audit(
+            event_layer="gets",
+            event_kind="tool_result",
+            actor="team_manager",
+            tenant_id=self.tenant_id,
+            run_id=self.run_id,
+            summary=f"tool_result: {kwargs.get('name', 'unknown')}",
+            result={"tool_name": kwargs.get("name", "unknown"), "output": str(output)[:1000] if output else None},
+            conn=None,
         )
 
     # -- helpers -----------------------------------------------------
@@ -256,14 +332,28 @@ class OrchestratorReasoningCallback(BaseCallbackHandler):
             if isinstance(redacted, dict):
                 think_text_redacted = redacted.get("text")
 
+        written_step_id: UUID | None = None
         try:
-            write_step(
+            written_step_id = write_step(
                 step_kind="agent_reasoning_step",
                 run_id=ctx.run_id,
                 tenant_id=ctx.tenant_id,
                 step_name="orchestrator_agent_turn",
                 input_envelope={
-                    "context_bundle_hash": "<langchain-passthrough>",
+                    # VT-464 D4: prompt_token_count is a REQUIRED field on
+                    # AgentReasoningStepInput (extra="forbid"). The LIVE brain
+                    # path runs through THIS langchain callback (step_name
+                    # 'orchestrator_agent_turn'), not agent_callback — it
+                    # previously omitted prompt_token_count, so every deployed
+                    # brain reasoning-step envelope soft-failed validation
+                    # (payload_validation_failed=True) and Ops replay degraded.
+                    # The prompt (input) token count is the same source
+                    # agent_callback uses: this turn's response usage
+                    # input_tokens (extracted into usage_data above).
+                    "prompt_token_count": int(
+                        usage_data.get("input_tokens", 0) or 0
+                    ),
+                    "context_bundle_hash": ctx.snapshot_id or "<langchain-passthrough>",
                     "context_bundle_components": [],
                     "context_bundle_token_count": 0,
                     "prior_tool_calls_count": self.usage.tool_calls,
@@ -299,6 +389,33 @@ class OrchestratorReasoningCallback(BaseCallbackHandler):
                 "VT-125 callback write_step swallowed (CL-122 best-effort)",
                 extra={"exc": repr(exc)},
             )
+
+        # VT-514 DECIDES — reasoning_turn spine row (fail-soft, conn=None).
+        # References the pipeline_steps reasoning row written above via
+        # reasoning_ref; carries model + redacted think_text, never raw context.
+        # §7D: reasoning_ref now carries the EXACT step_id write_step just
+        # returned (None when that write fell back to the local buffer —
+        # step_name stays as the (run_id, step_name) fallback join key).
+        emit_tm_audit(
+            event_layer="decides",
+            event_kind="reasoning_turn",
+            actor="team_manager",
+            tenant_id=ctx.tenant_id,
+            run_id=ctx.run_id,
+            snapshot_id=ctx.snapshot_id,
+            summary=(think_text_redacted[:200] if think_text_redacted else None),
+            decision={
+                "model_used": usage_data.get("model"),
+                "tokens_input": int(usage_data.get("input_tokens", 0) or 0),
+                "tokens_output": int(usage_data.get("output_tokens", 0) or 0),
+                "status": status,
+            },
+            reasoning_ref={
+                "run_id": str(ctx.run_id),
+                "step_id": str(written_step_id) if written_step_id is not None else None,
+                "step_name": "orchestrator_agent_turn",
+            },
+        )
 
     def _first_text(self, response: Any) -> str | None:
         try:

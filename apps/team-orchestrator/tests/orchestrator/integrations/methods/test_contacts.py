@@ -80,6 +80,35 @@ def test_normalize_phone(raw, e164, is_high):
         assert (conf >= 0.85) == is_high
 
 
+# --- VT-487: float / scientific-notation phone corruption is coerced-to-str + REJECTED -----------
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "9.98886e+11",       # str-form scientific notation (the corruption)
+        "9.98886E11",        # uppercase exponent
+        9.98886e11,          # an ACTUAL float (a numeric cell read by openpyxl/gspread)
+        998886123456.0,      # a float with a trailing .0
+        "+91998886.0",       # decimal-point artifact
+    ],
+)
+def test_normalize_phone_rejects_float_corruption(raw):
+    """A phone read as a FLOAT (or its scientific-notation str form) must NOT be digit-glued into a
+    plausible-but-wrong number — it is rejected (None) so a corrupted value never reaches a send."""
+    out, conf = _normalize_phone(raw)
+    assert out is None
+    assert conf == 0.0
+
+
+def test_normalize_phone_coerces_int_to_str():
+    """An int phone (a numeric cell) is coerced to str — a clean 10-digit int normalizes correctly,
+    proving the coerce-to-str path works (not just the reject path)."""
+    out, conf = _normalize_phone(9000000001)
+    assert out == "+919000000001"
+    assert conf >= 0.85
+
+
 # --- DB -----------------------------------------------------------------------
 
 pytest.importorskip("dbos")

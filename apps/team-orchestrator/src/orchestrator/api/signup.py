@@ -31,6 +31,11 @@ def _verify_internal_secret(provided: str | None) -> bool:
 # SignupError.code → HTTP status. Everything but a duplicate is a 400 (bad input).
 _DUPLICATE_STATUS = 409
 _BAD_REQUEST_STATUS = 400
+# VT-408 gate statuses: a terminal GSTIN reject is a 422 (the input is well-formed but the
+# business is not GST-registered — Unprocessable); a vendor_down HOLD is a 503 (transient,
+# retry — Service Unavailable on the verification vendor). Distinct from a 400 field error.
+_GATE_REJECT_STATUS = 422
+_VENDOR_DOWN_STATUS = 503
 
 # VT-94: in-process cache for the public founding-status endpoint (Cowork — a public
 # unauth endpoint must not be a per-request DB-load / DoS vector; the count changes only
@@ -48,6 +53,14 @@ class SignupBody(BaseModel):
     business_type: str = Field(..., min_length=1, max_length=40)
     consent_dpdpa: bool
     consent_residency: bool
+    # VT-408: the GSTIN to verify before the tenant is created (verify-then-create). The web
+    # form (VT-406) collects it as a gating sub-step. Optional at the schema boundary; an
+    # empty/unverified value is a hard reject in run_signup's gate (no GST => nothing).
+    gstin: str = Field(default="", max_length=20)
+    # VT-449: the MCA CIN the owner picked/confirmed (registry leg). When present, run_signup fetches MCA
+    # Company Master Data → uses the AUTHORITATIVE canonical name for the GST name-match + persists the
+    # (encrypted) tenant_mca_data. Optional; absent → the name-match anchors on the typed business_name.
+    cin: str = Field(default="", max_length=21)
 
 
 @router.get("/api/signup/business-types")
@@ -98,10 +111,31 @@ def signup(
     if not _verify_internal_secret(x_internal_secret):
         raise HTTPException(status_code=403, detail={"code": "forbidden"})
 
-    from orchestrator.onboarding.signup import SignupError, SignupInput, run_signup
+    from orchestrator.onboarding.signup import (
+        SignupError,
+        SignupGateError,
+        SignupInput,
+        run_signup,
+    )
+    from orchestrator.onboarding.signup_gate import gate_copy
 
     try:
         out = run_signup(SignupInput(**body.model_dump()))
+    except SignupGateError as exc:
+        # VT-408 GSTIN hard-gate refused to create a tenant. A retryable HOLD (vendor_down,
+        # "on our side") → 503 so the form shows a Retry affordance; a terminal REJECT
+        # (invalid/missing GSTIN, generic copy — NO enumeration oracle) → 422. NO tenant was
+        # created either way. The owner-facing bilingual copy is resolved server-side.
+        copy_kind = "vendor_down" if exc.retryable else "reject"
+        status = _VENDOR_DOWN_STATUS if exc.retryable else _GATE_REJECT_STATUS
+        raise HTTPException(
+            status_code=status,
+            detail={
+                "code": exc.outcome,
+                "retryable": exc.retryable,
+                "message": gate_copy(copy_kind, exc.language),
+            },
+        ) from exc
     except SignupError as exc:
         status = _DUPLICATE_STATUS if exc.code == "duplicate" else _BAD_REQUEST_STATUS
         raise HTTPException(

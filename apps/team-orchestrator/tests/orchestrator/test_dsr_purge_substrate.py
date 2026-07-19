@@ -168,6 +168,20 @@ def _seed_full_tenant_data(dsn: str, tenant_id: UUID) -> dict[str, UUID]:
             (str(tenant_id),),
         )
 
+        # tenant_oauth_tokens (VT-422 GAP-1): the per-(tenant, connector) ENCRYPTED OAuth
+        # credential. FK tenants but the tenant row is anonymized (not deleted) on DSR, so
+        # the FK never CASCADEs → the purge MUST sweep it explicitly or the encrypted token
+        # survives erasure (the DPDP-erasure bug VT-422 closes). PK is (tenant_id, connector_id).
+        conn.execute(
+            "INSERT INTO tenant_oauth_tokens "
+            "(tenant_id, connector_id, refresh_token_encrypted, scopes, "
+            " push_secret, shop_url) "
+            "VALUES (%s, 'shopify', 'enc-blob-placeholder', "
+            "ARRAY['read_orders','write_orders'], 'whsec_dsr_seed', "
+            "'dsr-seed.myshopify.com')",
+            (str(tenant_id),),
+        )
+
         # campaigns (post-018 reshape: plan_json JSONB)
         conn.execute(
             "INSERT INTO campaigns (tenant_id, run_id, status, "
@@ -256,12 +270,70 @@ def _seed_full_tenant_data(dsn: str, tenant_id: UUID) -> dict[str, UUID]:
             (str(tenant_id),),
         )
 
-        # day39_evaluations (VT-92): billing decision-audit (ARRR/fees subject data) →
-        # MUST hard-delete on DSR (in _PURGE_ORDER).
+        # tm_audit_log (VT-514, mig 147) + debug_events (VT-515, mig 146): VT-518 — the two
+        # tenant-scoped PII-bearing observability tables. Both MUST be hard-deleted on DSR
+        # (redact-at-write + RLS is insufficient for erasure — redacted activity history is
+        # still the subject's data). Seed one row each so the broad sweep + cross-tenant
+        # assertions exercise them. tm_audit_log run_id/parent_audit_id left NULL (FK-free
+        # seed); debug_events tenant_id is set (the subject's row — NULL-tenant pre-tenant
+        # failures are a separate, non-subject class the purge correctly leaves alone).
         conn.execute(
-            "INSERT INTO day39_evaluations "
-            "(tenant_id, verdict, arrr_paise, cumulative_fees_paise, evaluator_version) "
-            "VALUES (%s, 'continue', 10000, 5000, '1.0.0')",
+            "INSERT INTO tm_audit_log "
+            "(tenant_id, event_layer, event_kind, actor, summary) "
+            "VALUES (%s, 'does', 'business_action', 'sales_recovery', 'dsr-seed')",
+            (str(tenant_id),),
+        )
+        conn.execute(
+            "INSERT INTO debug_events "
+            "(tenant_id, failure_type, component, severity) "
+            "VALUES (%s, 'exception', 'signup', 'error')",
+            (str(tenant_id),),
+        )
+        # VT-524: owner_notifications delivery ledger — tenant data, must be erased on DSR.
+        conn.execute(
+            "INSERT INTO owner_notifications "
+            "(tenant_id, template_name, message_sid, owner_notification_status) "
+            "VALUES (%s, 'team_welcome3', 'SMtest-dsr-seed', 'accepted')",
+            (str(tenant_id),),
+        )
+        # VT-525: manager_tasks + manager_task_steps — task spine, tenant data, erased on DSR.
+        mtask = conn.execute(
+            "INSERT INTO manager_tasks (tenant_id, objective, status) "
+            "VALUES (%s, '{\"goal\": \"dsr-seed\"}'::jsonb, 'running') RETURNING id",
+            (str(tenant_id),),
+        ).fetchone()
+        mtask_id = mtask["id"] if isinstance(mtask, dict) else mtask[0]
+        conn.execute(
+            "INSERT INTO manager_task_steps "
+            "(tenant_id, task_id, step_seq, kind, status) "
+            "VALUES (%s, %s, 1, 'specialist_dispatch', 'pending')",
+            (str(tenant_id), str(mtask_id)),
+        )
+        # VT-527: pending_questions — owner-clarification ledger, tenant data, erased on DSR.
+        conn.execute(
+            "INSERT INTO pending_questions "
+            "(tenant_id, task_id, question_kind, question_text, status) "
+            "VALUES (%s, %s, 'clarification', 'which cohort?', 'open')",
+            (str(tenant_id), str(mtask_id)),
+        )
+        # VT-531: agent_corrections — reviewer-correction store, tenant data, erased on DSR.
+        conn.execute(
+            "INSERT INTO agent_corrections "
+            "(tenant_id, agent, correction_kind, decision_verb, correction_text) "
+            "VALUES (%s, 'sales_recovery', 'edit', 'needs_changes', 'make it shorter')",
+            (str(tenant_id),),
+        )
+        # VT-550: agent_memory — TENANT-scoped learnable memory, tenant data, erased on DSR.
+        conn.execute(
+            "INSERT INTO agent_memory "
+            "(tenant_id, memory_scope, source, memory_key, content) "
+            "VALUES (%s, 'tenant', 'learned', 'tone_pref', 'owner likes short warm messages')",
+            (str(tenant_id),),
+        )
+        # VT-552: incidents — durable incident records, tenant data, erased on DSR.
+        conn.execute(
+            "INSERT INTO incidents (tenant_id, incident_kind, severity) "
+            "VALUES (%s, 'silent_terminal', 'warning')",
             (str(tenant_id),),
         )
 
@@ -334,7 +406,15 @@ _PURGED_TABLES = (
     "platform_listings",  # VT-325: per-listing source must be swept by DSR purge
     "kg_events_processed",  # VT-327: KG consumer ledger must be swept by DSR purge
     "kg_events",  # VT-327: KG outbox (TENANT_CREATED business_name PII) must be swept
-    "day39_evaluations",  # VT-92: billing decision-audit must be swept by DSR purge
+    "tm_audit_log",  # VT-518: TM audit/trace (VT-514) — tenant PII activity history, erased on DSR
+    "debug_events",  # VT-518: debug/failure log (VT-515) — tenant PII, erased on DSR
+    "owner_notifications",  # VT-524: owner-notification delivery ledger — tenant data, erased on DSR
+    "manager_task_steps",  # VT-525: task step plan — tenant data, erased on DSR
+    "manager_tasks",  # VT-525: task spine — tenant data, erased on DSR
+    "pending_questions",  # VT-527: owner-clarification ledger — tenant data, erased on DSR
+    "agent_corrections",  # VT-531: reviewer-correction store — tenant data, erased on DSR
+    "agent_memory",  # VT-550: tenant learnable memory — tenant data, erased on DSR (global seeds survive)
+    "incidents",  # VT-552: durable incident records — tenant data, erased on DSR
     "owner_inputs",
     "campaigns",
     "pipeline_steps",
@@ -343,6 +423,7 @@ _PURGED_TABLES = (
     "phase_transitions",
     "subscriptions",
     "phone_token_resolutions",
+    "tenant_oauth_tokens",  # VT-422 GAP-1: encrypted OAuth credential must be erased on DSR
     "twilio_inbound_events",
     "rate_limit_buckets",
 )
@@ -847,3 +928,75 @@ def test_purge_hard_deletes_episodic_events_l2(substrate):  # type: ignore[no-un
     assert _count_tenant_rows(substrate.dsn, "episodic_events", tenant_b) >= 1, (
         "VT-323: cross-tenant leak — purging A wiped B's L2 rows"
     )
+
+
+def test_purge_hard_deletes_tenant_oauth_tokens(substrate):  # type: ignore[no-untyped-def]
+    """VT-422 GAP-1 — the DPDP erasure bug. The per-tenant ENCRYPTED OAuth credential
+    (Shopify offline token) was EXPORTED on DSR but never ERASED: it FKs tenants, but the
+    tenant row is anonymized (not deleted) so the CASCADE never fires, and the table was
+    missing from _PURGE_ORDER → the credential survived erasure. A tenant DSR-delete must
+    HARD-DELETE the token row (assert 0 rows after purge); a co-resident tenant is untouched.
+    Real PG (mock cursors hide the FK/scoping)."""
+    from orchestrator.dsr_purge import purge_tenant_data
+
+    tenant_a = _new_tenant(substrate.dsn, name="Tenant A (oauth purgee)")
+    tenant_b = _new_tenant(substrate.dsn, name="Tenant B (oauth untouched)")
+    _seed_full_tenant_data(substrate.dsn, tenant_a)
+    _seed_full_tenant_data(substrate.dsn, tenant_b)
+
+    # Pre: both have a stored encrypted OAuth credential.
+    assert _count_tenant_rows(substrate.dsn, "tenant_oauth_tokens", tenant_a) >= 1
+    assert _count_tenant_rows(substrate.dsn, "tenant_oauth_tokens", tenant_b) >= 1
+
+    result = purge_tenant_data(_open_dsr_ticket(substrate.dsn, tenant_a))
+    assert result.deleted_counts.get("tenant_oauth_tokens", 0) >= 1, (
+        "VT-422 GAP-1: purge must report tenant_oauth_tokens deletions"
+    )
+
+    # Post: A's encrypted credential is GONE; B's survives (scoping). This is THE
+    # privacy-at-rest assertion — the credential must not outlive erasure.
+    assert _count_tenant_rows(substrate.dsn, "tenant_oauth_tokens", tenant_a) == 0, (
+        "VT-422 GAP-1: DSR-delete left the encrypted OAuth token behind (credential survives erasure)"
+    )
+    assert _count_tenant_rows(substrate.dsn, "tenant_oauth_tokens", tenant_b) >= 1, (
+        "VT-422 GAP-1: cross-tenant leak — purging A wiped B's OAuth token"
+    )
+
+
+def test_purge_hard_deletes_tm_audit_and_debug_events(substrate):  # type: ignore[no-untyped-def]
+    """VT-518 (DSR-purge gap, Cowork audit-after of VT-514/515) — the two tenant-scoped
+    PII-bearing observability tables added by VT-514 (tm_audit_log) + VT-515 (debug_events)
+    were missing from _PURGE_ORDER, so a right-to-erasure tenant's audit + debug activity
+    history survived the purge. Redact-at-write + RLS is insufficient for ERASURE — the
+    redacted history is still the subject's data. A tenant DSR-delete MUST hard-delete both
+    (assert 0 rows after purge); a co-resident tenant is untouched. Real PG — mock cursors
+    hide the FK-ordering (tm_audit_log.run_id → pipeline_runs; parent_audit_id self-FK)."""
+    from orchestrator.dsr_purge import _PURGE_ORDER, purge_tenant_data
+
+    # Both tables are in the purge order (drift guard — a future edit dropping either
+    # silently re-opens the erasure gap).
+    assert "tm_audit_log" in _PURGE_ORDER, "tm_audit_log fell out of _PURGE_ORDER (DSR gap)"
+    assert "debug_events" in _PURGE_ORDER, "debug_events fell out of _PURGE_ORDER (DSR gap)"
+
+    tenant_a = _new_tenant(substrate.dsn, name="Tenant A (tm-audit purgee)")
+    tenant_b = _new_tenant(substrate.dsn, name="Tenant B (tm-audit untouched)")
+    _seed_full_tenant_data(substrate.dsn, tenant_a)
+    _seed_full_tenant_data(substrate.dsn, tenant_b)
+
+    # Pre: both tenants have audit + debug rows.
+    for table in ("tm_audit_log", "debug_events"):
+        assert _count_tenant_rows(substrate.dsn, table, tenant_a) >= 1
+        assert _count_tenant_rows(substrate.dsn, table, tenant_b) >= 1
+
+    result = purge_tenant_data(_open_dsr_ticket(substrate.dsn, tenant_a))
+    for table in ("tm_audit_log", "debug_events"):
+        assert result.deleted_counts.get(table, 0) >= 1, (
+            f"VT-518: purge must report {table} deletions"
+        )
+        # Post: A's history is GONE; B's survives (scoping). THE erasure assertion.
+        assert _count_tenant_rows(substrate.dsn, table, tenant_a) == 0, (
+            f"VT-518: DSR-delete left {table} rows behind (subject activity survives erasure)"
+        )
+        assert _count_tenant_rows(substrate.dsn, table, tenant_b) >= 1, (
+            f"VT-518: cross-tenant leak — purging A wiped B's {table}"
+        )

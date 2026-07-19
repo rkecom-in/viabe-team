@@ -1,12 +1,9 @@
-# VT-90 — trial-lifecycle tunables (config, not code; Cowork D-answer: tunable
-# without a deploy). The evaluator is deterministic + zero-LLM (Pillar 1).
+# VT-90 / VT-365 — trial-lifecycle tunables (config, not code; tunable without a deploy).
+# The evaluator is deterministic + zero-LLM (Pillar 1).
 #
-# Engagement = the bar a trial tenant must clear by trial-end to earn an auto-
-# extension: at least N campaigns in {approved, sent} generated within the trial
-# window. Both count — an approval is real engagement with the flow.
+# VT-365 (Fazal 2026-06-09): 30-day free trial, NO card in trial, opt-in subscribe at day 30,
+# NO auto-charge, NO refund, NO extensions. The trial simply WARNs then EXPIRES to `lapsed`
+# (dormant, re-subscribable). The old extension/grace/engagement tunables are removed.
 
-trial_days: 14                  # base trial length; each extension adds another 14
-grace_days: 7                   # post-trial-end grace before exhaust → cancelled
-warn_lead_days: 2               # day-12 warning = trial_end - 2 days
-engagement_min_campaigns: 1     # ≥1 approved-or-sent campaign in the window
-max_trial_extensions: 3         # mirrors state.MAX_TRIAL_EXTENSIONS (structural; Type-2 to change)
+trial_days: 30                  # flat trial length (was 14); no extensions
+warn_lead_days: 2               # day-28 warning = trial_end - 2 days (subscribe nudge)

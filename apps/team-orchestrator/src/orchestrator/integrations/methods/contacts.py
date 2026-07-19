@@ -51,11 +51,29 @@ class ContactsParseError(Exception):
     """Raised when a CSV's columns can't be mapped — caller asks the owner to fix the export."""
 
 
-def _normalize_phone(raw: str) -> tuple[str | None, float]:
-    """Return (E.164-ish, confidence). Indian → 0.95; foreign/odd → 0.6; junk → None."""
-    if not raw:
+def _normalize_phone(raw: object) -> tuple[str | None, float]:
+    """Return (E.164-ish, confidence). Indian → 0.95; foreign/odd → 0.6; junk → None.
+
+    VT-487 (SAFETY): phones are ALWAYS strings end-to-end — NEVER a float/int. A CSV/Sheet/JSON
+    cell read as a NUMBER (openpyxl/gspread/pandas numericize a digits-only cell to float/int)
+    and then str()'d renders to scientific notation ("9.98886e+11") — the exact corruption that
+    sent six Twilio 21211 "invalid To" failures. So:
+      1. coerce ``raw`` to str FIRST (a float/int input becomes its str form), and
+      2. REJECT (return None) any value carrying an 'e'/'E' scientific-notation marker or a '.'
+         decimal point — a phone has neither; their presence means the value was corrupted
+         upstream by numeric parsing and must NOT be repaired into a plausible-but-wrong number.
+    The float corruption is thereby caught at ingest, before a row is ever committed to a
+    send-reachable table.
+    """
+    if raw is None:
         return None, 0.0
-    s = raw.strip()
+    s = str(raw).strip()  # VT-487: coerce-to-str — a float/int phone never survives as a number
+    if not s:
+        return None, 0.0
+    # VT-487: a scientific-notation float artifact ("9.98886e+11") or any decimal-point value is a
+    # corrupted phone — reject, do not repair. A real phone is digits (+ optional leading '+').
+    if "e" in s or "E" in s or "." in s:
+        return None, 0.0
     has_plus = s.startswith("+")
     digits = re.sub(r"\D", "", s)
     if not digits:

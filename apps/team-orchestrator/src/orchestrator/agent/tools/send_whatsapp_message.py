@@ -76,8 +76,30 @@ def _now() -> datetime:
 # campaign-execute seam, which shares send_idempotency_keys) is NOT a prior
 # deliverable send — echoing it would raise a pydantic ValidationError that the
 # broad except turns into a phantom db_error AND wrongly suppress the send.
+#
+# VT-410 (sibling of VT-387, which fixed the same bug in send_whatsapp_template):
+# 'error' is DELIBERATELY excluded (it WAS in the VT-262 set). A freeform send that
+# TRANSIENTLY failed (Twilio 5xx, network blip, 4xx reject) caches send_status='error'
+# under the caller-supplied idempotency_key — treating that as an idempotent hit made
+# the freeform send unretryable for the key's full 24h TTL, so a retry within the
+# window silently no-opped. Excluding 'error' makes _check_idempotency return None for
+# an errored row → the caller re-runs every gate (opt-out/window/caps/rate) and re-sends.
+#
+# Double-send safety (the load-bearing invariant) — note how the FREEFORM path differs
+# from the template path: send_freeform_message() (twilio_send) does NOT catch
+# TwilioRestException — it lets ALL provider errors (4xx, 5xx, network, ValueError)
+# PROPAGATE and returns a SID ONLY on a delivered message. So unlike the template tool
+# (which has TWO 'error' producers: send_fn raising AND a 4xx success=False result),
+# the freeform tool writes 'error' to the ledger in exactly ONE place: the `except
+# Exception` around `send_fn(...)`. That except fires ONLY when messages.create() raised
+# — the provider did NOT accept the message, no side-effect occurred. The two other
+# 'error' RETURNS (the no_phone guard and the outer db_error except) write NOTHING to the
+# ledger. 'sent' is written ONLY after send_fn returns a real SID (a delivered message),
+# and 'sent' STAYS in the set — so a completed/sent freeform message remains an idempotent
+# hit and never re-sends. 'error' is therefore never written post-side-effect → dropping
+# it cannot cause a double-send.
 _IDEMPOTENT_HIT_STATUSES = frozenset(
-    {"sent", "window_closed", "rate_limited", "unauthorized", "error"}
+    {"sent", "window_closed", "rate_limited", "unauthorized"}
 )
 
 
@@ -168,7 +190,13 @@ def _resolve_customer(
     row = CustomersWrapper().find_by_id(tenant_id, customer_id)
     if row is None:
         return None
-    return {"phone_e164": row["phone_e164"], "last_inbound_at": row["last_inbound_at"]}
+    return {
+        "phone_e164": row["phone_e164"],
+        "last_inbound_at": row["last_inbound_at"],
+        # VT-369 (Gap-5 PR-1 fix): the freeform path was missing the opt-out
+        # gate. .get() — a stubbed row without the column passes as None.
+        "opt_out_status": row.get("opt_out_status"),
+    }
 
 
 def _write_ledger(
@@ -251,6 +279,33 @@ def send_whatsapp_message(
                             message=(
                                 "Customer not found or belongs to a different tenant. "
                                 "Cross-tenant sends are rejected."
+                            ),
+                        ),
+                    )
+
+                # --- Opt-out gate (VT-369 Gap-5 PR-1 fix — was MISSING here; CL-421
+                # dual-layer refuse, mirroring send_whatsapp_template): an opted-out
+                # customer who messages in re-opens a 24h *window*, not consent. An
+                # in-window freeform send to an opted_out/blocked/owner_excluded
+                # recipient is refused BEFORE any window/rate evaluation. ---
+                if customer.get("opt_out_status") in (
+                    "opted_out", "blocked", "owner_excluded",
+                ):
+                    logger.info(
+                        "send_whatsapp_message: opted_out tenant=%s customer=%s status=%s",
+                        payload.tenant_id, payload.customer_id,
+                        customer.get("opt_out_status"),
+                    )
+                    return SendWhatsAppMessageOutput(
+                        status="unauthorized",
+                        customer_id=payload.customer_id,
+                        error_envelope=ErrorEnvelope(
+                            code="recipient_opted_out",
+                            message=(
+                                "Customer has opt_out_status="
+                                f"'{customer.get('opt_out_status')}'. Freeform sends to "
+                                "opted-out recipients are refused even in-window "
+                                "(CL-421/VT-369)."
                             ),
                         ),
                     )

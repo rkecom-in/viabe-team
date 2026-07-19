@@ -13,8 +13,13 @@ retry".
 from __future__ import annotations
 
 import logging
+import os
+from typing import TYPE_CHECKING
 
 import httpx
+
+if TYPE_CHECKING:
+    from uuid import UUID
 
 logger = logging.getLogger(__name__)
 
@@ -105,4 +110,88 @@ async def send_resend_email(
     return False
 
 
-__all__ = ["send_telegram", "send_resend_email"]
+def alert_is_dev_routed(tenant_id: UUID | str | None = None) -> bool:
+    """VT-502: True when this ops alert must route to the DEV bot, NEVER the
+    ViabeOps OPS (PROD ops) channel. Reuses the VT-489 ``is_dev_routed`` gate
+    (no reinvention) so EVERY ``alert_fazal`` caller is gated the same way the
+    volume_spike/dispatch path already is:
+
+      - tenant-scoped alert (a tenant_id is known — support-bot escalation,
+        escalation-SLA, template-error) → dev-routed iff
+        ``is_dev_routed(tenant_id)`` = an explicit canary tenant
+        (``TEAM_CANARY_TENANT_IDS``) OR a non-prod env (``EXPECTED_ENV != prod``).
+      - global alert (``tenant_id`` None — VTR digest, billing ingress,
+        dead-letter backstop, audit-chain break) → dev-routed iff the env is
+        non-prod (the env arm only).
+
+    PROD IS UNAFFECTED: on ``EXPECTED_ENV=prod`` a real (non-canary) tenant's
+    alert — and every global ops alert — returns False → the OPS channel, exactly
+    as before. The new behaviour only ever DOWNGRADES a dev/canary alert to the
+    DEV bot, so the bogus re-drive tenant (``f0000bcd-…-beef``) can never page
+    PROD ops. FAIL TOWARD OPS (return False) on any routing error — a real prod
+    page is never silently suppressed.
+    """
+    try:
+        if tenant_id is not None:
+            from orchestrator.alerts.dispatch import is_dev_routed
+
+            return is_dev_routed(tenant_id)
+        from orchestrator.utils.dev_send_guard import is_prod_env
+
+        return not is_prod_env()
+    except Exception:  # noqa: BLE001 — never suppress a real ops page on a routing error
+        logger.exception("alert routing check failed; defaulting to the OPS channel")
+        return False
+
+
+def alert_fazal(text: str, tenant_id: UUID | str | None = None) -> None:
+    """Best-effort sync Telegram alert to the ops channel. Never raises into the
+    caller's path. Loop-safe: if an event loop is already running (an async caller),
+    ``asyncio.run`` would raise — so the send is off-loaded to a worker thread
+    rather than silently dropped (an ops alert must not vanish in async contexts).
+
+    Relocated to ``alerts.clients`` (VT-365): this is a generic ops-alert
+    helper — not tied to any one billing path. Shared by the support-bot,
+    template-error, email-deliverability, VTR-digest, escalation-SLA, and
+    subscribe/billing-ingress paths.
+
+    VT-502 — dev-aware routing (reuses the VT-489 gate via ``alert_is_dev_routed``):
+    when the alert is dev-routed (a canary tenant OR a non-prod env), it goes to
+    the DEV bot, NEVER the ViabeOps OPS channel — so a bogus/canary re-drive
+    tenant's escalation (and any dev-env alert) never pages PROD ops. Pass
+    ``tenant_id`` for a tenant-scoped alert so a canary tenant is dev-routed even
+    on prod; omit it for a global ops alert (env-arm routing). On prod with a real
+    (non-canary) tenant — or a global alert — it stays the OPS channel, unchanged.
+    """
+    import asyncio
+    import threading
+
+    if alert_is_dev_routed(tenant_id):
+        bot_env, chat_env = "TELEGRAM_DEV_BOT_TOKEN", "TELEGRAM_DEV_CHAT_ID"
+    else:
+        bot_env, chat_env = "TELEGRAM_OPS_BOT_TOKEN", "TELEGRAM_OPS_CHAT_ID"
+
+    def _run() -> None:
+        try:
+            asyncio.run(
+                send_telegram(
+                    os.environ.get(bot_env, ""),
+                    os.environ.get(chat_env, ""),
+                    text,
+                )
+            )
+        except Exception:  # noqa: BLE001 — alert is best-effort, never blocks the caller
+            logger.exception("alert_fazal: Telegram alert failed (best-effort)")
+
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        _run()  # no running loop — safe to asyncio.run inline
+        return
+    # A loop is already running; off-thread the send so asyncio.run can't raise.
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    t.join(timeout=10)
+
+
+__all__ = ["send_telegram", "send_resend_email", "alert_fazal", "alert_is_dev_routed"]

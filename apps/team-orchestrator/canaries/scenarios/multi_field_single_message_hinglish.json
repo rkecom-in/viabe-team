@@ -1,0 +1,23 @@
+{
+  "name": "multi_field_single_message_hinglish",
+  "domain": "onboarding",
+  "critical": true,
+  "setup_args": ["--owner-inputs", "true", "--journey", "--draft-type", "tailoring", "--draft-city", "Lucknow"],
+  "expected_fail": false,
+  "notes": "Hinglish variant of the multi-field-single-message behavior: name + business type + city + tenure all land in one Hinglish sentence, answering the pre-seeded business_type confirm in one shot. No later turn may re-ask any of those facts. Setup: `setup --owner-inputs true --journey --draft-type tailoring --draft-city Lucknow` then `script <tenant> multi_field_single_message_hinglish.json`.",
+  "steps": [
+    {
+      "message": "Hum Rihana Tailors hain, ladies aur gents ki tailoring ka kaam karte hain Lucknow mein, pichle 5 saal se",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "note": "Hinglish: name + business type + city + tenure in ONE message. Expect the reply to use/acknowledge this and move forward, not ask for any single fact."
+    },
+    {
+      "message": "sab thik se note ho gaya na?",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "assert_not_contains": ["what kind of business", "kis tarah ka business", "which city", "kaun se shehar", "what is your business name", "tell us about your business"],
+      "note": "Retention check in Hinglish: NONE of the facts (name / type / city / tenure) may be re-asked, in either language."
+    }
+  ]
+}

@@ -1,0 +1,29 @@
+{
+  "name": "i_sheets_oauth_resume_after_interruption",
+  "domain": "integration",
+  "critical": false,
+  "setup_args": ["--onboarded"],
+  "expected_fail": false,
+  "notes": "Mid-connect topic switch: the owner starts the Sheets OAuth kickoff, detours to an unrelated question, then returns. The tenant_integration_state phase_2_auth pending row (written by start_sheets_oauth) must survive the detour untouched, and the deterministic auth-wait gate (onboarding/sheets_resume.py) must still fire correctly on the resumed 'done'. Setup: `setup --onboarded` then `script <tenant> i_sheets_oauth_resume_after_interruption.json`.",
+  "steps": [
+    {
+      "message": "I want to connect my Google Sheet",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "assert_contains": ["http"],
+      "note": "Mints the real authorize_url and writes the phase_2_auth pending state."
+    },
+    {
+      "message": "Actually wait, what does Viabe cost per month?",
+      "assert_no_silent": true,
+      "assert_not_contains": ["don't see the connection"],
+      "note": "Unrelated detour — carries no floor 'done'-class token, so it must NOT mis-fire the sheets auth-wait gate; expect a real answer or honest deferral about pricing, not a re-prompt of the connect ask."
+    },
+    {
+      "message": "Ok sorry, back to connecting the sheet — done, I finished it",
+      "assert_no_silent": true,
+      "assert_contains": ["don't see the connection"],
+      "note": "Resume intent with a floor 'done' token — the auth-wait gate must still be armed after the detour and give its honest not-yet-connected line, never silently drop or fabricate a connection."
+    }
+  ]
+}

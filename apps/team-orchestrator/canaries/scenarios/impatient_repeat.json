@@ -1,0 +1,33 @@
+{
+  "name": "impatient_repeat",
+  "domain": "manager",
+  "critical": false,
+  "setup_args": [
+    "--onboarded",
+    "--flow",
+    "ready_asked"
+  ],
+  "expected_fail": false,
+  "notes": "Owner sends the SAME question twice in a row (impatience/repeat). The second reply must still answer (never silent, never D1) and must not scold or dismiss the owner. The harness can't structurally diff two replies for byte-identical canned copy — read step 1 vs step 2's transcript in the json-report/judge bundle to verdict that. Setup: `setup --onboarded --flow ready_asked` then `script <tenant> impatient_repeat.json`.",
+  "steps": [
+    {
+      "message": "how does this actually work",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "note": "First ask — baseline reply."
+    },
+    {
+      "message": "how does this actually work",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "assert_not_contains": [
+        "i already told you",
+        "as i already said",
+        "as i mentioned",
+        "already answered",
+        "like i said"
+      ],
+      "note": "Same question again immediately. Expect a real answer, not scolding — and (verify manually against step 1's transcript) not byte-identical canned copy."
+    }
+  ]
+}

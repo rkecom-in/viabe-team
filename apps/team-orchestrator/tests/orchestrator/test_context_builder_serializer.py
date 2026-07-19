@@ -145,7 +145,7 @@ def test_serializer_propagates_bundle_values() -> None:
     # dormant/high-value cohorts). business_type appears in BOTH the business
     # profile and the ledger summary block now.
     ledger_block = rendered.split("## Customer ledger summary", 1)[1].split("##", 1)[0]
-    assert "p50=30" in ledger_block  # recency days-since-last-inbound median
+    assert "p50=30" in ledger_block  # recency days-since-last-activity median (VT-485)
     assert "p90=95" in ledger_block
     assert "p50=22500" in ledger_block  # spend-paise median
     assert "business_type: cafe" in ledger_block
@@ -224,6 +224,84 @@ def test_serializer_appends_user_request_last() -> None:
         _seeded_context(user_request="please send winback to dormant cohort")
     )
     assert rendered.rstrip().endswith("please send winback to dormant cohort")
+
+
+def test_serializer_omits_manager_framing_section_when_absent() -> None:
+    """VT-607 (Loop Package 6): a non-loop dispatch (manager_desired_outcome left at its
+    CL-190 safe-empty default) must render IDENTICALLY to before this feature existed — the
+    section is omitted entirely, not rendered empty."""
+    rendered = serialize_bundle_for_prompt(_seeded_context())
+    assert "Manager's desired outcome" not in rendered
+    assert "## Acceptance criteria" not in rendered
+
+
+def test_serializer_renders_manager_framing_when_present() -> None:
+    """VT-607 (Loop Package 6): when the manager loop supplies its own step framing, the
+    rendered block carries both the desired outcome and each acceptance criterion, ahead of the
+    owner request (still last)."""
+    ctx = _seeded_context()
+    ctx_with_framing = SalesRecoveryContext(
+        tenant_id=ctx.tenant_id,
+        run_id=ctx.run_id,
+        user_request=ctx.user_request,
+        trigger_reason=ctx.trigger_reason,
+        business_profile=ctx.business_profile,
+        customer_ledger_summary=ctx.customer_ledger_summary,
+        recent_campaigns=ctx.recent_campaigns,
+        attribution_snapshot=ctx.attribution_snapshot,
+        pending_owner_inputs=ctx.pending_owner_inputs,
+        manager_desired_outcome="win back the dormant cohort within budget",
+        manager_acceptance_criteria=["cohort grounded in real customers", "expected recovery cited"],
+        meta=ctx.meta,
+        data_completeness=ctx.data_completeness,
+    )
+    rendered = serialize_bundle_for_prompt(ctx_with_framing)
+    assert "## Manager's desired outcome for this step" in rendered
+    assert "win back the dormant cohort within budget" in rendered
+    assert "## Acceptance criteria" in rendered
+    assert "- cohort grounded in real customers" in rendered
+    assert "- expected recovery cited" in rendered
+    assert rendered.index("Manager's desired outcome") < rendered.index("## Owner request")
+
+
+def test_serializer_omits_campaign_brief_section_when_absent() -> None:
+    """VT-667: a brief-less dispatch (creative_brief at its safe-empty default) renders
+    IDENTICALLY to before — the ``## Campaign brief`` section is omitted entirely, not an empty
+    stub. This is the byte-unchanged guarantee for the autonomous / non-campaign SR path."""
+    rendered = serialize_bundle_for_prompt(_seeded_context())
+    assert "## Campaign brief" not in rendered
+
+
+def test_serializer_renders_campaign_brief_verbatim_when_present() -> None:
+    """VT-667: when the conversational campaign path supplies the owner's brief, it renders
+    VERBATIM (no keyword extraction — CL-2026-07-15-no-lists), ahead of the owner request, with
+    the content-only scoping that names the offer template + keeps cohort/window/₹ server-owned."""
+    ctx = _seeded_context()
+    brief = "whip up a Diwali festive offer — 20% off or free dessert, warm greeting, dine-in + online"
+    ctx_with_brief = SalesRecoveryContext(
+        tenant_id=ctx.tenant_id,
+        run_id=ctx.run_id,
+        user_request=ctx.user_request,
+        trigger_reason=ctx.trigger_reason,
+        business_profile=ctx.business_profile,
+        customer_ledger_summary=ctx.customer_ledger_summary,
+        recent_campaigns=ctx.recent_campaigns,
+        attribution_snapshot=ctx.attribution_snapshot,
+        pending_owner_inputs=ctx.pending_owner_inputs,
+        creative_brief=brief,
+        meta=ctx.meta,
+        data_completeness=ctx.data_completeness,
+    )
+    rendered = serialize_bundle_for_prompt(ctx_with_brief)
+    assert "## Campaign brief (owner's own words)" in rendered
+    assert brief in rendered  # verbatim, not extracted
+    # names the offer-carrying template + admits the brief as the {{3}} grounding source
+    assert "team_winback_offer" in rendered
+    assert "offer_description" in rendered
+    # scoping: cohort/window/₹ stay server-owned; brief is content-only
+    assert "SYSTEM-owned" in rendered
+    # ordering: brief before the owner request (still last)
+    assert rendered.index("## Campaign brief") < rendered.index("## Owner request")
 
 
 def test_serializer_omits_identity_fields() -> None:

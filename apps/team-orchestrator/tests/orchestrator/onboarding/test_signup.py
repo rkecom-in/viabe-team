@@ -60,13 +60,18 @@ def test_create_signup_tenant_atomic(pool):
 
     with pool.connection() as c:
         t = c.execute(
-            "SELECT phase, plan_tier, preferred_language, trial_started_at, "
-            "signed_up_at, created_via, business_type FROM tenants WHERE id = %s",
+            "SELECT phase, plan_tier, preferred_language, language_preference, "
+            "trial_started_at, signed_up_at, created_via, business_type "
+            "FROM tenants WHERE id = %s",
             (str(res.tenant_id),),
         ).fetchone()
         assert t["phase"] == "onboarding"
         assert t["plan_tier"] == "founding"
-        assert t["preferred_language"] == "hi"
+        # VT-677 D3: the form toggle is a display-language PROXY — it seeds the OBSERVED column
+        # (language_preference); preferred_language (EXPLICIT choice) stays NULL until the owner
+        # actually chooses (verbal override / settings).
+        assert t["language_preference"] == "hi"
+        assert t["preferred_language"] is None
         assert t["trial_started_at"] is not None
         assert t["created_via"] == "web"
         assert t["business_type"] == "kirana"
@@ -133,9 +138,19 @@ def _valid_input(**over):
         business_name="Asha Kirana", owner_name="Asha Devi", whatsapp_number=_wa_91(),
         preferred_language="hi", city="Bengaluru", business_type="kirana",
         consent_dpdpa=True, consent_residency=True,
+        gstin="27AAKCR3738B1ZE",  # VT-408: a GSTIN is now mandatory at signup (verify-then-create)
     )
     base.update(over)
     return SignupInput(**base)
+
+
+def _active_search(_gstin):
+    """Injectable verify_search_fn → an ACTIVE GSTIN (VT-408 gate green path, no live creds).
+    Returns the REAL production GstinLookup type so the gate exercises the real is_active() /
+    authoritative_name() contract — only an ACTIVE status with a name earns gstin_verified."""
+    from orchestrator.integrations.methods.sandbox_kyc import GstinLookup
+
+    return GstinLookup(ok=True, legal_name="Asha Kirana", status="Active")
 
 
 def _wa_91() -> str:
@@ -151,6 +166,7 @@ def test_run_signup_full(pool):
     out = run_signup(
         _valid_input(),
         welcome_send_fn=lambda *a, **k: calls.append(a) or True,
+        verify_search_fn=_active_search,  # VT-408: green GSTIN verify (no live Sandbox)
     )
     assert out.plan_tier == "founding"
     assert out.city_tier in {"tier_1", "tier_2", "tier_3"}
@@ -179,13 +195,259 @@ def test_run_signup_full(pool):
     assert attrs.get("owner_name") == "Asha Devi"
 
 
+def test_run_signup_reconciliation_anchors_verified_entity(pool, monkeypatch):
+    """VT-406 reconciliation (verify-then-create completion): a verified signup persists the entity
+    anchor on the NEW tenant from the GATE's SERVER-verified gstin/name (never a client value) AND
+    seeds auto-discovery with the VERIFIED entity (name + gstin) — NOT the raw typed business_name."""
+    import dbos
+
+    from orchestrator.onboarding.signup import run_signup
+
+    seeds: list = []
+    monkeypatch.setattr(
+        dbos.DBOS, "start_workflow",
+        staticmethod(lambda _wf, _tid, seed: seeds.append(seed)), raising=False,
+    )
+    # Typed "Sundaram Book Store"; the verifier returns the AUTHORITATIVE "Sundaram Multi Pap Limited"
+    # — differs from the typed name but shares the distinctive 'sundaram' token, so it passes the VT-448
+    # name-match while still proving discovery anchors the VERIFIED name, not the typed one.
+    def _active_sundaram(_gstin):
+        from orchestrator.integrations.methods.sandbox_kyc import GstinLookup
+        return GstinLookup(ok=True, legal_name="Sundaram Multi Pap Limited", status="Active")
+
+    out = run_signup(
+        _valid_input(business_name="Sundaram Book Store"),
+        welcome_send_fn=lambda *a, **k: True,
+        verify_search_fn=_active_sundaram,
+    )
+    # Discovery anchored on the VERIFIED entity (name + gstin), not the typed name (the Sundaram fix).
+    assert len(seeds) == 1
+    assert seeds[0]["business_name"] == "Sundaram Multi Pap Limited"
+    assert seeds[0]["gstin"] == "27AAKCR3738B1ZE"
+
+    # The entity anchor is persisted on the business_profile entity from the server-verified result.
+    from orchestrator.db import tenant_connection
+    with tenant_connection(out.tenant_id) as conn:
+        bp = conn.execute(
+            "SELECT attributes FROM l1_entities WHERE entity_type = 'business_profile'"
+        ).fetchone()
+    attrs = bp["attributes"] if isinstance(bp, dict) else bp[0]
+    anchor = attrs.get("business_entity_anchor")
+    assert anchor is not None
+    assert anchor["gstin"] == "27AAKCR3738B1ZE"
+    assert anchor["trade_name"] == "Sundaram Multi Pap Limited"
+    assert anchor["source"] == "sandbox" and anchor["verified"] is True
+
+
+def test_run_signup_rejects_name_mismatch_unrelated_gstin(pool):
+    """VT-448 name-match security: a valid+ACTIVE GSTIN whose authoritative registry name is a DIFFERENT
+    business is REJECTED (a valid GSTIN alone is not enough) — SignupGateError, the generic invalid_gstin
+    outcome (no enumeration oracle), and NO tenant is created."""
+    from orchestrator.onboarding.signup import SignupGateError, run_signup
+
+    def _active_unrelated(_gstin):
+        from orchestrator.integrations.methods.sandbox_kyc import GstinLookup
+        return GstinLookup(ok=True, legal_name="Shubham Telecom Services", status="Active")
+
+    with pytest.raises(SignupGateError) as ei:
+        run_signup(
+            _valid_input(business_name="RKeCom Services Pvt Ltd"),
+            welcome_send_fn=lambda *a, **k: True,
+            verify_search_fn=_active_unrelated,
+        )
+    assert ei.value.outcome == "invalid_gstin"  # generic reject — no enumeration oracle
+
+
+def test_run_signup_mca_enrich_canonical_name_match_and_persist(pool, monkeypatch):
+    """VT-449 WIRING: a signup with a CIN fetches MCA → the name-match uses the MCA CANONICAL name (so a
+    typed name that would FAIL still passes when the GSTIN matches the registry canonical) AND the MCA
+    company data is persisted (encrypted) post-create. Proves the enrich is on the critical path, not dormant."""
+    monkeypatch.setenv("ENABLE_SANDBOX_MCA", "true")  # the ENABLED path (MCA parked OFF by default now)
+    from orchestrator.integrations.methods import mca
+    from orchestrator.onboarding import mca_store
+    from orchestrator.onboarding.signup import run_signup
+
+    cmd = mca.CompanyMasterData(ok=True, cin="U52609MH2020OPC344309",
+                                company_name="RKECOM SERVICES OPC PRIVATE LIMITED")
+    monkeypatch.setattr(mca, "company_master_data", lambda _cin, *, reason, request_fn=None: cmd)
+    stored = {"n": 0}
+    monkeypatch.setattr(mca_store, "store_company_master_data", lambda _t, _c: stored.update(n=stored["n"] + 1))
+
+    def _active(_g):
+        from orchestrator.integrations.methods.sandbox_kyc import GstinLookup
+        return GstinLookup(ok=True, legal_name="RKECOM SERVICES OPC PRIVATE LIMITED", status="Active")
+
+    # Typed "My Shop" shares NO distinctive token with the GSTIN's verified name → would REJECT without
+    # MCA; the MCA canonical "RKECOM…" matches the verified name → the create SUCCEEDS, proving the
+    # MCA canonical anchor (not the typed name) gates the name-match.
+    out = run_signup(
+        _valid_input(business_name="My Shop", cin="U52609MH2020OPC344309"),
+        welcome_send_fn=lambda *a, **k: True,
+        verify_search_fn=_active,
+    )
+    assert out.tenant_id is not None
+    assert stored["n"] == 1  # MCA company data persisted post-create (enrich is wired, not dormant)
+
+
+def test_run_signup_parked_mca_makes_zero_calls_when_flag_off(pool, monkeypatch):
+    """VT-449 PARK (Fazal 2026-06-27): with ENABLE_SANDBOX_MCA OFF (default), a signup carrying a CIN makes
+    ZERO MCA calls — company_master_data is never invoked, the name-match falls back to the typed name, and
+    the tenant is still created (gstin_verified). The clean parked-flow guarantee."""
+    monkeypatch.delenv("ENABLE_SANDBOX_MCA", raising=False)  # default OFF
+    from orchestrator.integrations.methods import mca
+    from orchestrator.onboarding.signup import run_signup
+
+    def _must_not_call(*_a, **_k):
+        raise AssertionError("MCA company_master_data must NOT be called when parked (flag off)")
+
+    monkeypatch.setattr(mca, "company_master_data", _must_not_call)
+
+    def _active(_g):
+        from orchestrator.integrations.methods.sandbox_kyc import GstinLookup
+        return GstinLookup(ok=True, legal_name="Asha Kirana", status="Active")
+
+    # CIN supplied, but parked → no MCA call; the name-match anchors on the typed "Asha Kirana".
+    out = run_signup(
+        _valid_input(business_name="Asha Kirana", cin="U52609MH2020OPC344309"),
+        welcome_send_fn=lambda *a, **k: True,
+        verify_search_fn=_active,
+    )
+    assert out.tenant_id is not None  # tenant created via GST-verify alone, zero MCA calls
+
+
+def test_run_signup_discovery_kick_failure_non_blocking(pool, monkeypatch):
+    """VT-366: a failing Auto-Discovery kick (post-commit, best-effort) must NEVER 500 the signup —
+    the tenant is already committed; discovery is fire-and-forget."""
+    import dbos
+
+    from orchestrator.onboarding.signup import run_signup
+
+    def _boom(*a, **k):
+        raise RuntimeError("discovery kick exploded")
+
+    monkeypatch.setattr(dbos.DBOS, "start_workflow", staticmethod(_boom), raising=False)
+
+    out = run_signup(
+        _valid_input(whatsapp_number="+919900000366"),
+        welcome_send_fn=lambda *a, **k: True,
+        verify_search_fn=_active_search,  # VT-408: green GSTIN verify (no live Sandbox)
+    )
+    # Signup still succeeds despite the kick raising.
+    assert out.tenant_id is not None
+    assert out.welcome_sent is True
+
+
+def _send_result(*, success: bool, error_code: str | None = None):
+    """Build a PII-safe SendResult for injecting into _default_welcome's send seam."""
+    from datetime import datetime, timezone
+
+    from orchestrator.utils.twilio_send import SendResult
+
+    return SendResult(
+        success=success,
+        message_sid=("SM" + "0" * 32) if success else None,
+        error_code=error_code,
+        error_message=None if success else "injected",
+        attempted_at=datetime.now(timezone.utc),
+        template_name="team_welcome",
+        recipient_phone_token="phone_tok_test",
+    )
+
+
+def test_default_welcome_calls_send_owner_template_correctly(pool, monkeypatch):
+    """VT-393/VT-404/VT-520: the un-injected default _default_welcome sends the real team_welcome3
+    template via the owner_send seam with the owner's language + {owner_name,
+    trial_end_date}, and welcome_sent MIRRORS SendResult.success (here: True)."""
+    from datetime import datetime, timezone
+
+    from orchestrator.onboarding import signup as signup_mod
+
+    captured: dict = {}
+
+    def _spy(tenant_id, template_name, language, params, *, recipient_phone):
+        captured.update(
+            tenant_id=tenant_id, template_name=template_name, language=language,
+            params=params, recipient_phone=recipient_phone,
+        )
+        return _send_result(success=True)
+
+    # Patch the seam where _default_welcome imports it (module-local import).
+    monkeypatch.setattr(
+        "orchestrator.owner_surface.owner_send.send_owner_template", _spy
+    )
+
+    tid = uuid.uuid4()
+    trial_end = datetime(2026, 7, 14, 9, 0, tzinfo=timezone.utc)
+    sent = signup_mod._default_welcome(
+        tid, "+919812300013", "hi", "Asha Devi", trial_end,
+    )
+    assert sent is True  # mirrors SendResult.success
+    assert captured["template_name"] == "team_welcome4"  # VT-555: UTILITY quick-reply welcome (team_welcome3 → MARKETING)
+    assert captured["language"] == "hi"  # honors the owner's preferred_language
+    assert captured["recipient_phone"] == "+919812300013"  # signup number, NOT owner_phone
+    assert captured["tenant_id"] == tid
+    # VT-555: name-only params — the trial-date var was dropped (no trial/free wording → UTILITY).
+    assert captured["params"] == {"owner_name": "Asha Devi"}
+    assert "trial_end_date" not in captured["params"]  # dropped var must not leak back in
+
+
+def test_run_signup_unapproved_sid_reports_not_sent_but_signup_succeeds(pool, monkeypatch):
+    """VT-390/VT-393 honesty: an unapproved SID → SendResult(success=False,
+    error_code='template_not_yet_approved') → welcome_sent=False, and the committed
+    signup STILL succeeds (the welcome is best-effort, non-terminal)."""
+    def _unapproved(*a, **k):
+        return _send_result(success=False, error_code="template_not_yet_approved")
+
+    monkeypatch.setattr(
+        "orchestrator.owner_surface.owner_send.send_owner_template", _unapproved
+    )
+
+    from orchestrator.onboarding.signup import run_signup
+
+    out = run_signup(
+        _valid_input(whatsapp_number=f"+9199{uuid.uuid4().int % 10**8:08d}"),
+        verify_search_fn=_active_search,  # VT-408: green GSTIN verify (no live Sandbox)
+    )
+    assert out.tenant_id is not None, "signup must still succeed when the send is unapproved"
+    assert out.welcome_sent is False, (
+        "an unapproved SID sends nothing — welcome_sent must report False (no faked delivery)"
+    )
+
+
+def test_run_signup_raising_welcome_send_is_non_terminal(pool, monkeypatch):
+    """A welcome send that RAISES (e.g. a 5xx re-raise for DBOS retry) must NEVER 500
+    the signup — the tenant is already committed; the run_signup try/except swallows it
+    and welcome_sent reports False."""
+    def _boom(*a, **k):
+        raise RuntimeError("twilio 5xx re-raised")
+
+    monkeypatch.setattr(
+        "orchestrator.owner_surface.owner_send.send_owner_template", _boom
+    )
+
+    from orchestrator.onboarding.signup import run_signup
+
+    out = run_signup(
+        _valid_input(whatsapp_number=f"+9199{uuid.uuid4().int % 10**8:08d}"),
+        verify_search_fn=_active_search,  # VT-408: green GSTIN verify (no live Sandbox)
+    )
+    assert out.tenant_id is not None, "a raising welcome send must not fail a committed signup"
+    assert out.welcome_sent is False
+
+
 def test_run_signup_duplicate_409(pool):
     from orchestrator.onboarding.signup import SignupError, run_signup
 
     wa = _wa_91()
-    run_signup(_valid_input(whatsapp_number=wa), welcome_send_fn=lambda *a, **k: True)
+    run_signup(
+        _valid_input(whatsapp_number=wa),
+        welcome_send_fn=lambda *a, **k: True, verify_search_fn=_active_search,
+    )
     with pytest.raises(SignupError) as e:
-        run_signup(_valid_input(whatsapp_number=wa), welcome_send_fn=lambda *a, **k: True)
+        run_signup(
+            _valid_input(whatsapp_number=wa),
+            welcome_send_fn=lambda *a, **k: True, verify_search_fn=_active_search,
+        )
     assert e.value.code == "duplicate"
 
 
@@ -228,6 +490,15 @@ def test_signup_route_status_mapping(pool, monkeypatch):
     monkeypatch.setenv("INTERNAL_API_SECRET", "vt326-test-secret")
     hdr = {"X-Internal-Secret": "vt326-test-secret"}
 
+    # VT-408: the route verifies the GSTIN before create — monkeypatch the Sandbox search to
+    # ACTIVE so the happy path reaches create (the HTTP path can't inject a search fn).
+    from orchestrator.integrations.methods import sandbox_kyc
+
+    monkeypatch.setattr(
+        sandbox_kyc, "search_gstin",
+        lambda g, **k: sandbox_kyc.GstinLookup(ok=True, legal_name="Asha Kirana", status="Active"),
+    )
+
     app = FastAPI()
     app.include_router(router)
     client = TestClient(app)
@@ -237,6 +508,7 @@ def test_signup_route_status_mapping(pool, monkeypatch):
         "whatsapp_number": _wa_91(), "preferred_language": "en",
         "city": "Mumbai", "business_type": "kirana",
         "consent_dpdpa": True, "consent_residency": True,
+        "gstin": "27AAKCR3738B1ZE",
     }
     r = client.post("/api/signup", json=body, headers=hdr)
     assert r.status_code == 201, r.text
@@ -266,6 +538,30 @@ def test_signup_route_status_mapping(pool, monkeypatch):
     r_phone = client.post("/api/signup", json={**body, "whatsapp_number": "+1202555"}, headers=hdr)
     assert r_phone.status_code == 400
     assert r_phone.json()["detail"]["code"] == "invalid_phone"
+
+    # VT-408: an INACTIVE GSTIN → 422 reject (no tenant), generic "GST-registered" copy. Patch
+    # the search to inactive for this one request.
+    monkeypatch.setattr(
+        sandbox_kyc, "search_gstin",
+        lambda g, **k: sandbox_kyc.GstinLookup(ok=True, legal_name="X", status="Cancelled"),
+    )
+    r_reject = client.post(
+        "/api/signup", json={**body, "whatsapp_number": _wa_91()}, headers=hdr
+    )
+    assert r_reject.status_code == 422
+    assert r_reject.json()["detail"]["code"] == "invalid_gstin"
+    assert "GST-registered" in r_reject.json()["detail"]["message"]
+
+    # VT-408: a vendor_down → 503 HOLD (retryable), distinct copy.
+    monkeypatch.setattr(
+        sandbox_kyc, "search_gstin", lambda g, **k: sandbox_kyc.GstinLookup(ok=False)
+    )
+    r_hold = client.post(
+        "/api/signup", json={**body, "whatsapp_number": _wa_91()}, headers=hdr
+    )
+    assert r_hold.status_code == 503
+    assert r_hold.json()["detail"]["code"] == "vendor_down"
+    assert r_hold.json()["detail"]["retryable"] is True
 
 
 def test_signup_kg_event_has_no_business_name_pii(pool):
@@ -322,3 +618,43 @@ def test_business_types_endpoint_serves_taxonomy(pool):
     assert "kirana" in keys and "other" in keys
     # every option carries both language labels (no PII).
     assert all(o.get("label_en") and o.get("label_hi") for o in opts)
+
+
+def test_welcome_trial_end_derives_from_trial_yaml(pool):
+    """VT-371: the team_welcome {{2}} trial-end date must come from config/trial.yaml trial_days —
+    the SAME source the evaluator/sweep read. The stale local _TRIAL_DAYS=14 told every new owner
+    their trial ended 16 days early. Asserted against the YAML value (NOT a literal 30 — re-pinning
+    a constant would just recreate the drift this fixes)."""
+    from datetime import timedelta
+    from pathlib import Path
+
+    import yaml
+
+    from orchestrator.onboarding import signup as signup_mod
+    from orchestrator.onboarding.signup import run_signup
+
+    yaml_days = int(
+        yaml.safe_load(
+            (Path(signup_mod.__file__).resolve().parents[3] / "config" / "trial.yaml")
+            .read_text(encoding="utf-8")
+        )["trial_days"]
+    )
+
+    calls: list[tuple] = []
+    out = run_signup(
+        _valid_input(whatsapp_number=f"+9199{uuid.uuid4().int % 10**8:08d}"),  # unique per run
+        welcome_send_fn=lambda *a, **k: calls.append(a) or True,
+        verify_search_fn=_active_search,  # VT-408: green GSTIN verify (no live Sandbox)
+    )
+    assert out.welcome_sent is True and len(calls) == 1
+    # _default_welcome signature: (tenant_id, whatsapp_number, preferred_language, owner_name, trial_end)
+    trial_end = calls[0][4]
+    # run_signup's `now` is internal; derive the expectation from the persisted trial_started_at.
+    with pool.connection() as c:
+        started = c.execute(
+            "SELECT trial_started_at FROM tenants WHERE id = %s", (str(out.tenant_id),)
+        ).fetchone()["trial_started_at"]
+    assert trial_end == started + timedelta(days=yaml_days), (
+        f"welcome trial_end must be trial_started_at + trial.yaml trial_days ({yaml_days})"
+    )
+    assert not hasattr(signup_mod, "_TRIAL_DAYS"), "the stale constant must be gone (grep-zero)"

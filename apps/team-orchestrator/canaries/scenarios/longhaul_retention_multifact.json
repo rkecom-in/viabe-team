@@ -1,0 +1,74 @@
+{
+  "name": "longhaul_retention_multifact",
+  "domain": "manager",
+  "critical": true,
+  "setup_args": ["--onboarded", "--flow", "plan_kicked"],
+  "expected_fail": false,
+  "notes": "Facet (a) — NO re-ask across a LONG conversation (the exact live-failure regime: 3x store-link re-ask under conversational load). Two specific facts stated UNPROMPTED at T1, then SIX unrelated intervening turns (capability Q, pricing FAQ, win-back tangent, chitchat, a correction to a DIFFERENT field, an availability FAQ) to defeat recency-only retention, then T8 recalls BOTH facts. A manager that re-asks 'which area?' / 'which day?' at T8 FAILS deterministically on the assert_not_contains interrogatives. Setup: `setup --onboarded --flow plan_kicked --name convo-harness-<id>` then `script <tenant> longhaul_retention_multifact.json`. plan_kicked = steady state, brain owns the conversation.",
+  "steps": [
+    {
+      "message": "Quick heads up before we start — I deliver within 5km of Karol Bagh, and my shop is closed on Tuesdays.",
+      "assert_no_silent": true,
+      "assert_not_d1": false,
+      "assert_contains": [],
+      "assert_not_contains": [],
+      "note": "T1: owner states TWO facts unprompted (delivery radius/area = Karol Bagh; closed day = Tuesday). Manager should acknowledge, not interrogate."
+    },
+    {
+      "message": "Can you handle my Instagram posts too, or just WhatsApp?",
+      "assert_no_silent": true,
+      "assert_not_d1": false,
+      "assert_contains": [],
+      "assert_not_contains": [],
+      "note": "T2 unrelated: capability question. Honest capability answer; no bearing on the retained facts."
+    },
+    {
+      "message": "By the way what does Viabe actually cost me per month?",
+      "assert_no_silent": true,
+      "assert_not_d1": false,
+      "assert_contains": [],
+      "assert_not_contains": [],
+      "note": "T3 unrelated: pricing FAQ."
+    },
+    {
+      "message": "Honestly some of my regulars have stopped coming lately, it's worrying.",
+      "assert_no_silent": true,
+      "assert_not_d1": false,
+      "assert_contains": [],
+      "assert_not_contains": [],
+      "note": "T4 unrelated: win-back tangent (emotional). Manager may empathize/offer help; must not lose the T1 facts."
+    },
+    {
+      "message": "Anyway, long day today. Diwali rush starting.",
+      "assert_no_silent": true,
+      "assert_not_d1": false,
+      "assert_contains": [],
+      "assert_not_contains": [],
+      "note": "T5 unrelated: chitchat. Tests the manager holds context across a non-task turn."
+    },
+    {
+      "message": "Oh one correction — my shop name is Sharma Traders, not Sharma Store. Fix that.",
+      "assert_no_silent": true,
+      "assert_not_d1": false,
+      "assert_contains": [],
+      "assert_not_contains": [],
+      "note": "T6 unrelated: a correction to a DIFFERENT field (shop NAME). Adversarial — the manager must update the name WITHOUT overwriting/confusing the T1 delivery-area or closed-day facts."
+    },
+    {
+      "message": "Do you work on Sundays or is it a holiday?",
+      "assert_no_silent": true,
+      "assert_not_d1": false,
+      "assert_contains": [],
+      "assert_not_contains": [],
+      "note": "T7 unrelated: an availability FAQ about VIABE (not the owner's shop) — a near-miss distractor for the 'closed Tuesday' fact, to catch a manager that conflates the two."
+    },
+    {
+      "message": "Remind me — which area do I deliver to, and which day is my shop shut?",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "assert_contains": ["karol bagh", "tuesday"],
+      "assert_not_contains": ["which area", "what area", "what's your delivery", "which day", "what day are you", "remind me which", "could you tell me your", "can you confirm your area", "not sure which area"],
+      "note": "T8, 6 turns after T1: manager MUST recall BOTH facts (Karol Bagh + Tuesday) and MUST NOT re-ask either (no interrogative targeting an already-known slot). Two facts + a 6-turn gap defeats recency-only passing. This is the core no-re-ask objective under long-conversation load."
+    }
+  ]
+}

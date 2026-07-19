@@ -1,0 +1,23 @@
+{
+  "name": "m_conversation_hinglish_status_smalltalk",
+  "domain": "manager",
+  "critical": false,
+  "expected_fail": false,
+  "setup_args": ["--onboarded"],
+  "notes": "Hinglish variation B: intra-sentence code-switching (English clauses and Hindi filler mixed WITHIN a single sentence) rather than the full-Hindi-per-turn style of hinglish_conversation.json/m_conversation_hinglish_winback_ask. Plain-chat path (no --flow/--journey, no seeded data) so the customer-count ask legitimately resolves to an honest no-data-connected answer. Register-matching is a manual transcript-review call. Setup: `setup --onboarded --name convo-harness-<id>` then `script <tenant> m_conversation_hinglish_status_smalltalk.json`.",
+  "steps": [
+    {
+      "message": "Hey, good morning! Aaj bahut kaam hai, but ek cheez pucchna tha — how exactly does this Team thing help me with marketing?",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "note": "Intra-sentence code-mixed greeting + capability question. Expect a real, register-appropriate answer."
+    },
+    {
+      "message": "Theek hai got it, thanks yaar. By the way, mujhe abhi customer count wagera dekhna hai — you can show that?",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "assert_not_contains": ["you have 0 customers", "you currently have 0"],
+      "note": "Code-mixed status ask with no data connected. Expect an honest 'not connected yet' class answer — never a fabricated zero-count as if it were real data."
+    }
+  ]
+}

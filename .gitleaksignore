@@ -12,3 +12,8 @@
 # zero-entropy. Historical scan-by-commit still flags 9342bfc).
 9342bfc937863b6e062496e6db9791ddaa994111:.github/workflows/ci.yml:generic-api-key:398
 9342bfc937863b6e062496e6db9791ddaa994111:.github/workflows/ci.yml:generic-api-key:425
+
+# VT-417 PR-1: fake HMAC canary webhook secret (`whsec_vt417_canary`) in the
+# Shopify ingest test — not a real credential; gitleaks generic-api-key
+# false-positives on the whsec_ prefix.
+6d3e3bf1e128b3bf666f044b5acd6f8c99590613:apps/team-orchestrator/tests/orchestrator/integrations/test_ingest_shopify.py:generic-api-key:269

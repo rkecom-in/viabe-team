@@ -38,6 +38,21 @@ def list_pending(limit: int = 50) -> list[dict[str, Any]]:
         return [dict(r) for r in cur.fetchall()]
 
 
+def count_pending() -> int:
+    """Count of still-stuck dropped events (status='pending') — the sweep's observability
+    metric. Read-only (no money effect); the scheduled sweep alerts when this is > 0.
+
+    Uses ``dict_row`` access (``row['n']``) because the graph pool sets
+    ``row_factory=dict_row`` by default — a positional ``row[0]`` does a dict
+    key lookup of ``0`` and KeyErrors."""
+    with get_pool().connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            "SELECT count(*) AS n FROM razorpay_webhook_dead_letter WHERE status = 'pending'"
+        )
+        row = cur.fetchone()
+        return int(row["n"]) if row else 0
+
+
 def replay(event_id: str, corrected_payload: dict[str, Any]) -> dict[str, Any]:
     """Re-feed a CORRECTED event through the ingress so the dropped charge's fee NOW applies
     (VT-352 F1). The corrected payload is operator-supplied (e.g. the fixed integer amount); the
@@ -59,7 +74,7 @@ def replay(event_id: str, corrected_payload: dict[str, Any]) -> dict[str, Any]:
         raise ValueError(f"no dead-letter row for event_id={event_id}")
     # F2 (Cowork bounce): tenant-scope cross-check. The dropped charge belongs to a specific
     # subscription; a typo'd subscription_id in the corrected payload would apply the fee to a
-    # DIFFERENT tenant (inflates their cumulative_fees → over-refund under the VT-93 math). Reject
+    # DIFFERENT tenant (inflates their cumulative_fees → fee over-count). Reject
     # when the corrected subscription_id ≠ the dead-letter row's original (if the original had one).
     original_sub = (row["event_payload"] or {}).get("subscription_id")
     corrected_sub = _subscription_id(corrected_payload)

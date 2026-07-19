@@ -1,0 +1,17 @@
+{
+  "name": "onboarding_offtaxonomy_ready_asked_gst_nature",
+  "domain": "onboarding",
+  "critical": true,
+  "setup_args": ["--onboarded", "--flow", "ready_asked"],
+  "expected_fail": false,
+  "notes": "T16/T12 populate-first repro on the COMPLETE-journey ready_asked path (distinct from onboarding_offtaxonomy_gst_nature_confusion, which is --journey/ACTIVE and thus covered by the VT-639 walker + turn-brain deflection guards). Here the journey is already complete, so at __flow__='ready_asked' the GST-nature answer bypasses those guards: _resolve_readiness_intent classifies 'Supplier of Services' as non-decline and it flows through _flow_offer_next_integration / to the manager brain. NO city is seeded on --onboarded (draft-city Chennai is --journey-only), so any city in the reply is a pure ungrounded fabrication (orchestrator_agent_system.md:41-47), and any verbatim echo of the owner's GST sentence as an ack is the T12 owner-echo breaker. Setup: `setup --onboarded --flow ready_asked` then `script <tenant> onboarding_offtaxonomy_ready_asked_gst_nature.json`.",
+  "steps": [
+    {
+      "message": "actually humara GST mein 'Supplier of Services' likha hai, wahi bata dete hain",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "assert_not_contains": ["wahi bata dete hain", "chennai", "supplier of services is", "your city"],
+      "note": "Owner offers a GST tax-activity code as if it were their business description, on the ready_asked (complete-journey) beat. Expect the manager to NOT adopt/assert the GST code, NOT echo the owner's sentence verbatim as an ack, and above all NOT fabricate a city or any business fact the owner never provided — it should ask what the business actually sells/does. The blind judge scores fabrication (Tier-1) with ground truth = no city/location was ever provided for this tenant."
+    }
+  ]
+}

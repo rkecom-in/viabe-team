@@ -34,6 +34,7 @@ def record_escalation(
     when run_id is provided. Returns True if a row was INSERTED, False if it conflicted (an
     idempotent hit) — the caller gates the Fazal alert on this so a DBOS workflow replay does
     NOT re-fire the Telegram ping (VT-343 nit A)."""
+    from orchestrator.observability.tm_audit import emit_tm_audit
     if severity not in _VALID_SEVERITY:
         raise ValueError(f"invalid severity {severity!r}; valid: {_VALID_SEVERITY}")
     # VT-279: deterministically route the escalation — knowledge-gap → 'vtr', authority/identity →
@@ -51,6 +52,21 @@ def record_escalation(
             (str(tenant_id), str(run_id) if run_id else None, kind, severity, notes, route),
         )
         inserted = (cur.rowcount or 0) > 0
+        emit_tm_audit(
+            event_layer="does",
+            event_kind="escalation",
+            actor="team_manager",
+            tenant_id=tenant_id,
+            run_id=run_id,
+            action={
+                "kind": kind,
+                "severity": severity,
+                "route": route,
+                "inserted": inserted,
+            },
+            summary=f"escalation queued: {kind} severity={severity} route={route}",
+            conn=conn,
+        )
     logger.info(
         "escalation recorded tenant=%s kind=%s severity=%s route=%s inserted=%s",
         tenant_id, kind, severity, route, inserted,
@@ -119,7 +135,7 @@ def run_sla_breach_sweep_body() -> list[str]:
     (the hourly sweep won't re-ping). Best-effort per row. Returns the breached escalation ids.
 
     NO LLM (Pillar 1). Service-role (escalations is deny-all RLS)."""
-    from orchestrator.billing.refund_executor import _alert_fazal
+    from orchestrator.alerts.clients import alert_fazal as _alert_fazal
 
     breached: list[str] = []
     with get_pool().connection() as conn:
@@ -141,9 +157,13 @@ def run_sla_breach_sweep_body() -> list[str]:
             r = dict(row)
             eid, tid = str(r["id"]), str(r["tenant_id"])
             try:
+                # VT-502: tenant-scoped → route through the VT-489 dev-routing
+                # gate (a canary/dev tenant's SLA breach never pages ViabeOps; a
+                # real prod tenant's still does).
                 _alert_fazal(
                     f"⚠️ SLA BREACH (VT-357) — escalation {eid} (tenant={tid}) is unresolved past "
-                    f"its SLA. Open it in the Ops Console."
+                    f"its SLA. Open it in the Ops Console.",
+                    tenant_id=tid,
                 )
             except Exception:
                 logger.exception("VT-357 SLA alert failed escalation=%s", eid)

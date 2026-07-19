@@ -1059,3 +1059,198 @@ def test_create_role_guarded_and_idempotent(migrated):
                 "SELECT count(*) FROM pg_roles WHERE rolname = %s", (role,)
             ).fetchone()[0]
             assert n == 1, f"{role}: expected 1, got {n}"
+
+
+# --- Migration 165: VT-605 plan-store columns (manager_tasks / manager_task_steps) --------------
+
+
+def test_manager_tasks_plan_store_columns_exist_with_safe_defaults(migrated):
+    """VT-605 (mig 165): manager_tasks gains plan_revision / terminal_outcome /
+    owner_notification_status. A pre-165-shape insert (all three omitted) still succeeds with the
+    documented defaults — no backfill needed, every existing caller is unaffected."""
+    dsn = migrated["dsn"]
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        tenant = conn.execute(
+            "INSERT INTO tenants (business_name, plan_tier, phase) "
+            "VALUES ('VT605 Cols Test', 'founding', 'onboarding') RETURNING id"
+        ).fetchone()[0]
+        task = conn.execute(
+            "INSERT INTO manager_tasks (tenant_id, objective) VALUES (%s, '{}'::jsonb) RETURNING id",
+            (tenant,),
+        ).fetchone()[0]
+        row = conn.execute(
+            "SELECT plan_revision, terminal_outcome, owner_notification_status "
+            "FROM manager_tasks WHERE id = %s",
+            (task,),
+        ).fetchone()
+    assert row[0] == 1
+    assert row[1] is None
+    assert row[2] == "not_required"
+
+
+def test_manager_tasks_status_accepts_queued(migrated):
+    """VT-605 (mig 165): the status CHECK is extended to accept 'queued'; a bogus value is still
+    rejected."""
+    dsn = migrated["dsn"]
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        tenant = conn.execute(
+            "INSERT INTO tenants (business_name, plan_tier, phase) "
+            "VALUES ('VT605 Queued Test', 'founding', 'onboarding') RETURNING id"
+        ).fetchone()[0]
+        task = conn.execute(
+            "INSERT INTO manager_tasks (tenant_id, objective, status) "
+            "VALUES (%s, '{}'::jsonb, 'queued') RETURNING id",
+            (tenant,),
+        ).fetchone()[0]
+        assert task is not None
+        with pytest.raises(psycopg.errors.CheckViolation):
+            conn.execute(
+                "INSERT INTO manager_tasks (tenant_id, objective, status) "
+                "VALUES (%s, '{}'::jsonb, 'bogus_status')",
+                (tenant,),
+            )
+
+
+def test_manager_tasks_terminal_outcome_and_owner_notification_status_checks(migrated):
+    """VT-605 (mig 165): terminal_outcome accepts NULL + its 5 named values, rejects anything else;
+    owner_notification_status accepts its 5 named values, rejects anything else."""
+    dsn = migrated["dsn"]
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        tenant = conn.execute(
+            "INSERT INTO tenants (business_name, plan_tier, phase) "
+            "VALUES ('VT605 Outcome Test', 'founding', 'onboarding') RETURNING id"
+        ).fetchone()[0]
+
+        for outcome in (
+            "completed_with_effect", "completed_no_action", "failed", "escalated", "cancelled",
+        ):
+            conn.execute(
+                "INSERT INTO manager_tasks (tenant_id, objective, terminal_outcome) "
+                "VALUES (%s, '{}'::jsonb, %s)",
+                (tenant, outcome),
+            )
+        with pytest.raises(psycopg.errors.CheckViolation):
+            conn.execute(
+                "INSERT INTO manager_tasks (tenant_id, objective, terminal_outcome) "
+                "VALUES (%s, '{}'::jsonb, 'bogus_outcome')",
+                (tenant,),
+            )
+
+        for status in ("not_required", "pending", "accepted", "delivered", "failed"):
+            conn.execute(
+                "INSERT INTO manager_tasks (tenant_id, objective, owner_notification_status) "
+                "VALUES (%s, '{}'::jsonb, %s)",
+                (tenant, status),
+            )
+        with pytest.raises(psycopg.errors.CheckViolation):
+            conn.execute(
+                "INSERT INTO manager_tasks (tenant_id, objective, owner_notification_status) "
+                "VALUES (%s, '{}'::jsonb, 'bogus_notification_status')",
+                (tenant,),
+            )
+
+
+def test_manager_task_steps_plan_store_columns_and_checks(migrated):
+    """VT-605 (mig 165): manager_task_steps gains plan_revision (default 1) + specialist
+    (nullable, CHECKed to the 3 roster specialists); kind admits 'advisory_tool'; evidence_kind
+    admits 'pipeline_step'; status admits 'superseded'."""
+    dsn = migrated["dsn"]
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        tenant = conn.execute(
+            "INSERT INTO tenants (business_name, plan_tier, phase) "
+            "VALUES ('VT605 Steps Test', 'founding', 'onboarding') RETURNING id"
+        ).fetchone()[0]
+        task = conn.execute(
+            "INSERT INTO manager_tasks (tenant_id, objective) VALUES (%s, '{}'::jsonb) RETURNING id",
+            (tenant,),
+        ).fetchone()[0]
+
+        # pre-165-shape insert (plan_revision/specialist omitted) still succeeds with defaults.
+        step = conn.execute(
+            "INSERT INTO manager_task_steps (tenant_id, task_id, step_seq, kind) "
+            "VALUES (%s, %s, 1, 'effect') RETURNING id",
+            (tenant, task),
+        ).fetchone()[0]
+        row = conn.execute(
+            "SELECT plan_revision, specialist FROM manager_task_steps WHERE id = %s", (step,)
+        ).fetchone()
+        assert row[0] == 1
+        assert row[1] is None
+
+        # kind admits 'advisory_tool'.
+        conn.execute(
+            "INSERT INTO manager_task_steps (tenant_id, task_id, step_seq, kind) "
+            "VALUES (%s, %s, 2, 'advisory_tool')",
+            (tenant, task),
+        )
+        # specialist admits the 3 roster values, on a NEW task (avoids the (task, revision, seq)
+        # unique index — a fresh task per specialist keeps this test about the CHECK, not the index).
+        for specialist in ("onboarding_conductor", "integration_agent", "sales_recovery_agent"):
+            t2 = conn.execute(
+                "INSERT INTO manager_tasks (tenant_id, objective) VALUES (%s, '{}'::jsonb) RETURNING id",
+                (tenant,),
+            ).fetchone()[0]
+            conn.execute(
+                "INSERT INTO manager_task_steps (tenant_id, task_id, step_seq, kind, specialist) "
+                "VALUES (%s, %s, 1, 'specialist_dispatch', %s)",
+                (tenant, t2, specialist),
+            )
+        with pytest.raises(psycopg.errors.CheckViolation):
+            conn.execute(
+                "INSERT INTO manager_task_steps (tenant_id, task_id, step_seq, kind, specialist) "
+                "VALUES (%s, %s, 99, 'specialist_dispatch', 'bogus_specialist')",
+                (tenant, task),
+            )
+        # evidence_kind admits 'pipeline_step'.
+        conn.execute(
+            "INSERT INTO manager_task_steps (tenant_id, task_id, step_seq, kind, evidence_kind) "
+            "VALUES (%s, %s, 3, 'verification', 'pipeline_step')",
+            (tenant, task),
+        )
+        # status admits 'superseded'.
+        conn.execute(
+            "UPDATE manager_task_steps SET status = 'superseded' WHERE id = %s", (step,)
+        )
+        with pytest.raises(psycopg.errors.CheckViolation):
+            conn.execute(
+                "UPDATE manager_task_steps SET status = 'bogus_status' WHERE id = %s", (step,)
+            )
+
+
+def test_manager_task_steps_seq_unique_within_revision_not_across(migrated):
+    """VT-605 (mig 165): the (task_id, step_seq) unique index (mig 152) is replaced by
+    (task_id, plan_revision, step_seq) — a revision may legitimately reuse step_seq=1 under a NEW
+    plan_revision (that is exactly what plan_store.revise_plan does); the SAME step_seq within the
+    SAME revision is still rejected."""
+    dsn = migrated["dsn"]
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        tenant = conn.execute(
+            "INSERT INTO tenants (business_name, plan_tier, phase) "
+            "VALUES ('VT605 Seq Test', 'founding', 'onboarding') RETURNING id"
+        ).fetchone()[0]
+        task = conn.execute(
+            "INSERT INTO manager_tasks (tenant_id, objective) VALUES (%s, '{}'::jsonb) RETURNING id",
+            (tenant,),
+        ).fetchone()[0]
+        conn.execute(
+            "INSERT INTO manager_task_steps (tenant_id, task_id, step_seq, plan_revision, kind) "
+            "VALUES (%s, %s, 1, 1, 'effect')",
+            (tenant, task),
+        )
+        # Same step_seq, SAME revision → rejected.
+        with pytest.raises(psycopg.errors.UniqueViolation):
+            conn.execute(
+                "INSERT INTO manager_task_steps (tenant_id, task_id, step_seq, plan_revision, kind) "
+                "VALUES (%s, %s, 1, 1, 'effect')",
+                (tenant, task),
+            )
+        # Same step_seq, NEW revision → allowed (a revision reusing step_seq=1).
+        conn.execute(
+            "INSERT INTO manager_task_steps (tenant_id, task_id, step_seq, plan_revision, kind) "
+            "VALUES (%s, %s, 1, 2, 'effect')",
+            (tenant, task),
+        )
+        n = conn.execute(
+            "SELECT count(*) FROM manager_task_steps WHERE task_id = %s", (task,)
+        ).fetchone()[0]
+        assert n == 2

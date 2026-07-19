@@ -606,3 +606,335 @@ def test_collapse_node_fails_closed_atomic_on_mixed_cohort(rls_ctx):
     assert n_recipients == 0, (
         "atomicity: the RESOLVED recipient must roll back too — no partial leak"
     )
+
+
+# ---------------------------------------------------------------------------
+# VT-594 change C (post-review restructure) — the in-chat plan summary SEND
+# moved OUT of collapse.py entirely (review Blocker 3: it fired unconditionally
+# before the run knew the gate outcome, causing a double-send/contradiction on
+# the queue_busy/send_failed/budget-skip cases). collapse_node now ONLY
+# threads a PII-safe ``chat_summary`` payload into ``pending_approval_request``
+# — the actual send lives in ``request_owner_approval.arm_pause_request`` (see
+# ``tests/orchestrator/agent/tools/test_request_owner_approval.py`` for the
+# send-ordering coverage). collapse_node itself performs NO send.
+# ---------------------------------------------------------------------------
+
+
+def _seed_recent_campaign_approval(dsn: str, tenant_id: str, run_id: str) -> None:
+    """Seed one RESOLVED pending_approvals row within the VT-334 7-day budget
+    window, so the budget counter (which counts regardless of resolved state)
+    can be tripped without leaving an OPEN row (which would trigger a
+    DIFFERENT guard — the per-tenant queue-busy refusal in arm_pause_request,
+    not exercised by this test)."""
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute(
+            """
+            INSERT INTO pending_approvals
+                (tenant_id, run_id, approval_type, summary, status, decision,
+                 timeout_at, resolved_at)
+            VALUES (%s, %s, 'campaign_send', 'prior approval', 'approved',
+                    'approved', now() + interval '1 hour', now())
+            """,
+            (tenant_id, run_id),
+        )
+
+
+def test_collapse_node_proposed_success_attaches_chat_summary(rls_ctx):
+    """collapse_node's proposed-success path threads a PII-safe chat_summary
+    into pending_approval_request — cohort size + label present, NO
+    selection_reason (review Blocker 1: agent-authored free prose that VT-498
+    documents the SR model baking literal customer names/phones into)."""
+    from orchestrator.collapse import collapse_node
+
+    tenant = _new_tenant(rls_ctx.dsn)
+    run_id = _new_run(rls_ctx.dsn, tenant)
+    plan = _plan(tenant, run_id, customer_id=_seed_customer(rls_ctx.dsn, tenant))
+
+    update = collapse_node(
+        {
+            "tenant_id": UUID(tenant),
+            "run_id": UUID(run_id),
+            "campaign_plan": plan,
+        }
+    )
+
+    req = update["pending_approval_request"]
+    chat_summary = req["chat_summary"]
+    assert set(chat_summary.keys()) == {"en", "hi"}
+    assert str(plan.target_cohort.cohort_size) in chat_summary["en"]
+    assert plan.target_cohort.cohort_label in chat_summary["en"]
+    assert plan.target_cohort.selection_reason not in chat_summary["en"], (
+        "Blocker 1: selection_reason is agent-authored free prose — must "
+        "never reach the chat summary"
+    )
+    assert plan.target_cohort.selection_reason not in chat_summary["hi"]
+
+
+def test_collapse_node_budget_skip_returns_empty_dict(rls_ctx):
+    """VT-334 budget-skip path: the campaign still persists, the return still
+    degrades to {} (no approval prompt / no chat_summary this week)."""
+    from orchestrator.collapse import collapse_node
+
+    tenant = _new_tenant(rls_ctx.dsn)
+    run_id = _new_run(rls_ctx.dsn, tenant)
+    plan = _plan(tenant, run_id, customer_id=_seed_customer(rls_ctx.dsn, tenant))
+
+    # Trip the VT-334 weekly budget (>= 2 recent campaign_send requests).
+    _seed_recent_campaign_approval(rls_ctx.dsn, tenant, _new_run(rls_ctx.dsn, tenant))
+    _seed_recent_campaign_approval(rls_ctx.dsn, tenant, _new_run(rls_ctx.dsn, tenant))
+
+    update = collapse_node(
+        {
+            "tenant_id": UUID(tenant),
+            "run_id": UUID(run_id),
+            "campaign_plan": plan,
+        }
+    )
+
+    assert update == {}, "budget-skip return contract is unchanged"
+
+
+def test_chat_summary_present_tense_no_future_promise() -> None:
+    """RC1: the approval template is armed + sent THIS turn right after the summary, so the summary
+    must NEVER promise a future 'I'll send the approval next' (read as a loop_stall) — present-tense
+    it + name the no-send-until-approve gate. Pure (no DB)."""
+    from orchestrator.collapse import _build_chat_summary_body
+
+    tid = uuid4()
+    body = _build_chat_summary_body(_plan(str(tid), str(uuid4())), tid)
+    for locale in ("en", "hi"):
+        low = body[locale].lower()
+        assert "approval ask next" not in low and "will send" not in low, locale
+    assert "approve" in body["en"].lower()          # points at approving now
+    assert "मंज़ूरी" in body["hi"]                    # HI names approval, present-tense
+
+
+# ---------------------------------------------------------------------------
+# Build R4 — plan-summary money honesty: N-of-M cohort scope clause +
+# deterministic expected-recovery clamp grounded in the cohort's OWN spend.
+# The clause/clamp FORMATTING is pinned by stubbed-derivation unit tests (pure,
+# no DB); the derivation SQL + clamp math are pinned by the realdb tests below.
+# ---------------------------------------------------------------------------
+
+
+def _proposed_plan(
+    tenant_id: str,
+    run_id: str,
+    *,
+    cohort_size: int = 1,
+    customer_ids: list[str] | None = None,
+    low_paise: int = 10_000_00,
+    high_paise: int = 30_000_00,
+):
+    """A valid v1.0 proposed plan with an arbitrary cohort size + ARRR range."""
+    from orchestrator.agent.schemas.campaign_plan import (
+        CampaignPlanProposed,
+        CampaignWindow,
+        ConfidenceLevel,
+        EvidenceRef,
+        EvidenceSourceKind,
+        ExpectedARRR,
+        Language,
+        MessagePlan,
+        TargetCohort,
+    )
+
+    ids = (
+        [UUID(c) for c in customer_ids]
+        if customer_ids is not None
+        else [uuid4() for _ in range(cohort_size)]
+    )
+    now = datetime.now(UTC)
+    return CampaignPlanProposed(
+        tenant_id=UUID(tenant_id),
+        run_id=UUID(run_id),
+        generated_at=now,
+        campaign_window=CampaignWindow(
+            start=now + timedelta(hours=1), end=now + timedelta(days=7)
+        ),
+        target_cohort=TargetCohort(
+            customer_ids=ids,
+            cohort_label="60-90 day dormants",
+            cohort_size=len(ids),
+            selection_reason="dormant cohort [E1].",
+        ),
+        expected_arrr=ExpectedARRR(
+            low_paise=low_paise,
+            high_paise=high_paise,
+            confidence=ConfidenceLevel.MEDIUM,
+            basis="prior winback yields [E1].",
+        ),
+        evidence_refs=[
+            EvidenceRef(
+                claim_id="E1",
+                source_kind=EvidenceSourceKind.TOOL_CALL,
+                source_id="test-evidence",
+            )
+        ],
+        message_plan=MessagePlan(
+            template_id="team_winback_v1",
+            template_params={"first_name": "Owner", "discount": "10"},
+            language=Language.EN,
+            personalization="owner-first-name.",
+        ),
+    )
+
+
+def test_chat_summary_nofm_clause_present_when_cohort_narrows(monkeypatch) -> None:
+    """total lapsed (19) > this plan's cohort (7) -> N-of-M scope line EN+HI."""
+    from orchestrator import collapse
+
+    tid = uuid4()
+    plan = _proposed_plan(str(tid), str(uuid4()), cohort_size=7)
+    monkeypatch.setattr(
+        collapse,
+        "_derive_summary_money",
+        lambda p, t: collapse._SummaryMoney(
+            low_rupees=100, high_rupees=300, arrr_grounded=False, total_lapsed=19
+        ),
+    )
+    body = collapse._build_chat_summary_body(plan, tid)
+    assert "19 of your customers" in body["en"] and "targets 7" in body["en"]
+    assert "कुल 19 ग्राहक" in body["hi"] and "7 को लक्षित" in body["hi"]
+
+
+def test_chat_summary_nofm_clause_absent_when_cohort_equals_total(monkeypatch) -> None:
+    """cohort == total -> no N-of-M clause (nothing was narrowed)."""
+    from orchestrator import collapse
+
+    tid = uuid4()
+    plan = _proposed_plan(str(tid), str(uuid4()), cohort_size=7)
+    monkeypatch.setattr(
+        collapse,
+        "_derive_summary_money",
+        lambda p, t: collapse._SummaryMoney(
+            low_rupees=100, high_rupees=300, arrr_grounded=False, total_lapsed=7
+        ),
+    )
+    body = collapse._build_chat_summary_body(plan, tid)
+    assert "lapsed in total" not in body["en"]
+    assert "लैप्स्ड हैं" not in body["hi"]
+
+
+def test_chat_summary_arrr_clamp_surfaced_with_basis(monkeypatch) -> None:
+    """Grounded money -> the CLAMPED ₹ range + basis note surface; the raw LLM
+    figure is never shown."""
+    from orchestrator import collapse
+
+    tid = uuid4()
+    plan = _proposed_plan(
+        str(tid), str(uuid4()), cohort_size=3, low_paise=10_000_00, high_paise=30_000_00
+    )
+    monkeypatch.setattr(
+        collapse,
+        "_derive_summary_money",
+        lambda p, t: collapse._SummaryMoney(
+            low_rupees=285, high_rupees=855, arrr_grounded=True, total_lapsed=None
+        ),
+    )
+    body = collapse._build_chat_summary_body(plan, tid)
+    assert "₹285" in body["en"] and "₹855" in body["en"]
+    assert collapse._ARRR_BASIS_NOTE_EN in body["en"]
+    assert collapse._ARRR_BASIS_NOTE_HI in body["hi"]
+    assert "10,000" not in body["en"], "raw LLM figure must never surface once grounded"
+
+
+def test_chat_summary_byte_identical_when_derivation_fails(monkeypatch) -> None:
+    """Fail-soft: a read error -> LLM figure verbatim, no clause/basis; the body
+    equals the clean pre-R4 baseline."""
+    from orchestrator import collapse
+
+    tid = uuid4()
+    plan = _proposed_plan(
+        str(tid), str(uuid4()), cohort_size=7, low_paise=10_000_00, high_paise=30_000_00
+    )
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(collapse, "tenant_connection", _boom)
+    failed = collapse._build_chat_summary_body(plan, tid)
+    baseline = collapse._build_chat_summary_body(
+        plan,
+        tid,
+        money=collapse._SummaryMoney(
+            low_rupees=10_000, high_rupees=30_000, arrr_grounded=False, total_lapsed=None
+        ),
+    )
+    assert failed == baseline
+    assert "₹10,000" in failed["en"] and "₹30,000" in failed["en"]
+    assert collapse._ARRR_BASIS_NOTE_EN not in failed["en"]
+    assert "lapsed in total" not in failed["en"]
+
+
+def _seed_customer_with_sale(
+    dsn: str, tenant_id: str, *, amount_paise: int, days_ago: int = 90
+) -> str:
+    """Seed a customer + one 'sale' ledger entry ``days_ago`` days back (lapsed by
+    the 45d window when days_ago > 45). Returns the customer id."""
+    cid = str(uuid4())
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute(
+            "INSERT INTO customers (id, tenant_id, display_name, opt_out_status) "
+            "VALUES (%s, %s, 'r4-cust', 'subscribed')",
+            (cid, tenant_id),
+        )
+        conn.execute(
+            "INSERT INTO customer_ledger_entries "
+            "(tenant_id, customer_id, amount_paise, entry_type, entry_date, "
+            " acquired_via, source_confidence, entry_key) "
+            "VALUES (%s, %s, %s, 'sale', (now()::date - %s), 'apify_gbp', 1.0, %s)",
+            (tenant_id, cid, amount_paise, days_ago, uuid4().hex),
+        )
+    return cid
+
+
+def test_derive_summary_money_clamps_llm_to_cohort_spend(rls_ctx):
+    """Build R4 ARRR: the surfaced range == band × the cohort's own spend
+    (formula), never the raw LLM figure; reproducible run-to-run. Seeded spends
+    80k+15k*i paise, one sale each (per-customer AOV == that sale)."""
+    from orchestrator.collapse import _derive_summary_money
+
+    tenant = _new_tenant(rls_ctx.dsn)
+    run_id = _new_run(rls_ctx.dsn, tenant)
+    ids = [
+        _seed_customer_with_sale(rls_ctx.dsn, tenant, amount_paise=80_000 + 15_000 * i)
+        for i in range(3)
+    ]
+    cohort_aov_sum = sum(80_000 + 15_000 * i for i in range(3))  # 285_000 paise
+    plan = _proposed_plan(
+        tenant, run_id, customer_ids=ids, low_paise=10_000_00, high_paise=30_000_00
+    )
+
+    money = _derive_summary_money(plan, UUID(tenant))
+
+    assert money.arrr_grounded is True
+    assert money.low_rupees == (cohort_aov_sum * 10 // 100) // 100
+    assert money.high_rupees == (cohort_aov_sum * 30 // 100) // 100
+    # the clamp bit (derived << LLM ₹10k–₹30k), so raw LLM rupees are NOT shown
+    assert money.low_rupees < 10_000 and money.high_rupees < 30_000
+    assert _derive_summary_money(plan, UUID(tenant)) == money, "must be deterministic"
+
+
+def test_derive_summary_money_nofm_and_arrr_on_narrowed_plan(rls_ctx):
+    """Realdb: 25 lapsed seeded, plan narrowed to 5 -> total_lapsed=25 surfaces as
+    the N-of-M scope line AND the ₹ range is grounded in the 5 targeted rows."""
+    from orchestrator.collapse import _build_chat_summary_body, _derive_summary_money
+
+    tenant = _new_tenant(rls_ctx.dsn)
+    run_id = _new_run(rls_ctx.dsn, tenant)
+    all_ids = [
+        _seed_customer_with_sale(rls_ctx.dsn, tenant, amount_paise=80_000 + 15_000 * i)
+        for i in range(25)
+    ]
+    narrowed = all_ids[:5]
+    plan = _proposed_plan(tenant, run_id, customer_ids=narrowed)
+
+    money = _derive_summary_money(plan, UUID(tenant))
+    assert money.total_lapsed == 25
+    assert money.arrr_grounded is True
+
+    body = _build_chat_summary_body(plan, UUID(tenant), money=money)
+    assert "25 of your customers" in body["en"] and "targets 5" in body["en"]
+    assert f"₹{money.low_rupees:,}" in body["en"]
+    assert "कुल 25 ग्राहक" in body["hi"]

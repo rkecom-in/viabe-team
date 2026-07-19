@@ -11,3 +11,26 @@
 # carries its own brief.
 
 max_revisions: 2
+
+# VT-500 — simple-tier calibration (Type 2 governance, like max_revisions).
+#
+# The grounding a campaign must DEFEND to ship is proportional to what it
+# CLAIMS and at what SCALE. A plain no-offer "we miss you" win-back to a
+# genuinely-lapsed, consented customer in a SMALL cohort should not be blocked
+# merely because it cannot defend an ARRR/ROI projection it never needed. This
+# block calibrates EXACTLY ONE axis — the expected_arrr business-justification
+# requirement — and ONLY on the narrow allow-listed simple lane. Every safety
+# rail (consent/opt-out/PII/onboarded/send-checkpoint/caps — all at the SEND
+# path) and ALL anti-fabrication grounding (schema/pillar/consistency-grounding/
+# legal + the executor validate_draft_params) stay BINDING on both tiers.
+#
+# enabled: false is the KILL-SWITCH — reverts the gate to all-strict (every
+# draft takes the full four-category grade, no expected_arrr critique dropped).
+#
+# The cohort ceiling is NOT configured here — it is imported from
+# autonomy.L3_AUTO_MAX_BATCH (the bulk always-confirm floor) so the
+# ship-without-ARRR ceiling and the bulk-checkpoint floor can never drift.
+simple_tier:
+  enabled: true
+  templates:
+    - team_winback_simple   # the ONE no-offer, non-money-bearing winback (config↔code pinned by test)

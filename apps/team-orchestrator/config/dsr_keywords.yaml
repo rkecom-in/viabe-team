@@ -1,18 +1,76 @@
-# Initial draft for VT-3.8. VT-8 admission gate will own production keyword
-# curation. Adding/removing keywords requires Type 2 governance per Notion.
+# DSR (data-subject / erasure request) keywords. VT-8 admission gate will own production keyword
+# curation. Adding/removing keywords requires Type 2 governance (unchanged by VT-585).
 #
-# Matching: case-insensitive, word-boundary, anywhere in the message body.
-keywords:
-  - data deletion
-  - my data
+# VT-585 — INTENT, NOT SUBSTRING. A DSR must fire on a genuine *erasure* intent, never on a bare
+# data mention. The old flat list carried bare nouns ("my data" / "मेरा डेटा"); those matched
+# deletion-ABSENT contexts ("connect my data", "yes connect my data", "मेरा डेटा कनेक्ट करो") and
+# falsely told an owner wiring their store that their DATA-DELETION request was acknowledged. Fixed
+# by splitting the list so a bare noun only fires WITH a deletion verb.
+#
+# Three sections, all matched case-insensitive / NFC-normalized / boundary-safe CONTAINMENT anywhere
+# in the body (shared keyword_match.boundary_patterns — same matcher as opt-out, so the two consent
+# surfaces cannot drift; `\b` is dead for Devanagari — see keyword_match). The matcher (`_dsr_match`
+# in pre_filter_gate.py) fires when EITHER:
+#   * a `standalone` phrase is present (unambiguous on its own), OR
+#   * a `delete_verbs` token AND a `data_nouns` token are BOTH present (in any order) — this is what
+#     separates "delete my data" / "data delete karo" / "मेरा डेटा हटाओ" (fire) from bare
+#     "my data" / "मेरा डेटा" (does not fire).
+# Failure direction stays DPDP-conservative: an exotic erasure phrasing the keywords miss still
+# reaches the brain (the substantive-message fall-through), which is a soft over-cost, not a dropped
+# request. The Devanagari verb forms are listed explicitly (not stemmed) because a matra-ending stem
+# cannot anchor a trailing boundary before a following full vowel letter (the keyword_match caveat).
+
+# Unambiguous on their own — fire without needing a separate noun.
+standalone:
   - GDPR
-  - मेरा डेटा
-  # VT-329 (Cowork adversarial review): code-switched / Hinglish DSR — real owners mix scripts
-  # mid-sentence ("मेरा data delete karo" / "data delete karo refund"). Boundary-safe containment
-  # (the lookaround patterns) keeps these conservative; the failure direction is fail-safe
-  # (over-route a deletion request, never miss one).
-  - data delete
-  - delete karo
-  - डिलीट
+  - erasure                 # "GDPR erasure", "data erasure", "erasure request"
+  - right to be forgotten
+  - forget me
+  - data deletion           # VT-3.8: "I want data deletion for my account"
+  # "delete me" (Devanagari, adjacent subject+verb — tight, so it does NOT fire on a stray
+  # "मुझे ... <verb>" across an unrelated clause the way a bare "मुझे" would).
+  - मुझे हटा                # remove me
+  - मुझे डिलीट              # delete me
+  - मुझे मिटा               # erase me
+
+# Deletion verbs. Meaningful for a DSR ONLY in combination with a data_nouns token (below), so this
+# list can be generous — a verb alone ("delete this message") never fires without a data noun.
+# VT-329: code-switched Hinglish uses the English verbs ("data delete karo"); Devanagari forms are
+# spelled out per the matra caveat above.
+delete_verbs:
+  - delete
+  - deleted
+  - deleting
+  - erase
+  - erased
+  - remove
+  - removed
+  - removing
+  - wipe
+  - wiped
+  - purge
+  - हटा
   - हटाओ
-  - मुझे हटा
+  - हटाना
+  - डिलीट
+  - मिटा
+  - मिटाओ
+  - मिटाना
+
+# Data / information nouns. A bare noun here NEVER fires alone (the VT-585 fix) — only alongside a
+# delete_verbs token. "data" (bare) is kept so code-switched "data delete karo" / "मेरा data delete
+# karo" fire; boundary-safe containment keeps it off "database" / "metadata".
+# ACCOUNT nouns (VT-585 follow-up, CC): account-erasure IS a DSR. Under the old flat list a bare
+# "हटाओ" fired, so "मेरा अकाउंट हटाओ" (delete my account) routed to DSR; the intent-not-substring
+# tightening dropped that (account ∉ nouns) — a real erasure-phrasing coverage LOSS. Restored here so
+# "delete my account" / "मेरा अकाउंट हटाओ" / "अकाउंट डिलीट करो" fire, WITHOUT reintroducing the bare-
+# verb over-fire (a verb still needs one of these nouns). Fail-safe direction (DPDP): an account-close
+# intent belongs in the DSR/erasure lane, not silently at the brain.
+data_nouns:
+  - data
+  - information
+  - info
+  - account
+  - डेटा
+  - अकाउंट
+  - खाता

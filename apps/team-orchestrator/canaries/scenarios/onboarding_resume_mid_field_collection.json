@@ -1,0 +1,28 @@
+{
+  "name": "onboarding_resume_mid_field_collection",
+  "domain": "onboarding",
+  "critical": true,
+  "setup_args": ["--owner-inputs", "true", "--journey"],
+  "expected_fail": false,
+  "notes": "Interruption DURING the initial ACTIVE field-collection walk (distinct from onboarding_resume_after_interruption_deferred.json, which resumes the COMPLETE journey's post-profile paced flow). The owner supplies facts, breaks off mid-conversation, then returns — the onboarding_journey row (queue/cursor/answers) is the durable resumability substrate and must not be re-walked from question 1. Setup: `setup --owner-inputs true --journey` (ACTIVE journey, 2-entry queue: confirm business_type='sweets' + gap 'about') then `script <tenant> onboarding_resume_mid_field_collection.json`.",
+  "steps": [
+    {
+      "message": "haan sahi hai, hum Probe Namkeen hain, Nagpur mein snacks ki dukaan hai",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "note": "Confirms the business_type guess AND volunteers the business name + city in the same message."
+    },
+    {
+      "message": "ek second, mujhe kahin jaana hai abhi, thodi der baad baat karta hoon",
+      "assert_no_silent": true,
+      "note": "Owner breaks off mid-journey. Expect a graceful, low-pressure acknowledgement — no forced question, no repeat of the just-answered confirm."
+    },
+    {
+      "message": "ok wapas aa gaya, chalo aage badhte hain",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "assert_not_contains": ["is that right?", "sweets business — is that", "which city is your business in", "what is your business name"],
+      "note": "Owner returns. The journey must resume from the cursor it was at — NOT re-ask the business_type confirm or the name/city already given before the interruption."
+    }
+  ]
+}

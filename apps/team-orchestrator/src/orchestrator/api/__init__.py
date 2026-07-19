@@ -6,6 +6,7 @@ from fastapi import APIRouter
 
 from orchestrator.api.admin import router as admin_router
 from orchestrator.api.consent_capture import router as consent_capture_router
+from orchestrator.api.coordinator_kick import router as coordinator_kick_router
 from orchestrator.api.drive_push import router as drive_push_router
 from orchestrator.api.dsr import router as dsr_router
 from orchestrator.api.hook_links import router as hook_links_router
@@ -13,11 +14,16 @@ from orchestrator.api.integration_push import router as integration_push_router
 from orchestrator.api.oauth_callback import router as oauth_callback_router
 from orchestrator.api.onboard_step import router as onboard_step_router
 from orchestrator.api.ops_resolve import router as ops_resolve_router
+from orchestrator.api.ops_run_control import router as ops_run_control_router  # VT-374
 from orchestrator.api.ops_runcontrol import router as ops_runcontrol_router
+from orchestrator.api.ops_vtr_console import router as ops_vtr_console_router  # VT-370
 from orchestrator.api.owner_dashboard import router as owner_dashboard_router
 from orchestrator.api.owner_verify import router as owner_verify_router
+from orchestrator.api.sheet_picker import router as sheet_picker_router  # VT-608
 from orchestrator.api.sheet_push import router as sheet_push_router
 from orchestrator.api.business_verification import router as business_verification_router  # VT-361
+from orchestrator.api.discovery import router as discovery_router  # VT-507
+from orchestrator.api.entity_match import router as entity_match_router  # VT-406
 from orchestrator.api.signup import router as signup_router
 from orchestrator.api.waitlist import router as waitlist_router
 from orchestrator.api.shopify_oauth import router as shopify_oauth_router
@@ -25,6 +31,7 @@ from orchestrator.api.shopify_webhook import router as shopify_webhook_router
 from orchestrator.api.razorpay_ingress import router as razorpay_ingress_router
 from orchestrator.api.razorpay_subscribe import router as razorpay_subscribe_router
 from orchestrator.api.twilio_ingress import router as twilio_ingress_router
+from orchestrator.api.version import router as version_router  # VT-508
 from orchestrator.api.whatsapp_oauth import router as whatsapp_oauth_router
 
 router = APIRouter()
@@ -33,20 +40,27 @@ router.include_router(razorpay_ingress_router)  # VT-89
 router.include_router(razorpay_subscribe_router)  # VT-331
 router.include_router(ops_resolve_router)
 router.include_router(ops_runcontrol_router)
+router.include_router(ops_run_control_router)  # VT-374 run-control substrate
+router.include_router(ops_vtr_console_router)  # VT-370 Gap-6 VTR console
 router.include_router(owner_verify_router)
 router.include_router(owner_dashboard_router)  # VT-87
 router.include_router(oauth_callback_router)
+router.include_router(sheet_picker_router)  # VT-608
 router.include_router(sheet_push_router)
 router.include_router(signup_router)
 router.include_router(business_verification_router)  # VT-361
+router.include_router(discovery_router)  # VT-507 async parallel discovery
+router.include_router(entity_match_router)  # VT-406 entity-match at signup
 router.include_router(waitlist_router)  # VT-97
 router.include_router(integration_push_router)
 router.include_router(shopify_webhook_router)
 router.include_router(shopify_oauth_router)
 router.include_router(onboard_step_router)
 router.include_router(admin_router)
+router.include_router(coordinator_kick_router)  # VT-431 on-demand kick
 router.include_router(drive_push_router)
 router.include_router(consent_capture_router)
 router.include_router(dsr_router)
 router.include_router(whatsapp_oauth_router)
 router.include_router(hook_links_router)
+router.include_router(version_router)  # VT-508 deploy stamp

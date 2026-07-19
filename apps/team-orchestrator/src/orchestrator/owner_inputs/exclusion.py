@@ -108,6 +108,24 @@ def handle_exclusion(tenant_id: UUID | str, body: str) -> ExclusionResult:
     caller (stage-2 router) delivers ``response_text``."""
     phone = _extract_phone(body)
     name = None if phone else _extract_name(body)
+    # R5 / CD6 item 2 — a GLOBAL send-stop with NO customer identifier ("bas ab message mat bhejo") is a
+    # tenant-level pause, NOT a per-customer exclusion. It normally routes to opt_out_handler at
+    # pre_filter (matches_global_stop wired into Rule a) and never reaches here; this is the
+    # belt-and-braces guard for a global-stop phrase that slips onto the edge-router exclusion path.
+    # Return needs_identifier with copy that SEPARATES the two intents (reply STOP to pause everything,
+    # or name one customer) — never the misleading "I couldn't find that customer", and never a wrong
+    # per-customer exclusion (no customer is resolved). Checked before name-resolve so a "bas ab" token
+    # residue can't be mis-resolved. (matches_global_stop already excludes any phone/named-customer.)
+    if not phone:
+        from orchestrator.pre_filter_gate import matches_global_stop
+
+        if matches_global_stop(body):
+            return ExclusionResult(
+                "needs_identifier",
+                None,
+                "To pause ALL messages, reply STOP. To exclude just one customer, tell me their "
+                "name or phone number.",
+            )
     if not phone and not name:
         return ExclusionResult(
             "needs_identifier",

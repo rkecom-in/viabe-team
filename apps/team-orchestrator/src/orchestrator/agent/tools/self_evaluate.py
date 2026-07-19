@@ -51,6 +51,7 @@ from anthropic import Anthropic
 from pydantic import BaseModel, ConfigDict, Field
 
 from orchestrator.agent.self_evaluate import (
+    GradeTier,
     SelfEvaluateFeedback,
     SelfEvaluateOutcome,
     SelfEvaluateVerdict,
@@ -114,6 +115,10 @@ class SelfEvaluateInput(BaseModel):
     draft_campaign_plan: dict[str, Any]
     context_summary: dict[str, Any] = Field(default_factory=dict)
     attempt_number: int = Field(default=1, ge=1, le=2)
+    # VT-500: the grade tier, forwarded to the prompt as a COOPERATIVE hint
+    # (the gate's deterministic expected_arrr filter is the binding contract).
+    # Defaults to ``"strict"`` so every existing caller is unchanged.
+    grade_tier: Literal["simple", "strict"] = "strict"
 
 
 class _FeedbackPayload(BaseModel):
@@ -219,6 +224,7 @@ def _self_evaluate_impl(
     draft_campaign_plan: dict[str, Any],
     context_summary: dict[str, Any],
     attempt_number: int,
+    grade_tier: str = "strict",
 ) -> SelfEvaluateOutput:
     """Run the Opus quality-gate evaluation for one draft.
 
@@ -241,6 +247,10 @@ def _self_evaluate_impl(
         "draft_campaign_plan": draft_campaign_plan,
         "context_summary": context_summary,
         "attempt_number": attempt_number,
+        # VT-500: cooperative tier hint — the prompt is told NOT to flag the
+        # two expected_arrr defensibility sub-rules on ``simple``. The gate's
+        # deterministic filter is the binding backstop if the model ignores it.
+        "grade_tier": grade_tier,
     }
     # mypy: anthropic Messages.create's overloads are TypedDict-heavy
     # — typing the plain-dict messages list to match would add
@@ -357,6 +367,7 @@ class SelfEvaluateTool(MCPTool[SelfEvaluateInput, SelfEvaluateOutput]):
             draft_campaign_plan=inputs.draft_campaign_plan,
             context_summary=inputs.context_summary,
             attempt_number=inputs.attempt_number,
+            grade_tier=inputs.grade_tier,
         )
 
 
@@ -394,15 +405,28 @@ class SelfEvaluateAdapter:
         ctx: ToolContext,
         attempt_number: int = 1,
         tool: SelfEvaluateTool | None = None,
+        context_summary: dict[str, Any] | None = None,
     ) -> None:
         self._ctx = ctx
         self._tool = tool or SelfEvaluateTool()
         self.attempt_number = attempt_number
+        # VT-485: the compact grounding context the gate cross-references on the
+        # ``consistency`` category (cohort size, recency basis, expected-ARRR
+        # substrate). Before VT-485 this was hardcoded ``{}`` at the call site,
+        # so the gate logged an empty context and could not verify the plan's
+        # grounding — a legitimately-grounded draft and a fabricated one looked
+        # identical to the ``consistency`` check. The production caller
+        # (``sales_recovery_node``) now derives this from the bundle. ``None`` /
+        # absent stays ``{}`` for the unit-test transport fixtures (which assert
+        # transport, not grounding) — never weakens the gate, only feeds it.
+        self.context_summary: dict[str, Any] = context_summary or {}
 
     def evaluate(
         self,
         draft: Any,
         criteria: list[str],
+        *,
+        tier: GradeTier = GradeTier.STRICT,
     ) -> SelfEvaluateVerdict:
         """Run the tool through the framework lifecycle and pack the
         result into a ``SelfEvaluateVerdict``.
@@ -411,7 +435,13 @@ class SelfEvaluateAdapter:
         forwarded to the seam — the four categories are baked into
         the system prompt at v1.0. (The criteria list lives in
         ``orchestrator.agent.self_evaluate.EVALUATION_CRITERIA`` and
-        the framework / prompt agree on them.)"""
+        the framework / prompt agree on them.)
+
+        VT-500: ``tier`` is forwarded to the prompt as ``grade_tier`` — a
+        COOPERATIVE hint that tells the grader not to raise the two
+        ``expected_arrr`` defensibility sub-rules on ``simple``. The gate's
+        deterministic ``expected_arrr`` filter remains the binding contract;
+        this only reduces wasted REVISE round-trips. Defaults to STRICT."""
 
         draft_dict = (
             draft.model_dump(mode="json") if hasattr(draft, "model_dump") else draft
@@ -419,8 +449,12 @@ class SelfEvaluateAdapter:
 
         raw_inputs: dict[str, Any] = {
             "draft_campaign_plan": draft_dict,
-            "context_summary": {},
+            # VT-485: feed the real grounding context (cohort size / recency
+            # basis / expected-ARRR substrate) the gate cross-references on the
+            # ``consistency`` category, instead of the old hardcoded ``{}``.
+            "context_summary": self.context_summary,
             "attempt_number": self.attempt_number,
+            "grade_tier": tier.value,
         }
 
         result: ToolResult = self._tool.call(self._ctx, raw_inputs)

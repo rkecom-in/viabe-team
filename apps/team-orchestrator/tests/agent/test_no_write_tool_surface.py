@@ -35,21 +35,115 @@ def _names(tools):
 
 ORCHESTRATOR_EXPECTED = {
     "escalate_to_fazal",
-    "compose_owner_output_tool",
+    # VT-590: compose_owner_output_tool removed from the manager inventory (see
+    # orchestrator_agent.py) — the manager writes its owner reply as message text.
     "write_l0_fragment",
     "query_l0",
+    # VT-466 — the manager's WRITE seam: tenant-scoped business objective record.
+    # Composes over the L1 business_profile entity (MERGE-not-clobber); NOT a
+    # send/ledger/accounts write (passes the VT-268 forbidden-capability guard).
+    "record_business_objective",
+    # VT-579 — the manager's RETRIEVAL over the lifetime conversation log.
+    "search_conversation_history",
+    # VT-677 (reviewed) — the owner's EXPLICIT language choice: writes ONLY
+    # tenants.preferred_language for the owner's OWN tenant (ambient-resolved, Pillar 3);
+    # no send, no ledger/accounts, no customer PII. D2: never affects live-turn mirroring.
+    "set_language_preference",
+    # VT-676 F3 (reviewed) — the owner's OWN customer list as a CSV attachment TO THE VERIFIED
+    # OWNER only (send_customer_list_to_owner owns every rail: server-derived recipient, private
+    # bucket, 300s URL, tm_audit). An OWNER-comms delivery, not a customer send; the transport
+    # rides the guarded freeform funnel (dev_send_guard/mock apply). Ambient-resolved tenant.
+    "export_customer_list",
 }
 INTEGRATION_EXPECTED = {
-    "list_connectors_tool",
-    "start_connector_setup_stub",
-    "pull_sample_stub",
-    "propose_field_mapping_stub",
-    "confirm_field_mapping_stub",
-    "setup_recurring_ingestion_stub",
-    "dedupe_against_existing_stub",
+    # VT-608 (Loop Package 5) — the ten context-scoped tools replacing the VT-206/425 stub
+    # inventory, real for both Shopify + Google Sheets. pull_sample returns COUNTS ONLY (+ column
+    # NAMES for google_sheet — CL-104 sanctions field-name-only exposure). commit_ingestion
+    # returns a TYPED PROPOSAL only — the actual write runs server-side
+    # (integrations.commit.execute_pending_ingestion_commit), never as an agent tool (VT-268
+    # fail-closed) — mirrors the pre-existing shopify_onboarding.pull_and_ingest_shopify pattern.
+    "list_supported_connectors",
+    "read_integration_state",
+    "start_oauth",
+    "check_oauth_status",
+    "pull_sample",
+    "propose_mapping",
+    "confirm_mapping",
+    "commit_ingestion",
+    "schedule_recurring_pull",
+    "verify_connector",
     "integration_escalate_to_fazal",
 }
-HANDOFF_EXPECTED = {"spawn_sales_recovery", "spawn_integration"}
+HANDOFF_EXPECTED = {
+    "spawn_sales_recovery",
+    "spawn_integration",
+    "spawn_onboarding_conductor",
+    # VT-604 Package 1 — the six business-domain lanes (VT-468..473) are NO LONGER
+    # spawnable: they hold no spawn tool, no graph node, no route. Their tools are
+    # Manager-held ADVISORY capabilities instead (see ADVISORY_EXPECTED below +
+    # agent/advisory_registry.py). ROSTER is EXACTLY these three.
+}
+
+# VT-604 Package 1 — the Manager's ADVISORY tool surface (the curated subset of the
+# six lanes' own tools, exposed directly — no spawn, no handoff). Pinned EXACT so a
+# new/removed advisory tool forces review of the classification table in
+# agent/advisory_registry.py's module docstring.
+ADVISORY_EXPECTED = {
+    "recommend_sales_play",
+    "identify_repeat_upsell_opportunity",
+    "list_recent_campaigns",
+    "draft_campaign_plan",
+    "draft_content",
+    "check_send_intent",
+    "check_ad_spend_intent",
+    "analyze_cash_flow",
+    "analyze_receivables",
+    "pricing_margin_input",
+    "propose_payment_reminder",
+    "accounting_categorize_books",
+    "accounting_prepare_tax_summary",
+    "accounting_organize_invoices_expenses",
+    "accounting_reconcile_transactions",
+    "read_integration_health",
+    "read_listing_health",
+    "advise_integration_setup",
+    "read_tech_context",
+    "propose_config_change",
+    "check_config_change_intent",
+    "analyze_tenant_spend",
+    "analyze_unit_economics",
+    "identify_spend_anomaly",
+    "analyze_marketing_roi",
+    "read_cost_context",
+}
+
+# VT-462 / VT-609 — the onboarding-conductor specialist's tool surface (parity allowlist pin with
+# the orchestrator + integration surfaces). VT-609: the conductor now legitimately holds
+# onboarding-state/policy WRITE tools (record_answer / record_skip / apply_correction /
+# propose_business_policy) — that is the point of the real-specialist conversion, not a boundary
+# breach. None of them touch a customer send, the owner's accounts-book Sheet, or the customer
+# ledger (the ONLY capabilities this guard forbids); "complete"/"activated" stay the DETERMINISTIC
+# checks (profile_completion_check / activation_check) the conductor can never self-assert. The
+# policy GRANT itself is a SEPARATE Pillar-7 propose/resolve split (VT-609 fix round 2) — the model
+# can only propose; the DETERMINISTIC approval-glue (not a second specialist tool — a fix-round-2
+# CRITICAL redesign: the first-cut resolve tool was never reliably re-dispatched) applies the owner's
+# own yes/no, reading the bounds off the durable proposal row, never a model-supplied value.
+ONBOARDING_CONDUCTOR_EXPECTED = {
+    "read_onboarding_state",
+    "extract_owner_answer",
+    "record_answer",
+    "record_skip",
+    "apply_correction",
+    "next_required_question",
+    "profile_completion_check",
+    "activation_check",
+    "propose_business_policy",
+    "conductor_escalate_to_fazal",
+}
+
+# VT-609 fix round (MAJOR — mode-gating): legacy/shadow get EXACTLY the pre-PR read-only toolset
+# (no write tool, no policy tool) — a legacy fall-through dispatch must never reach them.
+LEGACY_ONBOARDING_CONDUCTOR_EXPECTED = {"next_required_question", "profile_completion_check"}
 
 
 def test_orchestrator_tool_allowlist_pinned():
@@ -67,9 +161,112 @@ def test_integration_tool_allowlist_pinned():
 
 
 def test_handoff_tools_pinned():
-    from orchestrator.handoffs import spawn_integration, spawn_sales_recovery
+    # VT-604 Package 1 — the manager's handoff surface is the ROSTER's spawn tools
+    # (the registry drives it; ``roster_spawn_tools`` is what build_supervisor_graph
+    # binds as the manager's extra_tools) — EXACTLY the three roster specialists.
+    # Pin the EXACT set — a NEW spawn tool (a new lane made spawnable) fails this →
+    # forces a VT-268 + VT-604-scope review that the new handoff carries no
+    # send/write boundary breach AND is a deliberate roster addition, not a lane
+    # silently re-registering itself.
+    from orchestrator.agent.roster import roster_spawn_tools
 
-    assert _names([spawn_sales_recovery, spawn_integration]) == HANDOFF_EXPECTED
+    assert _names(roster_spawn_tools()) == HANDOFF_EXPECTED
+
+    # The three pre-roster handoffs are still standalone exports in handoffs.py
+    # (their identity/wiring unchanged) — assert they remain a subset of the pin.
+    from orchestrator.handoffs import (
+        spawn_integration,
+        spawn_onboarding_conductor,
+        spawn_sales_recovery,
+    )
+
+    assert _names(
+        [spawn_sales_recovery, spawn_integration, spawn_onboarding_conductor]
+    ) <= HANDOFF_EXPECTED
+
+
+def test_advisory_tools_pinned():
+    """VT-604 Package 1 — the Manager's advisory tool surface (the six lanes' curated
+    subset) is pinned EXACT. A new/removed tool forces updating the classification
+    table in ``agent/advisory_registry.py``'s module docstring, not a silent drift."""
+    from orchestrator.agent.advisory_registry import ADVISORY_TOOLS
+
+    assert _names(ADVISORY_TOOLS) == ADVISORY_EXPECTED
+
+
+def test_advisory_tools_guard_passes_real_surface():
+    """The full manager tool surface (base + roster spawns + advisory tools) — the
+    EXACT set ``build_supervisor_graph`` assembles for ``build_orchestrator_agent`` —
+    passes the VT-268 fail-closed guard. No advisory tool sends/spends/writes."""
+    from orchestrator.agent.advisory_registry import ADVISORY_TOOLS
+    from orchestrator.agent.orchestrator_agent import ORCHESTRATOR_AGENT_TOOLS
+    from orchestrator.agent.roster import roster_spawn_tools
+    from orchestrator.agent.tool_guardrail import assert_agent_tools_safe
+
+    assert_agent_tools_safe(
+        [*ORCHESTRATOR_AGENT_TOOLS, *roster_spawn_tools(), *ADVISORY_TOOLS],
+        surface="orchestrator_agent",
+    )
+
+
+def test_reply_to_owner_is_permitted_owner_send_and_binds_when_enabled(monkeypatch):
+    """VT-632 owner-reply carve-out (the risk-row's VT-268 review). reply_to_owner SENDS, but only
+    to the OWNER (recipient resolved server-side; the model supplies no number), so it is a
+    PERMITTED capability: its name carries no forbidden substring and the fail-closed guard passes
+    it by construction. With MANAGER_REPLY_TOOL on, build_orchestrator_agent binds it and the
+    augmented surface still passes the guard (no customer-send / write capability slips in)."""
+    from orchestrator.agent.tool_guardrail import (
+        assert_agent_tools_safe,
+        find_forbidden_tools,
+    )
+    from orchestrator.agent.tools.reply_to_owner import reply_to_owner
+
+    # Not a forbidden capability — its name matches no FORBIDDEN_CAPABILITY_SUBSTRING.
+    assert find_forbidden_tools([reply_to_owner]) == []
+    assert_agent_tools_safe([reply_to_owner], surface="test")  # no raise
+
+    # It is NOT in the flag-off base inventory (so test_orchestrator_tool_allowlist_pinned stays the
+    # review gate); it is bound only when the flag is on.
+    from orchestrator.agent.orchestrator_agent import ORCHESTRATOR_AGENT_TOOLS
+
+    assert "reply_to_owner" not in _names(ORCHESTRATOR_AGENT_TOOLS)
+
+    monkeypatch.setenv("MANAGER_REPLY_TOOL", "on")
+    from orchestrator.agent.orchestrator_agent import (
+        _MODEL,
+        _reply_to_owner_enabled,
+        build_orchestrator_agent,
+    )
+
+    assert _reply_to_owner_enabled() is True
+    build_orchestrator_agent(_MODEL)  # must NOT raise ToolGuardrailViolation
+
+
+def test_reply_to_owner_takes_no_recipient_argument():
+    """VT-632 structural mitigation: the tool exposes NO phone/recipient/customer parameter — the
+    recipient is resolved server-side, so the model can never target a number."""
+    from orchestrator.agent.tools.reply_to_owner import reply_to_owner
+
+    arg_names = set(reply_to_owner.args.keys())
+    for forbidden in ("recipient", "recipient_phone", "phone", "to", "number", "customer_id"):
+        assert forbidden not in arg_names, f"reply_to_owner must not accept {forbidden!r}"
+
+
+def test_onboarding_conductor_tool_allowlist_pinned():
+    from orchestrator.agent.onboarding_conductor import ONBOARDING_CONDUCTOR_TOOLS
+
+    # VT-609 — exact match: a NEW tool fails → forces VT-268 review that the new capability is not
+    # a customer-send / accounts-book-write / ledger-write boundary breach. The conductor DOES hold
+    # onboarding-state/policy write tools now (deliberate, VT-609) — none of them cross that line.
+    assert _names(ONBOARDING_CONDUCTOR_TOOLS) == ONBOARDING_CONDUCTOR_EXPECTED
+
+
+def test_onboarding_conductor_legacy_tool_allowlist_pinned():
+    """VT-609 fix round (MAJOR — mode-gating): legacy/shadow's toolset is pinned separately —
+    exactly the pre-PR read-only pair, no write/policy tool reachable outside enforce mode."""
+    from orchestrator.agent.onboarding_conductor import LEGACY_ONBOARDING_CONDUCTOR_TOOLS
+
+    assert _names(LEGACY_ONBOARDING_CONDUCTOR_TOOLS) == LEGACY_ONBOARDING_CONDUCTOR_EXPECTED
 
 
 def test_dangerous_standalone_functions_are_not_agent_tools():
@@ -99,6 +296,15 @@ def test_guard_passes_real_surfaces():
         surface="orchestrator_agent",
     )
     assert_agent_tools_safe(INTEGRATION_AGENT_TOOLS, surface="integration_agent")
+
+    # VT-462 — the onboarding-conductor surface is also safe (no send/write tool).
+    from orchestrator.agent.onboarding_conductor import (
+        LEGACY_ONBOARDING_CONDUCTOR_TOOLS,
+        ONBOARDING_CONDUCTOR_TOOLS,
+    )
+
+    assert_agent_tools_safe(ONBOARDING_CONDUCTOR_TOOLS, surface="onboarding_conductor")
+    assert_agent_tools_safe(LEGACY_ONBOARDING_CONDUCTOR_TOOLS, surface="onboarding_conductor")
 
 
 @pytest.mark.parametrize(
@@ -163,3 +369,33 @@ def test_mcptool_registry_has_no_forbidden_tool():
     for name in _REGISTRY:
         low = name.lower()
         assert not any(sub in low for sub in FORBIDDEN_CAPABILITY_SUBSTRINGS), name
+
+
+# --- VT-471 — the Accounting specialist lane (v1 PREPARE-only) -------------------------------
+# The lane PREPARES/SUMMARIZES; it holds NO file/submit/transact/ledger-write/send tool. The
+# guard must pass on its real surface (no forbidden capability) — the v1 PREPARE-only rail.
+
+ACCOUNTING_LANE_EXPECTED = {
+    "accounting_categorize_books",
+    "accounting_prepare_tax_summary",
+    "accounting_organize_invoices_expenses",
+    "accounting_reconcile_transactions",
+    "accounting_escalate_to_fazal",
+}
+
+
+def test_accounting_lane_tool_allowlist_pinned():
+    pytest.importorskip("langchain_anthropic")
+    from orchestrator.agent.accounting_lane import ACCOUNTING_LANE_TOOLS
+
+    # Exact match — a NEW tool (esp. a file/submit one) fails → forces VT-268 review that the
+    # new capability is not a send/write/file boundary breach.
+    assert _names(ACCOUNTING_LANE_TOOLS) == ACCOUNTING_LANE_EXPECTED
+
+
+def test_accounting_lane_guard_passes_real_surface():
+    pytest.importorskip("langchain_anthropic")
+    from orchestrator.agent.accounting_lane import ACCOUNTING_LANE_TOOLS
+    from orchestrator.agent.tool_guardrail import assert_agent_tools_safe
+
+    assert_agent_tools_safe(ACCOUNTING_LANE_TOOLS, surface="accounting_lane")

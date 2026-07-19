@@ -7,6 +7,9 @@ import pytest
 
 # trial_end_token imports PyJWT (`jwt`) → skip in the dep-less smoke; runs in the full suite.
 pytest.importorskip("jwt")
+# Importing orchestrator.billing.* pulls billing/__init__ → attribution_close, which imports psycopg
+# at module level → skip dep-less (psycopg absent); runs in the full orchestrator job.
+pytest.importorskip("psycopg")
 
 import jwt as pyjwt  # noqa: E402
 

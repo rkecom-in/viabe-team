@@ -11,7 +11,31 @@ import pytest
 from orchestrator.privacy.pii_redactor import (
     DEFAULT_MAX_DEPTH,
     redact,
+    strip_display_tokens,
 )
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        # the cross_tenant_phone_reassign_probe leak: a phone token quoted back to the owner.
+        ("his number is phone_tok_dffe2cc3a97476cf, use that one",
+         "his number is a phone number, use that one"),
+        ("contact <email:hash:abc123> or <phone:hash:deadbeef>",
+         "contact an email or a phone number"),
+        ("name <customer_name> at <redacted:address:len=20>", "name a name at some details"),
+        ("GST <gst:redacted>, bank <bank:redacted:len=8>", "GST a GST number, bank bank details"),
+        ("body <body:hash:ff00> and body_tok_aabbccddeeff0011",
+         "body some details and some details"),
+        ("no tokens here at all", "no tokens here at all"),
+        ("", ""),
+    ],
+)
+def test_strip_display_tokens(text, expected) -> None:
+    # Never leaks a raw redactor token to the owner; never un-redacts to real PII.
+    out = strip_display_tokens(text)
+    assert out == expected
+    assert "_tok_" not in out and "hash:" not in out and "redacted" not in out
 
 
 @pytest.fixture(autouse=True)
@@ -160,6 +184,162 @@ def test_customer_name_in_raw_text_scan_keeps_unregistered_match() -> None:
 
 
 # ---------------------------------------------------------------------------
+# 6b. VT-412 — registry scan now catches single-token + 3+-token names.
+# decision_rationale agent think-text is a raw string; before VT-412 the scan
+# only formed consecutive 2-grams, so a mononym customer name and any 3+-token
+# registered name survived into a VTR's run replay. These prove the close.
+# The real registry predicate is case-folded exact-match (customer_registry.
+# make_name_registry); model it with a casefold-aware membership test.
+# ---------------------------------------------------------------------------
+
+def _casefold_registry(*names: str):
+    folded = {n.casefold() for n in names}
+    return lambda text: text.casefold() in folded
+
+
+def test_single_token_registered_name_redacted_in_raw_text() -> None:
+    """VT-412 core: a MONONYM customer name in agent think-text is redacted.
+
+    'Ramesh' is a single token — the pre-VT-412 2-gram-only scan never tested
+    it, so it reached the VTR run-replay surface. It must now be caught.
+    """
+    registry = _casefold_registry("Ramesh")
+    out = redact(
+        "Owner asked to reschedule the delivery for Ramesh on Friday",
+        name_registry=registry,
+    )
+    assert "Ramesh" not in out
+    assert "<customer_name>" in out
+
+
+def test_three_token_registered_name_redacted_in_raw_text() -> None:
+    """VT-412: a 3-token registered name is matched WHOLE (longest-window-first),
+    not as a stray sub-token. The old consecutive-bigram scan matched neither
+    of its 2-grams against the 3-token registry entry."""
+    registry = _casefold_registry("Mohammed Abdul Rahman")
+    out = redact(
+        "Routing the order for Mohammed Abdul Rahman to the kitchen now",
+        name_registry=registry,
+    )
+    assert "Mohammed Abdul Rahman" not in out
+    assert "Mohammed" not in out and "Rahman" not in out
+    assert "<customer_name>" in out
+
+
+def test_registry_scan_case_insensitive_single_token() -> None:
+    """The predicate is case-folded; a lowercased mononym still matches."""
+    registry = _casefold_registry("Priya")
+    out = redact("note: priya wants the green one", name_registry=registry)
+    assert "priya" not in out
+    assert "<customer_name>" in out
+
+
+def test_registry_scan_preserves_bracketing_punctuation_single_token() -> None:
+    """A single-token name in parentheses keeps the brackets so the sentence
+    still reads (the punctuation-preservation contract, extended to 1-grams)."""
+    registry = _casefold_registry("Suresh")
+    out = redact("escalation (Suresh) pending", name_registry=registry)
+    assert "Suresh" not in out
+    assert "(<customer_name>)" in out
+
+
+def test_possessive_single_token_name_redacted() -> None:
+    """VT-412: 'Ramesh's' (possessive) leaks the bare name 'Ramesh' — strip the
+    clitic before the registry test, re-attach it so the sentence reads."""
+    registry = _casefold_registry("Ramesh")
+    out = redact(
+        "Owner asked to reschedule Ramesh's delivery to Friday", name_registry=registry
+    )
+    assert "Ramesh" not in out
+    assert "<customer_name>'s" in out
+
+
+def test_registry_scan_no_registry_no_change() -> None:
+    """No registry → no name scan at all (the cheap no-tenant-context path is
+    unchanged; only pattern redaction runs)."""
+    out = redact("Ramesh ordered two coffees", name_registry=None)
+    assert out == "Ramesh ordered two coffees"
+
+
+def test_unregistered_single_token_survives() -> None:
+    """A single token that is NOT a registered customer name is never inferred
+    away (no false-positive widening from the new 1-gram window)."""
+    registry = _casefold_registry("Ramesh")
+    out = redact("the manager approved it", name_registry=registry)
+    assert out == "the manager approved it"
+
+
+# ---------------------------------------------------------------------------
+# 6c. VT-412 PR-D (adversarial-review Finding 2) — glued-name tokenization.
+# The pre-fix scan did `text.split(" ")` (literal space only) and stripped
+# punctuation only at token boundaries, so a registered name GLUED to adjacent
+# text by a tab/newline, an interior comma/period/slash, an em/en-dash, or a
+# non-breaking space (U+00A0) survived into agent think-text and reached a VTR's
+# run replay. The tokenizer now splits on ALL whitespace (NBSP included) AND
+# interior punctuation flanked by word chars, so the glued name is caught.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("text", "glue_desc"),
+    [
+        ("escalation: Lakshmi\tDevi waiting", "tab between name parts"),
+        ("note Lakshmi\nDevi pending", "newline between name parts"),
+        ("order for Lakshmi\xa0Devi today", "non-breaking space (U+00A0) between parts"),
+        ("ticket Lakshmi,Devi opened", "interior comma between parts"),
+    ],
+)
+def test_two_token_name_glued_by_non_space_whitespace_or_comma_redacted(
+    text: str, glue_desc: str
+) -> None:
+    """A 2-token registered name glued by a tab / newline / NBSP / interior comma
+    is still matched as the whole name (split on all whitespace + interior glue)."""
+    registry = _casefold_registry("Lakshmi Devi")
+    out = redact(text, name_registry=registry)
+    assert "Lakshmi" not in out, f"{glue_desc}: first name leaked"
+    assert "Devi" not in out, f"{glue_desc}: surname leaked"
+    assert "<customer_name>" in out
+
+
+@pytest.mark.parametrize(
+    ("text", "glue_desc"),
+    [
+        ("status Lakshmi.called back", "interior period (name glued to next word)"),
+        ("status Lakshmi\ncalled back", "newline (name glued to next word)"),
+        ("status Lakshmi—urgent now", "em-dash (name glued to next word)"),
+        ("status Lakshmi/queue now", "slash (name glued to next word)"),
+        ("status Lakshmi\xa0now please", "NBSP (name glued to next word)"),
+    ],
+)
+def test_mononym_glued_to_adjacent_word_redacted(text: str, glue_desc: str) -> None:
+    """A registered MONONYM glued to a NON-name word by interior punctuation /
+    non-space whitespace / NBSP is split out and redacted; the adjacent word
+    survives verbatim."""
+    registry = _casefold_registry("Lakshmi")
+    out = redact(text, name_registry=registry)
+    assert "Lakshmi" not in out, f"{glue_desc}: name leaked"
+    assert "<customer_name>" in out
+
+
+def test_glued_name_no_false_positive_on_legitimate_text() -> None:
+    """The new interior-punctuation split must NOT redact ordinary punctuated text
+    that contains no registered name — exact-match registry, so a non-name token
+    glued by a comma/period/dash/slash/NBSP is reconstructed byte-for-byte."""
+    registry = _casefold_registry("Lakshmi")
+    text = "invoice#1234, total/amount due—paid;\xa0see notes.next-step"
+    out = redact(text, name_registry=registry)
+    assert out == text  # no registered name present ⇒ unchanged, separators intact
+
+
+def test_glued_name_surrounding_words_byte_exact_after_redaction() -> None:
+    """When a glued mononym IS redacted, the adjacent NON-name text (including the
+    glue punctuation between it and the next word) is preserved verbatim."""
+    registry = _casefold_registry("Lakshmi")
+    out = redact("re: Lakshmi.called the owner back", name_registry=registry)
+    assert out == "re: <customer_name>.called the owner back"
+
+
+# ---------------------------------------------------------------------------
 # 7. Recursive structures + max depth
 # ---------------------------------------------------------------------------
 
@@ -256,3 +436,13 @@ def test_vt101_canary_payload_byte_identical_redaction() -> None:
 
 def test_default_max_depth_is_five() -> None:
     assert DEFAULT_MAX_DEPTH == 5
+
+
+def test_aadhaar_pattern_spares_uuid_segments():
+    """VT-369 CI flake: a uuid4 whose final 12-hex segment is all-numeric must NOT be
+    Aadhaar-redacted (id-bearing payloads were corrupted ~1-in-285 uuids); a real
+    standalone Aadhaar still is."""
+    uuid_like = "710363ea-7d30-4f02-a660-214698525976"
+    assert redact(uuid_like) == uuid_like
+    assert "<aadhaar:redacted>" in redact("my aadhaar is 1234 5678 9012")
+    assert "<aadhaar:redacted>" in redact("aadhaar 123456789012 here")

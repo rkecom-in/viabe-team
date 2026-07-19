@@ -54,12 +54,37 @@ def dsn():
 
 
 def _seed_tenant(conn) -> str:
-    return str(
+    # VT-460: execute_approved_campaign now runs the shared onboarded + WABA-live pre-gate before the
+    # send loop. This test asserts the (downstream) complaint-freeze gate, so the tenant must clear
+    # the pre-gate: fully onboarded (journey-complete + gstin_verified + ≥1 enabled connector) + a
+    # 'live' WABA. (The ≥1-customer activation leg is satisfied by the per-test recipient seeds.)
+    from uuid import uuid4
+
+    tenant = str(
         conn.execute(
-            "INSERT INTO tenants (business_name, plan_tier, phase) "
-            "VALUES ('VT321 Co', 'standard', 'onboarding') RETURNING id"
+            # VT-522/VT-517: ownership_verified is a universal execution bar (VTR-human review) —
+            # seed it verified so execute_approved_campaign reaches the complaint-freeze logic.
+            "INSERT INTO tenants (business_name, plan_tier, phase, verification_status, "
+            "ownership_verified, ownership_status) "
+            "VALUES ('VT321 Co', 'standard', 'paid_active', 'gstin_verified', TRUE, 'verified') RETURNING id"
         ).fetchone()["id"]
     )
+    conn.execute(
+        "INSERT INTO tenant_connector_status (tenant_id, connector_id, enabled, last_status, "
+        "last_ingested_date) VALUES (%s, %s, TRUE, 'ok', CURRENT_DATE)",
+        (tenant, f"conn-{uuid4().hex[:8]}"),
+    )
+    conn.execute(
+        "INSERT INTO onboarding_journey (tenant_id, status, completed_at) "
+        "VALUES (%s, 'complete', now())",
+        (tenant,),
+    )
+    conn.execute(
+        "INSERT INTO tenant_whatsapp_accounts (tenant_id, status, phone_number) "
+        "VALUES (%s, 'live', %s)",
+        (tenant, f"+9180{uuid4().int % 10**8:08d}"),
+    )
+    return tenant
 
 
 def _seed_run(conn, tenant_id: str) -> str:

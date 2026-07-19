@@ -53,6 +53,32 @@ RATES: dict[str, _Rate] = {
         input_paise_per_million=_paise_per_million(15.0),
         output_paise_per_million=_paise_per_million(75.0),
     ),
+    # VT-480 — Opus 4.8, the tiered brain's COMPLEX path. $5 / M input,
+    # $25 / M output (Anthropic list price). Required in the table or the
+    # cost callback silently skips cost attribution (KeyError is caught +
+    # logged), which would zero the ₹5 cost-cap telemetry for every Opus run.
+    "claude-opus-4-8": _Rate(
+        input_paise_per_million=_paise_per_million(5.0),
+        output_paise_per_million=_paise_per_million(25.0),
+    ),
+    # VT-480 — Sonnet 4.6, the tiered brain's ROUTINE path. $3 / M input,
+    # $15 / M output. Same rationale: without this row, Sonnet brain runs
+    # report cost_paise=0 and never trip the hard limit. Retained for
+    # historical/cost attribution of older runs.
+    "claude-sonnet-4-6": _Rate(
+        input_paise_per_million=_paise_per_million(3.0),
+        output_paise_per_million=_paise_per_million(15.0),
+    ),
+    # Sonnet 5 — the routine/conversational tier as of 2026-07-04 (Fazal:
+    # upgrade for reasoning quality). $3 / M input, $15 / M output.
+    "claude-sonnet-5": _Rate(
+        # Current rate $2/M input (Fazal 2026-07-07); RISES to $3/M input at the start of
+        # September 2026 — bump this back to 3.0 then. Output est $10/M (5x input; confirm).
+        # NOTE: enforcement meters on RAW tokens/calls (rate-independent); these rates feed the
+        # ops-page ₹ display only, so a small output-rate error never breaks a limit.
+        input_paise_per_million=_paise_per_million(2.0),
+        output_paise_per_million=_paise_per_million(10.0),
+    ),
     # Haiku 4.5 — $1 / M input, $5 / M output.
     "claude-haiku-4-5": _Rate(
         input_paise_per_million=_paise_per_million(1.0),

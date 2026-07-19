@@ -1,0 +1,29 @@
+{
+  "name": "m_conversation_repeat_stated_business_type",
+  "domain": "manager",
+  "critical": true,
+  "expected_fail": false,
+  "setup_args": ["--onboarded"],
+  "notes": "Core context-retention closer: the owner VOLUNTARILY repeats a fact they already gave (out of not being sure it registered) — this must be treated as reassurance, not fresh info requiring a question, and no later turn may re-ask what's already known. Distinct from repeat_question_guard.json (which is a journey-walker multi-field capture test) — this is plain-chat (no --journey), the repeat is owner-initiated rather than a scripted re-ask probe. Setup: `setup --onboarded --name convo-harness-<id>` then `script <tenant> m_conversation_repeat_stated_business_type.json`.",
+  "steps": [
+    {
+      "message": "quick context — we're a stationery and gift shop near Sector 18 Noida",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "note": "Business type + locality stated as an aside."
+    },
+    {
+      "message": "what all can Viabe actually do for a shop like mine",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "note": "Unrelated capability question — the intervening turn."
+    },
+    {
+      "message": "just to repeat since I don't think I said it clearly before — we sell stationery and gifts, in case that matters",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "assert_not_contains": ["what kind of business", "what do you sell", "what type of business", "tell me about your business type", "what is your business"],
+      "note": "Owner voluntarily repeats an already-stated fact. Must be acknowledged as reassurance — never re-asked as if new/unknown."
+    }
+  ]
+}

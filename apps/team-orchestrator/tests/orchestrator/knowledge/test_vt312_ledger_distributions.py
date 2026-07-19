@@ -97,6 +97,19 @@ def _sale(pool, tid: str, cid: str, amount_paise: int) -> None:
         )
 
 
+def _sale_on_date(pool, tid: str, cid: str, amount_paise: int, *, days_ago: int) -> None:
+    """Seed one 'sale' ledger entry dated ``days_ago`` days back (VT-485 — the
+    purchase-recency signal). Idempotency key unique."""
+    with pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO customer_ledger_entries "
+            "(tenant_id, customer_id, amount_paise, entry_type, entry_date, "
+            " acquired_via, source_confidence, entry_key) "
+            "VALUES (%s, %s, %s, 'sale', (now()::date - %s), 'manual_entry', 1.0, %s)",
+            (tid, cid, amount_paise, days_ago, uuid4().hex),
+        )
+
+
 # --- the canary --------------------------------------------------------------
 
 
@@ -106,14 +119,17 @@ def test_ledger_summary_surfaces_raw_distributions(pool):
 
     tid = _tenant(pool, business_type="bakery")
 
-    # 5 customers, recency days-since-last-inbound = {5, 15, 30, 60, 95}.
+    # 5 customers, recency days-since-last-activity = {5, 15, 30, 60, 95}.
+    # VT-485: recency = the LATER of last_inbound_at and the last purchase, so
+    # the sale is dated to MATCH the inbound recency (sale days_ago == inbound
+    # days_ago) — both signals agree, the recency distribution is {5,15,30,60,95}.
     # percentile_cont(0.5) over a 5-element sorted set = the 3rd value = 30.
     recencies = [5, 15, 30, 60, 95]
     spends = [10_000, 25_000, 50_000, 120_000, 400_000]
     # per-customer spend totals = {10k, 25k, 50k, 120k, 400k}; p50 = 50_000.
     for days, amt in zip(recencies, spends, strict=True):
         cid = _customer(pool, tid, days_ago=days)
-        _sale(pool, tid, cid, amt)
+        _sale_on_date(pool, tid, cid, amt, days_ago=days)
 
     summary, ok = _build_ledger_summary(UUID(tid))
 
@@ -166,16 +182,22 @@ def test_ledger_summary_customers_without_sales_have_empty_spend(pool):
     assert summary.spend_paise_pctl == {}  # no sales → empty spend distribution
 
 
-def test_ledger_summary_null_recency_excluded_from_recency_pctl(pool):
-    """Customers with NULL last_inbound_at are counted in total_customers but
-    excluded from the recency percentile (WHERE last_inbound_at IS NOT NULL)."""
+def test_ledger_summary_null_inbound_no_sale_excluded_from_recency_pctl(pool):
+    """A customer with NEITHER signal (NULL last_inbound_at AND no sale) is
+    counted in total_customers but excluded from the recency percentile.
+
+    VT-485: the recency basis widened from last_inbound_at ALONE to the LATER of
+    last_inbound_at and the last purchase entry_date. A customer is now in the
+    recency distribution iff AT LEAST ONE signal exists; only a customer with
+    neither falls out."""
     from orchestrator.context_builder import _build_ledger_summary
 
     tid = _tenant(pool, business_type="cafe")
-    # 2 with recency, 1 NULL → total=3, recency p50 over {12, 24} interpolates 18.
+    # 2 with inbound recency, 1 with NEITHER inbound nor a sale → total=3,
+    # recency p50 over {12, 24} interpolates 18.
     _customer(pool, tid, days_ago=12)
     _customer(pool, tid, days_ago=24)
-    _customer(pool, tid, days_ago=None)
+    _customer(pool, tid, days_ago=None)  # no inbound, no sale → excluded
 
     summary, ok = _build_ledger_summary(UUID(tid))
 
@@ -183,3 +205,50 @@ def test_ledger_summary_null_recency_excluded_from_recency_pctl(pool):
     assert summary.total_customers == 3
     # percentile_cont(0.5) over {12, 24} = 18 (linear interpolation, rounded).
     assert summary.recency_days_pctl["p50"] == 18
+
+
+def test_ledger_summary_purchase_lapsed_customer_surfaces_in_recency(pool):
+    """VT-485 (the core fix): a Shopify-style customer with NULL last_inbound_at
+    but a 90-day-old PURCHASE is a valid dormant-cohort member — its recency
+    comes from the purchase-ledger entry_date, NOT last_inbound_at.
+
+    Before VT-485 this customer was EXCLUDED (last_inbound_at IS NOT NULL filter)
+    so a lapsed-by-purchase customer surfaced no dormant cohort and the agent
+    fell through to insufficient_data."""
+    from orchestrator.context_builder import _build_ledger_summary
+
+    tid = _tenant(pool, business_type="apparel")
+    # One purchase-lapsed customer: never messaged (NULL inbound), bought 90d ago.
+    cid = _customer(pool, tid, days_ago=None)
+    _sale_on_date(pool, tid, cid, 80_000, days_ago=90)
+
+    summary, ok = _build_ledger_summary(UUID(tid))
+
+    assert ok is True
+    assert summary.total_customers == 1
+    # Recency now derives from the 90-day-old purchase, not the NULL inbound.
+    assert summary.recency_days_pctl != {}, (
+        "purchase-lapsed customer must surface a recency distribution (VT-485)"
+    )
+    assert summary.recency_days_pctl["p50"] == 90
+    # The spend distribution is independently populated from the sale.
+    assert summary.spend_paise_pctl["p50"] == 80_000
+
+
+def test_ledger_summary_recency_takes_freshest_of_inbound_and_purchase(pool):
+    """VT-485: when a customer has BOTH signals, recency = the LATER (freshest)
+    of last_inbound_at and the last purchase. A 100-day-old purchase with a
+    10-day-old inbound message yields recency 10 (the customer is chat-active,
+    not dormant) — the purchase signal does not mask a recent inbound."""
+    from orchestrator.context_builder import _build_ledger_summary
+
+    tid = _tenant(pool, business_type="cafe")
+    cid = _customer(pool, tid, days_ago=10)  # inbound 10 days ago
+    _sale_on_date(pool, tid, cid, 30_000, days_ago=100)  # purchase 100 days ago
+
+    summary, ok = _build_ledger_summary(UUID(tid))
+
+    assert ok is True
+    assert summary.total_customers == 1
+    # GREATEST(inbound, sale) → the 10-day-old inbound wins (freshest activity).
+    assert summary.recency_days_pctl["p50"] == 10

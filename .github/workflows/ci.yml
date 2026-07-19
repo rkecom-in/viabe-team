@@ -2,7 +2,7 @@ name: CI
 
 on:
   pull_request:
-    branches: [main]
+    branches: [main, dev]  # VT-363: CC's default PR base is `dev`; CI must gate dev PRs too
     # VT-255 Actions-diet: dropped `edited` — a PR title/body edit must NOT
     # re-run the ~17-job suite (CL-423 numeric-title churn fired it constantly).
     # The cheap title gate lives in pr-title.yml, which still runs on `edited`.
@@ -155,6 +155,25 @@ jobs:
         # regression-protects the gate's own regex against an edit that silently breaks it.
         run: bash scripts/test-gate-no-price-literals.sh
 
+  gate-marketing-consent-default-empty:
+    name: gate-marketing-consent-default-empty
+    needs: changes
+    if: needs.changes.outputs.orchestrator == 'true' || needs.changes.outputs.ci == 'true'
+    runs-on: ubuntu-latest
+    # VT-396 step-3 C2 prod-safety (money/PII): MARKETING_CONSENT_VERSIONS MUST default to EMPTY
+    # in committed code — its non-empty value lives ONLY in the Railway *dev* env var, guarded at
+    # runtime by _assert_consent_versions_prod_safe under VIABE_ENV=production. This gate closes
+    # the CODE path: no committed orchestrator file may seed a non-empty default, so a non-empty
+    # marketing allowlist can never be merged into a branch and reach prod by code.
+    steps:
+      - uses: actions/checkout@v6
+      - name: Marketing-consent allowlist default stays empty (VT-396 C2)
+        run: bash scripts/gate-marketing-consent-default-empty.sh
+      - name: Self-test the marketing-consent default-empty gate (VT-396)
+        # Plants synthetic non-empty defaults + asserts the gate FIRES (and passes on the clean
+        # empty/env-driven forms) — regression-protects the gate's own regex.
+        run: bash scripts/test-gate-marketing-consent-default-empty.sh
+
   gate-no-llm-in-deterministic-triggers:
     name: gate-no-llm-in-deterministic-triggers
     needs: changes
@@ -212,12 +231,12 @@ jobs:
 
           # 1. scheduled_triggers.py — VT-28 deterministic-body targets.
           src = open("apps/team-orchestrator/src/orchestrator/scheduled_triggers.py").read()
+          # VT-365: the day-39 refund-evaluation trigger was removed (refund subsystem retired).
+          # The deterministic triggers are now attribution-close + monthly-impact.
           targets = (
               "run_attribution_close_body",
-              "run_day39_evaluation_body",
               "run_monthly_impact_body",
               "attribution_close_scheduled",
-              "day39_evaluation_scheduled",
               "monthly_impact_scheduled",
           )
           for fn in targets:
@@ -306,6 +325,22 @@ jobs:
           python-version: "3.13"
       - name: no-direct-tenant-db-access (enforced — hard-fail)
         run: python3 scripts/check_no_direct_tenant_db_access.py
+
+  gate-no-raw-railway-variables:
+    name: gate-no-raw-railway-variables
+    needs: changes
+    if: needs.changes.outputs.orchestrator == 'true' || needs.changes.outputs.ci == 'true'
+    runs-on: ubuntu-latest
+    # VT-403: raw railway-variables output carries secret VALUES; printing it leaked secrets twice
+    # (RESEND_API_KEY, PROD ANTHROPIC_API_KEY) — CL-431. Env inspection must route through
+    # scripts/env_presence.py (names -> booleans only). This gate hard-fails any raw usage.
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: no-raw-railway-variables (enforced — hard-fail)
+        run: python3 scripts/check_no_raw_railway_variables.py
 
   gate-sr-agent-prompt-token-cap:
     name: gate-sr-agent-prompt-token-cap
@@ -832,3 +867,47 @@ jobs:
           path: |
             apps/team-orchestrator/mypy-orchestrator.log
             apps/team-ingestion-worker/mypy-worker.log
+
+  # VT-363: ONE always-run gate to require in branch protection. The conditional jobs above SKIP on
+  # docs-only PRs — requiring them directly would WEDGE (a required *skipped* check = unmergeable,
+  # which is exactly the VT-245 wound). This aggregator is green when every required job passed OR was
+  # legitimately skipped, and red only when a required job actually failed/cancelled. The flaky/heavy
+  # jobs (migrations RLS-service_count, orchestrator chrono-order, e2e-playwright) + advisory mypy are
+  # deliberately NOT in `needs` — they still run + report, they just don't gate the merge. Promote them
+  # into this set once the VT-245 flakes are fixed.
+  ci-success:
+    name: ci-success
+    if: always()
+    needs:
+      - lint
+      - typecheck
+      - test
+      - gitleaks
+      - gate-no-deprecated-langgraph-imports
+      - gate-no-price-literals
+      - gate-marketing-consent-default-empty
+      - gate-no-llm-in-deterministic-triggers
+      - gate-no-langsmith-imports
+      - gate-no-direct-tenant-db-access
+      - gate-no-raw-railway-variables
+      - gate-sr-agent-prompt-token-cap
+      - gate-vt39-tools-harness-import
+      - gate-connector-registry-schema
+      - gate-vt35-hard-limit-constants
+      - gate-langgraph-nodes-have-observability-hook
+      - gate-mcp-tools-have-observability-decorator
+    runs-on: ubuntu-latest
+    steps:
+      - name: Required CI jobs must not have failed
+        env:
+          # GitHub-computed job results (success/failure/skipped/cancelled) — not user input.
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "required-job results: $RESULTS"
+          for r in $RESULTS; do
+            if [ "$r" = "failure" ] || [ "$r" = "cancelled" ]; then
+              echo "::error::A required CI job failed or was cancelled — blocking merge." >&2
+              exit 1
+            fi
+          done
+          echo "All required CI jobs passed or were acceptably skipped."

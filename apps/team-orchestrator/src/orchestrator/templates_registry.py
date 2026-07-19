@@ -120,6 +120,22 @@ class TemplateEntry:
 
     ``variables`` is an ordered tuple of snake_case param names;
     index i corresponds to positional ``{{i+1}}`` in the WhatsApp template.
+
+    VT-369 Gap-5 fields (additive, optional in yaml — every pre-existing entry
+    parses unchanged with the defaults below; MED-1):
+    - ``category``: ``'customer_marketing'`` (agent → customer; Meta MARKETING)
+      or ``'owner_notification'`` (agent → owner ops surface). ``""`` =
+      uncategorised legacy entry — the agent customer-send gate
+      (``agents/customer_send.py``) refuses anything that is not exactly
+      ``'customer_marketing'``, so legacy entries fail that gate CLOSED.
+    - ``money_bearing``: the body carries a discount/offer — trips the
+      always-confirm floor at L3 (plan §5.5, enforced PR-3).
+    - ``optout_line``: asserts the FIXED Meta body carries the customer STOP
+      opt-out line; ``customer_marketing`` entries MUST pin it (canary_load).
+    - ``body_sha256``: the sha256 of the Meta-APPROVED template body for this
+      language, fetched once via the Twilio Content API at SID-wiring time
+      (VT-383). ``None`` for pending-approval (null-SID) stubs. When pinned it
+      is the doc/yaml/Meta drift detector — CI fails if the approved body moves.
     """
 
     template_name: str
@@ -128,6 +144,24 @@ class TemplateEntry:
     audience: str
     variables: tuple[str, ...] = field(default_factory=tuple)
     agent_selectable: bool = False
+    category: str = ""
+    money_bearing: bool = False
+    optout_line: bool = False
+    body_sha256: str | None = None  # per-language APPROVED-body hash pin (VT-383)
+    # VT-426 hardening: per-template "Fazal has approved this for LIVE owner sends"
+    # gate. Defaults FALSE when absent in the yaml — a template the registry knows
+    # about (real SID present) still does NOT send via _owner_notify until Fazal
+    # flips this flag. The flag is read ONLY by the trial-sweep owner-notify path;
+    # every other send path is unaffected (a missing key is backward-safe — all
+    # pre-existing entries keep their existing behaviour on those paths).
+    approved_for_live: bool = False
+
+
+# Known values for the Gap-5 ``category`` field (canary_load rejects others).
+TEMPLATE_CATEGORIES = frozenset({"customer_marketing", "owner_notification"})
+
+# A pinned body_sha256 is a lowercase 64-char hex digest.
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 # ---------------------------------------------------------------------------
@@ -212,6 +246,9 @@ def resolve(
     audience = str(raw.get("audience") or "")
     agent_selectable = bool(raw.get("agent_selectable", False))
 
+    sha_map = raw.get("body_sha256") or {}
+    body_sha256 = sha_map.get(language) if isinstance(sha_map, dict) else None
+
     return TemplateEntry(
         template_name=template_name,
         language=language,
@@ -219,6 +256,12 @@ def resolve(
         audience=audience,
         variables=variables,
         agent_selectable=agent_selectable,
+        category=str(raw.get("category") or ""),
+        money_bearing=bool(raw.get("money_bearing", False)),
+        optout_line=bool(raw.get("optout_line", False)),
+        body_sha256=body_sha256,
+        # VT-426: default FALSE when the key is absent — fail-closed for live sends.
+        approved_for_live=bool(raw.get("approved_for_live", False)),
     )
 
 
@@ -324,6 +367,23 @@ def canary_load(path: Path | None = None) -> None:
             if len(unique) != len(variables):
                 errors.append(f"  [{name}] variables contains duplicates: {variables}")
 
+        # Gap-5 field checks (VT-369, MED-1): additive optional fields — absent
+        # is fine (legacy entry); present must be well-formed and a
+        # customer_marketing entry MUST pin the opt-out line (plan §3b).
+        category = raw.get("category")
+        if category is not None and category not in TEMPLATE_CATEGORIES:
+            errors.append(
+                f"  [{name}] category {category!r} not in {sorted(TEMPLATE_CATEGORIES)}"
+            )
+        for flag in ("money_bearing", "optout_line", "approved_for_live"):
+            if flag in raw and not isinstance(raw[flag], bool):
+                errors.append(f"  [{name}] {flag} must be a bool")
+        if category == "customer_marketing" and raw.get("optout_line") is not True:
+            errors.append(
+                f"  [{name}] customer_marketing templates MUST pin optout_line: true "
+                "(the STOP line lives in the FIXED Meta body — plan §3b)"
+            )
+
         # languages check
         langs = raw.get("languages")
         if langs is None:
@@ -345,6 +405,32 @@ def canary_load(path: Path | None = None) -> None:
                     f"  [{name}][{lang}] content_sid does not match ^HX[0-9a-f]{{32}}$"
                 )
 
+        # body_sha256 pin check (VT-383): optional. When present it must be a
+        # mapping of language -> 64-hex digest, every pinned language must be a
+        # declared variant, and a hash is forbidden on a null-SID stub (it would
+        # pin the doc draft, not the Meta-APPROVED body — plan §3c).
+        sha_map = raw.get("body_sha256")
+        if sha_map is not None:
+            if not isinstance(sha_map, dict) or len(sha_map) == 0:
+                errors.append(f"  [{name}] body_sha256 must be a non-empty mapping")
+            else:
+                for lang, digest in sha_map.items():
+                    if lang not in langs:
+                        errors.append(
+                            f"  [{name}][{lang}] body_sha256 pins an undeclared language"
+                        )
+                        continue
+                    if not isinstance(digest, str) or not _SHA256_RE.match(digest):
+                        errors.append(
+                            f"  [{name}][{lang}] body_sha256 must be a 64-char lowercase hex digest"
+                        )
+                    if langs.get(lang) is None:
+                        errors.append(
+                            f"  [{name}][{lang}] body_sha256 pinned with no SID — "
+                            "a hash on a null-SID stub pins the doc draft, not the "
+                            "Meta-APPROVED body (plan §3c)"
+                        )
+
     if errors:
         msg = "templates_registry canary_load FAILED:\n" + "\n".join(errors)
         raise TemplateRegistryError(msg)
@@ -356,6 +442,7 @@ def canary_load(path: Path | None = None) -> None:
 
 
 __all__ = [
+    "TEMPLATE_CATEGORIES",
     "TemplateEntry",
     "TemplateRegistryError",
     "TemplateNotConfigured",

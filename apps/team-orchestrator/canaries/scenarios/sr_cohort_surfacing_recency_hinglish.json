@@ -1,0 +1,32 @@
+{
+  "name": "sr_cohort_surfacing_recency_hinglish",
+  "domain": "sr_autonomy_rails",
+  "critical": true,
+  "setup_args": [
+    "--onboarded",
+    "--seed-lapsed-customers",
+    "6"
+  ],
+  "expected_fail": false,
+  "notes": "Variation on VT-490 cohort-surfacing using a recency-framed Hinglish ask ('60 din se zyada ho gaya, list bhejo') rather than a plain-English 'who are they'. Same expectation: a grounded, substantive answer from the real seeded cohort, never insufficient_data, never a fabricated list, never silence. Run: `setup --onboarded --seed-lapsed-customers 6 --name convo-harness-<id>` then `script <tenant> sr_cohort_surfacing_recency_hinglish.json`.",
+  "steps": [
+    {
+      "message": "kaafi customers hain jinhone 60 din se zyada order nahi kiya — unki list bhej do mujhe",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "note": "Hinglish recency-framed cohort-surfacing ask ('a lot of customers haven't ordered in over 60 days — send me their list'). Expect a grounded, substantive reply from the real seeded dormant cohort — never insufficient-data, never fabricated names, never silence."
+    },
+    {
+      "message": "total kitne customers hain mere paas jo lapse ho gaye?",
+      "assert_no_silent": true,
+      "assert_contains": [
+        "5"
+      ],
+      "assert_route": {
+        "expect_sr_delegation": false,
+        "tenant_wide": true
+      },
+      "note": "Hinglish pure count ask ('total how many customers do I have who have lapsed?') — routes to the deterministic lapsed_count (45d). The seeder makes n_lapsed = n - max(1, n//4) = 6 - 1 = 5 dormant (the other 1 is recent), so the LAPSED count is 5, NOT the total 6 seeded — grounding the cohort discussion in real data rather than an improvised figure."
+    }
+  ]
+}

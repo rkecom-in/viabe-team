@@ -11,30 +11,42 @@ from typing import Any
 
 from langchain_core.messages import AIMessage
 
+from orchestrator.observability.tm_audit import emit_tm_audit
 from orchestrator.state.agent_graph_state import AgentGraphState
 
 
 def route_after_orchestrator(state: AgentGraphState) -> str:
     """Return the conditional-edge key after the orchestrator node runs.
 
-    'spawn'    — the last AIMessage carries a spawn_sales_recovery tool_call;
-                 path map routes to 'sales_recovery_agent'.
-    'terminal' — no spawn tool_call; path map routes to 'orchestrator_terminal'.
+    Registry-driven (VT-465): for each spawn tool the manager's LLM may fire,
+    the roster declares the conditional-edge ``route_key`` it maps to. This
+    function looks up the FIRST roster spawn tool present in the last
+    AIMessage's tool_calls and returns its ``route_key``; no spawn tool ->
+    'terminal'. Adding a lane needs NO edit here — the new spec's
+    ``spawn_tool_name -> route_key`` enters the map automatically.
 
-    Precedence (§4.5 / CL-209): if the last AIMessage carries BOTH a
-    spawn_sales_recovery and an escalate_to_fazal tool_call, 'spawn' wins —
-    spawning the specialist is the routable action; escalation is handled
-    inside the agent loop, not by this conditional edge.
+    'spawn'           — spawn_sales_recovery fired; path map -> 'sales_recovery_agent'.
+    'spawn_integration' — spawn_integration fired; path map -> 'integration_agent'.
+    'terminal'        — no spawn tool_call; path map -> 'orchestrator_terminal'.
+
+    Precedence (§4.5 / CL-209): if the last AIMessage carries BOTH a spawn
+    tool_call and an escalate_to_fazal tool_call, the spawn wins — spawning the
+    specialist is the routable action; escalation is handled inside the agent
+    loop, not by this conditional edge. Tool-call order within the AIMessage
+    decides which roster member wins if (rarely) two spawn tools are emitted.
 
     CL-183 VERIFICATION TARGET (verified in test_supervisor.py):
     Whether this function fires on the spawn path depends on langgraph's
     Command.PARENT-vs-conditional-edge precedence, which Context7 does not
     document for this composition. test_supervisor_graph_spawn_path_and_
-    conditional_edge_dont_double_fire exercises it empirically. Returning
-    'spawn' for the spawn path is safe either way — it agrees with the
-    Command's goto target, or it is dead code on that path. Do not remove
+    conditional_edge_dont_double_fire exercises it empirically. Returning the
+    spawn ``route_key`` for the spawn path is safe either way — it agrees with
+    the Command's goto target, or it is dead code on that path. Do not remove
     that test as "redundant".
     """
+    # Local import avoids a module-load cycle (roster -> supervisor -> routing).
+    from orchestrator.agent.roster import spawn_tool_route_keys
+
     messages = state.get("messages", [])
     latest_ai = next(
         (m for m in reversed(messages) if isinstance(m, AIMessage)),
@@ -43,17 +55,48 @@ def route_after_orchestrator(state: AgentGraphState) -> str:
     if latest_ai is None:
         # Orchestrator never produced an AIMessage — treat as terminal.
         return "terminal"
+    route_for_tool = spawn_tool_route_keys()
     tool_calls = list(getattr(latest_ai, "tool_calls", None) or [])
     for tc in tool_calls:
-        if tc.get("name") == "spawn_sales_recovery":
-            return "spawn"
-        if tc.get("name") == "spawn_integration":
-            # VT-206 — orchestrator-agent decided to hand off to the
-            # Integration Agent. Same conditional-edge precedence
-            # discussion as spawn_sales_recovery (Command.PARENT vs
-            # explicit edge); both targets agree on goto so safe either
-            # way.
-            return "spawn_integration"
+        route_key = route_for_tool.get(tc.get("name", ""))
+        if route_key is not None:
+            _route_run_id = state.get("run_id")
+            # VT-514 DECIDES — route_decided spine row (fail-soft, conn=None).
+            emit_tm_audit(
+                event_layer="decides",
+                event_kind="route_decided",
+                actor="team_manager",
+                tenant_id=state.get("tenant_id"),
+                run_id=_route_run_id,
+                summary=f"orchestrator spawned specialist via {tc.get('name')}",
+                decision={
+                    "route_key": route_key,
+                    "spawn_tool": tc.get("name"),
+                    "tool_call_args": tc.get("args"),
+                },
+                # §7D — same join as handoffs.py's spawn emit: point back at
+                # this turn's reasoning_turn row (langchain_callback.py shape).
+                reasoning_ref={
+                    "run_id": str(_route_run_id) if _route_run_id is not None else None,
+                    "step_name": "orchestrator_agent_turn",
+                },
+            )
+            return route_key
+    # VT-514 DECIDES — terminal route (no spawn tool fired).
+    _terminal_run_id = state.get("run_id")
+    emit_tm_audit(
+        event_layer="decides",
+        event_kind="route_decided",
+        actor="team_manager",
+        tenant_id=state.get("tenant_id"),
+        run_id=_terminal_run_id,
+        summary="orchestrator terminated without spawning a specialist",
+        decision={"route_key": "terminal", "spawn_tool": None},
+        reasoning_ref={
+            "run_id": str(_terminal_run_id) if _terminal_run_id is not None else None,
+            "step_name": "orchestrator_agent_turn",
+        },
+    )
     return "terminal"
 
 

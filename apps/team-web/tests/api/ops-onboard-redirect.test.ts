@@ -40,10 +40,12 @@ describe('VT-230 — onboard auth flow', () => {
     vi.restoreAllMocks()
   })
 
-  it('A1 — onboard page source contains redirect to /team/ops/login?next=/team/onboard', async () => {
+  it('A1 — onboard page source redirects unauthed to the OWNER login (VT-415 cutover), not ops login', async () => {
     // Server-component runtime needs jsx-runtime that vitest env lacks
     // — smoke the module's source. Real visual + redirect verified at
     // playwright e2e + manual canary time.
+    // VT-415: the onboard surface is now OWNER-gated; an unauthed hit must go
+    // to /team/login (the owner OTP login), NOT /team/ops/login.
     const { readFile } = await import('fs/promises')
     const path = await import('path')
     // CWD is apps/team-web during `pnpm --filter @viabe/team-web test`
@@ -52,8 +54,14 @@ describe('VT-230 — onboard auth flow', () => {
       'app/(app)/team/onboard/page.tsx',
     )
     const src = await readFile(filePath, 'utf8')
-    expect(src).toContain("/team/ops/login?next=/team/onboard")
+    expect(src).toContain("/team/login?next=/team/onboard")
+    expect(src).not.toContain('/team/ops/login')
     expect(src).not.toContain("redirect('/login')")
+    // The FAZAL_TENANT_ID shim is gone — tenant comes from the owner session.
+    // Assert on LIVE code, not comments: no env read, no requireFazal CALL.
+    expect(src).toContain('requireOwnerSession')
+    expect(src).not.toContain('process.env.FAZAL_TENANT_ID')
+    expect(src).not.toContain('requireFazal(')
   })
 
   it('A2 — callback with valid session + allowlisted next → 302 to next + cookie path=/team', async () => {

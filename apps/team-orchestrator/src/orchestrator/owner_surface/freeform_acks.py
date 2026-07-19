@@ -35,6 +35,13 @@ ACK_COPY: dict[str, dict[str, str]] = {
             "आपके संदेश के लिए धन्यवाद। इसके लिए किसी व्यक्ति की ज़रूरत है, इसलिए मैंने इसे हमारे ग्राहक सेवा "
             "प्रतिनिधि को भेज दिया है, जो आपसे व्यक्तिगत रूप से संपर्क करेंगे। ज़रूरत होने पर आपका रेफरेंस {ref} है।"
         ),
+        # VT-677 D1: the hi-Latn register for hinglish-preference owners — SAME approved content as
+        # 'hi', romanized (free-form is in-window: no Meta constraint).
+        "hinglish": (
+            "Aapke message ke liye dhanyavaad. Iske liye ek insaan ki zaroorat hai, isliye maine "
+            "ise hamare customer service representative ko bhej diya hai — woh aapse personally "
+            "follow up karenge. Zaroorat ho toh aapka reference {ref} hai."
+        ),
     },
     "refund_processing": {
         "en": (
@@ -45,32 +52,20 @@ ACK_COPY: dict[str, dict[str, str]] = {
             "आपका ₹{amt} का रिफंड प्रोसेस किया जा रहा है। यह 5 कार्य-दिवसों के भीतर आपके मूल पेमेंट मेथड में "
             "पहुँच जाना चाहिए। पूरा होने पर मैं पुष्टि कर दूँगा।"
         ),
+        "hinglish": (
+            "Aapka ₹{amt} ka refund process ho raha hai. Yeh 5 business days ke andar aapke "
+            "original payment method mein pahunch jaana chahiye. Poora hote hi main confirm kar "
+            "dunga."
+        ),
     },
 }
 
-_SUPPORTED_LANGS = frozenset({"en", "hi"})
-
-
-def resolve_owner_locale(tenant_id: UUID | str) -> str:
-    """The owner's WhatsApp language: COALESCE(preferred_language, language_preference, 'en'),
-    normalised to a supported lang ('en' | 'hi'); unknown/unset → 'en'. Reads under
-    `tenant_connection` (SET ROLE app_role + GUC) so the tenants_select RLS policy is the
-    isolation layer, not a raw-pool WHERE (the VT-342 discipline). Best-effort — any error
-    falls back to 'en' (the ack must still send)."""
-    try:
-        from orchestrator.db.tenant_connection import tenant_connection
-
-        with tenant_connection(tenant_id) as conn:
-            row = conn.execute(
-                "SELECT COALESCE(preferred_language, language_preference, 'en') AS lang "
-                "FROM tenants WHERE id = %s",
-                (str(tenant_id),),
-            ).fetchone()
-    except Exception:
-        logger.exception("VT-349 locale resolve failed tenant=%s → en", tenant_id)
-        return "en"
-    lang = (dict(row).get("lang") if row else None) or "en"
-    return lang if lang in _SUPPORTED_LANGS else "en"
+# VT-677: the locale resolver is now CANONICAL in owner_surface.owner_locale (en|hinglish|hi value
+# space, explicit→observed→en precedence). Re-exported here so the 8 pre-VT-677 call sites keep
+# working unchanged; new code imports from owner_locale directly.
+from orchestrator.owner_surface.owner_locale import (  # noqa: E402
+    resolve_owner_locale as resolve_owner_locale,
+)
 
 
 def ack_body(kind: str, locale: str, **fmt: str) -> str:
@@ -93,7 +88,10 @@ def send_freeform_ack(
     try:
         from orchestrator.utils.twilio_send import send_freeform_message
 
-        send_freeform_message(body, recipient_phone)
+        # VT-579: this IS an owner-facing send (an in-window ack/reply from the manager surface). Pass
+        # tenant_id so the transport records it into the lifetime conversation log (the 'assistant' leg);
+        # the recording itself lives at the transport chokepoint (twilio_send), we only supply the scope.
+        send_freeform_message(body, recipient_phone, tenant_id=tenant_id, surface="manager")
         return True
     except Exception as exc:  # noqa: BLE001 — the ack must never crash the handler
         code = getattr(exc, "code", None)

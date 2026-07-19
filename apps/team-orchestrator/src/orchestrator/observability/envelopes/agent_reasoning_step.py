@@ -17,7 +17,21 @@ from .base import StepEnvelope
 class AgentReasoningStepInput(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
+    # Anthropic input (prompt) token count for this Messages.create turn —
+    # the canonical reasoning-step input measure (CL-249). Populated from the
+    # response usage.input_tokens by the agent_callback writer.
     prompt_token_count: int
+    # VT-464 D4: the Context Composer bundle provenance the agent_callback
+    # writer actually emits. These were previously absent from the schema,
+    # so with extra="forbid" every brain reasoning-step envelope soft-failed
+    # validation (payload_validation_failed=True) and Ops replay was degraded.
+    # Declaring them here makes the brain envelope validate without weakening
+    # the strict forbid posture (still no UNDECLARED extras).
+    context_bundle_hash: str
+    context_bundle_components: list[str]
+    context_bundle_token_count: int
+    prior_tool_calls_count: int
+    prior_tool_calls_summary: list[dict[str, Any]]
 
 
 class AgentReasoningStepOutput(BaseModel):

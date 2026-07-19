@@ -1,0 +1,34 @@
+{
+  "name": "multi_field_single_message",
+  "domain": "manager",
+  "critical": true,
+  "setup_args": [
+    "--onboarded",
+    "--flow",
+    "ready_asked"
+  ],
+  "expected_fail": false,
+  "notes": "One message carries THREE facts at once (business name, business type, store URL) in response to the readiness ask. No later turn may re-ask any of them individually. Setup: `setup --onboarded --flow ready_asked` then `script <tenant> multi_field_single_message.json`.",
+  "steps": [
+    {
+      "message": "Yes let's connect — we're Probe Hardware, a hardware and tools shop, my store is probe-hardware.myshopify.com",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "note": "Readiness affirm + business name + business type + store URL, all in ONE message. Expect the reply to USE the store URL (link or confirmation) rather than asking for any of the three facts individually."
+    },
+    {
+      "message": "did you get all that?",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "assert_not_contains": [
+        "what is your business type",
+        "what kind of business",
+        "what is your store",
+        "reply with your store address",
+        "what's your business name",
+        "what is your business name"
+      ],
+      "note": "Retention check: NONE of the three facts (business name / business type / store URL) may be re-asked."
+    }
+  ]
+}

@@ -4,11 +4,18 @@ Synthetic data only (CL-422 — no real customer PII on dev). Fail-not-skip when
 (Rule #15). Proves Fork A's guarantee at the DB layer, not app-side: the VTR role is DENIED on every
 PII-bearing table + the decrypt fn, CAN read the de-identified views, and the REF# is a stable KEYED
 hash (not the raw id, not a bare hash).
+
+VT-377 (mig-134): the views are assignment-scoped — an app_vtr_role read sees rows ONLY for tenants
+with an ACTIVE operator_assignments row matching the `app.vtr_operator_id` GUC (unset/empty ⇒ zero
+rows, fail-closed). The row-reading probes here therefore seed an assignment + set the GUC; the
+deny/grant probes are GUC-independent. The full two-operator isolation battery lives in
+tests/orchestrator/test_vtr_assignment_scoping_realdb.py (VT-377 §B3).
 """
 
 from __future__ import annotations
 
 import os
+from uuid import uuid4
 
 import pytest
 
@@ -62,6 +69,24 @@ def _seed_customer(dsn: str) -> tuple[str, str]:
     return tid, cid
 
 
+def _assigned_operator(dsn: str, tenant_id: str) -> str:
+    """Seed an ACTIVE operator_assignments row (service-role write — the table is deny-all RLS)
+    and return the operator id. mig-134: a view read sees this tenant only with the GUC set."""
+    op = str(uuid4())
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute(
+            "INSERT INTO operator_assignments (operator_id, tenant_id) VALUES (%s, %s)",
+            (op, tenant_id),
+        )
+    return op
+
+
+def _set_vtr_guc(cur, operator_id: str) -> None:
+    """Session-level set on a throwaway autocommit test connection (txn-local would evaporate
+    per-statement under autocommit; the connection closes right after, so nothing leaks)."""
+    cur.execute("SELECT set_config('app.vtr_operator_id', %s, false)", (operator_id,))
+
+
 def test_vtr_role_denied_on_every_pii_table(substrate) -> None:
     """Grant hygiene (sharpening #3): app_vtr_role has NO SELECT on any PII-bearing table — proven
     BOTH by has_table_privilege (catches PUBLIC / default-privilege leakage) AND a direct probe."""
@@ -96,9 +121,11 @@ def test_vtr_view_is_deidentified(substrate) -> None:
     """app_vtr_role CAN read vtr_customers, and the view exposes NO PII column (no display_name /
     email) — only the keyed REF# + business fields."""
     tid, cid = _seed_customer(substrate)
+    op = _assigned_operator(substrate, tid)  # mig-134: unassigned/GUC-less reads are zero rows
     with psycopg.connect(substrate, autocommit=True, row_factory=dict_row) as conn:
         with conn.cursor() as cur:
             cur.execute("SET ROLE app_vtr_role")
+            _set_vtr_guc(cur, op)
             cur.execute(
                 "SELECT * FROM vtr_customers WHERE tenant_id = %s", (tid,)
             )
@@ -115,12 +142,14 @@ def test_ref_is_keyed_and_stable(substrate) -> None:
     independent HMAC with the same key (proves it's keyed, not a bare/guessable hash)."""
     tid, cid = _seed_customer(substrate)
     _, cid2 = _seed_customer(substrate)
+    op = _assigned_operator(substrate, tid)  # mig-134: unassigned/GUC-less reads are zero rows
     with psycopg.connect(substrate, autocommit=True) as conn:
         ref1 = conn.execute(
             "SELECT encode(hmac(%s, %s, 'sha256'), 'hex')", (cid, _REF_KEY)
         ).fetchone()[0]
         with conn.cursor(row_factory=dict_row) as cur:
             cur.execute("SET ROLE app_vtr_role")
+            _set_vtr_guc(cur, op)
             cur.execute("SELECT customer_ref FROM vtr_customers WHERE tenant_id = %s", (tid,))
             view_ref = cur.fetchone()["customer_ref"]
             cur.execute("RESET ROLE")
@@ -145,7 +174,10 @@ def test_vtr_role_grants_are_exactly_the_de_identified_views(substrate) -> None:
     """Grant hygiene (Cowork fold-in a): app_vtr_role's table privileges are EXACTLY SELECT on the
     de-identified views and NOTHING else — covers ALL tables (catches any future grant that would
     widen the VTR surface), not just the probed PII set. VT-360 added the 3rd view
-    (vtr_tenant_alerts) for the team-web monitoring board."""
+    (vtr_tenant_alerts); VT-370 added the 4 console views (mig 130 — latest-plan w/ diff-values
+    stripped, plan-history metadata, autonomy w/o revoke_reason, batch aggregates w/o params);
+    VT-374 added the 2 run-control views (mig 131 — keys-only step timeline w/ envelope values
+    ONLY for the 4 audited name-free kinds, pause state w/o reason/operator ids)."""
     with psycopg.connect(substrate, autocommit=True) as conn:
         rows = conn.execute(
             "SELECT table_name, privilege_type FROM information_schema.role_table_grants "
@@ -156,4 +188,36 @@ def test_vtr_role_grants_are_exactly_the_de_identified_views(substrate) -> None:
         ("vtr_customers", "SELECT"),
         ("vtr_escalations", "SELECT"),
         ("vtr_tenant_alerts", "SELECT"),
+        ("vtr_business_plan", "SELECT"),
+        ("vtr_plan_history", "SELECT"),
+        ("vtr_agent_autonomy", "SELECT"),
+        ("vtr_draft_batches", "SELECT"),
+        ("vtr_step_timeline", "SELECT"),
+        ("vtr_workflow_controls", "SELECT"),
+        ("vtr_tenant_profile", "SELECT"),  # VT-405 (mig 137): signup + discovered draft, keys-only confirm
     }, f"app_vtr_role grants drifted beyond the de-identified views: {granted}"
+
+
+def test_vtr_admin_role_grants_are_exactly_the_exception_tier(substrate) -> None:
+    """VT-370 + VT-377: app_vtr_admin_role (the Fazal exception tier) is EXACTLY all nine
+    de-identified views (mig-134 — the admin tier's all-tenants role leg needs SELECT on every
+    view it opens) plus the param-level vtr_admin_batch_drafts — and never a raw table."""
+    with psycopg.connect(substrate, autocommit=True) as conn:
+        rows = conn.execute(
+            "SELECT table_name, privilege_type FROM information_schema.role_table_grants "
+            "WHERE grantee = 'app_vtr_admin_role'"
+        ).fetchall()
+    granted = {(r[0], r[1]) for r in rows}
+    assert granted == {
+        ("vtr_admin_batch_drafts", "SELECT"),
+        ("vtr_customers", "SELECT"),
+        ("vtr_escalations", "SELECT"),
+        ("vtr_tenant_alerts", "SELECT"),
+        ("vtr_business_plan", "SELECT"),
+        ("vtr_plan_history", "SELECT"),
+        ("vtr_agent_autonomy", "SELECT"),
+        ("vtr_draft_batches", "SELECT"),
+        ("vtr_step_timeline", "SELECT"),
+        ("vtr_workflow_controls", "SELECT"),
+        ("vtr_tenant_profile", "SELECT"),  # VT-405 (mig 137)
+    }, f"app_vtr_admin_role grants drifted: {granted}"

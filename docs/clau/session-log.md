@@ -1,5 +1,7 @@
 # Clau Session Log — chronological index
 
+> **Index frozen 2026-05-26; live derivatives = `decisions-ledger.md` + `active-context-summary.md`.**
+
 369 entries migrated from Notion 2026-05-25. Full bodies at `entries/CL-<N>.md`.
 Append-only going forward: new entries land as new `CL-<N>.md` files; this index is regenerated.
 

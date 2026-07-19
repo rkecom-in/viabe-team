@@ -151,6 +151,9 @@ def _record_step(
     usage = getattr(response, "usage", None)
     in_tokens = int(getattr(usage, "input_tokens", 0)) if usage else 0
     out_tokens = int(getattr(usage, "output_tokens", 0)) if usage else 0
+    # Raw Anthropic Messages SDK: input_tokens is UNCACHED; cache_read is separate
+    # (not included in input_tokens) — so it's the ledger's cached_tokens_in directly.
+    cache_read_tokens = int(getattr(usage, "cache_read_input_tokens", 0) or 0) if usage else 0
     model_used = getattr(response, "model", None)
 
     cost_paise = 0
@@ -178,6 +181,12 @@ def _record_step(
         tenant_id=ctx.tenant_id,
         step_name="agent_turn",
         input_envelope={
+            # VT-464 D4: prompt_token_count is a REQUIRED field on
+            # AgentReasoningStepInput — it was previously omitted, so every
+            # brain reasoning-step envelope soft-failed validation. The prompt
+            # (input) token count for this turn is the response usage's
+            # input_tokens.
+            "prompt_token_count": in_tokens,
             "context_bundle_hash": pending.context_bundle_hash,
             "context_bundle_components": pending.context_bundle_components,
             "context_bundle_token_count": pending.context_bundle_token_count,
@@ -201,6 +210,33 @@ def _record_step(
         tokens_input=in_tokens,
         tokens_output=out_tokens,
     )
+
+    # 173 + VT-619 — record this LLM call to the per-call cost ledger (llm_call_events) AND bump
+    # the per-agent monthly rollup. This decorator is SR-SPECIFIC: it wraps ONLY sales_recovery's
+    # ``_messages_create`` (the Anthropic Messages-SDK seam; verified — no other caller uses
+    # with_reasoning_capture). SR does NOT use ChatAnthropic, so its execution turns never reach
+    # the langchain seam — recording here is EXACTLY-ONCE per SR LLM call (no double-count).
+    # ``record_llm_call`` performs the VT-619 ``tenant_agent_usage`` UPSERT internally (via
+    # meter_llm_call), so it REPLACES the prior direct meter call: the rollup behavior is
+    # unchanged, the event-ledger write is added. ``model_used`` is the raw (date-suffixed)
+    # response.model — the ledger prices it via the base alias but records it verbatim (audit).
+    # Guarded + best-effort (CL-122): recording never breaks the SR turn.
+    try:
+        from orchestrator.llm.ledger import record_llm_call
+
+        if ctx is not None and getattr(ctx, "tenant_id", None):
+            record_llm_call(
+                tenant_id=ctx.tenant_id,
+                agent="sales_recovery",
+                call_site="sales_recovery_executor",
+                provider="anthropic",
+                model=model_used or "unknown",
+                tokens_in=in_tokens,
+                tokens_out=out_tokens,
+                cached_tokens_in=cache_read_tokens,
+            )
+    except Exception as exc:  # noqa: BLE001 — CL-122: metering never breaks a turn
+        logger.warning("173 SR-seam ledger record swallowed", extra={"exc": repr(exc)})
 
 
 def _first_text_block(response: Any) -> str | None:

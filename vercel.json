@@ -1,0 +1,9 @@
+{
+  "experimentalServices": {
+    "team-orchestrator": {
+      "root": "apps/team-orchestrator",
+      "entrypoint": "src.main:app",
+      "routePrefix": "/"
+    }
+  }
+}

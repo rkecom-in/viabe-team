@@ -22,6 +22,7 @@ from langgraph.types import Command
 
 from orchestrator._tenant_guard import TenantIsolationError
 from orchestrator.context_builder import build_sales_recovery_context
+from orchestrator.observability.tm_audit import emit_tm_audit
 from orchestrator.types.trigger_reason import TriggerReason
 
 
@@ -39,15 +40,22 @@ def _extract_user_request_from_state(state: dict[str, Any]) -> str:
             "spawn_sales_recovery: state['messages'] is empty —"
             " orchestrator must spawn the specialist with a user request"
         )
-    first = messages[0]
-    if isinstance(first, HumanMessage):
-        content: Any = first.content
-    elif isinstance(first, dict) and first.get("role") == "user":
-        content = first.get("content", "")
-    else:
+    # The dispatch path prepends SystemMessage blocks (L1 / business-context /
+    # manager-intent), so the user message is NOT necessarily messages[0].
+    # Scan for the FIRST HumanMessage / role='user' (matches the docstring) —
+    # indexing [0] crashed the spawn once dispatch started prepending (VT-463).
+    content: Any = None
+    for msg in messages:
+        if isinstance(msg, HumanMessage):
+            content = msg.content
+            break
+        if isinstance(msg, dict) and msg.get("role") == "user":
+            content = msg.get("content", "")
+            break
+    if content is None:
         raise ValueError(
-            "spawn_sales_recovery: state['messages'][0] is not a user"
-            f" message (got {type(first).__name__})"
+            "spawn_sales_recovery: no user message in state['messages']"
+            " (only system/non-user messages present)"
         )
     if isinstance(content, list):
         parts = [b.get("text", "") for b in content if isinstance(b, dict)]
@@ -92,6 +100,27 @@ def make_spawn_tool(
         }
         if update_builder is not None:
             update.update(update_builder(state))
+        _spawn_tenant_id = state.get("tenant_id")
+        if _spawn_tenant_id is not None:
+            _spawn_run_id = state.get("run_id")
+            emit_tm_audit(
+                event_layer="does",
+                event_kind="spawn",
+                actor=state.get("active_agent") or "team_manager",
+                tenant_id=_spawn_tenant_id,
+                run_id=_spawn_run_id,
+                summary=f"Spawning {agent_name}",
+                action={"target_lane": agent_name, "spawn_tool": tool_name},
+                # §7D — join this spawn decision back to the SAME turn's
+                # reasoning_turn row (langchain_callback.py's own reasoning_ref
+                # shape) so the WHY behind the LLM's tool call is queryable
+                # alongside the WHAT it did.
+                reasoning_ref={
+                    "run_id": str(_spawn_run_id) if _spawn_run_id is not None else None,
+                    "step_name": "orchestrator_agent_turn",
+                },
+                conn=None,
+            )
         return Command(goto=agent_name, graph=Command.PARENT, update=update)
 
     return handoff
@@ -130,11 +159,31 @@ def _build_sales_recovery_update(state: dict[str, Any]) -> dict[str, Any]:
     # handoff site rather than re-extracting in the specialist node.
     user_request = _extract_user_request_from_state(state)
 
+    # VT-607 (Loop Package 6) — the durable plan step's own framing, when this dispatch is running
+    # inside the manager loop (manager.workflow._dispatch_specialist_step always populates both in
+    # its initial_state; a legacy/shadow-mode dispatch never sets them, so both read as the
+    # SalesRecoveryContext safe-empty defaults below).
+    manager_desired_outcome = state.get("manager_step_desired_outcome") or ""
+    manager_acceptance_criteria = state.get("manager_step_acceptance_criteria") or []
+
+    # VT-667 — the owner's CAMPAIGN CONTENT brief in their own words. manager_step_situation
+    # is the owner's redacted verbatim ask (triage_seam._build_campaign_recovery_plan sets it to
+    # the redacted message on the D3/VT-657 campaign dispatch path, where it IS the creative
+    # brief — "whip up a Diwali festive offer …"). Threaded VERBATIM (no keyword extraction,
+    # CL-2026-07-15-no-lists); serialize_bundle_for_prompt scopes its use to MESSAGE CONTENT.
+    # Absent (autonomous / non-loop dispatch) → "" → the render section is omitted, brief-less
+    # flows are byte-unchanged. On non-campaign SR paths the situation is a generic string —
+    # harmless as a content-only input (the prompt scopes it).
+    creative_brief = state.get("manager_step_situation") or ""
+
     bundle = build_sales_recovery_context(
         tenant_id=tenant_id,
         run_id=run_id,
         trigger_reason=trigger_reason,
         user_request=user_request,
+        manager_desired_outcome=manager_desired_outcome,
+        manager_acceptance_criteria=manager_acceptance_criteria,
+        creative_brief=creative_brief,
     )
     return {"sales_recovery_context": bundle}
 
@@ -155,6 +204,25 @@ def _build_integration_update(state: dict[str, Any]) -> dict[str, Any]:
     if run_id is None:
         raise TenantIsolationError(
             "spawn_integration: run_id missing from state"
+        )
+    return {}
+
+
+def _build_onboarding_conductor_update(state: dict[str, Any]) -> dict[str, Any]:
+    """Build the ``spawn_onboarding_conductor`` Command.update extension (VT-462).
+
+    Minimal: the conductor reads the tenant's draft + journey state on its own (its tools key on
+    tenant_id); no specialist bundle needed at handoff. Fail-loud on missing tenant_id / run_id per
+    CL-195 + Pillar 3 (parity with ``_build_integration_update``)."""
+    tenant_id = state.get("tenant_id")
+    if tenant_id is None:
+        raise TenantIsolationError(
+            "spawn_onboarding_conductor: tenant_id missing from state"
+        )
+    run_id = state.get("run_id")
+    if run_id is None:
+        raise TenantIsolationError(
+            "spawn_onboarding_conductor: run_id missing from state"
         )
     return {}
 
@@ -181,4 +249,18 @@ spawn_sales_recovery = make_spawn_tool(
         "the owner wants to recover sales from inactive customers."
     ),
     update_builder=_build_sales_recovery_update,
+)
+
+
+spawn_onboarding_conductor = make_spawn_tool(
+    agent_name="onboarding_conductor",
+    tool_name="spawn_onboarding_conductor",
+    description=(
+        "Hand off to the Onboarding-Conductor for the owner's PROFILE-SETUP "
+        "conversation (confirming the discovered business profile + collecting "
+        "the missing business-context fields). Use when the owner is new or "
+        "mid-onboarding and the next step is setting up their business profile "
+        "— BEFORE connecting a data source (which is the Integration Agent)."
+    ),
+    update_builder=_build_onboarding_conductor_update,
 )

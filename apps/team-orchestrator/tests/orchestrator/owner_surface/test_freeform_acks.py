@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
@@ -27,12 +26,16 @@ def test_ack_body_bilingual_and_fallback() -> None:
 # ----------------------------- send_freeform_ack: best-effort, fail-safe -----------------
 def test_send_freeform_ack_sends(monkeypatch) -> None:
     seen: dict[str, str] = {}
+    # VT-579: send_freeform_ack now passes tenant_id + surface so the transport records the owner turn.
     monkeypatch.setattr(
         "orchestrator.utils.twilio_send.send_freeform_message",
-        lambda body, phone: (seen.update(body=body, phone=phone), "SM1")[1],
+        lambda body, phone, **kw: (seen.update(body=body, phone=phone, **kw), "SM1")[1],
     )
     assert fa.send_freeform_ack(uuid4(), "+919811111111", "hi there") is True
-    assert seen == {"body": "hi there", "phone": "+919811111111"}
+    assert seen["body"] == "hi there"
+    assert seen["phone"] == "+919811111111"
+    assert seen["surface"] == "manager"
+    assert "tenant_id" in seen
 
 
 def test_send_freeform_ack_no_phone_skips() -> None:
@@ -76,28 +79,6 @@ def test_edge_ack_sends_freeform_handler_text(monkeypatch) -> None:
     )
     ecr._send_edge_ack(uuid4(), "+919811111111", "You're excluded from campaigns.")
     assert seen["body"] == "You're excluded from campaigns."  # handler text sent as-is
-
-
-def test_refund_split_freeform_processing_template_completed(monkeypatch) -> None:
-    import orchestrator.billing.refund_executor as rx
-
-    free: dict[str, str] = {}
-    templates: list[tuple[str, dict]] = []
-
-    def _fake_template(t, name, params):  # noqa: ANN001, ANN202
-        templates.append((name, params))
-        return SimpleNamespace(success=True)
-
-    monkeypatch.setattr(fa, "resolve_owner_locale", lambda t: "en")
-    monkeypatch.setattr(fa, "send_freeform_ack", lambda t, p, body: free.update(body=body))
-    monkeypatch.setattr("orchestrator.utils.twilio_send.get_tenant_whatsapp_number", lambda t: "+919811111111")
-    monkeypatch.setattr("orchestrator.utils.twilio_send.send_template_message", _fake_template)
-    pending = rx._notify_owner(uuid4(), 249900)  # ₹2,499
-    assert "2,499" in free["body"]  # refund_processing = free-form, Indian-grouped
-    assert [n for n, _ in templates] == ["refund_completed"]  # only completed stays a template
-    # parity: both messages render the SAME grouped amount (₹2,499), not ₹2,499 vs ₹2499
-    assert templates[0][1]["1"] == "2,499"
-    assert pending is False
 
 
 # ----------------------------- DB: owner-locale resolution -------------------------------

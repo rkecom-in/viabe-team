@@ -33,17 +33,20 @@ attach the callback per invocation via the driver.
 from __future__ import annotations
 
 import logging
+import os
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, cast
 from uuid import UUID
 
 from langchain.agents import AgentState, create_agent
-from langchain_anthropic import ChatAnthropic
-from langchain_core.messages import SystemMessage
+from langchain.agents.middleware import wrap_tool_call
+from langchain_core.language_models import BaseChatModel
+from langchain_core.messages import SystemMessage, ToolMessage
 from langchain_core.tools import BaseTool, tool
+from langgraph.errors import GraphBubbleUp
 
-from orchestrator.agent.tools.compose_output import compose_owner_output_tool
+from orchestrator.llm.provider import resolve_chat_model
 from orchestrator.observability.decorators import tool_step
 from orchestrator.observability.envelopes.l0_query import (
     L0QueryInput,
@@ -58,12 +61,23 @@ from orchestrator.observability.l0_memory import (
     query_l0 as _query_l0_impl,
     write_l0_fragment as _write_l0_fragment_impl,
 )
+from orchestrator.security.prompt_quarantine import FRAMING
 from orchestrator.types.trigger_reason import TriggerReason
 
 logger = logging.getLogger("orchestrator.agent")
 
 _PROMPT_PATH = Path(__file__).parent.parent / "prompts" / "orchestrator_agent_system.md"
 ORCHESTRATOR_AGENT_SYSTEM_PROMPT = _PROMPT_PATH.read_text(encoding="utf-8")
+
+# VT-636 — the manager's own advisory tools (``read_listing_health`` et al., always bound via
+# ``advisory_registry.ADVISORY_TOOLS``) return GBP/Swiggy-SCRAPED ``name``/``category`` values
+# fenced at the tool-result seam (``agent/tech_lane.py``). The framing that tells the model those
+# fences are DATA, never instructions, renders ONCE here — the manager's always-on system prompt —
+# guarded so a future edit to the .md source can never duplicate it.
+if FRAMING not in ORCHESTRATOR_AGENT_SYSTEM_PROMPT:
+    ORCHESTRATOR_AGENT_SYSTEM_PROMPT = (
+        f"{ORCHESTRATOR_AGENT_SYSTEM_PROMPT}\n\n## Untrusted tool-result data\n\n{FRAMING}\n"
+    )
 
 # VT-194 prompt caching: wrap the system prompt in a SystemMessage whose
 # content is a structured block list carrying ``cache_control:
@@ -84,13 +98,53 @@ ORCHESTRATOR_AGENT_SYSTEM_MESSAGE = SystemMessage(
     ]
 )
 
-# Pinned exactly in pyproject (langgraph / langchain-* == ): the agent's model
-# behaviour is version-sensitive, so model + library bumps are Type 2 changes.
-# The call-arg ignore below is needed because mypy --strict does not expand
-# ChatAnthropic's pydantic fields into __init__ kwargs without the pydantic
-# plugin; the call is valid at runtime (smoke-tested) and a repo-wide mypy
-# plugin change is out of scope for this PR.
-_MODEL = ChatAnthropic(model="claude-opus-4-7", max_tokens=4096)  # type: ignore[call-arg]
+# VT-632 (Step 1) — the owner-reply-tool directive, appended to the system prompt ONLY when the
+# reply_to_owner tool is bound (flag-gated). Kept as a build-time append (not in the static .md) so
+# the instruction and the tool are turned on together: telling the model to call a tool it doesn't
+# hold would just confuse it. See build_orchestrator_agent + tools/reply_to_owner.py.
+_REPLY_TOOL_DIRECTIVE = (
+    "\n\n## Replying to the owner (REQUIRED)\n"
+    "You have a tool, `reply_to_owner`, and it is the ONLY channel that reaches the owner. END "
+    "EVERY handle-directly turn by calling `reply_to_owner` with the COMPLETE message you want the "
+    "owner to read, in the owner's own language — the SAME language and script as their most recent "
+    "message (Hindi / Hinglish / English); never switch them into English when they wrote Hindi or "
+    "Hinglish. Text you write but do NOT pass to the tool is never "
+    "delivered. You never pass a phone number — the runtime sends it to the owner.\n"
+    "- After you delegate and read the result, call `reply_to_owner` to tell the owner what "
+    "happened — do not stop at an intention.\n"
+    "- NEVER claim you did something (\"done\", \"sent\", \"I've connected it\") unless a tool "
+    "actually did it this turn. If you only intend to act, take the action, THEN report it.\n"
+    "- Do NOT repeat a message you already sent. If you have nothing new, give the next concrete "
+    "step, delegate the work, or ask ONE specific question."
+)
+
+
+def _reply_to_owner_enabled() -> bool:
+    """VT-632 flag gate. reply_to_owner (+ its directive + the dispatch scrape-skip) is active ONLY
+    when ``MANAGER_REPLY_TOOL`` is truthy. Dev-first rollout; the production cutover is Fazal-only.
+    Default OFF ⇒ the emission path is byte-identical to pre-VT-632."""
+    return os.getenv("MANAGER_REPLY_TOOL", "").strip().lower() in {"1", "true", "on", "yes"}
+
+
+def _system_message_with_reply_directive() -> SystemMessage:
+    """The base system prompt plus the reply_to_owner directive (VT-632). The base text keeps its
+    ephemeral cache_control; the short directive rides as a second, uncached block."""
+    return SystemMessage(
+        content=[
+            {
+                "type": "text",
+                "text": ORCHESTRATOR_AGENT_SYSTEM_PROMPT,
+                "cache_control": {"type": "ephemeral"},
+            },
+            {"type": "text", "text": _REPLY_TOOL_DIRECTIVE},
+        ]
+    )
+
+# VT-619b — the manager brain's module-level default routes through the multi-provider seam at the
+# "complex" tier (env-driven via TEAM_MODEL_COMPLEX; default claude-sonnet-5, was opus-4-7). The
+# LIVE per-turn brain build is dispatch._resolve_model (routine/complex by intent); this singleton is
+# the default/fallback ctor. sampling_kwargs + max_tokens now live inside the seam.
+_MODEL: BaseChatModel = resolve_chat_model("complex", agent="team_manager")
 
 
 # ---------------------------------------------------------------------------
@@ -107,7 +161,9 @@ def escalate_to_fazal(run_id: str, reason: str, context: str) -> str:
     """Escalate to Fazal. Log-only in this skeleton; real wiring is VT-3.6."""
     logger.warning(
         "ESCALATE_TO_FAZAL run_id=%s reason=%s context=%s",
-        run_id, reason, context,
+        run_id,
+        reason,
+        context,
     )
     return f"[skeleton] escalation logged for run_id={run_id}"
 
@@ -179,11 +235,200 @@ def query_l0(
     )
 
 
+# VT-466: the manager's WRITE seam — record/update the per-tenant business
+# OBJECTIVE / will / decisions / learnings the manager holds across turns. This
+# is TENANT-SCOPED context (vs. write_l0_fragment, which is the cross-tenant
+# k-anonymous cohort path). Composes over the EXISTING L1 business_profile entity
+# (MERGE-not-clobber, RLS-scoped) — NOT a new store, NOT a send/ledger/accounts
+# write (passes the VT-268 guardrail: the name carries no forbidden capability).
+@tool
+def record_business_objective(
+    tenant_id: str,
+    objective: str | None = None,
+    will: str | None = None,
+    policy: str | None = None,
+    decisions: str | None = None,
+    learnings: str | None = None,
+) -> dict[str, Any]:
+    """Record/update what you (the manager) hold for THIS business — the standing
+    OBJECTIVE / owner WILL / action POLICY / cross-turn DECISIONS / LEARNINGS.
+
+    Use this to persist the "what's good for this business" you reason about, so a
+    LATER turn (and the scoped slice you hand a specialist) sees it. TENANT-scoped
+    — for THIS owner only (cohort-generalizable learnings that should reach OTHER
+    businesses go to ``write_l0_fragment`` instead).
+
+    MERGE-not-clobber: supply ONLY the fields you are setting; omitted fields keep
+    their prior value (a single learning never wipes the standing objective). The
+    objective is owner/business context, NEVER customer PII.
+
+    Returns the merged objective record (the full current state after your patch).
+    """
+    from orchestrator.knowledge import write_business_objective
+    from orchestrator.observability.decorators import _observability_context
+
+    # Pillar 3 — the AUTHORITATIVE tenant is the ambient dispatch context, NOT the
+    # model-supplied arg. The brain occasionally hallucinates a malformed/placeholder
+    # ``tenant_id`` string ("the tenant's id", a truncated uuid, …); trusting it raised
+    # ``ValueError: badly formed hexadecimal UUID string`` inside ``write_business_objective``
+    # and crashed the whole brain run (langgraph re-raised the tool error → the run hung at
+    # 'running', never reaching the next tool / a specialist spawn). Resolve from the
+    # ObservabilityContext when present; fall back to the arg only if the context is absent.
+    ctx = _observability_context.get()
+    resolved_tenant: UUID | str | None = ctx.tenant_id if ctx is not None else None
+    if resolved_tenant is None:
+        try:
+            resolved_tenant = UUID(str(tenant_id))
+        except (ValueError, TypeError):
+            # No ambient context AND an unusable arg — surface a tool error the agent can
+            # read and route around, NOT an exception that aborts the whole run.
+            return {
+                "status": "error",
+                "error": "record_business_objective: no resolvable tenant context",
+            }
+
+    patch = {
+        k: v
+        for k, v in (
+            ("objective", objective),
+            ("will", will),
+            ("policy", policy),
+            ("decisions", decisions),
+            ("learnings", learnings),
+        )
+        if v is not None
+    }
+    merged = write_business_objective(resolved_tenant, patch)
+    return {"status": "recorded", "objective": merged}
+
+
+# VT-579: the manager's brain-commanded RETRIEVAL over the LIFETIME conversation log. The always-on
+# window (agent/dispatch.py) carries the last ≤20 turns within 24h; THIS tool lets the manager reach
+# FURTHER BACK ("referred to whenever required", CL-2026-07-03) — a lexical search over the whole tenant
+# conversation. Read-only, k-capped, tenant-scoped: no forbidden capability (passes the VT-268 guardrail).
+# Plain @tool (no tool_step) ON PURPOSE — the results carry verbatim conversation text; NOT writing an
+# observability envelope keeps that text out of pipeline_steps (the "never app-log message text" rule).
+@tool
+def search_conversation_history(query: str, limit: int = 10) -> dict[str, Any]:
+    """Search this owner's ENTIRE past conversation — further back than the recent window already in your
+    context.
+
+    Use it when you need something said EARLIER than the last-24h window shows: a past decision, a number
+    the owner gave a while ago, an earlier stated preference. ``query`` is matched case-insensitively
+    against the message text; up to ``limit`` (max 50) matches return NEWEST-first. THIS owner only.
+
+    Returns ``{"status": "ok"|"error", "matches": [{"role", "text", "at"}]}``.
+    """
+    from orchestrator.observability.decorators import _observability_context
+
+    # Pillar 3 — the AUTHORITATIVE tenant is the ambient dispatch context, NOT a model-supplied arg (the
+    # brain hallucinates ids); mirrors record_business_objective. No context ⇒ honest error, never a raise.
+    ctx = _observability_context.get()
+    resolved_tenant: UUID | str | None = ctx.tenant_id if ctx is not None else None
+    if resolved_tenant is None:
+        return {
+            "status": "error",
+            "error": "search_conversation_history: no resolvable tenant context",
+            "matches": [],
+        }
+    from orchestrator.conversation_log import search_history
+
+    rows = search_history(resolved_tenant, query, limit=limit)
+    matches = [
+        {
+            "role": r.get("role"),
+            "text": r.get("text"),
+            "at": (
+                r["created_at"].isoformat()
+                if hasattr(r.get("created_at"), "isoformat")
+                else str(r.get("created_at"))
+            ),
+        }
+        for r in rows
+    ]
+    return {"status": "ok", "matches": matches}
+
+
 # VT-194 dropped 3 STUBs (send_whatsapp_template_stub /
 # get_subscriber_state_stub / query_pipeline_history_stub). Each carried
 # ~300 tokens of schema text in the agent's prompt (~900 tokens total)
 # with no real implementation. Restore when VT-5.7 / VT-5.2 / VT-5.3
 # ship the real surfaces.
+
+
+@tool
+def set_language_preference(tenant_id: str, language: str) -> dict[str, Any]:
+    """Set the owner's EXPLICIT language preference — call ONLY when the owner explicitly asks
+    for a language ("English only please", "Hindi mein baat karo", "Hinglish chalega").
+
+    ``language`` must be one of: 'en' (English), 'hinglish' (Hindi in Latin script), 'hi'
+    (Hindi in Devanagari). This governs AGENT-INITIATED messages (reports, nudges, template
+    variants) and ambiguous turns ONLY — you still MIRROR the owner's live message language in
+    conversation, always (that rule is unchanged). Do NOT call this from your own inference of
+    what the owner "seems to" prefer — observation is handled automatically; this tool is for
+    an EXPLICIT owner instruction only.
+
+    Returns {"status": "ok", "language": ...} or a structured error (never raises).
+    """
+    from orchestrator.observability.decorators import _observability_context
+    from orchestrator.owner_surface.owner_locale import (
+        SUPPORTED_OWNER_LANGS,
+        set_explicit_language,
+    )
+
+    # Pillar 3 — ambient dispatch context is the authoritative tenant (mirrors
+    # record_business_objective; the model-supplied arg is a fallback only).
+    ctx = _observability_context.get()
+    resolved_tenant: UUID | str | None = ctx.tenant_id if ctx is not None else None
+    if resolved_tenant is None:
+        try:
+            resolved_tenant = UUID(str(tenant_id))
+        except (ValueError, TypeError):
+            return {
+                "status": "error",
+                "error": "set_language_preference: no resolvable tenant context",
+            }
+
+    lang = str(language).strip().lower()
+    if lang not in SUPPORTED_OWNER_LANGS:
+        return {
+            "status": "error",
+            "error": f"set_language_preference: language must be one of "
+            f"{sorted(SUPPORTED_OWNER_LANGS)}",
+        }
+    if not set_explicit_language(resolved_tenant, lang):
+        return {"status": "error", "error": "set_language_preference: persist failed"}
+    return {"status": "ok", "language": lang}
+
+
+@tool
+def export_customer_list(tenant_id: str) -> dict[str, Any]:
+    """Send the owner THEIR OWN full customer list as a WhatsApp CSV attachment — call when the
+    owner asks for their customer list / customer data as a file ("send me my customer list").
+
+    This IS available (VT-676) — never tell the owner an export isn't possible. The delivery path
+    owns every rail: recipient is the VERIFIED owner number (server-derived, never an argument),
+    private storage + short-lived link, audited. Returns {"status":"ok","delivered":true} on a real
+    transport send, or a structured error — on error tell the owner honestly it didn't attach and
+    that asking again retries; NEVER claim it was sent unless delivered=true.
+    """
+    from orchestrator.observability.decorators import _observability_context
+    from orchestrator.owner_surface.customer_export import send_customer_list_to_owner
+
+    ctx = _observability_context.get()
+    resolved_tenant: UUID | str | None = ctx.tenant_id if ctx is not None else None
+    if resolved_tenant is None:
+        try:
+            resolved_tenant = UUID(str(tenant_id))
+        except (ValueError, TypeError):
+            return {
+                "status": "error",
+                "error": "export_customer_list: no resolvable tenant context",
+            }
+    if send_customer_list_to_owner(resolved_tenant):
+        return {"status": "ok", "delivered": True}
+    return {"status": "error", "delivered": False,
+            "error": "export_customer_list: delivery failed — tell the owner honestly; a re-ask retries"}
 
 
 # Base tools every orchestrator-agent has, regardless of context. Specialist
@@ -197,9 +442,19 @@ def query_l0(
 # specialist agents invoke it directly via the MCPTool framework.
 ORCHESTRATOR_AGENT_TOOLS: list[BaseTool] = [
     escalate_to_fazal,
-    compose_owner_output_tool,
+    # VT-590: compose_owner_output_tool REMOVED from the manager inventory. Its
+    # output (canned text keyed by a routing intent) is discarded — nothing sends
+    # it — so on a handle-directly turn the manager would write an opener + defer
+    # the body to this tool, and only the opener (its trailing message text) got
+    # transmitted (VT-589). The manager now writes the WHOLE reply as its final
+    # message text; that text IS what the owner receives. The function still exists
+    # for the deterministic composer paths — it is just no longer a manager tool.
     write_l0_fragment,
     query_l0,
+    record_business_objective,  # VT-466 manager WRITE seam (tenant-scoped objective)
+    search_conversation_history,  # VT-579 manager RETRIEVAL over the lifetime conversation log
+    set_language_preference,  # VT-677 explicit owner language choice (D3 verbal override)
+    export_customer_list,  # VT-676 F3: owner's own customer list as a CSV attachment (brain path)
 ]
 
 
@@ -222,10 +477,117 @@ class OrchestratorAgentState(AgentState, total=False):
     run_id: UUID | None
     tenant_id: UUID | None
     trigger_reason: TriggerReason | None
+    # VT-667 iter-2 — the enforce-loop step framing MUST cross the subgraph boundary: the
+    # spawn_sales_recovery handoff (handoffs._build_sales_recovery_update, InjectedState) reads
+    # these to thread the owner's verbatim CREATIVE BRIEF (manager_step_situation) + the manager's
+    # framing into the SR bundle. Without them here, LangGraph's schema filter STRIPPED the keys at
+    # this exact seam (the same CL-209 mechanism the three fields above were added back for) — the
+    # brief silently read as "" on every live enforce dispatch, and the '## Manager's desired
+    # outcome' section had never rendered live (latent since VT-607).
+    manager_step_situation: str | None
+    manager_step_desired_outcome: str | None
+    manager_step_acceptance_criteria: list[str] | None
+
+
+# ---------------------------------------------------------------------------
+# VT-484 — tool-error recovery middleware (LAUNCH-BLOCKER robustness fix).
+#
+# THE DEFECT it fixes: a tool/spawn that RAISES orphans its ``tool_use`` block.
+# langchain's ``create_agent`` ToolNode defaults to ``_default_handle_tool_errors``,
+# which RE-RAISES every non-``ToolInvocationError`` exception (it only swallows
+# arg/validation errors). A re-raised tool error escapes the ToolNode WITHOUT
+# emitting a ``tool_result`` for that ``tool_use`` id → the conversation is now
+# Anthropic-invalid → the NEXT model call returns 400 ``tool_use ids were found
+# without tool_result blocks`` → the brain run HANGS at ``status='running'`` and
+# never reaches the next tool / a specialist spawn (e.g. spawn_sales_recovery).
+#
+# This is GENERAL: ANY tool that raises hangs the run, not just integration. The
+# live win-back drive hit it via a spawn whose handoff builder raised; VT-483
+# patched ONE tool (``record_business_objective``) to return an error dict, but
+# that does not generalise — this middleware does.
+#
+# THE FIX: wrap every tool call so a raised exception is turned into an ERROR
+# ``ToolMessage`` carrying the SAME ``tool_call_id`` — a valid ``tool_result``.
+# The conversation stays Anthropic-valid; the brain reads the error and either
+# recovers (re-routes / picks another tool) or terminates cleanly. No orphan.
+#
+# ``GraphBubbleUp`` (the base of ``GraphInterrupt`` raised by the owner-approval
+# ``interrupt()`` and of subgraph-control signals) is RE-RAISED unchanged —
+# catching it would break the Pillar-7 approval pause. This mirrors the ToolNode's
+# own ``except GraphBubbleUp: raise`` carve-out. Spawn handoffs that RETURN a
+# ``Command(goto=...)`` are unaffected: they return normally, never raise here.
+@wrap_tool_call
+def _tool_error_to_tool_result(request: Any, handler: Any) -> Any:
+    """Turn a raised tool error into an error ``ToolMessage`` (VT-484).
+
+    Keeps the ``tool_use``/``tool_result`` pairing intact so a raising tool can
+    never orphan its ``tool_use`` and 400 the next Anthropic call. ``GraphBubbleUp``
+    (interrupts / subgraph control) propagates unchanged.
+    """
+    try:
+        return handler(request)
+    except GraphBubbleUp:
+        # The owner-approval interrupt() + subgraph-control signals MUST bubble.
+        raise
+    except Exception as exc:  # noqa: BLE001 — convert ANY tool error to a tool_result
+        tool_call = request.tool_call
+        logger.warning(
+            "orchestrator_agent: tool %r raised; emitting error tool_result "
+            "(VT-484 — preventing orphaned tool_use / 400 hang): %s",
+            tool_call.get("name"),
+            type(exc).__name__,
+        )
+        # VT-530 (C2a): make the manager's self-handling VISIBLE in the audit spine.
+        _emit_recovery_attempted(tool_call.get("name"), exc)
+        return ToolMessage(
+            content=f"Error executing tool {tool_call.get('name')!r}: {exc!r}",
+            name=tool_call.get("name"),
+            tool_call_id=tool_call["id"],
+            status="error",
+        )
+
+
+def _emit_recovery_attempted(tool_name: str | None, exc: Exception) -> None:
+    """VT-530 (C2a) — record that a tool error was surfaced to the manager as a RECOVERY
+    opportunity.
+
+    Today the VT-484 seam turns a raised tool error into an error ``tool_result`` and the brain
+    "either recovers (re-routes / picks another tool) or terminates cleanly" — but the audit spine
+    only shows two disconnected ``tool_invoked``/``tool_result`` rows, so the self-handling is
+    invisible. This emits one ``recovery_attempted`` row (``event_layer='decides'``,
+    ``status='pending'`` — the outcome is decided on the brain's next turn) correlated by
+    ``run_id`` + the failed tool, so "tool X failed → manager handed the error to recover" is a
+    greppable event.
+
+    Deterministic + fully FAIL-SOFT: an audit failure (or an absent observability context) must
+    NEVER affect the VT-484 error-to-``tool_result`` conversion the brain depends on."""
+    try:
+        from orchestrator.observability.decorators import _observability_context
+        from orchestrator.observability.tm_audit import emit_tm_audit
+
+        ctx = _observability_context.get()
+        if ctx is None:
+            return  # best-effort — no run context to scope the row
+        emit_tm_audit(
+            event_layer="decides",
+            event_kind="recovery_attempted",
+            actor="team_manager",
+            tenant_id=ctx.tenant_id,
+            run_id=ctx.run_id,
+            summary=(
+                f"tool {tool_name!r} raised {type(exc).__name__}; error surfaced to the manager "
+                "to recover or terminate (VT-484 seam)"
+            ),
+            decision={"failed_tool": tool_name, "error_type": type(exc).__name__},
+            severity="warning",
+            status="pending",
+        )
+    except Exception:  # noqa: BLE001 — fail-soft: observability must never break the recovery path
+        logger.debug("VT-530 recovery_attempted audit emit failed (fail-soft)", exc_info=True)
 
 
 def build_orchestrator_agent(
-    model: ChatAnthropic,
+    model: BaseChatModel,
     *,
     extra_tools: Sequence[BaseTool] = (),
 ) -> Any:
@@ -246,6 +608,16 @@ def build_orchestrator_agent(
     observability. The agent itself is a plain runnable.
     """
     tools = [*ORCHESTRATOR_AGENT_TOOLS, *extra_tools]
+    # VT-632 (Step 1) — flag-gated: bind the owner-reply-authoring tool + append its directive.
+    # reply_to_owner SENDS to the owner, but the recipient is resolved SERVER-SIDE (the model never
+    # supplies a number) so the VT-268 boundary holds — its name carries no forbidden capability, so
+    # the guardrail below passes it by construction (the carve-out is documented in tool_guardrail).
+    system_message = ORCHESTRATOR_AGENT_SYSTEM_MESSAGE
+    if _reply_to_owner_enabled():
+        from orchestrator.agent.tools.reply_to_owner import reply_to_owner
+
+        tools.append(reply_to_owner)
+        system_message = _system_message_with_reply_directive()
     # VT-268: fail-CLOSED guardrail — the agent must never hold a direct
     # send-to-customer / accounts-book-write / ledger-write tool (raises at build if it does).
     from orchestrator.agent.tool_guardrail import assert_agent_tools_safe
@@ -254,12 +626,19 @@ def build_orchestrator_agent(
     return create_agent(
         model=model,
         tools=tools,
-        system_prompt=ORCHESTRATOR_AGENT_SYSTEM_MESSAGE,
+        system_prompt=system_message,
         name="orchestrator_agent",
         state_schema=OrchestratorAgentState,
+        # VT-484: a raised tool/spawn must STILL emit a tool_result (error) so the
+        # tool_use is never orphaned (no 400 "tool_use without tool_result" → no
+        # hang at status='running'). This is the launch-blocker robustness fix.
+        middleware=[_tool_error_to_tool_result],
     )
 
 
 # Default module-level instance — base tools only. The VT-3.4 supervisor builds
 # its own instance with the spawn_sales_recovery handoff tool added.
 orchestrator_agent = build_orchestrator_agent(_MODEL)
+
+# VT-632: once-per-boot visibility of the reply-tool flag state (low-noise; aids deploy confirmation).
+logger.info("VT-632: reply_to_owner flag enabled=%s", _reply_to_owner_enabled())

@@ -5,8 +5,5 @@
   "installCommand": "pnpm install --frozen-lockfile",
   "ignoreCommand": "git diff --quiet HEAD^ HEAD ./",
   "outputDirectory": ".next",
-  "regions": ["bom1"],
-  "github": {
-    "silent": false
-  }
+  "regions": ["bom1"]
 }

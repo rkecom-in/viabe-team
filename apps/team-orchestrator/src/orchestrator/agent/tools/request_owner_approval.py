@@ -69,7 +69,24 @@ _DEFAULT_TIMEOUT_HOURS = 48
 _MAX_TIMEOUT_HOURS = 168  # 7 days
 
 ApprovalType = Literal[
-    "campaign_send", "cohort_size_exceeded", "sensitive_data_access", "other"
+    "campaign_send", "cohort_size_exceeded", "sensitive_data_access", "other",
+    # VT-369 Gap-5 — the agent customer-messaging surface. CL-428: this Literal is the
+    # source of truth — migration 128 keeps the DB CHECK in exact sync (all three added
+    # in both, same PR; VT-384 PR-3 activates autonomy_upgrade — the offer/ENABLE consent row).
+    "agent_customer_send", "autonomy_upgrade", "l3_presend_notice",
+    # VT-467 — the business-impact rails surface (SPEND / COMMITMENT / CONFIG action above the
+    # tenant's autonomy threshold). CL-428: this Literal is the source of truth — migration 143
+    # keeps the DB CHECK in exact sync (added in both, same PR). The business-impact gate routes its
+    # owner-approval ask through the SAME arm_pause_request path agent_customer_send uses.
+    "business_impact_action",
+    # VT-609 fix round — the onboarding-conductor's business-policy PROPOSAL (the specialist can
+    # PROPOSE machine-enforceable bounds; only the owner's resolution grants them). CL-428:
+    # migration 169 keeps the DB CHECK in exact sync (added in both, same PR). Does NOT route
+    # through arm_pause_request (no registered WhatsApp template for this ask exists/is authorized
+    # yet — the specialist's own conversational reply carries the ask); armed via
+    # ``business_policy.propose_business_policy_grant`` instead. See that module for the full
+    # arm/resolve shape (mirrors business_impact_choke.dispatch_autonomy_offer/resolve_and_grant_l3).
+    "business_policy_grant",
 ]
 # The raw owner decision verb recorded on pending_approvals.decision. CL-428: this Literal is
 # the source of truth — migration 110 keeps the DB CHECK in exact sync ('defer' added in both,
@@ -91,6 +108,25 @@ class RequestOwnerApprovalInput(BaseModel):
     template_params: dict[str, str] = Field(default_factory=dict)
     language: Literal["en", "hi"] = "en"
     timeout_hours: int = Field(default=_DEFAULT_TIMEOUT_HOURS, ge=1, le=_MAX_TIMEOUT_HOURS)
+    # VT-369: the agent surface links the approval to its draft batch (migration 128
+    # column; ON DELETE SET NULL is safe because the row carries NO customer PII —
+    # batch id + counts only, the binding no-PII-in-approvals rule).
+    draft_batch_id: UUID | None = None
+    # VT-369: the agent surface sends `team_agent_draft_approval` instead of the weekly
+    # template. None -> APPROVAL_TEMPLATE_NAME (the legacy default, unchanged).
+    template_name: str | None = None
+    # VT-594 (post-review restructure) — a PII-safe {"en": ..., "hi": ...} plan-summary
+    # body, sent BEST-EFFORT before the approval template (see arm_pause_request). None
+    # for every existing caller that doesn't build one (agent_customer_send,
+    # business_impact_choke, autonomy) — no behavior change for them.
+    chat_summary: dict[str, str] | None = None
+    # T9 inc-3 — the manager task this approval settles (enforce path only; the node
+    # threads it from graph state). Anchors the stale-turn check: if the owner has sent
+    # a NEWER inbound since the turn that spawned this task (manager_tasks.
+    # source_message_ref), the chat_summary gets the reconciled "earlier request"
+    # framing so the late delivery reads as a promised follow-through, not a pile-on
+    # onto an unrelated later turn. None (legacy/weekly callers) → no check, unchanged.
+    manager_task_id: UUID | None = None
 
 
 class RequestOwnerApprovalError(BaseModel):
@@ -103,15 +139,22 @@ class RequestOwnerApprovalError(BaseModel):
 class PauseRequestResult(BaseModel):
     """Outcome of the pause-request side effects (before the interrupt).
 
-    status='armed'  -> template sent (or dry-run) + pending_approvals row
-                       present; the caller should now interrupt().
-    status='error'  -> template send failed; NO pending_approvals row written;
-                       the caller must NOT interrupt (Pillar 7: no orphan pause).
+    status='armed'   -> pending_approvals row INSERTed then template sent (or
+                        dry-run); the caller should now interrupt().
+    status='error'   -> template send failed; the armed row is DELETEd (VT-615
+                        arm-then-send rollback) so NO open row remains; the caller
+                        must NOT interrupt (Pillar 7: no orphan pause).
+    status='refused' -> VT-369 §4.1 (F5): ANOTHER approval is already open for this
+                        tenant — the approval queue is serialized per tenant so two
+                        open rows can never race one owner "yes" onto the wrong
+                        surface. NO row written, NO interrupt. Agent callers treat
+                        this as defer-to-next-sweep; weekly-cadence callers retry on
+                        their own schedule.
     """
 
     model_config = ConfigDict(frozen=True)
 
-    status: Literal["armed", "error"]
+    status: Literal["armed", "error", "refused"]
     approval_id: UUID | None = None
     error: RequestOwnerApprovalError | None = None
 
@@ -147,6 +190,51 @@ def _find_open_approval(conn: Any, tenant_id: UUID, run_id: UUID) -> dict[str, A
     return PendingApprovalsWrapper().find_open_for_run(tenant_id, run_id, conn=conn)
 
 
+# T9 inc-3 — the reconciled framing for a STALE settle (the owner sent a newer message while the
+# async task was still drafting). Prefixed to the chat_summary so the late delivery reads as the
+# promised follow-through on the EARLIER request, not a non-sequitur pile-on onto whatever turn is
+# current. Locale-keyed; the resolved-locale text gets the matching prefix (en fallback).
+_STALE_DRAFT_PREFIX = {
+    "en": "About your earlier campaign request — here's the draft, ready for your review.\n\n",
+    "hi": "आपके पहले वाले कैंपेन अनुरोध की बात — ड्राफ़्ट तैयार है, आपकी समीक्षा के लिए।\n\n",
+}
+
+
+def _owner_sent_newer_message(conn: Any, tenant_id: UUID, manager_task_id: UUID) -> bool:
+    """T9 inc-3 — True iff the owner sent a NEWER inbound after the turn that spawned this manager
+    task. The anchor is manager_tasks.source_message_ref (the spawning inbound's Twilio sid, written
+    by plan_store.create_plan), joined to its conversation_log owner row; the role-flipped twin of
+    runner._brain_emitted_owner_reply. A missing anchor (NULL ref / no matching log row) compares
+    NULL → EXISTS false → NOT stale. Fail-soft False: a read error must only ever fall back to
+    today's framing — it never touches the arm or the template send (Pillar 7 untouched)."""
+    try:
+        row = conn.execute(
+            """
+            SELECT EXISTS (
+                SELECT 1 FROM conversation_log o
+                WHERE o.tenant_id = %s AND o.role = 'owner'
+                  AND o.created_at > (
+                      SELECT s.created_at FROM conversation_log s
+                      JOIN manager_tasks mt
+                        ON mt.tenant_id = s.tenant_id AND mt.source_message_ref = s.message_sid
+                      WHERE mt.id = %s AND s.tenant_id = %s AND s.role = 'owner'
+                      ORDER BY s.created_at DESC LIMIT 1
+                  )
+            ) AS stale
+            """,
+            (str(tenant_id), str(manager_task_id), str(tenant_id)),
+        ).fetchone()
+    except Exception:  # noqa: BLE001 — framing-only read; never block the arm on it
+        logger.warning(
+            "request_owner_approval: stale-turn check failed (fail-soft → default framing) "
+            "tenant=%s task=%s", tenant_id, manager_task_id,
+        )
+        return False
+    if row is None:
+        return False
+    return bool(row["stale"] if isinstance(row, dict) else row[0])
+
+
 def arm_pause_request(
     payload: RequestOwnerApprovalInput,
     *,
@@ -158,19 +246,32 @@ def arm_pause_request(
     pending_approvals row. Idempotent across resume re-execution.
 
     Order of effects (Pillar 7 — no orphan pause):
-      0. If an OPEN approval already exists for this run, this is a resume
-         re-execution: do NOT re-send, do NOT re-insert; return armed with the
-         existing approval_id.
-      1. Send the approval template to the OWNER. On error -> return error
-         envelope and write NO pending_approvals row (so the caller will NOT
-         interrupt; the run terminates as a normal error, not a stuck pause).
-      2. INSERT pending_approvals (decision NULL, status='pending',
-         timeout_at = now + timeout_hours).
+      0.  If an OPEN approval already exists for this run, this is a resume
+          re-execution: do NOT re-send, do NOT re-insert; return armed with the
+          existing approval_id.
+      0b. VT-369 §4.1 (F5) — per-tenant approval-queue serialization: if ANY
+          open approval exists for the tenant (necessarily a DIFFERENT run —
+          step 0 already returned for this run's), REFUSE to arm (status=
+          'refused', no send, no row). Two open rows + one owner "yes" would
+          resolve the wrong surface (find_open_for_tenant is newest-LIMIT-1,
+          blind to approval_type). The migration-128 partial unique index
+          (one open row per tenant) is the structural backstop — its
+          IntegrityError at step 2 is the race-loser path, same refusal.
+      1.  INSERT pending_approvals (decision NULL, status='pending', timeout_at =
+          now + timeout_hours) — the DURABLE row FIRST (VT-615 arm-then-send). A
+          migration-128 one-open-per-tenant unique race is lost HERE
+          (UniqueViolation) BEFORE any send: status='refused', no template out, no
+          dropped campaign.
+      2.  Send the plan summary (best-effort) then the approval template to the
+          OWNER. On send error -> DELETE the row just armed (restores "error -> no
+          open row") and return the error envelope; the caller will NOT interrupt,
+          the run terminates as a normal error, not a stuck pause.
 
     ``conn_factory`` defaults to orchestrator.db.tenant_connection.
     ``send_fn`` defaults to twilio_send.send_template_message.
     ``dry_run`` skips the real Twilio call (canary/CI default at the node).
     """
+    from orchestrator.observability.tm_audit import emit_tm_audit
     if conn_factory is None:
         from orchestrator.db import tenant_connection
 
@@ -196,14 +297,144 @@ def arm_pause_request(
                 status="armed", approval_id=UUID(existing["id"])
             )
 
+        # 0b. VT-369 §4.1 (F5) — per-tenant queue serialization: any OTHER open
+        # approval for this tenant refuses the arm (defer-to-next-cycle for the
+        # caller; no send, no row, no interrupt).
+        open_any = PendingApprovalsWrapper().find_open_for_tenant(tenant_id, conn=conn)
+        if open_any is not None:
+            logger.info(
+                "request_owner_approval: refused (queue busy) tenant=%s run=%s "
+                "type=%s open_approval=%s open_type=%s",
+                tenant_id, run_id, payload.approval_type,
+                open_any["id"], open_any.get("approval_type"),
+            )
+            return PauseRequestResult(
+                status="refused",
+                error=RequestOwnerApprovalError(
+                    code="approval_queue_busy",
+                    message=(
+                        "Another approval is already open for this tenant — the "
+                        "approval queue is serialized per tenant (VT-369 §4.1/F5). "
+                        "Retry on the next cycle/sweep."
+                    ),
+                ),
+            )
+
         owner_phone = _resolve_owner_phone(conn, tenant_id)
 
-        # 1. Send the approval template to the owner.
+        # VT-615 (A) — ARM-THEN-SEND (was send-then-INSERT). The pending_approvals row is the durable
+        # source of truth for the owner's eventual "haan bhej do"; it MUST exist BEFORE any owner-facing
+        # send. The prior order sent the summary + approval template FIRST and INSERTed second, so a lost
+        # migration-128 one-open-per-tenant unique race (or any INSERT failure) left a template already in
+        # the owner's hand with NO row to resolve — the owner approves, find_open returns None, the reply
+        # falls through to dispatch_brain, and the campaign NEVER SENDS (the old "accepted residual"). Now:
+        # INSERT first (a race-loser refuses BEFORE any send — no phantom template, no dropped campaign);
+        # the sends happen only once the row is durable; a send failure DELETEs the row (autocommit conn —
+        # no implicit rollback; the pending_approvals_delete RLS policy permits the tenant-scoped delete) so
+        # no orphan blocks the tenant's one-open queue and the "error -> no open row" contract still holds.
+        approval_id = uuid4()
+        timeout_at = datetime.now(UTC) + timedelta(hours=payload.timeout_hours)
+        from psycopg.errors import UniqueViolation
+        from psycopg.types.json import Jsonb
+
+        row: dict[str, Any] = {
+            "id": str(approval_id),
+            "run_id": str(run_id),
+            "campaign_id": str(payload.campaign_id) if payload.campaign_id else None,
+            "approval_type": payload.approval_type,
+            "summary": payload.summary,
+            "details": Jsonb(dict(payload.details)),
+            "status": "pending",
+            "decision": None,
+            "owner_message_sid": None,  # set after the template send succeeds (step 2c)
+            "timeout_at": timeout_at,
+        }
+        if payload.draft_batch_id is not None:
+            row["draft_batch_id"] = str(payload.draft_batch_id)
+
+        # 1. INSERT the durable row FIRST. A migration-128 race-loser refuses HERE, before any send —
+        #    no phantom template reaches the owner, so no campaign is silently dropped.
+        try:
+            PendingApprovalsWrapper().insert(tenant_id, row, conn=conn)
+        except UniqueViolation:
+            try:
+                conn.rollback()
+            except Exception:  # noqa: BLE001 — autocommit conn: nothing pending
+                pass
+            logger.info(
+                "request_owner_approval: refused (one-open-per-tenant race lost, PRE-send) "
+                "tenant=%s run=%s type=%s",
+                tenant_id, run_id, payload.approval_type,
+            )
+            return PauseRequestResult(
+                status="refused",
+                error=RequestOwnerApprovalError(
+                    code="approval_queue_busy",
+                    message=(
+                        "Lost the one-open-approval-per-tenant race (unique index, "
+                        "migration 128). Retry on the next cycle/sweep."
+                    ),
+                ),
+            )
+
+        # A send failure past this point must remove the row we just armed (autocommit already committed
+        # it), else the orphan blocks the tenant's one-open queue until the timeout sweep reaps it.
+        def _rollback_arm() -> None:
+            try:
+                PendingApprovalsWrapper().delete_by_id(tenant_id, approval_id, conn=conn)
+            except Exception:  # noqa: BLE001 — best-effort; the timeout sweep is the backstop
+                # ERROR (not warning): a swallowed rollback leaves a committed open row that blocks THIS
+                # tenant's one-open approval queue until the timeout sweep reaps it (up to timeout_hours,
+                # default 48h). Rare — needs an independent DB-conn death between INSERT and rollback (the
+                # template fails over HTTP, so the conn is normally healthy) — but must not be silent.
+                logger.error(
+                    "request_owner_approval: arm rollback DELETE FAILED — tenant approval queue blocked "
+                    "until timeout sweep (up to %sh) tenant=%s run=%s approval=%s",
+                    payload.timeout_hours, tenant_id, run_id, approval_id,
+                )
+
+        # 2a. Best-effort PII-safe plan-summary send BEFORE the approval template (VT-594), so the owner
+        #     sees WHAT they're approving. A summary-send failure must NEVER block the arm.
+        if not dry_run and payload.chat_summary:
+            try:
+                from orchestrator.owner_surface.freeform_acks import (
+                    resolve_owner_locale,
+                    send_freeform_ack,
+                )
+
+                if owner_phone:
+                    locale = resolve_owner_locale(tenant_id)
+                    text = payload.chat_summary.get(locale) or payload.chat_summary.get("en")
+                    # T9 inc-3 — stale settle (owner moved on to a newer turn while the async task
+                    # drafted): reframe as the promised follow-through on the EARLIER request.
+                    # TEXT-ONLY: the arm row above and the template send below are untouched.
+                    if (
+                        text
+                        and payload.manager_task_id is not None
+                        and _owner_sent_newer_message(conn, tenant_id, payload.manager_task_id)
+                    ):
+                        text = (_STALE_DRAFT_PREFIX.get(locale) or _STALE_DRAFT_PREFIX["en"]) + text
+                        logger.info(
+                            "request_owner_approval: stale-turn reconcile framing applied "
+                            "tenant=%s run=%s task=%s",
+                            tenant_id, run_id, payload.manager_task_id,
+                        )
+                    if text:
+                        send_freeform_ack(tenant_id, owner_phone, text)
+            except Exception:  # noqa: BLE001 — best-effort; must never block the arm
+                logger.warning(
+                    "request_owner_approval: chat-summary send failed (fail-soft) "
+                    "tenant=%s run=%s", tenant_id, run_id,
+                )
+
+        # 2b. Send the approval template (the load-bearing send). On failure, roll back the arm row so the
+        #     owner never holds a template with no resolvable row.
+        template_name = payload.template_name or APPROVAL_TEMPLATE_NAME
         if not dry_run:
             try:
                 result = send_fn(
                     tenant_id,
-                    APPROVAL_TEMPLATE_NAME,
+                    template_name,
                     dict(payload.template_params),
                     recipient_phone=owner_phone,
                 )
@@ -213,6 +444,7 @@ def arm_pause_request(
                     "tenant=%s run=%s type=%s err=%s",
                     tenant_id, run_id, payload.approval_type, type(exc).__name__,
                 )
+                _rollback_arm()
                 return PauseRequestResult(
                     status="error",
                     error=RequestOwnerApprovalError(
@@ -226,6 +458,7 @@ def arm_pause_request(
                     tenant_id, run_id, payload.approval_type,
                     getattr(result, "error_code", None),
                 )
+                _rollback_arm()
                 return PauseRequestResult(
                     status="error",
                     error=RequestOwnerApprovalError(
@@ -234,30 +467,31 @@ def arm_pause_request(
                     ),
                 )
             owner_message_sid = getattr(result, "message_sid", None)
-        else:
-            owner_message_sid = None
+            # 2c. Record which owner message carried the template (metadata; resolve COALESCEs it).
+            if owner_message_sid:
+                try:
+                    PendingApprovalsWrapper().set_owner_message_sid(
+                        tenant_id, approval_id, owner_message_sid, conn=conn
+                    )
+                except Exception:  # noqa: BLE001 — metadata only; never fail the arm on it
+                    logger.warning(
+                        "request_owner_approval: owner_message_sid UPDATE failed (non-critical) "
+                        "tenant=%s run=%s approval=%s", tenant_id, run_id, approval_id,
+                    )
 
-        # 2. INSERT the pending_approvals row (decision NULL).
-        approval_id = uuid4()
-        timeout_at = datetime.now(UTC) + timedelta(hours=payload.timeout_hours)
-        from psycopg.types.json import Jsonb
-
-        # VT-306: insert through the typed wrapper on the caller's conn (atomic
-        # with the surrounding arm-pause txn; tenant_id forced to the scope).
-        PendingApprovalsWrapper().insert(
-            tenant_id,
-            {
-                "id": str(approval_id),
-                "run_id": str(run_id),
-                "campaign_id": str(payload.campaign_id) if payload.campaign_id else None,
+        emit_tm_audit(
+            event_layer="does",
+            event_kind="approval_armed",
+            actor="team_manager",
+            tenant_id=tenant_id,
+            run_id=run_id,
+            action={
+                "approval_id": str(approval_id),
                 "approval_type": payload.approval_type,
-                "summary": payload.summary,
-                "details": Jsonb(dict(payload.details)),
-                "status": "pending",
-                "decision": None,
-                "owner_message_sid": owner_message_sid,
-                "timeout_at": timeout_at,
+                "draft_batch_id": str(payload.draft_batch_id) if payload.draft_batch_id else None,
+                "dry_run": dry_run,
             },
+            summary=f"approval armed: {payload.approval_type}",
             conn=conn,
         )
 
@@ -309,11 +543,25 @@ def request_owner_approval_node(state: AgentGraphState) -> dict[str, Any]:
         template_params=req.get("template_params", {}),
         language=req.get("language", "en"),
         timeout_hours=req.get("timeout_hours", _DEFAULT_TIMEOUT_HOURS),
+        chat_summary=req.get("chat_summary"),
+        # T9 inc-3 — enforce path only (legacy/weekly graphs carry no manager_task_id → None →
+        # no stale-turn check). Anchors the reconciled framing for a late async settle.
+        manager_task_id=state.get("manager_task_id"),
     )
 
     # dry_run is carried on the request so the canary / CI exercise the full
     # pause/resume without a live Twilio call (default False = production send).
     armed = arm_pause_request(payload, dry_run=bool(req.get("dry_run", False)))
+    if armed.status == "refused":
+        # VT-369 §4.1 (F5): another approval is already open for this tenant —
+        # the queue is serialized per tenant. NO row was written and NO pause
+        # fires. The campaign stays 'proposed'; the weekly cadence retries on its
+        # own schedule. route_after_approval sends any non-'approved' decision to
+        # END (Pillar 7: a refused arm can never proceed to send).
+        return {
+            "owner_decision": "queue_busy",
+            "approval_error": armed.error.model_dump() if armed.error else None,
+        }
     if armed.status == "error":
         # No pending_approvals row was written. Surface a clean terminal that
         # does NOT pause and does NOT send: the campaign is not approved, so

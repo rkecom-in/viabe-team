@@ -29,11 +29,16 @@ def run_implicit_attribution_sweep() -> dict[str, int]:
     skipped = 0
 
     with pool.connection() as conn, conn.cursor() as cur:
-        # Find completed campaigns in last 7d with attribution data.
-        # Minimal schema assumption: pipeline_runs has tenant_id, status,
-        # completed_at; attribution_outcome lives in terminal_state_metadata
-        # JSONB. If attribution substrate not yet wired, this returns 0
-        # rows + sweep is a no-op (acceptable Phase 1).
+        # Runs whose attribution outcome was determined in the last 7d. The
+        # attribution_outcome / attribution_baseline / attribution_outcome_at keys
+        # are written by billing.attribution_close._back_annotate_run (VT-563) on
+        # the ORIGINATING run at close. The window keys on attribution_outcome_at
+        # (when the outcome was determined), NOT the run's end time — the
+        # originating run ended weeks earlier (at campaign generation), so an
+        # ended_at window would silently miss every real outcome (the pre-VT-563
+        # query keyed on a `completed_at` column that does not even exist on
+        # pipeline_runs, mig 005 — it has `ended_at` — so the sweep was doubly
+        # dead). COALESCE falls back to ended_at for any pre-VT-563-shape row.
         cur.execute(
             """
             SELECT id AS run_id,
@@ -41,9 +46,13 @@ def run_implicit_attribution_sweep() -> dict[str, int]:
                    terminal_state_metadata
             FROM pipeline_runs
             WHERE status = 'completed'
-              AND completed_at >= now() - interval '7 days'
               AND terminal_state_metadata IS NOT NULL
               AND terminal_state_metadata ? 'attribution_outcome'
+              AND terminal_state_metadata ? 'attribution_baseline'
+              AND COALESCE(
+                    (terminal_state_metadata->>'attribution_outcome_at')::timestamptz,
+                    ended_at
+                  ) >= now() - interval '7 days'
             """
         )
         rows = cur.fetchall()
@@ -68,7 +77,7 @@ def run_implicit_attribution_sweep() -> dict[str, int]:
 
         try:
             with pool.connection() as conn:
-                conn.execute(
+                cur = conn.execute(
                     """
                     INSERT INTO owner_feedback
                         (tenant_id, run_id, tier, signal, source_metadata)
@@ -84,7 +93,12 @@ def run_implicit_attribution_sweep() -> dict[str, int]:
                         '{"derived_from":"attribution_outcome"}',
                     ),
                 )
-                written += 1
+                # rowcount is 0 on an ON-CONFLICT no-op — a re-swept run must not
+                # over-report `written` (batch-review metric fix).
+                if cur.rowcount and cur.rowcount > 0:
+                    written += 1
+                else:
+                    skipped += 1
         except Exception:  # noqa: BLE001
             logger.exception(
                 "implicit_attribution write failed (tenant=%s, run=%s)",

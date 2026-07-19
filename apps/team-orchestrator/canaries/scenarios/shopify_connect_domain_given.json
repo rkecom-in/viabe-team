@@ -1,0 +1,31 @@
+{
+  "name": "shopify_connect_domain_given",
+  "domain": "integration",
+  "critical": true,
+  "setup_args": ["--onboarded", "--flow", "ready_asked"],
+  "expected_fail": false,
+  "notes": "Canonical Shopify connect flow, end to end through the DETERMINISTIC discovery/auth resume gate (onboarding/shopify_onboarding.py maybe_resume_shopify_onboarding — not an LLM paraphrase; journey.py's _send_turn sends these template strings verbatim). Step 1 resolves the readiness ask into the easiest-first integration offer (Shopify, agent_data_needs.py effort=1), which fires the integration seam (phase_1_discovery, awaiting='connector_choice') and sends the fixed instructions text containing 'yourstore.myshopify.com'. Step 2 gives a valid *.myshopify.com domain — _scan_shop_domain matches, mints a real authorize_url via start_shopify_setup, and sends the fixed 'Tap this link ... reply done' template. Step 3 says 'done' before any real OAuth completed (the harness has no browser) — shopify_is_connected() reads the DB and finds no token, so the gate must send the honest 'I don't see the connection yet' line, NEVER claim the store is connected. This last turn is the load-bearing truthful-owner-outcome check (marked critical) — the system must not fabricate a completed connection. Setup: `setup --onboarded --flow ready_asked` then `script <tenant> shopify_connect_domain_given.json`.",
+  "steps": [
+    {
+      "message": "Yes lets connect",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "assert_contains": ["myshopify.com"],
+      "note": "Resolves the readiness ask into the Shopify offer — the fixed instructions text names the *.myshopify.com domain shape."
+    },
+    {
+      "message": "Sure, my store address is sundaram-sweets.myshopify.com",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "assert_contains": ["myshopify.com"],
+      "note": "A valid shop domain in the SAME sentence as other chat — the discovery gate scans for it anywhere in the body, mints an authorize_url, and sends the tap-this-link template."
+    },
+    {
+      "message": "done",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "assert_not_contains": ["your shopify store is now connected", "i've connected your shopify", "i have connected your shopify", "shopify is connected", "connection is complete"],
+      "note": "No real OAuth callback ever landed for this synthetic tenant — the gate re-checks the DB and MUST say it doesn't see the connection yet, never fabricate a completed connect."
+    }
+  ]
+}

@@ -1,0 +1,62 @@
+# VT-384 (Gap-5 PR-3) — L3 autonomy ENABLE + kill keyword sets.
+#
+# LOCKSTEP with the CL-438 Meta-APPROVED `team_autonomy_offer` body
+# (.viabe/templates.md, verbatim from the VT-383 canary). The offer copy MAKES
+# two promises the owner can act on; this file is the deterministic matcher for
+# both. If the approved body ever changes, these sets change in the same PR.
+#
+#   EN offer body:
+#     "...you can always say STOP to turn this off instantly.
+#      Reply ENABLE to turn on automatic sending, or ignore this message..."
+#   HI offer body:
+#     "...आप कभी भी STOP कहकर इसे तुरंत बंद कर सकते हैं।
+#      ऑटोमैटिक भेजना चालू करने के लिए ENABLE लिखें..."
+#
+# MATCHING (mirrors pre_filter_gate's two existing styles):
+#   - `enable`: EXACT match on the whole NFC-normalized, case-folded, whitespace-
+#     collapsed body (the data_inputs ENABLE style). The offer promises a single
+#     deliberate verb ("Reply ENABLE" / "ENABLE लिखें") — both languages use the
+#     SAME Latin token ENABLE verbatim, so one token covers EN + HI. Hinglish
+#     transliterations ("chalu karo" / "shuru karo") are the owner's natural
+#     affirmatives and are included so a Tier-2/3 owner who answers in Hinglish
+#     is not stranded.
+#   - `kill`: boundary-safe CONTAINMENT (the opt-out style), NFC, EN + Devanagari
+#     + Hinglish — fires anywhere in the body. These are AUTONOMY-SPECIFIC kill
+#     phrases ("stop automatic sending" / "ऑटोमैटिक बंद") that disable L3 without
+#     a full DPDP opt-out. Bare STOP / बंद करो is the AUTHORITATIVE opt-out path
+#     (opt_out_keywords.yaml) and ALWAYS wins FIRST (CL-438 floor) — it is
+#     deliberately NOT duplicated here (it would be unreachable behind opt-out).
+#     The owner's promised universal off-switch (STOP) routes to opt_out_handler;
+#     this set is the narrower "turn off only the automatic sending" intent.
+
+# EXACT-match (whole normalized body) — the deliberate ENABLE verb + Hinglish affirmatives.
+enable:
+  - "ENABLE"
+  - "enable automatic sending"
+  - "turn on automatic sending"
+  - "chalu karo"
+  - "shuru karo"
+  - "auto chalu karo"
+
+# CONTAINMENT-match (anywhere in body), boundary-safe — autonomy-specific kill phrases.
+#
+# DELIBERATELY EXCLUDED (verified against opt_out_keywords.yaml + the pre_filter RULE_ORDER): any
+# phrase CONTAINING a bare opt-out keyword (STOP / बंद करो / band karo / roko) is caught by the
+# authoritative opt-out rule FIRST and never reaches here — "stop automatic sending",
+# "auto band karo" route to opt_out_handler by design (the CL-438 floor). This is SAFE — and the
+# offer's "say STOP to turn this off instantly" promise is HONEST — because opt_out_handler/dsr_handler
+# now invoke the autonomy FREEZE path (kill_autonomy_by_keyword: freeze + cancel every open batch incl.
+# auto_send_pending, same-txn — VT-384 gate-bounce F1), so a bare opt-out is STRICTLY STRONGER than the
+# kill keyword: it stops in-flight automatic sending AND sets the DPDP opt-out flag.
+# This list is ONLY phrases that disable automatic sending WITHOUT tripping a full DPDP opt-out, so
+# every entry is reachable (no dead keywords). "बंद" alone is not an opt-out keyword (that is the
+# multi-word "बंद करो"), so the Devanagari "ऑटोमैटिक ... बंद" phrasings ARE reachable.
+kill:
+  - "turn off automatic"
+  - "turn off auto"
+  - "turn off automatic sending"
+  - "disable automatic sending"
+  - "disable auto sending"
+  - "ऑटोमैटिक बंद"
+  - "ऑटोमैटिक भेजना बंद"
+  - "ऑटो बंद"

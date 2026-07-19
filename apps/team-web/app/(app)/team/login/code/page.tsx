@@ -12,7 +12,7 @@
 
 'use client'
 
-import { Suspense, useState } from 'react'
+import { Suspense, useEffect, useState } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
 
 function CodeEntryForm() {
@@ -23,6 +23,14 @@ function CodeEntryForm() {
   const [code, setCode] = useState('')
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
+
+  // Sweep #9: direct entry / param loss leaves a phone-less code form that can only 400 ("enter a
+  // valid mobile number") with no field to fix it. Redirect back to the phone-entry step so the owner
+  // re-enters their number, instead of stranding them on a dead form. router.replace (not push) so
+  // back-navigation doesn't trap them on this phone-less page.
+  useEffect(() => {
+    if (!phone) router.replace('/team/login')
+  }, [phone, router])
 
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault()
@@ -49,6 +57,24 @@ function CodeEntryForm() {
     } finally {
       setSubmitting(false)
     }
+  }
+
+  // Sweep #9: while the empty-phone redirect is in flight, render a brief "start over" prompt rather
+  // than the phone-less code form (which has no valid in-place recovery). The useEffect above sends
+  // the owner back to phone entry.
+  if (!phone) {
+    return (
+      <div className="w-full max-w-md bg-white shadow-md rounded-lg p-8 space-y-4 text-center">
+        <p className="text-sm text-gray-600">Redirecting…</p>
+        <button
+          type="button"
+          onClick={() => router.replace('/team/login')}
+          className="text-sm text-blue-600 hover:text-blue-700"
+        >
+          Start over — enter your number
+        </button>
+      </div>
+    )
   }
 
   return (

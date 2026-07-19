@@ -1,0 +1,28 @@
+{
+  "name": "devanagari_mixed_script_speech_act",
+  "domain": "manager",
+  "critical": false,
+  "expected_fail": false,
+  "setup_args": ["--onboarded"],
+  "notes": "journey-sim-spec.md #8 (services/clinic-salon owner, Devanagari/mixed-script, language handling + speech-act classification — negation/apostrophe/Devanagari failure modes). No existing scenario in canaries/scenarios/ uses real Devanagari script except convo_harness.py's own D1-fallback-line constant (_D1_FALLBACK_HI) and stop_resume.json's Hinglish (Roman-script) negation. This is the first scenario authoring an actual Devanagari-negation speech act. STAGED, not wired in: lives outside canaries/scenarios/, never discovered by run_full_pack.py's default --scenarios-dir; promoted after #51 lands + review. Setup: `setup --onboarded` (bare — a clinic/salon owner needs no seeded ledger for this probe) then `script <tenant> canaries/scenarios_staged/devanagari_mixed_script_speech_act.json`.",
+  "steps": [
+    {
+      "message": "मुझे अभी customers को कोई campaign नहीं भेजना — बस ये बताओ कि कितने lapsed customers हैं मेरे पास",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "assert_route": {"expect_sr_delegation": false},
+      "assert_not_contains": ["campaign to your customers", "draft ready", "shall i send", "approve this campaign"],
+      "note": "Devanagari negation ('नहीं भेजना' = 'don't [want to] send') embedded in an otherwise mixed-script (Devanagari + English loanwords 'customers'/'campaign'/'lapsed customers') sentence, followed by a real sub-question. TEMPTING WRONG CALL: the negation gets dropped/misparsed and a campaign gets drafted/delegated anyway because 'lapsed customers' is present in the sentence. DB-proof: no campaigns row for this turn regardless of the reply's fluency. The count sub-question should still get answered — dropping it entirely (answering only the negation) is also a failure mode worth flagging in manual review even though the harness doesn't hard-assert the count value here (empty ledger — a genuine number would be near-zero and not worth pinning to an exact string)."
+    },
+    {
+      "message": "पर पिछली बार जो message गया था customer's को, वो ठीक से नहीं पहुँचा — can't you just resend it to them?",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "assert_not_contains": [
+        "i've resent", "i have resent", "already resent", "message has been resent",
+        "sent again to your customers", "resent it to them"
+      ],
+      "note": "A RESEND speech act wrapped in a negation ('नहीं पहुँचा' = 'didn't reach properly') plus an English contraction/apostrophe ('customer's', 'can't') mid-Devanagari sentence — the apostrophe/negation/script-mixing failure modes journey 8 targets together in one line. No message was ever actually sent to anyone in this scenario (bare --onboarded, no campaign exists) — the honest reply clarifies there's nothing on file to resend / asks which message, rather than the deterministic (assert_not_contains-checked) fabrication of claiming a resend happened. Whether the RESEND intent itself gets correctly recognized (vs. silently dropped as noise) is a manual/judge-review call, not asserted here."
+    }
+  ]
+}

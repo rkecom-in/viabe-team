@@ -2,14 +2,15 @@
 
 **Read this FIRST before executing any brief in `.viabe/queue/`.**
 
-This document is the operating contract you (Claude Code) follow under the automation architecture locked 2026-05-24. The full architecture is in `.viabe/automation-plan.md`; this is the compressed action-protocol for the development cycle.
+This document is the operating contract you (Claude Code) follow under the automation architecture locked 2026-05-24. The full architecture is in `docs/archive/automation-plan.md` (archived 2026-07-17); this is the compressed action-protocol for the development cycle.
 
 ## Roles
 
 - **You (Claude Code):** read briefs from `.viabe/queue/`, plan, await Cowork plan review, implement on approval, open PR, append decisions to `task_log.md`. Surface clarifications to Cowork via `.running/to-cowork/` — never to Fazal directly.
 - **Cowork (delivery captain):** drafts briefs, reviews plans, audits PRs. Reachable via `.running/to-cowork/` for clarifications.
 - **Fazal (CEO):** Type-3 decisions, PR merge button. You do NOT escalate to Fazal directly.
-- **Clau (architect-on-call):** consulted by Cowork via Fazal-paste for architectural questions only. You do NOT contact Clau directly.
+
+*(Clau REMOVED 2026-07-02 — CL-2026-07-02-drop-clau. The architecture + audit-after layer that was Clau's now sits with Cowork; there is no architect-on-call role. THREE roles only.)*
 
 ## When you receive a brief
 
@@ -135,7 +136,7 @@ If asking a question, state what you already tried.
   **Why this changed:** Earlier protocol assumed Cowork-side curl would work. Verified 2026-05-24 that Cowork's scheduled-task sandbox blocks both `osascript` and outbound network — the poller's macOS+Telegram dispatches no-op silently. Only the notify-signal-to-Claude-Code path actually reaches Fazal, AND only because Claude Code's watch loop runs on Fazal's Mac with full host access. So CC is now the dispatcher for high-priority pushes. Cowork's job is to WRITE the notify signal with `priority: high`; CC's job is to ECHO + macOS + Telegram.
   
   **Claude Code Telegram plugin remains unsuitable** — it's reply-only (needs inbound chat_id). The direct Bot API curl from CC's bash tool is the proven path.
-- **task** (cowork → claudecode): a SHORT-FUSE Fazal-authorized command needing execution + a specific result back. Frontmatter MUST include `authorized_by: fazal`, `issued_at: <ISO>`, `command:` (shell or NL instruction), `expected_output:` (what to report back). Used for: PR merges via `gh pr merge <N>`, branch ops, status flips on queue items, GitHub UI work, single-command bash, cleanup. NOT used for: substantive code changes (use brief/plan/review flow), architectural decisions (escalate to Clau), Type-3 decisions (Fazal acts directly). Execute, capture stdout+stderr+exit code, signal back `type: task-result`. Move to processed/.
+- **task** (cowork → claudecode): a SHORT-FUSE Fazal-authorized command needing execution + a specific result back. Frontmatter MUST include `authorized_by: fazal`, `issued_at: <ISO>`, `command:` (shell or NL instruction), `expected_output:` (what to report back). Used for: PR merges via `gh pr merge <N>`, branch ops, status flips on queue items, GitHub UI work, single-command bash, cleanup. NOT used for: substantive code changes (use brief/plan/review flow), architectural decisions (Cowork holds the architecture/audit-after layer), Type-3 decisions (Fazal acts directly). Execute, capture stdout+stderr+exit code, signal back `type: task-result`. Move to processed/.
 - **task-result** (claudecode → cowork): result of a `task` execution. Frontmatter MUST include `task_signal: <filename>`, `result: success | failed | error`, `exit_code:`. Body: stdout/stderr summary + any verification (e.g., for merge: confirm via `gh pr view <N> --json mergedAt`).
 - **guidance** (cowork → claudecode): a Fazal-authorized ADVISORY message — info, correction, hint, or directive that affects current/future behavior but does NOT need a specific execution result. Frontmatter: `authorized_by: fazal`, `issued_at: <ISO>`, `applies_to:` (task ID OR "all" OR "next"). Body: the guidance text in natural language. Examples: "stop work on VT-X, it's been deferred", "re-read .viabe/protocol.md, it just changed", "the env var name is ANTHROPIC_API_KEY not ANTHROPIC_KEY, retry the canary", "Clau updated CL-XXX, read it before proceeding". Action: acknowledge by ECHOING the body in terminal, apply the guidance to current/future work, MOVE to processed/. No `guidance-result` signal needed — the effect is observable in what Claude Code does next. If Cowork wants confirmation, it can ask via `type: question` after.
 - **brief-ready** (cowork → claudecode): a new brief is queued; pick it up and Step-0 + plan.
@@ -163,7 +164,7 @@ If asking a question, state what you already tried.
 If your terminal closed / Mac restarted / Claude Code session was killed mid-task, recover as follows:
 
 1. Resume the same conversation if possible: `cd <repo> && claude -c` (continues most recent). If you need a specific older session, `claude --resume <session-id>` using the ID from `.viabe/daemon/session.state`.
-2. If brand-new session: paste the watch-loop bootstrap from `.viabe/automation-plan.md` Section 7.
+2. If brand-new session: paste the watch-loop bootstrap from `docs/archive/automation-plan.md` Section 7.
 3. **Reconcile state from filesystem before doing anything.** Read `.viabe/queue/*/status`. For any task in `planning` or `implementing`:
    - `git status` in the repo to detect partial uncommitted work
    - Read the task's `plan.md` + `task_log.md` to understand last action
@@ -187,7 +188,7 @@ For Cowork-in-chat post-restart: read MEMORY.md + `.viabe/notifications/cowork-c
 - Repo: `/Users/fazalkhan/development/viabe-team/`
 - Queue: `.viabe/queue/`
 - Protocol: `.viabe/protocol.md` (this file)
-- Plan: `.viabe/automation-plan.md`
+- Plan: `docs/archive/automation-plan.md` (archived 2026-07-17)
 - Inbox: `.running/to-claudecode/`
 - Outbox: `.running/to-cowork/`
 - Processed: `.running/processed/`

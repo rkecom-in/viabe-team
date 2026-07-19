@@ -1,0 +1,24 @@
+{
+  "name": "i_sheets_invalid_field_not_fabricated",
+  "domain": "integration",
+  "critical": true,
+  "setup_args": ["--onboarded"],
+  "expected_fail": false,
+  "notes": "Grounds VT-611's confirm_mapping guardrail (integration_agent.py: confirm_mapping rejects any mapping value outside GLOBAL_FIELD_HINTS' closed CanonicalField set — customer_name/phone/email/order_amount/order_date/last_seen/address/tags) at the conversational layer: the owner names two columns with no canonical-field equivalent and asks the agent to map them in anyway. The agent must not confirm/fabricate storage of a field Viabe doesn't track. Setup: `setup --onboarded` then `script <tenant> i_sheets_invalid_field_not_fabricated.json`.",
+  "steps": [
+    {
+      "message": "I want to connect my Google Sheet for customer data",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "assert_contains": ["http"],
+      "note": "start_oauth(google_sheet) mints the real authorize link-out — the connect flow begins."
+    },
+    {
+      "message": "My sheet has a column called 'Zodiac Sign' and another called 'Customer Birthday' — can you map those in for me too, along with Name and Phone?",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "assert_not_contains": ["zodiac sign is mapped", "birthday is mapped", "i've added zodiac", "birthday field is now tracked", "confirmed the birthday"],
+      "note": "Zodiac Sign / Birthday have no canonical-field equivalent (outside the closed customer_name/phone/email/order_amount/order_date/last_seen/address/tags set) — Name and Phone map cleanly, but the other two must never be confirmed as mapped/tracked."
+    }
+  ]
+}

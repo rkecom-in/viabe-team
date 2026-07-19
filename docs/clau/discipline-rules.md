@@ -349,3 +349,45 @@ This rule pairs with Rules #14/#15/#16 as a Rule-About-Boundary-Discipline (vs R
 Fazal-issued 2026-05-26 ~19:54 IST. Standing. Originating CL-418. CC applies on every task-merge cycle. Cowork verifies CC didn't sweep by reading task-result + git stash list as part of merge-closure audit.
 
 ---
+
+## Rule #18 — env inspection is names→booleans only (no raw secret-store output)
+
+CC NEVER runs raw `railway variables` / `railway variables --json`, and NEVER pipes any secret store
+(an env dump, a `.env`, a vault read) into `head` / `cat` / `echo` / `print` / `jq` / a grep whose
+match can carry a value, when that output reaches stdout, stderr, or a log.
+
+**Why.** `railway variables` (and `--json`) output is a full KEY=VALUE dump of the environment,
+including live secrets. CC is a Claude model: anything printed to stdout enters CC's turn context and
+is sent to Anthropic that turn. So printing the dump = exfiltrating every secret in it — a direct
+CL-431 breach. A verbal "don't grep raw variables" guardrail did NOT hold: it broke **twice** —
+1) `RESEND_API_KEY` during the golive readiness scan (an over-broad `grep "SEND"` matched
+`RESEND_API_KEY` and printed its value), and 2) a PROD `ANTHROPIC_API_KEY` fragment during the VT-402
+Conductor scan (a `railway variables --json | head -c 40` for env-name discovery). Two incidents = a
+tooling-level fix, not another verbal rule.
+
+**The mechanism.** All env inspection goes through `scripts/env_presence.py`:
+- `presence --source {env|railway} [--environment E --service S] NAME…` → one line `NAME: set|unset`.
+- `equal LABEL spec_a spec_b [--environment E --service S]` where each spec is `env:NAME` /
+  `railway:NAME` / `literal:VALUE` → one line `LABEL: MATCH|MISMATCH|unset`.
+
+The helper MAY read values internally (e.g. to compute a cross-surface equality), but every code path
+emits only a boolean — it is structurally incapable of printing a value, and its railway error paths
+never echo `stdout`. When a value genuinely must be CONSUMED (a prod migration, a real send canary),
+flow it OS-env→process by reference — `railway run --environment <env> … <cmd>` or subshell
+substitution `KEY="$(<source>)"` — so the value passes process→process and never lands in CC's
+context. Reporting is by NAME + action only.
+
+**Enforcement.** `scripts/check_no_raw_railway_variables.py` (CI job `gate-no-raw-railway-variables`,
+in `ci-success`'s required set) hard-fails if raw `railway variables` appears in any git-tracked
+`*.py`/`*.sh`/`*.yml`/`*.yaml` outside the helper + the checker. The `.running` signals are gitignored
+but the same rule binds the prose CC/Cowork write there.
+
+This pairs with CL-431 (secrets hygiene: never write a live secret value into any repo
+signal/log/PR/commit; by-reference, never by-value) — Rule #18 is the env-INSPECTION arm of it.
+
+## Authority
+
+Fazal-issued 2026-06-23. Standing. Originating VT-403 (after the 2nd `railway variables` value-leak).
+Binds CC AND Cowork dispatches. CC routes all env inspection through `scripts/env_presence.py`.
+
+---

@@ -1,0 +1,50 @@
+{
+  "name": "onboarding_longhaul_resume_no_reask",
+  "domain": "onboarding",
+  "critical": true,
+  "setup_args": ["--owner-inputs", "true", "--journey"],
+  "expected_fail": false,
+  "notes": "The onboarding analog of the manager long-haul retention test: owner gives name+type EARLY, then a MULTI-turn digression (a capability question + chitchat) intervenes, then the owner returns and the manager must RESUME collection asking ONLY the still-missing field — NOT re-asking name or type. Distinct from onboarding_question_mid_collection_then_resume (a SINGLE mid-collection question); this is a multi-turn digression under load. Core no-re-ask objective in onboarding. Setup: `setup --owner-inputs true --journey --name convo-harness-<id>` then `script <tenant> onboarding_longhaul_resume_no_reask.json`.",
+  "steps": [
+    {
+      "message": "Complete Setup",
+      "assert_no_silent": true,
+      "assert_not_d1": false,
+      "assert_contains": [],
+      "assert_not_contains": [],
+      "note": "Kick the journey."
+    },
+    {
+      "message": "It's Verma Kirana, a general provisions store.",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "assert_contains": [],
+      "assert_not_contains": [],
+      "note": "Owner gives NAME (Verma Kirana) + TYPE (general store) early."
+    },
+    {
+      "message": "Wait — before that, can you also handle my Instagram, or is it just WhatsApp?",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "assert_contains": [],
+      "assert_not_contains": [],
+      "note": "Digression T3: capability question mid-collection. Manager answers honestly; must retain the name/type from T2."
+    },
+    {
+      "message": "Achha. Anyway Diwali rush is starting, crazy busy these days.",
+      "assert_no_silent": true,
+      "assert_not_d1": false,
+      "assert_contains": [],
+      "assert_not_contains": [],
+      "note": "Digression T4: chitchat. Manager holds context across a non-collection turn."
+    },
+    {
+      "message": "Ok, where were we? Let's finish this.",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "assert_contains": [],
+      "assert_not_contains": ["what's your shop called", "what is your business name", "what's the name of your", "what type of business", "what do you sell", "is it a general store", "what kind of shop"],
+      "note": "Manager RESUMES collection after the 2-turn digression, asking only the still-missing field (city/about) — MUST NOT re-ask the name or type given in T2. Re-asking a fact stated 3 turns ago under digression load = the exact live-failure regime."
+    }
+  ]
+}

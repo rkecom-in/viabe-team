@@ -2,11 +2,14 @@
 
 You (Claude) just got pointed at this repo. **Read these files first, in this order, before answering any question or starting any work.** Skipping any of them is the #1 reason fresh sessions misroute work.
 
-1. **`docs/clau/operating-brief.md`** — defines the four-role model (Fazal/Cowork/Claude Code/Clau), the sequencing principle, and how decisions flow. ~5 min read.
+1. **`docs/clau/operating-brief.md`** — defines the three-role model (Fazal/Cowork/Claude Code), the sequencing principle, and how decisions flow. ~5 min read.
 2. **`docs/clau/latest-snapshot.md`** — 5-field State Snapshot: Critical Path / In Flight / Blocked On / Next Action / Do Not. **Treat as suspect until reconciled.** This file drifts; see Rule #14 below.
 3. **`docs/clau/decisions-ledger.md`** — flat list of every Standing decision with originating CL number. Do not re-litigate anything in here.
-4. **`docs/clau/active-context-summary.md`** — Cowork-maintained digest of every active CL + brief contract. Required reading before any brief-ready dispatch (Rule #16).
-5. **`docs/clau/discipline-rules.md`** — full text of Rules #1–17. Reference; read on demand.
+4. **`docs/agent-framework/ARCHITECTURE.md`** — CANONICAL definition of how the system is shaped (Manager / SubAgent / Tool; ratified Fazal 2026-07-16). The structural source of truth.
+5. **`docs/clau/active-context-summary.md`** — Cowork-maintained digest of every active CL + brief contract. Required reading before any brief-ready dispatch (Rule #16).
+6. **`docs/clau/discipline-rules.md`** — full text of Rules #1–17. Reference; read on demand.
+
+**Doc map:** `docs/README.md` is THE documentation index — every live doc, tiered by authority, plus what's archived. If a doc isn't listed there, it's structured history (sprint rows / session-log entries) or archived.
 
 After reading, **reconcile the snapshot against reality** before trusting it:
 
@@ -30,20 +33,23 @@ If the snapshot's HEAD / IN FLIGHT / NEXT ACTION doesn't match what `git log` sh
 - `apps/team-ingestion-worker/` (Python 3.13, Apify + Sarvam) — **Phase-1 `SystemExit` scaffold (VT-17), NOT deployed.** Platform ingestion actually runs IN the orchestrator via the apify method path (`integrations/methods/apify_gbp.py`, `apify_food.py` → `business_profile` aggregate + VT-325 `platform_listings` per-listing rows), not in this worker.
 - `packages/team-shared/` (cross-app types)
 
+**Positioning (Fazal 2026-06-13 — CL-440, carry this every session):** **Viabe Team is the core product** — the autonomous AI business platform that runs business tasks for owners. **Viabe Reports is an awareness feature**, not a co-equal product (top-of-funnel: build the Viabe brand, attract founders). In all external/positioning contexts, Reports is referred to as **"Viabe's Location Feasibility Report"**; Viabe Team stays **Viabe Team**. Reports remains a technically separate codebase/DB/KG — "feature" is the market framing, not a repo merge.
+
 **Binding launch milestone:** Reports-Jun15 (2026-06-15). Sprints 1+2 ship for that gate; everything else is ship-thin.
 
 **Repo:** `github.com/rkecom-in/viabe-team` (**private** — auth required for fetch/clone). Local clone at `/Users/fazalkhan/development/viabe-team`. **Main protection = an account-level ruleset; "Require status checks to pass" was turned OFF 2026-05-30 (VT-245)** — CI checks no longer block merges. The **local pre-push hook** (`scripts/git-hooks/pre-push`, install via `scripts/install-hooks.sh`) is the safety gate; CI is a non-blocking backstop on PRs. Route-via-PR remains a convention, not an enforced gate.
 
 ---
 
-## The four roles (full text in `docs/clau/operating-brief.md`)
+## The three roles (full text in `docs/clau/operating-brief.md`)
+
+**Clau REMOVED 2026-07-02 (CL-2026-07-02-drop-clau).** The model is now THREE roles; Clau's audit-AFTER + architecture layer folds into Cowork.
 
 | Role | Owns |
 |---|---|
 | **Fazal (CEO)** | All final calls. Product, pricing, privacy/legal, scope, launch. Authorizes every merge (Pillar 7). Can override anything. |
-| **Cowork (delivery captain)** | The tracker, sprint progress, status reconciliation, daily briefs, rostering, routing work to CC. Decides within-sprint operational matters using standing rules. Runs the loop **without Clau** by default. |
-| **Claude Code (implementer)** | Decision role inside a task — implementation approach, code-level design, refactors, library use, tests, bug fixes. MUST log every material step + decision so Clau's audit layer has substrate. |
-| **Clau (architect)** | Implementation strategy + cross-sprint sequencing. Audit-AFTER, not approval-before. Runs at sprint boundaries, on request, or when something looks off. |
+| **Cowork (delivery captain + audit-after)** | The tracker, sprint progress, status reconciliation, daily briefs, rostering, routing work to CC. Decides within-sprint operational matters using standing rules. **Audits what CC lands (the layer that was Clau's).** |
+| **Claude Code (implementer)** | Decision role inside a task — implementation approach, code-level design, refactors, library use, tests, bug fixes. Builds + logs + **self-gates** before landing. |
 
 ---
 
@@ -101,6 +107,8 @@ This is how delivery actually happens between Fazal-issued scope grants. Fresh s
 
 ### Orchestrator modes
 
+**On every (re)start, FIRST read [`.viabe/cc-startup-protocol.md`](.viabe/cc-startup-protocol.md) and run its startup sequence in order** — return the tree to clean `dev` → drain the FULL inbox oldest-first → reconcile vs `git log origin/dev` (Rule #14) → announce liveness — before any new work. In-session watchers/crons DIE on a process restart and do not self-recover; that protocol is the recovery discipline (archive signals only AFTER execution; re-arm-first on every wake; heartbeat >10min tasks). Cowork-mandated 2026-06-24 after two restart-stalls.
+
 CC runs under one of two orchestration modes:
 
 - **Interactive `claude -c` watch loop** — Fazal's primary today. Opened in a
@@ -139,13 +147,23 @@ Fazal grants scope at **batch level** ("ship batch 9," "complete the queued task
 
 **New scope = new explicit grant.** You don't ask mid-batch for every step, but you also don't widen scope without asking.
 
-### Merge workflow (post-VT-245, 2026-05-30)
+### Merge workflow (post-VT-245, 2026-05-30; dev-branch governance VT-363/CL-432, 2026-06-09)
+
+**Branch governance (VT-363, Fazal 2026-06-09 — CL-432):** there are TWO long-lived branches.
+**`dev`** → Railway Dev + Vercel `viabe-team-web-dev` + Supabase Seoul (the deployed, E2E-tested env).
+**`main`** → Railway Prod + Vercel `viabe-team-web` + Supabase Mumbai (deliberate, real customer data).
+- **CC's default PR base is `dev`.** CC self-merges [BUILD] rows on green into **`dev`** (CL-429, now → dev); risk rows (money/auth/PII/RLS/classifier) still get the Cowork subagent gate before the dev merge.
+- **`main` is Fazal-authorized ONLY.** CC NEVER merges to `main` without an explicit Fazal `type: task` promotion instruction (the new Pillar-7 gate). A `dev`→`main` promotion PR opens only on Fazal's word; Cowork relays it. A PR targeting `main` is forbidden unless it's that authorized promotion.
+- Flow: feature branch → PR into `dev` → CC self-merge on green → Dev deploy → phase E2E → **Fazal authorizes dev→main promotion** → Prod.
 
 Main protection is an account-level ruleset, but **"Require status checks to pass" is OFF** (Fazal, 2026-05-30) — CI no longer gates merges. The **local pre-push hook is the safety gate**; run `scripts/install-hooks.sh` once after cloning. CI is a non-blocking backstop on PRs.
 
 - **Before every push:** the `pre-push` hook runs the fast CI-equivalent suite (ruff + dep-less smoke + team-web tsc/vitest/lint + a conditional orchestrator docker build). It aborts the push on failure. Bypass with `git push --no-verify` (sparingly). Never push code the hook (or the equivalent local commands) hasn't passed — failing CI burns Actions minutes.
 - **Trigger-diet (VT-245):** ci.yml + deploy-dev.yml `paths-ignore` docs/sprint/session/cross-workflow changes, so those PRs/merges run 0 jobs.
 - Route-via-PR remains the convention (not enforced).
+- **CC MAY PUSH `origin/dev` WHEN REQUIRED (STANDING, Fazal 2026-06-28 — supersedes the 06-27 explicit-push rule).** Fazal granted CC push authority to `origin/dev`; no longer wait for a Fazal-explicit "push". Guardrails that REMAIN (cost control was the original reason — keep it sane): push only at a **DEPLOYABLE CHECKPOINT** (a coherent, green, gate-passed unit — NOT per-change), **BATCH** commits into ONE push, the **pre-push hook must be green** (`--no-verify` only for the known pre-existing l2_send lint), and `main` stays **Fazal-only**. "When required" = judgment: a checkpoint worth deploying, not every commit. See `decisions-ledger.md` (CL-2026-06-28-push-authority) + `.viabe/cc-startup-protocol.md`.
+- **CC FULL AUTONOMY — Cowork is AUDIT-AFTER, not gate-before (STANDING, Fazal 2026-06-28 21:30).** CC no longer waits on a Cowork bless/review for ANYTHING (risk rows included). **CC owns the gate:** run your own adversarial-verify + self-check against the no-drift contract BEFORE landing, then self-merge to dev + push at checkpoints. Cowork now audits what LANDS (against the agreed journey + risk) and raises to Fazal — it never holds/blocks CC, never a bottleneck. **Raise any need/blocker DIRECTLY to Fazal in the terminal** (a line in your response) — NOT a `to-cowork` signal you then block on. **What still binds CC directly** (these were never "Cowork's" gates): `main` Fazal-only (Pillar-7); the no-drift contract (203500Z — WhatsApp-conversational primary, gates stay real, MCA/PAN parked); keep correctness gates (GST/ownership/consent/onboarded/opt-out — never bend to make the e2e pass); no number/data unless Fazal provided it; dev harnesses prod-safe (EXPECTED_ENV=dev, fail-closed); NO real customer send before Fazal's sign-off. See `decisions-ledger.md` (CL-2026-06-28-cc-full-autonomy).
+- **VALIDATION HAPPENS ON DEPLOYED DEV, NEVER LOCALLY (STANDING, Fazal 2026-06-29).** Dev is the validation branch. A dead/absent local Anthropic key (or any local-LLM gap) is NOT a blocker — always PUSH to dev (CC push authority) + validate the re-drive THERE (Railway holds the valid LLM key). Do not hold a push/validation waiting on local-LLM availability. See `decisions-ledger.md` (CL-2026-06-29-validate-on-dev).
 - Recurring flakes (being fixed in VT-245): RLS service_count + chrono-order in `test_pipeline_log.py` — rerun via `gh pr checks <N> --watch` if they trip pre-fix.
 
 ### Deploy topology (ground truth, 2026-05-30 — check this BEFORE debugging a failing deploy)
@@ -153,7 +171,7 @@ Main protection is an account-level ruleset, but **"Require status checks to pas
 A `railway up` CLI job was debugged for an hour this session chasing `RAILWAY_TOKEN` — it was redundant with Railway's native auto-deploy, and its failure was *blocking* that native deploy. Root cause: the topology lived only in the Railway dashboard. So, the ground truth:
 
 - **Orchestrator (`apps/team-orchestrator`)** → **Railway NATIVE GitHub auto-deploy**. The Railway service is connected to `rkecom-in/viabe-team`, branch `main`, "Auto deploys on push" ON, "Wait for CI" ON. **There is NO `railway up` in CI** (the redundant job was removed in VT-246 / #154). Railway redeploys itself once `deploy-dev` is green. No `RAILWAY_TOKEN` in CI (secret unused/deletable).
-- **team-web (`apps/team-web`)** → **Vercel CLI job in `deploy-dev.yml`** (`vercel pull/build/deploy --prebuilt`, `VERCEL_TOKEN`; runs at repo root, project root-dir = `apps/team-web`; needs pnpm via `pnpm/action-setup`). Triggers on push to main.
+- **team-web (`apps/team-web`)** → **Vercel NATIVE Git auto-build** on push to `dev` (Fazal re-enabled "auto-build on push" for the `viabe-team-web-dev` project, 2026-06-27). The old Vercel CLI `--prebuilt` job in `deploy-dev.yml` was **REMOVED** (it double-built AND didn't auto-attach the production alias = the stale-URL bug). `deploy-dev.yml` is now `pre-deploy-checks` ONLY (Railway's "Wait for CI" still gates the orchestrator deploy on it being green). Native auto-build auto-attaches the production alias to the latest deploy. Now-unused secrets: `VERCEL_TOKEN`/`VERCEL_ORG_ID`/`VERCEL_PROJECT_ID`.
 - **`deploy-dev.yml`** = `pre-deploy-checks` + the Vercel job only. Because Railway's "Wait for CI" skips the native deploy if ANY Action on the push fails, **keeping `deploy-dev` green is what lets the orchestrator deploy** — a red CI run silently blocks it.
 - **Discipline:** before "fixing" a failing deploy/CI step, check this topology first — don't repair a step that's redundant with platform-native config (Railway/Vercel dashboards own the actual deploy).
 
@@ -161,8 +179,8 @@ A `railway up` CLI job was debugged for an hour this session chasing `RAILWAY_TO
 
 The single-env mechanics above describe the **Dev** path. The full topology is now **Dev + Prod**:
 
-- **Railway** — ONE project, TWO environments: **Dev** + **Prod**. Hosts the orchestrator. (Which branch/trigger maps to which Railway env — e.g. `main`→Prod vs a dev branch→Dev — is an OPEN wiring decision deferred to the **VT-231** cutover, NOT decided now; today `main`→the existing service.)
-- **Vercel** — TWO projects: **`viabe-team-dev`** (exists, dev) + **`viabe-team`** (PROD, **not yet created** — creation + deploy wiring = VT-231 cutover scope). Hosts team-web.
+- **Railway** — ONE project, TWO environments: **Dev** ← `dev` branch + **Prod** ← `main` branch (decided VT-363/CL-432). Hosts the orchestrator (`vt-orchestrator-service`). `EXPECTED_ENV=dev` set on Railway Dev (VT-362 guard); `EXPECTED_ENV=prod` Fazal-set on Prod. The env→branch trigger itself is a Railway-console setting (not CLI-inspectable) — verify/set it in the dashboard.
+- **Vercel** — TWO projects: **`viabe-team-web-dev`** (exists, dev) + **`viabe-team-web`** (PROD, **not yet created** — creation + deploy wiring = VT-231 cutover scope). Hosts team-web. **Name-collision note:** the Vercel projects are `viabe-team-web-dev` / `viabe-team-web` — distinct from the **Supabase** dev project `viabe-team-dev` (a different service; ground truth = `apps/team-web/.vercel/project.json` → `viabe-team-web-dev`). Do not conflate them.
 - **Supabase** — TWO projects: **dev = Seoul (`ap-northeast-2`)**, **prod = Mumbai (`ap-south-1`, being created)**. ADR-0003 dual-project + [[CL-422]] (dev-Seoul accepted; NO real customer data on dev until VT-231). Fazal chose two separate projects over single-project-branching (2026-06-09).
 - **CC console access (2026-06-09):** CC has direct management access to the **Supabase** (both projects), **Railway**, and **Vercel** consoles — Fazal logged CC in. CC can read/set env vars directly, **subject to the authority gate below (CL-431).**
 - **Authority gate (CL-431):** CC manages **DEV** env vars autonomously; **every PROD env-var change (config OR secrets) requires explicit Fazal authorization first** — the Pillar-7 analog for infrastructure. **Secrets hygiene (binding):** CC NEVER writes a live secret VALUE into any repo signal/log/PR/commit (the repo is git — an echoed secret is a committed secret); CC sets/rotates in the console and reports ONLY the variable NAME + action. **By-reference, never by value:** for any prod secret CC sets, pipe/substitute the value in a subshell (`railway variables set KEY="$(<source-cmd>)"`) — CC is FORBIDDEN from running anything that echoes a secret to stdout (`cat`/`echo`/`print`/get-variable-plaintext), because CC is a Claude model and plaintext in its context goes to Anthropic that turn. **Supabase PROD creds:** Fazal sets the VALUE; CC never READS the plaintext (no `cat`/`echo`/`print`/open), but a process CC LAUNCHES may CONSUME it from an injected env — `railway run --environment <prod> python …/apply_migrations.py` flows the value OS-env→process, never into CC's context — that's how CC runs prod migrations without knowing the credential (reports only the result + var NAME). **A prod migration run is itself Fazal-authorized** (prod-impacting, Pillar-7 spirit). **Env isolation (dev/prod must never jumble):** always pass `railway --environment <dev|prod>` explicitly (never the linked default); never source `supabase-dev.env` in the same shell as a prod-injected run (ambient dev `DATABASE_URL` would shadow the injected prod one); `apply_migrations.py` is guarded — it refuses unless the connected DB matches an explicit `--expected-env` (VT-362 `app_environment` sentinel); no seed data ever against `--expected-env prod`. See `decisions-ledger.md` CL-431.
@@ -185,6 +203,8 @@ When sandbox `git add` fails with `fatal: Unable to create '.git/index.lock': Fi
 
 **Rule #17 / CL-418 — shared git index.** Single working tree shared across Fazal + Cowork + CC + Claude chat. CC must NOT `git stash --include-untracked` (-u). CC must use explicit `git add <files>`, NOT `git commit -am`. Working-tree obstacles → signal Cowork + wait; don't workaround. Triggered by VT-30 + VT-178 sweep recurrence.
 
+**Rule #18 / VT-403 — env inspection is names→booleans only.** CC NEVER runs raw `railway variables` / `railway variables --json`, and NEVER pipes any secret store (env dump, `.env`, vault) to `head`/`cat`/`echo`/`print`/`jq`/a grep whose match can carry a value, when its output reaches stdout. `railway variables` output carries live secret VALUES; printing it puts a secret in CC's turn context (→ Anthropic that turn) — a CL-431 breach that happened **twice** (`RESEND_API_KEY` golive scan, then a PROD `ANTHROPIC_API_KEY` fragment in the VT-402 Conductor scan). **All env inspection goes through `scripts/env_presence.py`:** `presence --source {env|railway} NAME…` → `NAME: set|unset`; `equal LABEL spec_a spec_b` (specs `env:`/`railway:`/`literal:`) → `LABEL: MATCH|MISMATCH|unset`. It reads values internally but emits only booleans. When a value MUST be consumed (a prod migration, a send canary), flow it OS-env→process by-reference (`railway run …` / subshell substitution) — never into CC's context. Enforced by the `gate-no-raw-railway-variables` CI check. **Binds CC AND Cowork dispatches.**
+
 **Pillar 7 — Fazal-authorized merges.** Every PR merge requires `type: task` with `authorized_by: fazal`. Never auto-merge. Session-blanket auth is grant-scoped, not perpetual.
 
 **CL-421 (Locked Standing, 2026-05-29)** — ALL Integration Agent connectors MUST be zero-manual-paste after OAuth. Triggered by VT-212 Apps Script paste step being customer-hostile for the Tier-2/3 SMB persona.
@@ -198,6 +218,8 @@ When sandbox `git add` fails with `fatal: Unable to create '.git/index.lock': Fi
 **Migration numbers via the allocator only.** New migrations MUST claim their number through `scripts/migration_id_allocate.py` (flock-serialized, like the VT-ID allocator) — never hand-pick by scanning `migrations/`. Unlocked directory-scan picking is the recurring collision source under parallel work (e.g. VT-240 + VT-86 both reaching for 047). CL-424.
 
 **Ultracode + parallel fan-out (CL-424).** CC runs xhigh ultracode for all tasks; dynamic-workflow fan-out happens when the orchestrator warrants it. Binding guardrails: (1) allocate every VT-ID and migration number ONCE up-front, before any parallel phase — never let parallel subagents grab IDs/numbers concurrently (both allocators are flock-serialized but the discipline is to assign before fan-out, not race the lock); (2) one coherent PR per numeric VT row regardless of subagent count; (3) Cowork plan-first review still applies on big/risky rows; (4) Pillar-7 Fazal-authorized merge is unchanged.
+
+**Fix agreed issues IMMEDIATELY — no "post-e2e" parking (STANDING, Fazal 2026-06-28).** Once Fazal + Cowork agree something is broken/wrong, build the fix NOW — do NOT roster it as "after the run / post-e2e." The build-discipline is unchanged ("immediately" ≠ "skip the gates"): allocate the VT-id up-front → plan/build → adversarial-verify → Cowork gate → Fazal's explicit origin/dev push → deploy; risk rows (e.g. anything touching the GST verify/gate path) still get the plan-first gate; one coherent PR per row. Only genuinely-new SCOPE (vs an agreed fix) waits for a Fazal grant.
 
 **Don't re-litigate Standing decisions.** If it's in the ledger, it's settled.
 

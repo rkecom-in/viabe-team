@@ -6,13 +6,33 @@
 # subscriptions (service-role). team-web NEVER sees a resolved plan_id/amount; it sends
 # only plan_tier (Cowork Q1 — the money-authoritative mapping stays at the service-role
 # layer so a team-web bug can't create a subscription at the wrong plan/price).
+# total_count = the number of billing cycles Razorpay charges before the subscription
+# auto-completes (mandatory on subscription.create). Config, not code (VT-424) — kept here
+# alongside the price so a billing-term change is a config edit, not a code change. 120 monthly
+# cycles = a 10-year horizon (effectively "until cancelled"); cancellation is the real lifecycle
+# end, this is just the vendor-required upper bound.
+#
+# VT-429 — single-plan launch gate. `offered_tiers` is the SERVER-SIDE allowlist of the tiers an
+# owner may actually subscribe to right now. It is checked in razorpay_subscribe BEFORE
+# resolve_plan: a plan_tier NOT in this list is rejected (4xx) with NO subscription and NO vendor
+# call — never trust the client to send only an offered tier. At launch Fazal offers STANDARD
+# ONLY; founding + pro stay DEFINED below (so they resolve once re-offered) but are deliberately
+# OUT of this list. Widening post-launch = add a tier here (one config edit). Fail-closed: this
+# key being EMPTY or ABSENT means "offer NOTHING" (every tier → 4xx) — it must NEVER default to
+# "offer everything". The list is a top-level allowlist (not a per-plan flag) so "what is offered"
+# is auditable in one place and the default-deny is a single explicit gate.
+offered_tiers:
+  - standard
 plans:
   founding:
     amount_paise: 249900
+    total_count: 120
     plan_id_env: FOUNDING_RZP_PLAN_ID
   standard:
     amount_paise: 499900
+    total_count: 120
     plan_id_env: STANDARD_RZP_PLAN_ID
   pro:
     amount_paise: 1499900
+    total_count: 120
     plan_id_env: PRO_RZP_PLAN_ID

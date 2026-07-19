@@ -24,7 +24,6 @@ import re
 import time
 from pathlib import Path
 from typing import Any
-from uuid import UUID
 
 import pytest
 import yaml
@@ -217,23 +216,36 @@ def test_validate_params_correct_keys_no_raise():
 # ---------------------------------------------------------------------------
 
 
+# VT-383 (CL-438, 2026-06-12): F1 armed the two Gap-5 winbacks — Meta-approved
+# SIDs wired + agent_selectable flipped true. The live VT-45 selectable set grew
+# from {team_weekly_approval} to {team_weekly_approval, team_winback_simple,
+# team_winback_offer}. The 3 owner_notification surfaces stay non-selectable.
+_SELECTABLE_SET = frozenset(
+    {"team_weekly_approval", "team_winback_simple", "team_winback_offer"}
+)
+
+
 def test_approved_template_names_en_returns_only_selectable():
     names = approved_template_names("en", _path=_REAL_YAML_PATH)
     assert isinstance(names, tuple)
-    assert "team_weekly_approval" in names
+    # VT-383: the live selectable set is exactly these three (D5 pin, armed shape).
+    assert set(names) == _SELECTABLE_SET, f"selectable set drifted: {sorted(names)}"
     # Verify non-selectable templates are excluded.
     for name in ("team_opt_out_confirmation", "team_dsr_acknowledgment",
                  "team_error_handler", "team_status_ping",
                  "team_unable_to_complete_request", "team_agent_stuck_escalation",
-                 "team_welcome"):
+                 "team_welcome",
+                 # Gap-5 owner surfaces — system-invoked, never agent-selectable.
+                 "team_agent_draft_approval", "team_l3_presend_notice",
+                 "team_autonomy_offer"):
         assert name not in names, f"{name} should not be agent_selectable"
 
 
 def test_approved_template_names_hi_populated():
-    """VT-163-fix-1: hi SIDs populated — the agent-selectable template
-    (team_weekly_approval) now has a hi variant, so hi names are non-empty."""
+    """VT-163-fix-1: hi SIDs populated. VT-383: F1 armed the two winbacks in hi
+    too (Meta-approved hi SIDs), so the hi selectable set matches en."""
     names = approved_template_names("hi", _path=_REAL_YAML_PATH)
-    assert names == ("team_weekly_approval",)
+    assert set(names) == _SELECTABLE_SET, f"hi selectable set drifted: {sorted(names)}"
 
 
 # ---------------------------------------------------------------------------
@@ -461,22 +473,21 @@ def test_campaign_not_sent_validate_params_accepts_signature():
 
 
 # --------------------------------------------------------------------------- #
-# VT-45-wire (Fazal 2026-06-06) — the 5 business-initiated templates are LIVE
+# VT-365 (Fazal 2026-06-09) — 30-day flat trial, NO refund, NO trial extensions.
+# The refund subsystem + trial extensions are removed: `trial_extension_offered`,
+# `trial_max_reached`, `refund_offer`, `refund_completed` are retired from the
+# canonical registry (`.viabe/templates.md`). Only `trial_ending` survives as the
+# trial-lifecycle warn template (subscribe-or-lapse).
 # --------------------------------------------------------------------------- #
-_VT45_LIVE = (
-    "trial_ending",
-    "trial_extension_offered",
-    "trial_max_reached",
-    "refund_offer",
-    "refund_completed",
-)
+_VT365_TRIAL_LIVE = ("trial_ending",)
 # The 3 in-window acks are FREE-FORM (not templates) — REMOVED from the registry in VT-349.
 _VT349_FREEFORM_REMOVED = ("refund_processing", "support_handoff", "team_edge_case_ack")
 
 
-def test_vt45_wire_five_templates_resolve_live_sid_both_langs() -> None:
-    """Each of the 5 × {en, hi} resolves a non-null HX content_sid (no fail-closed stub)."""
-    for name in _VT45_LIVE:
+def test_trial_ending_resolves_live_sid_both_langs() -> None:
+    """VT-365: the surviving trial-lifecycle template (`trial_ending`) resolves a
+    non-null HX content_sid in {en, hi} (no fail-closed stub)."""
+    for name in _VT365_TRIAL_LIVE:
         for lang in ("en", "hi"):
             sid = reg.content_sid_for(name, lang)
             assert sid is not None, f"{name}[{lang}] still null (fail-closed)"
@@ -491,32 +502,6 @@ def test_vt349_freeform_acks_removed_from_registry() -> None:
     for name in _VT349_FREEFORM_REMOVED:
         with pytest.raises(UnknownTemplateError):
             reg.content_sid_for(name, "en")
-
-
-def test_vt45_send_template_uses_wired_sid(monkeypatch) -> None:
-    """send_template_message resolves + sends the wired SID (stubbed Twilio — assert the
-    content_sid it would send, no Meta call). importorskip("dbos") first: the send path imports
-    dbos via twilio_send, absent in the dep-less smoke (skip there, run in the full suite)."""
-    pytest.importorskip("dbos")
-    from unittest.mock import MagicMock
-
-    from orchestrator.utils import twilio_send
-
-    create = MagicMock(return_value=MagicMock(sid="SM" + "0" * 32))
-    fake_client = MagicMock()
-    fake_client.messages.create = create
-    monkeypatch.setattr(twilio_send, "_client", lambda: fake_client)
-    monkeypatch.setenv("TEAM_TWILIO_FROM_NUMBER", "+910000000000")
-    monkeypatch.setenv("TEAM_PHONE_HASH_SALT", "t")
-
-    twilio_send.send_template_message(
-        UUID(int=1),
-        "refund_offer",
-        {"refund_amount_inr": "500", "response_options": "Reply REFUND, CONTINUE, or DISCUSS"},
-        recipient_phone="+919800000000",
-    )
-    _, kwargs = create.call_args
-    assert kwargs["content_sid"] == "HX188eba65b0de1ee521f7922435e76ae6"
 
 
 # ---------------------------------------------------------------------------

@@ -1,0 +1,39 @@
+{
+  "name": "shopify_connect_malformed_domain_retry",
+  "domain": "integration",
+  "critical": false,
+  "setup_args": ["--onboarded", "--flow", "ready_asked"],
+  "expected_fail": false,
+  "notes": "Shopify connect with a Hinglish, malformed-then-corrected domain exchange through the DETERMINISTIC discovery/auth resume gate (onboarding/shopify_onboarding.py). Grounding note (harness semantics): `--flow integration:shopify` writes ZERO integration state, so on the first inbound the journey fires an ORPHAN re-offer (never the malformed-address reprompt) — the malformed reprompt only exists in maybe_resume_shopify_onboarding, reachable ONLY once phase_1_discovery/connector_choice is LIVE. So this uses `--flow ready_asked` exactly like the clean shopify_connect_domain_given.json: step 1's affirm resolves the readiness ask into the easiest-first Shopify offer, which fires the integration seam (begin_shopify_onboarding → phase_1_discovery, awaiting='connector_choice') and arms has_live_resume. THEN step 2 sends a domain-SHAPED but INVALID host ('mithai-treats.shopify.com' — validate_shop_domain only accepts *.myshopify.com; _is_domain_attempt catches the wrong-subdomain attempt) and earns the specific 'that's not a valid address ... yourstore.myshopify.com' reprompt rather than silence or a wrong guess. Step 3 corrects it and gets the real authorize_url mint. Step 4 confirms with a Hinglish done-token ('haan ho gaya' — in shopify_onboarding._DONE) before any real OAuth callback exists, so the same not-yet-connected honesty applies. Setup: `setup --onboarded --flow ready_asked` then `script <tenant> shopify_connect_malformed_domain_retry.json`.",
+  "steps": [
+    {
+      "message": "haan, chalo Shopify connect kar dete hain",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "assert_contains": ["myshopify.com"],
+      "note": "Hinglish affirm resolves the readiness ask into the easiest-first Shopify offer — the fixed instructions name the *.myshopify.com store-address shape and arm the discovery resume state."
+    },
+    {
+      "message": "mera store hai mithai-treats.shopify.com",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "assert_contains": ["myshopify.com"],
+      "assert_not_contains": ["your shopify store is now connected", "i've connected your shopify", "shopify is connected"],
+      "note": "Domain-shaped but wrong subdomain (.shopify.com, not .myshopify.com) — expect the specific malformed-address reprompt naming the correct yourstore.myshopify.com shape, not silence, not a guessed acceptance, and never a fabricated connection."
+    },
+    {
+      "message": "sorry, mithai-treats.myshopify.com",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "assert_contains": ["myshopify.com"],
+      "note": "Corrected valid domain — expect the authorize_url mint + tap-this-link instructions (the minted Shopify authorize URL itself carries the *.myshopify.com host)."
+    },
+    {
+      "message": "haan ho gaya",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "assert_not_contains": ["your shopify store is now connected", "i've connected your shopify", "shopify is connected", "connection is complete"],
+      "note": "Hinglish done-token before any real OAuth callback landed — the DB re-check must still fail and the reply must stay honest about not seeing the connection yet, in either language register."
+    }
+  ]
+}

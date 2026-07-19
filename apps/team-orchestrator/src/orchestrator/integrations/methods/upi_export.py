@@ -3,8 +3,10 @@
 Owner uploads a UPI app's transaction export (CSV; PDF is a deferred follow-up).
 Rows → the two-surface write seam (record_imported_transactions, VT-276):
   - CREDIT (customer paid the owner) → kept. Attributed (VPA resolves to a
-    customer) → imported_transactions + a clean ledger 'payment'; unattributed →
-    imported_transactions only, for VT-275 to attribute later.
+    customer) → imported_transactions + a clean ledger 'sale' (money received for
+    goods/services; VT-417 PR-3 — was 'payment', which the Sales-Recovery detector
+    ignores); unattributed → imported_transactions only, for VT-275 to attribute
+    later.
   - DEBIT (owner sent money) → kept ONLY when the counterparty resolves to a KNOWN
     customer (a refund — Cowork D2/N1: retain customer refunds, raw, not promoted);
     an unknown counterparty is an owner→vendor payment → DROPPED (not customer
@@ -249,7 +251,7 @@ def ingest_upi_export(
 ) -> IngestionSummary:
     """Parse a UPI export → resolve counterparties → two-surface write. Counts only.
 
-    CREDIT kept (attributed→ledger payment + raw; else raw). DEBIT kept only when
+    CREDIT kept (attributed→ledger 'sale' + raw; else raw). DEBIT kept only when
     the counterparty is a KNOWN customer (refund, raw); unknown debit (owner→vendor)
     dropped. tenant_id from invocation context (P3). run_id for telemetry parity.
     """
@@ -268,7 +270,14 @@ def ingest_upi_export(
         to_write.append(ImportedTxnIn(
             provider_ref=row.transaction_ref, amount_paise=row.amount_paise,
             txn_date=row.txn_date, direction=row.direction, customer_id=cid,
-            entry_type="payment", confidence=_CONF,
+            # VT-417 PR-3: a UPI credit (customer→owner) IS a sale (money received
+            # for goods/services). The Sales-Recovery detector counts ONLY
+            # entry_type='sale' (db/wrappers _LAPSED_CANDIDATES_SQL), so 'payment'
+            # made every UPI sale invisible to win-back targeting. entry_type only
+            # reaches the ledger for credits (record_imported_transactions promotes
+            # direction=='credit' only; debits/refunds park raw), so this is correct
+            # and never mislabels a refund.
+            entry_type="sale", confidence=_CONF,
         ))
 
     result: RecordImportResult = record_imported_transactions(

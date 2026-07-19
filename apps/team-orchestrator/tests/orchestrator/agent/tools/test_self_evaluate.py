@@ -202,6 +202,108 @@ def test_attempt_number_is_forwarded_to_the_model(monkeypatch):
     assert user_payload["attempt_number"] == 2
 
 
+# ---------- 7b. VT-485: a real context_summary reaches the gate model --------
+
+
+def test_context_summary_is_forwarded_to_the_model(monkeypatch):
+    """VT-485 (root cause b): the adapter must forward the REAL grounding
+    context to the gate's Opus call, not the old hardcoded ``{}``.
+
+    Before VT-485 ``SelfEvaluateAdapter.evaluate`` set ``context_summary={}``
+    unconditionally (self_evaluate.py:~422), so the model saw an empty context
+    and could not verify the draft's grounding on the ``consistency`` category.
+    Assert the supplied summary reaches the API call payload verbatim."""
+    monkeypatch.setenv("VIABE_ENV", "test")
+    payload = {
+        "outcome": "pass",
+        "feedback": {"schema": None, "pillar": None, "consistency": None, "legal": None},
+    }
+    fake = _patch_client_to_return(monkeypatch, json.dumps(payload))
+
+    grounding = {
+        "customer_ledger_summary": {
+            "total_customers": 42,
+            "recency_days_pctl": {"p50": 95},
+            "recency_basis": "later of last inbound and last purchase",
+        },
+        "attribution_snapshot": {"last_30d_recovered_paise": 0},
+        "expected_arrr_target_paise": 50_000,
+    }
+    adapter = SelfEvaluateAdapter(ctx=_ctx(), context_summary=grounding)
+    adapter.evaluate(_draft(), criteria=[])
+
+    user_msg_content = fake.messages.create.call_args.kwargs["messages"][0]["content"]
+    user_payload = json.loads(user_msg_content)
+    assert user_payload["context_summary"] == grounding, (
+        "the real grounding context must reach the gate model — not {}"
+    )
+
+
+def test_context_summary_defaults_to_empty_when_absent(monkeypatch):
+    """VT-485: omitting ``context_summary`` (the unit-test transport fixtures)
+    still defaults to ``{}`` — the plumbing is additive and never forces a
+    caller to supply one. The gate is fed when production supplies it, never
+    weakened when it doesn't."""
+    monkeypatch.setenv("VIABE_ENV", "test")
+    payload = {
+        "outcome": "pass",
+        "feedback": {"schema": None, "pillar": None, "consistency": None, "legal": None},
+    }
+    fake = _patch_client_to_return(monkeypatch, json.dumps(payload))
+
+    adapter = SelfEvaluateAdapter(ctx=_ctx())  # no context_summary
+    adapter.evaluate(_draft(), criteria=[])
+
+    user_msg_content = fake.messages.create.call_args.kwargs["messages"][0]["content"]
+    user_payload = json.loads(user_msg_content)
+    assert user_payload["context_summary"] == {}
+
+
+# ---------- 7c. VT-500: grade_tier is forwarded to the model -----------------
+
+
+def test_grade_tier_simple_is_forwarded_to_the_model(monkeypatch):
+    """VT-500: when the gate classifies a draft SIMPLE, the adapter forwards
+    ``grade_tier="simple"`` to the Opus payload as a cooperative hint. The
+    deterministic filter in the gate is the binding contract; this only tells
+    the model not to waste a REVISE on the expected_arrr defensibility axis."""
+    from orchestrator.agent.self_evaluate import GradeTier
+
+    monkeypatch.setenv("VIABE_ENV", "test")
+    payload = {
+        "outcome": "pass",
+        "feedback": {"schema": None, "pillar": None, "consistency": None, "legal": None},
+    }
+    fake = _patch_client_to_return(monkeypatch, json.dumps(payload))
+
+    adapter = SelfEvaluateAdapter(ctx=_ctx())
+    adapter.evaluate(_draft(), criteria=[], tier=GradeTier.SIMPLE)
+
+    user_payload = json.loads(
+        fake.messages.create.call_args.kwargs["messages"][0]["content"]
+    )
+    assert user_payload["grade_tier"] == "simple"
+
+
+def test_grade_tier_defaults_to_strict_when_unspecified(monkeypatch):
+    """Back-compat: an evaluate() call with no ``tier`` forwards
+    ``grade_tier="strict"`` — every pre-VT-500 caller is unchanged."""
+    monkeypatch.setenv("VIABE_ENV", "test")
+    payload = {
+        "outcome": "pass",
+        "feedback": {"schema": None, "pillar": None, "consistency": None, "legal": None},
+    }
+    fake = _patch_client_to_return(monkeypatch, json.dumps(payload))
+
+    adapter = SelfEvaluateAdapter(ctx=_ctx())
+    adapter.evaluate(_draft(), criteria=[])  # no tier kwarg
+
+    user_payload = json.loads(
+        fake.messages.create.call_args.kwargs["messages"][0]["content"]
+    )
+    assert user_payload["grade_tier"] == "strict"
+
+
 # ---------- 8. Independence: input schema rejects reasoning_chain ------------
 
 

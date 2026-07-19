@@ -1,0 +1,29 @@
+{
+  "name": "onboarding_question_mid_collection_then_resume",
+  "domain": "onboarding",
+  "critical": false,
+  "setup_args": ["--owner-inputs", "true", "--journey"],
+  "expected_fail": false,
+  "notes": "Owner asks a genuine how-does-this-work question DURING initial profile collection (distinct from topic_switch_and_return.json, which detours at the READY_ASKED paced-flow beat on a COMPLETE journey) — the turn-brain system prompt: 'If the owner asks YOU a question, answer it briefly first, then gently steer back to what is still needed.' Setup: `setup --owner-inputs true --journey` (ACTIVE journey, 2-entry queue: confirm business_type='sweets' + gap 'about') then `script <tenant> onboarding_question_mid_collection_then_resume.json`.",
+  "steps": [
+    {
+      "message": "haan sahi hai, hum Probe Handicrafts hain, Jaipur mein handicrafts bechte hain",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "note": "Confirms the business_type guess AND volunteers the business name + city in the same message."
+    },
+    {
+      "message": "ek second — iske liye kya mujhe alag se WhatsApp Business number lena padega?",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "note": "A genuine setup question mid-collection (do I need a separate WhatsApp Business number). Expect a real, substantive answer — not a canned re-prompt of the pending profile question, not deflection."
+    },
+    {
+      "message": "theek hai samajh gaya, chalo aage badho",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "assert_not_contains": ["which city is your business in", "what is your business name", "is that right? — sweets"],
+      "note": "Resume signal after the question was answered. Expect the profile-collection walk to continue from where it left off — no re-ask of the name/city just given, no restart from question 1."
+    }
+  ]
+}

@@ -16,7 +16,7 @@ import logging
 import os
 from datetime import UTC, datetime
 from typing import Any
-from uuid import NAMESPACE_URL, uuid5
+from uuid import NAMESPACE_URL, UUID, uuid5
 
 from dbos import DBOS, SetWorkflowID
 from fastapi import APIRouter, Header, HTTPException
@@ -26,6 +26,7 @@ from orchestrator.error_router import route_failure
 from orchestrator.failures import FailureRecord, FailureType
 from orchestrator.graph import get_pool
 from orchestrator.integrations.customer_inbound import customer_inbound_run
+from orchestrator.privacy.consent import record_consent
 from orchestrator.runner import webhook_pipeline_run
 from orchestrator.utils.phone_token import hash_phone
 
@@ -45,25 +46,112 @@ class TwilioIngressBody(BaseModel):
     twilio_fields: dict[str, Any]
 
 
+# VT-567 (live-drill root cause, 2026-07-02): a REAL WhatsApp inbound arrives channel-prefixed —
+# From='whatsapp:+91…' / To='whatsapp:+91…' — while every downstream identity (tenants.
+# whatsapp_number, phone tokenisation, consent/opt-out lookups) keys on PLAIN E.164. Nothing in
+# the chain stripped the prefix, so _lookup_tenant missed every live inbound → reason=
+# 'unknown_sender' → 200-and-drop: the owner's COMPLETE_SETUP tap never started a run (tests had
+# only ever posted plain E.164). Normalize ONCE, here at the ingress boundary, for BOTH the
+# lookups and the fields handed to the workflow — a partial strip would fork the phone-token
+# space (hash_phone('whatsapp:+91…') != hash_phone('+91…')).
+_WA_CHANNEL_PREFIX = "whatsapp:"
+_WA_PHONE_FIELDS = ("From", "To", "WaId")
+
+
+def _strip_wa_prefix(value: str) -> str:
+    return value[len(_WA_CHANNEL_PREFIX):] if value.startswith(_WA_CHANNEL_PREFIX) else value
+
+
+def _normalize_wa_fields(fields: dict[str, Any]) -> dict[str, Any]:
+    """Return ``fields`` with the WhatsApp channel prefix stripped off phone-bearing keys.
+    Plain-E.164 payloads (tests, SMS) pass through byte-identical."""
+    out = dict(fields)
+    for key in _WA_PHONE_FIELDS:
+        v = out.get(key)
+        if isinstance(v, str) and v.startswith(_WA_CHANNEL_PREFIX):
+            out[key] = _strip_wa_prefix(v)
+    return out
+
+
+# VT-582 (CL-2026-07-03-conversing-surfaces-and-harness): the DEV-ONLY ingress secret the
+# server-side conversation harness (canaries/convo_harness.py) drives the DEPLOYED dev orchestrator
+# with, so a fresh operator session can hold a full WhatsApp conversation without ever minting the
+# real INTERNAL_API_SECRET. Accepted ONLY on a POSITIVELY-dev env (EXPECTED_ENV in {dev,development},
+# the VT-362 sentinel mirrored from auth/prod_safety). On prod — or an unset/garbage EXPECTED_ENV —
+# it is IGNORED, fail-closed: the CL-431 prod gate, so DEV_TEST_INGRESS_SECRET can NEVER authenticate
+# a request in production. The prod INTERNAL_API_SECRET path is unchanged on every env.
+_DEV_ENV_VALUES = frozenset({"dev", "development"})
+
+
+def _dev_ingress_enabled() -> bool:
+    """True only when EXPECTED_ENV POSITIVELY reads a non-prod dev value (VT-362 sentinel).
+
+    Fail-closed exactly like ``auth/prod_safety._is_prod``: an unset/unknown/garbage EXPECTED_ENV
+    (including ``prod``) returns False, so the dev ingress secret is inert off dev."""
+    return os.environ.get("EXPECTED_ENV", "").strip().lower() in _DEV_ENV_VALUES
+
+
 def _verify_internal_secret(provided: str | None) -> bool:
-    """Constant-time compare against INTERNAL_API_SECRET (Pillar 8 — no bespoke crypto)."""
-    expected = os.environ.get("INTERNAL_API_SECRET", "")
-    if not expected or not provided:
+    """Constant-time compare against the accepted ingress secret(s) (Pillar 8 — no bespoke crypto).
+
+    Accepts the prod INTERNAL_API_SECRET on EVERY env; ADDITIONALLY — only on a positively-dev env
+    (VT-582) — the harness's DEV_TEST_INGRESS_SECRET. Both compares are constant-time
+    (``hmac.compare_digest``); neither secret is ever logged. A request that authenticates via the
+    dev secret is otherwise IDENTICAL downstream (same payload validation, tenant resolve, rate
+    limits) — this only widens WHO may open the door on dev, nothing beneath it."""
+    if not provided:
         return False
-    return hmac.compare_digest(provided, expected)
+    expected = os.environ.get("INTERNAL_API_SECRET", "")
+    if expected and hmac.compare_digest(provided, expected):
+        return True
+    if _dev_ingress_enabled():
+        dev_secret = os.environ.get("DEV_TEST_INGRESS_SECRET", "")
+        if dev_secret and hmac.compare_digest(provided, dev_secret):
+            return True
+    return False
 
 
 def _lookup_tenant(from_phone: str) -> str | None:
-    """Resolve a tenant by WhatsApp number. Most recent wins; None if unknown."""
+    """Resolve a tenant by WhatsApp number. FAIL-CLOSED on ambiguity (VT-416 PR-3).
+
+    Returns the single matching tenant id, or ``None`` when the number matches
+    no tenant. If MORE THAN ONE tenant ever shares the number, this does NOT
+    silently pick the newest (the old ``ORDER BY created_at DESC LIMIT 1``
+    behaviour, which could cross-route a customer's inbound to the wrong owner) —
+    it logs a clear error and returns ``None``, routing the message to the
+    existing unmatched path rather than to a guessed owner.
+
+    The canonical guarantee is the DB constraint: migration 066
+    (``tenants_whatsapp_number_key``, a partial UNIQUE index on
+    ``whatsapp_number WHERE whatsapp_number IS NOT NULL``, VT-267 / Fazal D1
+    2026-06-02) makes the business WhatsApp number a globally-unique tenant
+    identity, so a duplicate cannot be inserted in the first place. This code
+    guard is DEFENCE-IN-DEPTH: it converts the (now schema-impossible) two-match
+    case from a silent newest-wins mis-route into a fail-closed, logged
+    non-match — surviving a hypothetical future regression that drops the
+    constraint, without ever cross-routing a customer to the wrong owner.
+    """
     if not from_phone:
         return None
     with get_pool().connection() as conn:
-        row = conn.execute(
-            "SELECT id FROM tenants WHERE whatsapp_number = %s "
-            "ORDER BY created_at DESC LIMIT 1",
+        # Fetch up to two rows: one is the happy path, two proves ambiguity.
+        rows = conn.execute(
+            "SELECT id FROM tenants WHERE whatsapp_number = %s LIMIT 2",
             (from_phone,),
-        ).fetchone()
-    return str(row["id"]) if row else None
+        ).fetchall()
+    if not rows:
+        return None
+    if len(rows) > 1:
+        logger.error(
+            "twilio-ingress: ambiguous whatsapp_number — %d tenants share number=%s; "
+            "fail-closed (routing to unmatched path, NOT guessing an owner). "
+            "This should be impossible under the tenants_whatsapp_number_key "
+            "UNIQUE index (mig 066) — investigate the schema if it fires.",
+            len(rows),
+            hash_phone(from_phone),
+        )
+        return None
+    return str(rows[0]["id"])
 
 
 def _lookup_customer_inbound_tenant(to_phone: str) -> str | None:
@@ -165,7 +253,9 @@ def twilio_ingress(
     # Twilio always sends a MessageSid; a missing one is a team-web forwarder
     # bug — surface it so team-web can log/alert rather than collapsing every
     # malformed request into one workflow_id.
-    fields = body.twilio_fields
+    # VT-567: normalize the WhatsApp channel prefix ONCE at the boundary — lookups AND the
+    # workflow both see plain E.164 (see _normalize_wa_fields).
+    fields = _normalize_wa_fields(body.twilio_fields)
     message_sid = str(fields.get("MessageSid", ""))
     if not message_sid:
         raise HTTPException(status_code=400, detail="missing MessageSid")
@@ -220,3 +310,91 @@ def twilio_ingress(
         # Pillar 7: never 5xx for an application error.
         logger.exception("twilio-ingress: failed sid=%s", message_sid)
         return {"workflow_id": None, "reason": "error_logged"}
+
+
+# --- VT-598 addendum: dev-test consent seeding ---------------------------------------------------
+#
+# LIVE FINDING (2026-07): canaries/convo_harness.py's --seed-lapsed-customers writes
+# record_of_consent by calling orchestrator.privacy.consent.record_consent() DIRECTLY in the
+# harness's OWN process (via `railway run`, which does not inject the SEALED
+# TEAM_PHONE_HASH_SALT). That tokenises phone_e164 with a throwaway/default salt, while the
+# DEPLOYED service (this same module, running for real) computes phone_token with its real sealed
+# salt. The two tokens never match, so a locally-seeded consent row can never join against what the
+# deployed sales_recovery detection query (db/wrappers._LAPSED_CANDIDATES_SQL) computes server-side
+# — a seeded cohort silently reads as empty (proven live: 6 seeded lapsed customers -> "dormant
+# cohort count is 0"). The existing /api/orchestrator/consent/capture endpoint calls record_consent
+# SERVER-SIDE already (the correct fix shape) but is guarded by INTERNAL_API_SECRET only, which is
+# SEALED on Railway exactly like TEAM_PHONE_HASH_SALT — the harness (which only has
+# DEV_TEST_INGRESS_SECRET injected) cannot authenticate to it either.
+#
+# Fix: a DEV-ONLY sibling that does the SAME server-side record_consent() call, guarded by the
+# SAME _verify_internal_secret() this module already uses for /twilio-ingress — reused verbatim,
+# not reimplemented, so the CL-431 fail-closed prod gate (DEV_TEST_INGRESS_SECRET is INERT unless
+# EXPECTED_ENV positively reads dev/development) covers this endpoint identically. Note the prod
+# INTERNAL_API_SECRET ALSO authenticates here on every env, same as /consent/capture — this does
+# NOT add a new prod capability: whoever holds that secret can already write an arbitrary consent
+# record via /consent/capture today, so exposing the same record_consent() call under a second path
+# does not widen what a real INTERNAL_API_SECRET holder can already do in prod.
+
+
+class ConsentSeedBody(BaseModel):
+    tenant_id: str
+    phone_e164: str
+    consent_text_version: str
+
+
+class ConsentSeedResponse(BaseModel):
+    recorded: bool
+    active: bool
+    # First 12 chars only — this is a dev-test convenience echo (log/debug correlation), not a
+    # capability the caller needs the full token for; no reason to put more of it on the wire.
+    phone_token_prefix: str
+
+
+def _parse_dev_test_tenant(raw: str) -> UUID:
+    try:
+        return UUID(raw)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="invalid tenant_id") from exc
+
+
+@router.post("/api/orchestrator/dev-test/consent-seed")
+def dev_test_consent_seed(
+    body: ConsentSeedBody,
+    x_internal_secret: str | None = Header(default=None),
+) -> ConsentSeedResponse:
+    """VT-598 addendum — DEV-ONLY consent seeding for the conversation harness's
+    ``--seed-lapsed-customers`` path (see the module-level note above for the full finding).
+
+    Guarded by ``_verify_internal_secret`` — the SAME function ``/twilio-ingress`` uses, reused
+    verbatim: accepts the prod ``INTERNAL_API_SECRET`` on every env, ADDITIONALLY accepts
+    ``DEV_TEST_INGRESS_SECRET`` only on a positively-dev ``EXPECTED_ENV`` (CL-431 fail-closed — the
+    dev secret is inert on prod). Calls ``record_consent`` IN THIS PROCESS — i.e. with the deployed
+    service's own (sealed) ``TEAM_PHONE_HASH_SALT`` — so the ``phone_token`` this writes is
+    BYTE-IDENTICAL to what this same service computes for the same ``phone_e164`` anywhere else
+    (the detection query included). This is the entire fix: move the tokenisation into the process
+    that actually holds the real salt.
+
+    TIGHTER THAN /consent/capture (review decision 2026-07-04): this route refuses EVERYTHING —
+    including the prod ``INTERNAL_API_SECRET`` — unless ``EXPECTED_ENV`` positively reads dev
+    (``_dev_ingress_enabled``). A dev-test seeding surface has zero legitimate prod use, so off-dev
+    it answers 404 (indistinguishable from route-absent) rather than existing as a
+    capability-equivalent twin of /consent/capture.
+    """
+    if not _dev_ingress_enabled():
+        raise HTTPException(status_code=404, detail="not found")
+    if not _verify_internal_secret(x_internal_secret):
+        raise HTTPException(status_code=403, detail="invalid internal secret")
+    tenant_id = _parse_dev_test_tenant(body.tenant_id)
+    rec = record_consent(
+        tenant_id,
+        body.phone_e164,
+        consent_text_version=body.consent_text_version,
+        consent_method="dev_test_seed",
+        source="convo-harness-seed",
+    )
+    return ConsentSeedResponse(
+        recorded=True,
+        active=rec.active,
+        phone_token_prefix=rec.phone_token[:12],
+    )

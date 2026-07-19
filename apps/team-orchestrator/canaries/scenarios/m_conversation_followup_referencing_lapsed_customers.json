@@ -1,0 +1,42 @@
+{
+  "name": "m_conversation_followup_referencing_lapsed_customers",
+  "domain": "manager",
+  "critical": false,
+  "expected_fail": false,
+  "setup_args": [
+    "--onboarded",
+    "--seed-lapsed-customers",
+    "8"
+  ],
+  "notes": "Owner asks a follow-up referencing earlier context via anaphora ('those', 'them') rather than restating the subject — tests reference resolution against the immediately preceding turn's answer, distinct from the pure re-ask guards elsewhere in this theme. Setup: `setup --onboarded --seed-lapsed-customers 8 --name convo-harness-<id>` then `script <tenant> m_conversation_followup_referencing_lapsed_customers.json`.",
+  "steps": [
+    {
+      "message": "how many customers do I have on file?",
+      "assert_no_silent": true,
+      "assert_contains": [
+        "8"
+      ],
+      "assert_route": {
+        "expect_sr_delegation": false,
+        "tenant_wide": true
+      },
+      "note": "status_query fast-path baseline — the seeded count."
+    },
+    {
+      "message": "and out of those, how many haven't bought anything in a while?",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "assert_not_contains": [
+        "which customers do you mean",
+        "can you clarify which customers",
+        "which set of customers",
+        "not sure what you're referring to"
+      ],
+      "assert_route": {
+        "expect_sr_delegation": false,
+        "tenant_wide": true
+      },
+      "note": "Follow-up using 'those' to refer back to the customer set just discussed. Expect the manager to resolve the reference and give a substantive answer about the lapsed subset — never ask which customers are meant."
+    }
+  ]
+}

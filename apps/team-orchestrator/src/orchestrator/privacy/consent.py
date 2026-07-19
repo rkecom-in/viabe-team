@@ -149,7 +149,47 @@ def opt_out(tenant_id: UUID | str, phone_token: str) -> bool:
             "WHERE tenant_id = %s AND phone_token = %s AND opted_out_at IS NULL",
             (str(tenant_id), phone_token),
         )
-        return cur.rowcount > 0
+        updated = cur.rowcount > 0
+        if updated:
+            # VT-369 PR-2: opt-out ATTRIBUTION on the same connection (plan §3b — never
+            # fire-and-forget; a dropped attribution disarms the optout_spike demotion). The
+            # opt-out itself is COMMITTED regardless. SAVEPOINT (Cowork gate, compliance-
+            # critical): a SERVER-SIDE SQL error in the attribution would otherwise abort the
+            # SHARED transaction — the except would swallow it, the commit would downgrade to
+            # rollback, and the opt-out itself would be LOST. The nested transaction scopes any
+            # SQL failure to the attribution alone.
+            try:
+                with conn.transaction():  # SAVEPOINT — attribution-only blast radius
+                    _attribute_optout_to_agents(tenant_id, phone_token, conn)
+            except Exception:  # noqa: BLE001 — the opt-out stands; the spike trigger is the loss
+                logger.exception(
+                    "opt_out: agent attribution FAILED tenant=%s — the optout_spike "
+                    "regression trigger missed this event (investigate; the opt-out itself "
+                    "is committed)", tenant_id,
+                )
+        return updated
+
+
+def _attribute_optout_to_agents(tenant_id: UUID | str, phone_token: str, conn: Any) -> None:
+    """VT-369 §5.4: find agents whose ≤30d contact this opt-out attributes to; a spike (this being
+    the ≥3rd attributable opt-out in 7d) trips the optout_spike regression — same-conn."""
+    import os
+
+    from orchestrator.db.wrappers import CustomersWrapper
+
+    salt = os.environ.get("TEAM_PHONE_HASH_SALT", "")
+    if not salt:
+        return  # hash_phone would have failed upstream; nothing to join on
+    hits = CustomersWrapper().agent_optout_attribution(
+        tenant_id, phone_token, salt=salt, conn=conn
+    )
+    if not hits:
+        return
+    from orchestrator.agents.autonomy import record_regression_event
+
+    for hit in hits:
+        if int(hit.get("spike_count") or 0) >= 3:
+            record_regression_event(tenant_id, str(hit["agent"]), "optout_spike", conn=conn)
 
 
 def opt_out_for_phone(tenant_id: UUID | str, phone_e164: str) -> bool:

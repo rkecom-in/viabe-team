@@ -16,8 +16,8 @@
 # `any` if the specific phase isn't listed.
 
 welcome:
-  onboarding: team_welcome
-  trial: team_welcome
+  onboarding: team_welcome4   # VT-555: UTILITY quick-reply (team_welcome3 was force-converted MARKETING)
+  trial: team_welcome4
 
 weekly_approval:
   paid_active: team_weekly_approval
@@ -34,6 +34,12 @@ agent_stuck:
 
 status_ping:
   any: team_status_ping
+
+# VT-486: out-of-window (>24h) owner re-engagement. The composer reaches this name when
+# intent_or_trigger == "reengage" — used by the window-aware owner send when the 24h owner-care
+# window is CLOSED, so a free-form re-engage cannot be sent. The owner's reply re-opens the window.
+reengage:
+  any: team_reengage
 
 unable_to_complete:
   any: team_unable_to_complete_request

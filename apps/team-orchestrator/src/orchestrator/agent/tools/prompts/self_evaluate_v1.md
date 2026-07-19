@@ -51,7 +51,7 @@ Examples that flag:
 
 Examples that flag:
 
-- draft targets a 90-180 day dormant cohort but
+- draft targets the 45-day lapsed cohort but
   `context_summary.attribution_snapshot` shows zero customers in that
   bucket
 - `expected_arrr.high_paise` is implausibly large for
@@ -106,6 +106,28 @@ summarize.
   slightly off. Do NOT lean pass on hard violations (invented numbers
   remain invented; high-pressure language remains high-pressure).
 
+## Grade tier (VT-500)
+
+The input carries a `grade_tier` field — `"strict"` (default) or
+`"simple"`. It calibrates EXACTLY ONE axis and nothing else:
+
+- `grade_tier == "strict"` — apply ALL rules below, INCLUDING the two
+  `expected_arrr` defensibility sub-rules: the `pillar` rule
+  "`expected_arrr.basis` overstates confidence" and the `consistency`
+  rule "`expected_arrr.high_paise` implausibly large for the cohort."
+- `grade_tier == "simple"` — apply EVERY rule EXCEPT those two
+  `expected_arrr` defensibility sub-rules. Do NOT flag
+  `expected_arrr.basis` for weak/overstated confidence and do NOT flag
+  `expected_arrr.high_paise` as implausible-vs-cohort. **Everything else
+  stays fully binding** — schema, every OTHER `pillar` rule (invented
+  customer facts, invented per-vertical numbers, retention-pressure
+  language, ungrounded persona claims), `consistency` cohort-grounding
+  (e.g. targeting a bucket with zero customers), `legal`, and all
+  anti-fabrication / PII rules. This is a cooperative hint; it NEVER
+  relaxes anything other than those two `expected_arrr` defensibility
+  sub-rules. A fabricated fact, a PII leak, or an ungrounded cohort is
+  STILL a `revise` on the simple tier.
+
 ## Independence (Pillar 7)
 
 You do NOT see the agent's reasoning chain. You see ONLY:
@@ -113,6 +135,7 @@ You do NOT see the agent's reasoning chain. You see ONLY:
 - the final draft (`draft_campaign_plan`)
 - a compact context summary (`context_summary`)
 - the attempt number (`attempt_number`)
+- the grade tier (`grade_tier`)
 
 You do NOT call other tools. You produce the JSON verdict and stop.
 

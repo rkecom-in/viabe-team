@@ -20,11 +20,19 @@ from orchestrator.api import router
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     from dbos_config import launch_dbos, shutdown_dbos
+    from orchestrator.auth.prod_safety import assert_prod_safe_flags
     from orchestrator.dbos_purge import register_purge_scheduler
     from orchestrator.observability.envelopes import (
         validate_registry_completeness,
     )
     from orchestrator.scheduled_triggers import register_scheduled_triggers
+
+    # VT-434 fail-closed boot guard (FIRST — before any effect): refuse to boot
+    # under EXPECTED_ENV=prod if a dangerous test/mock auth-bypass / send-mock
+    # flag is on (TEAM_TWILIO_VERIFY_MOCK_MODE → static-OTP login bypass;
+    # TEAM_TWILIO_MOCK_MODE → real sends silently dropped). Prod detection
+    # mirrors VT-362's EXPECTED_ENV signal; dev/CI is a no-op.
+    assert_prod_safe_flags()
 
     # VT-179 boot hook (CL-419 / VT-179 fix-1): validate the typed-envelope
     # registry covers every step_kind=<literal> in source. Fail-fast at
@@ -68,6 +76,13 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     # contract as register_purge_scheduler — see scheduled_triggers.py
     # docstring for the DBOS app_version invariant.
     register_scheduled_triggers()
+    # VT-686 live wiring: register every first-party framework module at boot so the Manager's
+    # agent-directory block sees ALL identity cards from the first turn (before this, the
+    # registry started empty and only SR self-registered lazily mid-dispatch). Fail-closed:
+    # an invalid manifest/brief crashes boot here, loudly. Registering ≠ routing.
+    from orchestrator.agent_framework.modules import register_all_modules
+
+    register_all_modules()
     # VT-210: fan-out ingestion scheduler. Same contract.
     from orchestrator.integrations.scheduler import (
         register_ingestion_scheduler,
@@ -104,6 +119,36 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     )
 
     register_webhook_metrics_workflow()
+    # VT-384: the L3 auto-send HOLD workflow (l3_hold_workflow). Same
+    # register-before-launch contract — the workflow must be in the DBOS
+    # registry when launch_dbos() computes the app_version hash so the
+    # executor's start_l3_hold + DBOS recovery of a parked hold resolve.
+    from orchestrator.agents.l3_hold import register_l3_hold
+
+    register_l3_hold()
+    # VT-418: the L2 owner-approve→send driver (l2_send_workflow). Same
+    # register-before-launch contract — the workflow must be in the DBOS
+    # registry when launch_dbos() computes the app_version hash so the runner's
+    # start_l2_send + DBOS recovery of a parked/crashed send run resolve. The
+    # reconciler sweep (l2_approved_send_sweep_scheduled) registers with the
+    # other scheduled triggers in register_scheduled_triggers (above).
+    from orchestrator.agents.l2_send import register_l2_send
+
+    register_l2_send()
+    # VT-431: the autonomous agent-coordinator dispatch loop. Same
+    # register-before-launch contract — applies @DBOS.workflow to
+    # agent_dispatch_workflow + agent_coordinator_scheduled and @DBOS.scheduled
+    # (AGENT_COORDINATOR_CRON) to the sweep, so all three are in the DBOS
+    # registry when launch_dbos() computes the app_version hash and the daily
+    # sweep + DBOS recovery of an in-flight dispatch resolve. This is the
+    # activation of the previously-dark loop (the coordinator was built but
+    # never registered). Downstream customer sends STAY gated — the executor's
+    # detection is structurally fail-closed (empty MARKETING_CONSENT_VERSIONS on
+    # prod) and the CL-425 owner_inputs basis is re-checked fail-closed in the
+    # dispatch workflow; this only wires the dispatch loop, not any send gate.
+    from orchestrator.agents.coordinator import register_agent_coordinator
+
+    register_agent_coordinator()
     launch_dbos()
     # VT-280/VT-281: seed the VTR REF# keying secret from env (VT_REF_HMAC_KEY) so the
     # de-identified views never emit NULL refs before the first VTR read. Best-effort at the
@@ -116,6 +161,55 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     except Exception:
         logging.getLogger(__name__).exception(
             "VT-281 bootstrap_vtr_ref_secret failed at startup (VT_REF_HMAC_KEY set?)"
+        )
+    # VT-374 N4: warm the run-control pause cache from workflow_controls so a
+    # post-restart control-read error still fails CLOSED for scopes that were paused
+    # before the restart (the F9 guarantee is best-effort-after-restart by design).
+    # warm_pause_cache itself never raises; the try/except guards the import path —
+    # a warm failure must never block worker boot.
+    try:
+        from orchestrator.run_control import warm_pause_cache
+
+        warm_pause_cache()
+    except Exception:
+        logging.getLogger(__name__).exception(
+            "VT-374 warm_pause_cache failed at startup (best-effort)"
+        )
+    # VT-481: reap runs stranded status='running' by a prior process that died mid-run
+    # (a deploy-restart). DBOS cannot recover a prior-app-version row, so these never close
+    # on their own. Runs AFTER launch_dbos() so DBOS's own same-version recovery has already
+    # fired; the >1h age floor keeps it clear of any live in-flight run. Best-effort: a reaper
+    # failure must never block boot (reap_orphan_runs never raises, but guard the import too).
+    #
+    # VT-560: the two REAPERS are a startup catch-up only — their steady-state re-sweep runs
+    # on the @DBOS.scheduled substrate (scheduled_triggers.py: stalled_task_sweep_scheduled
+    # every 10 min, orphan_run_reaper_scheduled hourly); a long-lived process would otherwise
+    # never re-sweep and the VT-557 retry ladder never progressed. The VT-552 silent-terminal
+    # DETECTOR remains boot-only ON PURPOSE (batch-review finding): no live code writes the
+    # final_outcome it keys on, so scheduling it would open an incident + alert per completed
+    # run under traffic. Schedule it only after the close-path final_outcome writer lands.
+    try:
+        from orchestrator.orphan_reaper import (
+            detect_silent_terminal_runs,
+            reap_orphan_runs,
+            reap_stalled_manager_tasks,
+        )
+        from orchestrator.test_tenant_reaper import reap_test_tenants
+
+        reap_orphan_runs()
+        # VT-525 (B2): surface manager_tasks stranded active with no runnable step (same
+        # best-effort startup discipline; the >1h floor keeps it clear of a task mid-planning).
+        reap_stalled_manager_tasks()
+        # VT-552 (B1 part-2b): open incidents for runs that completed with no final_outcome
+        # (silent terminals — the owner never heard), same best-effort startup discipline.
+        detect_silent_terminal_runs()
+        # VT-620: GC leaked convo-harness test tenants (>1h old) so they stop paging ops as
+        # noise. STRICT convo-harness-% scope; best-effort (never raises). Steady-state re-sweep
+        # runs hourly on the @DBOS.scheduled substrate (test_tenant_reaper_scheduled).
+        reap_test_tenants()
+    except Exception:
+        logging.getLogger(__name__).exception(
+            "VT-481 orphan-reaper failed at startup (best-effort)"
         )
     yield
     shutdown_dbos()

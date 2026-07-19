@@ -1,0 +1,29 @@
+{
+  "name": "onboarding_refuse_field_graceful",
+  "domain": "onboarding",
+  "critical": true,
+  "setup_args": ["--owner-inputs", "true", "--journey"],
+  "expected_fail": false,
+  "notes": "Owner refuses to answer a still-needed field in NATURAL LANGUAGE — not the literal 'skip'/'baad' tokens already covered by onboarding_defer_field_explicit_skip.json / onboarding_defer_field_hinglish_baad.json. The refusal must be handled gracefully (acknowledged, not pressed) and never looped on verbatim. Setup: `setup --owner-inputs true --journey` (ACTIVE journey: confirm business_type='sweets' resolves first, then the 'about' gap is the refused field) then `script <tenant> onboarding_refuse_field_graceful.json`.",
+  "steps": [
+    {
+      "message": "haan sahi hai",
+      "assert_no_silent": true,
+      "note": "Confirms the seeded business_type guess, advancing the queue to the 'about' gap."
+    },
+    {
+      "message": "I don't really want to write out a whole description of my shop, isn't the name enough?",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "assert_not_contains": ["you must tell us", "we need you to describe", "please answer the question"],
+      "note": "A natural-language refusal of the 'about' field (not the literal skip token). Expect a graceful, non-pushy response — never coercive pressure to answer."
+    },
+    {
+      "message": "just move on please",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "assert_not_contains": ["tell us a little about your business", "what do you sell or do", "please describe your business"],
+      "note": "Owner reiterates the refusal. Expect the manager to move the conversation forward WITHOUT re-presenting the identical 'about' ask a second time."
+    }
+  ]
+}

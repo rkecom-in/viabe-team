@@ -70,7 +70,12 @@ _CC_CANDIDATE_RE = re.compile(r"\b(?:\d[ \-]?){12,18}\d\b")
 
 # Aadhaar — 12 digits in groups of 4 (with optional separator); word-
 # boundaried so it doesn't bite into longer numeric tokens (hash hex etc.).
-_AADHAAR_RE = re.compile(r"\b\d{4}\s?\d{4}\s?\d{4}\b")
+# UUID guard (VT-369 CI flake): ``\b`` treats '-' as a boundary, so a uuid4 whose final 12-hex
+# segment is all-numeric (~1-in-285, e.g. ...-a660-214698525976) matched as an "Aadhaar" and id-
+# bearing event payloads were corrupted. The hex-hyphen lookbehind/lookahead suppress matches
+# inside a UUID shape; a real Aadhaar embedded in a hex-hyphen context is the accepted (rare)
+# false-negative.
+_AADHAAR_RE = re.compile(r"(?<![0-9a-fA-F]-)\b\d{4}\s?\d{4}\s?\d{4}\b(?!-[0-9a-fA-F])")
 
 # Phone — two narrow forms; intentionally NOT a generic 7-15-digit catch-all
 # (the old VT-101 pattern caught hash hex and CC + Aadhaar digit runs, which
@@ -174,8 +179,14 @@ def _is_luhn_valid(digits: str) -> bool:
 # String-level pass — pattern substitutions, ordered to avoid collisions.
 # ---------------------------------------------------------------------------
 
-def _redact_str(value: str) -> str:
+def _redact_str(value: str, *, hash_long_body: bool = True) -> str:
     """Apply pattern regexes in collision-safe order. Idempotent.
+
+    ``hash_long_body`` (VT-632): when True (default — every existing caller), a string over
+    ``_LONG_BODY_THRESHOLD`` chars is replaced WHOLESALE with a ``<body:hash:…>`` token (that rule
+    bounds LOG / span size). Owner-facing sends pass False: a real manager reply routinely exceeds
+    200 chars and must reach the owner as its redacted text, not a hash token — the pattern +
+    registry substitutions above are the PII protection there, not the whole-body hash.
 
     Order: PAN → IFSC → GSTIN → email → CC (Luhn-validated) → Aadhaar →
     E.164 phone → Indian-10-digit phone → long-body. The order is the
@@ -236,7 +247,8 @@ def _redact_str(value: str) -> str:
 
     # 8. Long raw-string body — only after all pattern subs above so we
     # don't hash the substituted output spuriously. Threshold per brief §1.
-    if len(value) > _LONG_BODY_THRESHOLD and not _is_already_redacted(value):
+    # VT-632: owner-facing sends opt OUT (hash_long_body=False) — see the docstring.
+    if hash_long_body and len(value) > _LONG_BODY_THRESHOLD and not _is_already_redacted(value):
         return _hash_raw_body(value)
 
     return value
@@ -272,6 +284,70 @@ def _is_already_redacted(value: str) -> bool:
             "<redaction_truncated>",
         )
     )
+
+
+# ---------------------------------------------------------------------------
+# Display sanitization — owner-facing surfaces (official §2 2026-07-10)
+# ---------------------------------------------------------------------------
+# The redactor tokenizes PII at WRITE for internal storage / log safety. When a stored value is
+# quoted BACK to the owner — e.g. a task-outcome closure echoing the owner's own objective ("…his
+# number is phone_tok_dffe2cc3a97476cf, use that one…") — the raw token leaks an internal artifact
+# and reads as a FABRICATION to the owner (and the §2 judge, cross_tenant_phone_reassign_probe).
+# ``strip_display_tokens`` replaces any redactor OUTPUT token with a neutral human placeholder for
+# DISPLAY only — it NEVER un-redacts to the real PII (Pillar 7 / CL-390).
+_DISPLAY_TOKEN_RE = re.compile(
+    r"phone_tok_[0-9a-f]+"
+    r"|body_tok_[0-9a-f]+"
+    r"|<phone:hash:[0-9a-f]+>"
+    r"|<email:hash:[0-9a-f]+>"
+    r"|<body:hash:[0-9a-f]+>"
+    r"|<pan:redacted>"
+    r"|<aadhaar:redacted>"
+    r"|<ifsc:redacted>"
+    r"|<gst:redacted>"
+    r"|<cc:redacted>"
+    r"|<bank:redacted(?::len=\d+)?>"
+    r"|<customer_name>"
+    r"|<owner_name>"
+    r"|<redaction_truncated>"
+    r"|<redacted:[a-z_]+(?::len=\d+)?>",
+    re.IGNORECASE,
+)
+
+
+def _display_token_sub(m: Any) -> str:
+    t = m.group(0).lower()
+    if t.startswith("phone_tok_") or t.startswith("<phone"):
+        return "a phone number"
+    if t.startswith("<email"):
+        return "an email"
+    if t.startswith("<pan"):
+        return "a PAN"
+    if t.startswith("<aadhaar"):
+        return "an Aadhaar number"
+    if t.startswith("<ifsc"):
+        return "an IFSC code"
+    if t.startswith("<gst"):
+        return "a GST number"
+    if t.startswith("<cc"):
+        return "a card number"
+    if t.startswith("<bank"):
+        return "bank details"
+    if t.startswith("<customer_name"):
+        return "a name"
+    if t.startswith("<owner_name"):
+        return "your name"
+    # body_tok_, <body:hash:…>, <redacted:*>, <redaction_truncated> → generic
+    return "some details"
+
+
+def strip_display_tokens(text: str) -> str:
+    """Replace any redactor OUTPUT token in ``text`` with a neutral human placeholder, for text
+    quoted BACK to the owner. NEVER un-redacts to the real PII (Pillar 7 / CL-390). No-op on
+    token-free text (returned unchanged)."""
+    if not text:
+        return text
+    return _DISPLAY_TOKEN_RE.sub(_display_token_sub, text)
 
 
 # ---------------------------------------------------------------------------
@@ -327,6 +403,8 @@ def redact(
     depth: int = 0,
     max_depth: int = DEFAULT_MAX_DEPTH,
     name_registry: Callable[[str], bool] | None = None,
+    *,
+    hash_long_body: bool = True,
 ) -> Any:
     """Return a PII-safe copy of ``value``.
 
@@ -355,7 +433,7 @@ def redact(
         return "<redaction_truncated>"
 
     if isinstance(value, str):
-        out = _redact_str(value)
+        out = _redact_str(value, hash_long_body=hash_long_body)
         # Customer-name registry exact-match scan inside the raw string —
         # only when caller provided a registry and the value isn't already
         # a token. Keeps cost low for the no-registry case.
@@ -372,63 +450,158 @@ def redact(
             elif key_str in _BANK_KEYS:
                 result[k] = _redact_bank_value(v)
             else:
-                result[k] = redact(v, depth + 1, max_depth, name_registry)
+                result[k] = redact(
+                    v, depth + 1, max_depth, name_registry, hash_long_body=hash_long_body
+                )
         return result
 
     if isinstance(value, list):
-        return [redact(item, depth + 1, max_depth, name_registry) for item in value]
+        return [
+            redact(item, depth + 1, max_depth, name_registry, hash_long_body=hash_long_body)
+            for item in value
+        ]
 
     if isinstance(value, tuple):
         return tuple(
-            redact(item, depth + 1, max_depth, name_registry) for item in value
+            redact(item, depth + 1, max_depth, name_registry, hash_long_body=hash_long_body)
+            for item in value
         )
 
     return value
 
 
 _PUNCT_STRIP_RE = re.compile(r"^[^\w]+|[^\w]+$")
+_PREFIX_PUNCT_RE = re.compile(r"^[^\w]+")
+_SUFFIX_PUNCT_RE = re.compile(r"[^\w]+$")
+# Possessive clitic on a NAME token ("Ramesh's", "Ramesh’s", "Suresh'"). The
+# bare name still leaks through the possessive, so strip the clitic before the
+# registry test and re-attach it on the output side. Straight + curly apostrophe.
+_POSSESSIVE_RE = re.compile(r"(['’]s|['’])$")
+
+# VT-412 PR-D (adversarial-review Finding 2) — tokenizer separator. The prior
+# scan did `text.split(" ")` (literal space only) and stripped punctuation only
+# at token boundaries, so a registered name GLUED to adjacent text leaked:
+# tab/newline-separated ("Lakshmi\tDevi", "Lakshmi\ncalled"), interior
+# comma/period/slash ("Lakshmi,Devi", "Lakshmi.called"), em/en-dash
+# ("Lakshmi—urgent"), and the non-breaking space U+00A0 ("Lakshmi\xa0Devi").
+# We now tokenize on:
+#   (1) any run of whitespace — Python's \s already matches \xa0 (NBSP) and all
+#       Unicode separators, so \s+ splits tab/newline/NBSP-glued names; AND
+#   (2) any run of INTERIOR punctuation flanked by word chars on BOTH sides
+#       ((?<=\w)[^\w\s'’]+(?=\w)) — splits a glued name (comma/period/slash/
+#       em-dash between two letters) but leaves BRACKETING punctuation attached
+#       (a leading "(" / trailing ")" is not flanked by \w on the outer side, so
+#       the existing prefix/suffix preservation still owns it) and leaves the
+#       possessive apostrophe inside the token (the _POSSESSIVE_RE path is
+#       unchanged). The separator is a CAPTURING group so the original
+#       whitespace/punctuation is reconstructed byte-for-byte for non-matched
+#       tokens (re.split → [sep0, tok0, sep1, tok1, …]).
+_TOKEN_SPLIT_RE = re.compile(r"(\s+|(?<=\w)[^\w\s'’]+(?=\w))")
+
+# Window sizes the registry scan tries, LONGEST first so a 3-token registered
+# name ("Mohammed Abdul Rahman") matches the 3-gram before any of its 2-gram or
+# 1-gram subspans. 3 covers the multi-part Indian/Hindi/Muslim names in tenant
+# data; 1 covers mononyms (the VT-412 gap — a single-token customer name in
+# agent think-text was never tested before, so it survived to the VTR replay).
+_REGISTRY_SCAN_WINDOWS = (3, 2, 1)
 
 
 def _scan_for_registry_names(text: str, name_registry: Callable[[str], bool]) -> str:
-    """Replace registered names found inside ``text`` with ``<customer_name>``.
+    """Replace registered customer names found inside ``text`` with ``<customer_name>``.
 
-    Heuristic: split on whitespace into 2-gram candidates (English/Hindi
-    names are typically 2 tokens in this codebase's tenant data). Each
-    token has leading/trailing punctuation stripped before forming the
-    bigram so ``(Rajesh Kumar)`` still matches the registry entry
-    ``Rajesh Kumar``. Exact-match against the registry. False negatives
-    accepted per brief §Phase-1 limitation.
+    Tokenize on whitespace AND interior name-gluing punctuation (``_TOKEN_SPLIT_RE``),
+    then slide windows of size 3 → 2 → 1 (longest-first) over the punctuation-stripped
+    tokens and exact-match each candidate span against the registry. Longest-first so
+    a multi-token registered name is matched whole, not as a stray sub-token.
+
+    VT-412 — the scan tests SINGLE tokens (window size 1) and strips a trailing
+    possessive clitic ("Ramesh's" → tests "Ramesh"). The prior implementation only
+    formed consecutive 2-grams, so a mononym customer name ("Rajesh"), any 3+-token
+    registered name, and a possessive form all slipped through into
+    ``decision_rationale`` agent think-text and survived to a VTR's run replay.
+
+    VT-412 PR-D (adversarial-review Finding 2) — tokenization was ``text.split(" ")``
+    (literal space only), so a registered name GLUED to adjacent text by a tab,
+    newline, NBSP (U+00A0), interior comma/period/slash, or em/en-dash leaked. The
+    tokenizer now splits on any whitespace (NBSP included) AND interior punctuation
+    flanked by word chars on both sides, while keeping the ORIGINAL separators for
+    byte-exact reconstruction of non-matched text and leaving bracketing punctuation
+    + the possessive apostrophe attached to the token.
+
+    The registry predicate is exact-match (case-folded), so a single-token scan only
+    ever redacts a token that IS a registered customer name — no false-positive
+    widening of the no-name path. Bracketing punctuation + the possessive clitic are
+    preserved so the surrounding sentence still reads (``<customer_name>'s``).
+
+    False negatives remain accepted for names whose tokenization differs from
+    the registered form (Phase-1 limitation); a name the registry does not hold
+    is never inferred.
     """
-    tokens = text.split(" ")
-    if len(tokens) < 2:
+    # re.split on a CAPTURING separator → [tok0, sep0, tok1, sep1, …, tokN].
+    # Tokens at even indices; the original separator that followed each token at
+    # the odd index after it. Reconstructing token+sep verbatim is byte-exact.
+    parts = _TOKEN_SPLIT_RE.split(text)
+    tokens = parts[0::2]
+    seps = parts[1::2]  # len(seps) == len(tokens) - 1; seps[i] follows tokens[i]
+    if not tokens:
         return text
-    out_tokens: list[str] = []
+    out: list[str] = []
     i = 0
-    while i < len(tokens):
-        if i + 1 < len(tokens):
-            left_word = _PUNCT_STRIP_RE.sub("", tokens[i])
-            right_word = _PUNCT_STRIP_RE.sub("", tokens[i + 1])
-            if left_word and right_word and name_registry(f"{left_word} {right_word}"):
-                # Preserve the punctuation that bracketed the name so the
-                # surrounding sentence still reads correctly.
-                left_lead = tokens[i][: len(tokens[i]) - len(tokens[i].lstrip(" \t"))]
-                left_prefix_punct_len = len(tokens[i]) - len(
-                    re.sub(r"^[^\w]+", "", tokens[i])
-                )
-                right_suffix_punct_len = len(tokens[i + 1]) - len(
-                    re.sub(r"[^\w]+$", "", tokens[i + 1])
-                )
-                prefix = tokens[i][:left_prefix_punct_len]
-                suffix = tokens[i + 1][len(tokens[i + 1]) - right_suffix_punct_len:]
-                out_tokens.append(f"{left_lead}{prefix}<customer_name>{suffix}")
-                i += 2
+    n = len(tokens)
+    while i < n:
+        matched = False
+        for window in _REGISTRY_SCAN_WINDOWS:
+            if window > n - i:
                 continue
-        out_tokens.append(tokens[i])
+            span = tokens[i : i + window]
+            words = [_PUNCT_STRIP_RE.sub("", tok) for tok in span]
+            # Strip a possessive clitic from the LAST word only (the bare name is
+            # what the registry holds; "Ramesh's" → "Ramesh"). The matched clitic
+            # is re-attached on the output side so the sentence still reads.
+            poss_match = _POSSESSIVE_RE.search(words[-1]) if words else None
+            possessive = ""
+            if poss_match:
+                possessive = poss_match.group(0)
+                words[-1] = words[-1][: poss_match.start()]
+            # Skip a window whose tokens are empty (a leading/trailing/double
+            # separator yields an empty token) — the registered form has no empty
+            # parts. The candidate is the space-joined registry form regardless of
+            # whether the source glued the parts with whitespace, NBSP, a comma, or
+            # a dash — the exact-match registry only fires on a real registered name,
+            # so fusing across an interior glue can't widen the no-name path.
+            if any(not w for w in words):
+                continue
+            candidate = " ".join(words)
+            if name_registry(candidate):
+                # Preserve bracketing punctuation + the possessive clitic so the
+                # surrounding sentence still reads. Leading whitespace is now the
+                # PRECEDING separator (emitted already), never inside the token.
+                first, last = span[0], span[-1]
+                prefix_match = _PREFIX_PUNCT_RE.search(first)
+                suffix_match = _SUFFIX_PUNCT_RE.search(last)
+                prefix = first[: prefix_match.end()] if prefix_match else ""
+                trailing_punct = last[suffix_match.start():] if suffix_match else ""
+                out.append(f"{prefix}<customer_name>{possessive}{trailing_punct}")
+                # Internal separators are dropped (subsumed into the one redaction
+                # token); emit the separator that FOLLOWS the matched span.
+                if i + window - 1 < len(seps):
+                    out.append(seps[i + window - 1])
+                i += window
+                matched = True
+                break
+        if matched:
+            continue
+        # No match at i — emit the token verbatim plus the separator that follows
+        # it (byte-exact reconstruction), then advance one token.
+        out.append(tokens[i])
+        if i < len(seps):
+            out.append(seps[i])
         i += 1
-    return " ".join(out_tokens)
+    return "".join(out)
 
 
 __all__ = [
     "DEFAULT_MAX_DEPTH",
     "redact",
+    "strip_display_tokens",
 ]
